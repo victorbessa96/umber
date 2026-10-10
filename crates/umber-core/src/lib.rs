@@ -14,12 +14,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod assets;
+pub mod journal;
 pub mod layers;
 pub mod project;
 pub mod tiles;
 pub mod undo;
 
 pub use assets::{AssetError, AssetRef, AssetStore};
+pub use journal::{Journal, JournalEntry, JournalOp};
 
 pub use layers::{BlendMode, Layer, LayerCommand, LayerKind, LayerMask, LayerStack};
 pub use project::{

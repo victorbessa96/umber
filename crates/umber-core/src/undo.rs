@@ -174,6 +174,14 @@ impl<C: Command> UndoStack<C> {
         self.bytes_held = 0;
     }
 
+    /// The command [`undo`](Self::undo) would revert next — the most
+    /// recently pushed or redone one — with its `apply`-captured state
+    /// intact. The autosave journal reads it after `push`/`redo` (the
+    /// forward op) and *before* `undo` (revert `take()`s the captures).
+    pub fn peek_undo(&self) -> Option<&C> {
+        self.undo.back()
+    }
+
     /// Number of entries currently held in the undo journal.
     pub fn len(&self) -> usize {
         self.undo.len()

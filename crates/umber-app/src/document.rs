@@ -1,16 +1,35 @@
 //! App-side document state: the layer stack plus its undo journal, and
 //! the egui panels that view/drive them (Layers + History).
 
+use std::path::{Path, PathBuf};
+
+use umber_core::journal::{Journal, JournalOp};
 use umber_core::layers::{Layer, LayerCommand, LayerKind, LayerStack};
 use umber_core::undo::UndoStack;
 
-/// The open document: layer stack + undo history.
+/// The open document: layer stack + undo history + autosave journal.
 ///
 /// Wave 2 scope: one texture-set layer stack; multi-set documents and
 /// the paint-channel binding to GPU targets arrive with the tile pool.
 pub struct Document {
     pub stack: LayerStack,
     pub history: UndoStack<LayerCommand>,
+    /// The autosave journal (umber_core::journal), attached once the
+    /// document has a project directory (after a Save or an Open). A
+    /// never-saved document has nowhere to journal to and is not
+    /// journaled — the v1 boundary.
+    journal: Option<DocumentJournal>,
+    /// The high-water mark of the project last attached, kept apart from
+    /// the journal so a failed attach can't make the next save stamp a
+    /// *lower* `journal_seq` (which would re-arm already-saved entries).
+    journal_high_water: u64,
+}
+
+/// An attached journal plus the texture set this document's stack is.
+struct DocumentJournal {
+    journal: Journal,
+    texture_set: String,
+    dir: PathBuf,
 }
 
 /// Undo journal capacity (entries). Sized for long sessions; the memory
@@ -22,33 +41,118 @@ impl Default for Document {
         Self {
             stack: LayerStack::default(),
             history: UndoStack::new(HISTORY_MAX_ENTRIES),
+            journal: None,
+            journal_high_water: 0,
         }
     }
 }
 
 impl Document {
-    /// Runs `command` through the journal (applies + records for undo).
+    /// Runs `command` through the journal (applies + records for undo),
+    /// then appends the applied edit to the autosave journal.
     pub fn run(&mut self, command: LayerCommand) {
         self.history.push(command, &mut self.stack);
+        let op = self
+            .history
+            .peek_undo()
+            .and_then(|c| JournalOp::applied(c, &self.stack));
+        self.autosave(op);
     }
 
-    /// One-level undo; returns whether anything was undone.
+    /// One-level undo; returns whether anything was undone. The
+    /// autosave journal gets the edit the undo performed (read before
+    /// the revert, which consumes the command's captured state).
     pub fn undo(&mut self) -> bool {
-        self.history.undo(&mut self.stack)
+        let op = self
+            .history
+            .peek_undo()
+            .and_then(|c| JournalOp::reverting(c, &self.stack));
+        if !self.history.undo(&mut self.stack) {
+            return false;
+        }
+        self.autosave(op);
+        true
     }
 
     /// One-level redo; returns whether anything was redone.
     pub fn redo(&mut self) -> bool {
-        self.history.redo(&mut self.stack)
+        if !self.history.redo(&mut self.stack) {
+            return false;
+        }
+        let op = self
+            .history
+            .peek_undo()
+            .and_then(|c| JournalOp::applied(c, &self.stack));
+        self.autosave(op);
+        true
+    }
+
+    /// Appends `op` to the attached autosave journal, if any. A failed
+    /// append is logged, not fatal: the journal is an optimization over
+    /// losing the edits since the last save, never a gate on editing.
+    fn autosave(&mut self, op: Option<JournalOp>) {
+        let (Some(attached), Some(op)) = (self.journal.as_mut(), op) else {
+            return;
+        };
+        if let Err(err) = attached.journal.record(&attached.texture_set, op) {
+            log::warn!("autosave journal append failed: {err}");
+        }
+    }
+
+    /// Attaches the autosave journal of the project at `dir` (whose
+    /// `project.json` was just saved or loaded with `journal_seq` ==
+    /// `high_water`); this document's stack is its `texture_set`.
+    ///
+    /// Replaces any previously attached journal. When that one lived in a
+    /// different directory (Save As), it is truncated: its entries are
+    /// in the state just saved to `dir`, and left behind they would
+    /// "recover" into the old project on its next open.
+    pub fn attach_journal(
+        &mut self,
+        dir: &Path,
+        texture_set: &str,
+        high_water: u64,
+    ) -> std::io::Result<()> {
+        self.journal_high_water = high_water;
+        if let Some(old) = self.journal.take() {
+            if old.dir != dir {
+                if let Err(err) = umber_core::journal::truncate_journal(&old.dir) {
+                    log::warn!(
+                        "previous autosave journal not cleared ({}): {err}",
+                        old.dir.display()
+                    );
+                }
+            }
+        }
+        self.journal = Some(DocumentJournal {
+            journal: Journal::open(dir, high_water)?,
+            texture_set: texture_set.to_string(),
+            dir: dir.to_path_buf(),
+        });
+        Ok(())
+    }
+
+    /// The high-water mark a save of this document stamps into
+    /// `project.json`: the attached journal's last seq, never below the
+    /// mark of the project last attached (0 for a never-saved document).
+    pub fn journal_seq(&self) -> u64 {
+        self.journal
+            .as_ref()
+            .map_or(0, |j| j.journal.last_seq())
+            .max(self.journal_high_water)
     }
 
     /// Replaces the document's layer stack wholesale — the
     /// Open-Project path. The journal holds ids and indices captured
     /// against the *old* stack, so it is cleared with the swap:
     /// undo history is session-scoped by design and does not follow
-    /// the file across an open.
+    /// the file across an open. The autosave journal is detached too —
+    /// it belongs to the previous project's directory; the caller
+    /// attaches the loaded project's ([`Self::attach_journal`]).
     pub fn load_stack(&mut self, stack: LayerStack) {
         self.history.clear();
+        self.journal = None;
+        self.journal_high_water = 0;
         self.stack = stack;
     }
 
@@ -212,6 +316,75 @@ mod tests {
         assert_eq!(doc.layers().len(), 3);
         assert!(doc.undo());
         assert_eq!(doc.layers().len(), 2);
+    }
+
+    /// Design test 1: an op through the app's chokepoints lands as a
+    /// parseable, newline-terminated JSONL line with the entry shape —
+    /// undo journaled as the edit it performed, not as "undo".
+    #[test]
+    fn document_ops_land_as_journal_lines() {
+        use umber_core::journal::{read_journal, JournalEntry, JOURNAL_FILE_NAME};
+
+        let dir =
+            std::env::temp_dir().join(format!("umber-app-doc-journal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut doc = Document::default();
+        doc.attach_journal(&dir, "Body", 0).unwrap();
+        doc.run(LayerCommand::add("Paint 1", LayerKind::Paint));
+        doc.run(LayerCommand::set_visible(0, false));
+        assert!(doc.undo());
+        assert!(doc.redo());
+
+        let text = std::fs::read_to_string(dir.join(JOURNAL_FILE_NAME)).unwrap();
+        assert!(text.ends_with('\n'));
+        assert_eq!(text.lines().count(), 4);
+        assert!(
+            text.lines().next().unwrap().contains(r#""type":"add""#),
+            "{text}"
+        );
+        let body = |seq: u64, op: JournalOp| JournalEntry {
+            seq,
+            texture_set: "Body".into(),
+            op,
+        };
+        assert_eq!(
+            read_journal(&dir).unwrap(),
+            vec![
+                body(
+                    1,
+                    JournalOp::Add {
+                        id: 0,
+                        name: "Paint 1".into(),
+                        kind: LayerKind::Paint,
+                    }
+                ),
+                body(
+                    2,
+                    JournalOp::SetVisible {
+                        id: 0,
+                        value: false
+                    }
+                ),
+                body(3, JournalOp::SetVisible { id: 0, value: true }),
+                body(
+                    4,
+                    JournalOp::SetVisible {
+                        id: 0,
+                        value: false
+                    }
+                ),
+            ]
+        );
+        assert_eq!(doc.journal_seq(), 4);
+
+        // An unattached document (the never-saved case) writes nothing.
+        let mut loose = Document::default();
+        loose.run(LayerCommand::add("x", LayerKind::Fill));
+        assert_eq!(loose.journal_seq(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Red-state proof of the exact corruption `load_stack` closes:

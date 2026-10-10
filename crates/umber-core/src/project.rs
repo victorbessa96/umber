@@ -6,7 +6,14 @@
 //! myproject.umber/
 //!   project.json            # version, texture sets, per-set layer order, settings
 //!   layers/<set>/<id>.json  # one JSON file per layer — diffable, mergeable
+//!   journal.jsonl           # autosave journal: edits since the last save
 //! ```
+//!
+//! `journal.jsonl` (see [`crate::journal`]) holds the mutations made since
+//! `project.json` was written; `project.json`'s `journal_seq` is the
+//! high-water mark of the entries it already reflects. [`load_from_dir`]
+//! replays the entries past it (crash recovery), and [`save_to_dir`]
+//! truncates the journal once the new state is committed.
 //!
 //! [`ProjectModel`] is the in-memory document: full [`Layer`] bodies, grouped
 //! per texture set. On disk, layer bodies live in their own files and
@@ -25,6 +32,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::journal;
 use crate::layers::{Layer, LayerStack};
 use crate::TextureSet;
 
@@ -135,6 +143,10 @@ pub struct ProjectModel {
     /// stays graph-agnostic). Empty for pre-graph projects; old files
     /// load unchanged via the `serde(default)` on the file schema.
     pub graphs_mtlx: Vec<String>,
+    /// The autosave journal's high-water mark: the seq of the last
+    /// `journal.jsonl` entry this state already reflects (0 = none).
+    /// Saves stamp it from the live journal; recovery advances it.
+    pub journal_seq: u64,
 }
 
 impl ProjectModel {
@@ -151,6 +163,7 @@ impl ProjectModel {
             layers,
             settings,
             graphs_mtlx: Vec::new(),
+            journal_seq: 0,
         }
     }
 
@@ -159,6 +172,15 @@ impl ProjectModel {
     #[must_use]
     pub fn with_graphs_mtlx(mut self, graphs_mtlx: Vec<String>) -> Self {
         self.graphs_mtlx = graphs_mtlx;
+        self
+    }
+
+    /// Stamps the journal high-water mark (builder): a save from a
+    /// journaled session passes its journal's last seq, so the entries
+    /// the saved state already holds never replay on top of it.
+    #[must_use]
+    pub fn with_journal_seq(mut self, journal_seq: u64) -> Self {
+        self.journal_seq = journal_seq;
         self
     }
 }
@@ -176,6 +198,10 @@ struct ProjectFile {
     /// `default` keeps pre-graph files loading unchanged.
     #[serde(default)]
     graphs_mtlx: Vec<String>,
+    /// See [`ProjectModel::journal_seq`]. `default` (0) keeps
+    /// pre-journal files loading unchanged.
+    #[serde(default)]
+    journal_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -297,12 +323,88 @@ fn to_pretty_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, ProjectError
     Ok(bytes)
 }
 
+/// Writes `bytes` to `path` through a sibling temp file + rename, so
+/// a crash leaves either the old file or the new one, never a torn one
+/// (the [`crate::assets::AssetStore::store`] pattern).
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ProjectError> {
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(format!(".tmp.{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp_name);
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Removes everything under `layers_root` the just-saved `model` doesn't
+/// reference: set directories of deleted sets, layer files of deleted
+/// layers, and stray temp files. Set names compare case-insensitively
+/// (the same rule as `validate_project_structure`): on a
+/// case-insensitive filesystem a set renamed `body` → `Body` reuses the
+/// old directory, which must not be pruned as stale.
+fn prune_stale_layer_files(layers_root: &Path, model: &ProjectModel) -> Result<(), ProjectError> {
+    let live: Vec<(String, BTreeSet<String>)> = model
+        .layers
+        .iter()
+        .map(|entry| {
+            (
+                entry.texture_set.to_lowercase(),
+                entry
+                    .stack
+                    .layers
+                    .iter()
+                    .map(|l| format!("{}.json", l.id))
+                    .collect(),
+            )
+        })
+        .collect();
+    for set_entry in fs::read_dir(layers_root)? {
+        let set_entry = set_entry?;
+        let set_path = set_entry.path();
+        let set_name = set_entry.file_name().to_string_lossy().to_lowercase();
+        let live_files = live
+            .iter()
+            .find(|(name, _)| *name == set_name)
+            .map(|(_, files)| files);
+        match (set_path.is_dir(), live_files) {
+            (true, Some(live_files)) => {
+                for file in fs::read_dir(&set_path)? {
+                    let file = file?;
+                    let name = file.file_name().to_string_lossy().into_owned();
+                    if !live_files.contains(&name) {
+                        let path = file.path();
+                        if path.is_dir() {
+                            fs::remove_dir_all(&path)?;
+                        } else {
+                            fs::remove_file(&path)?;
+                        }
+                    }
+                }
+            }
+            (true, None) => fs::remove_dir_all(&set_path)?,
+            (false, _) => fs::remove_file(&set_path)?,
+        }
+    }
+    Ok(())
+}
+
 /// Writes `model` to `dir`, creating it if needed.
 ///
-/// `dir`'s `layers/` directory is entirely removed and rewritten from
-/// scratch, so a save into an existing project never leaves stale files
-/// behind — neither for individual layers deleted from a set, nor for a
-/// texture set deleted outright.
+/// A save into an existing project never leaves stale files behind —
+/// neither for individual layers deleted from a set, nor for a texture
+/// set deleted outright — and runs in a crash-safe order:
+///
+/// 1. every layer file is written (temp + rename each);
+/// 2. `project.json` is written atomically — the commit point;
+/// 3. stale layer files and set directories are pruned;
+/// 4. the autosave journal is truncated (the saved state now holds it).
+///
+/// A crash before (2) leaves the old `project.json`, whose layer files
+/// all still exist (nothing is deleted before the commit), plus the
+/// intact journal; a crash after (2) leaves at worst stale files and a
+/// journal whose entries are all at or below the new `journal_seq`. Not
+/// fully transactional: a crash before (2) can leave a layer file
+/// already holding its newer body under the old `project.json` — the
+/// journal's absolute-state ops converge that on the next recovery.
 pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError> {
     let texture_set_names: Vec<String> = model
         .texture_sets
@@ -328,9 +430,6 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
 
     fs::create_dir_all(dir)?;
     let layers_root = dir.join("layers");
-    if layers_root.exists() {
-        fs::remove_dir_all(&layers_root)?;
-    }
 
     let mut layer_sets = Vec::with_capacity(model.layers.len());
     for entry in &model.layers {
@@ -340,7 +439,7 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
         let mut layer_ids = Vec::with_capacity(entry.stack.layers.len());
         for layer in &entry.stack.layers {
             let bytes = to_pretty_json_bytes(layer)?;
-            fs::write(set_dir.join(format!("{}.json", layer.id)), bytes)?;
+            write_atomic(&set_dir.join(format!("{}.json", layer.id)), &bytes)?;
             layer_ids.push(layer.id);
         }
 
@@ -357,8 +456,13 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
         layer_sets,
         settings: model.settings.clone(),
         graphs_mtlx: model.graphs_mtlx.clone(),
+        journal_seq: model.journal_seq,
     };
-    fs::write(dir.join("project.json"), to_pretty_json_bytes(&file)?)?;
+    write_atomic(&dir.join("project.json"), &to_pretty_json_bytes(&file)?)?;
+    if layers_root.exists() {
+        prune_stale_layer_files(&layers_root, model)?;
+    }
+    journal::truncate_journal(dir)?;
     Ok(())
 }
 
@@ -419,13 +523,44 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
         });
     }
 
-    Ok(ProjectModel {
+    let mut model = ProjectModel {
         version: file.version,
         texture_sets: file.texture_sets,
         layers,
         settings: file.settings,
         graphs_mtlx: file.graphs_mtlx,
-    })
+        journal_seq: file.journal_seq,
+    };
+    recover_from_journal(&mut model, dir);
+    Ok(model)
+}
+
+/// Crash recovery (docs/specs/autosave-journal-design.md §3): replays the
+/// journal entries past `model.journal_seq`, then persists — `save_to_dir`
+/// rewrites `project.json` with the advanced high-water mark and only then
+/// truncates the journal. A crash at any point is safe: before the
+/// `project.json` commit the next load replays the same entries onto the
+/// same saved state; after it, every entry is at or below the new mark and
+/// is skipped.
+///
+/// Best-effort by design, never an error: an unreadable journal loads the
+/// saved state as-is, and a failed rewrite (read-only directory, full
+/// disk) still returns the recovered model, leaving the journal in place
+/// for the next load to replay again.
+fn recover_from_journal(model: &mut ProjectModel, dir: &Path) {
+    let Ok(entries) = journal::read_journal(dir) else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    if journal::replay(model, &entries) == 0 {
+        // Every entry already reflected: the crash fell between a
+        // rewrite and its truncate. Finish the truncate.
+        let _ = journal::truncate_journal(dir);
+        return;
+    }
+    let _ = save_to_dir(model, dir);
 }
 
 #[cfg(test)]
@@ -518,6 +653,7 @@ mod tests {
                 .collect(),
             settings: model.settings.clone(),
             graphs_mtlx: model.graphs_mtlx.clone(),
+            journal_seq: model.journal_seq,
         };
 
         let bytes_1 = to_pretty_json_bytes(&file).unwrap();

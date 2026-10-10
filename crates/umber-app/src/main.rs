@@ -416,16 +416,33 @@ impl UmberApp {
                 display: self.state.display,
             },
         )
-        .with_graphs_mtlx(graphs_mtlx);
+        .with_graphs_mtlx(graphs_mtlx)
+        // The journal high-water mark: every entry recorded so far is in
+        // this saved state, so none may replay on top of it.
+        .with_journal_seq(self.state.doc.journal_seq());
         match umber_core::project::save_to_dir(&model, &dir) {
-            Ok(()) => log::info!("project saved: {}", dir.display()),
+            Ok(()) => {
+                log::info!("project saved: {}", dir.display());
+                // From here on the document journals into `dir`, its seq
+                // continuing past the stamped mark (a Save As clears the
+                // old directory's journal — `dir` now holds those edits).
+                if let Err(e) = self
+                    .state
+                    .doc
+                    .attach_journal(&dir, &set_name, model.journal_seq)
+                {
+                    log::warn!("autosave journal unavailable: {e}");
+                }
+            }
             Err(e) => log::error!("project save failed: {e}"),
         }
     }
 
-    /// Loads a `.umber` project directory: restores the active texture
-    /// set's layer stack into the document (undo history starts fresh;
-    /// the journal is session-scoped by design) and the first carried
+    /// Loads a `.umber` project directory (recovering any autosave
+    /// journal a crash left — see `umber_core::journal`): restores the
+    /// active texture set's layer stack into the document (undo history
+    /// starts fresh; the journal is session-scoped by design), attaches
+    /// the project's autosave journal, and the first carried
     /// `.mtlx` graph into the graph panel (a parse failure keeps the
     /// current panel graph and logs — the panel's status line says so).
     fn open_project(&mut self) {
@@ -447,6 +464,15 @@ impl UmberApp {
                     return;
                 };
                 self.state.doc.load_stack(entry.stack.clone());
+                // `load_from_dir` already replayed + truncated any journal
+                // a crash left behind; resume journaling from its mark.
+                if let Err(e) = self
+                    .state
+                    .doc
+                    .attach_journal(&dir, &name, model.journal_seq)
+                {
+                    log::warn!("autosave journal unavailable: {e}");
+                }
                 // Hand-edited files can carry out-of-range values; the
                 // sliders' ranges are the contract.
                 self.state.display = model.settings.display.sanitized();
