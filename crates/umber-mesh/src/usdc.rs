@@ -173,11 +173,13 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
         _ => Vec::new(),
     };
 
-    // --- the fan triangulation + per-corner expansion (the .usda rules) ---
-    let mut positions: Vec<f32> = Vec::new();
+    // --- the fan triangulation + per-corner expansion (the .usda rules).
+    // MeshData's attribute vecs are per-vertex ([f32;3] / [f32;2] entries),
+    // so the builder accumulates triples, not flat floats. ---
+    let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut out_indices: Vec<u32> = Vec::new();
-    let mut out_normals: Vec<f32> = Vec::new();
-    let mut out_uvs: Vec<f32> = Vec::new();
+    let mut out_normals: Vec<[f32; 3]> = Vec::new();
+    let mut out_uvs: Vec<[f32; 2]> = Vec::new();
 
     let newell = |face: &[i32]| -> [f32; 3] {
         let mut n = [0f32; 3];
@@ -223,17 +225,18 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
                         points.len() / 3
                     )));
                 }
-                positions.extend_from_slice(&points[vi * 3..vi * 3 + 3]);
+                let p: [f32; 3] = [points[vi * 3], points[vi * 3 + 1], points[vi * 3 + 2]];
+                positions.push(p);
                 match &normals {
                     Some(n) if vi * 3 + 3 <= n.len() => {
-                        out_normals.extend_from_slice(&n[vi * 3..vi * 3 + 3]);
+                        out_normals.push([n[vi * 3], n[vi * 3 + 1], n[vi * 3 + 2]])
                     }
-                    _ => out_normals.extend_from_slice(&flat),
+                    _ => out_normals.push(flat),
                 }
                 if !uvs.is_empty() && vi * 2 + 2 <= uvs.len() {
-                    out_uvs.extend_from_slice(&uvs[vi * 2..vi * 2 + 2]);
+                    out_uvs.push([uvs[vi * 2], uvs[vi * 2 + 1]]);
                 } else {
-                    out_uvs.extend_from_slice(&[0.0, 0.0]);
+                    out_uvs.push([0.0, 0.0]);
                 }
                 out_indices.push(out_indices.len() as u32);
             }
@@ -290,15 +293,19 @@ def Mesh "Mesh"
         // 4 corners x 2 triangles x 3 floats, per-corner expansion.
         assert_eq!(
             mesh.positions.len(),
-            4 * 3 * 2,
-            "4 corners x 2 tris x 3 floats"
+            4 * 2,
+            "4 corners x 2 tris (per-vertex [f32;3] entries)"
         );
         assert_eq!(mesh.indices.len(), 6, "two triangles");
         // RightHanded default keeps winding: v0, v1, v2.
         assert_eq!(&mesh.indices[..3], &[0, 1, 2]);
-        // UVs carried per corner (4 corners x 2 tris x 2 floats).
-        assert_eq!(mesh.uvs.len(), 4 * 2 * 2);
-        assert!((mesh.uvs[0] - 0.0).abs() < 1e-6 && (mesh.uvs[2] - 1.0).abs() < 1e-6);
+        // UVs carried per corner (4 corners x 2 tris).
+        assert_eq!(mesh.uvs.len(), 4 * 2);
+        assert!(
+            (mesh.uvs[0][0] - 0.0).abs() < 1e-6 && (mesh.uvs[1][0] - 1.0).abs() < 1e-6,
+            "uv[0] == (0,0), uv[1] == (1,0): {:?}",
+            &mesh.uvs[..2]
+        );
     }
 
     #[test]
@@ -357,11 +364,11 @@ def Mesh "Cube"
             "normals per corner"
         );
         // The flat normals are unit length (Newell normalized).
-        for c in mesh.normals.chunks_exact(3) {
-            let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
-            assert!((len - 1.0).abs() < 1e-5, "normal not unit: {c:?}");
+        for n in &mesh.normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "normal not unit: {n:?}");
         }
         // UVs zero-filled (none authored).
-        assert!(mesh.uvs.iter().all(|&u| u == 0.0));
+        assert!(mesh.uvs.iter().all(|u| u[0] == 0.0 && u[1] == 0.0));
     }
 }
