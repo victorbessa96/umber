@@ -99,14 +99,12 @@ fn field(
     path: &SdfPath,
     name: &str,
 ) -> Result<Option<Value>, ImportError> {
-    // The property spec path, if it parses. USD's TEXT syntax namespaces
-    // attributes with colons (`primvars:st`), but Sdf PATHS are
-    // dot-separated (`/Mesh.primvars.st`) — and append_property rejects
-    // namespaced identifiers. Split on ':' and append each segment.
-    if let Ok(prop) = name
-        .split(':')
-        .try_fold(path.clone(), |p, seg| p.append_property(seg))
-    {
+    // The property spec path, if it parses. USD namespaced identifiers
+    // (colons) are VALID property-name segments in Sdf paths — the parser
+    // registers `primvars:st` at `/Mesh.primvars:st` verbatim
+    // (is_valid_namespace_identifier accepts ':' segments; the round-6
+    // split into dot segments pointed at a path that never exists).
+    if let Ok(prop) = path.append_property(name) {
         if data.spec_type(&prop) == Some(SpecType::Attribute) {
             return match data.try_field(&prop, "default") {
                 Ok(opt) => Ok(opt.map(|cow| cow.into_owned())),
@@ -182,16 +180,27 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
 
     // --- normals: primvars:normals else normals; flat Newell when absent ---
     let mut normals: Option<Vec<f32>> = None;
+    // --- Normals: primvars:normals else normals; typed-vector aware
+    // (`float3[]` parses to Vec3fVec, not FloatVec); flat Newell when absent.
     for name in ["primvars:normals", "normals"] {
-        if let Some(Value::FloatVec(v)) = field(data, path, name)? {
-            normals = Some(v);
-            break;
+        match field(data, path, name)? {
+            Some(Value::FloatVec(v)) => {
+                normals = Some(v);
+                break;
+            }
+            Some(Value::Vec3fVec(v)) => {
+                normals = Some(v.into_iter().flat_map(<[f32; 3]>::from).collect());
+                break;
+            }
+            _ => continue,
         }
     }
 
-    // --- UVs: primvars:st; zero-filled when absent (the .usda rule) ---
+    // --- UVs: primvars:st; typed-vector aware (`texCoord2f[]` parses to
+    // Vec2fVec); zero-filled when absent (the .usda rule) ---
     let uvs: Vec<f32> = match field(data, path, "primvars:st")? {
         Some(Value::FloatVec(v)) => v,
+        Some(Value::Vec2fVec(v)) => v.into_iter().flat_map(<[f32; 2]>::from).collect(),
         _ => Vec::new(),
     };
 
