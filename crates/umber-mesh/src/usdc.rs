@@ -22,7 +22,6 @@ use openusd::sdf::{AbstractData, Path as SdfPath, SpecType, Value};
 use openusd::usdc;
 
 use super::{ImportError, MeshData};
-
 /// Loads a `.usdc` (binary crate) file: the first Mesh prim becomes a
 /// fan-triangulated [`MeshData`], mirroring [`super::usd::load_usda`].
 pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
@@ -54,9 +53,11 @@ fn extract_first_mesh(data: &dyn AbstractData) -> Result<MeshData, ImportError> 
 
 fn find_first_mesh(data: &dyn AbstractData, path: &SdfPath) -> Option<SdfPath> {
     if data.spec_type(path) == Some(SpecType::Prim) {
-        if let Ok(Some(Value::Token(ty))) = data.try_field(path, "typeName") {
-            if ty.as_str() == "Mesh" {
-                return Some(path.clone());
+        if let Ok(Some(v)) = data.try_field(path, "typeName") {
+            if let Value::Token(ty) = v.as_ref() {
+                if ty.as_str() == "Mesh" {
+                    return Some(path.clone());
+                }
             }
         }
     }
@@ -74,11 +75,13 @@ fn find_first_mesh(data: &dyn AbstractData, path: &SdfPath) -> Option<SdfPath> {
 /// canonical composition the parser itself uses.
 fn child_prim_paths(data: &dyn AbstractData, path: &SdfPath) -> Vec<SdfPath> {
     let mut out = Vec::new();
-    if let Ok(Some(Value::TokenVec(names))) = data.try_field(path, "primChildren") {
-        for name in names {
-            let composed = format!("{}/{}", path.as_str().trim_end_matches('/'), name.as_str());
-            if let Ok(child) = SdfPath::from_str(&composed) {
-                out.push(child);
+    if let Ok(Some(v)) = data.try_field(path, "primChildren") {
+        if let Value::TokenVec(names) = v.as_ref() {
+            for name in names {
+                let composed = format!("{}/{}", path.as_str().trim_end_matches('/'), name.as_str());
+                if let Ok(child) = SdfPath::new(&composed) {
+                    out.push(child);
+                }
             }
         }
     }
@@ -87,19 +90,21 @@ fn child_prim_paths(data: &dyn AbstractData, path: &SdfPath) -> Vec<SdfPath> {
 
 /// One field lookup: decode failures become `ImportError::Usd` with the
 /// spec path (the crate's error context — the .usda parser's `line N:`
-/// equivalent).
+/// equivalent). Returns the CLONED value (try_field hands back a borrow;
+/// cloning here keeps every caller's match simple).
 fn field(
     data: &dyn AbstractData,
     path: &SdfPath,
     name: &str,
 ) -> Result<Option<Value>, ImportError> {
-    data.try_field(path, name).map_err(|e| {
-        ImportError::Usd(format!(
+    match data.try_field(path, name) {
+        Ok(opt) => Ok(opt.map(|cow| cow.into_owned())),
+        Err(e) => Err(ImportError::Usd(format!(
             "usd: {}.{} decode failed: {e}",
             path.as_str(),
             name
-        ))
-    })
+        ))),
+    }
 }
 
 /// Extracts the Mesh's geometry, mirroring the .usda parser's rules.
@@ -108,7 +113,7 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
     let points: Vec<f32> = match field(data, path, "points")? {
         Some(Value::FloatVec(v)) if !v.is_empty() => v,
         Some(Value::Vec3fVec(v)) if !v.is_empty() => {
-            v.into_iter().flat_map(|p| p.to_array()).collect()
+            v.into_iter().flat_map(|p| <[f32; 3]>::from(p)).collect()
         }
         Some(_) => {
             return Err(ImportError::Usd(format!(
@@ -203,6 +208,7 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
         let flat = newell(&face);
 
         for t in 0..(count - 2) {
+            let t = t as usize;
             let tri = if left_handed {
                 [face[0], face[t + 2], face[t + 1]]
             } else {
