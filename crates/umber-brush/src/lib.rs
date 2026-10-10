@@ -33,6 +33,7 @@ pub mod lazy_mouse;
 pub mod one_euro;
 pub mod preset;
 pub mod preset_library;
+pub mod retouch;
 pub mod spacing;
 pub mod wiring;
 
@@ -40,6 +41,7 @@ pub use dab_adapter::{BrushParams, DabAdapter};
 pub use lazy_mouse::LazyMouse;
 pub use one_euro::{OneEuroError, OneEuroFilter, OneEuroScalar};
 pub use preset_library::{Library, LibraryEntry};
+pub use retouch::{BrushTool, CloneParams, RgbaBuffer, SmudgeParams};
 pub use spacing::{DabPlan, SpacingAccumulator, SpacingError};
 pub use wiring::{ConditionerError, StrokeConditioner};
 

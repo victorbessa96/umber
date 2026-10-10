@@ -18,6 +18,7 @@ use crate::i18n::tr;
 
 use umber_brush::preset::{BrushPreset, ControlCurve};
 use umber_brush::preset_library::{user_preset_dir, Library};
+use umber_brush::{BrushTool, CloneParams, SmudgeParams};
 
 /// Size of the curve-editor plot (logical pixels).
 const CURVE_PLOT_SIZE: egui::Vec2 = egui::Vec2::new(150.0, 100.0);
@@ -42,6 +43,14 @@ pub struct BrushPanel {
     save_error: Option<String>,
     /// Buffer for the Save-As name field.
     save_as_name: String,
+    /// The active tool (paint / smudge / clone) and its params. Panel
+    /// state, not preset state: the `.umberbrush` format is unchanged.
+    /// The paint session adopts it via `PaintState::sync_tool`.
+    pub tool: BrushTool,
+    /// The last-edited params of each retouch tool, kept while another
+    /// tool is selected so switching back restores them.
+    smudge: SmudgeParams,
+    clone: CloneParams,
 }
 
 impl BrushPanel {
@@ -72,11 +81,18 @@ impl BrushPanel {
             dirs,
             save_error: None,
             save_as_name: String::new(),
+            tool: BrushTool::Paint,
+            smudge: SmudgeParams::default(),
+            clone: CloneParams::default(),
         }
     }
 
-    /// The panel body: preset selector + live editor + save row.
+    /// The panel body: tool rows + preset selector + live editor + save
+    /// row. The tool rows come first: they work with no preset selected.
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        self.tool_rows(ui);
+        ui.add_space(8.0);
+        ui.separator();
         self.preset_selector(ui);
         ui.add_space(8.0);
         ui.separator();
@@ -99,6 +115,58 @@ impl BrushPanel {
         self.save_row(ui, idx);
         if let Some(err) = self.save_error.clone() {
             ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color));
+        }
+    }
+
+    /// The tool selector (paint / smudge / clone) plus the active retouch
+    /// tool's param rows.
+    fn tool_rows(&mut self, ui: &mut egui::Ui) {
+        // Bank the active retouch params so a tool switch keeps them.
+        match self.tool {
+            BrushTool::Paint => {}
+            BrushTool::Smudge(params) => self.smudge = params,
+            BrushTool::Clone(params) => self.clone = params,
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(tr("brush.tool"));
+            let mut picked = self.tool;
+            ui.selectable_value(&mut picked, BrushTool::Paint, tr("brush.tool-paint"));
+            let smudge_on = matches!(picked, BrushTool::Smudge(_));
+            if ui
+                .selectable_label(smudge_on, tr("brush.tool-smudge"))
+                .clicked()
+            {
+                picked = BrushTool::Smudge(self.smudge);
+            }
+            let clone_on = matches!(picked, BrushTool::Clone(_));
+            if ui
+                .selectable_label(clone_on, tr("brush.tool-clone"))
+                .clicked()
+            {
+                picked = BrushTool::Clone(self.clone);
+            }
+            self.tool = picked;
+        });
+        match &mut self.tool {
+            BrushTool::Paint => {}
+            BrushTool::Smudge(params) => {
+                ui.add(
+                    egui::Slider::new(&mut params.strength, 0.0..=1.0)
+                        .text(tr("brush.smudge-strength")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut params.smear, 0.0..=1.0).text(tr("brush.smudge-smear")),
+                );
+            }
+            BrushTool::Clone(params) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(tr("brush.clone-offset"));
+                    ui.add(egui::DragValue::new(&mut params.source_offset.0).speed(0.001));
+                    ui.add(egui::DragValue::new(&mut params.source_offset.1).speed(0.001));
+                });
+                ui.checkbox(&mut params.follow, tr("brush.clone-follow"));
+                ui.weak(tr("brush.clone-hint"));
+            }
         }
     }
 

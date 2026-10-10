@@ -110,6 +110,19 @@ pub enum PaintError {
     /// device poll, buffer-map callback loss, or the map itself.
     #[error("paint-target readback failed: {0}")]
     Readback(String),
+    /// [`PaintTarget::write_region`] got a rect outside the target, an
+    /// empty rect, or a byte count that is not `width * height * 4`.
+    #[error("region write {width}x{height} at ({x}, {y}) does not fit the target or its bytes")]
+    InvalidRegion {
+        /// Region origin x, texels.
+        x: u32,
+        /// Region origin y, texels.
+        y: u32,
+        /// Region width, texels.
+        width: u32,
+        /// Region height, texels.
+        height: u32,
+    },
 }
 
 /// CPU-side staging for a dab batch, uploaded to a GPU storage buffer just
@@ -221,10 +234,13 @@ impl PaintTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
+            // COPY_DST: the retouch tools' region write-back
+            // (`write_region`) copies CPU-edited texels back in.
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -363,6 +379,80 @@ impl PaintTarget {
         drop(data);
         buffer.unmap();
         Ok(out)
+    }
+
+    /// Records a copy of tightly-packed RGBA8 `rgba` (`width * height * 4`
+    /// bytes, row-major) into the `width`x`height` region at `(x, y)` —
+    /// the inverse of [`Self::read_back_rgba8`] for one rect, used by the
+    /// retouch tools' write-back.
+    ///
+    /// Recorded on `encoder` (a `create_buffer_init` staging buffer +
+    /// `copy_buffer_to_texture`), NOT via `queue.write_texture`: a queue
+    /// write lands at submit time, ahead of every dispatch already on the
+    /// encoder — the same ordering hazard [`PaintCompositor`] documents for
+    /// `queue.write_buffer`. Recorded, it serializes with the splat passes
+    /// in command order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaintError::InvalidRegion`] for an empty or out-of-bounds
+    /// rect, or a byte count that doesn't match it.
+    pub fn write_region(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        (x, y): (u32, u32),
+        (width, height): (u32, u32),
+        rgba: &[u8],
+    ) -> Result<(), PaintError> {
+        let fits = width > 0
+            && height > 0
+            && x.checked_add(width).is_some_and(|x1| x1 <= self.width)
+            && y.checked_add(height).is_some_and(|y1| y1 <= self.height)
+            && rgba.len() == width as usize * height as usize * 4;
+        if !fits {
+            return Err(PaintError::InvalidRegion {
+                x,
+                y,
+                width,
+                height,
+            });
+        }
+        let unpadded_row = width * 4;
+        let padding = (256 - (unpadded_row % 256)) % 256;
+        let padded_row = unpadded_row + padding;
+        let mut padded = Vec::with_capacity(padded_row as usize * height as usize);
+        for row in rgba.chunks_exact(unpadded_row as usize) {
+            padded.extend_from_slice(row);
+            padded.resize(padded.len() + padding as usize, 0);
+        }
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_paint_region_upload"),
+            contents: &padded,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
     }
 }
 

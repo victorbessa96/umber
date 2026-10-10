@@ -31,6 +31,7 @@ mod paint_state;
 #[cfg(test)]
 mod perf_soak;
 mod plugins;
+mod retouch;
 mod size_presets;
 mod tile_selection;
 mod uv_view;
@@ -129,11 +130,35 @@ impl TabViewer for PanelViewer<'_> {
             Panel::LayerStack => document::layers_ui(ui, self.doc),
             Panel::Properties => {
                 self.brush.show(ui);
+                // The paint session adopts the panel's tool (and hands
+                // back an alt-click-resolved clone offset).
+                if let Some(paint) = self.paint.as_deref_mut() {
+                    paint.sync_tool(&mut self.brush.tool);
+                }
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));
             }
-            Panel::History => document::history_ui(ui, self.doc),
+            Panel::History => {
+                document::history_ui(ui, self.doc);
+                // Retouch (smudge/clone) strokes keep their own per-stroke
+                // history in v1 — the layer journal above can't hold texel
+                // snapshots yet.
+                if let Some(paint) = self.paint.as_deref_mut() {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(tr("history.strokes"));
+                        let undo = egui::Button::new(tr("history.undo-stroke"));
+                        if ui.add_enabled(paint.can_undo_stroke(), undo).clicked() {
+                            paint.undo_stroke();
+                        }
+                        let redo = egui::Button::new(tr("history.redo-stroke"));
+                        if ui.add_enabled(paint.can_redo_stroke(), redo).clicked() {
+                            paint.redo_stroke();
+                        }
+                    });
+                }
+            }
             Panel::TextureSets => {
                 ui.label(tr("shell.texture-sets-placeholder"));
             }

@@ -27,14 +27,28 @@
 //! per-event, so a stroke dragging across a tile seam paints each event
 //! into the tile under the pointer; there is no cross-tile stroke
 //! continuity.
+//!
+//! Retouch tools (docs/specs/smudge-clone-design.md): with a smudge or
+//! clone [`BrushTool`] active, the conditioned dabs skip the GPU splat and
+//! run on a per-stroke CPU mirror instead ([`crate::retouch`]). The hook
+//! is in `push_event_inner`, right after `DabAdapter::stamps_to_dabs`: the
+//! first event a stroke routes to a tile drains that tile's queue and
+//! reads it back (`PaintTarget::read_back_rgba8`), every event's dirty
+//! rect is written back as a `PaintThreadCommand::WriteRegion`, and
+//! `end_stroke` records the stroke as ONE entry in the retouch history.
+//! Retouch strokes do not seam-mirror in v1.
 
 use std::collections::BTreeMap;
 
 use egui::Pos2;
-use umber_brush::{BrushParams, DabAdapter, StrokeConditioner, StrokeEvent};
+use umber_brush::retouch::RetouchDab;
+use umber_brush::{BrushParams, BrushTool, DabAdapter, RgbaBuffer, StrokeConditioner, StrokeEvent};
+use umber_core::undo::UndoStack;
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
+
+use crate::retouch::{PaintStrokeCommand, PaintWrites, RetouchStroke};
 
 /// Errors from constructing or driving the paint session.
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +87,11 @@ const EVENT_STEP_NS: u64 = 8_000_000;
 /// UV segment. Must exceed 1.0 so a dab whose footprint can reach the
 /// opposite island is always expanded; start at 1.5× per the design doc.
 pub const SEAM_MIRROR_MARGIN: f32 = 1.5;
+
+/// Retouch-history capacity (strokes) and memory budget (bytes of
+/// before + after dirty-rect snapshots).
+const RETOUCH_HISTORY_MAX_ENTRIES: usize = 64;
+const RETOUCH_HISTORY_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// The paint session: one GPU target per UDIM tile plus the live stroke
 /// conditioner.
@@ -114,6 +133,27 @@ pub struct PaintState {
     /// once per [`Self::push_event_inner`] call, reset by
     /// [`Self::begin_stroke`].
     event_seq: u64,
+    /// The active tool (synced from the brush panel between strokes).
+    tool: BrushTool,
+    /// The live retouch stroke (`Some` between `begin_stroke` and
+    /// `end_stroke` while a smudge/clone tool is active).
+    retouch: Option<RetouchStroke>,
+    /// The alt-click clone source (UV). Kept across strokes: fixed mode
+    /// re-resolves the offset against every stroke's start (each stroke
+    /// samples this same point); follow mode resolves it once, on the
+    /// first stroke after the alt-click, and keeps that offset.
+    clone_source: Option<Pos2>,
+    /// Set by an alt-click, cleared by the first clone stroke after it.
+    clone_source_fresh: bool,
+    /// A clone offset resolved from `clone_source`, waiting to be written
+    /// back into the panel's params ([`Self::sync_tool`]).
+    resolved_clone_offset: Option<(f32, f32)>,
+    /// One entry per retouch stroke (the design's undo-per-stroke
+    /// contract), separate from the document's layer journal in v1.
+    retouch_history: UndoStack<PaintStrokeCommand>,
+    /// Region writes the retouch history's undo/redo produced, drained
+    /// into the tiles' queues right after each call.
+    retouch_writes: PaintWrites,
     /// Staged `Stage` batches since construction (test observability for
     /// the seam-blind zero-cost contract).
     #[cfg(test)]
@@ -163,6 +203,14 @@ impl PaintState {
             seam_graph: None,
             stroke_near_seam: false,
             event_seq: 0,
+            tool: BrushTool::Paint,
+            retouch: None,
+            clone_source: None,
+            clone_source_fresh: false,
+            resolved_clone_offset: None,
+            retouch_history: UndoStack::new(RETOUCH_HISTORY_MAX_ENTRIES)
+                .with_memory_budget(RETOUCH_HISTORY_MAX_BYTES),
+            retouch_writes: PaintWrites::default(),
             #[cfg(test)]
             staged_batches: 0,
             #[cfg(test)]
@@ -205,7 +253,111 @@ impl PaintState {
         // distance, so checking the same distance up front arms exactly the
         // strokes that can produce mirrors.
         self.stroke_near_seam = self.seam_near_uv([uv.x, uv.y], self.seam_radius_uv());
+        self.retouch = if self.tool.is_retouch() {
+            Some(self.begin_retouch(uv))
+        } else {
+            // The retouch history restores whole dirty-rect snapshots, so
+            // undoing one under newer paint would erase that paint: a
+            // paint-tool stroke ends the retouch history (v1 — paint
+            // strokes have no undo of their own yet).
+            self.retouch_history.clear();
+            None
+        };
         self.push_event_inner(uv, 1.0, true);
+    }
+
+    /// Opens the retouch stroke starting at `uv`. Clone: the alt-click
+    /// source resolves into the offset here (`source - start`, UV — every
+    /// stroke in fixed mode, the first stroke after the click in follow
+    /// mode), then the tracker starts in the start tile's local texels —
+    /// the UV offset scaled by the texel density with V flipped, matching
+    /// [`local_texel`].
+    fn begin_retouch(&mut self, uv: Pos2) -> RetouchStroke {
+        if let BrushTool::Clone(mut params) = self.tool {
+            if let Some(source) = self.clone_source {
+                if self.clone_source_fresh || !params.follow {
+                    params.source_offset = (source.x - uv.x, source.y - uv.y);
+                    self.resolved_clone_offset = Some(params.source_offset);
+                    self.tool = BrushTool::Clone(params);
+                }
+                self.clone_source_fresh = false;
+            }
+        }
+        let mut stroke = RetouchStroke::new(self.tool);
+        if let BrushTool::Clone(params) = self.tool {
+            let tile = self.route_tile(uv);
+            let start = local_texel([uv.x, uv.y], tile, self.texels_per_uv);
+            let offset = clone_offset_texels(params.source_offset, self.texels_per_uv);
+            stroke.begin_clone(tile, start, offset, params.follow);
+        }
+        stroke
+    }
+
+    /// Adopts the panel's tool (between strokes only — a tool swap
+    /// mid-stroke would split one stroke across two ops), first writing a
+    /// freshly resolved alt-click clone offset back into the panel's
+    /// params so the panel shows the offset the next stroke uses.
+    pub fn sync_tool(&mut self, panel_tool: &mut BrushTool) {
+        if let (BrushTool::Clone(params), Some(offset)) =
+            (&mut *panel_tool, self.resolved_clone_offset.take())
+        {
+            params.source_offset = offset;
+        }
+        if !self.stroking {
+            self.tool = *panel_tool;
+        }
+    }
+
+    /// Whether the clone tool is active (the UV view's alt-click gate).
+    pub fn clone_tool_active(&self) -> bool {
+        matches!(self.tool, BrushTool::Clone(_))
+    }
+
+    /// The alt-click affordance: arms `uv` as the clone source. The next
+    /// clone stroke resolves it into the offset (`source - stroke start`).
+    pub fn set_clone_source(&mut self, uv: Pos2) {
+        self.clone_source = Some(uv);
+        self.clone_source_fresh = true;
+    }
+
+    /// Reverts the last retouch stroke; `false` when there is none.
+    pub fn undo_stroke(&mut self) -> bool {
+        let undone = self.retouch_history.undo(&mut self.retouch_writes);
+        self.flush_retouch_writes();
+        undone
+    }
+
+    /// Re-applies the last undone retouch stroke; `false` when there is
+    /// none.
+    pub fn redo_stroke(&mut self) -> bool {
+        let redone = self.retouch_history.redo(&mut self.retouch_writes);
+        self.flush_retouch_writes();
+        redone
+    }
+
+    /// Whether [`Self::undo_stroke`] would do anything.
+    pub fn can_undo_stroke(&self) -> bool {
+        self.retouch_history.can_undo()
+    }
+
+    /// Whether [`Self::redo_stroke`] would do anything.
+    pub fn can_redo_stroke(&self) -> bool {
+        self.retouch_history.can_redo()
+    }
+
+    /// Queues the retouch history's pending region writes on their tiles.
+    fn flush_retouch_writes(&mut self) {
+        for (tile, rect, rgba) in self.retouch_writes.writes.drain(..) {
+            if let Some(thread) = self.targets.get_mut(&tile) {
+                let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                    x: rect.x0,
+                    y: rect.y0,
+                    width: rect.width(),
+                    height: rect.height(),
+                    rgba,
+                }]);
+            }
+        }
     }
 
     /// Extend the stroke to `uv`.
@@ -216,9 +368,17 @@ impl PaintState {
         self.push_event_inner(uv, 1.0, true);
     }
 
-    /// End the stroke (flushes nothing extra: `process_pending` drains all).
+    /// End the stroke (flushes nothing extra: `process_pending` drains
+    /// all). A retouch stroke that changed texels becomes ONE retouch
+    /// history entry.
     pub fn end_stroke(&mut self) {
         self.stroking = false;
+        if let Some(command) = self.retouch.take().and_then(RetouchStroke::finish) {
+            self.retouch_history.push(command, &mut self.retouch_writes);
+            // `push` applies the command (queues its "after" bytes); the
+            // stroke already uploaded them event by event.
+            self.retouch_writes.writes.clear();
+        }
     }
 
     /// Drains pending paint commands on EVERY tile's thread (mirrors and
@@ -301,6 +461,8 @@ impl PaintState {
     pub fn resize_target(&mut self, width: u32, height: u32) {
         self.texels_per_uv = width as f32;
         self.target_size = (width, height);
+        // Snapshots recorded at the old size no longer fit the targets.
+        self.retouch_history.clear();
         for thread in self.targets.values_mut() {
             let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
         }
@@ -382,7 +544,10 @@ impl PaintState {
         // (set by `begin_stroke`) skips the mirror call for seam-blind
         // strokes, and `mirror_positions` re-gates on UV-segment distance,
         // so far-from-seam events stage no extra batches.
-        if expand_seams && self.stroke_near_seam {
+        // Retouch strokes skip the mirror fan-out (v1): a smudge/clone dab
+        // reads its own tile's mirror, and a mirrored clone source has no
+        // defined counterpart across the seam.
+        if expand_seams && self.stroke_near_seam && !self.tool.is_retouch() {
             let radius_uv = self.seam_radius_uv();
             // Collect the mirrors first to end the graph borrow before the
             // recursive calls re-borrow `self`.
@@ -431,6 +596,22 @@ impl PaintState {
         if dabs.is_empty() {
             return;
         }
+        // The retouch hook: smudge/clone dabs (same positions, radius,
+        // pressure-shaped alpha and hardness as paint dabs) run on the CPU
+        // mirror instead of the GPU splat.
+        if self.tool.is_retouch() {
+            let retouch_dabs: Vec<RetouchDab> = dabs
+                .iter()
+                .map(|d| RetouchDab {
+                    pos: d.pos,
+                    radius: d.radius,
+                    alpha: d.alpha,
+                    hardness: d.hardness,
+                })
+                .collect();
+            self.retouch_event(tile, &retouch_dabs);
+            return;
+        }
         // Stage as one command; the thread splits into capacity segments
         // and overlap-safe dispatches.
         #[cfg(all(test, feature = "perf"))]
@@ -451,6 +632,55 @@ impl PaintState {
         #[cfg(all(test, feature = "perf"))]
         {
             self.staged_dabs += staged_n;
+        }
+    }
+
+    /// One event's retouch dabs on `tile`: mirror the tile on the stroke's
+    /// first touch, run the dabs on the mirror, and queue the event's dirty
+    /// rect back onto the tile's GPU target.
+    fn retouch_event(&mut self, tile: u16, dabs: &[RetouchDab]) {
+        // Taken for the call: `read_tile` needs `&mut self`.
+        let Some(mut stroke) = self.retouch.take() else {
+            return;
+        };
+        if stroke.accepts(tile) && !stroke.has_tile(tile) {
+            if let Some(image) = self.read_tile(tile) {
+                stroke.insert_tile(tile, image);
+            }
+        }
+        if let Some(rect) = stroke.apply(tile, dabs) {
+            let rgba = stroke.region(tile, rect);
+            if let Some(thread) = self.targets.get_mut(&tile) {
+                let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                    x: rect.x0,
+                    y: rect.y0,
+                    width: rect.width(),
+                    height: rect.height(),
+                    rgba,
+                }]);
+            }
+        }
+        self.retouch = Some(stroke);
+    }
+
+    /// `tile`'s current texels as a CPU image: drains the tile's queue
+    /// first (so earlier strokes' dabs are in the texture), then the
+    /// blocking full-target `PaintTarget::read_back_rgba8`. `None` (logged;
+    /// the stroke skips the tile) when the drain or the readback fails.
+    fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
+        let thread = self.targets.get_mut(&tile)?;
+        if let Err(err) = thread.process_pending() {
+            log::warn!("retouch: draining tile {tile} failed: {err:#}");
+            return None;
+        }
+        let target = thread.paint_target();
+        let (width, height) = target.dimensions();
+        match target.read_back_rgba8(&self.device, &self.queue) {
+            Ok(bytes) => RgbaBuffer::new(width, height, bytes),
+            Err(err) => {
+                log::warn!("retouch: reading tile {tile} back failed: {err:#}");
+                None
+            }
         }
     }
 
@@ -499,6 +729,12 @@ fn local_texel(uv: [f32; 2], tile: u16, texels_per_uv: f32) -> [f32; 2] {
         (uv[0] - tile_u) * texels_per_uv,
         (1.0 - (uv[1] - tile_v)) * texels_per_uv,
     ]
+}
+
+/// A UV-space clone offset in tile-local texels: scaled by the texel
+/// density, V negated (texel rows grow downward — [`local_texel`]'s flip).
+fn clone_offset_texels(offset_uv: (f32, f32), texels_per_uv: f32) -> [f32; 2] {
+    [offset_uv.0 * texels_per_uv, -offset_uv.1 * texels_per_uv]
 }
 
 /// Brush footprint in UV units for a target with `texels_per_uv` texels
@@ -601,6 +837,19 @@ mod tests {
         assert!((uv.x - 1.0).abs() < 1e-6 && (uv.y - 1.0).abs() < 1e-6);
         // Outside rejected.
         assert!(uv_from_pointer(rect, egui::pos2(101.0, 50.0)).is_none());
+    }
+
+    #[test]
+    fn clone_offset_texels_matches_local_texel_deltas() {
+        // The tracker's texel offset must land exactly where local_texel
+        // maps the alt-clicked source (V flip included).
+        let start = [0.25, 0.75];
+        let source = [0.5, 0.25];
+        let offset_uv = (source[0] - start[0], source[1] - start[1]);
+        let a = local_texel(start, FIRST_TILE, 512.0);
+        let b = local_texel(source, FIRST_TILE, 512.0);
+        let off = clone_offset_texels(offset_uv, 512.0);
+        assert_eq!([a[0] + off[0], a[1] + off[1]], b);
     }
 
     #[test]
@@ -883,6 +1132,55 @@ mod tests {
             base_total - base_converged,
             "far-from-seam extend stages exactly what the baseline stages"
         );
+    }
+
+    // --- Retouch tools (smudge + clone) ---
+
+    #[test]
+    fn smudge_stroke_writes_back_and_undoes_as_one_entry() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        // A vertical paint stroke gives the smudge an edge to drag.
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        state.process_pending().expect("drain succeeds");
+        let painted_batches = state.staged_batch_count();
+        let before = state
+            .paint_target()
+            .read_back_rgba8(&device, &queue)
+            .expect("readback");
+
+        let mut tool = BrushTool::Smudge(umber_brush::SmudgeParams {
+            strength: 1.0,
+            smear: 0.5,
+        });
+        state.sync_tool(&mut tool);
+        // A horizontal smudge across the painted line.
+        drive_stroke(&mut state, [0.2, 0.5], [0.01, 0.0], 20);
+        state.end_stroke();
+        assert_eq!(
+            state.staged_batch_count(),
+            painted_batches,
+            "retouch dabs never stage GPU splats"
+        );
+        assert!(state.can_undo_stroke(), "the smudge stroke is one entry");
+        state.process_pending().expect("drain succeeds");
+        let after = state
+            .paint_target()
+            .read_back_rgba8(&device, &queue)
+            .expect("readback");
+        assert_ne!(after, before, "the smudge must reach the GPU target");
+
+        assert!(state.undo_stroke());
+        assert!(!state.can_undo_stroke(), "one stroke, one entry");
+        state.process_pending().expect("drain succeeds");
+        let undone = state
+            .paint_target()
+            .read_back_rgba8(&device, &queue)
+            .expect("readback");
+        assert_eq!(undone, before, "undo restores the pre-stroke texels");
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---

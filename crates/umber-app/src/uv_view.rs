@@ -56,7 +56,24 @@ impl UvView {
             );
             let pointer_down =
                 interact.dragged_by(egui::PointerButton::Primary) || interact.clicked();
-            if pointer_down {
+            // The clone tool's source affordance: Alt + press sets the
+            // clone source and never paints — no stroke starts while Alt
+            // is held. Re-set every frame the button is down, so the last
+            // position before release wins.
+            let alt = ui.input(|i| i.modifiers.alt);
+            if alt && paint.clone_tool_active() {
+                if paint.is_stroking() {
+                    paint.end_stroke();
+                }
+                if pointer_down {
+                    if let Some(uv) = interact
+                        .interact_pointer_pos()
+                        .and_then(|pos| crate::paint_state::uv_from_pointer(square, pos))
+                    {
+                        paint.set_clone_source(uv);
+                    }
+                }
+            } else if pointer_down {
                 if let Some(pos) = interact.interact_pointer_pos() {
                     if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
                         if !paint.is_stroking() {

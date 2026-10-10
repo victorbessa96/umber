@@ -232,6 +232,15 @@ brush =
     .save-as-no-dir = Falha em Salvar como: sem pasta de predefinições do usuário
     .save-as-failed = Falha em Salvar como: { $error }
     .reset-failed = Falha ao redefinir: { $error }
+    .tool = Ferramenta
+    .tool-paint = Pintar
+    .tool-smudge = Borrar
+    .tool-clone = Clonar
+    .smudge-strength = Intensidade
+    .smudge-smear = Espalhamento
+    .clone-offset = Deslocamento da origem (UV)
+    .clone-follow = Seguir o traço
+    .clone-hint = Alt+clique na vista UV 2D para definir a origem.
 
 ## Painel de camadas
 
@@ -251,6 +260,9 @@ history =
         [one] { $count } entrada no histórico
        *[other] { $count } entradas no histórico
     }
+    .strokes = Traços de borrar / clonar
+    .undo-stroke = ↶ Desfazer traço
+    .redo-stroke = ↷ Refazer traço
 
 ## Seletor de tiles UDIM (Bakes + Exportação)
 

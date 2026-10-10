@@ -213,6 +213,15 @@ brush =
     .save-as-no-dir = Save As failed: no user preset dir
     .save-as-failed = Save As failed: { $error }
     .reset-failed = Reset failed: { $error }
+    .tool = Tool
+    .tool-paint = Paint
+    .tool-smudge = Smudge
+    .tool-clone = Clone
+    .smudge-strength = Strength
+    .smudge-smear = Smear
+    .clone-offset = Source offset (UV)
+    .clone-follow = Follow stroke
+    .clone-hint = Alt-click in the 2D UV view to set the source.
 
 ## Layers panel
 
@@ -232,6 +241,9 @@ history =
         [one] { $count } entry in journal
        *[other] { $count } entries in journal
     }
+    .strokes = Smudge / clone strokes
+    .undo-stroke = ↶ Undo stroke
+    .redo-stroke = ↷ Redo stroke
 
 ## UDIM tile selector (Bakes + Export)
 

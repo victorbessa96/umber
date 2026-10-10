@@ -74,6 +74,23 @@ pub enum PaintThreadCommand {
         /// The dabs to composite, in stroke order.
         dabs: Vec<Dab>,
     },
+    /// Overwrite the `width`x`height` region at `(x, y)` with
+    /// tightly-packed RGBA8 `rgba` — the retouch tools' (smudge/clone)
+    /// CPU write-back and their undo/redo restores. Recorded on the drain
+    /// encoder in FIFO order with the `Stage` dispatches (see
+    /// [`PaintTarget::write_region`]).
+    WriteRegion {
+        /// Region origin x, texels.
+        x: u32,
+        /// Region origin y, texels.
+        y: u32,
+        /// Region width, texels.
+        width: u32,
+        /// Region height, texels.
+        height: u32,
+        /// `width * height * 4` bytes, row-major.
+        rgba: Vec<u8>,
+    },
     /// Reset the paint target to fully transparent.
     Clear,
     /// Recreate the paint target at a new size.
@@ -212,6 +229,21 @@ impl PaintThread {
                 }
                 PaintThreadCommand::Stage { dabs } => {
                     self.stage_dabs(&mut encoder, &dabs)?;
+                }
+                PaintThreadCommand::WriteRegion {
+                    x,
+                    y,
+                    width,
+                    height,
+                    rgba,
+                } => {
+                    self.target.write_region(
+                        &self.device,
+                        &mut encoder,
+                        (x, y),
+                        (width, height),
+                        &rgba,
+                    )?;
                 }
             }
         }

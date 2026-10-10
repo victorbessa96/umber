@@ -69,3 +69,44 @@ flow.
 One claw slice, code-only: the two ops in the brush/composite
 path (the readback plumbing exists), the params + the panel
 rows, the five tests. No new deps.
+
+## As built (2026-10-10) — where the code departs from the above
+
+- **No CPU composite step existed** — the stamp blend is the GPU
+  compute pass (`PaintCompositor::splat_dabs`). The ops are new CPU
+  code (`umber-brush/src/retouch.rs`), mirroring the shader's
+  footprint + falloff texel for texel.
+- **The readback** is `PaintTarget::read_back_rgba8`
+  (`umber-gpu/src/paint.rs`; the transfer bake reads its own target
+  the same way). It is full-target + blocking, so it runs ONCE per
+  tile per stroke (the stroke's first touch) into a CPU mirror.
+- **No write-back existed**: the target gained `COPY_DST` and
+  `PaintTarget::write_region` / `PaintThreadCommand::WriteRegion`
+  (encoder-recorded, so it orders with the splat dispatches).
+  Per-event uploads are dirty-rect sized.
+- **The hook**: `PaintState::push_event_inner`, right after
+  `DabAdapter::stamps_to_dabs` — retouch tools branch to the mirror
+  there; the paint path is untouched.
+- **No paint undo existed** (the document journal holds layer
+  commands only). Retouch strokes get their own per-stroke history
+  in `PaintState` (`umber-app/src/retouch.rs`'s
+  `PaintStrokeCommand`, before/after dirty-rect snapshots), with
+  undo/redo-stroke buttons in the History panel. Snapshot restores
+  would erase newer paint, so a paint-tool stroke (or a target
+  resize) clears that history: retouch undo is valid only until the
+  next paint stroke. Unifying it with the layer journal (and giving
+  paint-tool strokes undo) is the follow-up.
+- **Readback citation**: `PaintTarget::read_back_rgba8`
+  (`umber-gpu/src/paint.rs`) is the fn the transfer bake reaches
+  through `transfer.rs` → the AO target's `read_back_rgba8`
+  (`umber-bake/src/ao.rs`) wrapper.
+- **Clone source** is set by Alt + press in the 2D UV view (clone
+  tool only; the 3D viewport's Alt is not wired). It resolves to
+  `source_offset = source - stroke start`: on every stroke in
+  fixed mode (each stroke samples the alt-clicked point), on the
+  first stroke after the click in follow mode (that offset is then
+  kept). Clone stays in the stroke's start tile; an off-tile
+  source texel is skipped. Retouch strokes don't seam-mirror in
+  v1.
+- Tool + params live on the brush panel, not the preset (the
+  `.umberbrush` format is unchanged).
