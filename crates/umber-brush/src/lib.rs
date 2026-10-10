@@ -35,6 +35,7 @@ pub mod preset;
 pub mod preset_library;
 pub mod retouch;
 pub mod spacing;
+pub mod symmetry;
 pub mod wiring;
 
 pub use dab_adapter::{BrushParams, DabAdapter};
@@ -43,6 +44,7 @@ pub use one_euro::{OneEuroError, OneEuroFilter, OneEuroScalar};
 pub use preset_library::{Library, LibraryEntry};
 pub use retouch::{BrushTool, CloneParams, RgbaBuffer, SmudgeParams};
 pub use spacing::{DabPlan, SpacingAccumulator, SpacingError};
+pub use symmetry::{MirrorAxis, MirrorSettings, RadialSettings, SymTransform, SymmetrySettings};
 pub use wiring::{ConditionerError, StrokeConditioner};
 
 /// One-euro filter parameters (Casiez CHI'12 — docs/research/05 §4).

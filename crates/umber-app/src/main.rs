@@ -130,10 +130,12 @@ impl TabViewer for PanelViewer<'_> {
             Panel::LayerStack => document::layers_ui(ui, self.doc),
             Panel::Properties => {
                 self.brush.show(ui);
-                // The paint session adopts the panel's tool (and hands
-                // back an alt-click-resolved clone offset).
+                // The paint session adopts the panel's tool and symmetry
+                // (and hands back an alt-click-resolved clone offset and a
+                // UV-view mirror-manipulator drag).
                 if let Some(paint) = self.paint.as_deref_mut() {
                     paint.sync_tool(&mut self.brush.tool);
+                    paint.sync_symmetry(&mut self.brush.symmetry);
                 }
             }
             Panel::Assets => {

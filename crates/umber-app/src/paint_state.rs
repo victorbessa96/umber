@@ -37,12 +37,32 @@
 //! rect is written back as a `PaintThreadCommand::WriteRegion`, and
 //! `end_stroke` records the stroke as ONE entry in the retouch history.
 //! Retouch strokes do not seam-mirror in v1.
+//!
+//! Symmetry (§2's P1 row, `umber_brush::symmetry`): the panel's
+//! [`SymmetrySettings`] are adopted between strokes ([`PaintState::sync_symmetry`])
+//! and snapshot into tile-local texel transforms at `begin_stroke`. The
+//! hook sits right after `DabAdapter::stamps_to_dabs` — AFTER the stroke
+//! conditioner, so siblings are exact images of the smoothed path and the
+//! one-euro/spacing state only ever sees the pointer (unlike the seam
+//! mirrors, which recurse through the conditioner). Paint dabs expand into
+//! the SAME `Stage` command (batch counts unchanged, dabs × siblings);
+//! retouch dabs hand the primaries to [`RetouchStroke`], which stamps the
+//! siblings with per-sibling smudge motion and mirrored clone sources.
+//! Symmetry is tile-local (each tile mirrors about its own center line)
+//! and v1 applies it to ORIGINAL events only: symmetric siblings do not
+//! seam-mirror and seam mirrors do not symmetrize (named follow-up).
+//! Symmetry off skips the expansion entirely — byte-identical staging.
+//! The settings are session state: not in the project file (follow-up).
 
 use std::collections::BTreeMap;
 
 use egui::Pos2;
 use umber_brush::retouch::RetouchDab;
-use umber_brush::{BrushParams, BrushTool, DabAdapter, RgbaBuffer, StrokeConditioner, StrokeEvent};
+use umber_brush::symmetry::{expand_dabs, texel_transforms};
+use umber_brush::{
+    BrushParams, BrushTool, DabAdapter, RgbaBuffer, StrokeConditioner, StrokeEvent, SymTransform,
+    SymmetrySettings,
+};
 use umber_core::undo::UndoStack;
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
@@ -154,6 +174,16 @@ pub struct PaintState {
     /// Region writes the retouch history's undo/redo produced, drained
     /// into the tiles' queues right after each call.
     retouch_writes: PaintWrites,
+    /// The symmetry settings (synced from the brush panel between
+    /// strokes; the UV view's mirror manipulator edits the offset here).
+    symmetry: SymmetrySettings,
+    /// Set when the manipulator changed `symmetry`, so the next
+    /// [`Self::sync_symmetry`] hands it back to the panel instead of
+    /// adopting the panel's (stale) copy.
+    symmetry_from_view: bool,
+    /// The live stroke's tile-local texel transforms (identity first),
+    /// snapshot at `begin_stroke`; `None` = symmetry off for this stroke.
+    stroke_symmetry: Option<Vec<SymTransform>>,
     /// Staged `Stage` batches since construction (test observability for
     /// the seam-blind zero-cost contract).
     #[cfg(test)]
@@ -163,8 +193,9 @@ pub struct PaintState {
     #[cfg(test)]
     staged_batches_per_tile: BTreeMap<u16, usize>,
     /// Staged dabs since construction (test observability for the stroke
-    /// soak's zero-drop assert: staged here must equal composited at drain).
-    #[cfg(all(test, feature = "perf"))]
+    /// soak's zero-drop assert — staged here must equal composited at
+    /// drain — and the symmetry sibling count).
+    #[cfg(test)]
     staged_dabs: u64,
 }
 
@@ -211,11 +242,14 @@ impl PaintState {
             retouch_history: UndoStack::new(RETOUCH_HISTORY_MAX_ENTRIES)
                 .with_memory_budget(RETOUCH_HISTORY_MAX_BYTES),
             retouch_writes: PaintWrites::default(),
+            symmetry: SymmetrySettings::default(),
+            symmetry_from_view: false,
+            stroke_symmetry: None,
             #[cfg(test)]
             staged_batches: 0,
             #[cfg(test)]
             staged_batches_per_tile: BTreeMap::new(),
-            #[cfg(all(test, feature = "perf"))]
+            #[cfg(test)]
             staged_dabs: 0,
         })
     }
@@ -253,6 +287,12 @@ impl PaintState {
         // distance, so checking the same distance up front arms exactly the
         // strokes that can produce mirrors.
         self.stroke_near_seam = self.seam_near_uv([uv.x, uv.y], self.seam_radius_uv());
+        // Snapshot the symmetry for the whole stroke (before the retouch
+        // stroke opens — it takes the same transforms).
+        self.stroke_symmetry = self
+            .symmetry
+            .is_active()
+            .then(|| texel_transforms(&self.symmetry, self.texels_per_uv));
         self.retouch = if self.tool.is_retouch() {
             Some(self.begin_retouch(uv))
         } else {
@@ -284,6 +324,9 @@ impl PaintState {
             }
         }
         let mut stroke = RetouchStroke::new(self.tool);
+        if let Some(transforms) = &self.stroke_symmetry {
+            stroke.set_symmetry(transforms.clone());
+        }
         if let BrushTool::Clone(params) = self.tool {
             let tile = self.route_tile(uv);
             let start = local_texel([uv.x, uv.y], tile, self.texels_per_uv);
@@ -305,6 +348,37 @@ impl PaintState {
         }
         if !self.stroking {
             self.tool = *panel_tool;
+        }
+    }
+
+    /// Syncs the symmetry settings with the panel: a manipulator edit made
+    /// in the UV view since the last sync is handed BACK to the panel
+    /// (the clone-offset pattern — else the panel's copy would overwrite
+    /// it); otherwise the panel's settings are adopted. Adoption takes
+    /// effect at the next `begin_stroke` (a live stroke keeps its
+    /// snapshot), so a mid-stroke edit never splits one stroke.
+    pub fn sync_symmetry(&mut self, panel: &mut SymmetrySettings) {
+        if std::mem::take(&mut self.symmetry_from_view) {
+            *panel = self.symmetry;
+        } else {
+            self.symmetry = *panel;
+        }
+    }
+
+    /// The current symmetry settings (the UV view draws its guides from
+    /// these).
+    pub fn symmetry(&self) -> &SymmetrySettings {
+        &self.symmetry
+    }
+
+    /// The mirror manipulator: moves the mirror line to `offset`
+    /// (tile-local UV, clamped to `0..=1`) and queues the hand-back to
+    /// the panel.
+    pub fn set_mirror_offset(&mut self, offset: f32) {
+        let offset = offset.clamp(0.0, 1.0);
+        if self.symmetry.mirror.offset != offset {
+            self.symmetry.mirror.offset = offset;
+            self.symmetry_from_view = true;
         }
     }
 
@@ -598,7 +672,9 @@ impl PaintState {
         }
         // The retouch hook: smudge/clone dabs (same positions, radius,
         // pressure-shaped alpha and hardness as paint dabs) run on the CPU
-        // mirror instead of the GPU splat.
+        // mirror instead of the GPU splat. Only the primaries go in: the
+        // retouch stroke stamps their symmetry siblings itself (it owns
+        // the per-sibling smudge chains and clone sources).
         if self.tool.is_retouch() {
             let retouch_dabs: Vec<RetouchDab> = dabs
                 .iter()
@@ -612,9 +688,16 @@ impl PaintState {
             self.retouch_event(tile, &retouch_dabs);
             return;
         }
+        // The symmetry hook: every original event's dab is followed by its
+        // siblings (same stamp, transformed position) in the same batch.
+        // Seam mirrors (`expand_seams == false`) are not symmetrized (v1).
+        let dabs = match (&self.stroke_symmetry, expand_seams) {
+            (Some(transforms), true) => expand_dabs(&dabs, transforms),
+            _ => dabs,
+        };
         // Stage as one command; the thread splits into capacity segments
         // and overlap-safe dispatches.
-        #[cfg(all(test, feature = "perf"))]
+        #[cfg(test)]
         let staged_n = dabs.len() as u64;
         if let Some(thread) = self.targets.get_mut(&tile) {
             let _ = thread.publish(vec![PaintThreadCommand::Stage { dabs }]);
@@ -628,8 +711,8 @@ impl PaintState {
             self.staged_batches += 1;
             *self.staged_batches_per_tile.entry(tile).or_default() += 1;
         }
-        // Soak observability: total staged dabs for the zero-drop assert.
-        #[cfg(all(test, feature = "perf"))]
+        // Soak/symmetry observability: total staged dabs.
+        #[cfg(test)]
         {
             self.staged_dabs += staged_n;
         }
@@ -709,8 +792,9 @@ impl PaintState {
     }
 
     /// Staged dabs since construction (test observability; see the
-    /// stroke soak's zero-drop assert in `perf_soak`).
-    #[cfg(all(test, feature = "perf"))]
+    /// stroke soak's zero-drop assert in `perf_soak` and the symmetry
+    /// staging test).
+    #[cfg(test)]
     pub(crate) fn staged_dab_count(&self) -> u64 {
         self.staged_dabs
     }
@@ -1181,6 +1265,68 @@ mod tests {
             .read_back_rgba8(&device, &queue)
             .expect("readback");
         assert_eq!(undone, before, "undo restores the pre-stroke texels");
+    }
+
+    // --- Symmetry ---
+
+    /// Test (b), end to end: with the mirror on, the same stroke stages
+    /// the same `Stage` batches (one per event — siblings ride in the
+    /// original's batch) carrying exactly twice the dabs (the stroke stays
+    /// clear of the axis, so no sibling dedups); with it off, the staging
+    /// is unchanged. The conditioner sees only the pointer either way.
+    #[test]
+    fn mirrored_stroke_stages_twice_the_dabs_in_the_same_batches() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let start = [0.2, 0.3];
+        let step = [0.0, 0.02];
+
+        let mut off = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        drive_stroke(&mut off, start, step, 15);
+        off.end_stroke();
+        assert!(off.staged_dab_count() > 0);
+
+        let mut on = PaintState::new(device, queue).expect("paint state builds");
+        let mut settings = SymmetrySettings::default();
+        settings.mirror.enabled = true;
+        on.sync_symmetry(&mut settings);
+        assert!(on.symmetry().mirror.enabled);
+        drive_stroke(&mut on, start, step, 15);
+        on.end_stroke();
+        assert_eq!(on.staged_batch_count(), off.staged_batch_count());
+        assert_eq!(on.staged_dab_count(), 2 * off.staged_dab_count());
+
+        // Turning it back off restores single staging for the next stroke.
+        settings.mirror.enabled = false;
+        on.sync_symmetry(&mut settings);
+        let (batches, dabs) = (on.staged_batch_count(), on.staged_dab_count());
+        drive_stroke(&mut on, start, step, 15);
+        on.end_stroke();
+        assert_eq!(on.staged_batch_count() - batches, off.staged_batch_count());
+        assert_eq!(on.staged_dab_count() - dabs, off.staged_dab_count());
+    }
+
+    #[test]
+    fn manipulator_offset_is_handed_back_to_the_panel() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut panel = SymmetrySettings::default();
+        panel.mirror.enabled = true;
+        state.sync_symmetry(&mut panel);
+        // The UV view drags the line: the panel adopts it next sync...
+        state.set_mirror_offset(0.3);
+        state.sync_symmetry(&mut panel);
+        assert_eq!(panel.mirror.offset, 0.3);
+        // ... and afterwards the panel leads again.
+        panel.mirror.offset = 0.6;
+        state.sync_symmetry(&mut panel);
+        assert_eq!(state.symmetry().mirror.offset, 0.6);
+        // Out-of-tile drags clamp to the tile.
+        state.set_mirror_offset(1.7);
+        assert_eq!(state.symmetry().mirror.offset, 1.0);
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---

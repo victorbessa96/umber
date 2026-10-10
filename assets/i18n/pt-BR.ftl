@@ -241,6 +241,17 @@ brush =
     .clone-offset = Deslocamento da origem (UV)
     .clone-follow = Seguir o traço
     .clone-hint = Alt+clique na vista UV 2D para definir a origem.
+    .symmetry = Simetria
+    .symmetry-mirror = Espelhar
+    .symmetry-axis = Eixo
+    .symmetry-axis-x = U (X)
+    .symmetry-axis-y = V (Y)
+    .symmetry-offset = Deslocamento (UV)
+    .symmetry-hint = Arraste a linha do espelho na vista UV 2D para movê-la.
+    .symmetry-radial = Radial
+    .symmetry-count = Cópias
+    .symmetry-flip-u = Inverter U
+    .symmetry-flip-v = Inverter V
 
 ## Painel de camadas
 

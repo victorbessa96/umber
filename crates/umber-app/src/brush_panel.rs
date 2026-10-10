@@ -18,7 +18,8 @@ use crate::i18n::tr;
 
 use umber_brush::preset::{BrushPreset, ControlCurve};
 use umber_brush::preset_library::{user_preset_dir, Library};
-use umber_brush::{BrushTool, CloneParams, SmudgeParams};
+use umber_brush::symmetry::{RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
+use umber_brush::{BrushTool, CloneParams, MirrorAxis, SmudgeParams, SymmetrySettings};
 
 /// Size of the curve-editor plot (logical pixels).
 const CURVE_PLOT_SIZE: egui::Vec2 = egui::Vec2::new(150.0, 100.0);
@@ -51,6 +52,10 @@ pub struct BrushPanel {
     /// tool is selected so switching back restores them.
     smudge: SmudgeParams,
     clone: CloneParams,
+    /// Mirror + radial symmetry. Panel (session) state like `tool`: not
+    /// in the preset nor the project file in v1. The paint session adopts
+    /// it via `PaintState::sync_symmetry`.
+    pub symmetry: SymmetrySettings,
 }
 
 impl BrushPanel {
@@ -84,6 +89,7 @@ impl BrushPanel {
             tool: BrushTool::Paint,
             smudge: SmudgeParams::default(),
             clone: CloneParams::default(),
+            symmetry: SymmetrySettings::default(),
         }
     }
 
@@ -91,6 +97,9 @@ impl BrushPanel {
     /// row. The tool rows come first: they work with no preset selected.
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.tool_rows(ui);
+        ui.add_space(8.0);
+        ui.separator();
+        symmetry_rows(ui, &mut self.symmetry);
         ui.add_space(8.0);
         ui.separator();
         self.preset_selector(ui);
@@ -446,6 +455,36 @@ impl Default for BrushPanel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The symmetry section: the mirror toggle with its axis + offset rows,
+/// the radial toggle with its count + flip rows. Applies to every tool
+/// (paint, smudge, clone).
+fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
+    ui.strong(tr("brush.symmetry"));
+    let mirror = &mut symmetry.mirror;
+    ui.checkbox(&mut mirror.enabled, tr("brush.symmetry-mirror"));
+    ui.add_enabled_ui(mirror.enabled, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr("brush.symmetry-axis"));
+            ui.selectable_value(&mut mirror.axis, MirrorAxis::X, tr("brush.symmetry-axis-x"));
+            ui.selectable_value(&mut mirror.axis, MirrorAxis::Y, tr("brush.symmetry-axis-y"));
+        });
+        ui.add(egui::Slider::new(&mut mirror.offset, 0.0..=1.0).text(tr("brush.symmetry-offset")));
+        ui.weak(tr("brush.symmetry-hint"));
+    });
+    let radial = &mut symmetry.radial;
+    ui.checkbox(&mut radial.enabled, tr("brush.symmetry-radial"));
+    ui.add_enabled_ui(radial.enabled, |ui| {
+        ui.add(
+            egui::Slider::new(&mut radial.count, RADIAL_COUNT_MIN..=RADIAL_COUNT_MAX)
+                .text(tr("brush.symmetry-count")),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut radial.flip_u, tr("brush.symmetry-flip-u"));
+            ui.checkbox(&mut radial.flip_v, tr("brush.symmetry-flip-v"));
+        });
+    });
 }
 
 /// Filename stem for Save-As: lowercase, spaces to dashes, everything

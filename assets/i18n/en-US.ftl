@@ -222,6 +222,17 @@ brush =
     .clone-offset = Source offset (UV)
     .clone-follow = Follow stroke
     .clone-hint = Alt-click in the 2D UV view to set the source.
+    .symmetry = Symmetry
+    .symmetry-mirror = Mirror
+    .symmetry-axis = Axis
+    .symmetry-axis-x = U (X)
+    .symmetry-axis-y = V (Y)
+    .symmetry-offset = Offset (UV)
+    .symmetry-hint = Drag the mirror line in the 2D UV view to move it.
+    .symmetry-radial = Radial
+    .symmetry-count = Copies
+    .symmetry-flip-u = Flip U
+    .symmetry-flip-v = Flip V
 
 ## Layers panel
 
