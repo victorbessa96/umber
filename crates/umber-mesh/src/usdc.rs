@@ -309,14 +309,14 @@ def Mesh "Mesh"
         // 4 corners x 2 triangles x 3 floats, per-corner expansion.
         assert_eq!(
             mesh.positions.len(),
-            4 * 2,
-            "4 corners x 2 tris (per-vertex [f32;3] entries)"
+            2 * 3,
+            "a quad fans into 2 triangles x 3 corners (per-vertex [f32;3] entries)"
         );
         assert_eq!(mesh.indices.len(), 6, "two triangles");
         // RightHanded default keeps winding: v0, v1, v2.
         assert_eq!(&mesh.indices[..3], &[0, 1, 2]);
-        // UVs carried per corner (4 corners x 2 tris).
-        assert_eq!(mesh.uvs.len(), 4 * 2);
+        // UVs carried per corner (2 tris x 3 corners).
+        assert_eq!(mesh.uvs.len(), 2 * 3);
         assert!(
             (mesh.uvs[0][0] - 0.0).abs() < 1e-6 && (mesh.uvs[1][0] - 1.0).abs() < 1e-6,
             "uv[0] == (0,0), uv[1] == (1,0): {:?}",
