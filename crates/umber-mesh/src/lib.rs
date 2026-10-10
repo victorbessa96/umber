@@ -17,6 +17,7 @@ pub mod seam;
 pub mod seam_mirror;
 pub mod udim;
 pub mod usd;
+pub mod usdc;
 
 pub use fbx::load_fbx;
 pub use gltf::load_gltf;
@@ -100,7 +101,8 @@ pub fn detect_format(path: &std::path::Path) -> Result<Format, ImportError> {
         Some("gltf" | "glb") => Ok(Format::Gltf),
         Some("fbx") => Ok(Format::Fbx),
         Some("usda" | "usd") => Ok(Format::Usd),
-        Some("usdc") => Err(ImportError::UsdBinary),
+        Some("usdc") => Ok(Format::Usdc),
+        Some("usdz") => Ok(Format::Usdz),
         Some(other) => Err(ImportError::Unsupported(other.to_string())),
         None => Err(ImportError::Unsupported("(no extension)".into())),
     }
@@ -114,19 +116,26 @@ pub enum Format {
     Fbx,
     /// `.usda`, or `.usd` (sniffed: binary crate content errors).
     Usd,
+    /// `.usdc` — the binary crate, via openusd (the deferral voided).
+    Usdc,
+    /// `.usdz` — the package format, its first layer.
+    Usdz,
 }
 
 /// Load a mesh from disk, dispatching on file extension.
 ///
 /// Supports `.obj` ([`load_obj`]), `.gltf`/`.glb` ([`load_gltf`]), `.fbx`
-/// ([`load_fbx`]) and `.usda`/`.usd` ([`load_usda`]). `.usdc` returns
-/// [`ImportError::UsdBinary`]; anything else [`ImportError::Unsupported`].
+/// ([`load_fbx`]), `.usda`/`.usd` ([`load_usda`]), `.usdc`
+/// ([`usdc::load_usdc`]) and `.usdz` ([`usdc::load_usdz`]);
+/// anything else [`ImportError::Unsupported`].
 pub fn load(path: &std::path::Path) -> Result<MeshData, ImportError> {
     match detect_format(path)? {
         Format::Obj => load_obj(path),
         Format::Gltf => load_gltf(path),
         Format::Fbx => load_fbx(path),
         Format::Usd => load_usda(path),
+        Format::Usdc => crate::usdc::load_usdc(path),
+        Format::Usdz => crate::usdc::load_usdz(path),
     }
 }
 
@@ -210,7 +219,11 @@ mod tests {
         );
         assert!(matches!(
             detect_format(std::path::Path::new("a.usdc")),
-            Err(ImportError::UsdBinary)
+            Ok(Format::Usdc)
+        ));
+        assert!(matches!(
+            detect_format(std::path::Path::new("a.usdz")),
+            Ok(Format::Usdz)
         ));
         assert!(detect_format(std::path::Path::new("a.stl")).is_err());
     }

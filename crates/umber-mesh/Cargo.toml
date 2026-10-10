@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 glam = { workspace = true }
+openusd = { workspace = true }
 thiserror = { workspace = true }
 bytemuck = { workspace = true }
 gltf = { workspace = true, features = ["names"] }
