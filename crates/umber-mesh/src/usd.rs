@@ -1512,10 +1512,11 @@ def Xform "World" (
         let _ = std::fs::remove_file(&text_usd);
         assert_eq!(result.expect("text .usd must load").triangle_count(), 2);
 
-        // `.usdc` errors honestly before touching the file.
+        // `.usdc` on a nonexistent path: the format is now SUPPORTED, so
+        // the error is the honest Io (the old UsdBinary stub is gone —
+        // the usdc arm reads the real file).
         let err = crate::load(Path::new("does-not-exist.usdc")).unwrap_err();
-        assert!(matches!(err, ImportError::UsdBinary), "{err:?}");
-        assert!(err.to_string().contains("usdc (binary)"), "{err}");
+        assert!(matches!(err, ImportError::Io(_)), "{err:?}");
 
         // A binary crate behind a `.usd` extension gets the same error.
         let binary_usd = write_fixture("crate.usd", b"PXR-USDC\x00\x07\x00\x00");

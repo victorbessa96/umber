@@ -88,15 +88,31 @@ fn child_prim_paths(data: &dyn AbstractData, path: &SdfPath) -> Vec<SdfPath> {
     out
 }
 
-/// One field lookup: decode failures become `ImportError::Usd` with the
-/// spec path (the crate's error context — the .usda parser's `line N:`
-/// equivalent). Returns the CLONED value (try_field hands back a borrow;
-/// cloning here keeps every caller's match simple).
+/// One field lookup. openusd is path-keyed: an attribute's VALUE lives on
+/// the attribute spec at `<prim>.<attr>` in its `default` field, while
+/// prim-level fields (`typeName`, `orientation`) sit on the prim spec
+/// itself. This helper resolves both: if `<path>.<name>` is an attribute
+/// spec, its `default` is the value; otherwise the field reads from the
+/// prim spec directly.
 fn field(
     data: &dyn AbstractData,
     path: &SdfPath,
     name: &str,
 ) -> Result<Option<Value>, ImportError> {
+    // The property spec path, if it parses.
+    if let Ok(prop) = path.append_property(name) {
+        if data.spec_type(&prop) == Some(SpecType::Attribute) {
+            return match data.try_field(&prop, "default") {
+                Ok(opt) => Ok(opt.map(|cow| cow.into_owned())),
+                Err(e) => Err(ImportError::Usd(format!(
+                    "usd: {}.{} decode failed: {e}",
+                    prop.as_str(),
+                    "default"
+                ))),
+            };
+        }
+    }
+    // Prim-level field (typeName, orientation, ...) — read on the prim.
     match data.try_field(path, name) {
         Ok(opt) => Ok(opt.map(|cow| cow.into_owned())),
         Err(e) => Err(ImportError::Usd(format!(
