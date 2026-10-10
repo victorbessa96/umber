@@ -608,7 +608,7 @@ mod tests {
         let out = symmetrize_coverage(&left_quarter, w, h, &ts).expect("shape matches");
         for y in 0..h as usize {
             for x in 0..w as usize {
-                let want = if x < 4 || x >= 12 { 1.0 } else { 0.0 };
+                let want = if !(4..12).contains(&x) { 1.0 } else { 0.0 };
                 assert_eq!(out[y * 16 + x], want, "texel ({x},{y})");
             }
         }
