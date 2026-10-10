@@ -99,8 +99,14 @@ fn field(
     path: &SdfPath,
     name: &str,
 ) -> Result<Option<Value>, ImportError> {
-    // The property spec path, if it parses.
-    if let Ok(prop) = path.append_property(name) {
+    // The property spec path, if it parses. USD's TEXT syntax namespaces
+    // attributes with colons (`primvars:st`), but Sdf PATHS are
+    // dot-separated (`/Mesh.primvars.st`) — and append_property rejects
+    // namespaced identifiers. Split on ':' and append each segment.
+    if let Ok(prop) = name
+        .split(':')
+        .try_fold(path.clone(), |p, seg| p.append_property(seg))
+    {
         if data.spec_type(&prop) == Some(SpecType::Attribute) {
             return match data.try_field(&prop, "default") {
                 Ok(opt) => Ok(opt.map(|cow| cow.into_owned())),
