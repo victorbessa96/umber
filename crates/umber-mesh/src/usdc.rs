@@ -13,7 +13,7 @@
 //! format forces it.
 //!
 //! Error contract: `safe` mode (structural validation before decode)
-//! + every failure maps to `ImportError::Usd`/`UsdBinary` — a corrupt
+//! and every failure maps to `ImportError::Usd`/`UsdBinary`; a corrupt
 //! file never panics.
 
 use std::path::Path;
@@ -113,7 +113,7 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
     let points: Vec<f32> = match field(data, path, "points")? {
         Some(Value::FloatVec(v)) if !v.is_empty() => v,
         Some(Value::Vec3fVec(v)) if !v.is_empty() => {
-            v.into_iter().flat_map(|p| <[f32; 3]>::from(p)).collect()
+            v.into_iter().flat_map(<[f32; 3]>::from).collect()
         }
         Some(_) => {
             return Err(ImportError::Usd(format!(
