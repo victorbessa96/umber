@@ -105,6 +105,9 @@ struct AgentExportStep {
     rays: u32,
     #[serde(default)]
     tiles: Vec<u16>,
+    /// Also write `<textureSet>.usda` (the `--usda` flag's session form).
+    #[serde(default)]
+    usda: bool,
 }
 
 /// The async bake's state, as `bake_status` reports it
@@ -292,6 +295,7 @@ impl Session {
                     &s.preset,
                     &flags,
                     &s.tiles,
+                    s.usda,
                     &mut |name: &str| skipped.push(name.to_string()),
                 )?;
                 fields(serde_json::json!({

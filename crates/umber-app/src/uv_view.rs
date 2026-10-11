@@ -10,6 +10,7 @@ use umber_mesh::MeshData;
 
 use crate::fill_layer::{PolygonFillMode, PolygonFillTool};
 use crate::i18n::tr;
+use crate::path_tool::PaintPathTool;
 
 /// Wireframe color for UV island edges.
 const UV_EDGE_COLOR: Color32 = Color32::from_rgb(140, 190, 255);
@@ -17,6 +18,20 @@ const UV_EDGE_COLOR: Color32 = Color32::from_rgb(140, 190, 255);
 const UV_BG_COLOR: Color32 = Color32::from_rgb(38, 38, 42);
 /// Background outside the UV square (padding area).
 const PAD_COLOR: Color32 = Color32::from_rgb(28, 28, 30);
+/// The paint-path polyline + points (green: distinct from the lasso
+/// amber, the symmetry orange and the quick-mask red).
+const PATH_COLOR: Color32 = Color32::from_rgb(110, 220, 130);
+/// The path's closing edge (dimmer: it previews, not yet committed).
+const PATH_COLOR_DIM: Color32 = Color32::from_rgb(70, 140, 85);
+/// Half-size (logical pixels) of a path point's drag/select rect.
+const PATH_POINT_GRAB_PX: f32 = 7.0;
+/// Segment-click and right-click-delete tolerance, in logical pixels
+/// (converted to UV units against the square's side at use).
+const PATH_CLICK_TOL_PX: f32 = 10.0;
+/// Pixels of drag distance that map to one unit of point size.
+const PATH_SIZE_PX_PER_UNIT: f32 = 28.0;
+/// The opacity handle's travel above the point, in logical pixels.
+const PATH_OPACITY_TRAVEL_PX: f32 = 36.0;
 
 /// The 2D UV view panel state: the cached quick-mask overlay texture.
 /// Zoom/pan for this view lands with the paint-engine sync work.
@@ -46,6 +61,7 @@ impl UvView {
         mut paint: Option<&mut crate::paint_state::PaintState>,
         display_lut: Option<&umber_gpu::DisplayLut>,
         tool: Option<&mut PolygonFillTool>,
+        path_tool: Option<&mut PaintPathTool>,
     ) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -60,6 +76,17 @@ impl UvView {
             rect.top() + (rect.height() - side) / 2.0,
         );
         let square = egui::Rect::from_min_size(origin, egui::vec2(side, side));
+
+        // UV-space -> screen-space: v is flipped (UV origin is bottom-left,
+        // screen origin is top-left). Defined before the interaction
+        // blocks: the path point/handle hit-tests need it, not just the
+        // overlay drawing below.
+        let to_screen = |uv: [f32; 2]| {
+            egui::Pos2::new(
+                square.left() + uv[0].clamp(0.0, 1.0) * side,
+                square.bottom() - uv[1].clamp(0.0, 1.0) * side,
+            )
+        };
 
         // The polygon-fill capture: while the lasso tool is armed,
         // primary clicks feed it (lasso points / the single pick) instead
@@ -105,14 +132,141 @@ impl UvView {
                     }
                 }
             }
+            let path_armed = path_tool.as_ref().is_some_and(|t| t.is_armed());
+            // The paint-path editor: per-point drag/select handles plus the
+            // selected point's size/opacity handles, registered after the
+            // paint surface and the mirror handle so they win the hit test
+            // where they overlap. Dragging a point (or a handle) consumes
+            // the click so the background capture below does not also
+            // append/insert on the same press.
+            let mut path_point_active = false;
+            if path_armed {
+                if let Some(ptool) = path_tool.as_deref_mut() {
+                    for i in 0..ptool.point_count() {
+                        let center = to_screen(ptool.points()[i].uv);
+                        let grab = egui::Rect::from_center_size(
+                            center,
+                            egui::vec2(PATH_POINT_GRAB_PX * 2.0, PATH_POINT_GRAB_PX * 2.0),
+                        );
+                        let handle = ui.interact(
+                            grab,
+                            ui.id().with(("uv-path-point", i)),
+                            Sense::click_and_drag(),
+                        );
+                        if handle.clicked() {
+                            ptool.select(Some(i));
+                            path_point_active = true;
+                        }
+                        if handle.dragged() {
+                            if let Some(pos) = handle.interact_pointer_pos() {
+                                if let Some(uv) =
+                                    crate::paint_state::uv_from_pointer(square, pos)
+                                {
+                                    ptool.move_point(i, [uv.x, uv.y]);
+                                    ptool.select(Some(i));
+                                    path_point_active = true;
+                                }
+                            }
+                        }
+                    }
+                    // The selected point's style handles: the size handle
+                    // sits size×28 px right of the point (horizontal drag
+                    // sets the radius scale), the opacity handle above it
+                    // (vertical drag sets the flow multiplier).
+                    if let Some(selected) = ptool.selected() {
+                        if let Some(point) = ptool.points().get(selected).copied() {
+                            let center = to_screen(point.uv);
+                            let size_dist = (point.size.clamp(0.0, 8.0)
+                                * PATH_SIZE_PX_PER_UNIT)
+                                .clamp(10.0, 64.0);
+                            let size_rect = egui::Rect::from_center_size(
+                                center + egui::vec2(size_dist, 0.0),
+                                egui::vec2(12.0, 12.0),
+                            );
+                            let size_handle = ui.interact(
+                                size_rect,
+                                ui.id().with("uv-path-size"),
+                                Sense::click_and_drag(),
+                            );
+                            if size_handle.dragged() {
+                                if let Some(pos) = size_handle.interact_pointer_pos() {
+                                    ptool.set_selected_size(
+                                        ((pos.x - center.x) / PATH_SIZE_PX_PER_UNIT)
+                                            .clamp(0.05, 8.0),
+                                    );
+                                    path_point_active = true;
+                                }
+                            }
+                            let op_center = center
+                                + egui::vec2(
+                                    0.0,
+                                    -12.0 - PATH_OPACITY_TRAVEL_PX * point.opacity.clamp(0.0, 1.0),
+                                );
+                            let op_rect = egui::Rect::from_center_size(
+                                op_center,
+                                egui::vec2(12.0, 12.0),
+                            );
+                            let op_handle = ui.interact(
+                                op_rect,
+                                ui.id().with("uv-path-opacity"),
+                                Sense::click_and_drag(),
+                            );
+                            if op_handle.dragged() {
+                                if let Some(pos) = op_handle.interact_pointer_pos() {
+                                    ptool.set_selected_opacity(
+                                        ((center.y - 12.0 - pos.y) / PATH_OPACITY_TRAVEL_PX)
+                                            .clamp(0.0, 1.0),
+                                    );
+                                    path_point_active = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let pointer_down = !handle_active
+                && !path_point_active
                 && (interact.dragged_by(egui::PointerButton::Primary) || interact.clicked());
             // The clone tool's source affordance: Alt + press sets the
             // clone source and never paints — no stroke starts while Alt
             // is held. Re-set every frame the button is down, so the last
             // position before release wins.
             let alt = ui.input(|i| i.modifiers.alt);
-            if tool_armed {
+            // The paint-path capture: while the path tool is armed, clicks
+            // build the path (append, or insert on a segment click) and
+            // right-clicks delete — and never start a stroke. It wins over
+            // the lasso capture below when both are armed (the explicit
+            // edit mode).
+            if path_armed {
+                if paint.is_stroking() {
+                    paint.end_stroke();
+                }
+                if !handle_active && !path_point_active {
+                    if let Some(pos) = interact.interact_pointer_pos() {
+                        if interact.secondary_clicked() {
+                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos)
+                            {
+                                if let Some(ptool) = path_tool.as_deref_mut() {
+                                    ptool.delete_near([uv.x, uv.y], PATH_CLICK_TOL_PX / side);
+                                }
+                            }
+                        } else if interact.clicked() {
+                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos)
+                            {
+                                if let Some(ptool) = path_tool.as_deref_mut() {
+                                    let clicked = [uv.x, uv.y];
+                                    let tol = PATH_CLICK_TOL_PX / side;
+                                    if let Some(hit) = ptool.point_near_index(clicked, tol) {
+                                        ptool.select(Some(hit));
+                                    } else if !ptool.insert_near_segment(clicked, tol) {
+                                        ptool.push_point(clicked);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if tool_armed {
                 if pointer_down {
                     if let Some(pos) = interact.interact_pointer_pos() {
                         if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
@@ -202,15 +356,6 @@ impl UvView {
             );
         }
 
-        // UV-space -> screen-space: v is flipped (UV origin is bottom-left,
-        // screen origin is top-left).
-        let to_screen = |uv: [f32; 2]| {
-            egui::Pos2::new(
-                square.left() + uv[0].clamp(0.0, 1.0) * side,
-                square.bottom() - uv[1].clamp(0.0, 1.0) * side,
-            )
-        };
-
         match mesh {
             Some(mesh) => {
                 // Draw each triangle as a 3-segment line loop. Per-triangle
@@ -265,6 +410,65 @@ impl UvView {
                 }
                 if let Some(pick) = tool.pick() {
                     painter.circle_stroke(to_screen(pick), 6.0, Stroke::new(1.5, LASSO_COLOR));
+                }
+            }
+        }
+        // The paint-path overlay: the editable polyline (plus its closing
+        // edge while closed), point rings sized by per-point size and
+        // tinted by per-point opacity, the selection ring, and the
+        // selected point's size/opacity handles.
+        if let Some(ptool) = path_tool.as_ref() {
+            if ptool.has_points() {
+                let pts: Vec<egui::Pos2> =
+                    ptool.points().iter().map(|p| to_screen(p.uv)).collect();
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], Stroke::new(2.0, PATH_COLOR));
+                }
+                if ptool.is_closed() && pts.len() >= 3 {
+                    painter.line_segment(
+                        [pts[pts.len() - 1], pts[0]],
+                        Stroke::new(1.0, PATH_COLOR_DIM),
+                    );
+                }
+                for (i, p) in ptool.points().iter().enumerate() {
+                    let center = to_screen(p.uv);
+                    let radius = 3.0 + 2.0 * p.size.clamp(0.0, 8.0).sqrt();
+                    let fill = PATH_COLOR
+                        .gamma_multiply(0.3 + 0.7 * p.opacity.clamp(0.0, 1.0));
+                    painter.circle_filled(center, radius, fill);
+                    if ptool.selected() == Some(i) {
+                        painter.circle_stroke(
+                            center,
+                            radius + 2.0,
+                            Stroke::new(1.5, egui::Color32::WHITE),
+                        );
+                        let size_dist = (p.size.clamp(0.0, 8.0) * PATH_SIZE_PX_PER_UNIT)
+                            .clamp(10.0, 64.0);
+                        painter.rect_stroke(
+                            egui::Rect::from_center_size(
+                                center + egui::vec2(size_dist, 0.0),
+                                egui::vec2(10.0, 10.0),
+                            ),
+                            0.0,
+                            Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
+                        painter.rect_stroke(
+                            egui::Rect::from_center_size(
+                                center
+                                    + egui::vec2(
+                                        0.0,
+                                        -12.0
+                                            - PATH_OPACITY_TRAVEL_PX
+                                                * p.opacity.clamp(0.0, 1.0),
+                                    ),
+                                egui::vec2(10.0, 10.0),
+                            ),
+                            0.0,
+                            Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
                 }
             }
         }

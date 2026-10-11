@@ -4817,6 +4817,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "umber-graph",
+ "umber-mesh",
 ]
 
 [[package]]

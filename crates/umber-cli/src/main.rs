@@ -36,7 +36,7 @@ fn main() -> Result<()> {
             println!("commands: inspect <mesh-file>");
             println!("          bake-ao <mesh-file> <out.png> [--size N] [--rays N] [--dilate N]");
             println!("          bake-all <mesh-file> <out-dir> [--size N] [--rays N] [--dilate N]");
-            println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]...");
+            println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda]");
             println!("          batch <recipe.json>");
             println!("          agent   (JSONL steps on stdin, one JSON result line each on stdout)");
             Ok(())
@@ -149,6 +149,8 @@ fn parse_bake_flags(args: &[String], start: usize) -> Result<BakeFlags> {
             }
             // export_cmd parses --preset/--tile itself; skip them (value too).
             "--preset" | "--tile" => i += 2,
+            // export_cmd's value-less --usda toggle.
+            "--usda" => i += 1,
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
     }
@@ -658,9 +660,13 @@ fn parse_tile(value: &str) -> Result<u16> {
 }
 
 /// `export <mesh> <out-dir> --preset <name> [--size N] [--rays N]
-/// [--tile UDIM]...` — runs the full pipeline headless: bakes the P0
+/// [--tile UDIM]... [--usda]` — runs the full pipeline headless: bakes the P0
 /// maps, packs them through the chosen export preset, writes the named
 /// outputs.
+///
+/// With `--usda`, `<textureSet>.usda` is written last: the whole mesh plus
+/// a UsdShade Material/Shader network binding the written textures to the
+/// OpenPBR surface (`umber_export::usd`).
 ///
 /// UDIM (wave-5 slice 5): the export runs once per tile. `--tile` is
 /// repeatable; without it, every tile the mesh's geometry occupies
@@ -672,12 +678,13 @@ fn parse_tile(value: &str) -> Result<u16> {
 /// `$udim` get `_<tile>` before the extension so tiles never collide.
 fn export_cmd(args: &[String]) -> Result<()> {
     let usage =
-        "usage: umber-cli export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]...";
+        "usage: umber-cli export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda]";
     let mesh_path = args.first().ok_or_else(|| anyhow::anyhow!("{usage}"))?;
     let out_dir = args.get(1).ok_or_else(|| anyhow::anyhow!("{usage}"))?;
 
     let mut preset_name = String::new();
     let mut requested_tiles = Vec::new();
+    let mut usda = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -695,6 +702,10 @@ fn export_cmd(args: &[String]) -> Result<()> {
                 requested_tiles.push(parse_tile(value)?);
                 i += 2;
             }
+            "--usda" => {
+                usda = true;
+                i += 1;
+            }
             "--size" | "--rays" => i += 2, // parsed by BakeFlags below
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
@@ -707,6 +718,7 @@ fn export_cmd(args: &[String]) -> Result<()> {
         &preset_name,
         &flags,
         &requested_tiles,
+        usda,
         &mut print_skipped,
     )?;
     for path in &written {
@@ -747,12 +759,17 @@ fn preset_by_name(name: &str) -> Result<umber_export::ExportPreset> {
 /// every present tile. Every preset output skipped because it needs a
 /// map the headless path doesn't bake is passed to `on_skip` (its
 /// filename template). Returns the written paths and the exported tiles.
+///
+/// With `usda` (the `--usda` flag / recipe field), `<textureSet>.usda`
+/// is written last: the whole mesh plus the UsdShade binding over the
+/// files the run wrote.
 fn run_export(
     mesh_path: &Path,
     out_dir: &Path,
     preset_name: &str,
     flags: &BakeFlags,
     requested_tiles: &[u16],
+    usda: bool,
     on_skip: &mut dyn FnMut(&str),
 ) -> Result<(Vec<PathBuf>, Vec<u16>)> {
     // Fail fast on a bad preset, before the mesh load.
@@ -765,6 +782,7 @@ fn run_export(
         preset_name,
         flags,
         requested_tiles,
+        usda,
         on_skip,
     )
 }
@@ -779,9 +797,11 @@ fn export_mesh(
     preset_name: &str,
     flags: &BakeFlags,
     requested_tiles: &[u16],
+    usda: bool,
     on_skip: &mut dyn FnMut(&str),
 ) -> Result<(Vec<PathBuf>, Vec<u16>)> {
-    let preset = preset_by_name(preset_name)?;
+    let mut full_preset = preset_by_name(preset_name)?;
+    full_preset.usda |= usda;
     let ctx = bake_context()?;
     let set_name = umber_mesh::texture_set_name(mesh_path, mesh);
     let present = present_tiles(mesh);
@@ -839,7 +859,6 @@ fn export_mesh(
         .first()
         .map(|(_, set)| set.maps_iter().collect())
         .unwrap_or_default();
-    let full_preset = preset;
     let filtered_outputs: Vec<_> = full_preset
         .outputs
         .iter()
@@ -855,6 +874,7 @@ fn export_mesh(
         name: full_preset.name.clone(),
         outputs: filtered_outputs,
         materialx: full_preset.materialx,
+        usda: full_preset.usda,
     };
     if preset.outputs.is_empty() {
         return Err(anyhow::anyhow!(
@@ -864,18 +884,39 @@ fn export_mesh(
 
     let pairs: Vec<(u16, &umber_export::MapSet)> =
         tile_sets.iter().map(|(tile, set)| (*tile, set)).collect();
-    let written = umber_export::run_preset_tiled(
-        &preset,
-        &pairs,
-        &umber_export::TokenSources {
-            texture_set: &set_name,
-            mesh: umber_export::mesh_stem(mesh_path),
-            layer_name: "",
-            // Overridden per tile by the tiled driver.
-            udim: umber_export::SINGLE_TILE_UDIM,
-        },
-        out_dir,
-    )?;
+    // Full driver-side token sources, bound: the `.usda` side reuses them
+    // to reference exactly the files this run writes.
+    let sources = umber_export::TokenSources {
+        texture_set: &set_name,
+        mesh: umber_export::mesh_stem(mesh_path),
+        layer_name: "",
+        // Overridden per tile by the tiled driver.
+        udim: umber_export::SINGLE_TILE_UDIM,
+    };
+    let mut written =
+        umber_export::run_preset_tiled(&preset, &pairs, &sources, out_dir)?;
+    if preset.usda {
+        // The `.usda` carries the whole mesh (per-tile splits stay a
+        // bake-window concern); only its texture references are
+        // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
+        let tile_names =
+            tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
+        let textures = umber_export::usd::usd_textures(&preset, |output| {
+            umber_export::usd::usda_file_for_output(output, &sources, tile_names)
+        });
+        let mesh_view = umber_export::usd::UsdMeshView {
+            positions: &mesh.positions,
+            normals: &mesh.normals,
+            uvs: &mesh.uvs,
+            indices: &mesh.indices,
+        };
+        written.push(umber_export::usd::write_usda(
+            out_dir,
+            &set_name,
+            &mesh_view,
+            &textures,
+        )?);
+    }
     Ok((written, tiles))
 }
 

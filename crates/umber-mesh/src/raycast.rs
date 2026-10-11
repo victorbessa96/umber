@@ -100,6 +100,25 @@ pub fn uv_at(mesh: &MeshData, hit: RayHit) -> Option<[f32; 2]> {
     })
 }
 
+/// Samples a 3D curve on the mesh surface into path UVs (the path tool's
+/// "3D curve" source): one `(origin, dir)` ray per curve sample, each
+/// resolving through [`ray_intersect`] + [`uv_at`].
+///
+/// Rays that miss (a drag across a silhouette, a gap in the mesh) or hit
+/// a triangle with no UVs contribute NO point rather than aborting the
+/// walk: a partial curve still replays, and the caller (`PaintPath`) caps
+/// the length anyway. `dir` need not be normalized (the
+/// [`ray_intersect`] contract).
+pub fn walk_surface_path(mesh: &MeshData, rays: &[([f32; 3], [f32; 3])]) -> Vec<[f32; 2]> {
+    rays
+        .iter()
+        .filter_map(|(origin, dir)| {
+            let hit = ray_intersect(mesh, Vec3::from_array(*origin), Vec3::from_array(*dir))?;
+            uv_at(mesh, hit)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +166,7 @@ mod tests {
 
     #[test]
     fn nearest_hit_wins_with_occluder() {
+
         let mut mesh = quad();
         // A second quad closer to the ray origin (z = 2).
         let base = mesh.positions.len() as u32;
@@ -165,5 +185,24 @@ mod tests {
         let hit =
             ray_intersect(&mesh, Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("hit");
         assert_eq!(hit.triangle, 2, "the z=2 quad (second pair) must win");
+    }
+
+    #[test]
+    fn surface_walk_keeps_hits_and_skips_misses() {
+        // A 3-sample curve over the quad: center hits, a parallel ray
+        // misses, a corner hits. The walk keeps the two UVs in order and
+        // drops the miss without aborting.
+        let mesh = quad();
+        let rays = [
+            ([0.0, 0.0, 5.0], [0.0, 0.0, -1.0]),
+            ([0.0, 0.0, 5.0], [0.0, 1.0, 0.0]),
+            ([1.0, -1.0, 5.0], [0.0, 0.0, -1.0]),
+        ];
+        let uvs = walk_surface_path(&mesh, &rays);
+        assert_eq!(uvs.len(), 2, "the miss contributes no point");
+        assert!((uvs[0][0] - 0.5).abs() < 1e-5 && (uvs[0][1] - 0.5).abs() < 1e-5);
+        assert!((uvs[1][0] - 1.0).abs() < 1e-5 && (uvs[1][1] - 0.0).abs() < 1e-5);
+        assert!(walk_surface_path(&mesh, &[]).is_empty());
+        assert!(walk_surface_path(&MeshData::default(), &rays).is_empty());
     }
 }

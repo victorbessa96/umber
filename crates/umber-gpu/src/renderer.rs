@@ -122,6 +122,16 @@ impl Default for WireColor {
     }
 }
 
+impl WireColor {
+    /// The cage overlay color (§6:59): amber at 60% so cage edges read
+    /// distinctly over the 40%-white wireframe when both show.
+    pub fn cage() -> Self {
+        Self {
+            color: [0.9, 0.6, 0.1, 0.6],
+        }
+    }
+}
+
 /// Ground-grid uniforms (group 0 binding 0 of `shaders::GRID_SHADER`):
 /// the inverse view-projection matrix the fragment unprojects NDC
 /// through to find the y=0 plane hit per pixel.

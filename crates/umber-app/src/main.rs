@@ -27,9 +27,11 @@ mod graph_canvas;
 mod graph_panel;
 mod history_panel;
 mod i18n;
+mod mesh_map_import;
 #[cfg(test)]
 mod input_photon;
 mod paint_state;
+mod path_tool;
 #[cfg(test)]
 mod perf_soak;
 mod plugins;
@@ -84,7 +86,12 @@ struct PanelViewer<'a> {
     paint: Option<&'a mut paint_state::PaintState>,
     doc: &'a mut document::Document,
     brush: &'a mut BrushPanel,
+    mesh_import: &'a mut mesh_map_import::MeshMapImportState,
+    /// The project's asset store (`None` before the first Save/Open —
+    /// the mesh-map import Apply path waits for it; see `mesh_map_import`).
+    store: Option<&'a umber_core::AssetStore>,
     polygon_fill: &'a mut fill_layer::PolygonFillTool,
+    path_tool: &'a mut path_tool::PaintPathTool,
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
     display_lut_state: &'a mut display_panel::DisplayLutState,
@@ -130,6 +137,7 @@ impl TabViewer for PanelViewer<'_> {
                 self.paint.as_deref_mut(),
                 Some(self.display_lut),
                 Some(&mut *self.polygon_fill),
+                Some(&mut *self.path_tool),
             ),
             Panel::LayerStack => document::layers_ui(ui, self.doc),
             Panel::Properties => {
@@ -141,6 +149,7 @@ impl TabViewer for PanelViewer<'_> {
                     paint.sync_tool(&mut self.brush.tool);
                     paint.sync_symmetry(&mut self.brush.symmetry);
                     paint.sync_line_constraint(self.brush.line_constraint);
+                    paint.sync_projection(self.brush.projection);
                     // ... plus the active preset's wash mode (build-up
                     // when no preset is selected).
                     let wash = self
@@ -155,9 +164,23 @@ impl TabViewer for PanelViewer<'_> {
                 // v1 source editor) plus the polygon-fill tool rows; edits
                 // run through Document as undoable, journaled SetFill ops.
                 fill_layer::fill_section_ui(ui, self.doc, self.mesh, &mut *self.polygon_fill);
+                // The paint-path tool rows (editable polyline → replayed
+                // stroke / closed-path fill through the paint session).
+                path_tool::path_tool_rows(
+                    ui,
+                    self.paint.as_deref_mut(),
+                    &mut *self.path_tool,
+                );
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));
+                ui.separator();
+                self.mesh_import.show(
+                    ui,
+                    self.doc,
+                    self.store,
+                    mesh_map_import::read_pending_from_disk,
+                );
             }
             Panel::History => {
                 history_panel::history_ui(ui, self.doc);
@@ -239,6 +262,9 @@ pub struct AppState {
     /// The polygon-fill lasso tool: the armed click-path capture feeding
     /// pixel masks into fill layers (session state, never serialized).
     pub polygon_fill: fill_layer::PolygonFillTool,
+    /// The paint-path tool: the editable polyline replayed as
+    /// paint/erase/smudge strokes (session state, never serialized).
+    pub path_tool: path_tool::PaintPathTool,
     /// The bakes panel: mesh-map bake settings + last-bake status.
     pub bakes: BakesPanel,
     /// The export dialog: preset choice, output dir + last-export status.
@@ -251,6 +277,15 @@ pub struct AppState {
     /// Whether the device display LUT matches `display` (starts dirty;
     /// the frame loop rebuilds + uploads).
     pub display_lut: display_panel::DisplayLutState,
+    /// Mesh-map import by naming convention (§7 P1 row): the folder-scan
+    /// routing + unmatched report + session texture set (channels ensured
+    /// on apply). Owns the session set so imported user channels survive
+    /// until the next save (see `mesh_map_import`).
+    pub mesh_import: mesh_map_import::MeshMapImportState,
+    /// The project directory of the last Save/Open (`None` for a
+    /// never-saved document — the import Apply path and the autosave
+    /// journal both wait for it).
+    pub project_dir: Option<PathBuf>,
 }
 
 /// The eframe app.
@@ -454,6 +489,11 @@ impl UmberApp {
     /// plus the graph panel's graph as a `.mtlx` string (the additive
     /// wave-5 carry — omitted when the panel's graph is empty, so
     /// graph-less projects save exactly the old shape).
+    ///
+    /// The saved texture set is the mesh-map import session set (its name
+    /// retargeted to the mesh's set name, channels kept): user channels an
+    /// earlier `<Set>_<suffix>` import created survive the save instead of
+    /// being reset to the five defaults.
     fn save_project(&mut self) {
         let set_name = self.project_texture_set_name();
         let Some(dir) = rfd::FileDialog::new()
@@ -462,13 +502,17 @@ impl UmberApp {
         else {
             return;
         };
+        // Keep the import session set (and its user channels) as the saved
+        // set: a rename keeps channels (see `retarget_set`).
+        self.state.mesh_import.retarget_set(&set_name);
+        let texture_set = self.state.mesh_import.session_set.clone();
         let graphs_mtlx = if self.state.graph.graph().nodes.is_empty() {
             Vec::new()
         } else {
             vec![self.state.graph.to_mtlx()]
         };
         let model = umber_core::project::ProjectModel::new(
-            vec![umber_core::TextureSet::new_default(&set_name)],
+            vec![texture_set],
             vec![umber_core::project::TextureSetLayers {
                 texture_set: set_name.clone(),
                 stack: self.state.doc.stack.clone(),
@@ -485,6 +529,9 @@ impl UmberApp {
         match umber_core::project::save_to_dir(&model, &dir) {
             Ok(()) => {
                 log::info!("project saved: {}", dir.display());
+                // The import Apply path (and future drops) now have a
+                // content-hash store to write into.
+                self.state.project_dir = Some(dir.clone());
                 // From here on the document journals into `dir`, its seq
                 // continuing past the stamped mark (a Save As clears the
                 // old directory's journal — `dir` now holds those edits).
@@ -526,6 +573,17 @@ impl UmberApp {
                     return;
                 };
                 self.state.doc.load_stack(entry.stack.clone());
+                // The import session set restores the saved set wholesale
+                // (channels included — user channels from earlier imports
+                // survive the open); unknown-name fallback is the default.
+                if let Some(saved) = model.texture_sets.iter().find(|ts| ts.name == name) {
+                    self.state.mesh_import.set_session_set(saved.clone());
+                } else {
+                    self.state
+                        .mesh_import
+                        .set_session_set(umber_core::TextureSet::new_default(&name));
+                }
+                self.state.project_dir = Some(dir.clone());
                 // `load_from_dir` already replayed + truncated any journal
                 // a crash left behind; resume journaling from its mark.
                 if let Err(e) = self
@@ -615,6 +673,7 @@ impl eframe::App for UmberApp {
         }
         self.state.viewport.set_show_wireframe(self.show_wireframe);
         self.state.viewport.set_show_grid(self.show_grid);
+        self.state.viewport.set_show_cage(self.state.bakes.show_cage());
         self.state.viewport.set_view_mode(self.view_mode);
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
@@ -685,6 +744,7 @@ impl eframe::App for UmberApp {
                 doc: &mut self.state.doc,
                 brush: &mut self.brush_panel,
                 polygon_fill: &mut self.state.polygon_fill,
+                path_tool: &mut self.state.path_tool,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
                 display_lut: &self.display_lut,

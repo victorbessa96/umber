@@ -44,6 +44,14 @@ pub struct Viewport {
     /// Procedural ground grid (View menu / G). Off by default, same
     /// byte-identical-off contract.
     show_grid: bool,
+    /// Cage wireframe overlay (§6:59, synced from the Bakes panel's cage
+    /// toggle by the app shell, like wireframe/grid). Off by default with
+    /// the same byte-identical-off contract. V1 reuses the wireframe
+    /// pass's mesh edges in amber (a true cage buffer — mesh inflated
+    /// along normals by the cage distance — is the named follow-up); the
+    /// toggle, ordering (after the mesh, with the wireframe), and overlay
+    /// plumbing are the shipped surface.
+    show_cage: bool,
     /// The shading mode (View menu; V cycles lit ↔ unlit). Defaults
     /// to Lit — today's render, byte-identical with the mode uniform
     /// at (0, 0).
@@ -93,6 +101,18 @@ impl Viewport {
         self.show_grid = on;
     }
 
+    /// Shows or hides the cage wireframe overlay (Bakes panel `Show
+    /// cage`). Synced from the app shell each frame before `ui`, like the
+    /// wireframe/grid toggles.
+    pub fn set_show_cage(&mut self, on: bool) {
+        self.show_cage = on;
+    }
+
+    /// Whether the cage overlay shows.
+    pub fn show_cage(&self) -> bool {
+        self.show_cage
+    }
+
     /// Sets the shading mode (View menu rows / V shortcut; synced from
     /// the app shell each frame before `ui`, like the overlay toggles).
     pub fn set_view_mode(&mut self, mode: ViewMode) {
@@ -106,9 +126,13 @@ impl Viewport {
 
     /// Draws the viewport and handles orbit/pan/zoom/paint input.
     ///
-    /// Paint mode: Ctrl/Cmd (or pen-tip with `ctrl`) + primary drag casts
-    /// the pointer through the camera into the mesh and feeds the hit UV
-    /// to `paint`'s stroke path. Plain drag orbits; shift-drag pans.
+    /// Paint mode (§2's P1 row, [`crate::paint_state::PaintProjection`]):
+    /// Ctrl/Cmd (or pen-tip with `ctrl`) + primary drag casts the pointer
+    /// through the camera into the mesh and feeds the hit UV to `paint`'s
+    /// Screen-projection path — the stroke you SEE is the stroke you get
+    /// (misses skip the stamp, seam mirrors fan out from the hit). Plain
+    /// drag orbits; shift-drag pans. In `Uv` projection the viewport never
+    /// paints (Ctrl+drag orbits); UV-space editing owns the stroke there.
     ///
     /// `display_lut` is the app's display LUT (the Display panel's
     /// chain), applied as the mesh pass's last step; `None` draws
@@ -129,17 +153,20 @@ impl Viewport {
         let painting = ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
             && response.dragged_by(PointerButton::Primary)
             && self.mesh_data.is_some()
-            && paint.is_some();
+            && paint
+                .as_ref()
+                .is_some_and(|p| p.projection().viewport_paints());
         if !painting {
             self.handle_input(ui, &response);
         } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint) {
             if let Some(pos) = response.interact_pointer_pos() {
-                if let Some(uv) = self.pick_uv(rect, mesh, pos) {
-                    if !paint.is_stroking() {
-                        paint.begin_stroke(egui::Pos2::new(uv[0], uv[1]));
-                    } else {
-                        paint.extend_stroke(egui::Pos2::new(uv[0], uv[1]));
-                    }
+                let hit = self
+                    .pick_uv(rect, mesh, pos)
+                    .map(|uv| egui::Pos2::new(uv[0], uv[1]));
+                if !paint.is_stroking() {
+                    paint.begin_screen_point(hit);
+                } else {
+                    paint.extend_screen_point(hit);
                 }
             }
         }
@@ -174,6 +201,12 @@ impl Viewport {
             if self.show_wireframe {
                 let wire = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::default());
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, wire));
+            }
+            // Cage overlay (§6:59): after the wireframe so its edges win,
+            // skipped entirely when off (byte-identical to cage-off).
+            if self.show_cage {
+                let cage = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::cage());
+                ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
             }
         }
     }
@@ -296,6 +329,68 @@ fn solo_channel_label(channel: SoloChannel) -> String {
 mod tests {
     use super::*;
 
+    /// A viewport staring straight down -z at the origin (yaw = pitch = 0
+    /// puts the eye on +z looking at the target), for the picking tests.
+    fn head_on_viewport() -> Viewport {
+        Viewport {
+            camera: OrbitCamera {
+                target: glam::Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.0,
+                ..OrbitCamera::default()
+            },
+            ..Viewport::default()
+        }
+    }
+
+    /// Two-triangle quad on the z=0 plane with unit UVs (mirrors
+    /// `umber_mesh::raycast`'s fixture: positions == UVs on x/y).
+    fn quad() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+        }
+    }
+
+    fn rect200() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0))
+    }
+
+    #[test]
+    fn pick_uv_center_hits_center_uv() {
+        // Screen→UV mapping (§2 P1): the ray through the viewport center
+        // meets the quad's center, whose UV is (0.5, 0.5).
+        let viewport = head_on_viewport();
+        let uv = viewport
+            .pick_uv(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("center ray must hit the quad");
+        assert!(
+            (uv[0] - 0.5).abs() < 1e-4 && (uv[1] - 0.5).abs() < 1e-4,
+            "center must map to center UV, got {uv:?}"
+        );
+    }
+
+    #[test]
+    fn pick_uv_corner_misses() {
+        // The 2x2 quad at distance 5 under a 45° fov fills the middle of
+        // the frame: the rect corner's ray leaves the quad → None, which
+        // is what the Screen path skips (no orphan dabs).
+        let viewport = head_on_viewport();
+        assert_eq!(viewport.pick_uv(rect200(), &quad(), egui::pos2(0.0, 0.0)), None);
+        assert_eq!(
+            viewport.pick_uv(rect200(), &quad(), egui::pos2(200.0, 200.0)),
+            None
+        );
+    }
+
     #[test]
     fn default_view_mode_is_lit() {
         // Lit is today's render: the default must be the mode whose
@@ -311,5 +406,17 @@ mod tests {
         assert_eq!(viewport.view_mode(), ViewMode::Unlit);
         viewport.set_view_mode(ViewMode::Solo(SoloChannel::Roughness));
         assert_eq!(viewport.view_mode(), ViewMode::Solo(SoloChannel::Roughness));
+    }
+
+    #[test]
+    fn cage_overlay_defaults_off_and_toggles() {
+        // Byte-identical-off contract: a fresh viewport draws the cage
+        // overlay nowhere until the Bakes panel's toggle syncs on.
+        let mut viewport = Viewport::default();
+        assert!(!viewport.show_cage());
+        viewport.set_show_cage(true);
+        assert!(viewport.show_cage());
+        viewport.set_show_cage(false);
+        assert!(!viewport.show_cage());
     }
 }

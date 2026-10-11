@@ -33,7 +33,7 @@ pub use smart::{
     AnchorError, AnchorRef, GeneratorBinding, MaskOp, MaskOpKind, MaskOpParams, MaskSource,
     SmartApplyResult, SmartError, SmartLayerKind, SmartLayerTemplate, SmartMask, SmartMaterial,
 };
-pub use tiles::{TileChannels, TileSet};
+pub use tiles::{AffectedRegion, TileChannels, TileSet};
 pub use umber_mesh::{FillParams, FillProjection, FillSource, ProjAxis};
 pub use undo::{Command, UndoStack};
 

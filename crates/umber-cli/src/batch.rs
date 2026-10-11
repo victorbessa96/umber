@@ -179,6 +179,9 @@ struct ExportStep {
     rays: u32,
     #[serde(default)]
     tiles: Vec<u16>,
+    /// Also write `<textureSet>.usda` (the `--usda` flag's recipe form).
+    #[serde(default)]
+    usda: bool,
 }
 
 /// `steps[i]`, plus `.<key>` when the step is a single-key object — the
@@ -286,6 +289,7 @@ fn run_step(step: &BatchStep) -> Result<String> {
                 &s.preset,
                 &flags,
                 &s.tiles,
+                s.usda,
                 &mut print_skipped,
             )?;
             Ok(format!(
@@ -502,6 +506,8 @@ mod tests {
         };
         assert_eq!(export.preset, "unreal");
         assert_eq!(export.tiles, [1001, 1002]);
+        // The recipe omits `usda`: older recipes parse with it off.
+        assert!(!export.usda);
     }
 
     #[test]

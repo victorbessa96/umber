@@ -32,6 +32,7 @@ pub mod dab_adapter;
 pub mod lazy_mouse;
 pub mod line_constraint;
 pub mod one_euro;
+pub mod path;
 pub mod preset;
 pub mod preset_library;
 pub mod quick_mask;
@@ -47,6 +48,10 @@ pub use line_constraint::{
     ANGLE_SNAP_MAX_DEG, ANGLE_SNAP_MIN_DEG,
 };
 pub use one_euro::{OneEuroError, OneEuroFilter, OneEuroScalar};
+pub use path::{
+    sanitize_size, PaintPath, PathDab, PathOp, PathPoint, PATH_EVENT_STEP_NS, PATH_MAX_POINTS,
+    PATH_MAX_SIZE, PATH_MIN_SIZE,
+};
 pub use preset_library::{Library, LibraryEntry};
 pub use quick_mask::{MaskPaint, MaskView, QuickMask};
 pub use retouch::{BrushTool, CloneParams, EraseChannels, EraseParams, RgbaBuffer, SmudgeParams};

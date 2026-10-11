@@ -15,7 +15,7 @@
 //! that empty form — which is what makes both conversion directions
 //! lossless (see the compat tests).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use umber_mesh::FIRST_TILE;
@@ -109,6 +109,74 @@ impl TileSet {
     /// channels when absent (mirrors the `MapSet::set` upsert pattern).
     pub fn add_channel(&mut self, tile_id: u16, channel: Channel) {
         self.tiles.entry(tile_id).or_default().add_channel(channel);
+    }
+}
+
+/// The auto-rebake affected region (§6:58): the set of UDIM tiles whose
+/// bakes a parameter change (or a skew-brush stroke) invalidated, plus a
+/// generation counter so the bake queue can tell "marked twice" from
+/// "marked once, rebaked, marked again".
+///
+/// Tile granularity is deliberate: the bakers run per tile
+/// (`umber_bake::ao::bake_ao_tile`), so a change that only touches one
+/// tile's skew mask must not rebake the others. Which MAPS each parameter
+/// dirties lives one layer up (`umber_bake::skew::param_dirties_map` —
+/// this crate must not depend on the bake engine); this type tracks the
+/// WHERE, that table the WHAT.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AffectedRegion {
+    tiles: BTreeSet<u16>,
+    generation: u64,
+}
+
+impl AffectedRegion {
+    /// Empty region (nothing to rebake).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks one tile affected (a skew-brush stroke lands on one tile).
+    pub fn mark_tile(&mut self, tile: u16) {
+        if self.tiles.insert(tile) {
+            self.generation += 1;
+        }
+    }
+
+    /// Marks every tile in `tiles` affected (a bake-parameter change
+    /// reaches all selected tiles).
+    pub fn mark_tiles(&mut self, tiles: &[u16]) {
+        for tile in tiles {
+            self.mark_tile(*tile);
+        }
+    }
+
+    /// Whether any tile is waiting for rebake.
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+
+    /// The affected tiles, ascending.
+    pub fn tiles(&self) -> Vec<u16> {
+        self.tiles.iter().copied().collect()
+    }
+
+    /// Whether `tile` is affected.
+    pub fn contains(&self, tile: u16) -> bool {
+        self.tiles.contains(&tile)
+    }
+
+    /// Bumps on every newly-marked tile (re-marking an already-dirty tile
+    /// is free — the rebake already covers it).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Takes the pending tiles (clears the region; the generation is kept
+    /// — it is a clock, not a count).
+    pub fn take(&mut self) -> Vec<u16> {
+        let tiles = self.tiles();
+        self.tiles.clear();
+        tiles
     }
 }
 
@@ -258,5 +326,30 @@ mod tests {
             set.set_tile(tile_id, base.clone());
         }
         assert_eq!(set.tiles_present(), vec![1001, 1002]);
+    }
+
+    #[test]
+    fn affected_region_tracks_tiles_and_generations() {
+        let mut region = AffectedRegion::new();
+        assert!(region.is_empty());
+        assert_eq!(region.generation(), 0);
+        // A parameter change marks every selected tile.
+        region.mark_tiles(&[1001, 1002]);
+        assert!(!region.is_empty());
+        assert_eq!(region.tiles(), vec![1001, 1002]);
+        assert!(region.contains(1002));
+        assert!(!region.contains(1003));
+        assert_eq!(region.generation(), 2);
+        // Re-marking a dirty tile is free (no generation bump — the
+        // pending rebake already covers it).
+        region.mark_tile(1001);
+        assert_eq!(region.generation(), 2);
+        // Taking clears the tiles but keeps the clock.
+        assert_eq!(region.take(), vec![1001, 1002]);
+        assert!(region.is_empty());
+        assert_eq!(region.generation(), 2);
+        region.mark_tile(1003);
+        assert_eq!(region.generation(), 3);
+        assert_eq!(region.tiles(), vec![1003]);
     }
 }

@@ -25,6 +25,7 @@ use umber_brush::{
 };
 
 use crate::paint_state::PaintState;
+use crate::paint_state::PaintProjection;
 
 /// Size of the curve-editor plot (logical pixels).
 const CURVE_PLOT_SIZE: egui::Vec2 = egui::Vec2::new(150.0, 100.0);
@@ -67,6 +68,10 @@ pub struct BrushPanel {
     /// v1. The paint session adopts it via
     /// `PaintState::sync_line_constraint`.
     pub line_constraint: LineConstraintMode,
+    /// Paint-what-you-see projection (§2's P1 row). Panel (session) state
+    /// like `line_constraint`: not in the preset nor the project file in
+    /// v1. The paint session adopts it via `PaintState::sync_projection`.
+    pub projection: PaintProjection,
 }
 
 impl BrushPanel {
@@ -103,6 +108,7 @@ impl BrushPanel {
             eraser: EraseParams::default(),
             symmetry: SymmetrySettings::default(),
             line_constraint: LineConstraintMode::default(),
+            projection: PaintProjection::default(),
         }
     }
 
@@ -118,6 +124,9 @@ impl BrushPanel {
         ui.add_space(8.0);
         ui.separator();
         line_constraint_rows(ui, &mut self.line_constraint);
+        ui.add_space(8.0);
+        ui.separator();
+        projection_rows(ui, &mut self.projection);
         ui.add_space(8.0);
         ui.separator();
         if let Some(paint) = paint {
@@ -646,6 +655,22 @@ fn line_constraint_rows(ui: &mut egui::Ui, mode: &mut LineConstraintMode) {
         );
     }
     ui.weak(tr("brush.line-constraint-hint"));
+}
+
+/// The paint-what-you-see projection section (§2's P1 row): 3D
+/// (Screen — viewport strokes raycast to the mesh) or UV-only (the 3D
+/// viewport orbits). Applies to every tool (paint, smudge, clone, eraser).
+fn projection_rows(ui: &mut egui::Ui, mode: &mut PaintProjection) {
+    ui.strong(tr("brush.projection"));
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(
+            &mut *mode,
+            PaintProjection::Screen,
+            tr("brush.projection-screen"),
+        );
+        ui.selectable_value(&mut *mode, PaintProjection::Uv, tr("brush.projection-uv"));
+    });
+    ui.weak(tr("brush.projection-hint"));
 }
 
 /// Filename stem for Save-As: lowercase, spaces to dashes, everything
