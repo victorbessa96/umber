@@ -7,7 +7,11 @@
 //! behind `umber-gpu`.
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
-use umber_gpu::{DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera};
+use umber_gpu::{
+    DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, SoloChannel, ViewMode,
+};
+
+use crate::i18n::tr;
 
 /// Background shown when there is no mesh loaded (and behind the mesh
 /// otherwise, since the shared egui render pass has no clear op of its
@@ -40,6 +44,10 @@ pub struct Viewport {
     /// Procedural ground grid (View menu / G). Off by default, same
     /// byte-identical-off contract.
     show_grid: bool,
+    /// The shading mode (View menu; V cycles lit ↔ unlit). Defaults
+    /// to Lit — today's render, byte-identical with the mode uniform
+    /// at (0, 0).
+    view_mode: ViewMode,
 }
 
 impl Viewport {
@@ -83,6 +91,17 @@ impl Viewport {
     /// Synced from the app shell each frame before `ui`.
     pub fn set_show_grid(&mut self, on: bool) {
         self.show_grid = on;
+    }
+
+    /// Sets the shading mode (View menu rows / V shortcut; synced from
+    /// the app shell each frame before `ui`, like the overlay toggles).
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        self.view_mode = mode;
+    }
+
+    /// The current shading mode.
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
     }
 
     /// Draws the viewport and handles orbit/pan/zoom/paint input.
@@ -143,7 +162,13 @@ impl Viewport {
                 let grid = gpu.grid_callback(view_proj);
                 ui.painter().add(umber_gpu::grid_paint_shape(rect, grid));
             }
-            let callback = mesh.paint_callback(gpu, uniform, display_lut);
+            let callback = {
+                // Data modes (data solos, every mesh-map preview) bind
+                // the identity table here — the §9 display-transform
+                // bypass (see `ViewMode::select_lut`).
+                let lut = self.view_mode.select_lut(display_lut);
+                mesh.paint_callback_with_mode(gpu, uniform, lut, self.view_mode)
+            };
             let shape = umber_gpu::mesh_paint_shape(rect, callback);
             ui.painter().add(shape);
             if self.show_wireframe {
@@ -200,5 +225,91 @@ impl Viewport {
                 self.camera.zoom(scroll.signum() * ZOOM_SENSITIVITY);
             }
         }
+    }
+}
+
+/// The View menu's view-mode rows (where the wireframe/grid toggles
+/// live): Lit / Unlit / Solo (+ channel picker) / Mesh-map preview
+/// (+ bake-map picker). Edits `mode` in place; returns whether it
+/// changed this frame. Every string goes through [`tr`] (both
+/// catalogs carry the `viewmode.*` keys).
+pub fn view_mode_menu(ui: &mut Ui, mode: &mut ViewMode) -> bool {
+    let before = *mode;
+    ui.label(tr("viewmode.label"));
+    ui.selectable_value(mode, ViewMode::Lit, tr("viewmode.lit"));
+    ui.selectable_value(mode, ViewMode::Unlit, tr("viewmode.unlit"));
+
+    let solo_active = matches!(mode, ViewMode::Solo(_));
+    if ui
+        .selectable_label(solo_active, tr("viewmode.solo"))
+        .clicked()
+        && !solo_active
+    {
+        *mode = ViewMode::Solo(SoloChannel::BaseColor);
+    }
+    if let ViewMode::Solo(channel) = mode {
+        egui::ComboBox::from_label(tr("viewmode.channel"))
+            .selected_text(solo_channel_label(*channel))
+            .show_ui(ui, |ui| {
+                for candidate in SoloChannel::ALL {
+                    ui.selectable_value(channel, candidate, solo_channel_label(candidate));
+                }
+            });
+    }
+
+    let preview_active = matches!(mode, ViewMode::MeshMapPreview(_));
+    if ui
+        .selectable_label(preview_active, tr("viewmode.mesh-preview"))
+        .clicked()
+        && !preview_active
+    {
+        *mode = ViewMode::MeshMapPreview(umber_mesh::MeshMapKind::AmbientOcclusion);
+    }
+    if let ViewMode::MeshMapPreview(kind) = mode {
+        egui::ComboBox::from_label(tr("viewmode.map"))
+            .selected_text(kind.suffix())
+            .show_ui(ui, |ui| {
+                for candidate in ViewMode::ALL_PREVIEW_KINDS {
+                    ui.selectable_value(kind, candidate, candidate.suffix());
+                }
+            });
+    }
+
+    *mode != before
+}
+
+/// The picker label for a solo channel (i18n'd; the shader-side token
+/// is [`SoloChannel::as_str`], not this).
+fn solo_channel_label(channel: SoloChannel) -> String {
+    match channel {
+        SoloChannel::BaseColor => tr("viewmode.basecolor"),
+        SoloChannel::Emissive => tr("viewmode.emissive"),
+        SoloChannel::Roughness => tr("viewmode.roughness"),
+        SoloChannel::Metallic => tr("viewmode.metallic"),
+        SoloChannel::AmbientOcclusion => tr("viewmode.ao"),
+        SoloChannel::Height => tr("viewmode.height"),
+        SoloChannel::Normal => tr("viewmode.normal"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_view_mode_is_lit() {
+        // Lit is today's render: the default must be the mode whose
+        // uniform is (0, 0), so existing frames are untouched.
+        assert_eq!(Viewport::default().view_mode(), ViewMode::Lit);
+        assert_eq!(ViewMode::default(), ViewMode::Lit);
+    }
+
+    #[test]
+    fn set_view_mode_round_trips() {
+        let mut viewport = Viewport::default();
+        viewport.set_view_mode(ViewMode::Unlit);
+        assert_eq!(viewport.view_mode(), ViewMode::Unlit);
+        viewport.set_view_mode(ViewMode::Solo(SoloChannel::Roughness));
+        assert_eq!(viewport.view_mode(), ViewMode::Solo(SoloChannel::Roughness));
     }
 }

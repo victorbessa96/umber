@@ -26,6 +26,7 @@ pub mod paint_thread;
 pub mod renderer;
 pub mod shaders;
 pub mod texture_display;
+pub mod view_mode;
 
 /// The §12 reference-scene benchmark — `perf` feature only (the
 /// harness lives here, not the app, because it drives the renderer
@@ -40,6 +41,7 @@ pub use ibl::{EnvFlags, EnvFormat, EnvIrradiance, IblError, SpecParams};
 pub use paint::{Dab, DabBuffer, PaintCompositor, PaintError, PaintTarget};
 pub use paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 pub use tile_pool::{texel_within_tile, tile_for, TileId, TilePool, TILE_SIZE};
+pub use view_mode::{PixelSource, SoloChannel, ViewMode, ViewModeParams};
 /// The depth format the app must request from eframe
 /// (`NativeOptions::depth_buffer = 32`) so the egui renderer's render pass
 /// carries a depth attachment matching [`renderer::GpuContext`]'s pipeline.

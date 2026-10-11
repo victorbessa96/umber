@@ -16,6 +16,7 @@ use wgpu::util::DeviceExt as _;
 
 use crate::ibl::{EnvFlags, EnvIrradiance, SpecParams};
 use crate::shaders::{GRID_SHADER, MESH_SHADER, WIREFRAME_SHADER};
+use crate::view_mode::{ViewMode, ViewModeParams};
 
 /// Errors raised while preparing GPU-side mesh data.
 #[derive(Debug, thiserror::Error)]
@@ -483,6 +484,22 @@ impl GpuContext {
                     },
                     count: None,
                 },
+                // View-mode selector (view-modes slice — see
+                // `shaders::MESH_SHADER`'s `VIEW_MODE_WGSL` block):
+                // which shading the fragment runs (lit / unlit /
+                // solo / mesh-map preview). Appended AFTER the
+                // specular tier — additive bindings, the classic
+                // layout-sync trap avoided by construction.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<ViewModeParams>() as u64),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -839,9 +856,10 @@ impl GpuContext {
 
     /// Builds the mesh pass's group-0 bind group: camera + diffuse IBL
     /// set (irradiance view, sampler, flags buffer) + specular tier
-    /// (prefilter views at bindings 4–6, spec uniform at 7). Used by
+    /// (prefilter views at bindings 4–6, spec uniform at 7) + the
+    /// view-mode selector (binding 8). Used by
     /// [`MeshBuffers::upload`] (fallback views/sampler, procedural
-    /// flags, default spec) and [`MeshBuffers`]'s rebuild path
+    /// flags, default spec, Lit mode) and [`MeshBuffers`]'s rebuild path
     /// (`set_environment` / `set_spec_params`: the map's own views and
     /// sampler, or the fallback pair).
     pub(crate) fn mesh_bind_group_full(
@@ -852,6 +870,7 @@ impl GpuContext {
         env_sampler: &wgpu::Sampler,
         prefilter_views: [&wgpu::TextureView; 3],
         spec_buffer: &wgpu::Buffer,
+        view_mode_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("umber_mesh_camera_bind_group"),
@@ -901,6 +920,14 @@ impl GpuContext {
                         size: None,
                     }),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: view_mode_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
             ],
         })
     }
@@ -908,8 +935,9 @@ impl GpuContext {
 
 /// GPU-resident mesh data for the viewport: vertex/index buffers plus the
 /// per-mesh camera uniform buffer, the environment-flag uniform buffer,
-/// the specular-tier uniform buffer, and the combined bind group
-/// (camera + IBL set + specular tier).
+/// the specular-tier uniform buffer, the view-mode uniform buffer, and
+/// the combined bind group
+/// (camera + IBL set + specular tier + view mode).
 pub struct MeshBuffers {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -919,6 +947,10 @@ pub struct MeshBuffers {
     /// Roughness/metallic uniform (mesh-pass binding 7): v1 stand-ins
     /// (see [`SpecParams`]), written by [`Self::set_spec_params`].
     spec_buffer: wgpu::Buffer,
+    /// View-mode selector (mesh-pass binding 8): written per frame by
+    /// [`MeshPaintCallback::write_uniform`] from the callback's mode
+    /// (see [`Self::paint_callback_with_mode`] — Lit by default).
+    view_mode_buffer: wgpu::Buffer,
     /// Currently bound environment (if any): retained so
     /// [`Self::set_spec_params`] can rebuild the bind group without
     /// dropping the map. Cloned handles — no GPU cost.
@@ -1007,6 +1039,14 @@ impl MeshBuffers {
             contents: bytemuck::bytes_of(&SpecParams::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        // View-mode selector at the Lit default (mode 0, channel 0);
+        // the per-frame callback overwrites it from its own mode (see
+        // `MeshPaintCallback::write_uniform`).
+        let view_mode_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_mesh_view_mode_buffer"),
+            contents: bytemuck::bytes_of(&ViewMode::Lit.uniform()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let bind_group = gpu.mesh_bind_group_full(
             &uniform_buffer,
             &flags_buffer,
@@ -1018,6 +1058,7 @@ impl MeshBuffers {
                 &gpu.fallback_env_view,
             ],
             &spec_buffer,
+            &view_mode_buffer,
         );
 
         let index_count = u32::try_from(mesh.indices.len())
@@ -1052,6 +1093,7 @@ impl MeshBuffers {
             uniform_buffer,
             flags_buffer,
             spec_buffer,
+            view_mode_buffer,
             bound_env: None,
             bind_group,
             wire_buffer,
@@ -1087,6 +1129,7 @@ impl MeshBuffers {
             sampler,
             prefilter,
             &self.spec_buffer,
+            &self.view_mode_buffer,
         );
     }
 
@@ -1130,11 +1173,32 @@ impl MeshBuffers {
     /// caller from the current camera + viewport aspect ratio. `lut` is
     /// the app's display LUT (the viewer chain, applied as the pass's
     /// last step), or `None` for the context's identity table.
+    /// Renders [`ViewMode::Lit`] — use
+    /// [`Self::paint_callback_with_mode`] for the other view modes.
     pub fn paint_callback(
         &self,
         gpu: &GpuContext,
         uniform: CameraUniform,
         lut: Option<&crate::display_lut::DisplayLut>,
+    ) -> MeshPaintCallback {
+        self.paint_callback_with_mode(gpu, uniform, lut, ViewMode::Lit)
+    }
+
+    /// [`Self::paint_callback`] with an explicit [`ViewMode`]: the
+    /// callback writes the mode's [`ViewModeParams`] into the mesh's
+    /// view-mode buffer on `prepare` (like the camera uniform), so the
+    /// shader's `view_mode` selector lands before this frame's draw.
+    ///
+    /// LUT contract: pass `mode.select_lut(lut)` as `lut` — data modes
+    /// (data solos, every mesh-map preview) then bind the identity
+    /// table, i.e. bypass the display transform per the §9 rule (see
+    /// [`crate::view_mode`).
+    pub fn paint_callback_with_mode(
+        &self,
+        gpu: &GpuContext,
+        uniform: CameraUniform,
+        lut: Option<&crate::display_lut::DisplayLut>,
+        mode: ViewMode,
     ) -> MeshPaintCallback {
         MeshPaintCallback {
             pipeline: gpu.pipeline.clone(),
@@ -1145,6 +1209,8 @@ impl MeshBuffers {
             index_count: self.index_count,
             uniform_buffer: self.uniform_buffer.clone(),
             uniform,
+            view_mode_buffer: self.view_mode_buffer.clone(),
+            view_mode: mode.uniform(),
         }
     }
 }
@@ -1166,13 +1232,23 @@ pub struct MeshPaintCallback {
     index_count: u32,
     uniform_buffer: wgpu::Buffer,
     uniform: CameraUniform,
+    /// Mesh-pass binding 8's buffer (shared with the mesh) plus this
+    /// frame's mode value, written by [`Self::write_uniform`].
+    view_mode_buffer: wgpu::Buffer,
+    view_mode: ViewModeParams,
 }
 
 impl MeshPaintCallback {
     /// `prepare`'s camera-uniform write, callable without egui's
-    /// callback plumbing (the perf harness's offscreen frames).
+    /// callback plumbing (the perf harness's offscreen frames). Also
+    /// writes the view-mode selector (same per-frame uniform pattern).
     pub(crate) fn write_uniform(&self, queue: &wgpu::Queue) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniform));
+        queue.write_buffer(
+            &self.view_mode_buffer,
+            0,
+            bytemuck::bytes_of(&self.view_mode),
+        );
     }
 
     /// Records the mesh draw onto any render pass — the state `paint`
@@ -2619,6 +2695,7 @@ mod tests {
                     env.prefilter_view(2),
                 ],
                 &spec,
+                &masked.view_mode_buffer,
             );
             let masked_bytes = render_mesh_offscreen(&gpu, &masked);
 
