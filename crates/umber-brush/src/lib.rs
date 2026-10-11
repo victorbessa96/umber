@@ -30,6 +30,7 @@ pub struct StrokeEvent {
 
 pub mod dab_adapter;
 pub mod lazy_mouse;
+pub mod line_constraint;
 pub mod one_euro;
 pub mod preset;
 pub mod preset_library;
@@ -41,6 +42,10 @@ pub mod wiring;
 
 pub use dab_adapter::{opaque_linearize, wash_scale, BrushParams, DabAdapter, WashMode};
 pub use lazy_mouse::LazyMouse;
+pub use line_constraint::{
+    constrain_point, sanitize_snap_deg, LineConstraint, LineConstraintMode, ANGLE_SNAP_DEFAULT_DEG,
+    ANGLE_SNAP_MAX_DEG, ANGLE_SNAP_MIN_DEG,
+};
 pub use one_euro::{OneEuroError, OneEuroFilter, OneEuroScalar};
 pub use preset_library::{Library, LibraryEntry};
 pub use quick_mask::{MaskPaint, MaskView, QuickMask};

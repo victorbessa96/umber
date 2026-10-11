@@ -1,9 +1,11 @@
-//! Pipeline wiring: filter → lazy mouse → spacing.
+//! Pipeline wiring: filter → lazy mouse → line constraint → spacing.
 //!
-//! [`StrokeConditioner`] chains the three conditioning stages for one
+//! [`StrokeConditioner`] chains the conditioning stages for one
 //! stroke: each [`StrokeEvent`](crate::StrokeEvent) is one-euro filtered
 //! (position plus a separate pressure instance), pulled through
-//! [`LazyMouse`](crate::LazyMouse), then expanded into
+//! [`LazyMouse`](crate::LazyMouse), projected through the
+//! [`LineConstraint`](crate::LineConstraint) (off by default —
+//! byte-identical to no constraint), then expanded into
 //! [`DabPlan`](crate::DabPlan)s by [`SpacingAccumulator`](crate::SpacingAccumulator).
 //! Dab-to-UV projection and GPU compositing are later slices; this stage only
 //! decides *where* dabs land and how strong they are.
@@ -14,8 +16,11 @@
 use thiserror::Error;
 
 use crate::{
-    one_euro::OneEuroError, spacing::DabPlan, LazyMouse, OneEuroFilter, OneEuroParams,
-    OneEuroScalar, SpacingAccumulator, SpacingError, StrokeEvent,
+    line_constraint::{LineConstraint, LineConstraintMode},
+    one_euro::OneEuroError,
+    spacing::DabPlan,
+    LazyMouse, OneEuroFilter, OneEuroParams, OneEuroScalar, SpacingAccumulator, SpacingError,
+    StrokeEvent,
 };
 
 /// Construction errors for [`StrokeConditioner`].
@@ -40,6 +45,7 @@ pub struct StrokeConditioner {
     pos_filter: OneEuroFilter,
     pressure_filter: OneEuroScalar,
     lazy: LazyMouse,
+    line: LineConstraint,
     spacing: SpacingAccumulator,
     cursor: [f32; 2],
     anchor: [f32; 2],
@@ -67,6 +73,7 @@ impl StrokeConditioner {
             pos_filter: OneEuroFilter::try_new(pos_params)?,
             pressure_filter: OneEuroScalar::try_new(pressure_params)?,
             lazy: LazyMouse::new(lazy_radius_px),
+            line: LineConstraint::default(),
             spacing: SpacingAccumulator::new(dabs_per_radius)?,
             cursor: [0.0, 0.0],
             anchor: [0.0, 0.0],
@@ -85,10 +92,12 @@ impl StrokeConditioner {
         self.spacing.dabs_per_radius
     }
 
-    /// Drop all per-stroke state (filters, cursor, banked partial dab).
+    /// Drop all per-stroke state (filters, cursor, line anchor, banked
+    /// partial dab).
     pub fn reset(&mut self) {
         self.pos_filter.reset();
         self.pressure_filter.reset();
+        self.line.reset();
         self.spacing.reset();
         self.cursor = [0.0, 0.0];
         self.anchor = [0.0, 0.0];
@@ -108,6 +117,10 @@ impl StrokeConditioner {
             .pressure_filter
             .filter(saturate01(event.pressure), event.time_ns);
         self.cursor = self.lazy.apply(pos, self.cursor);
+        // Straight-line constraint / angle snap (§2 line 23): the smoothed
+        // cursor projects onto the anchored line before spacing sees it.
+        // Off (the default) is the identity, so spacing input is unchanged.
+        self.cursor = self.line.apply(self.cursor);
         if !self.live {
             self.anchor = self.cursor;
             self.anchor_pressure = pressure;
@@ -131,6 +144,25 @@ impl StrokeConditioner {
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.live
+    }
+
+    /// Switch the straight-line / angle-snap mode. Takes effect on the
+    /// next event (the paint session only calls this between strokes, so
+    /// one stroke never splits across two modes); the anchor is kept.
+    pub fn set_line_constraint(&mut self, mode: LineConstraintMode) {
+        self.line.set_mode(mode);
+    }
+
+    /// The current straight-line / angle-snap mode.
+    #[must_use]
+    pub fn line_constraint(&self) -> LineConstraintMode {
+        self.line.mode()
+    }
+
+    /// The constraint's stroke anchor (the first stamp), if set.
+    #[must_use]
+    pub fn line_anchor(&self) -> Option<[f32; 2]> {
+        self.line.anchor()
     }
 }
 
@@ -215,6 +247,89 @@ mod tests {
         assert!(!c.is_live());
         let dabs = c.push(&event(0.0, 1.0, 0), 10.0);
         assert!(dabs.is_empty(), "post-reset event re-seeds");
+    }
+
+    #[test]
+    fn line_constraint_off_is_byte_identical() {
+        // Off (default vs. explicitly set) adds no arithmetic: every dab
+        // of the same 2D event sequence must compare bitwise-equal, and
+        // the filter must not even seed its anchor.
+        let seq: Vec<StrokeEvent> = (0..30)
+            .map(|i| StrokeEvent {
+                pos: [i as f32 * 3.0 + (i % 2) as f32, (i % 3) as f32 * 1.5],
+                pressure: 0.4 + i as f32 * 0.01,
+                tilt: None,
+                time_ns: i as u64 * 4_000_000,
+                in_proximity: true,
+                contact: true,
+            })
+            .collect();
+        let mut a = conditioner();
+        let mut b = conditioner();
+        b.set_line_constraint(LineConstraintMode::Off);
+        for ev in &seq {
+            assert_eq!(a.push(ev, 8.0), b.push(ev, 8.0));
+        }
+        assert_eq!(a.line_anchor(), None, "off must never anchor");
+        assert_eq!(b.line_anchor(), None, "off must never anchor");
+    }
+
+    #[test]
+    fn line_anchor_resets_with_the_stroke() {
+        let mut c = conditioner();
+        c.set_line_constraint(LineConstraintMode::AngleSnap { snap_deg: 15.0 });
+        for i in 0..10 {
+            c.push(&event(i as f32 * 5.0, 1.0, i as u64 * 8_000_000), 10.0);
+        }
+        assert!(c.line_anchor().is_some(), "a stroke must anchor the constraint");
+        c.reset();
+        assert_eq!(c.line_anchor(), None, "stroke end must drop the anchor");
+        assert_eq!(
+            c.line_constraint(),
+            LineConstraintMode::AngleSnap { snap_deg: 15.0 },
+            "reset keeps the mode, only the anchor goes"
+        );
+    }
+
+    #[test]
+    fn angle_snap_pins_dabs_to_the_snapped_ray() {
+        // A gentle diagonal drift (~6°) under a 90° snap: every dab must
+        // sit on the anchor's horizontal ray, not on the drifting raw
+        // path. The drift stays far below 45° even through the filter's
+        // startup transient (a first-order lag only ever shrinks the
+        // slope ratio toward the raw 1:10), so the snapped ray is always
+        // 0° — never ±90°.
+        let mut c = conditioner();
+        c.set_line_constraint(LineConstraintMode::AngleSnap { snap_deg: 90.0 });
+        let mut dabs = Vec::new();
+        for i in 0..20 {
+            let ev = StrokeEvent {
+                pos: [i as f32 * 20.0, i as f32 * 2.0],
+                pressure: 1.0,
+                tilt: None,
+                time_ns: i as u64 * 8_000_000,
+                in_proximity: true,
+                contact: true,
+            };
+            dabs.extend(c.push(&ev, 10.0));
+        }
+        assert!(!dabs.is_empty(), "a 380 px stroke must emit dabs");
+        let anchor = c.line_anchor().expect("stroke must be anchored");
+        for d in &dabs {
+            assert!(
+                (d.pos[1] - anchor[1]).abs() <= 1e-3,
+                "dab y {} must hold the snapped ray y {}",
+                d.pos[1],
+                anchor[1]
+            );
+        }
+        // The raw path drifts to y = 38; the snap must have held the ray.
+        let last = dabs.last().expect("dabs");
+        assert!(
+            (last.pos[1] - 38.0).abs() > 10.0,
+            "the snap must correct the drift, got y {}",
+            last.pos[1]
+        );
     }
 
     #[test]

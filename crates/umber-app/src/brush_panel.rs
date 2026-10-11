@@ -20,8 +20,8 @@ use umber_brush::preset::{BrushPreset, ControlCurve};
 use umber_brush::preset_library::{user_preset_dir, Library};
 use umber_brush::symmetry::{RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
 use umber_brush::{
-    BrushTool, CloneParams, EraseParams, MaskPaint, MirrorAxis, SmudgeParams, SymmetrySettings,
-    WashMode,
+    BrushTool, CloneParams, EraseParams, LineConstraintMode, MaskPaint, MirrorAxis, SmudgeParams,
+    SymmetrySettings, WashMode, ANGLE_SNAP_DEFAULT_DEG, ANGLE_SNAP_MAX_DEG, ANGLE_SNAP_MIN_DEG,
 };
 
 use crate::paint_state::PaintState;
@@ -62,6 +62,11 @@ pub struct BrushPanel {
     /// in the preset nor the project file in v1. The paint session adopts
     /// it via `PaintState::sync_symmetry`.
     pub symmetry: SymmetrySettings,
+    /// Straight-line constraint + angle snap (§2 line 23). Panel (session)
+    /// state like `symmetry`: not in the preset nor the project file in
+    /// v1. The paint session adopts it via
+    /// `PaintState::sync_line_constraint`.
+    pub line_constraint: LineConstraintMode,
 }
 
 impl BrushPanel {
@@ -97,6 +102,7 @@ impl BrushPanel {
             clone: CloneParams::default(),
             eraser: EraseParams::default(),
             symmetry: SymmetrySettings::default(),
+            line_constraint: LineConstraintMode::default(),
         }
     }
 
@@ -109,6 +115,9 @@ impl BrushPanel {
         ui.add_space(8.0);
         ui.separator();
         symmetry_rows(ui, &mut self.symmetry);
+        ui.add_space(8.0);
+        ui.separator();
+        line_constraint_rows(ui, &mut self.line_constraint);
         ui.add_space(8.0);
         ui.separator();
         if let Some(paint) = paint {
@@ -599,6 +608,44 @@ fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
             ui.checkbox(&mut radial.flip_v, tr("brush.symmetry-flip-v"));
         });
     });
+}
+
+/// The straight-line constraint section (§2 line 23,
+/// `umber_brush::line_constraint`): off, the Shift-like anchored line, or
+/// the anchored line with angle snap (configurable step, 15° default).
+/// Applies to every tool (paint, smudge, clone, eraser).
+fn line_constraint_rows(ui: &mut egui::Ui, mode: &mut LineConstraintMode) {
+    ui.strong(tr("brush.line-constraint"));
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(
+            &mut *mode,
+            LineConstraintMode::Off,
+            tr("brush.line-constraint-off"),
+        );
+        ui.selectable_value(
+            &mut *mode,
+            LineConstraintMode::Line,
+            tr("brush.line-constraint-line"),
+        );
+        // AngleSnap carries the step, so it gets a manual radio that arms
+        // the default step; the slider below edits it in place.
+        let snap_on = matches!(mode, LineConstraintMode::AngleSnap { .. });
+        if ui
+            .selectable_label(snap_on, tr("brush.line-constraint-snap"))
+            .clicked()
+        {
+            *mode = LineConstraintMode::AngleSnap {
+                snap_deg: ANGLE_SNAP_DEFAULT_DEG,
+            };
+        }
+    });
+    if let LineConstraintMode::AngleSnap { snap_deg } = mode {
+        ui.add(
+            egui::Slider::new(snap_deg, ANGLE_SNAP_MIN_DEG..=ANGLE_SNAP_MAX_DEG)
+                .text(tr("brush.line-constraint-angle")),
+        );
+    }
+    ui.weak(tr("brush.line-constraint-hint"));
 }
 
 /// Filename stem for Save-As: lowercase, spaces to dashes, everything
