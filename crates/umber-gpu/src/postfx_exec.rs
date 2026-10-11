@@ -815,9 +815,7 @@ impl PostStack {
         let plan = plan_chain(chain);
         let wanted = self.pool.wanted(&plan, frame.size);
         self.apply_pool(wanted);
-        if wanted.slots.is_none() {
-            return None;
-        }
+        wanted.slots?;
 
         prewarm(&mut self.pipelines, &plan, |pass| {
             build_pass_pipelines(&self.device, &self.pipeline_layout, &self.module, pass)

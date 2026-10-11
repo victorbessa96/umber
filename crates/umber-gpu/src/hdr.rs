@@ -261,7 +261,7 @@ impl HdrMode {
     /// already has) under [`Self::Hdr`]. Compose with `ViewMode` at the
     /// call site: `hdr_mode.select_lut(view_mode.select_lut(app_lut))`.
     /// See judgment call 3 for what this bypass does and does not cover.
-    pub fn select_lut<'a>(self, app_lut: Option<&'a DisplayLut>) -> Option<&'a DisplayLut> {
+    pub fn select_lut(self, app_lut: Option<&DisplayLut>) -> Option<&DisplayLut> {
         match self {
             Self::Sdr => app_lut,
             Self::Hdr(_) => None,

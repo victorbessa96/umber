@@ -1491,10 +1491,7 @@ impl GraphGpuEvaluator {
 
     /// The single input of a unary node (any wiring name — the
     /// `passthrough`/filter arity rule: exactly one).
-    fn single_input<'a>(
-        inputs: &'a [(String, Resolved)],
-        node: u64,
-    ) -> Result<&'a Resolved, EvalError> {
+    fn single_input(inputs: &[(String, Resolved)], node: u64) -> Result<&Resolved, EvalError> {
         match inputs.len() {
             1 => Ok(&inputs[0].1),
             0 => Err(EvalError::MissingInput {
