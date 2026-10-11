@@ -218,9 +218,13 @@ pub fn umber_style(density: Density) -> egui::Style {
 /// The Umber style with a user text scale (clamped to ±20%).
 pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
     let scale = clamp_text_scale(text_scale);
-    let mut style = egui::Style::default();
-    style.visuals = umber_visuals();
-    style.animation_time = MOTION_SECS;
+    // Struct-update form (not field reassignment): clippy's
+    // `field_reassign_with_default` fails the post-Default mutation pattern.
+    let mut style = egui::Style {
+        visuals: umber_visuals(),
+        animation_time: MOTION_SECS,
+        ..Default::default()
+    };
 
     let tokens = SpacingTokens::for_density(density);
     style.spacing.item_spacing = tokens.item;
