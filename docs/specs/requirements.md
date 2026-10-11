@@ -81,7 +81,7 @@
 | Camera: orbit/pan/zoom, perspective + orthographic | P0 | 1 |
 | Wireframe overlay; grid | P1 | 2 | ✓ built (`09eb4e9`) |
 | Displacement/tessellation preview | P2 | 6+ |
-| Post-effects stack (DoF, bloom, vignette, sharpen, tone-map) | P1 | 5 |
+| Post-effects stack (DoF, bloom, vignette, sharpen, tone-map) | P1 | 5 | ✓ built (`86e77ff`+`a523647`+`112b378`) — the model + WGSL + PostStack + panel; v1 boundaries named: the mesh pass renders to an HDR texture → PostStack → LUT is the next-step wiring (the panel's status line says so), the chain is session-only (not project-persisted yet) |
 | HDR surface output (wgpu 30 SurfaceColorSpace; DX12/Metal, Vulkan driver-dependent) | P1 | 5 |
 | Custom user shaders (WGSL plugins replacing GLSL import) | P2 | 6 |
 | Performance floor: 60fps viewport on mid-range GPU with 1M-tri mesh + 4K texture set | P0 | 1 |
