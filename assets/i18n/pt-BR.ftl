@@ -194,6 +194,24 @@ display =
     .rebuilding = Reconstruindo a LUT de exibição da GPU para o viewport 3D e a vista UV.
     .active-chain = Cadeia ativa: { $chain }. { $status }
 
+## Modos de exibição do viewport (§5 P0)
+
+viewmode =
+    .label = Modo de exibição
+    .lit = Iluminado (V)
+    .unlit = Sem iluminação (V)
+    .solo = Canal solo…
+    .mesh-preview = Prévia de mapa da malha…
+    .channel = Canal
+    .map = Mapa
+    .basecolor = Cor base
+    .emissive = Emissivo
+    .roughness = Rugosidade
+    .metallic = Metálico
+    .ao = Oclusão de ambiente
+    .height = Altura
+    .normal = Normal
+
 ## Painel de propriedades do pincel
 
 brush =
@@ -236,6 +254,9 @@ brush =
     .tool-paint = Pintar
     .tool-smudge = Borrar
     .tool-clone = Clonar
+    .tool-eraser = Borracha
+    .erase-channels = Canais da borracha
+    .erase-hint = Só o alfa por padrão (os dados de cor são mantidos, então desfazer os restaura). Ativar R/G/B apaga aquele canal de cor até zero mantendo o alfa.
     .smudge-strength = Intensidade
     .smudge-smear = Espalhamento
     .clone-offset = Deslocamento da origem (UV)
@@ -267,10 +288,40 @@ brush =
 
 layers =
     .add-paint = ＋ Adicionar camada de pintura
+    .add-fill = ＋ Adicionar camada de preenchimento
     .default-paint-name = Pintura { $n }
+    .default-fill-name = Preenchimento { $n }
     .kind-paint = pintura
     .kind-fill = preenchimento
     .kind-folder = pasta
+
+## Propriedades da camada de preenchimento
+
+fill =
+    .section = Camadas de preenchimento
+    .none = Sem camadas de preenchimento — adicione uma pelo painel Camadas.
+    .proj-uv = UV
+    .proj-triplanar = Triplanar
+    .proj-planar = Planar
+    .proj-spherical = Esférica
+    .proj-cylindrical = Cilíndrica
+    .axis = Eixo
+    .axis-x = X
+    .axis-y = Y
+    .axis-z = Z
+    .sharpness = Nitidez
+    .scale = Escala
+    .src-solid = Cor sólida
+    .src-gradient = Gradiente
+    .src-noise = Ruído
+    .src-graph = Snapshot do grafo
+    .alpha = Alfa
+    .color-a = Cor A
+    .color-b = Cor B
+    .angle = Ângulo
+    .seed = Semente
+    .octaves = Oitavas
+    .graph-note = Apenas um snapshot: reavalie o grafo para atualizar (a ligação viva com o grafo é um follow-up).
 
 ## Painel de histórico
 
@@ -281,7 +332,7 @@ history =
         [one] { $count } entrada no histórico
        *[other] { $count } entradas no histórico
     }
-    .strokes = Traços de borrar / clonar
+    .strokes = Traços de borrar / clonar / borracha
     .undo-stroke = ↶ Desfazer traço
     .redo-stroke = ↷ Refazer traço
 

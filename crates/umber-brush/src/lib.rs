@@ -44,7 +44,7 @@ pub use lazy_mouse::LazyMouse;
 pub use one_euro::{OneEuroError, OneEuroFilter, OneEuroScalar};
 pub use preset_library::{Library, LibraryEntry};
 pub use quick_mask::{MaskPaint, MaskView, QuickMask};
-pub use retouch::{BrushTool, CloneParams, RgbaBuffer, SmudgeParams};
+pub use retouch::{BrushTool, CloneParams, EraseChannels, EraseParams, RgbaBuffer, SmudgeParams};
 pub use spacing::{DabPlan, SpacingAccumulator, SpacingError};
 pub use symmetry::{MirrorAxis, MirrorSettings, RadialSettings, SymTransform, SymmetrySettings};
 pub use wiring::{ConditionerError, StrokeConditioner};

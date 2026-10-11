@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::layers::{BlendMode, Layer, LayerCommand, LayerKind, LayerStack};
 use crate::project::ProjectModel;
 use crate::undo::Command;
+use umber_mesh::FillParams;
 
 /// The journal's file name inside a `.umber` project directory.
 pub const JOURNAL_FILE_NAME: &str = "journal.jsonl";
@@ -97,6 +98,15 @@ pub enum JournalOp {
         /// The blend mode after the apply.
         mode: BlendMode,
     },
+    /// A layer's fill parameters ([`LayerCommand::SetFill`]): `None` when
+    /// the layer holds no fill params after the apply (a non-fill layer,
+    /// or a fill layer whose params were cleared by undo).
+    SetFill {
+        /// The layer's id.
+        id: u64,
+        /// The fill parameters after the apply.
+        fill: Option<FillParams>,
+    },
 }
 
 impl JournalOp {
@@ -143,6 +153,13 @@ impl JournalOp {
                     mode: layer.blend_mode,
                 })
             }
+            LayerCommand::SetFill { id, old, .. } => {
+                old.as_ref()?;
+                stack.layer(*id).map(|layer| JournalOp::SetFill {
+                    id: *id,
+                    fill: layer.fill.clone(),
+                })
+            }
         }
     }
 
@@ -177,6 +194,9 @@ impl JournalOp {
             LayerCommand::SetBlendMode { id, old, .. } => {
                 old.map(|mode| JournalOp::SetBlendMode { id: *id, mode })
             }
+            LayerCommand::SetFill { id, old, .. } => {
+                old.clone().map(|fill| JournalOp::SetFill { id: *id, fill })
+            }
         }
     }
 
@@ -195,7 +215,9 @@ impl JournalOp {
     /// - `Move` → [`LayerStack::reorder`] from the id's current index
     ///   (Reorder's apply); a second apply moves it onto itself.
     /// - `Set*` → [`LayerStack::set_opacity`] / [`LayerStack::set_visible`]
-    ///   / [`LayerStack::set_blend_mode`] (the `Set*` applies); absolute.
+    ///   / [`LayerStack::set_blend_mode`] / [`LayerStack::set_fill`] (the
+    ///   `Set*` applies); absolute. A `SetFill` with `fill: None` clears
+    ///   the layer's params (the undo-of-first-SetFill shape).
     ///
     /// Ids of `u64::MAX` are skipped: both re-insert paths compute `id + 1`
     /// for the stack's id counter, and `project` rejects that id anyway.
@@ -233,6 +255,16 @@ impl JournalOp {
             JournalOp::SetBlendMode { id, mode } => {
                 stack.set_blend_mode(*id, *mode);
             }
+            JournalOp::SetFill { id, fill } => match fill.clone() {
+                Some(params) => {
+                    stack.set_fill(*id, params);
+                }
+                None => {
+                    if let Some(layer) = stack.layer_mut(*id) {
+                        layer.fill = None;
+                    }
+                }
+            },
         }
     }
 }

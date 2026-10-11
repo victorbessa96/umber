@@ -28,10 +28,10 @@
 //! into the tile under the pointer; there is no cross-tile stroke
 //! continuity.
 //!
-//! Retouch tools (docs/specs/smudge-clone-design.md): with a smudge or
-//! clone [`BrushTool`] active, the conditioned dabs skip the GPU splat and
-//! run on a per-stroke CPU mirror instead ([`crate::retouch`]). The hook
-//! is in `push_event_inner`, right after `DabAdapter::stamps_to_dabs`: the
+//! Retouch tools (docs/specs/smudge-clone-design.md; the eraser is §2's P0
+//! row): with a smudge, clone or eraser [`BrushTool`] active, the
+//! conditioned dabs skip the GPU splat and run on a per-stroke CPU mirror
+//! instead ([`crate::retouch`]). The hook is in `push_event_inner`, right after `DabAdapter::stamps_to_dabs`: the
 //! first event a stroke routes to a tile drains that tile's queue and
 //! reads it back (`PaintTarget::read_back_rgba8`), every event's dirty
 //! rect is written back as a `PaintThreadCommand::WriteRegion`, and
@@ -71,8 +71,8 @@
 //!   flag, so primaries, siblings and seam mirrors are all multiplied by
 //!   their tile's GPU mask. Before the first gated dab on a tile, the
 //!   tile's whole plane is uploaded (an invert/clear/resize marks every
-//!   tile stale). Smudge/clone dabs multiply the CPU plane inside the
-//!   retouch ops.
+//!   tile stale). Smudge/clone/eraser dabs multiply the CPU plane inside
+//!   the retouch ops.
 //!
 //! Mask off (the default) changes nothing: no plane is allocated, no
 //! upload is queued, and the staged dabs are byte-identical.
@@ -538,6 +538,48 @@ impl PaintState {
         }
     }
 
+    /// Stages a fill layer's evaluated tile bytes into `tile`'s GPU target
+    /// (the fill layer's tile/texture-set plumbing: evaluation is CPU-side
+    /// in `fill_layer`, the upload rides the same `WriteRegion` queue as
+    /// retouch strokes — one full-tile write, in FIFO order with the
+    /// tile's staged dabs).
+    ///
+    /// Creates the tile target lazily on first use (like pointer routing).
+    /// Returns `false` — dropping the write with a log — when the target
+    /// cannot be created or `rgba` is not `width`x`height` RGBA8 (the fill
+    /// must re-evaluate at the target size first; a torn upload is worse
+    /// than a dropped one).
+    pub(crate) fn publish_fill(
+        &mut self,
+        tile: u16,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> bool {
+        if rgba.len() != width as usize * height as usize * 4 {
+            log::warn!(
+                "fill: dropping {width}x{height} upload for tile {tile} ({} bytes)",
+                rgba.len()
+            );
+            return false;
+        }
+        if !self.ensure_tile(tile) {
+            return false;
+        }
+        if let Some(thread) = self.targets.get_mut(&tile) {
+            let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                x: 0,
+                y: 0,
+                width,
+                height,
+                rgba,
+            }]);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Extend the stroke to `uv`.
     pub fn extend_stroke(&mut self, uv: Pos2) {
         if !self.stroking {
@@ -801,11 +843,12 @@ impl PaintState {
             self.mask_event(tile, &dabs);
             return;
         }
-        // The retouch hook: smudge/clone dabs (same positions, radius,
-        // pressure-shaped alpha and hardness as paint dabs) run on the CPU
-        // mirror instead of the GPU splat. Only the primaries go in: the
-        // retouch stroke stamps their symmetry siblings itself (it owns
-        // the per-sibling smudge chains and clone sources).
+        // The retouch hook: smudge/clone/eraser dabs (same positions,
+        // radius, pressure-shaped alpha and hardness as paint dabs) run on
+        // the CPU mirror instead of the GPU splat. Only the primaries go
+        // in: the retouch stroke stamps their symmetry siblings itself (it
+        // owns the per-sibling smudge chains and clone sources; the
+        // motion-independent eraser needs no per-sibling state).
         if self.tool.is_retouch() {
             let retouch_dabs: Vec<RetouchDab> = dabs
                 .iter()

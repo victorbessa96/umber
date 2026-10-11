@@ -72,6 +72,50 @@ impl Default for CloneParams {
     }
 }
 
+/// Eraser parameters (the design's `EraseParams`, §2's P0 row).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EraseParams {
+    /// Which channels the erase touches. Default is alpha-only: color
+    /// data is left in place (unassociated), so the stroke is
+    /// non-destructive and undo restores the exact before-state.
+    pub channels: EraseChannels,
+}
+
+impl Default for EraseParams {
+    fn default() -> Self {
+        Self {
+            channels: EraseChannels::default(),
+        }
+    }
+}
+
+/// Per-channel enable for the eraser (§2's P0 row).
+///
+/// An enabled channel is scaled toward zero by the dab's coverage
+/// (`out = round(orig * (1 - coverage))`); a disabled channel is left
+/// byte-identical. `a` scales the alpha channel (RGB untouched);
+/// `r`/`g`/`b` scale that color channel toward zero leaving alpha
+/// intact.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EraseChannels {
+    pub r: bool,
+    pub g: bool,
+    pub b: bool,
+    pub a: bool,
+}
+
+impl Default for EraseChannels {
+    /// Alpha-only: the classic eraser (transparency, not color removal).
+    fn default() -> Self {
+        Self {
+            r: false,
+            g: false,
+            b: false,
+            a: true,
+        }
+    }
+}
+
 /// The active brush tool: what a stroke's dabs do to the target.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub enum BrushTool {
@@ -83,6 +127,9 @@ pub enum BrushTool {
     Smudge(SmudgeParams),
     /// Sample the source point → write with the brush's flow (CPU).
     Clone(CloneParams),
+    /// Scale the enabled channels toward zero by the dab's coverage
+    /// (CPU, on the same per-stroke mirror as smudge/clone).
+    Erase(EraseParams),
 }
 
 impl BrushTool {
@@ -429,6 +476,75 @@ pub fn clone_dab_masked(
             });
             dst.set_texel(x, y, out);
             wrote = true;
+        }
+    }
+    wrote.then_some(rect)
+}
+
+/// The eraser op for one dab: every covered texel's ENABLED channels are
+/// scaled toward zero by the dab's coverage (`alpha * falloff`, the paint
+/// shader's exact footprint math) — `out = round(orig * (1 - coverage))`.
+/// Disabled channels are left byte-identical. The scale is multiplicative,
+/// so a soft eraser at 50% flow halves the alpha (repeated dabs converge
+/// to zero, like a real eraser) and a full-opacity hard dab zeroes its
+/// disc exactly.
+///
+/// Only the layer's own channels are touched (alpha-only by default) and
+/// the caller records the stroke-start snapshot for undo — that is the
+/// row's "non-destructive" contract: no clear, no layer delete, and the
+/// before-state is restorable.
+///
+/// Returns the texels written, or `None` for the identity cases
+/// (`alpha <= 0`, no channel enabled, or zero coverage everywhere) —
+/// which return before touching a byte, so the identity is exact.
+pub fn erase_dab(buf: &mut RgbaBuffer, dab: &RetouchDab, params: EraseParams) -> Option<DirtyRect> {
+    erase_dab_masked(buf, dab, params, None)
+}
+
+/// [`erase_dab`] gated by the quick mask: each texel's coverage is scaled
+/// by `mask` at that texel (`None` = ungated, byte-identical to
+/// [`erase_dab`]) — the same gate point the paint shader uses.
+pub fn erase_dab_masked(
+    buf: &mut RgbaBuffer,
+    dab: &RetouchDab,
+    params: EraseParams,
+    mask: Option<MaskView<'_>>,
+) -> Option<DirtyRect> {
+    if dab.alpha <= 0.0 {
+        return None;
+    }
+    let keep = [
+        !params.channels.r,
+        !params.channels.g,
+        !params.channels.b,
+        !params.channels.a,
+    ];
+    if keep == [true; 4] {
+        return None;
+    }
+    let rect = footprint(dab.pos, dab.radius, buf.width, buf.height)?;
+    let mut wrote = false;
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let Some(cov) = gated_coverage(dab, x, y, mask) else {
+                continue;
+            };
+            let k = (1.0 - cov.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            if k >= 1.0 {
+                continue;
+            }
+            let orig = buf.texel(x, y);
+            let out: [u8; 4] = std::array::from_fn(|c| {
+                if keep[c] {
+                    orig[c]
+                } else {
+                    (f32::from(orig[c]) * k).round().clamp(0.0, 255.0) as u8
+                }
+            });
+            if out != orig {
+                buf.set_texel(x, y, out);
+                wrote = true;
+            }
         }
     }
     wrote.then_some(rect)
@@ -819,6 +935,154 @@ mod tests {
             })
         );
         assert_eq!(DirtyRect::union_opt(None, Some(rect)), Some(rect));
+    }
+
+    /// Opaque mid-gray image: every channel is erasable and readable.
+    fn gray_opaque() -> RgbaBuffer {
+        let mut buf = RgbaBuffer::transparent(SIZE, SIZE);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                buf.set_texel(x, y, [200, 120, 60, 255]);
+            }
+        }
+        buf
+    }
+
+    fn erase_all() -> EraseParams {
+        EraseParams {
+            channels: EraseChannels {
+                r: true,
+                g: true,
+                b: true,
+                a: true,
+            },
+        }
+    }
+
+    /// Test (a): a full-opacity hard erase zeroes the enabled channels
+    /// under the footprint and leaves everything else byte-identical.
+    #[test]
+    fn erase_full_opacity_zeroes_alpha_under_the_footprint() {
+        let before = gray_opaque();
+        let mut after = before.clone();
+        let rect = erase_dab(
+            &mut after,
+            &hard_dab([32.0, 32.0], 8.0),
+            EraseParams::default(),
+        )
+        .expect("erase must write");
+        // The disc center is fully covered: alpha exactly zero.
+        assert_eq!(after.texel(32, 32)[3], 0, "center alpha must be zero");
+        // Default is alpha-only: color channels untouched.
+        assert_eq!(&after.texel(32, 32)[..3], &[200, 120, 60]);
+        // Far outside the radius: byte-identical.
+        assert_eq!(after.texel(4, 4), before.texel(4, 4));
+        assert_eq!(after.texel(60, 60), before.texel(60, 60));
+        // The dirty rect is the dab's shader-identical footprint box.
+        assert_eq!(rect, footprint([32.0, 32.0], 8.0, SIZE, SIZE).unwrap());
+    }
+
+    /// Test (b): a 50%-flow erase halves the alpha (coverage-scaled, the
+    /// same falloff math as paint) — the multiplicative converge-to-zero
+    /// semantics, not a binary clear.
+    #[test]
+    fn erase_half_flow_halves_alpha() {
+        let before = gray_opaque();
+        let mut after = before.clone();
+        let dab = RetouchDab {
+            alpha: 0.5,
+            ..hard_dab([32.0, 32.0], 8.0)
+        };
+        erase_dab(&mut after, &dab, EraseParams::default()).expect("erase must write");
+        let a = after.texel(32, 32)[3];
+        assert!(
+            (126..=129).contains(&a),
+            "half flow of 255 must land near 128, got {a}"
+        );
+        // A second identical dab converges further (multiplicative).
+        erase_dab(&mut after, &dab, EraseParams::default()).expect("erase must write");
+        let a2 = after.texel(32, 32)[3];
+        assert!(
+            a2 < a,
+            "repeated dabs must converge toward zero: {a} -> {a2}"
+        );
+        assert!(
+            (62..=66).contains(&a2),
+            "two half-flow dabs land near 64, got {a2}"
+        );
+    }
+
+    /// Test (c): the per-channel flags gate which channels the erase
+    /// touches. Alpha-only erases alpha leaving color; RGB erases color
+    /// leaving alpha.
+    #[test]
+    fn erase_channel_flags_gate_which_channels_change() {
+        // A-only (the default): alpha goes, color stays.
+        let mut a_only = gray_opaque();
+        erase_dab(
+            &mut a_only,
+            &hard_dab([32.0, 32.0], 8.0),
+            EraseParams::default(),
+        );
+        assert_eq!(a_only.texel(32, 32), [200, 120, 60, 0]);
+
+        // RGB-only: color goes, alpha stays.
+        let mut rgb_only = gray_opaque();
+        let rgb = EraseParams {
+            channels: EraseChannels {
+                r: true,
+                g: true,
+                b: true,
+                a: false,
+            },
+        };
+        erase_dab(&mut rgb_only, &hard_dab([32.0, 32.0], 8.0), rgb);
+        assert_eq!(rgb_only.texel(32, 32), [0, 0, 0, 255]);
+
+        // Single channel: only R moves.
+        let mut r_only = gray_opaque();
+        let r = EraseParams {
+            channels: EraseChannels {
+                r: true,
+                g: false,
+                b: false,
+                a: false,
+            },
+        };
+        erase_dab(&mut r_only, &hard_dab([32.0, 32.0], 8.0), r);
+        assert_eq!(r_only.texel(32, 32), [0, 120, 60, 255]);
+
+        // All channels: everything zeroes.
+        let mut all = gray_opaque();
+        erase_dab(&mut all, &hard_dab([32.0, 32.0], 8.0), erase_all());
+        assert_eq!(all.texel(32, 32), [0, 0, 0, 0]);
+
+        // No channel enabled, or zero flow: the exact identity.
+        let mut none = gray_opaque();
+        let no_channels = EraseParams {
+            channels: EraseChannels {
+                r: false,
+                g: false,
+                b: false,
+                a: false,
+            },
+        };
+        assert_eq!(
+            erase_dab(&mut none, &hard_dab([32.0, 32.0], 8.0), no_channels),
+            None
+        );
+        assert_eq!(
+            erase_dab(
+                &mut none,
+                &RetouchDab {
+                    alpha: 0.0,
+                    ..hard_dab([32.0, 32.0], 8.0)
+                },
+                erase_all()
+            ),
+            None
+        );
+        assert_eq!(none, gray_opaque());
     }
 
     #[test]

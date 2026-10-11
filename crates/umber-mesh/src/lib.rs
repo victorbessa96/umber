@@ -9,6 +9,7 @@ use glam::Vec3;
 pub mod bake_support;
 pub mod bvh;
 pub mod fbx;
+pub mod fill;
 pub mod gltf;
 pub mod mesh_maps;
 pub mod overlay;
@@ -20,6 +21,11 @@ pub mod usd;
 pub mod usdc;
 
 pub use fbx::load_fbx;
+pub use fill::{
+    cylindrical_coords, evaluate_fill_tile, projection_sample_2d, rasterize_uv_geometry,
+    sample_source, sample_triplanar, spherical_coords, triplanar_planar_uvs, triplanar_weights,
+    wrap01, FillParams, FillProjection, FillSource, FillTile, ProjAxis, TexelGeom,
+};
 pub use gltf::load_gltf;
 pub use mesh_maps::{
     format_mesh_map, parse_mesh_map, parse_mesh_map_stem, texture_set_name, MeshMapKind,

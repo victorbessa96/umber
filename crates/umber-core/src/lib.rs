@@ -29,6 +29,7 @@ pub use project::{
     CURRENT_PROJECT_VERSION,
 };
 pub use tiles::{TileChannels, TileSet};
+pub use umber_mesh::{FillParams, FillProjection, FillSource, ProjAxis};
 pub use undo::{Command, UndoStack};
 
 /// A named channel of a texture set (e.g. baseColor, roughness, normal).

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use std::mem::size_of;
 
+use umber_mesh::FillParams;
+
 use crate::undo::Command;
 
 /// What a layer contains and how its children (if any) relate to the stack.
@@ -17,8 +19,11 @@ use crate::undo::Command;
 pub enum LayerKind {
     /// A layer painted into directly with brush strokes.
     Paint,
-    /// A layer filled procedurally via a projection (UV/tri-planar/etc,
-    /// Wave 3).
+    /// A layer filled procedurally via a projection (UV/tri-planar/etc).
+    /// Stays a plain tag: the evaluatable parameters live on
+    /// [`Layer::fill`] (`Some` exactly for fill layers), so the
+    /// journal/project matches over `LayerKind` never churn when the fill
+    /// model grows.
     Fill,
     /// A group of layers.
     ///
@@ -34,19 +39,51 @@ pub enum LayerKind {
     },
 }
 
-/// The core 12 blend modes (requirements.md §2: "P0 core 12, full set 4").
+/// The core-12 blend modes plus the separable extras the stack already
+/// carried (requirements.md §2: "P0 core 12, full set 4").
 ///
-/// Blending is computed in linear space, per channel (architecture.md). A
-/// layer's `blend_mode` is meaningful for `Paint`/`Fill` layers and for a
-/// `Folder` layer's own composite step; `Passthrough` only makes sense on a
-/// `Folder` layer and is the blend-mode-enum spelling of what
-/// [`LayerKind::Folder`]'s `passthrough` flag already controls. The two are
-/// kept as separate fields (flag vs. enum variant) because the task's
-/// authoritative source for "does this folder pass through" is the flag;
-/// the compositor (not built in this task) is expected to treat a folder's
-/// `blend_mode: Passthrough` as redundant with `passthrough: true` and
-/// should not need to special-case a mismatch, but resolving that precisely
-/// is left open for Wave 2's compositor work.
+/// Blending is computed in linear space, per channel (architecture.md), via
+/// [`BlendMode::blend_channel`]. A layer's `blend_mode` is meaningful for
+/// `Paint`/`Fill` layers and for a `Folder` layer's own composite step;
+/// `Passthrough` only makes sense on a `Folder` layer and is the
+/// blend-mode-enum spelling of what [`LayerKind::Folder`]'s `passthrough`
+/// flag already controls. The two are kept as separate fields (flag vs.
+/// enum variant) because the task's authoritative source for "does this
+/// folder pass through" is the flag; the compositor (not built in this
+/// task) is expected to treat a folder's `blend_mode: Passthrough` as
+/// redundant with `passthrough: true` and should not need to special-case
+/// a mismatch, but resolving that precisely is left open for Wave 2's
+/// compositor work.
+///
+/// # Blend-set census (2026-10-10)
+///
+/// Task core-12 was: normal, passthrough, multiply, screen, overlay,
+/// soft-light, hard-light, color-dodge, color-burn, linear-dodge,
+/// linear-burn, add. Found in the enum before this task: Normal,
+/// Passthrough, Multiply, Screen, Overlay, SoftLight, HardLight, Add
+/// (8 of 12 — `Add` *is* Painter's "Linear Dodge (Add)", vocabulary item
+/// 10 in docs/research/01-painter-feature-inventory.md §2, so it covers
+/// both the `linear-dodge` and the `add` slots). Missing and added here:
+/// `ColorDodge`, `ColorBurn`, `LinearBurn` (see each variant's docs for
+/// the math and the divide-by-zero guards).
+///
+/// Already present beyond the task's core-12, kept as-is (all four are
+/// separable members of Painter's full-32 list, so they stay valid):
+/// `Darken` (Min), `Lighten` (Max), `Subtract`, `Difference`.
+///
+/// P0-full remainder — deliberately NOT added (Wave 4 compositor scope;
+/// adding enum variants with no consumer would be dead code, and two of
+/// the three families cannot be expressed in this function's per-channel
+/// scalar plumbing at all):
+/// - HSV modes (Tint, Saturation, Color, Value): non-separable, need an
+///   RGB-triplet fn, not a per-channel scalar.
+/// - Normal-map modes (Combine/Whiteout, Detail/RNM, Inverse Detail):
+///   need decoded normal vectors plus channel-aware routing (and Detail
+///   is the default for the normal channel, per the inventory doc).
+/// - Other separable Painter modes with no variant yet (Divide, Inverse
+///   Divide, Inverse Subtract, Exclusion, Signed Addition/AddSub, Vivid
+///   Light, Linear Light, Pin Light, Disable, Replace): expressible in
+///   [`BlendMode::blend_channel`]'s shape when the compositor needs them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BlendMode {
     /// Top layer fully replaces what's below it, modulated by opacity.
@@ -54,6 +91,7 @@ pub enum BlendMode {
     Normal,
     /// Folder-only: children blend directly with layers below the folder,
     /// as if the folder were not there. See [`LayerKind::Folder`].
+    /// Not a pixel op: [`BlendMode::blend_channel`] returns `None`.
     Passthrough,
     /// Result × base — darkens; black stays black, white is a no-op.
     Multiply,
@@ -65,16 +103,131 @@ pub enum BlendMode {
     Darken,
     /// Per-channel maximum of result and base.
     Lighten,
-    /// Linear-light additive blend; clamps at white.
+    /// Painter's "Linear Dodge (Add)": `min(1, src + dst)` — linear-light
+    /// additive blend; clamps at white. Covers both the `linear-dodge`
+    /// and the `add` slots of the task's core-12 (they are one mode).
     Add,
-    /// Linear-light subtractive blend; clamps at black.
+    /// Painter's "Subtract": `max(0, dst - src)` — base minus blend;
+    /// clamps at black. NOT the same as [`BlendMode::LinearBurn`].
     Subtract,
     /// Absolute difference between result and base.
     Difference,
-    /// Low-contrast Overlay variant (Photoshop/Substance-style soft light).
+    /// Low-contrast Overlay variant (Photoshop/Substance-style soft light,
+    /// Pegtop approximation — see [`BlendMode::blend_channel`]).
     SoftLight,
     /// Higher-contrast Overlay variant (roles of result/base swapped).
     HardLight,
+    /// Brightens the base toward white proportionally to the blend:
+    /// `src >= 1` yields white (guarded — a naive `dst / (1 - src)`
+    /// divides by zero), else `min(1, dst / (1 - src))`.
+    ColorDodge,
+    /// Darkens the base toward black proportionally to the blend:
+    /// `src <= 0` yields black (guarded), else
+    /// `1 - min(1, (1 - dst) / src)`.
+    ColorBurn,
+    /// Painter's "Linear Burn": `max(0, src + dst - 1)` — darkens every
+    /// pair whose sum is under white; clamps at black. Distinct from
+    /// [`BlendMode::Subtract`] (`dst - src`): e.g. src=0.6, dst=0.7 gives
+    /// 0.3 here, 0.1 under Subtract.
+    LinearBurn,
+}
+
+impl BlendMode {
+    /// Clamps a linear-space channel value to `0.0..=1.0` for blending.
+    ///
+    /// `±inf` saturates to the nearer end; `NaN` maps to `0.0` rather than
+    /// poisoning the composite (a `NaN` texel must still composite to
+    /// *something* finite — black is the safe choice, matching how
+    /// [`LayerStack::set_opacity`] refuses to store non-finite input
+    /// instead of letting it through).
+    fn clamp01(v: f32) -> f32 {
+        if v.is_nan() {
+            0.0
+        } else {
+            v.clamp(0.0, 1.0)
+        }
+    }
+
+    /// Blends one linear-space channel: `src` is the top (blend) layer's
+    /// value, `dst` the accumulated base below — the same src/dst
+    /// convention as the stamp composite (`src * cov + dst * (1 - …)`).
+    ///
+    /// Returns `None` for [`BlendMode::Passthrough`], which is structural
+    /// (folder children blend directly below) rather than a pixel op —
+    /// callers must handle folders before reaching per-pixel math.
+    /// Every other variant returns `Some` finite `0.0..=1.0` value for any
+    /// finite *or* non-finite input (inputs pass through [`BlendMode`]'s
+    /// private clamp first, and the dodge/burn guards below keep the
+    /// `1 - src` / `src` divisors off zero).
+    ///
+    /// Soft-light is the Pegtop approximation
+    /// `((1 - 2·src)·dst + 2·src)·dst`: exact no-op at 50% gray
+    /// (`src = 0.5` returns `dst`), softer than Overlay at the extremes —
+    /// the standard cheap Photoshop/Substance-style form.
+    pub fn blend_channel(self, src: f32, dst: f32) -> Option<f32> {
+        let (s, d) = (Self::clamp01(src), Self::clamp01(dst));
+        let v = match self {
+            BlendMode::Normal => s,
+            BlendMode::Passthrough => return None,
+            BlendMode::Multiply => s * d,
+            BlendMode::Screen => s + d - s * d,
+            BlendMode::Overlay => {
+                if d <= 0.5 {
+                    2.0 * s * d
+                } else {
+                    1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+                }
+            }
+            BlendMode::Darken => s.min(d),
+            BlendMode::Lighten => s.max(d),
+            BlendMode::Add => (s + d).min(1.0),
+            BlendMode::Subtract => (d - s).max(0.0),
+            BlendMode::Difference => (s - d).abs(),
+            BlendMode::SoftLight => ((1.0 - 2.0 * s) * d + 2.0 * s) * d,
+            BlendMode::HardLight => {
+                if s <= 0.5 {
+                    2.0 * s * d
+                } else {
+                    1.0 - 2.0 * (1.0 - s) * (1.0 - d)
+                }
+            }
+            BlendMode::ColorDodge => {
+                if s >= 1.0 {
+                    1.0
+                } else {
+                    (d / (1.0 - s)).min(1.0)
+                }
+            }
+            BlendMode::ColorBurn => {
+                if s <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - d) / s).min(1.0)
+                }
+            }
+            BlendMode::LinearBurn => (s + d - 1.0).max(0.0),
+        };
+        Some(Self::clamp01(v))
+    }
+
+    /// Blends one channel and mixes the result with the base according to
+    /// `opacity` (`0` = base unchanged, `1` = full blend effect) — the
+    /// per-pixel half of a layer's `blend_mode` + `opacity` pair.
+    ///
+    /// Non-finite `opacity` is treated as `0.0` (base unchanged), mirroring
+    /// [`LayerStack::set_opacity`]'s refusal to store non-finite input.
+    /// Returns `None` exactly when [`BlendMode::blend_channel`] does
+    /// (`Passthrough`).
+    pub fn composite_channel(self, src: f32, dst: f32, opacity: f32) -> Option<f32> {
+        let blend = self.blend_channel(src, dst)?;
+        let base = Self::clamp01(dst);
+        let o = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some(Self::clamp01(base + (blend - base) * o))
+    }
 }
 
 /// A paint mask attached to a layer.
@@ -108,14 +261,28 @@ pub struct Layer {
     pub blend_mode: BlendMode,
     /// Attached paint mask, if any.
     pub mask: Option<LayerMask>,
+    /// The fill source + projection, `Some` exactly for [`LayerKind::Fill`]
+    /// layers. `#[serde(default)]` so projects saved before the fill row
+    /// landed (no such key) still load — as paint-style layers with no
+    /// evaluatable fill.
+    #[serde(default)]
+    pub fill: Option<FillParams>,
 }
 
 impl Layer {
     /// Approximate RAM held by this layer, in bytes: the inline struct
-    /// plus heap name bytes. See [`LayerStack::memory_bytes`] for the
-    /// honesty contract (metadata only, no GPU tiles yet).
+    /// plus heap name bytes plus the fill params' snapshot bytes (if any).
+    /// See [`LayerStack::memory_bytes`] for the honesty contract (metadata
+    /// only, no GPU tiles yet).
     pub fn memory_bytes(&self) -> usize {
-        size_of::<Layer>() + self.name.len() + self.mask.as_ref().map(|m| m.name.len()).unwrap_or(0)
+        size_of::<Layer>()
+            + self.name.len()
+            + self.mask.as_ref().map(|m| m.name.len()).unwrap_or(0)
+            + self
+                .fill
+                .as_ref()
+                .map(FillParams::memory_bytes)
+                .unwrap_or(0)
     }
 }
 
@@ -194,6 +361,7 @@ impl LayerStack {
             visible: true,
             blend_mode: BlendMode::Normal,
             mask: None,
+            fill: None,
         });
         id
     }
@@ -214,6 +382,7 @@ impl LayerStack {
             visible: true,
             blend_mode: BlendMode::Normal,
             mask: None,
+            fill: None,
         });
         self.next_id = self.next_id.max(id + 1);
     }
@@ -271,6 +440,16 @@ impl LayerStack {
         let old = layer.blend_mode;
         layer.blend_mode = mode;
         Some(old)
+    }
+
+    /// Sets a layer's fill parameters (source + projection), returning the
+    /// previous value (`None` when the layer had no fill params — including
+    /// non-fill layers, which accept the write but stay non-fill: the
+    /// evaluator only runs `fill` on [`LayerKind::Fill`] layers, so a
+    /// stray write is inert data, never a behavior change).
+    pub fn set_fill(&mut self, id: u64, params: FillParams) -> Option<Option<FillParams>> {
+        let layer = self.layer_mut(id)?;
+        Some(layer.fill.replace(params))
     }
 
     /// Approximate RAM held by the whole stack, in bytes: per-layer
@@ -348,6 +527,16 @@ pub enum LayerCommand {
         /// Previous blend mode, captured by `apply` for `revert`.
         old: Option<BlendMode>,
     },
+    /// Sets a layer's fill parameters (source + projection).
+    SetFill {
+        /// Id of the layer to update.
+        id: u64,
+        /// New fill parameters.
+        new: FillParams,
+        /// Previous fill parameters (`None` when the layer had none),
+        /// captured by `apply` for `revert`.
+        old: Option<Option<FillParams>>,
+    },
 }
 
 impl LayerCommand {
@@ -400,6 +589,15 @@ impl LayerCommand {
             old: None,
         }
     }
+
+    /// Builds a [`SetFill`](LayerCommand::SetFill) command.
+    pub fn set_fill(id: u64, params: FillParams) -> Self {
+        LayerCommand::SetFill {
+            id,
+            new: params,
+            old: None,
+        }
+    }
 }
 
 impl Command for LayerCommand {
@@ -422,6 +620,7 @@ impl Command for LayerCommand {
             LayerCommand::SetOpacity { id, new, old } => *old = doc.set_opacity(*id, *new),
             LayerCommand::SetVisible { id, new, old } => *old = doc.set_visible(*id, *new),
             LayerCommand::SetBlendMode { id, new, old } => *old = doc.set_blend_mode(*id, *new),
+            LayerCommand::SetFill { id, new, old } => *old = doc.set_fill(*id, new.clone()),
         }
     }
 
@@ -460,6 +659,23 @@ impl Command for LayerCommand {
             LayerCommand::SetBlendMode { id, old, .. } => {
                 if let Some(value) = old.take() {
                     doc.set_blend_mode(*id, value);
+                }
+            }
+            LayerCommand::SetFill { id, old, .. } => {
+                if let Some(previous) = old.take() {
+                    match previous {
+                        Some(params) => {
+                            doc.set_fill(*id, params);
+                        }
+                        // The layer had no fill params before: undo removes
+                        // what the apply set (there is no "clear fill"
+                        // mutator — `None`-before means absent-before).
+                        None => {
+                            if let Some(layer) = doc.layer_mut(*id) {
+                                layer.fill = None;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -585,5 +801,229 @@ mod tests {
 
         assert!(undo.undo(&mut stack));
         assert_eq!(stack.layers, before);
+    }
+
+    #[test]
+    fn set_fill_round_trips_through_undo_and_json() {
+        use umber_mesh::{FillProjection, FillSource};
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Tint", LayerKind::Fill);
+        assert_eq!(stack.layer(id).unwrap().fill, None);
+
+        let red = FillParams {
+            source: FillSource::Solid {
+                color: [1.0, 0.0, 0.0, 1.0],
+            },
+            projection: FillProjection::Uv,
+        };
+        let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
+        undo.push(LayerCommand::set_fill(id, red.clone()), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().fill, Some(red.clone()));
+
+        let planar = FillParams {
+            source: red.source.clone(),
+            projection: FillProjection::Planar {
+                axis: umber_mesh::ProjAxis::X,
+            },
+        };
+        undo.push(LayerCommand::set_fill(id, planar.clone()), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().fill, Some(planar.clone()));
+
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().fill, Some(red.clone()));
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().fill, None);
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().fill, Some(red.clone()));
+
+        // JSON round-trip preserves the params …
+        let json = serde_json::to_string(stack.layer(id).unwrap()).unwrap();
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.fill, Some(red.clone()));
+        // … and pre-fill saves (no `fill` key) still load, as fill-less.
+        let legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut legacy = legacy.as_object().unwrap().clone();
+        legacy.remove("fill");
+        let back: Layer = serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(back.fill, None);
+        assert_eq!(back.name, "Tint");
+    }
+
+    fn blend(mode: BlendMode, src: f32, dst: f32) -> f32 {
+        mode.blend_channel(src, dst)
+            .unwrap_or_else(|| panic!("{mode:?} should be a separable pixel op"))
+    }
+
+    #[test]
+    fn color_dodge_pins_known_value_and_guards_white_source() {
+        // Known value: base 0.3 dodged by 0.5 -> 0.3 / 0.5 = 0.6.
+        let v = blend(BlendMode::ColorDodge, 0.5, 0.3);
+        assert!(
+            (v - 0.6).abs() < 1e-6,
+            "color dodge src=0.5 dst=0.3 should be 0.6, got {v}"
+        );
+        // Can-fail: a naive `dst / (1 - src)` divides by zero here
+        // (0/0 = NaN, which the output clamp maps to 0). White blend
+        // must dodge to white regardless of the base.
+        assert_eq!(
+            blend(BlendMode::ColorDodge, 1.0, 0.0),
+            1.0,
+            "color dodge by white over black must be white, not NaN-black"
+        );
+        assert_eq!(
+            blend(BlendMode::ColorDodge, 1.0, 0.4),
+            1.0,
+            "color dodge by white must saturate to white"
+        );
+    }
+
+    #[test]
+    fn color_burn_pins_known_value_and_guards_black_source() {
+        // Known value: base 0.7 burned by 0.5 -> 1 - 0.3/0.5 = 0.4.
+        let v = blend(BlendMode::ColorBurn, 0.5, 0.7);
+        assert!(
+            (v - 0.4).abs() < 1e-6,
+            "color burn src=0.5 dst=0.7 should be 0.4, got {v}"
+        );
+        // Can-fail: a naive `1 - (1 - dst) / src` divides by zero here.
+        // Black blend must burn to black regardless of the base.
+        assert_eq!(
+            blend(BlendMode::ColorBurn, 0.0, 1.0),
+            0.0,
+            "color burn by black over white must be black"
+        );
+        assert_eq!(
+            blend(BlendMode::ColorBurn, 0.0, 0.8),
+            0.0,
+            "color burn by black must stay black"
+        );
+    }
+
+    #[test]
+    fn linear_burn_clamps_and_differs_from_subtract() {
+        // Can-fail: LinearBurn is `src + dst - 1`, NOT Subtract's
+        // `dst - src`. src=0.6, dst=0.7 -> 0.3 here, 0.1 under Subtract.
+        let v = blend(BlendMode::LinearBurn, 0.6, 0.7);
+        assert!(
+            (v - 0.3).abs() < 1e-6,
+            "linear burn src=0.6 dst=0.7 should be 0.3 (not Subtract's 0.1), got {v}"
+        );
+        // Can-fail: the sum-minus-one goes negative and must clamp at
+        // black rather than leaking a negative channel value.
+        assert_eq!(
+            blend(BlendMode::LinearBurn, 0.1, 0.2),
+            0.0,
+            "linear burn 0.1/0.2 sums under 1 and must clamp to black"
+        );
+        assert_eq!(
+            blend(BlendMode::LinearBurn, 1.0, 1.0),
+            1.0,
+            "linear burn white/white stays white"
+        );
+    }
+
+    #[test]
+    fn add_is_linear_dodge_census_pin() {
+        // Painter's vocabulary item 10 is literally "Linear Dodge (Add)":
+        // one mode, two names. Pin `Add` to `min(1, src + dst)` so the
+        // core-12's `linear-dodge` and `add` slots stay covered by this
+        // single variant rather than a duplicate alias variant.
+        for (s, d) in [(0.0, 0.0), (0.3, 0.4), (0.6, 0.7), (1.0, 1.0)] {
+            assert_eq!(
+                blend(BlendMode::Add, s, d),
+                (s + d).min(1.0),
+                "Add({s}, {d}) must equal linear-dodge min(1, src + dst)"
+            );
+        }
+    }
+
+    #[test]
+    fn blend_census_every_separable_mode_returns_finite_clamped_math() {
+        // The static census pin: every variant except Passthrough must be
+        // a total pixel op — Some finite 0..=1 value for corner and
+        // mid-range inputs alike. The `len` assert below is the tripwire:
+        // add a variant without extending this list and it fails, forcing
+        // the census (and the enum docs above) to be updated with the enum.
+        let separable = [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::Add,
+            BlendMode::Subtract,
+            BlendMode::Difference,
+            BlendMode::SoftLight,
+            BlendMode::HardLight,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::LinearBurn,
+        ];
+        assert_eq!(separable.len(), 14, "census list must track the enum");
+        for mode in separable {
+            for (s, d) in [
+                (0.0, 0.0),
+                (1.0, 1.0),
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (0.25, 0.75),
+                (0.75, 0.25),
+            ] {
+                let v = mode
+                    .blend_channel(s, d)
+                    .unwrap_or_else(|| panic!("{mode:?} must return Some"));
+                assert!(
+                    v.is_finite() && (0.0..=1.0).contains(&v),
+                    "{mode:?}({s}, {d}) must be finite 0..=1, got {v}"
+                );
+            }
+        }
+        assert_eq!(
+            BlendMode::Passthrough.blend_channel(0.5, 0.5),
+            None,
+            "Passthrough is structural, not a pixel op"
+        );
+    }
+
+    #[test]
+    fn composite_channel_honors_opacity_and_ignores_non_finite() {
+        // Opacity 1 = full blend effect, 0 = base untouched.
+        assert_eq!(
+            BlendMode::Multiply
+                .composite_channel(0.5, 0.5, 1.0)
+                .expect("separable op"),
+            0.25,
+            "full-opacity multiply 0.5/0.5 is 0.25"
+        );
+        assert_eq!(
+            BlendMode::Multiply
+                .composite_channel(0.5, 0.5, 0.0)
+                .expect("separable op"),
+            0.5,
+            "zero opacity must leave the base untouched"
+        );
+        // Half opacity mixes halfway: 0.5 + (0.25 - 0.5) * 0.5 = 0.375.
+        let v = BlendMode::Multiply
+            .composite_channel(0.5, 0.5, 0.5)
+            .expect("separable op");
+        assert!(
+            (v - 0.375).abs() < 1e-6,
+            "half-opacity multiply should be 0.375, got {v}"
+        );
+        // Non-finite opacity leaves the base unchanged, mirroring
+        // `set_opacity`'s refusal to store non-finite input.
+        assert_eq!(
+            BlendMode::Screen
+                .composite_channel(0.9, 0.2, f32::NAN)
+                .expect("separable op"),
+            0.2,
+            "NaN opacity must leave the base untouched"
+        );
+        assert_eq!(
+            BlendMode::Passthrough.composite_channel(0.9, 0.2, 1.0),
+            None,
+            "Passthrough has no composite math either"
+        );
     }
 }

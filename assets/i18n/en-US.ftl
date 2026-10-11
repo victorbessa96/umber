@@ -181,6 +181,24 @@ display =
     .rebuilding = Rebuilding the GPU display LUT for the 3D viewport and the UV view.
     .active-chain = Active chain: { $chain }. { $status }
 
+## Viewport view modes (§5 P0 row)
+
+viewmode =
+    .label = View mode
+    .lit = Lit (V)
+    .unlit = Unlit (V)
+    .solo = Solo channel…
+    .mesh-preview = Mesh-map preview…
+    .channel = Channel
+    .map = Map
+    .basecolor = Base color
+    .emissive = Emissive
+    .roughness = Roughness
+    .metallic = Metallic
+    .ao = Ambient occlusion
+    .height = Height
+    .normal = Normal
+
 ## Brush properties panel
 
 brush =
@@ -217,6 +235,9 @@ brush =
     .tool-paint = Paint
     .tool-smudge = Smudge
     .tool-clone = Clone
+    .tool-eraser = Eraser
+    .erase-channels = Erase channels
+    .erase-hint = Alpha-only by default (color data is kept, so undo restores it). Enabling R/G/B erases that color channel toward zero leaving alpha intact.
     .smudge-strength = Strength
     .smudge-smear = Smear
     .clone-offset = Source offset (UV)
@@ -248,10 +269,40 @@ brush =
 
 layers =
     .add-paint = ＋ Add paint layer
+    .add-fill = ＋ Add fill layer
     .default-paint-name = Paint { $n }
+    .default-fill-name = Fill { $n }
     .kind-paint = paint
     .kind-fill = fill
     .kind-folder = folder
+
+## Fill layer properties (projection picker + v1 source editor)
+
+fill =
+    .section = Fill layers
+    .none = No fill layers — add one from the Layers panel.
+    .proj-uv = UV
+    .proj-triplanar = Tri-planar
+    .proj-planar = Planar
+    .proj-spherical = Spherical
+    .proj-cylindrical = Cylindrical
+    .axis = Axis
+    .axis-x = X
+    .axis-y = Y
+    .axis-z = Z
+    .sharpness = Sharpness
+    .scale = Scale
+    .src-solid = Solid color
+    .src-gradient = Gradient
+    .src-noise = Noise
+    .src-graph = Graph snapshot
+    .alpha = Alpha
+    .color-a = Color A
+    .color-b = Color B
+    .angle = Angle
+    .seed = Seed
+    .octaves = Octaves
+    .graph-note = Snapshot only: re-evaluate the graph to refresh it (live graph wiring is a follow-up).
 
 ## History panel
 
@@ -262,7 +313,7 @@ history =
         [one] { $count } entry in journal
        *[other] { $count } entries in journal
     }
-    .strokes = Smudge / clone strokes
+    .strokes = Smudge / clone / eraser strokes
     .undo-stroke = ↶ Undo stroke
     .redo-stroke = ↷ Redo stroke
 

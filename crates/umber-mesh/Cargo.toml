@@ -10,6 +10,7 @@ repository.workspace = true
 glam = { workspace = true }
 openusd = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 bytemuck = { workspace = true }
 gltf = { workspace = true, features = ["names"] }
 tobj = { workspace = true }

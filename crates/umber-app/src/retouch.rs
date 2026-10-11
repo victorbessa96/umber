@@ -1,5 +1,5 @@
-//! The retouch stroke session — the app half of the smudge + clone brushes
-//! (docs/specs/smudge-clone-design.md).
+//! The retouch stroke session — the app half of the smudge + clone + eraser
+//! brushes (docs/specs/smudge-clone-design.md; the eraser is §2's P0 row).
 //!
 //! The paint pipeline composites on the GPU (`PaintCompositor::splat_dabs`,
 //! a compute pass); there is no CPU composite step to extend. The retouch
@@ -38,6 +38,9 @@
 //!   translation (`clone_dab`), so its CONTENT is not reflected: a
 //!   mirrored clone places mirrored-source texels unflipped (v1; a
 //!   reflected-sample clone is a named follow-up).
+//! * Erase: motion-independent — every sibling erases at its own texels
+//!   with the same channel flags, so the mirror image is exact by
+//!   construction (no per-sibling state to transform).
 //!
 //! All siblings land in the stroke's own tile mirror, so a symmetric
 //! stroke is still ONE undo entry; its dirty rect is the bounding box of
@@ -48,13 +51,13 @@
 //! Quick mask (§2's P1 row, `umber_brush::quick_mask`): while the mask
 //! gates, [`RetouchStroke::apply_masked`] multiplies every dab's per-texel
 //! coverage by the tile's mask plane, for the primary and each sibling at
-//! its own texels. Smudge and clone are gated the way the paint shader
-//! gates a paint dab.
+//! its own texels. Smudge, clone and eraser are gated the way the paint
+//! shader gates a paint dab.
 
 use std::collections::BTreeMap;
 
 use umber_brush::retouch::{
-    clone_dab_masked, smudge_dab_masked, CloneStroke, DirtyRect, RetouchDab,
+    clone_dab_masked, erase_dab_masked, smudge_dab_masked, CloneStroke, DirtyRect, RetouchDab,
 };
 use umber_brush::symmetry::{sibling_positions, COINCIDENT_EPS_TEXELS};
 use umber_brush::{BrushTool, MaskView, RgbaBuffer, SymTransform};
@@ -138,13 +141,14 @@ impl RetouchStroke {
     }
 
     /// Whether events routed to `tile` take part in this stroke (clone:
-    /// only its own tile; smudge: every tile).
+    /// only its own tile; smudge and eraser: every tile).
     pub(crate) fn accepts(&self, tile: u16) -> bool {
         match (&self.tool, &self.clone) {
             (BrushTool::Paint, _) => false,
             (BrushTool::Clone(_), Some(clone)) => clone.tile == tile,
             (BrushTool::Clone(_), None) => false,
             (BrushTool::Smudge(_), _) => true,
+            (BrushTool::Erase(_), _) => true,
         }
     }
 
@@ -211,6 +215,12 @@ impl RetouchStroke {
                         let src = self.symmetry[k].apply(src);
                         clone_dab_masked(&mut mirror.live, &mirror.before, &dab, src, mask)
                     }),
+                    // The eraser is motion-independent (like clone, unlike
+                    // smudge): every sibling erases at its own texels with
+                    // the same channel flags, so the mirror image is exact.
+                    BrushTool::Erase(params) => {
+                        erase_dab_masked(&mut mirror.live, &dab, params, mask)
+                    }
                 };
                 self.last_dab[k] = Some((tile, pos));
                 event_dirty = DirtyRect::union_opt(event_dirty, wrote);
@@ -304,7 +314,10 @@ mod tests {
     use super::*;
     use umber_brush::retouch::SmudgeParams;
     use umber_brush::symmetry::texel_transforms;
-    use umber_brush::{CloneParams, MirrorAxis, MirrorSettings, QuickMask, SymmetrySettings};
+    use umber_brush::{
+        CloneParams, EraseChannels, EraseParams, MirrorAxis, MirrorSettings, QuickMask,
+        SymmetrySettings,
+    };
     use umber_core::undo::UndoStack;
 
     const SIZE: u32 = 64;
@@ -711,6 +724,177 @@ mod tests {
             // The window itself (allowed before the invert) is untouched.
             assert_eq!(gated.texel(31, 36), before.texel(31, 36));
         }
+    }
+
+    /// Opaque mid-gray (every channel erasable): the eraser tests'
+    /// equivalent of `hard_edge`.
+    fn gray_opaque() -> RgbaBuffer {
+        let mut buf = RgbaBuffer::transparent(SIZE, SIZE);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                buf.set_texel(x, y, [200, 120, 60, 255]);
+            }
+        }
+        buf
+    }
+
+    fn eraser() -> BrushTool {
+        BrushTool::Erase(EraseParams::default())
+    }
+
+    /// Test (d): one eraser stroke is ONE undo entry and undo restores the
+    /// exact pre-stroke bytes (the non-destructive contract: the erase
+    /// touches layer channels only, and the before-state comes back whole).
+    #[test]
+    fn eraser_stroke_is_one_undo_entry_restoring_before_state() {
+        let original = gray_opaque();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(16);
+        let mut writes = PaintWrites::default();
+
+        let events: Vec<[f32; 2]> = (0..6).map(|i| [16.0 + 4.0 * i as f32, 32.0]).collect();
+        let cmd = run_stroke(&mut image, eraser(), &events).expect("erase changed texels");
+        assert_eq!(cmd.regions.len(), 1, "one tile touched, one region");
+        history.push(cmd, &mut writes);
+        writes.writes.clear(); // the stroke itself already uploaded these
+        assert_eq!(history.len(), 1, "six events, one stroke, one entry");
+        let after_erase = image.clone();
+        assert_ne!(after_erase, original);
+        assert_eq!(image.texel(24, 32)[3], 0, "the stroke's path is erased");
+        assert_eq!(image.texel(24, 32)[0], 200, "a-only erase keeps color");
+        assert_eq!(
+            image.texel(56, 56),
+            [200, 120, 60, 255],
+            "far texels untouched"
+        );
+
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original, "undo restores the exact before-state");
+        assert!(!history.can_undo());
+
+        assert!(history.redo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, after_erase);
+    }
+
+    /// Test (e): the eraser mirrors like paint. On a mirror-symmetric
+    /// image, a stroke kept clear of the axis leaves the image
+    /// mirror-symmetric byte for byte; the control without symmetry breaks
+    /// it. The undo contract holds with symmetry: one entry, both sides
+    /// restored.
+    #[test]
+    fn mirrored_eraser_erases_both_sides_symmetrically() {
+        // Mirror-symmetric gray with a distinct left/right-readable alpha:
+        // symmetric_bands is black/white; erase its alpha instead.
+        let before = symmetric_bands();
+        let mut image = before.clone();
+        let events: Vec<[f32; 2]> = (0..3).map(|i| [12.0 + 4.0 * i as f32, 32.0]).collect();
+        let cmd = run_stroke_with(&mut image, eraser(), &events, &mirror_x()).expect("erase wrote");
+        assert_eq!(cmd.regions.len(), 1, "both sides live in one tile region");
+        assert_ne!(image, before, "the eraser must change texels");
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                assert_eq!(
+                    image.texel(x, y),
+                    image.texel(SIZE - 1 - x, y),
+                    "texel ({x},{y}) vs its mirror"
+                );
+            }
+        }
+        assert!(
+            (38..58).any(|x| image.texel(x, 32) != before.texel(x, 32)),
+            "the mirror band's edge really was erased"
+        );
+
+        // Control: the same stroke without symmetry breaks the symmetry.
+        let mut plain = before.clone();
+        run_stroke(&mut plain, eraser(), &events).expect("erase wrote");
+        assert!((0..SIZE).any(|x| plain.texel(x, 32) != plain.texel(SIZE - 1 - x, 32)));
+
+        // Undo restores both sides in one entry.
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(16);
+        let mut writes = PaintWrites::default();
+        let mut image2 = before.clone();
+        let cmd =
+            run_stroke_with(&mut image2, eraser(), &events, &mirror_x()).expect("erase wrote");
+        history.push(cmd, &mut writes);
+        writes.writes.clear();
+        assert_eq!(history.len(), 1);
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image2);
+        assert_eq!(image2, before, "undo restores both sides");
+    }
+
+    /// Test (f): the quick mask gates the eraser per texel — blocked
+    /// texels stay byte-identical while the allowed window erases. The
+    /// ungated control proves the stroke would have erased the blocked
+    /// texels.
+    #[test]
+    fn quick_mask_gates_the_eraser_per_texel() {
+        let mask = small_window_mask();
+        let view = mask.view(TILE).expect("the stamp allocated the plane");
+        // A stroke across the hard edge's middle: the window (32,36,r4)
+        // sits inside its footprint.
+        let events: Vec<[f32; 2]> = (0..9).map(|i| [16.0 + 4.0 * i as f32, 34.0]).collect();
+
+        let before = gray_opaque();
+        let mut plain = before.clone();
+        run_stroke(&mut plain, eraser(), &events).expect("erase wrote");
+        assert!(
+            changed_where(&before, &plain, &mask, true) > 0,
+            "the ungated stroke reaches the blocked region"
+        );
+
+        let mut gated = before.clone();
+        run_stroke_masked(
+            &mut gated,
+            eraser(),
+            &events,
+            &SymmetrySettings::default(),
+            Some(view),
+        )
+        .expect("the allowed window still erases");
+        assert_eq!(
+            changed_where(&before, &gated, &mask, true),
+            0,
+            "blocked texels must be byte-identical"
+        );
+        assert!(
+            changed_where(&before, &gated, &mask, false) > 0,
+            "the allowed window still erases"
+        );
+        // The eraser's own invariant under the gate: allowed texels lost
+        // alpha only (default a-only channels).
+        assert_eq!(gated.texel(32, 36)[3], 0);
+        assert_eq!(&gated.texel(32, 36)[..3], &[200, 120, 60]);
+    }
+
+    /// The eraser's per-channel flags survive the stroke session: an
+    /// RGB-erase stroke zeroes color leaving alpha, through the same
+    /// mirror/undo path as the default.
+    #[test]
+    fn eraser_channel_flags_apply_through_the_stroke_session() {
+        let rgb_erase = BrushTool::Erase(EraseParams {
+            channels: EraseChannels {
+                r: true,
+                g: true,
+                b: true,
+                a: false,
+            },
+        });
+        let original = gray_opaque();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(16);
+        let mut writes = PaintWrites::default();
+        let cmd =
+            run_stroke(&mut image, rgb_erase, &[[32.0, 32.0]]).expect("rgb erase changed texels");
+        history.push(cmd, &mut writes);
+        writes.writes.clear();
+        assert_eq!(image.texel(32, 32), [0, 0, 0, 255]);
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
     }
 
     /// Test (d): the mask applies AFTER symmetry expansion. Every sibling

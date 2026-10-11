@@ -19,7 +19,9 @@ use crate::i18n::tr;
 use umber_brush::preset::{BrushPreset, ControlCurve};
 use umber_brush::preset_library::{user_preset_dir, Library};
 use umber_brush::symmetry::{RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
-use umber_brush::{BrushTool, CloneParams, MaskPaint, MirrorAxis, SmudgeParams, SymmetrySettings};
+use umber_brush::{
+    BrushTool, CloneParams, EraseParams, MaskPaint, MirrorAxis, SmudgeParams, SymmetrySettings,
+};
 
 use crate::paint_state::PaintState;
 
@@ -46,14 +48,15 @@ pub struct BrushPanel {
     save_error: Option<String>,
     /// Buffer for the Save-As name field.
     save_as_name: String,
-    /// The active tool (paint / smudge / clone) and its params. Panel
-    /// state, not preset state: the `.umberbrush` format is unchanged.
+    /// The active tool (paint / smudge / clone / eraser) and its params.
+    /// Panel state, not preset state: the `.umberbrush` format is unchanged.
     /// The paint session adopts it via `PaintState::sync_tool`.
     pub tool: BrushTool,
     /// The last-edited params of each retouch tool, kept while another
     /// tool is selected so switching back restores them.
     smudge: SmudgeParams,
     clone: CloneParams,
+    eraser: EraseParams,
     /// Mirror + radial symmetry. Panel (session) state like `tool`: not
     /// in the preset nor the project file in v1. The paint session adopts
     /// it via `PaintState::sync_symmetry`.
@@ -91,6 +94,7 @@ impl BrushPanel {
             tool: BrushTool::Paint,
             smudge: SmudgeParams::default(),
             clone: CloneParams::default(),
+            eraser: EraseParams::default(),
             symmetry: SymmetrySettings::default(),
         }
     }
@@ -136,14 +140,15 @@ impl BrushPanel {
         }
     }
 
-    /// The tool selector (paint / smudge / clone) plus the active retouch
-    /// tool's param rows.
+    /// The tool selector (paint / smudge / clone / eraser) plus the active
+    /// retouch tool's param rows.
     fn tool_rows(&mut self, ui: &mut egui::Ui) {
         // Bank the active retouch params so a tool switch keeps them.
         match self.tool {
             BrushTool::Paint => {}
             BrushTool::Smudge(params) => self.smudge = params,
             BrushTool::Clone(params) => self.clone = params,
+            BrushTool::Erase(params) => self.eraser = params,
         }
         ui.horizontal_wrapped(|ui| {
             ui.strong(tr("brush.tool"));
@@ -162,6 +167,13 @@ impl BrushPanel {
                 .clicked()
             {
                 picked = BrushTool::Clone(self.clone);
+            }
+            let eraser_on = matches!(picked, BrushTool::Erase(_));
+            if ui
+                .selectable_label(eraser_on, tr("brush.tool-eraser"))
+                .clicked()
+            {
+                picked = BrushTool::Erase(self.eraser);
             }
             self.tool = picked;
         });
@@ -185,6 +197,24 @@ impl BrushPanel {
                 ui.checkbox(&mut params.follow, tr("brush.clone-follow"));
                 ui.weak(tr("brush.clone-hint"));
             }
+            BrushTool::Erase(params) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(tr("brush.erase-channels"));
+                    ui.checkbox(&mut params.channels.r, "R");
+                    ui.checkbox(&mut params.channels.g, "G");
+                    ui.checkbox(&mut params.channels.b, "B");
+                    ui.checkbox(&mut params.channels.a, "A");
+                });
+                ui.weak(tr("brush.erase-hint"));
+            }
+        }
+    }
+
+    /// The E shortcut: selects the eraser, restoring its banked channel
+    /// flags. A no-op when it is already selected.
+    pub fn select_eraser(&mut self) {
+        if !matches!(self.tool, BrushTool::Erase(_)) {
+            self.tool = BrushTool::Erase(self.eraser);
         }
     }
 
@@ -513,7 +543,7 @@ fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
 
 /// The symmetry section: the mirror toggle with its axis + offset rows,
 /// the radial toggle with its count + flip rows. Applies to every tool
-/// (paint, smudge, clone).
+/// (paint, smudge, clone, eraser).
 fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
     ui.strong(tr("brush.symmetry"));
     let mirror = &mut symmetry.mirror;
