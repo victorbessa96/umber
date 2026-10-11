@@ -1297,7 +1297,7 @@ impl PaintState {
     /// first (so earlier strokes' dabs are in the texture), then the
     /// blocking full-target `PaintTarget::read_back_rgba8`. `None` (logged;
     /// the stroke skips the tile) when the drain or the readback fails.
-    fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
+    pub(crate) fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
         let thread = self.targets.get_mut(&tile)?;
         if let Err(err) = thread.process_pending() {
             log::warn!("retouch: draining tile {tile} failed: {err:#}");
