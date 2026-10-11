@@ -152,10 +152,11 @@ impl Default for FillSource {
 }
 
 /// A fill layer's evaluatable parameters: what to paint + how to project it
-/// + where it may paint. Stored on `umber-core`'s `Layer`
-/// (`fill: Option<FillParams>`); `None` means "not a fill layer" and keeps
-/// [`crate::LayerKind::Fill`] a plain tag so the journal/project matches
-/// don't churn.
+/// + where it may paint.
+///
+/// Stored on `umber-core`'s `Layer` (`fill: Option<FillParams>`); `None`
+/// means "not a fill layer" and keeps [`crate::LayerKind::Fill`] a plain
+/// tag so the journal/project matches don't churn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FillParams {
     pub source: FillSource,
