@@ -347,12 +347,18 @@ pub struct PipelineCache<P> {
     entries: HashMap<&'static str, P>,
 }
 
-impl<P> PipelineCache<P> {
-    /// An empty cache (first dispatch of each entry compiles it).
-    pub fn new() -> Self {
+impl<P> Default for PipelineCache<P> {
+    fn default() -> Self {
         Self {
             entries: HashMap::new(),
         }
+    }
+}
+
+impl<P> PipelineCache<P> {
+    /// An empty cache (first dispatch of each entry compiles it).
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Whether `entry` already has a compiled pipeline.
@@ -1159,14 +1165,15 @@ fn resolve_inputs_gpu(
         // external is the typed Anchor error (deleted layer), on both
         // backends alike.
         if let ParamValue::Anchor(anchor) = pv {
-            let v = external.get(&anchor.key()).cloned().ok_or_else(|| {
-                EvalError::Anchor {
+            let v = external
+                .get(&anchor.key())
+                .cloned()
+                .ok_or_else(|| EvalError::Anchor {
                     node: node.id,
                     layer: anchor.layer_id,
                     channel: anchor.channel.clone(),
                     reason: "layer deleted or never composited".into(),
-                }
-            })?;
+                })?;
             map.insert(name.clone(), Resolved::Cpu(v));
         }
     }
@@ -1211,13 +1218,13 @@ fn perm_buffer_for(
     buf
 }
 
-fn pipeline_for<'a>(
-    cache: &'a mut PipelineCache<wgpu::ComputePipeline>,
-    device: &'a wgpu::Device,
-    bgl: &'a wgpu::BindGroupLayout,
-    module: &'a wgpu::ShaderModule,
+fn pipeline_for(
+    cache: &mut PipelineCache<wgpu::ComputePipeline>,
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    module: &wgpu::ShaderModule,
     entry: &'static str,
-) -> &'a wgpu::ComputePipeline {
+) -> &wgpu::ComputePipeline {
     // Check-then-insert (not `get_or_insert_with`): the factory borrows
     // `device`/`layout`/`module` while the cache borrows mutably, which a
     // closure cannot express — disjoint field borrows can.
@@ -1580,9 +1587,15 @@ impl GraphGpuEvaluator {
             let route = GpuRoute::route(&node.node_def, &node.params);
             match route {
                 GpuRoute::Alias => {
-                    let in_map =
-                        resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache, &eff_ctx.external)
-                            .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
+                    let in_map = resolve_inputs_gpu(
+                        graph,
+                        node,
+                        &gpu_tex,
+                        &cpu_out,
+                        cache,
+                        &eff_ctx.external,
+                    )
+                    .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
                     let single =
                         Self::single_input(&in_map, node.id).map_err(GraphGpuError::Eval)?;
                     match single {
@@ -1619,9 +1632,15 @@ impl GraphGpuEvaluator {
                     // name (edges overlaying NodeRefs) — flatten to
                     // `NodeOutput`s, reading back GPU handles now that the
                     // encoder is submitted.
-                    let resolved =
-                        resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache, &eff_ctx.external)
-                            .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
+                    let resolved = resolve_inputs_gpu(
+                        graph,
+                        node,
+                        &gpu_tex,
+                        &cpu_out,
+                        cache,
+                        &eff_ctx.external,
+                    )
+                    .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
                     let mut in_vec: Vec<(String, NodeOutput)> = Vec::with_capacity(resolved.len());
                     for (name, r) in &resolved {
                         let v = match r {
@@ -1644,9 +1663,15 @@ impl GraphGpuEvaluator {
                     cache.insert(*id, out);
                 }
                 GpuRoute::Gpu(op) => {
-                    let in_map =
-                        resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache, &eff_ctx.external)
-                            .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
+                    let in_map = resolve_inputs_gpu(
+                        graph,
+                        node,
+                        &gpu_tex,
+                        &cpu_out,
+                        cache,
+                        &eff_ctx.external,
+                    )
+                    .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
                     self.eval_gpu_node(&mut encoder, node, op, &in_map, tile, &mut gpu_tex)?;
                 }
             }

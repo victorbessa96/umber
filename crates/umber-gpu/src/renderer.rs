@@ -42,15 +42,6 @@ pub enum GpuError {
 /// 16-byte multiple — portable across backends (review #2: some
 /// Vulkan/Metal drivers are stricter than the WebGPU floor) and leaves a
 /// natural slot for Wave-2 UV attributes.
-
-/// The specular tier's GPU handles: prefilter views + spec uniform.
-/// Bundled so [`GpuContext::mesh_bind_group_full`] stays at 7 args
-/// (clippy's too-many-arguments floor).
-pub(crate) struct MeshTier<'a> {
-    pub prefilter_views: [&'a wgpu::TextureView; 3],
-    pub spec_buffer: &'a wgpu::Buffer,
-}
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -61,6 +52,16 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// Unused; pads the struct to 32 bytes.
     pub _pad: [f32; 2],
+}
+
+/// The specular tier's GPU handles: prefilter views + spec uniform.
+/// Bundled so [`GpuContext::mesh_bind_group_full`] stays at 7 args
+/// (clippy's too-many-arguments floor).
+pub(crate) struct MeshTier<'a> {
+    /// The three prefiltered environment-mip views bound at slots 4–6.
+    pub prefilter_views: [&'a wgpu::TextureView; 3],
+    /// The specular-params uniform bound at slot 7.
+    pub spec_buffer: &'a wgpu::Buffer,
 }
 
 /// Per-frame camera uniform, matching `shaders::MESH_SHADER`'s `Camera`
