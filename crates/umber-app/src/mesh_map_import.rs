@@ -107,7 +107,7 @@ pub fn channel_kind_for(name: &str) -> ChannelKind {
 
 /// Why a file was not routed (shown in the unmatched panel row, i18n'd via
 /// the `import.reason-*` keys).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum UnmatchedReason {
     /// Not a `.png` file (the baker emits PNG).
     NotPng,
@@ -124,7 +124,7 @@ pub enum UnmatchedReason {
 
 impl UnmatchedReason {
     /// The i18n key rendering this reason.
-    pub fn key(self) -> &'static str {
+    pub fn key(&self) -> &'static str {
         match self {
             Self::NotPng => "import.reason-not-png",
             Self::NoSeparator => "import.reason-no-separator",

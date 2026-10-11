@@ -382,7 +382,11 @@ fn dist_to_segment_t(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> (f32, f32) {
 /// through the session pipeline; a retouch replay lands as one undo
 /// entry); every other widget edits the session tool only. All strings go
 /// through [`tr`](crate::i18n::tr).
-pub fn path_tool_rows(ui: &mut egui::Ui, paint: Option<&mut PaintState>, tool: &mut PaintPathTool) {
+pub fn path_tool_rows(
+    ui: &mut egui::Ui,
+    mut paint: Option<&mut PaintState>,
+    tool: &mut PaintPathTool,
+) {
     ui.add_space(4.0);
     ui.strong(tr("path.tool"));
     ui.horizontal(|ui| {

@@ -60,8 +60,8 @@ impl UvView {
         gpu: &umber_gpu::GpuContext,
         mut paint: Option<&mut crate::paint_state::PaintState>,
         display_lut: Option<&umber_gpu::DisplayLut>,
-        tool: Option<&mut PolygonFillTool>,
-        path_tool: Option<&mut PaintPathTool>,
+        mut tool: Option<&mut PolygonFillTool>,
+        mut path_tool: Option<&mut PaintPathTool>,
     ) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
