@@ -16,8 +16,8 @@
 | Pressure dynamics mapped through input→curve model (MyPaint-style); log-radius; `opaque_linearize` flow semantics (per-stamp flow with per-stroke accumulation = Krita wash-mode; Build-up mode as alternative) | P0 | 2 |
 | Lazy mouse (radius-based stroke offset smoothing) + one-euro filter smoothing (Casiez CHI'12) with Krita-style stabilizer panel (samples@min/max speed, delay dead-zone) | P0 | 2 | ✓ built (lazy_mouse.rs, the stabilizer panel rows) |
 | Hardness/stamp falloff (radial gradient dabs); alpha source: bitmap textures + procedural | P0 | 2 |
-| Eraser (sets layer alpha to zero — non-destructive; per-channel enable) | P0 | 2 |
-| Fill layer + fill projections: UV, Tri-planar, Planar, Spherical, Cylindrical | P0 | 3 (fill layer ships with its projections — no projection-less staging) |
+| Eraser (sets layer alpha to zero — non-destructive; per-channel enable) | P0 | 2 | ✓ built (`21e1290`) — v1 boundary: seam-mirroring skipped (the retouch gate) |
+| Fill layer + fill projections: UV, Tri-planar, Planar, Spherical, Cylindrical | P0 | 3 (fill layer ships with its projections — no projection-less staging) | ✓ built (`12124f3`) — the five projections, WriteRegion path, panel, 12 tests |
 | Smudge (sample+blur blend), Clone (source offset + follow-stroke) | P1 | 3 | ✓ built (`2fbfc7e`) |
 | Symmetry: mirror (axis+offset+manipulator) and radial (count, flip U/V) — brush + fill-layer projections | P1 | 3 | ✓ built (`2689fa8`) |
 | Straight-line constraint; angle snap | P1 | 3 |
@@ -36,7 +36,7 @@
 | Texture sets (per material/mesh UV set); per-set channel stack: baseColor, roughness, metallic, normal, height, emissive, opacity, AO + user channels | P0 | 1 (model), 2 (full) |
 | Layer types: paint layer, fill layer; folders with passthrough | P0 | 2 |
 | Per-channel blending mode + opacity; blending computed in linear space per channel | P0 | 2 |
-| Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 built (BlendMode's 12 variants); the full-32 remainder open |
+| Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 math verified + 7 new modes (HSV family + normal-map combine) = 19 built (`21e1290`); the remainder open |
 | Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✓ metadata model (LayerMask in layers.rs); the paint-mask DATA path rides the quick-mask plumbing |
 | Layer instancing (source-edits propagate, cycle detection) | P1 | 4 |
 | Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 |
@@ -76,7 +76,7 @@
 |---|---|---|
 | PBR viewport: **OpenPBR 1.1 über-shader in WGSL** (native channel model = OpenPBR parameter names; spec is ASWF/Apache-2.0 with reference C++ to transliterate) | P0 | 1 (basic Blinn-Phong-ish PBR), 2 (OpenPBR + conformance suite) |
 | IBL environment lighting (HDR env maps, exposure, rotation, blur) | P0 | 1 (bundled env maps; HDR file import lands W2 with image import) |
-| View modes: lit / unlit single-channel solo (±display transform) / mesh-map preview | P0 | 1 |
+| View modes: lit / unlit single-channel solo (±display transform) / mesh-map preview | P0 | 1 | ✓ built (`f1159d1`) — v1 boundary: solo/preview render from bound data (texture bindings follow-up) |
 | 2D UV view alongside 3D view (synchronized) | P0 | 2 |
 | Camera: orbit/pan/zoom, perspective + orthographic | P0 | 1 |
 | Wireframe overlay; grid | P1 | 2 | ✓ built (`09eb4e9`) |
