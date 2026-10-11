@@ -1798,3 +1798,227 @@ fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
     }
 }
 "#;
+
+/// Skew-deviation baking (§6:57): the per-texel tangent-deviation channel
+/// the baker emits alongside the guarded maps, plus the edge-protection
+/// guard's shader half.
+///
+/// # Estimator
+///
+/// Per covered texel, over the SAME deterministic stratified hemisphere
+/// sample set as [`AO_BAKE_SHADER::hemisphere_sample`] (copied verbatim,
+/// not re-derived — skew must agree with the AO rays texel-for-texel),
+/// steered by the SAME Duff-et-al. `orthonormal_basis` tangent frame from
+/// the position pass's per-texel normal:
+///
+/// ```text
+/// bent = normalize(sum of unoccluded ray dirs)   // the bent vector
+/// skew = acos(clamp(dot(normal, bent), -1, 1)) / (PI / 2)   // 0..1
+/// ```
+///
+/// Output is grayscale `rgb = skew` (`deviation / 90°`, saturating past a
+/// right angle), `a` = coverage (`1.0` covered, `0.0` uncovered) — the
+/// encoding `umber_bake::skew::skew_byte` reproduces on the CPU side. A
+/// texel with no unoccluded ray (fully occluded: no bent direction
+/// exists) writes the geometric normal's encoding of zero skew with
+/// `a = 1.0` still covered — skew measures projection quality, not
+/// visibility, and a crevice's projection is as valid as a plane's. An
+/// uncovered texel (the position pass's coverage flag `<= 0.5`) skips the
+/// raycast and writes `(0, 0, 0, 0)`, matching every other baker.
+///
+/// # Edge protection (the guard in the bake pass)
+///
+/// `skew_threshold` (same 0..1 encoding: `threshold_deg / 90°`) is the
+/// shader half of `umber_bake::skew::apply_edge_protection`'s guard: where
+/// `skew > skew_threshold` the pass writes the edge-safe neutral
+/// (`vec3(1.0)` — unoccluded white, which never darkens a seam) into
+/// `guard_tex` INSTEAD of the guarded value, and the texel counts toward
+/// the bake log's skew-clamped warnings. The CPU side applies the same
+/// guard after the paint-combined skew (`max(baked, painted)` — the
+/// paintable half) so brushed "don't bake here" regions clamp even where
+/// the rays measured flat; the shader guard covers the unpainted fast
+/// path without a readback round-trip.
+///
+/// # Layout contracts
+///
+/// - `Tri` must match `umber_bake::ao`'s private `GpuTriangle`
+///   byte-for-byte (four `vec4<f32>`s — the same brute-force triangle
+///   list, no BVH, same perf budget of `texels * rays * triangle_count`;
+///   see [`AO_BAKE_SHADER`]'s doc comment).
+/// - `SkewParams` must match `umber_bake::skew`'s GPU uniform
+///   byte-for-byte (`rays`, `max_distance`, `bias`, `tri_count`,
+///   `skew_threshold` + three `u32` pads — 32 bytes, a multiple of WGSL's
+///   16-byte uniform-struct alignment).
+/// - `position_tex`/`normal_tex` are the two `Rgba32Float` outputs of
+///   `POSITION_BAKE_SHADER`'s `cs_main`, bound read-only and sampled with
+///   `textureLoad` at integer texel coordinates (no sampler, no filtering).
+///   Binding numbers (`0/1/2` plus `4/5/6`) mirror
+///   `AO_BAKE_SHADER::cs_main_from_position`'s set plus one output, so the
+///   raycast passes stay grep-comparable.
+/// - `skew_tex` is the deviation output, `guard_tex` the edge-protected
+///   copy of the guarded input `guard_src_tex` (both write-only
+///   `Rgba8Unorm` storage textures — core WebGPU, no device feature).
+///
+/// # Dispatch + workgroup shape
+///
+/// One workgroup (`@workgroup_size(1)`) per texel, dispatched as
+/// `dispatch_workgroups(width, height, 1)` — the serial-per-texel shape of
+/// `THICKNESS_BAKE_SHADER` (a minimum *distance* has no atomic-min in core
+/// WGSL, and neither does a direction *sum*; the bent accumulation here is
+/// a plain `vec3` variable, reduced implicitly by the serial ray loop).
+pub const SKEW_BAKE_SHADER: &str = r#"
+struct Tri {
+    v0: vec4<f32>,
+    v1: vec4<f32>,
+    v2: vec4<f32>,
+    normal: vec4<f32>,
+};
+
+struct SkewParams {
+    rays: u32,
+    max_distance: f32,
+    bias: f32,
+    tri_count: u32,
+    skew_threshold: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> triangles: array<Tri>;
+@group(0) @binding(1) var skew_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> params: SkewParams;
+@group(0) @binding(4) var position_tex: texture_2d<f32>;
+@group(0) @binding(5) var normal_tex: texture_2d<f32>;
+@group(0) @binding(6) var guard_src_tex: texture_2d<f32>;
+@group(0) @binding(7) var guard_tex: texture_storage_2d<rgba8unorm, write>;
+
+const PI: f32 = 3.14159265358979;
+const GOLDEN_CONJ: f32 = 0.6180339887498949;
+const EPS: f32 = 1e-6;
+
+/// Deterministic hemisphere direction for ray `i` of `n`, in a local frame
+/// where +Z is the hemisphere pole. Verbatim the same sample set as
+/// `AO_BAKE_SHADER::hemisphere_sample` (fixed, not per-texel jittered) so
+/// skew agrees with the AO rays texel-for-texel.
+fn hemisphere_sample(i: u32, n: u32) -> vec3<f32> {
+    let nf = max(f32(n), 1.0);
+    let cos_theta = 1.0 - (f32(i) + 0.5) / nf;
+    let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+    let phi = 2.0 * PI * fract(f32(i) * GOLDEN_CONJ);
+    return vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+}
+
+/// Möller–Trumbore ray-triangle intersection. Double-sided (no backface
+/// culling, matching `AO_BAKE_SHADER`). Returns true iff the hit parameter
+/// `t` lands in the open interval `(EPS, max_t)`.
+fn hits_triangle(
+    orig: vec3<f32>,
+    dir: vec3<f32>,
+    v0: vec3<f32>,
+    v1: vec3<f32>,
+    v2: vec3<f32>,
+    max_t: f32,
+) -> bool {
+    let e1 = v1 - v0;
+    let e2 = v2 - v0;
+    let h = cross(dir, e2);
+    let a = dot(e1, h);
+    if (abs(a) < EPS) {
+        return false;
+    }
+    let f = 1.0 / a;
+    let s = orig - v0;
+    let u = f * dot(s, h);
+    if (u < 0.0 || u > 1.0) {
+        return false;
+    }
+    let q = cross(s, e1);
+    let v = f * dot(dir, q);
+    if (v < 0.0 || u + v > 1.0) {
+        return false;
+    }
+    let t = f * dot(e2, q);
+    return t > EPS && t < max_t;
+}
+
+struct Basis {
+    b1: vec3<f32>,
+    b2: vec3<f32>,
+};
+
+/// Branchless tangent-frame construction from a unit normal (Duff et al.,
+/// "Building an Orthonormal Basis, Revisited", JCGT 2017). Verbatim the same
+/// frame as `AO_BAKE_SHADER::orthonormal_basis`.
+fn orthonormal_basis(n: vec3<f32>) -> Basis {
+    let sign_z = select(-1.0, 1.0, n.z >= 0.0);
+    let a = -1.0 / (sign_z + n.z);
+    let b = n.x * n.y * a;
+    return Basis(
+        vec3<f32>(1.0 + sign_z * n.x * n.x * a, sign_z * b, -sign_z * n.x),
+        vec3<f32>(b, sign_z + n.y * n.y * a, -n.y),
+    );
+}
+
+/// Mesh-fed skew: the per-texel ray origin and tangent frame come from
+/// `position_tex`/`normal_tex`. Uncovered texels write `(0, 0, 0, 0)` to
+/// both outputs with no raycast. Covered texels accumulate the unoccluded
+/// ray directions into `bent`, encode `skew = acos(dot(n, bent)) / 90°`
+/// into `skew_tex`, and write the edge-protected guarded value into
+/// `guard_tex` (neutral white where `skew > skew_threshold`).
+@compute @workgroup_size(1)
+fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
+    let coord = vec2<i32>(workgroup_id.xy);
+    let sample = textureLoad(position_tex, coord, 0);
+    if (sample.w <= 0.5) {
+        textureStore(skew_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        textureStore(guard_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    let surface_pos = sample.xyz;
+    let normal = normalize(textureLoad(normal_tex, coord, 0).xyz);
+    let basis = orthonormal_basis(normal);
+    let ray_origin = surface_pos + params.bias * normal;
+
+    var bent = vec3<f32>(0.0, 0.0, 0.0);
+    let n = params.rays;
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+        let local_dir = hemisphere_sample(i, n);
+        let dir = normalize(
+            local_dir.x * basis.b1 + local_dir.y * basis.b2 + local_dir.z * normal
+        );
+        var hit = false;
+        for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+            let tri = triangles[t];
+            if (hits_triangle(ray_origin, dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance)) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) {
+            bent = bent + dir;
+        }
+    }
+
+    // Fully occluded: no unoccluded direction exists — the projection is
+    // still valid, so skew reads 0 (not NaN, not 1).
+    var skew = 0.0;
+    let bent_len = length(bent);
+    if (bent_len > EPS) {
+        let cos_dev = clamp(dot(normal, bent / bent_len), -1.0, 1.0);
+        skew = acos(cos_dev) / (PI * 0.5);
+    }
+    skew = clamp(skew, 0.0, 1.0);
+    textureStore(skew_tex, coord, vec4<f32>(skew, skew, skew, 1.0));
+
+    // Edge protection: the guard in the bake pass. Past-threshold texels
+    // bake the edge-safe neutral instead of the guarded value.
+    let guarded = textureLoad(guard_src_tex, coord, 0);
+    if (skew > params.skew_threshold) {
+        textureStore(guard_tex, coord, vec4<f32>(1.0, 1.0, 1.0, guarded.w));
+    } else {
+        textureStore(guard_tex, coord, guarded);
+    }
+}
+"#;

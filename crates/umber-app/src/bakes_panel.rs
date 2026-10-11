@@ -48,10 +48,33 @@
 //! are reported skipped for every other selected tile, never written
 //! under the wrong tile's name. The per-tile × per-map checklist matrix
 //! and the remaining per-tile bakers are wave-6 work.
+//!
+//! Bake mode (§6:57–59): skew correction, auto-rebake, and the bake log.
+//! - Skew (§6:57): the `bake_skew` checkbox bakes the paintable skew
+//!   deviation channel (`umber_bake::skew`, emitted per
+//!   `umber_gpu::bake_shaders::SKEW_BAKE_SHADER`'s contract) under
+//!   `<set>_skew.png`; the threshold slider drives the edge-protection
+//!   guard the worker applies to the AO arm, and the clamped texel count
+//!   lands in the bake log's warnings column. V1 skew files are FLAT
+//!   (zero measured deviation — the GPU emission wiring is the named
+//!   follow-up); the paint-combine, guard, and log columns are fully live
+//!   and headless-tested.
+//! - Auto-rebake (§6:58): every frame [`BakesPanel::sync_param_tracking`]
+//!   diffs the sliders against the last applied snapshot and marks
+//!   [`umber_bake::skew::AutoRebake`] + the [`umber_core::AffectedRegion`]
+//!   tile set; 500 ms after the last change [`BakesPanel::poll_autorebake`]
+//!   fires ONLY the affected (map ∩ checked, tile ∩ selected, set ∩
+//!   enabled) jobs through the same async queue as a manual Bake.
+//! - Bake log + cage (§6:59): [`BakeLog`] lists one entry per baked map
+//!   (timestamp, set, map, tile, duration, skew-clamped warnings); clicking
+//!   a row jumps to (highlights) the responsible settings row. The cage
+//!   toggle is panel state synced to the viewport's cage wireframe overlay
+//!   by the app shell, mirroring the wireframe/grid toggles.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fluent::FluentValue;
 use umber_mesh::FIRST_TILE;
@@ -79,6 +102,19 @@ pub const MAX_DILATION_ITERATIONS: u32 = 64;
 /// Fallback texture-set name when the mesh came from nowhere on disk
 /// (mirrors `umber_mesh::texture_set_name`'s own fallback).
 pub const FALLBACK_TEXTURE_SET: &str = "TextureSet";
+/// The skew map's file suffix (`<set>_skew.png`): kept as a local const
+/// (not `umber_mesh::MeshMapKind` — that enum feeds the viewport preview
+/// ids 1:1, so it cannot grow a tenth kind without a shader + test
+/// ripple; see the module docs). Must equal
+/// `umber_bake::BakeMap::Skew::file_stem_suffix` (pinned by test).
+pub const SKEW_SUFFIX: &str = "skew";
+/// The default skew edge-protection threshold in degrees (see
+/// `umber_bake::skew::DEFAULT_SKEW_THRESHOLD_DEG`).
+pub const DEFAULT_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::DEFAULT_SKEW_THRESHOLD_DEG;
+/// Minimum/maximum skew thresholds the slider allows.
+pub const MIN_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::MIN_SKEW_THRESHOLD_DEG;
+/// Maximum skew threshold (90° = protection effectively off).
+pub const MAX_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::MAX_SKEW_THRESHOLD_DEG;
 
 /// Which mesh map the panel can bake (the four `umber-bake` entry points
 /// the panel drives; a subset of [`umber_mesh::MeshMapKind`]).
@@ -122,12 +158,22 @@ impl BakeSelection {
 /// One finished map write (what the status line summarizes).
 #[derive(Debug, Clone)]
 pub struct BakeRecord {
-    /// Which map was written.
-    pub selection: BakeSelection,
+    /// Which map was written (`None` = the skew deviation channel —
+    /// the skew map is not a [`BakeSelection`]: it is a correction mask,
+    /// not a color bake, and it must not join `BakeSelection::ALL` or the
+    /// pre-skew plan tests change meaning).
+    pub selection: Option<BakeSelection>,
+    /// The texture set this write belongs to (the per-set checklist).
+    pub set: String,
+    /// The UDIM tile this write belongs to.
+    pub tile: u16,
     /// Where it was written.
     pub path: PathBuf,
     /// Wall time for bake + dilate + PNG encode of this map.
     pub elapsed_ms: u128,
+    /// Texels the edge-protection guard clamped (the bake log's warnings
+    /// column; 0 for unguarded maps and for skew maps themselves).
+    pub skew_clamped: usize,
 }
 
 /// Which mesh one bake job rasterizes.
@@ -229,6 +275,202 @@ pub fn skipped_note(skipped: &[(u16, BakeSelection)]) -> Option<String> {
     Some(tr_args("bakes.skipped-note", args))
 }
 
+/// A settings row the bake log can jump to (§6:59): clicking a log entry
+/// highlights the row responsible for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BakeSettingId {
+    /// Output resolution.
+    Resolution,
+    /// Hemisphere ray count.
+    Rays,
+    /// UV-padding dilation width.
+    Dilation,
+    /// Skew edge-protection threshold.
+    SkewThreshold,
+    /// Cage visualization toggle.
+    Cage,
+}
+
+/// One bake-log entry (§6:59): timestamp, map, set, duration, warnings
+/// (the skew-clamped texel counts).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BakeLogEntry {
+    /// Monotonic id (click identity for jump-to-setting).
+    pub id: u64,
+    /// Unix seconds when the bake finished.
+    pub timestamp_secs: u64,
+    /// The texture set baked.
+    pub set: String,
+    /// Which map (`None` = the skew deviation channel).
+    pub selection: Option<BakeSelection>,
+    /// The UDIM tile baked.
+    pub tile: u16,
+    /// Wall time for bake + dilate + PNG encode of this map.
+    pub duration_ms: u128,
+    /// Texels the edge-protection guard clamped.
+    pub skew_clamped: usize,
+}
+
+impl BakeLogEntry {
+    /// The map label shown in the log row (the checkbox label, so the log
+    /// and the checklist can never disagree about names).
+    pub fn map_label(&self) -> String {
+        match self.selection {
+            Some(selection) => selection.label(),
+            None => tr("bakes.map-skew"),
+        }
+    }
+
+    /// The one-line log row (the dragon's format probe target):
+    /// `[<time>] <set> <map> (tile <tile>): <ms> ms[ — <n> skew-clamped]`.
+    pub fn summary(&self) -> String {
+        let warnings = if self.skew_clamped == 0 {
+            String::new()
+        } else {
+            let args = [("count", FluentValue::from(self.skew_clamped))];
+            tr_args("bakes.log-warnings", args)
+        };
+        let args = [
+            ("time", FluentValue::from(self.timestamp_secs)),
+            ("set", FluentValue::from(self.set.clone())),
+            ("map", FluentValue::from(self.map_label())),
+            ("tile", FluentValue::from(self.tile)),
+            ("ms", FluentValue::from(self.duration_ms.to_string())),
+            ("warnings", FluentValue::from(warnings)),
+        ];
+        tr_args("bakes.log-entry", args)
+    }
+
+    /// The settings row this entry jumps to: skew-clamped entries point
+    /// at the threshold that clamped them; skew-map entries at the same
+    /// threshold; AO/thickness (the raycast bakers) at the ray count;
+    /// position (whose only panel lever is the target size) at resolution;
+    /// curvature (whose strength is not a panel param) at dilation, the
+    /// post-pass every map shares.
+    pub fn setting_hint(&self) -> BakeSettingId {
+        if self.skew_clamped > 0 || self.selection.is_none() {
+            BakeSettingId::SkewThreshold
+        } else if matches!(
+            self.selection,
+            Some(BakeSelection::Ao) | Some(BakeSelection::Thickness)
+        ) {
+            BakeSettingId::Rays
+        } else if matches!(self.selection, Some(BakeSelection::Position)) {
+            BakeSettingId::Resolution
+        } else {
+            BakeSettingId::Dilation
+        }
+    }
+}
+
+/// The per-bake entry list (§6:59): one [`BakeLogEntry`] per written map,
+/// oldest first.
+#[derive(Debug, Clone, Default)]
+pub struct BakeLog {
+    entries: Vec<BakeLogEntry>,
+    next_id: u64,
+}
+
+impl BakeLog {
+    /// Empty log.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends one entry; returns its id (the jump-to-setting handle).
+    pub fn push(
+        &mut self,
+        timestamp_secs: u64,
+        set: String,
+        selection: Option<BakeSelection>,
+        tile: u16,
+        duration_ms: u128,
+        skew_clamped: usize,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entries.push(BakeLogEntry {
+            id,
+            timestamp_secs,
+            set,
+            selection,
+            tile,
+            duration_ms,
+            skew_clamped,
+        });
+        id
+    }
+
+    /// Every entry, oldest first.
+    pub fn entries(&self) -> &[BakeLogEntry] {
+        &self.entries
+    }
+
+    /// Entry count.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no bake has been logged yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Finds an entry by id (the log row click target).
+    pub fn entry(&self, id: u64) -> Option<&BakeLogEntry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+}
+
+/// One per-set checklist row (§6:59): the texture-set name plus whether it
+/// bakes. Synced from the mesh each frame (like the tile selector);
+/// manual Bakes start from the mesh's single set until the first sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetCheck {
+    /// Texture-set name (material name, or the file-stem fallback).
+    pub name: String,
+    /// Whether this set bakes (manual + auto-rebake alike).
+    pub enabled: bool,
+}
+
+/// What one auto-rebake firing covers (§6:58): the affected maps (plus
+/// whether the dirty skew tiles ride along), tiles, and sets — the
+/// per-map/per-set checklist intersected with the dirty sets. The caller
+/// hands it to the same async queue as a manual Bake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoRebakeFire {
+    /// Affected + still-checked maps, in bake order.
+    pub maps: Vec<BakeSelection>,
+    /// Whether the skew tiles bake too (dirty + checked).
+    pub skew: bool,
+    /// Affected + still-selected tiles.
+    pub tiles: Vec<u16>,
+    /// Enabled sets.
+    pub sets: Vec<String>,
+}
+
+/// The [`umber_bake::BakeMap`] behind a panel checkbox (the auto-rebake
+/// dirty set speaks `BakeMap`; the checklist speaks `BakeSelection`).
+pub fn bake_map_of(selection: BakeSelection) -> umber_bake::BakeMap {
+    match selection {
+        BakeSelection::Ao => umber_bake::BakeMap::AmbientOcclusion,
+        BakeSelection::Curvature => umber_bake::BakeMap::Curvature,
+        BakeSelection::Thickness => umber_bake::BakeMap::Thickness,
+        BakeSelection::Position => umber_bake::BakeMap::Position,
+    }
+}
+
+/// The status-line note for skew tiles v1 cannot bake (`None` when every
+/// selected tile is 1001 / the skew channel is off).
+pub fn skipped_skew_note(skipped: &[u16]) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
+    }
+    let tiles: Vec<String> = skipped.iter().map(|t| t.to_string()).collect();
+    let args = [("tiles", FluentValue::from(tiles.join(", ")))];
+    Some(tr_args("bakes.skipped-skew-note", args))
+}
+
 /// What [`BakesPanel::show`] needs from the app each frame.
 ///
 /// `gpu`/`mesh` are `Option` so the panel can gate itself: `None` mesh
@@ -258,9 +500,17 @@ struct BakeRequest {
     size: u32,
     rays: u32,
     dilation_iterations: u32,
+    /// Skew edge-protection threshold in degrees (the AO guard).
+    skew_threshold_deg: f32,
     /// The planned jobs, each with its output path (resolved on the main
-    /// thread from the panel's output dir + texture-set name).
-    jobs: Vec<(BakeJob, PathBuf)>,
+    /// thread from the panel's output dir + texture-set name) and the set
+    /// it belongs to (the per-set checklist fan-out).
+    jobs: Vec<(BakeJob, PathBuf, String)>,
+    /// The skew-map tiles to emit, each with its output path and set
+    /// (the whole-mesh path only rasterizes `[0, 1]`, so skew — like
+    /// curvature — bakes for tile 1001 only; see
+    /// [`BakesPanel::skew_tiles`]).
+    skew_jobs: Vec<(u16, PathBuf, String)>,
 }
 
 /// One in-flight bake on a worker thread: the receiving end of its
@@ -269,13 +519,20 @@ pub struct BakeJobHandle {
     receiver: mpsc::Receiver<BakeOutcome>,
     /// The plan's skipped (tile, map) pairs, appended to the done status.
     skipped: Vec<(u16, BakeSelection)>,
+    /// The skew tiles v1 cannot bake (whole-mesh path = tile 1001 only),
+    /// appended to the done status after [`skipped_note`].
+    skipped_skew: Vec<u16>,
 }
 
 impl BakeJobHandle {
     /// Runs `work` on a fresh named thread; its result arrives through
     /// [`Self::try_finish`]. The thread is detached (its `JoinHandle` is
     /// dropped): completion is observed through the channel alone.
-    fn spawn<F>(skipped: Vec<(u16, BakeSelection)>, work: F) -> std::io::Result<Self>
+    fn spawn<F>(
+        skipped: Vec<(u16, BakeSelection)>,
+        skipped_skew: Vec<u16>,
+        work: F,
+    ) -> std::io::Result<Self>
     where
         F: FnOnce() -> BakeOutcome + Send + 'static,
     {
@@ -286,7 +543,11 @@ impl BakeJobHandle {
                 // The panel may be gone (app quit); a dead receiver is fine.
                 let _ = sender.send(work());
             })?;
-        Ok(Self { receiver, skipped })
+        Ok(Self {
+            receiver,
+            skipped,
+            skipped_skew,
+        })
     }
 
     /// The job's result once the worker has finished, `None` while it is
@@ -314,8 +575,37 @@ pub struct BakesPanel {
     bake_curvature: bool,
     bake_thickness: bool,
     bake_position: bool,
+    /// Whether the skew deviation channel bakes (default off, like the
+    /// bent-normal toggle: a correction mask, opt-in per bake).
+    bake_skew: bool,
     rays: u32,
     dilation_iterations: u32,
+    /// Skew edge-protection threshold in degrees (the guard + the log's
+    /// warnings column).
+    skew_threshold_deg: f32,
+    /// Auto-rebake on parameter change (§6:58; default off — background
+    /// bakes are opt-in).
+    auto_rebake: bool,
+    /// The debounce dirty set (§6:58).
+    auto_state: umber_bake::skew::AutoRebake,
+    /// The dirty tiles (§6:58's WHERE; the WHAT is `auto_state`).
+    affected_tiles: umber_core::AffectedRegion,
+    /// The slider snapshot `sync_param_tracking` last consumed (param
+    /// changes are diffed per frame, so slider drags mark exactly once
+    /// per changed value without touching the setters' purity).
+    applied_resolution: u32,
+    applied_rays: u32,
+    applied_dilation: u32,
+    applied_skew_threshold_deg: f32,
+    /// The per-set checklist (§6:59), synced from the mesh each frame.
+    sets: Vec<SetCheck>,
+    /// Whether the cage wireframe overlay shows (synced to the viewport
+    /// by the app shell, like wireframe/grid).
+    show_cage: bool,
+    /// The row the last log click jumped to (highlighted in `show`).
+    highlighted_setting: Option<BakeSettingId>,
+    /// The per-bake entry list (§6:59).
+    log: BakeLog,
     output_dir: PathBuf,
     status: String,
     last_records: Vec<BakeRecord>,
@@ -338,8 +628,21 @@ impl BakesPanel {
             bake_curvature: true,
             bake_thickness: true,
             bake_position: true,
+            bake_skew: false,
             rays: DEFAULT_RAYS,
             dilation_iterations: DEFAULT_DILATION_ITERATIONS,
+            skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            auto_rebake: false,
+            auto_state: umber_bake::skew::AutoRebake::new(),
+            affected_tiles: umber_core::AffectedRegion::new(),
+            applied_resolution: DEFAULT_RESOLUTION,
+            applied_rays: DEFAULT_RAYS,
+            applied_dilation: DEFAULT_DILATION_ITERATIONS,
+            applied_skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            sets: Vec::new(),
+            show_cage: false,
+            highlighted_setting: None,
+            log: BakeLog::new(),
             output_dir,
             status: tr("bakes.no-bake-yet"),
             last_records: Vec::new(),
@@ -456,9 +759,276 @@ impl BakesPanel {
             .collect()
     }
 
-    /// Whether at least one map is checked.
+    /// Whether at least one map is checked (the skew channel counts: a
+    /// skew-only bake writes just the correction mask).
     pub fn any_selected(&self) -> bool {
-        self.bake_ao || self.bake_curvature || self.bake_thickness || self.bake_position
+        self.bake_ao
+            || self.bake_curvature
+            || self.bake_thickness
+            || self.bake_position
+            || self.bake_skew
+    }
+
+    /// Whether the skew deviation channel bakes.
+    pub fn skew_enabled(&self) -> bool {
+        self.bake_skew
+    }
+
+    /// Enables or disables the skew channel's checkbox.
+    pub fn set_skew_enabled(&mut self, enabled: bool) {
+        self.bake_skew = enabled;
+    }
+
+    /// The skew edge-protection threshold in degrees.
+    pub fn skew_threshold_deg(&self) -> f32 {
+        self.skew_threshold_deg
+    }
+
+    /// Sets the skew threshold, clamping to
+    /// `MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG`.
+    pub fn set_skew_threshold_deg(&mut self, threshold_deg: f32) {
+        self.skew_threshold_deg = threshold_deg
+            .clamp(MIN_SKEW_THRESHOLD_DEG, MAX_SKEW_THRESHOLD_DEG);
+    }
+
+    /// Whether auto-rebake fires on parameter change (§6:58).
+    pub fn auto_rebake(&self) -> bool {
+        self.auto_rebake
+    }
+
+    /// Enables or disables auto-rebake.
+    pub fn set_auto_rebake(&mut self, enabled: bool) {
+        self.auto_rebake = enabled;
+    }
+
+    /// Whether the cage wireframe overlay shows (the app shell syncs the
+    /// viewport from this each frame).
+    pub fn show_cage(&self) -> bool {
+        self.show_cage
+    }
+
+    /// Shows or hides the cage overlay.
+    pub fn set_show_cage(&mut self, on: bool) {
+        self.show_cage = on;
+    }
+
+    /// The row the last log click jumped to, if any (highlighted in `show`).
+    pub fn highlighted_setting(&self) -> Option<BakeSettingId> {
+        self.highlighted_setting
+    }
+
+    /// The bake log (§6:59).
+    pub fn bake_log(&self) -> &BakeLog {
+        &self.log
+    }
+
+    /// The skew-map tiles a bake covers: `(baked, skipped)`. The
+    /// whole-mesh path only rasterizes `[0, 1]` (tile 1001), so — like
+    /// curvature/thickness/position in [`plan_bake`] — skew bakes for tile
+    /// 1001 only and is reported skipped for every other selected tile.
+    /// A skew file is never written under the wrong tile's name.
+    pub fn skew_tiles(&self, present: &[u16], selected: &[u16]) -> (Vec<u16>, Vec<u16>) {
+        if !self.bake_skew {
+            return (Vec::new(), Vec::new());
+        }
+        let single = present.is_empty() || present == [FIRST_TILE];
+        if single {
+            return (vec![FIRST_TILE], Vec::new());
+        }
+        let mut baked = Vec::new();
+        let mut skipped = Vec::new();
+        for tile in selected {
+            if *tile == FIRST_TILE {
+                baked.push(*tile);
+            } else {
+                skipped.push(*tile);
+            }
+        }
+        (baked, skipped)
+    }
+
+    /// The skew channel's output path: `<dir>/<set>_skew.png` (the
+    /// `TextureSetName_map` convention with [`SKEW_SUFFIX`]).
+    pub fn skew_output_path_for(&self, texture_set: &str) -> PathBuf {
+        self.output_dir.join(format!("{texture_set}_{SKEW_SUFFIX}.png"))
+    }
+
+    /// The tile-suffixed skew output path: `<dir>/<set>_skew_<tile>.png`.
+    pub fn skew_tiled_output_path_for(&self, texture_set: &str, tile: u16) -> PathBuf {
+        self.output_dir
+            .join(format!("{texture_set}_{SKEW_SUFFIX}_{tile}.png"))
+    }
+
+    /// The per-set checklist names for `mesh`: one row per material, or
+    /// the single texture-set name when the mesh carries no materials
+    /// (mirrors `umber_mesh::texture_set_name`'s fallback chain).
+    pub fn set_names_for(mesh: &umber_mesh::MeshData, mesh_path: Option<&Path>) -> Vec<String> {
+        if mesh.material_names.is_empty() {
+            let fallback = PathBuf::from(FALLBACK_TEXTURE_SET);
+            vec![umber_mesh::texture_set_name(
+                mesh_path.unwrap_or(&fallback),
+                mesh,
+            )]
+        } else {
+            let mut names = mesh.material_names.clone();
+            names.sort();
+            names.dedup();
+            names
+        }
+    }
+
+    /// Syncs the per-set checklist from the mesh (new sets arrive enabled
+    /// — Painter checks all sets by default; unchecked-away sets stay
+    /// unchecked while present; vanished sets drop).
+    pub fn sync_sets(&mut self, names: &[String]) {
+        let mut next = Vec::with_capacity(names.len());
+        for name in names {
+            let enabled = self
+                .sets
+                .iter()
+                .find(|s| &s.name == name)
+                .map_or(true, |s| s.enabled);
+            next.push(SetCheck {
+                name: name.clone(),
+                enabled,
+            });
+        }
+        self.sets = next;
+    }
+
+    /// The checklist rows (test hook for the UI's checkboxes).
+    pub fn sets(&self) -> &[SetCheck] {
+        &self.sets
+    }
+
+    /// Enables or disables one set's checkbox; `false` for an unknown name.
+    pub fn set_set_enabled(&mut self, name: &str, enabled: bool) -> bool {
+        match self.sets.iter_mut().find(|s| s.name == name) {
+            Some(row) => {
+                row.enabled = enabled;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The enabled sets' names (what manual + auto bakes cover).
+    pub fn enabled_sets(&self) -> Vec<String> {
+        self.sets
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// Checks every set and every map (the Bake-all button: one click
+    /// from "nothing selected" to a full bake).
+    pub fn bake_all_sets(&mut self) {
+        for row in &mut self.sets {
+            row.enabled = true;
+        }
+        self.bake_ao = true;
+        self.bake_curvature = true;
+        self.bake_thickness = true;
+        self.bake_position = true;
+        self.bake_skew = true;
+    }
+
+    /// Diffs the sliders against the last consumed snapshot and marks the
+    /// dirty maps + tiles (§6:58). Called once per frame from `show` (and
+    /// directly by tests with manual `Instant`s). Slider drags re-arm the
+    /// 500 ms debounce on every change, so a drag fires once, after it ends.
+    pub fn sync_param_tracking(&mut self, now: Instant, selected_tiles: &[u16]) {
+        let mut changed = Vec::new();
+        if self.resolution != self.applied_resolution {
+            changed.push(umber_bake::skew::BakeParam::Resolution);
+            self.applied_resolution = self.resolution;
+        }
+        if self.rays != self.applied_rays {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_rays = self.rays;
+        }
+        if self.dilation_iterations != self.applied_dilation {
+            changed.push(umber_bake::skew::BakeParam::Dilation);
+            self.applied_dilation = self.dilation_iterations;
+        }
+        if (self.skew_threshold_deg - self.applied_skew_threshold_deg).abs() > f32::EPSILON {
+            changed.push(umber_bake::skew::BakeParam::SkewThreshold);
+            self.applied_skew_threshold_deg = self.skew_threshold_deg;
+        }
+        for param in changed {
+            self.auto_state.mark_param_change(param, now);
+            self.affected_tiles.mark_tiles(selected_tiles);
+        }
+    }
+
+    /// The pending auto-rebake (§6:58): the affected maps ∩ checked maps
+    /// (plus the skew tiles when the skew map is both dirty and checked),
+    /// over the affected tiles ∩ selected tiles, for the enabled sets.
+    /// `None` unless auto-rebake is on, the 500 ms window has elapsed, and
+    /// something affected is still checked — the existing async queue
+    /// absorbs the returned fire (one bake at a time: `None` while a job
+    /// is in flight). Firing takes (clears) both dirty sets.
+    pub fn poll_autorebake(
+        &mut self,
+        now: Instant,
+        selected_tiles: &[u16],
+    ) -> Option<AutoRebakeFire> {
+        if !self.auto_rebake || self.is_baking() || !self.auto_state.rebake_due(now) {
+            return None;
+        }
+        let dirty = self.auto_state.take_dirty()?;
+        let affected_tiles = self.affected_tiles.take();
+        let tiles: Vec<u16> = selected_tiles
+            .iter()
+            .copied()
+            .filter(|t| affected_tiles.contains(t))
+            .collect();
+        let mut maps = Vec::new();
+        for selection in BakeSelection::ALL {
+            if self.is_map_enabled(selection)
+                && dirty.contains(&bake_map_of(selection))
+            {
+                maps.push(selection);
+            }
+        }
+        let skew = self.bake_skew && dirty.contains(&umber_bake::BakeMap::Skew);
+        let sets = self.enabled_sets();
+        if (maps.is_empty() && !skew) || tiles.is_empty() || sets.is_empty() {
+            return None;
+        }
+        Some(AutoRebakeFire { maps, skew, tiles, sets })
+    }
+
+    /// Clicks a log row: highlights the responsible settings row (§6:59's
+    /// jump-to-setting). Returns `false` for an unknown entry id.
+    pub fn jump_to_setting(&mut self, entry_id: u64) -> bool {
+        match self.log.entry(entry_id) {
+            Some(entry) => {
+                self.highlighted_setting = Some(entry.setting_hint());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Prefixes the highlighted settings row with the jump marker (the
+    /// `▶` glyph is hardcoded, like the history panel's `↶`/`↷`).
+    pub fn row_label(&self, id: BakeSettingId, text: String) -> String {
+        if self.highlighted_setting == Some(id) {
+            format!("▶ {text}")
+        } else {
+            text
+        }
+    }
+
+    /// Unix seconds now (bake-log timestamps; `0` when the clock is
+    /// unavailable — never a panic).
+    pub fn now_unix_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 
     /// Whether the Bake button is enabled: mesh + GPU present, at least
@@ -482,8 +1052,12 @@ impl BakesPanel {
         let Some(outcome) = job.try_finish() else {
             return true;
         };
-        let skipped = self.job.take().map(|job| job.skipped).unwrap_or_default();
-        self.apply_outcome(outcome, &skipped);
+        let (skipped, skipped_skew) = self
+            .job
+            .take()
+            .map(|job| (job.skipped, job.skipped_skew))
+            .unwrap_or_default();
+        self.apply_outcome(outcome, &skipped, &skipped_skew);
         false
     }
 
@@ -526,24 +1100,60 @@ impl BakesPanel {
             ui.label(tr("bakes.no-gpu"));
         }
 
-        crate::size_presets::size_combo(ui, &tr("bakes.resolution"), &mut self.resolution);
+        // Resolution row (jump-highlightable via the marker prefix).
+        if self.highlighted_setting == Some(BakeSettingId::Resolution) {
+            ui.horizontal(|ui| {
+                ui.label("▶");
+                crate::size_presets::size_combo(ui, &tr("bakes.resolution"), &mut self.resolution);
+            });
+        } else {
+            crate::size_presets::size_combo(ui, &tr("bakes.resolution"), &mut self.resolution);
+        }
 
+        // Per-map checklist (§6:59) + the paintable skew channel (§6:57).
         ui.checkbox(&mut self.bake_ao, BakeSelection::Ao.label());
         ui.checkbox(&mut self.bake_curvature, BakeSelection::Curvature.label());
         ui.checkbox(&mut self.bake_thickness, BakeSelection::Thickness.label());
         ui.checkbox(&mut self.bake_position, BakeSelection::Position.label());
+        ui.checkbox(&mut self.bake_skew, tr("bakes.map-skew"));
 
         // UDIM tile selector: which present tiles the Bake covers (a
         // single-tile mesh shows `Tile 1001` with nothing to choose).
         if let Some(mesh) = ctx.mesh {
             self.tiles.sync(self.mesh_tiles.get(mesh));
+            self.sync_sets(&Self::set_names_for(mesh, ctx.mesh_path));
         }
         self.tiles.show(ui);
 
-        ui.add(egui::Slider::new(&mut self.rays, MIN_RAYS..=MAX_RAYS).text(tr("bakes.rays")));
+        // Per-set checklist (§6:59): one checkbox per texture set.
+        if !self.sets.is_empty() {
+            ui.label(tr("bakes.sets"));
+            for row in &mut self.sets {
+                ui.checkbox(&mut row.enabled, &row.name);
+            }
+        }
+
         ui.add(
-            egui::Slider::new(&mut self.dilation_iterations, 0..=MAX_DILATION_ITERATIONS)
-                .text(tr("bakes.dilation")),
+            egui::Slider::new(&mut self.rays, MIN_RAYS..=MAX_RAYS)
+                .text(self.row_label(BakeSettingId::Rays, tr("bakes.rays"))),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.dilation_iterations, 0..=MAX_DILATION_ITERATIONS).text(
+                self.row_label(BakeSettingId::Dilation, tr("bakes.dilation")),
+            ),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut self.skew_threshold_deg,
+                MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG,
+            )
+            .text(self.row_label(BakeSettingId::SkewThreshold, tr("bakes.skew-threshold"))),
+        );
+
+        ui.checkbox(&mut self.auto_rebake, tr("bakes.auto-rebake"));
+        ui.checkbox(
+            &mut self.show_cage,
+            self.row_label(BakeSettingId::Cage, tr("bakes.show-cage")),
         );
 
         ui.horizontal(|ui| {
@@ -562,15 +1172,66 @@ impl BakesPanel {
         if self.tiles.nothing_selected() {
             ui.label(tr("bakes.select-tile"));
         }
-        let enabled = self.can_bake(mesh_loaded, gpu_ready) && !self.tiles.nothing_selected();
-        if ui
-            .add_enabled(enabled, egui::Button::new(tr("button.bake")))
-            .clicked()
-        {
-            if let (Some(gpu), Some(mesh)) = (ctx.gpu, ctx.mesh) {
-                self.bake_now(&gpu.device, &gpu.queue, mesh, ctx.mesh_path);
+        let sets_ok = self.sets.is_empty() || !self.enabled_sets().is_empty();
+        if !sets_ok {
+            ui.label(tr("bakes.select-set"));
+        }
+        let enabled =
+            self.can_bake(mesh_loaded, gpu_ready) && !self.tiles.nothing_selected() && sets_ok;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(enabled, egui::Button::new(tr("button.bake")))
+                .clicked()
+            {
+                if let (Some(gpu), Some(mesh)) = (ctx.gpu, ctx.mesh) {
+                    self.bake_now(&gpu.device, &gpu.queue, mesh, ctx.mesh_path);
+                }
+            }
+            if ui
+                .add_enabled(enabled, egui::Button::new(tr("bakes.bake-all")))
+                .clicked()
+            {
+                self.bake_all_sets();
+                if let (Some(gpu), Some(mesh)) = (ctx.gpu, ctx.mesh) {
+                    self.bake_now(&gpu.device, &gpu.queue, mesh, ctx.mesh_path);
+                }
+            }
+        });
+
+        // Param tracking + auto-rebake (§6:58): diff the sliders, then fire
+        // through the same async queue when the debounce elapsed. Runs
+        // after the controls above so this frame's checkbox state applies.
+        if let Some(mesh) = ctx.mesh {
+            let present = self.mesh_tiles.get(mesh).to_vec();
+            let selected = self.tiles.resolve(&present);
+            self.sync_param_tracking(Instant::now(), &selected);
+            if let (Some(gpu), true) = (ctx.gpu, self.auto_rebake) {
+                let now = Instant::now();
+                if let Some(fire) = self.poll_autorebake(now, &selected) {
+                    self.bake_filtered(&gpu.device, &gpu.queue, mesh, ctx.mesh_path, &fire);
+                }
             }
         }
+
+        // Bake log (§6:59): one row per baked map; a click jumps to the
+        // responsible settings row (highlighted above).
+        ui.collapsing(tr("bakes.log"), |ui| {
+            if self.log.is_empty() {
+                ui.label(tr("bakes.log-empty"));
+            } else {
+                let rows: Vec<(u64, String)> = self
+                    .log
+                    .entries()
+                    .iter()
+                    .map(|e| (e.id, e.summary()))
+                    .collect();
+                for (id, summary) in rows {
+                    if ui.selectable_label(false, &summary).clicked() {
+                        self.jump_to_setting(id);
+                    }
+                }
+            }
+        });
 
         ui.separator();
         ui.horizontal_wrapped(|ui| {
@@ -597,21 +1258,101 @@ impl BakesPanel {
             return;
         }
         let present = self.mesh_tiles.get(mesh).to_vec();
-        let plan = self.bake_plan(&present);
+        let selected = self.tiles.resolve(&present);
+        let plan = plan_bake(&self.selected_maps(), &present, &selected);
+        let (skew_tiles, skew_skipped) = self.skew_tiles(&present, &selected);
+        let sets = self.sets_for_bake(mesh, mesh_path);
+        self.bake_jobs(device, queue, mesh, plan, skew_tiles, skew_skipped, sets);
+    }
+
+    /// The sets one bake writes: the enabled checklist sets, or the
+    /// mesh's single set when the checklist never synced (the pre-§6
+    /// single-set path, byte-identical to before).
+    fn sets_for_bake(
+        &self,
+        mesh: &umber_mesh::MeshData,
+        mesh_path: Option<&Path>,
+    ) -> Vec<String> {
+        if self.sets.is_empty() {
+            return Self::set_names_for(mesh, mesh_path);
+        }
+        self.enabled_sets()
+    }
+
+    /// Starts a filtered bake (the auto-rebake fire path): only `fire`'s
+    /// maps over its tiles for its sets. A no-op while a bake is already
+    /// in flight (the pending dirty set was already taken — the next
+    /// frame's tracking re-marks what is still stale).
+    fn bake_filtered(
+        &mut self,
+        device: &umber_gpu::WgpuDevice,
+        queue: &umber_gpu::WgpuQueue,
+        mesh: &umber_mesh::MeshData,
+        mesh_path: Option<&Path>,
+        fire: &AutoRebakeFire,
+    ) {
+        if self.is_baking() {
+            return;
+        }
+        let present = self.mesh_tiles.get(mesh).to_vec();
+        let plan = plan_bake(&fire.maps, &present, &fire.tiles);
+        let (skew_tiles, skew_skipped) = if fire.skew {
+            self.skew_tiles(&present, &fire.tiles)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        // The auto fire resolves its own sets (already checklist-filtered);
+        // fall back to the mesh's single set when the checklist is empty.
         let fallback = PathBuf::from(FALLBACK_TEXTURE_SET);
-        let set = umber_mesh::texture_set_name(mesh_path.unwrap_or(&fallback), mesh);
-        let jobs = plan
-            .jobs
-            .iter()
-            .map(|job| {
+        let single_set = umber_mesh::texture_set_name(mesh_path.unwrap_or(&fallback), mesh);
+        let sets = if fire.sets.is_empty() {
+            vec![single_set]
+        } else {
+            fire.sets.clone()
+        };
+        // Naming follows the plan (tiled iff the MESH is multi-tile —
+        // plan_bake derives it from `present`, not from the fire's tile
+        // subset — so a single-tile auto fire keeps the tiled names).
+        self.bake_jobs(device, queue, mesh, plan, skew_tiles, skew_skipped, sets);
+    }
+
+    /// Resolves output paths per set and spawns the worker: one job per
+    /// (set × planned job) plus one skew file per (set × skew tile). The
+    /// per-set fan-out writes the shared bake under each enabled set's
+    /// name (per-material masked bakes are the named follow-up — v1
+    /// establishes the checklist + naming, not the masking).
+    fn bake_jobs(
+        &mut self,
+        device: &umber_gpu::WgpuDevice,
+        queue: &umber_gpu::WgpuQueue,
+        mesh: &umber_mesh::MeshData,
+        plan: BakePlan,
+        skew_tiles: Vec<u16>,
+        skew_skipped: Vec<u16>,
+        sets: Vec<String>,
+    ) {
+        let mut jobs = Vec::new();
+        let mut skew_jobs = Vec::new();
+        for set in &sets {
+            for job in &plan.jobs {
                 let path = if plan.tiled {
-                    self.tiled_output_path_for(&set, job.selection, job.tile)
+                    self.tiled_output_path_for(set, job.selection, job.tile)
                 } else {
-                    self.output_path_for(&set, job.selection)
+                    self.output_path_for(set, job.selection)
                 };
-                (*job, path)
-            })
-            .collect();
+                jobs.push((*job, path, set.clone()));
+            }
+            for tile in &skew_tiles {
+                let path = if plan.tiled {
+                    self.skew_tiled_output_path_for(set, *tile)
+                } else {
+                    self.skew_output_path_for(set)
+                };
+                skew_jobs.push((*tile, path, set.clone()));
+            }
+        }
+        let count = jobs.len() + skew_jobs.len();
+        let skipped = plan.skipped;
         let request = BakeRequest {
             device: device.clone(),
             queue: queue.clone(),
@@ -619,9 +1360,11 @@ impl BakesPanel {
             size: self.resolution,
             rays: self.rays,
             dilation_iterations: self.dilation_iterations,
+            skew_threshold_deg: self.skew_threshold_deg,
             jobs,
+            skew_jobs,
         };
-        self.start_job(plan.jobs.len(), plan.skipped, move || run_bake(request));
+        self.start_job(count, skipped, skew_skipped, move || run_bake(request));
     }
 
     /// Spawns `work` as the panel's bake job and shows the in-flight
@@ -632,6 +1375,7 @@ impl BakesPanel {
         &mut self,
         job_count: usize,
         skipped: Vec<(u16, BakeSelection)>,
+        skipped_skew: Vec<u16>,
         work: F,
     ) -> bool
     where
@@ -640,7 +1384,7 @@ impl BakesPanel {
         if self.is_baking() {
             return false;
         }
-        match BakeJobHandle::spawn(skipped, work) {
+        match BakeJobHandle::spawn(skipped, skipped_skew, work) {
             Ok(job) => {
                 self.status = tr_args("status.baking", [("count", FluentValue::from(job_count))]);
                 self.job = Some(job);
@@ -656,8 +1400,14 @@ impl BakesPanel {
     }
 
     /// Records a finished job's outcome in `status`/`last_records` — the
-    /// same status lines the synchronous Bake wrote.
-    fn apply_outcome(&mut self, outcome: BakeOutcome, skipped: &[(u16, BakeSelection)]) {
+    /// same status lines the synchronous Bake wrote — plus one bake-log
+    /// entry per written map (§6:59).
+    fn apply_outcome(
+        &mut self,
+        outcome: BakeOutcome,
+        skipped: &[(u16, BakeSelection)],
+        skipped_skew: &[u16],
+    ) {
         match outcome {
             Ok(records) => {
                 let total: u128 = records.iter().map(|r| r.elapsed_ms).sum();
@@ -681,7 +1431,21 @@ impl BakesPanel {
                 if let Some(note) = skipped_note(skipped) {
                     status.push_str(&format!(" — {note}"));
                 }
+                if let Some(note) = skipped_skew_note(skipped_skew) {
+                    status.push_str(&format!(" — {note}"));
+                }
                 self.status = status;
+                let now = Self::now_unix_secs();
+                for record in &records {
+                    self.log.push(
+                        now,
+                        record.set.clone(),
+                        record.selection,
+                        record.tile,
+                        record.elapsed_ms,
+                        record.skew_clamped,
+                    );
+                }
                 self.last_records = records;
             }
             Err(err) => {
@@ -699,6 +1463,15 @@ impl BakesPanel {
 /// convention, tile-suffixed when the plan is tiled). `Result`-typed so
 /// failures carry context instead of unwrapping; the first failure ends
 /// the bake (maps already written stay on disk, as before).
+///
+/// Skew (§6:57) rides along: skew jobs emit first (v1: the flat CPU-model
+/// map — zero measured deviation — per the module docs; the GPU
+/// `SKEW_BAKE_SHADER` wiring replaces this emission without touching the
+/// guard), and the AO arm — the skew-guarded baker — runs the
+/// edge-protection guard over its dilated bytes under this run's skew map
+/// for the same tile (no skew bytes for the tile = uncovered guard = no
+/// clamp, never a misaligned guard). The clamped count lands in the
+/// record (the bake log's warnings column).
 fn run_bake(request: BakeRequest) -> BakeOutcome {
     use anyhow::Context as _;
 
@@ -709,17 +1482,52 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         size,
         rays,
         dilation_iterations,
+        skew_threshold_deg,
         jobs,
+        skew_jobs,
     } = request;
     let (device, queue, mesh) = (&device, &queue, &mesh);
     let dilate = umber_bake::DilateParams::new(dilation_iterations);
+    let threshold_byte = umber_bake::skew::skew_threshold_byte(skew_threshold_deg);
     let mut records = Vec::new();
+    let mut skew_by_tile: HashMap<u16, Vec<u8>> = HashMap::new();
 
-    for (job, path) in jobs {
+    for (tile, path, set) in skew_jobs {
+        let started = Instant::now();
+        let texels = (size as usize) * (size as usize);
+        // V1 flat emission (see this function's doc comment).
+        let baked = umber_bake::skew::skew_map_from_deviations(
+            &vec![0.0f32; texels],
+            &vec![true; texels],
+            size,
+            size,
+        );
+        let combined = crate::bake_sources::combine_skew_with_paint(&baked, None);
+        umber_export::png::write_png(
+            &path,
+            size,
+            size,
+            &combined,
+            umber_export::png::Transfer::Srgb,
+        )
+        .with_context(|| format!("writing {}", path.display()))?;
+        skew_by_tile.insert(tile, combined);
+        records.push(BakeRecord {
+            selection: None,
+            set,
+            tile,
+            path,
+            elapsed_ms: started.elapsed().as_millis(),
+            skew_clamped: 0,
+        });
+    }
+
+    for (job, path, set) in jobs {
         let selection = job.selection;
         let started = Instant::now();
         // `plan_bake` routes only AO to `BakeSource::Tile`; every
         // other map's job is a whole-mesh bake.
+        let mut skew_clamped = 0usize;
         let bytes: Vec<u8> = match selection {
             BakeSelection::Ao => {
                 // Shared with the Export dialog (`bake_sources::bake_ao`)
@@ -733,8 +1541,20 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                         device, queue, mesh, size, rays, job.tile,
                     )?,
                 };
-                umber_bake::dilation::dilate_map(device, queue, &raw, size, size, &dilate)
-                    .context("ao dilation")?
+                let mut dilated =
+                    umber_bake::dilation::dilate_map(device, queue, &raw, size, size, &dilate)
+                        .context("ao dilation")?;
+                // Edge protection (§6:57): the guard in the bake pass,
+                // over the DILATED bytes (the guard sees what ships).
+                if let Some(skew) = skew_by_tile.get(&job.tile) {
+                    skew_clamped = umber_bake::skew::apply_edge_protection(
+                        &mut dilated,
+                        skew,
+                        threshold_byte,
+                        umber_bake::skew::EDGE_SAFE_NEUTRAL,
+                    );
+                }
+                dilated
             }
             BakeSelection::Curvature => {
                 let raw = umber_bake::curvature::bake_curvature_mesh(
@@ -776,9 +1596,12 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         umber_export::png::write_png(&path, size, size, &bytes, umber_export::png::Transfer::Srgb)
             .with_context(|| format!("writing {}", path.display()))?;
         records.push(BakeRecord {
-            selection,
+            selection: Some(selection),
+            set,
+            tile: job.tile,
             path,
             elapsed_ms: started.elapsed().as_millis(),
+            skew_clamped,
         });
     }
     Ok(records)
@@ -1161,9 +1984,12 @@ mod tests {
 
     fn record(name: &str, elapsed_ms: u128) -> BakeRecord {
         BakeRecord {
-            selection: BakeSelection::Ao,
+            selection: Some(BakeSelection::Ao),
+            set: "Sword".to_string(),
+            tile: FIRST_TILE,
             path: Path::new("/tmp/umber-bakes-test").join(name),
             elapsed_ms,
+            skew_clamped: 0,
         }
     }
 
@@ -1174,7 +2000,7 @@ mod tests {
         // ran inline (or a poll that never drains) fails here.
         let mut p = panel();
         let (release, work) = gated(Ok(vec![record("Sword_ambient_occlusion.png", 7)]));
-        assert!(p.start_job(1, vec![(1002, BakeSelection::Curvature)], work));
+        assert!(p.start_job(1, vec![(1002, BakeSelection::Curvature)], Vec::new(), work));
         assert!(p.is_baking());
         // Worker parked on the gate: polling reports in-flight, and the
         // panel shows the baking status with no records yet.
@@ -1202,13 +2028,13 @@ mod tests {
         let mut p = panel();
         assert!(p.can_bake(true, true));
         let (release, work) = gated(Ok(vec![record("first.png", 1)]));
-        assert!(p.start_job(1, Vec::new(), work));
+        assert!(p.start_job(1, Vec::new(), Vec::new(), work));
         // The button's enabled logic: off while baking, whatever else holds.
         assert!(!p.can_bake(true, true));
         // A second click is a no-op: the in-flight job stays the one that
         // lands (the second body would report "second.png").
         let (_second_release, second) = gated(Ok(vec![record("second.png", 2)]));
-        assert!(!p.start_job(1, Vec::new(), second));
+        assert!(!p.start_job(1, Vec::new(), Vec::new(), second));
         assert_eq!(p.status(), "Baking 1 map…");
 
         release.send(()).expect("worker is waiting on the gate");
@@ -1222,12 +2048,12 @@ mod tests {
     fn failed_job_reaches_the_status_line_and_keeps_old_records() {
         let mut p = panel();
         let (release, work) = gated(Ok(vec![record("old.png", 3)]));
-        p.start_job(1, Vec::new(), work);
+        p.start_job(1, Vec::new(), Vec::new(), work);
         release.send(()).unwrap();
         await_job(&mut p);
 
         let (release, work) = gated(Err(anyhow::anyhow!("empty mesh").context("ao bake")));
-        assert!(p.start_job(4, Vec::new(), work));
+        assert!(p.start_job(4, Vec::new(), Vec::new(), work));
         assert_eq!(p.status(), "Baking 4 maps…");
         release.send(()).unwrap();
         await_job(&mut p);
@@ -1245,7 +2071,12 @@ mod tests {
         // must turn `Disconnected` into a failure and re-enable the button
         // (treating it like `Empty` would show "Baking…" forever).
         let mut p = panel();
-        assert!(p.start_job(1, Vec::new(), || panic!("simulated wgpu validation panic")));
+        assert!(p.start_job(
+            1,
+            Vec::new(),
+            Vec::new(),
+            || panic!("simulated wgpu validation panic")
+        ));
         await_job(&mut p);
         assert!(!p.is_baking());
         assert!(
@@ -1332,5 +2163,299 @@ mod tests {
         );
         assert!(p.last_records().is_empty());
         assert!(p.can_bake(true, true));
+    }
+
+    // --- Bake mode (§6:57–59) -------------------------------------------
+
+    #[test]
+    fn skew_channel_defaults_off_and_threshold_clamps() {
+        let mut p = panel();
+        assert!(!p.skew_enabled());
+        assert_eq!(p.skew_threshold_deg(), DEFAULT_SKEW_THRESHOLD_DEG);
+        assert_eq!(p.skew_threshold_deg(), 15.0);
+        // The local suffix pins the bake-engine convention.
+        assert_eq!(SKEW_SUFFIX, umber_bake::BakeMap::Skew.file_stem_suffix());
+        assert_eq!(SKEW_SUFFIX, "skew");
+        assert!(!crate::bake_sources::SKEW_CHANNEL_NAME.is_empty());
+
+        p.set_skew_threshold_deg(-5.0);
+        assert_eq!(p.skew_threshold_deg(), MIN_SKEW_THRESHOLD_DEG);
+        p.set_skew_threshold_deg(500.0);
+        assert_eq!(p.skew_threshold_deg(), MAX_SKEW_THRESHOLD_DEG);
+        p.set_skew_threshold_deg(20.0);
+        assert_eq!(p.skew_threshold_deg(), 20.0);
+
+        p.set_skew_enabled(true);
+        assert!(p.skew_enabled());
+        assert!(p.any_selected());
+        // Skew-only selection still bakes (the mask alone is a valid bake).
+        for selection in BakeSelection::ALL {
+            p.set_map_enabled(selection, false);
+        }
+        assert!(p.any_selected());
+        assert!(p.can_bake(true, true));
+        p.set_skew_enabled(false);
+        assert!(!p.any_selected());
+
+        // Skew output paths follow the TextureSetName_map convention.
+        let dir = Path::new("/tmp/umber-bakes-test");
+        assert_eq!(p.skew_output_path_for("Sword"), dir.join("Sword_skew.png"));
+        assert_eq!(
+            p.skew_tiled_output_path_for("Sword", 1002),
+            dir.join("Sword_skew_1002.png")
+        );
+    }
+
+    #[test]
+    fn skew_tiles_route_1001_only() {
+        let mut p = panel();
+        // Off: no skew jobs, no skips.
+        assert_eq!(p.skew_tiles(&[1001], &[1001]), (Vec::new(), Vec::new()));
+        p.set_skew_enabled(true);
+        // Single-tile mesh: the pre-UDIM whole-mesh path covers 1001.
+        assert_eq!(p.skew_tiles(&[1001], &[1001]), (vec![1001], Vec::new()));
+        assert_eq!(p.skew_tiles(&[], &[]), (vec![1001], Vec::new()));
+        // Multi-tile mesh: 1001 bakes whole-mesh, the rest are reported
+        // skipped — never written under the wrong tile's name.
+        assert_eq!(p.skew_tiles(&[1001, 1002], &[1001, 1002]), (vec![1001], vec![1002]));
+        assert_eq!(p.skew_tiles(&[1001, 1002], &[1002]), (Vec::new(), vec![1002]));
+    }
+
+    #[test]
+    fn skipped_skew_note_names_tiles() {
+        assert_eq!(skipped_skew_note(&[]), None);
+        assert_eq!(
+            skipped_skew_note(&[1002, 1011]).as_deref(),
+            Some("skew bakes tile 1001 only, skipped tiles: 1002, 1011")
+        );
+    }
+
+    #[test]
+    fn bake_map_of_covers_the_checklist() {
+        // The auto-rebake dirty set (BakeMap) meets the checklist
+        // (BakeSelection) 1:1 for the four color maps; skew is panel
+        // state, not a BakeSelection (see BakeRecord's docs).
+        for (selection, map) in [
+            (BakeSelection::Ao, umber_bake::BakeMap::AmbientOcclusion),
+            (BakeSelection::Curvature, umber_bake::BakeMap::Curvature),
+            (BakeSelection::Thickness, umber_bake::BakeMap::Thickness),
+            (BakeSelection::Position, umber_bake::BakeMap::Position),
+        ] {
+            assert_eq!(bake_map_of(selection), map, "{selection:?}");
+        }
+    }
+
+    #[test]
+    fn sets_checklist_syncs_filters_and_bakes_all() {
+        // Material names become the checklist rows (sorted, deduped).
+        let mesh = umber_mesh::MeshData {
+            material_names: vec!["B".into(), "A".into(), "A".into()],
+            ..umber_mesh::MeshData::default()
+        };
+        assert_eq!(BakesPanel::set_names_for(&mesh, None), vec!["A".to_string(), "B".to_string()]);
+        // No materials: the single texture-set fallback (today's path).
+        let bare = umber_mesh::MeshData::default();
+        assert_eq!(
+            BakesPanel::set_names_for(&bare, Some(Path::new("/m/Sword.obj"))),
+            vec!["Sword".to_string()]
+        );
+
+        let mut p = panel();
+        assert!(p.sets().is_empty());
+        assert!(p.enabled_sets().is_empty());
+        p.sync_sets(&["A".to_string(), "B".to_string()]);
+        // New sets arrive enabled (Painter checks all sets by default).
+        assert_eq!(p.enabled_sets(), vec!["A".to_string(), "B".to_string()]);
+        assert!(p.set_set_enabled("B", false));
+        assert_eq!(p.enabled_sets(), vec!["A".to_string()]);
+        assert!(!p.set_set_enabled("Z", true));
+        // Re-sync keeps the unchecked-away set unchecked, drops vanished
+        // sets, enables brand-new ones.
+        p.sync_sets(&["B".to_string(), "C".to_string()]);
+        assert_eq!(
+            p.sets(),
+            &[
+                SetCheck {
+                    name: "B".to_string(),
+                    enabled: false,
+                },
+                SetCheck {
+                    name: "C".to_string(),
+                    enabled: true,
+                },
+            ]
+        );
+        // Bake-all re-checks everything: sets, maps, and skew.
+        for selection in BakeSelection::ALL {
+            p.set_map_enabled(selection, false);
+        }
+        p.set_skew_enabled(false);
+        p.bake_all_sets();
+        assert_eq!(p.enabled_sets(), vec!["B".to_string(), "C".to_string()]);
+        assert_eq!(p.selected_maps(), BakeSelection::ALL.to_vec());
+        assert!(p.skew_enabled());
+    }
+
+    #[test]
+    fn log_entry_format_and_jump_to_setting() {
+        // THE FORMAT PROBE: timestamp, map, set, duration, warnings —
+        // exactly this string (the dragon checks it statically).
+        let mut log = BakeLog::new();
+        assert!(log.is_empty());
+        let clean = log.push(1, "Sword".into(), Some(BakeSelection::Ao), 1001, 7, 0);
+        let clamped = log.push(2, "Sword".into(), Some(BakeSelection::Ao), 1001, 9, 3);
+        let skew = log.push(2, "Blade".into(), None, 1001, 4, 0);
+        assert_eq!(log.len(), 3);
+        assert_eq!(
+            log.entry(clean).expect("just pushed").summary(),
+            "[1] Sword Ambient occlusion (tile 1001): 7 ms"
+        );
+        assert_eq!(
+            log.entry(clamped).expect("just pushed").summary(),
+            "[2] Sword Ambient occlusion (tile 1001): 9 ms — 3 skew-clamped texels"
+        );
+        assert_eq!(
+            log.entry(skew).expect("just pushed").summary(),
+            "[2] Blade Skew (correction mask) (tile 1001): 4 ms"
+        );
+
+        // Jump-to-setting: the log row click highlights the responsible
+        // row (clamped → threshold, clean AO → rays, skew → threshold,
+        // position → resolution, curvature → dilation).
+        let mut p = panel();
+        assert!(!p.jump_to_setting(9999), "unknown id jumps nowhere");
+        let t = BakesPanel::now_unix_secs();
+        let id_ao = p.log.push(t, "S".into(), Some(BakeSelection::Ao), 1001, 1, 0);
+        let id_clamped = p.log.push(t, "S".into(), Some(BakeSelection::Ao), 1001, 1, 5);
+        let id_skew = p.log.push(t, "S".into(), None, 1001, 1, 0);
+        let id_pos = p.log.push(
+            t,
+            "S".into(),
+            Some(BakeSelection::Position),
+            1001,
+            1,
+            0,
+        );
+        let id_curv = p.log.push(
+            t,
+            "S".into(),
+            Some(BakeSelection::Curvature),
+            1001,
+            1,
+            0,
+        );
+        assert!(p.jump_to_setting(id_ao));
+        assert_eq!(p.highlighted_setting(), Some(BakeSettingId::Rays));
+        assert!(p.jump_to_setting(id_clamped));
+        assert_eq!(p.highlighted_setting(), Some(BakeSettingId::SkewThreshold));
+        assert!(p.jump_to_setting(id_skew));
+        assert_eq!(p.highlighted_setting(), Some(BakeSettingId::SkewThreshold));
+        assert!(p.jump_to_setting(id_pos));
+        assert_eq!(p.highlighted_setting(), Some(BakeSettingId::Resolution));
+        assert!(p.jump_to_setting(id_curv));
+        assert_eq!(p.highlighted_setting(), Some(BakeSettingId::Dilation));
+        // The highlighted row carries the jump marker.
+        assert_eq!(p.row_label(BakeSettingId::Dilation, "Dilation".to_string()), "▶ Dilation");
+        assert_eq!(p.row_label(BakeSettingId::Rays, "Rays".to_string()), "Rays");
+    }
+
+    #[test]
+    fn param_tracking_marks_dirty_and_autorebake_fires_affected_only() {
+        use std::time::Duration;
+
+        let present = [1001, 1002];
+        // A ray-count change dirties the raycast maps {AO, thickness} —
+        // and nothing else (the affected-map set at panel level).
+        let mut p = panel();
+        p.set_auto_rebake(true);
+        p.tiles_mut().sync(&present);
+        p.sync_sets(&["A".to_string(), "B".to_string()]);
+        p.set_map_enabled(BakeSelection::Thickness, false);
+        let start = Instant::now();
+        let selected = p.tiles.resolve(&present);
+        p.set_rays(32);
+        p.sync_param_tracking(start, &selected);
+        // Inside the 500 ms window: pending but not due.
+        assert!(p.poll_autorebake(start + Duration::from_millis(499), &selected).is_none());
+        // Due: ONLY the affected + still-checked maps fire (AO — thickness
+        // is unchecked, curvature/position were never dirtied).
+        let fire = p
+            .poll_autorebake(start + Duration::from_millis(500), &selected)
+            .expect("debounced fire is due");
+        assert_eq!(fire.maps, vec![BakeSelection::Ao]);
+        assert!(!fire.skew);
+        assert_eq!(fire.tiles, vec![1001, 1002]);
+        assert_eq!(fire.sets, vec!["A".to_string(), "B".to_string()]);
+        // Firing takes the dirty sets: nothing pending afterward.
+        assert!(p.poll_autorebake(start + Duration::from_secs(60), &selected).is_none());
+
+        // A skew-threshold change fires the skew tiles when checked (and
+        // only the affected sets).
+        let mut p = panel();
+        p.set_auto_rebake(true);
+        p.set_skew_enabled(true);
+        p.tiles_mut().sync(&present);
+        p.sync_sets(&["A".to_string(), "B".to_string()]);
+        p.set_set_enabled("B", false);
+        let start = Instant::now();
+        let selected = p.tiles.resolve(&present);
+        p.set_skew_threshold_deg(25.0);
+        p.sync_param_tracking(start, &selected);
+        let fire = p
+            .poll_autorebake(start + Duration::from_millis(500), &selected)
+            .expect("skew fire is due");
+        assert!(fire.skew);
+        assert!(fire.maps.contains(&BakeSelection::Ao));
+        assert!(!fire.maps.contains(&BakeSelection::Thickness));
+        assert_eq!(fire.sets, vec!["A".to_string()]);
+
+        // Disabled auto-rebake never fires, however stale the params.
+        let mut p = panel();
+        p.tiles_mut().sync(&present);
+        let selected = p.tiles.resolve(&present);
+        p.set_rays(32);
+        p.sync_param_tracking(start, &selected);
+        assert!(p.poll_autorebake(start + Duration::from_secs(60), &selected).is_none());
+    }
+
+    #[test]
+    fn landed_bake_feeds_the_log() {
+        // A finished job appends one log entry per record (map, set,
+        // duration, warnings) — the log survives beside the status line.
+        let mut p = panel();
+        let (release, work) = gated(Ok(vec![
+            BakeRecord {
+                selection: Some(BakeSelection::Ao),
+                set: "Sword".to_string(),
+                tile: 1001,
+                path: Path::new("/tmp/umber-bakes-test").join("Sword_ambient_occlusion.png"),
+                elapsed_ms: 7,
+                skew_clamped: 2,
+            },
+            BakeRecord {
+                selection: None,
+                set: "Sword".to_string(),
+                tile: 1001,
+                path: Path::new("/tmp/umber-bakes-test").join("Sword_skew.png"),
+                elapsed_ms: 3,
+                skew_clamped: 0,
+            },
+        ]));
+        assert!(p.start_job(2, Vec::new(), Vec::new(), work));
+        release.send(()).unwrap();
+        await_job(&mut p);
+        assert_eq!(p.bake_log().len(), 2);
+        let entries = p.bake_log().entries();
+        assert_eq!(entries[0].selection, Some(BakeSelection::Ao));
+        assert_eq!(entries[0].skew_clamped, 2);
+        assert_eq!(entries[0].setting_hint(), BakeSettingId::SkewThreshold);
+        assert_eq!(entries[1].selection, None);
+        assert!(
+            entries[1]
+                .summary()
+                .contains("Sword Skew (correction mask) (tile 1001): 3 ms"),
+            "{}",
+            entries[1].summary()
+        );
     }
 }

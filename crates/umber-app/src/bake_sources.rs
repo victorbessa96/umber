@@ -290,10 +290,64 @@ pub fn bake_export_map_set_tile(
     Ok(map_set_from(ao, size))
 }
 
+/// Skew-correction bridge (§6:57): the paintable skew map + edge
+/// protection, shared by the Bakes panel and the Export dialog so neither
+/// reimplements the other's guard.
+///
+/// The skew map joins the paintable channel set under [`SKEW_CHANNEL_NAME`]
+/// (a mask the artist brushes — high skew = don't bake here). At bake
+/// time the painted mask combines with the emitted map
+/// (`max(baked, painted)` per texel) and the guard clamps the contribution
+/// where the combined skew exceeds the threshold. All three steps are pure
+/// over RGBA8 bytes (no GPU access), so they are directly testable; the
+/// GPU emission itself is `umber_gpu::bake_shaders::SKEW_BAKE_SHADER`,
+/// driven through the same mesh-fed path as [`bake_ao`].
+///
+/// V1 scope mirrors the Base Color bridge above: the painted skew mask is
+/// read back from the live paint session when present, else the emitted
+/// map bakes unguarded-by-paint (the threshold guard still applies).
+
+/// The paintable channel name the skew mask bakes under (the
+/// `TextureSetName_skew` convention, matching
+/// `umber_bake::BakeMap::Skew::file_stem_suffix`).
+pub const SKEW_CHANNEL_NAME: &str = "skew";
+
+/// Whether `channel` names the paintable skew mask (the skew map's
+/// membership in the paintable channel set).
+pub fn is_skew_channel(channel: &str) -> bool {
+    channel == SKEW_CHANNEL_NAME
+}
+
+/// Combines the emitted skew map with the artist's painted mask
+/// (`max(baked, painted)` per texel — painted white blocks the bake even
+/// where the rays measured flat). `None` paint passes the bake through.
+/// See `umber_bake::skew::combine_skew_with_paint` (the tested core; this
+/// is the app's named entry point so the panel and the dialog can never
+/// disagree about combine semantics).
+pub fn combine_skew_with_paint(baked: &[u8], painted: Option<&[u8]>) -> Vec<u8> {
+    umber_bake::skew::combine_skew_with_paint(baked, painted)
+}
+
+/// Applies the edge-protection guard to a baked `map` under the combined
+/// `skew_map` at `threshold_deg` degrees: texels past the threshold clamp
+/// to the edge-safe neutral. Returns the clamped texel count — the bake
+/// log's warnings column. See `umber_bake::skew::apply_edge_protection`.
+pub fn apply_skew_edge_protection(
+    map: &mut [u8],
+    skew_map: &[u8],
+    threshold_deg: f32,
+) -> usize {
+    umber_bake::skew::apply_edge_protection(
+        map,
+        skew_map,
+        umber_bake::skew::skew_threshold_byte(threshold_deg),
+        umber_bake::skew::EDGE_SAFE_NEUTRAL,
+    )
+}
+
 /// One tile's export-ready maps and which source fed its Base Color.
 #[derive(Debug)]
-pub struct TileMapSet {
-    /// The UDIM tile number (`$udim` for this tile's files).
+pub struct TileMapSet {    /// The UDIM tile number (`$udim` for this tile's files).
     pub tile: u16,
     /// The tile's maps (baked half + Base Color).
     pub set: umber_export::MapSet,
@@ -415,6 +469,7 @@ mod tests {
                 format: umber_export::presets::OutputFormat::Png8,
             }],
             materialx: false,
+            usda: false,
         };
         let out = std::env::temp_dir().join(format!(
             "umber-bake-sources-flat-base-{}",
@@ -699,6 +754,7 @@ mod tests {
                 format: umber_export::presets::OutputFormat::Png8,
             }],
             materialx: false,
+            usda: false,
         };
         let out = std::env::temp_dir().join(format!(
             "umber-bake-sources-assemble-{}",
@@ -868,5 +924,37 @@ mod tests {
         let at_512 = painted_base_color_tile(Some(&paint), 1001, 512, &device, &queue);
         assert_eq!(at_512.map(|b| b.len()), Some(512 * 512 * 4));
         assert!(painted_base_color_tile(Some(&paint), 1001, 8192, &device, &queue).is_none());
+    }
+
+    // --- Skew-correction bridge (§6:57) ---
+
+    #[test]
+    fn skew_channel_membership_names_the_paintable_mask() {
+        assert!(is_skew_channel("skew"));
+        assert_eq!(SKEW_CHANNEL_NAME, "skew");
+        assert_eq!(SKEW_CHANNEL_NAME, umber_bake::BakeMap::Skew.file_stem_suffix());
+        assert!(!is_skew_channel("baseColor"));
+        assert!(!is_skew_channel(""));
+    }
+
+    #[test]
+    fn skew_paint_combines_and_guards_end_to_end() {
+        // 1x2 map: texel 0 flat (no paint), texel 1 flat BUT painted white
+        // ("don't bake here") past the 15° default threshold.
+        let baked = umber_bake::skew::skew_map_from_deviations(&[0.0, 0.0], &[true, true], 2, 1);
+        let painted = vec![0u8, 0, 0, 255, 255, 255, 255, 255];
+        let combined = combine_skew_with_paint(&baked, Some(&painted));
+        assert_eq!(&combined[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&combined[4..8], &[255, 255, 255, 255]);
+        // The guard then clamps exactly the painted texel of a dark AO map.
+        let mut ao = vec![20u8, 20, 20, 255, 20, 20, 20, 255];
+        let clamped = apply_skew_edge_protection(
+            &mut ao,
+            &combined,
+            umber_bake::skew::DEFAULT_SKEW_THRESHOLD_DEG,
+        );
+        assert_eq!(clamped, 1);
+        assert_eq!(&ao[0..4], &[20, 20, 20, 255]);
+        assert_eq!(&ao[4..8], &[255, 255, 255, 255]);
     }
 }
