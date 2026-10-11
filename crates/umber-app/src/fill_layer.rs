@@ -255,14 +255,14 @@ pub fn apply_quick_mask(tile: FillTile, mask: &QuickMask, tile_id: u16) -> FillT
     let n = tile.coverage.len().min(tile.rgba.len() / 4);
     let mut out = tile;
     for i in 0..n {
-        if !(out.coverage[i] > 0.0) {
+        if !out.coverage[i].is_finite() || out.coverage[i] <= 0.0 {
             continue;
         }
         let m = mask
             .sample(tile_id, (i % mw as usize) as u32, (i / mw as usize) as u32)
             .clamp(0.0, 1.0);
         out.coverage[i] *= m;
-        if !(out.coverage[i] > 0.0) {
+        if !out.coverage[i].is_finite() || out.coverage[i] <= 0.0 {
             out.coverage[i] = 0.0;
             out.rgba[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]);
         }
@@ -342,7 +342,7 @@ pub fn composite_fill_over(base: &mut [u8], fill: &FillTile, blend: BlendMode, o
         .min(fill.coverage.len());
     for i in 0..n {
         let cov = fill.coverage[i];
-        if !(cov > 0.0) || op <= 0.0 {
+        if !cov.is_finite() || cov <= 0.0 || op <= 0.0 {
             continue;
         }
         let f = &fill.rgba[i * 4..i * 4 + 4];

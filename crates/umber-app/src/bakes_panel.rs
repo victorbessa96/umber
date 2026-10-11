@@ -489,6 +489,16 @@ pub struct BakesContext<'a> {
 /// What a bake worker sends back: every written map, or the first failure.
 type BakeOutcome = anyhow::Result<Vec<BakeRecord>>;
 
+/// The bake dispatch bundle (mesh + plan + the skew/sets fan-out) — keeps
+/// [`BakesPanel::bake_jobs`] under clippy's 7-argument floor.
+struct BakeDispatch<'a> {
+    mesh: &'a umber_mesh::MeshData,
+    plan: BakePlan,
+    skew_tiles: Vec<u16>,
+    skew_skipped: Vec<u16>,
+    sets: Vec<String>,
+}
+
 /// Everything one Bake reads, owned so it can move onto the worker thread
 /// (the `Send + 'static` bound on [`BakeJobHandle::spawn`] pins that at
 /// compile time — a non-`Send` GPU handle here would fail to build).
@@ -1263,7 +1273,17 @@ impl BakesPanel {
         let plan = plan_bake(&self.selected_maps(), &present, &selected);
         let (skew_tiles, skew_skipped) = self.skew_tiles(&present, &selected);
         let sets = self.sets_for_bake(mesh, mesh_path);
-        self.bake_jobs(device, queue, mesh, plan, skew_tiles, skew_skipped, sets);
+        self.bake_jobs(
+            device,
+            queue,
+            &BakeDispatch {
+                mesh,
+                plan,
+                skew_tiles,
+                skew_skipped,
+                sets,
+            },
+        );
     }
 
     /// The sets one bake writes: the enabled checklist sets, or the
@@ -1310,7 +1330,17 @@ impl BakesPanel {
         // Naming follows the plan (tiled iff the MESH is multi-tile —
         // plan_bake derives it from `present`, not from the fire's tile
         // subset — so a single-tile auto fire keeps the tiled names).
-        self.bake_jobs(device, queue, mesh, plan, skew_tiles, skew_skipped, sets);
+        self.bake_jobs(
+            device,
+            queue,
+            &BakeDispatch {
+                mesh,
+                plan,
+                skew_tiles,
+                skew_skipped,
+                sets,
+            },
+        );
     }
 
     /// Resolves output paths per set and spawns the worker: one job per
@@ -1322,12 +1352,15 @@ impl BakesPanel {
         &mut self,
         device: &umber_gpu::WgpuDevice,
         queue: &umber_gpu::WgpuQueue,
-        mesh: &umber_mesh::MeshData,
-        plan: BakePlan,
-        skew_tiles: Vec<u16>,
-        skew_skipped: Vec<u16>,
-        sets: Vec<String>,
+        dispatch: &BakeDispatch<'_>,
     ) {
+        let BakeDispatch {
+            mesh,
+            plan,
+            skew_tiles,
+            skew_skipped,
+            sets,
+        } = dispatch;
         let mut jobs = Vec::new();
         let mut skew_jobs = Vec::new();
         for set in &sets {
