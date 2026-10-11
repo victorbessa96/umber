@@ -21,11 +21,17 @@ exit(0 if o==c else 1)
 " || fails=$((fails+1))
 done
 
-echo "== (2) rustfmt canonical =="
-rustfmt --check "${files[@]}" 2>/dev/null && echo "  PASS: fmt clean" || {
-  echo "  fixing fmt drift in-place"; rustfmt "${files[@]}" 2>/dev/null
-  rustfmt --check "${files[@]}" 2>/dev/null && echo "  PASS: fmt aligned (in-place)" || { echo "  FAIL: fmt"; fails=$((fails+1)); }
-}
+echo "== (2) rustfmt canonical (.rs files only) =="
+rs=()
+for f in "${files[@]}"; do case "$f" in *.rs) rs+=("$f");; esac; done
+if [ "${#rs[@]}" -eq 0 ]; then
+  echo "  PASS: no .rs files to fmt"
+elif rustfmt --check "${rs[@]}" 2>/dev/null; then
+  echo "  PASS: fmt clean"
+else
+  echo "  fixing fmt drift in-place"; rustfmt "${rs[@]}" 2>/dev/null
+  rustfmt --check "${rs[@]}" 2>/dev/null && echo "  PASS: fmt aligned (in-place)" || { echo "  FAIL: fmt"; fails=$((fails+1)); }
+fi
 
 echo "== (3) the trap greps =="
 for f in "${files[@]}"; do
