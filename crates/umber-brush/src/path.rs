@@ -194,7 +194,8 @@ impl PaintPath {
         if !uv[0].is_finite() || !uv[1].is_finite() {
             return false;
         }
-        self.points.push(PathPoint::new(uv, pressure, size, opacity));
+        self.points
+            .push(PathPoint::new(uv, pressure, size, opacity));
         true
     }
 
@@ -246,13 +247,7 @@ impl PaintPath {
 
     /// Restyles the point at `index` (pressure/size/opacity stored raw —
     /// saturation applies at replay); `false` when out of bounds.
-    pub fn restyle_point(
-        &mut self,
-        index: usize,
-        pressure: f32,
-        size: f32,
-        opacity: f32,
-    ) -> bool {
+    pub fn restyle_point(&mut self, index: usize, pressure: f32, size: f32, opacity: f32) -> bool {
         match self.points.get_mut(index) {
             Some(p) => {
                 p.pressure = pressure;
@@ -366,11 +361,7 @@ impl PaintPath {
     /// is returned with the radius that spaced it. Deterministic: the same
     /// path through equally constructed conditioners yields identical
     /// [`PathDab`]s.
-    pub fn replay(
-        &self,
-        conditioner: &mut StrokeConditioner,
-        base_radius: f32,
-    ) -> Vec<PathDab> {
+    pub fn replay(&self, conditioner: &mut StrokeConditioner, base_radius: f32) -> Vec<PathDab> {
         conditioner.reset();
         let mut sequence: Vec<PathPoint> = self.points.clone();
         if self.closed {
@@ -484,12 +475,7 @@ mod tests {
         // 0.5 → 2.0, opacity ramps 0.2 → 1.0.
         for i in 0..5 {
             let t = i as f32 / 4.0;
-            assert!(path.push_point(
-                [40.0 * i as f32, 0.0],
-                1.0,
-                0.5 + 1.5 * t,
-                0.2 + 0.8 * t,
-            ));
+            assert!(path.push_point([40.0 * i as f32, 0.0], 1.0, 0.5 + 1.5 * t, 0.2 + 0.8 * t,));
         }
         path
     }
@@ -547,7 +533,8 @@ mod tests {
         let dabs = styled_path().replay(&mut conditioner(), 8.0);
         let last_size = 2.0;
         assert!(
-            dabs.iter().any(|d| (d.radius - 8.0 * last_size).abs() <= EPS),
+            dabs.iter()
+                .any(|d| (d.radius - 8.0 * last_size).abs() <= EPS),
             "the last segment must space at the last point's size"
         );
         for dab in &dabs {
