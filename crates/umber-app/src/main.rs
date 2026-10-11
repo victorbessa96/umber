@@ -92,6 +92,7 @@ struct PanelViewer<'a> {
     /// the mesh-map import Apply path waits for it; see `mesh_map_import`).
     store: Option<&'a umber_core::AssetStore>,
     polygon_fill: &'a mut fill_layer::PolygonFillTool,
+    fill_states: &'a mut fill_layer::FillLayerStates,
     path_tool: &'a mut path_tool::PaintPathTool,
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
@@ -175,7 +176,13 @@ impl TabViewer for PanelViewer<'_> {
                 // One collapsible row per fill layer (projection picker +
                 // v1 source editor) plus the polygon-fill tool rows; edits
                 // run through Document as undoable, journaled SetFill ops.
-                fill_layer::fill_section_ui(ui, self.doc, self.mesh, &mut *self.polygon_fill);
+                fill_layer::fill_section_ui(
+                    ui,
+                    self.doc,
+                    self.mesh,
+                    &mut *self.polygon_fill,
+                    &mut self.fill_states,
+                );
                 // The paint-path tool rows (editable polyline → replayed
                 // stroke / closed-path fill through the paint session).
                 path_tool::path_tool_rows(ui, self.paint.as_deref_mut(), &mut *self.path_tool);
@@ -277,6 +284,8 @@ pub struct AppState {
     /// The polygon-fill lasso tool: the armed click-path capture feeding
     /// pixel masks into fill layers (session state, never serialized).
     pub polygon_fill: fill_layer::PolygonFillTool,
+    /// The fill layers' evaluation caches + the panel's dirty queue.
+    pub fill_states: fill_layer::FillLayerStates,
     /// The paint-path tool: the editable polyline replayed as
     /// paint/erase/smudge strokes (session state, never serialized).
     pub path_tool: path_tool::PaintPathTool,
@@ -806,6 +815,7 @@ impl eframe::App for UmberApp {
                 doc: &mut self.state.doc,
                 brush: &mut self.brush_panel,
                 polygon_fill: &mut self.state.polygon_fill,
+                fill_states: &mut self.state.fill_states,
                 path_tool: &mut self.state.path_tool,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
@@ -836,6 +846,36 @@ impl eframe::App for UmberApp {
         if let Some(paint) = self.state.paint.as_mut() {
             if let Err(err) = paint.process_pending() {
                 log::warn!("paint processing failed: {err:#}");
+            }
+        }
+
+        // Fill-layer refresh: re-evaluate the tiles of any fill layer the
+        // panel (or a journal replay) marked this frame, staging the fresh
+        // bytes through the paint session's tile plumbing.
+        if !self.state.fill_states.dirty.is_empty() && self.state.paint.is_some() {
+            let dirty: Vec<u64> = self.state.fill_states.dirty.drain(..).collect();
+            if let Some(mesh) = self.state.mesh.as_ref() {
+                let mesh = mesh.clone();
+                let (tiles, symmetry) = {
+                    let paint = self.state.paint.as_ref().unwrap();
+                    (paint.tiles_present(), paint.symmetry().clone())
+                };
+                for layer in dirty {
+                    let Some(state) = self.state.fill_states.map.get_mut(&layer) else {
+                        continue;
+                    };
+                    let staged = fill_layer::refresh_fill_layer(
+                        state,
+                        &mesh,
+                        self.state.paint.as_mut().unwrap(),
+                        &tiles,
+                        1024,
+                        &symmetry,
+                    );
+                    if staged.is_empty() {
+                        log::warn!("fill refresh for layer {layer} staged no tiles");
+                    }
+                }
             }
         }
 

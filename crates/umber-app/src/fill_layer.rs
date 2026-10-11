@@ -778,11 +778,43 @@ pub fn polygon_fill_rows(
 /// widget changed (each edit is one undoable, journaled op — scrubbing a
 /// slider still emits per-frame ops, matching the brush panel's live-edit
 /// convention). All strings go through [`tr`](crate::i18n::tr).
+/// The session's per-fill-layer evaluation states (the cache host). Held by
+/// the app, driven by [`refresh_fill_layer`] after any fill-param edit —
+/// the journal replay path included (undo/redo re-fires SetFill, the panel
+/// re-marks, the refresh re-evaluates: the same live-not-baked contract).
+pub struct FillLayerStates {
+    /// One state per live fill layer, keyed by layer id.
+    pub map: std::collections::HashMap<u64, FillLayerState>,
+    /// Layers whose params changed this frame (drained by the app's
+    /// per-frame refresh; journal replays re-mark via the same path).
+    pub dirty: Vec<u64>,
+}
+
+impl Default for FillLayerStates {
+    fn default() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            dirty: Vec::new(),
+        }
+    }
+}
+
+impl FillLayerStates {
+    /// Ensures a state exists for `layer` at `params` (constructing on
+    /// first sight, adopting the params when the layer is re-picked).
+    pub fn ensure(&mut self, layer: u64, params: FillParams) {
+        self.map
+            .entry(layer)
+            .or_insert_with(|| FillLayerState::new(layer, params));
+    }
+}
+
 pub fn fill_section_ui(
     ui: &mut egui::Ui,
     doc: &mut Document,
     mesh: Option<&MeshData>,
     tool: &mut PolygonFillTool,
+    states: &mut FillLayerStates,
 ) {
     ui.add_space(8.0);
     ui.separator();
@@ -798,6 +830,8 @@ pub fn fill_section_ui(
         return;
     }
     for (id, name, params) in fills {
+        states.ensure(id, params.clone());
+        let mut mark_refresh = false;
         egui::CollapsingHeader::new(name.clone())
             .default_open(true)
             .show(ui, |ui| {
@@ -808,8 +842,12 @@ pub fn fill_section_ui(
                 source_rows(ui, id, &mut edited.source, &mut changed);
                 if changed {
                     doc.run(LayerCommand::set_fill(id, edited));
+                    mark_refresh = true;
                 }
             });
+        if mark_refresh {
+            states.dirty.push(id);
+        }
     }
     ui.separator();
     polygon_fill_rows(ui, doc, mesh, tool);
