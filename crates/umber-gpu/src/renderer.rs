@@ -42,6 +42,15 @@ pub enum GpuError {
 /// 16-byte multiple — portable across backends (review #2: some
 /// Vulkan/Metal drivers are stricter than the WebGPU floor) and leaves a
 /// natural slot for Wave-2 UV attributes.
+
+/// The specular tier's GPU handles: prefilter views + spec uniform.
+/// Bundled so [`GpuContext::mesh_bind_group_full`] stays at 7 args
+/// (clippy's too-many-arguments floor).
+pub(crate) struct MeshTier<'a> {
+    pub prefilter_views: [&'a wgpu::TextureView; 3],
+    pub spec_buffer: &'a wgpu::Buffer,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -868,8 +877,7 @@ impl GpuContext {
         flags_buffer: &wgpu::Buffer,
         env_view: &wgpu::TextureView,
         env_sampler: &wgpu::Sampler,
-        prefilter_views: [&wgpu::TextureView; 3],
-        spec_buffer: &wgpu::Buffer,
+        tier: MeshTier<'_>,
         view_mode_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1047,17 +1055,20 @@ impl MeshBuffers {
             contents: bytemuck::bytes_of(&ViewMode::Lit.uniform()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let tier = MeshTier {
+            prefilter_views: [
+                &gpu.fallback_env_view,
+                &gpu.fallback_env_view,
+                &gpu.fallback_env_view,
+            ],
+            spec_buffer: &spec_buffer,
+        };
         let bind_group = gpu.mesh_bind_group_full(
             &uniform_buffer,
             &flags_buffer,
             &gpu.fallback_env_view,
             &gpu.env_sampler,
-            [
-                &gpu.fallback_env_view,
-                &gpu.fallback_env_view,
-                &gpu.fallback_env_view,
-            ],
-            &spec_buffer,
+            tier,
             &view_mode_buffer,
         );
 
@@ -1122,13 +1133,16 @@ impl MeshBuffers {
                 &gpu.fallback_env_view,
             ],
         };
+        let tier = MeshTier {
+            prefilter_views: prefilter,
+            spec_buffer: &self.spec_buffer,
+        };
         self.bind_group = gpu.mesh_bind_group_full(
             &self.uniform_buffer,
             &self.flags_buffer,
             view,
             sampler,
-            prefilter,
-            &self.spec_buffer,
+            tier,
             &self.view_mode_buffer,
         );
     }
@@ -2684,16 +2698,20 @@ mod tests {
                     contents: bytemuck::bytes_of(&crate::ibl::SpecParams::default()),
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
+            let tier = MeshTier {
+                prefilter_views: [
+                    env.prefilter_view(0),
+                    env.prefilter_view(1),
+                    env.prefilter_view(2),
+                ],
+                spec_buffer: &spec,
+            };
             masked.bind_group = gpu.mesh_bind_group_full(
                 &masked.uniform_buffer,
                 &flags,
                 env.view(),
                 env.sampler(),
-                [
-                    env.prefilter_view(0),
-                    env.prefilter_view(1),
-                    env.prefilter_view(2),
-                ],
+                tier,
                 &spec,
                 &masked.view_mode_buffer,
             );

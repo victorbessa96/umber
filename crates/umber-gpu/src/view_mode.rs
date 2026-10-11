@@ -248,7 +248,7 @@ impl ViewMode {
     /// `None` (the context's identity table — a byte-exact bypass)
     /// when it bypasses. Callers pass the result straight to
     /// [`crate::MeshBuffers::paint_callback_with_mode`].
-    pub fn select_lut<'a>(self, app_lut: Option<&'a DisplayLut>) -> Option<&'a DisplayLut> {
+    pub fn select_lut(self, app_lut: Option<&DisplayLut>) -> Option<&DisplayLut> {
         if self.applies_display_lut() {
             app_lut
         } else {
