@@ -20,8 +20,8 @@
 | Fill layer + fill projections: UV, Tri-planar, Planar, Spherical, Cylindrical | P0 | 3 (fill layer ships with its projections — no projection-less staging) | ✓ built (`12124f3`) — the five projections, WriteRegion path, panel, 12 tests |
 | Smudge (sample+blur blend), Clone (source offset + follow-stroke) | P1 | 3 | ✓ built (`2fbfc7e`) |
 | Symmetry: mirror (axis+offset+manipulator) and radial (count, flip U/V) — brush + fill-layer projections | P1 | 3 | ✓ built (`2689fa8`) |
-| Straight-line constraint; angle snap | P1 | 3 |
-| Polygon fill (triangle/polygon/mesh/UV-chunk pixel-mask fills) | P1 | 3 |
+| Straight-line constraint; angle snap | P1 | 3 | ✓ built (`33b796f`) |
+| Polygon fill (triangle/polygon/mesh/UV-chunk pixel-mask fills) | P1 | 3 | ✓ built (`1329e8d`) |
 | Quick mask (temporary painted mask, invert) | P1 | 4 | ✓ built (`e4492ba`) |
 | Path tools (paint/erase/smudge along 3D curve; per-vertex size+opacity; filled path) | P1 | 5 |
 | Brush presets (.abr import optional; native preset files) | P0 | 2 | ✓ built (`f18a0ce`/`0d49d83`/`57ce764`) |
@@ -38,11 +38,11 @@
 | Per-channel blending mode + opacity; blending computed in linear space per channel | P0 | 2 |
 | Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 math verified + 7 new modes (HSV family + normal-map combine) = 19 built (`21e1290`); the remainder open |
 | Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✓ metadata model (LayerMask in layers.rs); the paint-mask DATA path rides the quick-mask plumbing |
-| Layer instancing (source-edits propagate, cycle detection) | P1 | 4 |
-| Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 |
+| Layer instancing (source-edits propagate, cycle detection) | P1 | 4 | ✓ built (`4cbaf21`) |
+| Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 | ✓ built (`4cbaf21`) |
 | Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |
 | UDIM multi-tile texture sets; per-tile resolution; cross-tile painting | P0 | 4 (data model from 1) | ✓ built (`82c694c`..`10cdffa`) |
-| Smart materials (folder presets applied with mesh-map-driven generators) | P1 | 4 |
+| Smart materials (folder presets applied with mesh-map-driven generators) | P1 | 4 | ✓ built (`4cbaf21`) — worn-metal + painted-wood examples ship |
 | Dynamic material layering (shader-declared sub-stacks) | P2 | 6+ |
 | Storage formats per channel: sRGB8/RGB16/RGB16F/RGB32F | P0 | 2 |
 
@@ -65,7 +65,7 @@
 | Original node-graph engine: DAG, topological eval, dirty-region propagation; graphs serialize as **MaterialX documents** — nodes with MaterialX standard-node equivalents map to standard nodes; painter-specific nodes ship as **declared custom nodedefs** (consuming DCCs read the document and evaluate what they support; no automatic full-fidelity interchange is claimed) | P0 | 4 |
 | Node set v1 (~40 core): noise family (perlin/value/worley), gradients, patterns, blur/sharpen, levels, curves, color ops, direction warp, flood fill from masks, edge detect, histogram ops | P0 | 4 |
 | Generator nodes driven by baked mesh maps (AO/curvature/position/WS-normal inputs plumbed automatically) | P0 | 4 |
-| Smart masks (effect-stack presets) | P1 | 4 |
+| Smart masks (effect-stack presets) | P1 | 4 | ✓ built (`4cbaf21`) — the edge-wear example ships |
 | Example-based texture synthesis (EmbarkStudios/texture-synthesis style) as first-class generator primitive | P1 | 4 |
 | Graph evaluated on GPU (WGSL compute passes per dirty tile) | P0 | 4 | ✓ built (`8590ae2`) — GraphGpuEvaluator, 20 entry points, total hybrid routing (the per-pixel families GPU; the globals/assets/guests CPU through the same registry) |
 | Community extension API for nodes (see plugins §10) | P1 | 6 |
@@ -152,7 +152,7 @@
 |---|---|---|
 | Dockable panels (egui_dock): layer stack, properties, assets/shelf, texture-set list, history, display settings, export dialog | P0 | 1 (shell) → 2 (dense) |
 | Brush properties panel: input→curve editor (MyPaint model), flow×opacity, stabilizer, jitter quartet [05] | P0 | 2 |
-| History window (session-global, click-to-time-travel; not persisted) | P1 | 2 |
+| History window (session-global, click-to-time-travel; not persisted) | P1 | 2 | ✓ built (`9af4c2f`) — the Bakes/Export record_context wiring = the named follow-up |
 | Dark pro theme, 4K-DPI scaling | P0 | 1 |
 | Node-canvas widget (custom, for graph editor) | P0 | 4 |
 | Localization (EN first; architecture i18n-ready) | P1 | 5 |
