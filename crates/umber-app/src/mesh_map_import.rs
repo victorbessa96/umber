@@ -599,7 +599,7 @@ impl MeshMapImportState {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path().map(|p| p.to_path_buf()))
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         if !dropped.is_empty() {
@@ -994,8 +994,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let created =
-            state.apply_session_set(&doc, &store, |item| bytes.get(item.file.as_str()).cloned());
+        let created = state.apply_session_set(&mut doc, &store, |item| {
+            bytes.get(item.file.as_str()).cloned()
+        });
         assert_eq!(created, 2);
         assert_eq!(doc.stack.layers.len(), 2);
         // The other set's file stays queued (never dropped, never applied).

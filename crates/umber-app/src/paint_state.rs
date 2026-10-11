@@ -1393,7 +1393,7 @@ fn texel_center_uv(tile: u16, x: u32, y: u32, texels_per_uv: f32) -> [f32; 2] {
     let (tile_u, tile_v) = tile_uv_offset(tile);
     [
         tile_u + (x as f32 + 0.5) / texels_per_uv,
-        tile_v + 1.0 - (f32::from(y) + 0.5) / texels_per_uv,
+        tile_v + 1.0 - (y as f32 + 0.5) / texels_per_uv,
     ]
 }
 
@@ -2602,8 +2602,8 @@ mod tests {
                 let uv = texel_center_uv(tile, x, y, 512.0);
                 let back = local_texel(uv, tile, 512.0);
                 assert!(
-                    (back[0] - (f32::from(x) + 0.5)).abs() < 1e-3
-                        && (back[1] - (f32::from(y) + 0.5)).abs() < 1e-3,
+                    (back[0] - (x as f32 + 0.5)).abs() < 1e-3
+                        && (back[1] - (y as f32 + 0.5)).abs() < 1e-3,
                     "tile {tile} texel ({x},{y}) must round-trip"
                 );
             }

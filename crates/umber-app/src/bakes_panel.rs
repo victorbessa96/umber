@@ -1137,27 +1137,25 @@ impl BakesPanel {
             }
         }
 
-        ui.add(
-            egui::Slider::new(&mut self.rays, MIN_RAYS..=MAX_RAYS)
-                .text(self.row_label(BakeSettingId::Rays, tr("bakes.rays"))),
-        );
+        let rays_label = self.row_label(BakeSettingId::Rays, tr("bakes.rays"));
+        ui.add(egui::Slider::new(&mut self.rays, MIN_RAYS..=MAX_RAYS).text(rays_label));
+        let dilation_label = self.row_label(BakeSettingId::Dilation, tr("bakes.dilation"));
         ui.add(
             egui::Slider::new(&mut self.dilation_iterations, 0..=MAX_DILATION_ITERATIONS)
-                .text(self.row_label(BakeSettingId::Dilation, tr("bakes.dilation"))),
+                .text(dilation_label),
         );
+        let skew_label = self.row_label(BakeSettingId::SkewThreshold, tr("bakes.skew-threshold"));
         ui.add(
             egui::Slider::new(
                 &mut self.skew_threshold_deg,
                 MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG,
             )
-            .text(self.row_label(BakeSettingId::SkewThreshold, tr("bakes.skew-threshold"))),
+            .text(skew_label),
         );
 
         ui.checkbox(&mut self.auto_rebake, tr("bakes.auto-rebake"));
-        ui.checkbox(
-            &mut self.show_cage,
-            self.row_label(BakeSettingId::Cage, tr("bakes.show-cage")),
-        );
+        let cage_label = self.row_label(BakeSettingId::Cage, tr("bakes.show-cage"));
+        ui.checkbox(&mut self.show_cage, cage_label);
 
         ui.horizontal(|ui| {
             let dir = self.output_dir.display().to_string();
