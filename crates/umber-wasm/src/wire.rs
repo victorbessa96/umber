@@ -133,12 +133,7 @@ fn decode_image(r: &mut Reader<'_>, what: &'static str) -> Result<ImageBuffer, W
 pub fn wire_params(params: &[(String, ParamValue)]) -> Vec<&(String, ParamValue)> {
     params
         .iter()
-        .filter(|(_, v)| {
-            !matches!(
-                v,
-                ParamValue::NodeRef(_) | ParamValue::Anchor(_)
-            )
-        })
+        .filter(|(_, v)| !matches!(v, ParamValue::NodeRef(_) | ParamValue::Anchor(_)))
         .collect()
 }
 

@@ -1163,10 +1163,18 @@ mod tests {
             for x in 0..16 {
                 let i = y * 16 + x;
                 if x < 8 {
-                    assert_eq!(&tile.rgba[i * 4..i * 4 + 4], &[255, 0, 0, 255], "inside ({x},{y})");
+                    assert_eq!(
+                        &tile.rgba[i * 4..i * 4 + 4],
+                        &[255, 0, 0, 255],
+                        "inside ({x},{y})"
+                    );
                     assert_eq!(tile.coverage[i], 1.0);
                 } else {
-                    assert_eq!(&tile.rgba[i * 4..i * 4 + 4], &[0, 0, 0, 0], "outside ({x},{y})");
+                    assert_eq!(
+                        &tile.rgba[i * 4..i * 4 + 4],
+                        &[0, 0, 0, 0],
+                        "outside ({x},{y})"
+                    );
                     assert_eq!(tile.coverage[i], 0.0);
                 }
             }

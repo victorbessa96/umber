@@ -451,13 +451,7 @@ impl GraphPanel {
 
     /// Binds a node input to a layer channel anchor (§3:42) and marks the
     /// node dirty. Returns `false` when the node id is unknown.
-    pub fn bind_anchor(
-        &mut self,
-        node_id: u64,
-        input: &str,
-        layer_id: u64,
-        channel: &str,
-    ) -> bool {
+    pub fn bind_anchor(&mut self, node_id: u64, input: &str, layer_id: u64, channel: &str) -> bool {
         self.set_param(
             node_id,
             input,
@@ -1095,18 +1089,11 @@ fn param_editor(
                         .selected_text(current_label)
                         .show_ui(ui, |ui| {
                             for (id, lname) in &panel.anchor_layers {
-                                ui.selectable_value(
-                                    &mut layer,
-                                    *id,
-                                    format!("{id}: {lname}"),
-                                );
+                                ui.selectable_value(&mut layer, *id, format!("{id}: {lname}"));
                             }
                         });
                     if layer != a.layer_id {
-                        result = Some(ParamValue::Anchor(AnchorRef::new(
-                            layer,
-                            a.channel.clone(),
-                        )));
+                        result = Some(ParamValue::Anchor(AnchorRef::new(layer, a.channel.clone())));
                     }
                 }
                 ui.label(tr("graph.anchor-channel"));

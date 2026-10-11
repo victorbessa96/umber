@@ -285,15 +285,14 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                     LayerKind::Fill => (tr("layers.kind-fill"), None),
                     LayerKind::Folder { .. } => (tr("layers.kind-folder"), None),
                     LayerKind::Instance { source_id } => {
-                        let source_name =
-                            match doc.stack.check_paintable(layer.id) {
-                                Err(InstanceError::PaintOnInstance { source, .. }) => doc
-                                    .stack
-                                    .layer(source)
-                                    .map(|l| l.name.clone())
-                                    .unwrap_or_else(|| source.to_string()),
-                                _ => source_id.to_string(),
-                            };
+                        let source_name = match doc.stack.check_paintable(layer.id) {
+                            Err(InstanceError::PaintOnInstance { source, .. }) => doc
+                                .stack
+                                .layer(source)
+                                .map(|l| l.name.clone())
+                                .unwrap_or_else(|| source.to_string()),
+                            _ => source_id.to_string(),
+                        };
                         let of = tr_args(
                             "layers.instance-of",
                             [("source", FluentValue::from(source_name.as_str()))],
@@ -357,9 +356,7 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
             );
             doc.run(LayerCommand::add(
                 name,
-                LayerKind::Instance {
-                    source_id: source,
-                },
+                LayerKind::Instance { source_id: source },
             ));
         }
     }

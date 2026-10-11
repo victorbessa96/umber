@@ -154,12 +154,7 @@ impl TabViewer for PanelViewer<'_> {
                 // One collapsible row per fill layer (projection picker +
                 // v1 source editor) plus the polygon-fill tool rows; edits
                 // run through Document as undoable, journaled SetFill ops.
-                fill_layer::fill_section_ui(
-                    ui,
-                    self.doc,
-                    self.mesh,
-                    &mut *self.polygon_fill,
-                );
+                fill_layer::fill_section_ui(ui, self.doc, self.mesh, &mut *self.polygon_fill);
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));

@@ -1086,7 +1086,11 @@ mod tests {
             "anchor spelling: {doc}"
         );
         let (back, _, _) = from_mtlx(&doc).expect("anchor doc parses");
-        let node = back.nodes.iter().find(|n| n.id == 9).expect("node survives");
+        let node = back
+            .nodes
+            .iter()
+            .find(|n| n.id == 9)
+            .expect("node survives");
         assert_eq!(
             node.params,
             vec![(

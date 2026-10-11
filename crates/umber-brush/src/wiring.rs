@@ -281,7 +281,10 @@ mod tests {
         for i in 0..10 {
             c.push(&event(i as f32 * 5.0, 1.0, i as u64 * 8_000_000), 10.0);
         }
-        assert!(c.line_anchor().is_some(), "a stroke must anchor the constraint");
+        assert!(
+            c.line_anchor().is_some(),
+            "a stroke must anchor the constraint"
+        );
         c.reset();
         assert_eq!(c.line_anchor(), None, "stroke end must drop the anchor");
         assert_eq!(

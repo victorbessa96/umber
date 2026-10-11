@@ -570,11 +570,7 @@ impl LayerStack {
     /// [`InstanceError::UnknownSource`] when `source_id` names no layer;
     /// [`InstanceError::Cycle`] when the retarget would close a cycle
     /// (direct `A→B→A` or indirect — the DFS walks the transitive chain).
-    pub fn set_instance_source(
-        &mut self,
-        id: u64,
-        source_id: u64,
-    ) -> Result<u64, InstanceError> {
+    pub fn set_instance_source(&mut self, id: u64, source_id: u64) -> Result<u64, InstanceError> {
         let layer = self.layer(id).ok_or(InstanceError::UnknownLayer(id))?;
         let old = match layer {
             Layer {
@@ -685,8 +681,7 @@ impl LayerStack {
             .map(|l| l.id)
             .collect();
         let in_set: std::collections::HashSet<u64> = instances.iter().copied().collect();
-        let mut indegree: HashMap<u64, usize> =
-            instances.iter().map(|&id| (id, 0)).collect();
+        let mut indegree: HashMap<u64, usize> = instances.iter().map(|&id| (id, 0)).collect();
         let mut outs: HashMap<u64, Vec<u64>> = HashMap::new();
         for &id in &instances {
             let src = self.instance_source(id).expect("instance checked");
@@ -1380,9 +1375,7 @@ mod tests {
         // fill of its own, while its opacity/blend/mask overlay the link.
         let mut stack = LayerStack::new();
         let src = stack.add_layer("Base", LayerKind::Paint);
-        let inst = stack
-            .add_instance("Base inst", src)
-            .expect("source exists");
+        let inst = stack.add_instance("Base inst", src).expect("source exists");
         assert_eq!(stack.instance_source(inst), Some(src));
         assert!(stack.is_instance(inst));
         assert!(!stack.is_instance(src));

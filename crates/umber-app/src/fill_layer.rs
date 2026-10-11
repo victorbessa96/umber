@@ -47,8 +47,8 @@ use umber_brush::symmetry::{symmetrize_coverage, texel_transforms};
 use umber_brush::{QuickMask, SymTransform, SymmetrySettings};
 use umber_core::{BlendMode, Layer, LayerCommand, LayerKind};
 use umber_mesh::{
-    evaluate_fill_tile, uv_triangle_at, FillMask, FillParams, FillProjection, FillSource,
-    FillTile, MeshData, ProjAxis, LASSO_MAX_POINTS,
+    evaluate_fill_tile, uv_triangle_at, FillMask, FillParams, FillProjection, FillSource, FillTile,
+    MeshData, ProjAxis, LASSO_MAX_POINTS,
 };
 
 use crate::document::Document;
@@ -246,11 +246,7 @@ pub fn apply_quick_mask(tile: FillTile, mask: &QuickMask, tile_id: u16) -> FillT
             continue;
         }
         let m = mask
-            .sample(
-                tile_id,
-                (i % mw as usize) as u32,
-                (i / mw as usize) as u32,
-            )
+            .sample(tile_id, (i % mw as usize) as u32, (i / mw as usize) as u32)
             .clamp(0.0, 1.0);
         out.coverage[i] *= m;
         if !(out.coverage[i] > 0.0) {
@@ -582,8 +578,9 @@ impl PolygonFillTool {
     /// capture is incomplete or the pick misses.
     pub fn build_mask(&self, mesh: &MeshData) -> Option<FillMask> {
         match self.mode {
-            PolygonFillMode::Polygon => (self.points.len() >= 3)
-                .then(|| FillMask::polygon(self.points.clone())),
+            PolygonFillMode::Polygon => {
+                (self.points.len() >= 3).then(|| FillMask::polygon(self.points.clone()))
+            }
             PolygonFillMode::Triangle => self.pick_triangle(mesh).map(FillMask::triangle),
             PolygonFillMode::Mesh => self
                 .pick_triangle(mesh)
@@ -713,7 +710,11 @@ pub fn polygon_fill_rows(
     // The capture status: lasso length, or the picked triangle.
     match tool.mode() {
         PolygonFillMode::Polygon => {
-            ui.label(format!("{}: {}", tr("fill.poly-points"), tool.point_count()));
+            ui.label(format!(
+                "{}: {}",
+                tr("fill.poly-points"),
+                tool.point_count()
+            ));
         }
         _ => {
             let pick = mesh
@@ -725,10 +726,7 @@ pub fn polygon_fill_rows(
     }
     ui.horizontal(|ui| {
         let undo = egui::Button::new(tr("fill.poly-undo-point"));
-        if ui
-            .add_enabled(!tool.points().is_empty(), undo)
-            .clicked()
-        {
+        if ui.add_enabled(!tool.points().is_empty(), undo).clicked() {
             tool.undo_point();
         }
         if ui
@@ -1283,13 +1281,7 @@ mod tests {
     #[test]
     fn quick_mask_gates_fill_coverage_per_texel() {
         let mesh = left_half_quad();
-        let raw = evaluate_fill_tile(
-            &mesh,
-            &solid_fill([1.0, 0.0, 0.0, 1.0]),
-            1001,
-            16,
-            16,
-        );
+        let raw = evaluate_fill_tile(&mesh, &solid_fill([1.0, 0.0, 0.0, 1.0]), 1001, 16, 16);
         // Inactive: untouched (the zero-cost path, like symmetry off).
         let idle = QuickMask::new(16, 16);
         let done = apply_quick_mask(
@@ -1468,10 +1460,16 @@ mod tests {
         assert!(tool.build_mask(&mesh).is_none());
 
         tool.set_armed(true);
-        assert!(!tool.set_pick([0.25, 0.5]), "polygon mode takes paths, not picks");
+        assert!(
+            !tool.set_pick([0.25, 0.5]),
+            "polygon mode takes paths, not picks"
+        );
         assert!(tool.push_point([0.0, 0.0]));
         assert!(tool.push_point([0.5, 0.0]));
-        assert!(!tool.push_point([f32::NAN, 0.0]), "non-finite never records");
+        assert!(
+            !tool.push_point([f32::NAN, 0.0]),
+            "non-finite never records"
+        );
         assert_eq!(tool.point_count(), 2);
         assert!(!tool.can_apply(), "two points are no polygon");
         assert!(tool.push_point([0.5, 1.0]));
@@ -1528,7 +1526,10 @@ mod tests {
 
         // Misses and non-fill targets are no-ops, never stray writes.
         tool.set_mode(PolygonFillMode::Triangle);
-        assert!(tool.set_pick([0.9, 0.9]), "recorded (right half is empty mesh)");
+        assert!(
+            tool.set_pick([0.9, 0.9]),
+            "recorded (right half is empty mesh)"
+        );
         assert_eq!(tool.pick_triangle(&mesh), None, "but it misses");
         assert!(tool.build_mask(&mesh).is_none());
         assert!(!tool.apply_to(&mut doc, &mesh));
@@ -1539,12 +1540,11 @@ mod tests {
         tool.set_target(Some(paint_id));
         assert!(tool.set_pick([0.25, 0.5]));
         assert!(!tool.apply_to(&mut doc, &mesh), "paint layers take no mask");
-        assert!(
-            doc.layers()
-                .iter()
-                .find(|l| l.id == paint_id)
-                .and_then(|l| l.fill.clone())
-                .is_none()
-        );
+        assert!(doc
+            .layers()
+            .iter()
+            .find(|l| l.id == paint_id)
+            .and_then(|l| l.fill.clone())
+            .is_none());
     }
 }

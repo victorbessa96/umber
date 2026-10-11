@@ -250,8 +250,7 @@ impl UvView {
         // the click-path is visible while it is captured.
         if let Some(tool) = tool.as_ref() {
             if tool.has_capture() {
-                let pts: Vec<egui::Pos2> =
-                    tool.points().iter().map(|uv| to_screen(*uv)).collect();
+                let pts: Vec<egui::Pos2> = tool.points().iter().map(|uv| to_screen(*uv)).collect();
                 for w in pts.windows(2) {
                     painter.line_segment([w[0], w[1]], Stroke::new(1.5, LASSO_COLOR));
                 }
