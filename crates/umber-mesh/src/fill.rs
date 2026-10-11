@@ -78,9 +78,10 @@ impl ProjAxis {
 /// The five fill projections (§2, line 20). The fill layer ships WITH these —
 /// there is no projection-less fill (a [`FillProjection::Uv`] identity is
 /// the trivial base case, not an absence).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum FillProjection {
     /// The identity: the fill source maps straight onto the UV layout.
+    #[default]
     Uv,
     /// The position sampled in each axis-aligned plane, blended by the
     /// dominant-axis weights ([`triplanar_weights`]).
@@ -100,12 +101,6 @@ pub enum FillProjection {
     /// The position mapped to `(angle, height)` around one axis: the angle
     /// of the non-axis pair plus the axis coordinate.
     Cylindrical { axis: ProjAxis },
-}
-
-impl Default for FillProjection {
-    fn default() -> Self {
-        FillProjection::Uv
-    }
 }
 
 /// The fill layer's 2D pattern source (v1).
@@ -158,19 +153,10 @@ impl Default for FillSource {
 /// Stored on `umber-core`'s `Layer` (`fill: Option<FillParams>`); `None`
 /// means "not a fill layer" and keeps [`crate::LayerKind::Fill`] a plain
 /// tag so the journal/project matches don't churn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FillParams {
     pub source: FillSource,
     pub projection: FillProjection,
-}
-
-impl Default for FillParams {
-    fn default() -> Self {
-        Self {
-            source: FillSource::default(),
-            projection: FillProjection::default(),
-        }
-    }
 }
 
 impl FillParams {
@@ -235,7 +221,7 @@ fn axis_plane_fallback(pos: [f32; 3]) -> [f32; 2] {
 /// Spherical `(u, v)` for `pos` (see [`projection_sample_2d`]).
 pub fn spherical_coords(pos: [f32; 3]) -> [f32; 2] {
     let r = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
-    if !(r > 0.0) || !r.is_finite() {
+    if !r.is_finite() || r <= 0.0 {
         return [0.0, 0.5];
     }
     let theta = pos[2].atan2(pos[0]);
@@ -729,7 +715,8 @@ mod tests {
     fn unit_cube() -> MeshData {
         // (face normal axis, sign, quad corners a/b/c/d for tris
         // (a,b,c),(a,c,d)).
-        let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3]); 6] = [
+        type QuadTable = [([f32; 3], [f32; 3], [f32; 3], [f32; 3]); 6];
+        let faces: QuadTable = [
             // -X
             (
                 [-1.0, -1.0, -1.0],

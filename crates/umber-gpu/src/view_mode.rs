@@ -135,9 +135,10 @@ pub enum PixelSource {
 }
 
 /// The viewport's shading mode (requirements.md §5 P0 row).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
     /// Today's render: the full PBR math through the display LUT.
+    #[default]
     Lit,
     /// Albedo/base-color only, no lighting math, through the LUT
     /// (unlit is still a color view of a color channel — §9).
@@ -148,12 +149,6 @@ pub enum ViewMode {
     /// The baked mesh map displayed instead of the paint (always
     /// data, always bypasses the LUT).
     MeshMapPreview(MeshMapKind),
-}
-
-impl Default for ViewMode {
-    fn default() -> Self {
-        Self::Lit
-    }
 }
 
 impl ViewMode {
