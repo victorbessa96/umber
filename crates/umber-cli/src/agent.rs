@@ -288,14 +288,17 @@ impl Session {
                     dilate: 0,
                 };
                 let mut skipped = Vec::new();
+                let ask = crate::ExportAsk {
+                    preset_name: &s.preset,
+                    flags: &flags,
+                    requested_tiles: &s.tiles,
+                    usda: s.usda,
+                };
                 let (written, tiles) = export_mesh(
                     &loaded.path,
                     &loaded.mesh,
                     &s.out_dir,
-                    &s.preset,
-                    &flags,
-                    &s.tiles,
-                    s.usda,
+                    &ask,
                     &mut |name: &str| skipped.push(name.to_string()),
                 )?;
                 fields(serde_json::json!({

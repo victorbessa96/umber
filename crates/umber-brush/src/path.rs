@@ -410,20 +410,15 @@ impl From<PathDab> for DabPlan {
 }
 
 /// The replay op mode: paint / erase / smudge along the path.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum PathOp {
     /// The stamp (the GPU splat pass).
+    #[default]
     Paint,
     /// The CPU eraser op, with these channel flags.
     Erase(EraseParams),
     /// The CPU smudge op, with these params.
     Smudge(SmudgeParams),
-}
-
-impl Default for PathOp {
-    fn default() -> Self {
-        Self::Paint
-    }
 }
 
 impl PathOp {

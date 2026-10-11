@@ -73,20 +73,12 @@ impl Default for CloneParams {
 }
 
 /// Eraser parameters (the design's `EraseParams`, §2's P0 row).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct EraseParams {
     /// Which channels the erase touches. Default is alpha-only: color
     /// data is left in place (unassociated), so the stroke is
     /// non-destructive and undo restores the exact before-state.
     pub channels: EraseChannels,
-}
-
-impl Default for EraseParams {
-    fn default() -> Self {
-        Self {
-            channels: EraseChannels::default(),
-        }
-    }
 }
 
 /// Per-channel enable for the eraser (§2's P0 row).

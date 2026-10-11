@@ -37,9 +37,10 @@ pub const ANGLE_SNAP_MIN_DEG: f32 = 1.0;
 pub const ANGLE_SNAP_MAX_DEG: f32 = 90.0;
 
 /// How a stroke's stamps are constrained to straight lines.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineConstraintMode {
     /// No constraint: the filter is the identity (bit-identical passthrough).
+    #[default]
     Off,
     /// Shift-like straight line: anchor (first stamp) → cursor.
     Line,
@@ -52,12 +53,6 @@ pub enum LineConstraintMode {
         /// `ANGLE_SNAP_MIN_DEG..=ANGLE_SNAP_MAX_DEG`.
         snap_deg: f32,
     },
-}
-
-impl Default for LineConstraintMode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 impl LineConstraintMode {

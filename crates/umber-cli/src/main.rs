@@ -775,43 +775,47 @@ fn run_export(
     // Fail fast on a bad preset, before the mesh load.
     preset_by_name(preset_name)?;
     let mesh = umber_mesh::load(mesh_path)?;
-    export_mesh(
-        mesh_path,
-        &mesh,
-        out_dir,
+    let ask = ExportAsk {
         preset_name,
         flags,
         requested_tiles,
         usda,
-        on_skip,
-    )
+    };
+    export_mesh(mesh_path, &mesh, out_dir, &ask, on_skip)
 }
 
 /// [`run_export`]'s body over an already-loaded mesh (the agent session
 /// exports the mesh it holds). `mesh_path` supplies the texture-set name
 /// and the `$mesh` token.
+/// The export request's tunables, bundled to stay under clippy's
+/// 7-argument floor (mesh/out_dir/reporting stay separate — they vary
+/// per call site in ways a bundle would obscure).
+pub struct ExportAsk<'a> {
+    preset_name: &'a str,
+    flags: &'a BakeFlags,
+    requested_tiles: &'a [u16],
+    usda: bool,
+}
+
 fn export_mesh(
     mesh_path: &Path,
     mesh: &umber_mesh::MeshData,
     out_dir: &Path,
-    preset_name: &str,
-    flags: &BakeFlags,
-    requested_tiles: &[u16],
-    usda: bool,
+    ask: &ExportAsk<'_>,
     on_skip: &mut dyn FnMut(&str),
 ) -> Result<(Vec<PathBuf>, Vec<u16>)> {
-    let mut full_preset = preset_by_name(preset_name)?;
-    full_preset.usda |= usda;
+    let mut full_preset = preset_by_name(ask.preset_name)?;
+    full_preset.usda |= ask.usda;
     let ctx = bake_context()?;
     let set_name = umber_mesh::texture_set_name(mesh_path, mesh);
     let present = present_tiles(mesh);
-    let tiles = select_tiles(requested_tiles, &present)?;
+    let tiles = select_tiles(ask.requested_tiles, &present)?;
     // The pre-UDIM path: a mesh living only in tile 1001 bakes whole.
     let whole_mesh = present == [umber_mesh::FIRST_TILE];
 
     let position_params = umber_bake::position::PositionMapParams {
-        width: flags.size,
-        height: flags.size,
+        width: ask.flags.size,
+        height: ask.flags.size,
     };
     let position_f32 =
         umber_bake::position::bake_position_map(&ctx.device, &ctx.queue, mesh, &position_params)?;
@@ -837,8 +841,8 @@ fn export_mesh(
         };
         // Bake the union of the preset's map kinds (data maps as linear
         // RGBA8 sources for the driver).
-        let ao = bake_ao(&ctx, tile_mesh, flags)?;
-        let mut map_set = umber_export::MapSet::new(flags.size);
+        let ao = bake_ao(&ctx, tile_mesh, ask.flags)?;
+        let mut map_set = umber_export::MapSet::new(ask.flags.size);
         map_set.set(umber_export::MapKind::AmbientOcclusion, ao);
         // The REAL baked tangent-space normal (OpenGL working convention;
         // the driver flips green for DirectX presets).
@@ -846,8 +850,8 @@ fn export_mesh(
             &ctx.device,
             &ctx.queue,
             tile_mesh,
-            flags.size,
-            flags.size,
+            ask.flags.size,
+            ask.flags.size,
             &umber_bake::normal_map::TangentNormalParams::default(),
         )?;
         map_set.set(umber_export::MapKind::Normal, tnormal);
@@ -878,7 +882,7 @@ fn export_mesh(
     };
     if preset.outputs.is_empty() {
         return Err(anyhow::anyhow!(
-            "preset '{preset_name}' has no outputs satisfiable from baked maps"
+            "preset '{ask.preset_name}' has no outputs satisfiable from baked maps"
         ));
     }
 
