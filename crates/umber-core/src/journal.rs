@@ -107,6 +107,14 @@ pub enum JournalOp {
         /// The fill parameters after the apply.
         fill: Option<FillParams>,
     },
+    /// An instance layer's source ([`LayerCommand::SetInstanceSource`]):
+    /// the source the stack holds after the apply.
+    SetInstanceSource {
+        /// The instance layer's id.
+        id: u64,
+        /// The source after the apply.
+        source: u64,
+    },
 }
 
 impl JournalOp {
@@ -160,6 +168,12 @@ impl JournalOp {
                     fill: layer.fill.clone(),
                 })
             }
+            LayerCommand::SetInstanceSource { id, old, .. } => {
+                old.as_ref()?;
+                stack
+                    .instance_source(*id)
+                    .map(|source| JournalOp::SetInstanceSource { id: *id, source })
+            }
         }
     }
 
@@ -196,6 +210,9 @@ impl JournalOp {
             }
             LayerCommand::SetFill { id, old, .. } => {
                 old.clone().map(|fill| JournalOp::SetFill { id: *id, fill })
+            }
+            LayerCommand::SetInstanceSource { id, old, .. } => {
+                old.map(|source| JournalOp::SetInstanceSource { id: *id, source })
             }
         }
     }
@@ -265,6 +282,12 @@ impl JournalOp {
                     }
                 }
             },
+            JournalOp::SetInstanceSource { id, source } => {
+                // Through the cycle guard (recovery never forces a cycle:
+                // a retarget that now cycles is ignored, like the live
+                // redo path).
+                let _ = stack.set_instance_source(*id, *source);
+            }
         }
     }
 }

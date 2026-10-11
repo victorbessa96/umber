@@ -47,7 +47,8 @@ use std::path::PathBuf;
 use fluent::FluentValue;
 use umber_gpu::{EvalBackend, GraphGpuEvaluator, TileSpec};
 use umber_graph::{
-    eval_graph_cached, EvalCache, EvalContext, Graph, Node, NodeOutput, NodeRegistry, ParamValue,
+    eval_graph_cached, AnchorRef, EvalCache, EvalContext, Graph, Node, NodeOutput, NodeRegistry,
+    ParamValue,
 };
 
 use crate::graph_canvas::CanvasState;
@@ -83,6 +84,10 @@ fn default_params(node_def: &str) -> Vec<(String, ParamValue)> {
         ],
         "image_asset" => vec![("path".into(), ParamValue::Asset(String::new()))],
         "mesh_map_generator" => vec![("map_name".into(), ParamValue::Asset("AO".into()))],
+        "anchor" => vec![
+            ("layer_id".into(), ParamValue::Int(0)),
+            ("channel".into(), ParamValue::Asset("baseColor".into())),
+        ],
         _ => Vec::new(),
     }
 }
@@ -94,6 +99,7 @@ fn full_registry() -> NodeRegistry {
     umber_graph::nodes::register_generator_nodes(&mut registry);
     umber_graph::nodes::register_filter_color_nodes(&mut registry);
     umber_graph::nodes::register_mask_spatial_nodes(&mut registry);
+    umber_graph::anchor::register_anchor_nodes(&mut registry);
     registry
 }
 
@@ -142,6 +148,14 @@ pub struct GraphPanel {
     /// The last plugin scan's summary line (kept apart from `status`,
     /// which every evaluate overwrites).
     plugin_status: Option<String>,
+    /// The active texture set's layers, for the anchor picker (the app
+    /// refreshes this each frame — the picker filters graph inputs to
+    /// the set by construction).
+    anchor_layers: Vec<(u64, String)>,
+    /// Composited layer channels for anchor resolution, keyed
+    /// `anchor:{id}:{channel}` (merged into the eval externals on every
+    /// [`Self::evaluate`] — the bridge uploads what the compositor baked).
+    anchor_externals: HashMap<String, NodeOutput>,
 }
 
 impl GraphPanel {
@@ -178,6 +192,8 @@ impl GraphPanel {
             canvas: CanvasState::default(),
             plugin_decls: Vec::new(),
             plugin_status: None,
+            anchor_layers: Vec::new(),
+            anchor_externals: HashMap::new(),
         }
     }
 
@@ -421,6 +437,49 @@ impl GraphPanel {
         true
     }
 
+    /// Refreshes the anchor picker's layer list: the active texture set's
+    /// `(id, name)` pairs. The picker filters graph inputs to the set by
+    /// construction — it can only bind what is listed here.
+    pub fn set_anchor_layers(&mut self, layers: Vec<(u64, String)>) {
+        self.anchor_layers = layers;
+    }
+
+    /// The anchor picker's current layer list.
+    pub fn anchor_layers(&self) -> &[(u64, String)] {
+        &self.anchor_layers
+    }
+
+    /// Binds a node input to a layer channel anchor (§3:42) and marks the
+    /// node dirty. Returns `false` when the node id is unknown.
+    pub fn bind_anchor(
+        &mut self,
+        node_id: u64,
+        input: &str,
+        layer_id: u64,
+        channel: &str,
+    ) -> bool {
+        self.set_param(
+            node_id,
+            input,
+            ParamValue::Anchor(AnchorRef::new(layer_id, channel)),
+        )
+    }
+
+    /// Uploads composited layer channels for anchor resolution, keyed
+    /// `anchor:{id}:{channel}` (see [`AnchorRef::key`]). Merged into the
+    /// eval externals on every [`Self::evaluate`], on both backends.
+    pub fn set_anchor_inputs(&mut self, inputs: HashMap<String, NodeOutput>) {
+        self.anchor_externals = inputs;
+    }
+
+    /// Merges the bridge externals (mesh-map stand-ins + uploaded anchor
+    /// channels) for one evaluation.
+    fn eval_externals(&self) -> HashMap<String, NodeOutput> {
+        let mut external = mesh_map_externals(self.resolution);
+        external.extend(self.anchor_externals.clone());
+        external
+    }
+
     /// Replaces the graph wholesale (the Open-Project path): cache
     /// cleared, everything marked dirty, output defaulting to the
     /// highest id, selection cleared. Carried canvas positions
@@ -525,7 +584,7 @@ impl GraphPanel {
         };
         let ctx = EvalContext {
             resolution: self.resolution,
-            external: mesh_map_externals(self.resolution),
+            external: self.eval_externals(),
         };
         match eval_graph_cached(
             &self.graph,
@@ -584,7 +643,7 @@ impl GraphPanel {
         let tile = TileSpec::tile_1001(self.resolution.0.max(1), self.resolution.1.max(1));
         let ctx = EvalContext {
             resolution: self.resolution,
-            external: mesh_map_externals(self.resolution),
+            external: self.eval_externals(),
         };
         let result = evaluator.evaluate(
             &self.graph,
@@ -1014,6 +1073,51 @@ fn param_editor(
                 });
             (edit != *v).then_some(ParamValue::NodeRef(edit))
         }
+        // The anchor picker: the layer combo lists ONLY the active texture
+        // set's layers (see `set_anchor_layers`), so a graph input binds
+        // within its set by construction. Layer and channel edit
+        // independently (one write-back per frame).
+        ParamValue::Anchor(a) => {
+            let mut result = None;
+            ui.horizontal(|ui| {
+                ui.label(name);
+                if panel.anchor_layers.is_empty() {
+                    ui.weak(tr("graph.anchor-none"));
+                } else {
+                    let current_label = panel
+                        .anchor_layers
+                        .iter()
+                        .find(|(id, _)| *id == a.layer_id)
+                        .map(|(id, lname)| format!("{id}: {lname}"))
+                        .unwrap_or_else(|| a.layer_id.to_string());
+                    let mut layer = a.layer_id;
+                    egui::ComboBox::from_label(tr("graph.anchor-layer"))
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            for (id, lname) in &panel.anchor_layers {
+                                ui.selectable_value(
+                                    &mut layer,
+                                    *id,
+                                    format!("{id}: {lname}"),
+                                );
+                            }
+                        });
+                    if layer != a.layer_id {
+                        result = Some(ParamValue::Anchor(AnchorRef::new(
+                            layer,
+                            a.channel.clone(),
+                        )));
+                    }
+                }
+                ui.label(tr("graph.anchor-channel"));
+                let mut channel = a.channel.clone();
+                ui.add(egui::TextEdit::singleline(&mut channel).desired_width(90.0));
+                if result.is_none() && !channel.trim().is_empty() && channel != a.channel {
+                    result = Some(ParamValue::Anchor(AnchorRef::new(a.layer_id, channel)));
+                }
+            });
+            result
+        }
     }
 }
 
@@ -1354,10 +1458,10 @@ mod tests {
 
     #[test]
     fn registry_listing_covers_all_merged_families() {
-        // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c = 24.
+        // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c + 1 anchor = 25.
         let panel = GraphPanel::new();
         let defs = panel.registry().node_defs();
-        assert_eq!(defs.len(), 24, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 25, "unexpected registry size: {defs:?}");
         for expected in [
             "uniform",
             "image_asset",
@@ -1383,6 +1487,7 @@ mod tests {
             "direction_warp",
             "triplanar_blend",
             "mesh_map_generator",
+            "anchor",
         ] {
             assert!(
                 defs.contains(&expected),
@@ -1392,6 +1497,49 @@ mod tests {
         let mut sorted = defs.clone();
         sorted.sort_unstable();
         assert_eq!(defs, sorted, "listing must be sorted");
+    }
+
+    #[test]
+    fn anchor_binding_resolves_through_panel_eval() {
+        // End-to-end §3:42: a node input bound to a layer anchor evaluates
+        // against the bridge-uploaded channel bytes.
+        let mut panel = GraphPanel::new();
+        panel.set_resolution((2, 2));
+        panel.set_anchor_layers(vec![(5, "Base".into())]);
+        assert_eq!(
+            panel.anchor_layers(),
+            &[(5, "Base".to_string())],
+            "the picker lists the set's layers"
+        );
+        let tail = panel.add_node("passthrough");
+        assert!(panel.bind_anchor(tail, "in", 5, "baseColor"));
+        assert!(!panel.bind_anchor(999, "in", 5, "baseColor"));
+        assert!(panel.set_output_node(tail));
+        // Unbound (deleted layer / never composited): honest failure, the
+        // previous output (none) kept.
+        panel.evaluate();
+        assert!(
+            panel.status().starts_with("Eval failed"),
+            "unbound anchor must fail, got {:?}",
+            panel.status()
+        );
+        assert!(panel.last_output().is_none());
+        // Bound: the bridge uploads the composited channel; the eval
+        // resolves the anchor to exactly those bytes.
+        let channel = NodeOutput::Image(
+            umber_graph::ImageBuffer::filled(2, 2, [9, 9, 9, 255]).expect("2x2 fills"),
+        );
+        panel.set_anchor_inputs(HashMap::from([(
+            "anchor:5:baseColor".to_string(),
+            channel.clone(),
+        )]));
+        panel.evaluate();
+        assert!(
+            !panel.status().starts_with("Eval failed"),
+            "bound anchor must evaluate, got {:?}",
+            panel.status()
+        );
+        assert_eq!(panel.last_output(), Some(&channel));
     }
 
     #[test]

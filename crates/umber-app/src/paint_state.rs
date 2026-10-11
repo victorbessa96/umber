@@ -54,6 +54,17 @@
 //! Symmetry off skips the expansion entirely — byte-identical staging.
 //! The settings are session state: not in the project file (follow-up).
 //!
+//! Straight-line constraint + angle snap (§2's P1 row,
+//! `umber_brush::line_constraint`): the panel's [`LineConstraintMode`] is
+//! adopted between strokes ([`PaintState::sync_line_constraint`]) and set
+//! on the live conditioner, whose hook sits AFTER lazy mouse and BEFORE
+//! spacing — every stamp projects onto the stroke-start-anchored line (or
+//! the nearest snap-multiple ray) before the dab planner sees it, so
+//! spacing and the dab adapter downstream are untouched. Off (the default)
+//! is the identity: staged dabs are byte-identical. Like symmetry, the
+//! mode is session state persisted in the paint session (not the project
+//! file); a mid-stroke change is refused so one stroke never splits.
+//!
 //! Wash mode (`umber_brush::WashMode`, §2 line 16): the active preset's
 //! mode is adopted between strokes ([`PaintState::sync_wash_mode`]) and
 //! renormalizes staged paint dabs pre-splat ([`apply_wash_mode`], right
@@ -89,8 +100,8 @@ use egui::Pos2;
 use umber_brush::retouch::{DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
-    wash_scale, BrushParams, BrushTool, DabAdapter, MaskPaint, QuickMask, RgbaBuffer,
-    StrokeConditioner, StrokeEvent, SymTransform, SymmetrySettings, WashMode,
+    wash_scale, BrushParams, BrushTool, DabAdapter, LineConstraintMode, MaskPaint, QuickMask,
+    RgbaBuffer, StrokeConditioner, StrokeEvent, SymTransform, SymmetrySettings, WashMode,
 };
 use umber_core::undo::UndoStack;
 use umber_gpu::paint::Dab;
@@ -212,6 +223,10 @@ pub struct PaintState {
     /// The symmetry settings (synced from the brush panel between
     /// strokes; the UV view's mirror manipulator edits the offset here).
     symmetry: SymmetrySettings,
+    /// The straight-line / angle-snap mode (synced from the brush panel
+    /// between strokes via [`Self::sync_line_constraint`]; the live
+    /// conditioner is set at the same time).
+    line_constraint: LineConstraintMode,
     /// Set when the manipulator changed `symmetry`, so the next
     /// [`Self::sync_symmetry`] hands it back to the panel instead of
     /// adopting the panel's (stale) copy.
@@ -294,6 +309,7 @@ impl PaintState {
                 .with_memory_budget(RETOUCH_HISTORY_MAX_BYTES),
             retouch_writes: PaintWrites::default(),
             symmetry: SymmetrySettings::default(),
+            line_constraint: LineConstraintMode::Off,
             symmetry_from_view: false,
             stroke_symmetry: None,
             quick_mask: QuickMask::new(TARGET_SIZE, TARGET_SIZE),
@@ -447,6 +463,22 @@ impl PaintState {
     /// these).
     pub fn symmetry(&self) -> &SymmetrySettings {
         &self.symmetry
+    }
+
+    /// Adopts the panel's straight-line / angle-snap mode (between strokes
+    /// only — a mode swap mid-stroke would split one stroke across two
+    /// projections) and sets it on the live conditioner, whose anchor
+    /// re-seeds at the next `begin_stroke`.
+    pub fn sync_line_constraint(&mut self, mode: LineConstraintMode) {
+        if !self.stroking {
+            self.line_constraint = mode;
+            self.conditioner.set_line_constraint(mode);
+        }
+    }
+
+    /// The current straight-line / angle-snap mode.
+    pub fn line_constraint(&self) -> LineConstraintMode {
+        self.line_constraint
     }
 
     /// The mirror manipulator: moves the mirror line to `offset`

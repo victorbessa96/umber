@@ -8,6 +8,7 @@ use umber_brush::symmetry::{RADIAL_CENTER, RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
 use umber_brush::{MirrorAxis, MirrorSettings, QuickMask, SymmetrySettings};
 use umber_mesh::MeshData;
 
+use crate::fill_layer::{PolygonFillMode, PolygonFillTool};
 use crate::i18n::tr;
 
 /// Wireframe color for UV island edges.
@@ -44,6 +45,7 @@ impl UvView {
         gpu: &umber_gpu::GpuContext,
         mut paint: Option<&mut crate::paint_state::PaintState>,
         display_lut: Option<&umber_gpu::DisplayLut>,
+        tool: Option<&mut PolygonFillTool>,
     ) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -59,6 +61,10 @@ impl UvView {
         );
         let square = egui::Rect::from_min_size(origin, egui::vec2(side, side));
 
+        // The polygon-fill capture: while the lasso tool is armed,
+        // primary clicks feed it (lasso points / the single pick) instead
+        // of painting — and never start a stroke.
+        let tool_armed = tool.as_ref().is_some_and(|t| t.is_armed());
         // Stroke input: primary-button drag inside the UV square maps to
         // UV space and feeds the paint conditioner. Left-drag orbits in
         // the 3D view; here left-drag paints.
@@ -106,7 +112,25 @@ impl UvView {
             // is held. Re-set every frame the button is down, so the last
             // position before release wins.
             let alt = ui.input(|i| i.modifiers.alt);
-            if alt && paint.clone_tool_active() {
+            if tool_armed {
+                if pointer_down {
+                    if let Some(pos) = interact.interact_pointer_pos() {
+                        if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
+                            if let Some(tool) = tool.as_mut() {
+                                let uv = [uv.x, uv.y];
+                                if tool.mode() == PolygonFillMode::Polygon {
+                                    tool.push_point(uv);
+                                } else {
+                                    tool.set_pick(uv);
+                                }
+                            }
+                        }
+                    }
+                }
+                if paint.is_stroking() {
+                    paint.end_stroke();
+                }
+            } else if alt && paint.clone_tool_active() {
                 if paint.is_stroking() {
                     paint.end_stroke();
                 }
@@ -221,6 +245,30 @@ impl UvView {
         if let Some(symmetry) = symmetry {
             draw_symmetry_guides(&painter, square, &symmetry);
         }
+        // The polygon-fill capture overlay: the pending lasso path (plus
+        // its closing edge once it is a polygon) or the single pick, so
+        // the click-path is visible while it is captured.
+        if let Some(tool) = tool.as_ref() {
+            if tool.has_capture() {
+                let pts: Vec<egui::Pos2> =
+                    tool.points().iter().map(|uv| to_screen(*uv)).collect();
+                for w in pts.windows(2) {
+                    painter.line_segment([w[0], w[1]], Stroke::new(1.5, LASSO_COLOR));
+                }
+                if pts.len() >= 3 {
+                    painter.line_segment(
+                        [pts[pts.len() - 1], pts[0]],
+                        Stroke::new(1.0, LASSO_COLOR_DIM),
+                    );
+                }
+                for p in &pts {
+                    painter.circle_filled(*p, 3.0, LASSO_COLOR);
+                }
+                if let Some(pick) = tool.pick() {
+                    painter.circle_stroke(to_screen(pick), 6.0, Stroke::new(1.5, LASSO_COLOR));
+                }
+            }
+        }
         let _ = response;
     }
 
@@ -260,6 +308,11 @@ const MASK_OVERLAY_ALPHA: f32 = 0.5;
 const MASK_OVERLAY_MAX_SIDE: u32 = 512;
 /// The "mask mode" label color.
 const MASK_OVERLAY_LABEL_COLOR: Color32 = Color32::from_rgb(255, 110, 110);
+/// The polygon-fill lasso path + pick marker (amber, distinct from the
+/// quick-mask red and the UV wireframe blue).
+const LASSO_COLOR: Color32 = Color32::from_rgb(255, 190, 60);
+/// The lasso's closing edge (dimmer: it previews, not yet committed).
+const LASSO_COLOR_DIM: Color32 = Color32::from_rgb(180, 130, 40);
 
 /// `tile`'s quick mask as an unmultiplied RGBA overlay: red at
 /// `(1 - mask) * MASK_OVERLAY_ALPHA` opacity (blocked tinted, allowed

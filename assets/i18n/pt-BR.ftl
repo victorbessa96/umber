@@ -158,6 +158,9 @@ graph =
     .edge-input = entrada
     .edge-from = de
     .add-edge = Adicionar aresta
+    .anchor-layer = camada
+    .anchor-channel = canal
+    .anchor-none = sem camadas para vincular
     .no-output = Nenhuma saída ainda — clique em Avaliar.
     .uniform-output = Saída uniforme: { $value }
     .no-eval-yet = Nenhuma avaliação ainda.
@@ -276,6 +279,12 @@ brush =
     .symmetry-count = Cópias
     .symmetry-flip-u = Inverter U
     .symmetry-flip-v = Inverter V
+    .line-constraint = Linha reta
+    .line-constraint-off = Desligada
+    .line-constraint-line = Linha
+    .line-constraint-snap = Snap de ângulo
+    .line-constraint-angle = Ângulo do snap
+    .line-constraint-hint = Ancorada no início do traço; o snap de ângulo trava a direção em múltiplos do ângulo.
     .quick-mask = Máscara rápida
     .quick-mask-mode = Modo máscara (X): os traços pintam a máscara
     .quick-mask-active = Restringir a pintura pela máscara
@@ -297,6 +306,11 @@ layers =
     .kind-paint = pintura
     .kind-fill = preenchimento
     .kind-folder = pasta
+    .kind-instance = instância
+    .instance-this = ⧉ Instância
+    .instance-of = instância de { $source }
+    .instance-name = { $source } (instância)
+    .instance-paint-hint = Pinte a origem, não a instância.
 
 ## Propriedades da camada de preenchimento
 
@@ -325,6 +339,20 @@ fill =
     .seed = Semente
     .octaves = Oitavas
     .graph-note = Apenas um snapshot: reavalie o grafo para atualizar (a ligação viva com o grafo é um follow-up).
+    .poly-tool = Preenchimento por polígono
+    .poly-armed = Capturar cliques (laço)
+    .poly-hint = Durante a captura, os cliques na vista UV 2D constroem a máscara em vez de pintar.
+    .poly-mode-polygon = Polígono (laço)
+    .poly-mode-triangle = Triângulo
+    .poly-mode-mesh = Ilha da malha
+    .poly-mode-uv-chunk = Ilha UV
+    .poly-points = Pontos do laço
+    .poly-pick = Triângulo escolhido
+    .poly-no-pick = nenhum
+    .poly-undo-point = Desfazer ponto
+    .poly-clear = Limpar
+    .poly-apply = Aplicar máscara
+    .poly-clear-mask = Remover máscara
 
 ## Painel de histórico
 
@@ -335,6 +363,21 @@ history =
         [one] { $count } entrada no histórico
        *[other] { $count } entradas no histórico
     }
+    .empty = Nenhum histórico ainda.
+    .op-add-paint = Adicionar camada de pintura
+    .op-add-fill = Adicionar camada de preenchimento
+    .op-add-folder = Adicionar camada de pasta
+    .op-add-instance = Adicionar camada de instância
+    .op-remove = Remover camada
+    .op-reorder = Reordenar camada
+    .op-set-opacity = Definir opacidade
+    .op-set-visible = Definir visibilidade
+    .op-set-blend = Definir modo de mesclagem
+    .op-set-fill = Camada de preenchimento
+    .op-set-instance-source = Definir origem da instância
+    .op-brush-stroke = Traço de pincel
+    .op-bake = Bake
+    .op-export = Exportação
     .strokes = Traços de borrar / clonar / borracha
     .undo-stroke = ↶ Desfazer traço
     .redo-stroke = ↷ Refazer traço

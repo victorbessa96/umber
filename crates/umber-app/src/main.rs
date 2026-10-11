@@ -25,6 +25,7 @@ mod export_dialog;
 mod fill_layer;
 mod graph_canvas;
 mod graph_panel;
+mod history_panel;
 mod i18n;
 #[cfg(test)]
 mod input_photon;
@@ -83,6 +84,7 @@ struct PanelViewer<'a> {
     paint: Option<&'a mut paint_state::PaintState>,
     doc: &'a mut document::Document,
     brush: &'a mut BrushPanel,
+    polygon_fill: &'a mut fill_layer::PolygonFillTool,
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
     display_lut_state: &'a mut display_panel::DisplayLutState,
@@ -127,6 +129,7 @@ impl TabViewer for PanelViewer<'_> {
                 self.gpu,
                 self.paint.as_deref_mut(),
                 Some(self.display_lut),
+                Some(&mut *self.polygon_fill),
             ),
             Panel::LayerStack => document::layers_ui(ui, self.doc),
             Panel::Properties => {
@@ -137,6 +140,7 @@ impl TabViewer for PanelViewer<'_> {
                 if let Some(paint) = self.paint.as_deref_mut() {
                     paint.sync_tool(&mut self.brush.tool);
                     paint.sync_symmetry(&mut self.brush.symmetry);
+                    paint.sync_line_constraint(self.brush.line_constraint);
                     // ... plus the active preset's wash mode (build-up
                     // when no preset is selected).
                     let wash = self
@@ -148,15 +152,20 @@ impl TabViewer for PanelViewer<'_> {
                     paint.sync_wash_mode(wash);
                 }
                 // One collapsible row per fill layer (projection picker +
-                // v1 source editor); edits run through Document as
-                // undoable, journaled SetFill ops.
-                fill_layer::fill_section_ui(ui, self.doc);
+                // v1 source editor) plus the polygon-fill tool rows; edits
+                // run through Document as undoable, journaled SetFill ops.
+                fill_layer::fill_section_ui(
+                    ui,
+                    self.doc,
+                    self.mesh,
+                    &mut *self.polygon_fill,
+                );
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));
             }
             Panel::History => {
-                document::history_ui(ui, self.doc);
+                history_panel::history_ui(ui, self.doc);
                 // Retouch (smudge/clone) strokes keep their own per-stroke
                 // history in v1 — the layer journal above can't hold texel
                 // snapshots yet.
@@ -201,6 +210,16 @@ impl TabViewer for PanelViewer<'_> {
                 self.export.show(ui, ctx);
             }
             Panel::Graph => {
+                // The anchor picker binds within the active texture set:
+                // refresh the panel's layer list from the document every
+                // frame (v1 holds one set's stack, so the list IS the set).
+                let layers: Vec<(u64, String)> = self
+                    .doc
+                    .layers()
+                    .iter()
+                    .map(|l| (l.id, l.name.clone()))
+                    .collect();
+                self.graph.set_anchor_layers(layers);
                 self.graph.show(ui);
             }
             Panel::Display => {
@@ -222,6 +241,9 @@ pub struct AppState {
     pub paint: Option<paint_state::PaintState>,
     /// The open document: layers + undo journal.
     pub doc: document::Document,
+    /// The polygon-fill lasso tool: the armed click-path capture feeding
+    /// pixel masks into fill layers (session state, never serialized).
+    pub polygon_fill: fill_layer::PolygonFillTool,
     /// The bakes panel: mesh-map bake settings + last-bake status.
     pub bakes: BakesPanel,
     /// The export dialog: preset choice, output dir + last-export status.
@@ -667,6 +689,7 @@ impl eframe::App for UmberApp {
                 paint: self.state.paint.as_mut(),
                 doc: &mut self.state.doc,
                 brush: &mut self.brush_panel,
+                polygon_fill: &mut self.state.polygon_fill,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
                 display_lut: &self.display_lut,

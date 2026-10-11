@@ -140,6 +140,38 @@ impl<C: Command> UndoStack<C> {
         true
     }
 
+    /// Time-travels the journal to `target` undo depth (entries held on
+    /// the undo stack) via repeated [`undo`](Self::undo)/[`redo`](Self::redo)
+    /// — there is no truncate-to-depth shortcut: every step runs the real
+    /// `revert`/`apply`, so the document passes through each intermediate
+    /// state exactly as stepwise undo/redo would. Saturates at the bottom
+    /// (depth 0, everything undone) and at the top (`undo.len() + redo.len()`,
+    /// everything redone): a target past either end stops there instead of
+    /// failing. Returns how many undo/redo steps were actually taken.
+    ///
+    /// Callers that journal each edit (the app's `Document`, whose autosave
+    /// journal must record every effective op) cannot delegate to this:
+    /// the reverting op must be read *before* each `undo` and the applied
+    /// op *after* each `redo`, so they step through their own
+    /// undo/redo chokepoints instead. This stays the generic primitive for
+    /// journal-only contexts.
+    pub fn jump(&mut self, doc: &mut C::Doc, target: usize) -> usize {
+        let mut steps = 0;
+        while self.undo.len() > target {
+            if !self.undo(doc) {
+                break;
+            }
+            steps += 1;
+        }
+        while self.undo.len() < target {
+            if !self.redo(doc) {
+                break;
+            }
+            steps += 1;
+        }
+        steps
+    }
+
     /// Whether [`undo`](Self::undo) would do anything right now.
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
@@ -395,5 +427,94 @@ mod tests {
         assert!(stack.undo(&mut doc));
         assert_eq!(doc, Counter(5));
         assert!(!stack.undo(&mut doc));
+    }
+
+    /// Drives `stack` to `target` with single undo/redo calls — the
+    /// reference behavior [`UndoStack::jump`] must be equivalent to.
+    fn step_to(stack: &mut UndoStack<AddCommand>, doc: &mut Counter, target: usize) -> usize {
+        let mut steps = 0;
+        while stack.len() > target {
+            assert!(stack.undo(doc));
+            steps += 1;
+        }
+        while stack.len() < target {
+            assert!(stack.redo(doc));
+            steps += 1;
+        }
+        steps
+    }
+
+    #[test]
+    fn jump_backward_is_n_undos() {
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<AddCommand> = UndoStack::new(100);
+        stack.push(AddCommand { delta: 1 }, &mut doc);
+        stack.push(AddCommand { delta: 10 }, &mut doc);
+        stack.push(AddCommand { delta: 100 }, &mut doc);
+        assert_eq!(doc, Counter(111));
+
+        // Depth 3 -> depth 0 is 3 undos.
+        assert_eq!(stack.jump(&mut doc, 0), 3);
+        assert_eq!(doc, Counter(0));
+        assert_eq!(stack.len(), 0);
+        assert!(stack.can_redo());
+    }
+
+    #[test]
+    fn jump_forward_redoes_and_round_trips() {
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<AddCommand> = UndoStack::new(100);
+        stack.push(AddCommand { delta: 1 }, &mut doc);
+        stack.push(AddCommand { delta: 10 }, &mut doc);
+        stack.push(AddCommand { delta: 100 }, &mut doc);
+
+        assert_eq!(stack.jump(&mut doc, 1), 2);
+        assert_eq!(doc, Counter(1));
+        assert_eq!(stack.jump(&mut doc, 3), 2);
+        assert_eq!(doc, Counter(111));
+        // Jumping to the depth already held is a no-op.
+        assert_eq!(stack.jump(&mut doc, 3), 0);
+        assert_eq!(doc, Counter(111));
+    }
+
+    #[test]
+    fn jump_saturates_past_both_ends() {
+        let mut doc = Counter::default();
+        let mut jumped: UndoStack<AddCommand> = UndoStack::new(100);
+        jumped.push(AddCommand { delta: 1 }, &mut doc);
+        jumped.push(AddCommand { delta: 2 }, &mut doc);
+
+        // No jump target is `usize`-negative, so the bottom saturates at
+        // depth 0; the top saturates once the redo stack is drained.
+        assert_eq!(jumped.jump(&mut doc, 0), 2);
+        assert_eq!(jumped.jump(&mut doc, 0), 0);
+        assert_eq!(jumped.jump(&mut doc, usize::MAX), 2);
+        assert_eq!(doc, Counter(3));
+        assert_eq!(jumped.jump(&mut doc, usize::MAX), 0);
+    }
+
+    #[test]
+    fn jump_matches_stepwise_undo_redo_at_every_depth() {
+        // Jump/state equivalence: for every reachable depth, a jumped
+        // journal holds the same document state and the same undo depth
+        // as one driven there one step at a time.
+        for target in 0..=3usize {
+            let mut a = Counter::default();
+            let mut jumped: UndoStack<AddCommand> = UndoStack::new(100);
+            jumped.push(AddCommand { delta: 1 }, &mut a);
+            jumped.push(AddCommand { delta: 10 }, &mut a);
+            jumped.push(AddCommand { delta: 100 }, &mut a);
+            let jump_steps = jumped.jump(&mut a, target);
+
+            let mut b = Counter::default();
+            let mut stepped: UndoStack<AddCommand> = UndoStack::new(100);
+            stepped.push(AddCommand { delta: 1 }, &mut b);
+            stepped.push(AddCommand { delta: 10 }, &mut b);
+            stepped.push(AddCommand { delta: 100 }, &mut b);
+            let step_steps = step_to(&mut stepped, &mut b, target);
+
+            assert_eq!((jump_steps, a), (step_steps, b), "target depth {target}");
+            assert_eq!(jumped.len(), stepped.len());
+        }
     }
 }

@@ -17,13 +17,20 @@ pub mod assets;
 pub mod journal;
 pub mod layers;
 pub mod project;
+pub mod smart;
 pub mod tiles;
 pub mod undo;
 
 pub use assets::{AssetError, AssetRef, AssetStore};
 pub use journal::{Journal, JournalEntry, JournalOp};
 
-pub use layers::{BlendMode, Layer, LayerCommand, LayerKind, LayerMask, LayerStack};
+pub use layers::{
+    BlendMode, InstanceError, Layer, LayerCommand, LayerKind, LayerMask, LayerStack,
+};
+pub use smart::{
+    AnchorError, AnchorRef, GeneratorBinding, MaskOp, MaskOpKind, MaskOpParams, MaskSource,
+    SmartApplyResult, SmartError, SmartLayerKind, SmartLayerTemplate, SmartMask, SmartMaterial,
+};
 pub use project::{
     load_from_dir, save_to_dir, ProjectError, ProjectModel, ProjectSettings, TextureSetLayers,
     CURRENT_PROJECT_VERSION,

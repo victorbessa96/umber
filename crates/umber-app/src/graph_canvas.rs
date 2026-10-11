@@ -250,10 +250,13 @@ pub fn port_position(rect: &GraphRect, port: PortSide) -> [f32; 2] {
 /// Scalar/vector2/string inputs are params, not ports.
 const IMAGE_INPUT_TYPES: &[&str] = &["color3", "vector3"];
 
-/// Registered generators without a painter nodedef: no input ports.
+/// Registered generators without a painter nodedef: no input ports
+/// (`anchor` reads its bound layer channel from the eval externals, so
+/// like the generators it has no edge inputs — only params).
 const GENERATORS: &[&str] = &[
     "uniform",
     "image_asset",
+    "anchor",
     "noise_perlin",
     "noise_value",
     "noise_worley",
@@ -1149,6 +1152,7 @@ mod tests {
         );
         assert!(input_ports("brick_pattern", &customs, &[]).is_empty());
         assert!(input_ports("mesh_map_generator", &customs, &[]).is_empty());
+        assert!(input_ports("anchor", &customs, &[]).is_empty());
         assert_eq!(input_ports("mix", &customs, &[]), ["fg", "bg"]);
         assert_eq!(
             input_ports("triplanar_blend", &customs, &[]),

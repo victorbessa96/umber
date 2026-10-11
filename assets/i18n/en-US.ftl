@@ -151,6 +151,9 @@ graph =
     .edge-input = input
     .edge-from = from
     .add-edge = Add edge
+    .anchor-layer = layer
+    .anchor-channel = channel
+    .anchor-none = no layers to bind
     .no-output = No output yet — press Evaluate.
     .uniform-output = Uniform output: { $value }
     .no-eval-yet = No evaluation yet.
@@ -257,6 +260,12 @@ brush =
     .symmetry-count = Copies
     .symmetry-flip-u = Flip U
     .symmetry-flip-v = Flip V
+    .line-constraint = Straight line
+    .line-constraint-off = Off
+    .line-constraint-line = Line
+    .line-constraint-snap = Angle snap
+    .line-constraint-angle = Snap angle
+    .line-constraint-hint = Anchored at the stroke start; angle snap locks the direction to multiples of the snap angle.
     .quick-mask = Quick mask
     .quick-mask-mode = Mask mode (X): strokes paint the mask
     .quick-mask-active = Gate painting with the mask
@@ -278,6 +287,11 @@ layers =
     .kind-paint = paint
     .kind-fill = fill
     .kind-folder = folder
+    .kind-instance = instance
+    .instance-this = ⧉ Instance
+    .instance-of = instance of { $source }
+    .instance-name = { $source } (instance)
+    .instance-paint-hint = Paint the source, not the instance.
 
 ## Fill layer properties (projection picker + v1 source editor)
 
@@ -306,6 +320,20 @@ fill =
     .seed = Seed
     .octaves = Octaves
     .graph-note = Snapshot only: re-evaluate the graph to refresh it (live graph wiring is a follow-up).
+    .poly-tool = Polygon fill
+    .poly-armed = Capture clicks (lasso)
+    .poly-hint = While capturing, clicks in the 2D UV view build the mask instead of painting.
+    .poly-mode-polygon = Polygon (lasso)
+    .poly-mode-triangle = Triangle
+    .poly-mode-mesh = Mesh island
+    .poly-mode-uv-chunk = UV chunk
+    .poly-points = Lasso points
+    .poly-pick = Picked triangle
+    .poly-no-pick = none
+    .poly-undo-point = Undo point
+    .poly-clear = Clear
+    .poly-apply = Apply mask
+    .poly-clear-mask = Clear mask
 
 ## History panel
 
@@ -316,6 +344,21 @@ history =
         [one] { $count } entry in journal
        *[other] { $count } entries in journal
     }
+    .empty = No history yet.
+    .op-add-paint = Add paint layer
+    .op-add-fill = Add fill layer
+    .op-add-folder = Add folder layer
+    .op-add-instance = Add instance layer
+    .op-remove = Remove layer
+    .op-reorder = Reorder layer
+    .op-set-opacity = Set opacity
+    .op-set-visible = Set visibility
+    .op-set-blend = Set blend mode
+    .op-set-fill = Fill layer
+    .op-set-instance-source = Set instance source
+    .op-brush-stroke = Brush stroke
+    .op-bake = Bake
+    .op-export = Export
     .strokes = Smudge / clone / eraser strokes
     .undo-stroke = ↶ Undo stroke
     .redo-stroke = ↷ Redo stroke
