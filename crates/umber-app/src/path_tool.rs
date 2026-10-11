@@ -175,7 +175,7 @@ impl PaintPathTool {
         if !uv[0].is_finite() || !uv[1].is_finite() {
             return false;
         }
-        if !(tol >= 0.0) {
+        if !tol.is_finite() || tol < 0.0 {
             return false;
         }
         let Some((seg, _)) = nearest_segment(self.path.points(), self.path.is_closed(), uv) else {
@@ -309,7 +309,7 @@ impl PaintPathTool {
 
 /// The nearest captured point within `tol` (UV units) of `uv`, if any.
 fn point_near(points: &[umber_brush::path::PathPoint], uv: [f32; 2], tol: f32) -> Option<usize> {
-    if !uv[0].is_finite() || !uv[1].is_finite() || !(tol >= 0.0) {
+    if !uv[0].is_finite() || !uv[1].is_finite() || !tol.is_finite() || tol < 0.0 {
         return None;
     }
     let mut best: Option<(usize, f32)> = None;
@@ -362,7 +362,7 @@ fn seg_b(points: &[umber_brush::path::PathPoint], seg: usize) -> [f32; 2] {
 fn dist_to_segment_t(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> (f32, f32) {
     let ab = [b[0] - a[0], b[1] - a[1]];
     let len2 = ab[0] * ab[0] + ab[1] * ab[1];
-    if !(len2 > 0.0) {
+    if !len2.is_finite() || len2 <= 0.0 {
         let dx = p[0] - a[0];
         let dy = p[1] - a[1];
         return (dx * dx + dy * dy, 0.0);

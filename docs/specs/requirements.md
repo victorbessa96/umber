@@ -36,7 +36,7 @@
 | Texture sets (per material/mesh UV set); per-set channel stack: baseColor, roughness, metallic, normal, height, emissive, opacity, AO + user channels | P0 | 1 (model), 2 (full) |
 | Layer types: paint layer, fill layer; folders with passthrough | P0 | 2 |
 | Per-channel blending mode + opacity; blending computed in linear space per channel | P0 | 2 |
-| Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 math verified + 7 new modes (HSV family + normal-map combine) = 19 built (`21e1290`); the remainder open |
+| Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 math verified + Darken/Lighten/Subtract/Difference kept = 15 built (14 separable + Passthrough; `21e1290`); HSV + normal-map families deferred (Wave 4 compositor scope); the remainder open |
 | Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✓ metadata model (LayerMask in layers.rs); the paint-mask DATA path rides the quick-mask plumbing |
 | Layer instancing (source-edits propagate, cycle detection) | P1 | 4 | ✓ built (`4cbaf21`) |
 | Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 | ✓ built (`4cbaf21`) |

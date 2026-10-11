@@ -576,15 +576,12 @@ impl PaintState {
     /// on continues the same stroke. A hit with no stroke in flight (the
     /// drag opened on a miss) starts the stroke there.
     pub fn extend_screen_point(&mut self, hit: Option<Pos2>) {
-        match hit {
-            Some(uv) => {
-                if self.stroking {
-                    self.extend_stroke(uv);
-                } else {
-                    self.begin_stroke(uv);
-                }
+        if let Some(uv) = hit {
+            if self.stroking {
+                self.extend_stroke(uv);
+            } else {
+                self.begin_stroke(uv);
             }
-            None => {}
         }
     }
 

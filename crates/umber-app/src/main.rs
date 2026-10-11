@@ -92,7 +92,6 @@ struct PanelViewer<'a> {
     /// the mesh-map import Apply path waits for it; see `mesh_map_import`).
     store: Option<&'a umber_core::AssetStore>,
     polygon_fill: &'a mut fill_layer::PolygonFillTool,
-    fill_states: &'a mut fill_layer::FillLayerStates,
     path_tool: &'a mut path_tool::PaintPathTool,
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
@@ -176,13 +175,7 @@ impl TabViewer for PanelViewer<'_> {
                 // One collapsible row per fill layer (projection picker +
                 // v1 source editor) plus the polygon-fill tool rows; edits
                 // run through Document as undoable, journaled SetFill ops.
-                fill_layer::fill_section_ui(
-                    ui,
-                    self.doc,
-                    self.mesh,
-                    &mut *self.polygon_fill,
-                    &mut self.fill_states,
-                );
+                fill_layer::fill_section_ui(ui, self.doc, self.mesh, &mut *self.polygon_fill);
                 // The paint-path tool rows (editable polyline → replayed
                 // stroke / closed-path fill through the paint session).
                 path_tool::path_tool_rows(ui, self.paint.as_deref_mut(), &mut *self.path_tool);
@@ -815,7 +808,6 @@ impl eframe::App for UmberApp {
                 doc: &mut self.state.doc,
                 brush: &mut self.brush_panel,
                 polygon_fill: &mut self.state.polygon_fill,
-                fill_states: &mut self.state.fill_states,
                 path_tool: &mut self.state.path_tool,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
@@ -849,33 +841,60 @@ impl eframe::App for UmberApp {
             }
         }
 
-        // Fill-layer refresh: re-evaluate the tiles of any fill layer the
-        // panel (or a journal replay) marked this frame, staging the fresh
-        // bytes through the paint session's tile plumbing.
-        if !self.state.fill_states.dirty.is_empty() && self.state.paint.is_some() {
-            let dirty: Vec<u64> = self.state.fill_states.dirty.drain(..).collect();
-            if let Some(mesh) = self.state.mesh.as_ref() {
-                let mesh = mesh.clone();
-                let (tiles, symmetry) = {
-                    let paint = self.state.paint.as_ref().unwrap();
-                    (paint.tiles_present(), paint.symmetry().clone())
-                };
-                for layer in dirty {
-                    let Some(state) = self.state.fill_states.map.get_mut(&layer) else {
-                        continue;
-                    };
-                    let staged = fill_layer::refresh_fill_layer(
-                        state,
-                        &mesh,
-                        self.state.paint.as_mut().unwrap(),
-                        &tiles,
-                        1024,
-                        &symmetry,
-                    );
-                    if staged.is_empty() {
-                        log::warn!("fill refresh for layer {layer} staged no tiles");
+        // Fill-layer refresh: adopt every doc-side fill change, then
+        // re-evaluate and stage the tiles of any layer the adoption pass
+        // marked (panel edits, undo/redo and journal replays all land in
+        // Layer::fill before this point in the frame — one adoption link
+        // covers every producer of fill-param changes).
+        if let Some(paint) = self.state.paint.as_mut() {
+            let layers: Vec<_> = self
+                .state
+                .doc
+                .layers()
+                .iter()
+                .filter(|l| l.kind == umber_core::LayerKind::Fill)
+                .map(|l| {
+                    (
+                        l.id,
+                        l.fill.clone().unwrap_or_default(),
+                        l.blend_mode,
+                        l.opacity,
+                    )
+                })
+                .collect();
+            for (id, params, blend, opacity) in &layers {
+                self.state.fill_states.ensure(*id, params, *blend, *opacity);
+            }
+            if !self.state.fill_states.dirty.is_empty() {
+                if let Some(mesh) = self.state.mesh.clone() {
+                    let dirty: Vec<u64> = self.state.fill_states.dirty.drain(..).collect();
+                    let (tiles, symmetry) = (paint.tiles_present(), *paint.symmetry());
+                    for layer in dirty {
+                        // A layer deleted between queueing and the mesh's
+                        // arrival must not ghost-publish.
+                        if !self
+                            .state
+                            .doc
+                            .layers()
+                            .iter()
+                            .any(|l| l.id == layer && l.kind == umber_core::LayerKind::Fill)
+                        {
+                            continue;
+                        }
+                        let Some(state) = self.state.fill_states.map.get_mut(&layer) else {
+                            continue;
+                        };
+                        let staged = fill_layer::refresh_fill_layer(
+                            state, &mesh, paint, &tiles, 1024, &symmetry,
+                        );
+                        if staged.is_empty() {
+                            log::warn!("fill refresh for layer {layer} staged no tiles");
+                        }
                     }
                 }
+                // No mesh loaded: LEAVE the queue — a fill layer first seen
+                // without a mesh stages its tiles on the mesh's arrival
+                // (ensure's dedup keeps the queue from growing meanwhile).
             }
         }
 

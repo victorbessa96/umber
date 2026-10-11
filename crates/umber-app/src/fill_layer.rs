@@ -821,24 +821,37 @@ pub struct FillLayerStates {
     /// One state per live fill layer, keyed by layer id.
     pub map: std::collections::HashMap<u64, FillLayerState>,
     /// Layers whose params changed this frame (drained by the app's
-    /// per-frame refresh; journal replays re-mark via the same path).
+    /// per-frame adoption pass; doc-side edits, undo/redo replays and
+    /// first-sight layers all queue here).
     pub dirty: Vec<u64>,
 }
 
 impl FillLayerStates {
-    /// Ensures a state exists for `layer` at `params` (constructing on
-    /// first sight, adopting the params when the layer is re-picked).
+    /// Ensures a state exists for `layer` (constructing on first sight),
+    /// then adopts the document's current `params`, `blend` and `opacity`.
+    /// A params change — or a first sight — marks the cache dirty and
+    /// queues the layer for the frame's refresh: panel edits, undo/redo
+    /// and journal replays all land in `Layer::fill` before the frame's
+    /// adoption pass runs, so every doc-side change re-evaluates through
+    /// the one live path (the live-not-baked contract).
     pub fn ensure(
         &mut self,
         layer: u64,
-        params: FillParams,
+        params: &FillParams,
         blend: umber_core::BlendMode,
         opacity: f32,
     ) {
+        let fresh = !self.map.contains_key(&layer);
         let state = self
             .map
             .entry(layer)
-            .or_insert_with(|| FillLayerState::new(layer, params));
+            .or_insert_with(|| FillLayerState::new(layer, params.clone()));
+        if fresh || state.params() != params {
+            state.set_params(params.clone());
+            if !self.dirty.contains(&layer) {
+                self.dirty.push(layer);
+            }
+        }
         state.blend = blend;
         state.opacity = opacity;
     }
@@ -849,7 +862,6 @@ pub fn fill_section_ui(
     doc: &mut Document,
     mesh: Option<&MeshData>,
     tool: &mut PolygonFillTool,
-    states: &mut FillLayerStates,
 ) {
     ui.add_space(8.0);
     ui.separator();
@@ -865,12 +877,6 @@ pub fn fill_section_ui(
         return;
     }
     for (id, name, params) in fills {
-        let layer = doc.layers().iter().find(|l| l.id == id);
-        let (blend, opacity) = layer
-            .map(|l| (l.blend_mode, l.opacity))
-            .unwrap_or((umber_core::BlendMode::default(), 1.0));
-        states.ensure(id, params.clone(), blend, opacity);
-        let mut mark_refresh = false;
         egui::CollapsingHeader::new(name.clone())
             .default_open(true)
             .show(ui, |ui| {
@@ -881,12 +887,8 @@ pub fn fill_section_ui(
                 source_rows(ui, id, &mut edited.source, &mut changed);
                 if changed {
                     doc.run(LayerCommand::set_fill(id, edited));
-                    mark_refresh = true;
                 }
             });
-        if mark_refresh {
-            states.dirty.push(id);
-        }
     }
     ui.separator();
     polygon_fill_rows(ui, doc, mesh, tool);
@@ -1623,5 +1625,77 @@ mod tests {
             .find(|l| l.id == paint_id)
             .and_then(|l| l.fill.clone())
             .is_none());
+    }
+
+    /// Test (h): the adoption contract — `FillLayerStates::ensure` adopts
+    /// the document's CURRENT params on every call (not just first sight),
+    /// marks the cache dirty, and queues the layer for the frame's refresh;
+    /// a no-op ensure (params unchanged) neither dirties nor queues. This
+    /// is the composed live-edit link the 06:11Z integration left open:
+    /// panel edits, undo/redo and journal replays all land in `Layer::fill`
+    /// before the frame's adoption pass reads it, so every doc-side change
+    /// re-evaluates through this one path.
+    #[test]
+    fn fill_states_adopt_doc_changes_and_queue_refresh() {
+        let mut stack = umber_core::LayerStack::new();
+        let id = stack.add_layer("Tint", LayerKind::Fill);
+        stack.set_fill(
+            id,
+            FillParams {
+                source: FillSource::Solid {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                },
+                projection: FillProjection::Uv,
+                mask: None,
+            },
+        );
+        let params_of =
+            |stack: &umber_core::LayerStack| stack.layer(id).unwrap().fill.clone().unwrap();
+
+        // First sight: constructed, marked dirty, queued.
+        let mut states = FillLayerStates::default();
+        let blend = stack.layer(id).unwrap().blend_mode;
+        let opacity = stack.layer(id).unwrap().opacity;
+        states.ensure(id, &params_of(&stack), blend, opacity);
+        assert!(states.dirty.contains(&id), "first sight must queue");
+        assert_eq!(states.dirty.len(), 1);
+        states.dirty.clear();
+
+        // No-op ensure: doc params unchanged — no dirty, no queue.
+        states.ensure(id, &params_of(&stack), blend, opacity);
+        assert!(states.dirty.is_empty(), "no-op must not queue");
+        let state = states.map.get(&id).unwrap();
+        assert!(!state.is_dirty(), "no-op must not dirty the cache");
+
+        // Doc-side edit (the panel/undo/journal path): ensure adopts the
+        // fresh params, marks the cache dirty, and queues the layer.
+        stack.set_fill(
+            id,
+            FillParams {
+                source: FillSource::Solid {
+                    color: [0.0, 1.0, 0.0, 1.0],
+                },
+                projection: FillProjection::Uv,
+                mask: None,
+            },
+        );
+        states.ensure(id, &params_of(&stack), blend, opacity);
+        assert!(states.dirty.contains(&id), "doc edit must queue");
+        let state = states.map.get(&id).unwrap();
+        assert!(state.is_dirty(), "doc edit must dirty the cache");
+        assert_eq!(
+            state.params().source,
+            FillSource::Solid {
+                color: [0.0, 1.0, 0.0, 1.0],
+            }
+        );
+
+        // Blend/opacity adoption rides every ensure without dirtying on
+        // its own (the composite publish reads them at refresh time).
+        stack.set_blend_mode(id, BlendMode::Multiply);
+        states.ensure(id, &params_of(&stack), BlendMode::Multiply, 0.5);
+        let (blend_now, opacity_now) = states.map.get(&id).unwrap().layer_blend_opacity();
+        assert_eq!(blend_now, BlendMode::Multiply);
+        assert_eq!(opacity_now, 0.5);
     }
 }

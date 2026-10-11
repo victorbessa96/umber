@@ -4831,6 +4831,7 @@ dependencies = [
  "log",
  "pollster 1.0.1",
  "profiling",
+ "serde",
  "thiserror 2.0.21",
  "umber-graph",
  "umber-mesh",

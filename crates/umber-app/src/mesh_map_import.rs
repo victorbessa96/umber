@@ -698,7 +698,7 @@ impl MeshMapImportState {
                     let rows: Vec<(String, UnmatchedReason)> = self
                         .unmatched
                         .iter()
-                        .map(|u| (u.file.clone(), u.reason.clone()))
+                        .map(|u| (u.file.clone(), u.reason))
                         .collect();
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for (file, reason) in &rows {
@@ -841,7 +841,7 @@ mod tests {
                 .unmatched
                 .iter()
                 .find(|u| u.file == file)
-                .map(|u| u.reason.clone())
+                .map(|u| u.reason)
         };
         assert_eq!(reason_of("notes.txt"), Some(UnmatchedReason::NotPng));
         assert_eq!(

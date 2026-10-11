@@ -53,6 +53,7 @@ impl UvView {
     /// and feeds pointer strokes into the paint session. The paint
     /// canvas presents through `display_lut` (the Display panel's chain;
     /// `None` = the identity table).
+    #[allow(clippy::too_many_arguments)]
     pub fn ui(
         &mut self,
         ui: &mut Ui,
