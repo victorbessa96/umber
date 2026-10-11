@@ -1354,25 +1354,21 @@ impl BakesPanel {
         queue: &umber_gpu::WgpuQueue,
         dispatch: &BakeDispatch<'_>,
     ) {
-        // Borrow each field once (dispatch is itself a reference — no double-&).
-        let mesh = dispatch.mesh;
-        let plan = &dispatch.plan;
-        let skew_tiles = &dispatch.skew_tiles;
-        let skew_skipped = &dispatch.skew_skipped;
-        let sets = &dispatch.sets;
+        // No field re-binds: `dispatch` is `&BakeDispatch`, so `dispatch.x`
+        // is already the borrowed field — re-binding with `&` made `&&Vec`s.
         let mut jobs = Vec::new();
         let mut skew_jobs = Vec::new();
-        for set in &sets {
-            for job in &plan.jobs {
-                let path = if plan.tiled {
+        for set in &dispatch.sets {
+            for job in &dispatch.plan.jobs {
+                let path = if dispatch.plan.tiled {
                     self.tiled_output_path_for(set, job.selection, job.tile)
                 } else {
                     self.output_path_for(set, job.selection)
                 };
                 jobs.push((*job, path, set.clone()));
             }
-            for tile in &skew_tiles {
-                let path = if plan.tiled {
+            for tile in &dispatch.skew_tiles {
+                let path = if dispatch.plan.tiled {
                     self.skew_tiled_output_path_for(set, *tile)
                 } else {
                     self.skew_output_path_for(set)
@@ -1381,11 +1377,11 @@ impl BakesPanel {
             }
         }
         let count = jobs.len() + skew_jobs.len();
-        let skipped = plan.skipped;
+        let skipped = dispatch.plan.skipped;
         let request = BakeRequest {
             device: device.clone(),
             queue: queue.clone(),
-            mesh: mesh.clone(),
+            mesh: dispatch.mesh.clone(),
             size: self.resolution,
             rays: self.rays,
             dilation_iterations: self.dilation_iterations,
@@ -1393,7 +1389,7 @@ impl BakesPanel {
             jobs,
             skew_jobs,
         };
-        self.start_job(count, skipped, skew_skipped.clone(), move || {
+        self.start_job(count, skipped, dispatch.skew_skipped.clone(), move || {
             run_bake(request)
         });
     }
