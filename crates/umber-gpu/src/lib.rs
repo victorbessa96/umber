@@ -25,6 +25,7 @@ pub mod ibl;
 pub mod material;
 pub mod paint;
 pub mod paint_thread;
+pub mod postfx;
 pub mod renderer;
 pub mod shaders;
 pub mod texture_display;
