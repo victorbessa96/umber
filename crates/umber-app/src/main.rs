@@ -22,6 +22,7 @@ mod display_panel;
 mod document;
 mod env;
 mod export_dialog;
+mod fill_layer;
 mod graph_canvas;
 mod graph_panel;
 mod i18n;
@@ -137,6 +138,10 @@ impl TabViewer for PanelViewer<'_> {
                     paint.sync_tool(&mut self.brush.tool);
                     paint.sync_symmetry(&mut self.brush.symmetry);
                 }
+                // One collapsible row per fill layer (projection picker +
+                // v1 source editor); edits run through Document as
+                // undoable, journaled SetFill ops.
+                fill_layer::fill_section_ui(ui, self.doc);
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));
@@ -249,6 +254,9 @@ pub struct UmberApp {
     show_wireframe: bool,
     /// Ground-grid toggle (View menu, G). Same sync + off contract.
     show_grid: bool,
+    /// Shading mode (View menu rows, V cycles lit ↔ unlit). Synced
+    /// into the viewport each frame; Lit by default (today's render).
+    view_mode: umber_gpu::ViewMode,
 }
 
 impl UmberApp {
@@ -332,6 +340,7 @@ impl UmberApp {
             last_dabs_composited: 0,
             show_wireframe: false,
             show_grid: false,
+            view_mode: umber_gpu::ViewMode::default(),
         })
     }
 }
@@ -539,18 +548,22 @@ impl eframe::App for UmberApp {
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Overlay keybinds (Wave-4 item 7): W toggles the wireframe, G
-        // the ground grid. Quick-mask keybinds (§2's P1 row): X enters/
+        // the ground grid. View-mode keybind (§5's P0 row): V cycles
+        // lit ↔ unlit (from Solo/preview it returns to Lit).
+        // Quick-mask keybinds (§2's P1 row): X enters/
         // leaves mask mode, I inverts the mask while in mask mode (outside
-        // it, I does nothing). Skipped while a text edit has focus (brush
-        // preset names, save-as dialog) so typing never flips the
-        // viewport or the mask.
+        // it, I does nothing). E selects the eraser (§2's P0 row). Skipped
+        // while a text edit has focus (brush preset names, save-as dialog)
+        // so typing never flips the viewport, the mask, or the tool.
         if !ui.ctx().text_edit_focused() {
-            let (wire_key, grid_key, mask_key, invert_key) = ui.input(|i| {
+            let (wire_key, grid_key, view_key, mask_key, invert_key, eraser_key) = ui.input(|i| {
                 (
                     i.key_pressed(egui::Key::W),
                     i.key_pressed(egui::Key::G),
+                    i.key_pressed(egui::Key::V),
                     i.key_pressed(egui::Key::X),
                     i.key_pressed(egui::Key::I),
+                    i.key_pressed(egui::Key::E),
                 )
             });
             if wire_key {
@@ -558,6 +571,12 @@ impl eframe::App for UmberApp {
             }
             if grid_key {
                 self.show_grid = !self.show_grid;
+            }
+            if view_key {
+                self.view_mode = self.view_mode.cycle_v();
+            }
+            if eraser_key {
+                self.brush_panel.select_eraser();
             }
             if let Some(paint) = self.state.paint.as_mut() {
                 if mask_key {
@@ -570,6 +589,7 @@ impl eframe::App for UmberApp {
         }
         self.state.viewport.set_show_wireframe(self.show_wireframe);
         self.state.viewport.set_show_grid(self.show_grid);
+        self.state.viewport.set_view_mode(self.view_mode);
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
             MenuButton::new(tr("menu.file")).ui(ui, |ui| {
@@ -615,6 +635,8 @@ impl eframe::App for UmberApp {
                 ui.label(tr("menu.perf-hud-unavailable"));
                 ui.checkbox(&mut self.show_wireframe, tr("menu.wireframe"));
                 ui.checkbox(&mut self.show_grid, tr("menu.grid"));
+                ui.separator();
+                viewport::view_mode_menu(ui, &mut self.view_mode);
             });
             MenuButton::new(tr("menu.help")).ui(ui, |ui| {
                 if ui.button(tr("menu.about")).clicked() {

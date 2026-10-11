@@ -10,7 +10,8 @@
 /// normals (no textures yet — that lands with the paint engine).
 /// Matches the `Vertex` and `CameraUniform` layouts in `renderer.rs`;
 /// bindings 1–3 are the diffuse IBL set, 4–7 the specular tier (see
-/// `GpuContext`'s bind-group layout). Group 1 is the display LUT
+/// `GpuContext`'s bind-group layout), binding 8 the view-mode
+/// selector (`crate::view_mode::VIEW_MODE_WGSL`, verbatim). Group 1 is the display LUT
 /// (`crate::display_lut`; the snippet is that module's
 /// `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
 /// the last step before the target.
@@ -72,6 +73,42 @@ struct SpecParams {
     _pad1: f32,
 };
 @group(0) @binding(7) var<uniform> spec_params: SpecParams;
+// ---- view mode (crate::view_mode — keep verbatim) ----
+struct ViewModeParams {
+    mode: u32,
+    channel: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+@group(0) @binding(8) var<uniform> view_mode: ViewModeParams;
+
+const VIEW_MODE_LIT: u32 = 0u;
+const VIEW_MODE_UNLIT: u32 = 1u;
+const VIEW_MODE_SOLO: u32 = 2u;
+const VIEW_MODE_MESH_PREVIEW: u32 = 3u;
+
+const VIEW_MODE_SOLO_BASE_COLOR: u32 = 0u;
+const VIEW_MODE_SOLO_EMISSIVE: u32 = 1u;
+const VIEW_MODE_SOLO_ROUGHNESS: u32 = 2u;
+const VIEW_MODE_SOLO_METALLIC: u32 = 3u;
+const VIEW_MODE_SOLO_AO: u32 = 4u;
+const VIEW_MODE_SOLO_HEIGHT: u32 = 5u;
+const VIEW_MODE_SOLO_NORMAL: u32 = 6u;
+
+const VIEW_MODE_PREVIEW_AO: u32 = 0u;
+const VIEW_MODE_PREVIEW_CURVATURE: u32 = 1u;
+const VIEW_MODE_PREVIEW_NORMAL_BASE: u32 = 2u;
+const VIEW_MODE_PREVIEW_POSITION: u32 = 3u;
+const VIEW_MODE_PREVIEW_THICKNESS: u32 = 4u;
+const VIEW_MODE_PREVIEW_ID: u32 = 5u;
+const VIEW_MODE_PREVIEW_HEIGHT: u32 = 6u;
+const VIEW_MODE_PREVIEW_BENT_NORMAL: u32 = 7u;
+const VIEW_MODE_PREVIEW_WORLD_SPACE_NORMAL: u32 = 8u;
+
+fn view_mode_bypasses_lut(mode: u32, channel: u32) -> bool {
+    return (mode == VIEW_MODE_SOLO && channel > VIEW_MODE_SOLO_EMISSIVE) || (mode == VIEW_MODE_MESH_PREVIEW);
+}
+// ---- end view mode ----
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -81,6 +118,9 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
+    // World position for the position-map preview proxy (identity
+    // transform in this pass — object space IS world space here).
+    @location(1) world_pos: vec3<f32>,
 };
 
 @vertex
@@ -88,6 +128,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.world_normal = in.normal;
+    out.world_pos = in.position;
     return out;
 }
 
@@ -153,6 +194,84 @@ fn prefiltered_env(r: vec3<f32>, roughness: f32) -> vec3<f32> {
     return mix(p1, p2, (clo - 0.5) * 2.0);
 }
 
+/// Single-channel solo proxy (view modes — `crate::view_mode`):
+/// one channel displayed raw, from already-bound data. The
+/// per-channel GPU textures have no bindings in v1 (the paint
+/// texture-set is document-model data; `SoloChannel::texture_binding`
+/// reserves the future group-2 slots), so each arm reads the closest
+/// bound source — the Wave-2 texture handoff swaps these arms to
+/// samples without renumbering the ids.
+fn solo_proxy(channel: u32, n: vec3<f32>) -> vec3<f32> {
+    if (channel == VIEW_MODE_SOLO_BASE_COLOR) {
+        // This pass's albedo stand-in — "baseColor raw" in today's
+        // uniform-material world (the texture sample lands with the
+        // group-2 handoff).
+        return BASE_COLOR;
+    }
+    if (channel == VIEW_MODE_SOLO_EMISSIVE) {
+        // No emission source in this pass.
+        return vec3<f32>(0.0);
+    }
+    if (channel == VIEW_MODE_SOLO_ROUGHNESS) {
+        let r = clamp(spec_params.roughness, 0.0, 1.0);
+        return vec3<f32>(r);
+    }
+    if (channel == VIEW_MODE_SOLO_METALLIC) {
+        let m = clamp(spec_params.metallic, 0.0, 1.0);
+        return vec3<f32>(m);
+    }
+    if (channel == VIEW_MODE_SOLO_AO) {
+        let e = environment_irradiance(n);
+        return vec3<f32>(0.2126 * e.r + 0.7152 * e.g + 0.0722 * e.b);
+    }
+    if (channel == VIEW_MODE_SOLO_HEIGHT) {
+        // No height source bound in v1 — mid-gray stand-in.
+        return vec3<f32>(0.5);
+    }
+    // VIEW_MODE_SOLO_NORMAL: no tangent-space map bound yet — the
+    // world normal remapped to 0..1 is the debug proxy.
+    return n * 0.5 + vec3<f32>(0.5);
+}
+
+/// Mesh-map preview proxy (view modes): the bake output displayed
+/// instead of the paint. Bake textures have no bindings in v1, so
+/// each kind maps to the closest solo proxy; curvature, thickness,
+/// and ID (no bound source at all) render mid-gray stand-ins until
+/// the bake-texture handoff.
+fn preview_proxy(kind: u32, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    if (kind == VIEW_MODE_PREVIEW_AO) {
+        return solo_proxy(VIEW_MODE_SOLO_AO, n);
+    }
+    if (kind == VIEW_MODE_PREVIEW_NORMAL_BASE || kind == VIEW_MODE_PREVIEW_BENT_NORMAL
+        || kind == VIEW_MODE_PREVIEW_WORLD_SPACE_NORMAL) {
+        return solo_proxy(VIEW_MODE_SOLO_NORMAL, n);
+    }
+    if (kind == VIEW_MODE_PREVIEW_POSITION) {
+        // Unit-cell repeat of object space (this pass has no model
+        // matrix — object space IS world space).
+        return fract(world_pos);
+    }
+    if (kind == VIEW_MODE_PREVIEW_HEIGHT) {
+        return solo_proxy(VIEW_MODE_SOLO_HEIGHT, n);
+    }
+    return vec3<f32>(0.5);
+}
+
+/// Resolves the view-mode output: Lit keeps the PBR color, Unlit
+/// drops the lighting math, Solo/Preview substitute their proxy.
+fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    if (mode == VIEW_MODE_UNLIT) {
+        return BASE_COLOR;
+    }
+    if (mode == VIEW_MODE_SOLO) {
+        return solo_proxy(channel, n);
+    }
+    if (mode == VIEW_MODE_MESH_PREVIEW) {
+        return preview_proxy(channel, n, world_pos);
+    }
+    return lit;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(in.world_normal);
@@ -164,8 +283,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = BASE_COLOR * (env + diffuse * SUN_COLOR * 0.55);
     // Specular IBL tier (wave-5 v1): Split-Sum factor one x factor two,
     // gated on the map flag — the diffuse term above is byte-untouched.
-    // v1 stand-ins: a uniform view (this pass has no world-pos varying,
-    // so camera.eye is the view source) and the SpecParams uniform
+    // v1 stand-ins: a uniform view (camera.eye is the view source, not
+    // the world_pos varying — that varying serves the position-map
+    // preview) and the SpecParams uniform
     // (roughness/metallic until the OpenPBR wiring exposes them).
     if (env_flags.flags == 1u) {
         let to_view = normalize(camera.eye.xyz);
@@ -176,6 +296,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let f0 = mix(vec3<f32>(0.04), BASE_COLOR, metal);
         let ab = env_brdf_approx(n_dot_v, rough);
         color = color + prefiltered_env(reflect_dir, rough) * (f0 * ab.x + ab.y);
+    }
+    // View modes (crate::view_mode): Lit keeps the PBR color
+    // above; Unlit/Solo/Preview substitute their proxy. Data modes
+    // bypass the display LUT below (the §9 rule — the CPU side binds
+    // the identity table for those modes, so the early return agrees
+    // with the bound table; the branch additionally protects a caller
+    // that passes the app LUT with a data mode).
+    color = apply_view_mode(view_mode.mode, view_mode.channel, color, n, in.world_pos);
+    if (view_mode_bypasses_lut(view_mode.mode, view_mode.channel)) {
+        return vec4<f32>(color, 1.0);
     }
     // Display LUT: the viewer chain, the last step before the target
     // (after diffuse + specular — the chain sees the finished color).

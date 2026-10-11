@@ -8,9 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
+use fluent::FluentValue;
 use umber_core::journal::{Journal, JournalOp};
 use umber_core::layers::{Layer, LayerCommand, LayerKind, LayerStack};
 use umber_core::undo::UndoStack;
+
+use crate::i18n::{tr, tr_args};
 
 /// The open document: layer stack + undo history + autosave journal.
 ///
@@ -180,10 +183,18 @@ impl Document {
 
 /// Draws the Layers panel: per-layer visibility toggle, name, kind badge.
 pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
-    if ui.button("＋ Add paint layer").clicked() {
-        let n = doc.layers().len() + 1;
-        doc.run(LayerCommand::add(format!("Paint {n}"), LayerKind::Paint));
-    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(tr("layers.add-paint")).clicked() {
+            let n = doc.layers().len() + 1;
+            let name = tr_args("layers.default-paint-name", [("n", FluentValue::from(n))]);
+            doc.run(LayerCommand::add(name, LayerKind::Paint));
+        }
+        if ui.button(tr("layers.add-fill")).clicked() {
+            let n = doc.layers().len() + 1;
+            let name = tr_args("layers.default-fill-name", [("n", FluentValue::from(n))]);
+            doc.run(LayerCommand::add(name, LayerKind::Fill));
+        }
+    });
     let mut remove_id = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         // Snapshot the display rows first so command runs below can't
@@ -192,7 +203,7 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
         struct Row {
             id: u64,
             name: String,
-            kind: &'static str,
+            kind: String,
             visible: bool,
         }
         let rows: Vec<Row> = doc
@@ -203,9 +214,9 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                 id: layer.id,
                 name: layer.name.clone(),
                 kind: match layer.kind {
-                    LayerKind::Paint => "paint",
-                    LayerKind::Fill => "fill",
-                    LayerKind::Folder { .. } => "folder",
+                    LayerKind::Paint => tr("layers.kind-paint"),
+                    LayerKind::Fill => tr("layers.kind-fill"),
+                    LayerKind::Folder { .. } => tr("layers.kind-folder"),
                 },
                 visible: layer.visible,
             })
@@ -221,7 +232,7 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                 ui.label(&layer.name);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new(layer.kind)
+                        egui::RichText::new(layer.kind.as_str())
                             .small()
                             .color(egui::Color32::from_gray(140)),
                     );
