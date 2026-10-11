@@ -129,7 +129,7 @@ impl TabViewer for PanelViewer<'_> {
             ),
             Panel::LayerStack => document::layers_ui(ui, self.doc),
             Panel::Properties => {
-                self.brush.show(ui);
+                self.brush.show(ui, self.paint.as_deref_mut());
                 // The paint session adopts the panel's tool and symmetry
                 // (and hands back an alt-click-resolved clone offset and a
                 // UV-view mirror-manipulator drag).
@@ -539,17 +539,33 @@ impl eframe::App for UmberApp {
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Overlay keybinds (Wave-4 item 7): W toggles the wireframe, G
-        // the ground grid. Skipped while a text edit has focus (brush
+        // the ground grid. Quick-mask keybinds (§2's P1 row): X enters/
+        // leaves mask mode, I inverts the mask while in mask mode (outside
+        // it, I does nothing). Skipped while a text edit has focus (brush
         // preset names, save-as dialog) so typing never flips the
-        // viewport.
+        // viewport or the mask.
         if !ui.ctx().text_edit_focused() {
-            let (wire_key, grid_key) =
-                ui.input(|i| (i.key_pressed(egui::Key::W), i.key_pressed(egui::Key::G)));
+            let (wire_key, grid_key, mask_key, invert_key) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::W),
+                    i.key_pressed(egui::Key::G),
+                    i.key_pressed(egui::Key::X),
+                    i.key_pressed(egui::Key::I),
+                )
+            });
             if wire_key {
                 self.show_wireframe = !self.show_wireframe;
             }
             if grid_key {
                 self.show_grid = !self.show_grid;
+            }
+            if let Some(paint) = self.state.paint.as_mut() {
+                if mask_key {
+                    paint.toggle_mask_mode();
+                }
+                if invert_key && paint.quick_mask().is_editing() {
+                    paint.invert_mask();
+                }
             }
         }
         self.state.viewport.set_show_wireframe(self.show_wireframe);

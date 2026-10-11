@@ -44,12 +44,20 @@
 //! every sibling (at 4K a full-tile radial stroke's before + after can
 //! take half of the history's 256 MB total budget — a per-sibling rect
 //! list is a follow-up).
+//!
+//! Quick mask (§2's P1 row, `umber_brush::quick_mask`): while the mask
+//! gates, [`RetouchStroke::apply_masked`] multiplies every dab's per-texel
+//! coverage by the tile's mask plane, for the primary and each sibling at
+//! its own texels. Smudge and clone are gated the way the paint shader
+//! gates a paint dab.
 
 use std::collections::BTreeMap;
 
-use umber_brush::retouch::{clone_dab, smudge_dab, CloneStroke, DirtyRect, RetouchDab};
+use umber_brush::retouch::{
+    clone_dab_masked, smudge_dab_masked, CloneStroke, DirtyRect, RetouchDab,
+};
 use umber_brush::symmetry::{sibling_positions, COINCIDENT_EPS_TEXELS};
-use umber_brush::{BrushTool, RgbaBuffer, SymTransform};
+use umber_brush::{BrushTool, MaskView, RgbaBuffer, SymTransform};
 use umber_core::undo::Command;
 
 /// One tile's CPU mirror for the current stroke.
@@ -161,7 +169,20 @@ impl RetouchStroke {
     /// primary dab followed by its symmetry siblings) and returns the rect
     /// they wrote — what the caller uploads. `None` when nothing changed
     /// (strength 0, an off-tile clone source, a tile with no mirror, ...).
+    #[cfg(test)]
     pub(crate) fn apply(&mut self, tile: u16, dabs: &[RetouchDab]) -> Option<DirtyRect> {
+        self.apply_masked(tile, dabs, None)
+    }
+
+    /// [`Self::apply`] gated by the quick mask: `mask` is `tile`'s plane
+    /// (`None` = ungated). It gates every sibling at the sibling's own
+    /// texels, so the mask applies AFTER symmetry expansion.
+    pub(crate) fn apply_masked(
+        &mut self,
+        tile: u16,
+        dabs: &[RetouchDab],
+        mask: Option<MaskView<'_>>,
+    ) -> Option<DirtyRect> {
         if !self.accepts(tile) {
             return None;
         }
@@ -184,11 +205,11 @@ impl RetouchStroke {
                             }
                             _ => [0.0, 0.0],
                         };
-                        smudge_dab(&mut mirror.live, &dab, params, motion)
+                        smudge_dab_masked(&mut mirror.live, &dab, params, motion, mask)
                     }
                     BrushTool::Clone(_) => primary_src.and_then(|src| {
                         let src = self.symmetry[k].apply(src);
-                        clone_dab(&mut mirror.live, &mirror.before, &dab, src)
+                        clone_dab_masked(&mut mirror.live, &mirror.before, &dab, src, mask)
                     }),
                 };
                 self.last_dab[k] = Some((tile, pos));
@@ -283,7 +304,7 @@ mod tests {
     use super::*;
     use umber_brush::retouch::SmudgeParams;
     use umber_brush::symmetry::texel_transforms;
-    use umber_brush::{CloneParams, MirrorAxis, MirrorSettings, SymmetrySettings};
+    use umber_brush::{CloneParams, MirrorAxis, MirrorSettings, QuickMask, SymmetrySettings};
     use umber_core::undo::UndoStack;
 
     const SIZE: u32 = 64;
@@ -335,6 +356,18 @@ mod tests {
         events: &[[f32; 2]],
         symmetry: &SymmetrySettings,
     ) -> Option<PaintStrokeCommand> {
+        run_stroke_masked(image, tool, events, symmetry, None)
+    }
+
+    /// [`run_stroke_with`] gated by `mask` (the tile's quick-mask plane),
+    /// the way `PaintState` gates a stroke while the quick mask is active.
+    fn run_stroke_masked(
+        image: &mut RgbaBuffer,
+        tool: BrushTool,
+        events: &[[f32; 2]],
+        symmetry: &SymmetrySettings,
+        mask: Option<MaskView<'_>>,
+    ) -> Option<PaintStrokeCommand> {
         let mut stroke = RetouchStroke::new(tool);
         stroke.set_symmetry(texel_transforms(symmetry, SIZE as f32));
         if let BrushTool::Clone(params) = tool {
@@ -345,7 +378,7 @@ mod tests {
             if !stroke.has_tile(TILE) {
                 stroke.insert_tile(TILE, image.clone());
             }
-            if let Some(rect) = stroke.apply(TILE, &[dab(pos)]) {
+            if let Some(rect) = stroke.apply_masked(TILE, &[dab(pos)], mask) {
                 image.write_region(rect, &stroke.region(TILE, rect));
             }
         }
@@ -559,5 +592,156 @@ mod tests {
         assert!(history.redo(&mut writes));
         drain(&mut writes, &mut image);
         assert_eq!(image, after);
+    }
+
+    // --- Quick mask ---
+
+    /// A mask allowing only a small hard disc at (32, 36), r 4: the
+    /// strokes below cross far more than that.
+    fn small_window_mask() -> QuickMask {
+        let mut mask = QuickMask::new(SIZE, SIZE);
+        mask.stamp(TILE, &hard_dab_r([32.0, 36.0], 4.0));
+        mask
+    }
+
+    fn hard_dab_r(pos: [f32; 2], radius: f32) -> RetouchDab {
+        RetouchDab {
+            pos,
+            radius,
+            alpha: 1.0,
+            hardness: 1.0,
+        }
+    }
+
+    /// Texels that differ between `a` and `b` where `mask` reads
+    /// `blocked` (exactly 0) or allowed (anything else).
+    fn changed_where(a: &RgbaBuffer, b: &RgbaBuffer, mask: &QuickMask, blocked: bool) -> usize {
+        let mut n = 0;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let is_blocked = mask.sample(TILE, x, y) == 0.0;
+                if is_blocked == blocked && a.texel(x, y) != b.texel(x, y) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// The two retouch strokes the gating tests run: a smudge across the
+    /// hard edge, and a clone pulling the white half over the black.
+    fn gated_strokes() -> Vec<(BrushTool, Vec<[f32; 2]>)> {
+        let clone = BrushTool::Clone(CloneParams {
+            source_offset: (8.0, 0.0),
+            follow: true,
+        });
+        vec![
+            (
+                smudge(),
+                (0..9).map(|i| [16.0 + 4.0 * i as f32, 34.0]).collect(),
+            ),
+            (clone, vec![[24.0, 36.0], [28.0, 36.0], [32.0, 36.0]]),
+        ]
+    }
+
+    /// Test (a): a stroke through a blocked region leaves the layer
+    /// unchanged there (before/after compare, texel for texel) and still
+    /// paints the allowed window, for smudge and clone alike. The
+    /// ungated control proves the stroke would have changed the blocked
+    /// texels.
+    #[test]
+    fn quick_mask_gates_retouch_strokes_per_texel() {
+        let mask = small_window_mask();
+        let view = mask.view(TILE).expect("the stamp allocated the plane");
+        for (tool, events) in gated_strokes() {
+            let before = hard_edge();
+            let mut plain = before.clone();
+            run_stroke(&mut plain, tool, &events);
+            assert!(
+                changed_where(&before, &plain, &mask, true) > 0,
+                "{tool:?}: the ungated stroke reaches the blocked region"
+            );
+
+            let mut gated = before.clone();
+            run_stroke_masked(
+                &mut gated,
+                tool,
+                &events,
+                &SymmetrySettings::default(),
+                Some(view),
+            );
+            assert_eq!(
+                changed_where(&before, &gated, &mask, true),
+                0,
+                "{tool:?}: blocked texels must be byte-identical"
+            );
+            assert!(
+                changed_where(&before, &gated, &mask, false) > 0,
+                "{tool:?}: the allowed window still paints"
+            );
+        }
+    }
+
+    /// Test (b): inverting flips the gating: the window that painted is
+    /// now the only place that does not, and what was blocked paints.
+    #[test]
+    fn inverted_quick_mask_flips_the_gating() {
+        let mut mask = small_window_mask();
+        mask.invert();
+        let view = mask.view(TILE).expect("plane exists");
+        for (tool, events) in gated_strokes() {
+            let before = hard_edge();
+            let mut gated = before.clone();
+            run_stroke_masked(
+                &mut gated,
+                tool,
+                &events,
+                &SymmetrySettings::default(),
+                Some(view),
+            );
+            assert_eq!(
+                changed_where(&before, &gated, &mask, true),
+                0,
+                "{tool:?}: the inverted window is blocked"
+            );
+            assert!(
+                changed_where(&before, &gated, &mask, false) > 0,
+                "{tool:?}: the formerly blocked region paints"
+            );
+            // The window itself (allowed before the invert) is untouched.
+            assert_eq!(gated.texel(31, 36), before.texel(31, 36));
+        }
+    }
+
+    /// Test (d): the mask applies AFTER symmetry expansion. Every sibling
+    /// is gated at its own texels: with the right half blocked, a left-side
+    /// mirrored smudge leaves the right half (where its sibling lands)
+    /// untouched, while the ungated control smudges it.
+    #[test]
+    fn quick_mask_gates_symmetry_siblings() {
+        let before = symmetric_bands();
+        let events: Vec<[f32; 2]> = (0..3).map(|i| [12.0 + 4.0 * i as f32, 32.0]).collect();
+        // Allow a disc on the left half only (x in 2..30): the whole right
+        // half reads blocked.
+        let mut mask = QuickMask::new(SIZE, SIZE);
+        mask.stamp(TILE, &hard_dab_r([16.0, 32.0], 14.0));
+        assert!((32..SIZE).all(|x| mask.sample(TILE, x, 32) == 0.0));
+
+        let mut plain = before.clone();
+        run_stroke_with(&mut plain, smudge(), &events, &mirror_x()).expect("smudge wrote");
+        let right_changed = |img: &RgbaBuffer| {
+            (32..SIZE).any(|x| (0..SIZE).any(|y| img.texel(x, y) != before.texel(x, y)))
+        };
+        assert!(
+            right_changed(&plain),
+            "control: the sibling smudges the right half"
+        );
+
+        let mut gated = before.clone();
+        run_stroke_masked(&mut gated, smudge(), &events, &mirror_x(), mask.view(TILE))
+            .expect("the primary still smudges the allowed left side");
+        assert!(!right_changed(&gated), "the blocked sibling writes nothing");
+        assert_eq!(changed_where(&before, &gated, &mask, true), 0);
+        assert!(changed_where(&before, &gated, &mask, false) > 0);
     }
 }

@@ -14,8 +14,15 @@
 //! target, texel centers at `+0.5`, `dist <= r`, and the same smoothstep
 //! [`radial_falloff`] — so a retouch dab covers exactly the texels a paint
 //! dab with the same position/radius/hardness would.
+//!
+//! The quick mask ([`crate::quick_mask`]) gates both ops at the same
+//! point the shader gates a paint dab: the per-texel coverage is
+//! multiplied by the mask there ([`smudge_dab_masked`],
+//! [`clone_dab_masked`]).
 
 use serde::{Deserialize, Serialize};
+
+use crate::quick_mask::MaskView;
 
 /// Fraction of the blur radius the motion tilt shifts the smudge sample
 /// window by (back along the incoming stroke direction).
@@ -228,7 +235,7 @@ pub fn radial_falloff(t: f32, hardness: f32) -> f32 {
 /// The shader's per-dab texel box `[floor(pos - r), ceil(pos + r)]`
 /// clamped to the image, as a half-open [`DirtyRect`]; `None` when the box
 /// misses the image entirely.
-fn footprint(pos: [f32; 2], radius: f32, width: u32, height: u32) -> Option<DirtyRect> {
+pub(crate) fn footprint(pos: [f32; 2], radius: f32, width: u32, height: u32) -> Option<DirtyRect> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -250,12 +257,18 @@ fn footprint(pos: [f32; 2], radius: f32, width: u32, height: u32) -> Option<Dirt
 
 /// The per-texel coverage the paint shader would give `(x, y)` under
 /// `dab` (`alpha * falloff`), or `None` outside the disc.
-fn coverage(dab: &RetouchDab, x: u32, y: u32) -> Option<f32> {
+pub(crate) fn coverage(dab: &RetouchDab, x: u32, y: u32) -> Option<f32> {
     let r = dab.radius.max(1e-5);
     let cx = x as f32 + 0.5 - dab.pos[0];
     let cy = y as f32 + 0.5 - dab.pos[1];
     let dist = (cx * cx + cy * cy).sqrt();
     (dist <= r).then(|| dab.alpha * radial_falloff(dist / r, dab.hardness))
+}
+
+/// [`coverage`] gated by the quick mask: multiplied by `mask` at `(x, y)`
+/// (the shader's `mask_gate` multiply, on the CPU). `None` mask = ungated.
+fn gated_coverage(dab: &RetouchDab, x: u32, y: u32, mask: Option<MaskView<'_>>) -> Option<f32> {
+    coverage(dab, x, y).map(|cov| mask.map_or(cov, |m| cov * m.at(x, y)))
 }
 
 /// The smudge sample-window shift for a dab moving along `motion` (texels
@@ -291,6 +304,20 @@ pub fn smudge_dab(
     params: SmudgeParams,
     motion: [f32; 2],
 ) -> Option<DirtyRect> {
+    smudge_dab_masked(buf, dab, params, motion, None)
+}
+
+/// [`smudge_dab`] gated by the quick mask: each texel's mix is scaled by
+/// `mask` there (`None` = ungated, byte-identical to [`smudge_dab`]). The
+/// mask gates the WRITE only — the blur still samples blocked texels, the
+/// way a masked smudge drags color in from under the mask.
+pub fn smudge_dab_masked(
+    buf: &mut RgbaBuffer,
+    dab: &RetouchDab,
+    params: SmudgeParams,
+    motion: [f32; 2],
+    mask: Option<MaskView<'_>>,
+) -> Option<DirtyRect> {
     let strength = params.strength.clamp(0.0, 1.0);
     let smear = params.smear.clamp(0.0, 1.0);
     if strength <= 0.0 || dab.alpha <= 0.0 {
@@ -318,7 +345,7 @@ pub fn smudge_dab(
     let mut wrote = false;
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
-            let Some(cov) = coverage(dab, x, y) else {
+            let Some(cov) = gated_coverage(dab, x, y, mask) else {
                 continue;
             };
             let mix = strength * cov;
@@ -360,6 +387,19 @@ pub fn clone_dab(
     dab: &RetouchDab,
     src_pos: [f32; 2],
 ) -> Option<DirtyRect> {
+    clone_dab_masked(dst, source, dab, src_pos, None)
+}
+
+/// [`clone_dab`] gated by the quick mask: each texel's coverage is scaled
+/// by `mask` at the DESTINATION texel (`None` = ungated, byte-identical
+/// to [`clone_dab`]).
+pub fn clone_dab_masked(
+    dst: &mut RgbaBuffer,
+    source: &RgbaBuffer,
+    dab: &RetouchDab,
+    src_pos: [f32; 2],
+    mask: Option<MaskView<'_>>,
+) -> Option<DirtyRect> {
     if dab.alpha <= 0.0 {
         return None;
     }
@@ -369,7 +409,7 @@ pub fn clone_dab(
     let mut wrote = false;
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
-            let Some(cov) = coverage(dab, x, y) else {
+            let Some(cov) = gated_coverage(dab, x, y, mask) else {
                 continue;
             };
             let sx = i64::from(x) + dx;

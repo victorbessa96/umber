@@ -53,17 +53,41 @@
 //! seam-mirror and seam mirrors do not symmetrize (named follow-up).
 //! Symmetry off skips the expansion entirely — byte-identical staging.
 //! The settings are session state: not in the project file (follow-up).
+//!
+//! Quick mask (§2's P1 row, `umber_brush::quick_mask` — semantics,
+//! convention and the not-persisted/not-undoable rule live there): the
+//! session owns one [`QuickMask`]. `begin_stroke` snapshots its two modes
+//! for the whole stroke:
+//!
+//! * Mask mode (`editing`): the stroke paints the MASK. The hook sits
+//!   right after symmetry expansion in `push_event_inner` and BEFORE the
+//!   retouch hook, so mask mode wins whatever tool is selected: the dabs
+//!   (and their symmetry siblings and seam mirrors) stamp the CPU mask,
+//!   the touched rect is queued onto the tile's GPU mask
+//!   (`PaintThreadCommand::WriteMask`), and nothing is staged. The layer
+//!   and the retouch history are untouched.
+//! * Gating (`active && !editing`): every layer dab is gated per texel
+//!   AFTER symmetry expansion. Paint dabs carry the shader's `mask_gate`
+//!   flag, so primaries, siblings and seam mirrors are all multiplied by
+//!   their tile's GPU mask. Before the first gated dab on a tile, the
+//!   tile's whole plane is uploaded (an invert/clear/resize marks every
+//!   tile stale). Smudge/clone dabs multiply the CPU plane inside the
+//!   retouch ops.
+//!
+//! Mask off (the default) changes nothing: no plane is allocated, no
+//! upload is queued, and the staged dabs are byte-identical.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::Pos2;
-use umber_brush::retouch::RetouchDab;
+use umber_brush::retouch::{DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
-    BrushParams, BrushTool, DabAdapter, RgbaBuffer, StrokeConditioner, StrokeEvent, SymTransform,
-    SymmetrySettings,
+    BrushParams, BrushTool, DabAdapter, MaskPaint, QuickMask, RgbaBuffer, StrokeConditioner,
+    StrokeEvent, SymTransform, SymmetrySettings,
 };
 use umber_core::undo::UndoStack;
+use umber_gpu::paint::Dab;
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
@@ -184,6 +208,21 @@ pub struct PaintState {
     /// The live stroke's tile-local texel transforms (identity first),
     /// snapshot at `begin_stroke`; `None` = symmetry off for this stroke.
     stroke_symmetry: Option<Vec<SymTransform>>,
+    /// The quick mask (session state: not in the project file, not in
+    /// any undo history).
+    quick_mask: QuickMask,
+    /// Tiles whose GPU mask texture matches `quick_mask`'s plane. Emptied
+    /// by every whole-mask change (invert, clear, resize); a gated dab's
+    /// tile is brought back in sync before it is staged.
+    mask_synced: BTreeSet<u16>,
+    /// The live stroke paints the mask (mask mode at `begin_stroke`).
+    stroke_mask_edit: bool,
+    /// The live stroke is gated by the mask (gating at `begin_stroke`).
+    stroke_mask_gate: bool,
+    /// Queued `WriteMask` commands since construction (test
+    /// observability for the mask-stroke and zero-cost contracts).
+    #[cfg(test)]
+    mask_uploads: usize,
     /// Staged `Stage` batches since construction (test observability for
     /// the seam-blind zero-cost contract).
     #[cfg(test)]
@@ -245,6 +284,12 @@ impl PaintState {
             symmetry: SymmetrySettings::default(),
             symmetry_from_view: false,
             stroke_symmetry: None,
+            quick_mask: QuickMask::new(TARGET_SIZE, TARGET_SIZE),
+            mask_synced: BTreeSet::new(),
+            stroke_mask_edit: false,
+            stroke_mask_gate: false,
+            #[cfg(test)]
+            mask_uploads: 0,
             #[cfg(test)]
             staged_batches: 0,
             #[cfg(test)]
@@ -293,7 +338,15 @@ impl PaintState {
             .symmetry
             .is_active()
             .then(|| texel_transforms(&self.symmetry, self.texels_per_uv));
-        self.retouch = if self.tool.is_retouch() {
+        // Snapshot the quick-mask modes too: X / I mid-stroke never split
+        // one stroke between the mask and the layer.
+        self.stroke_mask_edit = self.quick_mask.is_editing();
+        self.stroke_mask_gate = self.quick_mask.gates();
+        self.retouch = if self.stroke_mask_edit {
+            // A mask stroke paints only the mask: no retouch mirror, and
+            // the retouch history stays valid (the layer is untouched).
+            None
+        } else if self.tool.is_retouch() {
             Some(self.begin_retouch(uv))
         } else {
             // The retouch history restores whole dirty-rect snapshots, so
@@ -392,6 +445,57 @@ impl PaintState {
     pub fn set_clone_source(&mut self, uv: Pos2) {
         self.clone_source = Some(uv);
         self.clone_source_fresh = true;
+    }
+
+    /// The quick mask (the UV view draws its overlay from it, the panel
+    /// its rows).
+    pub fn quick_mask(&self) -> &QuickMask {
+        &self.quick_mask
+    }
+
+    /// The X shortcut: enters or leaves mask mode (entering arms gating,
+    /// see `umber_brush::quick_mask`); returns the new state. A live
+    /// stroke keeps the mode it began with.
+    pub fn toggle_mask_mode(&mut self) -> bool {
+        self.quick_mask.toggle_editing()
+    }
+
+    /// Enters (`true`) or leaves mask mode — the panel's toggle.
+    pub fn set_mask_mode(&mut self, editing: bool) {
+        self.quick_mask.set_editing(editing);
+    }
+
+    /// Arms or disarms gating. Disarming keeps the mask for the session.
+    pub fn set_mask_active(&mut self, active: bool) {
+        self.quick_mask.set_active(active);
+    }
+
+    /// What mask-mode strokes paint (white allows, black blocks).
+    pub fn set_mask_paint(&mut self, paint: MaskPaint) {
+        self.quick_mask.set_paint(paint);
+    }
+
+    /// Inverts the mask (the I shortcut in mask mode, or the panel
+    /// button). Refused (`false`) mid-stroke: a live gated stroke must
+    /// keep reading one mask.
+    pub fn invert_mask(&mut self) -> bool {
+        if self.stroking {
+            return false;
+        }
+        self.quick_mask.invert();
+        self.mask_synced.clear();
+        true
+    }
+
+    /// Zeroes the mask (the panel's Clear). Refused (`false`) mid-stroke,
+    /// like [`Self::invert_mask`].
+    pub fn clear_mask(&mut self) -> bool {
+        if self.stroking {
+            return false;
+        }
+        self.quick_mask.clear();
+        self.mask_synced.clear();
+        true
     }
 
     /// Reverts the last retouch stroke; `false` when there is none.
@@ -514,10 +618,16 @@ impl PaintState {
     }
 
     /// The tile the last original pointer event routed to (v1: the tile
-    /// the UV view displays).
-    #[cfg(test)]
-    pub(crate) fn active_tile(&self) -> u16 {
+    /// the UV view displays, and whose quick mask it overlays).
+    pub fn active_tile(&self) -> u16 {
         self.active_tile
+    }
+
+    /// Overrides the whole brush (test hook: the quick-mask tests paint
+    /// hard full-alpha masks so their values are exactly 0 or 1).
+    #[cfg(test)]
+    pub(crate) fn set_brush_params(&mut self, params: BrushParams) {
+        self.brush = params;
     }
 
     /// The edge lengths every tile's paint target has (as of the last
@@ -537,6 +647,10 @@ impl PaintState {
         self.target_size = (width, height);
         // Snapshots recorded at the old size no longer fit the targets.
         self.retouch_history.clear();
+        // Nor does the mask: it resets with the targets' contents (the
+        // `Resize` command drops each target's GPU mask too).
+        self.quick_mask.resize(width, height);
+        self.mask_synced.clear();
         for thread in self.targets.values_mut() {
             let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
         }
@@ -621,7 +735,12 @@ impl PaintState {
         // Retouch strokes skip the mirror fan-out (v1): a smudge/clone dab
         // reads its own tile's mirror, and a mirrored clone source has no
         // defined counterpart across the seam.
-        if expand_seams && self.stroke_near_seam && !self.tool.is_retouch() {
+        // Mask strokes do fan out: the mask covers the same 3D neighborhood
+        // in both islands, whatever tool is selected.
+        if expand_seams
+            && self.stroke_near_seam
+            && (self.stroke_mask_edit || !self.tool.is_retouch())
+        {
             let radius_uv = self.seam_radius_uv();
             // Collect the mirrors first to end the graph borrow before the
             // recursive calls re-borrow `self`.
@@ -670,6 +789,18 @@ impl PaintState {
         if dabs.is_empty() {
             return;
         }
+        // The quick-mask edit hook: a mask-mode stroke stamps the MASK
+        // with the same dabs a paint stroke would stage (symmetry siblings
+        // included) and stages nothing. It runs before the retouch hook, so
+        // mask mode wins over a selected smudge/clone tool.
+        if self.stroke_mask_edit {
+            let dabs = match (&self.stroke_symmetry, expand_seams) {
+                (Some(transforms), true) => expand_dabs(&dabs, transforms),
+                _ => dabs,
+            };
+            self.mask_event(tile, &dabs);
+            return;
+        }
         // The retouch hook: smudge/clone dabs (same positions, radius,
         // pressure-shaped alpha and hardness as paint dabs) run on the CPU
         // mirror instead of the GPU splat. Only the primaries go in: the
@@ -694,6 +825,17 @@ impl PaintState {
         let dabs = match (&self.stroke_symmetry, expand_seams) {
             (Some(transforms), true) => expand_dabs(&dabs, transforms),
             _ => dabs,
+        };
+        // The quick-mask gate, AFTER symmetry expansion: every staged dab
+        // (primary, sibling, seam mirror) carries the shader's gate flag,
+        // and the shader multiplies its per-texel coverage by this tile's
+        // mask texture, which is synced first so it holds the current
+        // plane.
+        let dabs = if self.stroke_mask_gate {
+            self.sync_mask_tile(tile);
+            dabs.into_iter().map(|d| d.with_mask_gate(true)).collect()
+        } else {
+            dabs
         };
         // Stage as one command; the thread splits into capacity segments
         // and overlap-safe dispatches.
@@ -731,7 +873,15 @@ impl PaintState {
                 stroke.insert_tile(tile, image);
             }
         }
-        if let Some(rect) = stroke.apply(tile, dabs) {
+        // The quick-mask gate: the retouch ops multiply their per-texel
+        // coverage by the tile's CPU plane (allocated empty if untouched).
+        let mask = if self.stroke_mask_gate {
+            self.quick_mask.ensure_plane(tile);
+            self.quick_mask.view(tile)
+        } else {
+            None
+        };
+        if let Some(rect) = stroke.apply_masked(tile, dabs, mask) {
             let rgba = stroke.region(tile, rect);
             if let Some(thread) = self.targets.get_mut(&tile) {
                 let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
@@ -744,6 +894,70 @@ impl PaintState {
             }
         }
         self.retouch = Some(stroke);
+    }
+
+    /// One mask-mode event on `tile`: stamps every dab into the quick mask
+    /// and queues the touched rect onto the tile's GPU mask (the whole
+    /// plane if that copy is stale).
+    fn mask_event(&mut self, tile: u16, dabs: &[Dab]) {
+        let mut dirty = None;
+        for dab in dabs {
+            let stamp = RetouchDab {
+                pos: dab.pos,
+                radius: dab.radius,
+                alpha: dab.alpha,
+                hardness: dab.hardness,
+            };
+            dirty = DirtyRect::union_opt(dirty, self.quick_mask.stamp(tile, &stamp));
+        }
+        if let Some(rect) = dirty {
+            if self.mask_synced.contains(&tile) {
+                self.publish_mask(tile, rect);
+            } else {
+                self.sync_mask_tile(tile);
+            }
+        }
+    }
+
+    /// Brings `tile`'s GPU mask in line with the CPU plane before gated
+    /// dabs read it: a tile never uploaded (or marked stale by an
+    /// invert/clear/resize) gets its whole plane. A no-op when in sync.
+    fn sync_mask_tile(&mut self, tile: u16) {
+        if self.mask_synced.contains(&tile) {
+            return;
+        }
+        let (width, height) = self.quick_mask.dimensions();
+        let full = DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: width,
+            y1: height,
+        };
+        self.publish_mask(tile, full);
+    }
+
+    /// Queues `rect` of `tile`'s quick mask (8-bit) as a `WriteMask` on
+    /// the tile's thread, in FIFO order with its `Stage` commands.
+    fn publish_mask(&mut self, tile: u16, rect: DirtyRect) {
+        if rect.width() == 0 || rect.height() == 0 {
+            return;
+        }
+        let values = self.quick_mask.gpu_bytes(tile, rect);
+        let Some(thread) = self.targets.get_mut(&tile) else {
+            return;
+        };
+        let _ = thread.publish(vec![PaintThreadCommand::WriteMask {
+            x: rect.x0,
+            y: rect.y0,
+            width: rect.width(),
+            height: rect.height(),
+            values,
+        }]);
+        self.mask_synced.insert(tile);
+        #[cfg(test)]
+        {
+            self.mask_uploads += 1;
+        }
     }
 
     /// `tile`'s current texels as a CPU image: drains the tile's queue
@@ -797,6 +1011,13 @@ impl PaintState {
     #[cfg(test)]
     pub(crate) fn staged_dab_count(&self) -> u64 {
         self.staged_dabs
+    }
+
+    /// Queued `WriteMask` commands since construction (test
+    /// observability; see the quick-mask tests).
+    #[cfg(test)]
+    pub(crate) fn mask_upload_count(&self) -> usize {
+        self.mask_uploads
     }
 }
 
@@ -1327,6 +1548,223 @@ mod tests {
         // Out-of-tile drags clamp to the tile.
         state.set_mirror_offset(1.7);
         assert_eq!(state.symmetry().mirror.offset, 1.0);
+    }
+
+    // --- Quick mask ---
+    //
+    // Every mask here is painted with a hard, full-alpha brush, so its
+    // values are exactly 0 or 1 and "blocked" (mask == 0.0, uploaded as
+    // byte 0) is a crisp texel set the before/after compares can use.
+    // Probe texels sit on row v = 0.5 (y = 256): x = 102 is u ≈ 0.2,
+    // x = 358 is u ≈ 0.7, x = 409 is u = 0.2's mirror about u = 0.5.
+
+    fn hard_brush() -> BrushParams {
+        BrushParams {
+            alpha: 1.0,
+            hardness: 1.0,
+            ..BrushParams::default()
+        }
+    }
+
+    /// Drains every queue, then reads tile 1001 back.
+    fn read_back(state: &mut PaintState, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
+        state.process_pending().expect("drain succeeds");
+        state
+            .paint_target()
+            .read_back_rgba8(device, queue)
+            .expect("readback")
+    }
+
+    fn texel_at(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let i = (y * TARGET_SIZE + x) as usize * 4;
+        [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
+    }
+
+    const CLEAR: [u8; 4] = [0, 0, 0, 0];
+
+    /// Texels of tile 1001 that differ between `a` and `b`, split by the
+    /// quick mask there: `(blocked, allowed)`.
+    fn changed_by_mask(state: &PaintState, a: &[u8], b: &[u8]) -> (usize, usize) {
+        let mask = state.quick_mask();
+        let mut out = (0, 0);
+        for (i, (ta, tb)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
+            if ta == tb {
+                continue;
+            }
+            let (x, y) = (i as u32 % TARGET_SIZE, i as u32 / TARGET_SIZE);
+            if mask.sample(FIRST_TILE, x, y) == 0.0 {
+                out.0 += 1;
+            } else {
+                out.1 += 1;
+            }
+        }
+        out
+    }
+
+    /// Mask mode on, one hard white stroke allowing u ≈ 0.6..0.9 along
+    /// v = 0.5, mask mode off. Everything else stays blocked (empty).
+    fn mask_right_window(state: &mut PaintState) {
+        assert!(state.toggle_mask_mode());
+        drive_stroke(state, [0.6, 0.5], [0.02, 0.0], 15);
+        state.end_stroke();
+        assert!(!state.toggle_mask_mode());
+    }
+
+    /// Tests (a), (c), (e), (f) end to end:
+    /// * (c) a mask-mode stroke stages nothing and leaves the layer
+    ///   byte-identical; it edits the mask and uploads it;
+    /// * (a) after leaving mask mode, a paint stroke across the whole row
+    ///   leaves every blocked texel byte-identical and paints the window;
+    /// * (e) deactivating stops gating (the same stroke paints the blocked
+    ///   probe) and the mask survives exit and re-entry;
+    /// * (f) clear zeroes it.
+    #[test]
+    fn quick_mask_gates_paint_and_mask_mode_paints_only_the_mask() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        state.set_brush_params(hard_brush());
+        let blank = read_back(&mut state, &device, &queue);
+        assert!(state.quick_mask().coverage(FIRST_TILE).is_none());
+        assert_eq!(state.mask_upload_count(), 0, "no mask, no upload");
+
+        // (c)
+        mask_right_window(&mut state);
+        assert_eq!(
+            state.staged_batch_count(),
+            0,
+            "a mask stroke stages nothing"
+        );
+        assert_eq!(state.staged_dab_count(), 0);
+        assert!(state.mask_upload_count() > 0, "the mask reached the GPU");
+        assert_eq!(
+            read_back(&mut state, &device, &queue),
+            blank,
+            "the layer is untouched by a mask stroke"
+        );
+        let mask = state.quick_mask();
+        assert_eq!(
+            mask.sample(FIRST_TILE, 358, 256),
+            1.0,
+            "white allowed the window"
+        );
+        assert_eq!(
+            mask.sample(FIRST_TILE, 102, 256),
+            0.0,
+            "the rest stays blocked"
+        );
+        let painted_mask = mask.coverage(FIRST_TILE).expect("plane").to_vec();
+
+        // (a)
+        assert!(state.quick_mask().gates());
+        drive_stroke(&mut state, [0.1, 0.5], [0.05, 0.0], 16);
+        state.end_stroke();
+        let gated = read_back(&mut state, &device, &queue);
+        let (blocked, allowed) = changed_by_mask(&state, &blank, &gated);
+        assert_eq!(blocked, 0, "blocked texels must be byte-identical");
+        assert!(allowed > 0, "the window paints");
+        assert_eq!(texel_at(&gated, 102, 256), CLEAR);
+        assert_ne!(texel_at(&gated, 358, 256), CLEAR);
+
+        // (e)
+        state.set_mask_active(false);
+        assert!(!state.quick_mask().gates());
+        drive_stroke(&mut state, [0.1, 0.5], [0.05, 0.0], 16);
+        state.end_stroke();
+        let ungated = read_back(&mut state, &device, &queue);
+        assert_ne!(
+            texel_at(&ungated, 102, 256),
+            CLEAR,
+            "ungated paints everywhere"
+        );
+        let survived = |state: &PaintState| {
+            state.quick_mask().coverage(FIRST_TILE) == Some(painted_mask.as_slice())
+        };
+        assert!(survived(&state), "deactivating keeps the mask");
+        state.set_mask_mode(true);
+        assert!(
+            survived(&state),
+            "re-entering mask mode shows the same mask"
+        );
+        state.set_mask_mode(false);
+        assert!(state.quick_mask().gates(), "and re-arms gating");
+
+        // (f)
+        assert!(state.clear_mask());
+        let plane = state.quick_mask().coverage(FIRST_TILE).expect("plane");
+        assert!(plane.iter().all(|&v| v == 0.0), "clear zeroes");
+    }
+
+    /// Test (b), end to end: inverting flips the gating — the window the
+    /// mask allowed is the one place the same stroke now leaves alone.
+    #[test]
+    fn inverted_quick_mask_flips_paint_gating() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        state.set_brush_params(hard_brush());
+        let blank = read_back(&mut state, &device, &queue);
+        mask_right_window(&mut state);
+        assert!(state.invert_mask());
+        assert_eq!(state.quick_mask().sample(FIRST_TILE, 358, 256), 0.0);
+
+        drive_stroke(&mut state, [0.1, 0.5], [0.05, 0.0], 16);
+        state.end_stroke();
+        let gated = read_back(&mut state, &device, &queue);
+        let (blocked, allowed) = changed_by_mask(&state, &blank, &gated);
+        assert_eq!(blocked, 0, "the inverted window is byte-identical");
+        assert!(allowed > 0);
+        assert_ne!(texel_at(&gated, 102, 256), CLEAR, "what was blocked paints");
+        assert_eq!(
+            texel_at(&gated, 358, 256),
+            CLEAR,
+            "what was allowed is blocked"
+        );
+        // Invert/clear are refused mid-stroke (one stroke, one mask).
+        state.begin_stroke(egui::pos2(0.5, 0.5));
+        assert!(!state.invert_mask() && !state.clear_mask());
+        state.end_stroke();
+    }
+
+    /// Test (d), end to end: the gate applies AFTER symmetry expansion.
+    /// With only the left side allowed, a mirrored stroke there paints its
+    /// primary but its sibling (on the blocked right side) writes nothing;
+    /// with the mask deactivated, the same sibling paints.
+    #[test]
+    fn quick_mask_gates_symmetry_siblings_on_the_gpu() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        state.set_brush_params(hard_brush());
+        let blank = read_back(&mut state, &device, &queue);
+        // Allow u ≈ 0.1..0.4 along v = 0.5 (symmetry still off).
+        assert!(state.toggle_mask_mode());
+        drive_stroke(&mut state, [0.1, 0.5], [0.02, 0.0], 15);
+        state.end_stroke();
+        assert!(!state.toggle_mask_mode());
+        assert!((256..TARGET_SIZE).all(|x| state.quick_mask().sample(FIRST_TILE, x, 256) == 0.0));
+
+        let mut settings = SymmetrySettings::default();
+        settings.mirror.enabled = true;
+        state.sync_symmetry(&mut settings);
+        drive_stroke(&mut state, [0.15, 0.5], [0.01, 0.0], 15);
+        state.end_stroke();
+        let gated = read_back(&mut state, &device, &queue);
+        let (blocked, allowed) = changed_by_mask(&state, &blank, &gated);
+        assert_eq!(blocked, 0, "no sibling texel lands on the blocked side");
+        assert!(allowed > 0);
+        assert_ne!(texel_at(&gated, 102, 256), CLEAR, "the primary paints");
+        assert_eq!(texel_at(&gated, 409, 256), CLEAR, "its sibling is gated");
+
+        // Control: ungated, the sibling paints.
+        state.set_mask_active(false);
+        drive_stroke(&mut state, [0.15, 0.5], [0.01, 0.0], 15);
+        state.end_stroke();
+        let ungated = read_back(&mut state, &device, &queue);
+        assert_ne!(texel_at(&ungated, 409, 256), CLEAR);
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---

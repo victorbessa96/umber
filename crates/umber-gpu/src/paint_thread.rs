@@ -91,6 +91,24 @@ pub enum PaintThreadCommand {
         /// `width * height * 4` bytes, row-major.
         rgba: Vec<u8>,
     },
+    /// Overwrite the `width`x`height` region at `(x, y)` of the target's
+    /// quick-mask texture with tightly-packed 8-bit `values` (`255` =
+    /// paint allowed) — what mask-gated dabs
+    /// ([`Dab::with_mask_gate`]) read. Queued in FIFO order with `Stage`,
+    /// so a mask edit lands before the gated dabs staged after it (see
+    /// [`PaintTarget::write_mask_region`]).
+    WriteMask {
+        /// Region origin x, texels.
+        x: u32,
+        /// Region origin y, texels.
+        y: u32,
+        /// Region width, texels.
+        width: u32,
+        /// Region height, texels.
+        height: u32,
+        /// `width * height` bytes, row-major.
+        values: Vec<u8>,
+    },
     /// Reset the paint target to fully transparent.
     Clear,
     /// Recreate the paint target at a new size.
@@ -243,6 +261,21 @@ impl PaintThread {
                         (x, y),
                         (width, height),
                         &rgba,
+                    )?;
+                }
+                PaintThreadCommand::WriteMask {
+                    x,
+                    y,
+                    width,
+                    height,
+                    values,
+                } => {
+                    self.target.write_mask_region(
+                        &self.device,
+                        &mut encoder,
+                        (x, y),
+                        (width, height),
+                        &values,
                     )?;
                 }
             }

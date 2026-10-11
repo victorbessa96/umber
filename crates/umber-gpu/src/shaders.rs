@@ -204,6 +204,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// therefore keep spatially-overlapping dabs in separate `splat_dabs`
 /// calls; wgpu's automatic hazard tracking orders successive compute
 /// passes on the same texture correctly.
+///
+/// Quick-mask gate (§2's P1 row, `umber_brush::quick_mask`): a dab whose
+/// `mask_gate` is set multiplies its per-texel coverage by `mask_tex` at
+/// that texel (R8, `1.0` = paint allowed, `0.0` = blocked). The flag rides
+/// per dab — not in a uniform — so gated and ungated dabs can share one
+/// drain without a submit-time `write_buffer` reordering them. Ungated
+/// dabs never load the mask (the bound texture may be a 1x1 fallback).
 pub const PAINT_COMPUTE_SHADER: &str = r#"
 struct Dab {
     pos: vec2<f32>,
@@ -211,7 +218,7 @@ struct Dab {
     alpha: f32,
     color: vec4<f32>,
     hardness: f32,
-    _pad0: f32,
+    mask_gate: f32,
     _pad1: f32,
     _pad2: f32,
 };
@@ -219,6 +226,7 @@ struct Dab {
 @group(0) @binding(0) var<storage, read> dabs: array<Dab>;
 @group(0) @binding(1) var paint_tex: texture_storage_2d<rgba8unorm, read_write>;
 @group(0) @binding(2) var<uniform> dims: vec2<u32>;
+@group(0) @binding(3) var mask_tex: texture_2d<f32>;
 
 const WORKGROUP_SIZE: u32 = 64u;
 
@@ -263,7 +271,10 @@ fn cs_main(
             continue;
         }
 
-        let coverage = dab.alpha * radial_falloff(dist / safe_radius, dab.hardness);
+        var coverage = dab.alpha * radial_falloff(dist / safe_radius, dab.hardness);
+        if (dab.mask_gate > 0.5) {
+            coverage = coverage * textureLoad(mask_tex, texel, 0).r;
+        }
         let src = dab.color * coverage;
         let dst = textureLoad(paint_tex, texel);
         let out = src + dst * (1.0 - src.a);

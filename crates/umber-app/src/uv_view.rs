@@ -5,8 +5,10 @@
 
 use egui::{Color32, Sense, Stroke, Ui};
 use umber_brush::symmetry::{RADIAL_CENTER, RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
-use umber_brush::{MirrorAxis, MirrorSettings, SymmetrySettings};
+use umber_brush::{MirrorAxis, MirrorSettings, QuickMask, SymmetrySettings};
 use umber_mesh::MeshData;
+
+use crate::i18n::tr;
 
 /// Wireframe color for UV island edges.
 const UV_EDGE_COLOR: Color32 = Color32::from_rgb(140, 190, 255);
@@ -15,10 +17,20 @@ const UV_BG_COLOR: Color32 = Color32::from_rgb(38, 38, 42);
 /// Background outside the UV square (padding area).
 const PAD_COLOR: Color32 = Color32::from_rgb(28, 28, 30);
 
-/// The 2D UV view panel state. Wave 2: stateless drawing; zoom/pan for
-/// this view lands with the paint-engine sync work.
+/// The 2D UV view panel state: the cached quick-mask overlay texture.
+/// Zoom/pan for this view lands with the paint-engine sync work.
 #[derive(Default)]
-pub struct UvView;
+pub struct UvView {
+    /// The quick-mask overlay, rebuilt only when its key changes.
+    mask_overlay: Option<MaskOverlay>,
+}
+
+/// The uploaded quick-mask overlay and what it was built from.
+struct MaskOverlay {
+    /// `(mask generation, displayed tile, mask dimensions)`.
+    key: (u64, u16, (u32, u32)),
+    texture: egui::TextureHandle,
+}
 
 impl UvView {
     /// Draws the UV wireframe for `mesh` (or a hint when none is loaded)
@@ -123,6 +135,12 @@ impl UvView {
 
         // Read before `paint` is consumed by the canvas callback below.
         let symmetry = paint.as_deref().map(|p| *p.symmetry());
+        let mask_texture = paint
+            .as_deref()
+            .and_then(|p| self.mask_overlay_texture(ui.ctx(), p));
+        let mask_mode = paint
+            .as_deref()
+            .is_some_and(|p| p.quick_mask().is_editing());
 
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, PAD_COLOR);
@@ -141,6 +159,23 @@ impl UvView {
             );
             let shape = umber_gpu::texture_display::texture_display_shape(square, callback);
             painter.add(shape);
+        }
+
+        // The quick-mask overlay over the canvas (red where blocked), under
+        // the wireframe like the strokes. Its rows run top-down like the
+        // paint target's, so it maps onto the square with no V flip.
+        if let Some(texture) = mask_texture {
+            let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(texture, square, full_uv, Color32::WHITE);
+        }
+        if mask_mode {
+            painter.text(
+                square.left_top() + egui::vec2(6.0, 6.0),
+                egui::Align2::LEFT_TOP,
+                tr("uv.mask-mode"),
+                egui::FontId::proportional(13.0),
+                MASK_OVERLAY_LABEL_COLOR,
+            );
         }
 
         // UV-space -> screen-space: v is flipped (UV origin is bottom-left,
@@ -188,6 +223,66 @@ impl UvView {
         }
         let _ = response;
     }
+
+    /// The quick-mask overlay texture for the displayed (active) tile, or
+    /// `None` while the mask is neither gating nor being edited. Rebuilt
+    /// and re-uploaded only when the mask's generation, the tile or the
+    /// size changes.
+    fn mask_overlay_texture(
+        &mut self,
+        ctx: &egui::Context,
+        paint: &crate::paint_state::PaintState,
+    ) -> Option<egui::TextureId> {
+        let mask = paint.quick_mask();
+        if !mask.shows_overlay() {
+            return None;
+        }
+        let tile = paint.active_tile();
+        let key = (mask.generation(), tile, mask.dimensions());
+        if self.mask_overlay.as_ref().map(|o| o.key) != Some(key) {
+            let (size, rgba) = mask_overlay_rgba(mask, tile);
+            let image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+            self.mask_overlay = Some(MaskOverlay {
+                key,
+                texture: ctx.load_texture("uv-quick-mask", image, Default::default()),
+            });
+        }
+        self.mask_overlay.as_ref().map(|o| o.texture.id())
+    }
+}
+
+/// The quick-mask overlay tint (conventional quick-mask red) and its
+/// opacity over a fully blocked texel.
+const MASK_OVERLAY_RGB: [u8; 3] = [255, 0, 0];
+const MASK_OVERLAY_ALPHA: f32 = 0.5;
+/// The overlay's longest side, texels: larger masks are point-sampled
+/// down (a 4K plane would otherwise re-upload 64 MB per mask edit).
+const MASK_OVERLAY_MAX_SIDE: u32 = 512;
+/// The "mask mode" label color.
+const MASK_OVERLAY_LABEL_COLOR: Color32 = Color32::from_rgb(255, 110, 110);
+
+/// `tile`'s quick mask as an unmultiplied RGBA overlay: red at
+/// `(1 - mask) * MASK_OVERLAY_ALPHA` opacity (blocked tinted, allowed
+/// clear), point-sampled to at most [`MASK_OVERLAY_MAX_SIDE`] per side.
+/// Returns `([width, height], bytes)`, rows top-down.
+fn mask_overlay_rgba(mask: &QuickMask, tile: u16) -> ([usize; 2], Vec<u8>) {
+    let (w, h) = mask.dimensions();
+    let step = w.max(h).div_ceil(MASK_OVERLAY_MAX_SIDE).max(1);
+    let (ow, oh) = (w.div_ceil(step), h.div_ceil(step));
+    let [r, g, b] = MASK_OVERLAY_RGB;
+    let view = mask.view(tile);
+    let empty = mask.empty_value();
+    let mut rgba = Vec::with_capacity(ow as usize * oh as usize * 4);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let v = view
+                .map_or(empty, |view| view.at(ox * step, oy * step))
+                .clamp(0.0, 1.0);
+            let a = ((1.0 - v) * MASK_OVERLAY_ALPHA * 255.0).round() as u8;
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    ([ow as usize, oh as usize], rgba)
 }
 
 /// Half-width (logical pixels) of the mirror manipulator's grab strip.
@@ -253,10 +348,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uv_view_is_stateless_default() {
-        // The panel holds no state in Wave 2; the default exists purely so
-        // AppState can derive Default. This test pins that decision: if UV
-        // view gains state (zoom/pan), update this test deliberately.
-        let _view = UvView;
+    fn uv_view_default_holds_only_the_mask_overlay_cache() {
+        // The panel's only state is the quick-mask overlay cache (empty
+        // until a mask shows); the default exists so AppState can derive
+        // Default. If UV view gains more state (zoom/pan), update this
+        // test deliberately.
+        let view = UvView::default();
+        assert!(view.mask_overlay.is_none());
+    }
+
+    #[test]
+    fn mask_overlay_tints_blocked_texels_and_clears_allowed_ones() {
+        let mut mask = QuickMask::new(8, 8);
+        mask.stamp(
+            1001,
+            &umber_brush::retouch::RetouchDab {
+                pos: [2.0, 2.0],
+                radius: 1.0,
+                alpha: 1.0,
+                hardness: 1.0,
+            },
+        );
+        let (size, rgba) = mask_overlay_rgba(&mask, 1001);
+        assert_eq!(size, [8, 8]);
+        let at = |x: usize, y: usize| &rgba[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4];
+        assert_eq!(at(1, 1), [255, 0, 0, 0], "allowed: clear");
+        assert_eq!(at(6, 6), [255, 0, 0, 128], "blocked: half-opacity red");
+        // Inverted: the tint swaps sides.
+        mask.invert();
+        let (_, rgba) = mask_overlay_rgba(&mask, 1001);
+        assert_eq!(rgba[(8 + 1) * 4 + 3], 128);
+        assert_eq!(rgba[(6 * 8 + 6) * 4 + 3], 0);
+    }
+
+    #[test]
+    fn mask_overlay_downsamples_large_masks() {
+        let (size, rgba) = mask_overlay_rgba(&QuickMask::new(4096, 2048), 1001);
+        assert_eq!(size, [512, 256]);
+        assert_eq!(rgba.len(), 512 * 256 * 4);
+        let (size, _) = mask_overlay_rgba(&QuickMask::new(512, 512), 1001);
+        assert_eq!(size, [512, 512], "the app's 512² target maps 1:1");
     }
 }

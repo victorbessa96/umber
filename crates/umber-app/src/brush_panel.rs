@@ -19,7 +19,9 @@ use crate::i18n::tr;
 use umber_brush::preset::{BrushPreset, ControlCurve};
 use umber_brush::preset_library::{user_preset_dir, Library};
 use umber_brush::symmetry::{RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
-use umber_brush::{BrushTool, CloneParams, MirrorAxis, SmudgeParams, SymmetrySettings};
+use umber_brush::{BrushTool, CloneParams, MaskPaint, MirrorAxis, SmudgeParams, SymmetrySettings};
+
+use crate::paint_state::PaintState;
 
 /// Size of the curve-editor plot (logical pixels).
 const CURVE_PLOT_SIZE: egui::Vec2 = egui::Vec2::new(150.0, 100.0);
@@ -93,15 +95,22 @@ impl BrushPanel {
         }
     }
 
-    /// The panel body: tool rows + preset selector + live editor + save
-    /// row. The tool rows come first: they work with no preset selected.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// The panel body: tool rows + symmetry + quick mask + preset selector
+    /// + live editor + save row. The tool rows come first: they work with
+    /// no preset selected. The quick-mask rows edit the paint session's
+    /// mask directly, so they show only when `paint` exists.
+    pub fn show(&mut self, ui: &mut egui::Ui, paint: Option<&mut PaintState>) {
         self.tool_rows(ui);
         ui.add_space(8.0);
         ui.separator();
         symmetry_rows(ui, &mut self.symmetry);
         ui.add_space(8.0);
         ui.separator();
+        if let Some(paint) = paint {
+            quick_mask_rows(ui, paint);
+            ui.add_space(8.0);
+            ui.separator();
+        }
         self.preset_selector(ui);
         ui.add_space(8.0);
         ui.separator();
@@ -455,6 +464,51 @@ impl Default for BrushPanel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The quick-mask section (§2's P1 row, `umber_brush::quick_mask`): mask
+/// mode (also X), gating, what mask strokes paint, Invert (also I in mask
+/// mode) and Clear. It edits the paint session's mask in place. The mask
+/// is session state, kept out of the panel, the preset, the project file
+/// and the undo history.
+fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
+    ui.strong(tr("brush.quick-mask"));
+    let mask = paint.quick_mask();
+    let (mut editing, mut active) = (mask.is_editing(), mask.is_active());
+    let (current, inverted) = (mask.paint(), mask.is_inverted());
+    if ui
+        .checkbox(&mut editing, tr("brush.quick-mask-mode"))
+        .changed()
+    {
+        paint.set_mask_mode(editing);
+    }
+    if ui
+        .checkbox(&mut active, tr("brush.quick-mask-active"))
+        .changed()
+    {
+        paint.set_mask_active(active);
+    }
+    let mut picked = current;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(tr("brush.quick-mask-paint"));
+        ui.selectable_value(&mut picked, MaskPaint::Allow, tr("brush.quick-mask-allow"));
+        ui.selectable_value(&mut picked, MaskPaint::Block, tr("brush.quick-mask-block"));
+    });
+    if picked != current {
+        paint.set_mask_paint(picked);
+    }
+    ui.horizontal(|ui| {
+        if ui.button(tr("brush.quick-mask-invert")).clicked() {
+            paint.invert_mask();
+        }
+        if ui.button(tr("brush.quick-mask-clear")).clicked() {
+            paint.clear_mask();
+        }
+        if inverted {
+            ui.weak(tr("brush.quick-mask-inverted"));
+        }
+    });
+    ui.weak(tr("brush.quick-mask-hint"));
 }
 
 /// The symmetry section: the mirror toggle with its axis + offset rows,

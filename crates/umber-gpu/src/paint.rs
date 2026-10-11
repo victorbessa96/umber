@@ -57,13 +57,19 @@ pub struct Dab {
     pub color: [f32; 4],
     /// Radial falloff: `1.0` hard edge, `0.0` soft falloff from the center.
     pub hardness: f32,
-    _pad: [f32; 3],
+    /// Quick-mask gate: `1.0` multiplies the dab's per-texel coverage by
+    /// the target's mask texture, `0.0` ignores it. Set through
+    /// [`Dab::with_mask_gate`] (it occupies what was the first padding
+    /// slot, so the layout is unchanged).
+    mask_gate: f32,
+    _pad: [f32; 2],
 }
 
 const _: () = assert!(size_of::<Dab>() == 48, "Dab must match the WGSL Dab layout");
 
 impl Dab {
-    /// Builds a dab from its conceptual fields (padding is internal).
+    /// Builds a dab from its conceptual fields (padding is internal). The
+    /// dab is not mask-gated.
     pub fn new(pos: [f32; 2], radius: f32, color: [f32; 4], alpha: f32, hardness: f32) -> Self {
         Self {
             pos,
@@ -71,8 +77,24 @@ impl Dab {
             alpha,
             color,
             hardness,
-            _pad: [0.0; 3],
+            mask_gate: 0.0,
+            _pad: [0.0; 2],
         }
+    }
+
+    /// This dab with the quick-mask gate set (`true`) or cleared. A gated
+    /// dab's coverage is multiplied by the target's mask texture per
+    /// texel; the caller uploads the mask
+    /// ([`PaintTarget::write_mask_region`]) before staging gated dabs.
+    #[must_use]
+    pub fn with_mask_gate(mut self, gated: bool) -> Self {
+        self.mask_gate = if gated { 1.0 } else { 0.0 };
+        self
+    }
+
+    /// Whether the quick-mask gate is set.
+    pub fn mask_gated(&self) -> bool {
+        self.mask_gate > 0.5
     }
 }
 
@@ -212,6 +234,10 @@ pub struct PaintTarget {
     texture: wgpu::Texture,
     texture_view: wgpu::TextureView,
     dims_buffer: wgpu::Buffer,
+    /// The quick-mask texture (R8, same size as the target), created on
+    /// the first [`Self::write_mask_region`]: a session that never masks
+    /// never pays for it.
+    mask: Option<(wgpu::Texture, wgpu::TextureView)>,
     width: u32,
     height: u32,
 }
@@ -253,6 +279,7 @@ impl PaintTarget {
             texture,
             texture_view,
             dims_buffer,
+            mask: None,
             width,
             height,
         }
@@ -454,6 +481,99 @@ impl PaintTarget {
         );
         Ok(())
     }
+
+    /// Records a copy of tightly-packed 8-bit quick-mask `values`
+    /// (`width * height` bytes, row-major, `255` = paint allowed) into the
+    /// `width`x`height` region of the mask texture at `(x, y)`, creating
+    /// the (zero = blocked) texture on first use. Recorded on `encoder`
+    /// like [`Self::write_region`], so it serializes with the splat
+    /// passes in command order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaintError::InvalidRegion`] for an empty or out-of-bounds
+    /// rect, or a byte count that doesn't match it.
+    pub fn write_mask_region(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        (x, y): (u32, u32),
+        (width, height): (u32, u32),
+        values: &[u8],
+    ) -> Result<(), PaintError> {
+        let fits = width > 0
+            && height > 0
+            && x.checked_add(width).is_some_and(|x1| x1 <= self.width)
+            && y.checked_add(height).is_some_and(|y1| y1 <= self.height)
+            && values.len() == width as usize * height as usize;
+        if !fits {
+            return Err(PaintError::InvalidRegion {
+                x,
+                y,
+                width,
+                height,
+            });
+        }
+        let (target_width, target_height) = (self.width, self.height);
+        let (mask_texture, _) = self.mask.get_or_insert_with(|| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("umber_paint_quick_mask"),
+                size: wgpu::Extent3d {
+                    width: target_width,
+                    height: target_height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        });
+        let padding = (256 - (width % 256)) % 256;
+        let padded_row = width + padding;
+        let mut padded = Vec::with_capacity(padded_row as usize * height as usize);
+        for row in values.chunks_exact(width as usize) {
+            padded.extend_from_slice(row);
+            padded.resize(padded.len() + padding as usize, 0);
+        }
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_paint_mask_upload"),
+            contents: &padded,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(())
+    }
+
+    /// Whether the quick-mask texture exists (a mask was uploaded since
+    /// the target was created).
+    pub fn has_mask(&self) -> bool {
+        self.mask.is_some()
+    }
 }
 
 /// Owns the dab-splat compute pipeline and bind-group layout shared by
@@ -472,6 +592,11 @@ pub struct PaintCompositor {
     device: wgpu::Device,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// The 1x1 mask bound for a target with no quick-mask texture yet
+    /// (binding 3 must always hold a view; only gated dabs read it, and
+    /// the caller uploads a mask before staging those).
+    _fallback_mask: wgpu::Texture,
+    fallback_mask_view: wgpu::TextureView,
     max_dabs_per_batch: usize,
 }
 
@@ -534,8 +659,34 @@ impl PaintCompositor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+
+        let fallback_mask = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("umber_paint_quick_mask_fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let fallback_mask_view = fallback_mask.create_view(&wgpu::TextureViewDescriptor::default());
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("umber_paint_pipeline_layout"),
@@ -558,6 +709,8 @@ impl PaintCompositor {
             device,
             pipeline,
             bind_group_layout,
+            _fallback_mask: fallback_mask,
+            fallback_mask_view,
             max_dabs_per_batch,
         })
     }
@@ -613,6 +766,15 @@ impl PaintCompositor {
                         offset: 0,
                         size: None,
                     }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(
+                        target
+                            .mask
+                            .as_ref()
+                            .map_or(&self.fallback_mask_view, |(_, view)| view),
+                    ),
                 },
             ],
         });
@@ -676,6 +838,20 @@ mod tests {
     #[test]
     fn dab_layout_matches_wgsl_struct_size() {
         assert_eq!(size_of::<Dab>(), 48);
+    }
+
+    #[test]
+    fn mask_gate_defaults_off_and_round_trips() {
+        let dab = Dab::new([1.0, 2.0], 3.0, [1.0, 0.0, 0.0, 1.0], 0.5, 0.25);
+        assert!(!dab.mask_gated());
+        let gated = dab.with_mask_gate(true);
+        assert!(gated.mask_gated());
+        // The gate rides in the old first padding slot (byte 36): the
+        // conceptual fields are untouched.
+        assert_eq!(bytemuck::bytes_of(&gated)[36..40], 1.0f32.to_ne_bytes());
+        assert_eq!(gated.pos, dab.pos);
+        assert_eq!(gated.hardness, dab.hardness);
+        assert!(!gated.with_mask_gate(false).mask_gated());
     }
 
     #[cfg(feature = "gpu")]
@@ -834,6 +1010,50 @@ mod tests {
                 [0, 0, 0, 0],
                 "corner should be untouched: {corner:?}"
             );
+        }
+
+        /// The quick-mask gate, per texel: a hard dab straddling a mask
+        /// edge (left half blocked, right half allowed) paints only the
+        /// allowed half; the same dab ungated paints both halves.
+        #[test]
+        fn mask_gated_dab_paints_only_where_the_mask_allows() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let compositor =
+                PaintCompositor::new(device.clone()).expect("device has the required feature");
+            let mut target = PaintTarget::new(&device, 64, 64);
+            let mask: Vec<u8> = (0..64 * 64)
+                .map(|i| if i % 64 < 32 { 0 } else { 255 })
+                .collect();
+            let red = Dab::new([32.0, 32.0], 16.0, [1.0, 0.0, 0.0, 1.0], 1.0, 1.0);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("umber_paint_test_encoder"),
+            });
+            target
+                .write_mask_region(&device, &mut encoder, (0, 0), (64, 64), &mask)
+                .expect("full-size mask fits");
+            assert!(target.has_mask());
+            compositor
+                .splat_dabs(&mut encoder, &target, &[red.with_mask_gate(true)])
+                .expect("gated dab splats");
+            queue.submit(Some(encoder.finish()));
+            let bytes = read_back_rgba8(&device, &queue, &target);
+            assert_eq!(pixel(&bytes, 64, 24, 32), [0, 0, 0, 0], "blocked half");
+            assert!(pixel(&bytes, 64, 40, 32)[0] > 200, "allowed half paints");
+
+            // Ungated: the mask is bound but ignored.
+            let plain = PaintTarget::new(&device, 64, 64);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("umber_paint_test_encoder"),
+            });
+            compositor
+                .splat_dabs(&mut encoder, &plain, &[red])
+                .expect("ungated dab splats");
+            queue.submit(Some(encoder.finish()));
+            let bytes = read_back_rgba8(&device, &queue, &plain);
+            assert!(pixel(&bytes, 64, 24, 32)[0] > 200);
+            assert!(pixel(&bytes, 64, 40, 32)[0] > 200);
         }
 
         #[test]

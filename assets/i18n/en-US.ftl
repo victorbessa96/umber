@@ -233,6 +233,16 @@ brush =
     .symmetry-count = Copies
     .symmetry-flip-u = Flip U
     .symmetry-flip-v = Flip V
+    .quick-mask = Quick mask
+    .quick-mask-mode = Mask mode (X): strokes paint the mask
+    .quick-mask-active = Gate painting with the mask
+    .quick-mask-paint = Mask paint
+    .quick-mask-allow = White (allow)
+    .quick-mask-block = Black (block)
+    .quick-mask-invert = Invert (I)
+    .quick-mask-clear = Clear
+    .quick-mask-inverted = inverted
+    .quick-mask-hint = Red marks blocked texels. The mask lasts for this session only: it is not saved and not undoable.
 
 ## Layers panel
 
@@ -271,3 +281,4 @@ size =
 
 uv =
     .no-mesh = no mesh loaded
+    .mask-mode = MASK MODE (X to exit)

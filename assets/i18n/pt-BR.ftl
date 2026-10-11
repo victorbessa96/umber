@@ -252,6 +252,16 @@ brush =
     .symmetry-count = Cópias
     .symmetry-flip-u = Inverter U
     .symmetry-flip-v = Inverter V
+    .quick-mask = Máscara rápida
+    .quick-mask-mode = Modo máscara (X): os traços pintam a máscara
+    .quick-mask-active = Restringir a pintura pela máscara
+    .quick-mask-paint = Pintura da máscara
+    .quick-mask-allow = Branco (permite)
+    .quick-mask-block = Preto (bloqueia)
+    .quick-mask-invert = Inverter (I)
+    .quick-mask-clear = Limpar
+    .quick-mask-inverted = invertida
+    .quick-mask-hint = O vermelho marca os texels bloqueados. A máscara dura só esta sessão: não é salva nem pode ser desfeita.
 
 ## Painel de camadas
 
@@ -290,3 +300,4 @@ size =
 
 uv =
     .no-mesh = nenhuma malha carregada
+    .mask-mode = MODO MÁSCARA (X para sair)
