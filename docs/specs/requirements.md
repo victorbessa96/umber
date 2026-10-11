@@ -110,7 +110,7 @@
 | FBX via ufbx (MIT C lib, official Rust bindings — the only credible route; Autodesk FBX SDK is non-redistributable) | P0 | 1 |
 | USD import (openusd pure-Rust: usda first, usdc when stable) | P1 | 5 |
 | Image formats: png/jpeg/tiff/exr/hdr (image + exr crates); SVG (later) | P0 (png/exr) | 2 |
-| Mesh-map import by naming convention (TextureSetName_map) | P1 | 3 |
+| Mesh-map import by naming convention (TextureSetName_map) | P1 | 3 | ✓ built (`00ee9d7`) — the folder-drop importer, every import a new layer, the unmatched report |
 | **Never:** .spp (undocumented HDF5), .sbsar execution (Adobe Developer Additional Terms — closed, no FOSS license exists) | hard wall | — |
 
 ## 8. Project format (.umber — the .spp kill-shot) — [04]
@@ -121,7 +121,7 @@
 | Textures as content-hash-named PNG/EXR tiles (git/LFS friendly; assets referenced by hash, never embedded blobs) | P0 | 2 |
 | Save/load round-trip determinism (CI-tested: save→load→export identical bytes) | P0 | 2 |
 | Autosave + crash recovery (journal) | P1 | 5 | ✓ built (`015fbf0`) |
-| Merge story documented (per-layer files = two artists editing different layers never conflict) | P1 | 2 (doc) |
+| Merge story documented (per-layer files = two artists editing different layers never conflict) | P1 | 2 (doc) | ✓ built (`a26d5e1`) — docs/merge-story.md: the five properties, the workflow, the honest limit |
 
 ## 9. Color management — [01][03][04]
 
