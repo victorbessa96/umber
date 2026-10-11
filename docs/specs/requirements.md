@@ -13,7 +13,7 @@
 | Requirement | Priority | Wave |
 |---|---|---|
 | Stamp-based brush engine: size, flow (per-stamp, pressure-bindable), stroke opacity (per-stroke, end-of-stroke), spacing (dabs-per-radius, residual partial-dab carry), angle, alignment (camera/tangent-wrap/tangent-planar/UV), jitter quartet (size/flow/angle/position) | P0 | 2 |
-| Pressure dynamics mapped through input→curve model (MyPaint-style); log-radius; `opaque_linearize` flow semantics (per-stamp flow with per-stroke accumulation = Krita wash-mode; Build-up mode as alternative) | P0 | 2 |
+| Pressure dynamics mapped through input→curve model (MyPaint-style); log-radius; `opaque_linearize` flow semantics (per-stamp flow with per-stroke accumulation = Krita wash-mode; Build-up mode as alternative) | P0 | 2 | ✓ built (`1c730da`) — WashMode { BuildUp, Wash }, the opaque_linearize math, the preset round-trip |
 | Lazy mouse (radius-based stroke offset smoothing) + one-euro filter smoothing (Casiez CHI'12) with Krita-style stabilizer panel (samples@min/max speed, delay dead-zone) | P0 | 2 | ✓ built (lazy_mouse.rs, the stabilizer panel rows) |
 | Hardness/stamp falloff (radial gradient dabs); alpha source: bitmap textures + procedural | P0 | 2 |
 | Eraser (sets layer alpha to zero — non-destructive; per-channel enable) | P0 | 2 | ✓ built (`21e1290`) — v1 boundary: seam-mirroring skipped (the retouch gate) |
@@ -67,7 +67,7 @@
 | Generator nodes driven by baked mesh maps (AO/curvature/position/WS-normal inputs plumbed automatically) | P0 | 4 |
 | Smart masks (effect-stack presets) | P1 | 4 |
 | Example-based texture synthesis (EmbarkStudios/texture-synthesis style) as first-class generator primitive | P1 | 4 |
-| Graph evaluated on GPU (WGSL compute passes per dirty tile) | P0 | 4 |
+| Graph evaluated on GPU (WGSL compute passes per dirty tile) | P0 | 4 | ✓ built (`8590ae2`) — GraphGpuEvaluator, 20 entry points, total hybrid routing (the per-pixel families GPU; the globals/assets/guests CPU through the same registry) |
 | Community extension API for nodes (see plugins §10) | P1 | 6 |
 
 ## 5. Viewport + shading — [01][03][04]
