@@ -1,5 +1,6 @@
 //! Fill-layer projections (§2's P0 row): UV, tri-planar, planar, spherical,
-//! cylindrical.
+//! cylindrical — plus the polygon-fill pixel masks (§2 line 24's P1 row),
+//! which gate the projection result per texel (see [`FillParams::mask`]).
 //!
 //! **Module placement (why here, not in `umber-app`):** every function in
 //! this module is a pure function of [`MeshData`] (triangles + UVs +
@@ -41,6 +42,7 @@ use std::mem::size_of;
 
 use serde::{Deserialize, Serialize};
 
+use crate::polygon_fill::FillMask;
 use crate::MeshData;
 
 /// A coordinate axis, for the [`FillProjection::Planar`] plane and the
@@ -149,25 +151,34 @@ impl Default for FillSource {
     }
 }
 
-/// A fill layer's evaluatable parameters: what to paint + how to project it.
-/// Stored on `umber-core`'s `Layer` (`fill: Option<FillParams>`); `None`
-/// means "not a fill layer" and keeps [`crate::LayerKind::Fill`] a plain
-/// tag so the journal/project matches don't churn.
+/// A fill layer's evaluatable parameters: what to paint + how to project it
+/// + where it may paint. Stored on `umber-core`'s `Layer`
+/// (`fill: Option<FillParams>`); `None` means "not a fill layer" and keeps
+/// [`crate::LayerKind::Fill`] a plain tag so the journal/project matches
+/// don't churn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FillParams {
     pub source: FillSource,
     pub projection: FillProjection,
+    /// The polygon-fill pixel mask (the P1 row: triangle / polygon lasso /
+    /// mesh island / UV chunk), or `None` for the unmasked P0 behavior.
+    /// `#[serde(default)]` so projects saved before the polygon-fill row
+    /// landed (no such key) still load — as unmasked fills.
+    #[serde(default)]
+    pub mask: Option<FillMask>,
 }
 
 impl FillParams {
-    /// Approximate heap held by these params (the graph snapshot's bytes;
-    /// everything else is inline). Feeds `Layer::memory_bytes`.
+    /// Approximate heap held by these params (the graph snapshot's bytes
+    /// plus the mask's loop/ID vecs; everything else is inline). Feeds
+    /// `Layer::memory_bytes`.
     pub fn memory_bytes(&self) -> usize {
         size_of::<FillParams>()
             + match &self.source {
                 FillSource::GraphImage { rgba, .. } => rgba.len(),
                 _ => 0,
             }
+            + self.mask.as_ref().map(FillMask::memory_bytes).unwrap_or(0)
     }
 }
 
@@ -471,6 +482,10 @@ pub struct TexelGeom {
     pub normal: [f32; 3],
     /// The texel center's global UV (tile offset included).
     pub uv: [f32; 2],
+    /// The covering triangle's index (`mesh.indices / 3` position): what
+    /// the polygon-fill topology masks test membership against. Tracks
+    /// the same last-in-index-order winner as the geometry itself.
+    pub triangle: usize,
 }
 
 /// Rasterizes `mesh`'s UV layout into `tile`'s `width`x`height` texel grid:
@@ -498,7 +513,7 @@ pub fn rasterize_uv_geometry(
     let index = tile.saturating_sub(crate::FIRST_TILE);
     let (tu, tv) = (f32::from(index % 10), f32::from(index / 10));
     let mut out: Vec<Option<TexelGeom>> = vec![None; w * h];
-    for tri in mesh.indices.chunks_exact(3) {
+    for (tri_idx, tri) in mesh.indices.chunks_exact(3).enumerate() {
         let (Some(&i0), Some(&i1), Some(&i2)) = (tri.first(), tri.get(1), tri.get(2)) else {
             continue;
         };
@@ -589,6 +604,7 @@ pub fn rasterize_uv_geometry(
                     ],
                     normal,
                     uv,
+                    triangle: tri_idx,
                 });
             }
         }
@@ -621,8 +637,11 @@ pub struct FillTile {
 
 /// Evaluates `params` over `tile`'s `width`x`height` grid: for each texel
 /// the projection maps the texel's surface point into the fill source's 2D
-/// space, samples it, and writes the byte. Pure — no caching here (the
-/// app-side dirty flag decides WHEN to call this, not what it returns).
+/// space, samples it, and writes the byte — unless `params.mask` excludes
+/// the texel, which stays transparent with coverage `0.0` (the polygon
+/// fill composes with every projection through this one gate, before
+/// symmetry and layer compositing). Pure — no caching here (the app-side
+/// dirty flag decides WHEN to call this, not what it returns).
 pub fn evaluate_fill_tile(
     mesh: &MeshData,
     params: &FillParams,
@@ -647,6 +666,11 @@ pub fn evaluate_fill_tile(
         let Some(g) = g else {
             continue;
         };
+        if let Some(mask) = params.mask.as_ref() {
+            if !mask.covers(g.uv, g.triangle) {
+                continue;
+            }
+        }
         let sample = match params.projection {
             FillProjection::Triplanar { sharpness, scale } => {
                 sample_triplanar(&params.source, g.pos, g.normal, sharpness, scale)
@@ -818,6 +842,7 @@ mod tests {
         FillParams {
             source: FillSource::Solid { color },
             projection: FillProjection::Uv,
+            mask: None,
         }
     }
 
@@ -924,6 +949,7 @@ mod tests {
                 sharpness: 2.0,
                 scale: 1.0,
             },
+            mask: None,
         };
         let size = 32u32;
         let tile = evaluate_fill_tile(&unit_cube(), &params, 1001, size, size);
@@ -1111,6 +1137,109 @@ mod tests {
         ] {
             assert_eq!(sample_source(&bad, [0.25, 0.25]), [0.0, 0.0, 0.0, 0.0]);
         }
+    }
+
+    /// Test (h): the mask+fill composition — a polygon-masked fill paints
+    /// only inside the lasso (same source+projection path, gated per
+    /// texel before the byte is written).
+    #[test]
+    fn masked_fill_paints_only_inside_the_polygon() {
+        let lasso = FillMask::polygon(vec![[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]]);
+        let params = FillParams {
+            source: FillSource::Solid {
+                color: [1.0, 0.0, 0.0, 1.0],
+            },
+            projection: FillProjection::Uv,
+            mask: Some(lasso),
+        };
+        let tile = evaluate_fill_tile(&full_uv_quad(), &params, 1001, 16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                let i = y * 16 + x;
+                if x < 8 {
+                    assert_eq!(&tile.rgba[i * 4..i * 4 + 4], &[255, 0, 0, 255], "inside ({x},{y})");
+                    assert_eq!(tile.coverage[i], 1.0);
+                } else {
+                    assert_eq!(&tile.rgba[i * 4..i * 4 + 4], &[0, 0, 0, 0], "outside ({x},{y})");
+                    assert_eq!(tile.coverage[i], 0.0);
+                }
+            }
+        }
+    }
+
+    /// Test (i): the triangle mask paints only the picked face — every
+    /// covered texel's geometry agrees it came from triangle 0, and
+    /// triangle 1 stays transparent.
+    #[test]
+    fn triangle_mask_paints_only_the_picked_face() {
+        let params = FillParams {
+            source: FillSource::Solid {
+                color: [0.0, 1.0, 0.0, 1.0],
+            },
+            projection: FillProjection::Uv,
+            mask: Some(FillMask::triangle(0)),
+        };
+        let mesh = full_uv_quad();
+        let tile = evaluate_fill_tile(&mesh, &params, 1001, 8, 8);
+        let geom = rasterize_uv_geometry(&mesh, 1001, 8, 8);
+        let mut covered = 0;
+        for (i, g) in geom.iter().enumerate() {
+            let g = g.expect("full coverage");
+            if g.triangle == 0 {
+                covered += 1;
+                assert_eq!(&tile.rgba[i * 4..i * 4 + 4], &[0, 255, 0, 255]);
+                assert_eq!(tile.coverage[i], 1.0);
+            } else {
+                assert_eq!(g.triangle, 1);
+                assert_eq!(&tile.rgba[i * 4..i * 4 + 4], &[0, 0, 0, 0]);
+                assert_eq!(tile.coverage[i], 0.0);
+            }
+        }
+        assert!(covered > 0 && covered < 64, "a strict subset: {covered}");
+    }
+
+    /// Test (j): the island masks compose with non-UV projections — a
+    /// planar fill gated by a UV-chunk paints the chunk's texels with the
+    /// planar sample and nothing else.
+    #[test]
+    fn island_mask_composes_with_non_uv_projections() {
+        let mesh = full_uv_quad();
+        let chunk = FillMask::uv_chunk(&mesh, 0);
+        let masked = FillParams {
+            source: FillSource::Solid {
+                color: [1.0, 1.0, 0.0, 1.0],
+            },
+            // The quad's shared vertices weld both triangles into one
+            // UV island (same position AND same UVs), so the chunk is
+            // the whole quad — full coverage, planar-sampled.
+            projection: FillProjection::Planar { axis: ProjAxis::X },
+            mask: Some(chunk),
+        };
+        let tile = evaluate_fill_tile(&mesh, &masked, 1001, 8, 8);
+        assert!(tile.coverage.iter().all(|&c| c == 1.0));
+        assert!(tile.rgba.chunks_exact(4).all(|px| px == [255, 255, 0, 255]));
+        // And the empty-set degradation paints nothing, never panics.
+        let empty = FillParams {
+            mask: Some(FillMask::mesh_island(&mesh, 99)),
+            ..masked
+        };
+        let tile = evaluate_fill_tile(&mesh, &empty, 1001, 8, 8);
+        assert!(tile.coverage.iter().all(|&c| c == 0.0));
+        assert!(tile.rgba.iter().all(|&b| b == 0));
+    }
+
+    /// The default params are unmasked, and the mask's heap counts toward
+    /// the layer's memory accounting.
+    #[test]
+    fn default_params_are_unmasked_and_masks_count_bytes() {
+        assert_eq!(FillParams::default().mask, None);
+        let plain = solid_params([1.0, 1.0, 1.0, 1.0]).memory_bytes();
+        let masked = FillParams {
+            mask: Some(FillMask::polygon(vec![[0.0; 2]; 10])),
+            ..solid_params([1.0, 1.0, 1.0, 1.0])
+        }
+        .memory_bytes();
+        assert!(masked > plain, "{masked} vs {plain}");
     }
 
     /// Malformed meshes degrade to uncovered texels, never panics — the

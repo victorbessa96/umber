@@ -13,6 +13,7 @@ pub mod fill;
 pub mod gltf;
 pub mod mesh_maps;
 pub mod overlay;
+pub mod polygon_fill;
 pub mod raycast;
 pub mod seam;
 pub mod seam_mirror;
@@ -32,6 +33,10 @@ pub use mesh_maps::{
     MeshMapName,
 };
 pub use overlay::{wire_vertices_from_indices, WireVertex};
+pub use polygon_fill::{
+    flood_connected_triangles, flood_uv_island, pick_from_ray, point_in_polygon,
+    rasterize_polygon_mask, uv_triangle_at, FillMask, LASSO_MAX_POINTS,
+};
 pub use raycast::{ray_intersect, uv_at, RayHit};
 pub use udim::{present_tiles, tile_of_triangle, tile_of_uv, triangles_for_tile, FIRST_TILE};
 pub use usd::load_usda;
