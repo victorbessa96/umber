@@ -286,11 +286,11 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                     LayerKind::Folder { .. } => (tr("layers.kind-folder"), None),
                     LayerKind::Instance { source_id } => {
                         let source_name = match doc.stack.check_paintable(layer.id) {
-                            Err(InstanceError::PaintOnInstance { source, .. }) => doc
+                            Err(InstanceError::PaintOnInstance { source_id, .. }) => doc
                                 .stack
-                                .layer(source)
+                                .layer(source_id)
                                 .map(|l| l.name.clone())
-                                .unwrap_or_else(|| source.to_string()),
+                                .unwrap_or_else(|| source_id.to_string()),
                             _ => source_id.to_string(),
                         };
                         let of = tr_args(

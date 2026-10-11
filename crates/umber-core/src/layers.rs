@@ -70,12 +70,12 @@ pub enum InstanceError {
     #[error("unknown layer {0}")]
     UnknownLayer(u64),
     /// The requested source layer does not exist.
-    #[error("instance {instance} references unknown source {source}")]
+    #[error("instance {instance} references unknown source id {source_id}")]
     UnknownSource {
         /// The instance layer's id.
         instance: u64,
         /// The missing source id.
-        source: u64,
+        source_id: u64,
     },
     /// The layer is not an instance (retarget/overlay ops need one).
     #[error("layer {0} is not an instance")]
@@ -85,12 +85,12 @@ pub enum InstanceError {
     #[error("instance cycle detected among layers {0:?}")]
     Cycle(Vec<u64>),
     /// Instances carry no pixels: paint the source instead.
-    #[error("layer {instance} is an instance of {source}: paint the source, not the instance")]
+    #[error("layer {instance} is an instance of {source_id}: paint the source, not the instance")]
     PaintOnInstance {
         /// The instance a paint was attempted on.
         instance: u64,
         /// The source to paint instead.
-        source: u64,
+        source_id: u64,
     },
 }
 
@@ -525,7 +525,7 @@ impl LayerStack {
         if self.layer(source_id).is_none() {
             return Err(InstanceError::UnknownSource {
                 instance: self.next_id,
-                source: source_id,
+                source_id: source_id,
             });
         }
         let id = self.next_id;
@@ -582,7 +582,7 @@ impl LayerStack {
         if self.layer(source_id).is_none() {
             return Err(InstanceError::UnknownSource {
                 instance: id,
-                source: source_id,
+                source_id: source_id,
             });
         }
         if let Some(participants) = self.would_cycle(id, source_id) {
@@ -666,7 +666,7 @@ impl LayerStack {
                 if self.layer(*source_id).is_none() {
                     return Err(InstanceError::UnknownSource {
                         instance: layer.id,
-                        source: *source_id,
+                        source_id: *source_id,
                     });
                 }
             }
@@ -748,7 +748,7 @@ impl LayerStack {
         match &layer.kind {
             LayerKind::Instance { source_id } => Err(InstanceError::PaintOnInstance {
                 instance: id,
-                source: *source_id,
+                source_id: *source_id,
             }),
             _ => Ok(()),
         }
@@ -1468,7 +1468,7 @@ mod tests {
             stack.check_paintable(inst),
             Err(InstanceError::PaintOnInstance {
                 instance: inst,
-                source: src,
+                source_id: src,
             })
         );
         assert_eq!(

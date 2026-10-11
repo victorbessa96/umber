@@ -1218,13 +1218,13 @@ fn perm_buffer_for(
     buf
 }
 
-fn pipeline_for(
-    cache: &mut PipelineCache<wgpu::ComputePipeline>,
+fn pipeline_for<'a>(
+    cache: &'a mut PipelineCache<wgpu::ComputePipeline>,
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
     module: &wgpu::ShaderModule,
     entry: &'static str,
-) -> &wgpu::ComputePipeline {
+) -> &'a wgpu::ComputePipeline {
     // Check-then-insert (not `get_or_insert_with`): the factory borrows
     // `device`/`layout`/`module` while the cache borrows mutably, which a
     // closure cannot express — disjoint field borrows can.
