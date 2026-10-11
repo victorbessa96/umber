@@ -489,6 +489,15 @@ impl EvalCache {
     pub fn get(&self, id: u64) -> Option<&NodeOutput> {
         self.outputs.get(&id)
     }
+
+    /// Records `id`'s output (the GPU evaluator's write path:
+    /// `eval_graph_cached` writes this map directly, which an external
+    /// crate cannot do — this additive setter lets `umber-gpu` leave an
+    /// identical cache behind a GPU eval. No behavior change to the CPU
+    /// paths, which never call it).
+    pub fn insert(&mut self, id: u64, output: NodeOutput) {
+        self.outputs.insert(id, output);
+    }
 }
 
 /// Dirty re-evaluation: re-runs ONLY `dirty` nodes plus everything

@@ -90,7 +90,7 @@ pub const ENTRY_BLUR_V: &str = "op_blur_v";
 pub const ENTRY_SHARPEN: &str = "op_sharpen";
 
 /// Every entry point in [`GRAPH_EVAL_SHADER`], in pipeline-cache order
-/// (see [`crate::graph_eval::GpuOp::entry_point`], which must return
+/// (see [`crate::graph_eval::GpuOp::entry_points`], which must return
 /// exactly these strings — the static test below pins the pairing).
 pub const GRAPH_ENTRY_POINTS: &[&str] = &[
     ENTRY_FILL_UNIFORM,
@@ -728,8 +728,19 @@ fn op_warp(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     // Forward warp: content shifts by +offset, so the sample sits at
     // `uv - offset` — in texel-index space exactly `(x - off.x*w, …)`,
-    // mirroring the CPU sampler.
-    let s = warp_sample(f32(gid.x) - off.x * w, f32(gid.y) - off.y * h, dims.x, dims.y);
+    // mirroring the CPU sampler. The clamp keeps hostile offsets (finite
+    // but far beyond any texture) inside `i32` range: WGSL float→int
+    // conversion outside `i32` range is an indeterminate value, while the
+    // CPU saturates — clamping closes that gap for every sane input
+    // (nothing real sits past ±1M texels).
+    let sx_raw = f32(gid.x) - off.x * w;
+    let sy_raw = f32(gid.y) - off.y * h;
+    let s = warp_sample(
+        clamp(sx_raw, -1000000.0, 1000000.0),
+        clamp(sy_raw, -1000000.0, 1000000.0),
+        dims.x,
+        dims.y,
+    );
     textureStore(dst, coord, vec4<f32>(q8(s.r), q8(s.g), q8(s.b), q8(s.a)));
 }
 
@@ -819,7 +830,7 @@ mod tests {
         for entry in GRAPH_ENTRY_POINTS {
             let def = format!("fn {entry}(");
             assert_eq!(
-                GRAPH_EVAL_SHADER.matches(&def).count(),
+                GRAPH_EVAL_SHADER.matches(def.as_str()).count(),
                 1,
                 "entry point {entry:?} must be defined exactly once"
             );
@@ -873,13 +884,12 @@ mod tests {
     #[cfg(feature = "gpu")]
     fn try_request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::default();
-        let Ok(adapter) = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        ) else {
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
             eprintln!("skipping: no wgpu adapter available");
             return None;
         };
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
     }
 }
-"#;

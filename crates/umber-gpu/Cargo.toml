@@ -10,6 +10,7 @@ repository.workspace = true
 thiserror = { workspace = true }
 log = { workspace = true }
 umber-mesh = { workspace = true }
+umber-graph = { workspace = true }
 glam = { workspace = true }
 wgpu = { workspace = true }
 egui-wgpu = { workspace = true }

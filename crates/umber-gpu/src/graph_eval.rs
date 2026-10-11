@@ -34,7 +34,7 @@
 //!
 //! # Tiles
 //!
-//! A tile is a UDIM tile id (`u16`, the [`umber_core`](docs)-side model in
+//! A tile is a UDIM tile id (`u16`, the `umber_core`-side model in
 //! `umber-core/src/tiles.rs` — umber-gpu stays dependency-minimal and
 //! takes plain ids, not that type) carrying its own resolution
 //! ([`TileSpec`]): one dispatch per (node, tile) pair, the dirty-node set
@@ -429,7 +429,11 @@ fn bad_param(name: &str) -> EvalError {
     }
 }
 
-fn float_param(params: &[(String, ParamValue)], name: &str, default: f32) -> Result<f32, EvalError> {
+fn float_param(
+    params: &[(String, ParamValue)],
+    name: &str,
+    default: f32,
+) -> Result<f32, EvalError> {
     let v = match find_param(params, name) {
         None => default,
         Some(ParamValue::Float(v)) => *v,
@@ -485,10 +489,16 @@ fn vec3_param(
 /// `ImageBuffer` enforces — a hostile param must not allocate the GPU).
 fn check_dims(width: u32, height: u32) -> Result<(), EvalError> {
     if width == 0 || height == 0 {
-        return Err(EvalError::Image(ImageError::EmptyDimensions { width, height }));
+        return Err(EvalError::Image(ImageError::EmptyDimensions {
+            width,
+            height,
+        }));
     }
     if width > 8192 || height > 8192 || width as u64 * height as u64 > (1u64 << 26) {
-        return Err(EvalError::Image(ImageError::DimensionsTooLarge { width, height }));
+        return Err(EvalError::Image(ImageError::DimensionsTooLarge {
+            width,
+            height,
+        }));
     }
     Ok(())
 }
@@ -550,7 +560,11 @@ fn pack_node(
                 }
                 Some(_) => return Err(bad_param("resolution")),
             };
-            (GraphParams::of([rgb[0], rgb[1], rgb[2], 0.0], [0.0; 4]), None, (w, h))
+            (
+                GraphParams::of([rgb[0], rgb[1], rgb[2], 0.0], [0.0; 4]),
+                None,
+                (w, h),
+            )
         }
         GpuOp::NoisePerlin | GpuOp::NoiseValue | GpuOp::NoiseWorley => {
             let (w, h) = gen()?;
@@ -590,7 +604,11 @@ fn pack_node(
             if scale <= 0.0 {
                 return Err(bad_param("scale"));
             }
-            (GraphParams::of([scale, 0.0, 0.0, 0.0], [0.0; 4]), None, (w, h))
+            (
+                GraphParams::of([scale, 0.0, 0.0, 0.0], [0.0; 4]),
+                None,
+                (w, h),
+            )
         }
         GpuOp::Dots => {
             let (w, h) = gen()?;
@@ -686,7 +704,11 @@ fn pack_node(
             if !(0.0..=1.0).contains(&factor) {
                 return Err(bad_param("factor"));
             }
-            (GraphParams::of([factor, 0.0, 0.0, 0.0], [0.0; 4]), None, (w, h))
+            (
+                GraphParams::of([factor, 0.0, 0.0, 0.0], [0.0; 4]),
+                None,
+                (w, h),
+            )
         }
         GpuOp::ColorCorrect => {
             let (w, h) = filter()?;
@@ -1083,6 +1105,10 @@ fn mat_tex(
         }),
     }
 }
+
+/// Looks up one upstream output across the fresh GPU/CPU maps with a
+/// cache fallback (the `resolve_inputs_cached` rule: fresh wins, cached
+/// fills gaps).
 fn lookup_upstream<'a>(
     id: u64,
     gpu: &'a HashMap<u64, GpuImage>,
@@ -1111,24 +1137,32 @@ fn resolve_inputs_gpu(
     let mut map: BTreeMap<String, Resolved> = BTreeMap::new();
     for (name, pv) in &node.params {
         if let ParamValue::NodeRef(up) = pv {
-            let v = lookup_upstream(*up, gpu, cpu, cache).ok_or_else(|| EvalError::MissingInput {
-                node: node.id,
-                input: name.clone(),
-            })?;
+            let v =
+                lookup_upstream(*up, gpu, cpu, cache).ok_or_else(|| EvalError::MissingInput {
+                    node: node.id,
+                    input: name.clone(),
+                })?;
             map.insert(name.clone(), v);
         }
     }
     for e in &graph.edges {
         if e.to == node.id {
-            let v =
-                lookup_upstream(e.from, gpu, cpu, cache).ok_or_else(|| EvalError::MissingInput {
+            let v = lookup_upstream(e.from, gpu, cpu, cache).ok_or_else(|| {
+                EvalError::MissingInput {
                     node: node.id,
                     input: e.input.clone(),
-                })?;
+                }
+            })?;
             map.insert(e.input.clone(), v);
         }
     }
     Ok(map.into_iter().collect())
+}
+
+/// Stamps a pack/resolve failure with the dispatching node's id (the
+/// `eval.rs` dispatcher rule: impls build errors with `node: 0`).
+fn stamped(node: u64, e: EvalError) -> GraphGpuError {
+    GraphGpuError::Eval(e.with_node(node))
 }
 
 /// Builds (or reuses, per seed) the noise permutation storage buffer:
@@ -1336,16 +1370,20 @@ impl GraphGpuEvaluator {
         src: [&wgpu::TextureView; 3],
         dst: &GpuImage,
     ) {
-        let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("umber_graph_eval_params"),
-            contents: bytemuck::bytes_of(params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let dims_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("umber_graph_eval_dims"),
-            contents: bytemuck::cast_slice(&[dst.width, dst.height]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_graph_eval_params"),
+                contents: bytemuck::bytes_of(params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let dims_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_graph_eval_dims"),
+                contents: bytemuck::cast_slice(&[dst.width, dst.height]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("umber_graph_eval_bind_group"),
             layout: &self.layout,
@@ -1409,21 +1447,6 @@ impl GraphGpuEvaluator {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dst.width.div_ceil(16), dst.height.div_ceil(16), 1);
-        }
-    }
-
-    /// Materializes a resolved input as a GPU texture: resident handles
-    /// pass through, CPU/cached images upload (visible to every later
-    /// dispatch — see `upload_texture`).
-    fn materialize(&self, input: &Resolved, node: u64) -> Result<GpuImage, EvalError> {
-        match input {
-            Resolved::Gpu(t) => Ok(t.clone()),
-            Resolved::Cpu(NodeOutput::Image(buf)) => Ok(upload_texture(&self.device, &self.queue, buf)),
-            Resolved::Cpu(other) => Err(EvalError::TypeMismatch {
-                node,
-                expected: "Image".into(),
-                got: other.kind().into(),
-            }),
         }
     }
 
@@ -1529,8 +1552,8 @@ impl GraphGpuEvaluator {
                 GpuRoute::Alias => {
                     let in_map = resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache)
                         .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
-                    let single = Self::single_input(&in_map, node.id)
-                        .map_err(GraphGpuError::Eval)?;
+                    let single =
+                        Self::single_input(&in_map, node.id).map_err(GraphGpuError::Eval)?;
                     match single {
                         Resolved::Gpu(t) => {
                             gpu_tex.insert(*id, t.clone());
@@ -1554,11 +1577,10 @@ impl GraphGpuEvaluator {
                     if upstream_is_gpu {
                         let submitted = std::mem::replace(
                             &mut encoder,
-                            self.device.create_command_encoder(
-                                &wgpu::CommandEncoderDescriptor {
+                            self.device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                     label: Some("umber_graph_eval_encoder"),
-                                },
-                            ),
+                                }),
                         );
                         self.queue.submit(Some(submitted.finish()));
                     }
@@ -1568,14 +1590,13 @@ impl GraphGpuEvaluator {
                     // encoder is submitted.
                     let resolved = resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache)
                         .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
-                    let mut in_vec: Vec<(String, NodeOutput)> =
-                        Vec::with_capacity(resolved.len());
+                    let mut in_vec: Vec<(String, NodeOutput)> = Vec::with_capacity(resolved.len());
                     for (name, r) in &resolved {
                         let v = match r {
                             Resolved::Cpu(v) => v.clone(),
-                            Resolved::Gpu(t) => NodeOutput::Image(
-                                readback_image(&self.device, &self.queue, t)?,
-                            ),
+                            Resolved::Gpu(t) => {
+                                NodeOutput::Image(readback_image(&self.device, &self.queue, t)?)
+                            }
                         };
                         in_vec.push((name.clone(), v));
                     }
@@ -1593,15 +1614,7 @@ impl GraphGpuEvaluator {
                 GpuRoute::Gpu(op) => {
                     let in_map = resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache)
                         .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
-                    self.eval_gpu_node(
-                        &mut encoder,
-                        graph,
-                        node,
-                        op,
-                        &in_map,
-                        tile,
-                        &mut gpu_tex,
-                    )?;
+                    self.eval_gpu_node(&mut encoder, node, op, &in_map, tile, &mut gpu_tex)?;
                 }
             }
         }
@@ -1636,25 +1649,27 @@ impl GraphGpuEvaluator {
     fn eval_gpu_node(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        _graph: &Graph,
         node: &Node,
         op: GpuOp,
         in_map: &[(String, Resolved)],
         tile: &TileSpec,
         gpu_tex: &mut HashMap<u64, GpuImage>,
     ) -> Result<(), GraphGpuError> {
-        let stamp = |e: EvalError| GraphGpuError::Eval(e.with_node(node.id));
+        let node_id = node.id;
         // First resolved input's extent, for filter nodes (None for
         // generators, which render at the tile extent).
         let first_extent = |r: &Resolved| -> Result<(u32, u32), GraphGpuError> {
             match r {
                 Resolved::Gpu(t) => Ok((t.width, t.height)),
                 Resolved::Cpu(NodeOutput::Image(buf)) => Ok((buf.width, buf.height)),
-                Resolved::Cpu(other) => Err(stamp(EvalError::TypeMismatch {
-                    node: 0,
-                    expected: "Image".into(),
-                    got: other.kind().into(),
-                })),
+                Resolved::Cpu(other) => Err(stamped(
+                    node_id,
+                    EvalError::TypeMismatch {
+                        node: 0,
+                        expected: "Image".into(),
+                        got: other.kind().into(),
+                    },
+                )),
             }
         };
         let input_extent = if in_map.is_empty() {
@@ -1665,18 +1680,14 @@ impl GraphGpuEvaluator {
 
         // The warp entry's `use_map` word is set here (the packer leaves
         // slot `a.w` at 0 — only the dispatcher knows the wiring).
-        let mut packed = pack_node(op, &node.params, input_extent, tile).map_err(stamp)?;
+        let mut packed =
+            pack_node(op, &node.params, input_extent, tile).map_err(|e| stamped(node.id, e))?;
         if op == GpuOp::Warp && in_map.iter().any(|(n, _)| n == "vector") {
             packed.params.a[3] = 1.0;
         }
 
         let fb = self.fallback_view.clone();
         let src_view_of = |t: &GpuImage| t.view.clone();
-        // Materialize helper: resolved input -> owned texture handle.
-        let this = &*self;
-        let mut tex_of = |r: &Resolved| -> Result<GpuImage, GraphGpuError> {
-            this.materialize(r, node.id).map_err(GraphGpuError::Eval)
-        };
 
         match op {
             // Generators and fills ignore wiring entirely (mirroring the
@@ -1706,9 +1717,14 @@ impl GraphGpuEvaluator {
                 Ok(())
             }
             // Single-input point/kernel ops.
-            GpuOp::Invert | GpuOp::Levels | GpuOp::Curves | GpuOp::ColorCorrect | GpuOp::HsvAdjust => {
+            GpuOp::Invert
+            | GpuOp::Levels
+            | GpuOp::Curves
+            | GpuOp::ColorCorrect
+            | GpuOp::HsvAdjust => {
                 let r = Self::single_input(in_map, node.id).map_err(GraphGpuError::Eval)?;
-                let tex = tex_of(r)?;
+                let tex =
+                    mat_tex(&self.device, &self.queue, r, node.id).map_err(GraphGpuError::Eval)?;
                 let dst = make_texture(&self.device, packed.width, packed.height);
                 let entry = op.entry_points()[0];
                 self.record_pass(
@@ -1724,7 +1740,8 @@ impl GraphGpuEvaluator {
             }
             GpuOp::EdgeDetect => {
                 let r = Self::single_input(in_map, node.id).map_err(GraphGpuError::Eval)?;
-                let tex = tex_of(r)?;
+                let tex =
+                    mat_tex(&self.device, &self.queue, r, node.id).map_err(GraphGpuError::Eval)?;
                 let dst = make_texture(&self.device, packed.width, packed.height);
                 self.record_pass(
                     encoder,
@@ -1740,13 +1757,18 @@ impl GraphGpuEvaluator {
             GpuOp::Mix => {
                 let fg = Self::named_input(in_map, node.id, "fg").map_err(GraphGpuError::Eval)?;
                 let bg = Self::named_input(in_map, node.id, "bg").map_err(GraphGpuError::Eval)?;
-                let fg_tex = tex_of(fg)?;
-                let bg_tex = tex_of(bg)?;
+                let fg_tex =
+                    mat_tex(&self.device, &self.queue, fg, node.id).map_err(GraphGpuError::Eval)?;
+                let bg_tex =
+                    mat_tex(&self.device, &self.queue, bg, node.id).map_err(GraphGpuError::Eval)?;
                 if fg_tex.width != bg_tex.width || fg_tex.height != bg_tex.height {
-                    return Err(stamp(EvalError::BadParam {
-                        node: 0,
-                        param: "fg/bg size mismatch".into(),
-                    }));
+                    return Err(stamped(
+                        node.id,
+                        EvalError::BadParam {
+                            node: 0,
+                            param: "fg/bg size mismatch".into(),
+                        },
+                    ));
                 }
                 let dst = make_texture(&self.device, packed.width, packed.height);
                 self.record_pass(
@@ -1765,17 +1787,23 @@ impl GraphGpuEvaluator {
                 for name in ["x", "y", "z"] {
                     let r =
                         Self::named_input(in_map, node.id, name).map_err(GraphGpuError::Eval)?;
-                    ts.push(tex_of(r)?);
+                    ts.push(
+                        mat_tex(&self.device, &self.queue, r, node.id)
+                            .map_err(GraphGpuError::Eval)?,
+                    );
                 }
                 if ts[0].width != ts[1].width
                     || ts[0].height != ts[1].height
                     || ts[0].width != ts[2].width
                     || ts[0].height != ts[2].height
                 {
-                    return Err(stamp(EvalError::BadParam {
-                        node: 0,
-                        param: "x/y/z size mismatch".into(),
-                    }));
+                    return Err(stamped(
+                        node.id,
+                        EvalError::BadParam {
+                            node: 0,
+                            param: "x/y/z size mismatch".into(),
+                        },
+                    ));
                 }
                 let dst = make_texture(&self.device, packed.width, packed.height);
                 self.record_pass(
@@ -1794,18 +1822,22 @@ impl GraphGpuEvaluator {
                 Ok(())
             }
             GpuOp::Warp => {
-                let r =
-                    Self::named_input(in_map, node.id, "input").map_err(GraphGpuError::Eval)?;
-                let tex = tex_of(r)?;
+                let r = Self::named_input(in_map, node.id, "input").map_err(GraphGpuError::Eval)?;
+                let tex =
+                    mat_tex(&self.device, &self.queue, r, node.id).map_err(GraphGpuError::Eval)?;
                 let map_view = match in_map.iter().find(|(n, _)| n == "vector") {
                     None => None,
                     Some((_, mv)) => {
-                        let mt = tex_of(mv)?;
+                        let mt = mat_tex(&self.device, &self.queue, mv, node.id)
+                            .map_err(GraphGpuError::Eval)?;
                         if mt.width != tex.width || mt.height != tex.height {
-                            return Err(stamp(EvalError::BadParam {
-                                node: 0,
-                                param: "vector/input size mismatch".into(),
-                            }));
+                            return Err(stamped(
+                                node.id,
+                                EvalError::BadParam {
+                                    node: 0,
+                                    param: "vector/input size mismatch".into(),
+                                },
+                            ));
                         }
                         Some(mt)
                     }
@@ -1817,11 +1849,7 @@ impl GraphGpuEvaluator {
                     ENTRY_WARP,
                     &packed.params,
                     None,
-                    [
-                        &src_view_of(&tex),
-                        map_ref.map_or(&fb, |m| &m.view),
-                        &fb,
-                    ],
+                    [&src_view_of(&tex), map_ref.map_or(&fb, |m| &m.view), &fb],
                     &dst,
                 );
                 gpu_tex.insert(node.id, dst);
@@ -1829,9 +1857,9 @@ impl GraphGpuEvaluator {
             }
             GpuOp::Blur => {
                 let r = Self::single_input(in_map, node.id).map_err(GraphGpuError::Eval)?;
-                let tex = tex_of(r)?;
-                let blur_params =
-                    GraphParams::of([packed.params.a[0], 0.0, 0.0, 0.0], [0.0; 4]);
+                let tex =
+                    mat_tex(&self.device, &self.queue, r, node.id).map_err(GraphGpuError::Eval)?;
+                let blur_params = GraphParams::of([packed.params.a[0], 0.0, 0.0, 0.0], [0.0; 4]);
                 let tmp = make_texture(&self.device, packed.width, packed.height);
                 let dst = make_texture(&self.device, packed.width, packed.height);
                 self.record_pass(
@@ -1855,13 +1883,12 @@ impl GraphGpuEvaluator {
             }
             GpuOp::Sharpen => {
                 let r = Self::single_input(in_map, node.id).map_err(GraphGpuError::Eval)?;
-                let tex = tex_of(r)?;
+                let tex =
+                    mat_tex(&self.device, &self.queue, r, node.id).map_err(GraphGpuError::Eval)?;
                 // `packed.params.a = [amount, radius, _, _]`; the blur
                 // stages take a radius-only uniform.
-                let blur_params =
-                    GraphParams::of([packed.params.a[1], 0.0, 0.0, 0.0], [0.0; 4]);
-                let sharp_params =
-                    GraphParams::of([packed.params.a[0], 0.0, 0.0, 0.0], [0.0; 4]);
+                let blur_params = GraphParams::of([packed.params.a[1], 0.0, 0.0, 0.0], [0.0; 4]);
+                let sharp_params = GraphParams::of([packed.params.a[0], 0.0, 0.0, 0.0], [0.0; 4]);
                 let tmp = make_texture(&self.device, packed.width, packed.height);
                 let blurred = make_texture(&self.device, packed.width, packed.height);
                 let dst = make_texture(&self.device, packed.width, packed.height);
@@ -1893,5 +1920,470 @@ impl GraphGpuEvaluator {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_shaders::GRAPH_ENTRY_POINTS;
+    use umber_graph::nodes::{
+        register_filter_color_nodes, register_generator_nodes, register_mask_spatial_nodes,
+    };
+    use umber_graph::{Edge, Node};
+
+    fn full_registry() -> NodeRegistry {
+        let mut registry = NodeRegistry::seeded();
+        register_generator_nodes(&mut registry);
+        register_filter_color_nodes(&mut registry);
+        register_mask_spatial_nodes(&mut registry);
+        registry
+    }
+
+    fn node(id: u64, def: &str, params: Vec<(String, ParamValue)>) -> Node {
+        Node {
+            id,
+            node_def: def.into(),
+            params,
+            canvas: None,
+        }
+    }
+
+    fn edge(from: u64, to: u64, input: &str) -> Edge {
+        Edge {
+            from,
+            to,
+            input: input.into(),
+        }
+    }
+
+    /// (b) The hybrid routing table covers every registered node type: no
+    /// built-in def falls through to the plugin catch-all (which would
+    /// silently CPU-eval a node the table claims is GPU-routed, or vice
+    /// versa — either way the table lies).
+    #[test]
+    fn routing_covers_every_registered_node_def() {
+        let registry = full_registry();
+        let defs = registry.node_defs();
+        assert_eq!(defs.len(), 24, "unexpected registry size: {defs:?}");
+        for def in defs {
+            let route = GpuRoute::route(def, &[]);
+            assert!(
+                !matches!(route, GpuRoute::Cpu(CpuPath::PluginGuest)),
+                "{def:?} must have an explicit table row, not the plugin catch-all"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_sends_unknown_defs_to_the_plugin_path() {
+        // WASM guests and typos evaluate through the registry on the CPU
+        // (honest fallback, never a dispatch of a missing entry point).
+        assert_eq!(
+            GpuRoute::route("blur5", &[]),
+            GpuRoute::Cpu(CpuPath::PluginGuest)
+        );
+        assert_eq!(
+            GpuRoute::route("nope_missing", &[]),
+            GpuRoute::Cpu(CpuPath::PluginGuest)
+        );
+    }
+
+    #[test]
+    fn routing_splits_the_param_dependent_arms() {
+        // `uniform` with a color param fills on the GPU; without one it is
+        // a scalar constant (no raster exists to dispatch).
+        assert_eq!(
+            GpuRoute::route(
+                "uniform",
+                &[("color".into(), ParamValue::Color([1.0, 0.0, 0.0]))]
+            ),
+            GpuRoute::Gpu(GpuOp::FillUniform)
+        );
+        assert_eq!(
+            GpuRoute::route("uniform", &[("value".into(), ParamValue::Float(1.0))]),
+            GpuRoute::Cpu(CpuPath::ScalarConst)
+        );
+        // The blur tap budget: small radii stay GPU, hostile ones ride the
+        // CPU kernel (routing, not validation — same bytes either way).
+        let radius = |r: i32| vec![("radius".into(), ParamValue::Int(r))];
+        assert_eq!(
+            GpuRoute::route("blur", &radius(1)),
+            GpuRoute::Gpu(GpuOp::Blur)
+        );
+        assert_eq!(
+            GpuRoute::route("blur", &radius(MAX_GPU_BLUR_RADIUS)),
+            GpuRoute::Gpu(GpuOp::Blur)
+        );
+        assert_eq!(
+            GpuRoute::route("blur", &radius(MAX_GPU_BLUR_RADIUS + 1)),
+            GpuRoute::Cpu(CpuPath::LargeKernel)
+        );
+        assert_eq!(
+            GpuRoute::route("sharpen", &radius(10_000)),
+            GpuRoute::Cpu(CpuPath::LargeKernel)
+        );
+        // A mistyped radius routes GPU and fails honestly at pack time
+        // (mirroring the CPU node's BadParam — never silent).
+        assert_eq!(
+            GpuRoute::route("blur", &[("radius".into(), ParamValue::Float(1.0))]),
+            GpuRoute::Gpu(GpuOp::Blur)
+        );
+        // The documented CPU rows.
+        assert_eq!(
+            GpuRoute::route("image_asset", &[]),
+            GpuRoute::Cpu(CpuPath::AssetLoad)
+        );
+        assert_eq!(
+            GpuRoute::route("flood_fill", &[]),
+            GpuRoute::Cpu(CpuPath::GlobalPass)
+        );
+        assert_eq!(
+            GpuRoute::route("histogram_match", &[]),
+            GpuRoute::Cpu(CpuPath::GlobalPass)
+        );
+        assert_eq!(
+            GpuRoute::route("mesh_map_generator", &[]),
+            GpuRoute::Cpu(CpuPath::External)
+        );
+        assert_eq!(GpuRoute::route("passthrough", &[]), GpuRoute::Alias);
+    }
+
+    /// (d) The pipeline cache compiles each entry once and reuses it:
+    /// the factory call count is the contract (the device-backed half of
+    /// this lives in the `gpu` golden below, which asserts the compiled
+    /// count across two evaluates).
+    #[test]
+    fn pipeline_cache_compiles_once_per_entry_and_reuses() {
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let mut cache: PipelineCache<String> = PipelineCache::new();
+        assert!(cache.is_empty());
+        let first = cache.get_or_insert_with("op_invert", || {
+            calls.set(calls.get() + 1);
+            "pipe-a".to_string()
+        });
+        assert_eq!(first, "pipe-a");
+        let second = cache.get_or_insert_with("op_invert", || {
+            calls.set(calls.get() + 1);
+            "pipe-b".to_string()
+        });
+        assert_eq!(second, "pipe-a", "second fetch must reuse, not rebuild");
+        assert_eq!(calls.get(), 1, "factory runs exactly once per entry");
+        cache.get_or_insert_with("fill_uniform", || {
+            calls.set(calls.get() + 1);
+            "pipe-c".to_string()
+        });
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains("op_invert"));
+        assert!(!cache.contains("op_mix"));
+        assert_eq!(cache.get("op_mix"), None);
+    }
+
+    /// Every shader entry point is reachable from exactly one op, and
+    /// every op maps into the shader table (the cache key contract: a
+    /// `pipeline_for` miss on a misspelled entry would compile-fail on
+    /// device, so pin both directions statically).
+    #[test]
+    fn gpu_ops_cover_the_shader_entry_table_both_ways() {
+        let ops = [
+            GpuOp::FillUniform,
+            GpuOp::NoisePerlin,
+            GpuOp::NoiseValue,
+            GpuOp::NoiseWorley,
+            GpuOp::Gradient,
+            GpuOp::Checkerboard,
+            GpuOp::Dots,
+            GpuOp::Brick,
+            GpuOp::Invert,
+            GpuOp::Levels,
+            GpuOp::Curves,
+            GpuOp::Mix,
+            GpuOp::ColorCorrect,
+            GpuOp::HsvAdjust,
+            GpuOp::Triplanar,
+            GpuOp::EdgeDetect,
+            GpuOp::Warp,
+            GpuOp::Blur,
+            GpuOp::Sharpen,
+        ];
+        let mut from_ops: Vec<&str> = ops
+            .iter()
+            .flat_map(|op| op.entry_points())
+            .copied()
+            .collect();
+        from_ops.sort_unstable();
+        let mut table: Vec<&str> = GRAPH_ENTRY_POINTS.to_vec();
+        table.sort_unstable();
+        assert_eq!(from_ops, table, "ops <-> shader entries must agree exactly");
+        assert_eq!(GpuOp::Blur.entry_points(), &[ENTRY_BLUR_H, ENTRY_BLUR_V]);
+        assert_eq!(
+            GpuOp::Sharpen.entry_points(),
+            &[ENTRY_BLUR_H, ENTRY_BLUR_V, ENTRY_SHARPEN]
+        );
+    }
+
+    /// (c) The dirty-set → dispatch-set mapping: dirty seeds, downstream
+    /// propagates, the tile list crosses, topo order holds per tile.
+    #[test]
+    fn plan_maps_dirty_through_downstream_across_tiles() {
+        // Chain 1 -> 2 -> 3 (all GPU-routed: uniform fill -> invert x2).
+        let red = vec![("color".into(), ParamValue::Color([1.0, 0.0, 0.0]))];
+        let mut g = Graph::new();
+        g.add_node(node(1, "uniform", red));
+        g.add_node(node(2, "invert", vec![]));
+        g.add_node(node(3, "invert", vec![]));
+        g.add_edge(edge(1, 2, "in"));
+        g.add_edge(edge(2, 3, "in"));
+        let tiles = [TileSpec::new(1001, 8, 8), TileSpec::new(1002, 8, 8)];
+
+        // Only the tail dirty, everything cached: just the tail per tile.
+        let cached: HashSet<u64> = [1, 2, 3].into_iter().collect();
+        let plan =
+            plan_dispatches(&g, &[3].into_iter().collect(), &cached, &tiles).expect("chain plans");
+        assert_eq!(
+            plan,
+            vec![
+                PlannedDispatch {
+                    node: 3,
+                    tile: 1001,
+                    route: GpuRoute::Gpu(GpuOp::Invert),
+                },
+                PlannedDispatch {
+                    node: 3,
+                    tile: 1002,
+                    route: GpuRoute::Gpu(GpuOp::Invert),
+                },
+            ]
+        );
+
+        // The head dirty: the whole downstream re-runs, topo order per tile.
+        let plan =
+            plan_dispatches(&g, &[1].into_iter().collect(), &cached, &tiles).expect("chain plans");
+        let nodes_1001: Vec<u64> = plan
+            .iter()
+            .filter(|d| d.tile == 1001)
+            .map(|d| d.node)
+            .collect();
+        let nodes_1002: Vec<u64> = plan
+            .iter()
+            .filter(|d| d.tile == 1002)
+            .map(|d| d.node)
+            .collect();
+        assert_eq!(nodes_1001, vec![1, 2, 3]);
+        assert_eq!(nodes_1002, vec![1, 2, 3]);
+        assert_eq!(plan.len(), 6);
+        assert_eq!(plan[0].route, GpuRoute::Gpu(GpuOp::FillUniform));
+    }
+
+    #[test]
+    fn plan_treats_cache_misses_as_dirty_and_skips_clean() {
+        // Diamond 1 -> {2, 3} -> 4: dirty {2} with a warm cache runs 2
+        // and downstream 4 only (1 and 3 stay cached).
+        let mut g = Graph::new();
+        g.add_node(node(
+            1,
+            "uniform",
+            vec![("color".into(), ParamValue::Color([0.0, 1.0, 0.0]))],
+        ));
+        g.add_node(node(2, "invert", vec![]));
+        g.add_node(node(3, "invert", vec![]));
+        g.add_node(node(4, "invert", vec![]));
+        g.add_edge(edge(1, 2, "in"));
+        g.add_edge(edge(1, 3, "in"));
+        g.add_edge(edge(2, 4, "in"));
+        g.add_edge(edge(3, 4, "in"));
+        let tiles = [TileSpec::tile_1001(8, 8)];
+
+        let cached: HashSet<u64> = [1, 2, 3, 4].into_iter().collect();
+        let plan = plan_dispatches(&g, &[2].into_iter().collect(), &cached, &tiles)
+            .expect("diamond plans");
+        let nodes: Vec<u64> = plan.iter().map(|d| d.node).collect();
+        assert_eq!(nodes, vec![2, 4], "only 2 and downstream 4 re-run");
+
+        // Cold cache with an empty dirty set still runs everything (a
+        // miss is dirty) — partial caches can never serve stale data.
+        let plan = plan_dispatches(&g, &HashSet::new(), &HashSet::new(), &tiles)
+            .expect("cold cache plans");
+        let nodes: Vec<u64> = plan.iter().map(|d| d.node).collect();
+        assert_eq!(nodes, vec![1, 2, 3, 4]);
+
+        // A clean node with a miss downstream-adjacent: dirty {4} runs
+        // only 4 (nothing is downstream of it).
+        let plan =
+            plan_dispatches(&g, &[4].into_iter().collect(), &cached, &tiles).expect("tail plans");
+        let nodes: Vec<u64> = plan.iter().map(|d| d.node).collect();
+        assert_eq!(nodes, vec![4]);
+    }
+
+    #[test]
+    fn pack_rejects_the_same_bad_params_as_the_cpu_nodes() {
+        let tile = TileSpec::tile_1001(8, 8);
+        let bad = |op: GpuOp, params: &[(String, ParamValue)], input: Option<(u32, u32)>| {
+            pack_node(op, params, input, &tile).expect_err("must fail")
+        };
+        // levels: degenerate range + negative gamma.
+        bad(
+            GpuOp::Levels,
+            &[
+                ("in_low".into(), ParamValue::Float(0.5)),
+                ("in_high".into(), ParamValue::Float(0.5)),
+            ],
+            Some((4, 4)),
+        );
+        bad(
+            GpuOp::Levels,
+            &[("gamma".into(), ParamValue::Float(-1.0))],
+            Some((4, 4)),
+        );
+        // mix: out-of-range factor.
+        bad(
+            GpuOp::Mix,
+            &[("factor".into(), ParamValue::Float(1.5))],
+            Some((4, 4)),
+        );
+        // curves: non-monotonic x + missing point.
+        bad(
+            GpuOp::Curves,
+            &[
+                ("curve_p0".into(), ParamValue::Vec2([0.0, 0.0])),
+                ("curve_p1".into(), ParamValue::Vec2([0.5, 0.5])),
+                ("curve_p2".into(), ParamValue::Vec2([0.5, 0.8])),
+                ("curve_p3".into(), ParamValue::Vec2([1.0, 1.0])),
+            ],
+            Some((4, 4)),
+        );
+        bad(GpuOp::Curves, &[], Some((4, 4)));
+        // triplanar: zero-sum weights.
+        bad(
+            GpuOp::Triplanar,
+            &[("weights".into(), ParamValue::Vec3([0.0, 0.0, 0.0]))],
+            Some((4, 4)),
+        );
+        // fill: mistyped color + hostile resolution.
+        bad(GpuOp::FillUniform, &[], None);
+        bad(
+            GpuOp::FillUniform,
+            &[
+                ("color".into(), ParamValue::Color([1.0, 0.0, 0.0])),
+                ("resolution".into(), ParamValue::Vec2([0.0, 4.0])),
+            ],
+            None,
+        );
+        // filters with no resolved input.
+        bad(GpuOp::Invert, &[], None);
+        // blur clamps negative radii to a copy (the documented CPU rule),
+        // it does not error.
+        let packed = pack_node(
+            GpuOp::Blur,
+            &[("radius".into(), ParamValue::Int(-3))],
+            Some((4, 4)),
+            &tile,
+        )
+        .expect("negative radius clamps");
+        assert_eq!(packed.params.a[0], 0.0);
+        assert_eq!((packed.width, packed.height), (4, 4));
+    }
+
+    /// The device-backed golden: uniform-red fill followed by invert must
+    /// read back byte-exact (both ops are quantization-clean: 0/1/255
+    /// round-trip through normalized f32 exactly), and a second evaluate
+    /// must reuse the compiled pipelines, not rebuild them.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_fill_then_invert_reads_back_exact_and_reuses_pipelines() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut evaluator = GraphGpuEvaluator::new(device.clone(), queue.clone());
+        assert!(evaluator.pipelines_compiled() == 0);
+
+        let mut g = Graph::new();
+        g.add_node(node(
+            1,
+            "uniform",
+            vec![("color".into(), ParamValue::Color([1.0, 0.0, 0.0]))],
+        ));
+        g.add_node(node(2, "invert", vec![]));
+        g.add_edge(edge(1, 2, "in"));
+        let mut registry = NodeRegistry::seeded();
+        register_filter_color_nodes(&mut registry);
+        let tile = TileSpec::new(1001, 4, 4);
+        let ctx = EvalContext::new(4, 4);
+        let mut cache = EvalCache::new();
+        let dirty: HashSet<u64> = [1, 2].into_iter().collect();
+
+        let out = evaluator
+            .evaluate(
+                &g,
+                &registry,
+                HashMap::new(),
+                &ctx,
+                &mut cache,
+                &dirty,
+                &tile,
+            )
+            .expect("gpu eval works");
+        // Red fills, then inverts to cyan.
+        match &out[&1] {
+            NodeOutput::Image(buf) => {
+                assert_eq!((buf.width, buf.height), (4, 4));
+                assert!(buf.data.chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
+            }
+            other => panic!("expected an Image, got {other:?}"),
+        }
+        match &out[&2] {
+            NodeOutput::Image(buf) => {
+                assert_eq!((buf.width, buf.height), (4, 4));
+                assert!(
+                    buf.data.chunks_exact(4).all(|px| px == [0, 255, 255, 255]),
+                    "inverted red must be cyan, got {:?}",
+                    buf.pixel(0, 0)
+                );
+            }
+            other => panic!("expected an Image, got {other:?}"),
+        }
+        assert!(
+            cache.get(2).is_some(),
+            "gpu outputs write back into the shared cache"
+        );
+        assert_eq!(
+            evaluator.pipelines_compiled(),
+            2,
+            "fill + invert compile once"
+        );
+
+        // Second eval, tail-only dirty (the head serves from cache): same
+        // bytes, no new pipelines.
+        let out2 = evaluator
+            .evaluate(
+                &g,
+                &registry,
+                HashMap::new(),
+                &ctx,
+                &mut cache,
+                &[2].into_iter().collect(),
+                &tile,
+            )
+            .expect("second gpu eval works");
+        assert_eq!(out2, out, "cached-head re-eval must agree byte-exact");
+        assert_eq!(
+            evaluator.pipelines_compiled(),
+            2,
+            "pipelines reuse across evals"
+        );
+    }
+
+    #[cfg(feature = "gpu")]
+    fn try_request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no wgpu adapter available");
+            return None;
+        };
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
     }
 }

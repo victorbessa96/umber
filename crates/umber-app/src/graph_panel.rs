@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use fluent::FluentValue;
+use umber_gpu::{EvalBackend, GraphGpuEvaluator, TileSpec};
 use umber_graph::{
     eval_graph_cached, EvalCache, EvalContext, Graph, Node, NodeOutput, NodeRegistry, ParamValue,
 };
@@ -126,6 +127,14 @@ pub struct GraphPanel {
     texture_key: Option<(u32, u32, u64)>,
     /// Canvas or list.
     view: GraphView,
+    /// Which backend [`Self::evaluate`] runs: CPU always, GPU when an
+    /// evaluator is attached (Auto, the default), or GPU-required. The
+    /// CPU path is unchanged and stays the reference for tests.
+    eval_backend: EvalBackend,
+    /// The device-bound GPU evaluator, attached by the app once eframe's
+    /// device is available (the panel itself never owns wgpu objects —
+    /// the architecture rule).
+    gpu_evaluator: Option<GraphGpuEvaluator>,
     /// The canvas's session state (view, drag, edge selection, menu).
     pub(crate) canvas: CanvasState,
     /// `.mtlx` declarations for the loaded plugin nodes (sorted by name).
@@ -164,6 +173,8 @@ impl GraphPanel {
             texture: None,
             texture_key: None,
             view: GraphView::Canvas,
+            eval_backend: EvalBackend::default(),
+            gpu_evaluator: None,
             canvas: CanvasState::default(),
             plugin_decls: Vec::new(),
             plugin_status: None,
@@ -230,6 +241,36 @@ impl GraphPanel {
     /// The shared raster resolution evaluations render at.
     pub fn resolution(&self) -> (u32, u32) {
         self.resolution
+    }
+
+    /// Which backend [`Self::evaluate`] runs (default [`EvalBackend::Auto`]:
+    /// GPU when an evaluator is attached, else CPU).
+    pub fn eval_backend(&self) -> EvalBackend {
+        self.eval_backend
+    }
+
+    /// Selects the evaluation backend (the §5 GPU row's switch: `Cpu`
+    /// keeps the reference path, `Gpu` requires an attached evaluator,
+    /// `Auto` uses one when present).
+    pub fn set_eval_backend(&mut self, backend: EvalBackend) {
+        self.eval_backend = backend;
+    }
+
+    /// Attaches a device-bound GPU evaluator (built by the app from
+    /// eframe's device/queue). `Auto` evaluations use it from then on;
+    /// detaching returns to CPU.
+    pub fn attach_gpu_evaluator(&mut self, evaluator: GraphGpuEvaluator) {
+        self.gpu_evaluator = Some(evaluator);
+    }
+
+    /// Detaches the GPU evaluator, if any (evaluations run on the CPU).
+    pub fn detach_gpu_evaluator(&mut self) {
+        self.gpu_evaluator = None;
+    }
+
+    /// Whether a GPU evaluator is currently attached.
+    pub fn has_gpu_evaluator(&self) -> bool {
+        self.gpu_evaluator.is_some()
     }
 
     /// Retargets the raster resolution (marks everything dirty — every
@@ -447,7 +488,29 @@ impl GraphPanel {
     /// Re-runs dirty nodes (+ downstream) through the cache and refreshes
     /// the output display. Errors land on the status line; the previous
     /// output (if any) is kept. Never panics.
+    ///
+    /// The backend follows [`Self::eval_backend`]: `Cpu` (and `Auto`
+    /// without an attached evaluator) runs the CPU cached-eval
+    /// ([`Self::evaluate_cpu`], unchanged); `Gpu` (and `Auto` with an
+    /// evaluator attached) runs the GPU tile evaluator
+    /// ([`Self::evaluate_gpu`]). `Gpu` with no evaluator attached is an
+    /// honest status-line error, never a silent CPU run.
     pub fn evaluate(&mut self) {
+        let use_gpu = match self.eval_backend {
+            EvalBackend::Cpu => false,
+            EvalBackend::Gpu => true,
+            EvalBackend::Auto => self.gpu_evaluator.is_some(),
+        };
+        if use_gpu {
+            self.evaluate_gpu();
+        } else {
+            self.evaluate_cpu();
+        }
+    }
+
+    /// The CPU cached-eval path (the reference implementation — behavior
+    /// identical to the pre-GPU `evaluate`).
+    fn evaluate_cpu(&mut self) {
         if self.graph.nodes.is_empty() {
             self.status = tr("graph.empty");
             self.status_is_error = false;
@@ -472,6 +535,68 @@ impl GraphPanel {
             &mut self.cache,
             &self.dirty,
         ) {
+            Ok(outputs) => {
+                self.dirty.clear();
+                self.last_output = outputs.get(&output_id).cloned();
+                let args = [
+                    ("count", FluentValue::from(outputs.len())),
+                    ("width", FluentValue::from(self.resolution.0.to_string())),
+                    ("height", FluentValue::from(self.resolution.1.to_string())),
+                ];
+                self.status = tr_args("graph.evaluated", args);
+                self.status_is_error = false;
+            }
+            Err(err) => {
+                let args = [("error", FluentValue::from(err.to_string()))];
+                self.status = tr_args("graph.eval-failed", args);
+                self.status_is_error = true;
+            }
+        }
+    }
+
+    /// The GPU tile-eval path: the dirty subgraph runs as WGSL compute
+    /// dispatches for the panel-resolution tile, through the attached
+    /// evaluator. Same status-line contract as [`Self::evaluate_cpu`]
+    /// (success clears dirty and refreshes the display; failures keep the
+    /// previous output); the cache ends identical to a CPU eval, so the
+    /// backends are interchangeable frame to frame.
+    fn evaluate_gpu(&mut self) {
+        if self.graph.nodes.is_empty() {
+            self.status = tr("graph.empty");
+            self.status_is_error = false;
+            self.last_output = None;
+            return;
+        }
+        let Some(output_id) = self.output_node else {
+            self.status = tr("graph.no-output-node");
+            self.status_is_error = false;
+            self.last_output = None;
+            return;
+        };
+        // Taken (not borrowed): the evaluator runs against the panel's
+        // other fields and is restored before the status update.
+        let Some(mut evaluator) = self.gpu_evaluator.take() else {
+            let args = [("error", FluentValue::from("GPU evaluator not attached"))];
+            self.status = tr_args("graph.eval-failed", args);
+            self.status_is_error = true;
+            return;
+        };
+        let tile = TileSpec::tile_1001(self.resolution.0.max(1), self.resolution.1.max(1));
+        let ctx = EvalContext {
+            resolution: self.resolution,
+            external: mesh_map_externals(self.resolution),
+        };
+        let result = evaluator.evaluate(
+            &self.graph,
+            &self.registry,
+            HashMap::new(),
+            &ctx,
+            &mut self.cache,
+            &self.dirty,
+            &tile,
+        );
+        self.gpu_evaluator = Some(evaluator);
+        match result {
             Ok(outputs) => {
                 self.dirty.clear();
                 self.last_output = outputs.get(&output_id).cloned();
@@ -1367,5 +1492,84 @@ mod tests {
         assert!(loaded.load_mtlx(&doc), "status: {}", loaded.status());
         assert_eq!(loaded.status(), "Graph loaded — press Evaluate.");
         assert_eq!(loaded.to_mtlx(), doc, "save/load/save is byte-stable");
+    }
+
+    #[test]
+    fn eval_backend_defaults_to_auto_without_an_evaluator() {
+        // The pre-GPU behavior is preserved: a fresh panel selects
+        // Auto, attaches nothing, and `evaluate` runs the CPU path (the
+        // existing CPU tests above prove what that computes — here the
+        // routing itself is pinned).
+        let panel = GraphPanel::new();
+        assert_eq!(panel.eval_backend(), EvalBackend::Auto);
+        assert!(!panel.has_gpu_evaluator());
+    }
+
+    #[test]
+    fn eval_backend_flag_round_trips_and_detaches() {
+        let mut panel = GraphPanel::new();
+        panel.set_eval_backend(EvalBackend::Cpu);
+        assert_eq!(panel.eval_backend(), EvalBackend::Cpu);
+        panel.set_eval_backend(EvalBackend::Gpu);
+        assert_eq!(panel.eval_backend(), EvalBackend::Gpu);
+        // Detaching an already-absent evaluator is a harmless no-op.
+        panel.detach_gpu_evaluator();
+        assert!(!panel.has_gpu_evaluator());
+    }
+
+    #[test]
+    fn gpu_backend_without_an_evaluator_is_an_honest_error_not_a_panic() {
+        // `Gpu` with nothing attached must NOT silently run the CPU path
+        // (a caller asking for GPU must know what it got): the status
+        // reports the failure and any previous output is kept.
+        let mut panel = GraphPanel::new();
+        panel.set_resolution((8, 8));
+        let (_head, _tail) = noise_chain(&mut panel);
+        panel.set_eval_backend(EvalBackend::Cpu);
+        panel.evaluate();
+        assert!(
+            !panel.status().starts_with("Eval failed"),
+            "cpu baseline must succeed, got {:?}",
+            panel.status()
+        );
+        let kept = panel.last_output().cloned().expect("cpu evaluated");
+
+        panel.set_eval_backend(EvalBackend::Gpu);
+        panel.evaluate();
+        assert!(
+            panel.status().starts_with("Eval failed"),
+            "gpu-without-evaluator must fail loudly, got {:?}",
+            panel.status()
+        );
+        assert_eq!(
+            panel.last_output(),
+            Some(&kept),
+            "previous output survives the failed gpu eval"
+        );
+        assert!(
+            !panel.dirty_set().is_empty(),
+            "failed eval must not clear the dirty set"
+        );
+    }
+
+    #[test]
+    fn auto_without_an_evaluator_matches_the_cpu_reference() {
+        // Auto with nothing attached IS the CPU path (byte-identical to
+        // an explicit Cpu selection on the same graph).
+        let mut auto_panel = GraphPanel::new();
+        auto_panel.set_resolution((8, 8));
+        let (_head, tail) = noise_chain(&mut auto_panel);
+        auto_panel.evaluate();
+        let auto_out = auto_panel.last_output().cloned().expect("evaluated");
+
+        let mut cpu_panel = GraphPanel::new();
+        cpu_panel.set_resolution((8, 8));
+        let (_head2, tail2) = noise_chain(&mut cpu_panel);
+        cpu_panel.set_eval_backend(EvalBackend::Cpu);
+        cpu_panel.evaluate();
+        let cpu_out = cpu_panel.last_output().cloned().expect("evaluated");
+
+        assert_eq!(tail, tail2);
+        assert_eq!(auto_out, cpu_out, "auto-without-gpu == explicit cpu");
     }
 }
