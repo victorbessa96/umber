@@ -242,7 +242,11 @@ impl<'a> TokenSources<'a> {
     /// driver passes [`tiled_template`]'s form of `output.filename`).
     /// `pub(crate)`: the [`crate::usd`] side resolves tile-aware texture
     /// references through the same expansion.
-    pub(crate) fn expand_output_from(&self, output: &crate::presets::OutputSpec, template: &str) -> String {
+    pub(crate) fn expand_output_from(
+        &self,
+        output: &crate::presets::OutputSpec,
+        template: &str,
+    ) -> String {
         let src_map = src_map_token(output);
         let color_space = output_color_space(output);
         crate::expand_template(

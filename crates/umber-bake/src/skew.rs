@@ -136,10 +136,8 @@ pub fn affected_maps_for_param(param: BakeParam) -> Vec<BakeMap> {
 /// rather than NaN.
 pub fn skew_deviation_deg(normal: [f32; 3], bent_dir: [f32; 3]) -> f32 {
     let n_len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-    let b_len = (bent_dir[0] * bent_dir[0]
-        + bent_dir[1] * bent_dir[1]
-        + bent_dir[2] * bent_dir[2])
-        .sqrt();
+    let b_len =
+        (bent_dir[0] * bent_dir[0] + bent_dir[1] * bent_dir[1] + bent_dir[2] * bent_dir[2]).sqrt();
     if n_len <= f32::EPSILON || b_len <= f32::EPSILON {
         return 0.0;
     }
@@ -326,8 +324,14 @@ mod tests {
         let tilt = 30.0f32.to_radians();
         let bent = [tilt.sin(), 0.0, tilt.cos()];
         let dev = skew_deviation_deg([0.0, 0.0, 1.0], bent);
-        assert!((dev - 30.0).abs() < 1e-3, "a 30° tilt must read ~30° of skew, got {dev}");
-        assert!(dev > DEFAULT_SKEW_THRESHOLD_DEG, "the fixture must exceed the default threshold");
+        assert!(
+            (dev - 30.0).abs() < 1e-3,
+            "a 30° tilt must read ~30° of skew, got {dev}"
+        );
+        assert!(
+            dev > DEFAULT_SKEW_THRESHOLD_DEG,
+            "the fixture must exceed the default threshold"
+        );
         assert!(skew_byte(dev) > skew_threshold_byte(DEFAULT_SKEW_THRESHOLD_DEG));
         // Aligned rays read ~0° (no skew on flat projections).
         assert!(skew_deviation_deg([0.0, 0.0, 1.0], [0.0, 0.0, 1.0]) < 1e-3);
@@ -350,7 +354,10 @@ mod tests {
         assert!(tilted > skew_threshold_byte(DEFAULT_SKEW_THRESHOLD_DEG));
         assert_eq!(&map[8..12], &[0, 0, 0, 0]);
         let at_threshold = skew_threshold_byte(DEFAULT_SKEW_THRESHOLD_DEG);
-        assert_eq!(&map[12..16], &[at_threshold, at_threshold, at_threshold, 255]);
+        assert_eq!(
+            &map[12..16],
+            &[at_threshold, at_threshold, at_threshold, 255]
+        );
     }
 
     #[test]
@@ -361,7 +368,8 @@ mod tests {
         let skew = vec![
             0, 0, 0, 255, // flat: keep
             200, 200, 200, 255, // past threshold: clamp
-            0, 0, 0, 0, // uncovered skew: skip (map texel is covered but the guard has no reading)
+            0, 0, 0,
+            0, // uncovered skew: skip (map texel is covered but the guard has no reading)
         ];
         let clamped = apply_edge_protection(&mut ao, &skew, threshold, EDGE_SAFE_NEUTRAL);
         assert_eq!(clamped, 1);
@@ -373,7 +381,10 @@ mod tests {
         let at = vec![threshold, threshold, threshold, 255];
         assert_eq!(apply_edge_protection(&mut single, &at, threshold, 255), 0);
         // Mismatched maps clamp nothing.
-        assert_eq!(apply_edge_protection(&mut single, &[1u8; 3], threshold, 255), 0);
+        assert_eq!(
+            apply_edge_protection(&mut single, &[1u8; 3], threshold, 255),
+            0
+        );
     }
 
     #[test]

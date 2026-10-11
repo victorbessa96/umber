@@ -893,14 +893,12 @@ fn export_mesh(
         // Overridden per tile by the tiled driver.
         udim: umber_export::SINGLE_TILE_UDIM,
     };
-    let mut written =
-        umber_export::run_preset_tiled(&preset, &pairs, &sources, out_dir)?;
+    let mut written = umber_export::run_preset_tiled(&preset, &pairs, &sources, out_dir)?;
     if preset.usda {
         // The `.usda` carries the whole mesh (per-tile splits stay a
         // bake-window concern); only its texture references are
         // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
-        let tile_names =
-            tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
+        let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
         let textures = umber_export::usd::usd_textures(&preset, |output| {
             umber_export::usd::usda_file_for_output(output, &sources, tile_names)
         });
@@ -911,10 +909,7 @@ fn export_mesh(
             indices: &mesh.indices,
         };
         written.push(umber_export::usd::write_usda(
-            out_dir,
-            &set_name,
-            &mesh_view,
-            &textures,
+            out_dir, &set_name, &mesh_view, &textures,
         )?);
     }
     Ok((written, tiles))

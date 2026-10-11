@@ -110,8 +110,7 @@ pub fn uv_at(mesh: &MeshData, hit: RayHit) -> Option<[f32; 2]> {
 /// the length anyway. `dir` need not be normalized (the
 /// [`ray_intersect`] contract).
 pub fn walk_surface_path(mesh: &MeshData, rays: &[([f32; 3], [f32; 3])]) -> Vec<[f32; 2]> {
-    rays
-        .iter()
+    rays.iter()
         .filter_map(|(origin, dir)| {
             let hit = ray_intersect(mesh, Vec3::from_array(*origin), Vec3::from_array(*dir))?;
             uv_at(mesh, hit)
@@ -166,7 +165,6 @@ mod tests {
 
     #[test]
     fn nearest_hit_wins_with_occluder() {
-
         let mut mesh = quad();
         // A second quad closer to the ray origin (z = 2).
         let base = mesh.positions.len() as u32;

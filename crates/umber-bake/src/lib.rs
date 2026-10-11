@@ -24,11 +24,10 @@ pub use dilation::{DilateError, DilateParams};
 pub use id::{IdBakeError, IdBakeParams, IdFlavor};
 pub use normal_map::{TangentNormalBakeError, TangentNormalParams};
 pub use skew::{
-    affected_maps_for_param, apply_edge_protection, combine_skew_with_paint,
-    skew_byte, skew_deg_from_byte, skew_deviation_deg, skew_map_from_deviations,
-    skew_threshold_byte, AutoRebake, BakeParam, AUTOREBAKE_DEBOUNCE,
-    DEFAULT_SKEW_THRESHOLD_DEG, EDGE_SAFE_NEUTRAL, MAX_SKEW_THRESHOLD_DEG,
-    MIN_SKEW_THRESHOLD_DEG,
+    affected_maps_for_param, apply_edge_protection, combine_skew_with_paint, skew_byte,
+    skew_deg_from_byte, skew_deviation_deg, skew_map_from_deviations, skew_threshold_byte,
+    AutoRebake, BakeParam, AUTOREBAKE_DEBOUNCE, DEFAULT_SKEW_THRESHOLD_DEG, EDGE_SAFE_NEUTRAL,
+    MAX_SKEW_THRESHOLD_DEG, MIN_SKEW_THRESHOLD_DEG,
 };
 pub use thickness::{ThicknessBakeError, ThicknessParams};
 pub use transfer::{bake_transfer_mesh, TransferError, TransferMap, TransferParams};
