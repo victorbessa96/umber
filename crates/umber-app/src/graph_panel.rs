@@ -88,18 +88,26 @@ fn default_params(node_def: &str) -> Vec<(String, ParamValue)> {
             ("layer_id".into(), ParamValue::Int(0)),
             ("channel".into(), ParamValue::Asset("baseColor".into())),
         ],
+        "synth" => vec![
+            ("example".into(), ParamValue::Asset(String::new())),
+            ("map_mode".into(), ParamValue::Int(0)),
+            ("tiling_mode".into(), ParamValue::Int(0)),
+            ("randomness".into(), ParamValue::Float(0.0)),
+            ("seed".into(), ParamValue::Int(1)),
+        ],
         _ => Vec::new(),
     }
 }
 
 /// Builds the panel's registry: the engine seed plus every merged node
-/// family (slices 2a/2b/2c).
+/// family (slices 2a/2b/2c), plus the post-v1 `synth` addition.
 fn full_registry() -> NodeRegistry {
     let mut registry = NodeRegistry::seeded();
     umber_graph::nodes::register_generator_nodes(&mut registry);
     umber_graph::nodes::register_filter_color_nodes(&mut registry);
     umber_graph::nodes::register_mask_spatial_nodes(&mut registry);
     umber_graph::anchor::register_anchor_nodes(&mut registry);
+    umber_graph::nodes::register_synth_nodes(&mut registry);
     registry
 }
 
@@ -867,6 +875,9 @@ impl GraphPanel {
                 self.set_output_node(id);
             }
         });
+        if def == "synth" {
+            ui.weak(tr("synth.help"));
+        }
 
         // Snapshot params so UI edits below can't borrow-conflict with
         // the write-back (E0502): each editor produces an optional
@@ -1445,10 +1456,11 @@ mod tests {
 
     #[test]
     fn registry_listing_covers_all_merged_families() {
-        // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c + 1 anchor = 25.
+        // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c + 1 anchor
+        // + 1 synth (post-v1) = 26.
         let panel = GraphPanel::new();
         let defs = panel.registry().node_defs();
-        assert_eq!(defs.len(), 25, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 26, "unexpected registry size: {defs:?}");
         for expected in [
             "uniform",
             "image_asset",
@@ -1475,6 +1487,7 @@ mod tests {
             "triplanar_blend",
             "mesh_map_generator",
             "anchor",
+            "synth",
         ] {
             assert!(
                 defs.contains(&expected),

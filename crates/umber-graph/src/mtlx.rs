@@ -64,6 +64,7 @@
 //! | `direction_warp` | `input: color3`, `vector: vector3` — UV offset by a vector input |
 //! | `mesh_map_generator` | `map_name: string` — binds a baked map by name |
 //! | `anchor` | `layer_id: integer`, `channel: string` — binds a layer channel in the set |
+//! | `synth` | `example: string`, `map_mode: integer`, `tiling_mode: integer`, `randomness: float`, `seed: integer`, `mask: color3` — example-based texture synthesis (§4 P1 row) |
 
 use crate::{Edge, Graph, Node, ParamValue};
 
@@ -128,6 +129,18 @@ pub fn painter_nodedefs() -> Vec<NodedefDecl> {
             inputs: vec![
                 ("layer_id".into(), "integer".into()),
                 ("channel".into(), "string".into()),
+            ],
+        },
+        NodedefDecl {
+            name: "synth".into(),
+            category: "synth".into(),
+            inputs: vec![
+                ("example".into(), "string".into()),
+                ("map_mode".into(), "integer".into()),
+                ("tiling_mode".into(), "integer".into()),
+                ("randomness".into(), "float".into()),
+                ("seed".into(), "integer".into()),
+                ("mask".into(), "color3".into()),
             ],
         },
     ]
@@ -214,6 +227,7 @@ pub const KNOWN_STANDARD_NODES: &[&str] = &[
     "image_asset",
     "levels",
     "invert",
+    "synth",
 ];
 
 /// Errors from `.mtlx` parsing.

@@ -20,6 +20,11 @@
 //! semantics identical to `umber_brush::ControlCurve` — umber-graph
 //! stays dependency-minimal (only `thiserror`), so the conversion to
 //! the real `ControlCurve` belongs at the app-bridge layer.
+//!
+//! Post-v1 addition: `synth` ([`synth`], requirements.md §4 P1 row,
+//! "Example-based texture synthesis") — a standalone family (its own
+//! [`register_synth_nodes`], not folded into [`register_generator_nodes`],
+//! whose doc commits to "seven node_defs").
 
 pub mod color;
 pub mod filter;
@@ -28,6 +33,7 @@ pub mod mask;
 pub mod noise;
 pub mod pattern;
 pub mod spatial;
+pub mod synth;
 
 pub use color::{register_color_nodes, ColorCorrectNode, HsvAdjustNode, MixNode};
 pub use filter::{
@@ -43,6 +49,7 @@ pub use pattern::{
 pub use spatial::{
     register_spatial_nodes, DirectionWarpNode, MeshMapGeneratorNode, TriplanarBlendNode,
 };
+pub use synth::{register_synth_nodes, SynthNode};
 
 /// Registers all seven slice-2a generator node_defs on `registry`.
 /// The [`crate::NodeRegistry::seeded`] set is untouched; callers add

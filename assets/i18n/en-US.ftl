@@ -187,6 +187,11 @@ canvas =
     .empty-hint = Right-click to add a node
     .add-node = Add node
 
+## Example-based texture synthesis node (§4 P1 row)
+
+synth =
+    .help = Multiresolution stochastic synthesis from an example image. map_mode: 0 = Random Walk (fills the whole canvas), 1 = Inpaint (needs a wired `mask` input; unmasked pixels pass through byte-identical). tiling_mode: 0 = clamped sampling, 1 = Tiled (wrap-sampled, seamless at the edges). randomness widens the candidate pool away from the single best match; seed makes the result reproducible.
+
 ## Display panel
 
 display =

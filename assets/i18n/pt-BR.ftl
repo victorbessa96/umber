@@ -200,6 +200,11 @@ canvas =
     .empty-hint = Clique com o botão direito para adicionar um nó
     .add-node = Adicionar nó
 
+## Nó de síntese de textura por exemplo (linha P1 do §4)
+
+synth =
+    .help = Síntese estocástica multirresolução a partir de uma imagem de exemplo. map_mode: 0 = Random Walk (preenche toda a tela), 1 = Inpaint (precisa de uma entrada `mask` conectada; os pixels não mascarados passam idênticos, byte a byte). tiling_mode: 0 = amostragem com recorte nas bordas, 1 = Tiled (amostragem com repetição, emenda perfeita nas bordas). randomness amplia o grupo de candidatos além do melhor único; seed torna o resultado reproduzível.
+
 ## Painel de exibição
 
 display =
