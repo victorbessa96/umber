@@ -66,7 +66,7 @@
 | Node set v1 (~40 core): noise family (perlin/value/worley), gradients, patterns, blur/sharpen, levels, curves, color ops, direction warp, flood fill from masks, edge detect, histogram ops | P0 | 4 |
 | Generator nodes driven by baked mesh maps (AO/curvature/position/WS-normal inputs plumbed automatically) | P0 | 4 |
 | Smart masks (effect-stack presets) | P1 | 4 | ✓ built (`4cbaf21`) — the edge-wear example ships |
-| Example-based texture synthesis (EmbarkStudios/texture-synthesis style) as first-class generator primitive | P1 | 4 |
+| Example-based texture synthesis (EmbarkStudios/texture-synthesis style) as first-class generator primitive | P1 | 4 | ✓ built (`b0dba14`) — the synth node: 3-level pyramid, neighborhood+coherence scoring, Tiled/RandomWalk/Inpaint, 11 judgment calls stated in-module, 7 tests |
 | Graph evaluated on GPU (WGSL compute passes per dirty tile) | P0 | 4 | ✓ built (`8590ae2`) — GraphGpuEvaluator, 20 entry points, total hybrid routing (the per-pixel families GPU; the globals/assets/guests CPU through the same registry) |
 | Community extension API for nodes (see plugins §10) | P1 | 6 |
 
