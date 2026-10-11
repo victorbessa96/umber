@@ -881,8 +881,9 @@ fn export_mesh(
         usda: full_preset.usda,
     };
     if preset.outputs.is_empty() {
+        let preset_name = ask.preset_name;
         return Err(anyhow::anyhow!(
-            "preset '{ask.preset_name}' has no outputs satisfiable from baked maps"
+            "preset '{preset_name}' has no outputs satisfiable from baked maps"
         ));
     }
 

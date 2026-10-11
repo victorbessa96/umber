@@ -306,7 +306,7 @@ pub fn bake_export_map_set_tile(
 /// V1 scope mirrors the Base Color bridge above: the painted skew mask is
 /// read back from the live paint session when present, else the emitted
 /// map bakes unguarded-by-paint (the threshold guard still applies).
-
+// --
 /// The paintable channel name the skew mask bakes under (the
 /// `TextureSetName_skew` convention, matching
 /// `umber_bake::BakeMap::Skew::file_stem_suffix`).

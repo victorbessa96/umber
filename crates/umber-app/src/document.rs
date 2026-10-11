@@ -305,7 +305,7 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                     name: layer.name.clone(),
                     kind,
                     visible: layer.visible,
-                    instance_of: instance_of,
+                    instance_of,
                 }
             })
             .collect();
