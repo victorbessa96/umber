@@ -4,7 +4,89 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
-## [Unreleased] — Wave 3 (2026-10-09)
+## [Unreleased]
+
+### Wave 4 — painting completeness (2026-10-09/10)
+
+The brush engine's professional floor: seam-aware stamping, presets,
+the full baker surface, IBL, overlays, and the perf instrumentation.
+
+- SeamGraph — UV-seam topology for seam-aware stamping (`fb984d1`)
+- Seam mirror math — UV reflection across seam edges (`aca7f8d`)
+- Seam-aware paint wiring — mirror dabs through push_event (`7106a79`)
+- Median-split BVH — high-to-low transfer acceleration (`057f9cf`)
+- Bake transfer support — cage lerp, distance clamps, match-by-name (`bb9ec90`)
+- High→low transfer GPU pass — height + world-normal from a high mesh (`2cb7b08`)
+- Brush preset data model — BrushPreset, ControlCurve, .umberbrush JSON (`f18a0ce`)
+- Preset library loader — search paths, user-wins precedence (`0d49d83`)
+- Brush properties panel — live editing, curve editor, save/save-as (`d58bdb4`)
+- Starter brush library — twelve .umberbrush presets (`57ce764`)
+- ID bake — FNV-hash region IDs from the position pass (`ab1dec5`)
+- Bent normals — shared-sample AO accumulator with confidence (`60324a4`)
+- Environment-map IBL — load-time convolve, mesh-pass integration (`8065908`)
+- Wireframe + ground grid overlays (`09eb4e9`)
+- Perf instrumentation — profiling spans, HUD, the stroke/undo soaks (`e4925a1`)
+
+### Wave 5 — the node graph + multi-tile (2026-10-10)
+
+The procedural center: the graph engine, MaterialX serialization,
+the ~40-node set, UDIM, USD import, async bakes, the display panel.
+
+- Painted-maps export bridge + full token sources (`b1aa05a`)
+- Node-graph eval engine — typed values, registry, cached dirty eval (`c7185e2`)
+- .mtlx serialization — declared custom nodedefs, byte-identical round-trip (`2a5c1be`)
+- Node set — noise, gradients, patterns, filters, color ops, mask ops, spatial (`ddc62eb`, `8ec500c`, `e16a356`)
+- Node-graph app bridge — Graph panel, export source, persistence (`abf04b6`)
+- Tangent-space transfer normal — per-texel UV-derivative TBN (`388f661`)
+- Specular IBL — cone-scaled prefilter + the Karis fit (`05a5f1c`)
+- UDIM complete — tile math, model, bake windows, paint routing, export, UI (`82c694c`..`10cdffa`)
+- USD .usda import — hand-parser loader, fan triangulation (`a17e1c8`)
+- Async bake jobs — the UI no longer freezes (`7bf6140`)
+- Display-transform panel — the viewer chain, persistence (`956ecdd`)
+
+### Wave 6 — the named list closed (2026-10-10)
+
+The graph canvas, CLI scripting, WASM plugins, installers, i18n,
+and the AI automation surface — all six items in one morning.
+
+- Graph canvas (noodle) editor — the visual graph surface (`ec0d9cc`)
+- CLI batch mode — the JSON recipe driver (`a6d297f`)
+- WASM plugin runtime — wasmtime bridge, guest SDK, three examples (`05f2e3c`)
+- Plugin registry integration — the app-side loader, menu, mtlx declarations (`263df1f`)
+- cargo-dist packaging — the release surface, measured 11 MB of 150 MB budget (`18e8c46`)
+- i18n — fluent catalogs, pt-BR first target, the top-surface migration (`e493c60`)
+- AI agent session — the JSONL automation surface (`7d2fcad`)
+
+### The frontier — post-wave-6 (2026-10-10)
+
+- 8K export — the audit, the presets, the end-to-end 8192² proof (`cd668a3`)
+- PSD export — layered, the ag-psd round trip (`40909ea`)
+- MaterialX document export — the OpenPBR texture-set document (`14d98fa`)
+- .usdc + .usdz import — openusd 0.7.0, both arms, seven CI rounds to green (`19ccc42`..`f007ed1`)
+- GPU display LUT — the chain lands on the pixels (`146d7a0`)
+- Long-tail i18n — every panel string to the catalogs (`652d682`)
+- Autosave journal — crash recovery, the idempotent replay (`015fbf0`)
+- Nightly perf gate — the §12 regression workflow + compare script (`860b2e4`)
+- Smudge + clone brushes — retouch ops, the write-back path, stroke history (`2fbfc7e`)
+- Symmetry — mirror + radial across every consumer (`2689fa8`)
+- Quick mask — the temporary painted gate (`e4492ba`)
+- Perf harnesses — the reference-scene bench + input→photon session (`909ee0c`, `ae7e8f9`)
+
+### The corrections (the honest record)
+
+- `d565e64` — 14d98fa's .usdc claim was false; the sync-back race destroyed
+  the work; re-made dragon-written (`19ccc42`). Pitfall 18 recorded.
+
+### Engineering notes
+
+- The remote-build flow (centralhost's 3070) with its pinned recipe; the
+  `.git` rsync incident (Pitfall 16); the claw pattern library
+  (limit→gate-the-tree, wedge→switch claws, four-claw failure→the fifth
+  claw is the dragon).
+- 599+ tests across the workspace; CI on Windows and Linux per commit;
+  the seven-round usdc arc closed at runtime green.
+
+## [Earlier] — Wave 3 (2026-10-09)
 
 The bake & export pipeline: six mesh-map bakers, UV padding, engine
 presets, the export driver, the headless CLI, and the app panels —
@@ -16,7 +98,7 @@ workspace 268 tests green, CI on Windows and Linux for every commit.
 - §6 infinite dilation — dilate_map_filled, the full-coverage entry point (`a04e243`)
 - §6 dithering option — Floyd-Steinberg at the f32->u8 boundary (`6edd477`)
 - export feeds the real baked tangent normal (`d64a65c`)
-- bake-all tangent-space normal — 6 maps, the full baker surface (`83099d7`)
+- bake-all tangent-space normal — 6 maps, the full baker surface (`83009d7`)
 - tangent-space normal bake — screen-space TBN from the position pair (`2d7fa0a`)
 - --dilate N flag on bake-ao + bake-all — uniform seam-padding control (`f2c29ee`)
 - bake-all world-space normal — 6 maps per invocation (`eff0a8f`)
@@ -53,7 +135,7 @@ workspace 268 tests green, CI on Windows and Linux for every commit.
 ### Added — app & CLI
 
 - .umber project I/O in the app — Open/Save Project in the File menu (`98e4c89`)
-- bake-all tangent-space normal — 6 maps, the full baker surface (`83099d7`)
+- bake-all tangent-space normal — 6 maps, the full baker surface (`83009d7`)
 - --dilate N flag on bake-ao + bake-all — uniform seam-padding control (`f2c29ee`)
 - Export dialog in the app — presets callable from the UI (`51ae037`)
 - bake-all world-space normal — 6 maps per invocation (`eff0a8f`)
@@ -100,4 +182,3 @@ workspace 268 tests green, CI on Windows and Linux for every commit.
 - wave-2): umber-core hardening round — path-traversal rejection + case-collision validation (claude claw, post-landing review) (`fc50afd`)
 - clone URL in CONTRIBUTING (`6c8e309`)
 - gitignore inline-comment bug (Cargo.lock pattern was a literal); real comments now (`b4a2da0`)
-
