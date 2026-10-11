@@ -95,10 +95,10 @@ impl BrushPanel {
         }
     }
 
-    /// The panel body: tool rows + symmetry + quick mask + preset selector
-    /// + live editor + save row. The tool rows come first: they work with
-    /// no preset selected. The quick-mask rows edit the paint session's
-    /// mask directly, so they show only when `paint` exists.
+    /// The panel body: tool rows then symmetry then quick mask then preset
+    /// selector then live editor then save row. The tool rows come first:
+    /// they work with no preset selected. The quick-mask rows edit the
+    /// paint session's mask directly, so they show only when `paint` exists.
     pub fn show(&mut self, ui: &mut egui::Ui, paint: Option<&mut PaintState>) {
         self.tool_rows(ui);
         ui.add_space(8.0);
