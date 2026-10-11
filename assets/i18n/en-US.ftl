@@ -200,6 +200,37 @@ display =
     .rebuilding = Rebuilding the GPU display LUT for the 3D viewport and the UV view.
     .active-chain = Active chain: { $chain }. { $status }
 
+## Post effects (Display panel section, §7 P1 row)
+
+postfx =
+    .title = Post effects
+    .empty = No effects — the scene goes straight to the display transform.
+    .add = Add effect
+    .dof = Depth of field
+    .bloom = Bloom
+    .vignette = Vignette
+    .sharpen = Sharpen
+    .tonemap = Tone map
+    .focus = Focus distance
+    .aperture = Aperture
+    .threshold = Threshold
+    .intensity = Intensity
+    .radius = Radius (px)
+    .strength = Strength
+    .softness = Softness
+    .amount = Amount
+    .mode = Curve
+    .exposure = Exposure (EV)
+    .mode-aces = ACES (fitted)
+    .mode-filmic = Filmic
+    .mode-reinhard = Reinhard
+    .drag-hint = Drag to reorder
+    .move-up = Move up
+    .move-down = Move down
+    .remove = Remove effect
+    .summary = { $active } of { $total } effects enabled, applied top to bottom.
+    .not-live = Not live in the viewport yet: the mesh pass still draws straight to the screen, so the chain has no scene-linear image to run on. Session only (not saved with the project).
+
 ## Viewport view modes (§5 P0 row)
 
 viewmode =

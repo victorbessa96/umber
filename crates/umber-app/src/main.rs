@@ -27,14 +27,15 @@ mod graph_canvas;
 mod graph_panel;
 mod history_panel;
 mod i18n;
-mod mesh_map_import;
 #[cfg(test)]
 mod input_photon;
+mod mesh_map_import;
 mod paint_state;
 mod path_tool;
 #[cfg(test)]
 mod perf_soak;
 mod plugins;
+mod postfx_panel;
 mod retouch;
 mod size_presets;
 mod tile_selection;
@@ -97,6 +98,10 @@ struct PanelViewer<'a> {
     display_lut_state: &'a mut display_panel::DisplayLutState,
     /// The device display LUT both GPU views sample.
     display_lut: &'a umber_gpu::DisplayLut,
+    /// The post-effects chain (the Display panel's postfx section).
+    postfx: &'a mut umber_gpu::postfx::PostChain,
+    /// The postfx section's session state (add pick, drag in flight).
+    postfx_panel: &'a mut postfx_panel::PostFxPanel,
 }
 
 impl TabViewer for PanelViewer<'_> {
@@ -166,11 +171,7 @@ impl TabViewer for PanelViewer<'_> {
                 fill_layer::fill_section_ui(ui, self.doc, self.mesh, &mut *self.polygon_fill);
                 // The paint-path tool rows (editable polyline → replayed
                 // stroke / closed-path fill through the paint session).
-                path_tool::path_tool_rows(
-                    ui,
-                    self.paint.as_deref_mut(),
-                    &mut *self.path_tool,
-                );
+                path_tool::path_tool_rows(ui, self.paint.as_deref_mut(), &mut *self.path_tool);
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));
@@ -241,7 +242,12 @@ impl TabViewer for PanelViewer<'_> {
                 self.graph.show(ui);
             }
             Panel::Display => {
-                display_panel::show(ui, self.display, self.display_lut_state);
+                // Scrolls: the postfx section grows one group per effect.
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    display_panel::show(ui, self.display, self.display_lut_state);
+                    ui.separator();
+                    postfx_panel::show(ui, self.postfx, self.postfx_panel);
+                });
             }
         }
     }
@@ -277,6 +283,12 @@ pub struct AppState {
     /// Whether the device display LUT matches `display` (starts dirty;
     /// the frame loop rebuilds + uploads).
     pub display_lut: display_panel::DisplayLutState,
+    /// The post-effects chain (§7:84; Display panel's postfx section).
+    /// Session state in v1: not yet saved in the project, and not yet
+    /// composited into the viewport (see `postfx_panel`).
+    pub postfx: umber_gpu::postfx::PostChain,
+    /// The postfx section's UI state (never serialized).
+    pub postfx_panel: postfx_panel::PostFxPanel,
     /// Mesh-map import by naming convention (§7 P1 row): the folder-scan
     /// routing + unmatched report + session texture set (channels ensured
     /// on apply). Owns the session set so imported user channels survive
@@ -678,7 +690,9 @@ impl eframe::App for UmberApp {
         }
         self.state.viewport.set_show_wireframe(self.show_wireframe);
         self.state.viewport.set_show_grid(self.show_grid);
-        self.state.viewport.set_show_cage(self.state.bakes.show_cage());
+        self.state
+            .viewport
+            .set_show_cage(self.state.bakes.show_cage());
         self.state.viewport.set_view_mode(self.view_mode);
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
@@ -764,6 +778,8 @@ impl eframe::App for UmberApp {
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
                 display_lut: &self.display_lut,
+                postfx: &mut self.state.postfx,
+                postfx_panel: &mut self.state.postfx_panel,
                 mesh_import: &mut self.state.mesh_import,
                 store: store.as_ref(),
             };

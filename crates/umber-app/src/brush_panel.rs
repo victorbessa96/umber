@@ -24,8 +24,8 @@ use umber_brush::{
     SymmetrySettings, WashMode, ANGLE_SNAP_DEFAULT_DEG, ANGLE_SNAP_MAX_DEG, ANGLE_SNAP_MIN_DEG,
 };
 
-use crate::paint_state::PaintState;
 use crate::paint_state::PaintProjection;
+use crate::paint_state::PaintState;
 
 /// Size of the curve-editor plot (logical pixels).
 const CURVE_PLOT_SIZE: egui::Vec2 = egui::Vec2::new(150.0, 100.0);

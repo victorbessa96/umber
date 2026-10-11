@@ -213,6 +213,37 @@ display =
     .rebuilding = Reconstruindo a LUT de exibição da GPU para o viewport 3D e a vista UV.
     .active-chain = Cadeia ativa: { $chain }. { $status }
 
+## Pós-efeitos (seção do painel de exibição, §7 P1)
+
+postfx =
+    .title = Pós-efeitos
+    .empty = Nenhum efeito — a cena vai direto para a transformação de exibição.
+    .add = Adicionar efeito
+    .dof = Profundidade de campo
+    .bloom = Bloom
+    .vignette = Vinheta
+    .sharpen = Nitidez
+    .tonemap = Mapeamento de tons
+    .focus = Distância de foco
+    .aperture = Abertura
+    .threshold = Limiar
+    .intensity = Intensidade
+    .radius = Raio (px)
+    .strength = Força
+    .softness = Suavidade
+    .amount = Quantidade
+    .mode = Curva
+    .exposure = Exposição (EV)
+    .mode-aces = ACES (ajustada)
+    .mode-filmic = Fílmica
+    .mode-reinhard = Reinhard
+    .drag-hint = Arraste para reordenar
+    .move-up = Mover para cima
+    .move-down = Mover para baixo
+    .remove = Remover efeito
+    .summary = { $active } de { $total } efeitos ativos, aplicados de cima para baixo.
+    .not-live = Ainda não aparece no viewport: o passe da malha ainda desenha direto na tela, então a cadeia não tem uma imagem linear da cena para processar. Só nesta sessão (não é salva no projeto).
+
 ## Modos de exibição do viewport (§5 P0)
 
 viewmode =

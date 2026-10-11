@@ -384,7 +384,10 @@ mod tests {
         // the frame: the rect corner's ray leaves the quad → None, which
         // is what the Screen path skips (no orphan dabs).
         let viewport = head_on_viewport();
-        assert_eq!(viewport.pick_uv(rect200(), &quad(), egui::pos2(0.0, 0.0)), None);
+        assert_eq!(
+            viewport.pick_uv(rect200(), &quad(), egui::pos2(0.0, 0.0)),
+            None
+        );
         assert_eq!(
             viewport.pick_uv(rect200(), &quad(), egui::pos2(200.0, 200.0)),
             None

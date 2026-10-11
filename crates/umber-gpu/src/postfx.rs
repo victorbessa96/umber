@@ -18,9 +18,10 @@
 //!   a fixed 2-slot pool at the surface size — a disabled effect skips
 //!   both its dispatch AND its slot allocation.
 //! - **CPU-side param model, GPU-side exec.** [`PostChain`] is pure data
-//!   (serde, undoable, panel-driven); [`PostStack`] owns the GPU objects
-//!   and rebuilds pipelines when the EFFECT SET changes (params ride
-//!   uniforms — no pipeline rebuilds on slider drags).
+//!   (serde, undoable, panel-driven); [`crate::postfx_exec::PostStack`]
+//!   owns the GPU objects and builds a pipeline the first time an EFFECT
+//!   KIND appears (params ride uniforms — no pipeline rebuilds on slider
+//!   drags).
 //! - **The WGSL follows the display_lut conventions**: fullscreen
 //!   triangle, texture_2d sample, no vertex buffer.
 //!
@@ -32,7 +33,8 @@
 use serde::{Deserialize, Serialize};
 
 /// One effect in the chain, with its parameters (all clamped at construct).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `Copy`: plain params only, so [`PostChain::active`] yields by value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PostEffect {
     /// Depth-of-field: a CoC-weighted gather around the focus plane.
     Dof {
@@ -67,6 +69,7 @@ pub enum PostEffect {
     /// Scene-linear tone-map (the artistic exposure/roll-off; the display
     /// transfer still applies after — this is NOT the display transform).
     ToneMap {
+        /// The curve family.
         mode: ToneMapMode,
         /// Exposure stop applied before the curve, -4..=4.
         exposure: f32,
@@ -106,6 +109,34 @@ impl PostEffect {
         }
     }
 
+    /// The effect a new chain row starts with (the panel's "Add effect"):
+    /// mid-range params, already inside the clamps.
+    pub fn default_for(pass: PostPass) -> Self {
+        match pass {
+            PostPass::Dof => Self::Dof {
+                focus: 5.0,
+                aperture: 0.3,
+            },
+            PostPass::Bloom => Self::Bloom {
+                threshold: 1.0,
+                intensity: 0.5,
+                radius: 8,
+            },
+            PostPass::Vignette => Self::Vignette {
+                strength: 0.3,
+                softness: 0.5,
+            },
+            PostPass::Sharpen => Self::Sharpen {
+                amount: 0.5,
+                radius: 1,
+            },
+            PostPass::ToneMap => Self::ToneMap {
+                mode: ToneMapMode::Aces,
+                exposure: 0.0,
+            },
+        }
+    }
+
     /// The pipeline key: which shader this effect dispatches.
     pub fn pass(self) -> PostPass {
         match self {
@@ -130,14 +161,35 @@ pub enum ToneMapMode {
     Reinhard,
 }
 
+impl ToneMapMode {
+    /// Every mode, in picker order.
+    pub const ALL: [Self; 3] = [Self::Aces, Self::Filmic, Self::Reinhard];
+}
+
 /// The five pipeline kinds (bloom's is internally the down+blur+add pair).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostPass {
+    /// Depth-of-field gather.
     Dof,
+    /// Bloom (threshold-downsample + blur-recombine).
     Bloom,
+    /// Radial vignette.
     Vignette,
+    /// Unsharp-mask sharpen.
     Sharpen,
+    /// Scene-linear tone-map.
     ToneMap,
+}
+
+impl PostPass {
+    /// Every pass kind, in the panel's "Add effect" order.
+    pub const ALL: [Self; 5] = [
+        Self::Dof,
+        Self::Bloom,
+        Self::Vignette,
+        Self::Sharpen,
+        Self::ToneMap,
+    ];
 }
 
 /// The ordered, user-reorderable chain (pure data; serde for the project).
@@ -173,7 +225,8 @@ impl PostChain {
     /// The number of full-res ping-pong intermediates the chain needs:
     /// each enabled effect reads one and writes one, so the chain needs
     /// exactly 2 slots (ping-pong), UNLESS zero effects are active — then
-    /// zero. This is the allocation contract [`PostStack`] follows.
+    /// zero. This is the allocation contract
+    /// [`crate::postfx_exec::PostStack`] follows.
     pub fn intermediate_count(&self) -> usize {
         match self.active().count() {
             0 => 0,
@@ -181,17 +234,30 @@ impl PostChain {
         }
     }
 
-    /// Moves the effect at `from` to `to` (the panel's drag-reorder).
-    /// Returns false when either index is out of bounds.
+    /// Moves the effect at `from` so it ends at index `to` (the panel's
+    /// drag-reorder and ▲/▼). Returns false when either index is out of
+    /// bounds or `from == to`.
     pub fn reorder(&mut self, from: usize, to: usize) -> bool {
         if from >= self.effects.len() || to >= self.effects.len() || from == to {
             return false;
         }
+        // remove-then-insert already lands the effect at `to` (no `to - 1`
+        // adjustment: that made [A, B] reorder(0, 1) a silent no-op).
         let e = self.effects.remove(from);
         let on = self.enabled.remove(from);
-        let to = if to > from { to - 1 } else { to };
         self.effects.insert(to, e);
         self.enabled.insert(to, on);
+        true
+    }
+
+    /// Removes the effect at `index` (and its flag). Returns false when
+    /// out of bounds.
+    pub fn remove(&mut self, index: usize) -> bool {
+        if index >= self.effects.len() {
+            return false;
+        }
+        self.effects.remove(index);
+        self.enabled.remove(index);
         true
     }
 
@@ -208,7 +274,12 @@ impl PostChain {
 }
 
 /// The scene-linear tone-map curves (shared CPU reference for tests and
-/// the WGSL mirrors; exact values pinned in the tests).
+/// the WGSL mirror — `postfx_exec::POSTFX_SHADER`'s `tone_map_channel`
+/// is this function op-for-op; exact values pinned in the tests).
+///
+/// `Filmic` is NOT canonical Hable (`curve(x) / curve(W)`): it computes
+/// `s·curve(W) / (1 + s·curve(W)/W)` with `s = x/W` — a Reinhard-shaped
+/// roll-off scaled by Hable's white point. The WGSL mirrors it as-is.
 pub fn tone_map(mode: ToneMapMode, exposure: f32, x: f32) -> f32 {
     let x = x * 2.0f32.powf(exposure);
     match mode {
@@ -274,16 +345,14 @@ mod tests {
             softness: 1.0,
         });
         assert_eq!(chain.intermediate_count(), 2, "any active = ping-pong pair");
-        chain
-            .set_enabled(0, false)
-            .unwrap_or_else(|_| panic!("index"));
-        chain.set_enabled(1, false).unwrap();
+        assert!(chain.set_enabled(0, false), "index 0 in bounds");
+        assert!(chain.set_enabled(1, false), "index 1 in bounds");
         assert_eq!(
             chain.active().count(),
             1,
             "the vignette survives both disables"
         );
-        chain.set_enabled(2, false).unwrap();
+        assert!(chain.set_enabled(2, false), "index 2 in bounds");
         assert_eq!(chain.intermediate_count(), 0, "all off = zero alloc");
     }
 
@@ -308,8 +377,10 @@ mod tests {
     #[test]
     fn aces_midgray_is_pinned() {
         // Narkowicz ACES at x=0.5: (0.5*(2.51*0.5+0.03))/(0.5*(2.43*0.5+0.59)+0.14)
+        // = 0.6425 / 1.0425 ≈ 0.6163 (the original pin of 0.3336 was a
+        // miscalculation of this same expression; the curve is unchanged).
         let v = tone_map(ToneMapMode::Aces, 0.0, 0.5);
-        assert!((v - 0.3336).abs() < 1e-3, "ACES(0.5) ≈ 0.3336, got {v}");
+        assert!((v - 0.6163).abs() < 1e-3, "ACES(0.5) ≈ 0.6163, got {v}");
         // Identity at 0: all curves map 0 → 0.
         for m in [
             ToneMapMode::Aces,
@@ -336,5 +407,46 @@ mod tests {
         assert_eq!(chain.effects[0].pass(), PostPass::Bloom);
         assert_eq!(chain.effects[1].pass(), PostPass::Sharpen);
         assert!(!chain.reorder(0, 9), "out-of-bounds is a no-op false");
+    }
+
+    #[test]
+    fn reorder_can_move_to_the_last_index() {
+        // The down-move: [A, B, C] reorder(0, 2) → [B, C, A]; and the
+        // adjacent swap reorder(0, 1) really swaps.
+        let mut chain = PostChain::new();
+        for pass in [PostPass::Sharpen, PostPass::Bloom, PostPass::Vignette] {
+            chain.push(PostEffect::default_for(pass));
+        }
+        assert!(chain.set_enabled(0, false));
+        assert!(chain.reorder(0, 2));
+        let order: Vec<_> = chain.effects.iter().map(|e| e.pass()).collect();
+        assert_eq!(
+            order,
+            vec![PostPass::Bloom, PostPass::Vignette, PostPass::Sharpen]
+        );
+        assert_eq!(chain.enabled, vec![true, true, false], "flag rode along");
+        assert!(chain.reorder(0, 1));
+        assert_eq!(chain.effects[0].pass(), PostPass::Vignette);
+        assert_eq!(chain.effects[1].pass(), PostPass::Bloom);
+    }
+
+    #[test]
+    fn remove_drops_effect_and_flag() {
+        let mut chain = PostChain::new();
+        chain.push(PostEffect::default_for(PostPass::Dof));
+        chain.push(PostEffect::default_for(PostPass::ToneMap));
+        assert!(chain.remove(0));
+        assert_eq!(chain.effects.len(), chain.enabled.len());
+        assert_eq!(chain.effects[0].pass(), PostPass::ToneMap);
+        assert!(!chain.remove(5));
+    }
+
+    #[test]
+    fn defaults_are_inside_the_clamps() {
+        for pass in PostPass::ALL {
+            let e = PostEffect::default_for(pass);
+            assert_eq!(e.pass(), pass);
+            assert_eq!(e.clamped(), e, "{pass:?} default already clamped");
+        }
     }
 }

@@ -159,9 +159,7 @@ impl UvView {
                         }
                         if handle.dragged() {
                             if let Some(pos) = handle.interact_pointer_pos() {
-                                if let Some(uv) =
-                                    crate::paint_state::uv_from_pointer(square, pos)
-                                {
+                                if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
                                     ptool.move_point(i, [uv.x, uv.y]);
                                     ptool.select(Some(i));
                                     path_point_active = true;
@@ -176,8 +174,7 @@ impl UvView {
                     if let Some(selected) = ptool.selected() {
                         if let Some(point) = ptool.points().get(selected).copied() {
                             let center = to_screen(point.uv);
-                            let size_dist = (point.size.clamp(0.0, 8.0)
-                                * PATH_SIZE_PX_PER_UNIT)
+                            let size_dist = (point.size.clamp(0.0, 8.0) * PATH_SIZE_PX_PER_UNIT)
                                 .clamp(10.0, 64.0);
                             let size_rect = egui::Rect::from_center_size(
                                 center + egui::vec2(size_dist, 0.0),
@@ -202,10 +199,8 @@ impl UvView {
                                     0.0,
                                     -12.0 - PATH_OPACITY_TRAVEL_PX * point.opacity.clamp(0.0, 1.0),
                                 );
-                            let op_rect = egui::Rect::from_center_size(
-                                op_center,
-                                egui::vec2(12.0, 12.0),
-                            );
+                            let op_rect =
+                                egui::Rect::from_center_size(op_center, egui::vec2(12.0, 12.0));
                             let op_handle = ui.interact(
                                 op_rect,
                                 ui.id().with("uv-path-opacity"),
@@ -244,15 +239,13 @@ impl UvView {
                 if !handle_active && !path_point_active {
                     if let Some(pos) = interact.interact_pointer_pos() {
                         if interact.secondary_clicked() {
-                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos)
-                            {
+                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
                                 if let Some(ptool) = path_tool.as_deref_mut() {
                                     ptool.delete_near([uv.x, uv.y], PATH_CLICK_TOL_PX / side);
                                 }
                             }
                         } else if interact.clicked() {
-                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos)
-                            {
+                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
                                 if let Some(ptool) = path_tool.as_deref_mut() {
                                     let clicked = [uv.x, uv.y];
                                     let tol = PATH_CLICK_TOL_PX / side;
@@ -419,8 +412,7 @@ impl UvView {
         // selected point's size/opacity handles.
         if let Some(ptool) = path_tool.as_ref() {
             if ptool.has_points() {
-                let pts: Vec<egui::Pos2> =
-                    ptool.points().iter().map(|p| to_screen(p.uv)).collect();
+                let pts: Vec<egui::Pos2> = ptool.points().iter().map(|p| to_screen(p.uv)).collect();
                 for w in pts.windows(2) {
                     painter.line_segment([w[0], w[1]], Stroke::new(2.0, PATH_COLOR));
                 }
@@ -433,8 +425,7 @@ impl UvView {
                 for (i, p) in ptool.points().iter().enumerate() {
                     let center = to_screen(p.uv);
                     let radius = 3.0 + 2.0 * p.size.clamp(0.0, 8.0).sqrt();
-                    let fill = PATH_COLOR
-                        .gamma_multiply(0.3 + 0.7 * p.opacity.clamp(0.0, 1.0));
+                    let fill = PATH_COLOR.gamma_multiply(0.3 + 0.7 * p.opacity.clamp(0.0, 1.0));
                     painter.circle_filled(center, radius, fill);
                     if ptool.selected() == Some(i) {
                         painter.circle_stroke(
@@ -442,8 +433,8 @@ impl UvView {
                             radius + 2.0,
                             Stroke::new(1.5, egui::Color32::WHITE),
                         );
-                        let size_dist = (p.size.clamp(0.0, 8.0) * PATH_SIZE_PX_PER_UNIT)
-                            .clamp(10.0, 64.0);
+                        let size_dist =
+                            (p.size.clamp(0.0, 8.0) * PATH_SIZE_PX_PER_UNIT).clamp(10.0, 64.0);
                         painter.rect_stroke(
                             egui::Rect::from_center_size(
                                 center + egui::vec2(size_dist, 0.0),
@@ -458,9 +449,7 @@ impl UvView {
                                 center
                                     + egui::vec2(
                                         0.0,
-                                        -12.0
-                                            - PATH_OPACITY_TRAVEL_PX
-                                                * p.opacity.clamp(0.0, 1.0),
+                                        -12.0 - PATH_OPACITY_TRAVEL_PX * p.opacity.clamp(0.0, 1.0),
                                     ),
                                 egui::vec2(10.0, 10.0),
                             ),

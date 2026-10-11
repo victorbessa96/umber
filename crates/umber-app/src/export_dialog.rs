@@ -712,14 +712,14 @@ impl ExportDialog {
         let write_started = Instant::now();
         let pairs: Vec<(u16, &umber_export::MapSet)> =
             tile_sets.iter().map(|t| (t.tile, &t.set)).collect();
-        let mut written = umber_export::run_preset_tiled(&filtered, &pairs, &sources, &self.output_dir)
-            .context("run_preset_tiled")?;
+        let mut written =
+            umber_export::run_preset_tiled(&filtered, &pairs, &sources, &self.output_dir)
+                .context("run_preset_tiled")?;
         if filtered.usda {
             // The `.usda` carries the whole mesh (per-tile splits stay a
             // bake-window concern); only its texture references are
             // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
-            let tile_names =
-                tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
+            let tile_names = tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
             let textures = umber_export::usd::usd_textures(&filtered, |output| {
                 umber_export::usd::usda_file_for_output(output, &sources, tile_names)
             });
@@ -730,8 +730,13 @@ impl ExportDialog {
                 indices: &mesh.indices,
             };
             written.push(
-                umber_export::usd::write_usda(&self.output_dir, &texture_set, &mesh_view, &textures)
-                    .context("write_usda")?,
+                umber_export::usd::write_usda(
+                    &self.output_dir,
+                    &texture_set,
+                    &mesh_view,
+                    &textures,
+                )
+                .context("write_usda")?,
             );
         }
         let write_ms = write_started.elapsed().as_millis();

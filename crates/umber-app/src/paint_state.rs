@@ -120,8 +120,8 @@ use umber_brush::{
 use umber_core::undo::UndoStack;
 use umber_gpu::paint::Dab;
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
-use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::polygon_fill::rasterize_polygon_mask;
+use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
 
 use crate::retouch::{PaintStrokeCommand, PaintWrites, RetouchStroke};
@@ -1068,7 +1068,12 @@ impl PaintState {
                 .map(|mapping| mapping.mirrored)
                 .collect();
             for mirrored in mirrors {
-                self.push_event_styled(Pos2::new(mirrored[0], mirrored[1]), pressure, radius_scale, false);
+                self.push_event_styled(
+                    Pos2::new(mirrored[0], mirrored[1]),
+                    pressure,
+                    radius_scale,
+                    false,
+                );
             }
         }
         // Mirrors across a tile seam land in the other tile: route by the
@@ -1677,7 +1682,8 @@ mod tests {
         // interleaved misses stages EXACTLY what the hits-only UV stroke
         // stages (same batches, same dabs, same order).
         let hits = [[0.3, 0.3], [0.32, 0.32], [0.34, 0.34], [0.36, 0.36]];
-        let mut direct = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut direct =
+            PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
         direct.begin_stroke(egui::pos2(hits[0][0], hits[0][1]));
         for [x, y] in &hits[1..] {
             direct.extend_stroke(egui::pos2(*x, *y));
@@ -1697,7 +1703,10 @@ mod tests {
                 Some(hits[3]),
             ],
         );
-        assert!(screen.is_stroking(), "hits keep the stroke alive across misses");
+        assert!(
+            screen.is_stroking(),
+            "hits keep the stroke alive across misses"
+        );
         screen.end_stroke();
         assert_eq!(
             screen.staged_batch_count(),
@@ -2608,10 +2617,7 @@ mod tests {
         path.push_point(start, 1.0, 1.0, 1.0);
         for i in 1..=steps {
             path.push_point(
-                [
-                    start[0] + step[0] * i as f32,
-                    start[1] + step[1] * i as f32,
-                ],
+                [start[0] + step[0] * i as f32, start[1] + step[1] * i as f32],
                 1.0,
                 1.0,
                 1.0,
@@ -2699,11 +2705,8 @@ mod tests {
         );
         // The eraser on a blank target is the exact identity (no writes,
         // no history) — while still replaying through its own consumer.
-        let mut blank = PaintState::new(
-            state.device.clone(),
-            state.queue.clone(),
-        )
-        .expect("paint state builds");
+        let mut blank =
+            PaintState::new(state.device.clone(), state.queue.clone()).expect("paint state builds");
         assert!(blank.replay_path(&path, &PathOp::Erase(umber_brush::EraseParams::default())));
         assert_eq!(blank.staged_batch_count(), 0);
         assert!(

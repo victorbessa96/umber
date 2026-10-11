@@ -317,7 +317,9 @@ pub fn import_bytes(
     bytes: &[u8],
 ) -> Result<ImportApplied, MeshMapImportError> {
     let (texture_set, channel, layer_name) = match classify_file_name(file_name) {
-        FileRoute::MeshMap { set, kind, channel } => (set, channel.to_string(), layer_name_for_kind(kind)),
+        FileRoute::MeshMap { set, kind, channel } => {
+            (set, channel.to_string(), layer_name_for_kind(kind))
+        }
         FileRoute::UserChannel { set, channel } => {
             let layer = layer_name_for_user_channel(&channel);
             (set, channel, layer)
@@ -433,7 +435,9 @@ impl MeshMapImportState {
                     layer_name,
                 });
             }
-            FileRoute::Unmatched { file, reason } => self.unmatched.push(UnmatchedFile { file, reason }),
+            FileRoute::Unmatched { file, reason } => {
+                self.unmatched.push(UnmatchedFile { file, reason })
+            }
         }
     }
 
@@ -447,7 +451,10 @@ impl MeshMapImportState {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(err) => {
-                self.status = tr_args("import.scan-failed", [("error", FluentValue::from(err.to_string()))]);
+                self.status = tr_args(
+                    "import.scan-failed",
+                    [("error", FluentValue::from(err.to_string()))],
+                );
                 return;
             }
         };
@@ -657,7 +664,12 @@ impl MeshMapImportState {
                         .pending
                         .iter()
                         .map(|p| {
-                            (p.file.clone(), p.texture_set.clone(), p.channel.clone(), p.layer_name.clone())
+                            (
+                                p.file.clone(),
+                                p.texture_set.clone(),
+                                p.channel.clone(),
+                                p.layer_name.clone(),
+                            )
                         })
                         .collect();
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -754,7 +766,11 @@ mod tests {
             let path = umber_mesh::format_mesh_map(dir, "Sword", kind, "png");
             let file = path.file_name().unwrap().to_str().unwrap().to_string();
             match classify_file_name(&file) {
-                FileRoute::MeshMap { set, kind: back, channel } => {
+                FileRoute::MeshMap {
+                    set,
+                    kind: back,
+                    channel,
+                } => {
                     assert_eq!(set, "Sword", "{file}");
                     assert_eq!(back, kind, "{file}");
                     assert_eq!(channel, channel_for_kind(kind), "{file}");
@@ -813,7 +829,10 @@ mod tests {
                 .map(|p| p.layer_name.clone())
                 .unwrap()
         };
-        assert_eq!(layer_of("Sword_ambient_occlusion.png"), "Imported ambient_occlusion");
+        assert_eq!(
+            layer_of("Sword_ambient_occlusion.png"),
+            "Imported ambient_occlusion"
+        );
         assert_eq!(layer_of("Sword_curvature.png"), "Imported curvature");
         // The unmatched report: txt (not png), tile-suffixed, no separator.
         assert_eq!(state.unmatched.len(), 3, "{:?}", state.unmatched);
@@ -829,7 +848,10 @@ mod tests {
             reason_of("Sword_ambient_occlusion_1002.png"),
             Some(UnmatchedReason::TileSuffixed)
         );
-        assert_eq!(reason_of("nodivider.png"), Some(UnmatchedReason::NoSeparator));
+        assert_eq!(
+            reason_of("nodivider.png"),
+            Some(UnmatchedReason::NoSeparator)
+        );
     }
 
     #[test]
@@ -853,11 +875,17 @@ mod tests {
         // And the unmatched edges of the generic split report, never route.
         assert!(matches!(
             classify_file_name("_curvature.png"),
-            FileRoute::Unmatched { reason: UnmatchedReason::EmptySet, .. }
+            FileRoute::Unmatched {
+                reason: UnmatchedReason::EmptySet,
+                ..
+            }
         ));
         assert!(matches!(
             classify_file_name("Sword_.png"),
-            FileRoute::Unmatched { reason: UnmatchedReason::EmptySuffix, .. }
+            FileRoute::Unmatched {
+                reason: UnmatchedReason::EmptySuffix,
+                ..
+            }
         ));
         // Case-insensitive PNG, case-preserving channel.
         match classify_file_name("Sword_AO.PNG") {
@@ -897,12 +925,19 @@ mod tests {
         assert_eq!(stack.layers.len(), before.len() + 1);
         assert_eq!(stack.layers[..before.len()], before);
         assert_eq!(stack.layers.last().unwrap().id, applied.layer_id);
-        assert_eq!(stack.layers.last().unwrap().name, "Imported ambient_occlusion");
+        assert_eq!(
+            stack.layers.last().unwrap().name,
+            "Imported ambient_occlusion"
+        );
         assert_ne!(applied.layer_id, base);
         assert_ne!(applied.layer_id, detail);
         // The AO channel did not exist in the default set — created as Data.
         assert!(channels_before.iter().all(|c| c.name != "AO"));
-        let ao = set.channels.iter().find(|c| c.name == "AO").expect("AO created");
+        let ao = set
+            .channels
+            .iter()
+            .find(|c| c.name == "AO")
+            .expect("AO created");
         assert_eq!(ao.kind, ChannelKind::Data);
         // A second import of the same file dedupes the asset (same hash)
         // and still creates a second layer (imports never merge).
@@ -914,8 +949,14 @@ mod tests {
             b"fake ao png",
         )
         .expect("re-imports");
-        assert_eq!(again.asset, applied.asset, "identical bytes dedupe to one blob");
-        assert_ne!(again.layer_id, applied.layer_id, "but each import is its own layer");
+        assert_eq!(
+            again.asset, applied.asset,
+            "identical bytes dedupe to one blob"
+        );
+        assert_ne!(
+            again.layer_id, applied.layer_id,
+            "but each import is its own layer"
+        );
         assert_eq!(stack.layers.len(), before.len() + 2);
         // Unknown suffixes create user channels and Paint layers too.
         let user = import_bytes(&mut stack, &mut set, &store, "Sword_wear.png", b"wear")
@@ -938,22 +979,34 @@ mod tests {
         let (store, dir) = tmp_store("session-set");
         let mut state = MeshMapImportState::default();
         state.retarget_set("Sword");
-        for name in ["Sword_curvature.png", "Shield_thickness.png", "Sword_wear.png"] {
+        for name in [
+            "Sword_curvature.png",
+            "Shield_thickness.png",
+            "Sword_wear.png",
+        ] {
             state.ingest_name(name, None);
         }
         let mut doc = Document::default();
-        let bytes: HashMap<&str, Vec<u8>> =
-            [("Sword_curvature.png", b"a".to_vec()), ("Sword_wear.png", b"b".to_vec()), ("Shield_thickness.png", b"c".to_vec())]
-                .into_iter()
-                .collect();
-        let created = state.apply_session_set(&doc, &store, |item| bytes.get(item.file.as_str()).cloned());
+        let bytes: HashMap<&str, Vec<u8>> = [
+            ("Sword_curvature.png", b"a".to_vec()),
+            ("Sword_wear.png", b"b".to_vec()),
+            ("Shield_thickness.png", b"c".to_vec()),
+        ]
+        .into_iter()
+        .collect();
+        let created =
+            state.apply_session_set(&doc, &store, |item| bytes.get(item.file.as_str()).cloned());
         assert_eq!(created, 2);
         assert_eq!(doc.stack.layers.len(), 2);
         // The other set's file stays queued (never dropped, never applied).
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.pending[0].file, "Shield_thickness.png");
         // Channels ensured on the session set (curvature + wear alongside).
-        assert!(state.session_set.channels.iter().any(|c| c.name == "curvature"));
+        assert!(state
+            .session_set
+            .channels
+            .iter()
+            .any(|c| c.name == "curvature"));
         assert!(state.session_set.channels.iter().any(|c| c.name == "wear"));
         std::fs::remove_dir_all(&dir).ok();
     }

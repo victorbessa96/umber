@@ -787,8 +787,8 @@ impl BakesPanel {
     /// Sets the skew threshold, clamping to
     /// `MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG`.
     pub fn set_skew_threshold_deg(&mut self, threshold_deg: f32) {
-        self.skew_threshold_deg = threshold_deg
-            .clamp(MIN_SKEW_THRESHOLD_DEG, MAX_SKEW_THRESHOLD_DEG);
+        self.skew_threshold_deg =
+            threshold_deg.clamp(MIN_SKEW_THRESHOLD_DEG, MAX_SKEW_THRESHOLD_DEG);
     }
 
     /// Whether auto-rebake fires on parameter change (§6:58).
@@ -850,7 +850,8 @@ impl BakesPanel {
     /// The skew channel's output path: `<dir>/<set>_skew.png` (the
     /// `TextureSetName_map` convention with [`SKEW_SUFFIX`]).
     pub fn skew_output_path_for(&self, texture_set: &str) -> PathBuf {
-        self.output_dir.join(format!("{texture_set}_{SKEW_SUFFIX}.png"))
+        self.output_dir
+            .join(format!("{texture_set}_{SKEW_SUFFIX}.png"))
     }
 
     /// The tile-suffixed skew output path: `<dir>/<set>_skew_<tile>.png`.
@@ -986,9 +987,7 @@ impl BakesPanel {
             .collect();
         let mut maps = Vec::new();
         for selection in BakeSelection::ALL {
-            if self.is_map_enabled(selection)
-                && dirty.contains(&bake_map_of(selection))
-            {
+            if self.is_map_enabled(selection) && dirty.contains(&bake_map_of(selection)) {
                 maps.push(selection);
             }
         }
@@ -997,7 +996,12 @@ impl BakesPanel {
         if (maps.is_empty() && !skew) || tiles.is_empty() || sets.is_empty() {
             return None;
         }
-        Some(AutoRebakeFire { maps, skew, tiles, sets })
+        Some(AutoRebakeFire {
+            maps,
+            skew,
+            tiles,
+            sets,
+        })
     }
 
     /// Clicks a log row: highlights the responsible settings row (§6:59's
@@ -1138,9 +1142,8 @@ impl BakesPanel {
                 .text(self.row_label(BakeSettingId::Rays, tr("bakes.rays"))),
         );
         ui.add(
-            egui::Slider::new(&mut self.dilation_iterations, 0..=MAX_DILATION_ITERATIONS).text(
-                self.row_label(BakeSettingId::Dilation, tr("bakes.dilation")),
-            ),
+            egui::Slider::new(&mut self.dilation_iterations, 0..=MAX_DILATION_ITERATIONS)
+                .text(self.row_label(BakeSettingId::Dilation, tr("bakes.dilation"))),
         );
         ui.add(
             egui::Slider::new(
@@ -1268,11 +1271,7 @@ impl BakesPanel {
     /// The sets one bake writes: the enabled checklist sets, or the
     /// mesh's single set when the checklist never synced (the pre-§6
     /// single-set path, byte-identical to before).
-    fn sets_for_bake(
-        &self,
-        mesh: &umber_mesh::MeshData,
-        mesh_path: Option<&Path>,
-    ) -> Vec<String> {
+    fn sets_for_bake(&self, mesh: &umber_mesh::MeshData, mesh_path: Option<&Path>) -> Vec<String> {
         if self.sets.is_empty() {
             return Self::set_names_for(mesh, mesh_path);
         }
@@ -2071,12 +2070,9 @@ mod tests {
         // must turn `Disconnected` into a failure and re-enable the button
         // (treating it like `Empty` would show "Baking…" forever).
         let mut p = panel();
-        assert!(p.start_job(
-            1,
-            Vec::new(),
-            Vec::new(),
-            || panic!("simulated wgpu validation panic")
-        ));
+        assert!(p.start_job(1, Vec::new(), Vec::new(), || panic!(
+            "simulated wgpu validation panic"
+        )));
         await_job(&mut p);
         assert!(!p.is_baking());
         assert!(
@@ -2217,8 +2213,14 @@ mod tests {
         assert_eq!(p.skew_tiles(&[], &[]), (vec![1001], Vec::new()));
         // Multi-tile mesh: 1001 bakes whole-mesh, the rest are reported
         // skipped — never written under the wrong tile's name.
-        assert_eq!(p.skew_tiles(&[1001, 1002], &[1001, 1002]), (vec![1001], vec![1002]));
-        assert_eq!(p.skew_tiles(&[1001, 1002], &[1002]), (Vec::new(), vec![1002]));
+        assert_eq!(
+            p.skew_tiles(&[1001, 1002], &[1001, 1002]),
+            (vec![1001], vec![1002])
+        );
+        assert_eq!(
+            p.skew_tiles(&[1001, 1002], &[1002]),
+            (Vec::new(), vec![1002])
+        );
     }
 
     #[test]
@@ -2252,7 +2254,10 @@ mod tests {
             material_names: vec!["B".into(), "A".into(), "A".into()],
             ..umber_mesh::MeshData::default()
         };
-        assert_eq!(BakesPanel::set_names_for(&mesh, None), vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(
+            BakesPanel::set_names_for(&mesh, None),
+            vec!["A".to_string(), "B".to_string()]
+        );
         // No materials: the single texture-set fallback (today's path).
         let bare = umber_mesh::MeshData::default();
         assert_eq!(
@@ -2325,25 +2330,19 @@ mod tests {
         let mut p = panel();
         assert!(!p.jump_to_setting(9999), "unknown id jumps nowhere");
         let t = BakesPanel::now_unix_secs();
-        let id_ao = p.log.push(t, "S".into(), Some(BakeSelection::Ao), 1001, 1, 0);
-        let id_clamped = p.log.push(t, "S".into(), Some(BakeSelection::Ao), 1001, 1, 5);
+        let id_ao = p
+            .log
+            .push(t, "S".into(), Some(BakeSelection::Ao), 1001, 1, 0);
+        let id_clamped = p
+            .log
+            .push(t, "S".into(), Some(BakeSelection::Ao), 1001, 1, 5);
         let id_skew = p.log.push(t, "S".into(), None, 1001, 1, 0);
-        let id_pos = p.log.push(
-            t,
-            "S".into(),
-            Some(BakeSelection::Position),
-            1001,
-            1,
-            0,
-        );
-        let id_curv = p.log.push(
-            t,
-            "S".into(),
-            Some(BakeSelection::Curvature),
-            1001,
-            1,
-            0,
-        );
+        let id_pos = p
+            .log
+            .push(t, "S".into(), Some(BakeSelection::Position), 1001, 1, 0);
+        let id_curv = p
+            .log
+            .push(t, "S".into(), Some(BakeSelection::Curvature), 1001, 1, 0);
         assert!(p.jump_to_setting(id_ao));
         assert_eq!(p.highlighted_setting(), Some(BakeSettingId::Rays));
         assert!(p.jump_to_setting(id_clamped));
@@ -2355,7 +2354,10 @@ mod tests {
         assert!(p.jump_to_setting(id_curv));
         assert_eq!(p.highlighted_setting(), Some(BakeSettingId::Dilation));
         // The highlighted row carries the jump marker.
-        assert_eq!(p.row_label(BakeSettingId::Dilation, "Dilation".to_string()), "▶ Dilation");
+        assert_eq!(
+            p.row_label(BakeSettingId::Dilation, "Dilation".to_string()),
+            "▶ Dilation"
+        );
         assert_eq!(p.row_label(BakeSettingId::Rays, "Rays".to_string()), "Rays");
     }
 
@@ -2376,7 +2378,9 @@ mod tests {
         p.set_rays(32);
         p.sync_param_tracking(start, &selected);
         // Inside the 500 ms window: pending but not due.
-        assert!(p.poll_autorebake(start + Duration::from_millis(499), &selected).is_none());
+        assert!(p
+            .poll_autorebake(start + Duration::from_millis(499), &selected)
+            .is_none());
         // Due: ONLY the affected + still-checked maps fire (AO — thickness
         // is unchecked, curvature/position were never dirtied).
         let fire = p
@@ -2387,7 +2391,9 @@ mod tests {
         assert_eq!(fire.tiles, vec![1001, 1002]);
         assert_eq!(fire.sets, vec!["A".to_string(), "B".to_string()]);
         // Firing takes the dirty sets: nothing pending afterward.
-        assert!(p.poll_autorebake(start + Duration::from_secs(60), &selected).is_none());
+        assert!(p
+            .poll_autorebake(start + Duration::from_secs(60), &selected)
+            .is_none());
 
         // A skew-threshold change fires the skew tiles when checked (and
         // only the affected sets).
@@ -2415,7 +2421,9 @@ mod tests {
         let selected = p.tiles.resolve(&present);
         p.set_rays(32);
         p.sync_param_tracking(start, &selected);
-        assert!(p.poll_autorebake(start + Duration::from_secs(60), &selected).is_none());
+        assert!(p
+            .poll_autorebake(start + Duration::from_secs(60), &selected)
+            .is_none());
     }
 
     #[test]

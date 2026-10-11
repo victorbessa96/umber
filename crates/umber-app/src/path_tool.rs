@@ -181,7 +181,11 @@ impl PaintPathTool {
         let Some((seg, _)) = nearest_segment(self.path.points(), self.path.is_closed(), uv) else {
             return false;
         };
-        let (dist2, _) = dist_to_segment_t(uv, seg_a(self.path.points(), seg), seg_b(self.path.points(), seg));
+        let (dist2, _) = dist_to_segment_t(
+            uv,
+            seg_a(self.path.points(), seg),
+            seg_b(self.path.points(), seg),
+        );
         if dist2 > tol * tol {
             return false;
         }
@@ -230,13 +234,7 @@ impl PaintPathTool {
     }
 
     /// Restyles the point at `index`; `false` when out of bounds.
-    pub fn restyle_point(
-        &mut self,
-        index: usize,
-        pressure: f32,
-        size: f32,
-        opacity: f32,
-    ) -> bool {
+    pub fn restyle_point(&mut self, index: usize, pressure: f32, size: f32, opacity: f32) -> bool {
         self.path.restyle_point(index, pressure, size, opacity)
     }
 
@@ -410,7 +408,10 @@ pub fn path_tool_rows(ui: &mut egui::Ui, paint: Option<&mut PaintState>, tool: &
         PathOpKind::Smudge => {
             let mut params = tool.smudge();
             if ui
-                .add(egui::Slider::new(&mut params.strength, 0.0..=1.0).text(tr("brush.smudge-strength")))
+                .add(
+                    egui::Slider::new(&mut params.strength, 0.0..=1.0)
+                        .text(tr("brush.smudge-strength")),
+                )
                 .changed()
             {
                 tool.smudge = params;

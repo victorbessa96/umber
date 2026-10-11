@@ -27,6 +27,7 @@ pub mod paint;
 pub mod paint_thread;
 pub mod postfx;
 pub mod postfx_exec;
+pub mod postfx_exec;
 pub mod renderer;
 pub mod shaders;
 pub mod texture_display;

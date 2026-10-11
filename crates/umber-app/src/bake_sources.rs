@@ -332,11 +332,7 @@ pub fn combine_skew_with_paint(baked: &[u8], painted: Option<&[u8]>) -> Vec<u8> 
 /// `skew_map` at `threshold_deg` degrees: texels past the threshold clamp
 /// to the edge-safe neutral. Returns the clamped texel count — the bake
 /// log's warnings column. See `umber_bake::skew::apply_edge_protection`.
-pub fn apply_skew_edge_protection(
-    map: &mut [u8],
-    skew_map: &[u8],
-    threshold_deg: f32,
-) -> usize {
+pub fn apply_skew_edge_protection(map: &mut [u8], skew_map: &[u8], threshold_deg: f32) -> usize {
     umber_bake::skew::apply_edge_protection(
         map,
         skew_map,
@@ -347,7 +343,8 @@ pub fn apply_skew_edge_protection(
 
 /// One tile's export-ready maps and which source fed its Base Color.
 #[derive(Debug)]
-pub struct TileMapSet {    /// The UDIM tile number (`$udim` for this tile's files).
+pub struct TileMapSet {
+    /// The UDIM tile number (`$udim` for this tile's files).
     pub tile: u16,
     /// The tile's maps (baked half + Base Color).
     pub set: umber_export::MapSet,
@@ -932,7 +929,10 @@ mod tests {
     fn skew_channel_membership_names_the_paintable_mask() {
         assert!(is_skew_channel("skew"));
         assert_eq!(SKEW_CHANNEL_NAME, "skew");
-        assert_eq!(SKEW_CHANNEL_NAME, umber_bake::BakeMap::Skew.file_stem_suffix());
+        assert_eq!(
+            SKEW_CHANNEL_NAME,
+            umber_bake::BakeMap::Skew.file_stem_suffix()
+        );
         assert!(!is_skew_channel("baseColor"));
         assert!(!is_skew_channel(""));
     }
