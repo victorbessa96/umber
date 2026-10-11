@@ -170,7 +170,7 @@ pub enum HdrProbe {
 pub fn probe(offered: Option<&[HdrSpace]>) -> HdrProbe {
     match offered {
         None => HdrProbe::NotExposed,
-        Some(spaces) if spaces.is_empty() => HdrProbe::SdrOnly,
+        Some([]) => HdrProbe::SdrOnly,
         Some(spaces) => HdrProbe::Offered(spaces.to_vec()),
     }
 }
