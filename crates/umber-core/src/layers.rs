@@ -525,7 +525,7 @@ impl LayerStack {
         if self.layer(source_id).is_none() {
             return Err(InstanceError::UnknownSource {
                 instance: self.next_id,
-                source_id: source_id,
+                source_id,
             });
         }
         let id = self.next_id;
@@ -582,7 +582,7 @@ impl LayerStack {
         if self.layer(source_id).is_none() {
             return Err(InstanceError::UnknownSource {
                 instance: id,
-                source_id: source_id,
+                source_id,
             });
         }
         if let Some(participants) = self.would_cycle(id, source_id) {

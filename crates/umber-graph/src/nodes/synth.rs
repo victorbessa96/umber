@@ -421,31 +421,37 @@ fn effective_score(raw: f32, is_coherence: bool, coherence_weight: f32) -> f32 {
 /// (`None`) rather than clamped onto a position that would not actually
 /// continue the chosen patch (judgment call 9). Also omitted when the
 /// stepped position is invalid (an Inpaint hole) per `valid`.
+/// The example-space walking context `step_coherence` needs, bundled to
+/// stay under clippy's 7-argument floor (judgment call 12).
+struct CoherenceCtx<'a> {
+    ex_w: u32,
+    ex_h: u32,
+    tiling: bool,
+    valid: Option<&'a [bool]>,
+}
+
 fn step_coherence(
     sx: u32,
     sy: u32,
     dx: i64,
     dy: i64,
-    ex_w: u32,
-    ex_h: u32,
-    tiling: bool,
-    valid: Option<&[bool]>,
+    ctx: &CoherenceCtx<'_>,
 ) -> Option<(u32, u32)> {
     let (nx, ny) = (i64::from(sx) + dx, i64::from(sy) + dy);
-    let (rx, ry) = if tiling {
+    let (rx, ry) = if ctx.tiling {
         (
-            nx.rem_euclid(i64::from(ex_w)),
-            ny.rem_euclid(i64::from(ex_h)),
+            nx.rem_euclid(i64::from(ctx.ex_w)),
+            ny.rem_euclid(i64::from(ctx.ex_h)),
         )
     } else {
-        if nx < 0 || nx >= i64::from(ex_w) || ny < 0 || ny >= i64::from(ex_h) {
+        if nx < 0 || nx >= i64::from(ctx.ex_w) || ny < 0 || ny >= i64::from(ctx.ex_h) {
             return None;
         }
         (nx, ny)
     };
     let (rx, ry) = (rx as u32, ry as u32);
-    if let Some(v) = valid {
-        if !v[(ry * ex_w + rx) as usize] {
+    if let Some(v) = ctx.valid {
+        if !v[(ry * ctx.ex_w + rx) as usize] {
             return None;
         }
     }
@@ -523,13 +529,35 @@ fn refine_level(
 
             if x > 0 {
                 let (lx, ly) = source[idx - 1];
-                if let Some(c) = step_coherence(lx, ly, 1, 0, ex_w, ex_h, cfg.tiling, valid_bool) {
+                if let Some(c) = step_coherence(
+                    lx,
+                    ly,
+                    1,
+                    0,
+                    &CoherenceCtx {
+                        ex_w,
+                        ex_h,
+                        tiling: cfg.tiling,
+                        valid: valid_bool,
+                    },
+                ) {
                     candidates.push((c.0, c.1, true));
                 }
             }
             if y > 0 {
                 let (ux, uy) = source[idx - w as usize];
-                if let Some(c) = step_coherence(ux, uy, 0, 1, ex_w, ex_h, cfg.tiling, valid_bool) {
+                if let Some(c) = step_coherence(
+                    ux,
+                    uy,
+                    0,
+                    1,
+                    &CoherenceCtx {
+                        ex_w,
+                        ex_h,
+                        tiling: cfg.tiling,
+                        valid: valid_bool,
+                    },
+                ) {
                     candidates.push((c.0, c.1, true));
                 }
             }
