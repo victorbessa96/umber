@@ -1354,13 +1354,13 @@ impl BakesPanel {
         queue: &umber_gpu::WgpuQueue,
         dispatch: &BakeDispatch<'_>,
     ) {
-        let BakeDispatch {
-            mesh,
-            plan,
-            skew_tiles,
-            skew_skipped,
-            sets,
-        } = dispatch;
+        let (mesh, plan, skew_tiles, skew_skipped, sets) = (
+            dispatch.mesh,
+            &dispatch.plan,
+            &dispatch.skew_tiles,
+            &dispatch.skew_skipped,
+            &dispatch.sets,
+        );
         let mut jobs = Vec::new();
         let mut skew_jobs = Vec::new();
         for set in &sets {
@@ -1394,7 +1394,9 @@ impl BakesPanel {
             jobs,
             skew_jobs,
         };
-        self.start_job(count, skipped, skew_skipped, move || run_bake(request));
+        self.start_job(count, skipped, skew_skipped.clone(), move || {
+            run_bake(request)
+        });
     }
 
     /// Spawns `work` as the panel's bake job and shows the in-flight
