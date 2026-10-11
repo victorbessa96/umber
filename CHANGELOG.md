@@ -57,6 +57,38 @@ and the AI automation surface — all six items in one morning.
 - i18n — fluent catalogs, pt-BR first target, the top-surface migration (`e493c60`)
 - AI agent session — the JSONL automation surface (`7d2fcad`)
 
+### The P1 tier closed (2026-10-10/11, the overnight)
+
+Every P1 requirements row built, marked, or honestly boundary'd in one
+overnight — ~30 kills across opencode, claude (opus + sonnet), and the
+dragon's own authoring.
+
+- Straight-line constraint + angle snap (`33b796f`) — the stroke filter, 9 tests
+- Polygon fill (`1329e8d`) — the four pixel-mask fills, scanline even-odd, 10 tests
+- History window (`9af4c2f`) — click-to-time-travel, the undo-jump semantics
+- The smart layer tier (`4cbaf21`) — instancing with cycle rejection, anchors,
+  smart materials + masks, three example presets ship in assets/smart/
+- Paint-what-you-see (`b2306c6`) — the Screen projection, live raycast v1
+  (the deferred Mari buffer = the named follow-up)
+- USD export (`897e323`) — .usda + UsdShade/OpenPBR, the importer round-trip
+  proven at runtime, 8/8 tests
+- Bake mode UI (`3733e5e`) — skew correction (paintable), auto-rebake,
+  the bake log with jump-to-setting, the cage viz
+- Path tools (`cb3e435`) — the replay engine, per-vertex size/opacity, filled paths
+- Mesh-map import (`00ee9d7`) — the folder-drop convention importer,
+  every import a new layer
+- The merge story (`a26d5e1`) — docs/merge-story.md: the five git-shaped
+  properties + the trap-gate tooling (scripts/verify-kill.sh)
+- Post-effects stack (`86e77ff`+`a523647`+`112b378`) — the chain model, the
+  WGSL passes, the PostStack render-graph + panel; the mesh→HDR-texture
+  wiring = the named follow-up (the panel says so)
+- HDR surface output (`eaa776a`+`fb96668`) — the capability model with the
+  eframe boundary PROVEN in-module (no format/colorspace hook in 0.36);
+  the surface switch gates on an eframe upgrade
+- Example-based texture synthesis (`b0dba14`) — the synth node: 3-level
+  pyramid, neighborhood+coherence scoring, Tiled/RandomWalk/Inpaint,
+  11 judgment calls stated, 7 tests
+
 ### The frontier — post-wave-6 (2026-10-10)
 
 - 8K export — the audit, the presets, the end-to-end 8192² proof (`cd668a3`)
