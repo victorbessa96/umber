@@ -1377,7 +1377,7 @@ impl BakesPanel {
             }
         }
         let count = jobs.len() + skew_jobs.len();
-        let skipped = dispatch.plan.skipped;
+        let skipped = dispatch.plan.skipped.clone();
         let request = BakeRequest {
             device: device.clone(),
             queue: queue.clone(),
