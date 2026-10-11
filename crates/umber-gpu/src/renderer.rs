@@ -203,6 +203,14 @@ pub struct GpuContext {
     /// LUT (`None`) — renders the pre-LUT bytes. Same always-populated
     /// pattern as `fallback_env_view`.
     identity_lut: crate::display_lut::DisplayLut,
+    /// The HDR surface-color-space probe result (§5 P1 row 85,
+    /// `crate::hdr`): always [`crate::hdr::HdrProbe::NotExposed`] in
+    /// this version — this context holds no `wgpu::Surface` to query
+    /// (see `crate::hdr`'s module boundary note). `pub` so umber-app can
+    /// weigh a requested [`crate::hdr::HdrMode`] against it
+    /// (`HdrMode::effective`) without this crate needing an i18n-facing
+    /// getter.
+    pub hdr_probe: crate::hdr::HdrProbe,
 }
 
 /// Depth format used by the viewport mesh pipeline when depth is enabled.
@@ -679,6 +687,11 @@ impl GpuContext {
 
         let (fallback_env_view, env_sampler) = Self::fallback_env_resources(&device);
 
+        // HDR surface probe (§5 P1 row 85, `crate::hdr`): `None` because
+        // this context is never handed a `wgpu::Surface` to query (see
+        // the module's boundary note) — eframe owns the real surface.
+        let hdr_probe = crate::hdr::probe(None);
+
         // Wireframe overlay pipeline (Wave-4 item 7): the SAME group-0
         // layout object as the mesh pass (the shader only declares
         // binding 0 — unused layout entries are legal), plus a group-1
@@ -846,6 +859,7 @@ impl GpuContext {
             grid_layout,
             display_lut_layout,
             identity_lut,
+            hdr_probe,
         }
     }
 

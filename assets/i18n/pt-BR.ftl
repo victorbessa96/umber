@@ -469,3 +469,10 @@ path =
     .clear = Limpar caminho
     .no-paint = Sem sessão de pintura — repetir precisa do alvo da GPU.
     .need-points = Adicione ao menos dois pontos para repetir.
+
+## Saída de superfície HDR (§5, linha P1 85)
+
+display-hdr =
+    .toggle = Saída HDR
+    .reason-not-exposed = Ainda não disponível: a camada de janelas desta versão (eframe) não expõe o espaço de cor da superfície, então o umber não pode perguntar ao display se ele suporta HDR.
+    .reason-sdr-only = Este adaptador ou superfície só ofereceu o espaço de cor SDR.

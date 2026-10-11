@@ -96,12 +96,21 @@ struct PanelViewer<'a> {
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
     display_lut_state: &'a mut display_panel::DisplayLutState,
-    /// The device display LUT both GPU views sample.
-    display_lut: &'a umber_gpu::DisplayLut,
+    /// The device display LUT both GPU views sample, already narrowed
+    /// by the EFFECTIVE HDR mode (`HdrMode::select_lut` — `None` once
+    /// HDR is live: the SDR table's transfer function must not apply to
+    /// an HDR surface). `Some` unconditionally today, since the
+    /// EFFECTIVE mode is always `Sdr` in this eframe version (see
+    /// `umber_gpu::hdr`'s module boundary note) — the type stays
+    /// `Option` so the bypass needs no signature change once it isn't.
+    display_lut: Option<&'a umber_gpu::DisplayLut>,
     /// The post-effects chain (the Display panel's postfx section).
     postfx: &'a mut umber_gpu::postfx::PostChain,
     /// The postfx section's session state (add pick, drag in flight).
     postfx_panel: &'a mut postfx_panel::PostFxPanel,
+    /// The requested HDR surface mode (§5 P1 row 85); the Display
+    /// panel's HDR row edits this.
+    hdr_mode: &'a mut umber_gpu::HdrMode,
 }
 
 impl TabViewer for PanelViewer<'_> {
@@ -129,18 +138,16 @@ impl TabViewer for PanelViewer<'_> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
-            Panel::Viewport => self.viewport.ui(
-                ui,
-                self.gpu,
-                self.paint.as_deref_mut(),
-                Some(self.display_lut),
-            ),
+            Panel::Viewport => {
+                self.viewport
+                    .ui(ui, self.gpu, self.paint.as_deref_mut(), self.display_lut)
+            }
             Panel::UvView => self.uv_view.ui(
                 ui,
                 self.mesh,
                 self.gpu,
                 self.paint.as_deref_mut(),
-                Some(self.display_lut),
+                self.display_lut,
                 Some(&mut *self.polygon_fill),
                 Some(&mut *self.path_tool),
             ),
@@ -246,6 +253,8 @@ impl TabViewer for PanelViewer<'_> {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     display_panel::show(ui, self.display, self.display_lut_state);
                     ui.separator();
+                    display_panel::hdr_row(ui, self.hdr_mode, &self.gpu.hdr_probe);
+                    ui.separator();
                     postfx_panel::show(ui, self.postfx, self.postfx_panel);
                 });
             }
@@ -330,6 +339,13 @@ pub struct UmberApp {
     /// Shading mode (View menu rows, V cycles lit ↔ unlit). Synced
     /// into the viewport each frame; Lit by default (today's render).
     view_mode: umber_gpu::ViewMode,
+    /// The requested HDR surface mode (§5 P1 row 85). Persisted as a
+    /// user preference (`display_panel::hdr_pref_path`), not a project
+    /// field — see `umber_gpu::hdr`'s module boundary note. The EFFECTIVE
+    /// mode a frame actually draws with is `hdr_mode.effective(&gpu.hdr_probe)`,
+    /// computed fresh each frame rather than stored, since `gpu.hdr_probe`
+    /// never changes within a session.
+    hdr_mode: umber_gpu::HdrMode,
 }
 
 impl UmberApp {
@@ -395,6 +411,13 @@ impl UmberApp {
         let mut graph = GraphPanel::new();
         graph.load_plugins(&plugins::plugin_paths());
 
+        // The HDR request (§5 P1 row 85): the persisted preference, or
+        // Sdr if there is none yet — a missing/unrecognized file is not
+        // an error (same contract as the locale preference).
+        let hdr_mode = display_panel::hdr_pref_path()
+            .and_then(|path| display_panel::read_hdr_pref(&path))
+            .unwrap_or_default();
+
         Ok(Self {
             state: AppState {
                 paint,
@@ -414,6 +437,7 @@ impl UmberApp {
             show_wireframe: false,
             show_grid: false,
             view_mode: umber_gpu::ViewMode::default(),
+            hdr_mode,
         })
     }
 }
@@ -760,6 +784,14 @@ impl eframe::App for UmberApp {
             .project_dir
             .as_ref()
             .map(|dir| umber_core::AssetStore::new(dir));
+        // The LUT-chain adaptation (§5 P1 row 85, `umber_gpu::hdr`): HDR
+        // bypasses the SDR display LUT the same way a data view-mode
+        // already does (`ViewMode::select_lut`) — composed here, once
+        // per frame, rather than threaded through the render callbacks.
+        let effective_lut = self
+            .hdr_mode
+            .effective(&self.gpu.hdr_probe)
+            .select_lut(Some(&self.display_lut));
         CentralPanel::default().show(ui, |ui| {
             let mut viewer = PanelViewer {
                 viewport: &mut self.state.viewport,
@@ -777,11 +809,12 @@ impl eframe::App for UmberApp {
                 path_tool: &mut self.state.path_tool,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
-                display_lut: &self.display_lut,
+                display_lut: effective_lut,
                 postfx: &mut self.state.postfx,
                 postfx_panel: &mut self.state.postfx_panel,
                 mesh_import: &mut self.state.mesh_import,
                 store: store.as_ref(),
+                hdr_mode: &mut self.hdr_mode,
             };
             DockArea::new(&mut self.dock)
                 .style(Style::from_egui(ui.style()))

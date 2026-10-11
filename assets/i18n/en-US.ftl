@@ -481,3 +481,10 @@ path =
     .clear = Clear path
     .no-paint = No paint session — replay needs the GPU target.
     .need-points = Add at least two points to replay.
+
+## HDR surface output (§5 P1 row 85)
+
+display-hdr =
+    .toggle = HDR output
+    .reason-not-exposed = Not available yet: this build's windowing layer (eframe) doesn't expose the surface's color space, so umber can't ask the display whether it supports HDR.
+    .reason-sdr-only = This adapter or surface only offered the SDR color space.

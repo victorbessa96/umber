@@ -25,10 +25,19 @@
 //! locale picker of `docs/specs/i18n-design.md`) — the app's one
 //! settings surface today. Real OCIO configs stay gated behind
 //! `umber-color`'s `ocio` feature.
+//!
+//! [`hdr_row`] adds the HDR output row (requirements.md §5, P1 row 85):
+//! a single checkbox behind which the whole feature sits in v1 — see
+//! `umber_gpu::hdr`'s module doc for the honest eframe boundary this
+//! panel reports (disabled + a visible reason, not a hardware verdict)
+//! and for why the request persists as a user preference
+//! ([`hdr_pref_path`]), the same pattern as the locale preference
+//! (`crate::i18n::locale_pref_path`), rather than in `.umber` project.
 
 use crate::i18n;
 use egui::{Color32, Ui};
 use fluent::FluentValue;
+use std::path::{Path, PathBuf};
 use umber_color::{
     apply_display_chain, build_display_lut, DisplaySettings, DisplayTransform, DISPLAY_LUT_BYTES,
 };
@@ -240,6 +249,76 @@ fn language_row(ui: &mut Ui) {
     }
 }
 
+/// The HDR output row (§5 P1 row 85, `umber_gpu::hdr`): a checkbox
+/// bound to the REQUEST (`hdr_mode`), disabled whenever `probe` offers
+/// no HDR space. The disabled reason is a visible label, not a
+/// hover-only tooltip — a disabled control's reason should be readable
+/// without hunting for it. Persists the request immediately on change
+/// (best-effort — a failed write logs and keeps the session's choice,
+/// the same contract [`crate::i18n::set_locale_persisted`] uses).
+pub fn hdr_row(ui: &mut Ui, hdr_mode: &mut umber_gpu::HdrMode, probe: &umber_gpu::HdrProbe) {
+    let mut requested_on = hdr_mode.space().is_some();
+    let available = probe.is_available();
+    let response = ui.add_enabled(
+        available,
+        egui::Checkbox::new(&mut requested_on, i18n::tr("display-hdr.toggle")),
+    );
+    if available && response.changed() {
+        *hdr_mode = if requested_on {
+            probe
+                .best()
+                .map_or(umber_gpu::HdrMode::Sdr, umber_gpu::HdrMode::Hdr)
+        } else {
+            umber_gpu::HdrMode::Sdr
+        };
+        if let Some(path) = hdr_pref_path() {
+            if let Err(err) = write_hdr_pref(&path, *hdr_mode) {
+                log::warn!("could not save HDR preference to {}: {err}", path.display());
+            }
+        }
+    }
+    if let Some(reason) = probe.disabled_reason() {
+        // Literal keys at each arm (not a variable) so the i18n
+        // completeness scan sees both call sites.
+        let text = match reason {
+            umber_gpu::DisabledReason::NotExposed => i18n::tr("display-hdr.reason-not-exposed"),
+            umber_gpu::DisabledReason::SdrOnly => i18n::tr("display-hdr.reason-sdr-only"),
+        };
+        ui.label(text);
+    }
+}
+
+/// The HDR preference file: a sibling of the locale/brushes/plugins
+/// per-user files (see [`crate::i18n::locale_pref_path`]). `None` when
+/// no home is discoverable.
+pub fn hdr_pref_path() -> Option<PathBuf> {
+    hdr_pref_path_from(umber_brush::preset_library::user_preset_dir().as_deref())
+}
+
+/// Pure half of [`hdr_pref_path`].
+pub fn hdr_pref_path_from(user_brush_dir: Option<&Path>) -> Option<PathBuf> {
+    user_brush_dir
+        .and_then(Path::parent)
+        .map(|base| base.join("hdr-mode"))
+}
+
+/// The persisted HDR request, `None` if the file is missing, blank, or
+/// holds a token this build does not recognize
+/// ([`umber_gpu::HdrMode::from_token`]) — the caller's `unwrap_or_default`
+/// then lands on `Sdr` rather than guessing.
+pub fn read_hdr_pref(path: &Path) -> Option<umber_gpu::HdrMode> {
+    let text = std::fs::read_to_string(path).ok()?;
+    umber_gpu::HdrMode::from_token(text.trim())
+}
+
+/// Persists `mode`'s token (creating the parent dir).
+pub fn write_hdr_pref(path: &Path, mode: umber_gpu::HdrMode) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("{}\n", mode.token()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +483,46 @@ mod tests {
             build_display_lut(&DisplaySettings::default()),
             umber_gpu::identity_lut_bytes()
         );
+    }
+
+    fn fresh_hdr_tmpdir() -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "umber-app-hdr-pref-test-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("test tmpdir must be creatable");
+        dir
+    }
+
+    #[test]
+    fn hdr_pref_path_sits_beside_the_brushes_dir() {
+        let dir = fresh_hdr_tmpdir();
+        let path = hdr_pref_path_from(Some(dir.join("brushes").as_path())).unwrap();
+        assert_eq!(path, dir.join("hdr-mode"));
+        assert!(hdr_pref_path_from(None).is_none());
+    }
+
+    #[test]
+    fn hdr_pref_round_trips_and_rejects_unknown_tokens() {
+        let dir = fresh_hdr_tmpdir();
+        let path = dir.join("hdr-mode");
+        assert_eq!(read_hdr_pref(&path), None, "no file yet");
+
+        write_hdr_pref(&path, umber_gpu::HdrMode::Hdr(umber_gpu::HdrSpace::Pq))
+            .expect("write must succeed");
+        assert_eq!(
+            read_hdr_pref(&path),
+            Some(umber_gpu::HdrMode::Hdr(umber_gpu::HdrSpace::Pq))
+        );
+
+        write_hdr_pref(&path, umber_gpu::HdrMode::Sdr).expect("write must succeed");
+        assert_eq!(read_hdr_pref(&path), Some(umber_gpu::HdrMode::Sdr));
+
+        // A hand-edited or future-version token: `None`, not a guess —
+        // the caller's `unwrap_or_default` then lands on `Sdr`.
+        std::fs::write(&path, "hdr11\n").unwrap();
+        assert_eq!(read_hdr_pref(&path), None);
     }
 }
