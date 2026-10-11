@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
 log = { workspace = true }
 umber-mesh = { workspace = true }
 umber-graph = { workspace = true }
