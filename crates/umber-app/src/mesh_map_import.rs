@@ -599,7 +599,7 @@ impl MeshMapImportState {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .filter_map(|f| f.path().map(|p| p.to_path_buf()))
                 .collect()
         });
         if !dropped.is_empty() {

@@ -237,7 +237,7 @@ mod tests {
         let along = 10.0 * (drag - ray).cos();
         let expected = [(along * ray.cos()) as f32, (along * ray.sin()) as f32];
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 15.0 });
-        c.apply([0.0, 0.0]);
+        let _ = c.apply([0.0, 0.0]);
         let target = [(10.0 * drag.cos()) as f32, (10.0 * drag.sin()) as f32];
         let out = c.apply(target);
         assert!(
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn anchor_resets_on_reset() {
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 15.0 });
-        c.apply([1.0, 1.0]);
+        let _ = c.apply([1.0, 1.0]);
         assert_eq!(c.anchor(), Some([1.0, 1.0]));
         c.reset();
         assert_eq!(c.anchor(), None, "stroke end must drop the anchor");
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn zero_length_vector_returns_the_anchor() {
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 15.0 });
-        c.apply([4.0, 2.0]);
+        let _ = c.apply([4.0, 2.0]);
         assert_eq!(c.apply([4.0, 2.0]), [4.0, 2.0]);
     }
 
@@ -278,14 +278,14 @@ mod tests {
         assert_eq!(sanitize_snap_deg(30.0), 30.0);
         // Through the filter: a degenerate step passes through like Line.
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 0.0 });
-        c.apply([0.0, 0.0]);
+        let _ = c.apply([0.0, 0.0]);
         assert_eq!(c.apply([3.0, 4.0]), [3.0, 4.0]);
     }
 
     #[test]
     fn non_finite_target_holds_the_anchor() {
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 15.0 });
-        c.apply([3.0, 7.0]);
+        let _ = c.apply([3.0, 7.0]);
         assert_eq!(c.apply([f32::NAN, 0.0]), [3.0, 7.0]);
         assert_eq!(
             c.anchor(),
@@ -299,7 +299,7 @@ mod tests {
         // Full-circle quantization: straight back (−x) with a 90° snap
         // holds −x (180° is a 90° multiple), it does not collapse to +x.
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 90.0 });
-        c.apply([0.0, 0.0]);
+        let _ = c.apply([0.0, 0.0]);
         let out = c.apply([-8.0, 0.5]);
         assert!(
             close(out, [-8.0, 0.0]),

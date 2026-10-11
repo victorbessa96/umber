@@ -1392,7 +1392,7 @@ fn tile_uv_offset(tile: u16) -> (f32, f32) {
 fn texel_center_uv(tile: u16, x: u32, y: u32, texels_per_uv: f32) -> [f32; 2] {
     let (tile_u, tile_v) = tile_uv_offset(tile);
     [
-        tile_u + (f32::from(x) + 0.5) / texels_per_uv,
+        tile_u + (x as f32 + 0.5) / texels_per_uv,
         tile_v + 1.0 - (f32::from(y) + 0.5) / texels_per_uv,
     ]
 }
