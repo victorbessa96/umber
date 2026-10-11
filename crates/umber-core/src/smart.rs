@@ -72,11 +72,7 @@ impl AnchorRef {
     /// [`AnchorError::UnknownLayer`] when the layer is missing — including
     /// the deleted case (a layer removed after the anchor bound it);
     /// [`AnchorError::UnknownChannel`] when `set` names no such channel.
-    pub fn resolve(
-        &self,
-        stack: &LayerStack,
-        set: Option<&TextureSet>,
-    ) -> Result<(), AnchorError> {
+    pub fn resolve(&self, stack: &LayerStack, set: Option<&TextureSet>) -> Result<(), AnchorError> {
         if stack.layer(self.layer_id).is_none() {
             return Err(AnchorError::UnknownLayer(self.layer_id));
         }
@@ -442,10 +438,7 @@ impl SmartMask {
     /// # Errors
     ///
     /// [`SmartError::EmptyMask`] when the preset has no ops.
-    pub fn compose_scalar(
-        &self,
-        lookup: &dyn Fn(&MaskSource) -> f32,
-    ) -> Result<f32, SmartError> {
+    pub fn compose_scalar(&self, lookup: &dyn Fn(&MaskSource) -> f32) -> Result<f32, SmartError> {
         if self.ops.is_empty() {
             return Err(SmartError::EmptyMask(self.name.clone()));
         }
@@ -478,9 +471,7 @@ impl SmartMask {
                         }
                     } else {
                         let t = ((acc - low) / (high - low)).clamp(0.0, 1.0);
-                        let gamma = if stage.params.gamma.is_finite()
-                            && stage.params.gamma > 0.0
-                        {
+                        let gamma = if stage.params.gamma.is_finite() && stage.params.gamma > 0.0 {
                             stage.params.gamma
                         } else {
                             1.0
@@ -635,10 +626,10 @@ mod tests {
             empty.apply(&mut stack),
             Err(SmartError::EmptyPreset(_))
         ));
-        assert!(SmartMaterial::from_json(
-            r#"{"name":"x","layers":[{"name":"y","kind":"voxel"}]}"#
-        )
-        .is_err());
+        assert!(
+            SmartMaterial::from_json(r#"{"name":"x","layers":[{"name":"y","kind":"voxel"}]}"#)
+                .is_err()
+        );
     }
 
     fn mask_fixture() -> SmartMask {
@@ -721,14 +712,12 @@ mod tests {
     fn shipped_presets_parse_apply_and_compose() {
         // The files under assets/smart/ are the static contract: they must
         // parse under this schema and apply cleanly (guards schema drift).
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/smart");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/smart");
         for (file, layers, anchors) in [
             ("worn-metal.umbersmart", 4, 3),
             ("painted-wood.umbersmart", 4, 2),
         ] {
-            let preset =
-                SmartMaterial::load_file(&root.join(file)).expect("shipped preset loads");
+            let preset = SmartMaterial::load_file(&root.join(file)).expect("shipped preset loads");
             let mut stack = LayerStack::new();
             let result = preset.apply(&mut stack).expect("shipped preset applies");
             assert_eq!(result.layer_ids.len(), layers, "{file}");
@@ -756,7 +745,12 @@ mod tests {
         mask.apply_to_mask_slot(&mut stack, id)
             .expect("mask slot applies");
         assert_eq!(
-            stack.layer(id).unwrap().mask.as_ref().map(|m| m.name.as_str()),
+            stack
+                .layer(id)
+                .unwrap()
+                .mask
+                .as_ref()
+                .map(|m| m.name.as_str()),
             Some("test")
         );
         assert!(

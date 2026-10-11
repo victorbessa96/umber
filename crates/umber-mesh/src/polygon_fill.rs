@@ -68,8 +68,8 @@ use std::mem::size_of;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
-use crate::MeshData;
 use crate::raycast::{ray_intersect, RayHit};
+use crate::MeshData;
 
 /// The lasso click-path cap (v1): further clicks are ignored, never an
 /// error — a 256-gon already covers any hand-drawn lasso, and the bound
@@ -296,9 +296,8 @@ pub fn rasterize_polygon_mask(
     let x1 = ((((max_u - tu) * width as f32 - 0.5).floor() as i64).min(width as i64 - 1)).max(0)
         as usize;
     let y0 = ((((tv + 1.0 - max_v) * height as f32 - 0.5).floor() as i64).max(0)) as usize;
-    let y1 = (((((tv + 1.0 - min_v) * height as f32 - 0.5).floor() as i64)
-        .min(height as i64 - 1))
-    .max(0)) as usize;
+    let y1 = (((((tv + 1.0 - min_v) * height as f32 - 0.5).floor() as i64).min(height as i64 - 1))
+        .max(0)) as usize;
     if x0 > x1 || y0 > y1 {
         return out;
     }
@@ -331,10 +330,7 @@ fn pos_key(mesh: &MeshData, idx: u32) -> (u8, [u32; 3]) {
 /// is its own island — same position but split UVs stays split, which is
 /// exactly the island definition).
 fn uv_key(mesh: &MeshData, idx: u32) -> (u8, [u32; 5]) {
-    match (
-        mesh.positions.get(idx as usize),
-        mesh.uvs.get(idx as usize),
-    ) {
+    match (mesh.positions.get(idx as usize), mesh.uvs.get(idx as usize)) {
         (Some(p), Some(uv))
             if p.iter().all(|v| v.is_finite()) && uv.iter().all(|v| v.is_finite()) =>
         {
@@ -379,7 +375,11 @@ fn flood_by_key<K: Eq + std::hash::Hash + Copy>(
             tri_keys.push([None, None, None]);
             continue;
         };
-        let keys = [Some(key(mesh, i0)), Some(key(mesh, i1)), Some(key(mesh, i2))];
+        let keys = [
+            Some(key(mesh, i0)),
+            Some(key(mesh, i1)),
+            Some(key(mesh, i2)),
+        ];
         for kk in keys.iter().flatten() {
             owners.entry(*kk).or_default().push(k);
         }
@@ -517,13 +517,7 @@ mod tests {
             assert!(!point_in_polygon(outside, &sq), "{outside:?} outside");
         }
         // Boundary is inclusive: edges…
-        for edge in [
-            [1.0, 0.5],
-            [0.0, 0.5],
-            [0.5, 0.0],
-            [0.5, 1.0],
-            [0.25, 0.0],
-        ] {
+        for edge in [[1.0, 0.5], [0.0, 0.5], [0.5, 0.0], [0.5, 1.0], [0.25, 0.0]] {
             assert!(point_in_polygon(edge, &sq), "{edge:?} on edge");
         }
         // …and vertices.
@@ -568,14 +562,17 @@ mod tests {
     #[test]
     fn degenerate_loops_contain_nothing() {
         let sq = square();
-        for empty in [&[][..], &[ [0.0, 0.0] ][..], &sq[..2]] {
+        for empty in [&[][..], &[[0.0, 0.0]][..], &sq[..2]] {
             assert!(!point_in_polygon([0.5, 0.5], empty));
         }
         assert!(!point_in_polygon([f32::NAN, 0.5], &sq));
         assert!(!point_in_polygon([0.5, f32::INFINITY], &sq));
         // NaN edges never toggle and never bound: far outside stays
         // outside even when the loop's closing edge is real.
-        assert!(!point_in_polygon([5.0, 5.0], &[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0]]));
+        assert!(!point_in_polygon(
+            [5.0, 5.0],
+            &[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0]]
+        ));
         // A zero-length edge is its own neighborhood, not a hole.
         assert!(point_in_polygon(
             [0.5, 0.5],
@@ -636,11 +633,8 @@ mod tests {
         // A genuinely disjoint shell stays separate.
         let mut two = mesh.clone();
         let base = two.positions.len() as u32;
-        two.positions.extend_from_slice(&[
-            [9.0, 9.0, 0.0],
-            [10.0, 9.0, 0.0],
-            [9.5, 10.0, 0.0],
-        ]);
+        two.positions
+            .extend_from_slice(&[[9.0, 9.0, 0.0], [10.0, 9.0, 0.0], [9.5, 10.0, 0.0]]);
         two.normals.extend_from_slice(&[[0.0, 0.0, 1.0]; 3]);
         two.uvs
             .extend_from_slice(&[[0.1, 0.1], [0.2, 0.1], [0.15, 0.2]]);
@@ -687,7 +681,10 @@ mod tests {
         // Malformed seeds degrade to empty sets (nothing covered).
         let empty = FillMask::mesh_island(&mesh, 99);
         assert!(!empty.covers([0.25, 0.25], 0));
-        assert_eq!(FillMask::uv_chunk(&mesh, 99), FillMask::UvChunk { triangles: vec![] });
+        assert_eq!(
+            FillMask::uv_chunk(&mesh, 99),
+            FillMask::UvChunk { triangles: vec![] }
+        );
     }
 
     /// The UV-view pick agrees with the rasterizer's overlap rule

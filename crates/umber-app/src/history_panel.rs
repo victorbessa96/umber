@@ -253,7 +253,10 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document) {
     });
     ui.separator();
     let n = doc.history.len();
-    ui.label(tr_args("history.journal", [("count", FluentValue::from(n))]));
+    ui.label(tr_args(
+        "history.journal",
+        [("count", FluentValue::from(n))],
+    ));
     ui.separator();
     if doc.session_history.is_empty() {
         ui.weak(tr("history.empty"));

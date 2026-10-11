@@ -154,11 +154,7 @@ impl Default for LineConstraint {
 ///   `≥ 0` so stamps never jump behind the anchor). Zero-length vectors
 ///   return the anchor (no direction exists).
 #[must_use]
-pub fn constrain_point(
-    anchor: [f32; 2],
-    target: [f32; 2],
-    mode: LineConstraintMode,
-) -> [f32; 2] {
+pub fn constrain_point(anchor: [f32; 2], target: [f32; 2], mode: LineConstraintMode) -> [f32; 2] {
     match mode {
         LineConstraintMode::Off | LineConstraintMode::Line => target,
         LineConstraintMode::AngleSnap { snap_deg } => {
@@ -254,7 +250,10 @@ mod tests {
             "a 40° drag with a 15° snap must land on 45°, got {out:?}, want {expected:?}"
         );
         // And it must actually differ from the raw cursor (the snap moved it).
-        assert!(!close(out, target), "the snap must move an off-multiple drag");
+        assert!(
+            !close(out, target),
+            "the snap must move an off-multiple drag"
+        );
     }
 
     #[test]
@@ -293,7 +292,11 @@ mod tests {
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 15.0 });
         c.apply([3.0, 7.0]);
         assert_eq!(c.apply([f32::NAN, 0.0]), [3.0, 7.0]);
-        assert_eq!(c.anchor(), Some([3.0, 7.0]), "NaN must not poison the anchor");
+        assert_eq!(
+            c.anchor(),
+            Some([3.0, 7.0]),
+            "NaN must not poison the anchor"
+        );
     }
 
     #[test]
@@ -303,6 +306,9 @@ mod tests {
         let mut c = LineConstraint::new(LineConstraintMode::AngleSnap { snap_deg: 90.0 });
         c.apply([0.0, 0.0]);
         let out = c.apply([-8.0, 0.5]);
-        assert!(close(out, [-8.0, 0.0]), "must project onto the 180° ray, got {out:?}");
+        assert!(
+            close(out, [-8.0, 0.0]),
+            "must project onto the 180° ray, got {out:?}"
+        );
     }
 }

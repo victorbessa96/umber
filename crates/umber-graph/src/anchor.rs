@@ -72,12 +72,14 @@ pub fn resolve_anchor_inputs(
     let mut out = Vec::new();
     for (name, pv) in params {
         if let ParamValue::Anchor(anchor) = pv {
-            let value = external.get(&anchor.key()).ok_or_else(|| EvalError::Anchor {
-                node: node_id,
-                layer: anchor.layer_id,
-                channel: anchor.channel.clone(),
-                reason: "layer deleted or never composited".into(),
-            })?;
+            let value = external
+                .get(&anchor.key())
+                .ok_or_else(|| EvalError::Anchor {
+                    node: node_id,
+                    layer: anchor.layer_id,
+                    channel: anchor.channel.clone(),
+                    reason: "layer deleted or never composited".into(),
+                })?;
             out.push((name.clone(), value.clone()));
         }
     }
@@ -119,14 +121,15 @@ impl NodeImpl for AnchorNode {
             }
         };
         let anchor = AnchorRef::new(layer_id, channel);
-        ctx.external.get(&anchor.key()).cloned().ok_or_else(|| {
-            EvalError::Anchor {
+        ctx.external
+            .get(&anchor.key())
+            .cloned()
+            .ok_or_else(|| EvalError::Anchor {
                 node: 0,
                 layer: anchor.layer_id,
                 channel: anchor.channel,
                 reason: "layer deleted or never composited".into(),
-            }
-        })
+            })
     }
 }
 
@@ -142,17 +145,12 @@ mod tests {
     use std::collections::HashMap;
 
     fn image_output() -> NodeOutput {
-        NodeOutput::Image(
-            crate::ImageBuffer::filled(2, 2, [9, 9, 9, 255]).expect("2x2 fills"),
-        )
+        NodeOutput::Image(crate::ImageBuffer::filled(2, 2, [9, 9, 9, 255]).expect("2x2 fills"))
     }
 
     #[test]
     fn anchor_key_is_stable() {
-        assert_eq!(
-            AnchorRef::new(7, "baseColor").key(),
-            "anchor:7:baseColor"
-        );
+        assert_eq!(AnchorRef::new(7, "baseColor").key(), "anchor:7:baseColor");
     }
 
     #[test]
@@ -171,13 +169,8 @@ mod tests {
         });
         let mut inputs = HashMap::new();
         inputs.insert("anchor:7:baseColor".to_string(), image_output());
-        let out = eval_graph(
-            &g,
-            &NodeRegistry::seeded(),
-            inputs,
-            &EvalContext::new(2, 2),
-        )
-        .expect("anchored graph evaluates");
+        let out = eval_graph(&g, &NodeRegistry::seeded(), inputs, &EvalContext::new(2, 2))
+            .expect("anchored graph evaluates");
         assert_eq!(out[&2], image_output());
     }
 
@@ -224,8 +217,7 @@ mod tests {
         register_anchor_nodes(&mut registry);
         let imp = registry.get("anchor").expect("registered");
         let mut ctx = EvalContext::new(2, 2);
-        ctx.external
-            .insert("anchor:3:AO".into(), image_output());
+        ctx.external.insert("anchor:3:AO".into(), image_output());
         let params = vec![
             ("layer_id".into(), ParamValue::Int(3)),
             ("channel".into(), ParamValue::Asset("AO".into())),
