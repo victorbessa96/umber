@@ -268,6 +268,7 @@ mod tests {
                 alpha,
                 hardness: 0.25,
                 pressure_gamma: 1.0,
+                wash_mode: crate::WashMode::BuildUp,
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

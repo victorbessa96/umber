@@ -137,6 +137,15 @@ impl TabViewer for PanelViewer<'_> {
                 if let Some(paint) = self.paint.as_deref_mut() {
                     paint.sync_tool(&mut self.brush.tool);
                     paint.sync_symmetry(&mut self.brush.symmetry);
+                    // ... plus the active preset's wash mode (build-up
+                    // when no preset is selected).
+                    let wash = self
+                        .brush
+                        .active_preset()
+                        .map_or(umber_brush::WashMode::BuildUp, |preset| {
+                            preset.params.wash_mode
+                        });
+                    paint.sync_wash_mode(wash);
                 }
                 // One collapsible row per fill layer (projection picker +
                 // v1 source editor); edits run through Document as

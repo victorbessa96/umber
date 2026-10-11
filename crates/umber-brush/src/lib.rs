@@ -39,7 +39,7 @@ pub mod spacing;
 pub mod symmetry;
 pub mod wiring;
 
-pub use dab_adapter::{BrushParams, DabAdapter};
+pub use dab_adapter::{opaque_linearize, wash_scale, BrushParams, DabAdapter, WashMode};
 pub use lazy_mouse::LazyMouse;
 pub use one_euro::{OneEuroError, OneEuroFilter, OneEuroScalar};
 pub use preset_library::{Library, LibraryEntry};

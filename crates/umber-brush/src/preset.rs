@@ -376,6 +376,7 @@ pub struct PresetFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WashMode;
 
     const EPS: f32 = 1e-6;
 
@@ -387,6 +388,7 @@ mod tests {
                 alpha: 0.33,
                 hardness: 0.77,
                 pressure_gamma: 2.2,
+                wash_mode: WashMode::Wash,
             },
             one_euro: OneEuroParams {
                 min_cutoff: 2.5,
@@ -525,6 +527,34 @@ mod tests {
         let back = BrushPreset::from_json(&without_spacing).expect("missing key must default");
         assert_eq!(back.spacing, SpacingConfig::default());
         assert_eq!(back.name, "Test Chisel");
+    }
+
+    #[test]
+    fn wash_mode_round_trips_and_old_files_default_to_build_up() {
+        // The fixture preset carries Wash: the byte-identical round trip
+        // above already proves the mode survives a save/load cycle.
+        assert_eq!(non_default_preset().params.wash_mode, WashMode::Wash);
+
+        // A pre-mode file (no `wash_mode` key under `params`) loads with
+        // historical build-up behavior instead of failing.
+        let valid = non_default_preset().to_json().expect("serialize");
+        let mut value: serde_json::Value = serde_json::from_str(&valid).expect("valid JSON");
+        value
+            .as_object_mut()
+            .expect("top-level object")
+            .get_mut("params")
+            .expect("params object")
+            .as_object_mut()
+            .expect("params is an object")
+            .remove("wash_mode");
+        let legacy = serde_json::to_string_pretty(&value).expect("re-serialize");
+        let back = BrushPreset::from_json(&legacy).expect("missing wash_mode must default");
+        assert_eq!(back.params.wash_mode, WashMode::BuildUp);
+        back.validate().expect("legacy preset must validate");
+        // ... while the Wash original validates too.
+        non_default_preset()
+            .validate()
+            .expect("wash preset must validate");
     }
 
     #[test]

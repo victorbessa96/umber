@@ -21,6 +21,7 @@ use umber_brush::preset_library::{user_preset_dir, Library};
 use umber_brush::symmetry::{RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
 use umber_brush::{
     BrushTool, CloneParams, EraseParams, MaskPaint, MirrorAxis, SmudgeParams, SymmetrySettings,
+    WashMode,
 };
 
 use crate::paint_state::PaintState;
@@ -210,6 +211,14 @@ impl BrushPanel {
         }
     }
 
+    /// The preset being edited, if one is selected (the paint session
+    /// reads its wash mode through this).
+    pub fn active_preset(&self) -> Option<&BrushPreset> {
+        self.active
+            .and_then(|i| self.library.entries.get(i))
+            .map(|entry| &entry.preset)
+    }
+
     /// The E shortcut: selects the eraser, restoring its banked channel
     /// flags. A no-op when it is already selected.
     pub fn select_eraser(&mut self) {
@@ -303,6 +312,27 @@ impl BrushPanel {
                     .text("Pressure gamma"),
             )
             .changed();
+
+        // Opacity accumulation: build-up lets overlapping stamps pile
+        // past the stroke opacity; wash normalizes the overlap to it
+        // (Krita wash mode via MyPaint's opaque_linearize).
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr("brush.wash-mode"));
+            changed |= ui
+                .selectable_value(
+                    &mut preset.params.wash_mode,
+                    WashMode::Wash,
+                    tr("brush.wash"),
+                )
+                .changed();
+            changed |= ui
+                .selectable_value(
+                    &mut preset.params.wash_mode,
+                    WashMode::BuildUp,
+                    tr("brush.build-up"),
+                )
+                .changed();
+        });
 
         ui.add_space(4.0);
         ui.strong("Stabilizer (one-euro)");
@@ -703,6 +733,7 @@ mod tests {
                 alpha,
                 hardness: 0.25,
                 pressure_gamma: 1.0,
+                wash_mode: umber_brush::WashMode::BuildUp,
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,
@@ -735,6 +766,40 @@ mod tests {
         assert!(panel.library.errors.is_empty());
         assert_eq!(panel.active, None);
         assert!(!panel.dirty);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wash_mode_toggle_persists_through_save_and_reload() {
+        let dir = fresh_tmpdir("wash-persist");
+        write_preset(&dir, "round.umberbrush", &test_preset("Round", 0.5));
+
+        let mut panel = BrushPanel::with_dirs(vec![dir.clone()]);
+        assert_eq!(panel.library.entries.len(), 1);
+        panel.active = Some(0);
+        assert_eq!(
+            panel.active_preset().map(|p| p.params.wash_mode),
+            Some(umber_brush::WashMode::BuildUp),
+            "legacy preset file loads as build-up"
+        );
+
+        // What the Wash/Build-up toggle row does: write through to the
+        // active preset and dirty the panel.
+        panel.library.entries[0].preset.params.wash_mode = umber_brush::WashMode::Wash;
+        panel.dirty = true;
+        panel.save_active();
+        assert!(!panel.dirty, "successful save clears dirty");
+
+        let fresh = Library::load_from_dirs(std::slice::from_ref(&dir));
+        assert_eq!(fresh.entries.len(), 1);
+        let back = &fresh.entries[0].preset;
+        assert_eq!(
+            back.params.wash_mode,
+            umber_brush::WashMode::Wash,
+            "the toggled mode must survive save + reload"
+        );
+        back.validate().expect("wash preset must validate");
 
         std::fs::remove_dir_all(&dir).ok();
     }

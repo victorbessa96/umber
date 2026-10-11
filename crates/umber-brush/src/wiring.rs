@@ -75,6 +75,16 @@ impl StrokeConditioner {
         })
     }
 
+    /// The live spacing density (dabs per radius of travel). The wash-mode
+    /// normalizer reads this as the stroke's mean overlap count, so the
+    /// linearization always matches the density that actually spaced the
+    /// stroke's dabs — even though that density is fixed at construction
+    /// today (preset spacing sync is a later slice).
+    #[must_use]
+    pub fn dabs_per_radius(&self) -> f32 {
+        self.spacing.dabs_per_radius
+    }
+
     /// Drop all per-stroke state (filters, cursor, banked partial dab).
     pub fn reset(&mut self) {
         self.pos_filter.reset();
@@ -205,6 +215,13 @@ mod tests {
         assert!(!c.is_live());
         let dabs = c.push(&event(0.0, 1.0, 0), 10.0);
         assert!(dabs.is_empty(), "post-reset event re-seeds");
+    }
+
+    #[test]
+    fn density_getter_reports_construction_density() {
+        // The wash normalizer reads the overlap count through this: it
+        // must be the density the spacing actually uses.
+        assert!((conditioner().dabs_per_radius() - 2.0).abs() <= EPS);
     }
 
     #[test]

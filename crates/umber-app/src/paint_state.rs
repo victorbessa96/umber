@@ -54,6 +54,12 @@
 //! Symmetry off skips the expansion entirely — byte-identical staging.
 //! The settings are session state: not in the project file (follow-up).
 //!
+//! Wash mode (`umber_brush::WashMode`, §2 line 16): the active preset's
+//! mode is adopted between strokes ([`PaintState::sync_wash_mode`]) and
+//! renormalizes staged paint dabs pre-splat ([`apply_wash_mode`], right
+//! after the retouch hook so smudge/clone/eraser and mask strokes keep
+//! build-up alphas). CPU-side only: no extra GPU surface, no shader arm.
+//!
 //! Quick mask (§2's P1 row, `umber_brush::quick_mask` — semantics,
 //! convention and the not-persisted/not-undoable rule live there): the
 //! session owns one [`QuickMask`]. `begin_stroke` snapshots its two modes
@@ -83,8 +89,8 @@ use egui::Pos2;
 use umber_brush::retouch::{DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
-    BrushParams, BrushTool, DabAdapter, MaskPaint, QuickMask, RgbaBuffer, StrokeConditioner,
-    StrokeEvent, SymTransform, SymmetrySettings,
+    wash_scale, BrushParams, BrushTool, DabAdapter, MaskPaint, QuickMask, RgbaBuffer,
+    StrokeConditioner, StrokeEvent, SymTransform, SymmetrySettings, WashMode,
 };
 use umber_core::undo::UndoStack;
 use umber_gpu::paint::Dab;
@@ -160,6 +166,11 @@ pub struct PaintState {
     /// Dab parameters every staged stroke uses (v1: the default brush;
     /// tests override the color to tell tiles' paint apart).
     brush: BrushParams,
+    /// How the live stroke's overlapping dabs accumulate, adopted from
+    /// the active preset between strokes ([`Self::sync_wash_mode`]).
+    /// `BuildUp` (the default) stages adapter dabs unchanged;
+    /// `Wash` renormalizes them pre-splat (see `push_event_inner`).
+    wash_mode: WashMode,
     conditioner: StrokeConditioner,
     /// Set on pointer-down inside the UV square; cleared on pointer-up.
     stroking: bool,
@@ -261,6 +272,7 @@ impl PaintState {
             target_size: (TARGET_SIZE, TARGET_SIZE),
             multi_tile: false,
             brush: BrushParams::default(),
+            wash_mode: WashMode::BuildUp,
             conditioner: StrokeConditioner::new(
                 umber_brush::OneEuroParams::default(),
                 umber_brush::OneEuroParams::default(),
@@ -401,6 +413,19 @@ impl PaintState {
         }
         if !self.stroking {
             self.tool = *panel_tool;
+        }
+    }
+
+    /// Adopts the active preset's wash mode (between strokes only — a
+    /// mode swap mid-stroke would split one stroke across two ops).
+    /// Only the mode crosses here: the rest of the preset's params are
+    /// still panel-local in v1 (the session paints with its own brush),
+    /// and the overlap count comes from the live conditioner density
+    /// (the density that actually spaced the stroke's dabs), not the
+    /// preset's spacing.
+    pub fn sync_wash_mode(&mut self, mode: WashMode) {
+        if !self.stroking {
+            self.wash_mode = mode;
         }
     }
 
@@ -862,6 +887,21 @@ impl PaintState {
             self.retouch_event(tile, &retouch_dabs);
             return;
         }
+        // Wash mode (MyPaint opaque_linearize, CPU-side pre-splat): the
+        // stroke's dabs are scaled so their overlap accumulates to the
+        // stroke opacity instead of past it. This lands AFTER the retouch
+        // hook, so smudge/clone/eraser and mask-mode strokes keep their
+        // own (build-up) dab alphas untouched — and BEFORE symmetry
+        // expansion, so siblings inherit the normalized alpha. No new GPU
+        // surface and no shader arm: the scale is one scalar per event
+        // batch, derived from the live conditioner density (the spacing
+        // that actually produced these stamps).
+        let dabs = apply_wash_mode(
+            dabs,
+            self.brush.alpha,
+            self.wash_mode,
+            self.conditioner.dabs_per_radius(),
+        );
         // The symmetry hook: every original event's dab is followed by its
         // siblings (same stamp, transformed position) in the same batch.
         // Seam mirrors (`expand_seams == false`) are not symmetrized (v1).
@@ -1093,6 +1133,25 @@ fn mirror_radius_uv(texels_per_uv: f32) -> f32 {
     (BRUSH_RADIUS_TEXELS * SEAM_MIRROR_MARGIN) / texels_per_uv
 }
 
+/// The wash-mode hook in `push_event_inner`, factored out so it is
+/// unit-testable without a GPU-backed [`PaintState`]: build-up dabs pass
+/// through untouched; wash dabs have every alpha scaled by
+/// `wash_scale(stroke_alpha, overlap)` so their overlap accumulates to
+/// the stroke opacity. Positions, radii, colors, hardness and mask gates
+/// are never touched — only the flow multiplier.
+fn apply_wash_mode(dabs: Vec<Dab>, stroke_alpha: f32, mode: WashMode, overlap: f32) -> Vec<Dab> {
+    if !matches!(mode, WashMode::Wash) {
+        return dabs;
+    }
+    let scale = wash_scale(stroke_alpha, overlap);
+    dabs.into_iter()
+        .map(|mut d| {
+            d.alpha *= scale;
+            d
+        })
+        .collect()
+}
+
 /// UV-space seam proximity: true iff `uv` lies within `radius_uv` of any
 /// seam edge's `uv_a` segment OR `uv_b` segment (segment distance, the same
 /// gate math as `seam_mirror`'s internal check). Free function so the gate
@@ -1205,6 +1264,44 @@ mod tests {
         let p = BrushParams::default();
         assert!(p.alpha > 0.0 && p.alpha <= 1.0);
         assert!(p.hardness >= 0.0 && p.hardness <= 1.0);
+    }
+
+    #[test]
+    fn wash_hook_passes_build_up_through_untouched() {
+        let dabs = vec![
+            Dab::new([1.0, 2.0], 24.0, [1.0, 0.0, 0.0, 1.0], 0.4, 0.5),
+            Dab::new([3.0, 4.0], 24.0, [1.0, 0.0, 0.0, 1.0], 0.7, 0.5),
+        ];
+        let back = apply_wash_mode(dabs.clone(), 0.8, WashMode::BuildUp, 5.0);
+        assert_eq!(back.len(), 2);
+        for (got, want) in back.iter().zip(dabs.iter()) {
+            assert!((got.alpha - want.alpha).abs() < 1e-7);
+            assert_eq!(got.pos, want.pos);
+            assert_eq!(got.color, want.color);
+        }
+    }
+
+    #[test]
+    fn wash_hook_normalizes_to_stroke_opacity() {
+        // Stroke opacity 0.5, overlap 5 (the live conditioner density):
+        // every dab alpha scales by wash_scale, so five overlapping dabs
+        // fold to 0.5 — while the same dabs unscaled fold past it.
+        let dabs = vec![Dab::new([8.0, 8.0], 24.0, [1.0, 0.0, 0.0, 1.0], 0.5, 1.0); 5];
+        let washed = apply_wash_mode(dabs.clone(), 0.5, WashMode::Wash, 5.0);
+        let scale = wash_scale(0.5, 5.0);
+        for dab in &washed {
+            assert!((dab.alpha - 0.5 * scale).abs() < 1e-7);
+        }
+        let folded: f32 = 1.0 - (1.0 - washed[0].alpha).powi(5);
+        assert!(
+            (folded - 0.5).abs() < 1e-5,
+            "five wash dabs must fold to the stroke opacity, got {folded}"
+        );
+        let buildup: f32 = 1.0 - (1.0 - 0.5).powi(5);
+        assert!(
+            (buildup - 0.96875).abs() < 1e-6 && (buildup - folded).abs() > 0.4,
+            "build-up must accumulate well past the wash ceiling"
+        );
     }
 
     // --- Seam-aware wiring tests (slice 3) ---

@@ -15,19 +15,49 @@ use crate::DabPlan;
 use serde::{Deserialize, Serialize};
 use umber_gpu::paint::Dab;
 
+/// How one stroke's overlapping stamps accumulate opacity (§2 line 16).
+///
+/// - [`WashMode::BuildUp`]: every stamp composites alpha-over on the
+///   layer, so overlapping stamps accumulate (`1-(1-a)^n`). This is the
+///   historical behavior — and what the GPU pass does by construction,
+///   since overlapping dabs are split across `splat_dabs` dispatches
+///   that see prior writes.
+/// - [`WashMode::Wash`]: Krita wash mode via MyPaint's `opaque_linearize`:
+///   the stroke's dabs are renormalized so their overlap accumulates to
+///   the stroke opacity instead of past it. Per-stamp flow still varies
+///   by pressure (each dab's linearized alpha is multiplied by its
+///   shaped pressure multiplier).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WashMode {
+    /// Overlapping stamps accumulate (status quo).
+    #[default]
+    BuildUp,
+    /// Overlapping stamps normalize to the stroke opacity.
+    Wash,
+}
+
 /// Static brush parameters for one stroke segment.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrushParams {
     /// Premultiplied RGBA stroke color, 0..=1 per channel.
     pub color: [f32; 4],
     /// Base per-dab opacity, 0..=1 (multiplied by each stamp's
-    /// `alpha_multiplier`, which carries the pressure curve).
+    /// `alpha_multiplier`, which carries the pressure curve). In
+    /// [`WashMode::Wash`] this is reinterpreted as the STROKE opacity
+    /// ceiling: per-dab alphas are solved from it via
+    /// [`opaque_linearize`].
     pub alpha: f32,
     /// Stamp hardness 0..=1 (1 = hard edge, 0 = softest falloff).
     pub hardness: f32,
     /// Nonlinear response applied to the pressure multiplier
     /// (1.0 = linear; >1 favors light pressure falloff).
     pub pressure_gamma: f32,
+    /// How the stroke's overlapping stamps accumulate. Defaults to
+    /// [`WashMode::BuildUp`] (the `#[serde(default)]` keeps pre-mode
+    /// `.umberbrush` files loading with historical behavior).
+    #[serde(default)]
+    pub wash_mode: WashMode,
 }
 
 impl Default for BrushParams {
@@ -37,8 +67,55 @@ impl Default for BrushParams {
             alpha: 0.8,
             hardness: 0.5,
             pressure_gamma: 1.0,
+            wash_mode: WashMode::BuildUp,
         }
     }
+}
+
+/// MyPaint's `opaque_linearize`: the per-dab base alpha such that
+/// `overlap` fully-overlapping dabs accumulate to exactly
+/// `stroke_opacity` under alpha-over compositing.
+///
+/// Solves `1 - (1-a)^n = O` for `a`: `a = 1 - (1-O)^(1/n)`. `overlap`
+/// is the mean covering count — the spacing density (`dabs_per_radius`:
+/// dabs emitted per radius of travel, so each texel is covered by about
+/// that many dabs as the brush passes). Center texels see up to ~2x
+/// (the disc's diameter spans two radii) and edge texels fewer; the
+/// density is the mean-field estimate, the same one MyPaint uses.
+///
+/// Degenerate densities (`<= 0`, non-finite) and sparse densities
+/// (`< 1`, dabs that never overlap) both collapse to `n = 1`, i.e. each
+/// dab paints at the stroke opacity — correct in both cases, since with
+/// no overlap there is nothing to normalize.
+pub fn opaque_linearize(stroke_opacity: f32, overlap: f32) -> f32 {
+    let o = stroke_opacity.clamp(0.0, 1.0);
+    let n = if overlap.is_finite() {
+        overlap.max(1.0)
+    } else {
+        1.0
+    };
+    if o <= 0.0 || o >= 1.0 {
+        return o;
+    }
+    1.0 - (1.0 - o).powf(1.0 / n)
+}
+
+/// The multiplicative form of [`opaque_linearize`] for callers that
+/// already hold build-up dabs: `wash_scale * (O * pressure)` equals the
+/// linearized `a * pressure` exactly (both factors `<= 1`, so no clamp
+/// ordering hazard). At `O == 0` the ratio tends to `1/n` (the linear
+/// limit of `1-(1-O)^(1/n)`); every dab alpha is `0` there anyway.
+pub fn wash_scale(stroke_opacity: f32, overlap: f32) -> f32 {
+    let o = stroke_opacity.clamp(0.0, 1.0);
+    if o <= 0.0 {
+        let n = if overlap.is_finite() {
+            overlap.max(1.0)
+        } else {
+            1.0
+        };
+        return 1.0 / n;
+    }
+    opaque_linearize(o, overlap) / o
 }
 
 /// Converts brush-space stamps into paint-space dabs.
@@ -53,11 +130,51 @@ impl DabAdapter {
     /// adapter carries it onto each dab unchanged). Each stamp's
     /// `alpha_multiplier` (pressure-interpolated) is shaped by
     /// `pressure_gamma`, multiplied by the base `alpha`, and clamped.
+    ///
+    /// This is the build-up path and ignores `params.wash_mode`: callers
+    /// that branch on the mode keep calling this for
+    /// [`WashMode::BuildUp`] (byte-identical to the pre-mode behavior)
+    /// and call [`Self::stamps_to_dabs_wash`] for [`WashMode::Wash`].
     pub fn stamps_to_dabs(stamps: &[DabPlan], radius_px: f32, params: &BrushParams) -> Vec<Dab> {
         let mut out = Vec::with_capacity(stamps.len());
         for stamp in stamps {
             let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
             let alpha = (params.alpha * shaped).clamp(0.0, 1.0);
+            out.push(Dab::new(
+                stamp.pos,
+                radius_px,
+                params.color,
+                alpha,
+                params.hardness,
+            ));
+        }
+        out
+    }
+
+    /// Wash-mode mapping: like [`Self::stamps_to_dabs`], but the base
+    /// alpha is [`opaque_linearize`]d from `params.alpha` (now the stroke
+    /// opacity ceiling) and `dabs_per_radius` (the spacing density that
+    /// produced `stamps` — the mean overlap count) before the per-stamp
+    /// pressure shaping multiplies in. Overlapping stamps then accumulate
+    /// to the stroke opacity instead of past it; per-stamp flow still
+    /// varies by pressure.
+    ///
+    /// Equivalent to mapping with [`Self::stamps_to_dabs`] and scaling
+    /// every dab alpha by [`wash_scale`] (proven equal by
+    /// `wash_scale_matches_opaque_linearize`), which is what the paint
+    /// session's post-retouch-hook renormalization does so the retouch
+    /// tools keep build-up dabs.
+    pub fn stamps_to_dabs_wash(
+        stamps: &[DabPlan],
+        radius_px: f32,
+        params: &BrushParams,
+        dabs_per_radius: f32,
+    ) -> Vec<Dab> {
+        let base = opaque_linearize(params.alpha, dabs_per_radius);
+        let mut out = Vec::with_capacity(stamps.len());
+        for stamp in stamps {
+            let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
+            let alpha = (base * shaped).clamp(0.0, 1.0);
             out.push(Dab::new(
                 stamp.pos,
                 radius_px,
@@ -155,5 +272,147 @@ mod tests {
             assert!(dab.pos[0] >= 0.0 && dab.pos[0] <= 40.0);
             assert_eq!(dab.pos[1], 0.0);
         }
+    }
+
+    /// Alpha-over fold of `n` identical dabs of per-dab alpha `a` onto a
+    /// transparent texel: `1 - (1-a)^n`. The CPU mirror of what the GPU
+    /// pass computes per texel for fully-overlapping stamps.
+    fn accumulate(a: f32, n: usize) -> f32 {
+        1.0 - (1.0 - a).powi(n as i32)
+    }
+
+    #[test]
+    fn wash_mode_defaults_to_build_up() {
+        assert_eq!(BrushParams::default().wash_mode, WashMode::BuildUp);
+    }
+
+    #[test]
+    fn build_up_overlapping_dabs_accumulate() {
+        // Two fully-overlapping stamps at stroke opacity 0.5: build-up
+        // dabs each carry 0.5 and fold to 1-(1-0.5)^2 = 0.75, NOT 0.5.
+        // Pins the pre-mode behavior for the BuildUp arm.
+        let params = BrushParams {
+            alpha: 0.5,
+            wash_mode: WashMode::BuildUp,
+            ..BrushParams::default()
+        };
+        let stamps = [stamp([0.0, 0.0], 1.0), stamp([0.0, 0.0], 1.0)];
+        let dabs = DabAdapter::stamps_to_dabs(&stamps, 8.0, &params);
+        assert_eq!(dabs.len(), 2);
+        assert!((dabs[0].alpha - 0.5).abs() < 1e-6);
+        assert!((dabs[1].alpha - 0.5).abs() < 1e-6);
+        let folded = accumulate(dabs[0].alpha, 2);
+        assert!(
+            (folded - 0.75).abs() < 1e-6,
+            "build-up must accumulate, got {folded}"
+        );
+    }
+
+    #[test]
+    fn opaque_linearize_hits_stroke_opacity() {
+        // The defining identity: n overlapping dabs of the linearized
+        // alpha fold to exactly the stroke opacity.
+        for opacity in [0.25, 0.5, 0.8] {
+            for overlap in [2.0, 4.0, 12.0] {
+                let a = opaque_linearize(opacity, overlap);
+                assert!(
+                    (0.0..=opacity).contains(&a),
+                    "linearized {a} must not exceed the stroke opacity {opacity}"
+                );
+                let folded = accumulate(a, overlap as usize);
+                assert!(
+                    (folded - opacity).abs() < 1e-5,
+                    "n={overlap} dabs must fold to {opacity}, got {folded}"
+                );
+            }
+        }
+        // Endpoints are fixed points.
+        assert_eq!(opaque_linearize(0.0, 4.0), 0.0);
+        assert_eq!(opaque_linearize(1.0, 4.0), 1.0);
+        // Degenerate densities collapse to n = 1 (each dab at full
+        // stroke opacity): nothing to normalize without overlap
+        // (epsilon: `powf(x, 1.0)` need not be bitwise `x`).
+        for bad_overlap in [0.0, -3.0, f32::NAN, 0.5] {
+            let got = opaque_linearize(0.8, bad_overlap);
+            assert!(
+                (got - 0.8).abs() < 1e-6,
+                "overlap {bad_overlap} must yield the stroke opacity, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn wash_dabs_sum_to_stroke_opacity_not_build_up() {
+        // Four fully-overlapping stamps, uniform full pressure, stroke
+        // opacity 0.5, overlap 4: wash dabs fold to 0.5 while build-up
+        // dabs fold to 1-(1-0.5)^4 = 0.9375.
+        let params = BrushParams {
+            alpha: 0.5,
+            wash_mode: WashMode::Wash,
+            ..BrushParams::default()
+        };
+        let stamps = [
+            stamp([0.0, 0.0], 1.0),
+            stamp([0.0, 0.0], 1.0),
+            stamp([0.0, 0.0], 1.0),
+            stamp([0.0, 0.0], 1.0),
+        ];
+        let wash = DabAdapter::stamps_to_dabs_wash(&stamps, 8.0, &params, 4.0);
+        assert_eq!(wash.len(), 4);
+        let folded_wash = accumulate(wash[0].alpha, 4);
+        assert!(
+            (folded_wash - 0.5).abs() < 1e-5,
+            "wash must normalize to the stroke opacity, got {folded_wash}"
+        );
+        let build_up = DabAdapter::stamps_to_dabs(&stamps, 8.0, &params);
+        let folded_build_up = accumulate(build_up[0].alpha, 4);
+        assert!(
+            (folded_build_up - 0.9375).abs() < 1e-6,
+            "build-up must accumulate past the stroke opacity, got {folded_build_up}"
+        );
+    }
+
+    #[test]
+    fn wash_scale_matches_opaque_linearize() {
+        // The session's post-hoc scale path equals the direct wash
+        // mapping: scale * (O * p) == linearized * p.
+        for opacity in [0.1, 0.5, 0.9] {
+            let scale = wash_scale(opacity, 4.0);
+            let direct = opaque_linearize(opacity, 4.0);
+            assert!(
+                ((scale * opacity) - direct).abs() < 1e-6,
+                "scale path diverged at O={opacity}: {} vs {direct}",
+                scale * opacity
+            );
+        }
+        // Zero opacity: the 1/n linear limit (dabs are 0 there anyway).
+        assert!((wash_scale(0.0, 4.0) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wash_keeps_pressure_variation_per_stamp() {
+        // Per-stamp flow still varies by pressure in wash mode: the dab
+        // alpha ratio equals the shaped-pressure ratio.
+        let params = BrushParams {
+            alpha: 0.6,
+            pressure_gamma: 2.0,
+            wash_mode: WashMode::Wash,
+            ..BrushParams::default()
+        };
+        let stamps = [stamp([0.0, 0.0], 0.25), stamp([1.0, 0.0], 1.0)];
+        let dabs = DabAdapter::stamps_to_dabs_wash(&stamps, 8.0, &params, 4.0);
+        assert!(
+            dabs[0].alpha < dabs[1].alpha,
+            "light pressure must stay fainter"
+        );
+        // Shaped multipliers: 0.25^2 = 0.0625 vs 1.0^2 = 1.0.
+        let want_ratio = 0.25f32.powf(2.0);
+        let got_ratio = dabs[0].alpha / dabs[1].alpha;
+        assert!(
+            (got_ratio - want_ratio).abs() < 1e-6,
+            "wash must preserve the pressure ratio, got {got_ratio}"
+        );
+        // And the hard dab still sits under the stroke opacity ceiling.
+        assert!(dabs[1].alpha < params.alpha);
     }
 }
