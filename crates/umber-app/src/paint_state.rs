@@ -31,7 +31,7 @@
 //! Retouch tools (docs/specs/smudge-clone-design.md; the eraser is §2's P0
 //! row): with a smudge, clone or eraser [`BrushTool`] active, the
 //! conditioned dabs skip the GPU splat and run on a per-stroke CPU mirror
-//! instead ([`crate::retouch`]). The hook is in `push_event_inner`, right after `DabAdapter::stamps_to_dabs`: the
+//! instead ([`crate::retouch`]). The hook is in `push_event_styled`, right after `DabAdapter::stamps_to_dabs`: the
 //! first event a stroke routes to a tile drains that tile's queue and
 //! reads it back (`PaintTarget::read_back_rgba8`), every event's dirty
 //! rect is written back as a `PaintThreadCommand::WriteRegion`, and
@@ -77,7 +77,7 @@
 //! for the whole stroke:
 //!
 //! * Mask mode (`editing`): the stroke paints the MASK. The hook sits
-//!   right after symmetry expansion in `push_event_inner` and BEFORE the
+//!   right after symmetry expansion in `push_event_styled` and BEFORE the
 //!   retouch hook, so mask mode wins whatever tool is selected: the dabs
 //!   (and their symmetry siblings and seam mirrors) stamp the CPU mask,
 //!   the touched rect is queued onto the tile's GPU mask
@@ -101,7 +101,7 @@
 //! fills its interior ([`Self::replay_filled_path`]: the polygon fill's
 //! even-odd rasterizer over the active tile, one stroke per covered row
 //! run). Per-point size rides a per-event radius scale
-//! ([`Self::push_event_styled`], which [`push_event_inner`](Self::push_event_inner)
+//! ([`Self::push_event_styled`], which [`push_event_styled`](Self::push_event_styled)
 //! delegates to at scale `1.0` — byte-identical); per-point opacity is
 //! folded into the event pressure by the path itself (both are flow
 //! multipliers, so spacing interpolates them for free). Replays refuse
@@ -190,7 +190,7 @@ const BRUSH_RADIUS_TEXELS: f32 = 24.0;
 /// event `time_ns: 0` (as this module historically did) freezes the filter
 /// and no stroke ever emits a dab. Real tablet timestamps are not plumbed
 /// through the UV view yet (a later stylus-wave slice); until then each
-/// `push_event_inner` call advances a per-stroke logical clock by one step
+/// `push_event_styled` call advances a per-stroke logical clock by one step
 /// (8 ms, the same regime as the brush crate's own tests). Deterministic:
 /// the same event sequence always conditions identically.
 const EVENT_STEP_NS: u64 = 8_000_000;
@@ -233,7 +233,7 @@ pub struct PaintState {
     /// How the live stroke's overlapping dabs accumulate, adopted from
     /// the active preset between strokes ([`Self::sync_wash_mode`]).
     /// `BuildUp` (the default) stages adapter dabs unchanged;
-    /// `Wash` renormalizes them pre-splat (see `push_event_inner`).
+    /// `Wash` renormalizes them pre-splat (see `push_event_styled`).
     wash_mode: WashMode,
     conditioner: StrokeConditioner,
     /// Set on pointer-down inside the UV square; cleared on pointer-up.
@@ -249,7 +249,7 @@ pub struct PaintState {
     /// mirror call entirely — the zero-cost contract).
     stroke_near_seam: bool,
     /// Per-stroke synthetic event clock (see [`EVENT_STEP_NS`]): advanced
-    /// once per [`Self::push_event_inner`] call, reset by
+    /// once per [`Self::push_event_styled`] call, reset by
     /// [`Self::begin_stroke`].
     event_seq: u64,
     /// The active tool (synced from the brush panel between strokes).
@@ -999,16 +999,12 @@ impl PaintState {
             .is_some_and(|graph| uv_near_seam(graph, uv, radius_uv))
     }
 
-    fn push_event_inner(&mut self, uv: Pos2, pressure: f32, expand_seams: bool) {
-        self.push_event_styled(uv, pressure, 1.0, expand_seams);
-    }
-
-    /// [`Self::push_event_inner`] with an explicit brush-radius scale: the
+    /// The stroke-event seam (every caller): position, pressure, an optional
     /// conditioner and the adapter both run at
     /// `BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale)`, so a replayed
     /// path's per-point size varies the dab footprint through the SAME
     /// spacing math live strokes use. Scale `1.0` is byte-identical to
-    /// [`Self::push_event_inner`] (every live caller passes it).
+    /// brush-radius scale (`1.0` = the live-stroke default).
     fn push_event_styled(
         &mut self,
         uv: Pos2,
@@ -1036,7 +1032,7 @@ impl PaintState {
         }
         // Seam-aware expansion at the UV layer, before texel conversion
         // (design slice 3, item 2): mirror positions become ADDITIONAL
-        // `push_event_inner` calls at the mirrored UVs with
+        // `push_event_styled` calls at the mirrored UVs with
         // `expand_seams = false`, so mirrors recurse through the SAME texel
         // conversion + conditioning path (spacing, one-euro, lazy-mouse)
         // without re-expanding (recursion terminates by construction).
@@ -1443,7 +1439,7 @@ fn mirror_radius_uv(texels_per_uv: f32) -> f32 {
     (BRUSH_RADIUS_TEXELS * SEAM_MIRROR_MARGIN) / texels_per_uv
 }
 
-/// The wash-mode hook in `push_event_inner`, factored out so it is
+/// The wash-mode hook in `push_event_styled`, factored out so it is
 /// unit-testable without a GPU-backed [`PaintState`]: build-up dabs pass
 /// through untouched; wash dabs have every alpha scaled by
 /// `wash_scale(stroke_alpha, overlap)` so their overlap accumulates to
@@ -1745,7 +1741,7 @@ mod tests {
         };
         // Same march as `seam_stroke_stages_original_plus_mirror_near_seam`
         // but through the Screen entry points: the resolved hit UVs fan
-        // out through the shared `push_event_inner` seam path, so a
+        // out through the shared `push_event_styled` seam path, so a
         // near-seam screen stroke stages original + mirror per event.
         let start = NEAR_SEAM_UV;
         let step = [0.02, 0.02];
@@ -1889,7 +1885,7 @@ mod tests {
 
     #[test]
     fn mirror_positions_fans_out_near_seam_only() {
-        // Pins the exact call `push_event_inner` makes: one position, the
+        // Pins the exact call `push_event_styled` makes: one position, the
         // wiring radius, the two-island graph.
         let graph = build_seam_graph(&two_island_quad());
         let r = gate_radius();
@@ -2038,7 +2034,7 @@ mod tests {
         // Same stroke on the seam mesh: the stroke-start arm stays off, the
         // mirror call never runs, so the event stream — and every staged
         // batch — is IDENTICAL to the seam-free baseline (structural
-        // equality, not just determinism: `push_event_inner` never consults
+        // equality, not just determinism: `push_event_styled` never consults
         // the graph when `stroke_near_seam` is false).
         let mut far = PaintState::new(device, queue).expect("paint state builds");
         far.set_mesh(&two_island_quad());

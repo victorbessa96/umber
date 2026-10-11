@@ -107,7 +107,7 @@ pub const FALLBACK_TEXTURE_SET: &str = "TextureSet";
 /// ids 1:1, so it cannot grow a tenth kind without a shader + test
 /// ripple; see the module docs). Must equal
 /// `umber_bake::BakeMap::Skew::file_stem_suffix` (pinned by test).
-pub const SKEW_SUFFIX: &str = "skew";
+pub const SKEW_SUFFIX: &str = crate::bake_sources::SKEW_CHANNEL_NAME;
 /// The default skew edge-protection threshold in degrees (see
 /// `umber_bake::skew::DEFAULT_SKEW_THRESHOLD_DEG`).
 pub const DEFAULT_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::DEFAULT_SKEW_THRESHOLD_DEG;
@@ -888,7 +888,7 @@ impl BakesPanel {
                 .sets
                 .iter()
                 .find(|s| &s.name == name)
-                .map_or(true, |s| s.enabled);
+                .is_some_and(|s| s.enabled);
             next.push(SetCheck {
                 name: name.clone(),
                 enabled,
@@ -1544,11 +1544,10 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                 // Edge protection (§6:57): the guard in the bake pass,
                 // over the DILATED bytes (the guard sees what ships).
                 if let Some(skew) = skew_by_tile.get(&job.tile) {
-                    skew_clamped = umber_bake::skew::apply_edge_protection(
+                    skew_clamped = crate::bake_sources::apply_skew_edge_protection(
                         &mut dilated,
                         skew,
-                        threshold_byte,
-                        umber_bake::skew::EDGE_SAFE_NEUTRAL,
+                        skew_threshold_deg,
                     );
                 }
                 dilated

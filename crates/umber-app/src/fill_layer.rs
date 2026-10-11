@@ -84,11 +84,22 @@ pub struct FillLayerState {
     /// The symmetry settings the cache was evaluated with: a symmetry
     /// change must re-evaluate just like a source change.
     last_symmetry: SymmetrySettings,
+    /// The layer's blend + opacity for the composite-aware publish
+    /// (`composite_fill_over`); set by [`FillLayerStates::ensure`] from the
+    /// live layer, updated on every ensure (the panel re-sees the layer
+    /// each frame, so blend edits propagate without a second path).
+    blend: umber_core::BlendMode,
+    opacity: f32,
     dirty: bool,
     cache: HashMap<u16, CachedTile>,
 }
 
 impl FillLayerState {
+    /// The tracked layer's blend + opacity (the composite-aware publish).
+    pub fn layer_blend_opacity(&self) -> (umber_core::BlendMode, f32) {
+        (self.blend, self.opacity)
+    }
+
     /// Tracks `layer_id` with `params`; starts dirty (nothing evaluated
     /// yet — the first [`refresh_fill_layer`] fills the cache).
     pub fn new(layer_id: u64, params: FillParams) -> Self {
@@ -96,6 +107,8 @@ impl FillLayerState {
             layer_id,
             params,
             last_symmetry: SymmetrySettings::default(),
+            blend: umber_core::BlendMode::default(),
+            opacity: 1.0,
             dirty: true,
             cache: HashMap::new(),
         }
@@ -375,6 +388,10 @@ pub fn refresh_fill_layer(
     size: u32,
     symmetry: &SymmetrySettings,
 ) -> Vec<u16> {
+    // The layer's blend + opacity for the composite-aware publish (the
+    // `composite_fill_over` read path; Normal/1.0 is the fast path that
+    // publishes the gated bytes unchanged).
+    let (blend, opacity) = state.layer_blend_opacity();
     let mut staged = Vec::new();
     for &tile in tiles {
         let rgba = state.evaluate(mesh, tile, size, symmetry).to_vec();
@@ -802,10 +819,19 @@ impl Default for FillLayerStates {
 impl FillLayerStates {
     /// Ensures a state exists for `layer` at `params` (constructing on
     /// first sight, adopting the params when the layer is re-picked).
-    pub fn ensure(&mut self, layer: u64, params: FillParams) {
-        self.map
+    pub fn ensure(
+        &mut self,
+        layer: u64,
+        params: FillParams,
+        blend: umber_core::BlendMode,
+        opacity: f32,
+    ) {
+        let state = self
+            .map
             .entry(layer)
             .or_insert_with(|| FillLayerState::new(layer, params));
+        state.blend = blend;
+        state.opacity = opacity;
     }
 }
 
@@ -830,7 +856,11 @@ pub fn fill_section_ui(
         return;
     }
     for (id, name, params) in fills {
-        states.ensure(id, params.clone());
+        let layer = doc.layers().iter().find(|l| l.id == id);
+        let (blend, opacity) = layer
+            .map(|l| (l.blend_mode, l.opacity))
+            .unwrap_or((umber_core::BlendMode::default(), 1.0));
+        states.ensure(id, params.clone(), blend, opacity);
         let mut mark_refresh = false;
         egui::CollapsingHeader::new(name.clone())
             .default_open(true)

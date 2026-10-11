@@ -324,6 +324,12 @@ pub fn is_skew_channel(channel: &str) -> bool {
 /// See `umber_bake::skew::combine_skew_with_paint` (the tested core; this
 /// is the app's named entry point so the panel and the dialog can never
 /// disagree about combine semantics).
+/// Whether a paint-session channel list includes the skew mask (the
+/// membership query the read path uses to find the painted mask).
+pub fn session_has_skew_channel(channels: &[String]) -> bool {
+    channels.iter().any(|c| is_skew_channel(c))
+}
+
 pub fn combine_skew_with_paint(baked: &[u8], painted: Option<&[u8]>) -> Vec<u8> {
     umber_bake::skew::combine_skew_with_paint(baked, painted)
 }
