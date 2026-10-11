@@ -45,10 +45,10 @@
 //!   Vogel disk of the requested radius with Gaussian weights (σ =
 //!   radius / 2) — uniform-density disk × Gaussian weight = a sparse
 //!   Gaussian. Large radii get softer, not more expensive.
-//! - **DoF needs depth the chain does not have yet.** [`PostFrame::depth`]
-//!   takes an optional depth view (bound as unfilterable float,
-//!   `textureLoad` only); with `None` the stack binds a 1×1 fallback and
-//!   flags it in the uniform, and the DoF pass is the identity. The
+//! - **DoF reads an optional depth.** [`PostFrame::depth`] takes a depth
+//!   view (bound as unfilterable float, `textureLoad` only) — the
+//!   viewport passes its offscreen depth; a caller with `None` gets a 1×1
+//!   fallback flagged in the uniform, and the DoF pass is the identity. The
 //!   camera is the directx-convention, non-reversed perspective of
 //!   `crate::camera` (z 0 = near, 1 = far), linearized with near/far.
 //! - **Bind groups are per run.** The input and depth views are the
@@ -58,15 +58,15 @@
 //!   is 0-or-2; a single-effect chain leaves slot 1 idle rather than
 //!   resizing the pool when a second effect is toggled on.
 //!
-//! # v1 boundary (honest)
+//! # The viewport splice
 //!
 //! [`PostStack::run`] is the render-graph node: input view in, final view
-//! out. It is NOT yet spliced into the viewport — the mesh pass draws
-//! straight into eframe's surface inside a paint callback and applies the
-//! display LUT inline (`shaders::MESH_SHADER`), so there is no scene-
-//! linear offscreen target to feed the chain. That splice (mesh → HDR
-//! target → this stack → LUT composite) is the next row; the panel says
-//! so in its status line.
+//! out. `crate::postfx_viewport` feeds it in the viewport: when the chain
+//! has an active effect, the mesh renders scene-linear into an
+//! [`POSTFX_FORMAT`] target (the in-shader LUT gated off), this stack runs
+//! on it, and a composite applies the display LUT into eframe's surface.
+//! An empty chain keeps the direct mesh pass and calls
+//! [`PostStack::release`], so nothing stays allocated.
 
 use std::collections::HashMap;
 
@@ -903,6 +903,13 @@ impl PostStack {
             PostRead::Slot(k) => Some(&slots[k].view),
             PostRead::Input => None,
         }
+    }
+
+    /// Drops every intermediate and the uniform buffer (pipelines stay
+    /// cached) — what [`Self::run`] does on an empty chain, for a caller
+    /// that stops calling `run` altogether (the viewport's direct path).
+    pub fn release(&mut self) {
+        self.apply_pool(PoolState::default());
     }
 
     /// Reconciles the GPU objects with `wanted` (drops what it no longer

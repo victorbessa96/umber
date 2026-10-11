@@ -1,8 +1,10 @@
 //! The GPU display LUT: the viewer chain (exposure → view → gamma, the
-//! app's Display panel) baked into a 256×1 RGBA8 texture that the two
-//! display passes — the viewport mesh pass (`shaders::MESH_SHADER`) and
-//! the UV view's paint-target display (`texture_display`) — read as
-//! their LAST step before the color target. See
+//! app's Display panel) baked into a 256×1 RGBA8 texture that the three
+//! display passes — the viewport mesh pass (`shaders::MESH_SHADER`, direct
+//! path), the post-effects composite (`postfx_viewport::COMPOSITE_SHADER`,
+//! the viewport when a chain is active) and the UV view's paint-target
+//! display (`texture_display`) — read as their LAST step before the color
+//! target. See
 //! `LANDING_NOTES_DISPLAY_PANEL.md`.
 //!
 //! Crate boundary: this crate never sees `umber_color::DisplaySettings`.
@@ -22,7 +24,7 @@
 //!   component. For the 8-bit paint target this is bit-exact (the input
 //!   IS one of the 256 levels); the identity table then returns the
 //!   input value unchanged, which is the golden's no-regression contract.
-//! - Group 1, binding 0 of both consumer pipelines (group 0 stays each
+//! - Group 1, binding 0 of every consumer pipeline (group 0 stays each
 //!   pass's own set — the same additive-group shape the wireframe pass
 //!   uses for its color uniform).
 //!
@@ -39,9 +41,10 @@ pub const DISPLAY_LUT_ENTRIES: u32 = 256;
 pub const DISPLAY_LUT_BYTES: usize = DISPLAY_LUT_ENTRIES as usize * 4;
 
 /// WGSL for the LUT read — the shader-side contract above, pasted
-/// verbatim into `shaders::MESH_SHADER` and the texture-display shader
-/// (WGSL has no includes here; `shaders_embed_the_lut_snippet_verbatim`
-/// pins both copies to this text so they cannot drift).
+/// verbatim into `shaders::MESH_SHADER`, the post-effects composite and
+/// the texture-display shader (WGSL has no includes here;
+/// `shaders_embed_the_lut_snippet_verbatim` pins every copy to this text
+/// so they cannot drift).
 pub const DISPLAY_LUT_WGSL: &str = r#"// ---- display LUT (crate::display_lut — keep verbatim) ----
 @group(1) @binding(0) var display_lut: texture_2d<f32>;
 
@@ -201,10 +204,11 @@ mod tests {
 
     #[test]
     fn shaders_embed_the_lut_snippet_verbatim() {
-        // Both consumers paste the same read; a one-sided edit (index
+        // Every consumer pastes the same read; a one-sided edit (index
         // rounding, binding slot, channel pick) must fail here, not as
         // a silent per-view mismatch on screen.
         assert!(crate::shaders::MESH_SHADER.contains(DISPLAY_LUT_WGSL));
+        assert!(crate::postfx_viewport::COMPOSITE_SHADER.contains(DISPLAY_LUT_WGSL));
         assert!(crate::texture_display::TEXTURE_DISPLAY_SHADER.contains(DISPLAY_LUT_WGSL));
     }
 

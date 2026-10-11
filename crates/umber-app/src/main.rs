@@ -138,10 +138,13 @@ impl TabViewer for PanelViewer<'_> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
-            Panel::Viewport => {
-                self.viewport
-                    .ui(ui, self.gpu, self.paint.as_deref_mut(), self.display_lut)
-            }
+            Panel::Viewport => self.viewport.ui(
+                ui,
+                self.gpu,
+                self.paint.as_deref_mut(),
+                self.display_lut,
+                self.postfx,
+            ),
             Panel::UvView => self.uv_view.ui(
                 ui,
                 self.mesh,
@@ -255,7 +258,10 @@ impl TabViewer for PanelViewer<'_> {
                     ui.separator();
                     display_panel::hdr_row(ui, self.hdr_mode, &self.gpu.hdr_probe);
                     ui.separator();
-                    postfx_panel::show(ui, self.postfx, self.postfx_panel);
+                    // The view mode decides whether an active chain is
+                    // live or bypassed (data modes) — the status line.
+                    let mode = self.viewport.view_mode();
+                    postfx_panel::show(ui, self.postfx, self.postfx_panel, mode);
                 });
             }
         }
@@ -295,8 +301,9 @@ pub struct AppState {
     /// the frame loop rebuilds + uploads).
     pub display_lut: display_panel::DisplayLutState,
     /// The post-effects chain (§7:84; Display panel's postfx section).
-    /// Session state in v1: not yet saved in the project, and not yet
-    /// composited into the viewport (see `postfx_panel`).
+    /// Live in the viewport whenever an effect is enabled (see
+    /// `umber_gpu::postfx_viewport`); session state in v1, not yet saved
+    /// in the project.
     pub postfx: umber_gpu::postfx::PostChain,
     /// The postfx section's UI state (never serialized).
     pub postfx_panel: postfx_panel::PostFxPanel,

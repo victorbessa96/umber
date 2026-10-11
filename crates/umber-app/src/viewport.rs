@@ -7,8 +7,10 @@
 //! behind `umber-gpu`.
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
+use umber_gpu::postfx::PostChain;
 use umber_gpu::{
-    DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, SoloChannel, ViewMode,
+    DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, PostFxViewport, SoloChannel,
+    ViewMode, ViewportRoute,
 };
 
 use crate::i18n::tr;
@@ -56,6 +58,11 @@ pub struct Viewport {
     /// to Lit — today's render, byte-identical with the mode uniform
     /// at (0, 0).
     view_mode: ViewMode,
+    /// The post-effects path (§7:84: mesh → HDR target → chain → LUT),
+    /// built on the first frame the chain routes there and kept for its
+    /// pipelines; its HDR target and intermediates are released on every
+    /// direct frame. `None` until then — the default path never builds it.
+    postfx: Option<PostFxViewport>,
 }
 
 impl Viewport {
@@ -137,12 +144,18 @@ impl Viewport {
     /// `display_lut` is the app's display LUT (the Display panel's
     /// chain), applied as the mesh pass's last step; `None` draws
     /// through the identity table.
+    ///
+    /// `postfx` is the post-effects chain: with an active effect (and a
+    /// display view mode — [`ViewportRoute::select`]) the mesh renders
+    /// scene-linear offscreen, the chain runs, and the LUT is applied by
+    /// the composite instead; otherwise the direct path above, unchanged.
     pub fn ui(
         &mut self,
         ui: &mut Ui,
         gpu: &GpuContext,
         paint: Option<&mut crate::paint_state::PaintState>,
         display_lut: Option<&DisplayLut>,
+        postfx: &PostChain,
     ) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -173,6 +186,18 @@ impl Viewport {
 
         ui.painter().rect_filled(rect, 0.0, EMPTY_VIEWPORT_COLOR);
 
+        let route = match self.mesh {
+            Some(_) => ViewportRoute::select(postfx, self.view_mode),
+            None => ViewportRoute::Direct,
+        };
+        // Direct frame: drop the HDR target + the chain's intermediates
+        // (last frame's callbacks have already run; a no-op once empty).
+        if route == ViewportRoute::Direct {
+            if let Some(post) = &self.postfx {
+                post.release();
+            }
+        }
+
         if let Some(mesh) = &self.mesh {
             profiling::scope!("display_pass");
             let aspect = rect.width() / rect.height();
@@ -189,14 +214,35 @@ impl Viewport {
                 let grid = gpu.grid_callback(view_proj);
                 ui.painter().add(umber_gpu::grid_paint_shape(rect, grid));
             }
-            let callback = {
-                // Data modes (data solos, every mesh-map preview) bind
-                // the identity table here — the §9 display-transform
-                // bypass (see `ViewMode::select_lut`).
-                let lut = self.view_mode.select_lut(display_lut);
-                mesh.paint_callback_with_mode(gpu, uniform, lut, self.view_mode)
+            let shape = match route {
+                ViewportRoute::Direct => {
+                    // Data modes (data solos, every mesh-map preview) bind
+                    // the identity table here — the §9 display-transform
+                    // bypass (see `ViewMode::select_lut`).
+                    let mode = self.view_mode;
+                    let lut = mode.select_lut(display_lut);
+                    let callback = mesh.paint_callback_with_mode(gpu, uniform, lut, mode);
+                    umber_gpu::mesh_paint_shape(rect, callback)
+                }
+                ViewportRoute::PostFx => {
+                    // Same slot as the mesh shape: after the grid (which
+                    // shows through the composite's alpha), before the
+                    // overlays (which test against its written depth).
+                    let build = || PostFxViewport::new(gpu);
+                    let post = self.postfx.get_or_insert_with(build);
+                    let callback = post.callback(
+                        gpu,
+                        mesh,
+                        uniform,
+                        self.view_mode,
+                        display_lut,
+                        postfx,
+                        rect,
+                        (self.camera.near, self.camera.far),
+                    );
+                    umber_gpu::postfx_paint_shape(rect, callback)
+                }
             };
-            let shape = umber_gpu::mesh_paint_shape(rect, callback);
             ui.painter().add(shape);
             if self.show_wireframe {
                 let wire = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::default());

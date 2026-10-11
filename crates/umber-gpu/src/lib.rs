@@ -28,6 +28,7 @@ pub mod paint;
 pub mod paint_thread;
 pub mod postfx;
 pub mod postfx_exec;
+pub mod postfx_viewport;
 pub mod renderer;
 pub mod shaders;
 pub mod texture_display;
@@ -50,6 +51,9 @@ pub use hdr::{DisabledReason, HdrMode, HdrProbe, HdrSpace};
 pub use ibl::{EnvFlags, EnvFormat, EnvIrradiance, IblError, SpecParams};
 pub use paint::{Dab, DabBuffer, PaintCompositor, PaintError, PaintTarget};
 pub use paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
+pub use postfx_viewport::{
+    postfx_paint_shape, PostFxPaintCallback, PostFxStatus, PostFxViewport, ViewportRoute,
+};
 pub use tile_pool::{texel_within_tile, tile_for, TileId, TilePool, TILE_SIZE};
 pub use view_mode::{PixelSource, SoloChannel, ViewMode, ViewModeParams};
 /// The depth format the app must request from eframe

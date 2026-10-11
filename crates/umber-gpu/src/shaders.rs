@@ -15,6 +15,13 @@
 /// (`crate::display_lut`; the snippet is that module's
 /// `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
 /// the last step before the target.
+///
+/// Two fragment entries (the LUT gate, see [`MESH_ENTRY_DIRECT`] /
+/// [`MESH_ENTRY_SCENE_LINEAR`]): `fs_main` applies the LUT inline (the
+/// direct path, unchanged), `fs_scene_linear` returns the same shaded
+/// color without it (the post-effects path, `crate::postfx_viewport`).
+/// Both call the one `shade` helper, so the two can never disagree on
+/// anything but the LUT.
 pub const MESH_SHADER: &str = r#"
 // ---- display LUT (crate::display_lut — keep verbatim) ----
 @group(1) @binding(0) var display_lut: texture_2d<f32>;
@@ -272,9 +279,13 @@ fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_
     return lit;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let n = normalize(in.world_normal);
+/// The shaded, view-mode-resolved color: everything before the display
+/// LUT. Shared by the two entry points (the LUT gate): `fs_main` (the
+/// direct path, LUT applied here) and `fs_scene_linear` (the post-effects
+/// path, scene-linear out; `crate::postfx_viewport`'s composite applies
+/// the LUT after the chain).
+fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    let n = normalize(world_normal);
     let to_light = normalize(-camera.light_dir.xyz);
     let diffuse = max(dot(n, to_light), 0.0);
     let env = environment_irradiance(n);
@@ -298,12 +309,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color = color + prefiltered_env(reflect_dir, rough) * (f0 * ab.x + ab.y);
     }
     // View modes (crate::view_mode): Lit keeps the PBR color
-    // above; Unlit/Solo/Preview substitute their proxy. Data modes
-    // bypass the display LUT below (the §9 rule — the CPU side binds
-    // the identity table for those modes, so the early return agrees
-    // with the bound table; the branch additionally protects a caller
-    // that passes the app LUT with a data mode).
-    color = apply_view_mode(view_mode.mode, view_mode.channel, color, n, in.world_pos);
+    // above; Unlit/Solo/Preview substitute their proxy.
+    return apply_view_mode(view_mode.mode, view_mode.channel, color, n, world_pos);
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let color = shade(in.world_normal, in.world_pos);
+    // Data modes bypass the display LUT below (the §9 rule — the CPU
+    // side binds the identity table for those modes, so the early
+    // return agrees with the bound table; the branch additionally
+    // protects a caller that passes the app LUT with a data mode).
     if (view_mode_bypasses_lut(view_mode.mode, view_mode.channel)) {
         return vec4<f32>(color, 1.0);
     }
@@ -313,7 +329,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // unorm target would store for c anyway.
     return vec4<f32>(apply_display_lut(color), 1.0);
 }
+
+/// The post-effects path's entry (the LUT gate OFF): scene-linear color
+/// into the Rgba16Float target, no clamp, no LUT. Alpha 1 marks mesh
+/// coverage — the target clears to transparent, the chain carries
+/// alpha through, and the composite blends on it.
+@fragment
+fn fs_scene_linear(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(shade(in.world_normal, in.world_pos), 1.0);
+}
 "#;
+
+/// [`MESH_SHADER`]'s direct-path fragment entry: the display LUT applied
+/// inline (data view modes excepted), into the eframe surface.
+pub const MESH_ENTRY_DIRECT: &str = "fs_main";
+
+/// [`MESH_SHADER`]'s post-effects-path fragment entry: the LUT gated OFF,
+/// scene-linear color into `crate::postfx_exec::POSTFX_FORMAT`.
+pub const MESH_ENTRY_SCENE_LINEAR: &str = "fs_scene_linear";
 
 /// Dab-splat compute pass: one workgroup per dab, rasterizing a filled,
 /// radially-falloff'd circle into a storage texture with premultiplied

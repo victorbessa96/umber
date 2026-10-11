@@ -175,6 +175,10 @@ pub struct GpuContext {
     /// repeat-U/clamp-V (see `crate::ibl::ibl_sampler`).
     env_sampler: wgpu::Sampler,
     depth_format: Option<wgpu::TextureFormat>,
+    /// The eframe surface format every display pipeline targets (kept
+    /// for the post-effects composite, built lazily by
+    /// `crate::postfx_viewport`).
+    color_format: wgpu::TextureFormat,
     /// Textured-quad display pipeline for paint-target presentation
     /// (built once; see `texture_display`).
     texture_display: crate::texture_display::TextureDisplay,
@@ -240,6 +244,23 @@ impl GpuContext {
     /// ([`crate::display_lut::DisplayLut::new`] builds against it).
     pub(crate) fn display_lut_layout(&self) -> &wgpu::BindGroupLayout {
         &self.display_lut_layout
+    }
+
+    /// The identity display LUT (what a consumer handed `None` binds).
+    pub(crate) fn identity_lut(&self) -> &crate::display_lut::DisplayLut {
+        &self.identity_lut
+    }
+
+    /// The mesh pass's group-0 layout (camera + IBL + spec + view mode):
+    /// the post-effects path's scene-linear mesh pipeline shares it, so
+    /// [`MeshBuffers`]' bind group binds straight through.
+    pub(crate) fn mesh_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.bind_group_layout
+    }
+
+    /// The surface format the display pipelines target.
+    pub(crate) fn color_format(&self) -> wgpu::TextureFormat {
+        self.color_format
     }
 
     /// Creates a uniform buffer holding `params`, ready for an OpenPBR
@@ -587,7 +608,7 @@ impl GpuContext {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(crate::shaders::MESH_ENTRY_DIRECT),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -848,6 +869,7 @@ impl GpuContext {
             pipeline,
             bind_group_layout,
             depth_format,
+            color_format,
             texture_display,
             openpbr_pipeline,
             openpbr_layout,
@@ -1296,6 +1318,21 @@ impl MeshPaintCallback {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_bind_group(1, &self.lut_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+    }
+
+    /// [`Self::draw`] through `pipeline` — the post-effects path's
+    /// scene-linear mesh pipeline (`crate::postfx_viewport`), whose layout
+    /// is group 0 only: the LUT gate is the entry point, so no group 1.
+    pub(crate) fn draw_scene_linear(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+    ) {
+        render_pass.set_pipeline(pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..1);

@@ -234,7 +234,10 @@ postfx =
     .move-down = Move down
     .remove = Remove effect
     .summary = { $active } of { $total } effects enabled, applied top to bottom.
-    .not-live = Not live in the viewport yet: the mesh pass still draws straight to the screen, so the chain has no scene-linear image to run on. Session only (not saved with the project).
+    .status-idle = Nothing enabled: the 3D viewport draws directly, with no offscreen pass.
+    .status-live = Live in the 3D viewport: the scene renders scene-linear offscreen, runs through this chain, then the display transform.
+    .status-bypassed = Bypassed in the 3D viewport: the current view mode shows raw data, which skips post effects and the display transform.
+    .session-only = Session only (not saved with the project).
 
 ## Viewport view modes (§5 P0 row)
 
@@ -278,6 +281,10 @@ brush =
     .dabs-per-radius = Dabs per radius
     .pressure-alpha = Pressure → alpha
     .pressure-radius = Pressure → radius
+    .curve-presets = Presets
+    .curve-preset-linear = Linear
+    .curve-preset-smooth = Smooth
+    .curve-preset-ease = Ease
     .wash-mode = Mode
     .wash = Wash
     .build-up = Build-up

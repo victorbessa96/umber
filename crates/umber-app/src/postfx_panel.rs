@@ -10,16 +10,17 @@
 //! the row loop and applied after it, so no row ever indexes a chain that
 //! changed under it.
 //!
-//! v1 limits (honest, and said in the status line): the chain is session
-//! state (not saved in the `.umber` project yet), and it is not live in
-//! the viewport — `umber_gpu::postfx_exec::PostStack` runs it, but the
-//! mesh pass still draws straight into the surface with the display LUT
-//! inline, so there is no scene-linear image to feed it.
+//! The status line says whether the chain is live in the viewport
+//! ([`PostFxStatus`]: idle with nothing enabled, live, or bypassed under
+//! a data view mode — see `umber_gpu::postfx_viewport`). v1 limit (also
+//! said there): the chain is session state, not saved in the `.umber`
+//! project yet.
 
 use crate::i18n;
 use egui::Ui;
 use fluent::FluentValue;
 use umber_gpu::postfx::{PostChain, PostEffect, PostPass, ToneMapMode};
+use umber_gpu::{PostFxStatus, ViewMode};
 
 /// The panel's session state (never serialized): the "Add effect" pick
 /// and the row being dragged.
@@ -80,8 +81,7 @@ fn drop_index(centers: &[f32], from: usize, pointer_y: f32) -> usize {
         .count()
 }
 
-/// The status line: how many effects run, and that the chain is not yet
-/// composited into the viewport.
+/// The status line's count: how many effects run, in what order.
 fn summary_label(chain: &PostChain) -> String {
     let args = [
         (
@@ -91,6 +91,15 @@ fn summary_label(chain: &PostChain) -> String {
         ("total", FluentValue::from(chain.effects.len().to_string())),
     ];
     i18n::tr_args("postfx.summary", args)
+}
+
+/// The status line's route: whether the viewport is running the chain.
+fn status_label(status: PostFxStatus) -> String {
+    match status {
+        PostFxStatus::Idle => i18n::tr("postfx.status-idle"),
+        PostFxStatus::Live => i18n::tr("postfx.status-live"),
+        PostFxStatus::BypassedDataMode => i18n::tr("postfx.status-bypassed"),
+    }
 }
 
 /// One effect's param sliders; true when a value changed. Ranges mirror
@@ -161,19 +170,20 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
     changed
 }
 
-/// Draws the section and edits `chain` in place. Returns whether the
-/// chain changed this frame.
-pub fn show(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel) -> bool {
+/// Draws the section and edits `chain` in place. `mode` is the viewport's
+/// view mode (the status line: a data mode bypasses the chain). Returns
+/// whether the chain changed this frame.
+pub fn show(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: ViewMode) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new(i18n::tr("postfx.title"))
         .default_open(true)
         .show(ui, |ui| {
-            changed = show_body(ui, chain, panel);
+            changed = show_body(ui, chain, panel, mode);
         });
     changed
 }
 
-fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel) -> bool {
+fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: ViewMode) -> bool {
     let mut changed = false;
     let mut edit: Option<RowEdit> = None;
     let n = chain.effects.len();
@@ -294,7 +304,9 @@ fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel) -> boo
     });
 
     ui.label(summary_label(chain));
-    ui.weak(i18n::tr("postfx.not-live"));
+    // After this frame's edits, so a toggle reads right immediately.
+    ui.weak(status_label(PostFxStatus::of(chain, mode)));
+    ui.weak(i18n::tr("postfx.session-only"));
     changed
 }
 
@@ -336,6 +348,23 @@ mod tests {
         assert!(chain.set_enabled(0, false));
         let label = summary_label(&chain);
         assert!(label.contains("1 of 2"), "{label}");
+    }
+
+    #[test]
+    fn status_line_flips_with_the_route() {
+        let mut chain = PostChain::new();
+        let idle = status_label(PostFxStatus::of(&chain, ViewMode::Lit));
+        chain.push(PostEffect::default_for(PostPass::Vignette));
+        let live = status_label(PostFxStatus::of(&chain, ViewMode::Lit));
+        let data = ViewMode::Solo(umber_gpu::SoloChannel::Roughness);
+        let bypassed = status_label(PostFxStatus::of(&chain, data));
+        for label in [&idle, &live, &bypassed] {
+            // Not the raw key: the en-US catalog defines each.
+            assert!(!label.starts_with("postfx."), "{label}");
+        }
+        assert_ne!(idle, live);
+        assert_ne!(live, bypassed);
+        assert_ne!(idle, bypassed);
     }
 
     #[test]

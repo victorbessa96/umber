@@ -247,7 +247,10 @@ postfx =
     .move-down = Mover para baixo
     .remove = Remover efeito
     .summary = { $active } de { $total } efeitos ativos, aplicados de cima para baixo.
-    .not-live = Ainda não aparece no viewport: o passe da malha ainda desenha direto na tela, então a cadeia não tem uma imagem linear da cena para processar. Só nesta sessão (não é salva no projeto).
+    .status-idle = Nada ativo: o viewport 3D desenha direto, sem passe fora da tela.
+    .status-live = Ativa no viewport 3D: a cena é renderizada em linear fora da tela, passa por esta cadeia e depois pela transformação de exibição.
+    .status-bypassed = Ignorada no viewport 3D: o modo de exibição atual mostra dados brutos, que dispensam pós-efeitos e a transformação de exibição.
+    .session-only = Só nesta sessão (não é salva no projeto).
 
 ## Modos de exibição do viewport (§5 P0)
 
@@ -297,6 +300,10 @@ brush =
     .dabs-per-radius = Dabs por raio
     .pressure-alpha = Pressão → opacidade
     .pressure-radius = Pressão → raio
+    .curve-presets = Predefinições
+    .curve-preset-linear = Linear
+    .curve-preset-smooth = Suave
+    .curve-preset-ease = Acelerada
     .wash-mode = Modo
     .wash = Lavar
     .build-up = Construir
