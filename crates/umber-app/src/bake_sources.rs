@@ -314,6 +314,11 @@ pub const SKEW_CHANNEL_NAME: &str = "skew";
 
 /// Whether `channel` names the paintable skew mask (the skew map's
 /// membership in the paintable channel set).
+///
+/// V1: the bake-side skew emission is flat (see `bakes_panel`'s module
+/// doc); the painted-skew READ that queries session channels for this
+/// membership is the named §6:57 follow-up — this is its ready API.
+#[allow(dead_code)] // the painted-skew read path (§6:57 v2)
 pub fn is_skew_channel(channel: &str) -> bool {
     channel == SKEW_CHANNEL_NAME
 }
@@ -326,6 +331,10 @@ pub fn is_skew_channel(channel: &str) -> bool {
 /// disagree about combine semantics).
 /// Whether a paint-session channel list includes the skew mask (the
 /// membership query the read path uses to find the painted mask).
+///
+/// V1: unused live (the flat-emission boundary above); the §6:57 v2
+/// painted-skew read is this function's consumer.
+#[allow(dead_code)] // the painted-skew read path (§6:57 v2)
 pub fn session_has_skew_channel(channels: &[String]) -> bool {
     channels.iter().any(|c| is_skew_channel(c))
 }

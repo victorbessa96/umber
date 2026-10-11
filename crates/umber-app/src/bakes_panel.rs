@@ -1485,7 +1485,6 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
     } = request;
     let (device, queue, mesh) = (&device, &queue, &mesh);
     let dilate = umber_bake::DilateParams::new(dilation_iterations);
-    let threshold_byte = umber_bake::skew::skew_threshold_byte(skew_threshold_deg);
     let mut records = Vec::new();
     let mut skew_by_tile: HashMap<u16, Vec<u8>> = HashMap::new();
 

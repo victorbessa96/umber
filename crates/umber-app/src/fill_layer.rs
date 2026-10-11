@@ -396,7 +396,7 @@ pub fn refresh_fill_layer(
     for &tile in tiles {
         let rgba = state.evaluate(mesh, tile, size, symmetry).to_vec();
         let coverage = state.coverage_of(tile, size).unwrap_or(&[]).to_vec();
-        let gated = apply_quick_mask(
+        let mut gated = apply_quick_mask(
             FillTile {
                 width: size,
                 height: size,
@@ -406,6 +406,23 @@ pub fn refresh_fill_layer(
             paint.quick_mask(),
             tile,
         );
+        // The composite-aware publish: a non-Normal blend (or opacity < 1)
+        // composites the fill over the readback through the SAME
+        // blend_channel primitive every other layer uses; Normal/1.0
+        // publishes the gated bytes unchanged (the fast path).
+        if blend != umber_core::BlendMode::Normal || opacity < 1.0 {
+            if let Some(base) = paint.read_tile(tile) {
+                let fill = FillTile {
+                    width: gated.width,
+                    height: gated.height,
+                    rgba: gated.rgba,
+                    coverage: gated.coverage,
+                };
+                let mut base_bytes = base.data;
+                composite_fill_over(&mut base_bytes, &fill, blend, opacity);
+                gated.rgba = base_bytes;
+            }
+        }
         if paint.publish_fill(tile, size, size, gated.rgba) {
             staged.push(tile);
         }
