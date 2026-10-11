@@ -16,3 +16,8 @@ image = { workspace = true }
 png = "0.17"
 ag-psd = "0.3.0"
 umber-graph = { workspace = true }
+
+# Round-trip tests only: the exported `.usda` parses back through the
+# real importer (`crate::usd` stays mesh-free in the shipped graph).
+[dev-dependencies]
+umber-mesh = { workspace = true }

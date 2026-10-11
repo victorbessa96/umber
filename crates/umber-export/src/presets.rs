@@ -157,6 +157,12 @@ pub struct ExportPreset {
     /// Absent in older preset files → off.
     #[serde(default)]
     pub materialx: bool,
+    /// Also write `<textureSet>.usda` — the mesh plus a UsdShade
+    /// Material/Shader network binding the written textures to the
+    /// OpenPBR surface (`crate::usd`). Absent in older preset files →
+    /// off, like [`Self::materialx`].
+    #[serde(default)]
+    pub usda: bool,
 }
 
 /// Export-configuration errors.
@@ -198,6 +204,7 @@ impl ExportPreset {
         Self {
             name: "glTF metal-rough".into(),
             materialx: false,
+            usda: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_baseColor.png".into(),
@@ -261,6 +268,7 @@ impl ExportPreset {
         Self {
             name: "Unreal ORM".into(),
             materialx: false,
+            usda: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_basecolor.png".into(),
@@ -314,6 +322,7 @@ impl ExportPreset {
         Self {
             name: "Unity HDRP/URP".into(),
             materialx: false,
+            usda: false,
             outputs: vec![
                 OutputSpec {
                     filename: "$textureSet_BaseMap.png".into(),
@@ -363,6 +372,7 @@ impl ExportPreset {
         Self {
             name: "Blender Principled".into(),
             materialx: false,
+            usda: false,
             outputs: vec![
                 passthrough(MapKind::BaseColor, "$textureSet_basecolor.png"),
                 passthrough(MapKind::Roughness, "$textureSet_roughness.png"),
@@ -608,5 +618,7 @@ mod tests {
         assert_eq!(preset.outputs[0].maps[0].0, MapKind::BaseColor);
         // Pre-MaterialX preset files (no `materialx` key) parse with it off.
         assert!(!preset.materialx);
+        // Pre-USD preset files (no `usda` key) parse with it off too.
+        assert!(!preset.usda);
     }
 }

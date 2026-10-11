@@ -18,6 +18,7 @@ pub mod icc;
 pub mod png;
 pub mod presets;
 pub mod psd;
+pub mod usd;
 
 pub use dither::dither_quantize_rgba8;
 

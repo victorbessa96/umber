@@ -240,7 +240,9 @@ impl<'a> TokenSources<'a> {
 
     /// [`Self::expand_output`] over an explicit `template` (the tiled
     /// driver passes [`tiled_template`]'s form of `output.filename`).
-    fn expand_output_from(&self, output: &crate::presets::OutputSpec, template: &str) -> String {
+    /// `pub(crate)`: the [`crate::usd`] side resolves tile-aware texture
+    /// references through the same expansion.
+    pub(crate) fn expand_output_from(&self, output: &crate::presets::OutputSpec, template: &str) -> String {
         let src_map = src_map_token(output);
         let color_space = output_color_space(output);
         crate::expand_template(
@@ -531,8 +533,9 @@ fn write_materialx(out_dir: &Path, texture_set: &str, doc: &str) -> Result<PathB
 }
 
 /// The graph-side mirror of a [`MapKind`] (exhaustive: a new kind fails
-/// to compile here until it is mapped).
-fn texture_map(kind: MapKind) -> TextureMap {
+/// to compile here until it is mapped). `pub(crate)`: the [`crate::usd`]
+/// side maps the same kinds to the same OpenPBR inputs.
+pub(crate) fn texture_map(kind: MapKind) -> TextureMap {
     match kind {
         MapKind::BaseColor => TextureMap::BaseColor,
         MapKind::Roughness => TextureMap::Roughness,
@@ -546,7 +549,8 @@ fn texture_map(kind: MapKind) -> TextureMap {
 }
 
 /// Whether output R/G/B are map `index`'s own R/G/B (the file IS the map).
-fn is_passthrough(output: &OutputSpec, index: usize) -> bool {
+/// `pub(crate)`: shared with the [`crate::usd`] channel analysis.
+pub(crate) fn is_passthrough(output: &OutputSpec, index: usize) -> bool {
     output.channels[0] == ChannelWiring::new(index, ChannelSlot::R)
         && output.channels[1] == ChannelWiring::new(index, ChannelSlot::G)
         && output.channels[2] == ChannelWiring::new(index, ChannelSlot::B)
@@ -554,8 +558,9 @@ fn is_passthrough(output: &OutputSpec, index: usize) -> bool {
 
 /// The output channel carrying map `index` in a packed output: its Gray
 /// slot first (the packing presets' scalar wire — glTF roughness = B, not
-/// the R it also feeds), then any of R/G/B, then A.
-fn packed_channel(output: &OutputSpec, index: usize) -> Option<u8> {
+/// the R it also feeds), then any of R/G/B, then A. `pub(crate)`: shared
+/// with the [`crate::usd`] channel analysis.
+pub(crate) fn packed_channel(output: &OutputSpec, index: usize) -> Option<u8> {
     let ch = &output.channels;
     (0..4)
         .find(|&i| ch[i].map == index && ch[i].slot == ChannelSlot::Gray)
@@ -828,6 +833,7 @@ mod tests {
         let preset = ExportPreset {
             name: "wiring probe".into(),
             materialx: false,
+            usda: false,
             outputs: vec![crate::presets::OutputSpec {
                 filename: "$textureSet_wiring.png".into(),
                 maps: vec![(MapKind::Roughness, vec![]), (MapKind::Metallic, vec![])],
@@ -882,6 +888,7 @@ mod tests {
         let preset = ExportPreset {
             name: "token probe".into(),
             materialx: false,
+            usda: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -916,6 +923,7 @@ mod tests {
         let preset = ExportPreset {
             name: "token probe".into(),
             materialx: false,
+            usda: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -946,6 +954,7 @@ mod tests {
         let preset = ExportPreset {
             name: "orm probe".into(),
             materialx: false,
+            usda: false,
             outputs: vec![crate::presets::OutputSpec {
                 filename: "$textureSet_$srcMap_$colorSpace.png".into(),
                 maps: vec![
@@ -1083,6 +1092,7 @@ mod tests {
         let preset = ExportPreset {
             name: "udim probe".into(),
             materialx: false,
+            usda: false,
             outputs: vec![passthrough_output(
                 "$textureSet_$srcMap_$udim.png",
                 MapKind::BaseColor,
@@ -1172,6 +1182,7 @@ mod tests {
         let udim_preset = ExportPreset {
             name: "token probe".into(),
             materialx: false,
+            usda: false,
             outputs: vec![passthrough_output(
                 "$mesh_$textureSet_$srcMap_$colorSpace_$layerName_$udim.png",
                 MapKind::BaseColor,
@@ -1473,6 +1484,7 @@ mod tests {
             name: "transfer probe".into(),
             outputs: vec![tiff, exr],
             materialx: true,
+            usda: false,
         };
         let mut set = MapSet::new(2);
         set.set(MapKind::Roughness, solid(2, 64));

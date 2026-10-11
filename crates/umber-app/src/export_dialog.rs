@@ -149,6 +149,7 @@ pub fn filter_satisfiable(
             name: preset.name.clone(),
             outputs: kept,
             materialx: preset.materialx,
+            usda: preset.usda,
         },
         skipped,
     )
@@ -330,6 +331,10 @@ pub struct ExportDialog {
     mesh_tiles: MeshTilesCache,
     /// Also write `<textureSet>.mtlx` (the preset's `materialx` toggle).
     materialx: bool,
+    /// Also write `<textureSet>.usda` — the whole mesh plus a UsdShade
+    /// Material/Shader network binding the written textures to the
+    /// OpenPBR surface (the preset's `usda` toggle, requirements §6 P1).
+    usda: bool,
 }
 
 impl ExportDialog {
@@ -346,6 +351,7 @@ impl ExportDialog {
             tiles: TileSelection::new(),
             mesh_tiles: MeshTilesCache::default(),
             materialx: false,
+            usda: false,
         }
     }
 
@@ -376,11 +382,22 @@ impl ExportDialog {
         self.materialx = on;
     }
 
+    /// Whether an export also writes the USD document.
+    pub fn usda(&self) -> bool {
+        self.usda
+    }
+
+    /// Turns the USD document output on/off.
+    pub fn set_usda(&mut self, on: bool) {
+        self.usda = on;
+    }
+
     /// The preset an Export click runs: the chosen engine preset with the
-    /// dialog's MaterialX toggle applied.
+    /// dialog's MaterialX and USD toggles applied.
     pub fn build_preset(&self) -> umber_export::ExportPreset {
         let mut preset = self.preset.build();
         preset.materialx = self.materialx;
+        preset.usda = self.usda;
         preset
     }
 
@@ -454,6 +471,7 @@ impl ExportDialog {
             });
         crate::size_presets::size_combo(ui, &tr("export.size"), &mut self.size);
         ui.checkbox(&mut self.materialx, tr("export.materialx"));
+        ui.checkbox(&mut self.usda, tr("export.usda"));
 
         ui.horizontal(|ui| {
             let dir = self.output_dir.display().to_string();
@@ -694,8 +712,28 @@ impl ExportDialog {
         let write_started = Instant::now();
         let pairs: Vec<(u16, &umber_export::MapSet)> =
             tile_sets.iter().map(|t| (t.tile, &t.set)).collect();
-        let written = umber_export::run_preset_tiled(&filtered, &pairs, &sources, &self.output_dir)
+        let mut written = umber_export::run_preset_tiled(&filtered, &pairs, &sources, &self.output_dir)
             .context("run_preset_tiled")?;
+        if filtered.usda {
+            // The `.usda` carries the whole mesh (per-tile splits stay a
+            // bake-window concern); only its texture references are
+            // tile-aware (`<UDIM>` when the run wrote tile-suffixed names).
+            let tile_names =
+                tiles.len() > 1 || tiles.iter().any(|t| *t != umber_mesh::FIRST_TILE);
+            let textures = umber_export::usd::usd_textures(&filtered, |output| {
+                umber_export::usd::usda_file_for_output(output, &sources, tile_names)
+            });
+            let mesh_view = umber_export::usd::UsdMeshView {
+                positions: &mesh.positions,
+                normals: &mesh.normals,
+                uvs: &mesh.uvs,
+                indices: &mesh.indices,
+            };
+            written.push(
+                umber_export::usd::write_usda(&self.output_dir, &texture_set, &mesh_view, &textures)
+                    .context("write_usda")?,
+            );
+        }
         let write_ms = write_started.elapsed().as_millis();
 
         Ok(ExportOutcome {
@@ -768,6 +806,18 @@ mod tests {
         // The satisfiable-outputs filter keeps the toggle.
         let (filtered, _) = filter_satisfiable(&d.build_preset(), &[]);
         assert!(filtered.materialx);
+    }
+
+    #[test]
+    fn usda_toggle_reaches_the_run_preset() {
+        let mut d = dialog();
+        assert!(!d.usda(), "off by default");
+        assert!(!d.build_preset().usda);
+        d.set_usda(true);
+        assert!(d.build_preset().usda);
+        // The satisfiable-outputs filter keeps the toggle.
+        let (filtered, _) = filter_satisfiable(&d.build_preset(), &[]);
+        assert!(filtered.usda);
     }
 
     #[test]
