@@ -21,6 +21,7 @@ pub mod display_lut;
 pub mod golden;
 pub mod graph_eval;
 pub mod graph_shaders;
+pub mod hdr;
 pub mod ibl;
 pub mod material;
 pub mod paint;
@@ -46,6 +47,7 @@ pub use graph_eval::{
     compute_run_set, plan_dispatches, CpuPath, EvalBackend, GpuOp, GpuRoute, GraphGpuError,
     GraphGpuEvaluator, GraphParams, PipelineCache, PlannedDispatch, TileSpec, MAX_GPU_BLUR_RADIUS,
 };
+pub use hdr::{DisabledReason, HdrMode, HdrProbe, HdrSpace};
 pub use ibl::{EnvFlags, EnvFormat, EnvIrradiance, IblError, SpecParams};
 pub use paint::{Dab, DabBuffer, PaintCompositor, PaintError, PaintTarget};
 pub use paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
