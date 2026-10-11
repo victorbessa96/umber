@@ -67,7 +67,7 @@ pub struct ParamGroup<'a> {
 impl<'a> ParamGroup<'a> {
     /// A group titled `title` (already localized). `id_salt` must be
     /// unique within the panel.
-    pub fn new(id_salt: impl std::hash::Hash, title: &'a str) -> Self {
+    pub fn new(id_salt: impl core::hash::Hash + core::fmt::Debug, title: &'a str) -> Self {
         ParamGroup {
             id: Id::new(id_salt),
             title,

@@ -3,9 +3,23 @@
 //! Wave-4 item 3 (docs/specs/brush-presets-design.md, "The properties
 //! panel data model"): the panel edits a [`BrushPreset`] live — engine
 //! params bind directly to sliders, the two pressure curves bind to a
-//! 4-point drag-the-control-points editor (straight polyline segments;
-//! the doc's piecewise-linear v1, no spline rendering). Changes write
-//! back to the preset file on explicit save only.
+//! 4-point drag-the-control-points editor. Changes write back to the
+//! preset file on explicit save only.
+//!
+//! GUI Phase 2 item 2 (docs/specs/gui-audit-and-roadmap.md §2, the
+//! flagship-widget pass) repaints that editor: a custom-painted grid
+//! backdrop, an accent-colored display spline through the 4 points,
+//! raised/hover/drag handle states, click-to-insert, right-click-to-
+//! delete, and a 120ms animated glide on a discrete position change.
+//! The spline is cosmetic only — [`ControlCurve::evaluate`] stays the
+//! piecewise-linear v1 brush-presets-design.md calls for ("linear
+//! interpolation first... Substance's curves are also piecewise-linear
+//! under the hood"), so the drawn curve and the value the engine
+//! actually samples can disagree by a little between control points;
+//! the cursor readout always shows `evaluate`'s real value, never the
+//! spline's. [`ControlCurve`] itself is unchanged by this pass: it is
+//! still fixed at exactly 4 points, so "insert"/"delete" are reinterpreted
+//! for that frozen shape — see [`insert_point`] and [`delete_point`].
 //!
 //! [`BrushPanel::new`] assumes the working directory is the repo root in
 //! dev builds (that is how the app runs today): it loads
@@ -31,9 +45,72 @@ use crate::paint_state::PaintState;
 const CURVE_PLOT_SIZE: egui::Vec2 = egui::Vec2::new(150.0, 100.0);
 /// Radius of the draggable control-point handles (logical pixels).
 const CURVE_HANDLE_RADIUS: f32 = 5.0;
+/// Side length of each control point's (invisible) hit-box: bigger than
+/// the drawn radius so a precise click is not required to grab a point.
+const CURVE_HANDLE_HIT_SIZE: f32 = 14.0;
 /// Minimum x gap between adjacent control points: the strict-monotonicity
 /// invariant of [`ControlCurve`] in curve-editor units.
 const CURVE_MIN_GAP: f32 = 0.01;
+/// Minor-gridline divisions, each direction (§2: "4x4 minor").
+const CURVE_GRID_DIVS: u32 = 4;
+/// Samples drawn per segment for the cosmetic display spline
+/// ([`spline_polyline`]).
+const CURVE_SPLINE_SAMPLES: usize = 16;
+/// Font size (logical pixels) of the cursor in/out readout.
+const CURVE_LABEL_SIZE: f32 = 11.0;
+
+/// The house motion-curve duration (docs/specs/gui-audit-and-roadmap.md
+/// §2.4: "120ms ease-out as the house curve"). This mirrors the
+/// in-flight `umber_gui::theme::MOTION_SECS` value exactly; it is
+/// duplicated here rather than depended on because `umber-app` does not
+/// wire the `umber-gui` crate yet (that crate's own Phase-0a landing is
+/// separate, still uncommitted work) — this upgrade is scoped to stay
+/// in-file, per the task that drove it, and collapses into the shared
+/// constant once that wiring lands.
+///
+/// Only the DURATION matches the house curve here, not necessarily its
+/// shape: the task names `animate_value_with_time` as the mechanism to
+/// use, and that call interpolates linearly over this duration rather
+/// than easing — an unverified detail (no cargo access to check egui's
+/// rustdoc against this exact version), but worth flagging since the
+/// roadmap's curve is specifically an ease-OUT. Shaping it would mean
+/// not using `animate_value_with_time` for the interpolation itself
+/// (e.g. driving it from a manually-tracked start time instead), which
+/// this pass does not do.
+const CURVE_MOTION_SECS: f32 = 0.12;
+
+/// The curve-editor palette: local consts carrying the same hex values
+/// as docs/specs/gui-audit-and-roadmap.md §2.1 (and the in-flight
+/// `umber_gui::theme::palette`) — see [`CURVE_MOTION_SECS`] for why this
+/// duplicates rather than imports.
+mod curve_palette {
+    use egui::Color32;
+
+    /// Plot background: the darkest neutral, so the plot reads recessed
+    /// against its parent panel.
+    pub const BG: Color32 = Color32::from_rgb(0x16, 0x18, 0x1D);
+    /// Minor gridlines (§2: "4x4 minor, the muted color").
+    pub const GRID_MINOR: Color32 = Color32::from_rgb(0x26, 0x2A, 0x33);
+    /// The outer frame: one step brighter than the minor grid.
+    pub const GRID_BORDER: Color32 = Color32::from_rgb(0x33, 0x38, 0x42);
+    /// The display spline: the ember-orange accent.
+    pub const SPLINE: Color32 = Color32::from_rgb(0xFF, 0x7A, 0x1A);
+    /// Idle control-point fill: the panel tone — a notch above [`BG`],
+    /// distinct from both the grid lines and the hover state below.
+    pub const POINT_IDLE: Color32 = Color32::from_rgb(0x1E, 0x21, 0x28);
+    /// Hovered control-point fill: literally "the raised color" per the
+    /// task (`RAISED`, same hex as [`GRID_MINOR`] — the handle's size and
+    /// bezel ring keep it legible against the thin gridlines).
+    pub const POINT_HOVER: Color32 = Color32::from_rgb(0x26, 0x2A, 0x33);
+    /// Dragged/active control-point fill: "the accent", per the task.
+    pub const POINT_DRAG: Color32 = Color32::from_rgb(0xFF, 0x7A, 0x1A);
+    /// Control-point bezel ring: muted text, bright enough to read
+    /// against every fill state above (including the drag state's own
+    /// accent-colored fill).
+    pub const POINT_STROKE: Color32 = Color32::from_rgb(0x9C, 0xA0, 0xAB);
+    /// The cursor in/out readout text.
+    pub const LABEL: Color32 = Color32::from_rgb(0x9C, 0xA0, 0xAB);
+}
 
 /// The properties panel state: the loaded shelf plus the edit session.
 pub struct BrushPanel {
@@ -723,55 +800,414 @@ pub(crate) fn clamp_control_point(
     (x, y)
 }
 
-/// Minimal 4-point curve editor: a 150x100 plot with the polyline
-/// through the control points (straight segments — the doc's
-/// piecewise-linear v1, no spline rendering) and 5px drag handles.
-/// Dragging a handle moves x (clamped between neighbors via
-/// [`clamp_control_point`]) and y (`0..=1`). Returns true when the curve
-/// changed this frame.
+/// Which of the two interior control points (index 1 or 2) a click at
+/// `click_x` should move, chosen by x-bracketing rather than raw
+/// distance: left of `points[1]` always targets `points[1]` (segment 0),
+/// right of `points[2]` always targets `points[2]` (segment 2), and a
+/// click between them targets whichever is nearer in x. Never returns 0
+/// or 3 — the endpoints are not insert targets.
+pub(crate) fn nearest_interior_index(points: &[(f32, f32); 4], click_x: f32) -> usize {
+    if click_x <= points[1].0 {
+        1
+    } else if click_x >= points[2].0 {
+        2
+    } else if click_x - points[1].0 <= points[2].0 - click_x {
+        1
+    } else {
+        2
+    }
+}
+
+/// "Insert on click": [`ControlCurve`] is fixed at exactly four points
+/// (`[(f32, f32); 4]`, enforced by `try_new` and `Deserialize` — the
+/// model is unchanged by this pass), so there is no fifth slot to insert
+/// into. Instead, a click relocates the nearest free interior point
+/// ([`nearest_interior_index`]) to the clicked position, clamped into
+/// its legal x-monotonic window by [`clamp_control_point`]. Factored out
+/// so it is unit-testable headless, same as `clamp_control_point`.
+pub(crate) fn insert_point(points: [(f32, f32); 4], click_x: f32, click_y: f32) -> [(f32, f32); 4] {
+    let idx = nearest_interior_index(&points, click_x);
+    let mut out = points;
+    out[idx] = clamp_control_point(&points, idx, click_x, click_y);
+    out
+}
+
+/// "Delete on right-click, never the endpoints": the endpoints (index 0,
+/// 3) always exist by construction, so a right-click on either is a
+/// no-op (`None`). For an interior point (index 1 or 2), deletion means
+/// collinearizing it — snapping its y onto the straight chord between
+/// its immediate neighbors, at its current x — which exactly cancels its
+/// contribution to [`ControlCurve::evaluate`]'s piecewise-linear
+/// sampling: the closest equivalent to removal the frozen four-point
+/// model allows. x is left untouched, so the result is always still
+/// strictly increasing in x.
+pub(crate) fn delete_point(points: [(f32, f32); 4], idx: usize) -> Option<[(f32, f32); 4]> {
+    let (lo, hi) = match idx {
+        1 => (points[0], points[2]),
+        2 => (points[1], points[3]),
+        _ => return None,
+    };
+    let x = points[idx].0;
+    let t = (x - lo.0) / (hi.0 - lo.0);
+    let y = lo.1 + (hi.1 - lo.1) * t;
+    let mut out = points;
+    out[idx] = (x, y);
+    Some(out)
+}
+
+/// Overwrite `curve` with `preset`, reporting whether anything actually
+/// changed — so clicking a preset button that already matches the
+/// current curve does not dirty the panel.
+pub(crate) fn apply_preset(curve: &mut ControlCurve, preset: ControlCurve) -> bool {
+    if *curve == preset {
+        false
+    } else {
+        *curve = preset;
+        true
+    }
+}
+
+/// Smoothstep, `3t^2 - 2t^3`: the "Smooth" preset's shape.
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Ease-out cubic, `1 - (1-t)^3`: the "Ease" preset's shape — a fast
+/// initial rise that levels off, the same ease-OUT direction as the
+/// house motion curve ([`CURVE_MOTION_SECS`]). Ease-IN (a slow start) was
+/// the other reasonable reading of "Ease"; this upgrade picks ease-out
+/// for that consistency and does not build the other.
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// The "Linear" preset: [`ControlCurve::identity`].
+pub(crate) fn preset_linear() -> ControlCurve {
+    ControlCurve::identity()
+}
+
+/// The "Smooth" preset: a smoothstep S-curve sampled at the identity
+/// curve's interior x values (1/3, 2/3).
+pub(crate) fn preset_smooth() -> ControlCurve {
+    let (t1, t2) = (1.0 / 3.0, 2.0 / 3.0);
+    ControlCurve::try_new(&[
+        (0.0, 0.0),
+        (t1, smoothstep(t1)),
+        (t2, smoothstep(t2)),
+        (1.0, 1.0),
+    ])
+    .expect("fixed, strictly-increasing x values always construct")
+}
+
+/// The "Ease" preset: an ease-out cubic sampled at the same x values.
+pub(crate) fn preset_ease() -> ControlCurve {
+    let (t1, t2) = (1.0 / 3.0, 2.0 / 3.0);
+    ControlCurve::try_new(&[
+        (0.0, 0.0),
+        (t1, ease_out_cubic(t1)),
+        (t2, ease_out_cubic(t2)),
+        (1.0, 1.0),
+    ])
+    .expect("fixed, strictly-increasing x values always construct")
+}
+
+/// Fritsch-Carlson monotone-cubic tangents at the 4 control points, used
+/// only to draw the smooth display spline ([`spline_polyline`]) — NOT
+/// [`ControlCurve::evaluate`]'s interpolation (see the module docs: that
+/// stays piecewise-linear; the spline is cosmetic chrome and the two can
+/// disagree slightly between control points). The limiter (the
+/// `alpha^2 + beta^2 > 9` rescale) keeps the drawn curve from
+/// overshooting past its neighbors' y range on a steep preset.
+fn hermite_tangents(points: &[(f32, f32); 4]) -> [f32; 4] {
+    let mut d = [0.0f32; 3];
+    for i in 0..3 {
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[i + 1];
+        d[i] = (y1 - y0) / (x1 - x0);
+    }
+    let mut m = [d[0], 0.0, 0.0, d[2]];
+    for i in 1..3 {
+        let (dm, dp) = (d[i - 1], d[i]);
+        m[i] = if dm == 0.0 || dp == 0.0 || dm.signum() != dp.signum() {
+            0.0
+        } else {
+            (dm + dp) / 2.0
+        };
+    }
+    for i in 0..3 {
+        if d[i] == 0.0 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+            continue;
+        }
+        let alpha = m[i] / d[i];
+        let beta = m[i + 1] / d[i];
+        let s = alpha * alpha + beta * beta;
+        if s > 9.0 {
+            let tau = 3.0 / s.sqrt();
+            m[i] = tau * alpha * d[i];
+            m[i + 1] = tau * beta * d[i];
+        }
+    }
+    m
+}
+
+/// Sample the cosmetic display spline (a Hermite cubic per segment, via
+/// [`hermite_tangents`]) into a curve-space (`[0,1]^2`) polyline:
+/// `samples_per_segment` steps per segment, sharing boundary points so
+/// the result has no duplicate vertices.
+fn spline_polyline(points: &[(f32, f32); 4], samples_per_segment: usize) -> Vec<(f32, f32)> {
+    let m = hermite_tangents(points);
+    let mut out = Vec::with_capacity(samples_per_segment * 3 + 1);
+    for seg in 0..3 {
+        let (x0, y0) = points[seg];
+        let (x1, y1) = points[seg + 1];
+        let dx = x1 - x0;
+        let start = if seg == 0 { 0 } else { 1 };
+        for step in start..=samples_per_segment {
+            let t = step as f32 / samples_per_segment as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h10 = t3 - 2.0 * t2 + t;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let h11 = t3 - t2;
+            let y = h00 * y0 + h10 * dx * m[seg] + h01 * y1 + h11 * dx * m[seg + 1];
+            out.push((x0 + dx * t, y));
+        }
+    }
+    out
+}
+
+/// The grid backdrop: [`CURVE_GRID_DIVS`]x[`CURVE_GRID_DIVS`] minor cells
+/// plus the outer frame (§2: "4x4 minor, the muted color").
+fn paint_curve_grid(painter: &egui::Painter, rect: egui::Rect) {
+    let stroke = egui::Stroke::new(1.0, curve_palette::GRID_MINOR);
+    for i in 1..CURVE_GRID_DIVS {
+        let t = i as f32 / CURVE_GRID_DIVS as f32;
+        let x = rect.left() + t * rect.width();
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            stroke,
+        );
+        let y = rect.top() + t * rect.height();
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            stroke,
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, curve_palette::GRID_BORDER),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// The 4-point curve editor: a custom-painted 150x100 plot (grid
+/// backdrop, accent display spline, raised/hover/drag handles),
+/// drag-to-edit, click-to-insert, right-click-to-delete, and a 120ms
+/// animated glide on any non-drag position change (insert, delete, or a
+/// preset button). `ControlCurve` stays fixed at 4 points — see
+/// [`insert_point`] and [`delete_point`] for what "insert"/"delete" mean
+/// against that frozen shape — so the handles are always exactly these
+/// 4, never created or destroyed; only their positions move. Returns
+/// true when the curve changed this frame.
 fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     let mut changed = false;
-    let (rect, _) = ui.allocate_exact_size(CURVE_PLOT_SIZE, egui::Sense::hover());
+
+    // `click()` only (no drag): the per-point handles below are
+    // allocated after this, on top, so they win hit-testing wherever
+    // they overlap the canvas (the same ordering the original editor
+    // relied on for its drag handles) and a click landing on a handle
+    // does not also register as a canvas-level insert.
+    let (rect, canvas_response) = ui.allocate_exact_size(CURVE_PLOT_SIZE, egui::Sense::click());
+    let base_id = canvas_response.id;
+
     let to_screen = |p: (f32, f32)| {
         egui::pos2(
             rect.left() + p.0 * rect.width(),
             rect.bottom() - p.1 * rect.height(),
         )
     };
-    let painter = ui.painter().clone();
-    painter.rect_stroke(
-        rect,
-        0.0,
-        ui.visuals().widgets.noninteractive.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
-    let screen: Vec<egui::Pos2> = curve.points.iter().map(|&p| to_screen(p)).collect();
-    let stroke = egui::Stroke::new(1.5, ui.visuals().text_color());
-    for pair in screen.windows(2) {
-        painter.line_segment([pair[0], pair[1]], stroke);
-    }
-    for i in 0..4 {
-        let center = to_screen(curve.points[i]);
-        painter.circle_filled(
-            center,
-            CURVE_HANDLE_RADIUS,
-            ui.visuals().widgets.active.bg_fill,
-        );
-        let grab = egui::Rect::from_center_size(center, egui::Vec2::splat(14.0));
-        let response = ui.allocate_rect(grab, egui::Sense::drag());
-        if response.dragged() {
-            let delta = response.drag_delta();
-            let candidate = (
-                curve.points[i].0 + delta.x / rect.width(),
-                curve.points[i].1 - delta.y / rect.height(),
-            );
-            let (x, y) = clamp_control_point(&curve.points, i, candidate.0, candidate.1);
-            if (x, y) != curve.points[i] {
-                curve.points[i] = (x, y);
+    let from_screen_x = |sx: f32| ((sx - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    let from_screen_y = |sy: f32| ((rect.bottom() - sy) / rect.height()).clamp(0.0, 1.0);
+
+    if canvas_response.clicked() {
+        if let Some(pos) = canvas_response.interact_pointer_pos() {
+            let click = (from_screen_x(pos.x), from_screen_y(pos.y));
+            let new_points = insert_point(curve.points, click.0, click.1);
+            if new_points != curve.points {
+                curve.points = new_points;
                 changed = true;
             }
         }
     }
+
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 0.0, curve_palette::BG);
+    paint_curve_grid(&painter, rect);
+
+    // Pass 1: interact with every handle first (drag, delete), updating
+    // `curve.points`, and resolve each point's DISPLAYED position. A
+    // dragged point shows its raw (un-animated) position — it must
+    // track the pointer exactly, with no lag — every other point shows
+    // the animated one, so a discrete jump (insert, delete, a preset
+    // button) glides into place over `CURVE_MOTION_SECS` instead of
+    // snapping. The `animate_value_with_time` call still runs for the
+    // dragged point too (with `animation_time` 0), only to keep its
+    // internal last-known position resynced every frame; otherwise the
+    // moment the drag releases, the next frame would see a sudden jump
+    // from a stale pre-drag position and glide "back" to where the
+    // point already visually is.
+    let mut displayed = curve.points;
+    let mut dragged_idx = None;
+    let mut point_state = [(false, false); 4]; // (dragged, hovered), for fill color below
+    for i in 0..4 {
+        let point_id = base_id.with(("curve-point", i));
+        let center = to_screen(curve.points[i]);
+        let grab = egui::Rect::from_center_size(center, egui::Vec2::splat(CURVE_HANDLE_HIT_SIZE));
+        let response = ui.interact(grab, point_id, egui::Sense::click_and_drag());
+
+        if response.dragged() {
+            dragged_idx = Some(i);
+            // Absolute pointer position, not accumulated `drag_delta`:
+            // `click_and_drag` sense (needed for `secondary_clicked`
+            // below) only starts reporting `dragged()` once the pointer
+            // clears a small click-vs-drag threshold, so summing deltas
+            // from that point on would drop the first few pixels and
+            // leave the handle trailing the cursor for the rest of the
+            // drag.
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (x, y) = clamp_control_point(
+                    &curve.points,
+                    i,
+                    from_screen_x(pos.x),
+                    from_screen_y(pos.y),
+                );
+                if (x, y) != curve.points[i] {
+                    curve.points[i] = (x, y);
+                    changed = true;
+                }
+            }
+        } else if response.secondary_clicked() {
+            if let Some(new_points) = delete_point(curve.points, i) {
+                if new_points != curve.points {
+                    curve.points = new_points;
+                    changed = true;
+                }
+            }
+        }
+        point_state[i] = (response.dragged(), response.hovered());
+
+        let anim_time = if response.dragged() {
+            0.0
+        } else {
+            CURVE_MOTION_SECS
+        };
+        let ctx = ui.ctx();
+        let ax = ctx.animate_value_with_time(point_id.with("x"), curve.points[i].0, anim_time);
+        let ay = ctx.animate_value_with_time(point_id.with("y"), curve.points[i].1, anim_time);
+        displayed[i] = if response.dragged() {
+            curve.points[i]
+        } else {
+            (ax, ay)
+        };
+    }
+
+    // The spline is drawn through the DISPLAYED (animated) positions, not
+    // the raw model: otherwise the line would snap to the new points
+    // instantly while the handles glide in behind it, visibly off the
+    // curve for 120ms. Guard against two edits landing inside the same
+    // animation window and leaving the displayed x's not strictly
+    // increasing (e.g. two inserts within 120ms of each other) — that
+    // would divide by a near-zero segment width in `hermite_tangents` —
+    // by falling back to the raw (always-valid) points for that frame.
+    let spline_source = if displayed[0].0 < displayed[1].0
+        && displayed[1].0 < displayed[2].0
+        && displayed[2].0 < displayed[3].0
+    {
+        displayed
+    } else {
+        curve.points
+    };
+    let spline: Vec<egui::Pos2> = spline_polyline(&spline_source, CURVE_SPLINE_SAMPLES)
+        .into_iter()
+        .map(to_screen)
+        .collect();
+    painter.add(egui::Shape::line(
+        spline,
+        egui::Stroke::new(1.75, curve_palette::SPLINE),
+    ));
+
+    // Pass 2: paint the handles at their displayed positions, on top of
+    // the spline.
+    for i in 0..4 {
+        let (dragged, hovered) = point_state[i];
+        let anim_center = to_screen(displayed[i]);
+        let fill = if dragged {
+            curve_palette::POINT_DRAG
+        } else if hovered {
+            curve_palette::POINT_HOVER
+        } else {
+            curve_palette::POINT_IDLE
+        };
+        painter.circle_filled(anim_center, CURVE_HANDLE_RADIUS, fill);
+        painter.circle_stroke(
+            anim_center,
+            CURVE_HANDLE_RADIUS,
+            egui::Stroke::new(1.5, curve_palette::POINT_STROKE),
+        );
+    }
+
+    // The in/out readout: the dragged point's exact x while dragging,
+    // else whatever x the pointer hovers over the plot at. "out" is
+    // always `ControlCurve::evaluate` — the real engine value — never
+    // the cosmetic spline above (see `hermite_tangents`'s doc: the two
+    // can differ slightly between control points).
+    let cursor_x = if let Some(i) = dragged_idx {
+        Some(curve.points[i].0)
+    } else {
+        canvas_response.hover_pos().map(|pos| from_screen_x(pos.x))
+    };
+    if let Some(in_x) = cursor_x {
+        let out_y = curve.evaluate(in_x);
+        // Flip the label to whichever side has room, so it stays inside
+        // the 150x100 plot instead of running off an edge.
+        let (anchor, dx, dy) = match (in_x > 0.5, out_y > 0.5) {
+            (true, true) => (egui::Align2::RIGHT_TOP, -8.0, 8.0),
+            (true, false) => (egui::Align2::RIGHT_BOTTOM, -8.0, -8.0),
+            (false, true) => (egui::Align2::LEFT_TOP, 8.0, 8.0),
+            (false, false) => (egui::Align2::LEFT_BOTTOM, 8.0, -8.0),
+        };
+        let label_pos = to_screen((in_x, out_y)) + egui::vec2(dx, dy);
+        painter.text(
+            label_pos,
+            anchor,
+            format!("in {in_x:.2}  out {out_y:.2}"),
+            egui::FontId::monospace(CURVE_LABEL_SIZE),
+            curve_palette::LABEL,
+        );
+    }
+
+    // The presets row. The button labels are i18n'd (en-US + pt-BR); the
+    // tabular-numerals ask in §2 wants JetBrains Mono for value fields,
+    // which is not wired into `umber-app` yet (the font loader is part
+    // of `umber-gui`'s own in-flight, uncommitted landing — see
+    // `CURVE_MOTION_SECS`) — `FontId::monospace` above is egui's bundled
+    // monospace font, used as the interim tabular-numerals stand-in.
+    ui.horizontal_wrapped(|ui| {
+        ui.weak(tr("brush.curve-presets"));
+        if ui.button(tr("brush.curve-preset-linear")).clicked() {
+            changed |= apply_preset(curve, preset_linear());
+        }
+        if ui.button(tr("brush.curve-preset-smooth")).clicked() {
+            changed |= apply_preset(curve, preset_smooth());
+        }
+        if ui.button(tr("brush.curve-preset-ease")).clicked() {
+            changed |= apply_preset(curve, preset_ease());
+        }
+    });
+
     changed
 }
 
@@ -973,5 +1409,174 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const EPS: f32 = 1e-6;
+
+    #[test]
+    fn nearest_interior_index_brackets_by_segment() {
+        let points = [(0.0, 0.0), (0.3, 0.3), (0.7, 0.7), (1.0, 1.0)];
+        // Segment 0 (left of p1) always targets p1, including the exact
+        // boundary and points left of the plot entirely.
+        assert_eq!(nearest_interior_index(&points, -0.5), 1);
+        assert_eq!(nearest_interior_index(&points, 0.0), 1);
+        assert_eq!(nearest_interior_index(&points, 0.3), 1);
+        // Segment 2 (right of p2) always targets p2, same at both ends.
+        assert_eq!(nearest_interior_index(&points, 0.7), 2);
+        assert_eq!(nearest_interior_index(&points, 1.0), 2);
+        assert_eq!(nearest_interior_index(&points, 1.5), 2);
+        // Segment 1 (between p1 and p2) picks whichever is nearer: the
+        // midpoint 0.5 is equidistant (0.2 each way) and ties to p1 (the
+        // `<=` branch), 0.45 is nearer p1, 0.55 is nearer p2.
+        assert_eq!(nearest_interior_index(&points, 0.5), 1);
+        assert_eq!(nearest_interior_index(&points, 0.45), 1);
+        assert_eq!(nearest_interior_index(&points, 0.55), 2);
+    }
+
+    #[test]
+    fn insert_point_moves_only_the_targeted_index_and_stays_valid() {
+        let points = [(0.0, 0.0), (0.3, 0.3), (0.7, 0.7), (1.0, 1.0)];
+        let out = insert_point(points, 0.1, 0.9);
+        // 0.1 is in segment 0, so only index 1 moves; the clamp pins y
+        // (0.9 is inside 0..=1, so it passes through unchanged) and x
+        // (0.1 is inside (0+gap, 0.7-gap), so it also passes through).
+        assert_eq!(out, [(0.0, 0.0), (0.1, 0.9), (0.7, 0.7), (1.0, 1.0)]);
+        assert!(
+            ControlCurve::try_new(&out).is_ok(),
+            "insert must never break the strictly-increasing-x invariant"
+        );
+
+        // A click far outside the legal window still produces a valid
+        // curve: clamp_control_point pins it to the nearest legal edge
+        // rather than violating monotonicity.
+        let out = insert_point(points, 5.0, -5.0);
+        assert!(ControlCurve::try_new(&out).is_ok());
+        assert_eq!(out[0], points[0], "untouched endpoints stay put");
+        assert_eq!(out[3], points[3], "untouched endpoints stay put");
+    }
+
+    #[test]
+    fn insert_point_in_the_middle_segment_picks_the_nearer_point() {
+        let points = [(0.0, 0.0), (0.2, 0.2), (0.8, 0.8), (1.0, 1.0)];
+        // 0.3 is nearer p1 (0.2) than p2 (0.8): only index 1 moves.
+        let out = insert_point(points, 0.3, 0.6);
+        assert_eq!(out[1], (0.3, 0.6));
+        assert_eq!(out[2], points[2]);
+
+        // 0.75 is nearer p2 (0.8) than p1 (0.2): only index 2 moves.
+        let out = insert_point(points, 0.75, 0.4);
+        assert_eq!(out[1], points[1]);
+        assert_eq!(out[2], (0.75, 0.4));
+    }
+
+    #[test]
+    fn delete_point_rejects_the_endpoints() {
+        let points = [(0.0, 0.0), (0.3, 0.4), (0.7, 0.6), (1.0, 1.0)];
+        assert_eq!(delete_point(points, 0), None, "never delete the endpoints");
+        assert_eq!(delete_point(points, 3), None, "never delete the endpoints");
+    }
+
+    #[test]
+    fn delete_point_collinearizes_the_interior_point_in_place() {
+        let points = [(0.0, 0.0), (0.25, 0.9), (0.75, 0.1), (1.0, 1.0)];
+
+        let out = delete_point(points, 1).expect("interior index deletes");
+        // x is untouched; y snaps onto the chord from p0 to p2:
+        // t = (0.25-0.0)/(0.75-0.0) = 1/3, y = 0 + (0.1-0)/3.
+        assert_eq!(out[1].0, points[1].0, "x never moves on delete");
+        assert!((out[1].1 - (0.1 / 3.0)).abs() <= EPS);
+        assert_eq!(out[0], points[0]);
+        assert_eq!(out[2], points[2]);
+        assert_eq!(out[3], points[3]);
+        assert!(ControlCurve::try_new(&out).is_ok());
+
+        let out = delete_point(points, 2).expect("interior index deletes");
+        // t = (0.75-0.25)/(1.0-0.25) = 2/3, y = 0.9 + (1.0-0.9)*2/3.
+        assert_eq!(out[2].0, points[2].0);
+        assert!((out[2].1 - (0.9 + 0.1 * 2.0 / 3.0)).abs() <= EPS);
+        assert!(ControlCurve::try_new(&out).is_ok());
+    }
+
+    #[test]
+    fn apply_preset_reports_no_change_when_already_matching() {
+        let mut curve = preset_linear();
+        assert!(!apply_preset(&mut curve, preset_linear()));
+        assert_eq!(curve, preset_linear());
+    }
+
+    #[test]
+    fn apply_preset_overwrites_and_reports_changed() {
+        let mut curve = preset_linear();
+        assert!(apply_preset(&mut curve, preset_smooth()));
+        assert_eq!(curve, preset_smooth());
+        // Applying the same preset again is a no-op the second time.
+        assert!(!apply_preset(&mut curve, preset_smooth()));
+    }
+
+    #[test]
+    fn preset_linear_is_the_identity_curve() {
+        assert_eq!(preset_linear(), ControlCurve::identity());
+    }
+
+    #[test]
+    fn preset_smooth_matches_smoothstep_at_the_identity_x_values() {
+        let curve = preset_smooth();
+        assert_eq!(curve.points[0], (0.0, 0.0));
+        assert_eq!(curve.points[3], (1.0, 1.0));
+        // smoothstep(1/3) = 3*(1/3)^2 - 2*(1/3)^3 = 1/3 - 2/27 = 7/27.
+        assert!((curve.points[1].0 - 1.0 / 3.0).abs() <= EPS);
+        assert!((curve.points[1].1 - 7.0 / 27.0).abs() <= EPS);
+        // smoothstep(2/3) = 3*(2/3)^2 - 2*(2/3)^3 = 4/3 - 16/27 = 20/27.
+        assert!((curve.points[2].0 - 2.0 / 3.0).abs() <= EPS);
+        assert!((curve.points[2].1 - 20.0 / 27.0).abs() <= EPS);
+    }
+
+    #[test]
+    fn preset_ease_matches_ease_out_cubic_at_the_identity_x_values() {
+        let curve = preset_ease();
+        assert_eq!(curve.points[0], (0.0, 0.0));
+        assert_eq!(curve.points[3], (1.0, 1.0));
+        // ease_out_cubic(1/3) = 1 - (2/3)^3 = 1 - 8/27 = 19/27.
+        assert!((curve.points[1].1 - 19.0 / 27.0).abs() <= EPS);
+        // ease_out_cubic(2/3) = 1 - (1/3)^3 = 1 - 1/27 = 26/27.
+        assert!((curve.points[2].1 - 26.0 / 27.0).abs() <= EPS);
+        // "Ease" rises faster than "Smooth" does early on (the chosen
+        // ease-OUT direction): a fast initial rise that levels off.
+        assert!(curve.points[1].1 > preset_smooth().points[1].1);
+    }
+
+    #[test]
+    fn spline_polyline_does_not_overshoot_monotonic_data() {
+        // A steep middle segment: the kind of preset most likely to make
+        // a naive (non-monotone) cubic overshoot past 0 or 1.
+        let curve = ControlCurve::try_new(&[(0.0, 0.0), (0.2, 0.05), (0.8, 0.95), (1.0, 1.0)])
+            .expect("valid test curve");
+        let poly = spline_polyline(&curve.points, 20);
+        let mut prev_y = f32::NEG_INFINITY;
+        for (x, y) in poly {
+            assert!(
+                (-1e-4..=1.0 + 1e-4).contains(&y),
+                "monotone-cubic sample out of [0,1] bounds: y={y} at x={x}"
+            );
+            assert!(
+                y >= prev_y - 1e-4,
+                "monotone-cubic sample not monotonic: {prev_y} -> {y} at x={x}"
+            );
+            prev_y = y;
+        }
+    }
+
+    #[test]
+    fn spline_polyline_passes_through_every_control_point() {
+        let curve = ControlCurve::try_new(&[(0.0, 0.1), (0.3, 0.5), (0.6, 0.2), (1.0, 0.9)])
+            .expect("valid test curve");
+        let poly = spline_polyline(&curve.points, 10);
+        for &(px, py) in &curve.points {
+            assert!(
+                poly.iter()
+                    .any(|&(x, y)| (x - px).abs() <= EPS && (y - py).abs() <= 1e-4),
+                "control point ({px}, {py}) must land exactly on the sampled spline"
+            );
+        }
     }
 }

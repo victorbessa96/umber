@@ -62,7 +62,10 @@ pub struct ToolRow<'a, T> {
 
 impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
     /// A row of `tools`. `id_salt` keeps the underline animation stable.
-    pub fn new(id_salt: impl std::hash::Hash, tools: &'a [Tool<'a, T>]) -> Self {
+    pub fn new(
+        id_salt: impl core::hash::Hash + core::fmt::Debug,
+        tools: &'a [Tool<'a, T>],
+    ) -> Self {
         ToolRow {
             id_salt: Id::new(id_salt),
             tools,

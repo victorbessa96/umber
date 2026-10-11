@@ -217,11 +217,11 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         // scroll is consumed only when it steps.
         let alt = ui.input(|i| i.modifiers.alt);
         if alt && response.hovered() && !response.dragged() {
-            let steps = wheel_steps(ui.input(|i| i.raw_scroll_delta.y));
+            let steps = wheel_steps(ui.input(|i| i.smooth_scroll_delta.y));
             if steps != 0 {
                 new = step_value(new, steps, self.step, self.min, self.max);
                 ui.input_mut(|i| {
-                    i.raw_scroll_delta = Vec2::ZERO;
+                    i.smooth_scroll_delta = Vec2::ZERO;
                     i.smooth_scroll_delta = Vec2::ZERO;
                 });
             }
