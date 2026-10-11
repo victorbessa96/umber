@@ -14,19 +14,19 @@
 |---|---|---|
 | Stamp-based brush engine: size, flow (per-stamp, pressure-bindable), stroke opacity (per-stroke, end-of-stroke), spacing (dabs-per-radius, residual partial-dab carry), angle, alignment (camera/tangent-wrap/tangent-planar/UV), jitter quartet (size/flow/angle/position) | P0 | 2 |
 | Pressure dynamics mapped through input→curve model (MyPaint-style); log-radius; `opaque_linearize` flow semantics (per-stamp flow with per-stroke accumulation = Krita wash-mode; Build-up mode as alternative) | P0 | 2 |
-| Lazy mouse (radius-based stroke offset smoothing) + one-euro filter smoothing (Casiez CHI'12) with Krita-style stabilizer panel (samples@min/max speed, delay dead-zone) | P0 | 2 |
+| Lazy mouse (radius-based stroke offset smoothing) + one-euro filter smoothing (Casiez CHI'12) with Krita-style stabilizer panel (samples@min/max speed, delay dead-zone) | P0 | 2 | ✓ built (lazy_mouse.rs, the stabilizer panel rows) |
 | Hardness/stamp falloff (radial gradient dabs); alpha source: bitmap textures + procedural | P0 | 2 |
 | Eraser (sets layer alpha to zero — non-destructive; per-channel enable) | P0 | 2 |
 | Fill layer + fill projections: UV, Tri-planar, Planar, Spherical, Cylindrical | P0 | 3 (fill layer ships with its projections — no projection-less staging) |
-| Smudge (sample+blur blend), Clone (source offset + follow-stroke) | P1 | 3 |
-| Symmetry: mirror (axis+offset+manipulator) and radial (count, flip U/V) — brush + fill-layer projections | P1 | 3 |
+| Smudge (sample+blur blend), Clone (source offset + follow-stroke) | P1 | 3 | ✓ built (`2fbfc7e`) |
+| Symmetry: mirror (axis+offset+manipulator) and radial (count, flip U/V) — brush + fill-layer projections | P1 | 3 | ✓ built (`2689fa8`) |
 | Straight-line constraint; angle snap | P1 | 3 |
 | Polygon fill (triangle/polygon/mesh/UV-chunk pixel-mask fills) | P1 | 3 |
-| Quick mask (temporary painted mask, invert) | P1 | 4 |
+| Quick mask (temporary painted mask, invert) | P1 | 4 | ✓ built (`e4492ba`) |
 | Path tools (paint/erase/smudge along 3D curve; per-vertex size+opacity; filled path) | P1 | 5 |
-| Brush presets (.abr import optional; native preset files) | P0 | 2 |
-| Seam-aware stamping: strokes crossing UV seams land consistently in both islands; 3D-space-neighbor padding/dilation | P0 | 2 |
-| Stroke evaluated in 3D space, not per-tile (works single-tile; UDIM cross-tile continuity arrives with UDIM in Wave 4) | P0 | 2 |
+| Brush presets (.abr import optional; native preset files) | P0 | 2 | ✓ built (`f18a0ce`/`0d49d83`/`57ce764`) |
+| Seam-aware stamping: strokes crossing UV seams land consistently in both islands; 3D-space-neighbor padding/dilation | P0 | 2 | ✓ built (`fb984d1`..`7106a79`) |
+| Stroke evaluated in 3D space, not per-tile (works single-tile; UDIM cross-tile continuity arrives with UDIM in Wave 4) | P0 | 2 | ✓ built (`708ae8a`, UDIM `82c694c`..`10cdffa`) |
 | Paint-what-you-see projection modes beyond UV (Mari-style paint buffer) | P1 | 4 |
 
 ## 2. Layer + channel system — [01]
@@ -36,12 +36,12 @@
 | Texture sets (per material/mesh UV set); per-set channel stack: baseColor, roughness, metallic, normal, height, emissive, opacity, AO + user channels | P0 | 1 (model), 2 (full) |
 | Layer types: paint layer, fill layer; folders with passthrough | P0 | 2 |
 | Per-channel blending mode + opacity; blending computed in linear space per channel | P0 | 2 |
-| Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 |
-| Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 |
+| Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 built (BlendMode's 12 variants); the full-32 remainder open |
+| Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✓ metadata model (LayerMask in layers.rs); the paint-mask DATA path rides the quick-mask plumbing |
 | Layer instancing (source-edits propagate, cycle detection) | P1 | 4 |
 | Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 |
 | Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |
-| UDIM multi-tile texture sets; per-tile resolution; cross-tile painting | P0 | 4 (data model from 1) |
+| UDIM multi-tile texture sets; per-tile resolution; cross-tile painting | P0 | 4 (data model from 1) | ✓ built (`82c694c`..`10cdffa`) |
 | Smart materials (folder presets applied with mesh-map-driven generators) | P1 | 4 |
 | Dynamic material layering (shader-declared sub-stacks) | P2 | 6+ |
 | Storage formats per channel: sRGB8/RGB16/RGB16F/RGB32F | P0 | 2 |
@@ -79,7 +79,7 @@
 | View modes: lit / unlit single-channel solo (±display transform) / mesh-map preview | P0 | 1 |
 | 2D UV view alongside 3D view (synchronized) | P0 | 2 |
 | Camera: orbit/pan/zoom, perspective + orthographic | P0 | 1 |
-| Wireframe overlay; grid | P1 | 2 |
+| Wireframe overlay; grid | P1 | 2 | ✓ built (`09eb4e9`) |
 | Displacement/tessellation preview | P2 | 6+ |
 | Post-effects stack (DoF, bloom, vignette, sharpen, tone-map) | P1 | 5 |
 | HDR surface output (wgpu 30 SurfaceColorSpace; DX12/Metal, Vulkan driver-dependent) | P1 | 5 |
@@ -120,7 +120,7 @@
 | Project = directory; `project.json` (scene, texture sets, settings) + per-layer JSON files (diffable, mergeable) | P0 | 2 |
 | Textures as content-hash-named PNG/EXR tiles (git/LFS friendly; assets referenced by hash, never embedded blobs) | P0 | 2 |
 | Save/load round-trip determinism (CI-tested: save→load→export identical bytes) | P0 | 2 |
-| Autosave + crash recovery (journal) | P1 | 5 |
+| Autosave + crash recovery (journal) | P1 | 5 | ✓ built (`015fbf0`) |
 | Merge story documented (per-layer files = two artists editing different layers never conflict) | P1 | 2 (doc) |
 
 ## 9. Color management — [01][03][04]
