@@ -1354,13 +1354,12 @@ impl BakesPanel {
         queue: &umber_gpu::WgpuQueue,
         dispatch: &BakeDispatch<'_>,
     ) {
-        let (mesh, plan, skew_tiles, skew_skipped, sets) = (
-            dispatch.mesh,
-            &dispatch.plan,
-            &dispatch.skew_tiles,
-            &dispatch.skew_skipped,
-            &dispatch.sets,
-        );
+        // Borrow each field once (dispatch is itself a reference — no double-&).
+        let mesh = dispatch.mesh;
+        let plan = &dispatch.plan;
+        let skew_tiles = &dispatch.skew_tiles;
+        let skew_skipped = &dispatch.skew_skipped;
+        let sets = &dispatch.sets;
         let mut jobs = Vec::new();
         let mut skew_jobs = Vec::new();
         for set in &sets {
