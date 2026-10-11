@@ -1297,7 +1297,7 @@ mod tests {
             (folded - 0.5).abs() < 1e-5,
             "five wash dabs must fold to the stroke opacity, got {folded}"
         );
-        let buildup: f32 = 1.0 - (1.0 - 0.5).powi(5);
+        let buildup: f32 = 1.0 - (1.0f32 - 0.5f32).powi(5);
         assert!(
             (buildup - 0.96875).abs() < 1e-6 && (buildup - folded).abs() > 0.4,
             "build-up must accumulate well past the wash ceiling"

@@ -96,7 +96,7 @@ pub(crate) fn display_lut_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
 /// `Some(&lut)` to [`crate::MeshBuffers::paint_callback`] and
 /// [`crate::texture_display::TextureDisplay::callback`]. Cloned handles
 /// (wgpu resources are `Arc`-backed), so callbacks keep it alive.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DisplayLut {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,

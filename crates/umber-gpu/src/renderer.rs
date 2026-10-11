@@ -910,20 +910,20 @@ impl GpuContext {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(prefilter_views[0]),
+                    resource: wgpu::BindingResource::TextureView(tier.prefilter_views[0]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: wgpu::BindingResource::TextureView(prefilter_views[1]),
+                    resource: wgpu::BindingResource::TextureView(tier.prefilter_views[1]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: wgpu::BindingResource::TextureView(prefilter_views[2]),
+                    resource: wgpu::BindingResource::TextureView(tier.prefilter_views[2]),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: spec_buffer,
+                        buffer: tier.spec_buffer,
                         offset: 0,
                         size: None,
                     }),

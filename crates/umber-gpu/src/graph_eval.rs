@@ -338,7 +338,7 @@ pub enum GraphGpuError {
 /// compile on first dispatch and are reused across evals for the
 /// evaluator's lifetime. Generic over the pipeline object so the
 /// reuse logic itself is unit-testable without a device (see tests).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PipelineCache<P> {
     entries: HashMap<&'static str, P>,
 }
@@ -346,7 +346,9 @@ pub struct PipelineCache<P> {
 impl<P> PipelineCache<P> {
     /// An empty cache (first dispatch of each entry compiles it).
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     /// Whether `entry` already has a compiled pipeline.
@@ -505,6 +507,7 @@ fn check_dims(width: u32, height: u32) -> Result<(), EvalError> {
 
 /// A packed GPU node: validated params + output extent + (for noise) the
 /// permutation-table seed to build the storage buffer from.
+#[derive(Debug)]
 struct PackedNode {
     params: GraphParams,
     perm_seed: Option<i32>,
@@ -1189,7 +1192,7 @@ fn perm_buffer_for(
 fn pipeline_for<'a>(
     cache: &'a mut PipelineCache<wgpu::ComputePipeline>,
     device: &'a wgpu::Device,
-    layout: &'a wgpu::BindGroupLayout,
+    bgl: &'a wgpu::BindGroupLayout,
     module: &'a wgpu::ShaderModule,
     entry: &'static str,
 ) -> &'a wgpu::ComputePipeline {
@@ -1198,9 +1201,14 @@ fn pipeline_for<'a>(
     // closure cannot express — disjoint field borrows can.
     if !cache.contains(entry) {
         let label = format!("umber_graph_eval_{entry}");
+        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(&label),
+            bind_group_layouts: &[Some(bgl)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(&label),
-            layout: Some(layout),
+            layout: Some(&pl),
             module,
             entry_point: Some(entry),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
