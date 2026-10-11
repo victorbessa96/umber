@@ -50,8 +50,11 @@ hits = [i+1 for i in range(len(lines)-2)
 assert not hits, f'doc-attachment: {hits[:3]}'
 " && note "doc attachment" || bad "doc-comment attachment"
 
-  # 4. negated float comparison (the !x > 0.0 class)
-  grep -nE '!\([a-z_.\[\]]+ > ' "$f" | head -1 | grep -q . \
+  # 4. negated float comparison (the !(x > 0.0) class) — POSIX ERE
+  #    bracket classes don't honor \[ escapes, so the class is kept to
+  #    identifiers + fields (the index form !(a[i] > 0) is rare enough
+  #    to ride on the other checks).
+  grep -nE '!\([a-zA-Z_][a-zA-Z0-9_.]* > ' "$f" | head -1 | grep -q . \
     && bad "negated float comparison" || note "no neg-cmp"
 
   # 5. manual Default on a derive-able shape (impl Default whose body is pure
