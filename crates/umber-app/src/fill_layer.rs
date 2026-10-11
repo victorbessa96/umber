@@ -347,13 +347,13 @@ pub fn composite_fill_over(base: &mut [u8], fill: &FillTile, blend: BlendMode, o
         }
         let f = &fill.rgba[i * 4..i * 4 + 4];
         let sa = f[3] as f32 / 255.0 * cov * op;
-        if !(sa > 0.0) {
+        if !sa.is_finite() || sa <= 0.0 {
             continue;
         }
         let b = &base[i * 4..i * 4 + 4];
         let da = b[3] as f32 / 255.0;
         let oa = sa + da * (1.0 - sa);
-        if !(oa > 0.0) {
+        if !oa.is_finite() || oa <= 0.0 {
             continue;
         }
         let mut out = [0u8; 4];
@@ -816,21 +816,13 @@ pub fn polygon_fill_rows(
 /// the app, driven by [`refresh_fill_layer`] after any fill-param edit —
 /// the journal replay path included (undo/redo re-fires SetFill, the panel
 /// re-marks, the refresh re-evaluates: the same live-not-baked contract).
+#[derive(Default)]
 pub struct FillLayerStates {
     /// One state per live fill layer, keyed by layer id.
     pub map: std::collections::HashMap<u64, FillLayerState>,
     /// Layers whose params changed this frame (drained by the app's
     /// per-frame refresh; journal replays re-mark via the same path).
     pub dirty: Vec<u64>,
-}
-
-impl Default for FillLayerStates {
-    fn default() -> Self {
-        Self {
-            map: std::collections::HashMap::new(),
-            dirty: Vec::new(),
-        }
-    }
 }
 
 impl FillLayerStates {
