@@ -93,10 +93,24 @@
 //!
 //! Mask off (the default) changes nothing: no plane is allocated, no
 //! upload is queued, and the staged dabs are byte-identical.
+//!
+//! Paint paths (§2 line 26's P1 row, `umber_brush::path`): a
+//! [`PaintPath`](umber_brush::path::PaintPath) replays as ONE stroke
+//! through this same pipeline ([`Self::replay_path`] — paint/erase/smudge
+//! route to the consumer the op mode already selects), and a closed path
+//! fills its interior ([`Self::replay_filled_path`]: the polygon fill's
+//! even-odd rasterizer over the active tile, one stroke per covered row
+//! run). Per-point size rides a per-event radius scale
+//! ([`Self::push_event_styled`], which [`push_event_inner`](Self::push_event_inner)
+//! delegates to at scale `1.0` — byte-identical); per-point opacity is
+//! folded into the event pressure by the path itself (both are flow
+//! multipliers, so spacing interpolates them for free). Replays refuse
+//! while a live stroke runs, and restore the session tool afterwards.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::Pos2;
+use umber_brush::path::{sanitize_size, PaintPath, PathOp};
 use umber_brush::retouch::{DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
@@ -107,9 +121,48 @@ use umber_core::undo::UndoStack;
 use umber_gpu::paint::Dab;
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
+use umber_mesh::polygon_fill::rasterize_polygon_mask;
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
 
 use crate::retouch::{PaintStrokeCommand, PaintWrites, RetouchStroke};
+
+/// Paint-what-you-see projection (§2's P1 row, Mari-style paint buffer).
+///
+/// * [`PaintProjection::Uv`]: pointer positions are already UVs (the 2D UV
+///   view). The 3D viewport does not paint — Ctrl+drag orbits.
+/// * [`PaintProjection::Screen`] (the default: today's behavior, both
+///   surfaces paint): a viewport pointer resolves through the camera + mesh
+///   raycast to a UV before conditioning, via
+///   [`PaintState::begin_screen_point`]/[`PaintState::extend_screen_point`];
+///   misses skip the stamp (no orphan dabs) and seam mirrors fan out from
+///   the resolved UV exactly like a UV-view stroke.
+///
+/// V1 judgment — live raycast, not a deferred Mari buffer: a true paint
+/// buffer would snapshot screen-space points mid-stroke and resolve them to
+/// UVs at stroke end, but that breaks the live preview (the UV view and the
+/// export bridge read the tile targets every frame), the per-frame
+/// `process_pending` drain the retouch readback depends on, and the per-event
+/// staged-batch accounting the seam/symmetry hooks rely on. It is also
+/// unnecessary in the current wiring: `Viewport::ui` skips `handle_input`
+/// while a paint drag is in flight, so the camera cannot move mid-stroke
+/// and there is nothing to tear. The deferred, camera-snapshotting buffer is
+/// the named follow-up for when camera animation during strokes lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaintProjection {
+    /// 2D UV editing only; the 3D viewport orbits.
+    Uv,
+    /// Paint what you see (the default): viewport strokes raycast to UVs.
+    #[default]
+    Screen,
+}
+
+impl PaintProjection {
+    /// Whether Ctrl+drag in the 3D viewport paints (`Screen`) or orbits
+    /// (`Uv`). The UV view paints in both modes.
+    pub fn viewport_paints(self) -> bool {
+        matches!(self, Self::Screen)
+    }
+}
 
 /// Errors from constructing or driving the paint session.
 #[derive(Debug, thiserror::Error)]
@@ -227,6 +280,9 @@ pub struct PaintState {
     /// between strokes via [`Self::sync_line_constraint`]; the live
     /// conditioner is set at the same time).
     line_constraint: LineConstraintMode,
+    /// Where strokes may start (§2's P1 row): UV view only, or UV view +
+    /// the raycast viewport ([`PaintProjection`]).
+    projection: PaintProjection,
     /// Set when the manipulator changed `symmetry`, so the next
     /// [`Self::sync_symmetry`] hands it back to the panel instead of
     /// adopting the panel's (stale) copy.
@@ -310,6 +366,7 @@ impl PaintState {
             retouch_writes: PaintWrites::default(),
             symmetry: SymmetrySettings::default(),
             line_constraint: LineConstraintMode::Off,
+            projection: PaintProjection::default(),
             symmetry_from_view: false,
             stroke_symmetry: None,
             quick_mask: QuickMask::new(TARGET_SIZE, TARGET_SIZE),
@@ -345,6 +402,13 @@ impl PaintState {
 
     /// Begin a stroke at `uv` (0..1 UV space).
     pub fn begin_stroke(&mut self, uv: Pos2) {
+        self.begin_stroke_styled(uv, 1.0, 1.0);
+    }
+
+    /// Begin a stroke at `uv` with an explicit pressure and brush-radius
+    /// scale (the path replay's per-point style; live strokes use `1.0`
+    /// for both through [`Self::begin_stroke`]).
+    pub fn begin_stroke_styled(&mut self, uv: Pos2, pressure: f32, radius_scale: f32) {
         self.conditioner.reset();
         self.event_seq = 0;
         self.stroking = true;
@@ -384,7 +448,7 @@ impl PaintState {
             self.retouch_history.clear();
             None
         };
-        self.push_event_inner(uv, 1.0, true);
+        self.push_event_styled(uv, pressure, radius_scale, true);
     }
 
     /// Opens the retouch stroke starting at `uv`. Clone: the alt-click
@@ -479,6 +543,49 @@ impl PaintState {
     /// The current straight-line / angle-snap mode.
     pub fn line_constraint(&self) -> LineConstraintMode {
         self.line_constraint
+    }
+
+    /// The current paint projection (which surfaces may start strokes).
+    pub fn projection(&self) -> PaintProjection {
+        self.projection
+    }
+
+    /// Adopts the panel's paint projection (between strokes only — a mode
+    /// swap mid-stroke would split one stroke across two surfaces).
+    pub fn sync_projection(&mut self, mode: PaintProjection) {
+        if !self.stroking {
+            self.projection = mode;
+        }
+    }
+
+    /// Begins a Screen-projection stroke at the viewport raycast result:
+    /// `Some(uv)` starts at the hit UV, `None` (a miss) starts nothing —
+    /// no orphan stroke, no orphan dabs. The viewport calls this on the
+    /// opening event of a paint drag instead of [`Self::begin_stroke`].
+    pub fn begin_screen_point(&mut self, hit: Option<Pos2>) {
+        if let Some(uv) = hit {
+            self.begin_stroke(uv);
+        }
+    }
+
+    /// Extends a Screen-projection stroke to the viewport raycast result:
+    /// `Some(uv)` conditions the hit UV through the existing pipeline
+    /// (seam mirrors, symmetry, wash, mask — all inherited, since this
+    /// funnels into [`Self::extend_stroke`]); `None` (a miss) skips the
+    /// stamp but keeps the stroke alive, so dragging off the mesh and back
+    /// on continues the same stroke. A hit with no stroke in flight (the
+    /// drag opened on a miss) starts the stroke there.
+    pub fn extend_screen_point(&mut self, hit: Option<Pos2>) {
+        match hit {
+            Some(uv) => {
+                if self.stroking {
+                    self.extend_stroke(uv);
+                } else {
+                    self.begin_stroke(uv);
+                }
+            }
+            None => {}
+        }
     }
 
     /// The mirror manipulator: moves the mirror line to `offset`
@@ -639,10 +746,17 @@ impl PaintState {
 
     /// Extend the stroke to `uv`.
     pub fn extend_stroke(&mut self, uv: Pos2) {
+        self.extend_stroke_styled(uv, 1.0, 1.0);
+    }
+
+    /// Extend the stroke to `uv` with an explicit pressure and
+    /// brush-radius scale (the path replay's per-point style; live strokes
+    /// use `1.0` for both through [`Self::extend_stroke`]).
+    pub fn extend_stroke_styled(&mut self, uv: Pos2, pressure: f32, radius_scale: f32) {
         if !self.stroking {
             return;
         }
-        self.push_event_inner(uv, 1.0, true);
+        self.push_event_styled(uv, pressure, radius_scale, true);
     }
 
     /// End the stroke (flushes nothing extra: `process_pending` drains
@@ -656,6 +770,90 @@ impl PaintState {
             // stroke already uploaded them event by event.
             self.retouch_writes.writes.clear();
         }
+    }
+
+    /// Replays `path` as ONE stroke in the `op` mode: each point becomes a
+    /// styled event (its folded pressure, its radius scale) through the
+    /// EXISTING pipeline — routing, seam mirrors, symmetry, wash, mask,
+    /// then the splat for paint or the CPU mirror for erase/smudge (the
+    /// consumer `op` already selects). A closed path appends its sealing
+    /// segment, like `umber_brush::path`'s headless replay.
+    ///
+    /// `false` (nothing staged) with fewer than 2 points or while a live
+    /// stroke runs — a replay never splits a stroke. The session tool is
+    /// restored afterwards, so replaying never disturbs the panel tool.
+    pub fn replay_path(&mut self, path: &PaintPath, op: &PathOp) -> bool {
+        if self.stroking || path.len() < 2 {
+            return false;
+        }
+        let saved = self.tool;
+        self.tool = op.to_brush_tool();
+        let points = path.points();
+        let first = &points[0];
+        self.begin_stroke_styled(
+            Pos2::new(first.uv[0], first.uv[1]),
+            first.effective_pressure(),
+            first.sanitized_size(),
+        );
+        for point in &points[1..] {
+            self.extend_stroke_styled(
+                Pos2::new(point.uv[0], point.uv[1]),
+                point.effective_pressure(),
+                point.sanitized_size(),
+            );
+        }
+        if path.is_closed() {
+            self.extend_stroke_styled(
+                Pos2::new(first.uv[0], first.uv[1]),
+                first.effective_pressure(),
+                first.sanitized_size(),
+            );
+        }
+        self.end_stroke();
+        self.tool = saved;
+        true
+    }
+
+    /// Stamps a closed path's interior on the active tile: the loop runs
+    /// through the polygon fill's even-odd rasterizer
+    /// ([`rasterize_polygon_mask`], reused — no duplicated parity math),
+    /// and each covered row run replays as one stroke at the path's mean
+    /// style through the same pipeline as [`Self::replay_path`].
+    ///
+    /// `false` (nothing staged) unless the path can fill, while a live
+    /// stroke runs, or when the loop covers no texel of the active tile.
+    /// V1 boundaries: the active tile only (a loop spanning tiles fills
+    /// the tile under the last pointer — per-event routing is the named
+    /// follow-up), and one stroke per row run (a retouch fill lands as one
+    /// undo entry per run — coalescing them is a follow-up).
+    pub fn replay_filled_path(&mut self, path: &PaintPath, op: &PathOp) -> bool {
+        if self.stroking || !path.can_fill() {
+            return false;
+        }
+        let (width, height) = self.target_size;
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let tile = self.active_tile;
+        let mask = rasterize_polygon_mask(&path.loop_uv(), tile, width, height);
+        let runs = fill_runs(&mask, width as usize, height as usize);
+        if runs.is_empty() {
+            return false;
+        }
+        let saved = self.tool;
+        self.tool = op.to_brush_tool();
+        let (pressure, size) = path.mean_style();
+        for run in &runs {
+            let start = texel_center_uv(tile, run.x0, run.y, self.texels_per_uv);
+            self.begin_stroke_styled(Pos2::new(start[0], start[1]), pressure, size);
+            for x in run.x0 + 1..=run.x1 {
+                let uv = texel_center_uv(tile, x, run.y, self.texels_per_uv);
+                self.extend_stroke_styled(Pos2::new(uv[0], uv[1]), pressure, size);
+            }
+            self.end_stroke();
+        }
+        self.tool = saved;
+        true
     }
 
     /// Drains pending paint commands on EVERY tile's thread (mirrors and
@@ -802,6 +1000,22 @@ impl PaintState {
     }
 
     fn push_event_inner(&mut self, uv: Pos2, pressure: f32, expand_seams: bool) {
+        self.push_event_styled(uv, pressure, 1.0, expand_seams);
+    }
+
+    /// [`Self::push_event_inner`] with an explicit brush-radius scale: the
+    /// conditioner and the adapter both run at
+    /// `BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale)`, so a replayed
+    /// path's per-point size varies the dab footprint through the SAME
+    /// spacing math live strokes use. Scale `1.0` is byte-identical to
+    /// [`Self::push_event_inner`] (every live caller passes it).
+    fn push_event_styled(
+        &mut self,
+        uv: Pos2,
+        pressure: f32,
+        radius_scale: f32,
+        expand_seams: bool,
+    ) {
         profiling::scope!("stroke_eval");
         // Per-tile routing (UDIM slice 4): an ORIGINAL event picks the
         // active tile; mirrors route by their own UV below but never move
@@ -854,7 +1068,7 @@ impl PaintState {
                 .map(|mapping| mapping.mirrored)
                 .collect();
             for mirrored in mirrors {
-                self.push_event_inner(Pos2::new(mirrored[0], mirrored[1]), pressure, false);
+                self.push_event_styled(Pos2::new(mirrored[0], mirrored[1]), pressure, radius_scale, false);
             }
         }
         // Mirrors across a tile seam land in the other tile: route by the
@@ -880,11 +1094,14 @@ impl PaintState {
             in_proximity: true,
             contact: true,
         };
-        let stamps = self.conditioner.push(&event, BRUSH_RADIUS_TEXELS);
+        let stamps = self
+            .conditioner
+            .push(&event, BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale));
         if stamps.is_empty() {
             return;
         }
-        let dabs = DabAdapter::stamps_to_dabs(&stamps, BRUSH_RADIUS_TEXELS, &self.brush);
+        let radius = BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale);
+        let dabs = DabAdapter::stamps_to_dabs(&stamps, radius, &self.brush);
         if dabs.is_empty() {
             return;
         }
@@ -1157,6 +1374,62 @@ fn clone_offset_texels(offset_uv: (f32, f32), texels_per_uv: f32) -> [f32; 2] {
     [offset_uv.0 * texels_per_uv, -offset_uv.1 * texels_per_uv]
 }
 
+/// A tile's integer UV offsets (the inverse of [`local_texel`]'s
+/// subtraction): `(tile - 1001) % 10` in U, `(tile - 1001) / 10` in V.
+fn tile_uv_offset(tile: u16) -> (f32, f32) {
+    let index = tile.saturating_sub(FIRST_TILE);
+    (f32::from(index % 10), f32::from(index / 10))
+}
+
+/// Global UV of a tile-local texel CENTER (the exact inverse of
+/// [`local_texel`], so a filled path's scan rows land on the texels the
+/// rasterizer covered).
+fn texel_center_uv(tile: u16, x: u32, y: u32, texels_per_uv: f32) -> [f32; 2] {
+    let (tile_u, tile_v) = tile_uv_offset(tile);
+    [
+        tile_u + (f32::from(x) + 0.5) / texels_per_uv,
+        tile_v + 1.0 - (f32::from(y) + 0.5) / texels_per_uv,
+    ]
+}
+
+/// One maximal x-contiguous covered span in a tile mask row: the filled
+/// path replays each as one stroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FillRun {
+    y: u32,
+    x0: u32,
+    x1: u32,
+}
+
+/// Row runs of the covered texels in `mask` (row-major, `width`x`height`):
+/// maximal x-contiguous `true` spans, rows top-down. A short `mask`
+/// degrades to no runs (never a panic — a torn rasterizer output must not
+/// crash the fill).
+fn fill_runs(mask: &[bool], width: usize, height: usize) -> Vec<FillRun> {
+    let mut runs = Vec::new();
+    for y in 0..height {
+        let mut x = 0;
+        while x < width {
+            let covered = mask.get(y * width + x).copied().unwrap_or(false);
+            if !covered {
+                x += 1;
+                continue;
+            }
+            let x0 = x;
+            x += 1;
+            while x < width && mask.get(y * width + x).copied().unwrap_or(false) {
+                x += 1;
+            }
+            runs.push(FillRun {
+                y: y as u32,
+                x0: x0 as u32,
+                x1: (x - 1) as u32,
+            });
+        }
+    }
+    runs
+}
+
 /// Brush footprint in UV units for a target with `texels_per_uv` texels
 /// per UV unit: `BRUSH_RADIUS_TEXELS * SEAM_MIRROR_MARGIN / texels_per_uv`.
 /// Free function so the radius math is unit-testable without a GPU-backed
@@ -1334,6 +1607,177 @@ mod tests {
             (buildup - 0.96875).abs() < 1e-6 && (buildup - folded).abs() > 0.4,
             "build-up must accumulate well past the wash ceiling"
         );
+    }
+
+    // --- Paint-what-you-see projection (§2's P1 row) ---
+    //
+    // The viewport raycasts each pointer to a hit UV (or a miss); these
+    // tests pin the session side of that contract. The ray side
+    // (`Viewport::pick_uv`: a known ray hits the known UV, corners miss)
+    // is pinned in `viewport.rs`.
+
+    #[test]
+    fn projection_default_is_screen_and_routes_the_viewport() {
+        // Screen is today's behavior (both surfaces paint), so existing
+        // sessions are untouched; Uv parks viewport painting (orbit).
+        assert_eq!(PaintProjection::default(), PaintProjection::Screen);
+        assert!(PaintProjection::Screen.viewport_paints());
+        assert!(!PaintProjection::Uv.viewport_paints());
+    }
+
+    /// Drives `points` through the Screen entry points: the first through
+    /// `begin_screen_point`, the rest through `extend_screen_point`.
+    fn drive_screen(state: &mut PaintState, points: &[Option<[f32; 2]>]) {
+        let mut first = true;
+        for point in points {
+            let hit = point.map(|[x, y]| egui::pos2(x, y));
+            if first {
+                state.begin_screen_point(hit);
+                first = false;
+            } else {
+                state.extend_screen_point(hit);
+            }
+        }
+    }
+
+    #[test]
+    fn screen_miss_opens_no_stroke_and_stages_nothing() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        state.begin_screen_point(None);
+        assert!(!state.is_stroking(), "a miss must not open a stroke");
+        state.extend_screen_point(None);
+        assert!(!state.is_stroking());
+        assert_eq!(state.staged_batch_count(), 0, "no hits, no stages");
+        assert_eq!(state.staged_dab_count(), 0);
+        state.end_stroke();
+    }
+
+    #[test]
+    fn screen_hit_after_opening_miss_starts_the_stroke_there() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        // The drag opens off the mesh, then moves onto it: the stroke
+        // starts at the first hit, with no orphan state from the misses.
+        drive_screen(&mut state, &[None, None, Some([0.3, 0.3])]);
+        assert!(state.is_stroking());
+        state.end_stroke();
+    }
+
+    #[test]
+    fn screen_misses_leave_no_trace_in_the_conditioned_stream() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // Misses never touch the conditioner, so a screen stroke with
+        // interleaved misses stages EXACTLY what the hits-only UV stroke
+        // stages (same batches, same dabs, same order).
+        let hits = [[0.3, 0.3], [0.32, 0.32], [0.34, 0.34], [0.36, 0.36]];
+        let mut direct = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        direct.begin_stroke(egui::pos2(hits[0][0], hits[0][1]));
+        for [x, y] in &hits[1..] {
+            direct.extend_stroke(egui::pos2(*x, *y));
+        }
+        direct.end_stroke();
+
+        let mut screen = PaintState::new(device, queue).expect("paint state builds");
+        drive_screen(
+            &mut screen,
+            &[
+                Some(hits[0]),
+                None,
+                Some(hits[1]),
+                None,
+                None,
+                Some(hits[2]),
+                Some(hits[3]),
+            ],
+        );
+        assert!(screen.is_stroking(), "hits keep the stroke alive across misses");
+        screen.end_stroke();
+        assert_eq!(
+            screen.staged_batch_count(),
+            direct.staged_batch_count(),
+            "misses stage nothing"
+        );
+        assert_eq!(
+            screen.staged_dab_count(),
+            direct.staged_dab_count(),
+            "the hit stream conditions identically"
+        );
+    }
+
+    #[test]
+    fn projection_sync_applies_between_strokes_only() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        assert_eq!(state.projection(), PaintProjection::Screen);
+        state.sync_projection(PaintProjection::Uv);
+        assert_eq!(state.projection(), PaintProjection::Uv);
+        // A mid-stroke swap would split one stroke across two surfaces.
+        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.sync_projection(PaintProjection::Screen);
+        assert_eq!(state.projection(), PaintProjection::Uv);
+        state.end_stroke();
+        state.sync_projection(PaintProjection::Screen);
+        assert_eq!(state.projection(), PaintProjection::Screen);
+    }
+
+    #[test]
+    fn screen_stroke_inherits_seam_mirrors() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // Same march as `seam_stroke_stages_original_plus_mirror_near_seam`
+        // but through the Screen entry points: the resolved hit UVs fan
+        // out through the shared `push_event_inner` seam path, so a
+        // near-seam screen stroke stages original + mirror per event.
+        let start = NEAR_SEAM_UV;
+        let step = [0.02, 0.02];
+        let march: Vec<Option<[f32; 2]>> = (0..=15)
+            .map(|i| Some([start[0] + step[0] * i as f32, start[1] + step[1] * i as f32]))
+            .collect();
+
+        let mut base = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        base.set_mesh(&single_island_quad());
+        drive_screen(&mut base, &march);
+        let base_converged = base.staged_batch_count();
+        assert!(base_converged >= 1);
+        base.extend_screen_point(Some(egui::pos2(
+            start[0] + step[0] * 16.0,
+            start[1] + step[1] * 16.0,
+        )));
+        assert_eq!(
+            base.staged_batch_count() - base_converged,
+            1,
+            "seam-free screen extend stages exactly the original"
+        );
+        base.end_stroke();
+
+        let mut seam = PaintState::new(device, queue).expect("paint state builds");
+        seam.set_mesh(&two_island_quad());
+        drive_screen(&mut seam, &march);
+        let seam_converged = seam.staged_batch_count();
+        assert!(
+            seam_converged > base_converged,
+            "near-seam screen stroke must stage MORE than the baseline"
+        );
+        seam.extend_screen_point(Some(egui::pos2(
+            start[0] + step[0] * 16.0,
+            start[1] + step[1] * 16.0,
+        )));
+        assert_eq!(
+            seam.staged_batch_count() - seam_converged,
+            2,
+            "near-seam screen extend stages original + mirror"
+        );
+        seam.end_stroke();
     }
 
     // --- Seam-aware wiring tests (slice 3) ---
@@ -2113,5 +2557,158 @@ mod tests {
             "mirrors never move the active tile"
         );
         state.process_pending().expect("drain succeeds");
+    }
+
+    // --- Paint paths (§2 line 26's P1 row) ---
+
+    #[test]
+    fn fill_runs_cover_maximal_spans() {
+        // Row 0 full, row 1 two spans, row 2 empty.
+        let mask = vec![
+            true, true, true, true, //
+            true, false, false, true, //
+            false, false, false, false,
+        ];
+        assert_eq!(
+            fill_runs(&mask, 4, 3),
+            vec![
+                FillRun { y: 0, x0: 0, x1: 3 },
+                FillRun { y: 1, x0: 0, x1: 0 },
+                FillRun { y: 1, x0: 3, x1: 3 },
+            ]
+        );
+        assert!(fill_runs(&[], 4, 4).is_empty());
+        // A torn (short) rasterizer output degrades to its present prefix,
+        // never a panic.
+        assert_eq!(
+            fill_runs(&[true], 4, 4),
+            vec![FillRun { y: 0, x0: 0, x1: 0 }]
+        );
+    }
+
+    #[test]
+    fn texel_center_uv_inverts_local_texel() {
+        for tile in [FIRST_TILE, 1002, 1011] {
+            for (x, y) in [(0, 0), (17, 42), (511, 511)] {
+                let uv = texel_center_uv(tile, x, y, 512.0);
+                let back = local_texel(uv, tile, 512.0);
+                assert!(
+                    (back[0] - (f32::from(x) + 0.5)).abs() < 1e-3
+                        && (back[1] - (f32::from(y) + 0.5)).abs() < 1e-3,
+                    "tile {tile} texel ({x},{y}) must round-trip"
+                );
+            }
+        }
+    }
+
+    /// The replay's event stream from path points (16 vertical steps, full
+    /// style — the same UVs `drive_stroke` feeds).
+    fn straight_path(start: [f32; 2], step: [f32; 2], steps: usize) -> PaintPath {
+        let mut path = PaintPath::new();
+        path.push_point(start, 1.0, 1.0, 1.0);
+        for i in 1..=steps {
+            path.push_point(
+                [
+                    start[0] + step[0] * i as f32,
+                    start[1] + step[1] * i as f32,
+                ],
+                1.0,
+                1.0,
+                1.0,
+            );
+        }
+        path
+    }
+
+    #[test]
+    fn replayed_path_stages_exactly_like_the_manual_stroke() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let (start, step) = ([0.2, 0.3], [0.0, 0.02]);
+
+        let mut manual =
+            PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        drive_stroke(&mut manual, start, step, 15);
+        manual.end_stroke();
+
+        let mut replayed = PaintState::new(device, queue).expect("paint state builds");
+        // Park a non-paint tool: the replay must restore it afterwards.
+        let mut smudge_tool = BrushTool::Smudge(umber_brush::SmudgeParams::default());
+        replayed.sync_tool(&mut smudge_tool);
+        let path = straight_path(start, step, 15);
+        assert!(replayed.replay_path(&path, &PathOp::Paint));
+        assert!(!replayed.is_stroking(), "replay ends its stroke");
+        assert_eq!(
+            replayed.staged_batch_count(),
+            manual.staged_batch_count(),
+            "a full-style replay is the manual event stream"
+        );
+        assert_eq!(
+            replayed.staged_dab_count(),
+            manual.staged_dab_count(),
+            "dab for dab, through the same conditioner"
+        );
+        assert_eq!(
+            replayed.tool, smudge_tool,
+            "the session tool survives the replay"
+        );
+    }
+
+    #[test]
+    fn replay_refuses_live_strokes_and_short_paths() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut short = PaintPath::new();
+        short.push_point([0.5, 0.5], 1.0, 1.0, 1.0);
+        assert!(!state.replay_path(&short, &PathOp::Paint));
+        assert!(!state.replay_filled_path(&short, &PathOp::Paint));
+        assert!(!state.replay_filled_path(&PaintPath::new(), &PathOp::Paint));
+        // A replay never splits a live stroke.
+        let path = straight_path([0.2, 0.3], [0.0, 0.02], 15);
+        state.begin_stroke(egui::pos2(0.5, 0.5));
+        assert!(!state.replay_path(&path, &PathOp::Paint));
+        assert!(!state.replay_filled_path(&path, &PathOp::Paint));
+        state.end_stroke();
+        assert!(state.replay_path(&path, &PathOp::Paint));
+    }
+
+    #[test]
+    fn retouch_replay_routes_to_the_cpu_mirror() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let path = straight_path([0.2, 0.5], [0.01, 0.0], 15);
+        let batches = state.staged_batch_count();
+        let op = PathOp::Smudge(umber_brush::SmudgeParams {
+            strength: 1.0,
+            smear: 0.5,
+        });
+        assert!(state.replay_path(&path, &op));
+        assert_eq!(
+            state.staged_batch_count(),
+            batches,
+            "smudge dabs never stage GPU splats"
+        );
+        assert!(
+            state.can_undo_stroke(),
+            "the replayed smudge is one undo entry"
+        );
+        // The eraser on a blank target is the exact identity (no writes,
+        // no history) — while still replaying through its own consumer.
+        let mut blank = PaintState::new(
+            state.device.clone(),
+            state.queue.clone(),
+        )
+        .expect("paint state builds");
+        assert!(blank.replay_path(&path, &PathOp::Erase(umber_brush::EraseParams::default())));
+        assert_eq!(blank.staged_batch_count(), 0);
+        assert!(
+            !blank.can_undo_stroke(),
+            "an identity erase records nothing"
+        );
     }
 }
