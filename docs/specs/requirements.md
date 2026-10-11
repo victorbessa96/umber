@@ -23,11 +23,11 @@
 | Straight-line constraint; angle snap | P1 | 3 | ✓ built (`33b796f`) |
 | Polygon fill (triangle/polygon/mesh/UV-chunk pixel-mask fills) | P1 | 3 | ✓ built (`1329e8d`) |
 | Quick mask (temporary painted mask, invert) | P1 | 4 | ✓ built (`e4492ba`) |
-| Path tools (paint/erase/smudge along 3D curve; per-vertex size+opacity; filled path) | P1 | 5 |
+| Path tools (paint/erase/smudge along 3D curve; per-vertex size+opacity; filled path) | P1 | 5 | ✓ built (`cb3e435`) |
 | Brush presets (.abr import optional; native preset files) | P0 | 2 | ✓ built (`f18a0ce`/`0d49d83`/`57ce764`) |
 | Seam-aware stamping: strokes crossing UV seams land consistently in both islands; 3D-space-neighbor padding/dilation | P0 | 2 | ✓ built (`fb984d1`..`7106a79`) |
 | Stroke evaluated in 3D space, not per-tile (works single-tile; UDIM cross-tile continuity arrives with UDIM in Wave 4) | P0 | 2 | ✓ built (`708ae8a`, UDIM `82c694c`..`10cdffa`) |
-| Paint-what-you-see projection modes beyond UV (Mari-style paint buffer) | P1 | 4 |
+| Paint-what-you-see projection modes beyond UV (Mari-style paint buffer) | P1 | 4 | ✓ built (`b2306c6`) — v1 live-raycast; the deferred Mari buffer = the named follow-up (the camera can't move mid-stroke today) |
 
 ## 2. Layer + channel system — [01]
 
@@ -54,9 +54,9 @@
 | Common settings: output size, dilation width, antialiasing (supersampling), ignore backfaces, low-as-high toggle, match by mesh name | P0 | 3 |
 | Cage: distance-based + custom offset; front/back projection distance | P0 | 3 |
 | Compute-shader raycast/bvh bake path (no RT hardware dependency); wgpu ray-query acceleration when stable | P0 | 3 |
-| Skew correction: paintable skew map + edge protection (Marmoset-class bake polish [02]) | P1 | 5 |
-| Auto-rebake of affected regions on parameter change | P1 | 5 |
-| Baking mode UI: per-set/per-map checklist, bake log with jump-to-setting, cage visualization | P1 | 3 (log) / 5 (viz) |
+| Skew correction: paintable skew map + edge protection (Marmoset-class bake polish [02]) | P1 | 5 | ✓ built (`3733e5e`) |
+| Auto-rebake of affected regions on parameter change | P1 | 5 | ✓ built (`3733e5e`) |
+| Baking mode UI: per-set/per-map checklist, bake log with jump-to-setting, cage visualization | P1 | 3 (log) / 5 (viz) | ✓ built (`3733e5e`) |
 
 ## 4. Procedural system (original — .sbsar is legally untouchable) — [01][04]
 
@@ -100,7 +100,7 @@
 | PSD export (layered) | P2 | 6+ |
 | PSD import (flatten-on-import; layer maps to texture-set layers) — DESIGNED, deferred: the ag-psd reader exists, but flattening semantics (blend modes, masks, groups) are a large honest-verification surface; deferred until a user need arrives, NOT a technical wall | P3 (designed) | later |
 | MaterialX document export (OpenPBR nodedef + image/UDIM tokens) — "beyond raster" interchange | P0 | 3 (basic), 4 (full) |
-| USD export (textures + .usda + material binding via UsdShade→OpenPBR) | P1 | 5 |
+| USD export (textures + .usda + material binding via UsdShade→OpenPBR) | P1 | 5 | ✓ built (`897e323`) — the importer round-trip proven at runtime, 8/8 tests |
 
 ## 7. Import — [01][03]
 
