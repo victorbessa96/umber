@@ -631,6 +631,11 @@ impl eframe::App for UmberApp {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
+        // Mesh-map import drops (§7 P1 row): drain here, not only in the
+        // Assets tab's `show` (egui_dock skips hidden tabs — same pattern
+        // as the async bake poll above), so a folder dropped while Assets
+        // is hidden still routes.
+        self.state.mesh_import.poll_drops(ui.ctx());
         // Overlay keybinds (Wave-4 item 7): W toggles the wireframe, G
         // the ground grid. View-mode keybind (§5's P0 row): V cycles
         // lit ↔ unlit (from Solo/preview it returns to Lit).
@@ -685,6 +690,10 @@ impl eframe::App for UmberApp {
                                 let n = mesh.vertex_count();
                                 match self.state.viewport.load_mesh(&self.gpu, &mesh) {
                                     Ok(()) => {
+                                        // The import session set follows the
+                                        // mesh's set name (channels kept).
+                                        let set_name = umber_mesh::texture_set_name(&path, &mesh);
+                                        self.state.mesh_import.retarget_set(&set_name);
                                         self.state.mesh = Some(mesh);
                                         self.state.mesh_path = Some(path);
                                         log::info!("loaded mesh: {n} vertices");
@@ -730,6 +739,13 @@ impl eframe::App for UmberApp {
             });
         });
 
+        // The import Apply path needs the project's content-hash store;
+        // it exists from the first Save/Open on (see `project_dir`).
+        let store = self
+            .state
+            .project_dir
+            .as_ref()
+            .map(|dir| umber_core::AssetStore::new(dir));
         CentralPanel::default().show(ui, |ui| {
             let mut viewer = PanelViewer {
                 viewport: &mut self.state.viewport,
@@ -748,6 +764,8 @@ impl eframe::App for UmberApp {
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
                 display_lut: &self.display_lut,
+                mesh_import: &mut self.state.mesh_import,
+                store: store.as_ref(),
             };
             DockArea::new(&mut self.dock)
                 .style(Style::from_egui(ui.style()))

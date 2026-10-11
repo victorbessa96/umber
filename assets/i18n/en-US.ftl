@@ -101,6 +101,21 @@ bakes =
     .skipped-note = skipped (v1 bakes only AO per tile; other maps tile 1001 only): { $pairs }
     .failed = Bake failed: { $error }
     .worker-failed = Bake failed: could not start the bake worker: { $error }
+    .map-skew = Skew (correction mask)
+    .skew-threshold = Skew threshold
+    .auto-rebake = Auto-rebake on change
+    .bake-all = Bake all
+    .sets = Texture sets:
+    .select-set = Select at least one texture set to bake.
+    .show-cage = Show cage
+    .log = Bake log
+    .log-empty = No bakes logged yet.
+    .log-entry = [{ $time }] { $set } { $map } (tile { $tile }): { $ms } ms{ $warnings }
+    .log-warnings = { $count ->
+        [one] — 1 skew-clamped texel
+       *[other] — { $count } skew-clamped texels
+    }
+    .skipped-skew-note = skew bakes tile 1001 only, skipped tiles: { $tiles }
 
 ## Export panel
 
@@ -379,8 +394,59 @@ tiles =
 size =
     .vram-note = { $size } × { $size } (~{ $mib } MB/texel-buffer)
 
+## Mesh-map import by naming convention (§7 P1 row)
+
+import =
+    .title = Mesh-map import
+    .hint = Drop a folder of TextureSetName_map.png files (what the baker emits), or choose one below. Known maps route to their texture-set channels; unknown suffixes become user channels. Every import creates a new layer — nothing is ever overwritten.
+    .choose = Choose folder…
+    .apply = Import as layers
+    .need-project = Save or open a project first — imports are stored content-hashed in the project before they become layers.
+    .no-files = No files scanned yet.
+    .scan-failed = Folder scan failed: { $error }
+    .scanned = { $matched } file(s) routed, { $unmatched } skipped.
+    .applied = { $count ->
+        [one] Imported { $count } file as a new layer.
+       *[other] Imported { $count } files as new layers.
+    }
+    .matched-title = { $count ->
+        [one] { $count } routed file
+       *[other] { $count } routed files
+    }
+    .unmatched-title = { $count ->
+        [one] { $count } skipped file
+       *[other] { $count } skipped files
+    }
+    .row-matched = { $file } → { $set } / { $channel } as “{ $layer }”
+    .row-unmatched = { $file } — { $reason }
+    .reason-not-png = not a PNG file (the baker emits PNG)
+    .reason-no-separator = no “_” separator — not a TextureSetName_map name
+    .reason-empty-set = nothing before the “_” — no texture-set name
+    .reason-empty-suffix = nothing after the “_” — no map name
+    .reason-tile-suffixed = tile-suffixed UDIM output (Set_map_tile) — import the per-tile files individually
+
 ## 2D UV view
 
 uv =
     .no-mesh = no mesh loaded
     .mask-mode = MASK MODE (X to exit)
+
+## Paint path tools (§2 P1 row)
+
+path =
+    .tool = Paint path
+    .armed = Edit path (captures clicks)
+    .hint = While editing, clicks in the 2D UV view build the path instead of painting. Drag points to move them, click a segment to insert, right-click to delete.
+    .op-paint = Paint
+    .op-erase = Erase
+    .op-smudge = Smudge
+    .closed = Closed loop
+    .points = Points
+    .selected = Selected
+    .size = Size
+    .opacity = Opacity
+    .replay = Replay path
+    .fill = Fill closed path
+    .clear = Clear path
+    .no-paint = No paint session — replay needs the GPU target.
+    .need-points = Add at least two points to replay.

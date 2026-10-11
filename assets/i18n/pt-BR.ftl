@@ -105,6 +105,21 @@ bakes =
     .skipped-note = ignorados (a v1 só faz bake de AO por tile; os demais mapas só no tile 1001): { $pairs }
     .failed = Falha no bake: { $error }
     .worker-failed = Falha no bake: não foi possível iniciar o worker de bake: { $error }
+    .map-skew = Skew (máscara de correção)
+    .skew-threshold = Limite de skew
+    .auto-rebake = Refazer o bake ao mudar
+    .bake-all = Fazer bake de tudo
+    .sets = Conjuntos de texturas:
+    .select-set = Selecione ao menos um conjunto de texturas para o bake.
+    .show-cage = Mostrar cage
+    .log = Histórico de bakes
+    .log-empty = Nenhum bake registrado ainda.
+    .log-entry = [{ $time }] { $set } { $map } (tile { $tile }): { $ms } ms{ $warnings }
+    .log-warnings = { $count ->
+        [one] — 1 texel com skew limitado
+       *[other] — { $count } texels com skew limitado
+    }
+    .skipped-skew-note = o skew só faz bake no tile 1001, tiles ignorados: { $tiles }
 
 ## Painel de exportação
 
@@ -403,3 +418,23 @@ size =
 uv =
     .no-mesh = nenhuma malha carregada
     .mask-mode = MODO MÁSCARA (X para sair)
+
+## Ferramentas de caminho de pintura (§2 P1)
+
+path =
+    .tool = Caminho de pintura
+    .armed = Editar caminho (captura cliques)
+    .hint = Durante a edição, os cliques na vista UV 2D constroem o caminho em vez de pintar. Arraste pontos para movê-los, clique num segmento para inserir, clique com o botão direito para excluir.
+    .op-paint = Pintar
+    .op-erase = Borracha
+    .op-smudge = Borrar
+    .closed = Laço fechado
+    .points = Pontos
+    .selected = Selecionado
+    .size = Tamanho
+    .opacity = Opacidade
+    .replay = Repetir caminho
+    .fill = Preencher caminho fechado
+    .clear = Limpar caminho
+    .no-paint = Sem sessão de pintura — repetir precisa do alvo da GPU.
+    .need-points = Adicione ao menos dois pontos para repetir.
