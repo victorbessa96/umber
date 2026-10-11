@@ -12,6 +12,7 @@ members = [
     "crates/stylus",
     "crates/umber-cli",
     "crates/umber-app",
+    "crates/umber-gui",
     "crates/umber-wasm",
     "crates/umber-plugin-sdk",
 ]
@@ -78,6 +79,7 @@ umber-bake = { path = "crates/umber-bake" }
 umber-graph = { path = "crates/umber-graph" }
 umber-export = { path = "crates/umber-export" }
 umber-color = { path = "crates/umber-color" }
+umber-gui = { path = "crates/umber-gui" }
 stylus = { path = "crates/stylus" }
 umber-wasm = { path = "crates/umber-wasm" }
 umber-plugin-sdk = { path = "crates/umber-plugin-sdk" }

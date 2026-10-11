@@ -1,0 +1,22 @@
+[package]
+name = "umber-gui"
+description = "Umber presentation layer: theme tokens, fonts, icon atlas, foundational widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+egui = { workspace = true }
+# Density persists in the app settings (Phase 3's settings panel).
+serde = { workspace = true }
+
+[features]
+# Bake Inter + JetBrains Mono into the binary via include_bytes!. Off by
+# default: the TTFs are not in the tree yet (see fonts.rs, the
+# "font-assets" follow-up), and include_bytes! of a missing file is a
+# compile error that would break the whole workspace build. Without the
+# feature the fonts load at runtime from assets/fonts/ and a missing file
+# panics with the expected path.
+default = []
+embedded-fonts = []

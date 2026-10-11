@@ -4846,6 +4846,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "umber-gui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "serde",
+]
+
+[[package]]
 name = "umber-mesh"
 version = "0.1.0"
 dependencies = [
