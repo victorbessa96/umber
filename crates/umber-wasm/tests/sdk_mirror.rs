@@ -39,6 +39,7 @@ fn as_sdk(v: &ParamValue) -> Param<'_> {
         ParamValue::Bool(b) => Param::Bool(*b),
         ParamValue::Asset(s) => Param::Asset(s),
         ParamValue::NodeRef(_) => unreachable!("never on the wire"),
+        ParamValue::Anchor(_) => unreachable!("never on the wire"),
     }
 }
 

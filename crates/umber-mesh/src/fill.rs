@@ -579,20 +579,26 @@ pub fn rasterize_uv_geometry(
                     tu + (x as f32 + 0.5) / width as f32,
                     tv + 1.0 - (y as f32 + 0.5) / height as f32,
                 ];
-                // Barycentrics via edge functions over the signed area
-                // (winding-agnostic: the inside test follows the area sign).
+                // Barycentrics via edge functions over the signed area.
+                // CORRECTION (polygon-fill investigation): the divisors
+                // below are `-area`, not `area`. Expanding the cross
+                // products shows `E_ab(v_opp) = -area` identically in both
+                // windings, so the TRUE barycentric weights are `-e_i /
+                // area`: dividing by `+area` negates them (weights summing
+                // to -1, positions mirrored through the origin, and the old
+                // `area > 0` inside branch — which then needs a sum ≥ -3e-6
+                // from weights summing to -1 — accepting NOTHING, so every
+                // CCW triangle rasterized empty). Over the true weights the
+                // inside test is one branch, winding-agnostic by
+                // construction.
                 let e0 =
                     (uv[0] - uv1[0]) * (uv2[1] - uv1[1]) - (uv[1] - uv1[1]) * (uv2[0] - uv1[0]);
                 let e1 =
                     (uv[0] - uv2[0]) * (uv0[1] - uv2[1]) - (uv[1] - uv2[1]) * (uv0[0] - uv2[0]);
                 let e2 =
                     (uv[0] - uv0[0]) * (uv1[1] - uv0[1]) - (uv[1] - uv0[1]) * (uv1[0] - uv0[0]);
-                let (b0, b1, b2) = (e0 / area, e1 / area, e2 / area);
-                let inside = if area > 0.0 {
-                    b0 >= -1e-6 && b1 >= -1e-6 && b2 >= -1e-6
-                } else {
-                    b0 <= 1e-6 && b1 <= 1e-6 && b2 <= 1e-6
-                };
+                let (b0, b1, b2) = (-e0 / area, -e1 / area, -e2 / area);
+                let inside = b0 >= -1e-6 && b1 >= -1e-6 && b2 >= -1e-6;
                 if !inside {
                     continue;
                 }

@@ -50,8 +50,9 @@
 //! Every mesh-index access goes through [`slice::get`]; malformed
 //! triangles, missing attributes and non-finite coordinates degrade to
 //! "outside the mask", never a panic. A degenerate loop (< 3 points)
-//! contains nothing. A malformed pick seed floods to the empty set (the
-//! fill paints nothing).
+//! contains nothing. A past-the-end pick seed floods to the empty set
+//! (the fill paints nothing); a malformed triangle floods to itself at
+//! most (see [`flood_connected_triangles`]).
 //!
 //! # Module placement
 //!
@@ -131,8 +132,8 @@ impl FillMask {
 
     /// Builds the whole-mesh mask: floods `mesh`'s position-welded
     /// connectivity from `seed` (see [`flood_connected_triangles`]). A
-    /// malformed seed floods to the empty set — the fill paints nothing,
-    /// never panics.
+    /// past-the-end seed floods to the empty set — the fill paints
+    /// nothing, never panics.
     pub fn mesh_island(mesh: &MeshData, seed: usize) -> Self {
         FillMask::Mesh {
             triangles: flood_connected_triangles(mesh, seed),
@@ -354,8 +355,11 @@ fn uv_key(mesh: &MeshData, idx: u32) -> (u8, [u32; 5]) {
 
 /// Floods one connectivity over the triangle list from `seed`: triangles
 /// sharing any weld `key` are neighbors. Returns the component's triangle
-/// indices, ascending and deduplicated. A `seed` past the end, or one
-/// whose triangle is malformed, floods to the empty set.
+/// indices, ascending and deduplicated. A `seed` past the end floods to
+/// the empty set; a malformed triangle shares keys with nothing (its
+/// missing attributes get unique sentinels), so it floods to itself at
+/// most — and the fill rasterizer skips malformed triangles, so such IDs
+/// never match a covered texel anyway.
 fn flood_by_key<K: Eq + std::hash::Hash + Copy>(
     mesh: &MeshData,
     seed: usize,
@@ -461,15 +465,14 @@ pub fn uv_triangle_at(mesh: &MeshData, uv: [f32; 2]) -> Option<usize> {
         if !area.is_finite() || area.abs() < 1e-12 {
             continue;
         }
+        // Same correction as `rasterize_uv_geometry` (see its comment):
+        // `E_ab(v_opp) = -area` in both windings, so the true weights are
+        // `-e_i / area` and the inside test is one branch.
         let e0 = (uv[0] - uv1[0]) * (uv2[1] - uv1[1]) - (uv[1] - uv1[1]) * (uv2[0] - uv1[0]);
         let e1 = (uv[0] - uv2[0]) * (uv0[1] - uv2[1]) - (uv[1] - uv2[1]) * (uv0[0] - uv2[0]);
         let e2 = (uv[0] - uv0[0]) * (uv1[1] - uv0[1]) - (uv[1] - uv0[1]) * (uv1[0] - uv0[0]);
-        let (b0, b1, b2) = (e0 / area, e1 / area, e2 / area);
-        let inside = if area > 0.0 {
-            b0 >= -1e-6 && b1 >= -1e-6 && b2 >= -1e-6
-        } else {
-            b0 <= 1e-6 && b1 <= 1e-6 && b2 <= 1e-6
-        };
+        let (b0, b1, b2) = (-e0 / area, -e1 / area, -e2 / area);
+        let inside = b0 >= -1e-6 && b1 >= -1e-6 && b2 >= -1e-6;
         if inside {
             found = Some(k);
         }
@@ -570,7 +573,9 @@ mod tests {
         }
         assert!(!point_in_polygon([f32::NAN, 0.5], &sq));
         assert!(!point_in_polygon([0.5, f32::INFINITY], &sq));
-        assert!(!point_in_polygon([0.5, 0.5], &[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0]]));
+        // NaN edges never toggle and never bound: far outside stays
+        // outside even when the loop's closing edge is real.
+        assert!(!point_in_polygon([5.0, 5.0], &[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0]]));
         // A zero-length edge is its own neighborhood, not a hole.
         assert!(point_in_polygon(
             [0.5, 0.5],

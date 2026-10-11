@@ -30,6 +30,7 @@
 //! | `direction_warp` | GPU | bilinear resample with edge clamping |
 //! | `flood_fill`, `histogram_match` | CPU (`GlobalPass`) | connected-component labeling and CDF transfer need whole-image global passes/reductions — no single per-pixel dispatch expresses them |
 //! | `mesh_map_generator` | CPU (`External`) | bridge-provided bytes (bake outputs); cloned/uploaded, never computed |
+//! | `anchor` | CPU (`External`) | bridge-provided bytes (the bound layer's composited channel); clone, never computed |
 //! | unregistered defs, incl. WASM guests | CPU (`PluginGuest`) | arbitrary guest/host code — dispatched through the registry like the CPU engine |
 //!
 //! # Tiles
@@ -285,6 +286,9 @@ impl GpuRoute {
             "direction_warp" => Self::Gpu(GpuOp::Warp),
             "triplanar_blend" => Self::Gpu(GpuOp::Triplanar),
             "mesh_map_generator" => Self::Cpu(CpuPath::External),
+            // Anchors are bridge-provided bytes like mesh maps (the layer's
+            // composited channel, uploaded under `anchor:{id}:{channel}`).
+            "anchor" => Self::Cpu(CpuPath::External),
             _ => Self::Cpu(CpuPath::PluginGuest),
         }
     }
@@ -1128,7 +1132,9 @@ fn lookup_upstream<'a>(
 }
 
 /// Resolves a node's inputs (sorted by name for determinism): `NodeRef`
-/// params first in param order, then edges in graph order overlaying
+/// params first in param order, then `Anchor` params against `external`
+/// (as [`Resolved::Cpu`] — bridge bytes, uploaded at the boundary when a
+/// GPU node consumes them), then edges in graph order overlaying
 /// same-named entries — the `eval.rs` rule, restated over [`Resolved`].
 fn resolve_inputs_gpu(
     graph: &Graph,
@@ -1136,6 +1142,7 @@ fn resolve_inputs_gpu(
     gpu: &HashMap<u64, GpuImage>,
     cpu: &HashMap<u64, NodeOutput>,
     cache: &EvalCache,
+    external: &HashMap<String, NodeOutput>,
 ) -> Result<Vec<(String, Resolved)>, EvalError> {
     let mut map: BTreeMap<String, Resolved> = BTreeMap::new();
     for (name, pv) in &node.params {
@@ -1146,6 +1153,21 @@ fn resolve_inputs_gpu(
                     input: name.clone(),
                 })?;
             map.insert(name.clone(), v);
+        }
+        // Anchors resolve through the same externals key as the CPU
+        // engine (`anchor::{id}:{channel}`); a bound anchor with no
+        // external is the typed Anchor error (deleted layer), on both
+        // backends alike.
+        if let ParamValue::Anchor(anchor) = pv {
+            let v = external.get(&anchor.key()).cloned().ok_or_else(|| {
+                EvalError::Anchor {
+                    node: node.id,
+                    layer: anchor.layer_id,
+                    channel: anchor.channel.clone(),
+                    reason: "layer deleted or never composited".into(),
+                }
+            })?;
+            map.insert(name.clone(), Resolved::Cpu(v));
         }
     }
     for e in &graph.edges {
@@ -1558,8 +1580,9 @@ impl GraphGpuEvaluator {
             let route = GpuRoute::route(&node.node_def, &node.params);
             match route {
                 GpuRoute::Alias => {
-                    let in_map = resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache)
-                        .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
+                    let in_map =
+                        resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache, &eff_ctx.external)
+                            .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
                     let single =
                         Self::single_input(&in_map, node.id).map_err(GraphGpuError::Eval)?;
                     match single {
@@ -1596,8 +1619,9 @@ impl GraphGpuEvaluator {
                     // name (edges overlaying NodeRefs) — flatten to
                     // `NodeOutput`s, reading back GPU handles now that the
                     // encoder is submitted.
-                    let resolved = resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache)
-                        .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
+                    let resolved =
+                        resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache, &eff_ctx.external)
+                            .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
                     let mut in_vec: Vec<(String, NodeOutput)> = Vec::with_capacity(resolved.len());
                     for (name, r) in &resolved {
                         let v = match r {
@@ -1620,8 +1644,9 @@ impl GraphGpuEvaluator {
                     cache.insert(*id, out);
                 }
                 GpuRoute::Gpu(op) => {
-                    let in_map = resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache)
-                        .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
+                    let in_map =
+                        resolve_inputs_gpu(graph, node, &gpu_tex, &cpu_out, cache, &eff_ctx.external)
+                            .map_err(|e| GraphGpuError::Eval(e.with_node(node.id)))?;
                     self.eval_gpu_node(&mut encoder, node, op, &in_map, tile, &mut gpu_tex)?;
                 }
             }
@@ -2052,6 +2077,10 @@ mod tests {
         );
         assert_eq!(
             GpuRoute::route("mesh_map_generator", &[]),
+            GpuRoute::Cpu(CpuPath::External)
+        );
+        assert_eq!(
+            GpuRoute::route("anchor", &[]),
             GpuRoute::Cpu(CpuPath::External)
         );
         assert_eq!(GpuRoute::route("passthrough", &[]), GpuRoute::Alias);

@@ -4,7 +4,8 @@
 //! Pipeline: [`Graph::validate`] first (dangling/duplicate/cycle
 //! checks from [`crate::topo`]), then a deterministic Kahn sweep, then
 //! per node: resolve inputs (edges + [`ParamValue::NodeRef`] params
-//! read upstream outputs), dispatch through the registry, store.
+//! read upstream outputs + [`ParamValue::Anchor`] params read layer
+//! externals), dispatch through the registry, store.
 //!
 //! This module does NOT reuse [`Graph::evaluate`]'s generic closure
 //! API: that API boxes errors (`Box<dyn Error>`), which would force an
@@ -15,6 +16,7 @@
 //! [`Graph::validate`]: crate::Graph::validate
 //! [`Graph::evaluate`]: crate::Graph::evaluate
 //! [`ParamValue::NodeRef`]: crate::ParamValue::NodeRef
+//! [`ParamValue::Anchor`]: crate::ParamValue::Anchor
 
 use crate::topo::{Graph, GraphError};
 use crate::value::{ImageBuffer, ImageError, NodeOutput};
@@ -58,6 +60,20 @@ pub enum EvalError {
         node: u64,
         /// The offending param name ( MAY carry detail after a space).
         param: String,
+    },
+    /// An [`Anchor`](crate::AnchorRef) bound on a node input has no
+    /// composited layer channel behind it: the layer was deleted after
+    /// binding, or the bridge never uploaded it.
+    #[error("node {node} has an unbound anchor {channel:?} on layer {layer}: {reason}")]
+    Anchor {
+        /// The consumer's node id (stamped by the dispatcher).
+        node: u64,
+        /// The referenced layer's id.
+        layer: u64,
+        /// The referenced channel name.
+        channel: String,
+        /// What went wrong, human-readable.
+        reason: String,
     },
     /// Topology rejection (dangling refs, duplicates, cycles) —
     /// validation runs before any node executes.
@@ -109,6 +125,17 @@ impl EvalError {
                 got,
             },
             Self::BadParam { param, .. } => Self::BadParam { node: id, param },
+            Self::Anchor {
+                layer,
+                channel,
+                reason,
+                ..
+            } => Self::Anchor {
+                node: id,
+                layer,
+                channel,
+                reason,
+            },
             Self::FuelExhausted { .. } => Self::FuelExhausted { node: id },
             Self::Plugin { reason, .. } => Self::Plugin { node: id, reason },
             other => other,
@@ -270,9 +297,9 @@ impl NodeImpl for UniformNode {
                 node: 0,
                 param: "value".into(),
             }),
-            Some(ParamValue::NodeRef(_)) => Err(EvalError::BadParam {
+            Some(ParamValue::NodeRef(_) | ParamValue::Anchor(_)) => Err(EvalError::BadParam {
                 node: 0,
-                param: "value (NodeRef must be wired via edges, not passed as a param)".into(),
+                param: "value (references must be wired, not passed as a param)".into(),
             }),
             Some(v) => Ok(NodeOutput::Uniform(v.clone())),
         }
@@ -381,24 +408,28 @@ fn topo_order(graph: &Graph) -> Result<Vec<u64>, GraphError> {
 }
 
 /// Resolves a node's inputs, sorted by name for determinism:
-/// `NodeRef` params first (in param order), then edges (in
-/// [`Graph::edges`] order, overlaying same-named entries — explicit
-/// wiring wins).
+/// `NodeRef` params first (in param order), then `Anchor` params against
+/// `external` (the effective context externals — a bound anchor with no
+/// external is [`EvalError::Anchor`]), then edges (in [`Graph::edges`]
+/// order, overlaying same-named entries — explicit wiring wins).
 fn resolve_inputs(
     graph: &Graph,
     node: &Node,
     outputs: &HashMap<u64, NodeOutput>,
+    external: &HashMap<String, NodeOutput>,
 ) -> Result<Vec<(String, NodeOutput)>, EvalError> {
-    resolve_inputs_cached(graph, node, outputs, &HashMap::new())
+    resolve_inputs_cached(graph, node, outputs, &HashMap::new(), external)
 }
 
 /// [`resolve_inputs`] with a cache fallback for clean upstreams
 /// (see [`eval_graph_cached`]): fresh outputs win, cached fill gaps.
+/// Anchor externals have no cache half — they are per-eval bridge state.
 fn resolve_inputs_cached(
     graph: &Graph,
     node: &Node,
     fresh: &HashMap<u64, NodeOutput>,
     cached: &HashMap<u64, NodeOutput>,
+    external: &HashMap<String, NodeOutput>,
 ) -> Result<Vec<(String, NodeOutput)>, EvalError> {
     let lookup = |id: &u64| fresh.get(id).or_else(|| cached.get(id));
     let mut map: BTreeMap<String, NodeOutput> = BTreeMap::new();
@@ -410,6 +441,9 @@ fn resolve_inputs_cached(
             })?;
             map.insert(name.clone(), v.clone());
         }
+    }
+    for (name, value) in crate::anchor::resolve_anchor_inputs(node.id, &node.params, external)? {
+        map.insert(name, value);
     }
     for e in &graph.edges {
         if e.to == node.id {
@@ -455,7 +489,7 @@ pub fn eval_graph(
     let mut outputs: HashMap<u64, NodeOutput> = HashMap::with_capacity(graph.nodes.len());
     for id in order {
         let node = node_by_id(graph, id);
-        let in_vec = resolve_inputs(graph, node, &outputs)?;
+        let in_vec = resolve_inputs(graph, node, &outputs, &eff_ctx.external)?;
         let imp = registry
             .get(&node.node_def)
             .ok_or_else(|| EvalError::UnknownNode {
@@ -554,7 +588,8 @@ pub fn eval_graph_cached(
             // propagation below re-runs its downstream, so no stale
             // consumer survives a re-run.
         }
-        let in_vec = resolve_inputs_cached(graph, node, &outputs, &cache.outputs)?;
+        let in_vec =
+            resolve_inputs_cached(graph, node, &outputs, &cache.outputs, &eff_ctx.external)?;
         let imp = registry
             .get(&node.node_def)
             .ok_or_else(|| EvalError::UnknownNode {

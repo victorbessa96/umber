@@ -1,0 +1,37 @@
+{
+  "name": "Edge wear",
+  "version": 1,
+  "ops": [
+    {
+      "source": {
+        "type": "generator",
+        "node_def": "mesh_map_generator",
+        "map_name": "curvature"
+      },
+      "op": "multiply",
+      "params": {}
+    },
+    {
+      "source": {
+        "type": "constant",
+        "value": 0.35
+      },
+      "op": "add",
+      "params": {
+        "amount": 1.0
+      }
+    },
+    {
+      "source": {
+        "type": "constant",
+        "value": 0.0
+      },
+      "op": "levels",
+      "params": {
+        "low": 0.4,
+        "high": 0.9,
+        "gamma": 1.0
+      }
+    }
+  ]
+}

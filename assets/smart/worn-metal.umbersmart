@@ -1,0 +1,45 @@
+{
+  "name": "Worn metal",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Metal folder",
+      "kind": "folder"
+    },
+    {
+      "name": "Base metal",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Edge wear",
+      "kind": "fill",
+      "blend_mode": "Overlay",
+      "opacity": 0.85,
+      "mask": "Wear mask",
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "curvature",
+        "channel": "roughness"
+      }
+    },
+    {
+      "name": "Grunge",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.5,
+      "mask": "Grunge mask",
+      "generator": {
+        "node_def": "noise_perlin",
+        "map_name": "",
+        "channel": "baseColor"
+      }
+    }
+  ]
+}

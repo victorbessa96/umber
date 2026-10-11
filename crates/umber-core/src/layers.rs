@@ -37,6 +37,61 @@ pub enum LayerKind {
         /// See the variant's own doc comment above.
         passthrough: bool,
     },
+    /// An instance: renders its source layer's composited pixels.
+    ///
+    /// Source-edits propagate: the composite eval walks instances
+    /// transitively (A instances B instances C → eval order C,B,A — see
+    /// [`LayerStack::instance_eval_order`]). The instance graph is a DAG:
+    /// a would-be cycle is rejected at attach time with
+    /// [`InstanceError::Cycle`].
+    ///
+    /// The `Layer`'s own `opacity`/`blend_mode`/`mask` act as per-instance
+    /// OVERLAYS on the link (not edits to the source pixels): an instance
+    /// can restyle its source without touching it. Instances carry no
+    /// pixels of their own, so painting one directly is rejected with
+    /// [`InstanceError::PaintOnInstance`].
+    Instance {
+        /// The instanced layer's id (same texture set).
+        source_id: u64,
+    },
+}
+
+/// Everything that can go wrong with layer instancing (§3:41).
+///
+/// JUDGMENT CALL — cycle logic lives here as a small DFS rather than
+/// reusing `umber-graph`'s `topo.rs`: `umber-core` is the dependency-minimal
+/// document model (it does not depend on `umber-graph`), and pulling the
+/// graph crate in for one DFS would invert the layering. The algorithm is
+/// the same shape (Kahn sweep for ordering, DFS for the would-be-cycle
+/// probe) and is documented as a structural mirror.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum InstanceError {
+    /// No layer with this id exists in the stack.
+    #[error("unknown layer {0}")]
+    UnknownLayer(u64),
+    /// The requested source layer does not exist.
+    #[error("instance {instance} references unknown source {source}")]
+    UnknownSource {
+        /// The instance layer's id.
+        instance: u64,
+        /// The missing source id.
+        source: u64,
+    },
+    /// The layer is not an instance (retarget/overlay ops need one).
+    #[error("layer {0} is not an instance")]
+    NotAnInstance(u64),
+    /// Attaching this source would close a cycle (participants listed,
+    /// starting at the instance being retargeted).
+    #[error("instance cycle detected among layers {0:?}")]
+    Cycle(Vec<u64>),
+    /// Instances carry no pixels: paint the source instead.
+    #[error("layer {instance} is an instance of {source}: paint the source, not the instance")]
+    PaintOnInstance {
+        /// The instance a paint was attempted on.
+        instance: u64,
+        /// The source to paint instead.
+        source: u64,
+    },
 }
 
 /// The core-12 blend modes plus the separable extras the stack already
@@ -442,7 +497,7 @@ impl LayerStack {
         Some(old)
     }
 
-    /// Sets a layer's fill parameters (source + projection), returning the
+    /// Sets a layer's fill parameters (source + projection + mask), returning the
     /// previous value (`None` when the layer had no fill params — including
     /// non-fill layers, which accept the write but stay non-fill: the
     /// evaluator only runs `fill` on [`LayerKind::Fill`] layers, so a
@@ -450,6 +505,258 @@ impl LayerStack {
     pub fn set_fill(&mut self, id: u64, params: FillParams) -> Option<Option<FillParams>> {
         let layer = self.layer_mut(id)?;
         Some(layer.fill.replace(params))
+    }
+
+    /// Pushes a new instance layer onto the top of the stack, rendering
+    /// `source_id`'s composited pixels. The new layer's own
+    /// `opacity`/`blend_mode`/`mask` are its per-instance overlays.
+    ///
+    /// # Errors
+    ///
+    /// [`InstanceError::UnknownSource`] when `source_id` names no layer.
+    /// A fresh instance cannot cycle (its id is new to the graph), so no
+    /// [`InstanceError::Cycle`] arises here — cycles are rejected by
+    /// [`Self::set_instance_source`].
+    pub fn add_instance(
+        &mut self,
+        name: impl Into<String>,
+        source_id: u64,
+    ) -> Result<u64, InstanceError> {
+        if self.layer(source_id).is_none() {
+            return Err(InstanceError::UnknownSource {
+                instance: self.next_id,
+                source: source_id,
+            });
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.layers.push(Layer {
+            id,
+            name: name.into(),
+            kind: LayerKind::Instance { source_id },
+            opacity: 1.0,
+            visible: true,
+            blend_mode: BlendMode::Normal,
+            mask: None,
+            fill: None,
+        });
+        Ok(id)
+    }
+
+    /// The source of an instance layer, if `id` names one (`None` for
+    /// non-instance layers or unknown ids).
+    pub fn instance_source(&self, id: u64) -> Option<u64> {
+        match self.layer(id) {
+            Some(Layer {
+                kind: LayerKind::Instance { source_id },
+                ..
+            }) => Some(*source_id),
+            _ => None,
+        }
+    }
+
+    /// Whether `id` names an instance layer.
+    pub fn is_instance(&self, id: u64) -> bool {
+        self.instance_source(id).is_some()
+    }
+
+    /// Retargets an instance layer onto a new source, rejecting the
+    /// would-be cycle at attach time. Returns the previous source.
+    ///
+    /// # Errors
+    ///
+    /// [`InstanceError::UnknownLayer`] when `id` names no layer;
+    /// [`InstanceError::NotAnInstance`] when it names a non-instance;
+    /// [`InstanceError::UnknownSource`] when `source_id` names no layer;
+    /// [`InstanceError::Cycle`] when the retarget would close a cycle
+    /// (direct `A→B→A` or indirect — the DFS walks the transitive chain).
+    pub fn set_instance_source(
+        &mut self,
+        id: u64,
+        source_id: u64,
+    ) -> Result<u64, InstanceError> {
+        let layer = self.layer(id).ok_or(InstanceError::UnknownLayer(id))?;
+        let old = match layer {
+            Layer {
+                kind: LayerKind::Instance { source_id },
+                ..
+            } => *source_id,
+            _ => return Err(InstanceError::NotAnInstance(id)),
+        };
+        if self.layer(source_id).is_none() {
+            return Err(InstanceError::UnknownSource {
+                instance: id,
+                source: source_id,
+            });
+        }
+        if let Some(participants) = self.would_cycle(id, source_id) {
+            return Err(InstanceError::Cycle(participants));
+        }
+        if let Some(layer) = self.layer_mut(id) {
+            layer.kind = LayerKind::Instance { source_id };
+        }
+        Ok(old)
+    }
+
+    /// Whether pointing `instance_id` at `new_source` would close a cycle:
+    /// `Some(participants)` (starting at `instance_id`) when yes, `None`
+    /// when safe. A small iterative DFS over the instance edges — the
+    /// structural mirror of `umber-graph`'s Kahn check (see
+    /// [`InstanceError`] for why it lives here).
+    fn would_cycle(&self, instance_id: u64, new_source: u64) -> Option<Vec<u64>> {
+        // Follow source links transitively from the candidate source: if
+        // the walk reaches the instance being retargeted, the edge closes
+        // a cycle. Non-instance layers terminate the walk (they have no
+        // outgoing edge).
+        let mut chain = vec![instance_id];
+        let mut cursor = new_source;
+        // Bounded by the layer count: a longer walk must repeat a layer,
+        // which is itself a cycle through the new edge.
+        for _ in 0..=self.layers.len() {
+            if cursor == instance_id {
+                chain.push(cursor);
+                return Some(chain);
+            }
+            chain.push(cursor);
+            match self.layer(cursor) {
+                Some(Layer {
+                    kind: LayerKind::Instance { source_id },
+                    ..
+                }) => cursor = *source_id,
+                _ => return None,
+            }
+        }
+        chain.push(cursor);
+        Some(chain)
+    }
+
+    /// The transitive source chain of `id`, nearest first
+    /// (`A→B→C` yields `[B, C]`). Stops at the first non-instance layer
+    /// or missing link; empty for non-instances.
+    pub fn instance_chain(&self, id: u64) -> Vec<u64> {
+        let mut chain = Vec::new();
+        let mut cursor = match self.instance_source(id) {
+            Some(s) => s,
+            None => return chain,
+        };
+        for _ in 0..=self.layers.len() {
+            chain.push(cursor);
+            match self.layer(cursor) {
+                Some(Layer {
+                    kind: LayerKind::Instance { source_id },
+                    ..
+                }) => cursor = *source_id,
+                _ => break,
+            }
+        }
+        chain
+    }
+
+    /// Evaluation order for the instance subgraph: sources before their
+    /// instances, transitively (A instances B instances C → `C` before
+    /// `B` before `A`). Non-instance layers keep stack order; instance
+    /// layers sort after their transitive sources (stable otherwise).
+    ///
+    /// # Errors
+    ///
+    /// [`InstanceError::Cycle`] if the stored graph already cycles
+    /// (attach-time rejection in [`Self::set_instance_source`] should make
+    /// this unreachable — it fires for hand-built or legacy files), or
+    /// [`InstanceError::UnknownSource`] on a dangling source link.
+    pub fn instance_eval_order(&self) -> Result<Vec<u64>, InstanceError> {
+        // Validate links first (dangling sources are loud, not skipped).
+        for layer in &self.layers {
+            if let LayerKind::Instance { source_id } = &layer.kind {
+                if self.layer(*source_id).is_none() {
+                    return Err(InstanceError::UnknownSource {
+                        instance: layer.id,
+                        source: *source_id,
+                    });
+                }
+            }
+        }
+        // Kahn sweep over instance edges (source → instance), restricted
+        // to instance layers; non-instances emit in stack order first.
+        use std::collections::HashMap;
+        let instances: Vec<u64> = self
+            .layers
+            .iter()
+            .filter(|l| matches!(l.kind, LayerKind::Instance { .. }))
+            .map(|l| l.id)
+            .collect();
+        let in_set: std::collections::HashSet<u64> = instances.iter().copied().collect();
+        let mut indegree: HashMap<u64, usize> =
+            instances.iter().map(|&id| (id, 0)).collect();
+        let mut outs: HashMap<u64, Vec<u64>> = HashMap::new();
+        for &id in &instances {
+            let src = self.instance_source(id).expect("instance checked");
+            if in_set.contains(&src) {
+                *indegree.get_mut(&id).expect("instance keyed") += 1;
+                outs.entry(src).or_default().push(id);
+            }
+        }
+        let mut queue: Vec<u64> = indegree
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&id, _)| id)
+            .collect();
+        queue.sort_unstable();
+        let mut order = Vec::with_capacity(instances.len());
+        while let Some(&id) = queue.first() {
+            queue.remove(0);
+            order.push(id);
+            if let Some(next) = outs.get(&id) {
+                let mut next = next.clone();
+                next.sort_unstable();
+                for to in next {
+                    let d = indegree.get_mut(&to).expect("instance keyed");
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push(to);
+                        queue.sort_unstable();
+                    }
+                }
+            }
+        }
+        if order.len() != instances.len() {
+            let mut cyclic: Vec<u64> = indegree
+                .iter()
+                .filter(|(_, &d)| d > 0)
+                .map(|(&id, _)| id)
+                .collect();
+            cyclic.sort_unstable();
+            return Err(InstanceError::Cycle(cyclic));
+        }
+        // Full stack order: plain layers in stack order, then instances in
+        // dependency order (sources — plain or ordered instances — always
+        // precede their instances).
+        let mut full: Vec<u64> = self
+            .layers
+            .iter()
+            .filter(|l| !matches!(l.kind, LayerKind::Instance { .. }))
+            .map(|l| l.id)
+            .collect();
+        full.extend(order);
+        Ok(full)
+    }
+
+    /// Rejects direct painting on an instance layer: instances carry no
+    /// pixels, so a paint attempt is a typed error naming the source to
+    /// paint instead. `Ok(())` for paintable (non-instance) layers.
+    ///
+    /// # Errors
+    ///
+    /// [`InstanceError::UnknownLayer`] for unknown ids;
+    /// [`InstanceError::PaintOnInstance`] for instances (names the source).
+    pub fn check_paintable(&self, id: u64) -> Result<(), InstanceError> {
+        let layer = self.layer(id).ok_or(InstanceError::UnknownLayer(id))?;
+        match &layer.kind {
+            LayerKind::Instance { source_id } => Err(InstanceError::PaintOnInstance {
+                instance: id,
+                source: *source_id,
+            }),
+            _ => Ok(()),
+        }
     }
 
     /// Approximate RAM held by the whole stack, in bytes: per-layer
@@ -527,7 +834,7 @@ pub enum LayerCommand {
         /// Previous blend mode, captured by `apply` for `revert`.
         old: Option<BlendMode>,
     },
-    /// Sets a layer's fill parameters (source + projection).
+    /// Sets a layer's fill parameters (source + projection + mask).
     SetFill {
         /// Id of the layer to update.
         id: u64,
@@ -536,6 +843,17 @@ pub enum LayerCommand {
         /// Previous fill parameters (`None` when the layer had none),
         /// captured by `apply` for `revert`.
         old: Option<Option<FillParams>>,
+    },
+    /// Retargets an instance layer onto a new source (§3:41). Cycle-safe:
+    /// the apply reuses [`LayerStack::set_instance_source`], so a redo
+    /// that would now close a cycle is ignored rather than applied.
+    SetInstanceSource {
+        /// Id of the instance layer to retarget.
+        id: u64,
+        /// New source layer id.
+        new: u64,
+        /// Previous source, captured by `apply` for `revert`.
+        old: Option<u64>,
     },
 }
 
@@ -598,6 +916,15 @@ impl LayerCommand {
             old: None,
         }
     }
+
+    /// Builds a [`SetInstanceSource`](LayerCommand::SetInstanceSource) command.
+    pub fn set_instance_source(id: u64, source: u64) -> Self {
+        LayerCommand::SetInstanceSource {
+            id,
+            new: source,
+            old: None,
+        }
+    }
 }
 
 impl Command for LayerCommand {
@@ -621,6 +948,9 @@ impl Command for LayerCommand {
             LayerCommand::SetVisible { id, new, old } => *old = doc.set_visible(*id, *new),
             LayerCommand::SetBlendMode { id, new, old } => *old = doc.set_blend_mode(*id, *new),
             LayerCommand::SetFill { id, new, old } => *old = doc.set_fill(*id, new.clone()),
+            LayerCommand::SetInstanceSource { id, new, old } => {
+                *old = doc.set_instance_source(*id, *new).ok();
+            }
         }
     }
 
@@ -676,6 +1006,14 @@ impl Command for LayerCommand {
                             }
                         }
                     }
+                }
+            }
+            LayerCommand::SetInstanceSource { id, old, .. } => {
+                if let Some(previous) = old.take() {
+                    // Undo of a retarget restores the old source; like the
+                    // apply, it goes through the cycle guard (a redo/undo
+                    // pair that now cycles is ignored, never forced).
+                    let _ = doc.set_instance_source(*id, previous);
                 }
             }
         }
@@ -815,6 +1153,7 @@ mod tests {
                 color: [1.0, 0.0, 0.0, 1.0],
             },
             projection: FillProjection::Uv,
+            mask: None,
         };
         let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
         undo.push(LayerCommand::set_fill(id, red.clone()), &mut stack);
@@ -825,6 +1164,7 @@ mod tests {
             projection: FillProjection::Planar {
                 axis: umber_mesh::ProjAxis::X,
             },
+            mask: None,
         };
         undo.push(LayerCommand::set_fill(id, planar.clone()), &mut stack);
         assert_eq!(stack.layer(id).unwrap().fill, Some(planar.clone()));
@@ -847,6 +1187,13 @@ mod tests {
         let back: Layer = serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
         assert_eq!(back.fill, None);
         assert_eq!(back.name, "Tint");
+        // … and pre-polygon saves (a `fill` without `mask`) still load,
+        // as unmasked fills.
+        let mut unmasked = serde_json::to_value(stack.layer(id).unwrap().fill.clone()).unwrap();
+        unmasked.as_object_mut().unwrap().remove("mask");
+        let back: FillParams = serde_json::from_value(unmasked).unwrap();
+        assert_eq!(back.mask, None);
+        assert_eq!(back, red);
     }
 
     fn blend(mode: BlendMode, src: f32, dst: f32) -> f32 {
@@ -1025,5 +1372,149 @@ mod tests {
             None,
             "Passthrough has no composite math either"
         );
+    }
+
+    #[test]
+    fn instance_renders_source_and_overlays_are_link_local() {
+        // An instance renders its source's pixels: the instance holds no
+        // fill of its own, while its opacity/blend/mask overlay the link.
+        let mut stack = LayerStack::new();
+        let src = stack.add_layer("Base", LayerKind::Paint);
+        let inst = stack
+            .add_instance("Base inst", src)
+            .expect("source exists");
+        assert_eq!(stack.instance_source(inst), Some(src));
+        assert!(stack.is_instance(inst));
+        assert!(!stack.is_instance(src));
+        // Per-instance overlays live on the link, not the pixels.
+        stack.set_opacity(inst, 0.5);
+        stack.set_blend_mode(inst, BlendMode::Multiply);
+        assert_eq!(stack.layer(inst).unwrap().opacity, 0.5);
+        assert_eq!(stack.layer(inst).unwrap().blend_mode, BlendMode::Multiply);
+        // … and the source is untouched by the overlay.
+        assert_eq!(stack.layer(src).unwrap().opacity, 1.0);
+        assert_eq!(stack.layer(src).unwrap().blend_mode, BlendMode::Normal);
+    }
+
+    #[test]
+    fn instance_direct_cycle_is_rejected_at_attach_time() {
+        // A→B→A: retargeting B onto A (which instances B) must fail.
+        let mut stack = LayerStack::new();
+        let a = stack.add_layer("A", LayerKind::Paint);
+        let b = stack.add_instance("B inst A", a).expect("source exists");
+        assert_eq!(
+            stack.set_instance_source(b, b),
+            Err(InstanceError::Cycle(vec![b, b])),
+            "self-instancing closes a 1-cycle"
+        );
+        // Build the reverse link attempt: A is paint, so make A an
+        // instance of B first is impossible — instead add C instancing B,
+        // then retarget B onto C (B→C→B).
+        let c = stack.add_instance("C inst B", b).expect("source exists");
+        match stack.set_instance_source(b, c) {
+            Err(InstanceError::Cycle(participants)) => {
+                assert_eq!(participants.first(), Some(&b));
+                assert!(participants.contains(&c));
+            }
+            other => panic!("A→B→A must be rejected, got {other:?}"),
+        }
+        // The failed retarget changed nothing.
+        assert_eq!(stack.instance_source(b), Some(a));
+        let _ = a;
+    }
+
+    #[test]
+    fn instance_four_hop_indirect_cycle_is_rejected() {
+        // D→C→B→A chain, then retarget A (as instance) onto D: the DFS
+        // must walk all four hops and reject.
+        let mut stack = LayerStack::new();
+        let a0 = stack.add_layer("A", LayerKind::Paint);
+        let b = stack.add_instance("B inst A", a0).expect("source exists");
+        let c = stack.add_instance("C inst B", b).expect("source exists");
+        let d = stack.add_instance("D inst C", c).expect("source exists");
+        // Turn the paint root into an instance of D would close
+        // A→D→C→B→A — but A is paint, so instead retarget B onto D:
+        // B→D→C→B (3 hops through the new edge).
+        match stack.set_instance_source(b, d) {
+            Err(InstanceError::Cycle(participants)) => {
+                assert_eq!(participants.first(), Some(&b));
+                for id in [b, c, d] {
+                    assert!(participants.contains(&id), "participants: {participants:?}");
+                }
+            }
+            other => panic!("4-hop indirect cycle must be rejected, got {other:?}"),
+        }
+        assert_eq!(stack.instance_source(b), Some(a0));
+    }
+
+    #[test]
+    fn instance_eval_order_walks_transitively() {
+        // A instances B instances C (paint root): eval order C,B,A —
+        // sources before instances, transitively, regardless of stack
+        // (insertion) order.
+        let mut stack = LayerStack::new();
+        let c = stack.add_layer("C", LayerKind::Paint);
+        let b = stack.add_instance("B inst C", c).expect("source exists");
+        let a = stack.add_instance("A inst B", b).expect("source exists");
+        assert_eq!(stack.instance_chain(a), vec![b, c]);
+        assert_eq!(stack.instance_chain(b), vec![c]);
+        assert!(stack.instance_chain(c).is_empty());
+        let order = stack.instance_eval_order().expect("acyclic");
+        let pos = |id: u64| order.iter().position(|&x| x == id).unwrap();
+        assert!(pos(c) < pos(b), "C before B: {order:?}");
+        assert!(pos(b) < pos(a), "B before A: {order:?}");
+    }
+
+    #[test]
+    fn instance_paint_attempt_is_a_typed_error_naming_the_source() {
+        let mut stack = LayerStack::new();
+        let src = stack.add_layer("Base", LayerKind::Paint);
+        let inst = stack.add_instance("inst", src).expect("source exists");
+        assert_eq!(stack.check_paintable(src), Ok(()));
+        assert_eq!(
+            stack.check_paintable(inst),
+            Err(InstanceError::PaintOnInstance {
+                instance: inst,
+                source: src,
+            })
+        );
+        assert_eq!(
+            stack.check_paintable(999),
+            Err(InstanceError::UnknownLayer(999))
+        );
+    }
+
+    #[test]
+    fn instance_unknown_source_and_not_an_instance_are_typed() {
+        let mut stack = LayerStack::new();
+        let a = stack.add_layer("A", LayerKind::Paint);
+        assert!(matches!(
+            stack.add_instance("ghost", 999),
+            Err(InstanceError::UnknownSource { .. })
+        ));
+        assert_eq!(
+            stack.set_instance_source(a, a),
+            Err(InstanceError::NotAnInstance(a))
+        );
+        let inst = stack.add_instance("inst", a).expect("source exists");
+        assert!(matches!(
+            stack.set_instance_source(inst, 999),
+            Err(InstanceError::UnknownSource { .. })
+        ));
+    }
+
+    #[test]
+    fn instance_retarget_round_trips_through_undo() {
+        let mut stack = LayerStack::new();
+        let a = stack.add_layer("A", LayerKind::Paint);
+        let b = stack.add_layer("B", LayerKind::Paint);
+        let inst = stack.add_instance("inst", a).expect("source exists");
+        let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
+        undo.push(LayerCommand::set_instance_source(inst, b), &mut stack);
+        assert_eq!(stack.instance_source(inst), Some(b));
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.instance_source(inst), Some(a));
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.instance_source(inst), Some(b));
     }
 }

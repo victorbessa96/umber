@@ -127,11 +127,18 @@ fn decode_image(r: &mut Reader<'_>, what: &'static str) -> Result<ImageBuffer, W
 
 /// The params that cross the wire: everything except
 /// [`ParamValue::NodeRef`] (references are wiring — the engine resolves
-/// them to inputs before dispatch).
+/// them to inputs before dispatch) and [`ParamValue::Anchor`] (layer
+/// bindings are host-side too — resolved to inputs before dispatch, so
+/// they never reach the guest; the SDK `Param` enum is unchanged).
 pub fn wire_params(params: &[(String, ParamValue)]) -> Vec<&(String, ParamValue)> {
     params
         .iter()
-        .filter(|(_, v)| !matches!(v, ParamValue::NodeRef(_)))
+        .filter(|(_, v)| {
+            !matches!(
+                v,
+                ParamValue::NodeRef(_) | ParamValue::Anchor(_)
+            )
+        })
         .collect()
 }
 
@@ -171,6 +178,7 @@ fn encode_value(out: &mut Vec<u8>, v: &ParamValue) -> Result<u32, WireError> {
             KIND_ASSET
         }
         ParamValue::NodeRef(_) => return Err(WireError::Invalid("param kind (NodeRef)")),
+        ParamValue::Anchor(_) => return Err(WireError::Invalid("param kind (Anchor)")),
     })
 }
 

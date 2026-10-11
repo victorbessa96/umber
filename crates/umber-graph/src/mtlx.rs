@@ -22,7 +22,8 @@
 //! * Params emit as `<input name type value />`. [`ParamValue`] mapping:
 //!   `Float → float`, `Int → integer`, `Vec2 → vector2`, `Vec3 → vector3`,
 //!   `Color → color3`, `Bool → boolean`, `Asset → string` (content-hash
-//!   path). `NodeRef` is NOT a value input — it is a connection (below).
+//!   path), `Anchor → anchor` (`{layer_id}:{channel}`). `NodeRef` is NOT a
+//!   value input — it is a connection (below).
 //! * Edges emit painter-idiomatically: the connected input carries
 //!   `output="N{from}"`, always typed `color3` (single-output nodes emit
 //!   images, so connections carry image data). Per node, connected inputs
@@ -62,6 +63,7 @@
 //! | `brick_pattern` | `scale: vector2`, `mortar: float` — Substance-style brick |
 //! | `direction_warp` | `input: color3`, `vector: vector3` — UV offset by a vector input |
 //! | `mesh_map_generator` | `map_name: string` — binds a baked map by name |
+//! | `anchor` | `layer_id: integer`, `channel: string` — binds a layer channel in the set |
 
 use crate::{Edge, Graph, Node, ParamValue};
 
@@ -119,6 +121,14 @@ pub fn painter_nodedefs() -> Vec<NodedefDecl> {
             name: "mesh_map_generator".into(),
             category: "mesh_map_generator".into(),
             inputs: vec![("map_name".into(), "string".into())],
+        },
+        NodedefDecl {
+            name: "anchor".into(),
+            category: "anchor".into(),
+            inputs: vec![
+                ("layer_id".into(), "integer".into()),
+                ("channel".into(), "string".into()),
+            ],
         },
     ]
 }
@@ -353,6 +363,15 @@ pub fn to_mtlx(graph: &Graph, custom_nodedefs: &[NodedefDecl]) -> String {
                     "    <input name=\"{}\" type=\"string\" value=\"{}\" />\n",
                     esc(name),
                     esc(s)
+                )),
+                // Anchors ride their own value type (`{layer_id}:{channel}`;
+                // the channel half takes the whole remainder so channels
+                // containing `:` survive the split on parse).
+                ParamValue::Anchor(a) => out.push_str(&format!(
+                    "    <input name=\"{}\" type=\"anchor\" value=\"{}:{}\" />\n",
+                    esc(name),
+                    a.layer_id,
+                    esc(&a.channel)
                 )),
                 ParamValue::NodeRef(_) => {} // emitted as a connection above.
             }
@@ -709,6 +728,31 @@ fn value_from_typed(
             }),
         },
         "string" => Ok(ParamValue::Asset(value.into())),
+        // Anchors (see `to_mtlx`): `{layer_id}:{channel}`. A missing `:` or
+        // a non-numeric head is a parse error, not a silent Asset — an
+        // anchor that loaded as a plain string would never resolve.
+        "anchor" => value.split_once(':').map_or(
+            Err(MtlxError::Parse {
+                line,
+                message: format!("element '{elem}': value '{value}' is not layer_id:channel"),
+            }),
+            |(head, channel)| {
+                head.parse::<u64>().map_or(
+                    Err(MtlxError::Parse {
+                        line,
+                        message: format!(
+                            "element '{elem}': value '{value}' is not layer_id:channel"
+                        ),
+                    }),
+                    |layer_id| {
+                        Ok(ParamValue::Anchor(crate::AnchorRef::new(
+                            layer_id,
+                            channel.to_string(),
+                        )))
+                    },
+                )
+            },
+        ),
         // Unknown value type: preserve the raw string as an Asset so no
         // data is lost (re-emits as `string`; see module docs).
         _ => Ok(ParamValue::Asset(value.into())),
@@ -1019,6 +1063,44 @@ mod tests {
                 "<nodedef> at {pos} must precede first <node> at {first_node}"
             );
         }
+    }
+
+    #[test]
+    fn anchor_params_round_trip_exactly() {
+        // An Anchor param must survive the mtlx carry byte-stable: emit as
+        // `type="anchor" value="{id}:{channel}"`, parse back to the same
+        // Anchor (not a silent Asset string — that would never resolve).
+        let mut g = sample_graph();
+        g.nodes.push(Node {
+            id: 9,
+            node_def: "mix".into(),
+            params: vec![(
+                "fg".into(),
+                ParamValue::Anchor(crate::AnchorRef::new(7, "baseColor")),
+            )],
+            canvas: None,
+        });
+        let doc = to_mtlx(&g, &painter_nodedefs());
+        assert!(
+            doc.contains(r#"type="anchor" value="7:baseColor""#),
+            "anchor spelling: {doc}"
+        );
+        let (back, _, _) = from_mtlx(&doc).expect("anchor doc parses");
+        let node = back.nodes.iter().find(|n| n.id == 9).expect("node survives");
+        assert_eq!(
+            node.params,
+            vec![(
+                "fg".to_string(),
+                ParamValue::Anchor(crate::AnchorRef::new(7, "baseColor"))
+            )],
+            "anchor must round-trip, not degrade to Asset"
+        );
+        // A malformed anchor value is a parse error, not a silent string.
+        let bad = doc.replace(r#"value="7:baseColor""#, r#"value="nonsense""#);
+        assert!(
+            from_mtlx(&bad).is_err(),
+            "a colon-less anchor must fail to parse"
+        );
     }
 
     #[test]

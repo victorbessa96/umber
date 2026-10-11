@@ -15,6 +15,7 @@
 //! value space, RGBA8 buffers) and [`eval`] (registry-dispatched
 //! evaluation, dirty-aware cached re-evaluation).
 
+pub mod anchor;
 pub mod eval;
 pub mod mtlx;
 pub mod mtlx_doc;
@@ -22,6 +23,7 @@ pub mod nodes;
 pub mod topo;
 pub mod value;
 
+pub use anchor::AnchorRef;
 pub use eval::{
     eval_graph, eval_graph_cached, EvalCache, EvalContext, EvalError, NodeImpl, NodeRegistry,
 };
@@ -63,6 +65,10 @@ pub enum ParamValue {
     NodeRef(u64),
     /// Reference to an image asset (content-hash path).
     Asset(String),
+    /// A layer-channel anchor (§3:42): any node input can bind one within
+    /// the same texture set; the eval resolves it to the layer's
+    /// composited channel at eval time (see [`anchor`]).
+    Anchor(anchor::AnchorRef),
 }
 
 #[cfg(test)]
