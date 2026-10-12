@@ -15,12 +15,53 @@
 //! The session is GPU-free (the [`PaintState`](crate::paint_state) wiring
 //! owns the device), so the stroke + undo contract is testable headless.
 //!
-//! Undo (design test 5, "one undo per stroke"): [`RetouchStroke::finish`]
-//! yields ONE [`PaintStrokeCommand`] per stroke — every touched tile's
-//! dirty rect, before + after — for an [`UndoStack`](umber_core::undo::UndoStack).
+//! Undo (design test 5, "one undo per stroke"): [`RetouchStroke::record`]
+//! records ONE [`PaintStrokeCommand`] per stroke — every touched tile's
+//! dirty rect, before + after — for an [`UndoStack`] (an overlapping
+//! successor may later coalesce into it — the cumulative merge below).
 //! Its document is a [`PaintWrites`] queue, so applying/reverting a
 //! command needs no GPU either: the caller drains the queue into
 //! `WriteRegion` commands.
+//!
+//! Cumulative merge (audit 2026-10-12-c1 Pass 4 item 5, §12's undo-RAM
+//! row): strokes reach the history through [`record_stroke`] (the retouch
+//! path via [`RetouchStroke::record`], the paint path via `PaintState`'s
+//! capture), which COALESCES a stroke into the top entry when they overlap
+//! instead of stacking a second snapshot of the same texels. The merged
+//! entry stores the oldest before + the newest after, never the
+//! intermediate pair. Judgment calls:
+//!
+//! * Merge happens at PUSH time, against the TOP undo entry only (older
+//!   entries are never rewritten). It needs the new stroke's FULL-tile
+//!   start and end images ([`StrokeTile`]), not just its rect bytes: the
+//!   merged rect is the bounding box `U` of the two rects, and `U`'s
+//!   corners lie in neither rect, so neither entry holds their bytes. With
+//!   the start image they are exact: `before(U)` = the stroke-start image
+//!   over `U` with the old rect overwritten by the old entry's before;
+//!   `after(U)` = the stroke-end image over `U`. Texels outside both rects
+//!   were untouched by either stroke, so start = end there. Undoing the
+//!   merged entry equals undoing both strokes in turn, byte for byte.
+//! * Eligibility, per tile the stroke and the top entry SHARE: the rects
+//!   must intersect (half-open, so edge-adjacent rects do NOT merge — the
+//!   merge never eats a distinct region), and `|U| ≤ |old| + |new|` (bytes)
+//!   — the size guard: a thin horizontal stroke crossing a thin vertical
+//!   one has a bounding box far larger than the pair, so merging would
+//!   GROW memory; those stack. Every shared tile must pass, and at least
+//!   one tile must be shared; tiles on only one side carry over unchanged.
+//!   An entry keeps at most one region per tile (the merge preserves it).
+//! * Undo/redo granularity: a merged entry undoes AND redoes all of its
+//!   strokes as one unit — repainting the same spot N times is one undo
+//!   step. Accepted and named (the brief's call); split redo under merged
+//!   storage is the follow-up, not v1.
+//! * Redo replays the merged entry's after over all of `U`, including the
+//!   old rect's texels outside the new rect. Those equal the old entry's
+//!   after unless something outside the history wrote the tile between the
+//!   strokes (a fill-layer upload) — the same last-write-wins property
+//!   linear undo already has.
+//! * The envelope is unchanged: 64 entries / 256 MiB (`PaintState`'s
+//!   caps). The merge raises the EFFECTIVE stroke count inside it (N
+//!   overlapping 4K full-tile strokes hold 128 MiB, not N × 128 MiB); it
+//!   does not raise the caps.
 //!
 //! Symmetry (§2's P1 row, `umber_brush::symmetry`): [`RetouchStroke::apply`]
 //! takes the PRIMARY dabs and stamps each one's symmetric siblings itself
@@ -61,7 +102,7 @@ use umber_brush::retouch::{
 };
 use umber_brush::symmetry::{sibling_positions, COINCIDENT_EPS_TEXELS};
 use umber_brush::{BrushTool, MaskView, RgbaBuffer, SymTransform};
-use umber_core::undo::Command;
+use umber_core::undo::{Command, UndoStack};
 
 /// One tile's CPU mirror for the current stroke.
 struct TileMirror {
@@ -238,25 +279,167 @@ impl RetouchStroke {
             .unwrap_or_default()
     }
 
-    /// Ends the stroke: ONE undo record covering every tile it wrote
-    /// (each tile's dirty union, before + after), or `None` when the
-    /// stroke changed nothing.
-    pub(crate) fn finish(self) -> Option<PaintStrokeCommand> {
-        let regions: Vec<TileRegion> = self
-            .tiles
-            .into_iter()
-            .filter_map(|(tile, mirror)| {
-                let rect = mirror.dirty?;
-                Some(TileRegion {
+    /// Every tile the stroke wrote, with its full stroke-start (`before`)
+    /// and stroke-end (`live`) mirrors.
+    fn stroke_tiles(&self) -> Vec<StrokeTile<'_>> {
+        self.tiles
+            .iter()
+            .filter_map(|(&tile, mirror)| {
+                Some(StrokeTile {
                     tile,
-                    rect,
-                    before: mirror.before.region(rect),
-                    after: mirror.live.region(rect),
+                    rect: mirror.dirty?,
+                    start: &mirror.before,
+                    end: &mirror.live,
                 })
             })
-            .collect();
-        (!regions.is_empty()).then_some(PaintStrokeCommand { regions })
+            .collect()
     }
+
+    /// Ends the stroke: ONE undo record covering every tile it wrote
+    /// (each tile's dirty union, before + after), or `None` when the
+    /// stroke changed nothing. Unmerged — the history path is
+    /// [`Self::record`].
+    #[cfg(test)]
+    pub(crate) fn finish(self) -> Option<PaintStrokeCommand> {
+        stroke_command(&self.stroke_tiles())
+    }
+
+    /// Ends the stroke onto `history` through [`record_stroke`] (merged
+    /// into the top entry when they overlap). `false` when the stroke
+    /// changed nothing.
+    pub(crate) fn record(
+        self,
+        history: &mut UndoStack<PaintStrokeCommand>,
+        writes: &mut PaintWrites,
+    ) -> bool {
+        record_stroke(history, writes, &self.stroke_tiles())
+    }
+}
+
+/// One tile of a finished stroke, before it becomes an undo record: the
+/// dirty rect plus the FULL-tile stroke-start and stroke-end images (the
+/// merge reads texels outside the rect — see the module docs).
+pub(crate) struct StrokeTile<'a> {
+    pub tile: u16,
+    pub rect: DirtyRect,
+    pub start: &'a RgbaBuffer,
+    pub end: &'a RgbaBuffer,
+}
+
+/// Whether the half-open rects share at least one texel.
+fn intersects(a: DirtyRect, b: DirtyRect) -> bool {
+    a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
+}
+
+/// Whether `rect` lies inside `image`.
+fn fits(rect: DirtyRect, image: &RgbaBuffer) -> bool {
+    rect.x1 <= image.width && rect.y1 <= image.height
+}
+
+/// The unmerged record of a stroke: one region per tile, its rect's
+/// start + end bytes. `None` when no tile was written.
+pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeCommand> {
+    let regions: Vec<TileRegion> = tiles
+        .iter()
+        .map(|t| TileRegion {
+            tile: t.tile,
+            rect: t.rect,
+            before: t.start.region(t.rect),
+            after: t.end.region(t.rect),
+        })
+        .collect();
+    (!regions.is_empty()).then_some(PaintStrokeCommand { regions })
+}
+
+/// Whether `tiles` coalesce into `top` (the module docs' eligibility
+/// rule): at least one shared tile, and every shared tile's rects
+/// intersect, pass the size guard, and fit the stroke's images.
+fn can_merge(top: &PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> bool {
+    let mut shared = 0;
+    for t in tiles {
+        let Some(old) = top.regions.iter().find(|r| r.tile == t.tile) else {
+            continue;
+        };
+        let union = old.rect.union(t.rect);
+        if !intersects(old.rect, t.rect)
+            || union.byte_len() > old.rect.byte_len() + t.rect.byte_len()
+            || !fits(union, t.start)
+            || !fits(union, t.end)
+        {
+            return false;
+        }
+        shared += 1;
+    }
+    shared > 0
+}
+
+/// Folds the stroke into `top` (eligibility already checked by
+/// [`can_merge`]): shared tiles grow to the union with the oldest before
+/// and the newest after, the rest carry over.
+fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrokeCommand {
+    let mut regions: BTreeMap<u16, TileRegion> =
+        top.regions.into_iter().map(|r| (r.tile, r)).collect();
+    for t in tiles {
+        let region = match regions.remove(&t.tile) {
+            Some(old) => {
+                let union = old.rect.union(t.rect);
+                let mut before = RgbaBuffer {
+                    width: union.width(),
+                    height: union.height(),
+                    data: t.start.region(union),
+                };
+                // The old rect, in the union's local coordinates.
+                let local = DirtyRect {
+                    x0: old.rect.x0 - union.x0,
+                    y0: old.rect.y0 - union.y0,
+                    x1: old.rect.x1 - union.x0,
+                    y1: old.rect.y1 - union.y0,
+                };
+                before.write_region(local, &old.before);
+                TileRegion {
+                    tile: t.tile,
+                    rect: union,
+                    before: before.data,
+                    after: t.end.region(union),
+                }
+            }
+            None => TileRegion {
+                tile: t.tile,
+                rect: t.rect,
+                before: t.start.region(t.rect),
+                after: t.end.region(t.rect),
+            },
+        };
+        regions.insert(t.tile, region);
+    }
+    PaintStrokeCommand {
+        regions: regions.into_values().collect(),
+    }
+}
+
+/// Records a finished stroke on `history`: merged into the top entry when
+/// [`can_merge`] allows, else pushed as its own entry. The push's queued
+/// re-apply is dropped from `writes` (the stroke already uploaded its
+/// bytes). `false` (history untouched) when no tile was written.
+pub(crate) fn record_stroke(
+    history: &mut UndoStack<PaintStrokeCommand>,
+    writes: &mut PaintWrites,
+    tiles: &[StrokeTile<'_>],
+) -> bool {
+    let merge = history.peek_undo().is_some_and(|top| can_merge(top, tiles));
+    let command = if merge {
+        history
+            .take_top_unreverted()
+            .map(|top| merge_stroke(top, tiles))
+    } else {
+        stroke_command(tiles)
+    };
+    let Some(command) = command else {
+        return false;
+    };
+    history.push(command, writes);
+    writes.writes.clear();
+    true
 }
 
 /// One tile's slice of a stroke's undo record.
@@ -318,7 +501,6 @@ mod tests {
         CloneParams, EraseChannels, EraseParams, MirrorAxis, MirrorSettings, QuickMask,
         SymmetrySettings,
     };
-    use umber_core::undo::UndoStack;
 
     const SIZE: u32 = 64;
     const TILE: u16 = 1001;
@@ -381,6 +563,18 @@ mod tests {
         symmetry: &SymmetrySettings,
         mask: Option<MaskView<'_>>,
     ) -> Option<PaintStrokeCommand> {
+        drive_stroke(image, tool, events, symmetry, mask).finish()
+    }
+
+    /// The stroke [`run_stroke_masked`] drives, left unfinished so a test
+    /// can [`RetouchStroke::record`] it instead.
+    fn drive_stroke(
+        image: &mut RgbaBuffer,
+        tool: BrushTool,
+        events: &[[f32; 2]],
+        symmetry: &SymmetrySettings,
+        mask: Option<MaskView<'_>>,
+    ) -> RetouchStroke {
         let mut stroke = RetouchStroke::new(tool);
         stroke.set_symmetry(texel_transforms(symmetry, SIZE as f32));
         if let BrushTool::Clone(params) = tool {
@@ -395,7 +589,7 @@ mod tests {
                 image.write_region(rect, &stroke.region(TILE, rect));
             }
         }
-        stroke.finish()
+        stroke
     }
 
     fn drain(writes: &mut PaintWrites, image: &mut RgbaBuffer) {
@@ -927,5 +1121,287 @@ mod tests {
         assert!(!right_changed(&gated), "the blocked sibling writes nothing");
         assert_eq!(changed_where(&before, &gated, &mask, true), 0);
         assert!(changed_where(&before, &gated, &mask, false) > 0);
+    }
+
+    // --- Cumulative merge ---
+
+    fn rect(x0: u32, y0: u32, x1: u32, y1: u32) -> DirtyRect {
+        DirtyRect { x0, y0, x1, y1 }
+    }
+
+    /// A synthetic stroke on `image`: fills `r` with opaque gray `value`
+    /// and returns the stroke's full-tile `(start, end)` images.
+    fn fill_stroke(image: &mut RgbaBuffer, r: DirtyRect, value: u8) -> (RgbaBuffer, RgbaBuffer) {
+        let start = image.clone();
+        for y in r.y0..r.y1 {
+            for x in r.x0..r.x1 {
+                image.set_texel(x, y, [value, value, value, 255]);
+            }
+        }
+        (start, image.clone())
+    }
+
+    /// Paints `r` on `image` and records it on `history` the way
+    /// `end_stroke` does.
+    fn record_fill(
+        history: &mut UndoStack<PaintStrokeCommand>,
+        writes: &mut PaintWrites,
+        image: &mut RgbaBuffer,
+        r: DirtyRect,
+        value: u8,
+    ) {
+        let (start, end) = fill_stroke(image, r, value);
+        let tiles = [StrokeTile {
+            tile: TILE,
+            rect: r,
+            start: &start,
+            end: &end,
+        }];
+        assert!(record_stroke(history, writes, &tiles));
+        assert!(writes.writes.is_empty(), "the push's re-apply is dropped");
+    }
+
+    /// The soak: N = 8 strokes, each a 16×16 rect shifted 4 texels right
+    /// of the last (`R_k = [8+4k, 24+4k) × [8, 24)`), every one
+    /// overlapping its predecessor. Pins (a) count + bytes, (b) undo of
+    /// the merged entry restores the pre-first-stroke image, (d) the
+    /// delta against the unmerged baseline.
+    #[test]
+    fn overlapping_strokes_merge_into_one_entry_with_exact_bytes() {
+        const N: u32 = 8;
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        // After stroke k the entry's rect is the running union
+        // [8, 24+4k) × [8, 24): (16 + 4k) × 16 texels × 4 bytes × 2 sides.
+        let expected_bytes = [2048, 2560, 3072, 3584, 4096, 4608, 5120, 5632];
+        for k in 0..N {
+            let r = rect(8 + 4 * k, 8, 24 + 4 * k, 24);
+            record_fill(&mut history, &mut writes, &mut image, r, 10 * (k as u8 + 1));
+            assert_eq!(history.len(), 1, "stroke {k} coalesces into the one entry");
+            assert_eq!(
+                history.bytes_held(),
+                expected_bytes[k as usize],
+                "stroke {k}"
+            );
+        }
+        let top = history.peek_undo().expect("one entry");
+        assert_eq!(top.regions.len(), 1);
+        assert_eq!(top.regions[0].rect, rect(8, 8, 52, 24));
+        let painted = image.clone();
+
+        // (d) The unmerged baseline: the same strokes as plain entries,
+        // 8 × (16·16·4·2 = 2048) = 16384 bytes; merged 44·16·4·2 = 5632.
+        let mut baseline: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut scratch = original.clone();
+        for k in 0..N {
+            let r = rect(8 + 4 * k, 8, 24 + 4 * k, 24);
+            let (start, end) = fill_stroke(&mut scratch, r, 10 * (k as u8 + 1));
+            let cmd = stroke_command(&[StrokeTile {
+                tile: TILE,
+                rect: r,
+                start: &start,
+                end: &end,
+            }])
+            .expect("the fill writes");
+            baseline.push(cmd, &mut writes);
+        }
+        writes.writes.clear();
+        assert_eq!(baseline.len(), 8);
+        assert_eq!(baseline.bytes_held(), 16384);
+        assert_eq!(baseline.bytes_held() - history.bytes_held(), 10752);
+
+        // (b) One undo restores the ORIGINAL pre-first-stroke bytes over
+        // the whole image (the union's corners included), and redo the
+        // final state.
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
+        assert!(!history.can_undo(), "the eight strokes were one entry");
+        assert!(history.redo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, painted, "the merged unit redoes as one");
+    }
+
+    /// (c) Strokes that share no texel stack one entry each — including
+    /// an edge-adjacent pair (half-open rects touch but do not intersect,
+    /// though their union would pass the size guard). 4 × 2048 bytes.
+    #[test]
+    fn non_overlapping_strokes_stack_one_entry_each() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        let rects = [
+            rect(0, 0, 16, 16),
+            rect(16, 0, 32, 16), // shares the x = 16 edge with the first
+            rect(40, 0, 56, 16),
+            rect(0, 40, 16, 56),
+        ];
+        let mut states = vec![image.clone()];
+        for (k, &r) in rects.iter().enumerate() {
+            record_fill(&mut history, &mut writes, &mut image, r, 50 + k as u8);
+            assert_eq!(history.len(), k + 1);
+            states.push(image.clone());
+        }
+        assert_eq!(history.bytes_held(), 4 * 2048);
+
+        // Each undo walks back exactly one stroke.
+        for k in (0..rects.len()).rev() {
+            assert!(history.undo(&mut writes));
+            drain(&mut writes, &mut image);
+            assert_eq!(image, states[k], "undo of stroke {k}");
+        }
+        assert_eq!(image, original);
+        assert!(!history.can_undo());
+    }
+
+    /// The size guard: a thin horizontal stroke crossing a thin vertical
+    /// one intersects, but the union (64·64 = 4096 texels) dwarfs the pair
+    /// (64·4 + 4·64 = 512) — merging would GROW memory, so they stack:
+    /// 2 entries, 2 × (256·4·2 = 2048) = 4096 bytes (merged would be
+    /// 4096·4·2 = 32768).
+    #[test]
+    fn crossing_strokes_whose_union_outgrows_the_pair_stack() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(0, 30, 64, 34),
+            90,
+        );
+        let first = image.clone();
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(30, 0, 34, 64),
+            180,
+        );
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.bytes_held(), 4096);
+
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, first, "the crossing stroke undoes alone");
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
+    }
+
+    /// Multi-tile: a stroke overlapping the top entry on one tile and
+    /// touching a fresh tile merges, carrying the fresh tile's region in;
+    /// a later stroke whose only SHARED tile is disjoint stacks.
+    #[test]
+    fn merge_carries_unshared_tiles_and_disjoint_shared_tiles_stack() {
+        const OTHER: u16 = 1002;
+        let mut images = BTreeMap::from([(TILE, hard_edge()), (OTHER, gray_opaque())]);
+        let originals = images.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+
+        // Stroke 1: TILE only, 16×16 → 2048 bytes.
+        let r1 = rect(8, 8, 24, 24);
+        let (s1, e1) = fill_stroke(images.get_mut(&TILE).unwrap(), r1, 30);
+        let tiles = [StrokeTile {
+            tile: TILE,
+            rect: r1,
+            start: &s1,
+            end: &e1,
+        }];
+        assert!(record_stroke(&mut history, &mut writes, &tiles));
+
+        // Stroke 2: overlaps on TILE ([16,32)×[8,24) → union [8,32)×[8,24),
+        // 24·16·4·2 = 3072) and writes OTHER fresh (16·16·4·2 = 2048).
+        let r2 = rect(16, 8, 32, 24);
+        let r2_other = rect(0, 0, 16, 16);
+        let (s2, e2) = fill_stroke(images.get_mut(&TILE).unwrap(), r2, 60);
+        let (s2o, e2o) = fill_stroke(images.get_mut(&OTHER).unwrap(), r2_other, 120);
+        let tiles = [
+            StrokeTile {
+                tile: TILE,
+                rect: r2,
+                start: &s2,
+                end: &e2,
+            },
+            StrokeTile {
+                tile: OTHER,
+                rect: r2_other,
+                start: &s2o,
+                end: &e2o,
+            },
+        ];
+        assert!(record_stroke(&mut history, &mut writes, &tiles));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.peek_undo().unwrap().regions.len(), 2);
+        assert_eq!(history.bytes_held(), 3072 + 2048);
+        let after_two = images.clone();
+
+        // Stroke 3: TILE only, disjoint from the entry's TILE rect → stacks.
+        let r3 = rect(40, 40, 48, 48);
+        let (s3, e3) = fill_stroke(images.get_mut(&TILE).unwrap(), r3, 200);
+        let tiles = [StrokeTile {
+            tile: TILE,
+            rect: r3,
+            start: &s3,
+            end: &e3,
+        }];
+        assert!(record_stroke(&mut history, &mut writes, &tiles));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.bytes_held(), 3072 + 2048 + 512);
+
+        assert!(history.undo(&mut writes));
+        drain_tiles(&mut writes, &mut images);
+        assert!(history.undo(&mut writes));
+        drain_tiles(&mut writes, &mut images);
+        assert_eq!(images, originals, "both tiles back to their originals");
+        assert!(history.redo(&mut writes));
+        drain_tiles(&mut writes, &mut images);
+        assert_eq!(images, after_two, "the merged unit redoes both tiles");
+    }
+
+    /// [`drain`] across several tiles.
+    fn drain_tiles(writes: &mut PaintWrites, images: &mut BTreeMap<u16, RgbaBuffer>) {
+        for (tile, r, bytes) in writes.writes.drain(..) {
+            images
+                .get_mut(&tile)
+                .expect("a tile the test owns")
+                .write_region(r, &bytes);
+        }
+    }
+
+    /// The retouch wiring: two overlapping smudge strokes recorded through
+    /// [`RetouchStroke::record`] land as ONE entry, and its undo restores
+    /// the pre-first-stroke image.
+    #[test]
+    fn overlapping_retouch_strokes_record_as_one_entry() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        let none = SymmetrySettings::default();
+        let down: Vec<[f32; 2]> = (0..6).map(|i| [32.0, 16.0 + 4.0 * i as f32]).collect();
+        // Back up the same edge: the same footprint column, so the rects
+        // nearly coincide (the union passes the size guard by a wide margin).
+        let up: Vec<[f32; 2]> = (0..6).map(|i| [33.0, 36.0 - 4.0 * i as f32]).collect();
+
+        let stroke = drive_stroke(&mut image, smudge(), &down, &none, None);
+        assert!(stroke.record(&mut history, &mut writes));
+        let after_first = image.clone();
+        assert_ne!(after_first, original);
+        let stroke = drive_stroke(&mut image, smudge(), &up, &none, None);
+        assert!(stroke.record(&mut history, &mut writes));
+        assert_ne!(image, after_first, "the second smudge moves texels too");
+        assert_eq!(history.len(), 1, "the overlapping smudge coalesced");
+
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
+        assert!(!history.can_undo());
     }
 }

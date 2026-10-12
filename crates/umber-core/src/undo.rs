@@ -214,6 +214,26 @@ impl<C: Command> UndoStack<C> {
         self.undo.back()
     }
 
+    /// Removes the command [`undo`](Self::undo) would revert next WITHOUT
+    /// reverting it, releasing its [`Command::memory_bytes`] from the
+    /// budget and bypassing `on_evict` (the entry is not dropped history —
+    /// the caller folds it into a successor). The coalescing hook: a caller
+    /// that merges a new edit into the top entry takes it here, builds the
+    /// merged command (whose `apply` must land the document exactly where
+    /// it already is), and [`push`](Self::push)es that. The redo stack is
+    /// left alone; the follow-up `push` clears it as any fresh edit does.
+    pub fn take_top_unreverted(&mut self) -> Option<C> {
+        let top = self.undo.pop_back()?;
+        self.bytes_held = self.bytes_held.saturating_sub(top.memory_bytes());
+        Some(top)
+    }
+
+    /// Total [`Command::memory_bytes`] currently held across both stacks —
+    /// what the memory budget is compared against.
+    pub fn bytes_held(&self) -> usize {
+        self.bytes_held
+    }
+
     /// Number of entries currently held in the undo journal.
     pub fn len(&self) -> usize {
         self.undo.len()
@@ -427,6 +447,56 @@ mod tests {
         assert!(stack.undo(&mut doc));
         assert_eq!(doc, Counter(5));
         assert!(!stack.undo(&mut doc));
+    }
+
+    #[test]
+    fn take_top_unreverted_releases_bytes_without_reverting_or_evicting() {
+        #[derive(Debug, Clone)]
+        struct Weighted(usize);
+
+        impl Command for Weighted {
+            type Doc = Counter;
+
+            fn apply(&mut self, doc: &mut Counter) {
+                doc.0 += 1;
+            }
+
+            fn revert(&mut self, doc: &mut Counter) {
+                doc.0 -= 1;
+            }
+
+            fn memory_bytes(&self) -> usize {
+                self.0
+            }
+        }
+
+        let evicted = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+        let evicted_clone = evicted.clone();
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<Weighted> = UndoStack::new(100)
+            .with_memory_budget(1000)
+            .with_on_evict(move |_| *evicted_clone.borrow_mut() += 1);
+        stack.push(Weighted(100), &mut doc);
+        stack.push(Weighted(30), &mut doc);
+        assert_eq!(stack.bytes_held(), 130);
+
+        let top = stack.take_top_unreverted().expect("the 30-byte entry");
+        assert_eq!(top.0, 30);
+        assert_eq!(stack.bytes_held(), 100, "130 - 30");
+        assert_eq!(doc, Counter(2), "taking the top does not revert it");
+        assert_eq!(*evicted.borrow(), 0, "a taken entry is not evicted");
+        assert_eq!(stack.len(), 1);
+        assert!(!stack.can_redo(), "nor does it land on the redo stack");
+
+        // The merged successor: one entry where two were.
+        stack.push(Weighted(50), &mut doc);
+        assert_eq!(stack.bytes_held(), 150, "100 + 50");
+        assert_eq!(stack.len(), 2);
+
+        // Empty journal: nothing to take, budget untouched.
+        stack.clear();
+        assert!(stack.take_top_unreverted().is_none());
+        assert_eq!(stack.bytes_held(), 0);
     }
 
     /// Drives `stack` to `target` with single undo/redo calls — the

@@ -66,8 +66,16 @@
 //!
 //! * Last-stroke undo is byte-exact. Undoing an OLDER stroke under newer
 //!   paint overwrites the overlap (linear-undo last-write-wins) — the same
-//!   property retouch strokes already had among themselves; no attempt is
-//!   made to merge overlapping rects.
+//!   property retouch strokes already had among themselves.
+//! * Cumulative merge (audit 2026-10-12-c1 Pass 4 item 5): `end_stroke`
+//!   records through [`crate::retouch::record_stroke`], which coalesces a
+//!   stroke into the TOP entry when their rects overlap on a shared tile
+//!   and the union is no larger than the pair (oldest before + newest
+//!   after over the union; rules and judgment calls in `retouch`'s module
+//!   docs). The paint path hands it the full-tile before snapshot and the
+//!   full-tile after readback it already holds. A merged entry undoes and
+//!   redoes as ONE unit: repainting the same spot N times is one undo step
+//!   (split redo under merged storage is the named follow-up).
 //! * Cost is two full-target readbacks per touched tile per stroke (before
 //!   at first touch, after at end); retouch needs one because the after
 //!   lives in its CPU mirror. Paint has no CPU composite step to keep an
@@ -95,7 +103,13 @@
 //!   of history" — at 4K that would be 8 GiB, and the byte budget caps it
 //!   at ~2. Full-tile strokes are the pathological case (a real stroke
 //!   covers a small union); the v1 boundary is that no per-entry cap
-//!   exists, so one giant stroke can evict the whole history.
+//!   exists, so one giant stroke can evict the whole history. The
+//!   cumulative merge (above) is what raises the EFFECTIVE stroke count
+//!   inside this envelope: N overlapping full-tile 4K strokes coalesce into
+//!   one 128 MiB entry instead of evicting each other at the third. Both
+//!   caps stay exactly 64 entries / 256 MiB — the merge never raises them.
+//!   Non-overlapping strokes (and crossings whose bounding box outgrows
+//!   the pair) still stack one entry each.
 //! * One tile at the default = 64 MiB of GPU target, plus the tile's CPU
 //!   mirror ONLY when a retouch stroke touched it (paint composites on the
 //!   GPU, so paint strokes hold no CPU composite — their undo capture is
@@ -244,7 +258,7 @@ use umber_mesh::polygon_fill::rasterize_polygon_mask;
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
 
-use crate::retouch::{PaintStrokeCommand, PaintWrites, RetouchStroke, TileRegion};
+use crate::retouch::{record_stroke, PaintStrokeCommand, PaintWrites, RetouchStroke, StrokeTile};
 
 /// Paint-what-you-see projection (§2's P1 row, Mari-style paint buffer).
 ///
@@ -336,8 +350,9 @@ const EVENT_STEP_NS: u64 = 8_000_000;
 /// opposite island is always expanded; start at 1.5× per the design doc.
 pub const SEAM_MIRROR_MARGIN: f32 = 1.5;
 
-/// Retouch-history capacity (strokes) and memory budget (bytes of
-/// before + after dirty-rect snapshots).
+/// Retouch-history capacity (entries — one per stroke, or one per run of
+/// overlapping strokes under the cumulative merge) and memory budget
+/// (bytes of before + after dirty-rect snapshots). Unchanged by the merge.
 const RETOUCH_HISTORY_MAX_ENTRIES: usize = 64;
 const RETOUCH_HISTORY_MAX_BYTES: usize = 256 * 1024 * 1024;
 
@@ -1114,31 +1129,28 @@ impl PaintState {
     /// docs).
     pub fn end_stroke(&mut self) {
         self.stroking = false;
-        if let Some(command) = self.retouch.take().and_then(RetouchStroke::finish) {
-            self.retouch_history.push(command, &mut self.retouch_writes);
-            // `push` applies the command (queues its "after" bytes); the
-            // stroke already uploaded them event by event.
-            self.retouch_writes.writes.clear();
+        // Both paths record through `retouch::record_stroke`: merged into
+        // the top entry when they overlap (the cumulative merge), and the
+        // push's queued re-apply dropped — the stroke already uploaded its
+        // bytes (retouch event by event; paint on the GPU, drained to read
+        // them back).
+        if let Some(stroke) = self.retouch.take() {
+            let _ = stroke.record(&mut self.retouch_history, &mut self.retouch_writes);
         }
         if let Some(capture) = self.paint_capture.take() {
-            if let Some(command) = self.finish_paint_capture(capture) {
-                self.retouch_history.push(command, &mut self.retouch_writes);
-                // Same as above: the after-bytes are already on the GPU
-                // (drained below to read them), so the queued re-apply is
-                // dropped.
-                self.retouch_writes.writes.clear();
-            }
+            self.record_paint_capture(capture);
         }
     }
 
     /// Ends a paint stroke's undo capture: drains each touched tile, reads
-    /// it back, and slices the AFTER bytes out of the stroke's dirty rect
-    /// next to the BEFORE snapshot. Tiles with no dirty rect, an unreadable
-    /// tile, a rect that no longer fits the target (a resize landed
-    /// mid-stroke), or byte-identical before/after (a fully gated-away
-    /// stroke) contribute no region; no regions means no entry (`None`).
-    fn finish_paint_capture(&mut self, capture: PaintStrokeCapture) -> Option<PaintStrokeCommand> {
-        let mut regions = Vec::new();
+    /// it back, and records the stroke (its BEFORE snapshot and the AFTER
+    /// readback, both full-tile so the merge can fill the union's corners).
+    /// Tiles with no dirty rect, an unreadable tile, a rect that no longer
+    /// fits the target (a resize landed mid-stroke), or byte-identical
+    /// before/after over the rect (a fully gated-away stroke) contribute no
+    /// region; no regions means no entry.
+    fn record_paint_capture(&mut self, capture: PaintStrokeCapture) {
+        let mut finished = Vec::new();
         for (tile, entry) in capture.tiles {
             let Some(rect) = entry.dirty else {
                 continue;
@@ -1146,22 +1158,28 @@ impl PaintState {
             let Some(after_image) = self.read_tile(tile) else {
                 continue;
             };
-            if rect.x1 > after_image.width || rect.y1 > after_image.height {
+            if rect.x1 > after_image.width
+                || rect.y1 > after_image.height
+                || entry.before.width != after_image.width
+                || entry.before.height != after_image.height
+            {
                 continue;
             }
-            let before = entry.before.region(rect);
-            let after = after_image.region(rect);
-            if before == after {
+            if entry.before.region(rect) == after_image.region(rect) {
                 continue;
             }
-            regions.push(TileRegion {
-                tile,
-                rect,
-                before,
-                after,
-            });
+            finished.push((tile, rect, entry.before, after_image));
         }
-        (!regions.is_empty()).then_some(PaintStrokeCommand { regions })
+        let tiles: Vec<StrokeTile<'_>> = finished
+            .iter()
+            .map(|(tile, rect, start, end)| StrokeTile {
+                tile: *tile,
+                rect: *rect,
+                start,
+                end,
+            })
+            .collect();
+        let _ = record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles);
     }
 
     /// Replays `path` as ONE stroke in the `op` mode: each point becomes a
@@ -1216,8 +1234,11 @@ impl PaintState {
     /// stroke runs, or when the loop covers no texel of the active tile.
     /// V1 boundaries: the active tile only (a loop spanning tiles fills
     /// the tile under the last pointer — per-event routing is the named
-    /// follow-up), and one stroke per row run (a retouch fill lands as one
-    /// undo entry per run — coalescing them is a follow-up).
+    /// follow-up), and one stroke per row run. Each run records through
+    /// the cumulative merge (`retouch::record_stroke`), so runs whose
+    /// footprints overlap the previous run's (adjacent rows at the brush
+    /// radius) coalesce into one undo entry; a run disjoint from its
+    /// predecessor, or a crossing the size guard rejects, stacks its own.
     pub fn replay_filled_path(&mut self, path: &PaintPath, op: &PathOp) -> bool {
         if self.stroking || !path.can_fill() {
             return false;
@@ -2616,6 +2637,11 @@ mod tests {
         // The smudge is the SECOND entry: one per stroke, entries stack
         // (critical 3's contract — see the sibling test at :2360). One undo
         // reverts the smudge only; the setup stroke's entry remains.
+        // The strokes DO intersect (a cross), but the cumulative merge's
+        // size guard keeps them apart: at 512, r = 24, the vertical rect is
+        // ~50×194 and the horizontal ~146×48, so their bounding box
+        // (~146×194 ≈ 28k texels) is ~1.7× the pair (~16.7k) — a cross
+        // never coalesces (`retouch`'s module docs).
         assert!(state.undo_stroke(), "the smudge entry undoes");
         assert!(
             state.can_undo_stroke(),
