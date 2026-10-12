@@ -117,9 +117,9 @@
 
 | Requirement | Priority | Wave |
 |---|---|---|
-| Project = directory; `project.json` (scene, texture sets, settings) + per-layer JSON files (diffable, mergeable) | P0 | 2 |  ✓ code (`579eb09` .umber format + `015bf0` journal); NOT REACHABLE: the project format saves the layer JSON but not the paint data — see the save/load row
-| Textures as content-hash-named PNG/EXR tiles (git/LFS friendly; assets referenced by hash, never embedded blobs) | P0 | 2 |  ✓ code (AssetStore round-trip tested in isolation); the app's save path never calls it for paint
-| Save/load round-trip determinism (CI-tested: save→load→export identical bytes) | P0 | 2 |  ✗-as-marked: save_project writes metadata + graph ONLY — painted pixels never stored; reopen loses all paint; the round-trip tests never touch pixels (review critical 4)
+| Project = directory; `project.json` (scene, texture sets, settings) + per-layer JSON files (diffable, mergeable) | P0 | 2 |  ✓ code (`579eb09` .umber format + `015bf0` journal + `d834d77` the paint sidecars); reachability = Gate 0
+| Textures as content-hash-named PNG/EXR tiles (git/LFS friendly; assets referenced by hash, never embedded blobs) | P0 | 2 |  ✓ code (AssetStore round-trip tested in isolation); the app writes PNG sidecars directly (`d834d77`); AssetStore content-hash routing = the named follow-up
+| Save/load round-trip determinism (CI-tested: save→load→export identical bytes) | P0 | 2 | ✓ code (`d834d77`): paint pixels persist as PNG sidecars (tile-1001 v1, Linear transfer, WriteRegion reload; the GPU round-trip test rides CI/lavapipe; AssetStore routing + atomic commit = named follow-ups) — reachability = Gate 0 |
 | Autosave + crash recovery (journal) | P1 | 5 | ✓ built (`015fbf0`) |
 | Merge story documented (per-layer files = two artists editing different layers never conflict) | P1 | 2 (doc) | ✓ built (`a26d5e1`) — docs/merge-story.md: the five properties, the workflow, the honest limit |
 
