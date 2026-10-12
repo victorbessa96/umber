@@ -3524,6 +3524,14 @@ mod tests {
         }
         state.end_stroke();
         state.set_mask_mode(false);
+        // Exiting edit mode does NOT disarm the quick mask (it stays armed
+        // and gating — see QuickMask::gates: active && !editing; the app's
+        // X-key flow deactivates it separately). The paint stroke below
+        // must land, so deactivate the way the app does after a mask
+        // session — otherwise the mask gates every dab, the stroke stages
+        // nothing, and the identity rule records no history entry (the
+        // CI red on 2564c17: can_undo_stroke() false at the next assert).
+        state.set_mask_active(false);
         assert!(
             state.quick_mask().coverage(1001).is_some(),
             "the mask stroke must allocate the default set's plane"
