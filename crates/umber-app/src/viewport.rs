@@ -5,9 +5,39 @@
 //! `umber_gpu` is opaque to this crate (received from or handed to
 //! `umber_gpu`'s API), per the architecture rule that GPU objects stay
 //! behind `umber-gpu`.
+//!
+//! CORE-LOOP follow-up (the strategy-review disposition's first core-loop
+//! kill: viewport texture binding; the GPU side —
+//! `MeshBuffers::set_base_color_texture` / `clear_base_color_texture` —
+//! landed first and waited uncallable). Each frame with a mesh loaded, the
+//! paint session's ACTIVE tile is bound as the mesh pass's base-color
+//! texture just before the draw callback is built, so the stroke you paint
+//! is the stroke you see lit in 3D. Judgment calls, all v1:
+//!
+//! * One tile bound at a time — the active tile
+//!   (`PaintState::active_tile` + `tile_target`), not a hardcoded 1001.
+//!   Single-tile sessions always have the active tile at 1001, so their
+//!   behavior is unchanged; multi-tile meshes show the tile under the last
+//!   pointer. The tile-pool atlas + page-table indirection (every tile at
+//!   once) is the architecture doc's named later slice.
+//! * The tile select is `PaintParams::for_udim` (the real constructor —
+//!   there is no `for_tile(tile, size)`); no target size enters the bind
+//!   because the shader samples in UV space and the texel density lives in
+//!   `PaintState`.
+//! * Re-bound EVERY frame while paint is present: a `Resize` command
+//!   replaces the tile's texture object, so a params-equality skip would
+//!   keep sampling the evicted texture. The matching clear is skipped once
+//!   already cleared (flags == 0 holds no view — provably identical).
+//! * The bind sits before the route match, so the Direct and PostFx arms
+//!   both see paint (the PostFx path reuses the mesh's own callback).
+//! * No paint session (or a session tile with no target yet) clears back
+//!   to the constant arm — pixel-identical to a mesh that never bound
+//!   paint, and the mesh-less empty-state hero path is untouched (it binds
+//!   nothing at all).
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 use umber_gpu::postfx::PostChain;
+use umber_gpu::renderer::PaintParams;
 use umber_gpu::{
     DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, PostFxViewport, SoloChannel,
     ViewMode, ViewportRoute,
@@ -153,7 +183,7 @@ impl Viewport {
         &mut self,
         ui: &mut Ui,
         gpu: &GpuContext,
-        paint: Option<&mut crate::paint_state::PaintState>,
+        mut paint: Option<&mut crate::paint_state::PaintState>,
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
     ) {
@@ -171,7 +201,7 @@ impl Viewport {
                 .is_some_and(|p| p.projection().viewport_paints());
         if !painting {
             self.handle_input(ui, &response);
-        } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint) {
+        } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let hit = self
                     .pick_uv(rect, mesh, pos)
@@ -204,8 +234,13 @@ impl Viewport {
             }
         }
 
-        if let Some(mesh) = &self.mesh {
+        if let Some(mesh) = self.mesh.as_mut() {
             profiling::scope!("display_pass");
+            // CORE-LOOP bind (see the module docs): the active paint tile
+            // becomes the mesh pass's base-color texture before EITHER
+            // route's callback is built, so paint shows in 3D the frame it
+            // lands. No session / no target clears to the constant arm.
+            bind_paint_target(gpu, mesh, paint.as_deref());
             let aspect = rect.width() / rect.height();
             let view_proj = self.camera.view_proj(aspect);
             // Normalized once here (review #6): the shader re-normalizes
@@ -238,7 +273,7 @@ impl Viewport {
                     let post = self.postfx.get_or_insert_with(build);
                     let callback = post.callback(
                         gpu,
-                        mesh,
+                        &*mesh,
                         uniform,
                         self.view_mode,
                         display_lut,
@@ -251,13 +286,13 @@ impl Viewport {
             };
             ui.painter().add(shape);
             if self.show_wireframe {
-                let wire = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::default());
+                let wire = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::default());
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, wire));
             }
             // Cage overlay (§6:59): after the wireframe so its edges win,
             // skipped entirely when off (byte-identical to cage-off).
             if self.show_cage {
-                let cage = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::cage());
+                let cage = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::cage());
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
             }
         }
@@ -310,6 +345,39 @@ impl Viewport {
                 self.camera.zoom(scroll.signum() * ZOOM_SENSITIVITY);
             }
         }
+    }
+}
+
+/// Binds the paint session's active tile as `mesh`'s base-color texture
+/// (the CORE-LOOP follow-up — see the module docs). `None` (view-only
+/// device, or a tile with no target yet) clears to the constant arm, which
+/// renders pixel-identical to a mesh that never bound paint.
+///
+/// UV derivation: [`PaintParams::for_udim`] subtracts the tile origin
+/// (`(tile - 1001) % 10`, `(tile - 1001) / 10`) at scale 1 — the exact
+/// inverse of [`crate::paint_state`] tile-local mapping (its `local_texel`
+/// subtracts the same offsets before the V-flipped texel map), so the
+/// shader's `(uv - offset) * scale` lands on the bound tile's own texels.
+fn bind_paint_target(
+    gpu: &GpuContext,
+    mesh: &mut MeshBuffers,
+    paint: Option<&crate::paint_state::PaintState>,
+) {
+    let Some(paint) = paint else {
+        // Already on the constant arm: nothing is bound and the skip is
+        // provably identical (no view held, flags already 0).
+        if mesh.paint_params().flags != 0 {
+            mesh.clear_base_color_texture(gpu);
+        }
+        return;
+    };
+    let tile = paint.active_tile();
+    // Unconditional while paint is present: a `Resize` command replaces the
+    // tile's texture object, so a params-equality skip would keep sampling
+    // the evicted texture. One bind group + one small uniform write a frame.
+    match paint.tile_target(tile) {
+        Some(target) => mesh.set_base_color_texture(gpu, target, PaintParams::for_udim(tile)),
+        None => mesh.clear_base_color_texture(gpu),
     }
 }
 
