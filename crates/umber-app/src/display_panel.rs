@@ -33,6 +33,49 @@
 //! and for why the request persists as a user preference
 //! ([`hdr_pref_path`]), the same pattern as the locale preference
 //! (`crate::i18n::locale_pref_path`), rather than in `.umber` project.
+//!
+//! GUI Phase 1 chrome, kill 5 (docs/specs/gui-audit-and-roadmap.md
+//! Phase 1, "Display panel"): the panel's sections render as
+//! [`umber_gui::ParamGroup`] collapsibles and the exposure/gamma sliders
+//! are [`umber_gui::ValueField`]s (drag-scrub, wheel-step, tabular
+//! numerals) over the same ranges and backing state as the stock sliders
+//! they replaced. Chrome only: no state struct, default, range, LUT math,
+//! preview ramp, HDR persistence, or locale path changed, and every test
+//! below is untouched.
+//!
+//! Deliberately NOT migrated (v1 boundaries of this pass):
+//! - Group titles: the transform group is the one new content key
+//!   (`display.transform`, both catalogs); the preview group reuses
+//!   `display.preview` verbatim as its header (trailing colon and all —
+//!   renaming it would churn the pt-BR rendering for no gain); language
+//!   reuses `settings.language`; HDR adds `display-hdr.title` (`HDR`,
+//!   identical in both locales — an untranslatable acronym). The old
+//!   `ComboBox::from_label` texts moved into the row labels / headers,
+//!   so no visible string was lost.
+//! - The preview strip stays custom-painted: the swatch colors are LUT
+//!   data, not chrome, so scope item (3) leaves them alone.
+//! - No other hand-rolled colors exist in this file (no
+//!   `RichText::color`, no custom strokes), so scope item (3) otherwise
+//!   changes nothing; the groups themselves paint from `umber-gui`'s
+//!   theme tokens internally.
+//! - No `umber_style`/fonts call at panel level (the `brush_panel.rs`
+//!   rationale): `main.rs` applies no Umber style today, and a
+//!   panel-local style would diverge from the still-unmigrated panels.
+//!   [`umber_gui::ValueField`] only needs `FontId::monospace`, which
+//!   works on stock fonts.
+//! - Exposure wheel-steps 0.1 EV per notch (`.step(0.1)` — its range is
+//!   10 EV wide); gamma keeps the field default step (0.01, matching the
+//!   status line's two decimals). Both keep two decimals and no unit
+//!   suffix — the row labels already carry "(EV)", and gamma is
+//!   unitless. Stored values keep full precision; snapping only applies
+//!   while scrubbing/stepping, same as before.
+//! - [`umber_gui::ParamGroup`]'s header count covers top-level
+//!   [`umber_gui::widgets::ParamGroupUi::row`] calls only: the transform
+//!   group counts its view/exposure/gamma rows (the reset button draws
+//!   on `group.ui` verbatim, uncounted); the preview, language, and HDR
+//!   groups draw entirely on `group.ui` (custom canvas / shared-combo /
+//!   checkbox bodies), so their headers show no count — the same wart
+//!   class `brush_panel.rs` documents.
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -41,6 +84,7 @@ use std::path::{Path, PathBuf};
 use umber_color::{
     apply_display_chain, build_display_lut, DisplaySettings, DisplayTransform, DISPLAY_LUT_BYTES,
 };
+use umber_gui::{ParamGroup, ValueField};
 
 /// The GPU display LUT's CPU-side sync state: whether the table on the
 /// device matches the current settings. The panel's write path marks it
@@ -162,60 +206,69 @@ fn chain_label(s: &DisplaySettings, live: bool) -> String {
 pub fn show(ui: &mut Ui, settings: &mut DisplaySettings, lut: &mut DisplayLutState) -> bool {
     let mut changed = false;
 
-    egui::ComboBox::from_label(i18n::tr("display.view"))
-        .selected_text(settings.view.label())
-        .show_ui(ui, |ui| {
-            for candidate in DisplayTransform::ALL {
-                changed |= ui
-                    .selectable_value(&mut settings.view, candidate, candidate.label())
-                    .changed();
-            }
+    let transform_title = i18n::tr("display.transform");
+    ParamGroup::new("display-transform", transform_title.as_str()).show(ui, |group| {
+        group.row(&i18n::tr("display.view"), |ui| {
+            egui::ComboBox::from_id_salt("display_view_combo")
+                .selected_text(settings.view.label())
+                .show_ui(ui, |ui| {
+                    for candidate in DisplayTransform::ALL {
+                        changed |= ui
+                            .selectable_value(&mut settings.view, candidate, candidate.label())
+                            .changed();
+                    }
+                });
         });
-    changed |= ui
-        .add(
-            egui::Slider::new(&mut settings.exposure, DisplaySettings::EXPOSURE_RANGE)
-                .text(i18n::tr("display.exposure")),
-        )
-        .changed();
-    changed |= ui
-        .add(
-            egui::Slider::new(&mut settings.gamma, DisplaySettings::GAMMA_RANGE)
-                .text(i18n::tr("display.gamma")),
-        )
-        .changed();
-    if ui
-        .add_enabled(
-            !settings.is_identity(),
-            egui::Button::new(i18n::tr("button.reset")),
-        )
-        .clicked()
-    {
-        *settings = DisplaySettings::default();
-        changed = true;
-    }
+        changed |= group
+            .row(&i18n::tr("display.exposure"), |ui| {
+                ui.add(
+                    ValueField::new(&mut settings.exposure)
+                        .range(DisplaySettings::EXPOSURE_RANGE)
+                        .step(0.1),
+                )
+            })
+            .changed();
+        changed |= group
+            .row(&i18n::tr("display.gamma"), |ui| {
+                ui.add(ValueField::new(&mut settings.gamma).range(DisplaySettings::GAMMA_RANGE))
+            })
+            .changed();
+        if group
+            .ui
+            .add_enabled(
+                !settings.is_identity(),
+                egui::Button::new(i18n::tr("button.reset")),
+            )
+            .clicked()
+        {
+            *settings = DisplaySettings::default();
+            changed = true;
+        }
+    });
     if changed {
         lut.mark_display_lut_dirty();
     }
 
     ui.add_space(4.0);
-    ui.label(i18n::tr("display.preview"));
-    let width = ui.available_width().max(PREVIEW_STOPS as f32);
-    let size = egui::vec2(width, SWATCH_HEIGHT);
-    let (strip, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let painter = ui.painter_at(strip);
-    let step = strip.width() / PREVIEW_STOPS as f32;
-    for (i, color) in swatches(settings).into_iter().enumerate() {
-        let cell = egui::Rect::from_min_size(
-            egui::pos2(strip.left() + i as f32 * step, strip.top()),
-            egui::vec2(step, strip.height()),
-        );
-        painter.rect_filled(cell, 0.0, color);
-    }
+    let preview_title = i18n::tr("display.preview");
+    ParamGroup::new("display-preview", preview_title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        let width = ui.available_width().max(PREVIEW_STOPS as f32);
+        let size = egui::vec2(width, SWATCH_HEIGHT);
+        let (strip, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(strip);
+        let step = strip.width() / PREVIEW_STOPS as f32;
+        for (i, color) in swatches(settings).into_iter().enumerate() {
+            let cell = egui::Rect::from_min_size(
+                egui::pos2(strip.left() + i as f32 * step, strip.top()),
+                egui::vec2(step, strip.height()),
+            );
+            painter.rect_filled(cell, 0.0, color);
+        }
+        ui.label(chain_label(settings, lut.is_live(settings)));
+    });
 
-    ui.separator();
-    ui.label(chain_label(settings, lut.is_live(settings)));
-
-    ui.separator();
+    ui.add_space(4.0);
     language_row(ui);
     changed
 }
@@ -234,19 +287,23 @@ fn locale_label(tag: &str) -> String {
 /// setting: [`crate::i18n::set_locale_persisted`] writes the per-user
 /// locale file). Takes effect from the next frame.
 fn language_row(ui: &mut Ui) {
-    let (current, locales) = i18n::with(|i| (i.locale().to_owned(), i.locales()));
-    let mut picked = current.clone();
-    egui::ComboBox::from_label(i18n::tr("settings.language"))
-        .selected_text(locale_label(&current))
-        .show_ui(ui, |ui| {
-            for tag in locales {
-                let label = locale_label(&tag);
-                ui.selectable_value(&mut picked, tag, label);
-            }
-        });
-    if picked != current {
-        i18n::set_locale_persisted(&picked);
-    }
+    let title = i18n::tr("settings.language");
+    ParamGroup::new("display-language", title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        let (current, locales) = i18n::with(|i| (i.locale().to_owned(), i.locales()));
+        let mut picked = current.clone();
+        egui::ComboBox::from_id_salt("display_language_combo")
+            .selected_text(locale_label(&current))
+            .show_ui(ui, |ui| {
+                for tag in locales {
+                    let label = locale_label(&tag);
+                    ui.selectable_value(&mut picked, tag, label);
+                }
+            });
+        if picked != current {
+            i18n::set_locale_persisted(&picked);
+        }
+    });
 }
 
 /// The HDR output row (§5 P1 row 85, `umber_gpu::hdr`): a checkbox
@@ -257,35 +314,39 @@ fn language_row(ui: &mut Ui) {
 /// (best-effort — a failed write logs and keeps the session's choice,
 /// the same contract [`crate::i18n::set_locale_persisted`] uses).
 pub fn hdr_row(ui: &mut Ui, hdr_mode: &mut umber_gpu::HdrMode, probe: &umber_gpu::HdrProbe) {
-    let mut requested_on = hdr_mode.space().is_some();
-    let available = probe.is_available();
-    let response = ui.add_enabled(
-        available,
-        egui::Checkbox::new(&mut requested_on, i18n::tr("display-hdr.toggle")),
-    );
-    if available && response.changed() {
-        *hdr_mode = if requested_on {
-            probe
-                .best()
-                .map_or(umber_gpu::HdrMode::Sdr, umber_gpu::HdrMode::Hdr)
-        } else {
-            umber_gpu::HdrMode::Sdr
-        };
-        if let Some(path) = hdr_pref_path() {
-            if let Err(err) = write_hdr_pref(&path, *hdr_mode) {
-                log::warn!("could not save HDR preference to {}: {err}", path.display());
+    let title = i18n::tr("display-hdr.title");
+    ParamGroup::new("display-hdr", title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        let mut requested_on = hdr_mode.space().is_some();
+        let available = probe.is_available();
+        let response = ui.add_enabled(
+            available,
+            egui::Checkbox::new(&mut requested_on, i18n::tr("display-hdr.toggle")),
+        );
+        if available && response.changed() {
+            *hdr_mode = if requested_on {
+                probe
+                    .best()
+                    .map_or(umber_gpu::HdrMode::Sdr, umber_gpu::HdrMode::Hdr)
+            } else {
+                umber_gpu::HdrMode::Sdr
+            };
+            if let Some(path) = hdr_pref_path() {
+                if let Err(err) = write_hdr_pref(&path, *hdr_mode) {
+                    log::warn!("could not save HDR preference to {}: {err}", path.display());
+                }
             }
         }
-    }
-    if let Some(reason) = probe.disabled_reason() {
-        // Literal keys at each arm (not a variable) so the i18n
-        // completeness scan sees both call sites.
-        let text = match reason {
-            umber_gpu::DisabledReason::NotExposed => i18n::tr("display-hdr.reason-not-exposed"),
-            umber_gpu::DisabledReason::SdrOnly => i18n::tr("display-hdr.reason-sdr-only"),
-        };
-        ui.label(text);
-    }
+        if let Some(reason) = probe.disabled_reason() {
+            // Literal keys at each arm (not a variable) so the i18n
+            // completeness scan sees both call sites.
+            let text = match reason {
+                umber_gpu::DisabledReason::NotExposed => i18n::tr("display-hdr.reason-not-exposed"),
+                umber_gpu::DisabledReason::SdrOnly => i18n::tr("display-hdr.reason-sdr-only"),
+            };
+            ui.label(text);
+        }
+    });
 }
 
 /// The HDR preference file: a sibling of the locale/brushes/plugins
