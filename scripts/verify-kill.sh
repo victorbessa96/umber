@@ -89,9 +89,13 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     covered=0
     for lock in "$LOCK_DIR"/*.lock; do
       [ -e "$lock" ] || continue
-      # strip parenthetical qualifiers from lock entries (e.g. path(rows-only))
-      base="${f%%\(*}"
-      if grep -qxF "$f" "$lock" 2>/dev/null || grep -qxF "$base" "$lock" 2>/dev/null; then
+      # Parenthetical qualifiers live in LOCK ENTRIES (e.g. path(rows-only)),
+      # not in dirty paths — strip them from the lock's lines when matching
+      # (the 2026-10-12 claw review caught this inverted: the old code
+      # stripped from $f, which never carries parens, so a qualified lock
+      # entry never covered its file in this audit).
+      lock_base_entries=$(sed 's/([^(]*)$//' "$lock" 2>/dev/null)
+      if grep -qxF "$f" "$lock" 2>/dev/null || echo "$lock_base_entries" | grep -qxF "$f"; then
         covered=1
         echo "  PASS: $f — locked by ${lock##*/}"
         break

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(bash scripts/kill-locks.sh list)",
+      "Bash(bash scripts/kill-locks.sh check:*)",
+      "Bash(bash scripts/verify-kill.sh:*)",
+      "Bash(rustfmt --edition 2021:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)"
+    ]
+  }
+}

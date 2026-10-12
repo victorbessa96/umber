@@ -29,6 +29,8 @@ if [ -n "$report" ] && [ -e "$report" ]; then
   dest="docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.json"
   case "$report" in
     *.jsonl) dest="docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.jsonl" ;;
+    *.md)    dest="docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.md" ;;
+    *.json)  dest="docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.json" ;;
   esac
   cp "$report" "$dest"
   echo "  report: $dest"
@@ -89,9 +91,15 @@ echo "  CHANGELOG appended"
 
 # (4) commit + push
 git add CHANGELOG.md docs/loop/queue.md
-[ -n "$report" ] && [ -e "docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.json" ] && git add "docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.json"
-[ -n "$report" ] && [ -e "docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.jsonl" ] && git add "docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.jsonl"
+report_staged=""
+for ext in json jsonl md; do
+  f="docs/loop/kill-reports/$(date +%Y-%m-%d)-${name}.${ext}"
+  if [ -n "$report" ] && [ -e "$f" ]; then
+    git add "$f"
+    report_staged="$f"
+  fi
+done
 git commit -q -m "docs(loop): worklist #$row marked done — the queue row, the durable kill report, the CHANGELOG entry ($name, $sha)"
 git push origin master
-echo "  pushed"
+echo "  pushed${report_staged:+ ($report_staged)}"
 echo "land-kill: done"
