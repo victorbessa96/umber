@@ -64,5 +64,14 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p stylus --features winink
 
+      # OCIO bundled build (audit worklist #8): the vendored C++ tree
+      # (Imath/Half/OCIO core) compiles ~2.5 min on 2 cores and runs the
+      # real-mode test pair (the ACES 2.0 built-ins materialize; the
+      # enum-name constants answer back). Linux-only for now: the bundled
+      # path is where it was proven; Windows cross-build = named follow-up.
+      - name: OCIO bundled build + real-mode tests (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo test -p umber-color --features ocio-bundled
+
       - name: Build release smoke
         run: cargo build --release --workspace
