@@ -49,6 +49,16 @@ Gate 0 PASSING, so the phase closes when that run lands green.
   DISCLOSED to Bessa in the 04:3x ping. The commits themselves are
   verified-good (CI green on 0c668403, verdicts pending on f867215);
   the process gate was skipped, not the quality gate.
+- 2026-10-12 06:1x — **push-gate.json instantiated** (78dcf29) at
+  `approved: false` — the mechanism the contract names but no session
+  had created; its absence is what let the ungated push read as
+  "nowhere to check". Eight commits (6430623..78dcf29) ride local
+  behind it, including Gate 0. Flip paths, any one of which pushes the
+  wave and starts Gate 0's CI verdict: (1) Bessa edits the file to
+  `approved: true` in any session; (2) his Telegram word — any session
+  flips it on that authority and records the word in this log; (3) his
+  in-session `git push` himself. Ratify-or-rollback on the sibling's
+  ungated push remains his open call from the disclosure.
 
 ## Scratch
 
