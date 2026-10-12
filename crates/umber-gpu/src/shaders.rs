@@ -18,7 +18,12 @@
 //! `PaintParams` — group 0, not group 2, so every existing group-0
 //! bind group and draw keeps working with the fallback bound; the
 //! group-2 per-channel reservation in `crate::view_mode` stays the
-//! Wave-2 contract for the full channel set). Group 1 is the display LUT
+//! Wave-2 contract for the full channel set). Binding 12 is the
+//! height channel's texture (audit worklist #12, "height→normal live
+//! in viewport"): reuses the paint sampler/addressing, gated by its
+//! own `PaintParams` flag bit, folded into `shade`'s lit path as a
+//! per-frame normal perturbation (no bake, no TBN — see
+//! `height_perturbed_normal`'s doc for the v1 boundary). Group 1 is the display LUT
 //! (`crate::display_lut`; the snippet is that module's
 //! `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
 //! the last step before the target.
@@ -138,13 +143,22 @@ struct PaintParams {
     uv_offset: vec2<f32>,
     uv_scale: vec2<f32>,
     flags: u32,
+    height_strength: f32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
+    _pad5: u32,
 };
 @group(0) @binding(11) var<uniform> paint_params: PaintParams;
 
 const PAINT_HAS_TEXTURE: u32 = 1u;
+// Height channel (audit worklist #12): a mesh-pass texture binding
+// feeding `height_perturbed_normal`, gated by this flag bit. Reuses
+// `paint_sampler` and `paint_tile_uv` — same tile, same addressing.
+const PAINT_HAS_HEIGHT_TEXTURE: u32 = 2u;
+@group(0) @binding(12) var height_tex: texture_2d<f32>;
 // ---- end paint tile ----
 
 struct VertexInput {
@@ -200,6 +214,66 @@ fn paint_albedo(uv: vec2<f32>) -> vec3<f32> {
         return BASE_COLOR;
     }
     return textureSample(paint_tex, paint_sampler, paint_tile_uv(uv)).rgb;
+}
+
+/// Height → normal, live, per frame (audit worklist #12): a
+/// screen-space surface-gradient perturbation (Mikkelsen, "Bump
+/// Mapping Unparametrized Surfaces on the GPU", 2010 — the same
+/// formula behind Three.js's `perturbNormalArb`) built from `dpdx`/
+/// `dpdy` of the INTERPOLATED world position instead of per-vertex
+/// tangents, so a height stroke tilts the lit normal correctly
+/// regardless of how the mesh's uvs sit relative to world space.
+///
+/// The height gradient itself comes from two explicit, unfiltered
+/// `textureLoad`s (u+1, v+1 texel) rather than `dpdx`/`dpdy` of a
+/// filtered sample — deterministic, no mip/filter-dependent
+/// derivative, so the golden tests in `renderer.rs` can pin exact
+/// bytes against it. Edge texels clamp (no neighbor past the last
+/// row/column) rather than wrap.
+///
+/// # v1 boundary
+///
+/// `dpdx`/`dpdy` are per-primitive, screen-space derivatives: correct
+/// within one triangle's flat facet, but with no notion of a curved
+/// surface's true tangent frame across triangles — a heavily
+/// triangulated or curved mesh gets a perturbation that's only exact
+/// per-facet. True per-vertex tangents (uploaded alongside normals,
+/// the bake pipeline's own `TRANSFER_BAKE_SHADER::transfer_tbn`
+/// convention) are the named follow-up once the mesh pass carries
+/// them — see this module's top doc and the kill report
+/// (`docs/loop/kill-reports/2026-10-12-height-normal.md`).
+fn height_perturbed_normal(n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let tile_uv = paint_tile_uv(uv);
+    let dims = textureDimensions(height_tex);
+    let dims_f = vec2<f32>(dims);
+    let max_texel = vec2<i32>(dims) - vec2<i32>(1, 1);
+    let texel = clamp(vec2<i32>(floor(tile_uv * dims_f)), vec2<i32>(0, 0), max_texel);
+    let texel_u1 = vec2<i32>(min(texel.x + 1, max_texel.x), texel.y);
+    let texel_v1 = vec2<i32>(texel.x, min(texel.y + 1, max_texel.y));
+    let h0 = textureLoad(height_tex, texel, 0).r;
+    let hu = textureLoad(height_tex, texel_u1, 0).r;
+    let hv = textureLoad(height_tex, texel_v1, 0).r;
+    // UV-space height gradient, scaled by the per-tile strength.
+    let dhdu = (hu - h0) * dims_f.x * paint_params.height_strength;
+    let dhdv = (hv - h0) * dims_f.y * paint_params.height_strength;
+
+    // Chain-rule into screen space via the uv's own screen-space
+    // derivative, so the result doesn't assume uv axes line up with
+    // world axes.
+    let duv_dx = dpdx(tile_uv);
+    let duv_dy = dpdy(tile_uv);
+    let dhdx = dhdu * duv_dx.x + dhdv * duv_dx.y;
+    let dhdy = dhdu * duv_dy.x + dhdv * duv_dy.y;
+
+    // Mikkelsen's surface gradient: a local frame from the position's
+    // own screen-space derivatives, no tangent attribute required.
+    let dpos_dx = dpdx(world_pos);
+    let dpos_dy = dpdy(world_pos);
+    let r1 = cross(dpos_dy, n);
+    let r2 = cross(n, dpos_dx);
+    let det = dot(dpos_dx, r1);
+    let surf_grad = sign(det) * (dhdx * r1 + dhdy * r2);
+    return normalize(abs(det) * n - surf_grad);
 }
 
 /// Hemispherical environment irradiance: the bound convolved map when
@@ -345,7 +419,14 @@ fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_
 /// path, scene-linear out; `crate::postfx_viewport`'s composite applies
 /// the LUT after the chain).
 fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
-    let n = normalize(world_normal);
+    var n = normalize(world_normal);
+    // Height → normal, live (audit worklist #12): uniform control
+    // flow on a buffer-sourced flag, the same gate `paint_albedo`
+    // uses for its texture — the unbound path (flag 0) never calls
+    // `height_perturbed_normal`, so it's pixel-identical to today.
+    if ((paint_params.flags & PAINT_HAS_HEIGHT_TEXTURE) != 0u) {
+        n = height_perturbed_normal(n, world_pos, uv);
+    }
     let to_light = normalize(-camera.light_dir.xyz);
     let diffuse = max(dot(n, to_light), 0.0);
     let env = environment_irradiance(n);

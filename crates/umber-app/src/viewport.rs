@@ -479,6 +479,23 @@ impl Viewport {
 /// inverse of [`crate::paint_state`] tile-local mapping (its `local_texel`
 /// subtracts the same offsets before the V-flipped texel map), so the
 /// shader's `(uv - offset) * scale` lands on the bound tile's own texels.
+///
+/// # No height-channel counterpart (audit worklist #12, checked — not wired)
+///
+/// `umber_gpu::MeshBuffers` now has `set_height_texture`/
+/// `clear_height_texture` (mirroring `set_base_color_texture`/
+/// `clear_base_color_texture` above) feeding the Lit path's per-frame
+/// normal perturbation. This function does NOT call them: `PaintState`
+/// has no per-channel paint targets — `targets: BTreeMap<u16,
+/// PaintThread>` is one target PER TILE, used for base color only (see
+/// `crate::document`'s own doc: "the paint-channel binding to GPU
+/// targets arrive with the tile pool"). There is no "the artist is
+/// painting Height now" state anywhere in umber-app to read, live or
+/// baked, and inventing one here would be exactly the fabricated-global
+/// CLAUDE.md's contract warns against. Wiring this seam is therefore the
+/// tile-pool's job, not this kill's — see the kill report
+/// (`docs/loop/kill-reports/2026-10-12-height-normal.md`) for what was
+/// checked before reaching this conclusion.
 fn bind_paint_target(
     gpu: &GpuContext,
     mesh: &mut MeshBuffers,

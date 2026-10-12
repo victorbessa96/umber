@@ -44,6 +44,20 @@
 //! channel-texture group (group 2, one binding per channel): the ids
 //! pin the layout contract now so the Wave-2 texture handoff cannot
 //! renumber them.
+//!
+//! **Height is now a partial exception** (audit worklist #12,
+//! "height→normal live in viewport"): group 0 binding 12 carries a
+//! real height texture, gated by `PaintParams::HAS_HEIGHT_TEXTURE`,
+//! and the [`ViewMode::Lit`] path folds it into the shaded normal
+//! per frame (`shaders::MESH_SHADER`'s `height_perturbed_normal`) —
+//! that sentence above ("no per-channel GPU textures") is no longer
+//! true for Lit specifically. `SoloChannel::Height`'s `solo_proxy`
+//! arm is UNCHANGED: it still returns the mid-gray stand-in, not the
+//! bound height value — only Lit consumes binding 12 today. Wiring
+//! Solo/Preview to it too is a small, separate follow-up (same
+//! texture, different consumer), deliberately left out of this kill
+//! to keep its surface to the one audited gate (the lit normal
+//! response). See `docs/loop/kill-reports/2026-10-12-height-normal.md`.
 
 use umber_mesh::MeshMapKind;
 

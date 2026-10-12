@@ -64,10 +64,12 @@ const _: () = assert!(
     "Vertex must stay position + normal + uv (32 bytes)"
 );
 
-/// The mesh pass's base-color paint uniform (`MESH_SHADER` binding 11):
-/// the tile-select for the bound paint texture plus the bound flag.
+/// The mesh pass's base-color + height paint uniform (`MESH_SHADER`
+/// binding 11): the tile-select for the bound paint/height textures,
+/// their bound flags, and the height perturbation's strength.
 /// Byte-identical to the WGSL `PaintParams` struct (see that block's
-/// layout contract) — 32 bytes.
+/// layout contract) — 48 bytes (grown from 32 for the height→normal
+/// live kill, audit worklist #12 — `height_strength` plus padding).
 ///
 /// # UDIM scale convention (v1)
 ///
@@ -77,14 +79,16 @@ const _: () = assert!(
 /// UDIM tile number to its origin: tile (tu, tv) binds offset (tu, tv),
 /// scale (1, 1), i.e. the fractional part for uvs inside the tile.
 /// Mesh UVs are used as-is (no V flip): a paint upload's row 0 is v 0 —
-/// see `crate::paint::PaintTarget`'s viewport-sampling note.
+/// see `crate::paint::PaintTarget`'s viewport-sampling note. The height
+/// texture (binding 12) shares this same tile addressing.
 ///
 /// # v1 boundary
 ///
 /// One bound tile only (the app binds the active tile's `PaintTarget`;
 /// the tile-pool atlas + page-table indirection of the architecture
-/// doc's virtual texturing is a later slice). No per-channel textures —
-/// the group-2 reservation in `crate::view_mode` still holds for those.
+/// doc's virtual texturing is a later slice). No per-channel textures
+/// beyond base color and height — the group-2 reservation in
+/// `crate::view_mode` still holds for the rest.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PaintParams {
@@ -92,20 +96,40 @@ pub struct PaintParams {
     pub uv_offset: [f32; 2],
     /// Scale applied after the offset (1, 1 for UDIM tiles).
     pub uv_scale: [f32; 2],
-    /// Bit 0 ([`Self::HAS_TEXTURE`]) = a paint texture is bound.
+    /// Bit 0 ([`Self::HAS_TEXTURE`]) = a paint texture is bound; bit 1
+    /// ([`Self::HAS_HEIGHT_TEXTURE`]) = a height texture is bound.
     pub flags: u32,
-    /// Padding to the 32-byte uniform multiple.
-    pub _pad: [u32; 3],
+    /// Scale applied to the height channel's finite-difference
+    /// gradient before it perturbs the normal (world units of
+    /// displacement per unit height — depends on mesh scale, a v1
+    /// judgment call). 1.0 = unscaled. Ignored while
+    /// [`Self::HAS_HEIGHT_TEXTURE`] is clear.
+    pub height_strength: f32,
+    /// Padding to the 48-byte uniform multiple.
+    pub _pad: [u32; 6],
 }
 
 const _: () = assert!(
-    size_of::<PaintParams>() == 32,
+    size_of::<PaintParams>() == 48,
     "PaintParams must match the WGSL PaintParams layout"
 );
 
 impl PaintParams {
     /// Flag bit: a paint texture is bound (the shader samples it).
     pub const HAS_TEXTURE: u32 = 1;
+    /// Flag bit: a height texture is bound (the shader perturbs the
+    /// normal from it — see `shaders::MESH_SHADER`'s
+    /// `height_perturbed_normal`).
+    pub const HAS_HEIGHT_TEXTURE: u32 = 2;
+
+    /// UDIM tile origin (1001..=1100, clamped): tile (tu, tv) at
+    /// offset (tu, tv). Shared by [`Self::for_udim`] and
+    /// [`Self::height_for_udim`].
+    fn udim_origin(tile: u16) -> [f32; 2] {
+        let clamped = tile.clamp(umber_mesh::FIRST_TILE, 1100);
+        let local = clamped - umber_mesh::FIRST_TILE;
+        [f32::from(local % 10), f32::from(local / 10)]
+    }
 
     /// No texture bound: the shader returns the `BASE_COLOR` constant
     /// (pixel-identical to the pre-texture pass). The offset/scale are
@@ -115,7 +139,8 @@ impl PaintParams {
             uv_offset: [0.0, 0.0],
             uv_scale: [1.0, 1.0],
             flags: 0,
-            _pad: [0; 3],
+            height_strength: 1.0,
+            _pad: [0; 6],
         }
     }
 
@@ -125,20 +150,45 @@ impl PaintParams {
             uv_offset: [0.0, 0.0],
             uv_scale: [1.0, 1.0],
             flags: Self::HAS_TEXTURE,
-            _pad: [0; 3],
+            height_strength: 1.0,
+            _pad: [0; 6],
         }
     }
 
     /// A texture holding UDIM `tile`'s texels (1001..=1100, clamped),
     /// sampled by global mesh uvs: offset = the tile's origin, scale 1.
     pub fn for_udim(tile: u16) -> Self {
-        let clamped = tile.clamp(umber_mesh::FIRST_TILE, 1100);
-        let local = clamped - umber_mesh::FIRST_TILE;
         Self {
-            uv_offset: [f32::from(local % 10), f32::from(local / 10)],
+            uv_offset: Self::udim_origin(tile),
             uv_scale: [1.0, 1.0],
             flags: Self::HAS_TEXTURE,
-            _pad: [0; 3],
+            height_strength: 1.0,
+            _pad: [0; 6],
+        }
+    }
+
+    /// A height texture bound over single-tile (0..1) uvs, with
+    /// `strength` scaling the finite-difference gradient — world
+    /// units of displacement per unit height (1.0 = unscaled).
+    pub fn height(strength: f32) -> Self {
+        Self {
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            flags: Self::HAS_HEIGHT_TEXTURE,
+            height_strength: strength,
+            _pad: [0; 6],
+        }
+    }
+
+    /// [`Self::height`] over a UDIM tile's own uvs (mirrors
+    /// [`Self::for_udim`]).
+    pub fn height_for_udim(tile: u16, strength: f32) -> Self {
+        Self {
+            uv_offset: Self::udim_origin(tile),
+            uv_scale: [1.0, 1.0],
+            flags: Self::HAS_HEIGHT_TEXTURE,
+            height_strength: strength,
+            _pad: [0; 6],
         }
     }
 }
@@ -153,9 +203,9 @@ pub(crate) struct MeshTier<'a> {
     pub spec_buffer: &'a wgpu::Buffer,
 }
 
-/// The base-color paint binding: tile texture + sampler + tile-select
-/// uniform. Bundled for the same reason as [`MeshTier`] (one param,
-/// bindings 9–11).
+/// The base-color + height paint binding: tile texture + sampler +
+/// tile-select uniform + height texture. Bundled for the same reason
+/// as [`MeshTier`] (one param, bindings 9–12).
 pub(crate) struct MeshPaint<'a> {
     /// The tile's texture view (a [`crate::paint::PaintTarget::view`], or
     /// the context's 1×1 fallback when unbound).
@@ -165,16 +215,20 @@ pub(crate) struct MeshPaint<'a> {
     pub sampler: &'a wgpu::Sampler,
     /// The tile-select uniform bound at slot 11.
     pub params_buffer: &'a wgpu::Buffer,
+    /// The height tile's texture view (bound at slot 12), or the
+    /// context's 1×1 fallback when unbound — reuses [`Self::sampler`],
+    /// never sampled while `PaintParams::HAS_HEIGHT_TEXTURE` is clear.
+    pub height_view: &'a wgpu::TextureView,
 }
 
-/// The tail of the mesh pass's group-0 bind group (bindings 4–11): the
+/// The tail of the mesh pass's group-0 bind group (bindings 4–12): the
 /// specular tier, the paint set, and the view-mode selector. One bundle
 /// so [`GpuContext::mesh_bind_group_full`] stays at clippy's 7-arg
 /// floor — it would otherwise take eight.
 pub(crate) struct MeshTail<'a> {
     /// The specular tier (bindings 4–7).
     pub tier: MeshTier<'a>,
-    /// The base-color paint set (bindings 9–11).
+    /// The base-color + height paint set (bindings 9–12).
     pub paint: MeshPaint<'a>,
     /// The view-mode selector (binding 8).
     pub view_mode_buffer: &'a wgpu::Buffer,
@@ -720,6 +774,21 @@ impl GpuContext {
                     },
                     count: None,
                 },
+                // Height channel (audit worklist #12 — see
+                // `shaders::MESH_SHADER`'s `height_perturbed_normal`):
+                // appended AFTER the paint params — same additive,
+                // layout-sync-safe pattern as every earlier block in
+                // this group.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -1122,13 +1191,13 @@ impl GpuContext {
     /// Builds the mesh pass's group-0 bind group: camera + diffuse IBL
     /// set (irradiance view, sampler, flags buffer) + specular tier
     /// (prefilter views at bindings 4–6, spec uniform at 7) + the
-    /// view-mode selector (binding 8) + the base-color paint set (tile
-    /// view, sampler, params at bindings 9–11). Used by
-    /// [`MeshBuffers::upload`] (fallback views/samplers, procedural
-    /// flags, default spec, Lit mode, unbound paint) and
+    /// view-mode selector (binding 8) + the base-color + height paint
+    /// set (tile view, sampler, params, height view at bindings
+    /// 9–12). Used by [`MeshBuffers::upload`] (fallback views/samplers,
+    /// procedural flags, default spec, Lit mode, unbound paint) and
     /// [`MeshBuffers`]'s rebuild path (`set_environment` /
-    /// `set_spec_params` / `set_base_color_texture`: the map's own views
-    /// and sampler, or the fallback pair).
+    /// `set_spec_params` / `set_base_color_texture` / `set_height_texture`:
+    /// the map's own views and sampler, or the fallback pair).
     pub(crate) fn mesh_bind_group_full(
         &self,
         uniform_buffer: &wgpu::Buffer,
@@ -1214,6 +1283,10 @@ impl GpuContext {
                         size: None,
                     }),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(paint.height_view),
+                },
             ],
         })
     }
@@ -1227,6 +1300,23 @@ struct BoundPaint {
     view: wgpu::TextureView,
     /// The params uploaded alongside (kept for introspection/rebuild).
     params: PaintParams,
+}
+
+/// The retained half of a height binding (audit worklist #12): the
+/// tile view plus the addressing/strength the shader needs, kept
+/// separately from [`BoundPaint`] since base color and height bind
+/// (and clear) independently — see [`MeshBuffers::write_paint_params`].
+struct BoundHeight {
+    /// Cloned height-tile view — keeps its texture alive.
+    view: wgpu::TextureView,
+    /// Tile addressing, shared with base color when both are bound to
+    /// the same tile (the common case — see `write_paint_params`'s
+    /// doc for what happens when only one side is bound).
+    uv_offset: [f32; 2],
+    uv_scale: [f32; 2],
+    /// The finite-difference gradient scale (see
+    /// [`PaintParams::height_strength`]'s doc).
+    strength: f32,
 }
 
 /// GPU-resident mesh data for the viewport: vertex/index buffers plus the
@@ -1247,8 +1337,11 @@ pub struct MeshBuffers {
     /// [`MeshPaintCallback::write_uniform`] from the callback's mode
     /// (see [`Self::paint_callback_with_mode`] — Lit by default).
     view_mode_buffer: wgpu::Buffer,
-    /// Tile-select uniform (mesh-pass binding 11): written by
-    /// [`Self::set_base_color_texture`] / [`Self::clear_base_color_texture`].
+    /// Tile-select + height-strength uniform (mesh-pass binding 11):
+    /// composed by [`Self::write_paint_params`] from [`Self::bound_paint`]
+    /// and [`Self::bound_height`] — never written verbatim from a
+    /// caller's [`PaintParams`], so binding one channel can't clobber
+    /// the other's flag.
     paint_params_buffer: wgpu::Buffer,
     /// Currently bound environment (if any): retained so
     /// [`Self::set_spec_params`] can rebuild the bind group without
@@ -1262,6 +1355,8 @@ pub struct MeshBuffers {
     /// — see the bind-group lifetime note on
     /// [`Self::set_base_color_texture`].
     bound_paint: Option<BoundPaint>,
+    /// Currently bound height tile (if any) — see [`BoundHeight`].
+    bound_height: Option<BoundHeight>,
     bind_group: wgpu::BindGroup,
     /// Duplicated-vertex wireframe buffer (Wave-4 item 7): 3 verts per
     /// triangle with barycentric corners, built once at upload from the
@@ -1383,6 +1478,7 @@ impl MeshBuffers {
             view: gpu.fallback_paint_view(),
             sampler: gpu.paint_sampler(),
             params_buffer: &paint_params_buffer,
+            height_view: gpu.fallback_paint_view(),
         };
         let bind_group = gpu.mesh_bind_group_full(
             &uniform_buffer,
@@ -1432,6 +1528,7 @@ impl MeshBuffers {
             paint_params_buffer,
             bound_env: None,
             bound_paint: None,
+            bound_height: None,
             bind_group,
             wire_buffer,
             wire_count,
@@ -1439,10 +1536,10 @@ impl MeshBuffers {
     }
 
     /// Rebuilds the group-0 bind group from the current flags + bound
-    /// environment + spec buffer + bound paint. Shared by
-    /// [`Self::set_environment`], [`Self::set_spec_params`], and
-    /// [`Self::set_base_color_texture`] (disjoint field borrows — no
-    /// borrow of the whole `self`).
+    /// environment + spec buffer + bound paint + bound height. Shared
+    /// by [`Self::set_environment`], [`Self::set_spec_params`],
+    /// [`Self::set_base_color_texture`], and [`Self::set_height_texture`]
+    /// (disjoint field borrows — no borrow of the whole `self`).
     fn rebuild_bind_group(&mut self, gpu: &GpuContext) {
         let (view, sampler) = match &self.bound_env {
             Some(env) => (env.view(), env.sampler()),
@@ -1464,19 +1561,22 @@ impl MeshBuffers {
             prefilter_views: prefilter,
             spec_buffer: &self.spec_buffer,
         };
-        // Bound paint survives environment/spec rebuilds (and vice
-        // versa): each setter only replaces its own slice.
-        let paint = match &self.bound_paint {
-            Some(bound) => MeshPaint {
-                view: &bound.view,
-                sampler: gpu.paint_sampler(),
-                params_buffer: &self.paint_params_buffer,
-            },
-            None => MeshPaint {
-                view: gpu.fallback_paint_view(),
-                sampler: gpu.paint_sampler(),
-                params_buffer: &self.paint_params_buffer,
-            },
+        // Bound paint and bound height survive environment/spec
+        // rebuilds (and each other): each setter only replaces its
+        // own slice.
+        let paint_view = match &self.bound_paint {
+            Some(bound) => &bound.view,
+            None => gpu.fallback_paint_view(),
+        };
+        let height_view = match &self.bound_height {
+            Some(bound) => &bound.view,
+            None => gpu.fallback_paint_view(),
+        };
+        let paint = MeshPaint {
+            view: paint_view,
+            sampler: gpu.paint_sampler(),
+            params_buffer: &self.paint_params_buffer,
+            height_view,
         };
         self.bind_group = gpu.mesh_bind_group_full(
             &self.uniform_buffer,
@@ -1489,6 +1589,46 @@ impl MeshBuffers {
                 view_mode_buffer: &self.view_mode_buffer,
             },
         );
+    }
+
+    /// Composes and writes the mesh-pass tile-select uniform (binding
+    /// 11) from [`Self::bound_paint`] and [`Self::bound_height`] —
+    /// never a caller's [`PaintParams`] verbatim. Each setter/clearer
+    /// updates its own `bound_*` field, then calls this, so binding
+    /// (or clearing) one channel can never clobber the other's flag
+    /// bit — the bug a single shared "last write wins" buffer write
+    /// would have (base color is re-bound every viewport frame per
+    /// `umber_app::viewport::bind_paint_target`).
+    ///
+    /// Tile addressing (`uv_offset`/`uv_scale`) prefers the bound
+    /// paint's, falling back to the bound height's, then the
+    /// identity — the two are expected to agree (the app binds both
+    /// from the same active tile); v1 doesn't reconcile a mismatch.
+    fn write_paint_params(&mut self, gpu: &GpuContext) {
+        let mut flags = 0u32;
+        let (uv_offset, uv_scale) = if let Some(bound) = &self.bound_paint {
+            flags |= PaintParams::HAS_TEXTURE;
+            (bound.params.uv_offset, bound.params.uv_scale)
+        } else if let Some(bound) = &self.bound_height {
+            (bound.uv_offset, bound.uv_scale)
+        } else {
+            ([0.0, 0.0], [1.0, 1.0])
+        };
+        let height_strength = if let Some(bound) = &self.bound_height {
+            flags |= PaintParams::HAS_HEIGHT_TEXTURE;
+            bound.strength
+        } else {
+            1.0
+        };
+        let params = PaintParams {
+            uv_offset,
+            uv_scale,
+            flags,
+            height_strength,
+            _pad: [0; 6],
+        };
+        gpu.queue
+            .write_buffer(&self.paint_params_buffer, 0, bytemuck::bytes_of(&params));
     }
 
     /// Swaps the bound environment: `Some(env)` samples the convolved
@@ -1541,29 +1681,65 @@ impl MeshBuffers {
         target: &crate::paint::PaintTarget,
         params: PaintParams,
     ) {
-        gpu.queue
-            .write_buffer(&self.paint_params_buffer, 0, bytemuck::bytes_of(&params));
         self.bound_paint = Some(BoundPaint {
             view: target.view().clone(),
             params,
         });
+        self.write_paint_params(gpu);
         self.rebuild_bind_group(gpu);
     }
 
     /// Unbinds the paint tile: the 1×1 fallback returns and the params
     /// flag goes to 0, so the shader takes the constant arm again —
     /// pixel-identical to a mesh that never bound paint. The next
-    /// [`Self::paint_callback`] picks it up.
+    /// [`Self::paint_callback`] picks it up. The bound height (if any)
+    /// is untouched.
     pub fn clear_base_color_texture(&mut self, gpu: &GpuContext) {
-        let params = PaintParams::disabled();
-        gpu.queue
-            .write_buffer(&self.paint_params_buffer, 0, bytemuck::bytes_of(&params));
         self.bound_paint = None;
+        self.write_paint_params(gpu);
+        self.rebuild_bind_group(gpu);
+    }
+
+    /// Binds `target`'s view as the mesh pass's height tile (binding
+    /// 12), gated by `params`'s [`PaintParams::HAS_HEIGHT_TEXTURE`]
+    /// flag and scaled by its `height_strength` — the lit path's
+    /// `height_perturbed_normal` (audit worklist #12) picks it up on
+    /// the next [`Self::paint_callback`]. Mirrors
+    /// [`Self::set_base_color_texture`]'s pattern and bind-group
+    /// lifetime contract (the cloned view keeps `target`'s texture
+    /// alive); the bound base color is untouched.
+    pub fn set_height_texture(
+        &mut self,
+        gpu: &GpuContext,
+        target: &crate::paint::PaintTarget,
+        params: PaintParams,
+    ) {
+        self.bound_height = Some(BoundHeight {
+            view: target.view().clone(),
+            uv_offset: params.uv_offset,
+            uv_scale: params.uv_scale,
+            strength: params.height_strength,
+        });
+        self.write_paint_params(gpu);
+        self.rebuild_bind_group(gpu);
+    }
+
+    /// Unbinds the height tile: the 1×1 fallback returns and the
+    /// height flag goes to 0, so the shader skips
+    /// `height_perturbed_normal` again — pixel-identical to a mesh
+    /// that never bound one. The bound base color (if any) is
+    /// untouched.
+    pub fn clear_height_texture(&mut self, gpu: &GpuContext) {
+        self.bound_height = None;
+        self.write_paint_params(gpu);
         self.rebuild_bind_group(gpu);
     }
 
     /// The currently bound tile-select params (the last
     /// [`Self::set_base_color_texture`] value, or [`PaintParams::disabled`]).
+    /// Base-color-only by design — `umber_app::viewport::bind_paint_target`'s
+    /// skip check reads this to mean "is a base-color texture bound",
+    /// independent of whether a height texture also is.
     pub fn paint_params(&self) -> PaintParams {
         self.bound_paint
             .as_ref()
@@ -1947,11 +2123,14 @@ mod tests {
     }
 
     #[test]
-    fn vertex_stays_32_bytes_with_the_uv_slot() {
+    fn vertex_stays_32_bytes_and_paint_params_match_the_wgsl_layout() {
         // The uv replaced the old `_pad` in place: stride is unchanged,
         // so the OpenPBR pipeline (locations 0–1) needs no update.
         assert_eq!(size_of::<Vertex>(), 32);
-        assert_eq!(size_of::<PaintParams>(), 32);
+        // PaintParams grew 32→48 for `height_strength` (worklist #12,
+        // binding 12); the WGSL block and the assert at the struct's
+        // definition carry the same number.
+        assert_eq!(size_of::<PaintParams>(), 48);
     }
 
     #[test]
@@ -3165,6 +3344,7 @@ mod tests {
                 view: gpu.fallback_paint_view(),
                 sampler: gpu.paint_sampler(),
                 params_buffer: &masked.paint_params_buffer,
+                height_view: gpu.fallback_paint_view(),
             };
             masked.bind_group = gpu.mesh_bind_group_full(
                 &masked.uniform_buffer,
@@ -3451,10 +3631,8 @@ mod tests {
             target
         }
 
-        /// Renders `buffers` in `mode` into a W×H linear target through
-        /// the real mesh pipeline (the `MeshPaintCallback::draw` state:
-        /// group 0 = the mesh's CURRENT bind group, group 1 = identity
-        /// LUT) and returns tightly-packed RGBA8 bytes.
+        /// [`render_mesh_mode`] at the family's usual test camera
+        /// (identity projection, `NEG_Y` light).
         fn render_mesh_mode(
             gpu: &GpuContext,
             buffers: &MeshBuffers,
@@ -3462,12 +3640,35 @@ mod tests {
             w: u32,
             h: u32,
         ) -> Vec<u8> {
+            render_mesh_mode_with_camera(
+                gpu,
+                buffers,
+                mode,
+                w,
+                h,
+                CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y),
+            )
+        }
+
+        /// Renders `buffers` in `mode` into a W×H linear target through
+        /// the real mesh pipeline (the `MeshPaintCallback::draw` state:
+        /// group 0 = the mesh's CURRENT bind group, group 1 = identity
+        /// LUT) and returns tightly-packed RGBA8 bytes. Takes an
+        /// explicit camera uniform — the height-perturbation tests need
+        /// a light with x/y components (`NEG_Y` only reads `n.y`, which
+        /// would hide a pure-x or pure-y perturbation; see
+        /// `height_stroke_perturbs_the_lit_normal`).
+        fn render_mesh_mode_with_camera(
+            gpu: &GpuContext,
+            buffers: &MeshBuffers,
+            mode: ViewMode,
+            w: u32,
+            h: u32,
+            uniform: CameraUniform,
+        ) -> Vec<u8> {
             let device = &gpu.device;
-            gpu.queue.write_buffer(
-                &buffers.uniform_buffer,
-                0,
-                bytemuck::bytes_of(&CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y)),
-            );
+            gpu.queue
+                .write_buffer(&buffers.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
             gpu.queue.write_buffer(
                 &buffers.view_mode_buffer,
                 0,
@@ -3704,6 +3905,261 @@ mod tests {
                 buffers.paint_params().uv_scale,
                 [1.0, 1.0],
                 "cleared params keep the identity transform"
+            );
+        }
+
+        // --- Height→normal live (audit worklist #12) tests. ---
+
+        /// A quad spanning NDC `[-1, 1]²`, uv = `pos.xy * 0.5 + 0.5` (u
+        /// tracks world x, v tracks world y) — unlike
+        /// `fullscreen_textured_mesh`'s degenerate uvs (one texel for
+        /// the whole frame, by design), this mesh needs a REAL uv
+        /// gradient across the screen for the height perturbation's
+        /// finite differences and `dpdx`/`dpdy` to be nonzero. Same CCW
+        /// winding convention as `fullscreen_textured_mesh` (first
+        /// triangle's cross product is +Z, matching the vertex normal,
+        /// so backface culling keeps both).
+        fn textured_quad_mesh() -> umber_mesh::MeshData {
+            umber_mesh::MeshData {
+                positions: vec![
+                    [-1.0, -1.0, 0.0],
+                    [1.0, -1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [-1.0, 1.0, 0.0],
+                ],
+                normals: vec![[0.0, 0.0, 1.0]; 4],
+                uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material_names: vec![],
+            }
+        }
+
+        /// A 4×4 height tile (R channel only; G/B/A unused) through the
+        /// real `PaintTarget` write path: a linear ramp 0/85/170/255
+        /// along ONE axis, constant along the other, so the per-texel
+        /// finite difference is exactly 85/255 and the orthogonal one
+        /// is exactly 0. `horizontal` ramps by column (a "+u" ramp — u
+        /// tracks world x on `textured_quad_mesh`); `!horizontal` ramps
+        /// by row (a "+v" ramp).
+        fn height_ramp_target(gpu: &GpuContext, horizontal: bool) -> crate::paint::PaintTarget {
+            let target = crate::paint::PaintTarget::new(&gpu.device, 4, 4);
+            let steps: [u8; 4] = [0, 85, 170, 255];
+            let mut rgba = [0u8; 4 * 4 * 4];
+            for (i, texel) in rgba.chunks_exact_mut(4).enumerate() {
+                let (row, col) = (i / 4, i % 4);
+                texel[0] = if horizontal { steps[col] } else { steps[row] };
+                texel[3] = 255;
+            }
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("umber_height_ramp_test_upload_encoder"),
+                });
+            target
+                .write_region(&gpu.device, &mut encoder, (0, 0), (4, 4), &rgba)
+                .expect("4x4 region fits the 4x4 target");
+            gpu.queue.submit(Some(encoder.finish()));
+            target
+        }
+
+        /// Mirrors `shaders::MESH_SHADER`'s `height_perturbed_normal`
+        /// (the Mikkelsen screen-space surface-gradient formula) so the
+        /// golden test below pins bytes derived from the SAME
+        /// arithmetic the GPU runs — not hand-expanded decimals (the
+        /// `expected_procedural_byte` family's style, extended).
+        /// `f32::signum` (never 0) stands in for WGSL's `sign` (which
+        /// can return 0): the test's `det` is always nonzero, so the
+        /// two never diverge here.
+        fn mikkelsen_perturbed_normal(
+            n: glam::Vec3,
+            dpos_dx: glam::Vec3,
+            dpos_dy: glam::Vec3,
+            dhdx: f32,
+            dhdy: f32,
+        ) -> glam::Vec3 {
+            let r1 = dpos_dy.cross(n);
+            let r2 = n.cross(dpos_dx);
+            let det = dpos_dx.dot(r1);
+            let surf_grad = det.signum() * (dhdx * r1 + dhdy * r2);
+            (det.abs() * n - surf_grad).normalize()
+        }
+
+        /// Closed-form expected byte for a height-perturbed normal
+        /// under a light with x, y, AND z components — unlike the
+        /// family's usual `NEG_Y` (`to_light = +Y`, which reads only
+        /// `n.y` and would hide a pure-x, "+u ramp" perturbation
+        /// entirely). `to_light = normalize(1, 1, 1)`.
+        ///
+        /// `dhdx`/`dhdy` are the already-strength-scaled screen-space
+        /// height derivatives (see `height_stroke_perturbs_the_lit_normal`'s
+        /// doc for how they're derived from the bound ramp); `(0.0,
+        /// 0.0)` is the unperturbed/flat case.
+        fn expected_height_perturbed_byte(dhdx: f32, dhdy: f32) -> [u8; 4] {
+            const GROUND: [f32; 3] = [0.30, 0.27, 0.24];
+            const SKY: [f32; 3] = [0.45, 0.55, 0.78];
+            const BASE: [f32; 3] = [0.72, 0.72, 0.75];
+            const SUN: [f32; 3] = [1.0, 0.96, 0.90];
+            // Identity view_proj: world_pos IS the vertex position, so
+            // its screen-space derivative is the per-pixel NDC step
+            // (2/W, -2/H — the y flip is wgpu's NDC-to-framebuffer
+            // convention) at W=H=4.
+            let n0 = glam::Vec3::new(0.0, 0.0, 1.0);
+            let dpos_dx = glam::Vec3::new(0.5, 0.0, 0.0);
+            let dpos_dy = glam::Vec3::new(0.0, -0.5, 0.0);
+            let n = mikkelsen_perturbed_normal(n0, dpos_dx, dpos_dy, dhdx, dhdy);
+            let to_light = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
+            let diffuse = n.dot(to_light).max(0.0);
+            let t = (n.y * 0.5 + 0.5).clamp(0.0, 1.0);
+            let env = [
+                GROUND[0] + (SKY[0] - GROUND[0]) * t,
+                GROUND[1] + (SKY[1] - GROUND[1]) * t,
+                GROUND[2] + (SKY[2] - GROUND[2]) * t,
+            ];
+            let px = [
+                BASE[0] * (env[0] + diffuse * SUN[0] * 0.55),
+                BASE[1] * (env[1] + diffuse * SUN[1] * 0.55),
+                BASE[2] * (env[2] + diffuse * SUN[2] * 0.55),
+            ];
+            [
+                (px[0] * 255.0 + 0.5).floor() as u8,
+                (px[1] * 255.0 + 0.5).floor() as u8,
+                (px[2] * 255.0 + 0.5).floor() as u8,
+                255,
+            ]
+        }
+
+        /// THE CAN-FAIL END-TO-END for the height→normal live kill
+        /// (audit worklist #12, gate: "height stroke → lit viewport
+        /// normal response, golden-image pinned"): a known height ramp
+        /// bound on `textured_quad_mesh` perturbs the Lit normal, and
+        /// the response differs from the flat baseline AND between a
+        /// +u-only and a +v-only ramp — a viewport that ignored the
+        /// bound height, or perturbed along the wrong axis, collapses
+        /// these to the same bytes.
+        ///
+        /// # Derivation (pixel: row 1, col 1 of the 4×4 readback)
+        ///
+        /// At W=H=4, pixel (col=1, row=1)'s uv is (0.375, 0.625) —
+        /// which lands at the CENTER of height-texture texel (col=1,
+        /// row=2) (the height texture is also 4×4, so every readback
+        /// pixel's uv lands exactly on its matching texel's center —
+        /// no filtering ambiguity). `duv/dscreen` is (0.25, 0) in x,
+        /// (0, -0.25) in y (constant across this planar quad).
+        ///
+        /// A "+u" ramp (`height_ramp_target(horizontal: true)`) is
+        /// column-only: at texel (1, 2), h0 = 85/255, h(u+1) = 170/255,
+        /// h(v+1) = 85/255 (row-independent, same as h0) → dhdv = 0.
+        /// At strength 0.75: dhdu = (170-85)/255 * 4 * 0.75 = 1.0
+        /// exactly, so dhdx = dhdu*0.25 = 0.25, dhdy = -dhdv*0.25 = 0.
+        ///
+        /// A "+v" ramp is row-only: at texel (1, 2), h0 = 170/255,
+        /// h(u+1) = 170/255 (column-independent, same as h0) → dhdu =
+        /// 0; h(v+1) = 255/255, so dhdv = (255-170)/255*4*0.75 = 1.0,
+        /// dhdy = -0.25, dhdx = 0.
+        #[test]
+        fn height_stroke_perturbs_the_lit_normal() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping height_stroke_perturbs_the_lit_normal: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let mesh = textured_quad_mesh();
+            let camera =
+                CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::new(-1.0, -1.0, -1.0));
+            // Pixel (row=1, col=1) → byte offset (1*4 + 1) * 4 = 20.
+            const OFFSET: usize = 20;
+
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            let flat = render_mesh_mode_with_camera(&gpu, &buffers, ViewMode::Lit, 4, 4, camera);
+            let flat_expected = expected_height_perturbed_byte(0.0, 0.0);
+            let flat_px = &flat[OFFSET..OFFSET + 4];
+            for c in 0..4 {
+                assert!(
+                    flat_px[c].abs_diff(flat_expected[c]) <= 1,
+                    "flat pixel ch{c}: got {flat_px:?}, want {flat_expected:?}"
+                );
+            }
+
+            let strength = 0.75;
+            let u_ramp = height_ramp_target(&gpu, true);
+            buffers.set_height_texture(&gpu, &u_ramp, PaintParams::height(strength));
+            let u_bytes = render_mesh_mode_with_camera(&gpu, &buffers, ViewMode::Lit, 4, 4, camera);
+            let u_expected = expected_height_perturbed_byte(0.25, 0.0);
+            let u_px = &u_bytes[OFFSET..OFFSET + 4];
+            for c in 0..4 {
+                assert!(
+                    u_px[c].abs_diff(u_expected[c]) <= 1,
+                    "+u ramp pixel ch{c}: got {u_px:?}, want {u_expected:?}"
+                );
+            }
+
+            let v_ramp = height_ramp_target(&gpu, false);
+            buffers.set_height_texture(&gpu, &v_ramp, PaintParams::height(strength));
+            let v_bytes = render_mesh_mode_with_camera(&gpu, &buffers, ViewMode::Lit, 4, 4, camera);
+            let v_expected = expected_height_perturbed_byte(0.0, -0.25);
+            let v_px = &v_bytes[OFFSET..OFFSET + 4];
+            for c in 0..4 {
+                assert!(
+                    v_px[c].abs_diff(v_expected[c]) <= 1,
+                    "+v ramp pixel ch{c}: got {v_px:?}, want {v_expected:?}"
+                );
+            }
+
+            assert_ne!(
+                flat_px, u_px,
+                "a bound +u height ramp must change the flat baseline"
+            );
+            assert_ne!(
+                flat_px, v_px,
+                "a bound +v height ramp must change the flat baseline"
+            );
+            assert_ne!(u_px, v_px, "a +u ramp must differ from a +v ramp");
+        }
+
+        /// FALLBACK REGRESSION for the height kill: binding then
+        /// clearing a height texture renders byte-identical to a mesh
+        /// that never touched the height API — mirrors
+        /// `clear_base_color_texture_restores_the_fallback`'s pattern
+        /// for `PaintParams::HAS_HEIGHT_TEXTURE`. Uses the family's
+        /// usual `NEG_Y`-light helpers (no need for the custom camera
+        /// above — this test only needs byte equality, not a nonzero
+        /// response).
+        #[test]
+        fn height_texture_flag_off_matches_unbound_baseline() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping height_texture_flag_off_matches_unbound_baseline: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let mesh = fullscreen_textured_mesh([0.25, 0.25]);
+            let never_touched = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            let baseline = render_mesh_mode(&gpu, &never_touched, ViewMode::Lit, 4, 4);
+
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            let height = height_ramp_target(&gpu, true);
+            buffers.set_height_texture(&gpu, &height, PaintParams::height(1.0));
+            buffers.clear_height_texture(&gpu);
+            let cleared = render_mesh_mode(&gpu, &buffers, ViewMode::Lit, 4, 4);
+
+            assert_eq!(
+                baseline, cleared,
+                "clearing the height texture must restore fallback bytes exactly"
             );
         }
     }

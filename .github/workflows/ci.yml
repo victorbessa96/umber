@@ -48,6 +48,14 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+        # The GPU golden family (`renderer::tests::gpu`, 173 tests incl.
+        # the height→normal goldens) is feature-gated behind `gpu`
+        # (pollster device bootstrap); without this leg the workspace
+        # run compiles umber-gpu WITHOUT it and the entire family is
+        # silently skipped. Lavapipe satisfies the adapter.
+      - name: GPU feature tests (Linux lavapipe)
+        if: runner.os == 'Linux'
+        run: cargo test -p umber-gpu --features gpu
 
       # Windows Ink backend: feature-gated behind `winink` (target-gated dep —
       # inert on Linux). Only windows-latest can actually compile+run the
