@@ -1,0 +1,371 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+Gate 0 journey test — wiring the full core loop into one passing run.
+[0m# [0mTodos
+[•] Read agent contract + strategy review §2
+[ ] Verify six leg APIs (fbx, paint, compositor, undo, save/open, ORM export)
+[ ] Write gate0_journey.rs test
+[ ] Run fmt, clippy, verify-kill
+[0m
+[0m→ [0mRead AGENTS.md
+[0m✱ [0mGlob "CLAUDE.md"[90m 1 match[0m
+[0m→ [0mRead docs/specs/2026-10-12-strategy-review.md
+[0m→ [0mRead CLAUDE.md
+[0m
+[0m# [0mTodos
+[✓] Read agent contract + strategy review §2
+[•] Verify six leg APIs (fbx, paint, compositor, undo, save/open, ORM export)
+[ ] Write gate0_journey.rs test
+[ ] Run fmt, clippy, verify-kill
+[0m
+[0m✱ [0mGlob "crates/umber-app/src/*.rs"[90m 28 matches[0m
+[0m✱ [0mGlob "crates/umber-app/tests/*.rs"[90m 0 matches[0m
+[0m✱ [0mGlob "crates/umber-export/src/*.rs"[90m 10 matches[0m
+[0m✱ [0mGrep "loads_fbx_cube_fixture|load_fbx"[90m in crates/umber-mesh · 7 matches[0m
+[0m→ [0mRead crates/umber-mesh/src/fbx.rs
+[0m→ [0mRead crates/umber-app/src/paint_state.rs
+Contract and core-loop risks reviewed. Now verifying each leg's real API shape.
+[0m✱ [0mGrep "fn save_project|fn open_project|fn try_request_device|save_project|sidecar"[90m in crates/umber-app/src · 43 matches[0m
+[0m✱ [0mGrep "pub fn|pub struct ExportPreset|unreal_orm|OpenglORM"[90m in crates/umber-export/src · 53 matches[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1096][0m
+[0m→ [0mRead crates/umber-export/src/png.rs
+[0m→ [0mRead crates/umber-export/src/driver.rs[90m [offset=80, limit=400][0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=660, limit=500][0m
+[0m→ [0mRead crates/umber-app/Cargo.toml
+[0m✱ [0mGrep "pub (fn|struct).*omposit|mod composit"[90m in crates/umber-gpu/src · 8 matches[0m
+[0m→ [0mRead crates/umber-export/src/presets.rs[90m [offset=140, limit=280][0m
+[0m→ [0mRead crates/umber-gpu/src/compositor.rs
+[0m→ [0mRead crates/umber-export/src/driver.rs[90m [offset=760, limit=120][0m
+[0m✱ [0mGlob "crates/umber-cli/src/*.rs"[90m 3 matches[0m
+[0m✱ [0mGrep "pub enum MapKind|AmbientOcclusion|pub fn solid|fn solid"[90m in crates/umber-export/src · 13 matches[0m
+[0m✱ [0mGrep "pub fn (read_back_rgba8|new|dimensions|write_region|clear|view)|pub struct PaintTarget|impl PaintTarget"[90m in crates/umber-gpu/src/paint.rs · 37 matches[0m
+[0m→ [0mRead crates/umber-cli/Cargo.toml
+Key structural question: how do existing integration tests reach bin-only crate code?
+[0m✱ [0mGlob "crates/umber-cli/tests/*.rs"[90m 1 match[0m
+[0m→ [0mRead crates/umber-export/src/presets.rs[90m [limit=140][0m
+[0m→ [0mRead crates/umber-gpu/src/paint.rs[90m [offset=243, limit=120][0m
+[0m→ [0mRead crates/umber-cli/tests/agent.rs[90m [limit=60][0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1, limit=120][0m
+[0m✱ [0mGrep "WgpuDevice|WgpuQueue"[90m in crates/umber-gpu/src/lib.rs · 1 match[0m
+[0m✱ [0mGrep "pub const FIRST_TILE|pub use|pub mod"[90m in crates/umber-mesh/src/udim.rs · 24 matches[0m
+[0m✱ [0mGrep "^use |crate::"[90m in crates/umber-app/src/retouch.rs · 100 matches[0m
+[0m→ [0mRead crates/umber-export/src/driver.rs[90m [offset=700, limit=60][0m
+Now reading the existing sidecar tests (to cite the boundary honestly) and retouch.rs imports.
+[0m→ [0mRead crates/umber-app/src/retouch.rs[90m [offset=1, limit=110][0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1405, limit=165][0m
+[0m✱ [0mGrep "fn validate_set|fn write_outputs|fn map_kind_is_color|fn write_materialx|fn materialx_document"[90m in crates/umber-export/src/driver.rs · 5 matches[0m
+[0m→ [0mRead crates/umber-export/src/driver.rs[90m [offset=25, limit=55][0m
+[0m→ [0mRead crates/umber-export/src/driver.rs[90m [offset=584, limit=120][0m
+All APIs verified. Checking workspace lints and umber-gpu features before writing.
+[0m→ [0mRead Cargo.toml
+[0m→ [0mRead crates/umber-gpu/Cargo.toml
+Checking umber-export lib re-exports, then writing.
+[0m→ [0mRead crates/umber-export/src/lib.rs
+[0m
+[0m# [0mTodos
+[✓] Read agent contract + strategy review §2
+[✓] Verify six leg APIs (fbx, paint, compositor, undo, save/open, ORM export)
+[•] Write gate0_journey.rs test (+ lib.rs seam, publish_fill visibility)
+[ ] Run fmt, clippy, verify-kill
+[0m
+[0m← [0mWrite crates/umber-app/src/lib.rs
+Wrote file successfully.
+[0m
+[0m✱ [0mGrep "pub\(crate\)|pub fn|pub struct"[90m in crates/umber-app/src/retouch.rs · 100 matches[0m
+retouch.rs's `pub(crate)` items are all consumed by paint_state — no dead-code risk in the lib crate. Making the one seam edit now.
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -860,9 +860,14 @@
+ /// Returns `false` — dropping the write with a log — when the target
+ /// cannot be created or `rgba` is not `width`x`height` RGBA8 (the fill
+ /// must re-evaluate at the target size first; a torn upload is worse
+ /// than a dropped one).
+-pub(crate) fn publish_fill(
++///
++/// `pub` (not `pub(crate)`) is the Gate-0 seam: the project open path
++/// restores sidecar PNGs through this call, and the journey test in
++/// `tests/gate0_journey.rs` — outside this crate — drives the same
++/// restore. No other caller needed the width.
++pub fn publish_fill(
+     &mut self,
+     tile: u16,
+     width: u32,
+     height: u32,
+
+[0m
+Now writing the journey test.
+[0m← [0mWrite crates/umber-app/tests/gate0_journey.rs
+Wrote file successfully.
+[0m
+[0m← [0mEdit crates/umber-app/tests/gate0_journey.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
++++ /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+@@ -107,9 +107,9 @@
+     }))
+     .ok()
+ }
+ 
+-/// A solid `size`×`size` RGBA8 map with every byte `value` (so R=G=B=ALEC
++/// A solid `size`×`size` RGBA8 map with every byte `value` (so R=G=B=A=
+ /// `value` per texel — the `Gray` wiring slot's Rec.709 luminance of a
+ /// gray texel is exactly the input value, which the ORM leg depends on).
+ fn solid(size: u32, value: u8) -> Vec<u8> {
+     vec![value; size as usize * size as usize * 4]
+
+[0m
+[0m→ [0mRead crates/umber-app/tests/gate0_journey.rs[90m [offset=62, limit=14][0m
+[0m✗ [0mEdit crates/umber-app/tests/gate0_journey.rs failed
+[91m[1mError: [0mCould not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.
+[0m→ [0mRead crates/umber-app/tests/gate0_journey.rs[90m [offset=100, limit=18][0m
+Files written. Running the gates, one cargo command at a time.
+[0m
+[0m$ [0mcargo fmt --all
+(no output)
+[0m
+[0m$ [0mcargo clippy -p umber-app --all-targets -- -D warnings
+Checking umber-app v0.1.0 (/home/bessa/Projects/umber/crates/umber-app)
+error: method `set_brush_color` is never used
+    --> crates/umber-app/src/paint_state.rs:1104:19
+     |
+ 433 | impl PaintState {
+     | --------------- method in this implementation
+...
+1104 |     pub(crate) fn set_brush_color(&mut self, color: [f32; 4]) {
+     |                   ^^^^^^^^^^^^^^^
+     |
+     = note: `-D dead-code` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error[E0277]: the trait bound `f32: std::convert::From<i32>` is not satisfied
+   --> crates/umber-app/tests/gate0_journey.rs:172:17
+    |
+172 |         let t = f32::from(i) * 0.02;
+    |                 ^^^ the trait `std::convert::From<i32>` is not implemented for `f32`
+    |
+    = help: `f32` implements trait `std::convert::From<T>`:
+              std::convert::From<bool>
+              std::convert::From<dpi::LogicalUnit<P>>
+              std::convert::From<dpi::PhysicalUnit<P>>
+              std::convert::From<exr::block::samples::Sample>
+              std::convert::From<f16>
+              std::convert::From<half::bfloat::bf16>
+              std::convert::From<half::binary16::f16>
+              std::convert::From<i16>
+            and 6 others
+
+error: could not compile `umber-app` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `umber-app` (test "gate0_journey") due to 1 previous error
+[0m
+Two failures: a type error in my test, and `set_brush_color` dead in the lib crate (its only consumer is the bin's bake_sources test). The contract-compliant fix is wiring a consumer — Gate-0 will use it for a distinctive stroke color.
+[0m✱ [0mGrep "set_brush_color|set_brush_params"[90m in crates/umber-app/src · 8 matches[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1099, limit=25][0m
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1097,12 +1097,15 @@
+     // BTreeMap keys iterate sorted.
+     self.targets.keys().copied().collect()
+ }
+ 
+-/// Overrides the stroke color (test hook: the per-tile export test
+-/// paints each tile a different color).
+-#[cfg(test)]
+-pub(crate) fn set_brush_color(&mut self, color: [f32; 4]) {
++/// Overrides the stroke color (the per-tile export test paints each
++/// tile a different color; the Gate-0 journey test paints its stroke
++/// pure green so the painted texel is color-identifiable).
++///
++/// `pub` (not `pub(crate)`) is the Gate-0 seam alongside
++/// [`Self::publish_fill`]: the journey test lives outside this crate.
++pub fn set_brush_color(&mut self, color: [f32; 4]) {
+     self.brush.color = color;
+ }
+ 
+ /// The tile the last original pointer event routed to (v1: the tile
+
+[0m
+[0m← [0mEdit crates/umber-app/src/lib.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/lib.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/lib.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/lib.rs
+@@ -15,13 +15,16 @@
+ //! * This surface is additive: `main.rs` keeps its own `mod paint_state;`
+ //!   / `mod retouch;` declarations (same files, compiled once per crate —
+ //!   legal, and zero risk to the shell). Nothing is moved or re-wired.
+ //! * Only what the journey test needs is reachable: `paint_state`'s
+-//!   `pub(crate)` test hooks (`set_brush_color`, `read_tile`, …) stay
+-//!   crate-private to each crate. The one widened seam is
+-//!   [`paint_state::PaintState::publish_fill`] (`pub(crate)` → `pub`):
+-//!   the project open path restores sidecar PNGs through it, so a
+-//!   save/reopen leg that cannot call it is not a save/reopen leg.
++//!   remaining `pub(crate)` test hooks (`set_brush_params`, `read_tile`,
++//!   …) stay crate-private to each crate. The widened seams are
++//!   [`paint_state::PaintState::publish_fill`] and
++//!   [`paint_state::PaintState::set_brush_color`] (`pub(crate)` → `pub`):
++//!   the project open path restores sidecar PNGs through the former, and
++//!   the journey test paints its color-identifiable stroke through the
++//!   latter — so a save/reopen leg that cannot restore, or a paint leg
++//!   that cannot name its color, is not Gate 0.
+ //! * The eframe shell itself (`save_project` / `open_project`'s dialogs
+ //!   and the `project.json` commit) stays shell-only; the journey test
+ //!   replicates their sidecar file round-trip through the same helpers
+ //!   (`umber_export::png::{write_png, read_png_rgba8}`) and the same
+
+[0m
+[0m← [0mEdit crates/umber-app/tests/gate0_journey.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
++++ /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+@@ -10,9 +10,11 @@
+ //! 2. **4K pressure paint**: `PaintState::with_target_size(4096)` plus the
+ //!    CRITICAL-5 pair
+ //!    (`begin_screen_point_pressured`/`extend_screen_point_pressured`) at
+ //!    pressure 0.5, driven across the loaded mesh's UVs (`set_mesh` first,
+-//!    so the seam/UDIM routing sees the real cube).
++//!    so the seam/UDIM routing sees the real cube). The stroke paints pure
++//!    green (`set_brush_color`) so the painted texel is color-identifiable
++//!    in every downstream leg.
+ //! 3. **See lit**: the CORE-LOOP bind is the paint tile feeding the mesh
+ //!    pass; its headless form is the COMPOSITOR's output — the painted
+ //!    tile composites (single `Normal` layer over transparent) and the
+ //!    painted texel differs from the unpainted state.
+
+[0m
+[0m✗ [0mEdit crates/umber-app/tests/gate0_journey.rs failed
+[91m[1mError: [0mCould not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.
+[0m→ [0mRead crates/umber-app/tests/gate0_journey.rs[90m [offset=140, limit=60][0m
+[0m
+[0m← [0mEdit crates/umber-app/tests/gate0_journey.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
++++ /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+@@ -160,8 +160,12 @@
+ // ---- Leg 2: 4K pressure paint on the loaded mesh's UVs. ----
+ let mut paint =
+     PaintState::with_target_size(device.clone(), queue.clone(), SIZE).expect("paint builds");
+ assert_eq!(paint.target_size(), (SIZE, SIZE));
++// Pure-green stroke: R and B stay exactly 0 under any coverage (0 ×
++// anything is exact — no rounding), so the painted texel pins color,
++// not just alpha.
++paint.set_brush_color([0.0, 1.0, 0.0, 1.0]);
+ paint.set_mesh(&mesh);
+ paint.process_pending().expect("pre-stroke drain succeeds");
+ let pre = paint
+     .paint_target()
+
+[0m
+[0m← [0mEdit crates/umber-app/tests/gate0_journey.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
++++ /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+@@ -174,9 +174,9 @@
+ assert_eq!(pre.len(), SIZE as usize * SIZE as usize * 4);
+ 
+ paint.begin_screen_point_pressured(Some(egui::pos2(0.30, 0.30)), PRESSURE);
+ for i in 1..=16 {
+-    let t = f32::from(i) * 0.02;
++    let t = i as f32 * 0.02;
+     paint.extend_screen_point_pressured(Some(egui::pos2(0.30 + t, 0.30 + t)), PRESSURE);
+ }
+ paint.end_stroke();
+ assert!(
+
+[0m
+[0m→ [0mRead crates/umber-app/tests/gate0_journey.rs[90m [offset=200, limit=60][0m
+[0m
+[0m← [0mEdit crates/umber-app/tests/gate0_journey.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
++++ /home/bessa/Projects/umber/crates/umber-app/tests/gate0_journey.rs
+@@ -225,8 +225,18 @@
+     post[painted_base..painted_base + 4],
+     [0, 0, 0, 0],
+     "the stroke must change the painted texel"
+ );
++// Color identity: the stroke is pure green, so R and B are exactly 0
++// and G is positive at the painted texel (a default-color or
++// color-dropping regression fails here).
++assert_eq!(post[painted_base], 0, "painted R must be 0");
++assert_eq!(post[painted_base + 2], 0, "painted B must be 0");
++assert!(
++    post[painted_base + 1] > 0,
++    "painted G must be positive, got {}",
++    post[painted_base + 1]
++);
+ 
+ // ---- Leg 3: see lit — the painted tile composites downstream. ----
+ let compositor =
+     StackCompositor::new(device.clone()).expect("compositor builds on the paint device");
+
+[0m
+[0m$ [0mcargo fmt --all
+(no output)
+[0m
+[0m$ [0mcargo clippy -p umber-app --all-targets -- -D warnings
+Checking umber-app v0.1.0 (/home/bessa/Projects/umber/crates/umber-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.45s
+[0m
+Clippy passes. Running verify-kill on the touched files.
+[0m$ [0mbash scripts/verify-kill.sh crates/umber-app/tests/gate0_journey.rs crates/umber-app/src/lib.rs crates/umber-app/src/paint_state.rs
+== (1) brace balance + fn/test census ==
+  PASS: crates/umber-app/tests/gate0_journey.rs braces 29/29
+  PASS: crates/umber-app/src/lib.rs braces 1/1
+  PASS: crates/umber-app/src/paint_state.rs braces 367/367
+== (2) rustfmt canonical (.rs files only) ==
+  PASS: fmt clean
+== (3) the trap greps ==
+  PASS: crates/umber-app/tests/gate0_journey.rs matches!-arity: 0 suspicious
+  PASS: crates/umber-app/src/lib.rs matches!-arity: 0 suspicious
+  WARN: crates/umber-app/src/paint_state.rs — possible thiserror source-field trap: 374:    clone_source: Option<Pos2>,
+  WARN: crates/umber-app/src/paint_state.rs — possible thiserror source-field trap: 493:            clone_source: None,
+  PASS: crates/umber-app/src/paint_state.rs matches!-arity: 0 suspicious
+== (4) doc-comment attachment (blank line between doc blocks) ==
+  PASS: crates/umber-app/tests/gate0_journey.rs doc-attachment: clean
+  PASS: crates/umber-app/src/lib.rs doc-attachment: clean
+  PASS: crates/umber-app/src/paint_state.rs doc-attachment: clean
+
+VERIFY-KILL: crates/umber-app/tests/gate0_journey.rs crates/umber-app/src/lib.rs crates/umber-app/src/paint_state.rs — balanced, fmt-clean, trap-scanned
+[0m
+Verify-kill passes (the two WARNs are false positives — `clone_source: Option<Pos2>` is session state, not a thiserror `source` field; both lines pre-date my change). Final checks:
+[0m$ [0mcargo fmt --all --check && git status --short
+M crates/umber-app/src/paint_state.rs
+?? crates/umber-app/src/lib.rs
+?? crates/umber-app/tests/
+[0m
+[0m# [0mTodos
+[✓] Read agent contract + strategy review §2
+[✓] Verify six leg APIs (fbx, paint, compositor, undo, save/open, ORM export)
+[✓] Write gate0_journey.rs test (+ lib.rs seam, publish_fill visibility)
+[✓] Run fmt, clippy, verify-kill
+[0m
+Report per the contract:
+
+**1. Built** — files touched (3):
+- `crates/umber-app/tests/gate0_journey.rs` (NEW): the Gate-0 journey test, one `#[test]` driving all six legs in user order — FBX load of `cube_b7400.fbx` → 4K `with_target_size(4096)` pressure-0.5 stroke via the CRITICAL-5 pair → `StackCompositor` single-Normal-layer composite asserting the painted texel left transparency → `undo_stroke`/`redo_stroke` byte-exact readback pins → sidecar round-trip (`write_png` Linear + `target_size.txt` → fresh session → `read_png_rgba8` + row-flip → `publish_fill` → byte-identical) → `ExportPreset::unreal_orm()` via `run_preset`, decoding `Gate0_OpenglORM.png` and pinning R/G/B/A = 204/128/77/204 at the row-flipped painted texel.
+- `crates/umber-app/src/lib.rs` (NEW): the one named seam — exposes `pub mod paint_state; pub mod retouch;` so `tests/` can link the session (bin-only crates are unreachable from integration tests). `main.rs` untouched; same files compile once per crate.
+- `crates/umber-app/src/paint_state.rs` (EDIT, 2 hunks): `publish_fill` and `set_brush_color` widened `pub(crate)` → `pub` with seam docs. The journey restores through the former and paints its color-identifiable (pure-green, R=B exactly 0) stroke through the latter.
+
+**2. Judgment calls** (all in module docs): the compositor assertion is the headless equivalent of "see lit" (literal viewport frame is shell-only); pressure magnitude unpinned (only the pressured pair is driven — exact alpha would pin GPU rounding); painted-count lower bound 100 with the dab-footprint arithmetic cited (GPU edge coverage is implementation-defined); leg-5 replicates the sidecar file shape while `save_project`'s dialogs + `project.json` commit stay shell-only (filename codec/flip/save-load helpers already pinned by `main.rs::paint_persistence_tests`); full-4K buffers with early drops (~hundreds of MiB transient peak).
+
+**3. Unverified**: runtime execution — no GPU in this environment and the contract forbids `cargo test`; compilation of lib+bin+test is proven via clippy. CI (lavapipe/WARP) is the runtime gate. If the FBX cube's UVs ever span tiles, the `tiles_present() == [1001]` pin fails loud by design.
+
+**4. Deferred**: no requirements-row mark (Gate 0 is a release-checklist gate, not a requirements row); per-texture-set sizes, cross-tile stroke continuity, and shell-dialog coverage stay named follow-ups in the test docs.
+
+**5. Gates run**: `cargo fmt --all` + `--check` — pass; `cargo clippy -p umber-app --all-targets -- -D warnings` — pass; `bash scripts/verify-kill.sh` on all three files — pass (2 WARNs adjudicated false positives: `clone_source: Option<Pos2>` is session state, not a thiserror `source` field; both lines pre-date this change). First clippy run caught and fixed a real `f32::from(i)` type error and the `set_brush_color` lib-dead-code, the latter resolved by wiring the consumer per rule 6.

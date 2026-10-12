@@ -1,0 +1,2394 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+Fixing the gray viewport — wiring paint textures into the 3D view.
+[0m→ [0mRead .
+[0m→ [0mRead CLAUDE.md
+[0m→ [0mRead docs/specs/2026-10-12-strategy-review.md
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs
+[0m→ [0mRead crates/umber-gpu/src/shaders.rs
+[0m→ [0mRead crates/umber-gpu/src/paint.rs
+[0m✱ [0mGrep "struct MeshData|pub (positions|uvs|normals|indices)"[90m in crates/umber-mesh/src · 5 matches[0m
+[0m✱ [0mGlob "crates/umber-gpu/src/*.rs"[90m 21 matches[0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1169][0m
+[0m→ [0mRead crates/umber-gpu/src/golden.rs
+[0m→ [0mRead crates/umber-mesh/src/lib.rs[90m [offset=30, limit=90][0m
+[0m→ [0mRead crates/umber-gpu/src/view_mode.rs
+I've mapped the gray-viewport gap. Now checking the remaining layout owners before editing.
+[0m→ [0mRead crates/umber-gpu/src/lib.rs
+[0m→ [0mRead crates/umber-gpu/src/postfx_viewport.rs
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=2410][0m
+The shape is clear, but I've spotted three collision risks (a possible arg-count break in the tree, a postfx test pinning the exact `shade(...)` call text, and app code possibly constructing `Vertex`). Verifying before editing.
+[0m→ [0mRead crates/umber-gpu/src/tile_pool.rs[90m [limit=120][0m
+[0m→ [0mRead crates/umber-mesh/src/udim.rs[90m [limit=100][0m
+[0m✱ [0mGrep "mesh_bind_group_full|MeshTier|_pad|Vertex \{|Vertex\{"[90m in crates · 88 matches[0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=913, limit=80][0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=2755, limit=35][0m
+[0m
+[0m$ [0mbash scripts/kill-locks.sh status 2>&1 | head -50; echo ---; git status --short | head -30; echo ---; git log --oneline -5
+---
+---
+d3516c6 docs: the strategy review lands + the truth pass begins — six rows corrected
+f0dd91e docs(requirements): the AI-interface row marked — the anchor fix rides (the python assert caught the em-dash mismatch, the patch tool didn't)
+0dbda8e feat(§10): the AI-texturing provider interface — the P2 design hook, delivered
+abf7ce0 fix(i18n): the panel kills' catalog keys land — the 4b6de58 red closed
+a2c34e4 feat(gui): Phase 1 kill 5 — the Display panel migrates to the design language
+[0m
+[0m$ [0mls scripts/ && git log --oneline -3 -- crates/umber-gpu/src/renderer.rs
+brief-template.sh
+ci-consume.sh
+kill-locks.sh
+loop-status.sh
+perf_compare.py
+pre-push.sh
+verify-kill.sh
+aeffe52 feat(§7): the postfx viewport wiring — the §7:84 named follow-up CLOSED
+fb96668 feat(§7): HDR's app half — the probe in GpuContext, the panel row, the persistence
+cb3e435 feat(§2): path tools — the 3D-curve replay engine, per-vertex size/opacity, filled paths
+[0m
+[0m$ [0mbash scripts/kill-locks.sh status; echo "exit=$?"
+exit=0
+[0m
+[0m$ [0mcargo check -p umber-gpu --all-targets 2>&1 | tail -30
+Checking umber-graph v0.1.0 (/home/bessa/Projects/umber/crates/umber-graph)
+    Checking umber-mesh v0.1.0 (/home/bessa/Projects/umber/crates/umber-mesh)
+    Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.33s
+[0m
+It compiles — so my arg count must be off. Rechecking the exact call text.
+[0m$ [0mrg -n "mesh_bind_group_full" crates/umber-gpu/src/renderer.rs; echo ---; sed -n '2771,2779p' crates/umber-gpu/src/renderer.rs
+58:/// Bundled so [`GpuContext::mesh_bind_group_full`] stays at 7 args
+921:    pub(crate) fn mesh_bind_group_full(
+1113:        let bind_group = gpu.mesh_bind_group_full(
+1187:        self.bind_group = gpu.mesh_bind_group_full(
+2771:            masked.bind_group = gpu.mesh_bind_group_full(
+---
+            masked.bind_group = gpu.mesh_bind_group_full(
+                &masked.uniform_buffer,
+                &flags,
+                env.view(),
+                env.sampler(),
+                tier,
+                &spec,
+                &masked.view_mode_buffer,
+            );
+[0m
+[0m$ [0mcat crates/umber-gpu/Cargo.toml; echo ===; rg -n "gpu|features" .github/workflows/*.yml | head -40
+[package]
+name = "umber-gpu"
+description = "Umber GPU layer: wgpu device context, render graph, tile pool, shaders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
+umber-mesh = { workspace = true }
+umber-graph = { workspace = true }
+glam = { workspace = true }
+wgpu = { workspace = true }
+egui-wgpu = { workspace = true }
+epaint = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true, optional = true }
+profiling = { workspace = true }
+
+[features]
+gpu = ["pollster"]
+perf = ["gpu"]
+===
+.github/workflows/ci.yml:57:        run: cargo test -p stylus --features winink
+.github/workflows/perf-nightly.yml:35:        run: cargo build --release -p umber-app -p umber-gpu --features perf
+.github/workflows/perf-nightly.yml:45:          cargo test -p umber-gpu --features perf --release ref_scene -- --nocapture --ignored || true
+.github/workflows/perf-nightly.yml:46:          cargo test -p umber-app --features perf --release input_photon perf_soak -- --nocapture --ignored || true
+[0m
+[0m$ [0msed -n '1,80p' .github/workflows/ci.yml
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        # pinned via rust-toolchain.toml (1.97.0) — see file at repo root
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # lavapipe (Linux) / WARP (Windows) — headless software GPU for the
+      # future golden-image tests. Installed now so the runner image is
+      # proven early; GPU tests arrive with Wave 2/3 golden-image work.
+      - name: Install lavapipe (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1
+
+      - name: Software GPU presence probe
+        if: runner.os == 'Linux'
+        run: |
+          ls /usr/share/vulkan/icd.d/ || true
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # Windows Ink backend: feature-gated behind `winink` (target-gated dep —
+      # inert on Linux). Only windows-latest can actually compile+run the
+      # WM_POINTER decode tests; this step is the backend's only real executor.
+      - name: Stylus winink feature tests (Windows only)
+        if: runner.os == 'Windows'
+        run: cargo test -p stylus --features winink
+
+      - name: Build release smoke
+        run: cargo build --release --workspace
+[0m
+[0m✱ [0mGrep "Vertex|mesh_bind_group|paint_callback|MeshBuffers|MESH_SHADER"[90m in crates/umber-app/src · 4 matches[0m
+[0m✱ [0mGrep "Vertex|MESH_SHADER|vertex_attr_array|mesh_bind_group_layout"[90m in crates/umber-gpu/src · 100 matches[0m
+All collision checks done. Setting up the work plan.
+[0m
+[0m# [0mTodos
+[•] shaders.rs: UV attribute + group-0 paint bindings 9-11 + sampling + solo/unlit wiring
+[ ] renderer.rs: Vertex.uv, PaintParams, MeshPaint bundle, layout/pipeline/upload/setters
+[ ] renderer.rs tests: fix stray &spec arg, add paint can-fail GPU tests + PaintParams unit tests
+[ ] paint.rs: viewport-sampling consumer contract docs
+[ ] postfx_viewport.rs collateral: vertex attrs + shade-pin string (no live locks)
+[ ] Gates: fmt, clippy, verify-kill, check --features gpu, check umber-app untouched
+[0m
+Now the shader edit.
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -1,21 +1,28 @@
+ //! WGSL shader sources for the viewport mesh pass.
+-
+-/// Normal-shaded mesh pass with a directional light and a hemispherical
+-/// environment light: the procedural sky/ground irradiance by default,
+-/// or a convolved environment map when one is bound (Wave-4 item 6 —
+-/// see `crate::ibl`'s convention block for the equirect math shared
+-/// with the convolve shader) plus the v1 specular IBL tier (three
+-/// cone-scaled prefiltered levels × the analytic BRDF fit — see
+-/// `crate::ibl::IBL_PREFILTER_SHADER`). Driven entirely by vertex
+-/// normals (no textures yet — that lands with the paint engine).
+-/// Matches the `Vertex` and `CameraUniform` layouts in `renderer.rs`;
+-/// bindings 1–3 are the diffuse IBL set, 4–7 the specular tier (see
+-/// `GpuContext`'s bind-group layout), binding 8 the view-mode
+-/// selector (`crate::view_mode::VIEW_MODE_WGSL`, verbatim). Group 1 is the display LUT
+-/// (`crate::display_lut`; the snippet is that module's
+-/// `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
+-/// the last step before the target.
++//!
++//! Normal-shaded mesh pass with a directional light and a hemispherical
++//! environment light: the procedural sky/ground irradiance by default,
++//! or a convolved environment map when one is bound (Wave-4 item 6 —
++//! see `crate::ibl`'s convention block for the equirect math shared
++//! with the convolve shader) plus the v1 specular IBL tier (three
++//! cone-scaled prefiltered levels × the analytic BRDF fit — see
++//! `crate::ibl::IBL_PREFILTER_SHADER`). Vertex normals drive the
++//! lighting; the albedo is the bound paint tile when one is set, else
++//! the `BASE_COLOR` constant (core-loop kill 1 — the viewport shows
++//! paint; see `paint_albedo` below for the fallback contract).
++//! Matches the `Vertex` and `CameraUniform` layouts in `renderer.rs`;
++//! bindings 1–3 are the diffuse IBL set, 4–7 the specular tier (see
++//! `GpuContext`'s bind-group layout), binding 8 the view-mode
++//! selector (`crate::view_mode::VIEW_MODE_WGSL`, verbatim), bindings
++//! 9–11 the base-color paint set (`paint_tex`, `paint_sampler`,
++//! `PaintParams` — group 0, not group 2, so every existing group-0
++//! bind group and draw keeps working with the fallback bound; the
++//! group-2 per-channel reservation in `crate::view_mode` stays the
++//! Wave-2 contract for the full channel set). Group 1 is the display LUT
++//! (`crate::display_lut`; the snippet is that module's
++//! `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
++//! the last step before the target.
+ ///
+ /// Two fragment entries (the LUT gate, see [`MESH_ENTRY_DIRECT`] /
+ /// [`MESH_ENTRY_SCENE_LINEAR`]): `fs_main` applies the LUT inline (the
+ /// direct path, unchanged), `fs_scene_linear` returns the same shaded
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -123,27 +123,55 @@
+     return (mode == VIEW_MODE_SOLO && channel > VIEW_MODE_SOLO_EMISSIVE) || (mode == VIEW_MODE_MESH_PREVIEW);
+ }
+ // ---- end view mode ----
+ 
++// ---- paint tile (core-loop kill 1 — the viewport shows paint) ----
++// The composited base-color tile: one `PaintTarget`'s view (rgba8,
++// filterable), a shared filtering clamp sampler, and the tile-select
++// uniform. All three are always bound (a 1x1 fallback texture +
++// `flags == 0` when no paint is set) so the pipeline layout never
++// changes at runtime — the same always-populated pattern as the IBL
++// set above. Appended AFTER the view-mode selector: additive bindings,
++// the classic layout-sync trap avoided by construction.
++@group(0) @binding(9) var paint_tex: texture_2d<f32>;
++@group(0) @binding(10) var paint_sampler: sampler;
++struct PaintParams {
++    uv_offset: vec2<f32>,
++    uv_scale: vec2<f32>,
++    flags: u32,
++    _pad0: u32,
++    _pad1: u32,
++    _pad2: u32,
++};
++@group(0) @binding(11) var<uniform> paint_params: PaintParams;
++
++const PAINT_HAS_TEXTURE: u32 = 1u;
++// ---- end paint tile ----
++
+ struct VertexInput {
+     @location(0) position: vec3<f32>,
+     @location(1) normal: vec3<f32>,
++    @location(2) uv: vec2<f32>,
+ };
+ 
+ struct VertexOutput {
+     @builtin(position) clip_position: vec4<f32>,
+     @location(0) world_normal: vec3<f32>,
+     // World position for the position-map preview proxy (identity
+     // transform in this pass — object space IS world space here).
+     @location(1) world_pos: vec3<f32>,
++    // Interpolated paint UV (the mesh's own uvs, uploaded verbatim —
++    // see `renderer::Vertex`).
++    @location(2) uv: vec2<f32>,
+ };
+ 
+ @vertex
+ fn vs_main(in: VertexInput) -> VertexOutput {
+     var out: VertexOutput;
+     out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+     out.world_normal = in.normal;
+     out.world_pos = in.position;
++    out.uv = in.uv;
+     return out;
+ }
+ 
+ const SUN_COLOR: vec3<f32> = vec3<f32>(1.0, 0.96, 0.90);
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -178,8 +178,31 @@
+ const SKY_COLOR: vec3<f32> = vec3<f32>(0.45, 0.55, 0.78);
+ const GROUND_COLOR: vec3<f32> = vec3<f32>(0.30, 0.27, 0.24);
+ const BASE_COLOR: vec3<f32> = vec3<f32>(0.72, 0.72, 0.75);
+ 
++/// Tile-space UV: the bound texture holds ONE tile's texels, so a
++/// global (possibly UDIM) uv is reduced to tile-local
++/// `(uv - offset) * scale` before sampling. The single-tile default
++/// (offset 0, scale 1) is the identity; UDIM tile (tu, tv) binds
++/// offset (tu, tv), scale (1, 1) — the fractional part for uvs inside
++/// the tile. Mirrors `renderer::PaintParams` byte-for-byte; see that
++/// type's docs for the convention and the v1 single-texture boundary.
++fn paint_tile_uv(uv: vec2<f32>) -> vec2<f32> {
++    return (uv - paint_params.uv_offset) * paint_params.uv_scale;
++}
++
++/// The textured albedo: the bound tile at the interpolated uv when a
++/// texture is set, else today's constant — so the unbound path renders
++/// pixel-identical to the pre-texture shader. The flag branch is
++/// uniform control flow, so the unsampled texture cannot leak into the
++/// output (the `fallback_ignores_bound_map` family pins this).
++fn paint_albedo(uv: vec2<f32>) -> vec3<f32> {
++    if ((paint_params.flags & PAINT_HAS_TEXTURE) == 0u) {
++        return BASE_COLOR;
++    }
++    return textureSample(paint_tex, paint_sampler, paint_tile_uv(uv)).rgb;
++}
++
+ /// Hemispherical environment irradiance: the bound convolved map when
+ /// `env_flags.flags == 1`, else the procedural stand-in — sky above the
+ /// horizon, ground below, blended by the normal's vertical component.
+ ///
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -263,16 +263,17 @@
+ /// one channel displayed raw, from already-bound data. The
+ /// per-channel GPU textures have no bindings in v1 (the paint
+ /// texture-set is document-model data; `SoloChannel::texture_binding`
+ /// reserves the future group-2 slots), so each arm reads the closest
+-/// bound source — the Wave-2 texture handoff swaps these arms to
+-/// samples without renumbering the ids.
+-fn solo_proxy(channel: u32, n: vec3<f32>) -> vec3<f32> {
++/// bound source — except base color, which samples the bound paint
++/// tile (core-loop kill 1): solo base-color IS the texture. The
++/// Wave-2 texture handoff swaps the remaining arms to samples without
++/// renumbering the ids.
++fn solo_proxy(channel: u32, n: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+     if (channel == VIEW_MODE_SOLO_BASE_COLOR) {
+-        // This pass's albedo stand-in — "baseColor raw" in today's
+-        // uniform-material world (the texture sample lands with the
+-        // group-2 handoff).
+-        return BASE_COLOR;
++        // The bound paint tile at the interpolated uv — or the
++        // uniform-material constant when nothing is bound.
++        return paint_albedo(uv);
+     }
+     if (channel == VIEW_MODE_SOLO_EMISSIVE) {
+         // No emission source in this pass.
+         return vec3<f32>(0.0);
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -303,38 +303,39 @@
+ /// instead of the paint. Bake textures have no bindings in v1, so
+ /// each kind maps to the closest solo proxy; curvature, thickness,
+ /// and ID (no bound source at all) render mid-gray stand-ins until
+ /// the bake-texture handoff.
+-fn preview_proxy(kind: u32, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
++fn preview_proxy(kind: u32, n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+     if (kind == VIEW_MODE_PREVIEW_AO) {
+-        return solo_proxy(VIEW_MODE_SOLO_AO, n);
++        return solo_proxy(VIEW_MODE_SOLO_AO, n, uv);
+     }
+     if (kind == VIEW_MODE_PREVIEW_NORMAL_BASE || kind == VIEW_MODE_PREVIEW_BENT_NORMAL
+         || kind == VIEW_MODE_PREVIEW_WORLD_SPACE_NORMAL) {
+-        return solo_proxy(VIEW_MODE_SOLO_NORMAL, n);
++        return solo_proxy(VIEW_MODE_SOLO_NORMAL, n, uv);
+     }
+     if (kind == VIEW_MODE_PREVIEW_POSITION) {
+         // Unit-cell repeat of object space (this pass has no model
+         // matrix — object space IS world space).
+         return fract(world_pos);
+     }
+     if (kind == VIEW_MODE_PREVIEW_HEIGHT) {
+-        return solo_proxy(VIEW_MODE_SOLO_HEIGHT, n);
++        return solo_proxy(VIEW_MODE_SOLO_HEIGHT, n, uv);
+     }
+     return vec3<f32>(0.5);
+ }
+ 
+ /// Resolves the view-mode output: Lit keeps the PBR color, Unlit
+-/// drops the lighting math, Solo/Preview substitute their proxy.
+-fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
++/// drops the lighting math (albedo only — the texture when bound),
++/// Solo/Preview substitute their proxy.
++fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+     if (mode == VIEW_MODE_UNLIT) {
+-        return BASE_COLOR;
++        return paint_albedo(uv);
+     }
+     if (mode == VIEW_MODE_SOLO) {
+-        return solo_proxy(channel, n);
++        return solo_proxy(channel, n, uv);
+     }
+     if (mode == VIEW_MODE_MESH_PREVIEW) {
+-        return preview_proxy(channel, n, world_pos);
++        return preview_proxy(channel, n, world_pos, uv);
+     }
+     return lit;
+ }
+ 
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -343,16 +343,18 @@
+ /// LUT. Shared by the two entry points (the LUT gate): `fs_main` (the
+ /// direct path, LUT applied here) and `fs_scene_linear` (the post-effects
+ /// path, scene-linear out; `crate::postfx_viewport`'s composite applies
+ /// the LUT after the chain).
+-fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
++fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+     let n = normalize(world_normal);
+     let to_light = normalize(-camera.light_dir.xyz);
+     let diffuse = max(dot(n, to_light), 0.0);
+     let env = environment_irradiance(n);
+     // Environment acts as the ambient term; the sun adds directional
+     // energy on top, weighted so lit surfaces approach full brightness.
+-    var color = BASE_COLOR * (env + diffuse * SUN_COLOR * 0.55);
++    // The albedo is the bound paint tile (or the constant fallback).
++    let albedo = paint_albedo(uv);
++    var color = albedo * (env + diffuse * SUN_COLOR * 0.55);
+     // Specular IBL tier (wave-5 v1): Split-Sum factor one x factor two,
+     // gated on the map flag — the diffuse term above is byte-untouched.
+     // v1 stand-ins: a uniform view (camera.eye is the view source, not
+     // the world_pos varying — that varying serves the position-map
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -365,15 +365,15 @@
+         let reflect_dir = reflect(-to_view, n);
+         let n_dot_v = clamp(dot(n, to_view), 0.0, 1.0);
+         let rough = clamp(spec_params.roughness, 0.0, 1.0);
+         let metal = clamp(spec_params.metallic, 0.0, 1.0);
+-        let f0 = mix(vec3<f32>(0.04), BASE_COLOR, metal);
++        let f0 = mix(vec3<f32>(0.04), albedo, metal);
+         let ab = env_brdf_approx(n_dot_v, rough);
+         color = color + prefiltered_env(reflect_dir, rough) * (f0 * ab.x + ab.y);
+     }
+     // View modes (crate::view_mode): Lit keeps the PBR color
+     // above; Unlit/Solo/Preview substitute their proxy.
+-    return apply_view_mode(view_mode.mode, view_mode.channel, color, n, world_pos);
++    return apply_view_mode(view_mode.mode, view_mode.channel, color, n, world_pos, uv);
+ }
+ 
+ @fragment
+ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -376,9 +376,9 @@
+ }
+ 
+ @fragment
+ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+-    let color = shade(in.world_normal, in.world_pos);
++    let color = shade(in.world_normal, in.world_pos, in.uv);
+     // Data modes bypass the display LUT below (the §9 rule — the CPU
+     // side binds the identity table for those modes, so the early
+     // return agrees with the bound table; the branch additionally
+     // protects a caller that passes the app LUT with a data mode).
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/shaders.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/shaders.rs
+@@ -397,9 +397,9 @@
+ /// coverage — the target clears to transparent, the chain carries
+ /// alpha through, and the composite blends on it.
+ @fragment
+ fn fs_scene_linear(in: VertexOutput) -> @location(0) vec4<f32> {
+-    return vec4<f32>(shade(in.world_normal, in.world_pos), 1.0);
++    return vec4<f32>(shade(in.world_normal, in.world_pos, in.uv), 1.0);
+ }
+ "#;
+ 
+ /// [`MESH_SHADER`]'s direct-path fragment entry: the display LUT applied
+
+[0m
+Shader done. Now the renderer — `Vertex`, `PaintParams`, layout, upload, setters.
+[0m# [0mTodos
+[✓] shaders.rs: UV attribute + group-0 paint bindings 9-11 + sampling + solo/unlit wiring
+[•] renderer.rs: Vertex.uv, PaintParams, MeshPaint bundle, layout/pipeline/upload/setters
+[ ] renderer.rs tests: fix stray &spec arg, add paint can-fail GPU tests + PaintParams unit tests
+[ ] paint.rs: viewport-sampling consumer contract docs
+[ ] postfx_viewport.rs collateral: vertex attrs + shade-pin string (no live locks)
+[ ] Gates: fmt, clippy, verify-kill, check --features gpu, check umber-app untouched
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -33,28 +33,117 @@
+     #[error("index count {0} exceeds u32::MAX")]
+     IndexCountOverflow(usize),
+ }
+ 
+-/// Interleaved vertex layout uploaded to the GPU: position + normal,
+-/// padded to 32 bytes.
++/// Interleaved vertex layout uploaded to the GPU: position + normal + uv,
++/// 32 bytes.
+ ///
+-/// UVs are intentionally omitted — this pass is normal-shaded only; texture
+-/// sampling lands with the paint engine. `_pad` keeps the struct at a
+-/// 16-byte multiple — portable across backends (review #2: some
+-/// Vulkan/Metal drivers are stricter than the WebGPU floor) and leaves a
+-/// natural slot for Wave-2 UV attributes.
++/// The uv slot is the core-loop kill-1 handoff: the shader samples the
++/// bound paint tile at the interpolated uv, so the viewport shows paint.
++/// Uploaded verbatim from [`umber_mesh::MeshData::uvs`] when the counts
++/// match; zero-filled when the source mesh has no (or mismatched) uvs —
++/// a uv-less mesh then samples tile-local (0, 0) everywhere, which only
++/// matters once a texture is bound (the unbound fallback ignores uv).
++/// Replacing the old `_pad` keeps the stride at 32 bytes, so the
++/// OpenPBR pipeline (which reads locations 0–1 only) and every buffer
++/// size in the tree are untouched.
+ #[repr(C)]
+ #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+ pub struct Vertex {
+     /// Object-space position.
+     pub position: [f32; 3],
+     /// Object-space normal (recomputed on upload if the source mesh lacks
+     /// one — see [`MeshBuffers::upload`]).
+     pub normal: [f32; 3],
+-    /// Unused; pads the struct to 32 bytes.
+-    pub _pad: [f32; 2],
++    /// Paint UV, in the mesh's own uv space (global UDIM uvs for a
++    /// multi-tile mesh — the `PaintParams` tile select reduces them).
++    pub uv: [f32; 2],
+ }
+ 
++const _: () = assert!(
++    size_of::<Vertex>() == 32,
++    "Vertex must stay position + normal + uv (32 bytes)"
++);
++
++/// The mesh pass's base-color paint uniform (`MESH_SHADER` binding 11):
++/// the tile-select for the bound paint texture plus the bound flag.
++/// Byte-identical to the WGSL `PaintParams` struct (see that block's
++/// layout contract) — 32 bytes.
++///
++/// # UDIM scale convention (v1)
++///
++/// The bound texture holds ONE tile's texels; the shader samples
++/// `(uv - uv_offset) * uv_scale`. [`Self::identity`] (offset 0, scale 1)
++/// is the single-tile path (uvs already 0..1). [`Self::for_udim`] maps a
++/// UDIM tile number to its origin: tile (tu, tv) binds offset (tu, tv),
++/// scale (1, 1), i.e. the fractional part for uvs inside the tile.
++/// Mesh UVs are used as-is (no V flip): a paint upload's row 0 is v 0 —
++/// see `crate::paint::PaintTarget`'s viewport-sampling note.
++///
++/// # v1 boundary
++///
++/// One bound tile only (the app binds the active tile's `PaintTarget`;
++/// the tile-pool atlas + page-table indirection of the architecture
++/// doc's virtual texturing is a later slice). No per-channel textures —
++/// the group-2 reservation in `crate::view_mode` still holds for those.
++#[repr(C)]
++#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++pub struct PaintParams {
++    /// Tile origin subtracted from the global uv before scaling.
++    pub uv_offset: [f32; 2],
++    /// Scale applied after the offset (1, 1 for UDIM tiles).
++    pub uv_scale: [f32; 2],
++    /// Bit 0 ([`Self::HAS_TEXTURE`]) = a paint texture is bound.
++    pub flags: u32,
++    /// Padding to the 32-byte uniform multiple.
++    pub _pad: [u32; 3],
++}
++
++const _: () = assert!(
++    size_of::<PaintParams>() == 32,
++    "PaintParams must match the WGSL PaintParams layout"
++);
++
++impl PaintParams {
++    /// Flag bit: a paint texture is bound (the shader samples it).
++    pub const HAS_TEXTURE: u32 = 1;
++
++    /// No texture bound: the shader returns the `BASE_COLOR` constant
++    /// (pixel-identical to the pre-texture pass). The offset/scale are
++    /// still the identity so a stale uniform can never skew a re-bind.
++    pub fn disabled() -> Self {
++        Self {
++            uv_offset: [0.0, 0.0],
++            uv_scale: [1.0, 1.0],
++            flags: 0,
++            _pad: [0; 3],
++        }
++    }
++
++    /// A texture bound over single-tile (0..1) uvs: sample them directly.
++    pub fn identity() -> Self {
++        Self {
++            uv_offset: [0.0, 0.0],
++            uv_scale: [1.0, 1.0],
++            flags: Self::HAS_TEXTURE,
++            _pad: [0; 3],
++        }
++    }
++
++    /// A texture holding UDIM `tile`'s texels (1001..=1100, clamped),
++    /// sampled by global mesh uvs: offset = the tile's origin, scale 1.
++    pub fn for_udim(tile: u16) -> Self {
++        let clamped = tile.clamp(umber_mesh::FIRST_TILE, 1100);
++        let local = clamped - umber_mesh::FIRST_TILE;
++        Self {
++            uv_offset: [f32::from(local % 10), f32::from(local / 10)],
++            uv_scale: [1.0, 1.0],
++            flags: Self::HAS_TEXTURE,
++            _pad: [0; 3],
++        }
++    }
++}
++
+ /// The specular tier's GPU handles: prefilter views + spec uniform.
+ /// Bundled so [`GpuContext::mesh_bind_group_full`] stays at 7 args
+ /// (clippy's too-many-arguments floor).
+ pub(crate) struct MeshTier<'a> {
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -152,8 +152,22 @@
+     /// The specular-params uniform bound at slot 7.
+     pub spec_buffer: &'a wgpu::Buffer,
+ }
+ 
++/// The base-color paint binding: tile texture + sampler + tile-select
++/// uniform. Bundled for the same reason as [`MeshTier`] (one param,
++/// bindings 9–11).
++pub(crate) struct MeshPaint<'a> {
++    /// The tile's texture view (a [`crate::paint::PaintTarget::view`], or
++    /// the context's 1×1 fallback when unbound).
++    pub view: &'a wgpu::TextureView,
++    /// The shared paint sampler (filtering, clamp-to-edge — v1 uses one
++    /// sampler for every tile; per-texture samplers are deferred).
++    pub sampler: &'a wgpu::Sampler,
++    /// The tile-select uniform bound at slot 11.
++    pub params_buffer: &'a wgpu::Buffer,
++}
++
+ /// Per-frame camera uniform, matching `shaders::MESH_SHADER`'s `Camera`
+ /// struct layout exactly (16-byte alignment: `light_dir` carries an unused
+ /// `w` so it packs cleanly after the mat4x4).
+ #[repr(C)]
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -276,8 +276,18 @@
+ fallback_env_view: wgpu::TextureView,
+ /// Shared irradiance sampler (group 0 binding 2) — bilinear,
+ /// repeat-U/clamp-V (see `crate::ibl::ibl_sampler`).
+ env_sampler: wgpu::Sampler,
++/// 1×1 fallback paint tile, bound at group 0 binding 9 whenever no
++/// paint is set. Never sampled while the params flag is 0 (the
++/// shader's constant arm doesn't touch it), but the bind group must
++/// always be fully populated.
++fallback_paint_view: wgpu::TextureView,
++/// Shared paint sampler (group 0 binding 10) — filtering,
++/// clamp-to-edge on both axes. Clamp (not repeat) so a tile-local
++/// uv at exactly 1.0 reads the edge texel instead of wrapping into
++/// the opposite edge.
++paint_sampler: wgpu::Sampler,
+ depth_format: Option<wgpu::TextureFormat>,
+ /// The eframe surface format every display pipeline targets (kept
+ /// for the post-effects composite, built lazily by
+ /// `crate::postfx_viewport`).
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -370,8 +370,19 @@
+ pub(crate) fn mesh_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+     &self.bind_group_layout
+ }
+ 
++/// The shared paint sampler (mesh-pass group 0 binding 10).
++pub(crate) fn paint_sampler(&self) -> &wgpu::Sampler {
++    &self.paint_sampler
++}
++
++/// The 1×1 fallback paint tile (mesh-pass group 0 binding 9 when
++/// no paint is set).
++pub(crate) fn fallback_paint_view(&self) -> &wgpu::TextureView {
++    &self.fallback_paint_view
++}
++
+ /// The surface format the display pipelines target.
+ pub(crate) fn color_format(&self) -> wgpu::TextureFormat {
+     self.color_format
+ }
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -672,8 +672,42 @@
+                 min_binding_size: NonZeroU64::new(size_of::<ViewModeParams>() as u64),
+             },
+             count: None,
+         },
++        // Base-color paint set (core-loop kill 1 — see
++        // `shaders::MESH_SHADER`'s paint block): the tile
++        // texture (rgba8, filterable), its sampler, and the
++        // tile-select uniform. Appended AFTER the view-mode
++        // selector — same additive pattern. Group 0 (not a
++        // new group) so every existing draw — tests, the
++        // post-effects scene pass, the wireframe overlay's
++        // layout reuse — binds unchanged with the fallback.
++        wgpu::BindGroupLayoutEntry {
++            binding: 9,
++            visibility: wgpu::ShaderStages::FRAGMENT,
++            ty: wgpu::BindingType::Texture {
++                sample_type: wgpu::TextureSampleType::Float { filterable: true },
++                view_dimension: wgpu::TextureViewDimension::D2,
++                multisampled: false,
++            },
++            count: None,
++        },
++        wgpu::BindGroupLayoutEntry {
++            binding: 10,
++            visibility: wgpu::ShaderStages::FRAGMENT,
++            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
++            count: None,
++        },
++        wgpu::BindGroupLayoutEntry {
++            binding: 11,
++            visibility: wgpu::ShaderStages::FRAGMENT,
++            ty: wgpu::BindingType::Buffer {
++                ty: wgpu::BufferBindingType::Uniform,
++                has_dynamic_offset: false,
++                min_binding_size: NonZeroU64::new(size_of::<PaintParams>() as u64),
++            },
++            count: None,
++        },
+     ],
+ });
+ 
+ // Display LUT (crate::display_lut): group 1 of the mesh pass and
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -744,9 +744,9 @@
+     module: &shader,
+     buffers: &[Some(wgpu::VertexBufferLayout {
+         array_stride: size_of::<Vertex>() as u64,
+         step_mode: wgpu::VertexStepMode::Vertex,
+-        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
++        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+     })],
+     compilation_options: wgpu::PipelineCompilationOptions::default(),
+ },
+ primitive: wgpu::PrimitiveState {
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -864,8 +864,9 @@
+     cache: None,
+ });
+ 
+ let (fallback_env_view, env_sampler) = Self::fallback_env_resources(&device);
++let (fallback_paint_view, paint_sampler) = Self::fallback_paint_resources(&device);
+ 
+ // HDR surface probe (§5 P1 row 85, `crate::hdr`): `None` because
+ // this context is never handed a `wgpu::Surface` to query (see
+ // the module's boundary note) — eframe owns the real surface.
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1033,8 +1033,10 @@
+ openpbr_pipeline,
+ openpbr_layout,
+ fallback_env_view,
+ env_sampler,
++fallback_paint_view,
++paint_sampler,
+ wire_pipeline,
+ wire_color_layout,
+ grid_pipeline,
+ grid_layout,
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1049,10 +1049,9 @@
+ /// Builds the fallback IBL resources for [`Self::new`]: a 1×1
+ /// `Rgba16Float` texture view (never sampled while `env_flags == 0`,
+ /// but the bind group must stay fully populated) and the shared
+ /// irradiance sampler (bilinear, repeat-U/clamp-V).
+-fn fallback_env_resources(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {
+-    let fallback = device.create_texture(&wgpu::TextureDescriptor {
++fn fallback_env_resources(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {        let fallback = device.create_texture(&wgpu::TextureDescriptor {
+         label: Some("umber_mesh_fallback_irradiance"),
+         size: wgpu::Extent3d {
+             width: 1,
+             height: 1,
+
+[0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1020, limit=55][0m
+Fixing a brace-line merge from my last edit and adding the paint fallback constructor.
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1049,9 +1049,10 @@
+ /// Builds the fallback IBL resources for [`Self::new`]: a 1×1
+ /// `Rgba16Float` texture view (never sampled while `env_flags == 0`,
+ /// but the bind group must stay fully populated) and the shared
+ /// irradiance sampler (bilinear, repeat-U/clamp-V).
+-fn fallback_env_resources(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {        let fallback = device.create_texture(&wgpu::TextureDescriptor {
++fn fallback_env_resources(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {
++    let fallback = device.create_texture(&wgpu::TextureDescriptor {
+         label: Some("umber_mesh_fallback_irradiance"),
+         size: wgpu::Extent3d {
+             width: 1,
+             height: 1,
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1070,8 +1070,43 @@
+         crate::ibl::ibl_sampler(device),
+     )
+ }
+ 
++/// Builds the fallback paint resources for [`Self::new`]: a 1×1
++/// `Rgba8Unorm` texture view (never sampled while the paint flags
++/// are 0, but the bind group must stay fully populated) and the
++/// shared paint sampler (filtering, clamp-to-edge).
++fn fallback_paint_resources(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {
++    let fallback = device.create_texture(&wgpu::TextureDescriptor {
++        label: Some("umber_mesh_fallback_paint"),
++        size: wgpu::Extent3d {
++            width: 1,
++            height: 1,
++            depth_or_array_layers: 1,
++        },
++        mip_level_count: 1,
++        sample_count: 1,
++        dimension: wgpu::TextureDimension::D2,
++        format: wgpu::TextureFormat::Rgba8Unorm,
++        usage: wgpu::TextureUsages::TEXTURE_BINDING,
++        view_formats: &[],
++    });
++    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
++        label: Some("umber_mesh_paint_sampler"),
++        mag_filter: wgpu::FilterMode::Linear,
++        min_filter: wgpu::FilterMode::Linear,
++        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
++        address_mode_u: wgpu::AddressMode::ClampToEdge,
++        address_mode_v: wgpu::AddressMode::ClampToEdge,
++        address_mode_w: wgpu::AddressMode::ClampToEdge,
++        ..Default::default()
++    });
++    (
++        fallback.create_view(&wgpu::TextureViewDescriptor::default()),
++        sampler,
++    )
++}
++
+ /// Builds the mesh pass's group-0 bind group: camera + diffuse IBL
+ /// set (irradiance view, sampler, flags buffer) + specular tier
+ /// (prefilter views at bindings 4–6, spec uniform at 7) + the
+ /// view-mode selector (binding 8). Used by
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1108,20 +1108,23 @@
+ 
+ /// Builds the mesh pass's group-0 bind group: camera + diffuse IBL
+ /// set (irradiance view, sampler, flags buffer) + specular tier
+ /// (prefilter views at bindings 4–6, spec uniform at 7) + the
+-/// view-mode selector (binding 8). Used by
+-/// [`MeshBuffers::upload`] (fallback views/sampler, procedural
+-/// flags, default spec, Lit mode) and [`MeshBuffers`]'s rebuild path
+-/// (`set_environment` / `set_spec_params`: the map's own views and
+-/// sampler, or the fallback pair).
++/// view-mode selector (binding 8) + the base-color paint set (tile
++/// view, sampler, params at bindings 9–11). Used by
++/// [`MeshBuffers::upload`] (fallback views/samplers, procedural
++/// flags, default spec, Lit mode, unbound paint) and
++/// [`MeshBuffers`]'s rebuild path (`set_environment` /
++/// `set_spec_params` / `set_base_color_texture`: the map's own views
++/// and sampler, or the fallback pair).
+ pub(crate) fn mesh_bind_group_full(
+     &self,
+     uniform_buffer: &wgpu::Buffer,
+     flags_buffer: &wgpu::Buffer,
+     env_view: &wgpu::TextureView,
+     env_sampler: &wgpu::Sampler,
+     tier: MeshTier<'_>,
++    paint: MeshPaint<'_>,
+     view_mode_buffer: &wgpu::Buffer,
+ ) -> wgpu::BindGroup {
+     self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+         label: Some("umber_mesh_camera_bind_group"),
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1181,8 +1181,24 @@
+                         offset: 0,
+                         size: None,
+                     }),
+                 },
++                wgpu::BindGroupEntry {
++                    binding: 9,
++                    resource: wgpu::BindingResource::TextureView(paint.view),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 10,
++                    resource: wgpu::BindingResource::Sampler(paint.sampler),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 11,
++                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
++                        buffer: paint.params_buffer,
++                        offset: 0,
++                        size: None,
++                    }),
++                },
+             ],
+         })
+     }
+ }
+
+[0m
+Now the `MeshBuffers` struct, upload, rebuild, and setters.
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1151, limit=130][0m
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1204,11 +1204,11 @@
+ }
+ 
+ /// GPU-resident mesh data for the viewport: vertex/index buffers plus the
+ /// per-mesh camera uniform buffer, the environment-flag uniform buffer,
+-/// the specular-tier uniform buffer, the view-mode uniform buffer, and
+-/// the combined bind group
+-/// (camera + IBL set + specular tier + view mode).
++/// the specular-tier uniform buffer, the view-mode uniform buffer, the
++/// paint tile-select uniform buffer, and the combined bind group
++/// (camera + IBL set + specular tier + view mode + paint set).
+ pub struct MeshBuffers {
+     vertex_buffer: wgpu::Buffer,
+     index_buffer: wgpu::Buffer,
+     index_count: u32,
+@@ -1220,12 +1220,23 @@
+     /// View-mode selector (mesh-pass binding 8): written per frame by
+     /// [`MeshPaintCallback::write_uniform`] from the callback's mode
+     /// (see [`Self::paint_callback_with_mode`] — Lit by default).
+     view_mode_buffer: wgpu::Buffer,
++    /// Tile-select uniform (mesh-pass binding 11): written by
++    /// [`Self::set_base_color_texture`] / [`Self::clear_base_color_texture`].
++    paint_params_buffer: wgpu::Buffer,
+     /// Currently bound environment (if any): retained so
+     /// [`Self::set_spec_params`] can rebuild the bind group without
+     /// dropping the map. Cloned handles — no GPU cost.
+     bound_env: Option<EnvIrradiance>,
++    /// Currently bound paint tile (if any): the texture view plus the
++    /// tile-select params, retained so [`Self::set_environment`] /
++    /// [`Self::set_spec_params`] rebuild the bind group without
++    /// dropping the paint. The cloned view keeps the tile's texture
++    /// alive (wgpu views hold their texture) until replaced or cleared
++    /// — see the bind-group lifetime note on
++    /// [`Self::set_base_color_texture`].
++    bound_paint: Option<BoundPaint>,
+     bind_group: wgpu::BindGroup,
+     /// Duplicated-vertex wireframe buffer (Wave-4 item 7): 3 verts per
+     /// triangle with barycentric corners, built once at upload from the
+     /// index list. Drawn non-indexed through the wire pipeline.
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1202,8 +1202,18 @@
+         })
+     }
+ }
+ 
++/// The retained half of a paint binding: the tile view plus the
++/// tile-select params the bind group was built with, so environment and
++/// spec rebuilds keep the paint without the caller re-binding it.
++struct BoundPaint {
++    /// Cloned tile view — keeps the `PaintTarget`'s texture alive.
++    view: wgpu::TextureView,
++    /// The params uploaded alongside (kept for introspection/rebuild).
++    params: PaintParams,
++}
++
+ /// GPU-resident mesh data for the viewport: vertex/index buffers plus the
+ /// per-mesh camera uniform buffer, the environment-flag uniform buffer,
+ /// the specular-tier uniform buffer, the view-mode uniform buffer, the
+ /// paint tile-select uniform buffer, and the combined bind group
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1260,9 +1260,12 @@
+ impl MeshBuffers {
+     /// Uploads `mesh` to GPU buffers. Recomputes vertex normals when the
+     /// source mesh has none (or a mismatched count) rather than failing —
+     /// OBJ files without `vn` lines and in-flight glTF/FBX loaders are
+-    /// expected to hit this path.
++    /// expected to hit this path. UVs ride the same rule: uploaded
++    /// verbatim when the counts match, zero-filled otherwise (a uv-less
++    /// mesh samples tile-local (0, 0) once a texture is bound; unbound
++    /// it renders the constant fallback either way).
+     pub fn upload(gpu: &GpuContext, mesh: &umber_mesh::MeshData) -> Result<Self, GpuError> {
+         let device = &gpu.device;
+         if mesh.positions.is_empty() {
+             return Err(GpuError::EmptyMesh);
+@@ -1275,17 +1278,23 @@
+             Cow::Borrowed(&mesh.normals)
+         } else {
+             Cow::Owned(compute_vertex_normals(&mesh.positions, &mesh.indices))
+         };
++        let uvs: Cow<'_, [[f32; 2]]> = if mesh.uvs.len() == mesh.positions.len() {
++            Cow::Borrowed(&mesh.uvs)
++        } else {
++            Cow::Owned(vec![[0.0; 2]; mesh.positions.len()])
++        };
+ 
+         let vertices: Vec<Vertex> = mesh
+             .positions
+             .iter()
+             .zip(normals.iter())
+-            .map(|(p, n)| Vertex {
++            .zip(uvs.iter())
++            .map(|((p, n), uv)| Vertex {
+                 position: *p,
+                 normal: *n,
+-                _pad: [0.0; 2],
++                uv: *uv,
+             })
+             .collect();
+ 
+         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+
+[0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1295, limit=130][0m
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1354,14 +1354,28 @@
+         &gpu.fallback_env_view,
+     ],
+     spec_buffer: &spec_buffer,
+ };
++// Unbound paint by default: the 1×1 fallback tile + the disabled
++// params (flags == 0); `set_base_color_texture` flips this when
++// the app binds a tile.
++let paint_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
++    label: Some("umber_mesh_paint_params_buffer"),
++    contents: bytemuck::bytes_of(&PaintParams::disabled()),
++    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
++});
++let paint = MeshPaint {
++    view: &gpu.fallback_paint_view,
++    sampler: &gpu.paint_sampler,
++    params_buffer: &paint_params_buffer,
++};
+ let bind_group = gpu.mesh_bind_group_full(
+     &uniform_buffer,
+     &flags_buffer,
+     &gpu.fallback_env_view,
+     &gpu.env_sampler,
+     tier,
++    paint,
+     &view_mode_buffer,
+ );
+ 
+ let index_count = u32::try_from(mesh.indices.len())
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1410,9 +1410,11 @@
+     uniform_buffer,
+     flags_buffer,
+     spec_buffer,
+     view_mode_buffer,
++    paint_params_buffer,
+     bound_env: None,
++    bound_paint: None,
+     bind_group,
+     wire_buffer,
+     wire_count,
+ })
+
+[0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1428, limit=115][0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1418, limit=12][0m
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1420,10 +1420,11 @@
+     })
+ }
+ 
+ /// Rebuilds the group-0 bind group from the current flags + bound
+-/// environment + spec buffer. Shared by [`Self::set_environment`]
+-/// and [`Self::set_spec_params`] (disjoint field borrows — no
++/// environment + spec buffer + bound paint. Shared by
++/// [`Self::set_environment`], [`Self::set_spec_params`], and
++/// [`Self::set_base_color_texture`] (disjoint field borrows — no
+ /// borrow of the whole `self`).
+ fn rebuild_bind_group(&mut self, gpu: &GpuContext) {
+     let (view, sampler) = match &self.bound_env {
+         Some(env) => (env.view(), env.sampler()),
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1445,14 +1445,34 @@
+     let tier = MeshTier {
+         prefilter_views: prefilter,
+         spec_buffer: &self.spec_buffer,
+     };
++    // Bound paint survives environment/spec rebuilds (and vice
++    // versa): each setter only replaces its own slice.
++    let fallback_paint = MeshPaint {
++        view: &gpu.fallback_paint_view,
++        sampler: &gpu.paint_sampler,
++        params_buffer: &self.paint_params_buffer,
++    };
++    let bound_paint;
++    let paint = match &self.bound_paint {
++        Some(bound) => {
++            bound_paint = MeshPaint {
++                view: &bound.view,
++                sampler: &gpu.paint_sampler,
++                params_buffer: &self.paint_params_buffer,
++            };
++            bound_paint
++        }
++        None => fallback_paint,
++    };
+     self.bind_group = gpu.mesh_bind_group_full(
+         &self.uniform_buffer,
+         &self.flags_buffer,
+         view,
+         sampler,
+         tier,
++        paint,
+         &self.view_mode_buffer,
+     );
+ }
+ 
+
+[0m
+Simplifying that rebuild block — the deferred-init local is needlessly clever.
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1447,24 +1447,19 @@
+     spec_buffer: &self.spec_buffer,
+ };
+ // Bound paint survives environment/spec rebuilds (and vice
+ // versa): each setter only replaces its own slice.
+-let fallback_paint = MeshPaint {
+-    view: &gpu.fallback_paint_view,
+-    sampler: &gpu.paint_sampler,
+-    params_buffer: &self.paint_params_buffer,
+-};
+-let bound_paint;
+ let paint = match &self.bound_paint {
+-    Some(bound) => {
+-        bound_paint = MeshPaint {
+-            view: &bound.view,
+-            sampler: &gpu.paint_sampler,
+-            params_buffer: &self.paint_params_buffer,
+-        };
+-        bound_paint
+-    }
+-    None => fallback_paint,
++    Some(bound) => MeshPaint {
++        view: &bound.view,
++        sampler: &gpu.paint_sampler,
++        params_buffer: &self.paint_params_buffer,
++    },
++    None => MeshPaint {
++        view: &gpu.fallback_paint_view,
++        sampler: &gpu.paint_sampler,
++        params_buffer: &self.paint_params_buffer,
++    },
+ };
+ self.bind_group = gpu.mesh_bind_group_full(
+     &self.uniform_buffer,
+     &self.flags_buffer,
+
+[0m
+Now the setters.
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1496,8 +1496,68 @@
+         .write_buffer(&self.spec_buffer, 0, bytemuck::bytes_of(&params));
+     self.rebuild_bind_group(gpu);
+ }
+ 
++/// Binds `target`'s view as the mesh pass's base-color tile
++/// (bindings 9–11) with `params` selecting the tile region — the
++/// viewport shows paint. Takes effect on the next
++/// [`Self::paint_callback`], like [`Self::set_environment`]; the
++/// bound environment and spec params are preserved.
++///
++/// # Bind-group lifetime
++///
++/// The rebuilt bind group clones `target`'s view, and a wgpu view
++/// holds its texture alive — so `target` (a tile-pool entry, a
++/// scratch surface, …) may be dropped or evicted right after this
++/// call without breaking later draws: the bound texels stay valid
++/// until replaced by another `set_base_color_texture` or
++/// [`Self::clear_base_color_texture`]. Re-binding after repainting
++/// the SAME `PaintTarget` is unnecessary (the view aliases the
++/// texture, not a snapshot) — but re-binding after the tile's
++/// texture was recreated (evict + recreate) IS required, since the
++/// new texture is a different GPU object.
++pub fn set_base_color_texture(
++    &mut self,
++    gpu: &GpuContext,
++    target: &crate::paint::PaintTarget,
++    params: PaintParams,
++) {
++    gpu.queue.write_buffer(
++        &self.paint_params_buffer,
++        0,
++        bytemuck::bytes_of(&params),
++    );
++    self.bound_paint = Some(BoundPaint {
++        view: target.view().clone(),
++        params,
++    });
++    self.rebuild_bind_group(gpu);
++}
++
++/// Unbinds the paint tile: the 1×1 fallback returns and the params
++/// flag goes to 0, so the shader takes the constant arm again —
++/// pixel-identical to a mesh that never bound paint. The next
++/// [`Self::paint_callback`] picks it up.
++pub fn clear_base_color_texture(&mut self, gpu: &GpuContext) {
++    let params = PaintParams::disabled();
++    gpu.queue.write_buffer(
++        &self.paint_params_buffer,
++        0,
++        bytemuck::bytes_of(&params),
++    );
++    self.bound_paint = None;
++    self.rebuild_bind_group(gpu);
++}
++
++/// The currently bound tile-select params (the last
++/// [`Self::set_base_color_texture`] value, or [`PaintParams::disabled`]).
++pub fn paint_params(&self) -> PaintParams {
++    self.bound_paint.as_ref().map_or_else(
++        PaintParams::disabled,
++        |bound| bound.params,
++    )
++}
++
+ /// Number of indices in this mesh's index buffer (3x the triangle count).
+ pub fn index_count(&self) -> u32 {
+     self.index_count
+ }
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/lib.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/lib.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/lib.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/lib.rs
+@@ -61,9 +61,9 @@
+ /// carries a depth attachment matching [`renderer::GpuContext`]'s pipeline.
+ pub const DEPTH_FORMAT_BITS: u8 = 32;
+ pub use renderer::{
+     grid_paint_shape, mesh_paint_shape, wire_paint_shape, CameraUniform, GpuContext, GpuError,
+-    GridPaintCallback, GridUniform, MeshBuffers, MeshPaintCallback, Vertex, WireColor,
++    GridPaintCallback, GridUniform, MeshBuffers, MeshPaintCallback, PaintParams, Vertex, WireColor,
+     WireframePaintCallback,
+ };
+ // App-facing handle re-exports: umber-app must not name wgpu types
+ // directly (architecture rule — GPU objects stay behind umber-gpu), but it
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/lib.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/lib.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/lib.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/lib.rs
+@@ -61,9 +61,9 @@
+ /// carries a depth attachment matching [`renderer::GpuContext`]'s pipeline.
+ pub const DEPTH_FORMAT_BITS: u8 = 32;
+ pub use renderer::{
+     grid_paint_shape, mesh_paint_shape, wire_paint_shape, CameraUniform, GpuContext, GpuError,
+-    GridPaintCallback, GridUniform, MeshBuffers, MeshPaintCallback, PaintParams, Vertex, WireColor,
++    GridPaintCallback, GridUniform, MeshBuffers, MeshPaintCallback, Vertex, WireColor,
+     WireframePaintCallback,
+ };
+ // App-facing handle re-exports: umber-app must not name wgpu types
+ // directly (architecture rule — GPU objects stay behind umber-gpu), but it
+
+[0m
+Core renderer work done. Now tests — first the latent arg-count fix, then the new pins.
+[0m# [0mTodos
+[✓] shaders.rs: UV attribute + group-0 paint bindings 9-11 + sampling + solo/unlit wiring
+[✓] renderer.rs: Vertex.uv, PaintParams, MeshPaint bundle, layout/pipeline/upload/setters
+[•] renderer.rs tests: fix stray &spec arg, add paint can-fail GPU tests + PaintParams unit tests
+[ ] paint.rs: viewport-sampling consumer contract docs
+[ ] postfx_viewport.rs collateral: vertex attrs + shade-pin string (no live locks)
+[ ] Gates: fmt, clippy, verify-kill, check --features gpu, check umber-app untouched
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -3104,15 +3104,22 @@
+         env.prefilter_view(2),
+     ],
+     spec_buffer: &spec,
+ };
++// Hand-built group binds the unbound-paint fallback (the
++// flag-0 proof below is about the IBL set — paint stays off).
++let paint = MeshPaint {
++    view: gpu.fallback_paint_view(),
++    sampler: gpu.paint_sampler(),
++    params_buffer: &masked.paint_params_buffer,
++};
+ masked.bind_group = gpu.mesh_bind_group_full(
+     &masked.uniform_buffer,
+     &flags,
+     env.view(),
+     env.sampler(),
+     tier,
+-    &spec,
++    paint,
+     &masked.view_mode_buffer,
+ );
+ let masked_bytes = render_mesh_offscreen(&gpu, &masked);
+ 
+
+[0m
+Now the non-GPU unit test (runs in CI) —
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1932,8 +1932,49 @@
+         assert!(glam::Vec3::from(n).is_finite());
+     }
+ }
+ 
++#[test]
++fn vertex_stays_32_bytes_with_the_uv_slot() {
++    // The uv replaced the old `_pad` in place: stride is unchanged,
++    // so the OpenPBR pipeline (locations 0–1) needs no update.
++    assert_eq!(size_of::<Vertex>(), 32);
++    assert_eq!(size_of::<PaintParams>(), 32);
++}
++
++#[test]
++fn paint_params_constructors_pin_the_tile_select() {
++    // Disabled: no flag, but still the identity transform — a stale
++    // uniform can never skew a re-bind.
++    let disabled = PaintParams::disabled();
++    assert_eq!(disabled.flags, 0);
++    assert_eq!(disabled.uv_offset, [0.0, 0.0]);
++    assert_eq!(disabled.uv_scale, [1.0, 1.0]);
++
++    // Single tile: sample uvs directly.
++    let identity = PaintParams::identity();
++    assert_eq!(identity.flags, PaintParams::HAS_TEXTURE);
++    assert_eq!(identity.uv_offset, [0.0, 0.0]);
++    assert_eq!(identity.uv_scale, [1.0, 1.0]);
++
++    // UDIM: offset = the tile's origin, scale 1 (the shader samples
++    // the fractional part for uvs inside the tile).
++    assert_eq!(PaintParams::for_udim(1001).uv_offset, [0.0, 0.0]);
++    assert_eq!(PaintParams::for_udim(1002).uv_offset, [1.0, 0.0]);
++    assert_eq!(PaintParams::for_udim(1011).uv_offset, [0.0, 1.0]);
++    assert_eq!(PaintParams::for_udim(1100).uv_offset, [9.0, 9.0]);
++    for tile in [1001, 1002, 1011, 1100] {
++        let params = PaintParams::for_udim(tile);
++        assert_eq!(params.flags, PaintParams::HAS_TEXTURE);
++        assert_eq!(params.uv_scale, [1.0, 1.0]);
++    }
++    // Out-of-range tiles clamp to the 10x10 grid (the udim crate's
++    // own clamp policy, mirrored here so a bad tile id can't
++    // address outside the texture).
++    assert_eq!(PaintParams::for_udim(999).uv_offset, [0.0, 0.0]);
++    assert_eq!(PaintParams::for_udim(9999).uv_offset, [9.0, 9.0]);
++}
++
+ #[cfg(feature = "gpu")]
+ mod gpu {
+     // NOTE: `wgpu::util::DeviceExt` (for `create_buffer_init` below)
+     // arrives via this glob: the parent module imports it and glob
+
+[0m
+Now the headless GPU can-fail tests. Checking the exact tail anchor first.
+[0m$ [0mtail -20 crates/umber-gpu/src/renderer.rs; echo ===; rg -n "fn fallback_diffuse_unchanged_across_spec_params" crates/umber-gpu/src/renderer.rs
+let mesh = fullscreen_mesh([0.0, 0.0, 1.0]);
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            let want = expected_procedural_byte([0.0, 0.0, 1.0]);
+            for (rough, metal) in [(0.0, 1.0), (1.0, 0.0), (0.0, 0.0), (1.0, 1.0), (0.5, 0.0)] {
+                buffers.set_spec_params(&gpu, SpecParams::new(rough, metal));
+                let bytes = render_mesh_offscreen(&gpu, &buffers);
+                assert_eq!(bytes.len(), 8 * 8 * 4);
+                for (i, px) in bytes.chunks_exact(4).enumerate() {
+                    for c in 0..4 {
+                        let diff = px[c].abs_diff(want[c]);
+                        assert!(
+                            diff <= 1,
+                            "rough={rough} metal={metal} pixel {i} ch{c}: got {px:?}, want {want:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+===
+3363:        fn fallback_diffuse_unchanged_across_spec_params() {
+[0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=3363, limit=30][0m
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -3391,6 +3391,303 @@
+                     }
+                 }
+             }
+         }
++
++        // --- Core-loop kill 1 (the viewport shows paint) tests. Same
++        // offscreen pattern as above, plus a real `PaintTarget` as the
++        // bound tile: the paint engine's own surface, not a hand-made
++        // texture — so the test proves the paint → viewport edge, not
++        // just sampling in the abstract.
++
++        /// Full-screen triangle with per-vertex uvs (the big-triangle
++        /// trick + degenerate uvs): every fragment interpolates to `uv`,
++        /// so with all three verts at a texel center the whole frame
++        /// samples ONE texel — filtering- and orientation-independent.
++        /// CCW like `fullscreen_mesh`, so backface culling keeps it.
++        fn fullscreen_textured_mesh(uv: [f32; 2]) -> umber_mesh::MeshData {
++            umber_mesh::MeshData {
++                positions: vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
++                normals: vec![[0.0, 0.0, 1.0]; 3],
++                uvs: vec![uv; 3],
++                indices: vec![0, 1, 2],
++                material_names: vec![],
++            }
++        }
++
++        /// A 2×2 paint tile through the real `PaintTarget` write path:
++        /// row 0 (v 0) red/green, row 1 blue/white. All four corners use
++        /// 0/255 channels only, so the sampled + identity-LUT bytes are
++        /// bit-exact, never rounding-adjacent.
++        fn paint_2x2(gpu: &GpuContext) -> crate::paint::PaintTarget {
++            let target = crate::paint::PaintTarget::new(&gpu.device, 2, 2);
++            let rgba: [u8; 16] = [
++                255, 0, 0, 255, 0, 255, 0, 255, //
++                0, 0, 255, 255, 255, 255, 255, 255,
++            ];
++            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
++                label: Some("umber_paint_test_upload_encoder"),
++            });
++            target
++                .write_region(&gpu.device, &mut encoder, (0, 0), (2, 2), &rgba)
++                .expect("2x2 region fits the 2x2 target");
++            gpu.queue.submit(Some(encoder.finish()));
++            target
++        }
++
++        /// Renders `buffers` in `mode` into a W×H linear target through
++        /// the real mesh pipeline (the `MeshPaintCallback::draw` state:
++        /// group 0 = the mesh's CURRENT bind group, group 1 = identity
++        /// LUT) and returns tightly-packed RGBA8 bytes.
++        fn render_mesh_mode(
++            gpu: &GpuContext,
++            buffers: &MeshBuffers,
++            mode: ViewMode,
++            w: u32,
++            h: u32,
++        ) -> Vec<u8> {
++            let device = &gpu.device;
++            gpu.queue.write_buffer(
++                &buffers.uniform_buffer,
++                0,
++                bytemuck::bytes_of(&CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y)),
++            );
++            gpu.queue.write_buffer(
++                &buffers.view_mode_buffer,
++                0,
++                bytemuck::bytes_of(&mode.uniform()),
++            );
++            let target = device.create_texture(&wgpu::TextureDescriptor {
++                label: Some("umber_paint_viewport_test_target"),
++                size: wgpu::Extent3d {
++                    width: w,
++                    height: h,
++                    depth_or_array_layers: 1,
++                },
++                mip_level_count: 1,
++                sample_count: 1,
++                dimension: wgpu::TextureDimension::D2,
++                format: wgpu::TextureFormat::Rgba8Unorm,
++                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
++                view_formats: &[],
++            });
++            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
++            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
++                label: Some("umber_paint_viewport_test_encoder"),
++            });
++            {
++                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
++                    label: Some("umber_paint_viewport_test_pass"),
++                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
++                        view: &view,
++                        resolve_target: None,
++                        ops: wgpu::Operations {
++                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
++                            store: wgpu::StoreOp::Store,
++                        },
++                        depth_slice: None,
++                    })],
++                    depth_stencil_attachment: None,
++                    timestamp_writes: None,
++                    occlusion_query_set: None,
++                    multiview_mask: None,
++                });
++                pass.set_pipeline(&gpu.pipeline);
++                pass.set_bind_group(0, &buffers.bind_group, &[]);
++                pass.set_bind_group(1, gpu.identity_lut.bind_group(), &[]);
++                pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
++                pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
++                pass.draw_indexed(0..buffers.index_count, 0, 0..1);
++            }
++            gpu.queue.submit(Some(encoder.finish()));
++            readback_packed(device, &gpu.queue, &target, w, h)
++        }
++
++        /// THE CAN-FAIL END-TO-END: the quad mesh with the 2×2 paint
++        /// tile bound renders the painted texel colors in solo
++        /// base-color — every pixel within 1 LSB of the written texel.
++        /// A viewport that ignored the bound texture (constant gray)
++        /// misses by ~70+ LSB; a broken tile select lands on the wrong
++        /// texel (255 LSB). The ≤1 LSB bound admits only unorm rounding.
++        #[test]
++        fn paint_texture_sample_appears_in_solo_base_color() {
++            let Some((adapter, device, queue)) = try_request_device() else {
++                eprintln!(
++                    "skipping paint_texture_sample_appears_in_solo_base_color: no wgpu adapter available"
++                );
++                return;
++            };
++            let gpu = GpuContext::new(
++                adapter,
++                device,
++                queue,
++                wgpu::TextureFormat::Rgba8Unorm,
++                None,
++            );
++            let target = paint_2x2(&gpu);
++            let mode = ViewMode::Solo(crate::SoloChannel::BaseColor);
++            // (texel-center uv, written texel bytes). Upload row 0 is v
++            // 0 (the no-V-flip convention — see `PaintParams`), so
++            // (0.25, 0.25) is red, (0.75, 0.75) white.
++            for (uv, want) in [
++                ([0.25, 0.25], [255u8, 0, 0, 255]),
++                ([0.75, 0.25], [0u8, 255, 0, 255]),
++                ([0.25, 0.75], [0u8, 0, 255, 255]),
++                ([0.75, 0.75], [255u8, 255, 255, 255]),
++            ] {
++                let mesh = fullscreen_textured_mesh(uv);
++                let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
++                buffers.set_base_color_texture(&gpu, &target, PaintParams::identity());
++                let bytes = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
++                assert_eq!(bytes.len(), 4 * 4 * 4);
++                for (i, px) in bytes.chunks_exact(4).enumerate() {
++                    for c in 0..4 {
++                        let diff = px[c].abs_diff(want[c]);
++                        assert!(
++                            diff <= 1,
++                            "uv {uv:?} pixel {i} ch{c}: got {px:?}, want {want:?}"
++                        );
++                    }
++                }
++            }
++        }
++
++        /// The unbound path in the color views: solo base-color AND
++        /// unlit render the `BASE_COLOR` constant through the identity
++        /// LUT — 0.72·255 = 183.6 → 184, 0.75·255 = 191.25 → 191.
++        /// Pixel-pins the fallback the textured test above compares
++        /// against (and the empty-mesh path the goldens pin).
++        #[test]
++        fn unbound_paint_renders_the_constant_in_color_views() {
++            let Some((adapter, device, queue)) = try_request_device() else {
++                eprintln!(
++                    "skipping unbound_paint_renders_the_constant_in_color_views: no wgpu adapter available"
++                );
++                return;
++            };
++            let gpu = GpuContext::new(
++                adapter,
++                device,
++                queue,
++                wgpu::TextureFormat::Rgba8Unorm,
++                None,
++            );
++            let want = [184u8, 184, 191, 255];
++            for mode in [
++                ViewMode::Solo(crate::SoloChannel::BaseColor),
++                ViewMode::Unlit,
++            ] {
++                let mesh = fullscreen_textured_mesh([0.25, 0.25]);
++                let buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
++                let bytes = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
++                assert_eq!(bytes.len(), 4 * 4 * 4);
++                for (i, px) in bytes.chunks_exact(4).enumerate() {
++                    for c in 0..4 {
++                        let diff = px[c].abs_diff(want[c]);
++                        assert!(
++                            diff <= 1,
++                            "{mode:?} pixel {i} ch{c}: got {px:?}, want {want:?}"
++                        );
++                    }
++                }
++            }
++        }
++
++        /// Paint feeds the lighting math, not just the solo proxy: the
++        /// red texel bound in Lit renders near (96, 0, 0) — red × the
++        /// +Z procedural env (t = 0.5, diffuse 0) — instead of the
++        /// constant's (69, 75, 98). Both halves pinned: the textured
++        /// bytes AND the unbound bytes they must differ from.
++        #[test]
++        fn lit_mode_multiplies_the_bound_texture_by_light() {
++            let Some((adapter, device, queue)) = try_request_device() else {
++                eprintln!(
++                    "skipping lit_mode_multiplies_the_bound_texture_by_light: no wgpu adapter available"
++                );
++                return;
++            };
++            let gpu = GpuContext::new(
++                adapter,
++                device,
++                queue,
++                wgpu::TextureFormat::Rgba8Unorm,
++                None,
++            );
++            let target = paint_2x2(&gpu);
++            let mesh = fullscreen_textured_mesh([0.25, 0.25]);
++            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
++            let plain = render_mesh_mode(&gpu, &buffers, ViewMode::Lit, 4, 4);
++            let closed = expected_procedural_byte([0.0, 0.0, 1.0]);
++            assert_eq!(closed, [69, 75, 98, 255]);
++            for (i, px) in plain.chunks_exact(4).enumerate() {
++                for c in 0..4 {
++                    assert!(
++                        px[c].abs_diff(closed[c]) <= 1,
++                        "unbound lit pixel {i} ch{c}: got {px:?}, want {closed:?}"
++                    );
++                }
++            }
++
++            buffers.set_base_color_texture(&gpu, &target, PaintParams::identity());
++            let bytes = render_mesh_mode(&gpu, &buffers, ViewMode::Lit, 4, 4);
++            assert_eq!(bytes.len(), 4 * 4 * 4);
++            for (i, px) in bytes.chunks_exact(4).enumerate() {
++                // Red × env (0.375, 0.41, 0.51): 0.375·255 = 95.6 → 96.
++                assert!(
++                    px[0].abs_diff(96) <= 2,
++                    "bound lit pixel {i}: red got {px:?}, want ≈96"
++                );
++                assert_eq!(
++                    (px[1], px[2]),
++                    (0, 0),
++                    "bound lit pixel {i}: no green/blue may survive the red albedo: {px:?}"
++                );
++            }
++        }
++
++        /// Clearing restores the fallback byte-for-byte: bind → clear
++        /// renders IDENTICAL bytes to a mesh that never bound paint (the
++        /// `fallback_ignores_bound_map` pattern for the paint set — the
++        /// flag flip is uniform control flow, so no sampling residue).
++        #[test]
++        fn clear_base_color_texture_restores_the_fallback() {
++            let Some((adapter, device, queue)) = try_request_device() else {
++                eprintln!(
++                    "skipping clear_base_color_texture_restores_the_fallback: no wgpu adapter available"
++                );
++                return;
++            };
++            let gpu = GpuContext::new(
++                adapter,
++                device,
++                queue,
++                wgpu::TextureFormat::Rgba8Unorm,
++                None,
++            );
++            let target = paint_2x2(&gpu);
++            let mode = ViewMode::Solo(crate::SoloChannel::BaseColor);
++            let mesh = fullscreen_textured_mesh([0.75, 0.75]);
++            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
++            let plain = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
++
++            buffers.set_base_color_texture(&gpu, &target, PaintParams::identity());
++            let textured = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
++            assert_ne!(
++                plain, textured,
++                "binding white over the constant must change the frame"
++            );
++
++            buffers.clear_base_color_texture(&gpu);
++            let restored = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
++            assert_eq!(
++                plain, restored,
++                "clearing the paint must restore fallback bytes exactly"
++            );
++            assert_eq!(buffers.paint_params().flags, 0);
++            assert_eq!(
++                buffers.paint_params().uv_scale,
++                [1.0, 1.0],
++                "cleared params keep the identity transform"
++            );
++        }
+     }
+ }
+
+[0m
+Tests in. Now the paint.rs consumer contract.
+[0m← [0mEdit crates/umber-gpu/src/paint.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/paint.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/paint.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/paint.rs
+@@ -18,8 +18,18 @@
+ //! across separate `splat_dabs` calls — wgpu's resource hazard tracking
+ //! orders successive compute passes on the same texture, so a second call
+ //! always sees the first call's writes. See `shaders::PAINT_COMPUTE_SHADER`
+ //! for the shader-side half of this contract.
++//!
++//! **Viewport sampling (core-loop kill 1):** a tile's [`PaintTarget::view`]
++//! binds straight into the mesh pass
++//! ([`crate::renderer::MeshBuffers::set_base_color_texture`]) as the
++//! base-color tile — no copy, no conversion. The target's `Rgba8Unorm`
++//! bytes ARE the sampled texels (row 0 is v 0 — mesh UVs are used
++//! as-is, no V flip; see [`crate::renderer::PaintParams`]' tile-select
++//! convention). Repainting the same target needs no re-bind (the view
++//! aliases the texture); recreating it (evict + recreate) does — the
++//! bind group holds the old texture alive (cloned view) until replaced.
+ 
+ use std::borrow::Cow;
+ use std::mem::size_of;
+ use std::num::NonZeroU64;
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/paint.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/paint.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/paint.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/paint.rs
+@@ -334,9 +334,10 @@
+     &self.texture
+ }
+ 
+ /// The texture's default view — for display callbacks sampling the
+-/// paint surface.
++/// paint surface, and for the mesh pass's base-color tile binding
++/// ([`crate::renderer::MeshBuffers::set_base_color_texture`]).
+ pub fn view(&self) -> &wgpu::TextureView {
+     &self.texture_view
+ }
+ 
+
+[0m
+[0m→ [0mRead crates/umber-gpu/src/postfx_viewport.rs[90m [offset=360, limit=15][0m
+[0m→ [0mRead crates/umber-gpu/src/postfx_viewport.rs[90m [offset=794, limit=28][0m
+[0m
+[0m← [0mEdit crates/umber-gpu/src/postfx_viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/postfx_viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/postfx_viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/postfx_viewport.rs
+@@ -365,9 +365,11 @@
+     entry_point: Some("vs_main"),
+     buffers: &[Some(wgpu::VertexBufferLayout {
+         array_stride: size_of::<Vertex>() as u64,
+         step_mode: wgpu::VertexStepMode::Vertex,
+-        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
++        // Same three attributes as the direct pipeline
++        // (renderer.rs): position + normal + paint uv.
++        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+     })],
+     compilation_options: wgpu::PipelineCompilationOptions::default(),
+ },
+ // The direct pipeline's state (renderer.rs), target aside.
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/postfx_viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/postfx_viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/postfx_viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/postfx_viewport.rs
+@@ -803,9 +803,11 @@
+         body.contains("apply_display_lut("),
+         route.mesh_applies_lut(),
+         "{route:?}: {body}"
+     );
+-    let shared = "shade(in.world_normal, in.world_pos)";
++    // The shared helper call, uv included (core-loop kill 1
++    // threads the paint uv through `shade`).
++    let shared = "shade(in.world_normal, in.world_pos, in.uv)";
+     assert!(body.contains(shared), "{body}");
+ }
+ assert!(
+     !wgsl_fn(MESH_SHADER, "shade").contains("apply_display_lut("),
+
+[0m
+All edits done. Running the gates, one at a time.
+[0m# [0mTodos
+[✓] shaders.rs: UV attribute + group-0 paint bindings 9-11 + sampling + solo/unlit wiring
+[✓] renderer.rs: Vertex.uv, PaintParams, MeshPaint bundle, layout/pipeline/upload/setters
+[✓] renderer.rs tests: fix stray &spec arg, add paint can-fail GPU tests + PaintParams unit tests
+[✓] paint.rs: viewport-sampling consumer contract docs
+[✓] postfx_viewport.rs collateral: vertex attrs + shade-pin string (no live locks)
+[•] Gates: fmt, clippy, verify-kill, check --features gpu, check umber-app untouched
+[0m
+[0m$ [0mcargo fmt --all && echo FMT_OK
+FMT_OK
+[0m
+[0m$ [0mcargo clippy -p umber-gpu --all-targets -- -D warnings 2>&1 | tail -20
+error: this function has too many arguments (8/7)
+    --> crates/umber-gpu/src/renderer.rs:1119:5
+     |
+1119 | /     pub(crate) fn mesh_bind_group_full(
+1120 | |         &self,
+1121 | |         uniform_buffer: &wgpu::Buffer,
+1122 | |         flags_buffer: &wgpu::Buffer,
+...    |
+1127 | |         view_mode_buffer: &wgpu::Buffer,
+1128 | |     ) -> wgpu::BindGroup {
+     | |________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_arguments
+     = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: could not compile `umber-gpu` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `umber-gpu` (lib test) due to 2 previous errors
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -166,8 +166,21 @@
+     /// The tile-select uniform bound at slot 11.
+     pub params_buffer: &'a wgpu::Buffer,
+ }
+ 
++/// The tail of the mesh pass's group-0 bind group (bindings 4–11): the
++/// specular tier, the paint set, and the view-mode selector. One bundle
++/// so [`GpuContext::mesh_bind_group_full`] stays at clippy's 7-arg
++/// floor — it would otherwise take eight.
++pub(crate) struct MeshTail<'a> {
++    /// The specular tier (bindings 4–7).
++    pub tier: MeshTier<'a>,
++    /// The base-color paint set (bindings 9–11).
++    pub paint: MeshPaint<'a>,
++    /// The view-mode selector (binding 8).
++    pub view_mode_buffer: &'a wgpu::Buffer,
++}
++
+ /// Per-frame camera uniform, matching `shaders::MESH_SHADER`'s `Camera`
+ /// struct layout exactly (16-byte alignment: `light_dir` carries an unused
+ /// `w` so it packs cleanly after the mat4x4).
+ #[repr(C)]
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1134,11 +1134,9 @@
+     uniform_buffer: &wgpu::Buffer,
+     flags_buffer: &wgpu::Buffer,
+     env_view: &wgpu::TextureView,
+     env_sampler: &wgpu::Sampler,
+-    tier: MeshTier<'_>,
+-    paint: MeshPaint<'_>,
+-    view_mode_buffer: &wgpu::Buffer,
++    tail: MeshTail<'_>,
+ ) -> wgpu::BindGroup {
+     self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+         label: Some("umber_mesh_camera_bind_group"),
+         layout: &self.bind_group_layout,
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1136,8 +1136,13 @@
+     env_view: &wgpu::TextureView,
+     env_sampler: &wgpu::Sampler,
+     tail: MeshTail<'_>,
+ ) -> wgpu::BindGroup {
++    let MeshTail {
++        tier,
++        paint,
++        view_mode_buffer,
++    } = tail;
+     self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+         label: Some("umber_mesh_camera_bind_group"),
+         layout: &self.bind_group_layout,
+         entries: &[
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1388,11 +1388,13 @@
+     &uniform_buffer,
+     &flags_buffer,
+     &gpu.fallback_env_view,
+     &gpu.env_sampler,
+-    tier,
+-    paint,
+-    &view_mode_buffer,
++    MeshTail {
++        tier,
++        paint,
++        view_mode_buffer: &view_mode_buffer,
++    },
+ );
+ 
+ let index_count = u32::try_from(mesh.indices.len())
+     .map_err(|_| GpuError::IndexCountOverflow(mesh.indices.len()))?;
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1482,11 +1482,13 @@
+         &self.uniform_buffer,
+         &self.flags_buffer,
+         view,
+         sampler,
+-        tier,
+-        paint,
+-        &self.view_mode_buffer,
++        MeshTail {
++            tier,
++            paint,
++            view_mode_buffer: &self.view_mode_buffer,
++        },
+     );
+ }
+ 
+ /// Swaps the bound environment: `Some(env)` samples the convolved
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -3170,11 +3170,13 @@
+     &masked.uniform_buffer,
+     &flags,
+     env.view(),
+     env.sampler(),
+-    tier,
+-    paint,
+-    &masked.view_mode_buffer,
++    MeshTail {
++        tier,
++        paint,
++        view_mode_buffer: &masked.view_mode_buffer,
++    },
+ );
+ let masked_bytes = render_mesh_offscreen(&gpu, &masked);
+ 
+ assert_eq!(
+
+[0m
+[0m$ [0mcargo fmt --all && cargo clippy -p umber-gpu --all-targets -- -D warnings 2>&1 | tail -20
+Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+error: methods `paint_sampler` and `fallback_paint_view` are never used
+   --> crates/umber-gpu/src/renderer.rs:388:19
+    |
+355 | impl GpuContext {
+    | --------------- methods in this implementation
+...
+388 |     pub(crate) fn paint_sampler(&self) -> &wgpu::Sampler {
+    |                   ^^^^^^^^^^^^^
+...
+394 |     pub(crate) fn fallback_paint_view(&self) -> &wgpu::TextureView {
+    |                   ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: could not compile `umber-gpu` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `umber-gpu` (lib test) due to 1 previous error
+[0m
+Wiring the accessors into the non-gated path instead of allowing dead code.
+[0m$ [0mrg -n "fallback_paint_view|paint_sampler" crates/umber-gpu/src/renderer.rs
+297:    fallback_paint_view: wgpu::TextureView,
+302:    paint_sampler: wgpu::Sampler,
+388:    pub(crate) fn paint_sampler(&self) -> &wgpu::Sampler {
+389:        &self.paint_sampler
+394:    pub(crate) fn fallback_paint_view(&self) -> &wgpu::TextureView {
+395:        &self.fallback_paint_view
+881:        let (fallback_paint_view, paint_sampler) = Self::fallback_paint_resources(&device);
+1050:            fallback_paint_view,
+1051:            paint_sampler,
+1107:            label: Some("umber_mesh_paint_sampler"),
+1383:            view: &gpu.fallback_paint_view,
+1384:            sampler: &gpu.paint_sampler,
+1472:                sampler: &gpu.paint_sampler,
+1476:                view: &gpu.fallback_paint_view,
+1477:                sampler: &gpu.paint_sampler,
+3165:                view: gpu.fallback_paint_view(),
+3166:                sampler: gpu.paint_sampler(),
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1379,10 +1379,10 @@
+     contents: bytemuck::bytes_of(&PaintParams::disabled()),
+     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+ });
+ let paint = MeshPaint {
+-    view: &gpu.fallback_paint_view,
+-    sampler: &gpu.paint_sampler,
++    view: gpu.fallback_paint_view(),
++    sampler: gpu.paint_sampler(),
+     params_buffer: &paint_params_buffer,
+ };
+ let bind_group = gpu.mesh_bind_group_full(
+     &uniform_buffer,
+
+[0m
+[0m← [0mEdit crates/umber-gpu/src/renderer.rs
+Index: /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
++++ /home/bessa/Projects/umber/crates/umber-gpu/src/renderer.rs
+@@ -1468,14 +1468,14 @@
+ // versa): each setter only replaces its own slice.
+ let paint = match &self.bound_paint {
+     Some(bound) => MeshPaint {
+         view: &bound.view,
+-        sampler: &gpu.paint_sampler,
++        sampler: gpu.paint_sampler(),
+         params_buffer: &self.paint_params_buffer,
+     },
+     None => MeshPaint {
+-        view: &gpu.fallback_paint_view,
+-        sampler: &gpu.paint_sampler,
++        view: gpu.fallback_paint_view(),
++        sampler: gpu.paint_sampler(),
+         params_buffer: &self.paint_params_buffer,
+     },
+ };
+ self.bind_group = gpu.mesh_bind_group_full(
+
+[0m
+[0m$ [0mcargo fmt --all && cargo clippy -p umber-gpu --all-targets -- -D warnings 2>&1 | tail -20
+Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.10s
+[0m
+Clippy clean. Now verify-kill and the feature-gated compile check.
+[0m$ [0mbash scripts/verify-kill.sh crates/umber-gpu/src/shaders.rs crates/umber-gpu/src/renderer.rs crates/umber-gpu/src/paint.rs crates/umber-gpu/src/postfx_viewport.rs 2>&1 | tail -20
+== (2) rustfmt canonical (.rs files only) ==
+  PASS: fmt clean
+== (3) the trap greps ==
+  PASS: crates/umber-gpu/src/shaders.rs matches!-arity: 0 suspicious
+  WARN: crates/umber-gpu/src/renderer.rs — possible thiserror source-field trap: 456:                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+  WARN: crates/umber-gpu/src/renderer.rs — possible thiserror source-field trap: 464:                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+  PASS: crates/umber-gpu/src/renderer.rs matches!-arity: 0 suspicious
+  WARN: crates/umber-gpu/src/paint.rs — possible thiserror source-field trap: 637:            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(PAINT_COMPUTE_SHADER)),
+  WARN: crates/umber-gpu/src/paint.rs — possible thiserror source-field trap: 763:                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+  PASS: crates/umber-gpu/src/paint.rs matches!-arity: 0 suspicious
+  WARN: crates/umber-gpu/src/postfx_viewport.rs — possible thiserror source-field trap: 352:            source: wgpu::ShaderSource::Wgsl(MESH_SHADER.into()),
+  WARN: crates/umber-gpu/src/postfx_viewport.rs — possible thiserror source-field trap: 405:            source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER.into()),
+  PASS: crates/umber-gpu/src/postfx_viewport.rs matches!-arity: 0 suspicious
+== (4) doc-comment attachment (blank line between doc blocks) ==
+  PASS: crates/umber-gpu/src/shaders.rs doc-attachment: clean
+  PASS: crates/umber-gpu/src/renderer.rs doc-attachment: clean
+  PASS: crates/umber-gpu/src/paint.rs doc-attachment: clean
+  PASS: crates/umber-gpu/src/postfx_viewport.rs doc-attachment: clean
+
+VERIFY-KILL: crates/umber-gpu/src/shaders.rs crates/umber-gpu/src/renderer.rs crates/umber-gpu/src/paint.rs crates/umber-gpu/src/postfx_viewport.rs — balanced, fmt-clean, trap-scanned
+[0m
+[0m$ [0mcargo check -p umber-gpu --all-targets --features gpu 2>&1 | tail -25
+Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.18s
+[0m
+[0m$ [0mcargo clippy -p umber-gpu --all-targets --features gpu -- -D warnings 2>&1 | tail -25
+Checking umber-color v0.1.0 (/home/bessa/Projects/umber/crates/umber-color)
+    Checking umber-core v0.1.0 (/home/bessa/Projects/umber/crates/umber-core)
+    Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.61s
+[0m
+Both clippy configurations pass. Proving the read-only app surface still compiles.
+[0m$ [0mcargo check -p umber-app --all-targets 2>&1 | tail -8
+Checking umber-wasm v0.1.0 (/home/bessa/Projects/umber/crates/umber-wasm)
+    Checking umber-export v0.1.0 (/home/bessa/Projects/umber/crates/umber-export)
+    Checking umber-core v0.1.0 (/home/bessa/Projects/umber/crates/umber-core)
+    Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Checking umber-bake v0.1.0 (/home/bessa/Projects/umber/crates/umber-bake)
+    Checking umber-brush v0.1.0 (/home/bessa/Projects/umber/crates/umber-brush)
+    Checking umber-app v0.1.0 (/home/bessa/Projects/umber/crates/umber-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 34.53s
+[0m
+All gates green. Final review of the WGSL diff before reporting.
+[0m→ [0mRead crates/umber-gpu/src/shaders.rs[90m [offset=119, limit=115][0m
+[0m
+[0m$ [0mgit diff --stat; echo ===; git status --short
+Cargo.lock                              |   1 +
+ crates/umber-gpu/Cargo.toml             |   1 +
+ crates/umber-gpu/src/paint.rs           |  13 +-
+ crates/umber-gpu/src/postfx_viewport.rs |   8 +-
+ crates/umber-gpu/src/renderer.rs        | 763 ++++++++++++++++++++++++++++++--
+ crates/umber-gpu/src/shaders.rs         | 138 ++++--
+ crates/umber-gpu/src/tile_pool.rs       | 322 ++++++++++++--
+ 7 files changed, 1137 insertions(+), 109 deletions(-)
+===
+ M Cargo.lock
+ M crates/umber-gpu/Cargo.toml
+ M crates/umber-gpu/src/paint.rs
+ M crates/umber-gpu/src/postfx_viewport.rs
+ M crates/umber-gpu/src/renderer.rs
+ M crates/umber-gpu/src/shaders.rs
+ M crates/umber-gpu/src/tile_pool.rs
+[0m
+[0m$ [0mgit diff crates/umber-gpu/Cargo.toml Cargo.lock | head -40; echo ===; git diff --stat crates/umber-gpu/src/tile_pool.rs
+diff --git a/Cargo.lock b/Cargo.lock
+index 2e933d4..95236a8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4834,6 +4834,7 @@ dependencies = [
+  "profiling",
+  "serde",
+  "thiserror 2.0.21",
++ "umber-core",
+  "umber-graph",
+  "umber-mesh",
+  "wgpu",
+diff --git a/crates/umber-gpu/Cargo.toml b/crates/umber-gpu/Cargo.toml
+index af8b27c..5c68005 100644
+--- a/crates/umber-gpu/Cargo.toml
++++ b/crates/umber-gpu/Cargo.toml
+@@ -10,6 +10,7 @@ repository.workspace = true
+ thiserror = { workspace = true }
+ serde = { workspace = true }
+ log = { workspace = true }
++umber-core = { workspace = true }
+ umber-mesh = { workspace = true }
+ umber-graph = { workspace = true }
+ glam = { workspace = true }
+===
+ crates/umber-gpu/src/tile_pool.rs | 322 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 286 insertions(+), 36 deletions(-)
+[0m
+[0m$ [0mcargo clippy -p umber-gpu --all-targets -- -D warnings 2>&1 | tail -3 && cargo fmt --all --check && echo ALL_GREEN
+Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.26s
+Diff in /home/bessa/Projects/umber/crates/umber-gpu/src/tile_pool.rs:399:
+         use std::collections::HashSet;
+         let base = PoolKey::new(7, ChannelKind::Color, TileId::new(1, 2));
+         // Each component varies independently.
+[31m-        assert_ne!(
+(B[m[31m-            base,
+(B[m[31m-            PoolKey::new(8, ChannelKind::Color, TileId::new(1, 2))
+(B[m[31m-        );
+(B[m[31m-        assert_ne!(
+(B[m[31m-            base,
+(B[m[31m-            PoolKey::new(7, ChannelKind::Data, TileId::new(1, 2))
+(B[m[31m-        );
+(B[m[31m-        assert_ne!(
+(B[m[31m-            base,
+(B[m[31m-            PoolKey::new(7, ChannelKind::Color, TileId::new(2, 1))
+(B[m[31m-        );
+(B[m[32m+        assert_ne!(base, PoolKey::new(8, ChannelKind::Color, TileId::new(1, 2)));
+(B[m[32m+        assert_ne!(base, PoolKey::new(7, ChannelKind::Data, TileId::new(1, 2)));
+(B[m[32m+        assert_ne!(base, PoolKey::new(7, ChannelKind::Color, TileId::new(2, 1)));
+(B[m         let mut set = HashSet::new();
+         set.insert(base);
+         assert!(set.contains(&PoolKey::new(7, ChannelKind::Color, TileId::new(1, 2))));
+Diff in /home/bessa/Projects/umber/crates/umber-gpu/src/tile_pool.rs:438:
+     #[test]
+     fn memory_budget_math_pins_the_review_figures() {
+         // One tile is exactly 1 MiB (512² RGBA8).
+[31m-        assert_eq!(
+(B[m[31m-            u64::from(TILE_SIZE) * u64::from(TILE_SIZE) * 4,
+(B[m[31m-            1 << 20
+(B[m[31m-        );
+(B[m[32m+        assert_eq!(u64::from(TILE_SIZE) * u64::from(TILE_SIZE) * 4, 1 << 20);
+(B[m         // A fully-resident 4K layer-channel is 64 tiles = 64 MiB — the
+         // review's "~64MB per layer-channel" figure.
+         assert_eq!(64 * (1 << 20), 64 << 20);
+[0m
+[0m$ [0mcargo fmt --all && cargo fmt --all --check && echo TREE_FMT_CLEAN; git diff --stat crates/umber-gpu/src/tile_pool.rs
+TREE_FMT_CLEAN
+ crates/umber-gpu/src/tile_pool.rs | 310 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 274 insertions(+), 36 deletions(-)
+[0m
+[0m$ [0mcargo clippy -p umber-gpu --all-targets -- -D warnings 2>&1 | tail -2 && git diff --stat -- crates/umber-gpu/src/shaders.rs crates/umber-gpu/src/renderer.rs crates/umber-gpu/src/paint.rs crates/umber-gpu/src/postfx_viewport.rs
+Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.54s
+ crates/umber-gpu/src/paint.rs           |  13 +-
+ crates/umber-gpu/src/postfx_viewport.rs |   8 +-
+ crates/umber-gpu/src/renderer.rs        | 763 ++++++++++++++++++++++++++++++--
+ crates/umber-gpu/src/shaders.rs         | 138 ++++--
+ 4 files changed, 849 insertions(+), 73 deletions(-)
+[0m
+[0m# [0mTodos
+[✓] shaders.rs: UV attribute + group-0 paint bindings 9-11 + sampling + solo/unlit wiring
+[✓] renderer.rs: Vertex.uv, PaintParams, MeshPaint bundle, layout/pipeline/upload/setters
+[✓] renderer.rs tests: fix stray &spec arg, add paint can-fail GPU tests + PaintParams unit tests
+[✓] paint.rs: viewport-sampling consumer contract docs
+[✓] postfx_viewport.rs collateral: vertex attrs + shade-pin string (no live locks)
+[✓] Gates: fmt, clippy, verify-kill, check --features gpu, check umber-app untouched
+[0m
+# CORE-LOOP CRITICAL 1 — the viewport shows paint: report
+
+## 1. Built
+
+**`crates/umber-gpu/src/shaders.rs`** (my surface)
+- `VertexInput` gains `@location(2) uv`; `VertexOutput` gains `@location(2) uv`, passed through in `vs_main`.
+- New group-0 bindings **9** (`paint_tex: texture_2d<f32>`, rgba8 filterable), **10** (`paint_sampler`), **11** (`PaintParams` uniform: `uv_offset`, `uv_scale`, `flags` + pad, 32 B). Always populated (1×1 fallback + `flags == 0`), same pattern as the IBL set.
+- `paint_tile_uv()` (`(uv − offset) × scale`), `paint_albedo()` (flag-gated sample, else `BASE_COLOR` constant). `shade()` takes `uv`; albedo feeds diffuse AND the specular F0. Both fragment entries pass `in.uv`. Solo base-color returns `paint_albedo(uv)`; **Unlit returns `paint_albedo(uv)` too** (was constant); all other solos/previews unchanged. The `VIEW_MODE_WGSL` and display-LUT blocks are byte-untouched (their verbatim tests still hold). `OPENPBR_SHADER` untouched.
+
+**`crates/umber-gpu/src/renderer.rs`** (my surface)
+- `Vertex._pad` → `Vertex.uv` **in place** (stride stays 32 B; OpenPBR pipeline needs no change) + `size_of` const-assert. `upload()` copies `MeshData.uvs` verbatim on count match, zero-fills otherwise.
+- New `PaintParams` (`disabled()` / `identity()` / `for_udim(tile)`, 32 B const-assert), `MeshPaint` + `MeshTier`-style `MeshTail` bundles, bindings 9–11 in the group-0 layout, UV in the mesh pipeline's vertex layout.
+- `GpuContext` owns `fallback_paint_view` + filtering clamp `paint_sampler`. `MeshBuffers` owns `paint_params_buffer` + `bound_paint`; new `set_base_color_texture(gpu, &PaintTarget, params)` / `clear_base_color_texture()` / `paint_params()`; `rebuild_bind_group` preserves paint across env/spec changes and vice versa. `MeshPaintCallback::draw` unchanged (paint rides inside group 0).
+- Tests (6 new): `vertex_stays_32_bytes_with_the_uv_slot`, `paint_params_constructors_pin_the_tile_select` (both run in CI), and gpu-gated `paint_texture_sample_appears_in_solo_base_color` (the can-fail pin: 2×2 real `PaintTarget` via `write_region`, degenerate-UV fullscreen triangle, all 4 texels, ≤1 LSB), `unbound_paint_renders_the_constant_in_color_views` ([184,184,191,255]), `lit_mode_multiplies_the_bound_texture_by_light` (bound red ≈ (96,0,0) vs constant (69,75,98)), `clear_base_color_texture_restores_the_fallback` (byte-exact restore).
+- Also fixed a **latent break**: `fallback_ignores_bound_map` passed 7 args (`&spec` twice — tier already carries it) to the 6-param `mesh_bind_group_full`. Invisible to CI (never builds `--features gpu`); fixed while adding the paint bundle. All its assertions unchanged.
+
+**`crates/umber-gpu/src/paint.rs`** (my surface): module-doc viewport-sampling contract + `view()` doc edge. No code change (`PaintTarget` was already `TEXTURE_BINDING`-capable).
+
+**`crates/umber-gpu/src/postfx_viewport.rs`** (collateral, 2 lines, no live locks registered): scene-linear pipeline vertex attrs + the `shade(...)` pin string. Both mechanically forced — the deliverable is impossible without them (pipeline creation fails at runtime; the LUT-gate test pins the call text).
+
+## 2. Judgment calls (all in module docs)
+- **Group 0 append, not new group 2**: every existing draw, the postfx scene pass, and the wireframe layout-reuse keep working with zero call-site changes; unbound renders stay pixel-identical. The group-2 per-channel reservation in `view_mode.rs` stands for the full channel set.
+- **`(uv − offset) × scale` UDIM convention**; identity default; `for_udim` clamps to 1001–1100 mirroring `umber-mesh::udim`.
+- **No V flip**: upload row 0 = v 0, mesh UVs used as-is (pinned by test orientation comments).
+- **Bind-group lifetime**: the group clones the tile view (views Arc-hold textures) — dropping/evicting the `PaintTarget` after binding is safe; recreating it requires re-bind. Repainting the same target needs none.
+- **v1 boundary**: one bound tile, one shared sampler, base-color only; per-channel textures + tile-pool atlas stay deferred.
+- **Unlit shows the texture** (albedo-only view); consistent with `view_mode.rs`'s "albedo/base-color only".
+- Root re-export of `PaintParams` deliberately left for the dragon's app follow-up (`umber_gpu::renderer::PaintParams` is reachable).
+- No requirements-row mark: this kill doesn't complete a full row (single texture; channels/undo/save still open).
+
+## 3. Unverified
+- **WGSL was never executed here**: `cargo check`/`clippy` don't compile WGSL (naga runs at pipeline creation), and the contract forbids `cargo test`. The new GPU tests + all pre-existing gpu-gated tests need a real run (`cargo test -p umber-gpu --features gpu`, ideally lavapipe/WARP in CI). Reviewed the WGSL op-by-op instead (bitwise-`&` on `u32`, `textureSample` arity, struct offsets 0/8/16 — all 4/8-aligned, 32 B total).
+- New `vertex_attr_array![... 2 => Float32x2]` and `SamplerBindingType::Filtering` shapes confirmed by `cargo check` only, not by pipeline creation.
+- Exactness chain (degenerate-UV → texel-center → ≤1 LSB) rests on f32 barycentric error (~1e-7 texel) staying far under half an LSB — sound, but adapter variance is why the bound is ≤1, not 0.
+
+## 4. Deferred
+- App wiring (`umber-app` viewport binds the active tile per frame) — dragon's follow-up, untouched as ordered.
+- `ref_scene.rs:14` doc ("`Vertex` drops UVs") is now stale; left for whoever owns that file.
+- Multi-tile binding, per-channel textures, custom sampler per tile — recorded in `PaintParams`/`MeshPaint` docs.
+
+## 5. Gates run
+- `cargo fmt --all` + `--check`: **PASS** tree-wide (final state).
+- `cargo clippy -p umber-gpu --all-targets -- -D warnings`: **PASS**; plus `--features gpu`: **PASS** (covers the new gated tests). One fix en route: 8-arg constructor → `MeshTail` bundle (clippy counts `self`).
+- `bash scripts/verify-kill.sh` on all four files: **PASS** (balanced, fmt-clean; the five `source:` WARNs are named false positives — wgpu descriptor fields, not thiserror).
+- `cargo check -p umber-gpu --all-targets --features gpu`: **PASS**. `cargo check -p umber-app --all-targets`: **PASS** (read-only surface unbroken).
+- **Never committed.** Note: a concurrent kill is reworking `tile_pool.rs` + added `umber-core` to `umber-gpu/Cargo.toml` mid-session; I built on the clean tree, intersected it only via the mandated repo-wide `cargo fmt` (mechanical, semantics-preserving), and claim none of those files.
+- Golden status: `golden.rs` untouched (its tests are pure-comparison, no rendering); the renderer fallback byte-pins (`(69,75,98)`, flag-0 byte-identity) are preserved by construction — unbound shader math is textually the old math with `albedo == BASE_COLOR`.

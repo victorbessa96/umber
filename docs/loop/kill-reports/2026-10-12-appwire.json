@@ -1,0 +1,309 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+Wiring the CORE-LOOP texture bind — reading the contract and landing zone first.
+[0m→ [0mRead CLAUDE.md
+[0m→ [0mRead docs/specs/2026-10-12-strategy-review.md
+[0m→ [0mRead crates/umber-app/src/viewport.rs
+[0m→ [0mRead crates/umber-app/src/paint_state.rs
+[0m→ [0mRead crates/umber-app/src/main.rs
+[0m✱ [0mGrep "set_base_color_texture|clear_base_color_texture|struct PaintParams|for_tile|PaintParams"[90m in crates/umber-gpu/src · 49 matches[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1145][0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=55, limit=130][0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [offset=1520, limit=60][0m
+Now let me check the exact GPU-side signatures I need to call against.
+[0m✱ [0mGrep "pub fn paint_callback_with_mode|pub fn callback|pub fn wire_callback|pub fn view\(|pub fn dimensions|PaintParams"[90m in crates/umber-gpu/src · 44 matches[0m
+[0m✱ [0mGrep "Resize"[90m in crates/umber-gpu/src/paint_thread.rs · 4 matches[0m
+[0m✱ [0mGrep "pub use|pub mod renderer|PaintParams"[90m in crates/umber-gpu/src/lib.rs · 49 matches[0m
+[0m→ [0mRead crates/umber-gpu/src/postfx_viewport.rs[90m [limit=30, offset=490][0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [limit=60, offset=1595][0m
+[0m→ [0mRead crates/umber-gpu/src/lib.rs[90m [offset=66, limit=15][0m
+[0m→ [0mRead crates/umber-gpu/src/renderer.rs[90m [limit=30, offset=480][0m
+[0m→ [0mRead crates/umber-gpu/src/paint_thread.rs[90m [limit=50, offset=230][0m
+All APIs confirmed. Key findings that shape the edit:
+
+- Real constructor is `PaintParams::for_udim(tile)` (no `for_tile(tile, size)` exists) — same `(tile-1001)%10, /10` convention as `PaintState`'s `local_texel`.
+- `PaintParams` is not re-exported at the `umber_gpu` root; must use `umber_gpu::renderer::PaintParams` (precedent: `main.rs` uses `umber_gpu::renderer::depth_format()`).
+- `Resize` replaces the `PaintTarget` (new GPU texture), so params-equality caching would go stale — must rebind every frame when paint is present.
+- `main.rs:144` already passes paint through; the borrow fix is internal to `viewport.ui` (the paint branch currently *moves* `paint`).
+[0m
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -4,11 +4,41 @@
+ //! Never touches a `wgpu` type by name — every value it holds or passes to
+ //! `umber_gpu` is opaque to this crate (received from or handed to
+ //! `umber_gpu`'s API), per the architecture rule that GPU objects stay
+ //! behind `umber-gpu`.
++//!
++//! CORE-LOOP follow-up (the strategy-review disposition's first core-loop
++//! kill: viewport texture binding; the GPU side —
++//! `MeshBuffers::set_base_color_texture` / `clear_base_color_texture` —
++//! landed first and waited uncallable). Each frame with a mesh loaded, the
++//! paint session's ACTIVE tile is bound as the mesh pass's base-color
++//! texture just before the draw callback is built, so the stroke you paint
++//! is the stroke you see lit in 3D. Judgment calls, all v1:
++//!
++//! * One tile bound at a time — the active tile
++//!   (`PaintState::active_tile` + `tile_target`), not a hardcoded 1001.
++//!   Single-tile sessions always have the active tile at 1001, so their
++//!   behavior is unchanged; multi-tile meshes show the tile under the last
++//!   pointer. The tile-pool atlas + page-table indirection (every tile at
++//!   once) is the architecture doc's named later slice.
++//! * The tile select is `PaintParams::for_udim` (the real constructor —
++//!   there is no `for_tile(tile, size)`); no target size enters the bind
++//!   because the shader samples in UV space and the texel density lives in
++//!   `PaintState`.
++//! * Re-bound EVERY frame while paint is present: a `Resize` command
++//!   replaces the tile's texture object, so a params-equality skip would
++//!   keep sampling the evicted texture. The matching clear is skipped once
++//!   already cleared (flags == 0 holds no view — provably identical).
++//! * The bind sits before the route match, so the Direct and PostFx arms
++//!   both see paint (the PostFx path reuses the mesh's own callback).
++//! * No paint session (or a session tile with no target yet) clears back
++//!   to the constant arm — pixel-identical to a mesh that never bound
++//!   paint, and the mesh-less empty-state hero path is untouched (it binds
++//!   nothing at all).
+ 
+ use egui::{Color32, PointerButton, Response, Sense, Ui};
+ use umber_gpu::postfx::PostChain;
++use umber_gpu::renderer::PaintParams;
+ use umber_gpu::{
+     DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, PostFxViewport, SoloChannel,
+     ViewMode, ViewportRoute,
+ };
+
+[0m
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -200,9 +200,9 @@
+         .as_ref()
+         .is_some_and(|p| p.projection().viewport_paints());
+ if !painting {
+     self.handle_input(ui, &response);
+-} else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint) {
++} else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
+     if let Some(pos) = response.interact_pointer_pos() {
+         let hit = self
+             .pick_uv(rect, mesh, pos)
+             .map(|uv| egui::Pos2::new(uv[0], uv[1]));
+
+[0m
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -233,10 +233,15 @@
+         post.release();
+     }
+ }
+ 
+-if let Some(mesh) = &self.mesh {
++if let Some(mesh) = self.mesh.as_mut() {
+     profiling::scope!("display_pass");
++    // CORE-LOOP bind (see the module docs): the active paint tile
++    // becomes the mesh pass's base-color texture before EITHER
++    // route's callback is built, so paint shows in 3D the frame it
++    // lands. No session / no target clears to the constant arm.
++    bind_paint_target(gpu, mesh, paint.as_deref());
+     let aspect = rect.width() / rect.height();
+     let view_proj = self.camera.view_proj(aspect);
+     // Normalized once here (review #6): the shader re-normalizes
+     // per-fragment defensively, but the uniform arrives clean.
+
+[0m
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -272,9 +272,9 @@
+ let build = || PostFxViewport::new(gpu);
+ let post = self.postfx.get_or_insert_with(build);
+ let callback = post.callback(
+     gpu,
+-    mesh,
++    &*mesh,
+     uniform,
+     self.view_mode,
+     display_lut,
+     postfx,
+
+[0m
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -285,15 +285,15 @@
+             }
+         };
+         ui.painter().add(shape);
+         if self.show_wireframe {
+-            let wire = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::default());
++            let wire = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::default());
+             ui.painter().add(umber_gpu::wire_paint_shape(rect, wire));
+         }
+         // Cage overlay (§6:59): after the wireframe so its edges win,
+         // skipped entirely when off (byte-identical to cage-off).
+         if self.show_cage {
+-            let cage = gpu.wire_callback(mesh, uniform, umber_gpu::WireColor::cage());
++            let cage = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::cage());
+             ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
+         }
+     }
+ }
+
+[0m
+Now the bind helper, placed between the `impl` block and `view_mode_menu`:
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -347,8 +347,41 @@
+         }
+     }
+ }
+ 
++/// Binds the paint session's active tile as `mesh`'s base-color texture
++/// (the CORE-LOOP follow-up — see the module docs). `None` (view-only
++/// device, or a tile with no target yet) clears to the constant arm, which
++/// renders pixel-identical to a mesh that never bound paint.
++///
++/// UV derivation: [`PaintParams::for_udim`] subtracts the tile origin
++/// (`(tile - 1001) % 10`, `(tile - 1001) / 10`) at scale 1 — the exact
++/// inverse of [`crate::paint_state`] tile-local mapping (its `local_texel`
++/// subtracts the same offsets before the V-flipped texel map), so the
++/// shader's `(uv - offset) * scale` lands on the bound tile's own texels.
++fn bind_paint_target(
++    gpu: &GpuContext,
++    mesh: &mut MeshBuffers,
++    paint: Option<&crate::paint_state::PaintState>,
++) {
++    let Some(paint) = paint else {
++        // Already on the constant arm: nothing is bound and the skip is
++        // provably identical (no view held, flags already 0).
++        if mesh.paint_params().flags != 0 {
++            mesh.clear_base_color_texture(gpu);
++        }
++        return;
++    };
++    let tile = paint.active_tile();
++    // Unconditional while paint is present: a `Resize` command replaces the
++    // tile's texture object, so a params-equality skip would keep sampling
++    // the evicted texture. One bind group + one small uniform write a frame.
++    match paint.tile_target(tile) {
++        Some(target) => mesh.set_base_color_texture(gpu, target, PaintParams::for_udim(tile)),
++        None => mesh.clear_base_color_texture(gpu),
++    }
++}
++
+ /// The View menu's view-mode rows (where the wireframe/grid toggles
+ /// live): Lit / Unlit / Solo (+ channel picker) / Mesh-map preview
+ /// (+ bake-map picker). Edits `mode` in place; returns whether it
+ /// changed this frame. Every string goes through [`tr`] (both
+
+[0m
+`main.rs` needs no edit — the call chain already passes `self.paint.as_deref_mut()` and `viewport.ui`'s signature is unchanged; the borrow fix (`paint.as_mut()` instead of moving `paint`) is internal to `viewport.rs`. Running gates, one at a time:
+[0m$ [0mcargo fmt --all
+(no output)
+[0m
+[0m$ [0mcargo clippy -p umber-app --all-targets -- -D warnings
+Checking umber-gpu v0.1.0 (/home/bessa/Projects/umber/crates/umber-gpu)
+    Checking umber-brush v0.1.0 (/home/bessa/Projects/umber/crates/umber-brush)
+    Checking umber-bake v0.1.0 (/home/bessa/Projects/umber/crates/umber-bake)
+    Checking umber-app v0.1.0 (/home/bessa/Projects/umber/crates/umber-app)
+error[E0596]: cannot borrow `paint` as mutable, as it is not declared as mutable
+   --> crates/umber-app/src/viewport.rs:204:77
+    |
+204 |         } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
+    |                                                                             ^^^^^ cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+186 |         mut paint: Option<&mut crate::paint_state::PaintState>,
+    |         +++
+
+For more information about this error, try `rustc --explain E0596`.
+error: could not compile `umber-app` (bin "umber") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `umber-app` (bin "umber" test) due to 1 previous error
+[0m
+The contract's trap list called this one (`Option<&mut T>` needs a `mut` binding). Fixing:
+[0m← [0mEdit crates/umber-app/src/viewport.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/viewport.rs
+@@ -182,9 +182,9 @@
+ pub fn ui(
+     &mut self,
+     ui: &mut Ui,
+     gpu: &GpuContext,
+-    paint: Option<&mut crate::paint_state::PaintState>,
++    mut paint: Option<&mut crate::paint_state::PaintState>,
+     display_lut: Option<&DisplayLut>,
+     postfx: &PostChain,
+ ) {
+     let rect = ui.available_rect_before_wrap();
+
+[0m
+[0m$ [0mcargo clippy -p umber-app --all-targets -- -D warnings
+Checking umber-app v0.1.0 (/home/bessa/Projects/umber/crates/umber-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.53s
+[0m
+[0m$ [0mbash scripts/verify-kill.sh crates/umber-app/src/viewport.rs crates/umber-app/src/main.rs
+== (1) brace balance + fn/test census ==
+  PASS: crates/umber-app/src/viewport.rs braces 68/68
+  PASS: crates/umber-app/src/main.rs braces 171/171
+== (2) rustfmt canonical (.rs files only) ==
+  PASS: fmt clean
+== (3) the trap greps ==
+  PASS: crates/umber-app/src/viewport.rs matches!-arity: 0 suspicious
+  PASS: crates/umber-app/src/main.rs matches!-arity: 0 suspicious
+== (4) doc-comment attachment (blank line between doc blocks) ==
+  PASS: crates/umber-app/src/viewport.rs doc-attachment: clean
+  PASS: crates/umber-app/src/main.rs doc-attachment: clean
+
+VERIFY-KILL: crates/umber-app/src/viewport.rs crates/umber-app/src/main.rs — balanced, fmt-clean, trap-scanned
+[0m
+All gates green. Quick read-only check of the final diff:
+[0m$ [0mgit status --short && git diff --stat
+M crates/umber-app/src/viewport.rs
+ crates/umber-app/src/viewport.rs | 80 +++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 74 insertions(+), 6 deletions(-)
+[0m
+Only `viewport.rs` touched; `main.rs` verified clean, no edit needed. Report per the contract:
+
+## 1. Built
+- **`crates/umber-app/src/viewport.rs`** (only file changed, +74/−6): the CORE-LOOP viewport texture binding.
+  - `Viewport::ui` frame path: `if let Some(mesh) = &self.mesh` → `self.mesh.as_mut()`, and `bind_paint_target(gpu, mesh, paint.as_deref())` runs before either route arm builds its callback, so Direct **and** PostFx frames (PostFx reuses the mesh's own callback internally) see paint.
+  - New free fn `bind_paint_target`: active tile via `paint.active_tile()` + `paint.tile_target(tile)` → `mesh.set_base_color_texture(gpu, target, PaintParams::for_udim(tile))`; `None` session or missing tile → `mesh.clear_base_color_texture(gpu)` (fallback arm; mesh-less hero path binds nothing, pixel-identical).
+  - Borrow fix: the paint-input branch `(self.mesh_data.as_ref(), paint)` **moved** `paint`; now `paint.as_mut()` (+ `mut` on the param — the contract's E0596 trap, which clippy caught once), keeping it alive for the bind.
+  - `post.callback(gpu, mesh…)` / `wire_callback(mesh…)` call sites adjusted to `&*mesh`.
+- **`crates/umber-app/src/main.rs`**: read, verified, **untouched** — `PanelViewer` already passes `self.paint.as_deref_mut()` at :144 and `viewport.ui`'s signature is unchanged, so the borrow flow needed nothing structural.
+- Tests added: **0** — per the brief, the golden safety is existing tests passing unchanged plus the renderer's own tests (the app has no GPU golden for the viewport; `bind_paint_target` needs a live device and can't run headless).
+
+## 2. Judgment calls (all also in `viewport.rs` module docs + `bind_paint_target` docs)
+- **Bind the active tile, not hardcoded 1001.** Single-tile sessions always have active == 1001 (behavior unchanged); multi-tile shows the tile under the last pointer. The atlas + page-table (all tiles at once) is the documented later slice. Renderer docs prescribe exactly this ("the app binds the active tile's `PaintTarget`").
+- **Real API is `PaintParams::for_udim(tile)`** — the brief's `for_tile(tile_index, mesh_tiles)` doesn't exist. Imported as `umber_gpu::renderer::PaintParams` (`PaintParams` is not re-exported at the crate root; precedent: `main.rs`'s `umber_gpu::renderer::depth_format()`). UV derivation: offset `((tile−1001)%10, (tile−1001)/10)`, scale 1 — the exact inverse of `paint_state`'s `local_texel` offsets (verified by reading both); no target size enters the bind (shader samples UV space).
+- **Rebind every frame while paint is present.** `Resize` replaces the tile's texture object (`paint_thread.rs:245`), so a params-equality skip would sample the evicted texture. Cost: one bind group + one small uniform write/frame. The `clear` path *is* skipped when already cleared (`flags == 0` holds no view — provably identical).
+- No requirements-row mark: this is one link of the core-loop phase, not a completed row.
+
+## 3. Unverified
+- No GPU/runtime run here (`cargo build`/`test` forbidden; CI is the gate). The bind→draw path (uniform write → rebuilt bind group → callback samples paint) is verified by reading `renderer.rs` (`set_base_color_texture` :1538, `clear…` :1557, `paint_params` :1567, callback clones `self.bind_group` :1616), not by execution. Headless CI without an adapter can't exercise it either — needs a GPU runner or the Gate-0 journey test.
+
+## 4. Deferred (recorded in module docs)
+- Multi-tile atlas + page-table indirection; per-channel textures (group-2 reservation still holds); pressure/undo/save legs of the core loop (other kills' surfaces).
+
+## 5. Gates run
+- `cargo fmt --all`: **pass** (no output).
+- `cargo clippy -p umber-app --all-targets -- -D warnings`: **pass** (one E0596 on the first run from the missing `mut` — fixed, re-run clean).
+- `bash scripts/verify-kill.sh crates/umber-app/src/viewport.rs crates/umber-app/src/main.rs`: **pass** — braces balanced, fmt clean, trap greps and doc-attachment clean.

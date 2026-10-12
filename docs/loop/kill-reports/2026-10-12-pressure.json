@@ -1,0 +1,241 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+Fixing the constant-pressure stroke — bridging live touch force into the paint engine.
+[0m→ [0mRead AGENTS.md
+[0m→ [0mRead docs/specs/2026-10-12-strategy-review.md
+[0m→ [0mRead crates/umber-app/src/viewport.rs
+[0m→ [0mRead crates/umber-app/src/paint_state.rs
+[0m✱ [0mGrep "pressure"[90m in crates/umber-brush/src · 100 matches[0m
+[0m✱ [0mGrep "pressure"[90m in crates/umber-app/src · 29 matches[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1094][0m
+I've mapped the stroke path through the viewport; now confirming the touch pressure source and how pressure shapes the dabs.
+[0m→ [0mRead crates/umber-brush/src/dab_adapter.rs
+[0m→ [0mRead crates/umber-brush/src/wiring.rs
+[0m→ [0mRead crates/stylus/src/lib.rs[90m [limit=80][0m
+[0m
+[0m$ [0mls docs/claw-artifacts/ 2>/dev/null; ls ~/.cargo/registry/src/*/egui-0.36*/src/ 2>/dev/null | head -30
+ag-psd
+openpbr
+openusd
+stylus
+umber-gpu
+umber-mesh
+wasmtime
+animation_manager.rs
+atomics
+cache
+callstack.rs
+containers
+context.rs
+data
+debug_text.rs
+drag_and_drop.rs
+grid.rs
+gui_zoom.rs
+hit_test.rs
+id.rs
+id_salt.rs
+input_state
+interaction.rs
+introspection.rs
+layers.rs
+layout.rs
+lib.rs
+load
+load.rs
+memory
+os.rs
+painter.rs
+pass_state.rs
+placer.rs
+plugin.rs
+response.rs
+sense.rs
+[0m
+[0m$ [0mls ~/.cargo/registry/src/*/egui-0.36*/src/input_state/ 2>/dev/null; rg -n "force|struct MultiTouchInfo|struct Touch\b|enum TouchPhase|force" ~/.cargo/registry/src/*/egui-0.36.2/src/event.rs ~/.cargo/registry/src/*/egui-0.36.2/src/input_state/touch_state.rs 2>/dev/null | head -60
+mod.rs
+touch_state.rs
+wheel_state.rs
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:12:pub struct MultiTouchInfo {
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:58:    /// Current force of the touch (average of the forces of the individual fingers). This is a
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:62:    /// is not capable of measuring the touch force at all.
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:66:    pub force: f32,
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:112:    avg_force: f32,
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:125:    /// Current force of the touch. A value in the interval [0.0 .. 1.0]
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:128:    /// is not capable of measuring the touch force.
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:129:    force: Option<f32>,
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:150:                    force,
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:153:                        self.active_touches.insert(id, ActiveTouch { pos, force });
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:159:                            touch.force = force;
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:220:                force: state.current.avg_force,
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:258:                avg_force: 0.0,
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:263:            // first pass: calculate force and center of touch positions:
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:265:                state.avg_force += touch.force.unwrap_or(0.0);
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:269:            state.avg_force *= num_touches_recip;
+[0m
+[0m$ [0mrg -n "force|TouchPhase|pub struct Touch\b|MultiTouchInfo|multi_touch" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/event.rs | head -40; echo ---; sed -n '1,140p' ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs
+rg: /home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/event.rs: IO error for operation on /home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/event.rs: No such file or directory (os error 2)
+---
+use core::fmt::Debug;
+use std::collections::BTreeMap;
+
+use crate::{
+    Event, RawInput, TouchId, TouchPhase,
+    data::input::TouchDeviceId,
+    emath::{Pos2, Vec2, normalized_angle},
+};
+
+/// All you probably need to know about a multi-touch gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MultiTouchInfo {
+    /// Point in time when the gesture started.
+    pub start_time: f64,
+
+    /// Position of the pointer at the time the gesture started.
+    pub start_pos: Pos2,
+
+    /// Center position of the current gesture (average of all touch points).
+    pub center_pos: Pos2,
+
+    /// Number of touches (fingers) on the surface. Value is ≥ 2 since for a single touch no
+    /// [`MultiTouchInfo`] is created.
+    pub num_touches: usize,
+
+    /// Proportional zoom factor (pinch gesture).
+    /// * `zoom = 1`: no change
+    /// * `zoom < 1`: pinch together
+    /// * `zoom > 1`: pinch spread
+    pub zoom_delta: f32,
+
+    /// 2D non-proportional zoom factor (pinch gesture).
+    ///
+    /// For horizontal pinches, this will return `[z, 1]`,
+    /// for vertical pinches this will return `[1, z]`,
+    /// and otherwise this will return `[z, z]`,
+    /// where `z` is the zoom factor:
+    /// * `zoom = 1`: no change
+    /// * `zoom < 1`: pinch together
+    /// * `zoom > 1`: pinch spread
+    pub zoom_delta_2d: Vec2,
+
+    /// Rotation in radians. Moving fingers around each other will change this value. This is a
+    /// relative value, comparing the orientation of fingers in the current frame with the previous
+    /// frame. If all fingers are resting, this value is `0.0`.
+    pub rotation_delta: f32,
+
+    /// Relative movement (comparing previous frame and current frame) of the average position of
+    /// all touch points. Without movement this value is `Vec2::ZERO`.
+    ///
+    /// Note that this may not necessarily be measured in screen points (although it _will_ be for
+    /// most mobile devices). In general (depending on the touch device), touch coordinates cannot
+    /// be directly mapped to the screen. A touch always is considered to start at the position of
+    /// the pointer, but touch movement is always measured in the units delivered by the device,
+    /// and may depend on hardware and system settings.
+    pub translation_delta: Vec2,
+
+    /// Current force of the touch (average of the forces of the individual fingers). This is a
+    /// value in the interval `[0.0 .. =1.0]`.
+    ///
+    /// Note 1: A value of `0.0` either indicates a very light touch, or it means that the device
+    /// is not capable of measuring the touch force at all.
+    ///
+    /// Note 2: Just increasing the physical pressure without actually moving the finger may not
+    /// necessarily lead to a change of this value.
+    pub force: f32,
+}
+
+/// The current state (for a specific touch device) of touch events and gestures.
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub(crate) struct TouchState {
+    /// Technical identifier of the touch device. This is used to identify relevant touch events
+    /// for this [`TouchState`] instance.
+    device_id: TouchDeviceId,
+
+    /// Active touches, if any.
+    ///
+    /// `TouchId` is the unique identifier of the touch. It is valid as long as the finger/pen touches the surface. The
+    /// next touch will receive a new unique ID.
+    ///
+    /// Refer to [`ActiveTouch`].
+    active_touches: BTreeMap<TouchId, ActiveTouch>,
+
+    /// If a gesture has been recognized (i.e. when exactly two fingers touch the surface), this
+    /// holds state information
+    gesture_state: Option<GestureState>,
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+struct GestureState {
+    start_time: f64,
+    start_pointer_pos: Pos2,
+    pinch_type: PinchType,
+    previous: Option<DynGestureState>,
+    current: DynGestureState,
+}
+
+/// Gesture data that can change over time
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+struct DynGestureState {
+    /// used for proportional zooming
+    avg_distance: f32,
+
+    /// used for non-proportional zooming
+    avg_abs_distance2: Vec2,
+
+    avg_pos: Pos2,
+
+    avg_force: f32,
+
+    heading: f32,
+}
+
+/// Describes an individual touch (finger or digitizer) on the touch surface. Instances exist as
+/// long as the finger/pen touches the surface.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+struct ActiveTouch {
+    /// Current position of this touch, in device coordinates (not necessarily screen position)
+    pos: Pos2,
+
+    /// Current force of the touch. A value in the interval [0.0 .. 1.0]
+    ///
+    /// Note that a value of 0.0 either indicates a very light touch, or it means that the device
+    /// is not capable of measuring the touch force.
+    force: Option<f32>,
+}
+
+impl TouchState {
+    pub fn new(device_id: TouchDeviceId) -> Self {
+        Self {
+            device_id,
+            active_touches: Default::default(),
+            gesture_state: None,
+        }
+    }
+[0m
+[0m$ [0mrg -n "force|TouchPhase|pub struct Touch|multi_touch" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/data/input.rs ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs 2>/dev/null | head -50; echo ===; rg -rn "pub enum TouchPhase|Touch \{" ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/ 2>/dev/null | head
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:567:        self.multi_touch()
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:590:        if let Some(multi_touch) = self.multi_touch() {
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:591:            multi_touch.zoom_delta_2d
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:618:        self.multi_touch()
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:631:        self.multi_touch().map_or_else(
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:815:    /// let multi_touch = ui.input(|i| i.multi_touch());
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:816:    /// if let Some(multi_touch) = multi_touch {
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:817:    ///     zoom *= multi_touch.zoom_delta;
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:818:    ///     rotation += multi_touch.rotation_delta;
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:834:    pub fn multi_touch(&self) -> Option<MultiTouchInfo> {
+===
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/mod.rs:            if let Event::n device_id, .. } = event {
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:struct Activen
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:                Event::n
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/input_state/touch_state.rs:                        self.active_touches.insert(id, Activen pos, force });
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/data/input/touch.rs:n {
+/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/data/input/event.rs:    n
+[0m
+[93m[1m! [0mpermission requested: external_directory (/home/bessa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/data/input/*); auto-rejecting
+[0m✗ [0mcat ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/data/input/event.rs | rg -n "Touch|force|phase" -i | head -40; echo ===; cat ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.36.2/src/data/input/touch.rs 2>/dev/null | head -100 failed
+[91m[1mError: [0mThe user rejected permission to use this specific tool call.
