@@ -85,24 +85,24 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
 1. **Read docs/loop/loop-prompt.md first** — it is the loop contract
    (rules, queue, iteration protocol, failure modes). Read
    docs/loop/queue.md second — per-item state lives there.
-2. The four criticals landed as a commit chain in one evening
-   (e802f92 → bed9e0a). The CI red streak on their wake (5 reds:
-   compositor pin d1aeeb3-fixed, then the smudge test's stale one-entry
-   premise f78e6c1→9e4fb9e→bed9e0a) is closed: bed9e0a pushed, the
-   stacking contract (entries stack, one per stroke — sibling test
-   two_paint_strokes_undo_reverts_only_the_latest pins it) is the truth.
-3. B2 is the open kill: tile pool (1MiB/tile, 64MiB/layer-channel at 4K)
-   + compositor exist in umber-gpu, but the live paint target is still
-   512² (paint_state.rs:233 TARGET_SIZE). Wire 4K as the live target +
-   per-layer channel routing; the memory model is already prototyped in
-   the tilepool kill report (/tmp/umber-tilepool-*.json).
+2. The criticals landed as a commit chain in one evening and the CI red
+   streak on their wake is closed: bed9e0a (the smudge stacking-contract
+   fix — the sibling test two_paint_strokes_undo_reverts_only_the_latest
+   pins the contract) went green on both platforms, and the wave
+   continued green through f867215 (pressure API), 6430623 (the raw
+   Event::Touch source fix), and 15c072e (Gate 0 itself).
+3. B2 landed v1 (133dd12): DEFAULT_TARGET_SIZE=4096,
+   with_target_size for pinned test geometry, the Texture Sets size
+   combo, target_size.txt sidecar persistence — per-set/per-channel
+   sizing remains the named follow-up (C1 worklist #4).
 4. The smudge-test lesson generalizes: when a feature changes a
    cross-cutting invariant (every stroke = one history entry), grep the
    test suite for every consumer of the OLD invariant before marking done.
 5. Kill-locks before dispatch (scripts/kill-locks.sh add|check|remove|list)
    — no live locks; zero claws running as of this write.
-6. 599+ tests green on both platforms pre-core-loop-phase; expect the
-   count to move as B2/B5/B6 land.
+6. Test counts: 599+ green on both platforms through the core-loop
+   close; the C1 audit's Pass 2 verified zero stale-premise tests
+   (the smudge class is fully repaired).
 
 ## History pointers (audit trail, preserved deliberately)
 

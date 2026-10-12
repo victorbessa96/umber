@@ -4,7 +4,7 @@
 
 Umber is a ground-up reimagining of the 3D texture-painting DCC: paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps, and export engine-ready texture sets — fast, local-first, and free forever. Built completely in Rust for **Windows and Linux**.
 
-> Status: **Core-loop phase — the product spine under construction.** The engine crates are real (brush engine, bakers, export driver, node graph, .umber project I/O — 599+ workspace tests, CI green on both platforms per commit), and the strategy review (2026-10-12) named the six missing user-path joins: viewport texture binding, 4K live target, stroke undo, pixel save/load, pen pressure, per-layer channels. Four landed; the 4K live wiring and pen pressure are the open kills before Gate 0 (the journey test: FBX → 4K pressure paint → lit 3D → undo/redo → save/reopen → export decode-verified). GUI polish and the P2 tier are frozen until Gate 0 passes. No release tag until then.
+> Status: **Core loop COMPLETE — Gate 0 passed on both CI platforms (2026-10-12).** The journey is whole end to end: FBX in → 4K painting with real pen pressure → paint visible in the lit 3D viewport → undo/redo byte-exact → save/reopen loses nothing → engine-ready export, decode-verified (run 38255484123). The engine crates (brush engine, bakers, export driver, node graph, .umber project I/O — 599+ workspace tests, CI green on both platforms per commit) now have the user path they were missing. GUI polish and the P2 tier stay frozen until the owner lifts the freeze; no release tag yet — SPEC ratification and the perf baseline lead the pre-release checklist.
 
 ## Why
 
@@ -60,12 +60,12 @@ umber/
 ├── docs/
 │   ├── research/      # claw research reports (Painter inventory, competitors, ecosystem)
 │   └── specs/         # design specs per subsystem
-└── crates/            # Rust workspace — 11 crates, 250+ tests, CI green
+└── crates/            # Rust workspace — 14 crates, 599+ tests, CI green
 ```
 
 ## Contributing
 
-Early stage — the design docs are the product right now. Read `SPEC.md`, open issues for anything missing from the requirements, and watch `docs/research/` as the feature inventory lands. Code contributions open when Wave 1 breaks ground (see `STATE.md`).
+The core loop is real and Gate-0-verified — the app paints, undoes, saves, and exports end to end (see `STATE.md` for the current worklist). Read `SPEC.md` and `docs/specs/requirements.md`, pick from the roadmap surfaces, and open issues for anything missing. Code contributions welcome; the workspace map lives in `CLAUDE.md`/`AGENTS.md`.
 
 ## Credit
 
