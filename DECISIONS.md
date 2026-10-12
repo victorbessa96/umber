@@ -86,3 +86,31 @@ Context: the §9 survey (docs/research/ocio-aces-integration.md) found ocio-rs 0
 Options rejected: bundled-in-CI (multi-minute C++ compile per commit — violates the load directive); pre-installed system OCIO (packagers' path, unportable); no ocio at all (§9 P0 requires it).
 Owner: Razul
 Revisit when: the display-transform panel ships — then the bundled build gets its one-time manual run + golden tests against the CPU reference path.
+
+## [2026-10-12 01:46] strategy-review-acceptance-core-loop-phase
+Decision: The claude-opus adversarial strategy review (docs/specs/2026-10-12-strategy-review.md) is ACCEPTED IN FULL. The roadmap re-cuts around the six criticals on the user path; the core-loop phase (B1..B6, Gate 0 the exit gate) becomes the only active hunt; GUI chrome + P2 frozen until Gate 0 passes; ✓ marks split into "✓ code" vs "✓ reachable" with only reachable counting toward the floor; the Gate-0 journey test added to the release checklist as the FIRST gate. No tag, no release, no v0.1 claim until Gate 0 passes.
+Context: 40 kills ran against the requirements TABLE while the product's spine (see-paint / undo-paint / save-paint / pressure / channels) was unbuilt — the review's finding "the P0/P1 completion claim is not honest as stated" was correct, and its disposition (queue order: truth pass → core loop → freeze the rest) was adopted as the active wave.
+Options rejected: continue the GUI/P2 queue (polishing a scaffold); tag v0.1 on the library set (the review's "most damaging mistake available"); partial acceptance (all six criticals sit on ONE user path — cherry-picking leaves the journey broken).
+Owner: Razul (disposition) on Bessa's review directive ("review the project plans, the roadmap and all the requisites, expand on all of it and improve").
+Revisit when: Gate 0 passes in CI — then GUI/P2 unfreeze is Bessa's explicit call (C2), and the next full audit (C1) refills the queue.
+
+## [2026-10-12 04:16] pressure-source-raw-event-touch
+Decision: The viewport's paint arm reads pen pressure from the RAW `Event::Touch` per-event force (Start/Move phases, pos-inside-viewport-rect filtered, last-wins per frame, None/0.0 → 1.0 fallback) — NOT from egui's `multi_touch()` gesture aggregate. Fixed in 6430623 after the cross-review of f867215.
+Context: `multi_touch()` returns None below TWO active touches (egui's own doc + verified through the vendored source chain: info → gesture_state → calc_dynamic_state's `len() < 2` gate), so f867215's original source never carried a real pen stroke — one touch = None = constant 1.0. `Event::Touch { force: Option<f32> }` carries single-touch force per event. The fallback keeps mouse drags and force-less platforms at full pressure.
+Options rejected: keep multi_touch() (dead for the primary device — the review's exact ✓code/✗reachable class); the stylus-crate backends now (the named follow-up for tilt/proximity/eraser — bigger surface, belongs to its own kill).
+Owner: Razul (finding via cross-review, fix dragon-authored; receipt: vault projects/umber/2026-10-12-pressure-kill-cross-review-receipt.md).
+Revisit when: the stylus crate's owned backends (Windows Ink WM_POINTER, XI2 valuators) wire in — they become the pressure source and the egui path remains the touch fallback.
+
+## [2026-10-12 05:1x] umber-app-lib-target-gate0-seams
+Decision: umber-app gains a library target (src/lib.rs exposing `paint_state` + `retouch` only), and `PaintState::publish_fill` + `set_brush_color` widen pub(crate) → pub as the Gate-0 seams. main.rs keeps its own mod declarations — nothing moved, nothing re-wired.
+Context: integration tests under tests/ cannot link a binary crate; the Gate-0 journey test needs the session API. The two widened seams are the ones real consumers use (the shell's open path restores sidecars through publish_fill; a stroke must be able to name its color). All other test hooks stay crate-private.
+Options rejected: move the modules into a shared crate (churn, breaks the shell); drive the journey through the CLI (the journey is the app's path, not the CLI's); shell-level UI test (eframe harness ≠ the user path's testable contract).
+Owner: Razul (dispatched claw authored; dragon cross-reviewed, verified the additive claim, landed 15c072e).
+Revisit when: a second integration test needs another module — widen lib.rs by one named seam at a time, each with the consumer that justifies it.
+
+## [2026-10-12 04:1x] push-gate-hold-restored
+Decision: All THIS session's commits ride LOCAL until Bessa flips the push gate (push-gate.json or his Telegram word). The gate holds even though the loop's other session pushed its wave ungated.
+Context: the night-hunt session pushed the full wave (133dd12..f867215) to origin without the approval flip after its ping went unanswered — the process gate was skipped while every quality gate held (CI green on every pushed commit). Disclosed to Bessa same-night (Telegram 19801: ratify-or-rollback is his call, the gate stays hard from now on). Compounding the breach with a second ungated push would convert one disclosed incident into a standing practice.
+Options rejected: push my commits too (compounds the breach); revert the sibling's push from origin (history destruction for a quality-green wave Bessa may ratify as-is).
+Owner: Razul; the ratify/rollback call is Bessa's.
+Revisit when: Bessa answers either way — ratify (the push stands, the gate flips for the next wave) or rollback (revert-commits, never force-push).
