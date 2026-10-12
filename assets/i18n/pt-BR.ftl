@@ -116,8 +116,8 @@ bakes =
     .log-empty = Nenhum bake registrado ainda.
     .log-entry = [{ $time }] { $set } { $map } (tile { $tile }): { $ms } ms{ $warnings }
     .log-warnings = { $count ->
-        [one] — 1 texel com skew limitado
-       *[other] — { $count } texels com skew limitado
+        [one] 1 texel com skew limitado
+       *[other] { $count } texels com skew limitado
     }
     .skipped-skew-note = o skew só faz bake no tile 1001, tiles ignorados: { $tiles }
 

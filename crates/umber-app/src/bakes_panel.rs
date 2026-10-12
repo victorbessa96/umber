@@ -324,11 +324,16 @@ impl BakeLogEntry {
     /// The one-line log row (the dragon's format probe target):
     /// `[<time>] <set> <map> (tile <tile>): <ms> ms[ — <n> skew-clamped]`.
     pub fn summary(&self) -> String {
+        // Fluent trims leading whitespace from variant patterns, so the
+        // "ms — N" separator cannot live inside the .ftl variant. The
+        // variants carry the bare tail; the Rust side owns the join —
+        // and when nothing was clamped, `warnings` is empty and the
+        // entry ends at "ms" (no dangling separator).
         let warnings = if self.skew_clamped == 0 {
             String::new()
         } else {
             let args = [("count", FluentValue::from(self.skew_clamped))];
-            tr_args("bakes.log-warnings", args)
+            format!(" — {}", tr_args("bakes.log-warnings", args))
         };
         let args = [
             ("time", FluentValue::from(self.timestamp_secs)),
@@ -894,11 +899,15 @@ impl BakesPanel {
     pub fn sync_sets(&mut self, names: &[String]) {
         let mut next = Vec::with_capacity(names.len());
         for name in names {
+            // Absent sets arrive ENABLED (Painter checks all sets by
+            // default). `is_none_or` keeps the absent-arm `true` — an
+            // `is_some_and` sweep here once flipped this default and
+            // starved every auto-rebake fire (the 7-failure class).
             let enabled = self
                 .sets
                 .iter()
                 .find(|s| &s.name == name)
-                .is_some_and(|s| s.enabled);
+                .is_none_or(|s| s.enabled);
             next.push(SetCheck {
                 name: name.clone(),
                 enabled,

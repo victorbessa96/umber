@@ -112,8 +112,8 @@ bakes =
     .log-empty = No bakes logged yet.
     .log-entry = [{ $time }] { $set } { $map } (tile { $tile }): { $ms } ms{ $warnings }
     .log-warnings = { $count ->
-        [one] — 1 skew-clamped texel
-       *[other] — { $count } skew-clamped texels
+        [one] 1 skew-clamped texel
+       *[other] { $count } skew-clamped texels
     }
     .skipped-skew-note = skew bakes tile 1001 only, skipped tiles: { $tiles }
 

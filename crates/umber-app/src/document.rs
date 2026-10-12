@@ -568,14 +568,23 @@ mod tests {
         assert!(doc.layers().is_empty());
         assert_eq!(doc.history.len(), 0);
 
-        // Depth 0 -> depth 2 is 2 redos; the hidden flag is back.
+        // Depth 0 -> depth 2 is 2 redos; the two Add layers are back.
+        // The SetVisible hide is NOT: its redo sits at depth 3, one more
+        // step up — the flag returns only when the full history is
+        // redone (depth 3).
         assert_eq!(doc.jump_to_depth(2), 2);
         assert_eq!(doc.layers().len(), 2);
-        assert!(!doc.layers()[0].visible);
+        assert!(doc.layers()[0].visible);
         assert_eq!(doc.history.len(), 2);
 
+        // Depth 2 -> depth 3: the final redo restores the hide (the
+        // one-step-further check the born-broken assertion missed).
+        assert_eq!(doc.jump_to_depth(3), 1);
+        assert!(!doc.layers()[0].visible);
+        assert_eq!(doc.history.len(), 3);
+
         // Already there: no steps.
-        assert_eq!(doc.jump_to_depth(2), 0);
+        assert_eq!(doc.jump_to_depth(3), 0);
     }
 
     /// Journal-truncate equivalence, both halves:

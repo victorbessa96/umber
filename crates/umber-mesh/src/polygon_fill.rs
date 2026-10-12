@@ -547,15 +547,29 @@ mod tests {
     }
 
     /// Self-intersecting lassos read even-odd: the bowtie's wings are
-    /// singly-covered (inside), the far corners outside, and the crossing
-    /// itself is boundary (inside).
+    /// singly-covered (inside), the far pockets outside, and the crossing
+    /// itself is boundary (inside). This loop's sub-loops are the
+    /// upper-left triangle (0,0)-(0.5,0.5)-(0,1) and the lower-right
+    /// triangle (0.5,0.5)-(1,1)-(1,0) — probes must sit strictly inside
+    /// them, not on the x+y=1 anti-diagonal where the inclusive boundary
+    /// rule reads them as inside regardless of wing.
     #[test]
     fn self_intersecting_bowtie_reads_even_odd() {
         let bow = vec![[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]];
-        assert!(point_in_polygon([0.8, 0.2], &bow), "lower wing inside");
-        assert!(!point_in_polygon([0.2, 0.8], &bow), "upper wing outside");
+        assert!(point_in_polygon([0.2, 0.7], &bow), "upper-left wing inside");
+        assert!(
+            point_in_polygon([0.9, 0.2], &bow),
+            "lower-right wing inside"
+        );
         assert!(point_in_polygon([0.5, 0.5], &bow), "crossing is boundary");
-        assert!(!point_in_polygon([0.1, 0.5], &bow), "off-loop outside");
+        assert!(
+            !point_in_polygon([0.8, 0.95], &bow),
+            "upper-right pocket outside"
+        );
+        assert!(
+            !point_in_polygon([0.2, 0.1], &bow),
+            "lower-left pocket outside"
+        );
     }
 
     /// Degenerate inputs contain nothing, never panic.

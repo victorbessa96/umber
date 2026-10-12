@@ -931,17 +931,22 @@ mod tests {
         let sharp = triplanar_weights([0.9, 0.1, 0.0], 8.0);
         assert!(sharp[0] > soft[0], "{soft:?} vs {sharp:?}");
         // Degenerate normals blend equally instead of NaN.
-        for n in [
-            [0.0, 0.0, 0.0],
-            [f32::NAN, 0.0, 1.0],
-            [f32::INFINITY, 0.0, 0.0],
-        ] {
+        for n in [[0.0, 0.0, 0.0], [f32::INFINITY, 0.0, 0.0]] {
             let w = triplanar_weights(n, 2.0);
             assert!(
                 near(w[0], 1.0 / 3.0) && near(w[1], 1.0 / 3.0) && near(w[2], 1.0 / 3.0),
                 "{n:?} -> {w:?}"
             );
         }
+        // Partially non-finite input is SANITIZED, not degraded: the
+        // documented contract treats non-finite components as 0, so
+        // [NaN, 0, 1] reads as the clean +z normal and concentrates on
+        // its plane — the same behavior every partial-NaN normal gets.
+        let w = triplanar_weights([f32::NAN, 0.0, 1.0], 2.0);
+        assert!(
+            near(w[0], 0.0) && near(w[1], 0.0) && near(w[2], 1.0),
+            "{w:?}"
+        );
     }
 
     /// Test (b): tri-planar on a cube — every covered texel samples its

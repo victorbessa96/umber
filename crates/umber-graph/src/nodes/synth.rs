@@ -817,7 +817,12 @@ mod tests {
     #[test]
     fn effective_score_applies_the_shipped_coherence_bonus() {
         assert_eq!(effective_score(100.0, false, 0.6), 100.0);
-        assert_eq!(effective_score(100.0, true, 0.6), 40.0);
+        // 0.6 is inexact in binary f32 (1.0 - 0.6 = 0.39999998), so the
+        // scaled score is 39.999996 — one ulp off 40.0 (f32 ulp at 40 is
+        // ~3.8e-6). The shipped semantics are the multiplicative scale,
+        // asserted to tolerance (crate convention, topo.rs), not to
+        // exact equality.
+        assert!((effective_score(100.0, true, 0.6) - 40.0).abs() < 1e-5);
         assert_eq!(effective_score(100.0, true, 1.0), 0.0);
         assert_eq!(effective_score(100.0, true, 0.0), 100.0);
     }

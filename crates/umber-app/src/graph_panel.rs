@@ -1672,7 +1672,7 @@ mod tests {
         // reports the failure and any previous output is kept.
         let mut panel = GraphPanel::new();
         panel.set_resolution((8, 8));
-        let (_head, _tail) = noise_chain(&mut panel);
+        let (head, _tail) = noise_chain(&mut panel);
         panel.set_eval_backend(EvalBackend::Cpu);
         panel.evaluate();
         assert!(
@@ -1694,6 +1694,14 @@ mod tests {
             Some(&kept),
             "previous output survives the failed gpu eval"
         );
+        // The failed GPU eval must not clear the dirty set — but the
+        // preceding CPU baseline eval legitimately DID (success clears).
+        // Re-dirty via a param touch, then assert the failed GPU eval
+        // preserves it.
+        panel.set_param(head, "scale", ParamValue::Float(5.0));
+        assert!(!panel.dirty_set().is_empty(), "param touch re-dirties");
+        panel.evaluate();
+        assert!(panel.status().starts_with("Eval failed"));
         assert!(
             !panel.dirty_set().is_empty(),
             "failed eval must not clear the dirty set"

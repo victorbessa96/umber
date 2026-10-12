@@ -832,9 +832,9 @@ pub(crate) fn insert_point(points: [(f32, f32); 4], click_x: f32, click_y: f32) 
     out
 }
 
-/// "Delete on right-click, never the endpoints": the endpoints (index 0,
-/// 3) always exist by construction, so a right-click on either is a
-/// no-op (`None`). For an interior point (index 1 or 2), deletion means
+/// "Delete on right-click, never the endpoints": the endpoints (indices
+/// 0 and 3) always exist by construction, so a right-click on either is
+/// a no-op (`None`). For an interior point (index 1 or 2), deletion means
 /// collinearizing it — snapping its y onto the straight chord between
 /// its immediate neighbors, at its current x — which exactly cancels its
 /// contribution to [`ControlCurve::evaluate`]'s piecewise-linear
@@ -1009,8 +1009,8 @@ fn paint_curve_grid(painter: &egui::Painter, rect: egui::Rect) {
 /// animated glide on any non-drag position change (insert, delete, or a
 /// preset button). `ControlCurve` stays fixed at 4 points — see
 /// [`insert_point`] and [`delete_point`] for what "insert"/"delete" mean
-/// against that frozen shape — so the handles are always exactly these
-/// 4, never created or destroyed; only their positions move. Returns
+/// against that frozen shape — so the handles are always exactly those
+/// four, never created or destroyed; only their positions move. Returns
 /// true when the curve changed this frame.
 fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     let mut changed = false;

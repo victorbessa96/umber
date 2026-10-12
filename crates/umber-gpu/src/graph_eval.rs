@@ -2175,7 +2175,13 @@ mod tests {
             .flat_map(|op| op.entry_points())
             .copied()
             .collect();
+        // Ops SHARE entries by design — Sharpen reuses Blur's H/V passes
+        // (sharpen = blur + composite) — so the flat-mapped ops list is a
+        // multiset while the shader table is a set. The contract here is
+        // coverage both ways (every entry claimed, every claim tabled),
+        // not multiplicity; the per-op asserts below pin the sharing.
         from_ops.sort_unstable();
+        from_ops.dedup();
         let mut table: Vec<&str> = GRAPH_ENTRY_POINTS.to_vec();
         table.sort_unstable();
         assert_eq!(from_ops, table, "ops <-> shader entries must agree exactly");

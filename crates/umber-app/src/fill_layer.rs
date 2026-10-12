@@ -642,11 +642,17 @@ impl PolygonFillTool {
             Some(mask) => mask,
             None => return false,
         };
+        // A fill layer without params is the default fill everywhere the
+        // app reads one (the refresh path's `unwrap_or_default`
+        // convention): apply adopts it rather than hard-rejecting, so a
+        // mask can be lassoed onto a freshly added (never edited) fill
+        // layer. The Fill-kind guard stays: adoption is for fill layers
+        // only — a paint target still rejects (no stray set_fill write).
         let mut params = match doc
             .layers()
             .iter()
-            .find(|l| l.id == target)
-            .and_then(|l| l.fill.clone())
+            .find(|l| l.id == target && l.kind == LayerKind::Fill)
+            .map(|l| l.fill.clone().unwrap_or_default())
         {
             Some(params) => params,
             None => return false,
@@ -1661,7 +1667,17 @@ mod tests {
         assert_eq!(states.dirty.len(), 1);
         states.dirty.clear();
 
-        // No-op ensure: doc params unchanged — no dirty, no queue.
+        // No-op ensure: doc params unchanged — no dirty, no queue. The
+        // cache's own dirty flag first settles (evaluate once, the
+        // sibling tests' pattern) so the assertion observes the no-op,
+        // not the never-evaluated initial state.
+        let mesh = left_half_quad();
+        let off = SymmetrySettings::default();
+        states
+            .map
+            .get_mut(&id)
+            .unwrap()
+            .evaluate(&mesh, 1001, 16, &off);
         states.ensure(id, &params_of(&stack), blend, opacity);
         assert!(states.dirty.is_empty(), "no-op must not queue");
         let state = states.map.get(&id).unwrap();

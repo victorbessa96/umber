@@ -13,6 +13,14 @@ RID=$(gh run list --limit 10 --json databaseId,headSha \
 gh run view "$RID" --repo victorbessa96/umber --log-failed 2>/dev/null > /tmp/ci-$$.txt
 echo "=== run $RID for $SHA — the error classes (deduped) ==="
 grep -E "error(:|\[)" /tmp/ci-$$.txt | grep -vE "implied|override|could not compile|Process completed|For more information" | sort -u
+echo "=== the failing tests (FAILED + panicked classes) ==="
+# Test failures never say "error" — they say FAILED and panicked at.
+# Strip the job/step/timestamp prefix and thread pids so sort -u dedups
+# across platforms and reruns; the class is the test name + site.
+sed -e 's/^[^\t]*\t[^\t]*\t[^ ]* //' -e 's/ ([0-9]*) panicked/ panicked/' /tmp/ci-$$.txt \
+  | grep -E "panicked at|^test .*FAILED" \
+  | sort -u
 echo "=== the sites ==="
 grep -E "\-\->" /tmp/ci-$$.txt | sed 's/.*--> //' | sort -u
+grep -oE "panicked at [^ ]+:[0-9]+:[0-9]+" /tmp/ci-$$.txt | sed -e 's/panicked at //' -e 's|\\|/|g' | sort -u
 rm -f /tmp/ci-$$.txt
