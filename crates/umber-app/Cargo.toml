@@ -20,6 +20,7 @@ umber-export = { workspace = true }
 umber-graph = { workspace = true }
 umber-color = { workspace = true }
 umber-wasm = { workspace = true }
+umber-gui = { workspace = true }
 stylus = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }

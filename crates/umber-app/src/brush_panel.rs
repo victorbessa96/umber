@@ -25,10 +25,51 @@
 //! dev builds (that is how the app runs today): it loads
 //! `assets/brushes` as an extra search dir alongside the packaged path.
 //! The packaged path override happens in a later slice.
+//!
+//! GUI Phase 0a/1 chrome (docs/specs/gui-audit-and-roadmap.md):
+//! - The panel's sections render as [`umber_gui::ParamGroup`] collapsibles
+//!   and every numeric slider is an [`umber_gui::ValueField`] (drag-scrub,
+//!   wheel-step, tabular numerals) over the same range and backing
+//!   state as the stock slider it replaced. Chrome only: no state struct,
+//!   default, range, or save path changed, and the 18 tests below are
+//!   untouched.
+//!
+//! Deliberately NOT migrated (v1 boundaries of this pass):
+//! - The curve editor, its "Pressure → …" section headers, and the preset
+//!   selector / save rows stay as-is (roadmap Phase 2 scope).
+//! - The clone-offset [`egui::DragValue`]s are not sliders, so they stay.
+//! - The preset editor's hardcoded English labels ("Alpha", "Min cutoff",
+//!   …) stay hardcoded: converting them to `tr()` would change pt-BR
+//!   rendering, which is a separate i18n kill. The `ftl` catalogs already
+//!   carry matching keys; wiring them is deferred, not forgotten.
+//! - No `umber_style`/fonts call at boot or panel level: `main.rs` applies
+//!   no Umber style today (only a dock `Style::from_egui`), `assets/fonts`
+//!   is not in the tree yet so `install_fonts` would panic (see
+//!   `umber_gui::fonts`' `font-assets` follow-up), and a panel-local style
+//!   would diverge from the other eleven panels before the migration wave
+//!   reaches them. [`umber_gui::ValueField`] only needs
+//!   `FontId::monospace`, which works on stock fonts.
+//! - The kill brief named size/flow/opacity/jitter/angle params, but this
+//!   panel's actual sliders are alpha, hardness, pressure-gamma, the
+//!   stabilizer trio, the lazy-mouse pair, spacing density, the smudge
+//!   pair, mirror offset, radial count, and angle snap. Every numeric
+//!   slider present was migrated; nothing matching the brief's names
+//!   exists in this file to migrate.
+//! - Wheel-step sizes, drag speeds, decimals, and the "px"/"°" unit
+//!   suffixes are display-chrome choices (literal symbols per
+//!   [`umber_gui::ValueField`]'s own docs, not translatable words, so no
+//!   `tr()` keys). The stored values keep full precision; snapping only
+//!   applies while scrubbing/stepping, same as before.
+//! - [`umber_gui::ParamGroup`]'s header count covers top-level
+//!   [`umber_gui::ParamGroupUi::row`] calls; rows inside `add_enabled_ui`
+//!   blocks (mirror/radial bodies) use manual label + field rows and do
+//!   not count, so a fully-disabled section header can read "0".
 
 use std::path::PathBuf;
 
 use crate::i18n::tr;
+use umber_gui::widgets::ParamGroupUi;
+use umber_gui::{ParamGroup, ValueField};
 
 use umber_brush::preset::{BrushPreset, ControlCurve};
 use umber_brush::preset_library::{user_preset_dir, Library};
@@ -194,23 +235,18 @@ impl BrushPanel {
     /// they work with no preset selected. The quick-mask rows edit the
     /// paint session's mask directly, so they show only when `paint` exists.
     pub fn show(&mut self, ui: &mut egui::Ui, paint: Option<&mut PaintState>) {
+        // The chrome sections above the preset selector are ParamGroups
+        // (their headers carry the separation, so no separators between
+        // them); the preset selector / editor / save rows below keep
+        // their existing separators — Phase 2 scope.
         self.tool_rows(ui);
-        ui.add_space(8.0);
-        ui.separator();
         symmetry_rows(ui, &mut self.symmetry);
-        ui.add_space(8.0);
-        ui.separator();
         line_constraint_rows(ui, &mut self.line_constraint);
-        ui.add_space(8.0);
-        ui.separator();
         projection_rows(ui, &mut self.projection);
-        ui.add_space(8.0);
-        ui.separator();
         if let Some(paint) = paint {
             quick_mask_rows(ui, paint);
-            ui.add_space(8.0);
-            ui.separator();
         }
+        ui.separator();
         self.preset_selector(ui);
         ui.add_space(8.0);
         ui.separator();
@@ -246,64 +282,42 @@ impl BrushPanel {
             BrushTool::Clone(params) => self.clone = params,
             BrushTool::Erase(params) => self.eraser = params,
         }
-        ui.horizontal_wrapped(|ui| {
-            ui.strong(tr("brush.tool"));
-            let mut picked = self.tool;
-            ui.selectable_value(&mut picked, BrushTool::Paint, tr("brush.tool-paint"));
-            let smudge_on = matches!(picked, BrushTool::Smudge(_));
-            if ui
-                .selectable_label(smudge_on, tr("brush.tool-smudge"))
-                .clicked()
-            {
-                picked = BrushTool::Smudge(self.smudge);
+        let title = tr("brush.tool");
+        ParamGroup::new("brush-tool", title.as_str()).show(ui, |group| {
+            tool_selector_row(group, &mut self.tool, self.smudge, self.clone, self.eraser);
+            match &mut self.tool {
+                BrushTool::Paint => {}
+                BrushTool::Smudge(params) => {
+                    group.row(&tr("brush.smudge-strength"), |ui| {
+                        ui.add(ValueField::new(&mut params.strength).range(0.0..=1.0))
+                    });
+                    group.row(&tr("brush.smudge-smear"), |ui| {
+                        ui.add(ValueField::new(&mut params.smear).range(0.0..=1.0))
+                    });
+                }
+                BrushTool::Clone(params) => {
+                    group.ui.horizontal_wrapped(|ui| {
+                        ui.label(tr("brush.clone-offset"));
+                        ui.add(egui::DragValue::new(&mut params.source_offset.0).speed(0.001));
+                        ui.add(egui::DragValue::new(&mut params.source_offset.1).speed(0.001));
+                    });
+                    group
+                        .ui
+                        .checkbox(&mut params.follow, tr("brush.clone-follow"));
+                    group.ui.weak(tr("brush.clone-hint"));
+                }
+                BrushTool::Erase(params) => {
+                    group.ui.horizontal_wrapped(|ui| {
+                        ui.label(tr("brush.erase-channels"));
+                        ui.checkbox(&mut params.channels.r, "R");
+                        ui.checkbox(&mut params.channels.g, "G");
+                        ui.checkbox(&mut params.channels.b, "B");
+                        ui.checkbox(&mut params.channels.a, "A");
+                    });
+                    group.ui.weak(tr("brush.erase-hint"));
+                }
             }
-            let clone_on = matches!(picked, BrushTool::Clone(_));
-            if ui
-                .selectable_label(clone_on, tr("brush.tool-clone"))
-                .clicked()
-            {
-                picked = BrushTool::Clone(self.clone);
-            }
-            let eraser_on = matches!(picked, BrushTool::Erase(_));
-            if ui
-                .selectable_label(eraser_on, tr("brush.tool-eraser"))
-                .clicked()
-            {
-                picked = BrushTool::Erase(self.eraser);
-            }
-            self.tool = picked;
         });
-        match &mut self.tool {
-            BrushTool::Paint => {}
-            BrushTool::Smudge(params) => {
-                ui.add(
-                    egui::Slider::new(&mut params.strength, 0.0..=1.0)
-                        .text(tr("brush.smudge-strength")),
-                );
-                ui.add(
-                    egui::Slider::new(&mut params.smear, 0.0..=1.0).text(tr("brush.smudge-smear")),
-                );
-            }
-            BrushTool::Clone(params) => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(tr("brush.clone-offset"));
-                    ui.add(egui::DragValue::new(&mut params.source_offset.0).speed(0.001));
-                    ui.add(egui::DragValue::new(&mut params.source_offset.1).speed(0.001));
-                });
-                ui.checkbox(&mut params.follow, tr("brush.clone-follow"));
-                ui.weak(tr("brush.clone-hint"));
-            }
-            BrushTool::Erase(params) => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(tr("brush.erase-channels"));
-                    ui.checkbox(&mut params.channels.r, "R");
-                    ui.checkbox(&mut params.channels.g, "G");
-                    ui.checkbox(&mut params.channels.b, "B");
-                    ui.checkbox(&mut params.channels.a, "A");
-                });
-                ui.weak(tr("brush.erase-hint"));
-            }
-        }
     }
 
     /// The preset being edited, if one is selected (the paint session
@@ -314,12 +328,29 @@ impl BrushPanel {
             .map(|entry| &entry.preset)
     }
 
-    /// The E shortcut: selects the eraser, restoring its banked channel
-    /// flags. A no-op when it is already selected.
-    pub fn select_eraser(&mut self) {
-        if !matches!(self.tool, BrushTool::Erase(_)) {
-            self.tool = BrushTool::Erase(self.eraser);
+    /// The toolbar strip and the E shortcut (`ShellAction::SelectTool`):
+    /// banks the current retouch params, then selects `kind` with its
+    /// banked params restored. A no-op when `kind` is already selected.
+    /// (Generalizes the former `select_eraser`, which E called.)
+    pub fn select_tool(&mut self, kind: crate::toolbar::ToolKind) {
+        use crate::toolbar::ToolKind;
+        if ToolKind::of(&self.tool) == kind {
+            return;
         }
+        // Bank first: an edit made this frame hasn't been banked by
+        // `tool_rows` yet when a shortcut fires before the panel draws.
+        match self.tool {
+            BrushTool::Paint => {}
+            BrushTool::Smudge(params) => self.smudge = params,
+            BrushTool::Clone(params) => self.clone = params,
+            BrushTool::Erase(params) => self.eraser = params,
+        }
+        self.tool = match kind {
+            ToolKind::Paint => BrushTool::Paint,
+            ToolKind::Smudge => BrushTool::Smudge(self.smudge),
+            ToolKind::Clone => BrushTool::Clone(self.clone),
+            ToolKind::Erase => BrushTool::Erase(self.eraser),
+        };
     }
 
     /// Preset combo + broken-file badge + overridden count.
@@ -393,20 +424,28 @@ impl BrushPanel {
             }
         });
 
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.params.alpha, 0.0..=1.0).text("Alpha"))
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.params.hardness, 0.0..=1.0).text("Hardness"))
-            .changed();
+        changed |= value_row(
+            ui,
+            "Alpha",
+            ValueField::new(&mut preset.params.alpha).range(0.0..=1.0),
+        )
+        .changed();
+        changed |= value_row(
+            ui,
+            "Hardness",
+            ValueField::new(&mut preset.params.hardness).range(0.0..=1.0),
+        )
+        .changed();
         // Gamma > 1 favors light pressure; the 0.05 floor avoids
         // div-by-zero downstream.
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut preset.params.pressure_gamma, 0.05..=4.0)
-                    .text("Pressure gamma"),
-            )
-            .changed();
+        changed |= value_row(
+            ui,
+            "Pressure gamma",
+            ValueField::new(&mut preset.params.pressure_gamma)
+                .range(0.05..=4.0)
+                .step(0.05),
+        )
+        .changed();
 
         // Opacity accumulation: build-up lets overlapping stamps pile
         // past the stroke opacity; wash normalizes the overlap to it
@@ -430,34 +469,70 @@ impl BrushPanel {
         });
 
         ui.add_space(4.0);
-        ui.strong("Stabilizer (one-euro)");
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.one_euro.min_cutoff, 0.1..=10.0).text("Min cutoff"))
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.one_euro.beta, 0.0..=0.1).text("Beta"))
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.one_euro.d_cutoff, 0.1..=10.0).text("d cutoff"))
-            .changed();
+        ParamGroup::new("brush-stabilizer", "Stabilizer (one-euro)").show(ui, |group| {
+            changed |= group
+                .row("Min cutoff", |ui| {
+                    ui.add(
+                        ValueField::new(&mut preset.one_euro.min_cutoff)
+                            .range(0.1..=10.0)
+                            .step(0.1),
+                    )
+                })
+                .changed();
+            changed |= group
+                .row("Beta", |ui| {
+                    ui.add(
+                        ValueField::new(&mut preset.one_euro.beta)
+                            .range(0.0..=0.1)
+                            .step(0.005)
+                            .decimals(3),
+                    )
+                })
+                .changed();
+            changed |= group
+                .row("d cutoff", |ui| {
+                    ui.add(
+                        ValueField::new(&mut preset.one_euro.d_cutoff)
+                            .range(0.1..=10.0)
+                            .step(0.1),
+                    )
+                })
+                .changed();
+        });
 
         ui.add_space(4.0);
-        ui.strong("Lazy mouse");
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.lazy_mouse.radius_px, 0.0..=64.0).text("Radius px"))
-            .changed();
-        changed |= ui
-            .add(egui::Slider::new(&mut preset.lazy_mouse.strength, 0.0..=1.0).text("Strength"))
-            .changed();
+        ParamGroup::new("brush-lazy-mouse", "Lazy mouse").show(ui, |group| {
+            changed |= group
+                .row("Radius px", |ui| {
+                    ui.add(
+                        ValueField::new(&mut preset.lazy_mouse.radius_px)
+                            .range(0.0..=64.0)
+                            .step(0.5)
+                            .decimals(1)
+                            .unit("px"),
+                    )
+                })
+                .changed();
+            changed |= group
+                .row("Strength", |ui| {
+                    ui.add(ValueField::new(&mut preset.lazy_mouse.strength).range(0.0..=1.0))
+                })
+                .changed();
+        });
 
         ui.add_space(4.0);
-        ui.strong("Spacing");
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut preset.spacing.dabs_per_radius, 1.0..=64.0)
-                    .text("Dabs per radius"),
-            )
-            .changed();
+        ParamGroup::new("brush-spacing", "Spacing").show(ui, |group| {
+            changed |= group
+                .row("Dabs per radius", |ui| {
+                    ui.add(
+                        ValueField::new(&mut preset.spacing.dabs_per_radius)
+                            .range(1.0..=64.0)
+                            .step(0.5)
+                            .decimals(1),
+                    )
+                })
+                .changed();
+        });
 
         ui.add_space(4.0);
         ui.strong("Pressure → alpha");
@@ -621,13 +696,61 @@ impl Default for BrushPanel {
     }
 }
 
+/// The tool selector radio row (paint / smudge / clone / eraser), split
+/// out of [`BrushPanel::tool_rows`] so that method stays a chrome wrapper:
+/// the banked params arrive by value and the picked tool writes back
+/// through `tool`. Behavior is the original code verbatim.
+fn tool_selector_row(
+    group: &mut ParamGroupUi<'_>,
+    tool: &mut BrushTool,
+    smudge: SmudgeParams,
+    clone: CloneParams,
+    eraser: EraseParams,
+) {
+    group.ui.horizontal_wrapped(|ui| {
+        let mut picked = *tool;
+        ui.selectable_value(&mut picked, BrushTool::Paint, tr("brush.tool-paint"));
+        let smudge_on = matches!(picked, BrushTool::Smudge(_));
+        if ui
+            .selectable_label(smudge_on, tr("brush.tool-smudge"))
+            .clicked()
+        {
+            picked = BrushTool::Smudge(smudge);
+        }
+        let clone_on = matches!(picked, BrushTool::Clone(_));
+        if ui
+            .selectable_label(clone_on, tr("brush.tool-clone"))
+            .clicked()
+        {
+            picked = BrushTool::Clone(clone);
+        }
+        let eraser_on = matches!(picked, BrushTool::Erase(_));
+        if ui
+            .selectable_label(eraser_on, tr("brush.tool-eraser"))
+            .clicked()
+        {
+            picked = BrushTool::Erase(eraser);
+        }
+        *tool = picked;
+    });
+}
+
 /// The quick-mask section (§2's P1 row, `umber_brush::quick_mask`): mask
 /// mode (also X), gating, what mask strokes paint, Invert (also I in mask
 /// mode) and Clear. It edits the paint session's mask in place. The mask
 /// is session state, kept out of the panel, the preset, the project file
 /// and the undo history.
 fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
-    ui.strong(tr("brush.quick-mask"));
+    let title = tr("brush.quick-mask");
+    ParamGroup::new("brush-quick-mask", title.as_str()).show(ui, |group| {
+        quick_mask_body(group, paint);
+    });
+}
+
+/// The quick-mask body: the group-level widgets (kept verbatim, only the
+/// `ui` they draw on changed).
+fn quick_mask_body(group: &mut ParamGroupUi<'_>, paint: &mut PaintState) {
+    let ui: &mut egui::Ui = &mut *group.ui;
     let mask = paint.quick_mask();
     let (mut editing, mut active) = (mask.is_editing(), mask.is_active());
     let (current, inverted) = (mask.paint(), mask.is_inverted());
@@ -666,32 +789,64 @@ fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
     ui.weak(tr("brush.quick-mask-hint"));
 }
 
+/// A muted-label + [`ValueField`] row for bodies that draw on a plain
+/// `&mut Ui` (inside `add_enabled_ui` blocks, or the ungrouped preset
+/// rows), where [`ParamGroupUi::row`] is not reachable. Same grammar,
+/// uncounted — see the module docs. Returns the field's [`egui::Response`]
+/// so callers keep their `.changed()` dirty-tracking verbatim.
+fn value_row<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    field: ValueField<'_, N>,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(umber_gui::muted()));
+        ui.add(field)
+    })
+    .inner
+}
+
 /// The symmetry section: the mirror toggle with its axis + offset rows,
 /// the radial toggle with its count + flip rows. Applies to every tool
 /// (paint, smudge, clone, eraser).
 fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
-    ui.strong(tr("brush.symmetry"));
-    let mirror = &mut symmetry.mirror;
-    ui.checkbox(&mut mirror.enabled, tr("brush.symmetry-mirror"));
-    ui.add_enabled_ui(mirror.enabled, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(tr("brush.symmetry-axis"));
-            ui.selectable_value(&mut mirror.axis, MirrorAxis::X, tr("brush.symmetry-axis-x"));
-            ui.selectable_value(&mut mirror.axis, MirrorAxis::Y, tr("brush.symmetry-axis-y"));
+    let title = tr("brush.symmetry");
+    ParamGroup::new("brush-symmetry", title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        ui.checkbox(&mut symmetry.mirror.enabled, tr("brush.symmetry-mirror"));
+        ui.add_enabled_ui(symmetry.mirror.enabled, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(tr("brush.symmetry-axis"));
+                ui.selectable_value(
+                    &mut symmetry.mirror.axis,
+                    MirrorAxis::X,
+                    tr("brush.symmetry-axis-x"),
+                );
+                ui.selectable_value(
+                    &mut symmetry.mirror.axis,
+                    MirrorAxis::Y,
+                    tr("brush.symmetry-axis-y"),
+                );
+            });
+            value_row(
+                ui,
+                &tr("brush.symmetry-offset"),
+                ValueField::new(&mut symmetry.mirror.offset).range(0.0..=1.0),
+            );
+            ui.weak(tr("brush.symmetry-hint"));
         });
-        ui.add(egui::Slider::new(&mut mirror.offset, 0.0..=1.0).text(tr("brush.symmetry-offset")));
-        ui.weak(tr("brush.symmetry-hint"));
-    });
-    let radial = &mut symmetry.radial;
-    ui.checkbox(&mut radial.enabled, tr("brush.symmetry-radial"));
-    ui.add_enabled_ui(radial.enabled, |ui| {
-        ui.add(
-            egui::Slider::new(&mut radial.count, RADIAL_COUNT_MIN..=RADIAL_COUNT_MAX)
-                .text(tr("brush.symmetry-count")),
-        );
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut radial.flip_u, tr("brush.symmetry-flip-u"));
-            ui.checkbox(&mut radial.flip_v, tr("brush.symmetry-flip-v"));
+        let radial = &mut symmetry.radial;
+        ui.checkbox(&mut radial.enabled, tr("brush.symmetry-radial"));
+        ui.add_enabled_ui(radial.enabled, |ui| {
+            value_row(
+                ui,
+                &tr("brush.symmetry-count"),
+                ValueField::new(&mut radial.count).range(RADIAL_COUNT_MIN..=RADIAL_COUNT_MAX),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut radial.flip_u, tr("brush.symmetry-flip-u"));
+                ui.checkbox(&mut radial.flip_v, tr("brush.symmetry-flip-v"));
+            });
         });
     });
 }
@@ -701,53 +856,64 @@ fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
 /// the anchored line with angle snap (configurable step, 15° default).
 /// Applies to every tool (paint, smudge, clone, eraser).
 fn line_constraint_rows(ui: &mut egui::Ui, mode: &mut LineConstraintMode) {
-    ui.strong(tr("brush.line-constraint"));
-    ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(
-            &mut *mode,
-            LineConstraintMode::Off,
-            tr("brush.line-constraint-off"),
-        );
-        ui.selectable_value(
-            &mut *mode,
-            LineConstraintMode::Line,
-            tr("brush.line-constraint-line"),
-        );
-        // AngleSnap carries the step, so it gets a manual radio that arms
-        // the default step; the slider below edits it in place.
-        let snap_on = matches!(mode, LineConstraintMode::AngleSnap { .. });
-        if ui
-            .selectable_label(snap_on, tr("brush.line-constraint-snap"))
-            .clicked()
-        {
-            *mode = LineConstraintMode::AngleSnap {
-                snap_deg: ANGLE_SNAP_DEFAULT_DEG,
-            };
+    let title = tr("brush.line-constraint");
+    ParamGroup::new("brush-line-constraint", title.as_str()).show(ui, |group| {
+        group.ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut *mode,
+                LineConstraintMode::Off,
+                tr("brush.line-constraint-off"),
+            );
+            ui.selectable_value(
+                &mut *mode,
+                LineConstraintMode::Line,
+                tr("brush.line-constraint-line"),
+            );
+            // AngleSnap carries the step, so it gets a manual radio that arms
+            // the default step; the field below edits it in place.
+            let snap_on = matches!(mode, LineConstraintMode::AngleSnap { .. });
+            if ui
+                .selectable_label(snap_on, tr("brush.line-constraint-snap"))
+                .clicked()
+            {
+                *mode = LineConstraintMode::AngleSnap {
+                    snap_deg: ANGLE_SNAP_DEFAULT_DEG,
+                };
+            }
+        });
+        if let LineConstraintMode::AngleSnap { snap_deg } = mode {
+            // Any finite positive step is usable downstream
+            // (`sanitize_snap_deg`), so the wheel step is half a degree.
+            group.row(&tr("brush.line-constraint-angle"), |ui| {
+                ui.add(
+                    ValueField::new(snap_deg)
+                        .range(ANGLE_SNAP_MIN_DEG..=ANGLE_SNAP_MAX_DEG)
+                        .step(0.5)
+                        .decimals(1)
+                        .unit("°"),
+                )
+            });
         }
+        group.ui.weak(tr("brush.line-constraint-hint"));
     });
-    if let LineConstraintMode::AngleSnap { snap_deg } = mode {
-        ui.add(
-            egui::Slider::new(snap_deg, ANGLE_SNAP_MIN_DEG..=ANGLE_SNAP_MAX_DEG)
-                .text(tr("brush.line-constraint-angle")),
-        );
-    }
-    ui.weak(tr("brush.line-constraint-hint"));
 }
 
 /// The paint-what-you-see projection section (§2's P1 row): 3D
 /// (Screen — viewport strokes raycast to the mesh) or UV-only (the 3D
 /// viewport orbits). Applies to every tool (paint, smudge, clone, eraser).
 fn projection_rows(ui: &mut egui::Ui, mode: &mut PaintProjection) {
-    ui.strong(tr("brush.projection"));
-    ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(
-            &mut *mode,
-            PaintProjection::Screen,
-            tr("brush.projection-screen"),
-        );
-        ui.selectable_value(&mut *mode, PaintProjection::Uv, tr("brush.projection-uv"));
+    let title = tr("brush.projection");
+    ParamGroup::new("brush-projection", title.as_str()).show(ui, |group| {
+        group.ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut *mode,
+                PaintProjection::Screen,
+                tr("brush.projection-screen"),
+            );
+            ui.selectable_value(&mut *mode, PaintProjection::Uv, tr("brush.projection-uv"));
+        });
+        group.ui.weak(tr("brush.projection-hint"));
     });
-    ui.weak(tr("brush.projection-hint"));
 }
 
 /// Filename stem for Save-As: lowercase, spaces to dashes, everything
@@ -1578,5 +1744,35 @@ mod tests {
                 "control point ({px}, {py}) must land exactly on the sampled spline"
             );
         }
+    }
+
+    #[test]
+    fn select_tool_banks_and_restores_retouch_params() {
+        use crate::toolbar::ToolKind;
+        let mut panel = BrushPanel::with_dirs(Vec::new());
+        assert_eq!(panel.tool, BrushTool::Paint);
+
+        // Select smudge, edit it in place (as the panel's fields do), then
+        // switch away before any `tool_rows` draw banks the edit.
+        panel.select_tool(ToolKind::Smudge);
+        let BrushTool::Smudge(params) = &mut panel.tool else {
+            panic!("smudge selected: {:?}", panel.tool);
+        };
+        params.strength = 0.25;
+        panel.select_tool(ToolKind::Erase);
+        assert!(matches!(panel.tool, BrushTool::Erase(_)));
+
+        // Back to smudge: the edit survived the round trip.
+        panel.select_tool(ToolKind::Smudge);
+        let BrushTool::Smudge(params) = panel.tool else {
+            panic!("smudge reselected: {:?}", panel.tool);
+        };
+        assert_eq!(params.strength, 0.25);
+
+        // Reselecting the active kind keeps its live params.
+        panel.select_tool(ToolKind::Smudge);
+        assert_eq!(panel.tool, BrushTool::Smudge(params));
+        panel.select_tool(ToolKind::Paint);
+        assert_eq!(panel.tool, BrushTool::Paint);
     }
 }
