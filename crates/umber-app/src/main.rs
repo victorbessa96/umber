@@ -14,6 +14,40 @@
 //! (`bakes_panel::BakeJobHandle`, polled each frame below); the
 //! paint-thread + ring-buffer architecture (docs/specs/architecture.md)
 //! lands with the paint engine.
+//!
+//! Paint-pixel persistence (CORE-LOOP CRITICAL 4, the 2026-10-12 strategy
+//! review): `save_project` also writes every present paint tile as a
+//! byte-exact PNG under `<project>/paint/tile-<N>.png`, and `open_project`
+//! uploads them back through the fill layer's `WriteRegion` queue path
+//! (`PaintState::publish_fill`). Judgment calls (v1 boundaries):
+//!
+//! * Sidecar files, not `project.json`/`AssetStore`: the project schema is
+//!   owned by `umber-core` (another kill's surface) and this crate has no
+//!   serde dependency, so a `paint` section with `AssetRef`s cannot be
+//!   added here. Content-hash routing through `AssetStore` is the named
+//!   follow-up (it also closes requirements row §8:121).
+//! * Every present tile is written; the verified boundary is tile 1001
+//!   (the same tile the viewport bind shows).
+//! * `Transfer::Linear`: the export dialog's `Srgb` moves bytes through
+//!   the IEC curve, which would break the save→load byte comparison.
+//! * `read_png_rgba8` flips rows into its equirect GPU row order, so the
+//!   load path flips them back (`flip_rows_vertical`) — without it the
+//!   round trip is a vertical mirror, and the byte-compare test pins this.
+//! * Open resizes the session to the saved tile dims first (a resize drops
+//!   contents and clears the session-scoped stroke-undo history, so no
+//!   stale rect can undo against the restored pixels). A project with no
+//!   `paint/` sidecar clears the session to transparent instead of keeping
+//!   the previous document's pixels (the layer stack is replaced wholesale
+//!   on open; the paint must not bleed across documents).
+//! * Journal coexistence: the autosave journal records layer-metadata ops
+//!   only (`umber_core::journal::JournalOp` has no pixel op) and the stroke
+//!   undo history is RAM-only, so save/open and the journal share nothing
+//!   but the `journal_seq` stamp — paint pixels ride beside both. Torn-save
+//!   window (crash between the `project.json` commit and the sidecar
+//!   writes) can leave new metadata with old paint or vice versa; one
+//!   atomic commit for both is deferred.
+//! * Save prunes `tile-*.png` files for tiles the session no longer holds,
+//!   so a re-save into a project dir never resurrects a dropped tile.
 
 mod bake_sources;
 mod bakes_panel;
@@ -623,13 +657,182 @@ impl UmberApp {
                 .unwrap_or(&umber_mesh::MeshData::default()),
         )
     }
+}
 
+/// The paint sidecar directory inside a `.umber` project: one
+/// byte-exact `tile-<N>.png` per persisted paint tile (see the module
+/// docs for why a sidecar, not `project.json`).
+fn paint_sidecar_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join("paint")
+}
+
+/// The sidecar PNG for one paint tile.
+fn paint_tile_path(project_dir: &Path, tile: u16) -> PathBuf {
+    paint_sidecar_dir(project_dir).join(format!("tile-{tile}.png"))
+}
+
+/// Parses a `tile-<N>.png` sidecar file name back to its tile number;
+/// `None` for anything else (the temp files the atomic writers leave on
+/// a crash, a foreign file dropped into the folder, …).
+fn parse_paint_tile_name(name: &str) -> Option<u16> {
+    let rest = name.strip_prefix("tile-")?.strip_suffix(".png")?;
+    rest.parse::<u16>().ok()
+}
+
+/// Vertical row flip over tightly-packed RGBA8 bytes: output row 0 is
+/// input row `height - 1`. Compensates `read_png_rgba8`'s equirect GPU
+/// row-order flip on the load path (and is its own inverse, which the
+/// round-trip test pins). A length mismatch returns the input unchanged
+/// rather than panicking — the callers' bytes always match; this guards
+/// only against a future caller passing a sliced region.
+fn flip_rows_vertical(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let stride = width as usize * 4;
+    let rows = height as usize;
+    if rgba.len() != stride * rows {
+        return rgba.to_vec();
+    }
+    let mut out = vec![0u8; rgba.len()];
+    for row in 0..rows {
+        let src = row * stride;
+        let dst = (rows - 1 - row) * stride;
+        out[dst..dst + stride].copy_from_slice(&rgba[src..src + stride]);
+    }
+    out
+}
+
+/// Writes every present paint tile into the project sidecar as a
+/// Linear-transfer PNG (byte-exact — the export dialog's `Srgb` would
+/// move the bytes through the IEC curve). Reads through
+/// `PaintState::read_tile`, the REAL readback path: it drains the
+/// tile's queue first so earlier strokes' dabs are in the bytes, then
+/// does the blocking `PaintTarget::read_back_rgba8` — the same call the
+/// stroke-undo capture uses. Prunes `tile-*.png` files for tiles the
+/// session no longer holds, then returns how many tiles were stored.
+fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
+    let mut saved = 0usize;
+    let tiles = paint.tiles_present();
+    for tile in &tiles {
+        let Some(image) = paint.read_tile(*tile) else {
+            log::warn!("paint save: tile {tile} readback failed; skipping");
+            continue;
+        };
+        let path = paint_tile_path(project_dir, *tile);
+        if let Err(e) = umber_export::png::write_png(
+            &path,
+            image.width,
+            image.height,
+            &image.data,
+            umber_export::png::Transfer::Linear,
+        ) {
+            log::warn!("paint save: tile {tile} PNG write failed: {e:#}");
+            continue;
+        }
+        saved += 1;
+    }
+    // A re-save into a project dir must never resurrect a dropped tile:
+    // delete sidecar files no present tile claims.
+    if let Ok(entries) = std::fs::read_dir(paint_sidecar_dir(project_dir)) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stale = parse_paint_tile_name(&name).is_some_and(|t| !tiles.contains(&t));
+            if stale {
+                let path = entry.path();
+                if let Err(e) = std::fs::remove_file(&path) {
+                    log::warn!("paint save: stale {} not removed: {e}", path.display());
+                }
+            }
+        }
+    }
+    saved
+}
+
+/// Restores the paint sidecar into `paint` through the EXISTING
+/// `WriteRegion` queue path (`PaintState::publish_fill` — the same call
+/// the fill-layer refresh uses, one full-tile write per tile, in FIFO
+/// order). Decodes each `tile-<N>.png`, flips it back out of the PNG
+/// reader's row order, resizes the session to the saved dims first (the
+/// resize drops the old contents and clears the session-scoped
+/// stroke-undo history with them), then drains so the pixels have landed
+/// before returning. Tiles whose dims disagree with the first tile's are
+/// skipped with a log (v1 keeps one size for all tiles). A project with
+/// no sidecar clears the session to transparent instead of keeping the
+/// previous document's pixels. Returns how many tiles were restored.
+fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
+    let dir = paint_sidecar_dir(project_dir);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    let mut tiles: Vec<(u16, u32, u32, Vec<u8>)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(tile) = parse_paint_tile_name(&name) else {
+            continue;
+        };
+        match umber_export::png::read_png_rgba8(&entry.path()) {
+            Ok((width, height, bytes)) => {
+                tiles.push((
+                    tile,
+                    width,
+                    height,
+                    flip_rows_vertical(&bytes, width, height),
+                ));
+            }
+            Err(e) => log::warn!(
+                "paint open: {} decode failed: {e:#}",
+                entry.path().display()
+            ),
+        }
+    }
+    if tiles.is_empty() {
+        // No paint persisted: the newly opened document must not show the
+        // previous document's pixels (the layer stack is replaced
+        // wholesale on open; the paint follows the same rule).
+        let (width, height) = paint.target_size();
+        paint.resize_target(width, height);
+        if let Err(e) = paint.process_pending() {
+            log::warn!("paint open: clearing the session failed: {e:#}");
+        }
+        return 0;
+    }
+    tiles.sort_by_key(|entry| entry.0);
+    let (first_width, first_height) = (tiles[0].1, tiles[0].2);
+    paint.resize_target(first_width, first_height);
+    if let Err(e) = paint.process_pending() {
+        log::warn!("paint open: resize to the saved size failed: {e:#}");
+        return 0;
+    }
+    let mut restored = 0usize;
+    for (tile, width, height, bytes) in tiles {
+        if (width, height) != (first_width, first_height) {
+            log::warn!(
+                "paint open: tile {tile} is {width}x{height}, want {first_width}x{first_height}; skipping"
+            );
+            continue;
+        }
+        if paint.publish_fill(tile, width, height, bytes) {
+            restored += 1;
+        } else {
+            log::warn!("paint open: tile {tile} upload failed; skipping");
+        }
+    }
+    if let Err(e) = paint.process_pending() {
+        log::warn!("paint open: upload drain failed: {e:#}");
+    }
+    restored
+}
+
+impl UmberApp {
     /// Saves the document as a `.umber` project directory via a save
     /// dialog: one texture set (named from the loaded mesh), the
     /// layer stack + project settings through `umber_core::project`,
     /// plus the graph panel's graph as a `.mtlx` string (the additive
     /// wave-5 carry — omitted when the panel's graph is empty, so
     /// graph-less projects save exactly the old shape).
+    ///
+    /// Paint pixels ride along as the `paint/` sidecar
+    /// (`save_paint_tiles`, after the `project.json` commit so the
+    /// directory is guaranteed to exist).
     ///
     /// The saved texture set is the mesh-map import session set (its name
     /// retargeted to the mesh's set name, channels kept): user channels an
@@ -670,6 +873,14 @@ impl UmberApp {
         match umber_core::project::save_to_dir(&model, &dir) {
             Ok(()) => {
                 log::info!("project saved: {}", dir.display());
+                // The painted pixels ride along as the `paint/` sidecar,
+                // after the commit so the directory exists (a pixel-write
+                // failure logs but keeps the metadata save — the torn-save
+                // window is documented in the module docs).
+                if let Some(paint) = self.state.paint.as_mut() {
+                    let tiles = save_paint_tiles(paint, &dir);
+                    log::info!("paint saved: {tiles} tile(s)");
+                }
                 // The import Apply path (and future drops) now have a
                 // content-hash store to write into.
                 self.state.project_dir = Some(dir.clone());
@@ -691,7 +902,9 @@ impl UmberApp {
     /// Loads a `.umber` project directory (recovering any autosave
     /// journal a crash left — see `umber_core::journal`): restores the
     /// active texture set's layer stack into the document (undo history
-    /// starts fresh; the journal is session-scoped by design), attaches
+    /// starts fresh; the journal is session-scoped by design), the paint
+    /// sidecar's pixels into the paint session (`load_paint_tiles` — the
+    /// stroke-undo history restarts empty with them), attaches
     /// the project's autosave journal, and the first carried
     /// `.mtlx` graph into the graph panel (a parse failure keeps the
     /// current panel graph and logs — the panel's status line says so).
@@ -738,6 +951,13 @@ impl UmberApp {
                 // sliders' ranges are the contract.
                 self.state.display = model.settings.display.sanitized();
                 self.state.display_lut.mark_display_lut_dirty();
+                // The painted pixels (or a clear to transparent when the
+                // project predates the sidecar — never the previous
+                // document's paint).
+                if let Some(paint) = self.state.paint.as_mut() {
+                    let tiles = load_paint_tiles(paint, &dir);
+                    log::info!("paint restored: {tiles} tile(s)");
+                }
                 if let Some(doc) = model.graphs_mtlx.first() {
                     if self.state.graph.load_mtlx(doc) {
                         log::info!("project graph restored into the Graph panel");
@@ -1097,4 +1317,134 @@ fn main() -> eframe::Result<()> {
             Err(err) => Err(format!("{err:#}").into()),
         }),
     )
+}
+
+/// Paint-sidecar persistence tests (CORE-LOOP CRITICAL 4): the filename
+/// codec, the row-flip inverse, and the save→load byte comparison.
+#[cfg(test)]
+mod paint_persistence_tests {
+    use super::*;
+
+    /// Requests a paint-capable device (graceful skip where no wgpu
+    /// adapter exists — the same pattern as
+    /// `paint_state::tests::try_request_device`; lavapipe covers CI).
+    /// Returns `None` when the test must be skipped.
+    fn try_request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no wgpu adapter available");
+            return None;
+        };
+        if !adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            eprintln!("skipping: adapter lacks TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "umber-app-paint-{label}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn paint_tile_filename_parses_exactly() {
+        assert_eq!(parse_paint_tile_name("tile-1001.png"), Some(1001));
+        assert_eq!(parse_paint_tile_name("tile-65535.png"), Some(65535));
+        assert_eq!(parse_paint_tile_name("project.json"), None);
+        assert_eq!(parse_paint_tile_name("tile-1001.png.tmp.123"), None);
+        assert_eq!(parse_paint_tile_name("tile-.png"), None);
+        assert_eq!(parse_paint_tile_name("tile-abc.png"), None);
+        assert_eq!(parse_paint_tile_name("tile-1001.exr"), None);
+        assert_eq!(
+            paint_tile_path(Path::new("/p"), 1001),
+            PathBuf::from("/p/paint/tile-1001.png")
+        );
+    }
+
+    #[test]
+    fn flip_rows_vertical_is_its_own_inverse_with_exact_bytes() {
+        // 2x3 RGBA: every row one distinct value, so the order is pinned
+        // exactly (not a range check — a mirror would fail).
+        let (width, height) = (2u32, 3u32);
+        let mut bytes = Vec::new();
+        for row in 0..3u8 {
+            bytes.extend_from_slice(&[row, row, row, 255, row, row, row, 255]);
+        }
+        let flipped = flip_rows_vertical(&bytes, width, height);
+        let mut expected = Vec::new();
+        for row in [2u8, 1, 0] {
+            expected.extend_from_slice(&[row, row, row, 255, row, row, row, 255]);
+        }
+        assert_eq!(flipped, expected, "row order must reverse exactly");
+        assert_eq!(
+            flip_rows_vertical(&flipped, width, height),
+            bytes,
+            "a second flip must restore the input (the load path depends on this)"
+        );
+    }
+
+    #[test]
+    fn save_open_round_trip_is_byte_identical() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("paint builds");
+        // A 25-event diagonal stroke (the conditioner needs a run of
+        // events before it emits its first dab).
+        paint.begin_stroke(egui::pos2(0.2, 0.2));
+        for i in 1..=24 {
+            let t = i as f32 * 0.02;
+            paint.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+        }
+        paint.end_stroke();
+        paint.process_pending().expect("drain succeeds");
+        let before = paint
+            .read_tile(umber_mesh::FIRST_TILE)
+            .expect("readback succeeds");
+        // Can-fail guard against a vacuous pass: a stroke that staged
+        // nothing would compare two blank targets equal. Fresh targets
+        // are zero-initialized (transparent black), so any painted texel
+        // is nonzero somewhere.
+        assert!(
+            before.data.iter().any(|&b| b != 0),
+            "the stroke must leave non-zero texels (else the comparison below is vacuous)"
+        );
+
+        let dir = unique_temp_dir("roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_paint_tiles(&mut paint, &dir);
+        assert_eq!(saved, 1, "a single-tile session stores exactly tile 1001");
+        assert!(paint_tile_path(&dir, umber_mesh::FIRST_TILE).exists());
+
+        let mut fresh =
+            paint_state::PaintState::new(device, queue).expect("fresh paint state builds");
+        let restored = load_paint_tiles(&mut fresh, &dir);
+        assert_eq!(restored, 1);
+        let after = fresh
+            .read_tile(umber_mesh::FIRST_TILE)
+            .expect("fresh readback succeeds");
+        assert_eq!(after.width, before.width);
+        assert_eq!(after.height, before.height);
+        assert_eq!(
+            after.data, before.data,
+            "save→load must restore byte-identical texels"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
