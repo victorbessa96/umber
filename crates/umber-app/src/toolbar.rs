@@ -158,7 +158,7 @@ impl ToolKind {
     pub fn icon(self) -> &'static str {
         match self {
             ToolKind::Paint => "paintbrush",
-            ToolKind::Smudge => "fingerprint",
+            ToolKind::Smudge => "fingerprint-pattern",
             ToolKind::Clone => "stamp",
             ToolKind::Erase => "eraser",
             ToolKind::Pick => "pipette",
