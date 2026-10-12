@@ -64,7 +64,7 @@ Pass 4), highest first:
 | 9 | Distribution: prove the installers | **todo** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
 | 10 | Color picker / eyedropper | **done (7067cd3)** | Pick on the strip + viewport sampling + set_brush_color; display-chain-aware sample = the named follow-up |
 | 11 | ID-mask selection | **todo** | expansion row (unfrozen; queued in audit order) |
-| 12 | Height→normal live in viewport | **todo** | expansion row (unfrozen; queued in audit order) |
+| 12 | Height→normal live in viewport | **done (861ca9a) — Mikkelsen screen-space perturbation, goldens pinned under lavapipe; app wiring awaits the per-channel tile pool (documented)** | expansion row (unfrozen; queued in audit order) |
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work

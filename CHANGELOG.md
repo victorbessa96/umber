@@ -27,6 +27,7 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - Cumulative undo merge — overlapping strokes coalesce at push; the byte budget carries regions, not stroke counts (`37025d5`)
 - The eyedropper — Pick on the strip, sample the mesh, paint with it (`7067cd3`)
 - The XI2 stylus backend — pen pressure/tilt/proximity reach the brush on Linux; the claw's orphaned kill consumed and finished (`d2fd7b7`)
+- Height→normal live in the lit viewport — a height stroke tilts the light per frame; the GPU-feature CI leg lands with it (`861ca9a`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 
