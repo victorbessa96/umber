@@ -287,6 +287,11 @@ impl RetouchStroke {
             .filter_map(|(&tile, mirror)| {
                 Some(StrokeTile {
                     tile,
+                    // Retouch tools (smudge/clone/erase) stay baseColor-only
+                    // in v1 — a deliberate boundary (see `PaintState`'s
+                    // module docs): they never consult the session's
+                    // active channel.
+                    channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                     rect: mirror.dirty?,
                     start: &mirror.before,
                     end: &mirror.live,
@@ -318,9 +323,14 @@ impl RetouchStroke {
 
 /// One tile of a finished stroke, before it becomes an undo record: the
 /// dirty rect plus the FULL-tile stroke-start and stroke-end images (the
-/// merge reads texels outside the rect — see the module docs).
+/// merge reads texels outside the rect — see the module docs). `channel`
+/// is the per-channel tile pool's undo key extension
+/// (docs/specs/per-channel-tile-pool-design.md): a stroke only ever
+/// touches ONE channel, so every `StrokeTile` a single stroke produces
+/// shares it.
 pub(crate) struct StrokeTile<'a> {
     pub tile: u16,
+    pub channel: String,
     pub rect: DirtyRect,
     pub start: &'a RgbaBuffer,
     pub end: &'a RgbaBuffer,
@@ -343,6 +353,7 @@ pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeComm
         .iter()
         .map(|t| TileRegion {
             tile: t.tile,
+            channel: t.channel.clone(),
             rect: t.rect,
             before: t.start.region(t.rect),
             after: t.end.region(t.rect),
@@ -352,12 +363,18 @@ pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeComm
 }
 
 /// Whether `tiles` coalesce into `top` (the module docs' eligibility
-/// rule): at least one shared tile, and every shared tile's rects
-/// intersect, pass the size guard, and fit the stroke's images.
+/// rule): at least one shared (tile, channel), and every shared one's
+/// rects intersect, pass the size guard, and fit the stroke's images. A
+/// height stroke never coalesces with a baseColor entry on the same
+/// tile — the channel is part of the undo key, not just the tile.
 fn can_merge(top: &PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> bool {
     let mut shared = 0;
     for t in tiles {
-        let Some(old) = top.regions.iter().find(|r| r.tile == t.tile) else {
+        let Some(old) = top
+            .regions
+            .iter()
+            .find(|r| r.tile == t.tile && r.channel == t.channel)
+        else {
             continue;
         };
         let union = old.rect.union(t.rect);
@@ -374,13 +391,17 @@ fn can_merge(top: &PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> bool {
 }
 
 /// Folds the stroke into `top` (eligibility already checked by
-/// [`can_merge`]): shared tiles grow to the union with the oldest before
-/// and the newest after, the rest carry over.
+/// [`can_merge`]): shared (tile, channel) pairs grow to the union with
+/// the oldest before and the newest after, the rest carry over.
 fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrokeCommand {
-    let mut regions: BTreeMap<u16, TileRegion> =
-        top.regions.into_iter().map(|r| (r.tile, r)).collect();
+    let mut regions: BTreeMap<(u16, String), TileRegion> = top
+        .regions
+        .into_iter()
+        .map(|r| ((r.tile, r.channel.clone()), r))
+        .collect();
     for t in tiles {
-        let region = match regions.remove(&t.tile) {
+        let key = (t.tile, t.channel.clone());
+        let region = match regions.remove(&key) {
             Some(old) => {
                 let union = old.rect.union(t.rect);
                 let mut before = RgbaBuffer {
@@ -398,6 +419,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
                 before.write_region(local, &old.before);
                 TileRegion {
                     tile: t.tile,
+                    channel: t.channel.clone(),
                     rect: union,
                     before: before.data,
                     after: t.end.region(union),
@@ -405,12 +427,13 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
             }
             None => TileRegion {
                 tile: t.tile,
+                channel: t.channel.clone(),
                 rect: t.rect,
                 before: t.start.region(t.rect),
                 after: t.end.region(t.rect),
             },
         };
-        regions.insert(t.tile, region);
+        regions.insert(key, region);
     }
     PaintStrokeCommand {
         regions: regions.into_values().collect(),
@@ -446,6 +469,8 @@ pub(crate) fn record_stroke(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TileRegion {
     pub tile: u16,
+    /// The undo key's channel component (see [`StrokeTile::channel`]).
+    pub channel: String,
     pub rect: DirtyRect,
     /// The rect's bytes at stroke start.
     pub before: Vec<u8>,
@@ -463,8 +488,8 @@ pub(crate) struct PaintStrokeCommand {
 /// [`PaintStrokeCommand`]. The owner drains `writes` into the GPU targets.
 #[derive(Debug, Default)]
 pub(crate) struct PaintWrites {
-    /// `(tile, rect, bytes)`, in order.
-    pub writes: Vec<(u16, DirtyRect, Vec<u8>)>,
+    /// `(tile, channel, rect, bytes)`, in order.
+    pub writes: Vec<(u16, String, DirtyRect, Vec<u8>)>,
 }
 
 impl Command for PaintStrokeCommand {
@@ -472,15 +497,23 @@ impl Command for PaintStrokeCommand {
 
     fn apply(&mut self, doc: &mut PaintWrites) {
         for region in &self.regions {
-            doc.writes
-                .push((region.tile, region.rect, region.after.clone()));
+            doc.writes.push((
+                region.tile,
+                region.channel.clone(),
+                region.rect,
+                region.after.clone(),
+            ));
         }
     }
 
     fn revert(&mut self, doc: &mut PaintWrites) {
         for region in &self.regions {
-            doc.writes
-                .push((region.tile, region.rect, region.before.clone()));
+            doc.writes.push((
+                region.tile,
+                region.channel.clone(),
+                region.rect,
+                region.before.clone(),
+            ));
         }
     }
 
@@ -593,8 +626,9 @@ mod tests {
     }
 
     fn drain(writes: &mut PaintWrites, image: &mut RgbaBuffer) {
-        for (tile, rect, bytes) in writes.writes.drain(..) {
+        for (tile, channel, rect, bytes) in writes.writes.drain(..) {
             assert_eq!(tile, TILE);
+            assert_eq!(channel, crate::paint_state::BASE_COLOR_CHANNEL);
             image.write_region(rect, &bytes);
         }
     }
@@ -1153,6 +1187,7 @@ mod tests {
         let (start, end) = fill_stroke(image, r, value);
         let tiles = [StrokeTile {
             tile: TILE,
+            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
             rect: r,
             start: &start,
             end: &end,
@@ -1200,6 +1235,7 @@ mod tests {
             let (start, end) = fill_stroke(&mut scratch, r, 10 * (k as u8 + 1));
             let cmd = stroke_command(&[StrokeTile {
                 tile: TILE,
+                channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                 rect: r,
                 start: &start,
                 end: &end,
@@ -1310,6 +1346,7 @@ mod tests {
         let (s1, e1) = fill_stroke(images.get_mut(&TILE).unwrap(), r1, 30);
         let tiles = [StrokeTile {
             tile: TILE,
+            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
             rect: r1,
             start: &s1,
             end: &e1,
@@ -1325,12 +1362,14 @@ mod tests {
         let tiles = [
             StrokeTile {
                 tile: TILE,
+                channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                 rect: r2,
                 start: &s2,
                 end: &e2,
             },
             StrokeTile {
                 tile: OTHER,
+                channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                 rect: r2_other,
                 start: &s2o,
                 end: &e2o,
@@ -1347,6 +1386,7 @@ mod tests {
         let (s3, e3) = fill_stroke(images.get_mut(&TILE).unwrap(), r3, 200);
         let tiles = [StrokeTile {
             tile: TILE,
+            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
             rect: r3,
             start: &s3,
             end: &e3,
@@ -1367,7 +1407,8 @@ mod tests {
 
     /// [`drain`] across several tiles.
     fn drain_tiles(writes: &mut PaintWrites, images: &mut BTreeMap<u16, RgbaBuffer>) {
-        for (tile, r, bytes) in writes.writes.drain(..) {
+        for (tile, channel, r, bytes) in writes.writes.drain(..) {
+            assert_eq!(channel, crate::paint_state::BASE_COLOR_CHANNEL);
             images
                 .get_mut(&tile)
                 .expect("a tile the test owns")

@@ -347,6 +347,13 @@ pub const DEFAULT_TARGET_SIZE: u32 = 4096;
 /// state and a set-less mesh all agree on one set.
 pub const DEFAULT_TEXTURE_SET: &str = "TextureSet";
 
+/// The reserved channel name (docs/specs/per-channel-tile-pool-design.md):
+/// `umber_core::TextureSet::new_default`'s first channel. Routing to it
+/// resolves to [`TileTargets::base_color`] and never allocates a
+/// `channels` entry — every pre-channel caller (`targets.get_mut(&tile)`
+/// reading `.base_color`) stays byte-identical.
+pub(crate) const BASE_COLOR_CHANNEL: &str = "baseColor";
+
 /// Brush radius in target texels.
 const BRUSH_RADIUS_TEXELS: f32 = 24.0;
 
@@ -376,6 +383,28 @@ pub const SEAM_MIRROR_MARGIN: f32 = 1.5;
 const RETOUCH_HISTORY_MAX_ENTRIES: usize = 64;
 const RETOUCH_HISTORY_MAX_BYTES: usize = 256 * 1024 * 1024;
 
+/// One tile's paint targets (docs/specs/per-channel-tile-pool-design.md):
+/// `base_color` is the v1-era surface every pre-channel caller reads —
+/// created at tile creation exactly as today ([`PaintState::ensure_tile`])
+/// — and `channels` holds one additional [`PaintThread`] per non-reserved
+/// channel name that has ever routed here, lazily materialized on first
+/// route ([`PaintState::ensure_channel`]). A channel with no route costs
+/// nothing: `channels` stays empty.
+struct TileTargets {
+    base_color: PaintThread,
+    channels: BTreeMap<String, PaintThread>,
+}
+
+impl TileTargets {
+    /// Every materialized thread, `base_color` first — `process_pending`'s
+    /// per-tile drain and `resize_set`'s per-tile `Resize` publish both
+    /// walk this so a materialized channel is never left undrained or
+    /// stale-sized (channels share their tile's set size).
+    fn threads_mut(&mut self) -> impl Iterator<Item = &mut PaintThread> {
+        std::iter::once(&mut self.base_color).chain(self.channels.values_mut())
+    }
+}
+
 /// One tile's slice of a live paint stroke's undo capture: the
 /// stroke-start snapshot plus the union of every staged dab footprint on
 /// that tile (see the module docs). The snapshot is taken lazily on the
@@ -403,12 +432,20 @@ pub struct PaintState {
     /// Device/queue handles kept for lazy per-tile target creation.
     device: umber_gpu::WgpuDevice,
     queue: umber_gpu::WgpuQueue,
-    /// One paint thread per UDIM tile. Tile [`FIRST_TILE`] is created in
+    /// One [`TileTargets`] per UDIM tile. Tile [`FIRST_TILE`] is created in
     /// [`Self::new`] and never removed; other tiles appear on first route.
-    targets: BTreeMap<u16, PaintThread>,
+    targets: BTreeMap<u16, TileTargets>,
     /// The tile the last original (non-mirror) event routed to; always a
     /// key of `targets`.
     active_tile: u16,
+    /// The channel new strokes paint (the Texture Sets panel's future
+    /// channel combo edits this — [`Self::set_active_channel`], mirroring
+    /// [`Self::set_active_set`]). [`BASE_COLOR_CHANNEL`] by default.
+    active_channel: String,
+    /// The live stroke's channel, snapshotted at `begin_stroke` (like
+    /// `stroke_mask_edit`/`stroke_symmetry`) so a mid-stroke
+    /// `set_active_channel` never splits one stroke across two targets.
+    stroke_channel: String,
     /// Every known texture set's paint-target size (square in practice —
     /// see the module docs; the load path honors stored non-squares).
     /// Unknown sets read as [`DEFAULT_TARGET_SIZE`]² (see
@@ -565,8 +602,16 @@ impl PaintState {
         Ok(Self {
             device,
             queue,
-            targets: BTreeMap::from([(FIRST_TILE, first)]),
+            targets: BTreeMap::from([(
+                FIRST_TILE,
+                TileTargets {
+                    base_color: first,
+                    channels: BTreeMap::new(),
+                },
+            )]),
             active_tile: FIRST_TILE,
+            active_channel: BASE_COLOR_CHANNEL.to_string(),
+            stroke_channel: BASE_COLOR_CHANNEL.to_string(),
             set_sizes: BTreeMap::from([(default_set.clone(), (size, size))]),
             tile_sets: BTreeMap::from([(FIRST_TILE, default_set.clone())]),
             active_set: default_set.clone(),
@@ -645,6 +690,23 @@ impl PaintState {
     /// The active texture set's name.
     pub fn active_set(&self) -> &str {
         &self.active_set
+    }
+
+    /// The channel new strokes paint (see the `active_channel` field
+    /// docs). [`BASE_COLOR_CHANNEL`] by default.
+    pub fn active_channel(&self) -> &str {
+        &self.active_channel
+    }
+
+    /// Makes `name` the active channel: the next `begin_stroke` snapshots
+    /// it for that stroke's routing (`target_of`/`target_of_mut`). A
+    /// no-op mid-stroke (like the `sync_*` adopts — a swap under a live
+    /// stroke would split one stroke across two targets); the live
+    /// stroke keeps its own snapshot.
+    pub fn set_active_channel(&mut self, name: &str) {
+        if !self.stroking {
+            self.active_channel = name.to_string();
+        }
     }
 
     /// Every known texture-set name, ascending.
@@ -765,6 +827,10 @@ impl PaintState {
         // one stroke between the mask and the layer.
         self.stroke_mask_edit = self.quick_mask().is_editing();
         self.stroke_mask_gate = self.quick_mask().gates();
+        // Snapshot the active channel: a mid-stroke `set_active_channel`
+        // (refused anyway — see its own docs) must never retarget a live
+        // stroke partway through.
+        self.stroke_channel = self.active_channel.clone();
         self.retouch = if self.stroke_mask_edit {
             // A mask stroke paints only the mask: no retouch mirror, and
             // the retouch history stays valid (the layer is untouched).
@@ -1144,10 +1210,15 @@ impl PaintState {
         self.retouch_history.can_redo()
     }
 
-    /// Queues the retouch history's pending region writes on their tiles.
+    /// Queues the retouch history's pending region writes on their
+    /// targets (tile + channel — the undo key, see the module docs).
     fn flush_retouch_writes(&mut self) {
-        for (tile, rect, rgba) in self.retouch_writes.writes.drain(..) {
-            if let Some(thread) = self.targets.get_mut(&tile) {
+        // Drain into a local first: the writes and the target lookup both
+        // borrow `self` mutably — the iterator can't hold the borrow while
+        // `target_of_mut` takes it.
+        let writes: Vec<_> = self.retouch_writes.writes.drain(..).collect();
+        for (tile, channel, rect, rgba) in writes {
+            if let Some(thread) = self.target_of_mut(tile, &channel) {
                 let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
                     x: rect.x0,
                     y: rect.y0,
@@ -1186,7 +1257,45 @@ impl PaintState {
         if !self.ensure_tile(tile) {
             return false;
         }
-        if let Some(thread) = self.targets.get_mut(&tile) {
+        if let Some(thread) = self.target_of_mut(tile, BASE_COLOR_CHANNEL) {
+            let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                x: 0,
+                y: 0,
+                width,
+                height,
+                rgba,
+            }]);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// [`Self::publish_fill`]'s channel-aware sibling: uploads `rgba` into
+    /// `tile`'s `channel` target, materializing it first via
+    /// [`Self::ensure_channel`] (lazy creation on first route). The
+    /// project open path restores a per-channel sidecar PNG through this;
+    /// `publish_fill` itself stays [`BASE_COLOR_CHANNEL`]-only (the Gate-0
+    /// seam's existing signature is untouched).
+    pub fn publish_fill_channel(
+        &mut self,
+        tile: u16,
+        channel: &str,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> bool {
+        if rgba.len() != width as usize * height as usize * 4 {
+            log::warn!(
+                "fill: dropping {width}x{height} upload for tile {tile}/{channel} ({} bytes)",
+                rgba.len()
+            );
+            return false;
+        }
+        if !self.ensure_channel(tile, channel) {
+            return false;
+        }
+        if let Some(thread) = self.target_of_mut(tile, channel) {
             let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
                 x: 0,
                 y: 0,
@@ -1243,12 +1352,15 @@ impl PaintState {
     /// before/after over the rect (a fully gated-away stroke) contribute no
     /// region; no regions means no entry.
     fn record_paint_capture(&mut self, capture: PaintStrokeCapture) {
+        let channel = self.stroke_channel.clone();
         let mut finished = Vec::new();
         for (tile, entry) in capture.tiles {
             let Some(rect) = entry.dirty else {
                 continue;
             };
-            let Some(after_image) = self.read_tile(tile) else {
+            // Not materializing: `capture.tiles` only holds tiles whose
+            // channel thread `capture_paint_event` already materialized.
+            let Some(after_image) = self.read_target(tile, &channel, false) else {
                 continue;
             };
             if rect.x1 > after_image.width
@@ -1267,6 +1379,7 @@ impl PaintState {
             .iter()
             .map(|(tile, rect, start, end)| StrokeTile {
                 tile: *tile,
+                channel: channel.clone(),
                 rect: *rect,
                 start,
                 end,
@@ -1363,22 +1476,25 @@ impl PaintState {
         true
     }
 
-    /// Drains pending paint commands on EVERY tile's thread (mirrors and
+    /// Drains pending paint commands on EVERY materialized thread —
+    /// `base_color` and every routed channel, on every tile (mirrors and
     /// strokes that left a tile may have queued work off the active tile)
-    /// and returns the cumulative stats summed across tiles. With one tile
-    /// this is exactly that thread's stats.
+    /// — and returns the cumulative stats summed across all of them. With
+    /// one tile and no routed channel this is exactly that thread's stats.
     ///
     /// # Errors
     ///
     /// Propagates GPU-processing failures.
     pub fn process_pending(&mut self) -> Result<FrameStats, umber_gpu::paint::PaintError> {
         let mut total = FrameStats::default();
-        for thread in self.targets.values_mut() {
-            let stats = thread.process_pending()?;
-            total.dabs_composited += stats.dabs_composited;
-            total.dispatches += stats.dispatches;
-            total.clears += stats.clears;
-            total.segments += stats.segments;
+        for tile_targets in self.targets.values_mut() {
+            for thread in tile_targets.threads_mut() {
+                let stats = thread.process_pending()?;
+                total.dabs_composited += stats.dabs_composited;
+                total.dispatches += stats.dispatches;
+                total.clears += stats.clears;
+                total.segments += stats.segments;
+            }
         }
         self.last_stats = total;
         Ok(self.last_stats)
@@ -1389,21 +1505,22 @@ impl PaintState {
         self.last_stats
     }
 
-    /// Read-only access to the ACTIVE tile's paint target (for display
-    /// callbacks and the single-target export paths).
+    /// Read-only access to the ACTIVE tile's baseColor paint target (for
+    /// display callbacks and the single-target export paths).
     pub fn paint_target(&self) -> &umber_gpu::paint::PaintTarget {
         self.targets
             .get(&self.active_tile)
             .or_else(|| self.targets.get(&FIRST_TILE))
             .expect("tile 1001 is created in PaintState::new and never removed")
+            .base_color
             .paint_target()
     }
 
-    /// Read-only access to `tile`'s paint target, or `None` when nothing
-    /// has routed to that tile yet (the per-tile export reads each
+    /// Read-only access to `tile`'s baseColor paint target, or `None` when
+    /// nothing has routed to that tile yet (the per-tile export reads each
     /// present tile through this).
     pub fn tile_target(&self, tile: u16) -> Option<&umber_gpu::paint::PaintTarget> {
-        self.targets.get(&tile).map(PaintThread::paint_target)
+        self.targets.get(&tile).map(|t| t.base_color.paint_target())
     }
 
     /// The tiles this session holds a paint target for, ascending —
@@ -1412,6 +1529,16 @@ impl PaintState {
     pub fn tiles_present(&self) -> Vec<u16> {
         // BTreeMap keys iterate sorted.
         self.targets.keys().copied().collect()
+    }
+
+    /// Every channel materialized on `tile` besides baseColor, ascending
+    /// (baseColor itself is implicit — present for every tile `tiles_present`
+    /// lists). The per-channel save path's census.
+    pub fn channels_present(&self, tile: u16) -> Vec<String> {
+        self.targets
+            .get(&tile)
+            .map(|t| t.channels.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Overrides the stroke color (the per-tile export test paints each
@@ -1489,8 +1616,10 @@ impl PaintState {
             self.mask_synced.remove(tile);
         }
         for tile in &tiles {
-            if let Some(thread) = self.targets.get_mut(tile) {
-                let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+            if let Some(tile_targets) = self.targets.get_mut(tile) {
+                for thread in tile_targets.threads_mut() {
+                    let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+                }
             }
         }
     }
@@ -1517,7 +1646,13 @@ impl PaintState {
         let (width, height) = self.tile_size(tile);
         match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
             Ok(thread) => {
-                self.targets.insert(tile, thread);
+                self.targets.insert(
+                    tile,
+                    TileTargets {
+                        base_color: thread,
+                        channels: BTreeMap::new(),
+                    },
+                );
                 let active = self.active_set.clone();
                 self.tile_sets.entry(tile).or_insert(active);
                 true
@@ -1526,6 +1661,73 @@ impl PaintState {
                 log::warn!("paint target for tile {tile} failed: {err:#}");
                 false
             }
+        }
+    }
+
+    /// Ensures `tile` has a paint thread for `channel`, creating it at the
+    /// tile's SET size on first use — the lazy materialization contract
+    /// (see the module docs): a channel's thread appears on first route
+    /// (a stroke, a bake write, or this explicit pre-warm call).
+    /// [`BASE_COLOR_CHANNEL`] defers to [`Self::ensure_tile`] and never
+    /// allocates a `channels` entry. Returns `false` (logged) on creation
+    /// failure, same as `ensure_tile`.
+    pub fn ensure_channel(&mut self, tile: u16, channel: &str) -> bool {
+        if channel == BASE_COLOR_CHANNEL {
+            return self.ensure_tile(tile);
+        }
+        if !self.ensure_tile(tile) {
+            return false;
+        }
+        if self
+            .targets
+            .get(&tile)
+            .is_some_and(|t| t.channels.contains_key(channel))
+        {
+            return true;
+        }
+        let (width, height) = self.tile_size(tile);
+        match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
+            Ok(thread) => {
+                self.targets
+                    .get_mut(&tile)
+                    .expect("ensure_tile just created or kept it")
+                    .channels
+                    .insert(channel.to_string(), thread);
+                true
+            }
+            Err(err) => {
+                log::warn!("paint channel target for tile {tile}/{channel} failed: {err:#}");
+                false
+            }
+        }
+    }
+
+    /// Resolves `tile`'s thread for `channel`, mutably, WITHOUT
+    /// materializing: `None` when the tile or the channel has never been
+    /// created. The read accessors' non-creating counterpart to
+    /// `target_of_mut` — a read must never side-effect creation.
+    fn existing_target_mut(&mut self, tile: u16, channel: &str) -> Option<&mut PaintThread> {
+        let targets = self.targets.get_mut(&tile)?;
+        if channel == BASE_COLOR_CHANNEL {
+            Some(&mut targets.base_color)
+        } else {
+            targets.channels.get_mut(channel)
+        }
+    }
+
+    /// Resolves `tile`'s thread for `channel`, mutably — materializing `channel` first (lazy
+    /// creation on first route; a non-reserved channel that has never
+    /// routed here appears now). `None` only on a creation failure (same
+    /// as `ensure_tile`/`ensure_channel`).
+    fn target_of_mut(&mut self, tile: u16, channel: &str) -> Option<&mut PaintThread> {
+        if !self.ensure_channel(tile, channel) {
+            return None;
+        }
+        let targets = self.targets.get_mut(&tile)?;
+        if channel == BASE_COLOR_CHANNEL {
+            Some(&mut targets.base_color)
+        } else {
+            targets.channels.get_mut(channel)
         }
     }
 
@@ -1729,10 +1931,13 @@ impl PaintState {
             self.capture_paint_event(tile, &dabs);
         }
         // Stage as one command; the thread splits into capacity segments
-        // and overlap-safe dispatches.
+        // and overlap-safe dispatches. Routes to the stroke's snapshotted
+        // channel — the design's routing rule: every stroke lands in
+        // `route_tile(uv)`'s ACTIVE-CHANNEL target, not always baseColor.
         #[cfg(test)]
         let staged_n = dabs.len() as u64;
-        if let Some(thread) = self.targets.get_mut(&tile) {
+        let channel = self.stroke_channel.clone();
+        if let Some(thread) = self.target_of_mut(tile, &channel) {
             let _ = thread.publish(vec![PaintThreadCommand::Stage { dabs }]);
         }
         // Test observability: count staged batches for the seam-blind
@@ -1767,7 +1972,12 @@ impl PaintState {
             .as_ref()
             .is_some_and(|capture| !capture.tiles.contains_key(&tile));
         if needs_snapshot {
-            let image = self.read_tile(tile);
+            // Materializing: the FIRST stroke ever routed to this channel
+            // has no existing thread to read — its just-created blank
+            // bytes are the correct before-state (the same contract
+            // `ensure_tile` already gives a brand-new tile).
+            let channel = self.stroke_channel.clone();
+            let image = self.read_target(tile, &channel, true);
             let (Some(capture), Some(image)) = (self.paint_capture.as_mut(), image) else {
                 return;
             };
@@ -1819,7 +2029,10 @@ impl PaintState {
         };
         if let Some(rect) = stroke.apply_masked(tile, dabs, mask) {
             let rgba = stroke.region(tile, rect);
-            if let Some(thread) = self.targets.get_mut(&tile) {
+            // Retouch tools stay baseColor-only in v1 (a deliberate
+            // boundary — see the module docs): smudge/clone/erase never
+            // consult `stroke_channel`.
+            if let Some(thread) = self.target_of_mut(tile, BASE_COLOR_CHANNEL) {
                 let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
                     x: rect.x0,
                     y: rect.y0,
@@ -1879,7 +2092,11 @@ impl PaintState {
             return;
         }
         let values = self.quick_mask_for_tile(tile).gpu_bytes(tile, rect);
-        let Some(thread) = self.targets.get_mut(&tile) else {
+        // The quick mask is per-SET, not per-channel (v1 non-goal — see
+        // the module docs): it gates baseColor's thread today; a
+        // non-baseColor channel's OWN GPU mask copy is a named follow-up
+        // for the (c) landing.
+        let Some(thread) = self.target_of_mut(tile, BASE_COLOR_CHANNEL) else {
             return;
         };
         let _ = thread.publish(vec![PaintThreadCommand::WriteMask {
@@ -1896,22 +2113,55 @@ impl PaintState {
         }
     }
 
-    /// `tile`'s current texels as a CPU image: drains the tile's queue
+    /// `tile`'s baseColor texels as a CPU image: drains the tile's queue
     /// first (so earlier strokes' dabs are in the texture), then the
     /// blocking full-target `PaintTarget::read_back_rgba8`. `None` (logged;
     /// the stroke skips the tile) when the drain or the readback fails.
+    /// Channel-aware reads use [`Self::read_channel_tile`] instead — this
+    /// stays baseColor-only (the eyedropper/ID-mask pattern: explicit
+    /// channel, no ambient active-channel state).
     pub(crate) fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
-        let thread = self.targets.get_mut(&tile)?;
+        self.read_target(tile, BASE_COLOR_CHANNEL, false)
+    }
+
+    /// [`Self::read_tile`]'s channel-aware sibling: `tile`'s `channel`
+    /// texels. `None` when that channel has never routed on `tile` — like
+    /// `read_tile` on a never-created tile, a read never side-effects
+    /// creation (the eyedropper/ID-mask pattern: explicit channel, no
+    /// ambient active-channel state, and no surprise allocation either).
+    pub fn read_channel_tile(&mut self, tile: u16, channel: &str) -> Option<RgbaBuffer> {
+        self.read_target(tile, channel, false)
+    }
+
+    /// The shared implementation behind [`Self::read_tile`]/
+    /// [`Self::read_channel_tile`]/the paint-stroke capture's "before"
+    /// snapshot: drains `tile`'s `channel` target's queue, then the
+    /// blocking full-target readback. `materialize` selects
+    /// `target_of_mut` (the capture's first-touch snapshot: a freshly
+    /// materialized thread's blank bytes ARE the correct before-state) or
+    /// `existing_target_mut` (the public read accessors, which must never
+    /// create a target as a side effect of reading one).
+    fn read_target(&mut self, tile: u16, channel: &str, materialize: bool) -> Option<RgbaBuffer> {
+        // Clone the Arc handles out before the mutable target borrow —
+        // `thread` borrows `self.targets` while the read-back wants
+        // `self.device`/`self.queue` immutably (E0502 otherwise).
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let thread = if materialize {
+            self.target_of_mut(tile, channel)?
+        } else {
+            self.existing_target_mut(tile, channel)?
+        };
         if let Err(err) = thread.process_pending() {
-            log::warn!("retouch: draining tile {tile} failed: {err:#}");
+            log::warn!("retouch: draining tile {tile}/{channel} failed: {err:#}");
             return None;
         }
         let target = thread.paint_target();
         let (width, height) = target.dimensions();
-        match target.read_back_rgba8(&self.device, &self.queue) {
+        match target.read_back_rgba8(&device, &queue) {
             Ok(bytes) => RgbaBuffer::new(width, height, bytes),
             Err(err) => {
-                log::warn!("retouch: reading tile {tile} back failed: {err:#}");
+                log::warn!("retouch: reading tile {tile}/{channel} back failed: {err:#}");
                 None
             }
         }
@@ -3480,6 +3730,166 @@ mod tests {
         state.end_stroke();
         assert_eq!(state.tile_count(), 2, "1001 already existed");
         assert_eq!(state.active_tile(), 1001);
+    }
+
+    /// Design gate 1 (docs/specs/per-channel-tile-pool-design.md): a
+    /// height write lands in height's target ONLY — baseColor stays
+    /// all-transparent — and the stroke-undo journal restores per
+    /// channel (the undo key is (tile, channel), not just tile).
+    #[test]
+    fn height_channel_is_isolated_from_base_color_with_per_channel_undo() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // Deterministic pattern: texel (x, y) channel c holds
+        // (x*31 + y*17 + c*71 + seed) mod 251 (251 is prime, so the
+        // values spread; the same formula main.rs's persistence tests
+        // use). Seed 5 pins texel (0,0) to [5, 76, 147, 218] and
+        // (1,0)'s red to 36 — exact bytes, not ranges, so a swapped
+        // formula fails here.
+        fn channel_pattern(seed: u8) -> Vec<u8> {
+            let mut out = Vec::with_capacity(512 * 512 * 4);
+            for y in 0..512u32 {
+                for x in 0..512u32 {
+                    for c in 0..4u32 {
+                        out.push(((x * 31 + y * 17 + c * 71 + u32::from(seed)) % 251) as u8);
+                    }
+                }
+            }
+            out
+        }
+        let height_bytes = channel_pattern(5);
+        assert_eq!(&height_bytes[..4], &[5u8, 76, 147, 218]);
+        assert_eq!(height_bytes[4], 36);
+        assert!(height_bytes.iter().any(|&b| b != 0));
+
+        assert!(state.ensure_channel(1001, "height"));
+        assert_eq!(state.channels_present(1001), vec!["height".to_string()]);
+        assert!(state.publish_fill_channel(1001, "height", 512, 512, height_bytes.clone()));
+        state.process_pending().expect("upload lands");
+
+        // Height holds the bytes; baseColor is untouched (a fresh
+        // target is zero-initialized transparent black — all-zero).
+        let height = state
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!((height.width, height.height), (512, 512));
+        assert_eq!(height.data, height_bytes);
+        let base = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("baseColor reads back");
+        assert_eq!((base.width, base.height), (512, 512));
+        assert!(
+            base.data.iter().all(|&b| b == 0),
+            "baseColor must stay all-transparent"
+        );
+        // A never-routed channel reads None — reads never materialize
+        // (the eyedropper/ID-mask contract on read_target).
+        assert!(state.read_channel_tile(1001, "roughness").is_none());
+        assert_eq!(state.channels_present(1001), vec!["height".to_string()]);
+
+        // The undo half needs a real stroke: fill publishes ride the
+        // WriteRegion queue with no history entry (publish_fill's own
+        // contract), while a paint-tool stroke records one entry keyed
+        // by (tile, channel) — see record_paint_capture.
+        assert!(!state.can_undo_stroke(), "fills record no undo entry");
+        state.set_active_channel("height");
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(state.can_undo_stroke(), "the height stroke is one entry");
+        state.process_pending().expect("drain succeeds");
+        let stroked = state
+            .read_channel_tile(1001, "height")
+            .expect("height re-reads");
+        // Can-fail guard with a derivation, not a hope: the pattern's
+        // bytes are all < 251 (mod 251), while the default brush
+        // ([0.85, 0.2, 0.1, 1.0]) stamps full-coverage texels at alpha
+        // 255 down the stroke's center — a value the pattern can never
+        // hold — so at least one byte must differ.
+        assert_ne!(
+            stroked.data, height_bytes,
+            "the stroke must reach the height target"
+        );
+        // Still isolated after the stroke: baseColor never saw a dab.
+        let base_after = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("baseColor re-reads");
+        assert!(base_after.data.iter().all(|&b| b == 0));
+
+        // Undo restores the height fill byte-exact WITHOUT touching
+        // baseColor; redo replays the stroke's bytes.
+        assert!(state.undo_stroke());
+        state.process_pending().expect("drain succeeds");
+        let undone = state
+            .read_channel_tile(1001, "height")
+            .expect("height re-reads");
+        assert_eq!(
+            undone.data, height_bytes,
+            "undo restores the pre-stroke height bytes"
+        );
+        let base_undone = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("baseColor re-reads");
+        assert!(base_undone.data.iter().all(|&b| b == 0));
+        assert!(state.redo_stroke());
+        state.process_pending().expect("drain succeeds");
+        let redone = state
+            .read_channel_tile(1001, "height")
+            .expect("height re-reads");
+        assert_eq!(
+            redone.data, stroked.data,
+            "redo restores the post-stroke height bytes"
+        );
+        assert!(!state.can_redo_stroke());
+    }
+
+    /// Design gate 2: channel targets materialize lazily — a session
+    /// that KNOWS five channel names but routes to one holds exactly
+    /// two targets (baseColor + the routed one).
+    #[test]
+    fn channel_targets_materialize_lazily_per_routed_channel() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // The census: baseColor is implicit (present for every tile
+        // tiles_present lists), so targets = channels_present + 1.
+        let census = |state: &PaintState| state.channels_present(1001).len() + 1;
+        assert_eq!(census(&state), 1, "a fresh tile holds baseColor only");
+        assert_eq!(state.tile_count(), 1);
+
+        // Five known channel names (the document's TextureSet.channels
+        // is the source of truth; the session mirrors it as plain
+        // strings) — routing to ONE materializes exactly one entry.
+        assert!(state.ensure_channel(1001, "height"));
+        assert_eq!(state.channels_present(1001), vec!["height".to_string()]);
+        assert_eq!(census(&state), 2, "baseColor + the one routed channel");
+        assert_eq!(
+            state.tile_count(),
+            1,
+            "routing a channel never spawns a tile"
+        );
+        // Re-routing the same channel reuses its entry.
+        assert!(state.ensure_channel(1001, "height"));
+        assert_eq!(census(&state), 2);
+        // Routing baseColor never allocates a channels entry (the
+        // reserved-name contract on BASE_COLOR_CHANNEL).
+        assert!(state.ensure_channel(1001, BASE_COLOR_CHANNEL));
+        assert_eq!(census(&state), 2);
+        // The four unrouted names cost nothing: no entry, and reads
+        // report absence WITHOUT creating one (read_target with
+        // materialize=false).
+        for channel in ["roughness", "metallic", "normal", "ao"] {
+            assert!(
+                state.read_channel_tile(1001, channel).is_none(),
+                "{channel} was never routed"
+            );
+        }
+        assert_eq!(census(&state), 2, "reads must not materialize targets");
+        assert_eq!(state.tile_count(), 1);
     }
 
     #[test]

@@ -790,9 +790,67 @@ fn paint_sidecar_dir(project_dir: &Path) -> PathBuf {
     project_dir.join("paint")
 }
 
-/// The sidecar PNG for one paint tile.
+/// The sidecar PNG for one baseColor paint tile — the legacy FLAT
+/// `paint/tile-<N>.png` shape, byte-identical to the v2 layout and
+/// untouched by the per-channel tile pool
+/// (docs/specs/per-channel-tile-pool-design.md): every v2 project and
+/// every one of today's single-channel sessions keeps this exact path.
+/// [`paint_channel_tile_path`] is the channel-aware sibling for every
+/// OTHER channel, which nests under its own `paint/<channel>/` directory
+/// (baseColor deliberately does NOT move there — a smaller, zero-churn
+/// diff than the design doc's sketch; see the kill report).
 fn paint_tile_path(project_dir: &Path, tile: u16) -> PathBuf {
     paint_sidecar_dir(project_dir).join(format!("tile-{tile}.png"))
+}
+
+/// [`paint_tile_path`]'s channel-aware sibling: `paint/tile-<N>.png` for
+/// the reserved baseColor channel (identical to `paint_tile_path`),
+/// `paint/<channel>/tile-<N>.png` for every other channel.
+fn paint_channel_tile_path(project_dir: &Path, channel: &str, tile: u16) -> PathBuf {
+    if channel == paint_state::BASE_COLOR_CHANNEL {
+        paint_tile_path(project_dir, tile)
+    } else {
+        paint_sidecar_dir(project_dir)
+            .join(channel)
+            .join(format!("tile-{tile}.png"))
+    }
+}
+
+/// The manifest `name`/sidecar-listing form of `(channel, tile)`: the
+/// legacy flat `tile-<N>.png` for baseColor (byte-identical to the v2
+/// commit shape — see [`paint_tile_path`]'s docs), else
+/// `<channel>/tile-<N>.png`. NOT a 6th manifest column: `parse_paint_commit`
+/// destructures an exact 5-field array (`main.rs`'s `PaintCommitEntry`
+/// codec), so a literal new column would refuse every v2 manifest AND
+/// every new manifest a v2 binary tries to roll forward. Encoding the
+/// channel in the `name` field itself keeps the codec's arity exactly 5
+/// and is what [`parse_paint_sidecar_name`] parses back.
+fn paint_sidecar_name(channel: &str, tile: u16) -> String {
+    if channel == paint_state::BASE_COLOR_CHANNEL {
+        format!("tile-{tile}.png")
+    } else {
+        format!("{channel}/tile-{tile}.png")
+    }
+}
+
+/// Parses a manifest `name`/sidecar listing back to its `(channel,
+/// tile)`: a bare `tile-<N>.png` is the reserved baseColor channel (the
+/// v2 shape — see [`paint_sidecar_name`]'s docs); `<channel>/tile-<N>.png`
+/// names an explicit channel. `None` for anything else, including a
+/// channel component that is empty, `..`, or holds a backslash (texture-
+/// set channel names are arbitrary user/import-derived strings, and the
+/// manifest line is space-delimited — this is the trust boundary, not
+/// `is_paint_sidecar_name`'s whitelist alone).
+fn parse_paint_sidecar_name(name: &str) -> Option<(String, u16)> {
+    if let Some(tile) = parse_paint_tile_name(name) {
+        return Some((paint_state::BASE_COLOR_CHANNEL.to_string(), tile));
+    }
+    let (channel, rest) = name.split_once('/')?;
+    if channel.is_empty() || channel == ".." || channel.contains('\\') {
+        return None;
+    }
+    let tile = parse_paint_tile_name(rest)?;
+    Some((channel.to_string(), tile))
 }
 
 /// The sidecar file holding the session's paint-target size
@@ -1021,11 +1079,14 @@ fn paint_manifest_path(project_dir: &Path) -> PathBuf {
 }
 
 /// Whether `name` is a file a paint commit may write under `paint/`: a
-/// `tile-<N>.png` or one of the two size files. Recovery refuses a
-/// manifest naming anything else (a hand-edited `../x` never escapes the
-/// folder).
+/// flat or channel-qualified `tile-<N>.png` (see
+/// [`parse_paint_sidecar_name`]) or one of the two size files. Recovery
+/// refuses a manifest naming anything else (a hand-edited `../x` never
+/// escapes the folder).
 fn is_paint_sidecar_name(name: &str) -> bool {
-    parse_paint_tile_name(name).is_some() || name == "target_size.txt" || name == "target_sizes.txt"
+    parse_paint_sidecar_name(name).is_some()
+        || name == "target_size.txt"
+        || name == "target_sizes.txt"
 }
 
 /// The staged temp name for `name`: `<name>.tmp.<pid>` (the shape
@@ -1164,6 +1225,10 @@ fn finish_paint_stage(
 }
 
 /// Stages `bytes` as the next commit's `name` (temp + store blob).
+/// Creates `name`'s parent directory first — a no-op for a flat name
+/// (the sidecar directory already exists), the channel subdirectory's
+/// first write otherwise (`paint/<channel>/` nests one level under
+/// `paint/`, created lazily like the tile pool it mirrors).
 fn stage_paint_bytes(
     project_dir: &Path,
     store: &umber_core::AssetStore,
@@ -1171,13 +1236,18 @@ fn stage_paint_bytes(
     bytes: &[u8],
 ) -> std::io::Result<PaintCommitEntry> {
     let temp = paint_temp_name(name);
-    std::fs::write(paint_sidecar_dir(project_dir).join(&temp), bytes)?;
+    let path = paint_sidecar_dir(project_dir).join(&temp);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, bytes)?;
     finish_paint_stage(project_dir, store, name, temp, bytes)
 }
 
 /// Stages one tile readback as a Linear-transfer PNG temp (the same
 /// `write_png` call the sidecar always used — byte-exact), then stores
-/// the encoded bytes.
+/// the encoded bytes. Creates `name`'s parent directory first, like
+/// [`stage_paint_bytes`].
 fn stage_paint_png(
     project_dir: &Path,
     store: &umber_core::AssetStore,
@@ -1188,6 +1258,9 @@ fn stage_paint_png(
 ) -> std::io::Result<PaintCommitEntry> {
     let temp = paint_temp_name(name);
     let path = paint_sidecar_dir(project_dir).join(&temp);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     umber_export::png::write_png(
         &path,
         width,
@@ -1215,6 +1288,31 @@ fn commit_paint_manifest(project_dir: &Path, entries: &[PaintCommitEntry]) -> st
         log::warn!("paint save: committed, directory fsync failed: {e:#}");
     }
     Ok(())
+}
+
+/// Every `tile-<N>.png`-shaped sidecar currently on disk under `dir`, as
+/// the SAME relative name the manifest uses: a flat `tile-<N>.png` at the
+/// top level, or `<channel>/tile-<N>.png` one level into a channel
+/// subdirectory — exactly as deep as the per-channel layout ever nests.
+/// Used by the prune step so a dropped tile OR a dropped channel's tile
+/// is pruned regardless of which directory it lives in.
+fn list_paint_tile_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            for inner in std::fs::read_dir(&path)?.flatten() {
+                let inner_name = inner.file_name().to_string_lossy().into_owned();
+                if parse_paint_tile_name(&inner_name).is_some() {
+                    names.push(format!("{name}/{inner_name}"));
+                }
+            }
+        } else if parse_paint_tile_name(&name).is_some() {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// Applies a pending commit (idempotent — safe to re-run after a crash at
@@ -1276,11 +1374,10 @@ fn apply_paint_commit(project_dir: &Path, max_steps: Option<usize>) -> std::io::
         std::fs::rename(&restore, &target)?;
     }
     let listed: std::collections::HashSet<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    for entry in std::fs::read_dir(&dir)?.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if parse_paint_tile_name(&name).is_some() && !listed.contains(name.as_str()) {
+    for name in list_paint_tile_names(&dir)? {
+        if !listed.contains(name.as_str()) {
             step()?;
-            std::fs::remove_file(entry.path())?;
+            std::fs::remove_file(dir.join(&name))?;
         }
     }
     sync_dir(&dir)?;
@@ -1304,13 +1401,25 @@ fn recover_paint_sidecar(project_dir: &Path) {
             return;
         }
     }
-    let Ok(entries) = std::fs::read_dir(paint_sidecar_dir(project_dir)) else {
+    sweep_paint_temps(&paint_sidecar_dir(project_dir));
+}
+
+/// Removes every staged temp under `dir`, recursing one level into
+/// channel subdirectories (the per-channel layout's only nesting depth)
+/// so a crash mid-save on a non-baseColor channel leaves no orphan
+/// `paint/<channel>/*.tmp.<pid>` behind either.
+fn sweep_paint_temps(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            sweep_paint_temps(&path);
+            continue;
+        }
         let name = entry.file_name().to_string_lossy().into_owned();
         if is_paint_temp_name(&name) {
-            let path = entry.path();
             if let Err(e) = std::fs::remove_file(&path) {
                 log::warn!("paint: orphan temp {} not removed: {e}", path.display());
             }
@@ -1318,16 +1427,18 @@ fn recover_paint_sidecar(project_dir: &Path) {
     }
 }
 
-/// Writes every present paint tile into the project sidecar as a
-/// Linear-transfer PNG (byte-exact — the export dialog's `Srgb` would
-/// move the bytes through the IEC curve), crash-safely: every artifact is
-/// staged (temp + `AssetStore` blob) before ONE manifest rename commits
-/// the save (see the module docs). Reads through
-/// `PaintState::read_tile`, the REAL readback path: it drains the
-/// tile's queue first so earlier strokes' dabs are in the bytes, then
-/// does the blocking `PaintTarget::read_back_rgba8` — the same call the
-/// stroke-undo capture uses. Prunes `tile-*.png` files for tiles the
-/// session no longer holds, then returns how many tiles were stored
+/// Writes every present paint tile — and every materialized channel on
+/// it (docs/specs/per-channel-tile-pool-design.md) — into the project
+/// sidecar as a Linear-transfer PNG (byte-exact — the export dialog's
+/// `Srgb` would move the bytes through the IEC curve), crash-safely:
+/// every artifact is staged (temp + `AssetStore` blob) before ONE
+/// manifest rename commits the save (see the module docs). Reads
+/// through `PaintState::read_tile`/`read_channel_tile`, the REAL
+/// readback path: it drains the target's queue first so earlier strokes'
+/// dabs are in the bytes, then does the blocking
+/// `PaintTarget::read_back_rgba8` — the same call the stroke-undo
+/// capture uses. Prunes sidecar files for tiles/channels the session no
+/// longer holds, then returns how many paint artifacts were stored
 /// (0 when the save never committed — the previous paint stays intact).
 fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
     match commit_paint_tiles(paint, project_dir) {
@@ -1387,25 +1498,38 @@ fn commit_paint_tiles(
     )?);
     let mut saved = 0usize;
     for tile in &tiles {
-        let name = format!("tile-{tile}.png");
-        let Some(image) = paint.read_tile(*tile) else {
-            // A failed readback keeps the tile's previous sidecar (if
-            // any): it is re-staged as-is so the commit does not prune it.
-            log::warn!("paint save: tile {tile} readback failed; keeping its previous file");
-            if let Ok(bytes) = std::fs::read(paint_tile_path(project_dir, *tile)) {
-                entries.push(stage_paint_bytes(project_dir, &store, &name, &bytes)?);
-            }
-            continue;
-        };
-        entries.push(stage_paint_png(
-            project_dir,
-            &store,
-            &name,
-            image.width,
-            image.height,
-            &image.data,
-        )?);
-        saved += 1;
+        let mut channels = vec![paint_state::BASE_COLOR_CHANNEL.to_string()];
+        channels.extend(paint.channels_present(*tile));
+        for channel in &channels {
+            let name = paint_sidecar_name(channel, *tile);
+            let image = if channel == paint_state::BASE_COLOR_CHANNEL {
+                paint.read_tile(*tile)
+            } else {
+                paint.read_channel_tile(*tile, channel)
+            };
+            let Some(image) = image else {
+                // A failed readback keeps the artifact's previous sidecar
+                // (if any): it is re-staged as-is so the commit does not
+                // prune it.
+                log::warn!(
+                    "paint save: tile {tile}/{channel} readback failed; keeping its previous file"
+                );
+                let path = paint_channel_tile_path(project_dir, channel, *tile);
+                if let Ok(bytes) = std::fs::read(&path) {
+                    entries.push(stage_paint_bytes(project_dir, &store, &name, &bytes)?);
+                }
+                continue;
+            };
+            entries.push(stage_paint_png(
+                project_dir,
+                &store,
+                &name,
+                image.width,
+                image.height,
+                &image.data,
+            )?);
+            saved += 1;
+        }
     }
     commit_paint_manifest(project_dir, &entries)?;
     // Committed: from here an interruption rolls forward on the next open.
@@ -1437,6 +1561,65 @@ fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> 
     load_paint_tiles_reported(paint, project_dir).restored
 }
 
+/// Decodes one sidecar PNG, flipped back out of the reader's row order.
+/// `None` (logged) on a decode failure — the caller skips that artifact.
+fn decode_paint_png(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
+    match umber_export::png::read_png_rgba8(path) {
+        Ok((width, height, bytes)) => {
+            Some((width, height, flip_rows_vertical(&bytes, width, height)))
+        }
+        Err(e) => {
+            log::warn!("paint open: {} decode failed: {e:#}", path.display());
+            None
+        }
+    }
+}
+
+/// Every `(channel, tile)` artifact currently on disk under `dir`: flat
+/// `tile-<N>.png` files first (the reserved baseColor channel — the v2
+/// shape), then one level into every subdirectory (an explicit channel
+/// name). A channel subdirectory inserts AFTER the flat pass, so a
+/// (forward-compatible, never written by this crate today) literal
+/// `paint/baseColor/` wins over a same-tile flat collision.
+fn collect_paint_tiles(
+    dir: &Path,
+) -> std::collections::BTreeMap<(String, u16), (u32, u32, Vec<u8>)> {
+    let mut found = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    let mut channel_dirs = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if path.is_dir() {
+            channel_dirs.push((name, path));
+            continue;
+        }
+        let Some(tile) = parse_paint_tile_name(&name) else {
+            continue;
+        };
+        if let Some(decoded) = decode_paint_png(&path) {
+            found.insert((paint_state::BASE_COLOR_CHANNEL.to_string(), tile), decoded);
+        }
+    }
+    for (channel, path) in channel_dirs {
+        let Ok(inner) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for inner_entry in inner.flatten() {
+            let inner_name = inner_entry.file_name().to_string_lossy().into_owned();
+            let Some(tile) = parse_paint_tile_name(&inner_name) else {
+                continue;
+            };
+            if let Some(decoded) = decode_paint_png(&inner_entry.path()) {
+                found.insert((channel.clone(), tile), decoded);
+            }
+        }
+    }
+    found
+}
+
 fn load_paint_tiles_reported(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
@@ -1446,36 +1629,12 @@ fn load_paint_tiles_reported(
     // is the old project or the new one — never a torn mix.
     recover_paint_sidecar(project_dir);
     let dir = paint_sidecar_dir(project_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(_) => return PaintLoadReport::default(),
-    };
-    let mut tiles: Vec<(u16, u32, u32, Vec<u8>)> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(tile) = parse_paint_tile_name(&name) else {
-            continue;
-        };
-        match umber_export::png::read_png_rgba8(&entry.path()) {
-            Ok((width, height, bytes)) => {
-                tiles.push((
-                    tile,
-                    width,
-                    height,
-                    flip_rows_vertical(&bytes, width, height),
-                ));
-            }
-            Err(e) => log::warn!(
-                "paint open: {} decode failed: {e:#}",
-                entry.path().display()
-            ),
-        }
-    }
+    let found = collect_paint_tiles(&dir);
     let mapping = std::fs::read_to_string(paint_set_sizes_path(project_dir))
         .ok()
         .and_then(|text| parse_paint_set_sizes(&text));
     let active = paint.active_set().to_string();
-    if tiles.is_empty() {
+    if found.is_empty() {
         // No paint persisted: the newly opened document must not show the
         // previous document's pixels (the layer stack is replaced
         // wholesale on open; the paint follows the same rule).
@@ -1521,7 +1680,6 @@ fn load_paint_tiles_reported(
         }
         return PaintLoadReport::default();
     }
-    tiles.sort_by_key(|entry| entry.0);
     match &mapping {
         Some(known) => {
             // The mapping is authoritative: every known set goes to its
@@ -1556,12 +1714,22 @@ fn load_paint_tiles_reported(
             // The v1 shape, byte-identical: every tile joins the active
             // set and the first tile's dims lead (a resize drops the old
             // contents and clears the session-scoped stroke-undo history
-            // with them).
+            // with them). No mapping means no `target_sizes.txt`, which
+            // this crate always writes alongside any channel data — so
+            // `found` here holds ONLY baseColor entries, and `found`'s
+            // `(channel, tile)` key order reduces to tile order (every
+            // key shares the same channel string).
             paint.clear_tile_assignments();
-            for (tile, _, _, _) in &tiles {
+            let mut tile_ids: Vec<u16> = found.keys().map(|(_, tile)| *tile).collect();
+            tile_ids.dedup();
+            for tile in &tile_ids {
                 paint.assign_tile_to_set(*tile, &active);
             }
-            let (first_width, first_height) = (tiles[0].1, tiles[0].2);
+            let (first_width, first_height, _) = found
+                .values()
+                .next()
+                .cloned()
+                .expect("found is non-empty here");
             paint.resize_set(&active, first_width, first_height);
         }
     }
@@ -1570,7 +1738,7 @@ fn load_paint_tiles_reported(
         return PaintLoadReport::default();
     }
     let mut report = PaintLoadReport::default();
-    for (tile, width, height, bytes) in tiles {
+    for ((channel, tile), (width, height, bytes)) in found {
         // Tiles the mapping never assigned resolve to the active set;
         // recording the resolution keeps the next save's mapping exact.
         let set = paint.set_of_tile(tile).to_string();
@@ -1578,7 +1746,9 @@ fn load_paint_tiles_reported(
         let expected = paint.tile_size(tile);
         if (width, height) != expected {
             let (ew, eh) = expected;
-            log::warn!("paint open: tile {tile} is {width}x{height}, want {ew}x{eh}; skipping");
+            log::warn!(
+                "paint open: tile {tile}/{channel} is {width}x{height}, want {ew}x{eh}; skipping"
+            );
             report.skipped.push(PaintTileSkip {
                 tile,
                 expected,
@@ -1586,10 +1756,15 @@ fn load_paint_tiles_reported(
             });
             continue;
         }
-        if paint.publish_fill(tile, width, height, bytes) {
+        let landed = if channel == paint_state::BASE_COLOR_CHANNEL {
+            paint.publish_fill(tile, width, height, bytes)
+        } else {
+            paint.publish_fill_channel(tile, &channel, width, height, bytes)
+        };
+        if landed {
             report.restored += 1;
         } else {
-            log::warn!("paint open: tile {tile} upload failed; skipping");
+            log::warn!("paint open: tile {tile}/{channel} upload failed; skipping");
         }
     }
     if let Err(e) = paint.process_pending() {
@@ -2479,6 +2654,224 @@ mod paint_persistence_tests {
                 found: (512, 512),
             }],
             "the mismatch is on the record with exact dims"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_channels_round_trip_byte_identical_per_channel() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // 512² keeps the test fast; the sizes must MATCH the target —
+        // a 512 publish into a 4096 target would land a 512 region at
+        // the origin, not the pattern — so the session is built at 512
+        // via with_target_size (tile 1001 pre-exists at that size).
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        let before_base = pattern_bytes(512, 512, 3);
+        let before_height = pattern_bytes(512, 512, 77);
+        // Can-fail guards against a vacuous pass: the patterns are
+        // non-blank and distinct, and the (0,0) texels pin the formula
+        // exactly (seed 3 → [3, 74, 145, 216]; seed 77 → [77, 148, 219,
+        // 39] — the same derivation as the two-set test).
+        assert_eq!(&before_base[..4], &[3u8, 74, 145, 216]);
+        assert_eq!(&before_height[..4], &[77u8, 148, 219, 39]);
+        assert_ne!(before_base, before_height);
+        assert!(before_base.iter().any(|&b| b != 0));
+        assert!(paint.publish_fill(1001, 512, 512, before_base.clone()));
+        assert!(paint.publish_fill_channel(1001, "height", 512, 512, before_height.clone()));
+        paint.process_pending().expect("uploads land");
+        let staged_base = paint.read_tile(1001).expect("baseColor stages");
+        assert_eq!(staged_base.data, before_base);
+        let staged_height = paint
+            .read_channel_tile(1001, "height")
+            .expect("height stages");
+        assert_eq!(staged_height.data, before_height);
+
+        let dir = unique_temp_dir("per-channel-roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_paint_tiles(&mut paint, &dir);
+        assert_eq!(saved, 2, "baseColor + height persist as two artifacts");
+        // baseColor keeps the v2 FLAT layout byte-for-byte
+        // (paint/tile-1001.png — paint_tile_path, deliberately
+        // unchanged by the per-channel pool; see its docs), while any
+        // other channel nests one level under paint/<channel>/.
+        assert!(paint_tile_path(&dir, 1001).exists());
+        assert_eq!(
+            paint_channel_tile_path(&dir, paint_state::BASE_COLOR_CHANNEL, 1001),
+            paint_tile_path(&dir, 1001),
+            "the reserved channel resolves to the flat v2 path"
+        );
+        let height_path = paint_channel_tile_path(&dir, "height", 1001);
+        assert_eq!(
+            height_path,
+            paint_sidecar_dir(&dir).join("height").join("tile-1001.png")
+        );
+        assert!(height_path.exists());
+        // The manifest names both artifacts — the channel rides in the
+        // NAME field (paint_sidecar_name), not a new column — and the
+        // commit applied (no pending manifest left behind).
+        assert!(!paint_commit_pending_path(&dir).exists());
+        let manifest = std::fs::read_to_string(paint_manifest_path(&dir)).unwrap();
+        let entries = parse_paint_commit(&manifest).expect("the applied manifest parses");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(
+            names.contains(&"tile-1001.png"),
+            "baseColor keeps its flat v2 name, got {names:?}"
+        );
+        assert!(
+            names.contains(&"height/tile-1001.png"),
+            "height nests under its channel dir, got {names:?}"
+        );
+
+        // Reopen in a fresh session (default set, 4K): both channels
+        // restore byte-identical AT the saved size.
+        let mut fresh =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 2,
+                skipped: Vec::new(),
+            }
+        );
+        assert_eq!(fresh.channels_present(1001), vec!["height".to_string()]);
+        let after_base = fresh.read_tile(1001).expect("baseColor reads back");
+        assert_eq!((after_base.width, after_base.height), (512, 512));
+        assert_eq!(
+            after_base.data, before_base,
+            "baseColor restores byte-identical"
+        );
+        let after_height = fresh
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!((after_height.width, after_height.height), (512, 512));
+        assert_eq!(
+            after_height.data, before_height,
+            "height restores byte-identical"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_flat_manifest_loads_all_base_color() {
+        // The codec has NO channel column (verified against source):
+        // parse_paint_commit destructures an exact 5-field array
+        // `<name> <hash> <ext> <size> <temp>` and refuses any other
+        // arity — a literal 6th column fails the whole manifest. The
+        // channel instead rides in the NAME field
+        // (paint_sidecar_name/parse_paint_sidecar_name): a bare
+        // `tile-<N>.png` IS the reserved baseColor channel. A v2
+        // project (saved before channels existed) therefore names only
+        // flat tiles, and the load path restores every one through
+        // publish_fill. Hand-written codec pins first:
+        let zeros = "0".repeat(64);
+        let flat_line = format!("tile-1001.png {zeros} png 123 tile-1001.png.tmp.42");
+        let flat = parse_paint_commit(&format!("# Umber paint commit v1\n{flat_line}\n"))
+            .expect("a v2-shaped 5-field flat line parses");
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].name, "tile-1001.png");
+        // A 6-field line (the "add a channel column" shape the design
+        // doc's draft text sketches) refuses the WHOLE manifest —
+        // which is why the landed codec encodes the channel in the
+        // name instead (see paint_sidecar_name's docs).
+        let six_field = format!("tile-1001.png baseColor {zeros} png 123 tile-1001.png.tmp.42");
+        assert_eq!(
+            parse_paint_commit(&format!("# Umber paint commit v1\n{six_field}\n")),
+            None,
+            "a 6-field line must refuse"
+        );
+        // The name codec itself, exact (not contains-checks): flat is
+        // baseColor, one level nests, anything else rejects.
+        assert_eq!(
+            parse_paint_sidecar_name("tile-1001.png"),
+            Some((paint_state::BASE_COLOR_CHANNEL.to_string(), 1001))
+        );
+        assert_eq!(
+            parse_paint_sidecar_name("height/tile-1001.png"),
+            Some(("height".to_string(), 1001))
+        );
+        // A literal paint/baseColor/ subdirectory parses as the
+        // reserved channel too — and wins over a same-tile flat file
+        // on load (collect_paint_tiles inserts the flat pass first;
+        // the channel pass overwrites). Pinned so a future rename of
+        // the reserved name fails loudly instead of forking the pool.
+        assert_eq!(
+            parse_paint_sidecar_name("baseColor/tile-1001.png"),
+            Some((paint_state::BASE_COLOR_CHANNEL.to_string(), 1001))
+        );
+        for bad in [
+            "",
+            "tile-1001.png/",
+            "/tile-1001.png",
+            "../tile-1001.png",
+            "height\\tile-1001.png",
+            "a\\b/tile-1001.png",
+            "height/tile-abc.png",
+            "height/tile-1001.exr",
+            "tile-1001.exr",
+        ] {
+            assert_eq!(parse_paint_sidecar_name(bad), None, "{bad:?} must reject");
+        }
+
+        // End to end: a baseColor-only session saved through the REAL
+        // save path produces exactly the v2 shape (flat names only, no
+        // channel directory), and reopens all-baseColor with no
+        // channel materialized.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        let before = pattern_bytes(512, 512, 11);
+        assert_eq!(&before[..4], &[11u8, 82, 153, 224]);
+        assert!(paint.publish_fill(1001, 512, 512, before.clone()));
+        paint.process_pending().expect("upload lands");
+
+        let dir = unique_temp_dir("channel-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
+        assert!(
+            !paint_sidecar_dir(&dir).join("height").exists(),
+            "no channel was routed, so no channel directory is written"
+        );
+        let manifest = std::fs::read_to_string(paint_manifest_path(&dir)).unwrap();
+        let entries = parse_paint_commit(&manifest).expect("the applied manifest parses");
+        for entry in &entries {
+            if entry.name == "target_size.txt" || entry.name == "target_sizes.txt" {
+                continue;
+            }
+            assert_eq!(
+                parse_paint_sidecar_name(&entry.name),
+                Some((paint_state::BASE_COLOR_CHANNEL.to_string(), 1001)),
+                "every tile entry in a channel-less save is flat baseColor"
+            );
+        }
+
+        let mut fresh = paint_state::PaintState::new(device, queue).expect("fresh session builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 1,
+                skipped: Vec::new(),
+            }
+        );
+        assert!(
+            fresh.channels_present(1001).is_empty(),
+            "the migration must not materialize any channel"
+        );
+        let after = fresh.read_tile(1001).expect("readback succeeds");
+        assert_eq!((after.width, after.height), (512, 512));
+        assert_eq!(
+            after.data, before,
+            "v2 pixels restore byte-identical as baseColor"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
