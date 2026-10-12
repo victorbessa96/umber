@@ -861,13 +861,12 @@ impl PaintState {
     /// cannot be created or `rgba` is not `width`x`height` RGBA8 (the fill
     /// must re-evaluate at the target size first; a torn upload is worse
     /// than a dropped one).
-    pub(crate) fn publish_fill(
-        &mut self,
-        tile: u16,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    ) -> bool {
+    ///
+    /// `pub` (not `pub(crate)`) is the Gate-0 seam: the project open path
+    /// restores sidecar PNGs through this call, and the journey test in
+    /// `tests/gate0_journey.rs` — outside this crate — drives the same
+    /// restore. No other caller needed the width.
+    pub fn publish_fill(&mut self, tile: u16, width: u32, height: u32, rgba: Vec<u8>) -> bool {
         if rgba.len() != width as usize * height as usize * 4 {
             log::warn!(
                 "fill: dropping {width}x{height} upload for tile {tile} ({} bytes)",
@@ -1099,10 +1098,13 @@ impl PaintState {
         self.targets.keys().copied().collect()
     }
 
-    /// Overrides the stroke color (test hook: the per-tile export test
-    /// paints each tile a different color).
-    #[cfg(test)]
-    pub(crate) fn set_brush_color(&mut self, color: [f32; 4]) {
+    /// Overrides the stroke color (the per-tile export test paints each
+    /// tile a different color; the Gate-0 journey test paints its stroke
+    /// pure green so the painted texel is color-identifiable).
+    ///
+    /// `pub` (not `pub(crate)`) is the Gate-0 seam alongside
+    /// [`Self::publish_fill`]: the journey test lives outside this crate.
+    pub fn set_brush_color(&mut self, color: [f32; 4]) {
         self.brush.color = color;
     }
 

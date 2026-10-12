@@ -117,7 +117,12 @@ const BLEND_COLOR_BURN: u32 = 12u;
 const BLEND_LINEAR_BURN: u32 = 13u;
 
 fn clamp01(v: f32) -> f32 {
-    if (isNan(v)) {
+    // WGSL has NO isNan/isnan builtin (removed from the spec; naga 30's
+    // front accepts neither spelling — the Gate-0 journey test caught this
+    // on the shader's FIRST real compile, since the unit tests exercise
+    // only the CPU oracle). The portable idiom: NaN is the only f32 that
+    // compares unequal to itself.
+    if (v != v) {
         return 0.0;
     }
     return clamp(v, 0.0, 1.0);
@@ -186,7 +191,10 @@ fn cs_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let s = textureLoad(src_tex, xy, 0);
     let d = textureLoad(acc_tex, xy);
     var o = params.opacity;
-    if (!isFinite(o)) {
+    // Same WGSL fact as clamp01: no isFinite builtin. The finite check is
+    // abs(o) != inf, i.e. !(o is NaN or ±inf) — NaN fails every comparison,
+    // and inf fails the <= bound. One line, spec-portable.
+    if (!(o <= 1000000.0 && o >= -1000000.0)) {
         o = 0.0;
     }
     o = clamp(o, 0.0, 1.0);
