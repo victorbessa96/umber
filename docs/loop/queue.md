@@ -56,7 +56,7 @@ Pass 4), highest first:
 | 1 | Re-mark the drifted requirements rows | **done** | 967ec7b: §5 PBR viewport REACHABLE, §5 postfx wiring-landed, §10 distribution split-mark, §5 perf re-phrased; perf-design doc's dead const fixed |
 | 2 | Re-baseline perf/baseline.json on the 4K path | **todo** | ref-scene + input→photon + 200Hz dab-drop + 100-step undo-RAM, per adapter; nightly gate compares against it |
 | 3 | AssetStore routing + atomic commit for paint save | **todo** | the one paint-loss vector Gate 0 doesn't cover; fault-injection test (torn save = old-or-new, never half) |
-| 4 | Per-texture-set (then per-channel) sizing | **in flight** | dispatched to opencode (the B2 v1 boundary: size off the session global into per-set storage) |
+| 4 | Per-texture-set (then per-channel) sizing | **done (2564c17)** | the set model + per-tile routing at the set's size + per-set panel + target_sizes.txt with v1 back-compat; the two-sets/two-sizes round-trip test pins it; per-channel sizing = named follow-up |
 | 5 | Cumulative merge for stroke undo | **todo** | overlapping dirty-rect merge; envelope stays 64/256MiB, effective strokes up |
 | 6 | Docs truth refresh (README/STATE/queue) | **done** | 9a7c078: README status/tree-diagram/contributing + STATE handoff 2/3/6 |
 | 7 | Stylus-crate backends (winink + XI2) | **todo** | tilt/proximity/eraser behind the raw-Touch source; Linux first |
