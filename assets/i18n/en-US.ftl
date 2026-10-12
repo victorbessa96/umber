@@ -144,6 +144,8 @@ bakes =
        *[other] { $count } skew-clamped texels
     }
     .skipped-skew-note = skew bakes tile 1001 only, skipped tiles: { $tiles }
+    .settings-group = Settings
+    .maps-group = Maps
 
 ## Export panel
 
@@ -223,6 +225,7 @@ synth =
 ## Display panel
 
 display =
+    .transform = Transform
     .view = View
     .exposure = Exposure (EV)
     .gamma = Gamma
@@ -429,6 +432,8 @@ fill =
 ## History panel
 
 history =
+    .section-controls = Undo / redo
+    .section-log = Session log
     .undo = ↶ Undo
     .redo = ↷ Redo
     .journal = { $count ->
@@ -525,6 +530,7 @@ path =
 ## HDR surface output (§5 P1 row 85)
 
 display-hdr =
+    .title = HDR
     .toggle = HDR output
     .reason-not-exposed = Not available yet: this build's windowing layer (eframe) doesn't expose the surface's color space, so umber can't ask the display whether it supports HDR.
     .reason-sdr-only = This adapter or surface only offered the SDR color space.

@@ -148,6 +148,8 @@ bakes =
        *[other] { $count } texels com skew limitado
     }
     .skipped-skew-note = o skew só faz bake no tile 1001, tiles ignorados: { $tiles }
+    .settings-group = Configurações
+    .maps-group = Mapas
 
 ## Painel de exportação
 
@@ -236,6 +238,7 @@ synth =
 ## Painel de exibição
 
 display =
+    .transform = Transformação
     .view = Vista
     .exposure = Exposição (EV)
     .gamma = Gama
@@ -448,6 +451,8 @@ fill =
 ## Painel de histórico
 
 history =
+    .section-controls = Desfazer / refazer
+    .section-log = Registro da sessão
     .undo = ↶ Desfazer
     .redo = ↷ Refazer
     .journal = { $count ->
@@ -513,6 +518,7 @@ path =
 ## Saída de superfície HDR (§5, linha P1 85)
 
 display-hdr =
+    .title = HDR
     .toggle = Saída HDR
     .reason-not-exposed = Ainda não disponível: a camada de janelas desta versão (eframe) não expõe o espaço de cor da superfície, então o umber não pode perguntar ao display se ele suporta HDR.
     .reason-sdr-only = Este adaptador ou superfície só ofereceu o espaço de cor SDR.
