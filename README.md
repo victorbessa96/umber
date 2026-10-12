@@ -4,7 +4,7 @@
 
 Umber is a ground-up reimagining of the 3D texture-painting DCC: paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps, and export engine-ready texture sets — fast, local-first, and free forever. Built completely in Rust for **Windows and Linux**.
 
-> Status: **Wave 3 — bake & export pipeline landed.** Mesh-map bakers (AO, position, world normal, curvature, thickness, tangent normal), UV-seam dilation, engine presets (glTF / Unreal / Unity / Blender), the export driver, a headless CLI (`inspect` / `bake-ao` / `bake-all` / `export`), and the egui app with Bakes panel, Export dialog, and `.umber` project save/load are all in. 250+ workspace tests green, CI on both platforms every commit. Painting, the node graph, and a first release are ahead — watch the repo.
+> Status: **Core-loop phase — the product spine under construction.** The engine crates are real (brush engine, bakers, export driver, node graph, .umber project I/O — 599+ workspace tests, CI green on both platforms per commit), and the strategy review (2026-10-12) named the six missing user-path joins: viewport texture binding, 4K live target, stroke undo, pixel save/load, pen pressure, per-layer channels. Four landed; the 4K live wiring and pen pressure are the open kills before Gate 0 (the journey test: FBX → 4K pressure paint → lit 3D → undo/redo → save/reopen → export decode-verified). GUI polish and the P2 tier are frozen until Gate 0 passes. No release tag until then.
 
 ## Why
 

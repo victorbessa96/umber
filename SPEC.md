@@ -1,6 +1,14 @@
 # Umber — Spec v1.0 (DRAFT — awaiting Bessa's ratification)
 
 > The project contract. v0.1 draft written at project start; this v1.0 draft folds in the Wave-0 research corpus (docs/research/01–05) and the adversarial-review fixes (docs/research/06). **Ratified only when Bessa approves.** Until then, no implementation work beyond what this spec names as Wave-0.
+>
+> AMENDMENT NOTE (2026-10-12, A2 of the core-loop queue): the strategy review
+> (docs/specs/2026-10-12-strategy-review.md) re-cut the roadmap around the six
+> criticals — the core-loop phase (Gate 0: the journey test) now precedes all
+> GUI/P2 work, and the wave sequencing below is the historical scope mapping,
+> not the active order. The active queue lives in docs/loop/queue.md. This
+> amendment does not change the spec's deliverables, non-goals, or exit
+> criteria; it reorders execution and freezes chrome until Gate 0 passes.
 
 ## One-sentence goal
 
