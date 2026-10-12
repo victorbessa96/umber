@@ -702,6 +702,12 @@ impl PaintState {
         }
     }
 
+    pub fn begin_screen_point_pressured(&mut self, hit: Option<Pos2>, pressure: f32) {
+        if let Some(uv) = hit {
+            self.begin_stroke_styled(uv, pressure, 1.0);
+        }
+    }
+
     /// Extends a Screen-projection stroke to the viewport raycast result:
     /// `Some(uv)` conditions the hit UV through the existing pipeline
     /// (seam mirrors, symmetry, wash, mask — all inherited, since this
@@ -715,6 +721,16 @@ impl PaintState {
                 self.extend_stroke(uv);
             } else {
                 self.begin_stroke(uv);
+            }
+        }
+    }
+
+    pub fn extend_screen_point_pressured(&mut self, hit: Option<Pos2>, pressure: f32) {
+        if let Some(uv) = hit {
+            if self.stroking {
+                self.extend_stroke_styled(uv, pressure, 1.0);
+            } else {
+                self.begin_stroke_styled(uv, pressure, 1.0);
             }
         }
     }
@@ -2462,6 +2478,50 @@ mod tests {
         assert!(state.redo_stroke());
         assert_eq!(read_back(&mut state, &device, &queue), second);
         assert!(!state.can_redo_stroke());
+    }
+
+    // --- Paint-stroke pressure (CORE-LOOP CRITICAL 5) ---
+
+    /// Pressure shapes dabs: a half-pressure stroke paints lighter than a
+    /// full-pressure one at the same UVs. The chain is real end to end —
+    /// `begin/extend_screen_point_pressured` → `begin_stroke_styled` →
+    /// the conditioner → `DabPlan.alpha_multiplier` → the dab alpha
+    /// (`pressure_gamma` shaping) → the GPU splat → the readback. The
+    /// test drives the SAME UV path twice on fresh states, once at 1.0
+    /// pressure and once at 0.3, and pins that the light stroke's texels
+    /// carry smaller alpha than the heavy stroke's at the same texel.
+    #[test]
+    fn pressured_stroke_paints_lighter_than_full_pressure() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let paint_at = |pressure: f32| -> Vec<u8> {
+            let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint state builds");
+            state.begin_screen_point_pressured(Some(egui::pos2(0.3, 0.3)), pressure);
+            for i in 1..=15 {
+                state.extend_screen_point_pressured(
+                    Some(egui::pos2(0.3, 0.3 + 0.02 * i as f32)),
+                    pressure,
+                );
+            }
+            state.end_stroke();
+            read_back(&mut state, &device, &queue)
+        };
+        let heavy = paint_at(1.0);
+        let light = paint_at(0.3);
+        // The stroke's core texel: on the driven line, at the surface
+        // center of the first dab cluster. The heavy stroke's alpha
+        // channel must exceed the light stroke's there.
+        let w = 512usize;
+        let texel = |bytes: &[u8]| -> u8 { bytes[(256 * w + 154) * 4 + 3] };
+        assert!(texel(&heavy) > 0, "the heavy stroke must paint alpha");
+        assert!(
+            texel(&heavy) > texel(&light),
+            "half pressure must paint lighter: heavy alpha {} vs light {}",
+            texel(&heavy),
+            texel(&light)
+        );
     }
 
     // --- Symmetry ---

@@ -206,10 +206,28 @@ impl Viewport {
                 let hit = self
                     .pick_uv(rect, mesh, pos)
                     .map(|uv| egui::Pos2::new(uv[0], uv[1]));
+                // CORE-LOOP CRITICAL 5 — real pressure: the digitizer's
+                // normalized force feeds the stroke. egui's multi-touch
+                // state carries `force` in 0..=1 (the average of active
+                // touches; a pen reports one). A 0.0 force is ambiguous —
+                // a very light touch OR a device that cannot measure
+                // force at all — so it maps to 1.0: a mouse drag paints
+                // at full pressure, never a ghost-faint stroke. This is
+                // the event layer egui already delivers (Wayland wl_touch
+                // and Windows touch); the stylus crate's OWNED pen
+                // backends (Windows Ink, XI2 valuators) remain the
+                // follow-up for full pen fidelity (tilt, proximity).
+                let pressure = ui.input(|i| i.multi_touch()).map_or(1.0, |t| {
+                    if t.force > 0.0 {
+                        t.force
+                    } else {
+                        1.0
+                    }
+                });
                 if !paint.is_stroking() {
-                    paint.begin_screen_point(hit);
+                    paint.begin_screen_point_pressured(hit, pressure);
                 } else {
-                    paint.extend_screen_point(hit);
+                    paint.extend_screen_point_pressured(hit, pressure);
                 }
             }
         }
