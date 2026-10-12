@@ -6,6 +6,11 @@
 #   ...the task body (READ:/DELIVERABLE:/State every judgment call.)...
 #   EOF
 # Then dispatch with the standard one-liner (printed on success).
+# NOTE — the two-step form: the nested $(cat | python3) inside $() dies in some
+# shell contexts (empty message to opencode, "You must provide a message").
+# ALWAYS extract the task to a plain file first, then feed THAT:
+#   cat /tmp/umber-<name>-oc.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["task"])' > /tmp/oc-task-<name>.txt
+#   opencode run "$(cat /tmp/oc-task-<name>.txt)" > /tmp/umber-<name>-oc-out.json 2>&1
 set -u
 NAME="${1:?usage: brief-template.sh <kill-name> (task on stdin)}"
 BODY="$(cat)"
