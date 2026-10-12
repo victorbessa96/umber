@@ -4,21 +4,38 @@ The tag fires on Bessa's word (the standing rule from the packaging
 commit). This is the readiness state, so the word is the only
 remaining input.
 
+Updated 2026-10-12 per the strategy review's checklist audit: every
+gate below checked process; none checked FUNCTION. Gate 0 (the
+journey test) is now the first gate — the process gates follow it.
+
+## Gate 0 — the journey test (the FUNCTION gate, added by the review)
+
+FBX → 4K pressure paint → see lit → undo/redo → save/reopen → ORM
+export decode-verified. One continuous session exercising the six
+core-loop criticals JOINED — not each in isolation. The harness:
+`crates/umber-app/tests/gate0_journey.rs` (in flight; the compositor
+assertion is the headless 'see lit' equivalent, the shell frame named
+as the shell-only remainder). [IN FLIGHT]
+
 ## The gate (what must be true when the tag fires)
 
-1. **The P0 floor assembled** — the three hunting rows land + green:
+1. **Gate 0 green** — the journey test passes on CI (lavapipe + WARP),
+   the core-loop phase's exit gate.
+2. **The P0 floor assembled** — the three hunting rows land + green:
    the fill layer + projections, the view modes, the eraser (the
-   chain, 22:47). The blend census verifies the math. [IN FLIGHT]
-2. **The compile debt cleared** — every code-only commit since the
-   machine went off gates on the machine's return (or CI's runtime
-   verdicts, which have been the de facto gate all day): the full
-   workspace suite green on both platforms. [CI PER COMMIT; THE
-   MACHINE'S FULL GATE PENDING ITS RETURN]
-3. **The changelog current** — ✓ done (`4b234a1`).
-4. **The requirements marked** — ✓ the 12 verified rows (`3f2318c`);
-   the three gap rows mark when their kills land.
-5. **The perf baselines** — the first row measured (d369886); the
-   nightly job produces the rest on its first run (first-run mode).
+   chain, 22:47). The blend census verifies the math. [LANDED — the
+   fill layer, view modes, and eraser kills all landed and CI-green
+   in the 2026-10-11/12 era; the blend census carried the math]
+3. **The compile debt cleared** — every code-only commit gates on CI
+   per commit (the de facto gate): the full workspace suite green on
+   both platforms. [CI GREEN per commit through f867215]
+4. **The changelog current** — ✓ done (`4b234a1`).
+5. **The requirements marked** — ✓ the census current through the
+   core-loop phase: all six criticals' rows marked ✓ code with the
+   code-vs-reachable split (the last marks: `472b774`).
+6. **The perf baselines** — the first row measured (d369886); the
+   re-baseline at the 4K default = the named follow-up (the 512²
+   baselines are invalidated by `133dd12`).
 
 ## The tag shape (drafted, not fired)
 
