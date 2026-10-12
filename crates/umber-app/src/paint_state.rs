@@ -2244,18 +2244,19 @@ mod tests {
         };
         let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
         // A vertical paint stroke gives the smudge an edge to drag. Since the
-        // stroke-undo work, THIS stroke records its own history entry — undo
-        // it before the smudge begins so the smudge's own entry is the only
-        // one (the test's "one entry" premise, restored).
+        // stroke-undo work (critical 3) this setup stroke records its own
+        // history entry, and it STAYS: entries stack, one per stroke — the
+        // same contract two_paint_strokes_undo_reverts_only_the_latest pins
+        // for plain paint. Undoing it here would blank the canvas and leave
+        // the smudge nothing to drag (the 9e4fb9e lesson: the smudge then
+        // moves nothing and the write-back assert dies).
         drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
         state.end_stroke();
         state.process_pending().expect("drain succeeds");
-        assert!(state.undo_stroke(), "the setup stroke has an entry");
         assert!(
-            !state.can_undo_stroke(),
-            "the setup stroke was the only one"
+            state.can_undo_stroke(),
+            "the setup stroke records its entry (one per stroke)"
         );
-        state.process_pending().expect("drain succeeds");
         let painted_batches = state.staged_batch_count();
         let before = state
             .paint_target()
@@ -2283,14 +2284,20 @@ mod tests {
             .expect("readback");
         assert_ne!(after, before, "the smudge must reach the GPU target");
 
-        assert!(state.undo_stroke());
-        assert!(!state.can_undo_stroke(), "one stroke, one entry");
+        // The smudge is the SECOND entry: one per stroke, entries stack
+        // (critical 3's contract — see the sibling test at :2360). One undo
+        // reverts the smudge only; the setup stroke's entry remains.
+        assert!(state.undo_stroke(), "the smudge entry undoes");
+        assert!(
+            state.can_undo_stroke(),
+            "the setup stroke's entry remains beneath the smudge's"
+        );
         state.process_pending().expect("drain succeeds");
         let undone = state
             .paint_target()
             .read_back_rgba8(&device, &queue)
             .expect("readback");
-        assert_eq!(undone, before, "undo restores the pre-stroke texels");
+        assert_eq!(undone, before, "undo restores the pre-smudge texels");
     }
 
     // --- Paint-stroke undo (CORE-LOOP CRITICAL 3) ---
