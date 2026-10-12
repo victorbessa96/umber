@@ -65,6 +65,7 @@ status =
     }, { $failed } com falha
     .uv = UV
     .tile = Tile
+    .pen = Caneta
     .fps = fps
 
 ## Configurações

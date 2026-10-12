@@ -41,6 +41,12 @@ profiling = { workspace = true }
 # off, every profiling::span! in the workspace compiles to nothing.
 perf = ["profiling/profile-with-tracy"]
 
+# Linux tablets: the stylus crate's XI2 backend ships with the app on
+# Linux (x11-dl dlopens libX11/libXi at runtime; without an X display
+# the backend reports unavailable and the Touch fallback rules).
+[target.'cfg(target_os = "linux")'.dependencies]
+stylus = { workspace = true, features = ["xi2"] }
+
 [dev-dependencies]
 pollster = { workspace = true }
 wgpu = { workspace = true }

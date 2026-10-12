@@ -4341,6 +4341,7 @@ dependencies = [
  "log",
  "thiserror 2.0.21",
  "windows",
+ "x11-dl",
 ]
 
 [[package]]

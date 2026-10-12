@@ -23,6 +23,9 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - Real pressure reaches the brush — critical 5; the pressured API pair + alpha shaping + can-fail test (`f867215`)
 - The pressure source lives — raw `Event::Touch` per-event force; the multi_touch 2+ gate never carried a single pen (`6430623`)
 - Gate 0 — the journey test, six legs joined: FBX → 4K pressured paint → compositor → undo/redo → save/reopen → ORM decode-verified; the compositor shader's isNan corpse dies on its first real compile (`15c072e`)
+- Crash-safe paint saves — atomic manifest commit + AssetStore routing; reopen is old-or-new, never torn (`e4ad8b7`)
+- Cumulative undo merge — overlapping strokes coalesce at push; the byte budget carries regions, not stroke counts (`37025d5`)
+- The eyedropper — Pick on the strip, sample the mesh, paint with it (`7067cd3`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 

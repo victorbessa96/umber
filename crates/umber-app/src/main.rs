@@ -124,6 +124,7 @@ mod postfx_panel;
 mod retouch;
 mod size_presets;
 mod status_bar;
+mod stylus_input;
 mod tile_selection;
 mod toolbar;
 mod uv_view;
@@ -198,6 +199,9 @@ struct PanelViewer<'a> {
     /// The requested HDR surface mode (§5 P1 row 85); the Display
     /// panel's HDR row edits this.
     hdr_mode: &'a mut umber_gpu::HdrMode,
+    /// This frame's stylus pressure (XI2), or `None` when no stylus
+    /// Motion drained this frame — the viewport prefers it over Touch.
+    stylus_pressure: Option<f32>,
 }
 
 impl TabViewer for PanelViewer<'_> {
@@ -237,6 +241,7 @@ impl TabViewer for PanelViewer<'_> {
                     ui,
                     self.gpu,
                     self.paint.as_deref_mut(),
+                    self.stylus_pressure,
                     self.display_lut,
                     self.postfx,
                 ) {
@@ -433,6 +438,12 @@ pub struct AppState {
     /// never-saved document — the import Apply path and the autosave
     /// journal both wait for it).
     pub project_dir: Option<PathBuf>,
+    /// The tablet poller (Linux XI2 when the `xi2` feature is compiled
+    /// in, Touch fallback otherwise): drained once per frame before the
+    /// viewport's paint arm reads, so stylus pressure wins over Touch.
+    /// Opens its stream on construction; headless/CI degrades to `None`
+    /// (no stream) by design — see `stylus_input`.
+    pub stylus: stylus_input::StylusPoller,
 }
 
 /// The eframe app.
@@ -1832,6 +1843,16 @@ impl eframe::App for UmberApp {
             paint.sync_tool(&mut self.brush_panel.tool);
         }
 
+        // Stylus (XI2) poll, once per frame BEFORE the paint arm reads
+        // (the dock below): drains the tablet stream, holds the Erase
+        // tool while the eraser end is active, and hands this frame's
+        // pressure to the viewport via the viewer. Without a backend the
+        // poll is a clock tick and the pressure is `None` (Touch rules).
+        self.state.stylus.poll_frame();
+        self.state.stylus.apply_tool_override(&mut self.brush_panel);
+        let stylus_pressure = self.state.stylus.pressure_for_frame();
+        let pen_source = self.state.stylus.pen_source();
+
         // The status bar reads the UV view's hover from the last frame
         // (taken, so a hidden UV tab reads none); see `status_bar`.
         let hover_before = self.state.uv_view.take_hover_uv();
@@ -1841,6 +1862,7 @@ impl eframe::App for UmberApp {
                 .map(|uv| status_bar::absolute_uv(tile.unwrap_or(umber_mesh::FIRST_TILE), uv)),
             tile,
             frame_dt: ui.input(|i| i.stable_dt),
+            pen: pen_source,
         };
         egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
             status_bar::show(ui, &status);
@@ -1884,6 +1906,7 @@ impl eframe::App for UmberApp {
                 mesh_import: &mut self.state.mesh_import,
                 store: store.as_ref(),
                 hdr_mode: &mut self.hdr_mode,
+                stylus_pressure,
             };
             DockArea::new(&mut self.dock)
                 .style(Style::from_egui(ui.style()))

@@ -210,6 +210,7 @@ impl Viewport {
         ui: &mut Ui,
         gpu: &GpuContext,
         mut paint: Option<&mut crate::paint_state::PaintState>,
+        stylus_pressure: Option<f32>,
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
     ) -> Option<PickSample> {
@@ -287,29 +288,36 @@ impl Viewport {
                 // single-pen case; per-touch-id tracking rides with the
                 // stylus-crate backends — Windows Ink, XI2 — the named
                 // follow-up for tilt, proximity, eraser).
-                let pressure = ui
-                    .input(|i| {
-                        let mut force: Option<f32> = None;
-                        for event in &i.events {
-                            if let egui::Event::Touch {
-                                phase: egui::TouchPhase::Start | egui::TouchPhase::Move,
-                                pos,
-                                force: f,
-                                ..
-                            } = event
-                            {
-                                // Only the touch stream inside this viewport
-                                // feeds the stroke: a second finger landing on
-                                // a panel mid-stroke must not override the
-                                // pen's force for the frame.
-                                if rect.contains(*pos) {
-                                    force = *f;
-                                }
+                //
+                // STYLUS (XI2) PREFERENCE: `stylus_pressure` is this
+                // frame's Motion pressure from the poller
+                // (`stylus_input::StylusPoller::pressure_for_frame` —
+                // `Some` only when a stylus Motion drained THIS frame).
+                // It wins over Touch; Touch wins over 1.0; the shared
+                // `resolve_pressure` folds non-positive/non-finite to
+                // 1.0 (the mouse / can't-measure-force rule, unchanged).
+                let touch_force = ui.input(|i| {
+                    let mut force: Option<f32> = None;
+                    for event in &i.events {
+                        if let egui::Event::Touch {
+                            phase: egui::TouchPhase::Start | egui::TouchPhase::Move,
+                            pos,
+                            force: f,
+                            ..
+                        } = event
+                        {
+                            // Only the touch stream inside this viewport
+                            // feeds the stroke: a second finger landing on
+                            // a panel mid-stroke must not override the
+                            // pen's force for the frame.
+                            if rect.contains(*pos) {
+                                force = *f;
                             }
                         }
-                        force
-                    })
-                    .map_or(1.0, |f| if f > 0.0 { f } else { 1.0 });
+                    }
+                    force
+                });
+                let pressure = crate::stylus_input::resolve_pressure(stylus_pressure, touch_force);
                 if !paint.is_stroking() {
                     paint.begin_screen_point_pressured(hit, pressure);
                 } else {

@@ -40,11 +40,11 @@ else
   if [ -z "$RUSTFMT" ]; then
     echo "  FAIL: rustfmt not found (not on PATH, not in ~/.cargo/bin) — fmt NOT verified"
     fails=$((fails+1))
-  elif "$RUSTFMT" --check "${rs[@]}" 2>/dev/null; then
+  elif "$RUSTFMT" --edition 2021 --check "${rs[@]}" 2>/dev/null; then
     echo "  PASS: fmt clean"
   else
-    echo "  fixing fmt drift in-place"; "$RUSTFMT" "${rs[@]}" 2>/dev/null
-    "$RUSTFMT" --check "${rs[@]}" 2>/dev/null && echo "  PASS: fmt aligned (in-place)" || { echo "  FAIL: fmt"; fails=$((fails+1)); }
+    echo "  fixing fmt drift in-place"; "$RUSTFMT" --edition 2021 "${rs[@]}" 2>/dev/null
+    "$RUSTFMT" --edition 2021 --check "${rs[@]}" 2>/dev/null && echo "  PASS: fmt aligned (in-place)" || { echo "  FAIL: fmt"; fails=$((fails+1)); }
   fi
 fi
 

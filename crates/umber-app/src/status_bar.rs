@@ -1,5 +1,6 @@
 //! The bottom status bar (GUI roadmap Phase 0b,
-//! docs/specs/gui-audit-and-roadmap.md Part 3): cursor UV | UDIM tile | fps.
+//! docs/specs/gui-audit-and-roadmap.md Part 3): cursor UV | UDIM tile |
+//! pen source | fps.
 //!
 //! The format functions are pure (no `tr()`, no egui) and pinned by the
 //! tests below. [`show`] only lays them out next to localized labels.
@@ -50,6 +51,11 @@ pub struct StatusSnapshot {
     pub cursor_uv: Option<[f32; 2]>,
     /// The active paint tile.
     pub tile: Option<u16>,
+    /// The tablet backend behind the latest pen event, if any
+    /// (`stylus_input::StylusPoller::pen_source` — XI2 on Linux, `None`
+    /// on Touch/mouse). The token itself (`x11-xinput2`) is a protocol
+    /// id, not a translated string; only the `Pen` label is i18n'd.
+    pub pen: Option<stylus::InputSource>,
     /// `egui::InputState::stable_dt`, seconds.
     pub frame_dt: f32,
 }
@@ -83,6 +89,12 @@ pub fn format_uv(uv: Option<[f32; 2]>) -> String {
 /// The tile number, or [`NO_VALUE`].
 pub fn format_tile(tile: Option<u16>) -> String {
     tile.map_or_else(|| NO_VALUE.to_owned(), |t| t.to_string())
+}
+
+/// The pen backend token (`x11-xinput2`), or [`NO_VALUE`] with no pen
+/// event yet this session.
+pub fn format_pen(source: Option<stylus::InputSource>) -> String {
+    source.map_or_else(|| NO_VALUE.to_owned(), |s| s.to_string())
 }
 
 /// Frames per second from a frame delta. `None` for a zero, negative or
@@ -119,6 +131,9 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
         ui.separator();
         ui.label(label(tr("status.tile")));
         ui.label(value(format_tile(status.tile)));
+        ui.separator();
+        ui.label(label(tr("status.pen")));
+        ui.label(value(format_pen(status.pen)));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(label(tr("status.fps")));
             ui.label(value(format_fps(status.frame_dt)));
@@ -168,6 +183,20 @@ mod tests {
         assert_eq!(format_tile(Some(1001)), "1001");
         assert_eq!(format_tile(Some(1100)), "1100");
         assert_eq!(format_tile(None), "—");
+    }
+
+    #[test]
+    fn pen_formats_the_backend_token_or_dashes() {
+        // The token is the protocol id (untranslated); the label is.
+        assert_eq!(
+            format_pen(Some(stylus::InputSource::X11Xinput2)),
+            "x11-xinput2"
+        );
+        assert_eq!(
+            format_pen(Some(stylus::InputSource::MouseFallback)),
+            "mouse-fallback"
+        );
+        assert_eq!(format_pen(None), "—");
     }
 
     #[test]

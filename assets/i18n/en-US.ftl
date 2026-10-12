@@ -61,6 +61,7 @@ status =
     .plugins = { $loaded } plugin(s) loaded, { $failed } failed
     .uv = UV
     .tile = Tile
+    .pen = Pen
     .fps = fps
 
 ## Settings

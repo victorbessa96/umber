@@ -16,6 +16,9 @@ use std::fmt;
 #[cfg(all(windows, feature = "winink"))]
 pub mod winink;
 
+#[cfg(all(target_os = "linux", feature = "xi2"))]
+pub mod xi2;
+
 /// A raw tablet event, normalized across backends.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TabletEvent {
@@ -32,6 +35,14 @@ pub enum TabletEvent {
     },
     /// Tip contact began or ended.
     Contact { down: bool, time_ns: u64 },
+    /// The eraser end is in use (inverted stylus): `active` while the
+    /// eraser end is down or in proximity-command, cleared when it lifts.
+    /// Backends that can distinguish the eraser end (XI2's eraser slave
+    /// device; Windows Ink's eraser flag is the named follow-up) emit
+    /// this INSTEAD of `Contact`, so the app can hold the eraser tool
+    /// for the stroke's duration. Backends that cannot tell the ends
+    /// apart emit plain `Contact` and never this variant.
+    Eraser { active: bool, time_ns: u64 },
     /// Barrel button state changed.
     Button {
         button: u8,
@@ -68,6 +79,42 @@ impl fmt::Display for InputSource {
 pub struct SourcedEvent {
     pub source: InputSource,
     pub event: TabletEvent,
+}
+
+/// A per-frame tablet event source: backends push decoded
+/// [`SourcedEvent`]s here and the app drains them once per frame, before
+/// the paint arm reads. Object-safe so the app can hold any backend
+/// (or a test double) behind one pointer without knowing its type.
+pub trait StylusStream {
+    /// Removes and returns every event queued since the last drain.
+    fn drain(&mut self) -> Vec<SourcedEvent>;
+}
+
+/// Opens the platform's preferred tablet stream, or `None` when no
+/// backend is compiled in or the backend cannot start (no X display,
+/// no tablet stack). Never panics, never blocks: a `None` means the
+/// app paints from the egui `Event::Touch` fallback, unchanged.
+///
+/// Backend priority today is one deep: Linux with the `xi2` feature
+/// opens the X11 XI2 reader ([`xi2::Xi2Reader`]); every other
+/// configuration returns `None` (Windows Ink stays the named
+/// follow-up — its passive decode exists but has no window hook yet).
+#[must_use]
+pub fn open_system_stream() -> Option<Box<dyn StylusStream>> {
+    #[cfg(all(target_os = "linux", feature = "xi2"))]
+    {
+        xi2::Xi2Reader::open().map_or_else(
+            |err| {
+                log::info!("stylus: XI2 backend unavailable ({err}); touch fallback");
+                None
+            },
+            |reader| Some(Box::new(reader) as Box<dyn StylusStream>),
+        )
+    }
+    #[cfg(not(all(target_os = "linux", feature = "xi2")))]
+    {
+        None
+    }
 }
 
 #[cfg(test)]
