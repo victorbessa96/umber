@@ -73,6 +73,39 @@ print(f'  {\"WARN\" if hits else \"PASS\"}: $f doc-attachment: {hits[:3] if hits
 " || true
 done
 
+echo "== (5) lock audit (every dirty file matches a live kill-lock, or is dragon-owned) =="
+# A claw may wander off its registered surface; this leg catches it BEFORE
+# commit. Dirty files covered by any /tmp/umber-kill-locks/*.lock entry are
+# legitimate kill-in-flight surfaces. Dirty files NOT in any lock are the
+# dragon's own work (docs/loop/queue.md, STATE, scratch) — they pass with a
+# note. A claw-locked file dirty while its lock's claw has EXITED is the
+# orphan-consumption case — the dragon consumes; the note names it.
+LOCK_DIR=/tmp/umber-kill-locks
+uncovered=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  while IFS= read -r f; do
+    f="${f#?? }"
+    [ -n "$f" ] || continue
+    covered=0
+    for lock in "$LOCK_DIR"/*.lock; do
+      [ -e "$lock" ] || continue
+      # strip parenthetical qualifiers from lock entries (e.g. path(rows-only))
+      base="${f%%\(*}"
+      if grep -qxF "$f" "$lock" 2>/dev/null || grep -qxF "$base" "$lock" 2>/dev/null; then
+        covered=1
+        echo "  PASS: $f — locked by ${lock##*/}"
+        break
+      fi
+    done
+    if [ "$covered" -eq 0 ]; then
+      echo "  NOTE: $f — not under any kill-lock (dragon-owned surface, or register it)"
+      uncovered=$((uncovered+1))
+    fi
+  done < <(git status --porcelain | awk '{print $NF}')
+else
+  echo "  SKIP: not a git work tree"
+fi
+
 echo
-[ "$fails" -eq 0 ] && echo "VERIFY-KILL: ${files[*]} — balanced, fmt-clean, trap-scanned" || echo "VERIFY-KILL: $fails hard failure(s)"
+[ "$fails" -eq 0 ] && echo "VERIFY-KILL: ${files[*]} — balanced, fmt-clean, trap-scanned$([ "$uncovered" -gt 0 ] && echo ", $uncovered unlocked-but-noted file(s)")" || echo "VERIFY-KILL: $fails hard failure(s)"
 exit "$fails"
