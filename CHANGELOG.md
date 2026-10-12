@@ -31,6 +31,7 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - Installers proven at the local boundary — real linux-gnu tarballs, shell installers, verified sha256s; the missing profile.dist fixed (`9f875b3`)
 - The OCIO bundled build executed — the never-run C++ tree compiled, the ACES 2.0 built-ins materialized, and a false UI-name constant died on the real library's answer (`60b04d0`)
 - ID-mask selection — click a region, paint only that region; the mask gate does the gating, the bake feeds the IDs (`e2bed70`)
+- The height channel reaches the Lit viewport — the tile pool's (c) landing closes audit #12 end-to-end (`be11fe5`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 
