@@ -70,6 +70,49 @@
 //!   a row jumps to (highlights) the responsible settings row. The cage
 //!   toggle is panel state synced to the viewport's cage wireframe overlay
 //!   by the app shell, mirroring the wireframe/grid toggles.
+//!
+//! GUI Phase 1 chrome, kill 4 (docs/specs/gui-audit-and-roadmap.md
+//! Phase 1, the panel-migration wave): this panel's sections render as
+//! [`umber_gui::ParamGroup`] collapsibles and the rays / dilation /
+//! skew-threshold sliders are [`umber_gui::ValueField`]s (drag-scrub,
+//! wheel-step, tabular numerals) over the same ranges and backing state
+//! as the stock sliders they replaced. Chrome only: no state struct,
+//! default, range, validation, plan, worker, log, or status path changed,
+//! and every test below is untouched.
+//!
+//! Deliberately NOT migrated (v1 boundaries of this pass):
+//! - Resolution stays the shared [`crate::size_presets::size_combo`]
+//!   preset picker (the empty-combo-label row form, so the row label
+//!   carries the visible text), not a free [`umber_gui::ValueField`]: a
+//!   scrubbing field would accept sizes [`BakesPanel::set_resolution`]
+//!   and the tests reject — the same call the export dialog's kill
+//!   documents for its own size picker.
+//! - No hand-rolled colors exist in this file (no `RichText::color`, no
+//!   custom strokes), so scope item (3) changes nothing; the groups and
+//!   fields paint from `umber-gui`'s theme tokens internally. The `▶`
+//!   jump glyph stays hardcoded (the history panel's `↶`/`↷` precedent,
+//!   already documented on [`BakesPanel::row_label`]).
+//! - No `umber_style`/fonts call at panel level (the `brush_panel.rs`
+//!   rationale): `main.rs` applies no Umber style today, and a
+//!   panel-local style would diverge from the still-unmigrated panels.
+//!   [`umber_gui::ValueField`] only needs `FontId::monospace`, which
+//!   works on stock fonts.
+//! - Group titles reuse existing catalog keys where one exists
+//!   (`bakes.sets`, `bakes.log`); only the settings and maps groups
+//!   needed new keys (`bakes.settings-group`, `bakes.maps-group`, in
+//!   both catalogs).
+//! - [`umber_gui::ParamGroup`]'s header count covers top-level
+//!   [`umber_gui::widgets::ParamGroupUi::row`] calls only: the settings
+//!   group counts its four numeric rows (the auto-rebake/cage checkboxes
+//!   and the out-dir row draw on `group.ui` verbatim, uncounted), and
+//!   the maps / sets / log groups draw entirely on `group.ui` (their
+//!   checkboxes and the tile selector live outside counted rows), so
+//!   their headers show no count — the same wart class `brush_panel.rs`
+//!   documents.
+//! - The tile selector lives in the maps group (coverage is maps ×
+//!   tiles) and the out-dir row in the settings group; the Bake-button
+//!   warnings, the buttons, the param-tracking block, and the status
+//!   line stay on the plain panel `Ui` as actions, not parameters.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +120,7 @@ use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fluent::FluentValue;
+use umber_gui::{ParamGroup, ValueField};
 use umber_mesh::FIRST_TILE;
 
 use crate::i18n::{tr, tr_args};
@@ -1106,9 +1150,11 @@ impl BakesPanel {
         &self.last_records
     }
 
-    /// Draws the panel: resolution combo, per-map checkboxes, rays and
-    /// dilation sliders, output-dir row, the Bake button (starts a
-    /// background job), and the status line.
+    /// Draws the panel: the settings / maps / sets [`umber_gui::ParamGroup`]
+    /// sections (resolution picker, per-map checkboxes, rays / dilation /
+    /// skew-threshold [`umber_gui::ValueField`]s, output-dir row), the Bake
+    /// buttons (start a background job), the bake log group, and the status
+    /// line.
     ///
     /// Gated: with no mesh (or no GPU) a reason line replaces the bake
     /// controls' effect — the Bake button is disabled either way, and
@@ -1123,66 +1169,107 @@ impl BakesPanel {
             ui.label(tr("bakes.no-gpu"));
         }
 
-        // Resolution row (jump-highlightable via the marker prefix).
-        if self.highlighted_setting == Some(BakeSettingId::Resolution) {
-            ui.horizontal(|ui| {
-                ui.label("▶");
-                crate::size_presets::size_combo(ui, &tr("bakes.resolution"), &mut self.resolution);
+        // Settings group: the resolution picker, the three numeric
+        // fields (rays / dilation / skew threshold as `ValueField`s over
+        // the same ranges the stock sliders used), the auto-rebake + cage
+        // toggles, and the out-dir row.
+        let settings_title = tr("bakes.settings-group");
+        ParamGroup::new("bakes-settings", settings_title.as_str()).show(ui, |group| {
+            // Resolution row (jump-highlightable via the marker prefix):
+            // the shared preset combo, not a `ValueField` (see the module
+            // docs). The row label carries the visible text, so the combo
+            // itself takes an empty label.
+            if self.highlighted_setting == Some(BakeSettingId::Resolution) {
+                group.ui.horizontal(|ui| {
+                    ui.label("▶");
+                    crate::size_presets::size_combo(
+                        ui,
+                        &tr("bakes.resolution"),
+                        &mut self.resolution,
+                    );
+                });
+            } else {
+                let resolution_label = tr("bakes.resolution");
+                group.row(resolution_label.as_str(), |ui| {
+                    crate::size_presets::size_combo(ui, "", &mut self.resolution);
+                });
+            }
+
+            let rays_label = self.row_label(BakeSettingId::Rays, tr("bakes.rays"));
+            group.row(rays_label.as_str(), |ui| {
+                ui.add(ValueField::new(&mut self.rays).range(MIN_RAYS..=MAX_RAYS));
             });
-        } else {
-            crate::size_presets::size_combo(ui, &tr("bakes.resolution"), &mut self.resolution);
-        }
+            let dilation_label = self.row_label(BakeSettingId::Dilation, tr("bakes.dilation"));
+            group.row(dilation_label.as_str(), |ui| {
+                ui.add(
+                    ValueField::new(&mut self.dilation_iterations)
+                        .range(0..=MAX_DILATION_ITERATIONS),
+                );
+            });
+            let skew_label =
+                self.row_label(BakeSettingId::SkewThreshold, tr("bakes.skew-threshold"));
+            group.row(skew_label.as_str(), |ui| {
+                ui.add(
+                    ValueField::new(&mut self.skew_threshold_deg)
+                        .range(MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG)
+                        .step(0.5)
+                        .decimals(1)
+                        .unit("°"),
+                );
+            });
 
-        // Per-map checklist (§6:59) + the paintable skew channel (§6:57).
-        ui.checkbox(&mut self.bake_ao, BakeSelection::Ao.label());
-        ui.checkbox(&mut self.bake_curvature, BakeSelection::Curvature.label());
-        ui.checkbox(&mut self.bake_thickness, BakeSelection::Thickness.label());
-        ui.checkbox(&mut self.bake_position, BakeSelection::Position.label());
-        ui.checkbox(&mut self.bake_skew, tr("bakes.map-skew"));
+            group
+                .ui
+                .checkbox(&mut self.auto_rebake, tr("bakes.auto-rebake"));
+            let cage_label = self.row_label(BakeSettingId::Cage, tr("bakes.show-cage"));
+            group.ui.checkbox(&mut self.show_cage, cage_label);
 
-        // UDIM tile selector: which present tiles the Bake covers (a
-        // single-tile mesh shows `Tile 1001` with nothing to choose).
+            group.ui.horizontal(|ui| {
+                let dir = self.output_dir.display().to_string();
+                ui.label(tr_args("common.out-dir", [("dir", FluentValue::from(dir))]));
+                if ui.button(tr("button.choose")).clicked() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.output_dir = dir;
+                    }
+                }
+            });
+        });
+
+        // Maps group: the per-map checklist (§6:59) + the paintable skew
+        // channel (§6:57) + the UDIM tile selector (coverage is maps ×
+        // tiles, so the selector lives here rather than in its own group).
+        let maps_title = tr("bakes.maps-group");
+        ParamGroup::new("bakes-maps", maps_title.as_str()).show(ui, |group| {
+            group
+                .ui
+                .checkbox(&mut self.bake_ao, BakeSelection::Ao.label());
+            group
+                .ui
+                .checkbox(&mut self.bake_curvature, BakeSelection::Curvature.label());
+            group
+                .ui
+                .checkbox(&mut self.bake_thickness, BakeSelection::Thickness.label());
+            group
+                .ui
+                .checkbox(&mut self.bake_position, BakeSelection::Position.label());
+            group.ui.checkbox(&mut self.bake_skew, tr("bakes.map-skew"));
+
+            if let Some(mesh) = ctx.mesh {
+                self.tiles.sync(self.mesh_tiles.get(mesh));
+            }
+            let ui: &mut egui::Ui = &mut *group.ui;
+            self.tiles.show(ui);
+        });
+
+        // Sets group: the per-set checklist (§6:59), synced from the mesh
+        // each frame (like the tile selector above).
         if let Some(mesh) = ctx.mesh {
-            self.tiles.sync(self.mesh_tiles.get(mesh));
             self.sync_sets(&Self::set_names_for(mesh, ctx.mesh_path));
         }
-        self.tiles.show(ui);
-
-        // Per-set checklist (§6:59): one checkbox per texture set.
-        if !self.sets.is_empty() {
-            ui.label(tr("bakes.sets"));
+        let sets_title = tr("bakes.sets");
+        ParamGroup::new("bakes-sets", sets_title.as_str()).show(ui, |group| {
             for row in &mut self.sets {
-                ui.checkbox(&mut row.enabled, &row.name);
-            }
-        }
-
-        let rays_label = self.row_label(BakeSettingId::Rays, tr("bakes.rays"));
-        ui.add(egui::Slider::new(&mut self.rays, MIN_RAYS..=MAX_RAYS).text(rays_label));
-        let dilation_label = self.row_label(BakeSettingId::Dilation, tr("bakes.dilation"));
-        ui.add(
-            egui::Slider::new(&mut self.dilation_iterations, 0..=MAX_DILATION_ITERATIONS)
-                .text(dilation_label),
-        );
-        let skew_label = self.row_label(BakeSettingId::SkewThreshold, tr("bakes.skew-threshold"));
-        ui.add(
-            egui::Slider::new(
-                &mut self.skew_threshold_deg,
-                MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG,
-            )
-            .text(skew_label),
-        );
-
-        ui.checkbox(&mut self.auto_rebake, tr("bakes.auto-rebake"));
-        let cage_label = self.row_label(BakeSettingId::Cage, tr("bakes.show-cage"));
-        ui.checkbox(&mut self.show_cage, cage_label);
-
-        ui.horizontal(|ui| {
-            let dir = self.output_dir.display().to_string();
-            ui.label(tr_args("common.out-dir", [("dir", FluentValue::from(dir))]));
-            if ui.button(tr("button.choose")).clicked() {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    self.output_dir = dir;
-                }
+                group.ui.checkbox(&mut row.enabled, &row.name);
             }
         });
 
@@ -1234,24 +1321,29 @@ impl BakesPanel {
         }
 
         // Bake log (§6:59): one row per baked map; a click jumps to the
-        // responsible settings row (highlighted above).
-        ui.collapsing(tr("bakes.log"), |ui| {
-            if self.log.is_empty() {
-                ui.label(tr("bakes.log-empty"));
-            } else {
-                let rows: Vec<(u64, String)> = self
-                    .log
-                    .entries()
-                    .iter()
-                    .map(|e| (e.id, e.summary()))
-                    .collect();
-                for (id, summary) in rows {
-                    if ui.selectable_label(false, &summary).clicked() {
-                        self.jump_to_setting(id);
+        // responsible settings row (highlighted above). Collapsed by
+        // default, like the old `ui.collapsing`.
+        let log_title = tr("bakes.log");
+        ParamGroup::new("bakes-log", log_title.as_str())
+            .default_open(false)
+            .show(ui, |group| {
+                let ui: &mut egui::Ui = &mut *group.ui;
+                if self.log.is_empty() {
+                    ui.label(tr("bakes.log-empty"));
+                } else {
+                    let rows: Vec<(u64, String)> = self
+                        .log
+                        .entries()
+                        .iter()
+                        .map(|e| (e.id, e.summary()))
+                        .collect();
+                    for (id, summary) in rows {
+                        if ui.selectable_label(false, &summary).clicked() {
+                            self.jump_to_setting(id);
+                        }
                     }
                 }
-            }
-        });
+            });
 
         ui.separator();
         ui.horizontal_wrapped(|ui| {
