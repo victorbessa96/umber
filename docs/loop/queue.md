@@ -59,7 +59,7 @@ Pass 4), highest first:
 | 4 | Per-texture-set (then per-channel) sizing | **done (2564c17)** | the set model + per-tile routing at the set's size + per-set panel + target_sizes.txt with v1 back-compat; the two-sets/two-sizes round-trip test pins it; per-channel sizing = named follow-up |
 | 5 | Cumulative merge for stroke undo | **done (37025d5)** | merge-at-push for intersecting rects; the 8-stroke soak pins 5632B vs 16384B unmerged; envelope unchanged (64/256MiB) |
 | 6 | Docs truth refresh (README/STATE/queue) | **done** | 9a7c078: README status/tree-diagram/contributing + STATE handoff 2/3/6 |
-| 7 | Stylus-crate backends (winink + XI2) | **todo** | tilt/proximity/eraser behind the raw-Touch source; Linux first |
+| 7 | Stylus-crate backends (winink + XI2) | **done (d2fd7b7)** | XI2 backend + StylusPoller wiring landed (Linux half; claw-authored, orphan-consumed after wrapper death); winink = the Windows half, named follow-up |
 | 8 | OCIO bundled build | **todo** | the never-run C++ build; display chain off stub behind the feature |
 | 9 | Distribution: prove the installers | **todo** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
 | 10 | Color picker / eyedropper | **done (7067cd3)** | Pick on the strip + viewport sampling + set_brush_color; display-chain-aware sample = the named follow-up |

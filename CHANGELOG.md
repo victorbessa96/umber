@@ -26,6 +26,7 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - Crash-safe paint saves — atomic manifest commit + AssetStore routing; reopen is old-or-new, never torn (`e4ad8b7`)
 - Cumulative undo merge — overlapping strokes coalesce at push; the byte budget carries regions, not stroke counts (`37025d5`)
 - The eyedropper — Pick on the strip, sample the mesh, paint with it (`7067cd3`)
+- The XI2 stylus backend — pen pressure/tilt/proximity reach the brush on Linux; the claw's orphaned kill consumed and finished (`d2fd7b7`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 
