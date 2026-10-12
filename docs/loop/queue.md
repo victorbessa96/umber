@@ -34,14 +34,16 @@ recorded in STATE.md; the strategy-review queue is the active wave.
 Gate 0's verdict is CI's at the next push; the phase's exit condition is
 Gate 0 PASSING, so the phase closes when that run lands green.
 
-**GATE 0 RUNTIME VERDICT IN FLIGHT (2026-10-12 10:2x).** The wave pushed
-(70dc67a, gate flipped by Bessa's in-session word). Run 38255484123:
-ubuntu-latest GREEN (the journey test passed on lavapipe); windows
-mid-run. **C1 audit dispatched in parallel** (opencode, kill-locked on
-docs/loop/audit-2026-10-12-c1.md) — the contract's Phase C trigger
-fires on the queue emptying; the audit runs against the tree as-is so
-the refreshed worklist is ready the moment the phase closes. Push gate
-is STANDING approval per Bessa's word (keep it true, push autonomously).
+**GATE 0 RUNTIME VERDICT: PASS (2026-10-12 10:5x).** Run 38255484123 on
+70dc67a: ubuntu-latest GREEN + windows-latest GREEN.
+`gate0_journey_fbx_to_decode_verified_orm ... ok` on BOTH platforms
+(lavapipe 13:27:49Z, WARP 13:29:45Z). The core-loop phase's exit
+condition is MET: FBX → 4K pressured paint → compositor → undo/redo →
+save/reopen → ORM decode-verified, end to end, CI-proven. **PHASE
+CLOSED.** Milestone ping sent (Telegram 19815). GUI/P2 unfreeze is
+Bessa's explicit call (C2). C1 (the refreshed-worklist audit) is in
+flight; its deliverable refills the queue. Push gate is STANDING
+approval per Bessa's word.
 
 ## Push log
 

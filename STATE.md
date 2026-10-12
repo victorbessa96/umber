@@ -11,9 +11,11 @@
 
 ## Status line
 
-Current phase: **CORE-LOOP (post-strategy-review)** — the product spine
-(the six criticals on the one user path that matters) until Gate 0 passes.
-State: CORE-LOOP-IN-FLIGHT
+Current phase: **CORE-LOOP — CLOSED (Gate 0 PASSED 2026-10-12, run 38255484123,
+both platforms green).** The user path is whole end to end; the next phase's
+queue comes from the C1 audit's refreshed worklist. GUI/P2 unfreeze is
+Bessa's explicit call.
+State: GATE-0-PASSED-PHASE-CLOSED
 GUI chrome + all P2 work: FROZEN pending Gate 0 (Bessa lifts the freeze).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate.
 No tag, no release, no v0.1 claim until Gate 0 passes.

@@ -6,7 +6,7 @@ the source of truth.
 
 ## [Unreleased]
 
-### Core-loop phase — the user-path spine (2026-10-12, in flight)
+### Core-loop phase — CLOSED: Gate 0 PASSED (2026-10-12, both platforms)
 
 The strategy review (docs/specs/2026-10-12-strategy-review.md) found the
 engine crates real but the user-path joins missing; GUI/P2 frozen until
