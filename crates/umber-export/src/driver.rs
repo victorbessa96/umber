@@ -664,7 +664,16 @@ fn write_outputs(
         let transfer = output_transfer(output);
 
         match output.format {
-            OutputFormat::Png8 => crate::png::write_png(&path, size, size, &packed, transfer)?,
+            OutputFormat::Png8 => {
+                crate::png::write_png(&path, size, size, &packed, transfer)?;
+                // The iCCP embed (§9 P1): color-managed maps carry the
+                // bundled sRGB profile so viewers decode them correctly;
+                // data maps (linear passthrough) stay unprofiled —
+                // `map_kind_is_color` is the §9 rule.
+                if transfer == Transfer::Srgb {
+                    crate::icc::embed_srgb_iccp(&path)?;
+                }
+            }
             OutputFormat::Png16 => {
                 // Up-shift the u8 sources to u16 (×257: 0->0, 255->65535).
                 let mut u16s = Vec::with_capacity(texels * 4);

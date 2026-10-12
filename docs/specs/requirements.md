@@ -129,7 +129,7 @@
 |---|---|---|
 | Scene-linear working space, OCIO v2 configs (ocio-rs, vendored build) incl. ACES 2.0 CG/Studio built-ins | P0 | 2 (viewport), 3 (full configs) |
 | Per-channel color-managed flags (baseColor yes; roughness/metallic/normal = data) | P0 | 2 |  ✓ built (`21e1290` census's per-channel flags) —
-| ICC profile embed on export (lcms2) | P1 | 3 |
+| ICC profile embed on export (lcms2) | P1 | 3 | ✓ built (`1e3a139` the iCCP writer — png crate writes the chunk natively, NO lcms2 needed; `driver.rs` wires it: every color-managed PNG8 embeds the bundled sRGB profile, data maps stay unprofiled per the §9 rule; 80/80 export tests) |
 | Display transform via GPU LUT (OCIO GPU shader extraction → 3D texture) | P0 | 2 |  ✓ built (`146d7a0` the GPU display LUT on the pixels; `956ecdd` panel) —
 
 ## 10. Platform, input, plugins, distribution — [03]
