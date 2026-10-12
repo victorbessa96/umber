@@ -10,6 +10,16 @@ repository.workspace = true
 egui = { workspace = true }
 # Density persists in the app settings (Phase 3's settings panel).
 serde = { workspace = true }
+serde_json = { workspace = true }
+# The baked icon atlas PNGs decode here (umber-gui's own top-first decoder
+# in icons.rs — NOT umber-export's GPU-row-order reader; see that module's
+# cycle decision). Same crate + version umber-export uses.
+png = "0.17"
+
+[dev-dependencies]
+# Feature-gated `gpu` smoke test only (the renderer::tests::gpu pattern).
+pollster = { workspace = true }
+wgpu = { workspace = true }
 
 [features]
 # Bake Inter + JetBrains Mono into the binary via include_bytes!. Off by
@@ -20,3 +30,12 @@ serde = { workspace = true }
 # panics with the expected path.
 default = []
 embedded-fonts = []
+# Bake the icon atlas PNGs + manifest into the binary via include_bytes!.
+# Off by default until icon-raster has generated them (same missing-file
+# compile-error reason as embedded-fonts). Without the feature the atlas
+# loads at runtime from assets/icons/atlas/ and a missing file is a
+# recoverable AtlasLoadError (placeholder boxes), never a panic.
+embedded-icons = []
+# GPU-optional smoke test in icons.rs (try_request_device, skips without
+# an adapter). Off by default; CI opts in like umber-gpu/umber-bake.
+gpu = []

@@ -21,7 +21,14 @@ pub mod theme;
 pub mod widgets;
 
 pub use fonts::{install_fonts, umber_fonts};
-pub use icons::{icon, icon_button, AtlasBuilder, IconAtlas, IconFamily};
+#[cfg(feature = "embedded-icons")]
+pub use icons::load_embedded_atlas;
+pub use icons::{
+    assemble_baked_atlas, atlas_dir, atlas_file_name, icon, icon_button, load_baked_atlas,
+    load_baked_atlas_from, manifest_key, texture_name, AtlasBuilder, AtlasLoadError, BakedFamily,
+    BakedManifest, IconAtlas, IconFamily, ATLAS_DIR_ENV, ATLAS_DIR_PATH, ATLAS_VERSION,
+    LUCIDE_VERSION, MANIFEST_FILE,
+};
 pub use theme::{
     accent, accent_hover, hover, muted, panel_bg, umber_style, umber_style_scaled, Density,
     MOTION_SECS,

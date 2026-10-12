@@ -1,0 +1,277 @@
+{
+  "atlas_version": 1,
+  "lucide": "1.55.0",
+  "source": "https://github.com/lucide-icons/lucide/releases/tag/1.55.0",
+  "missing": [
+    "fingerprint",
+    "flip-horizontal-2"
+  ],
+  "tool": {
+    "cell": 20,
+    "atlas": [
+      60,
+      60
+    ],
+    "order": [
+      "paintbrush",
+      "eraser",
+      "stamp",
+      "pipette",
+      "paint-bucket",
+      "spline",
+      "pentagon",
+      "square-dashed"
+    ],
+    "icons": {
+      "eraser": {
+        "x": 20,
+        "y": 0,
+        "w": 20,
+        "h": 20
+      },
+      "paint-bucket": {
+        "x": 20,
+        "y": 20,
+        "w": 20,
+        "h": 20
+      },
+      "paintbrush": {
+        "x": 0,
+        "y": 0,
+        "w": 20,
+        "h": 20
+      },
+      "pentagon": {
+        "x": 0,
+        "y": 40,
+        "w": 20,
+        "h": 20
+      },
+      "pipette": {
+        "x": 0,
+        "y": 20,
+        "w": 20,
+        "h": 20
+      },
+      "spline": {
+        "x": 40,
+        "y": 20,
+        "w": 20,
+        "h": 20
+      },
+      "square-dashed": {
+        "x": 20,
+        "y": 40,
+        "w": 20,
+        "h": 20
+      },
+      "stamp": {
+        "x": 40,
+        "y": 0,
+        "w": 20,
+        "h": 20
+      }
+    }
+  },
+  "tool2x": {
+    "cell": 40,
+    "atlas": [
+      120,
+      120
+    ],
+    "order": [
+      "paintbrush",
+      "eraser",
+      "stamp",
+      "pipette",
+      "paint-bucket",
+      "spline",
+      "pentagon",
+      "square-dashed"
+    ],
+    "icons": {
+      "eraser": {
+        "x": 40,
+        "y": 0,
+        "w": 40,
+        "h": 40
+      },
+      "paint-bucket": {
+        "x": 40,
+        "y": 40,
+        "w": 40,
+        "h": 40
+      },
+      "paintbrush": {
+        "x": 0,
+        "y": 0,
+        "w": 40,
+        "h": 40
+      },
+      "pentagon": {
+        "x": 0,
+        "y": 80,
+        "w": 40,
+        "h": 40
+      },
+      "pipette": {
+        "x": 0,
+        "y": 40,
+        "w": 40,
+        "h": 40
+      },
+      "spline": {
+        "x": 80,
+        "y": 40,
+        "w": 40,
+        "h": 40
+      },
+      "square-dashed": {
+        "x": 40,
+        "y": 80,
+        "w": 40,
+        "h": 40
+      },
+      "stamp": {
+        "x": 80,
+        "y": 0,
+        "w": 40,
+        "h": 40
+      }
+    }
+  },
+  "panel": {
+    "cell": 16,
+    "atlas": [
+      48,
+      48
+    ],
+    "order": [
+      "file",
+      "folder-open",
+      "save",
+      "pencil",
+      "undo-2",
+      "redo-2",
+      "eye",
+      "panel-left"
+    ],
+    "icons": {
+      "eye": {
+        "x": 0,
+        "y": 32,
+        "w": 16,
+        "h": 16
+      },
+      "file": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "folder-open": {
+        "x": 16,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "panel-left": {
+        "x": 16,
+        "y": 32,
+        "w": 16,
+        "h": 16
+      },
+      "pencil": {
+        "x": 0,
+        "y": 16,
+        "w": 16,
+        "h": 16
+      },
+      "redo-2": {
+        "x": 32,
+        "y": 16,
+        "w": 16,
+        "h": 16
+      },
+      "save": {
+        "x": 32,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "undo-2": {
+        "x": 16,
+        "y": 16,
+        "w": 16,
+        "h": 16
+      }
+    }
+  },
+  "panel2x": {
+    "cell": 32,
+    "atlas": [
+      96,
+      96
+    ],
+    "order": [
+      "file",
+      "folder-open",
+      "save",
+      "pencil",
+      "undo-2",
+      "redo-2",
+      "eye",
+      "panel-left"
+    ],
+    "icons": {
+      "eye": {
+        "x": 0,
+        "y": 64,
+        "w": 32,
+        "h": 32
+      },
+      "file": {
+        "x": 0,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "folder-open": {
+        "x": 32,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "panel-left": {
+        "x": 32,
+        "y": 64,
+        "w": 32,
+        "h": 32
+      },
+      "pencil": {
+        "x": 0,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "redo-2": {
+        "x": 64,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      },
+      "save": {
+        "x": 64,
+        "y": 0,
+        "w": 32,
+        "h": 32
+      },
+      "undo-2": {
+        "x": 32,
+        "y": 32,
+        "w": 32,
+        "h": 32
+      }
+    }
+  }
+}

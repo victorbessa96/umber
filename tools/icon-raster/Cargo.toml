@@ -1,0 +1,29 @@
+# icon-raster is a standalone helper workspace (the `examples/` precedent:
+# its own `[workspace]`, so the root workspace is untouched). It builds for
+# the host and never ships in the app.
+[workspace]
+
+[package]
+name = "icon-raster"
+description = "Umber icon build step: rasterize pinned lucide SVGs into the umber-gui icon atlas PNGs + manifest"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "icon-raster"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned per docs/specs/tech-stack.md version policy (exact versions also
+# named in the kill contract: resvg 0.44.0 + usvg 0.44.0 + tiny-skia 0.11.4).
+resvg = "=0.44.0"
+# PNG encode of the packed atlas (same crate + version umber-export uses).
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Single source of truth for the icon lists + grid math: the tool packs with
+# umber-gui's own TOOL_ICONS / PANEL_ICONS / pack_grid, so the raster output
+# can never drift from what icons.rs expects.
+umber-gui = { path = "../../crates/umber-gui" }

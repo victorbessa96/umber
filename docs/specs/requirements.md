@@ -153,7 +153,7 @@
 | Dockable panels (egui_dock): layer stack, properties, assets/shelf, texture-set list, history, display settings, export dialog | P0 | 1 (shell) → 2 (dense) |  ✓ built (`ba9fecc`→`e1321a1` dock shell; every panel listed exists in main.rs) —
 | Brush properties panel: input→curve editor (MyPaint model), flow×opacity, stabilizer, jitter quartet [05] | P0 | 2 |  ✓ built (`d58bdb4` live preset editing + curve editor; stabilizer rows in brush_panel) —
 | History window (session-global, click-to-time-travel; not persisted) | P1 | 2 | ✓ built (`9af4c2f`) — the Bakes/Export record_context wiring = the named follow-up |
-| Dark pro theme, 4K-DPI scaling | P0 | 1 |  ✓ built (egui native DPI; `77ec811`→`c51fc1a` the umber theme tokens) —
+| Dark pro theme, 4K-DPI scaling | P0 | 1 |  ✓ built (egui native DPI; `77ec811`→`c51fc1a` the umber theme tokens) — icon-raster step ✓ code (`PENDING`): raster tool `tools/icon-raster/src/main.rs`, baked-atlas loader `umber-gui icons.rs::load_baked_atlas`, manifest `assets/icons/atlas/manifest.json` (lucide 1.55.0; 16/18 ids rasterized, the 2 renamed upstream keep placeholder boxes per the placeholder contract) — NOT REACHABLE from the app yet: boot still constructs `IconAtlas::empty()` (`umber-app main.rs:603`), the loader swap-in is the named follow-up |
 | Node-canvas widget (custom, for graph editor) | P0 | 4 |  ✓ built (`abf04b6` graph panel + graph_canvas.rs) —
 | Localization (EN first; architecture i18n-ready) | P1 | 5 |  ✓ built (`e493c60` fluent catalog, 396 keys en-US + pt-BR) —
 
