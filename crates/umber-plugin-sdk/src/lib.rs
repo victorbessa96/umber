@@ -26,9 +26,14 @@
 //! negative `ERR_*` code). A declarative macro rather than an attribute
 //! proc-macro: v1 needs no syntax rewriting, and it keeps the SDK a
 //! single dependency-free crate.
+//!
+//! [`provider`] is the AI-texturing provider interface (inpaint /
+//! seamless-tile generation): a design hook under the same no_std,
+//! no-allocator constraint, with no host binding yet.
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod provider;
 pub mod wire_consts;
 
 use wire_consts::{
