@@ -26,11 +26,26 @@ rs=()
 for f in "${files[@]}"; do case "$f" in *.rs) rs+=("$f");; esac; done
 if [ "${#rs[@]}" -eq 0 ]; then
   echo "  PASS: no .rs files to fmt"
-elif rustfmt --check "${rs[@]}" 2>/dev/null; then
-  echo "  PASS: fmt clean"
 else
-  echo "  fixing fmt drift in-place"; rustfmt "${rs[@]}" 2>/dev/null
-  rustfmt --check "${rs[@]}" 2>/dev/null && echo "  PASS: fmt aligned (in-place)" || { echo "  FAIL: fmt"; fails=$((fails+1)); }
+  # Resolve the formatter BEFORE trusting any exit code. A PATH-bare
+  # session (wake/loop shells without ~/.cargo/bin) turns `rustfmt` into
+  # exit 127, which this gate read as "fmt drift" — firing a bogus
+  # in-place fix with a binary that does not exist (burned 2026-10-12:
+  # two false-reds on a fmt-clean committed file). Missing formatter is
+  # an honest, named failure; it must never masquerade as drift.
+  RUSTFMT="$(command -v rustfmt || true)"
+  if [ -z "$RUSTFMT" ] && [ -x "$HOME/.cargo/bin/rustfmt" ]; then
+    RUSTFMT="$HOME/.cargo/bin/rustfmt"
+  fi
+  if [ -z "$RUSTFMT" ]; then
+    echo "  FAIL: rustfmt not found (not on PATH, not in ~/.cargo/bin) — fmt NOT verified"
+    fails=$((fails+1))
+  elif "$RUSTFMT" --check "${rs[@]}" 2>/dev/null; then
+    echo "  PASS: fmt clean"
+  else
+    echo "  fixing fmt drift in-place"; "$RUSTFMT" "${rs[@]}" 2>/dev/null
+    "$RUSTFMT" --check "${rs[@]}" 2>/dev/null && echo "  PASS: fmt aligned (in-place)" || { echo "  FAIL: fmt"; fails=$((fails+1)); }
+  fi
 fi
 
 echo "== (3) the trap greps =="
