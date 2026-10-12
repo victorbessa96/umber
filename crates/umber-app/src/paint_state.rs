@@ -354,6 +354,17 @@ pub const DEFAULT_TEXTURE_SET: &str = "TextureSet";
 /// reading `.base_color`) stays byte-identical.
 pub(crate) const BASE_COLOR_CHANNEL: &str = "baseColor";
 
+/// The height channel's canonical name (audit worklist #12's binding seam):
+/// the channel the viewport binds through `MeshBuffers::set_height_texture`
+/// for the Lit path's per-frame normal perturbation. It is a CONVENTION,
+/// not a reserved word — any channel named "height" materializes and binds
+/// like any other; this const is the single spelling the app-side bind
+/// reads so a rename is one edit (the document's channel list remains the
+/// source of truth for what exists). `pub` (not `pub(crate)`): the lib
+/// surface exposes paint_state for integration tests, and the const is part
+/// of the channel-name contract a test pins.
+pub const HEIGHT_CHANNEL: &str = "height";
+
 /// Brush radius in target texels.
 const BRUSH_RADIUS_TEXELS: f32 = 24.0;
 
@@ -1521,6 +1532,25 @@ impl PaintState {
     /// present tile through this).
     pub fn tile_target(&self, tile: u16) -> Option<&umber_gpu::paint::PaintTarget> {
         self.targets.get(&tile).map(|t| t.base_color.paint_target())
+    }
+
+    /// Read-only access to `tile`'s `channel` paint target, or `None` when
+    /// the channel has not materialized on that tile yet (lazy — see the
+    /// tile-pool design doc). `BASE_COLOR_CHANNEL` routes to the baseColor
+    /// field, mirroring the routing rules everywhere else. The viewport's
+    /// height bind (audit #12's (c) seam) reads through this: it must NEVER
+    /// create a target as a side effect of binding.
+    pub fn channel_target(
+        &self,
+        tile: u16,
+        channel: &str,
+    ) -> Option<&umber_gpu::paint::PaintTarget> {
+        let entry = self.targets.get(&tile)?;
+        if channel == BASE_COLOR_CHANNEL {
+            Some(entry.base_color.paint_target())
+        } else {
+            entry.channels.get(channel).map(|t| t.paint_target())
+        }
     }
 
     /// The tiles this session holds a paint target for, ascending —
@@ -4276,5 +4306,54 @@ mod tests {
         );
         // ...while the resized set's own mask follows its new size.
         assert_eq!(state.quick_mask_for_tile(1002).dimensions(), (128, 128));
+    }
+
+    /// The binding seam's routing contract (audit #12's (c) landing): the
+    /// read-only `channel_target` resolves exactly as the write paths do —
+    /// the reserved baseColor name to the field, a materialized channel to
+    /// its map entry, an unmaterialized channel to `None` (binding must
+    /// never materialize). The viewport's height arm rides this: bind when
+    /// `Some`, clear when `None`, so the lazy-pool contract holds at the
+    /// GPU boundary too.
+    #[test]
+    fn channel_target_routes_read_only_never_materializes() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // baseColor routes to the field (always materialized on 1001).
+        assert!(
+            state.channel_target(1001, BASE_COLOR_CHANNEL).is_some(),
+            "baseColor is present from construction"
+        );
+        // height: absent until routed.
+        assert!(
+            state.channel_target(1001, HEIGHT_CHANNEL).is_none(),
+            "an unmaterialized channel must read None"
+        );
+        assert!(
+            state.channels_present(1001).is_empty(),
+            "and the read must not have materialized it"
+        );
+        // Route + fill height; the read now resolves, and a read of an
+        // UNKNOWN channel still reads None without materializing.
+        assert!(state.ensure_channel(1001, HEIGHT_CHANNEL));
+        assert!(state.publish_fill_channel(
+            1001,
+            HEIGHT_CHANNEL,
+            512,
+            512,
+            vec![128u8; 512 * 512 * 4]
+        ));
+        assert!(state.channel_target(1001, HEIGHT_CHANNEL).is_some());
+        assert!(
+            state.channel_target(1001, "roughness").is_none(),
+            "unknown channels read None"
+        );
+        assert_eq!(
+            state.channels_present(1001),
+            vec![HEIGHT_CHANNEL.to_string()]
+        );
     }
 }

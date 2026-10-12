@@ -519,22 +519,17 @@ impl Viewport {
 /// subtracts the same offsets before the V-flipped texel map), so the
 /// shader's `(uv - offset) * scale` lands on the bound tile's own texels.
 ///
-/// # No height-channel counterpart (audit worklist #12, checked — not wired)
+/// # The height-channel bind (audit #12's (c) seam — landed with the tile pool)
 ///
-/// `umber_gpu::MeshBuffers` now has `set_height_texture`/
-/// `clear_height_texture` (mirroring `set_base_color_texture`/
-/// `clear_base_color_texture` above) feeding the Lit path's per-frame
-/// normal perturbation. This function does NOT call them: `PaintState`
-/// has no per-channel paint targets — `targets: BTreeMap<u16,
-/// PaintThread>` is one target PER TILE, used for base color only (see
-/// `crate::document`'s own doc: "the paint-channel binding to GPU
-/// targets arrive with the tile pool"). There is no "the artist is
-/// painting Height now" state anywhere in umber-app to read, live or
-/// baked, and inventing one here would be exactly the fabricated-global
-/// CLAUDE.md's contract warns against. Wiring this seam is therefore the
-/// tile-pool's job, not this kill's — see the kill report
-/// (`docs/loop/kill-reports/2026-10-12-height-normal.md`) for what was
-/// checked before reaching this conclusion.
+/// The per-channel tile pool (docs/specs/per-channel-tile-pool-design.md)
+/// gave `PaintState` its channel dimension; this function now binds the
+/// active tile's HEIGHT-channel target through `set_height_texture` when
+/// one has materialized (lazy — an unrouted channel simply leaves the
+/// perturbation off, no invented state). The bind is read-only by
+/// contract: `channel_target` never materializes a target, so binding
+/// cannot create GPU memory as a side effect. When no height target
+/// exists the perturbation clears (the flag-off path is the golden-tested
+/// byte-identical baseline from the heightnormal kill).
 fn bind_paint_target(
     gpu: &GpuContext,
     mesh: &mut MeshBuffers,
@@ -555,6 +550,16 @@ fn bind_paint_target(
     match paint.tile_target(tile) {
         Some(target) => mesh.set_base_color_texture(gpu, target, PaintParams::for_udim(tile)),
         None => mesh.clear_base_color_texture(gpu),
+    }
+    // The height arm (audit #12): the same active tile, its height channel.
+    // Mirrors the baseColor pattern — bind when present, clear when not —
+    // so a height stroke's texture reaches the Lit path's perturbation the
+    // same frame it landed (the compositor-free live view the audit gated).
+    match paint.channel_target(tile, crate::paint_state::HEIGHT_CHANNEL) {
+        Some(target) => {
+            mesh.set_height_texture(gpu, target, PaintParams::height_for_udim(tile, 1.0))
+        }
+        None => mesh.clear_height_texture(gpu),
     }
 }
 
