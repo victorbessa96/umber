@@ -115,3 +115,9 @@ Other scripts (`brief-template.sh`, `ci-consume.sh`, `loop-status.sh`, `perf_com
 3. **Unverified:** API signatures you couldn't confirm, and behavior that needs a GPU or runtime run. Name the gap; don't paper over it.
 4. **Deferred:** what you deliberately left out, and where it's recorded.
 5. **Gates run:** verify-kill, fmt and clippy results, verbatim pass/fail.
+
+## Traps learned 2026-10-11 (the ICC-pin session; fold into the next CLAUDE.md regen)
+
+- **`Path::ends_with` matches whole components**, not string suffixes: `Path::from("Sword_baseColor.png").ends_with("baseColor.png")` is FALSE. Suffix-match via `file_name().to_str()`. (Cost: an hour of probe archaeology on a working export.)
+- **A closure returning `&str` borrowed from its argument** cannot feed `.iter().find()` — the borrow can't outlive the call. Return an owned `String`.
+- **`std::env::temp_dir()` under Hermes is `~/.hermes/cache/scratch`** — CI-style `/tmp` assumptions don't hold locally; leftover dirs from failed runs accumulate there and ARE the evidence.
