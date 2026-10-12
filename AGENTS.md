@@ -10,7 +10,7 @@ Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, th
    - `cargo fmt --all`
    - `cargo clippy -p <crate> --all-targets -- -D warnings` for every crate you touched (`-D warnings` is what CI uses; without it you pass locally and fail CI).
 2. **Never commit.** No `git add/commit/push/stash/checkout/reset`. The orchestrator ("the dragon") reviews, gates and commits. The exception is a brief that explicitly gives you the tree.
-3. **Extend, don't revert.** Other agents edit the tree concurrently. If a file you didn't write changed, build on it, and never "clean up" someone else's hunk.
+3. **Extend, don't revert.** Other agents edit the tree concurrently. If a file you didn't write changed, build on it, and never "clean up" someone else's hunk. Concurrent kills own DISJOINT file surfaces: the dragon registers each kill's files via `bash scripts/kill-locks.sh add <name> <files…>` and refuses any dispatch whose surface intersects a live lock.
 4. **Don't guess dependency APIs.** Read the source first: `docs/claw-artifacts/<crate>/` (vendored, with a verified-facts README), then `~/.cargo/registry/src/*/`.
    Shapes that already burned rounds:
    - wgpu 30 `PipelineLayoutDescriptor { bind_group_layouts: &[Option<&Bgl>], immediate_size }`
