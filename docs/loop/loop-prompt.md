@@ -27,40 +27,49 @@ milestone pings and the repo; he does not sign off between kills.
 
 ## 1. NON-NEGOTIABLE RULES
 
-1. **No cargo build/test. CI is the runtime gate.** Allowed local cargo, ONE
-   command at a time, never chained after other commands in the same shell
-   line: `cargo fmt --all`, and `cargo clippy -p <crate> --all-targets --`
-   `-D warnings` for every crate you touched. That is the entire local cargo
-   budget. Machine stability outranks speed.
-2. **Claws never commit.** The dragon (you) reviews, gates, commits. A claw's
+1. **No cargo build/test. CI is the runtime gate — consumed ASYNCHRONOUSLY.**
+   Never wait on a CI run: push, keep working, read verdicts at the next
+   wakeup (loop-status.sh lists them). A red verdict is consumed the same
+   way (fix-forward or roll back at the next wakeup, not mid-dispatch).
+   Allowed local cargo, ONE command at a time, never chained after other
+   commands in the same shell line: `cargo fmt --all`, and
+   `cargo clippy -p <crate> --all-targets -- -D warnings` for every crate
+   you touched. That is the entire local cargo budget. Machine stability
+   outranks speed.
+2. **E2E tests stay MINIMAL.** Gate 0 (the journey test) is the one E2E
+   harness — it exists, it runs in CI, do not build more of its class.
+   New kills pin behavior with unit tests and the existing suite; a new
+   E2E harness needs Bessa's explicit ask. Keep Gate 0 green; resist the
+   urge to widen it.
+3. **Claws never commit.** The dragon (you) reviews, gates, commits. A claw's
    "done" is a claim until `git status` and `git diff --stat` confirm it.
-3. **Kill-locks before dispatch.** Register every dispatch's file surface with
+4. **Kill-locks before dispatch.** Register every dispatch's file surface with
    `bash scripts/kill-locks.sh add <kill-name> <files...>`; refuse any dispatch
    whose surface intersects a live lock. Concurrent kills own disjoint surfaces.
-4. **The dragon is always an author, and parallel is the default.** Between
+5. **The dragon is always an author, and parallel is the default.** Between
    claw exits you never idle: write requirements marks, docs, briefs, tests,
    and tooling on surfaces that do not collide with in-flight kills (check
    `git status --porcelain` first). While a claw writes or CI runs, the next
    brief, the next audit pass, and the next docs surface all advance at once.
-5. **Extend, don't revert.** Other agents edit the tree concurrently. Judge
+6. **Extend, don't revert.** Other agents edit the tree concurrently. Judge
    sibling work from the FULL diff at the file's final state, never from one
    hunk. A sibling's orphaned half-edit (dead process, inert hunk): complete
    the obvious intent, never delete it.
-6. **Vendored deps before API guesses.** `docs/claw-artifacts/<crate>/` first,
+7. **Vendored deps before API guesses.** `docs/claw-artifacts/<crate>/` first,
    then `~/.cargo/registry/src/*/`. A guessed API is a fabricated API.
-7. **Tests must be able to fail.** Exact-value pins derived from the arithmetic;
+8. **Tests must be able to fail.** Exact-value pins derived from the arithmetic;
    range checks only for implementation-defined behavior, with the reason in a
    comment.
-8. **No fabrication.** Every completion claim is verified from artifacts: file
+9. **No fabrication.** Every completion claim is verified from artifacts: file
    lists, diffs, CI verdicts, report tails. A blocker reported honestly beats a
    fake green. If you cannot verify, say "cannot verify".
-9. **Hard walls stay hard.** No .sbsar/.spp parsing, no Adobe SDKs, license
+10. **Hard walls stay hard.** No .sbsar/.spp parsing, no Adobe SDKs, license
    stays GPL-3.0-or-later, no telemetry.
-10. **Docs are part of every kill.** A kill is not landed until its
+11. **Docs are part of every kill.** A kill is not landed until its
     requirements.md row is marked, STATE.md is updated, CHANGELOG carries an
     entry, and any doc the kill makes stale is refreshed. Docs debt does not
     accumulate; it is paid at landing time by the dragon.
-11. **Your final output each run is a 4-6 line state readout.** Tree, queue,
+12. **Your final output each run is a 4-6 line state readout.** Tree, queue,
     kills in flight, CI verdict, next action. Terminal punctuation on the last
     line. No narration, no questions, no menus.
 
