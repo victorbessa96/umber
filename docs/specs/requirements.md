@@ -40,7 +40,7 @@
 | Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✗-as-marked: METADATA ONLY (LayerMask in layers.rs); no mask pixels exist behind it — the review's critical 6 territory; part of the channel-pool work |
 | Layer instancing (source-edits propagate, cycle detection) | P1 | 4 | ✓ built (`4cbaf21`) |
 | Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 | ✓ built (`4cbaf21`) |
-| Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |  ✗-as-marked: TARGET_SIZE=512 (paint_state.rs:180); 4K/8K only via test hooks — the export's 8K is a 16× upsample of 512² (review critical 2)
+| Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |  ✓ code (`133dd12`): DEFAULT_TARGET_SIZE=4096 (paint_state.rs:266), per-texture-set size via the Texture Sets panel's SIZE_PRESETS combo, persisted in the project; the 8K-only VRAM note preserved; per-set/per-channel sizes = deferred v1 boundary (module docs) — reachability = Gate 0 |
 | UDIM multi-tile texture sets; per-tile resolution; cross-tile painting | P0 | 4 (data model from 1) | ✓ built (`82c694c`..`10cdffa`) |
 | Smart materials (folder presets applied with mesh-map-driven generators) | P1 | 4 | ✓ built (`4cbaf21`) — worn-metal + painted-wood examples ship |
 | Dynamic material layering (shader-declared sub-stacks) | P2 | 6+ |
