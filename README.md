@@ -4,7 +4,7 @@
 
 Umber is a ground-up reimagining of the 3D texture-painting DCC: paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps, and export engine-ready texture sets — fast, local-first, and free forever. Built completely in Rust for **Windows and Linux**.
 
-> Status: **Core loop COMPLETE — Gate 0 passed on both CI platforms (2026-10-12).** The journey is whole end to end: FBX in → 4K painting with real pen pressure → paint visible in the lit 3D viewport → undo/redo byte-exact → save/reopen loses nothing → engine-ready export, decode-verified (run 38255484123). The engine crates (brush engine, bakers, export driver, node graph, .umber project I/O — 599+ workspace tests, CI green on both platforms per commit) now have the user path they were missing. GUI polish and the P2 tier stay frozen until the owner lifts the freeze; no release tag yet — SPEC ratification and the perf baseline lead the pre-release checklist.
+> Status: **Core loop COMPLETE — Gate 0 passed on both CI platforms (2026-10-12).** The journey is whole end to end: FBX in → 4K painting with real pen pressure → paint visible in the lit 3D viewport → undo/redo byte-exact → save/reopen loses nothing → engine-ready export, decode-verified (run 38255484123). The engine crates (brush engine, bakers, export driver, node graph, .umber project I/O — 599+ workspace tests, CI green on both platforms per commit) now have the user path they were missing. The roadmap is open — the next worklist (docs/loop/audit-2026-10-12-c1.md) leads with truth, integrity, and perf baselining; no release tag yet (SPEC ratification and the perf baseline lead the pre-release checklist).
 
 ## Why
 

@@ -45,6 +45,33 @@ Bessa's explicit call (C2). C1 (the refreshed-worklist audit) is in
 flight; its deliverable refills the queue. Push gate is STANDING
 approval per Bessa's word.
 
+## The C1 refreshed worklist (2026-10-12, the active queue)
+
+The core-loop phase is CLOSED (Gate 0 PASS, run 38255484123). The queue is
+now the C1 audit's 12-item worklist (docs/loop/audit-2026-10-12-c1.md,
+Pass 4), highest first:
+
+| # | item | state | evidence |
+|---|---|---|---|
+| 1 | Re-mark the drifted requirements rows | **done** | 967ec7b: §5 PBR viewport REACHABLE, §5 postfx wiring-landed, §10 distribution split-mark, §5 perf re-phrased; perf-design doc's dead const fixed |
+| 2 | Re-baseline perf/baseline.json on the 4K path | **todo** | ref-scene + input→photon + 200Hz dab-drop + 100-step undo-RAM, per adapter; nightly gate compares against it |
+| 3 | AssetStore routing + atomic commit for paint save | **todo** | the one paint-loss vector Gate 0 doesn't cover; fault-injection test (torn save = old-or-new, never half) |
+| 4 | Per-texture-set (then per-channel) sizing | **in flight** | dispatched to opencode (the B2 v1 boundary: size off the session global into per-set storage) |
+| 5 | Cumulative merge for stroke undo | **todo** | overlapping dirty-rect merge; envelope stays 64/256MiB, effective strokes up |
+| 6 | Docs truth refresh (README/STATE/queue) | **done** | 9a7c078: README status/tree-diagram/contributing + STATE handoff 2/3/6 |
+| 7 | Stylus-crate backends (winink + XI2) | **todo** | tilt/proximity/eraser behind the raw-Touch source; Linux first |
+| 8 | OCIO bundled build | **todo** | the never-run C++ build; display chain off stub behind the feature |
+| 9 | Distribution: prove the installers | **todo** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
+| 10 | Color picker / eyedropper | **todo** | first of the expansion rows (unfrozen by the standing directive; queued in audit order) |
+| 11 | ID-mask selection | **todo** | expansion row (unfrozen; queued in audit order) |
+| 12 | Height→normal live in viewport | **todo** | expansion row (unfrozen; queued in audit order) |
+
+Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
+standing directive 2026-10-12 ("do NOT wait on me for anything to work
+in this project"). Items 10-12 are regular queue work in their audit
+order. GUI 0b shell chrome and the P1 backlog names are queue candidates
+for the NEXT audit cycle, not walls.
+
 ## Push log
 
 - 2026-10-12 bed9e0a pushed — smudge-test stacking-contract fix, forward-fix

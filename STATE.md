@@ -16,7 +16,7 @@ both platforms green).** The user path is whole end to end; the next phase's
 queue comes from the C1 audit's refreshed worklist. GUI/P2 unfreeze is
 Bessa's explicit call.
 State: GATE-0-PASSED-PHASE-CLOSED
-GUI chrome + all P2 work: FROZEN pending Gate 0 (Bessa lifts the freeze).
+GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate.
 No tag, no release, no v0.1 claim until Gate 0 passes.
 
@@ -77,8 +77,8 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
   the queue item.
 - Remote build gate (centralhost) unreachable as of 2026-10-12 ~02:50
   (ping + ssh dead). CI is the runtime gate until it returns.
-- Push-gate approval for wave pushes rides Bessa's word (Telegram or
-  in-session); the loop never flips it for itself.
+- Pushes are autonomous: push-gate.json is STANDING approval (Bessa's
+  directive: keep it true, push when needed).
 
 ## Handoff note (what the next session must know)
 
