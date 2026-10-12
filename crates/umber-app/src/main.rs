@@ -1912,6 +1912,12 @@ mod paint_persistence_tests {
         let mut paint =
             paint_state::PaintState::new(device.clone(), queue.clone()).expect("paint builds");
         paint.set_active_set("Body");
+        // Tile 1001 is the constructor's pre-assigned default-set tile
+        // (tile_sets maps it to TextureSet at build); switching the ACTIVE
+        // set never re-routes recorded tiles (the field docs: assignment
+        // steers FUTURE ensure_tile calls). Re-assign it to Body so the
+        // 2048 publish lands in a 2048 target.
+        paint.assign_tile_to_set(1001, "Body");
         paint.resize_set("Body", 2048, 2048);
         paint.ensure_set("Cloak");
         assert_eq!(paint.size_of_set("Cloak"), (4096, 4096));
@@ -2030,6 +2036,11 @@ mod paint_persistence_tests {
             paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
                 .expect("paint builds");
         paint.set_active_set("Body");
+        // 1001 is pre-assigned to the default set at build; the global
+        // sidecar records the ACTIVE set's size, so route the tile to
+        // Body (512) before saving — else the global reads the default
+        // set's 4096 and the v1 round-trip premise breaks.
+        paint.assign_tile_to_set(1001, "Body");
         let before = pattern_bytes(512, 512, 11);
         assert_eq!(&before[..4], &[11u8, 82, 153, 224]);
         assert!(paint.publish_fill(1001, 512, 512, before.clone()));
