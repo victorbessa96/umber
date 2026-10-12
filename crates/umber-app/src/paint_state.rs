@@ -2243,9 +2243,18 @@ mod tests {
             return;
         };
         let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
-        // A vertical paint stroke gives the smudge an edge to drag.
+        // A vertical paint stroke gives the smudge an edge to drag. Since the
+        // stroke-undo work, THIS stroke records its own history entry — undo
+        // it before the smudge begins so the smudge's own entry is the only
+        // one (the test's "one entry" premise, restored).
         drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
         state.end_stroke();
+        state.process_pending().expect("drain succeeds");
+        assert!(state.undo_stroke(), "the setup stroke has an entry");
+        assert!(
+            !state.can_undo_stroke(),
+            "the setup stroke was the only one"
+        );
         state.process_pending().expect("drain succeeds");
         let painted_batches = state.staged_batch_count();
         let before = state
