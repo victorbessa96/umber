@@ -60,13 +60,19 @@ for rm in re.finditer(r'<!--\s*requirements row:\s*(.+?)\s*-->\s*\n(.+)', body):
     open('docs/specs/requirements.md', 'w').write('\n'.join(lines))
     print(f"  requirements row updated (locator: {locator[:60]}...)")
     applied += 1
-# ftl keys: locale comment + the key = value line
+# ftl keys: locale comment + the key = value line. The comment carries the
+# FULL dotted path (brush.tool-pick) but the .ftl file holds the LEAF key
+# (.tool-pick) under its [section] header — the duplicate check matches the
+# leaf, the part that actually lives in the file (probed: the full-path check
+# never fired and a duplicate key landed twice — the 2026-10-12 delta-probe
+# catch).
 for fm in re.finditer(r'<!--\s*ftl:\s*(en-US|pt-BR)\s+(\S+)\s*-->\s*\n(.+)', body):
     locale, key, line = fm.group(1), fm.group(2), fm.group(3).rstrip()
     path = f'assets/i18n/{locale}.ftl'
+    leaf = '.' + key.split('.')[-1]
     s = open(path).read()
-    if key in s:
-        sys.exit(f"land-kill: ftl key {key} already exists in {path} — deltas are for NEW keys")
+    if leaf in s:
+        sys.exit(f"land-kill: ftl key {key} (leaf {leaf}) already exists in {path} — deltas are for NEW keys")
     if not s.endswith('\n'):
         s += '\n'
     open(path, 'w').write(s + line + '\n')
