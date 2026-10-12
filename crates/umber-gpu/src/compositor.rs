@@ -199,7 +199,9 @@ fn cs_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r = dx + (blend_channel(params.mode, s.x, d.x) - dx) * cov;
     let g = dy + (blend_channel(params.mode, s.y, d.y) - dy) * cov;
     let b = dz + (blend_channel(params.mode, s.z, d.z) - dz) * cov;
-    let a = dw + (sa - dw) * cov;
+    // Straight-alpha over (Porter-Duff): the lerp form diverges at partial
+    // src alpha — half-alpha red over opaque white must remain opaque.
+    let a = cov + dw * (1.0 - cov);
     textureStore(acc_tex, xy, vec4<f32>(r, g, b, a));
 }
 // ---- end stack compositor ----"#;
@@ -380,11 +382,16 @@ pub fn composite_pixel(
     let base_b = clamp01(dst[2]);
     let base_a = clamp01(dst[3]);
     let cov = src_a * clamped_opacity(opacity);
+    // Alpha is straight-alpha-over (Porter-Duff), NOT a lerp: out_a must be
+    // cov + base_a·(1−cov). The lerp (base_a + (src_a−base_a)·cov) coincides
+    // with this when src is opaque (why the opaque-pins test passed) but
+    // diverges at partial src alpha — half-alpha over opaque white must stay
+    // opaque (1.0), and the lerp gave 0.75. CI's failing pin proved it.
     Some([
         base_r + (blend_r - base_r) * cov,
         base_g + (blend_g - base_g) * cov,
         base_b + (blend_b - base_b) * cov,
-        base_a + (src_a - base_a) * cov,
+        cov + base_a * (1.0 - cov),
     ])
 }
 
