@@ -22,3 +22,8 @@ serde_json = { workspace = true }
 # gentle-load directive, see docs/research/ocio-aces-integration.md).
 default = []
 ocio = ["ocio-rs"]
+# The vendored C++ build: ocio-rs's `bundled` (→ ocio-sys/bundled —
+# Imath/Half/OCIO core compiled + static-linked). The audit's #8: the
+# build that never ran. Enables the real handle-allocating paths the
+# stub returns Err from.
+ocio-bundled = ["ocio", "ocio-rs/bundled"]

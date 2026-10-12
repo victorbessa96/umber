@@ -34,11 +34,16 @@ impl From<ocio_rs::OcioError> for OcioBridgeError {
 }
 
 /// The name OCIO registers the ACES 2.0 CG config under (the §9
-/// default; Studio is the opt-in alternative).
-pub const ACES_CG_CONFIG: &str = "CG Config for ACES 2.0";
+/// default; Studio is the opt-in alternative). The REGISTRY'S ENUM
+/// NAME, verified against the real vendored OCIO 2.5 on the first
+/// bundled run (2026-10-12): `create_from_builtin_config` matches
+/// these compact identifiers — "Could not find 'CG'" is what the UI
+/// form produced; the UI names live in `builtin_configs()`'s second
+/// tuple slot for display only.
+pub const ACES_CG_CONFIG: &str = "cg-config-v4.0.0_aces-v2.0_ocio-v2.5";
 
 /// The ACES 2.0 Studio config (the §9 alternative to CG).
-pub const ACES_STUDIO_CONFIG: &str = "Studio Config for ACES 2.0";
+pub const ACES_STUDIO_CONFIG: &str = "studio-config-v4.0.0_aces-v2.0_ocio-v2.5";
 
 /// Enumerates OCIO's built-in configs (name + UI name pairs). Stub
 /// mode: the registry handle fails to allocate, so the list comes back
@@ -71,6 +76,14 @@ pub fn create_builtin_config(name: &str) -> Result<(), OcioBridgeError> {
 mod tests {
     use super::*;
 
+    // The mode split (audit worklist #8): stub mode (default) has NO C++
+    // library behind the bridge — handle allocation fails, the registry
+    // enumerates empty. The bundled build (ocio-bundled → ocio-rs/bundled)
+    // compiles the vendored OCIO C++ tree and the real registry
+    // materializes: eight built-in configs incl. the ACES 2.0 CG/Studio
+    // pair the §9 row names. The tests assert whichever side compiled in.
+
+    #[cfg(not(feature = "ocio-bundled"))]
     #[test]
     fn stub_mode_reports_no_builtin_configs() {
         // In stub mode the registry handle fails to allocate, so the
@@ -80,6 +93,7 @@ mod tests {
         assert!(configs.is_empty(), "stub mode: no configs, got {configs:?}");
     }
 
+    #[cfg(not(feature = "ocio-bundled"))]
     #[test]
     fn stub_mode_config_creation_fails_cleanly() {
         // The built-in creation path exists (the probe proved the API
@@ -93,11 +107,51 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ocio-bundled")]
+    #[test]
+    fn real_mode_enumerates_the_aces_2_pair() {
+        // The vendored OCIO 2.5 registry carries eight built-in configs
+        // (probed 2026-10-12, ocio-bundled first real run); the §9 pair
+        // MUST be among them under their UI names. Can-fail guard: an
+        // empty registry here means the bundled build silently
+        // degraded to the stub — the kill's whole point.
+        let configs = builtin_configs();
+        assert!(
+            !configs.is_empty(),
+            "bundled build must enumerate configs; empty = stub degraded"
+        );
+        let names: Vec<&str> = configs.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&ACES_CG_CONFIG),
+            "ACES 2.0 CG config missing from {names:?}"
+        );
+        assert!(
+            names.contains(&ACES_STUDIO_CONFIG),
+            "ACES 2.0 Studio config missing from {names:?}"
+        );
+    }
+
+    #[cfg(feature = "ocio-bundled")]
+    #[test]
+    fn real_mode_creates_the_aces_2_cg_config() {
+        // The §9 P0's actual payload: CreateFromBuiltin("CG Config for
+        // ACES 2.0") returns a live config handle — the in-memory
+        // config with zero external LUT files (the research doc's
+        // architecture, now executed).
+        create_builtin_config(ACES_CG_CONFIG)
+            .expect("the real OCIO creates the ACES 2.0 CG config");
+    }
+
     #[test]
     fn config_names_are_documented_constants() {
-        // The §9 defaults are pinned: any rename upstream fails this
-        // test when the real OCIO lands and the registry enumerates.
-        assert_eq!(ACES_CG_CONFIG, "CG Config for ACES 2.0");
-        assert_eq!(ACES_STUDIO_CONFIG, "Studio Config for ACES 2.0");
+        // The §9 defaults are pinned to the registry's ENUM names (the
+        // real run proved create_from_builtin_config matches these,
+        // not the UI names). Any rename upstream fails this test the
+        // next time the bundled build runs.
+        assert_eq!(ACES_CG_CONFIG, "cg-config-v4.0.0_aces-v2.0_ocio-v2.5");
+        assert_eq!(
+            ACES_STUDIO_CONFIG,
+            "studio-config-v4.0.0_aces-v2.0_ocio-v2.5"
+        );
     }
 }
