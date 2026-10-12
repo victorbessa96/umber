@@ -27,15 +27,18 @@ source of loop truth). Summary:
 
 - B1 viewport texture binding (critical 1) — DONE (e802f92 + 9455885)
 - B2 4K live target + per-layer/per-channel routing (criticals 2+6) —
-  IN FLIGHT (tile pool + compositor landed; the live paint target is still
-  TARGET_SIZE=512, paint_state.rs:233 — the 4K wiring is the open gate)
+  DONE v1 (133dd12: DEFAULT_TARGET_SIZE=4096, Texture Sets size combo,
+  target_size.txt sidecar; per-set/per-channel sizing = named follow-up)
 - B3 stroke undo journal (critical 3) — DONE (f78e6c1; smudge test
   stacking contract pinned bed9e0a)
 - B4 pixel save/load (critical 4) — DONE (d834d77 + c999da6)
-- B5 pen pressure end-to-end (critical 5) — TODO (begin_stroke hardcodes
-  1.0; stylus crate has zero uses in umber-app; Linux first)
-- B6 Gate 0 journey test — TODO (FBX → 4K pressure paint → lit 3D →
-  undo/redo → save/reopen → export decode-verified)
+- B5 pen pressure end-to-end (critical 5) — DONE (f867215 pressured API +
+  shaping + can-fail test; 6430623 the source fix: raw `Event::Touch`
+  force, single pens included — the multi_touch 2+ gate never carried a
+  pen, cross-review finding fixed same-night; stylus-crate backends =
+  named follow-up)
+- B6 Gate 0 journey test — IN FLIGHT (the gate0 claw writes
+  tests/gate0_journey.rs + the lib.rs seams; live session owns it)
 
 Phase A (truth pass) is partial: A0's row corrections landed (d3516c6);
 A1 (this rewrite), A2 (roadmap reconciliation), A3 (docs sweep) close

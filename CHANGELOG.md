@@ -19,6 +19,9 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - Compositor alpha is straight-alpha-over — CI's pin caught the divergent form (`d1aeeb3`)
 - Pixel save/load — critical 4; painted maps persist through the AssetStore, reopen loses nothing (`d834d77`)
 - Smudge test pins the stacking contract — 4-red streak root-caused: entries stack, one per stroke (`bed9e0a`)
+- Paint target goes 4K, sized per texture set — critical 2; DEFAULT_TARGET_SIZE=4096, size combo, sidecar persistence (`133dd12`)
+- Real pressure reaches the brush — critical 5; the pressured API pair + alpha shaping + can-fail test (`f867215`)
+- The pressure source lives — raw `Event::Touch` per-event force; the multi_touch 2+ gate never carried a single pen (`6430623`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 
