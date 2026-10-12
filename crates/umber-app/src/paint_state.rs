@@ -38,6 +38,59 @@
 //! `end_stroke` records the stroke as ONE entry in the retouch history.
 //! Retouch strokes do not seam-mirror in v1.
 //!
+//! Paint-stroke undo (CORE-LOOP CRITICAL 3, the 2026-10-12 strategy
+//! review): paint-tool strokes record ONE [`PaintStrokeCommand`] per stroke
+//! on the SAME `retouch_history` — the v1 `clear()` on every paint stroke
+//! is gone. The capture mirrors the retouch path with one structural
+//! difference (paint composites on the GPU, so there is no CPU mirror
+//! holding the after-bytes):
+//!
+//! * Lazy per-tile before snapshot: the first staged batch a stroke routes
+//!   to a tile drains that tile's queue and reads it back
+//!   (`PaintTarget::read_back_rgba8`), so earlier strokes' dabs are in the
+//!   bytes. Tiles the stroke never stages to cost nothing.
+//! * Dirty accumulation: the union of the staged dabs' shader-identical
+//!   footprint boxes ([`umber_brush::retouch::footprint`]), taken over the
+//!   FINAL dabs (after symmetry expansion and mask gating), so symmetric
+//!   siblings are covered; seam mirrors recurse through the same staging,
+//!   so their tiles accumulate too. Under an active mask gate the union is
+//!   conservative (footprint ⊇ written texels) — undo stays byte-exact.
+//! * At `end_stroke` each touched tile is drained and read back, and the
+//!   AFTER bytes are sliced out of the same rect. A tile whose
+//!   before == after (a fully gated-away stroke) contributes no region, and
+//!   a stroke with no regions records no entry — the identity rule, same as
+//!   retouch. Undo/redo apply through `retouch_writes` (`WriteRegion`), the
+//!   same drain as retouch strokes.
+//!
+//! Judgment calls (v1 boundaries):
+//!
+//! * Last-stroke undo is byte-exact. Undoing an OLDER stroke under newer
+//!   paint overwrites the overlap (linear-undo last-write-wins) — the same
+//!   property retouch strokes already had among themselves; no attempt is
+//!   made to merge overlapping rects.
+//! * Cost is two full-target readbacks per touched tile per stroke (before
+//!   at first touch, after at end); retouch needs one because the after
+//!   lives in its CPU mirror. Paint has no CPU composite step to keep an
+//!   after in, so the readbacks are inherent, not a shortcut.
+//! * Memory: RGBA8 is 4 bytes/texel. At 512² a full-tile rect is
+//!   512·512·4 = 1 MiB per side, so a worst-case entry (before + after) is
+//!   ~2 MiB and the 64-entry cap binds first (64 × 2 MiB ≈ 128 MiB, inside
+//!   the 256 MiB budget). At 4K a full-tile side is 64 MiB and one entry is
+//!   ~128 MiB: two such entries fill the budget and the third evicts the
+//!   oldest, while the 64-entry cap alone would admit ~8 GiB — so at 4K the
+//!   BYTE budget is the RAM guard and the entry cap is the stroke-count UX.
+//!   A typical stroke is small (brush r = 24 texels ⇒ footprint ≈ 49×49×4
+//!   ≈ 10 KiB per side; a 16-event union is tens of KiB). V1 keeps BOTH
+//!   existing caps unchanged ([`RETOUCH_HISTORY_MAX_ENTRIES`] +
+//!   [`RETOUCH_HISTORY_MAX_BYTES`]) and wires no `on_evict` hook — evicted
+//!   entries are plain `Vec<u8>`, whose drop needs no cleanup. Against the
+//!   review's §12:167 row (2 GB / 100-step budget): this 256 MiB / 64-step
+//!   envelope sits well inside it; the entry cap must never be raised
+//!   toward 100 without the byte budget beside it.
+//! * Mask-mode strokes still leave the history alone (they touch the mask,
+//!   not the layer), and [`Self::resize_target`] still clears it (rects
+//!   recorded at the old size no longer fit).
+//!
 //! Symmetry (§2's P1 row, `umber_brush::symmetry`): the panel's
 //! [`SymmetrySettings`] are adopted between strokes ([`PaintState::sync_symmetry`])
 //! and snapshot into tile-local texel transforms at `begin_stroke`. The
@@ -111,7 +164,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egui::Pos2;
 use umber_brush::path::{sanitize_size, PaintPath, PathOp};
-use umber_brush::retouch::{DirtyRect, RetouchDab};
+use umber_brush::retouch::{footprint, DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
     wash_scale, BrushParams, BrushTool, DabAdapter, LineConstraintMode, MaskPaint, QuickMask,
@@ -124,7 +177,7 @@ use umber_mesh::polygon_fill::rasterize_polygon_mask;
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
 
-use crate::retouch::{PaintStrokeCommand, PaintWrites, RetouchStroke};
+use crate::retouch::{PaintStrokeCommand, PaintWrites, RetouchStroke, TileRegion};
 
 /// Paint-what-you-see projection (§2's P1 row, Mari-style paint buffer).
 ///
@@ -207,6 +260,27 @@ pub const SEAM_MIRROR_MARGIN: f32 = 1.5;
 const RETOUCH_HISTORY_MAX_ENTRIES: usize = 64;
 const RETOUCH_HISTORY_MAX_BYTES: usize = 256 * 1024 * 1024;
 
+/// One tile's slice of a live paint stroke's undo capture: the
+/// stroke-start snapshot plus the union of every staged dab footprint on
+/// that tile (see the module docs). The snapshot is taken lazily on the
+/// stroke's first staged batch per tile, so untouched tiles cost nothing.
+struct PaintTileCapture {
+    /// The tile's texels before the stroke touched it (drained first, so
+    /// earlier strokes' dabs are in the bytes).
+    before: RgbaBuffer,
+    /// Union of the staged dab footprints, or `None` when the tile was
+    /// snapshotted but nothing staged yet.
+    dirty: Option<DirtyRect>,
+}
+
+/// The live paint-tool stroke's undo capture (`Some` between
+/// `begin_stroke` and `end_stroke` while the paint tool is active; `None`
+/// for retouch and mask-mode strokes, which have their own paths).
+#[derive(Default)]
+struct PaintStrokeCapture {
+    tiles: BTreeMap<u16, PaintTileCapture>,
+}
+
 /// The paint session: one GPU target per UDIM tile plus the live stroke
 /// conditioner.
 pub struct PaintState {
@@ -257,6 +331,9 @@ pub struct PaintState {
     /// The live retouch stroke (`Some` between `begin_stroke` and
     /// `end_stroke` while a smudge/clone tool is active).
     retouch: Option<RetouchStroke>,
+    /// The live paint stroke's undo capture (`Some` between
+    /// `begin_stroke` and `end_stroke` while the paint tool is active).
+    paint_capture: Option<PaintStrokeCapture>,
     /// The alt-click clone source (UV). Kept across strokes: fixed mode
     /// re-resolves the offset against every stroke's start (each stroke
     /// samples this same point); follow mode resolves it once, on the
@@ -267,7 +344,7 @@ pub struct PaintState {
     /// A clone offset resolved from `clone_source`, waiting to be written
     /// back into the panel's params ([`Self::sync_tool`]).
     resolved_clone_offset: Option<(f32, f32)>,
-    /// One entry per retouch stroke (the design's undo-per-stroke
+    /// One entry per paint or retouch stroke (the design's undo-per-stroke
     /// contract), separate from the document's layer journal in v1.
     retouch_history: UndoStack<PaintStrokeCommand>,
     /// Region writes the retouch history's undo/redo produced, drained
@@ -358,6 +435,7 @@ impl PaintState {
             event_seq: 0,
             tool: BrushTool::Paint,
             retouch: None,
+            paint_capture: None,
             clone_source: None,
             clone_source_fresh: false,
             resolved_clone_offset: None,
@@ -437,15 +515,17 @@ impl PaintState {
         self.retouch = if self.stroke_mask_edit {
             // A mask stroke paints only the mask: no retouch mirror, and
             // the retouch history stays valid (the layer is untouched).
+            self.paint_capture = None;
             None
         } else if self.tool.is_retouch() {
+            self.paint_capture = None;
             Some(self.begin_retouch(uv))
         } else {
-            // The retouch history restores whole dirty-rect snapshots, so
-            // undoing one under newer paint would erase that paint: a
-            // paint-tool stroke ends the retouch history (v1 — paint
-            // strokes have no undo of their own yet).
-            self.retouch_history.clear();
+            // A paint-tool stroke opens its own undo capture (one entry
+            // per stroke on the shared history — see the module docs); the
+            // before snapshot is taken lazily per tile at the first staged
+            // batch, so a stroke that stages nothing records nothing.
+            self.paint_capture = Some(PaintStrokeCapture::default());
             None
         };
         self.push_event_styled(uv, pressure, radius_scale, true);
@@ -659,15 +739,16 @@ impl PaintState {
         true
     }
 
-    /// Reverts the last retouch stroke; `false` when there is none.
+    /// Reverts the last stroke (paint or retouch — one entry per stroke);
+    /// `false` when there is none.
     pub fn undo_stroke(&mut self) -> bool {
         let undone = self.retouch_history.undo(&mut self.retouch_writes);
         self.flush_retouch_writes();
         undone
     }
 
-    /// Re-applies the last undone retouch stroke; `false` when there is
-    /// none.
+    /// Re-applies the last undone stroke (paint or retouch); `false` when
+    /// there is none.
     pub fn redo_stroke(&mut self) -> bool {
         let redone = self.retouch_history.redo(&mut self.retouch_writes);
         self.flush_retouch_writes();
@@ -758,7 +839,9 @@ impl PaintState {
 
     /// End the stroke (flushes nothing extra: `process_pending` drains
     /// all). A retouch stroke that changed texels becomes ONE retouch
-    /// history entry.
+    /// history entry, and so does a paint-tool stroke that wrote texels
+    /// (its before snapshot plus the drained after-bytes — see the module
+    /// docs).
     pub fn end_stroke(&mut self) {
         self.stroking = false;
         if let Some(command) = self.retouch.take().and_then(RetouchStroke::finish) {
@@ -767,6 +850,48 @@ impl PaintState {
             // stroke already uploaded them event by event.
             self.retouch_writes.writes.clear();
         }
+        if let Some(capture) = self.paint_capture.take() {
+            if let Some(command) = self.finish_paint_capture(capture) {
+                self.retouch_history.push(command, &mut self.retouch_writes);
+                // Same as above: the after-bytes are already on the GPU
+                // (drained below to read them), so the queued re-apply is
+                // dropped.
+                self.retouch_writes.writes.clear();
+            }
+        }
+    }
+
+    /// Ends a paint stroke's undo capture: drains each touched tile, reads
+    /// it back, and slices the AFTER bytes out of the stroke's dirty rect
+    /// next to the BEFORE snapshot. Tiles with no dirty rect, an unreadable
+    /// tile, a rect that no longer fits the target (a resize landed
+    /// mid-stroke), or byte-identical before/after (a fully gated-away
+    /// stroke) contribute no region; no regions means no entry (`None`).
+    fn finish_paint_capture(&mut self, capture: PaintStrokeCapture) -> Option<PaintStrokeCommand> {
+        let mut regions = Vec::new();
+        for (tile, entry) in capture.tiles {
+            let Some(rect) = entry.dirty else {
+                continue;
+            };
+            let Some(after_image) = self.read_tile(tile) else {
+                continue;
+            };
+            if rect.x1 > after_image.width || rect.y1 > after_image.height {
+                continue;
+            }
+            let before = entry.before.region(rect);
+            let after = after_image.region(rect);
+            if before == after {
+                continue;
+            }
+            regions.push(TileRegion {
+                tile,
+                rect,
+                before,
+                after,
+            });
+        }
+        (!regions.is_empty()).then_some(PaintStrokeCommand { regions })
     }
 
     /// Replays `path` as ONE stroke in the `op` mode: each point becomes a
@@ -1167,6 +1292,15 @@ impl PaintState {
         } else {
             dabs
         };
+        // The paint-stroke undo capture (see the module docs): the staged
+        // dabs' footprints union into the stroke's dirty rect, snapshotting
+        // the tile's before-bytes on first touch. Runs on the FINAL dabs
+        // (post symmetry expansion and mask gating) so siblings are
+        // covered; seam mirrors recurse through this same staging for their
+        // own tiles.
+        if self.paint_capture.is_some() {
+            self.capture_paint_event(tile, &dabs);
+        }
         // Stage as one command; the thread splits into capacity segments
         // and overlap-safe dispatches.
         #[cfg(test)]
@@ -1187,6 +1321,50 @@ impl PaintState {
         #[cfg(test)]
         {
             self.staged_dabs += staged_n;
+        }
+    }
+
+    /// One event's staged paint dabs for the stroke's undo capture: the
+    /// tile's before-bytes are snapshotted on the stroke's first staged
+    /// batch there (drained first, so earlier strokes are in the bytes),
+    /// then every dab's shader-identical footprint unions into the dirty
+    /// rect. A tile whose readback fails records nothing — the stroke still
+    /// paints there, but that tile has no before to restore (a dropped
+    /// readback must never drop a stamp).
+    fn capture_paint_event(&mut self, tile: u16, dabs: &[Dab]) {
+        if self.paint_capture.is_none() {
+            return;
+        }
+        let needs_snapshot = self
+            .paint_capture
+            .as_ref()
+            .is_some_and(|capture| !capture.tiles.contains_key(&tile));
+        if needs_snapshot {
+            let image = self.read_tile(tile);
+            let (Some(capture), Some(image)) = (self.paint_capture.as_mut(), image) else {
+                return;
+            };
+            capture.tiles.insert(
+                tile,
+                PaintTileCapture {
+                    before: image,
+                    dirty: None,
+                },
+            );
+        }
+        let Some(capture) = self.paint_capture.as_mut() else {
+            return;
+        };
+        let Some(entry) = capture.tiles.get_mut(&tile) else {
+            return;
+        };
+        // The snapshot's own dims (not the session's): they are the target
+        // the rect must fit at `end_stroke`.
+        let (width, height) = (entry.before.width, entry.before.height);
+        for dab in dabs {
+            if let Some(rect) = footprint(dab.pos, dab.radius, width, height) {
+                entry.dirty = DirtyRect::union_opt(entry.dirty, Some(rect));
+            }
         }
     }
 
@@ -2104,6 +2282,92 @@ mod tests {
             .read_back_rgba8(&device, &queue)
             .expect("readback");
         assert_eq!(undone, before, "undo restores the pre-stroke texels");
+    }
+
+    // --- Paint-stroke undo (CORE-LOOP CRITICAL 3) ---
+
+    /// A paint stroke is ONE history entry: undo restores the exact
+    /// pre-stroke bytes, redo the exact post-stroke bytes.
+    #[test]
+    fn paint_stroke_undoes_and_redoes_byte_exact() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let blank = read_back(&mut state, &device, &queue);
+        assert!(!state.can_undo_stroke(), "a fresh session has no entries");
+
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(
+            state.staged_dab_count() > 0,
+            "the stroke must stage dabs (got {})",
+            state.staged_dab_count()
+        );
+        assert!(state.can_undo_stroke(), "the paint stroke is one entry");
+        let painted = read_back(&mut state, &device, &queue);
+        assert_ne!(painted, blank, "the stroke must reach the GPU target");
+
+        assert!(state.undo_stroke());
+        assert!(!state.can_undo_stroke(), "one stroke, one entry");
+        assert_eq!(
+            read_back(&mut state, &device, &queue),
+            blank,
+            "undo restores the pre-stroke texels"
+        );
+
+        assert!(state.redo_stroke());
+        assert_eq!(
+            read_back(&mut state, &device, &queue),
+            painted,
+            "redo restores the post-stroke texels"
+        );
+        assert!(!state.can_redo_stroke());
+    }
+
+    /// Two paint strokes are two entries: one undo reverts only the
+    /// latest, leaving the first stroke's paint byte-identical in place.
+    #[test]
+    fn two_paint_strokes_undo_reverts_only_the_latest() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let blank = read_back(&mut state, &device, &queue);
+
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        let first = read_back(&mut state, &device, &queue);
+        assert_ne!(first, blank, "the first stroke must paint");
+
+        // Far from the first stroke: ~200 texels apart at r = 24, so the
+        // second stroke's dirty rect cannot cover the first stroke's paint.
+        drive_stroke(&mut state, [0.7, 0.7], [0.0, 0.02], 15);
+        state.end_stroke();
+        let second = read_back(&mut state, &device, &queue);
+        assert_ne!(second, first, "the second stroke must paint");
+
+        assert!(state.undo_stroke());
+        assert!(state.can_undo_stroke(), "the first stroke's entry remains");
+        assert_eq!(
+            read_back(&mut state, &device, &queue),
+            first,
+            "one undo reverts only the latest stroke"
+        );
+
+        assert!(state.undo_stroke());
+        assert!(!state.can_undo_stroke(), "two strokes, two entries");
+        assert_eq!(
+            read_back(&mut state, &device, &queue),
+            blank,
+            "the second undo reaches the blank target"
+        );
+
+        assert!(state.redo_stroke());
+        assert_eq!(read_back(&mut state, &device, &queue), first);
+        assert!(state.redo_stroke());
+        assert_eq!(read_back(&mut state, &device, &queue), second);
+        assert!(!state.can_redo_stroke());
     }
 
     // --- Symmetry ---

@@ -274,7 +274,13 @@ pub fn radial_falloff(t: f32, hardness: f32) -> f32 {
 /// The shader's per-dab texel box `[floor(pos - r), ceil(pos + r)]`
 /// clamped to the image, as a half-open [`DirtyRect`]; `None` when the box
 /// misses the image entirely.
-pub(crate) fn footprint(pos: [f32; 2], radius: f32, width: u32, height: u32) -> Option<DirtyRect> {
+///
+/// Shared with the app-side paint-stroke undo capture
+/// (`umber-app`'s `paint_state`): the union of one stroke's staged dab
+/// footprints is that stroke's dirty rect, so paint strokes snapshot the
+/// same box a retouch dab would report. Kept next to the ops (not
+/// duplicated in the app) so the box cannot drift from the shader math.
+pub fn footprint(pos: [f32; 2], radius: f32, width: u32, height: u32) -> Option<DirtyRect> {
     if width == 0 || height == 0 {
         return None;
     }
