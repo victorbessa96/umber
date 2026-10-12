@@ -37,9 +37,31 @@
 //! journal's bottom instead of failing (`jump_to_depth` stops when `undo`
 //! returns `false`). Rows are never rewritten to hide this: the log is the
 //! session's honest timeline, and saturation is the documented behavior.
+//!
+//! GUI Phase 1 kill 2 (docs/specs/gui-audit-and-roadmap.md, the
+//! panel-migration wave): the panel's sections render as
+//! [`umber_gui::ParamGroup`] collapsibles over the same buttons, labels
+//! and rows as before. Chrome only: no model, jump math, or row text
+//! changed, and the 5 tests below are untouched.
+//!
+//! Deliberately NOT migrated (v1 boundaries of this pass):
+//! - No [`umber_gui::ValueField`]: the panel has no editable numerics —
+//!   the journal count and the `depth · label` row prefixes are read-only
+//!   displays, and a scrub field with no write-back target would be
+//!   decoration, not a widget.
+//! - No theme-token color swaps: the panel authors no colors (context rows
+//!   use stock `weak`, the current row uses stock `selectable_label`), so
+//!   there is nothing hand-rolled to re-token. An accent highlight for the
+//!   current-depth row awaits the app-wide `umber_style` wiring.
+//! - The Layers panel UI lives in [`crate::document::layers_ui`], owned by
+//!   a concurrent kill — read for the E0502 collect-then-act pattern, not
+//!   edited here.
+//! - Group ids (`history-controls`, `history-log`) are panel-local
+//!   literals in the [`ParamGroup::new`] calls below.
 
 use fluent::FluentValue;
 use umber_core::layers::{LayerCommand, LayerKind};
+use umber_gui::ParamGroup;
 
 use crate::document::Document;
 use crate::i18n::{tr, tr_args};
@@ -225,86 +247,92 @@ impl SessionHistory {
     }
 }
 
-/// Draws the History panel: undo/redo buttons, the journal-size line, then
-/// the session log — oldest first, one row per entry (`depth · label` for
-/// undoable ops, weak `· label` for context rows), the row at the live undo
-/// depth highlighted. Clicking an undoable row time-travels the document to
-/// its depth; context rows are display-only.
+/// Draws the History panel: an undo/redo + journal-size group, then the
+/// session-log group — oldest first, one row per entry (`depth · label`
+/// for undoable ops, weak `· label` for context rows), the row at the
+/// live undo depth highlighted. Clicking an undoable row time-travels the
+/// document to its depth; context rows are display-only.
 ///
 /// The egui drawing itself is untested by construction; the model (record
 /// order, jump math, display-but-don't-jump, truncate equivalence) is
 /// covered headless in this module's + `document`'s tests.
 pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document) {
-    ui.horizontal(|ui| {
-        let can_undo = doc.history.can_undo();
-        let can_redo = doc.history.can_redo();
-        if ui
-            .add_enabled(can_undo, egui::Button::new(tr("history.undo")))
-            .clicked()
-        {
-            doc.undo();
-        }
-        if ui
-            .add_enabled(can_redo, egui::Button::new(tr("history.redo")))
-            .clicked()
-        {
-            doc.redo();
-        }
+    let controls_title = tr("history.section-controls");
+    ParamGroup::new("history-controls", controls_title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        ui.horizontal(|ui| {
+            let can_undo = doc.history.can_undo();
+            let can_redo = doc.history.can_redo();
+            if ui
+                .add_enabled(can_undo, egui::Button::new(tr("history.undo")))
+                .clicked()
+            {
+                doc.undo();
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new(tr("history.redo")))
+                .clicked()
+            {
+                doc.redo();
+            }
+        });
+        let n = doc.history.len();
+        ui.label(tr_args(
+            "history.journal",
+            [("count", FluentValue::from(n))],
+        ));
     });
-    ui.separator();
-    let n = doc.history.len();
-    ui.label(tr_args(
-        "history.journal",
-        [("count", FluentValue::from(n))],
-    ));
-    ui.separator();
-    if doc.session_history.is_empty() {
-        ui.weak(tr("history.empty"));
-        return;
-    }
-    let depth = doc.history.len();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        // Snapshot the rows first so the click-jump below can't
-        // borrow-conflict with the iteration (the layers panel's E0502
-        // pattern): collect-then-act.
-        struct Row {
-            text: String,
-            target: Option<usize>,
-            current: bool,
+    let log_title = tr("history.section-log");
+    ParamGroup::new("history-log", log_title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        if doc.session_history.is_empty() {
+            ui.weak(tr("history.empty"));
+            return;
         }
-        let rows: Vec<Row> = doc
-            .session_history
-            .entries()
-            .iter()
-            .map(|entry| match entry.jump_target() {
-                Some(d) => Row {
-                    text: format!("{d} · {}", entry.kind.label()),
-                    target: Some(d),
-                    current: d == depth,
-                },
-                None => Row {
-                    text: format!("· {}", entry.kind.label()),
-                    target: None,
-                    current: false,
-                },
-            })
-            .collect();
-        let mut jump_to = None;
-        for row in &rows {
-            match row.target {
-                Some(target) => {
-                    if ui.selectable_label(row.current, &row.text).clicked() {
-                        jump_to = Some(target);
+        let depth = doc.history.len();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Snapshot the rows first so the click-jump below can't
+            // borrow-conflict with the iteration (the layers panel's E0502
+            // pattern): collect-then-act.
+            struct Row {
+                text: String,
+                target: Option<usize>,
+                current: bool,
+            }
+            let rows: Vec<Row> = doc
+                .session_history
+                .entries()
+                .iter()
+                .map(|entry| match entry.jump_target() {
+                    Some(d) => Row {
+                        text: format!("{d} · {}", entry.kind.label()),
+                        target: Some(d),
+                        current: d == depth,
+                    },
+                    None => Row {
+                        text: format!("· {}", entry.kind.label()),
+                        target: None,
+                        current: false,
+                    },
+                })
+                .collect();
+            let mut jump_to = None;
+            for row in &rows {
+                match row.target {
+                    Some(target) => {
+                        if ui.selectable_label(row.current, &row.text).clicked() {
+                            jump_to = Some(target);
+                        }
+                    }
+                    None => {
+                        ui.label(egui::RichText::new(&row.text).weak());
                     }
                 }
-                None => {
-                    ui.label(egui::RichText::new(&row.text).weak());
-                }
             }
-        }
-        if let Some(target) = jump_to {
-            doc.jump_to_depth(target);
-        }
+            if let Some(target) = jump_to {
+                doc.jump_to_depth(target);
+            }
+        });
     });
 }
 
