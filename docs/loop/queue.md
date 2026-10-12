@@ -11,10 +11,13 @@ phase opened. GUI/P2 FROZEN pending Gate 0. No tags, no release claims.
 
 | item | state | evidence |
 |---|---|---|
-| A0 requirements un-tick/split, ✓code vs ✓reachable | **partial** | d3516c6 landed six row corrections (OCIO, stylus, distribution, camera, perf floor, masks, history). Reachable-split adoption across ALL rows not verified complete. |
-| A1 STATE.md rewrite from current truth | **todo** | STATE.md still carries "wave 3 of 6" status line vs "ALL WAVES 0-6 NOW BUILT" handoff — the self-contradiction the review named. Rewrite owed. |
-| A2 roadmap reconciliation (requirements/SPEC/STATE/README one story) | **todo** | Not started. SPEC stays DRAFT pending Bessa's ratification. |
-| A3 docs sweep (stale wave claims) | **todo** | Not started. Audit trail preserved in docs/specs/2026-10-09-full-project-audit.md + 2026-10-12-strategy-review.md. |
+| A0 requirements un-tick/split, ✓code vs ✓reachable | **done** | d3516c6 (prior session): six row corrections (OCIO, stylus, distribution, camera, perf floor, masks, history). Rows now carry the ✓code/NOT REACHABLE split with file:line evidence. |
+| A1 STATE.md rewrite from current truth | **done** | e116729: one status line (CORE-LOOP-IN-FLIGHT), the queue summary, the contradiction + Oct-9 grant language removed, history preserved in CHANGELOG/DECISIONS pointers. |
+| A2 roadmap reconciliation (requirements/SPEC/STATE/README one story) | **done** | 3e0278f: README status → core-loop truth; SPEC dated amendment note (execution reordered; deliverables unchanged; still DRAFT pending ratification). |
+| A3 docs sweep (stale wave claims) | **done** | 3e0278f: README + SPEC were the live stale surfaces; wave3-delivery-audit.md is dated history, preserved. |
+
+**PHASE A COMPLETE (2026-10-12 04:0x).** All four items landed; queue order
+recorded in STATE.md; the strategy-review queue is the active wave.
 
 ## Phase B — core-loop kills (B1..B6)
 
@@ -32,7 +35,11 @@ phase opened. GUI/P2 FROZEN pending Gate 0. No tags, no release claims.
 - 2026-10-12 bed9e0a pushed — smudge-test stacking-contract fix, forward-fix
   of the 5-red streak (f78e6c1 introduced, 9e4fb9e mis-fixed, bed9e0a
   root-caused: entries stack, one per stroke; sibling test :2360 pins it).
-  CI verdict: pending at write time — updated below when it lands.
+  **CI verdict: GREEN** (run 38212963060, ubuntu + windows, completed
+  ~03:55 local). Red streak closed.
+- 2026-10-12 e116729 + 3e0278f (Phase A docs) committed locally — **push
+  approval requested from Bessa** (wave push; the loop does not push
+  without the gate).
 
 ## Scratch
 
