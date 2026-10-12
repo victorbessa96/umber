@@ -713,6 +713,71 @@ mod tests {
     }
 
     #[test]
+    fn color_managed_png8_carries_the_iccp_chunk_data_maps_do_not() {
+        // The end-to-end wiring pin (§9 P1): a BaseColor PNG8 export must
+        // contain the literal iCCP chunk (the bundled sRGB profile), and
+        // a data map (Roughness, linear passthrough) must NOT — the §9
+        // rule "baseColor yes; roughness/metallic/normal = data" lands
+        // on the actual bytes the driver writes.
+        fn has_iccp(path: &std::path::Path) -> bool {
+            let bytes = std::fs::read(path).unwrap();
+            // PNG chunks: [len:u32][type:ascii 4][data][crc:u32]. Scan
+            // the chunk stream before IDAT for the iCCP type bytes.
+            let mut off = 8; // skip the PNG signature
+            while off + 8 <= bytes.len() {
+                let ctype = &bytes[off + 4..off + 8];
+                if ctype == b"IDAT" {
+                    break;
+                }
+                if ctype == b"iCCP" {
+                    return true;
+                }
+                let len = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+                off += 12 + len; // header + data + crc
+            }
+            false
+        }
+
+        let size = 2;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 200));
+        set.set(MapKind::Metallic, solid(size, 255));
+        set.set(MapKind::Roughness, solid(size, 128));
+        set.set(MapKind::Normal, solid(size, 128));
+
+        let out = std::env::temp_dir().join(format!("umber-export-drv-icc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let written = run_preset(
+            &ExportPreset::gltf_metal_rough(),
+            &set,
+            &TokenSources::new("Probe"),
+            &out,
+        )
+        .unwrap();
+        // The preset's output order is packed-first (metallicRoughness,
+        // baseColor, normal) — find by file name. NOTE: `Path::ends_with`
+        // matches whole path COMPONENTS, not string suffixes — use the
+        // file name as a str.
+        let name_of = |p: &std::path::Path| -> String {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let base = written
+            .iter()
+            .find(|p| name_of(p).ends_with("baseColor.png"))
+            .expect("baseColor written");
+        let orm = written
+            .iter()
+            .find(|p| name_of(p).ends_with("metallicRoughness.png"))
+            .expect("ORM written");
+        assert!(has_iccp(base), "baseColor must embed the sRGB iCCP");
+        assert!(!has_iccp(orm), "packed data maps stay unprofiled");
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
     fn gltf_preset_writes_three_named_outputs() {
         let size = 4;
         let mut set = MapSet::new(size);
