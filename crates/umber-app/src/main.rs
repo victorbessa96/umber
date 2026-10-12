@@ -20,6 +20,7 @@ mod bakes_panel;
 mod brush_panel;
 mod display_panel;
 mod document;
+mod empty_state;
 mod env;
 mod export_dialog;
 mod fill_layer;
@@ -38,7 +39,9 @@ mod plugins;
 mod postfx_panel;
 mod retouch;
 mod size_presets;
+mod status_bar;
 mod tile_selection;
+mod toolbar;
 mod uv_view;
 mod viewport;
 
@@ -339,15 +342,15 @@ pub struct UmberApp {
     /// dab-throughput delta (`perf` feature only).
     #[cfg(feature = "perf")]
     last_dabs_composited: u64,
-    /// Wireframe overlay toggle (View menu, W). Synced into the
-    /// viewport each frame; off by default (off renders byte-identical
-    /// to the mesh-only frame).
-    show_wireframe: bool,
-    /// Ground-grid toggle (View menu, G). Same sync + off contract.
-    show_grid: bool,
-    /// Shading mode (View menu rows, V cycles lit ↔ unlit). Synced
-    /// into the viewport each frame; Lit by default (today's render).
-    view_mode: umber_gpu::ViewMode,
+    /// The view toggles: wireframe (View menu / toolbar / W), ground grid
+    /// (G), shading mode (V cycles lit ↔ unlit). Synced into the viewport
+    /// each frame; off/off/Lit by default (off renders byte-identical to
+    /// the mesh-only frame, Lit is today's render).
+    view: toolbar::ViewToggles,
+    /// The icon atlas the toolbar's tool strip draws from. Empty until
+    /// the lucide raster step lands (see `toolbar`'s module docs), so the
+    /// strip shows placeholder glyphs.
+    icons: umber_gui::IconAtlas,
     /// The requested HDR surface mode (§5 P1 row 85). Persisted as a
     /// user preference (`display_panel::hdr_pref_path`), not a project
     /// field — see `umber_gpu::hdr`'s module boundary note. The EFFECTIVE
@@ -443,9 +446,8 @@ impl UmberApp {
             last_frame_time: None,
             #[cfg(feature = "perf")]
             last_dabs_composited: 0,
-            show_wireframe: false,
-            show_grid: false,
-            view_mode: umber_gpu::ViewMode::default(),
+            view: toolbar::ViewToggles::default(),
+            icons: umber_gui::IconAtlas::empty(),
             hdr_mode,
         })
     }
@@ -453,6 +455,99 @@ impl UmberApp {
 
 /// App-level actions (kept out of the App impl to keep that block small).
 impl UmberApp {
+    /// The one place a [`toolbar::ShellAction`] takes effect: the toolbar
+    /// buttons and the shell shortcuts both land here, so a button and its
+    /// key cannot drift (see `toolbar`'s module docs for the key table and
+    /// the routing calls).
+    fn dispatch(&mut self, action: toolbar::ShellAction) {
+        use toolbar::ShellAction;
+        if self.view.apply(action) {
+            return;
+        }
+        match action {
+            ShellAction::OpenMesh => self.open_mesh(),
+            ShellAction::OpenProject => self.open_project(),
+            ShellAction::SaveProject => self.save_project(),
+            ShellAction::Undo => {
+                let _ = self.state.doc.undo();
+            }
+            ShellAction::Redo => {
+                let _ = self.state.doc.redo();
+            }
+            // Quick mask (§2's P1 row): needs a paint session; I inverts
+            // only while the mask is being edited (outside it, nothing).
+            ShellAction::ToggleMaskMode => {
+                if let Some(paint) = self.state.paint.as_mut() {
+                    paint.toggle_mask_mode();
+                }
+            }
+            ShellAction::InvertMask => {
+                if let Some(paint) = self.state.paint.as_mut() {
+                    if paint.quick_mask().is_editing() {
+                        paint.invert_mask();
+                    }
+                }
+            }
+            ShellAction::SelectTool(kind) => self.brush_panel.select_tool(kind),
+            // Applied by `ViewToggles::apply` above.
+            ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {}
+        }
+    }
+
+    /// File > Open Mesh / the toolbar button: picker → [`Self::load_mesh_path`].
+    fn open_mesh(&mut self) {
+        if let Some(path) = rfd_pick_mesh() {
+            self.load_mesh_path(path);
+        }
+    }
+
+    /// Loads `path` as the session mesh (the picker and a mesh drop on
+    /// the window both land here). Failures log; the current mesh stays.
+    fn load_mesh_path(&mut self, path: PathBuf) {
+        match umber_mesh::load(&path) {
+            Ok(mesh) => {
+                let n = mesh.vertex_count();
+                match self.state.viewport.load_mesh(&self.gpu, &mesh) {
+                    Ok(()) => {
+                        // The import session set follows the mesh's set
+                        // name (channels kept).
+                        let set_name = umber_mesh::texture_set_name(&path, &mesh);
+                        self.state.mesh_import.retarget_set(&set_name);
+                        self.state.mesh = Some(mesh);
+                        self.state.mesh_path = Some(path);
+                        log::info!("loaded mesh: {n} vertices");
+                    }
+                    Err(e) => log::error!("mesh upload failed: {e:#}"),
+                }
+            }
+            Err(e) => log::error!("mesh load failed: {e}"),
+        }
+    }
+
+    /// Mesh files dropped on the window this frame load as the mesh (the
+    /// empty-state hero's promise; `empty_state` has the routing call).
+    /// One mesh per session in v1: the first loads, the rest are logged.
+    fn load_dropped_mesh(&mut self, ctx: &egui::Context) {
+        let meshes: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| empty_state::is_mesh_file(p))
+                .collect()
+        });
+        let Some((first, rest)) = meshes.split_first() else {
+            return;
+        };
+        for skipped in rest {
+            log::warn!(
+                "one mesh per session: ignored dropped {}",
+                skipped.display()
+            );
+        }
+        self.load_mesh_path(first.clone());
+    }
+
     /// Loads the committed studio default if present (procedural
     /// otherwise) — called once at startup, after construction, so a
     /// missing asset degrades to the fallback instead of failing.
@@ -680,77 +775,22 @@ impl eframe::App for UmberApp {
         // Assets tab's `show` (egui_dock skips hidden tabs — same pattern
         // as the async bake poll above), so a folder dropped while Assets
         // is hidden still routes.
+        // (Mesh files are filtered out there; `load_dropped_mesh` takes them.)
         self.state.mesh_import.poll_drops(ui.ctx());
-        // Overlay keybinds (Wave-4 item 7): W toggles the wireframe, G
-        // the ground grid. View-mode keybind (§5's P0 row): V cycles
-        // lit ↔ unlit (from Solo/preview it returns to Lit).
-        // Quick-mask keybinds (§2's P1 row): X enters/
-        // leaves mask mode, I inverts the mask while in mask mode (outside
-        // it, I does nothing). E selects the eraser (§2's P0 row). Skipped
-        // while a text edit has focus (brush preset names, save-as dialog)
-        // so typing never flips the viewport, the mask, or the tool.
-        if !ui.ctx().text_edit_focused() {
-            let (wire_key, grid_key, view_key, mask_key, invert_key, eraser_key) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::W),
-                    i.key_pressed(egui::Key::G),
-                    i.key_pressed(egui::Key::V),
-                    i.key_pressed(egui::Key::X),
-                    i.key_pressed(egui::Key::I),
-                    i.key_pressed(egui::Key::E),
-                )
-            });
-            if wire_key {
-                self.show_wireframe = !self.show_wireframe;
-            }
-            if grid_key {
-                self.show_grid = !self.show_grid;
-            }
-            if view_key {
-                self.view_mode = self.view_mode.cycle_v();
-            }
-            if eraser_key {
-                self.brush_panel.select_eraser();
-            }
-            if let Some(paint) = self.state.paint.as_mut() {
-                if mask_key {
-                    paint.toggle_mask_mode();
-                }
-                if invert_key && paint.quick_mask().is_editing() {
-                    paint.invert_mask();
-                }
-            }
-        }
-        self.state.viewport.set_show_wireframe(self.show_wireframe);
-        self.state.viewport.set_show_grid(self.show_grid);
-        self.state
-            .viewport
-            .set_show_cage(self.state.bakes.show_cage());
-        self.state.viewport.set_view_mode(self.view_mode);
+        self.load_dropped_mesh(ui.ctx());
+        // Shell shortcuts (`toolbar`'s key table): the overlay keys (W
+        // wireframe, G grid — Wave-4 item 7), V lit ↔ unlit (§5's P0 row),
+        // X / I quick mask (§2's P1 row), E eraser (§2's P0 row), plus the
+        // Ctrl chords for undo/redo/save/open. Empty while a text edit has
+        // focus (brush preset names, save-as dialog), so typing never
+        // flips the viewport, the mask, or the tool. Dispatched with the
+        // toolbar's clicks below, through the same `dispatch`.
+        let mut actions = toolbar::poll_shortcuts(ui.ctx());
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
             MenuButton::new(tr("menu.file")).ui(ui, |ui| {
                 if ui.button(tr("menu.open-mesh")).clicked() {
-                    if let Some(path) = rfd_pick_mesh() {
-                        match umber_mesh::load(&path) {
-                            Ok(mesh) => {
-                                let n = mesh.vertex_count();
-                                match self.state.viewport.load_mesh(&self.gpu, &mesh) {
-                                    Ok(()) => {
-                                        // The import session set follows the
-                                        // mesh's set name (channels kept).
-                                        let set_name = umber_mesh::texture_set_name(&path, &mesh);
-                                        self.state.mesh_import.retarget_set(&set_name);
-                                        self.state.mesh = Some(mesh);
-                                        self.state.mesh_path = Some(path);
-                                        log::info!("loaded mesh: {n} vertices");
-                                    }
-                                    Err(e) => log::error!("mesh upload failed: {e:#}"),
-                                }
-                            }
-                            Err(e) => log::error!("mesh load failed: {e}"),
-                        }
-                    }
+                    actions.push(toolbar::ShellAction::OpenMesh);
                 }
                 if ui.button(tr("menu.open-project")).clicked() {
                     self.open_project();
@@ -774,16 +814,68 @@ impl eframe::App for UmberApp {
                 ui.checkbox(&mut self.show_perf_hud, tr("menu.perf-hud"));
                 #[cfg(not(feature = "perf"))]
                 ui.label(tr("menu.perf-hud-unavailable"));
-                ui.checkbox(&mut self.show_wireframe, tr("menu.wireframe"));
-                ui.checkbox(&mut self.show_grid, tr("menu.grid"));
+                ui.checkbox(&mut self.view.wireframe, tr("menu.wireframe"));
+                ui.checkbox(&mut self.view.grid, tr("menu.grid"));
                 ui.separator();
-                viewport::view_mode_menu(ui, &mut self.view_mode);
+                viewport::view_mode_menu(ui, &mut self.view.view_mode);
             });
             MenuButton::new(tr("menu.help")).ui(ui, |ui| {
                 if ui.button(tr("menu.about")).clicked() {
                     ui.label(tr("menu.about-text"));
                 }
             });
+        });
+
+        // Shell chrome (GUI Phase 0b): the toolbar under the menu bar, the
+        // status bar at the bottom. Both are egui panels, laid out before
+        // the central dock area, which takes what remains (egui_dock has
+        // no top/bottom slots of its own).
+        let toolbar_view = toolbar::ToolbarView {
+            tool: toolbar::ToolKind::of(&self.brush_panel.tool),
+            can_undo: self.state.doc.history.can_undo(),
+            can_redo: self.state.doc.history.can_redo(),
+            view: self.view,
+            paint_available: self.state.paint.is_some(),
+            mask_editing: self
+                .state
+                .paint
+                .as_ref()
+                .is_some_and(|p| p.quick_mask().is_editing()),
+        };
+        let icons = &self.icons;
+        egui::Panel::top("umber-toolbar").show(ui, |ui| {
+            actions.extend(toolbar::show(ui, &toolbar_view, icons));
+        });
+        for action in actions {
+            self.dispatch(action);
+        }
+        self.state.viewport.set_show_wireframe(self.view.wireframe);
+        self.state.viewport.set_show_grid(self.view.grid);
+        self.state
+            .viewport
+            .set_show_cage(self.state.bakes.show_cage());
+        self.state.viewport.set_view_mode(self.view.view_mode);
+        // The paint session adopts the panel's tool here too, not only in
+        // the Properties tab (egui_dock skips hidden tabs — same pattern as
+        // the bake poll), so a toolbar/E tool change reaches the session
+        // while Assets is the visible tab of that node.
+        if let Some(paint) = self.state.paint.as_mut() {
+            paint.sync_tool(&mut self.brush_panel.tool);
+        }
+
+        // The status bar reads the UV view's hover from the last frame
+        // (taken, so a hidden UV tab reads none); see `status_bar`.
+        let hover_before = self.state.uv_view.take_hover_uv();
+        let tile = self.state.paint.as_ref().map(|p| p.active_tile());
+        let status = status_bar::StatusSnapshot {
+            cursor_uv: hover_before.map(|uv| {
+                status_bar::absolute_uv(tile.unwrap_or(umber_mesh::FIRST_TILE), uv)
+            }),
+            tile,
+            frame_dt: ui.input(|i| i.stable_dt),
+        };
+        egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
+            status_bar::show(ui, &status);
         });
 
         // The import Apply path needs the project's content-hash store;
@@ -829,6 +921,12 @@ impl eframe::App for UmberApp {
                 .style(Style::from_egui(ui.style()))
                 .show_inside(ui, &mut viewer);
         });
+        // The status bar drew before the dock: one more frame when the
+        // hover moved, so its readout catches up (converges — the next
+        // frame records the same hover).
+        if self.state.uv_view.hover_uv() != hover_before {
+            ui.ctx().request_repaint();
+        }
 
         // Display LUT rebuild, after the panels (the Display panel's
         // edits this frame included): the upload is staged on the queue,
@@ -950,10 +1048,7 @@ impl eframe::App for UmberApp {
 /// swap pickers later).
 fn rfd_pick_mesh() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter(
-            tr("shell.filter-meshes"),
-            &["obj", "gltf", "glb", "fbx", "usda", "usd"],
-        )
+        .add_filter(tr("shell.filter-meshes"), &empty_state::MESH_EXTENSIONS)
         .pick_file()
 }
 

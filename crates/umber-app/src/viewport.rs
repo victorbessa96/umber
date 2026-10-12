@@ -185,6 +185,12 @@ impl Viewport {
         }
 
         ui.painter().rect_filled(rect, 0.0, EMPTY_VIEWPORT_COLOR);
+        // The empty state (Phase 0b): the drop-zone hero until a mesh
+        // loads, lit while a file drag hovers the window.
+        if self.mesh.is_none() {
+            let hovering = ui.input(|i| !i.raw.hovered_files.is_empty());
+            crate::empty_state::paint_hero(ui, rect, hovering);
+        }
 
         let route = match self.mesh {
             Some(_) => ViewportRoute::select(postfx, self.view_mode),

@@ -59,6 +59,9 @@ status =
        *[other] Baking { $count } maps…
     }
     .plugins = { $loaded } plugin(s) loaded, { $failed } failed
+    .uv = UV
+    .tile = Tile
+    .fps = fps
 
 ## Settings
 
@@ -78,6 +81,31 @@ shell =
     .texture-sets-placeholder = Texture sets (Wave 2)
     .filter-environment = Environment
     .filter-meshes = Meshes
+    .new = New
+    .new-deferred = New project isn't available yet: it needs to reset the paint targets, not just the layer stack.
+    .open = Open…
+    .tip-open-mesh = Load a mesh to paint (or drop one on the viewport)
+    .tip-open-project = Open a .umber project (Ctrl+O)
+    .tip-save-project = Save the project (Ctrl+S)
+    .undo = Undo
+    .redo = Redo
+    .tip-undo = Undo the last layer edit (Ctrl+Z)
+    .tip-redo = Redo the last undone layer edit (Ctrl+Shift+Z)
+    .wireframe = Wireframe
+    .tip-wireframe = Show the mesh wireframe (W)
+    .grid = Grid
+    .tip-grid = Show the ground grid (G)
+    .view-lit = Lit
+    .view-other = Unlit / preview
+    .tip-view-cycle = Switch between lit and unlit shading (V)
+    .mask = Mask
+    .tip-mask = Enter or leave quick-mask mode (X)
+    .invert-mask = Invert
+    .tip-invert-mask = Invert the quick mask (I)
+    .hero-title = Drop a mesh here to start painting
+    .hero-release = Release to load the mesh
+    .hero-hint = or use Open Mesh… in the toolbar or the File menu
+    .hero-formats = Supported:
 
 ## Bakes panel
 

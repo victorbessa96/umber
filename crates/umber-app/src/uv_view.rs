@@ -39,6 +39,11 @@ const PATH_OPACITY_TRAVEL_PX: f32 = 36.0;
 pub struct UvView {
     /// The quick-mask overlay, rebuilt only when its key changes.
     mask_overlay: Option<MaskOverlay>,
+    /// The tile-local UV under the pointer, recorded by the last `ui`
+    /// call (`None` off the square). The status bar reads it; the shell
+    /// clears it each frame before the dock runs, so a hidden tab reads
+    /// `None` rather than a stale position (see `status_bar`).
+    hover_uv: Option<[f32; 2]>,
 }
 
 /// The uploaded quick-mask overlay and what it was built from.
@@ -49,6 +54,17 @@ struct MaskOverlay {
 }
 
 impl UvView {
+    /// The tile-local UV the pointer was over at the last `ui` call.
+    pub fn hover_uv(&self) -> Option<[f32; 2]> {
+        self.hover_uv
+    }
+
+    /// Returns [`Self::hover_uv`] and clears it (the shell calls this once
+    /// per frame before the dock, which re-records it if the tab draws).
+    pub fn take_hover_uv(&mut self) -> Option<[f32; 2]> {
+        self.hover_uv.take()
+    }
+
     /// Draws the UV wireframe for `mesh` (or a hint when none is loaded)
     /// and feeds pointer strokes into the paint session. The paint
     /// canvas presents through `display_lut` (the Display panel's chain;
@@ -77,6 +93,13 @@ impl UvView {
             rect.top() + (rect.height() - side) / 2.0,
         );
         let square = egui::Rect::from_min_size(origin, egui::vec2(side, side));
+        // The status bar's cursor readout. Read off the raw pointer, not
+        // a response: the paint surface and handles registered below sit
+        // on top of `response` and would take its hover.
+        self.hover_uv = ui
+            .input(|i| i.pointer.hover_pos())
+            .and_then(|pos| crate::paint_state::uv_from_pointer(square, pos))
+            .map(|uv| [uv.x, uv.y]);
 
         // UV-space -> screen-space: v is flipped (UV origin is bottom-left,
         // screen origin is top-left). Defined before the interaction

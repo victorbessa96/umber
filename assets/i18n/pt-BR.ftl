@@ -63,6 +63,9 @@ status =
         [one] { $loaded } plugin carregado
        *[other] { $loaded } plugins carregados
     }, { $failed } com falha
+    .uv = UV
+    .tile = Tile
+    .fps = fps
 
 ## Configurações
 
@@ -82,6 +85,31 @@ shell =
     .texture-sets-placeholder = Conjuntos de texturas (Onda 2)
     .filter-environment = Ambiente
     .filter-meshes = Malhas
+    .new = Novo
+    .new-deferred = Novo projeto ainda não está disponível: ele precisa redefinir os alvos de pintura, não só a pilha de camadas.
+    .open = Abrir…
+    .tip-open-mesh = Carregar uma malha para pintar (ou soltar uma na viewport)
+    .tip-open-project = Abrir um projeto .umber (Ctrl+O)
+    .tip-save-project = Salvar o projeto (Ctrl+S)
+    .undo = Desfazer
+    .redo = Refazer
+    .tip-undo = Desfazer a última edição de camada (Ctrl+Z)
+    .tip-redo = Refazer a última edição de camada desfeita (Ctrl+Shift+Z)
+    .wireframe = Wireframe
+    .tip-wireframe = Mostrar o wireframe da malha (W)
+    .grid = Grade
+    .tip-grid = Mostrar a grade do chão (G)
+    .view-lit = Iluminado
+    .view-other = Sem luz / prévia
+    .tip-view-cycle = Alternar entre sombreamento iluminado e sem luz (V)
+    .mask = Máscara
+    .tip-mask = Entrar ou sair do modo de máscara rápida (X)
+    .invert-mask = Inverter
+    .tip-invert-mask = Inverter a máscara rápida (I)
+    .hero-title = Solte uma malha aqui para começar a pintar
+    .hero-release = Solte para carregar a malha
+    .hero-hint = ou use Abrir malha… na barra de ferramentas ou no menu Arquivo
+    .hero-formats = Suportados:
 
 ## Painel de bakes
 

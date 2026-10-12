@@ -594,12 +594,16 @@ impl MeshMapImportState {
     /// from the Assets panel (hidden tabs are skipped by egui_dock, so the
     /// shell calls this even when the panel is hidden — same pattern as
     /// the async bake poll in `main.rs`).
+    ///
+    /// Mesh files are skipped: the shell loads those as the mesh
+    /// (`crate::empty_state`'s drop routing), they are never maps.
     pub fn poll_drops(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
                 .map(|f| f.path().to_path_buf())
+                .filter(|p| !crate::empty_state::is_mesh_file(p))
                 .collect()
         });
         if !dropped.is_empty() {
