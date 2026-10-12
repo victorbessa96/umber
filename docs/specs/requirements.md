@@ -37,10 +37,10 @@
 | Layer types: paint layer, fill layer; folders with passthrough | P0 | 2 |  ✓ built (`579eb09` stack + `12124f3`/`21e1290` fill/eraser kinds) —
 | Per-channel blending mode + opacity; blending computed in linear space per channel | P0 | 2 |  ✓ built (`21e1290` core-12 math + blend census 15) —
 | Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 math verified + Darken/Lighten/Subtract/Difference kept = 15 built (14 separable + Passthrough; `21e1290`); HSV + normal-map families deferred (Wave 4 compositor scope); the remainder open |
-| Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✓ metadata model (LayerMask in layers.rs); the paint-mask DATA path rides the quick-mask plumbing |
+| Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✗-as-marked: METADATA ONLY (LayerMask in layers.rs); no mask pixels exist behind it — the review's critical 6 territory; part of the channel-pool work |
 | Layer instancing (source-edits propagate, cycle detection) | P1 | 4 | ✓ built (`4cbaf21`) |
 | Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 | ✓ built (`4cbaf21`) |
-| Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |  ✓ built (4K default in paint stack; 8K via `cd668a3` export upsample) —
+| Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |  ✗-as-marked: TARGET_SIZE=512 (paint_state.rs:180); 4K/8K only via test hooks — the export's 8K is a 16× upsample of 512² (review critical 2)
 | UDIM multi-tile texture sets; per-tile resolution; cross-tile painting | P0 | 4 (data model from 1) | ✓ built (`82c694c`..`10cdffa`) |
 | Smart materials (folder presets applied with mesh-map-driven generators) | P1 | 4 | ✓ built (`4cbaf21`) — worn-metal + painted-wood examples ship |
 | Dynamic material layering (shader-declared sub-stacks) | P2 | 6+ |
@@ -74,17 +74,17 @@
 
 | Requirement | Priority | Wave |
 |---|---|---|
-| PBR viewport: **OpenPBR 1.1 über-shader in WGSL** (native channel model = OpenPBR parameter names; spec is ASWF/Apache-2.0 with reference C++ to transliterate) | P0 | 1 (basic Blinn-Phong-ish PBR), 2 (OpenPBR + conformance suite) |  ✓ built (OpenPBR über-shader live in material.rs per the audit doc's §5 verdict, conformance tests live) —
+| PBR viewport: **OpenPBR 1.1 über-shader in WGSL** (native channel model = OpenPBR parameter names; spec is ASWF/Apache-2.0 with reference C++ to transliterate) | P0 | 1 (basic Blinn-Phong-ish PBR), 2 (OpenPBR + conformance suite) |  ✓ code, NOT REACHABLE: the über-shader exists but the mesh pass samples no textures (no UV attr, constant BASE_COLOR) — paint is invisible in 3D (review critical 1)
 | IBL environment lighting (HDR env maps, exposure, rotation, blur) | P0 | 1 (bundled env maps; HDR file import lands W2 with image import) |  ✓ built (`342e8f1` hemispherical; `8065908` env-map convolve; `05a5f1c` specular prefilter) —
 | View modes: lit / unlit single-channel solo (±display transform) / mesh-map preview | P0 | 1 | ✓ built (`f1159d1`) — v1 boundary: solo/preview render from bound data (texture bindings follow-up) |
 | 2D UV view alongside 3D view (synchronized) | P0 | 2 |  ✓ built (`8128dff` panel + `8a1c142` live paint canvas) —
-| Camera: orbit/pan/zoom, perspective + orthographic | P0 | 1 |  ✓ built (`93e0140` turntable orbit rig; ortho pending) —
+| Camera: orbit/pan/zoom, perspective + orthographic | P0 | 1 |  ✓ code (`93e0140` turntable orbit only — ORTHO UNBUILT; the review's named gap)
 | Wireframe overlay; grid | P1 | 2 | ✓ built (`09eb4e9`) |
 | Displacement/tessellation preview | P2 | 6+ |
 | Post-effects stack (DoF, bloom, vignette, sharpen, tone-map) | P1 | 5 | ✓ built (`86e77ff`+`a523647`+`112b378`) — the model + WGSL + PostStack + panel; v1 boundaries named: the mesh pass renders to an HDR texture → PostStack → LUT is the next-step wiring (the panel's status line says so), the chain is session-only (not project-persisted yet) |
 | HDR surface output (wgpu 30 SurfaceColorSpace; DX12/Metal, Vulkan driver-dependent) | P1 | 5 | ✓ built (`eaa776a`) — the capability model + probe + panel, with the honest v1 boundary PROVEN in-module: eframe 0.36 exposes no format/colorspace hook (preferred_framebuffer_format hardcodes 8-bit SDR); the surface switch gates on an eframe upgrade |
 | Custom user shaders (WGSL plugins replacing GLSL import) | P2 | 6 |
-| Performance floor: 60fps viewport on mid-range GPU with 1M-tri mesh + 4K texture set | P0 | 1 |  ✓ built (`e4925a1` facade+HUD+soak tests; `input_photon.rs` the measurement protocol; the floor itself = the nightly perf run) —
+| Performance floor: 60fps viewport on mid-range GPU with 1M-tri mesh + 4K texture set | P0 | 1 |  ✓ code (`e4925a1` facade+HUD+soak; `input_photon.rs` protocol) — NOT REACHABLE: perf/baseline.json absent, the 512² target invalidates the baselines; re-baseline after the core-loop phase
 
 ## 6. Export pipeline — [01][04]
 
@@ -117,9 +117,9 @@
 
 | Requirement | Priority | Wave |
 |---|---|---|
-| Project = directory; `project.json` (scene, texture sets, settings) + per-layer JSON files (diffable, mergeable) | P0 | 2 |  ✓ built (`579eb09` .umber format + `015fbf0` autosave journal) —
-| Textures as content-hash-named PNG/EXR tiles (git/LFS friendly; assets referenced by hash, never embedded blobs) | P0 | 2 |  ✓ built (`assets.rs` content-hash AssetStore, round-trip tested) —
-| Save/load round-trip determinism (CI-tested: save→load→export identical bytes) | P0 | 2 |  ✓ built (assets.rs `store_and_load_roundtrip`; export bytes pinned by §6 tests) —
+| Project = directory; `project.json` (scene, texture sets, settings) + per-layer JSON files (diffable, mergeable) | P0 | 2 |  ✓ code (`579eb09` .umber format + `015bf0` journal); NOT REACHABLE: the project format saves the layer JSON but not the paint data — see the save/load row
+| Textures as content-hash-named PNG/EXR tiles (git/LFS friendly; assets referenced by hash, never embedded blobs) | P0 | 2 |  ✓ code (AssetStore round-trip tested in isolation); the app's save path never calls it for paint
+| Save/load round-trip determinism (CI-tested: save→load→export identical bytes) | P0 | 2 |  ✗-as-marked: save_project writes metadata + graph ONLY — painted pixels never stored; reopen loses all paint; the round-trip tests never touch pixels (review critical 4)
 | Autosave + crash recovery (journal) | P1 | 5 | ✓ built (`015fbf0`) |
 | Merge story documented (per-layer files = two artists editing different layers never conflict) | P1 | 2 (doc) | ✓ built (`a26d5e1`) — docs/merge-story.md: the five properties, the workflow, the honest limit |
 
@@ -139,7 +139,7 @@
 | Windows 10/11 + Linux (Vulkan 1.3; DX12 on Windows) | P0 | 1 |  ✓ built (CI both platforms green through the era) —
 | CI on GitHub Actions: windows-latest + ubuntu; headless GPU tests via **lavapipe (Linux) and WARP (Windows)** — the Windows path is named, not silently assumed | P0 | 1 |  ✓ built (ci.yml: lavapipe named+installed; WARP on windows runner) —
 | Stylus/tablet: **owned `stylus` crate** — Windows dual-path (Windows Ink WM_POINTER + Wintab32 polling), Linux (Wayland zwp_tablet_v2 + X11 XI2); pressure/tilt/proximity/hover; fork/absorb octotablet; upstream to winit | P0 | 1 (windows-ink basic) → 2 (dual) → 5 (matrix) |
-| Pressure into paint pipeline bypassing egui input (winit raw events → canvas) | P0 | 2 |  ✓ built (`905a389` winink skeleton; PaintState's pressure-ful begin/extend path) —
+| Pressure into paint pipeline bypassing egui input (winit raw events → canvas) | P0 | 2 |  ✗-as-marked: the winink SKELETON exists (`905a389`) + PaintState has styled paths, but begin_stroke hardcodes 1.0 and stylus has ZERO uses in umber-app — pressure never reaches the brush (review critical 5)
 | Plugin runtime: wasmtime + WASI 0.3 component model (sandboxed; host-API for stamps/ops — plugins orchestrate, never execute inner paint loops) | P1 | 6 |  ✓ built (umber-wasm + umber-plugin-sdk; `plugins.rs` host API) —
 | **AI-assisted texturing — P2 research track, out of v0.1** (docs/research/04 §13: Painter has no first-party AI; local-first inpainting/seamless-tile generation via candle or sidecar is the open flank). v0.1 ships only the plugin/provider-interface design hook (Wave 6); delivery is post-0.1 | P2 | 6 (interface only) | ✓ built (the interface: `provider.rs` — TextureProvider + the WASM-safe FnProvider, ProviderRegistry with local-first resolution, GenerationRequest/Result/Provenance, no_std zero-dep, 11 tests; delivery itself stays post-0.1 per this row's own boundary) |
 | Scripting/automation: headless CLI (bake/export/render-batch), project format is the API | P1 | 6 |  ✓ built (`5327294` bake-all CLI + wave-6 batch.rs) —
