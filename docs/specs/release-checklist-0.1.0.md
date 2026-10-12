@@ -49,10 +49,15 @@ as the shell-only remainder). [IN FLIGHT]
 - The dist workflow (release.yml) builds on the tag push: the two
   targets, shell + PowerShell installers, checksums — measured at
   11 MB against the 150 MB budget.
+- SPEC ratification + a dogfood cohort ride the release path as
+  gates 7-8 (the review's IMPROVEMENTS §4.4): the SPEC docs
+  ratify before the tag, the dogfood cohort (Bessa first) paints a
+  real asset end to end and files what breaks.
 
 ## The known-deferred (honest, in the tag's companion notes not the message)
 
 - PSD import (P3-designed), .usdz read beyond the first layer, the
   full-32 blend set, OCIO configs (the adoption probe's rule), the
   path tools, the post-effects stack — all tracked, none blocking
-  the 0.1.0 floor.
+  the 0.1.0 floor. (Review-audit note: nothing P0 hides here — the
+  P0 holes all live in the census's code-vs-reachable split now.)
