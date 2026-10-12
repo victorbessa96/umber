@@ -74,17 +74,17 @@
 
 | Requirement | Priority | Wave |
 |---|---|---|
-| PBR viewport: **OpenPBR 1.1 über-shader in WGSL** (native channel model = OpenPBR parameter names; spec is ASWF/Apache-2.0 with reference C++ to transliterate) | P0 | 1 (basic Blinn-Phong-ish PBR), 2 (OpenPBR + conformance suite) |  ✓ code, NOT REACHABLE: the über-shader exists but the mesh pass samples no textures (no UV attr, constant BASE_COLOR) — paint is invisible in 3D (review critical 1)
+| PBR viewport: **OpenPBR 1.1 über-shader in WGSL** (native channel model = OpenPBR parameter names; spec is ASWF/Apache-2.0 with reference C++ to transliterate) | P0 | 1 (basic Blinn-Phong-ish PBR), 2 (OpenPBR + conformance suite) |  ✓ code, REACHABLE: the über-shader exists AND the mesh pass samples the bound paint tile (UV attr `renderer.rs:37`, `paint_tex` sampling `shaders.rs:135/202`, app bind `viewport.rs:401` — critical 1 closed by B1, `e802f92`+`9455885`); paint is visible in 3D, Gate-0-verified end to end (`15c072e`, CI run 38255484123 both platforms) — the C1 audit's 1b re-mark: the old NOT-REACHABLE clause was falsified by the core-loop work |
 | IBL environment lighting (HDR env maps, exposure, rotation, blur) | P0 | 1 (bundled env maps; HDR file import lands W2 with image import) |  ✓ built (`342e8f1` hemispherical; `8065908` env-map convolve; `05a5f1c` specular prefilter) —
 | View modes: lit / unlit single-channel solo (±display transform) / mesh-map preview | P0 | 1 | ✓ built (`f1159d1`) — v1 boundary: solo/preview render from bound data (texture bindings follow-up) |
 | 2D UV view alongside 3D view (synchronized) | P0 | 2 |  ✓ built (`8128dff` panel + `8a1c142` live paint canvas) —
 | Camera: orbit/pan/zoom, perspective + orthographic | P0 | 1 |  ✓ code (`93e0140` turntable orbit only — ORTHO UNBUILT; the review's named gap)
 | Wireframe overlay; grid | P1 | 2 | ✓ built (`09eb4e9`) |
 | Displacement/tessellation preview | P2 | 6+ |
-| Post-effects stack (DoF, bloom, vignette, sharpen, tone-map) | P1 | 5 | ✓ built (`86e77ff`+`a523647`+`112b378`) — the model + WGSL + PostStack + panel; v1 boundaries named: the mesh pass renders to an HDR texture → PostStack → LUT is the next-step wiring (the panel's status line says so), the chain is session-only (not project-persisted yet) |
+| Post-effects stack (DoF, bloom, vignette, sharpen, tone-map) | P1 | 5 | ✓ built (`86e77ff`+`a523647`+`112b378`) — the model + WGSL + PostStack + panel; the mesh pass → HDR texture → PostStack → LUT wiring LANDED (`postfx_viewport.rs:6-13`, viewport.rs:266-324); v1 boundary: the chain is session-only (not project-persisted yet) — the C1 audit's 1c re-mark: the spent 'next-step wiring' clause replaced with the wiring's actual state |
 | HDR surface output (wgpu 30 SurfaceColorSpace; DX12/Metal, Vulkan driver-dependent) | P1 | 5 | ✓ built (`eaa776a`) — the capability model + probe + panel, with the honest v1 boundary PROVEN in-module: eframe 0.36 exposes no format/colorspace hook (preferred_framebuffer_format hardcodes 8-bit SDR); the surface switch gates on an eframe upgrade |
 | Custom user shaders (WGSL plugins replacing GLSL import) | P2 | 6 |
-| Performance floor: 60fps viewport on mid-range GPU with 1M-tri mesh + 4K texture set | P0 | 1 |  ✓ code (`e4925a1` facade+HUD+soak; `input_photon.rs` protocol) — NOT REACHABLE: perf/baseline.json absent, the 512² target invalidates the baselines; re-baseline after the core-loop phase
+| Performance floor: 60fps viewport on mid-range GPU with 1M-tri mesh + 4K texture set | P0 | 1 |  ✓ code (`e4925a1` facade+HUD+soak; `input_photon.rs` protocol) — NOT REACHABLE: perf/baseline.json absent, and the pre-core-loop baselines ran at 512² so they measured the wrong path; re-baseline on the 4096-default path = worklist #2 |
 
 ## 6. Export pipeline — [01][04]
 
@@ -143,7 +143,7 @@
 | Plugin runtime: wasmtime + WASI 0.3 component model (sandboxed; host-API for stamps/ops — plugins orchestrate, never execute inner paint loops) | P1 | 6 |  ✓ built (umber-wasm + umber-plugin-sdk; `plugins.rs` host API) —
 | **AI-assisted texturing — P2 research track, out of v0.1** (docs/research/04 §13: Painter has no first-party AI; local-first inpainting/seamless-tile generation via candle or sidecar is the open flank). v0.1 ships only the plugin/provider-interface design hook (Wave 6); delivery is post-0.1 | P2 | 6 (interface only) | ✓ built (the interface: `provider.rs` — TextureProvider + the WASM-safe FnProvider, ProviderRegistry with local-first resolution, GenerationRequest/Result/Provenance, no_std zero-dep, 11 tests; delivery itself stays post-0.1 per this row's own boundary) |
 | Scripting/automation: headless CLI (bake/export/render-batch), project format is the API | P1 | 6 |  ✓ built (`5327294` bake-all CLI + wave-6 batch.rs) —
-| Distribution: cargo-dist (MSI + GH releases), Flatpak + AppImage on Linux; CI on windows-latest + ubuntu with lavapipe GPU tests | P0 (CI) | 1 (CI), 6 (installers) |
+| Distribution: cargo-dist (MSI + GH releases), Flatpak + AppImage on Linux; CI on windows-latest + ubuntu with lavapipe GPU tests | P0 (CI) | 1 (CI), 6 (installers) |  ✓ code, NOT PROVEN: the config exists (`dist-workspace.toml:7-9`, cargo-dist 0.30.0 shell+powershell installer targets; `release.yml:1`) but NO installer has ever been produced or smoke-tested — the C1 audit's 1d split-mark (config built / installers unproven); the review's own caveat: never claim installers the dist config can't produce. Proving them = worklist #9 |
 | Profiling: tracy-client + profiling facade from day one | P0 | 1 |  ✓ built (`e4925a1` facade spans + HUD; tracy feature-gated) —
 
 ## 11. UI shell — [01]

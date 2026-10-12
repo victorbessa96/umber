@@ -35,9 +35,10 @@ menu toggle `Show Perf HUD`) reading:
   throughput line; drops are computable from the staged-vs-
   composited relationship: staged dabs in, composited out, any
   shortfall is a drop)
-- tile-pool/paint-target bytes (PaintTarget size — v1 is the one
-  TARGET_SIZE² texture; the pool accounting lands with the tile-pool
-  slice)
+- tile-pool/paint-target bytes (PaintTarget size — the paint target is
+  now DEFAULT_TARGET_SIZE=4096 by default with arbitrary sizes via
+  with_target_size/resize_target; the pool accounting lands with the
+  tile-pool slice)
 - undo depth (UndoStack len — v1 proxy for the RAM budget until
   tile accounting lands)
 
