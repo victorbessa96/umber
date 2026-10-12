@@ -102,7 +102,11 @@ pub fn format_fps(dt: f32) -> String {
 /// Draws the bar into `ui`.
 pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
     ui.set_style(theme::umber_style(theme::Density::Compact));
-    let label = |text: String| RichText::new(text).size(theme::TEXT_STATUS).color(theme::muted());
+    let label = |text: String| {
+        RichText::new(text)
+            .size(theme::TEXT_STATUS)
+            .color(theme::muted())
+    };
     let value = |text: String| {
         RichText::new(text)
             .size(theme::TEXT_STATUS)

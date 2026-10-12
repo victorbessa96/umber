@@ -490,7 +490,8 @@ impl UmberApp {
             }
             ShellAction::SelectTool(kind) => self.brush_panel.select_tool(kind),
             // Applied by `ViewToggles::apply` above.
-            ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {}
+            ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {
+            }
         }
     }
 
@@ -868,9 +869,8 @@ impl eframe::App for UmberApp {
         let hover_before = self.state.uv_view.take_hover_uv();
         let tile = self.state.paint.as_ref().map(|p| p.active_tile());
         let status = status_bar::StatusSnapshot {
-            cursor_uv: hover_before.map(|uv| {
-                status_bar::absolute_uv(tile.unwrap_or(umber_mesh::FIRST_TILE), uv)
-            }),
+            cursor_uv: hover_before
+                .map(|uv| status_bar::absolute_uv(tile.unwrap_or(umber_mesh::FIRST_TILE), uv)),
             tile,
             frame_dt: ui.input(|i| i.stable_dt),
         };

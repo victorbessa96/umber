@@ -375,7 +375,10 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
             actions.push(ShellAction::ToggleMaskMode);
         }
         if ui
-            .add_enabled(view.mask_editing, egui::Button::new(tr("shell.invert-mask")))
+            .add_enabled(
+                view.mask_editing,
+                egui::Button::new(tr("shell.invert-mask")),
+            )
             .on_hover_text(tr("shell.tip-invert-mask"))
             .clicked()
         {
@@ -447,7 +450,10 @@ mod tests {
     #[test]
     fn chords_map_and_redo_wins_over_undo() {
         assert_eq!(resolve_shortcut(Key::Z, cmd()), Some(ShellAction::Undo));
-        assert_eq!(resolve_shortcut(Key::Z, cmd_shift()), Some(ShellAction::Redo));
+        assert_eq!(
+            resolve_shortcut(Key::Z, cmd_shift()),
+            Some(ShellAction::Redo)
+        );
         assert_eq!(
             resolve_shortcut(Key::S, cmd()),
             Some(ShellAction::SaveProject)
@@ -459,10 +465,7 @@ mod tests {
         // Unbound shifted / alt variants.
         assert_eq!(resolve_shortcut(Key::S, cmd_shift()), None);
         assert_eq!(resolve_shortcut(Key::O, cmd_shift()), None);
-        let cmd_alt = Modifiers {
-            alt: true,
-            ..cmd()
-        };
+        let cmd_alt = Modifiers { alt: true, ..cmd() };
         assert_eq!(resolve_shortcut(Key::Z, cmd_alt), None);
         // The chord keys alone do nothing.
         for key in [Key::Z, Key::S, Key::O] {
