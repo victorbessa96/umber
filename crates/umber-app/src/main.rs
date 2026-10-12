@@ -1495,6 +1495,15 @@ fn load_paint_tiles_reported(
                     names.push(name.clone());
                 }
             }
+            // Assignments first, then the resize: a pre-existing tile's
+            // TARGET keeps its old size when the mapping lands (assignment
+            // steers future creations only — the field docs), so the set's
+            // resize must run AFTER the assignment for the tile's target
+            // to actually take the set's size on reopen.
+            paint.clear_tile_assignments();
+            for (tile, set) in &known.tiles {
+                paint.assign_tile_to_set(*tile, set);
+            }
             for name in &names {
                 let (width, height) = known
                     .sizes
@@ -1502,10 +1511,6 @@ fn load_paint_tiles_reported(
                     .copied()
                     .unwrap_or_else(|| paint.size_of_set(name));
                 paint.resize_set(name, width, height);
-            }
-            paint.clear_tile_assignments();
-            for (tile, set) in &known.tiles {
-                paint.assign_tile_to_set(*tile, set);
             }
         }
         None => {
@@ -2444,8 +2449,11 @@ mod paint_persistence_tests {
         // 1001 is pre-assigned to the default set at build; the global
         // sidecar records the ACTIVE set's size, so route the tile to
         // Body (512) before saving — else the global reads the default
-        // set's 4096 and the v1 round-trip premise breaks.
+        // set's 4096 and the v1 round-trip premise breaks. The resize
+        // REBUILDS the pre-existing 1001 target at 512 (assignment alone
+        // steers future creations only — the field docs).
         paint.assign_tile_to_set(1001, "Body");
+        paint.resize_set("Body", 512, 512);
         let before = pattern_bytes(512, 512, 11);
         assert_eq!(&before[..4], &[11u8, 82, 153, 224]);
         assert!(paint.publish_fill(1001, 512, 512, before.clone()));

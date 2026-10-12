@@ -47,11 +47,13 @@ impl IconFamily {
 
 /// Lucide ids of the tool-row family (§2.3: paint / eraser / smudge /
 /// clone / fill / path / polygon / mask / symmetry).
-pub const TOOL_ICONS: [&str; 9] = [
+pub const TOOL_ICONS: [&str; 10] = [
     "paintbrush",
     "eraser",
     "fingerprint", // smudge
     "stamp",       // clone
+    "pipette",     // the eyedropper (Pick) — placeholder until the lucide
+    // raster step lands (unknown ids draw a box, never panic)
     "paint-bucket",
     "spline", // path
     "pentagon",
