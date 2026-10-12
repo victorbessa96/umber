@@ -25,22 +25,43 @@ split mark had exactly this question open.
 
 ## What was produced locally
 
-`cargo dist build` was NOT run this pass: it compiles the whole workspace in
-release mode, and a second claw (heightnormal) is writing renderer/shader
-files in the same tree RIGHT NOW. One cargo at a time; the build is the next
-step once that kill lands.
+`cargo dist build --target x86_64-unknown-linux-gnu` — DIST_BUILD_EXIT=0,
+8m21s in the new `dist` profile (LTO thin, codegen-units 1, inherits
+release). Real artifacts under `target/distrib/`:
+
+- `umber-app-x86_64-unknown-linux-gnu.tar.xz` (11.3 MB; binary + README +
+  CHANGELOG + LICENSE) + `.sha256` — VERIFIED (`sha256sum -c`: OK)
+- `umber-cli-x86_64-unknown-linux-gnu.tar.xz` (3.0 MB) + `.sha256` — VERIFIED
+- `source.tar.gz` (4.3 MB) + `.sha256` — VERIFIED
+- `umber-app-installer.sh` / `umber-cli-installer.sh` (49 KB each) —
+  `bash -n` SYNTAX OK on both; content references the real artifact names
+  (9 umber-app mentions)
+- `sha256.sum` (the umbrella checksum manifest)
+
+## The config fix this kill surfaced
+
+cargo-dist 0.32 defaults to the `dist` build profile; dist-workspace.toml
+never defined one and Cargo.toml had no `[profile.dist]` — the first real
+build died on `error: profile 'dist' is not defined`. Fixed in the root
+Cargo.toml: `[profile.dist] inherits = "release"` (the config's intent —
+release-grade artifacts). Verified: TOML parses, cargo metadata resolves,
+dist plan accepts (ad-hoc probe, 3/3 PASS).
 
 ## Honest unproven boundary
 
-- The windows-msvc artifacts can only be PRODUCED on CI's windows runner (no
-  cross toolchain here); the plan proves the config, CI produces the zip.
-- The installers' own curl-of-release fetches require a published GitHub
-  release to smoke-test end-to-end — that is release.yml's job on tag, and
-  the smoke test runs when the first tag lands.
-- What CAN be locally proven and is still owed: `cargo dist build` on
-  linux-gnu (real `.tar.xz` + installer.sh), `bash -n` on the installer
-  script, checksum verification of the produced archive against its
-  `.sha256`.
+- The windows-msvc `.zip` + powershell installer can only be PRODUCED on
+  CI's windows runner (no cross toolchain locally; the build's WARN lines
+  say exactly this). The plan proves the config; CI produces the zip on
+  tag.
+- The installers' own curl-of-release fetches require a PUBLISHED GitHub
+  release to smoke-test end-to-end — that is release.yml's job on the
+  first version tag; the local scripts' syntax + artifact references are
+  what can be proven pre-tag.
+- MSI + Flatpak + AppImage: dist-workspace.toml configures shell +
+  powershell installers ONLY. The requirements row's "MSI + Flatpak +
+  AppImage" list was config-ambitious; the honest statement is
+  shell/powershell per the config as shipped. Flatpak/AppImage would be
+  NEW config work, not unproven existing config.
 
 ## Config fixes
 

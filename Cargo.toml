@@ -95,5 +95,10 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
+# cargo-dist's build profile (its default since 0.28): inherits release's
+# LTO/strip shape so the installer artifacts match the release build.
+[profile.dist]
+inherits = "release"
+
 [profile.dev.package."*"]
 opt-level = 1 # keep debug builds usable with heavy GPU deps
