@@ -29,6 +29,7 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - The XI2 stylus backend — pen pressure/tilt/proximity reach the brush on Linux; the claw's orphaned kill consumed and finished (`d2fd7b7`)
 - Height→normal live in the lit viewport — a height stroke tilts the light per frame; the GPU-feature CI leg lands with it (`861ca9a`)
 - Installers proven at the local boundary — real linux-gnu tarballs, shell installers, verified sha256s; the missing profile.dist fixed (`9f875b3`)
+- The OCIO bundled build executed — the never-run C++ tree compiled, the ACES 2.0 built-ins materialized, and a false UI-name constant died on the real library's answer (`60b04d0`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 

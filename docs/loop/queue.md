@@ -60,7 +60,7 @@ Pass 4), highest first:
 | 5 | Cumulative merge for stroke undo | **done (37025d5)** | merge-at-push for intersecting rects; the 8-stroke soak pins 5632B vs 16384B unmerged; envelope unchanged (64/256MiB) |
 | 6 | Docs truth refresh (README/STATE/queue) | **done** | 9a7c078: README status/tree-diagram/contributing + STATE handoff 2/3/6 |
 | 7 | Stylus-crate backends (winink + XI2) | **done (d2fd7b7)** | XI2 backend + StylusPoller wiring landed (Linux half; claw-authored, orphan-consumed after wrapper death); winink = the Windows half, named follow-up |
-| 8 | OCIO bundled build | **todo** | the never-run C++ build; display chain off stub behind the feature |
+| 8 | OCIO bundled build | **done (60b04d0) — the vendored C++ build ran clean (2m30s); real-mode tests pin the ACES 2.0 pair; the UI-name constants corrected to the registry's enum names** | the never-run C++ build; display chain off stub behind the feature |
 | 9 | Distribution: prove the installers | **done (9f875b3) — local boundary PROVEN: real tarballs + installers + verified checksums; windows zip + PS installer + end-to-end release fetch = CI's on first tag** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
 | 10 | Color picker / eyedropper | **done (7067cd3)** | Pick on the strip + viewport sampling + set_brush_color; display-chain-aware sample = the named follow-up |
 | 11 | ID-mask selection | **todo** | expansion row (unfrozen; queued in audit order) |
