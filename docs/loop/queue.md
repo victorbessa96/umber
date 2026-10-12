@@ -55,14 +55,14 @@ Pass 4), highest first:
 |---|---|---|---|
 | 1 | Re-mark the drifted requirements rows | **done** | 967ec7b: §5 PBR viewport REACHABLE, §5 postfx wiring-landed, §10 distribution split-mark, §5 perf re-phrased; perf-design doc's dead const fixed |
 | 2 | Re-baseline perf/baseline.json on the 4K path | **in flight** | the scheduled nightly (run 38234644651) is cooking the lavapipe harness numbers RIGHT NOW — on completion its artifact seeds the first baseline.json; the compare step's first-baseline handling rides the same kill |
-| 3 | AssetStore routing + atomic commit for paint save | **in flight** | atomicsave claw writing (lock: main.rs + assets.rs); torn-save fault-injection + store-routed byte-identity tests |
+| 3 | AssetStore routing + atomic commit for paint save | **done (e4ad8b7)** | atomic manifest commit + store-backed recovery; 7 tests incl. interrupted-save + byte-identity; reopen = old-or-new, never torn |
 | 4 | Per-texture-set (then per-channel) sizing | **done (2564c17)** | the set model + per-tile routing at the set's size + per-set panel + target_sizes.txt with v1 back-compat; the two-sets/two-sizes round-trip test pins it; per-channel sizing = named follow-up |
-| 5 | Cumulative merge for stroke undo | **in flight** | undomerge claw writing (lock: retouch.rs); merge-at-push for intersecting rects, merged-redo semantics named, byte accounting pinned |
+| 5 | Cumulative merge for stroke undo | **done (37025d5)** | merge-at-push for intersecting rects; the 8-stroke soak pins 5632B vs 16384B unmerged; envelope unchanged (64/256MiB) |
 | 6 | Docs truth refresh (README/STATE/queue) | **done** | 9a7c078: README status/tree-diagram/contributing + STATE handoff 2/3/6 |
 | 7 | Stylus-crate backends (winink + XI2) | **todo** | tilt/proximity/eraser behind the raw-Touch source; Linux first |
 | 8 | OCIO bundled build | **todo** | the never-run C++ build; display chain off stub behind the feature |
 | 9 | Distribution: prove the installers | **todo** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
-| 10 | Color picker / eyedropper | **todo** | first of the expansion rows (unfrozen by the standing directive; queued in audit order) |
+| 10 | Color picker / eyedropper | **done (7067cd3)** | Pick on the strip + viewport sampling + set_brush_color; display-chain-aware sample = the named follow-up |
 | 11 | ID-mask selection | **todo** | expansion row (unfrozen; queued in audit order) |
 | 12 | Height→normal live in viewport | **todo** | expansion row (unfrozen; queued in audit order) |
 
