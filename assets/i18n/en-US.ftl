@@ -107,6 +107,13 @@ shell =
     .hero-hint = or use Open Mesh… in the toolbar or the File menu
     .hero-formats = Supported:
 
+## Texture Sets panel
+
+texturesets =
+    .size = Paint target size
+    .resize-clears = Changing the size clears the canvas, the stroke undo history and the quick mask. This is intentional.
+    .no-paint = No paint session — the GPU target is unavailable.
+
 ## Bakes panel
 
 bakes =

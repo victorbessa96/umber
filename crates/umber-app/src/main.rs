@@ -48,6 +48,15 @@
 //!   atomic commit for both is deferred.
 //! * Save prunes `tile-*.png` files for tiles the session no longer holds,
 //!   so a re-save into a project dir never resurrects a dropped tile.
+//! * The session target size rides in `<project>/paint/target_size.txt`
+//!   (`"{width}x{height}"`), written on every save even with zero tiles
+//!   (a 4K choice with no paint yet survives the round trip). Open restores
+//!   it only when no tile PNGs exist — with pixels, the PNG dims lead, so
+//!   the bytes always fit the target they land in; a missing/unparseable
+//!   file keeps the live size. Any positive dims round-trip: the UI offers
+//!   squares only, but clamping a stored size down would drop pixels
+//!   silently. A sidecar file (not `project.json`) for the same
+//!   schema-ownership reason as the pixels above.
 
 mod bake_sources;
 mod bakes_panel;
@@ -251,7 +260,7 @@ impl TabViewer for PanelViewer<'_> {
                 }
             }
             Panel::TextureSets => {
-                ui.label(tr("shell.texture-sets-placeholder"));
+                texture_sets_panel_ui(ui, self.paint.as_deref_mut());
             }
             Panel::Bakes => {
                 let ctx = BakesContext {
@@ -612,7 +621,7 @@ impl UmberApp {
     /// Exports the current paint target as an sRGB PNG via a save dialog.
     ///
     /// Readback is blocking (one full-target copy); acceptable for a
-    /// user-triggered export at 512².
+    /// user-triggered export at the session target size.
     fn export_paint_png(&mut self) {
         let Some(paint) = self.state.paint.as_ref() else {
             return;
@@ -671,12 +680,72 @@ fn paint_tile_path(project_dir: &Path, tile: u16) -> PathBuf {
     paint_sidecar_dir(project_dir).join(format!("tile-{tile}.png"))
 }
 
+/// The sidecar file holding the session's paint-target size
+/// (`<project>/paint/target_size.txt`, body `"{width}x{height}"`): written
+/// on every save — even with zero tiles, so a 4K choice with no paint yet
+/// survives the round trip — and read on open only when the sidecar holds
+/// no tiles (with tiles, the PNG dims lead: they must fit the pixels they
+/// carry). A sidecar file, not `project.json`: the project schema is owned
+/// by `umber-core` (another kill's surface) and this crate has no serde
+/// dependency. Judgment call: any positive dims round-trip (the combo only
+/// offers square presets, but the load path honors what it stored —
+/// clamping a hand-grown size back down would drop pixels silently).
+fn paint_target_size_path(project_dir: &Path) -> PathBuf {
+    paint_sidecar_dir(project_dir).join("target_size.txt")
+}
+
+/// `"{width}x{height}"` (the `target_size.txt` body).
+fn format_paint_target_size(width: u32, height: u32) -> String {
+    format!("{width}x{height}")
+}
+
+/// Parses [`format_paint_target_size`]'s output; `None` for anything else
+/// (a hand-edited file degrades to the session's live size — never a panic
+/// and never a zero-size target).
+fn parse_paint_target_size(text: &str) -> Option<(u32, u32)> {
+    let (w, h) = text.trim().split_once('x')?;
+    let (width, height): (u32, u32) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 /// Parses a `tile-<N>.png` sidecar file name back to its tile number;
 /// `None` for anything else (the temp files the atomic writers leave on
 /// a crash, a foreign file dropped into the folder, …).
 fn parse_paint_tile_name(name: &str) -> Option<u16> {
     let rest = name.strip_prefix("tile-")?.strip_suffix(".png")?;
     rest.parse::<u16>().ok()
+}
+
+/// The Texture Sets panel's paint-target size section (CORE-LOOP CRITICAL 2,
+/// the 2026-10-12 strategy review): the shared `SIZE_PRESETS` combo
+/// (512..8K — the same list the Bakes panel and the Export dialog offer)
+/// routed to [`paint_state::PaintState::resize_target`] on change. The
+/// resize is INTENTIONAL-clear (canvas contents, stroke-undo history and
+/// quick mask all reset — see `resize_target`): the hint string names it,
+/// so a size change is never a silent undo loss. The choice persists in
+/// the project (`target_size.txt` — see [`save_paint_tiles`]).
+///
+/// V1 boundary: ONE session size shared by every tile (the review's
+/// per-texture-set size is the named follow-up, alongside the per-layer
+/// tile pool). The combo is square-only: a non-square session (only a
+/// hand-edited project can produce one) shows its width, and picking any
+/// row normalizes it to that square. No paint session (no GPU target)
+/// shows the unavailable string instead of the combo.
+fn texture_sets_panel_ui(ui: &mut Ui, paint: Option<&mut paint_state::PaintState>) {
+    let Some(paint) = paint else {
+        ui.label(tr("texturesets.no-paint"));
+        return;
+    };
+    let (width, height) = paint.target_size();
+    let mut size = width;
+    ui.horizontal(|ui| {
+        ui.label(tr("texturesets.size"));
+        size_presets::size_combo(ui, "", &mut size);
+    });
+    if (size, size) != (width, height) {
+        paint.resize_target(size, size);
+    }
+    ui.label(tr("texturesets.resize-clears"));
 }
 
 /// Vertical row flip over tightly-packed RGBA8 bytes: output row 0 is
@@ -709,6 +778,20 @@ fn flip_rows_vertical(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 /// stroke-undo capture uses. Prunes `tile-*.png` files for tiles the
 /// session no longer holds, then returns how many tiles were stored.
 fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
+    // The session size rides along even with zero tiles (a 4K choice with
+    // no paint yet must survive the round trip); a write failure logs but
+    // keeps the metadata save (same torn-save window as the pixels).
+    if let Err(e) = std::fs::create_dir_all(paint_sidecar_dir(project_dir)) {
+        log::warn!("paint save: sidecar dir not created: {e:#}");
+    } else {
+        let (width, height) = paint.target_size();
+        if let Err(e) = std::fs::write(
+            paint_target_size_path(project_dir),
+            format_paint_target_size(width, height),
+        ) {
+            log::warn!("paint save: target size not stored: {e:#}");
+        }
+    }
     let mut saved = 0usize;
     let tiles = paint.tiles_present();
     for tile in &tiles {
@@ -787,8 +870,15 @@ fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> 
     if tiles.is_empty() {
         // No paint persisted: the newly opened document must not show the
         // previous document's pixels (the layer stack is replaced
-        // wholesale on open; the paint follows the same rule).
-        let (width, height) = paint.target_size();
+        // wholesale on open; the paint follows the same rule). The session
+        // resizes to the SAVED size when the sidecar stored one (a 4K
+        // choice with no paint yet survives the round trip); a
+        // missing/unparseable file keeps the live size — the clear still
+        // runs either way.
+        let (width, height) = std::fs::read_to_string(paint_target_size_path(project_dir))
+            .ok()
+            .and_then(|text| parse_paint_target_size(&text))
+            .unwrap_or_else(|| paint.target_size());
         paint.resize_target(width, height);
         if let Err(e) = paint.process_pending() {
             log::warn!("paint open: clearing the session failed: {e:#}");
@@ -1372,6 +1462,34 @@ mod paint_persistence_tests {
         assert_eq!(
             paint_tile_path(Path::new("/p"), 1001),
             PathBuf::from("/p/paint/tile-1001.png")
+        );
+    }
+
+    #[test]
+    fn target_size_round_trips_exactly_and_rejects_garbage() {
+        // Every offered preset formats and parses back exactly (not a
+        // range check — a dropped size would fail); trailing newlines
+        // (hand-edited files) parse too.
+        for size in crate::size_presets::SIZE_PRESETS {
+            let text = format_paint_target_size(size, size);
+            assert_eq!(text, format!("{size}x{size}"));
+            assert_eq!(parse_paint_target_size(&text), Some((size, size)));
+            assert_eq!(
+                parse_paint_target_size(&format!("{text}\n")),
+                Some((size, size))
+            );
+        }
+        assert_eq!(parse_paint_target_size("4096x4096"), Some((4096, 4096)));
+        // Garbage degrades to None (the load path keeps the live size):
+        // empty, one-sided, zero-sided, non-numeric, wrong separator.
+        for bad in [
+            "", "512", "x512", "512x", "0x512", "512x0", "0x0", "ax512", "512xa", "512*512",
+        ] {
+            assert_eq!(parse_paint_target_size(bad), None, "{bad:?} must reject");
+        }
+        assert_eq!(
+            paint_target_size_path(Path::new("/p")),
+            PathBuf::from("/p/paint/target_size.txt")
         );
     }
 

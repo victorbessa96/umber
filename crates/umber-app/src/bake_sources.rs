@@ -629,7 +629,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut paint = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut paint = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         // March across the target center: 60 events converge the stroke
         // conditioner well past its spacing threshold, laying a dense
         // brick-red run (the default brush color [0.85, 0.2, 0.1]).
@@ -850,7 +851,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut paint = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut paint = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         paint.set_mesh(&crate::paint_state::two_tile_strip());
         paint.set_brush_color([0.85, 0.2, 0.1, 1.0]);
         paint_run(&mut paint, 0.35, 0.5); // tile 1001
@@ -931,7 +933,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let paint = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let paint = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         assert_eq!(paint.target_size(), (512, 512));
         let at_512 = painted_base_color_tile(Some(&paint), 1001, 512, &device, &queue);
         assert_eq!(at_512.map(|b| b.len()), Some(512 * 512 * 4));

@@ -111,6 +111,13 @@ shell =
     .hero-hint = ou use Abrir malha… na barra de ferramentas ou no menu Arquivo
     .hero-formats = Suportados:
 
+## Painel de conjuntos de texturas
+
+texturesets =
+    .size = Tamanho do alvo de pintura
+    .resize-clears = Mudar o tamanho limpa a tela, o histórico de traços e a máscara rápida. Isso é intencional.
+    .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
+
 ## Painel de bakes
 
 bakes =

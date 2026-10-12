@@ -72,21 +72,48 @@
 //!   at first touch, after at end); retouch needs one because the after
 //!   lives in its CPU mirror. Paint has no CPU composite step to keep an
 //!   after in, so the readbacks are inherent, not a shortcut.
-//! * Memory: RGBA8 is 4 bytes/texel. At 512² a full-tile rect is
-//!   512·512·4 = 1 MiB per side, so a worst-case entry (before + after) is
-//!   ~2 MiB and the 64-entry cap binds first (64 × 2 MiB ≈ 128 MiB, inside
-//!   the 256 MiB budget). At 4K a full-tile side is 64 MiB and one entry is
-//!   ~128 MiB: two such entries fill the budget and the third evicts the
-//!   oldest, while the 64-entry cap alone would admit ~8 GiB — so at 4K the
-//!   BYTE budget is the RAM guard and the entry cap is the stroke-count UX.
-//!   A typical stroke is small (brush r = 24 texels ⇒ footprint ≈ 49×49×4
-//!   ≈ 10 KiB per side; a 16-event union is tens of KiB). V1 keeps BOTH
-//!   existing caps unchanged ([`RETOUCH_HISTORY_MAX_ENTRIES`] +
-//!   [`RETOUCH_HISTORY_MAX_BYTES`]) and wires no `on_evict` hook — evicted
-//!   entries are plain `Vec<u8>`, whose drop needs no cleanup. Against the
-//!   review's §12:167 row (2 GB / 100-step budget): this 256 MiB / 64-step
-//!   envelope sits well inside it; the entry cap must never be raised
-//!   toward 100 without the byte budget beside it.
+//! * Memory: RGBA8 is 4 bytes/texel. At the 4096 default a full-tile
+//!   rect is 4096·4096·4 = 64 MiB per side, so a worst-case entry
+//!   (before + after) is ~128 MiB: two such entries fill the 256 MiB
+//!   budget and the third evicts the oldest, while the 64-entry cap alone
+//!   would admit ~8 GiB — so at 4K the BYTE budget is the RAM guard and
+//!   the entry cap is the stroke-count UX. At 512² a full-tile side is
+//!   1 MiB and a worst-case entry ~2 MiB, so the 64-entry cap binds first
+//!   (64 × 2 MiB ≈ 128 MiB, inside the budget). A typical stroke is small
+//!   (brush r = 24 texels ⇒ footprint ≈ 49×49×4 ≈ 10 KiB per side; a
+//!   16-event union is tens of KiB). V1 keeps BOTH existing caps unchanged
+//!   ([`RETOUCH_HISTORY_MAX_ENTRIES`] + [`RETOUCH_HISTORY_MAX_BYTES`])
+//!   and wires no `on_evict` hook — evicted entries are plain `Vec<u8>`,
+//!   whose drop needs no cleanup. Against the review's §12:167 row
+//!   (2 GB / 100-step budget): this 256 MiB / 64-step envelope sits well
+//!   inside it; the entry cap must never be raised toward 100 without the
+//!   byte budget beside it. NOTE on the caps' shape: the 256 MiB figure is
+//!   the WHOLE-history budget, not a per-entry cap — one full-tile 4K
+//!   stroke entry is 128 MiB, i.e. half the budget, so the second such
+//!   entry fits and the third evicts the first. The budget still holds at
+//!   4K (it is what evicts); what does NOT hold is "64 full-tile strokes
+//!   of history" — at 4K that would be 8 GiB, and the byte budget caps it
+//!   at ~2. Full-tile strokes are the pathological case (a real stroke
+//!   covers a small union); the v1 boundary is that no per-entry cap
+//!   exists, so one giant stroke can evict the whole history.
+//! * One tile at the default = 64 MiB of GPU target, plus the tile's CPU
+//!   mirror ONLY when a retouch stroke touched it (paint composites on the
+//!   GPU, so paint strokes hold no CPU composite — their undo capture is
+//!   the before/after rect pair above), plus the undo snapshot cost. N
+//!   tiles × 64 MiB at 4K × (UDIM tile count): a 10-tile set holds
+//!   ~640 MiB of live targets before any undo entry.
+//! * Target size (CORE-LOOP CRITICAL 2, the 2026-10-12 strategy review):
+//!   [`Self::new`] builds every tile at [`DEFAULT_TARGET_SIZE`] (4096 —
+//!   the review's directive; the old 512 live target survives only as the
+//!   tests' explicit construction size). The user-facing setting lives in
+//!   the Texture Sets panel (the `SIZE_PRESETS` combo, 512..8K) and routes
+//!   through [`Self::resize_target`], which rebuilds the whole tile pool
+//!   at the new size. V1 boundary (the review asked for a per-texture-set
+//!   size): there is ONE session size shared by every tile — per-set or
+//!   per-channel sizes are the named follow-up alongside the per-layer
+//!   tile pool. `resize_target` takes arbitrary `(width, height)` but the
+//!   UI only offers squares; non-square sizes arise only from the project
+//!   load path's stored dims.
 //! * Mask-mode strokes still leave the history alone (they touch the mask,
 //!   not the layer), and [`Self::resize_target`] still clears it (rects
 //!   recorded at the old size no longer fit).
@@ -229,8 +256,14 @@ pub enum PaintStateError {
     Conditioning(#[from] umber_brush::ConditionerError),
 }
 
-/// Paint-target edge length in texels (Wave 2: single square tile).
-const TARGET_SIZE: u32 = 512;
+/// Default paint-target edge length in texels: 4096 (CORE-LOOP CRITICAL 2,
+/// the 2026-10-12 strategy review's directive — the live target is 4K, not
+/// 512; the 4K/8K-via-test-hook era ends here). 4096² RGBA8 = 64 MiB per
+/// tile-target (see the module docs' memory note); N tiles × that at 4K ×
+/// UDIM. The [`Self::new`] default; [`Self::with_target_size`] builds any
+/// square size (the wiring tests pin 512 explicitly so their seam/mask
+/// geometry stays byte-identical).
+pub const DEFAULT_TARGET_SIZE: u32 = 4096;
 
 /// Brush radius in target texels.
 const BRUSH_RADIUS_TEXELS: f32 = 24.0;
@@ -312,8 +345,8 @@ pub struct PaintState {
     conditioner: StrokeConditioner,
     /// Set on pointer-down inside the UV square; cleared on pointer-up.
     stroking: bool,
-    /// UV→texel scale (target texels per UV unit); constant while the
-    /// target is TARGET_SIZE².
+    /// UV→texel scale (target texels per UV unit); tracks the live
+    /// target size (see [`Self::resize_target`]).
     texels_per_uv: f32,
     last_stats: FrameStats,
     /// Seam topology of the loaded mesh (`None` until [`Self::set_mesh`]).
@@ -399,8 +432,14 @@ pub struct PaintState {
 
 impl PaintState {
     /// Creates the tile-1001 paint target on `device`/`queue` (cloned
-    /// inside `PaintThread`); further tiles are created lazily on first
-    /// route.
+    /// inside `PaintThread`) at the [`DEFAULT_TARGET_SIZE`]² default;
+    /// further tiles are created lazily on first route (at the live size —
+    /// see [`Self::resize_target`]).
+    ///
+    /// Judgment call (lowest-churn API shape): `new` keeps its
+    /// `(device, queue)` signature so the app and the perf harnesses are
+    /// untouched, and square non-default sizes go through
+    /// [`Self::with_target_size`] (the wiring tests' explicit 512).
     ///
     /// # Errors
     ///
@@ -411,13 +450,28 @@ impl PaintState {
         device: umber_gpu::WgpuDevice,
         queue: umber_gpu::WgpuQueue,
     ) -> Result<Self, PaintStateError> {
-        let first = PaintThread::new(device.clone(), queue.clone(), TARGET_SIZE, TARGET_SIZE)?;
+        Self::with_target_size(device, queue, DEFAULT_TARGET_SIZE)
+    }
+
+    /// Creates the tile-1001 paint target at `size`×`size` texels (square —
+    /// the UI only offers square presets; [`Self::resize_target`] is the
+    /// arbitrary-size path). Same lazily-grown tile pool as [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::new`].
+    pub fn with_target_size(
+        device: umber_gpu::WgpuDevice,
+        queue: umber_gpu::WgpuQueue,
+        size: u32,
+    ) -> Result<Self, PaintStateError> {
+        let first = PaintThread::new(device.clone(), queue.clone(), size, size)?;
         Ok(Self {
             device,
             queue,
             targets: BTreeMap::from([(FIRST_TILE, first)]),
             active_tile: FIRST_TILE,
-            target_size: (TARGET_SIZE, TARGET_SIZE),
+            target_size: (size, size),
             multi_tile: false,
             brush: BrushParams::default(),
             wash_mode: WashMode::BuildUp,
@@ -428,7 +482,7 @@ impl PaintState {
                 5.0,
             )?,
             stroking: false,
-            texels_per_uv: TARGET_SIZE as f32,
+            texels_per_uv: size as f32,
             last_stats: FrameStats::default(),
             seam_graph: None,
             stroke_near_seam: false,
@@ -447,7 +501,7 @@ impl PaintState {
             projection: PaintProjection::default(),
             symmetry_from_view: false,
             stroke_symmetry: None,
-            quick_mask: QuickMask::new(TARGET_SIZE, TARGET_SIZE),
+            quick_mask: QuickMask::new(size, size),
             mask_synced: BTreeSet::new(),
             stroke_mask_edit: false,
             stroke_mask_gate: false,
@@ -1058,9 +1112,16 @@ impl PaintState {
     }
 
     /// Switches every tile's paint target to `width`x`height` (contents
-    /// dropped); tiles created later use the same size. The stroke-soak
-    /// test uses this to run against a 4K target, the 8K test against
-    /// 8192²; the app itself stays on [`TARGET_SIZE`].
+    /// dropped); tiles created later use the same size. The Texture Sets
+    /// panel's size combo routes here; the stroke-soak and input→photon
+    /// harnesses resize to their own 4K target explicitly (they measure
+    /// relative perf, not the default — see their module docs).
+    ///
+    /// INTENTIONAL: the resize clears the stroke-undo history (rects
+    /// recorded at the old size no longer fit the targets) and resets the
+    /// quick mask with the targets' contents (the `Resize` command drops
+    /// each target's GPU mask too). The UI names this (the Texture Sets
+    /// panel's hint string), so a size change is never a silent undo loss.
     pub fn resize_target(&mut self, width: u32, height: u32) {
         self.texels_per_uv = width as f32;
         self.target_size = (width, height);
@@ -1821,7 +1882,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.begin_screen_point(None);
         assert!(!state.is_stroking(), "a miss must not open a stroke");
         state.extend_screen_point(None);
@@ -1836,7 +1898,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         // The drag opens off the mesh, then moves onto it: the stroke
         // starts at the first hit, with no orphan state from the misses.
         drive_screen(&mut state, &[None, None, Some([0.3, 0.3])]);
@@ -1853,15 +1916,16 @@ mod tests {
         // interleaved misses stages EXACTLY what the hits-only UV stroke
         // stages (same batches, same dabs, same order).
         let hits = [[0.3, 0.3], [0.32, 0.32], [0.34, 0.34], [0.36, 0.36]];
-        let mut direct =
-            PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut direct = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         direct.begin_stroke(egui::pos2(hits[0][0], hits[0][1]));
         for [x, y] in &hits[1..] {
             direct.extend_stroke(egui::pos2(*x, *y));
         }
         direct.end_stroke();
 
-        let mut screen = PaintState::new(device, queue).expect("paint state builds");
+        let mut screen =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         drive_screen(
             &mut screen,
             &[
@@ -1896,7 +1960,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         assert_eq!(state.projection(), PaintProjection::Screen);
         state.sync_projection(PaintProjection::Uv);
         assert_eq!(state.projection(), PaintProjection::Uv);
@@ -1924,7 +1989,8 @@ mod tests {
             .map(|i| Some([start[0] + step[0] * i as f32, start[1] + step[1] * i as f32]))
             .collect();
 
-        let mut base = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut base = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         base.set_mesh(&single_island_quad());
         drive_screen(&mut base, &march);
         let base_converged = base.staged_batch_count();
@@ -1940,7 +2006,8 @@ mod tests {
         );
         base.end_stroke();
 
-        let mut seam = PaintState::new(device, queue).expect("paint state builds");
+        let mut seam =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         seam.set_mesh(&two_island_quad());
         drive_screen(&mut seam, &march);
         let seam_converged = seam.staged_batch_count();
@@ -2016,8 +2083,13 @@ mod tests {
     /// A UV ~0.57 UV units from either island's segment: outside the gate.
     const FAR_FROM_SEAM_UV: [f32; 2] = [0.9, 0.1];
 
+    /// The seam fixtures' gate radius: the mirror-gate math at an explicit
+    /// 512 texels-per-UV (the wiring tests construct at 512 via
+    /// [`PaintState::with_target_size`] so `NEAR_SEAM_UV`'s ~0.021-UV seam
+    /// offset stays inside the gate — at the 4096 default the gate would
+    /// be 8× tighter in UV and the same fixtures would read as seam-free).
     fn gate_radius() -> f32 {
-        mirror_radius_uv(TARGET_SIZE as f32)
+        mirror_radius_uv(512.0)
     }
 
     #[test]
@@ -2145,7 +2217,8 @@ mod tests {
 
         // Baseline: seam-free mesh. The measured extend stages exactly the
         // original — 1 batch.
-        let mut base = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut base = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         base.set_mesh(&single_island_quad());
         drive_stroke(&mut base, start, step, 15);
         let base_converged = base.staged_batch_count();
@@ -2166,7 +2239,8 @@ mod tests {
         // Seam mesh, identical stroke: the measured extend stages original
         // + mirror — 2 batches (the mirror recurses with expand=false, so
         // no further fan-out: recursion terminates).
-        let mut seam = PaintState::new(device, queue).expect("paint state builds");
+        let mut seam =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         seam.set_mesh(&two_island_quad());
         drive_stroke(&mut seam, start, step, 15);
         let seam_converged = seam.staged_batch_count();
@@ -2196,7 +2270,8 @@ mod tests {
         let start = FAR_FROM_SEAM_UV;
         let step = [-0.02, 0.02];
 
-        let mut base = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut base = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         base.set_mesh(&single_island_quad());
         drive_stroke(&mut base, start, step, 15);
         let base_converged = base.staged_batch_count();
@@ -2211,7 +2286,7 @@ mod tests {
         // batch — is IDENTICAL to the seam-free baseline (structural
         // equality, not just determinism: `push_event_styled` never consults
         // the graph when `stroke_near_seam` is false).
-        let mut far = PaintState::new(device, queue).expect("paint state builds");
+        let mut far = PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         far.set_mesh(&two_island_quad());
         drive_stroke(&mut far, start, step, 15);
         assert_eq!(
@@ -2242,7 +2317,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         // A vertical paint stroke gives the smudge an edge to drag. Since the
         // stroke-undo work (critical 3) this setup stroke records its own
         // history entry, and it STAYS: entries stack, one per stroke — the
@@ -2309,7 +2385,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         let blank = read_back(&mut state, &device, &queue);
         assert!(!state.can_undo_stroke(), "a fresh session has no entries");
 
@@ -2348,7 +2425,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         let blank = read_back(&mut state, &device, &queue);
 
         drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
@@ -2401,12 +2479,13 @@ mod tests {
         let start = [0.2, 0.3];
         let step = [0.0, 0.02];
 
-        let mut off = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut off = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         drive_stroke(&mut off, start, step, 15);
         off.end_stroke();
         assert!(off.staged_dab_count() > 0);
 
-        let mut on = PaintState::new(device, queue).expect("paint state builds");
+        let mut on = PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         let mut settings = SymmetrySettings::default();
         settings.mirror.enabled = true;
         on.sync_symmetry(&mut settings);
@@ -2431,7 +2510,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         let mut panel = SymmetrySettings::default();
         panel.mirror.enabled = true;
         state.sync_symmetry(&mut panel);
@@ -2473,8 +2553,8 @@ mod tests {
             .expect("readback")
     }
 
-    fn texel_at(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
-        let i = (y * TARGET_SIZE + x) as usize * 4;
+    fn texel_at(bytes: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = (y * width + x) as usize * 4;
         [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
     }
 
@@ -2484,12 +2564,13 @@ mod tests {
     /// quick mask there: `(blocked, allowed)`.
     fn changed_by_mask(state: &PaintState, a: &[u8], b: &[u8]) -> (usize, usize) {
         let mask = state.quick_mask();
+        let width = state.target_size().0;
         let mut out = (0, 0);
         for (i, (ta, tb)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
             if ta == tb {
                 continue;
             }
-            let (x, y) = (i as u32 % TARGET_SIZE, i as u32 / TARGET_SIZE);
+            let (x, y) = (i as u32 % width, i as u32 / width);
             if mask.sample(FIRST_TILE, x, y) == 0.0 {
                 out.0 += 1;
             } else {
@@ -2521,7 +2602,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         state.set_brush_params(hard_brush());
         let blank = read_back(&mut state, &device, &queue);
         assert!(state.quick_mask().coverage(FIRST_TILE).is_none());
@@ -2562,8 +2644,8 @@ mod tests {
         let (blocked, allowed) = changed_by_mask(&state, &blank, &gated);
         assert_eq!(blocked, 0, "blocked texels must be byte-identical");
         assert!(allowed > 0, "the window paints");
-        assert_eq!(texel_at(&gated, 102, 256), CLEAR);
-        assert_ne!(texel_at(&gated, 358, 256), CLEAR);
+        assert_eq!(texel_at(&gated, state.target_size().0, 102, 256), CLEAR);
+        assert_ne!(texel_at(&gated, state.target_size().0, 358, 256), CLEAR);
 
         // (e)
         state.set_mask_active(false);
@@ -2572,7 +2654,7 @@ mod tests {
         state.end_stroke();
         let ungated = read_back(&mut state, &device, &queue);
         assert_ne!(
-            texel_at(&ungated, 102, 256),
+            texel_at(&ungated, state.target_size().0, 102, 256),
             CLEAR,
             "ungated paints everywhere"
         );
@@ -2601,7 +2683,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         state.set_brush_params(hard_brush());
         let blank = read_back(&mut state, &device, &queue);
         mask_right_window(&mut state);
@@ -2614,9 +2697,13 @@ mod tests {
         let (blocked, allowed) = changed_by_mask(&state, &blank, &gated);
         assert_eq!(blocked, 0, "the inverted window is byte-identical");
         assert!(allowed > 0);
-        assert_ne!(texel_at(&gated, 102, 256), CLEAR, "what was blocked paints");
+        assert_ne!(
+            texel_at(&gated, state.target_size().0, 102, 256),
+            CLEAR,
+            "what was blocked paints"
+        );
         assert_eq!(
-            texel_at(&gated, 358, 256),
+            texel_at(&gated, state.target_size().0, 358, 256),
             CLEAR,
             "what was allowed is blocked"
         );
@@ -2635,7 +2722,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         state.set_brush_params(hard_brush());
         let blank = read_back(&mut state, &device, &queue);
         // Allow u ≈ 0.1..0.4 along v = 0.5 (symmetry still off).
@@ -2643,7 +2731,7 @@ mod tests {
         drive_stroke(&mut state, [0.1, 0.5], [0.02, 0.0], 15);
         state.end_stroke();
         assert!(!state.toggle_mask_mode());
-        assert!((256..TARGET_SIZE).all(|x| state.quick_mask().sample(FIRST_TILE, x, 256) == 0.0));
+        assert!((256..512).all(|x| state.quick_mask().sample(FIRST_TILE, x, 256) == 0.0));
 
         let mut settings = SymmetrySettings::default();
         settings.mirror.enabled = true;
@@ -2654,15 +2742,23 @@ mod tests {
         let (blocked, allowed) = changed_by_mask(&state, &blank, &gated);
         assert_eq!(blocked, 0, "no sibling texel lands on the blocked side");
         assert!(allowed > 0);
-        assert_ne!(texel_at(&gated, 102, 256), CLEAR, "the primary paints");
-        assert_eq!(texel_at(&gated, 409, 256), CLEAR, "its sibling is gated");
+        assert_ne!(
+            texel_at(&gated, state.target_size().0, 102, 256),
+            CLEAR,
+            "the primary paints"
+        );
+        assert_eq!(
+            texel_at(&gated, state.target_size().0, 409, 256),
+            CLEAR,
+            "its sibling is gated"
+        );
 
         // Control: ungated, the sibling paints.
         state.set_mask_active(false);
         drive_stroke(&mut state, [0.15, 0.5], [0.01, 0.0], 15);
         state.end_stroke();
         let ungated = read_back(&mut state, &device, &queue);
-        assert_ne!(texel_at(&ungated, 409, 256), CLEAR);
+        assert_ne!(texel_at(&ungated, state.target_size().0, 409, 256), CLEAR);
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---
@@ -2673,7 +2769,8 @@ mod tests {
             return;
         };
         // Unrouted session: tile 1001 only.
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.set_mesh(&two_tile_strip());
         assert_eq!(state.tiles_present(), vec![1001]);
         // A routed 1002 event adds 1002; listing is ascending (1002 was
@@ -2729,7 +2826,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.set_mesh(&two_tile_strip());
         assert_eq!(state.staged_batch_count_for(1001), 0);
         assert_eq!(state.staged_batch_count_for(1002), 0);
@@ -2766,7 +2864,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.set_mesh(&two_tile_strip());
         assert_eq!(state.tile_count(), 1, "only tile 1001 exists up front");
 
@@ -2790,7 +2889,8 @@ mod tests {
             return;
         };
         // No mesh: even an out-of-[0,1] UV stays in 1001.
-        let mut bare = PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut bare = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         bare.begin_stroke(egui::pos2(1.5, 0.5));
         bare.end_stroke();
         assert_eq!(bare.tile_count(), 1);
@@ -2798,7 +2898,8 @@ mod tests {
 
         // Single-tile mesh: the UV view's u == 1.0 edge (tile_of_uv gives
         // 1002) must not spawn a blank tile.
-        let mut single = PaintState::new(device, queue).expect("paint state builds");
+        let mut single =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         single.set_mesh(&single_island_quad());
         drive_stroke(&mut single, [0.9, 0.5], [0.01, 0.0], 15);
         single.end_stroke();
@@ -2820,7 +2921,8 @@ mod tests {
         // two_island_quad's second island lives at UV ~10–11, which
         // tile_of_uv clamps to tile 1100: the mesh is multi-tile, and the
         // seam mirrors route there while the pointer stays in 1001.
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.set_mesh(&two_island_quad());
         drive_stroke(&mut state, NEAR_SEAM_UV, [0.02, 0.02], 16);
         state.end_stroke();
@@ -2906,12 +3008,13 @@ mod tests {
         };
         let (start, step) = ([0.2, 0.3], [0.0, 0.02]);
 
-        let mut manual =
-            PaintState::new(device.clone(), queue.clone()).expect("paint state builds");
+        let mut manual = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
         drive_stroke(&mut manual, start, step, 15);
         manual.end_stroke();
 
-        let mut replayed = PaintState::new(device, queue).expect("paint state builds");
+        let mut replayed =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         // Park a non-paint tool: the replay must restore it afterwards.
         let mut smudge_tool = BrushTool::Smudge(umber_brush::SmudgeParams::default());
         replayed.sync_tool(&mut smudge_tool);
@@ -2939,7 +3042,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         let mut short = PaintPath::new();
         short.push_point([0.5, 0.5], 1.0, 1.0, 1.0);
         assert!(!state.replay_path(&short, &PathOp::Paint));
@@ -2959,7 +3063,8 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         let path = straight_path([0.2, 0.5], [0.01, 0.0], 15);
         let batches = state.staged_batch_count();
         let op = PathOp::Smudge(umber_brush::SmudgeParams {
@@ -2979,12 +3084,58 @@ mod tests {
         // The eraser on a blank target is the exact identity (no writes,
         // no history) — while still replaying through its own consumer.
         let mut blank =
-            PaintState::new(state.device.clone(), state.queue.clone()).expect("paint state builds");
+            PaintState::with_target_size(state.device.clone(), state.queue.clone(), 512)
+                .expect("paint state builds");
         assert!(blank.replay_path(&path, &PathOp::Erase(umber_brush::EraseParams::default())));
         assert_eq!(blank.staged_batch_count(), 0);
         assert!(
             !blank.can_undo_stroke(),
             "an identity erase records nothing"
         );
+    }
+
+    // --- Paint-target size (CORE-LOOP CRITICAL 2) ---
+
+    /// `new` builds the 4096 default (the review's directive), and
+    /// `resize_target` round-trips 512→4096→512 exactly (each resize also
+    /// clears the stroke history — asserted here so a silent keep would
+    /// fail).
+    #[test]
+    fn new_defaults_to_4k_and_resize_round_trips() {
+        assert_eq!(
+            DEFAULT_TARGET_SIZE, 4096,
+            "the live paint target is 4K, not 512"
+        );
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        assert_eq!(state.target_size(), (4096, 4096));
+        assert_eq!(state.paint_target().dimensions(), (4096, 4096));
+
+        state.resize_target(512, 512);
+        assert_eq!(state.target_size(), (512, 512));
+        state.process_pending().expect("resize applies");
+        assert_eq!(state.paint_target().dimensions(), (512, 512));
+
+        state.resize_target(4096, 4096);
+        assert_eq!(state.target_size(), (4096, 4096));
+        state.process_pending().expect("resize applies");
+        assert_eq!(state.paint_target().dimensions(), (4096, 4096));
+
+        // The resize-clears-undo contract, on the record: a painted stroke
+        // followed by a resize leaves no entry behind.
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(
+            state.can_undo_stroke(),
+            "the setup stroke must record an entry (else the clear below is vacuous)"
+        );
+        state.resize_target(512, 512);
+        assert!(
+            !state.can_undo_stroke(),
+            "a resize must clear the stroke history (rects no longer fit)"
+        );
+        assert_eq!(state.target_size(), (512, 512));
     }
 }
