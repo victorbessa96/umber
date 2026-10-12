@@ -1,77 +1,110 @@
 # umber — State
 
 > Updated every wave. This file is the bridge across context windows. Read this first on any new session before deciding what to do.
+>
+> ARCHITECTURE NOTE: this file was rewritten 2026-10-12 (A1 of the core-loop
+> queue) from CURRENT TRUTH after the strategy review found it
+> self-contradictory (status line said "wave 3 of 6" while the handoff said
+> everything through wave 6 was built; Oct-9 overnight-grant language was
+> still live). The wave-history narrative lives in CHANGELOG.md and
+> DECISIONS.md; this file carries ONE current picture.
 
 ## Status line
 
-Current wave: **3 of 6** (bake & export pipeline complete; painting core from Wave 2 landed through the brush/layer/undo/viewport surface)
-State: WAVE-3-BAKE/EXPORT-COMPLETE
-Last checkpoint: Wave 1 @ 905a389 (exit 0, clean — 2026-10-09 09:28 UTC)
-Last green commit: 8b79e48 (README current; workspace 250+ tests green on both platforms)
+Current phase: **CORE-LOOP (post-strategy-review)** — the product spine
+(the six criticals on the one user path that matters) until Gate 0 passes.
+State: CORE-LOOP-IN-FLIGHT
+GUI chrome + all P2 work: FROZEN pending Gate 0 (Bessa lifts the freeze).
+SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate.
+No tag, no release, no v0.1 claim until Gate 0 passes.
 
-**WAVE-1-ACTIVATION (2026-10-09 03:25):** Bessa's /loop instruction ("continue working autonomously... writing the code and expanding until 11am") explicitly authorizes implementation past the ratification gate. Wave 1 opened under loop authorization with SPEC v1.0 as the working contract — ratification still pending; any Bessa edits at ratification rescope per the spec-change rule. Full trail: DECISIONS.md [03:25].
+## The core-loop queue (the ONLY active hunt)
 
-**RENAME 2026-10-09 02:41:** Patina → **Umber** (name-collision sweep found live USPTO marks + in-category Patina® Mac paint app; claw recommended Umber — no software trademark, no in-category product, on-theme: raw earth pigment containing iron oxide). Repo: **github.com/victorbessa96/umber** (old URL 301-redirects). Executed under overnight grant; **Bessa can revert on wake** — full trail in DECISIONS.md [02:41].
+The strategy review (docs/specs/2026-10-12-strategy-review.md, accepted in
+full by the dragon 2026-10-12, d3516c6) found six critical gaps on the user
+path. Queue truth and per-item state live in docs/loop/queue.md (single
+source of loop truth). Summary:
 
-**Overnight autonomy grant active** (Bessa asleep, granted 2026-10-09 02:15): take all decisions needed until wake. Green-light standing for everything except: (a) SPEC.md v1.0 remains DRAFT until Bessa ratifies, (b) .sbsar/.spp wall stays absolute, (c) license stays GPL-3.0-or-later.
+- B1 viewport texture binding (critical 1) — DONE (e802f92 + 9455885)
+- B2 4K live target + per-layer/per-channel routing (criticals 2+6) —
+  IN FLIGHT (tile pool + compositor landed; the live paint target is still
+  TARGET_SIZE=512, paint_state.rs:233 — the 4K wiring is the open gate)
+- B3 stroke undo journal (critical 3) — DONE (f78e6c1; smudge test
+  stacking contract pinned bed9e0a)
+- B4 pixel save/load (critical 4) — DONE (d834d77 + c999da6)
+- B5 pen pressure end-to-end (critical 5) — TODO (begin_stroke hardcodes
+  1.0; stylus crate has zero uses in umber-app; Linux first)
+- B6 Gate 0 journey test — TODO (FBX → 4K pressure paint → lit 3D →
+  undo/redo → save/reopen → export decode-verified)
 
-## Active wave
+Phase A (truth pass) is partial: A0's row corrections landed (d3516c6);
+A1 (this rewrite), A2 (roadmap reconciliation), A3 (docs sweep) close
+with the phase.
 
-**Name:** Wave 2 — Painting core (THE BIG ONE)
-**Goal:** Full brush engine (libmypaint-documented-semantics dynamics, one-euro + lazy mouse); seam-aware UV-rasterization stamping + golden-image harness; 3D-space stroke evaluation; layer stack + masks + per-channel blending (core 12 blend modes); undo journal; OCIO viewport; OpenPBR über-shader + conformance suite; bundled brush presets; tile-pool memory architecture foundation; .umber project format with CPU-path deterministic round-trip; HDR image import; history window; Windows dual stylus path (Ink + Wintab); 2D UV view; wireframe/grid overlays.
-**Entry state:** Wave 1 closed clean — see git log 342e8f1..905a389 and the checkpoint manifest.
-**Exit criteria (from SPEC Wave 2):** every item above lands with CI-green gates + cross-review; golden-image harness running on lavapipe/WARP; project round-trip byte-identical in CI.
+## Machine-load directive (standing)
 
-**Wave-1 progress (2026-10-09 03:25–05:57):**
-- [x] 11-crate workspace scaffolded — builds clean, clippy 0 warnings, fmt clean (ba9fecc)
-- [x] App binary verified live: window boots, wgpu enumerates Vulkan (Intel HD 530) + llvmpipe + GL adapters
-- [x] CLI verified end-to-end: OBJ inspect (3 verts/1 tri/bounds correct)
-- [x] CI workflow (ubuntu+windows matrix) + THIRD_PARTY.md license manifest (rfd + claw deps recorded)
-- [x] glTF/GLB/FBX loaders landed (opencode claw + 14-finding cross-review, fa393d2); real binary-FBX fixture (ufbx upstream cube) un-ignored and green
-- [x] wgpu viewport render pass landed (claude claw + 10-finding cross-review, 93e0140): OrbitCamera, WGSL normal-shaded pass, GpuContext/MeshBuffers/paint-callback, depth via NativeOptions::depth_buffer=32 (verified against vendored eframe source), 32B vertex pad, GPU tests 10/10 on real adapter
-- [x] **CI GREEN BOTH PLATFORMS on 93e0140** (windows-latest ✅ + ubuntu-latest ✅) — toolchain pin 1.97.0 + platform-agnostic tests held
-- [ ] IBL environment lighting (bundled env maps — viewport currently directional+ambient normal-shaded)
-- [ ] Stylus crate Windows-Ink backend skeleton (event vocabulary done; WM_POINTER backend feature-gated = not started)
-- [ ] Wave-1 checkpoint (dragon-checkpoint) once the two items above land
+One cargo command at a time, no gate stacking, never chained after other
+commands in the same shell line — stacked full-parallelism gates crashed
+Hermes (2026-10-12, Bessa's order). Local cargo budget: `cargo fmt --all`,
+`cargo clippy -p <crate> --all-targets -- -D warnings` per touched crate,
+ONE at a time. No local cargo build/test — CI (ubuntu+windows) is the
+runtime gate. Remote gate (centralhost 192.168.15.64, 16-core/31GB, RTX
+3070) is the sanctioned heavy-build path when reachable.
 
-**Claw lessons learned this wave (both claws hit sandbox walls, both rescued the same way):** headless opencode cannot read the cargo registry (auto-rejects external_directory); headless claude cannot WebFetch/cargo-doc without pre-approved allowlists. Fix pattern that worked: vendor the exact dependency sources into docs/claw-artifacts/<crate>/ with a verified-API-facts README, and pass --allowedTools explicitly on claude dispatches. Both rescued dispatches delivered full working code + honest LANDING_NOTES.
+## Claw dispatch recipe (proven)
 
-## Handoff addendum (next loop iteration)
+Vendor dependency sources into docs/claw-artifacts/<crate>/ + verified-API
+facts README before dispatch. opencode: brief points at the artifacts.
+claude: --allowedTools with cargo read/write allowlist. Cross-review by the
+OTHER claw. Never trust claw self-reports: verify from artifacts (fmt/
+clippy/test + behavioral probes) before committing. Claws never commit.
 
-**Wave-3 bake & export surface is code-complete** (2026-10-09, ending 8b79e48): six mesh-map bakers (AO/position/world-normal/curvature/thickness/tangent-normal, 71 GPU tests), 8-neighbor UV dilation, four engine presets (glTF/Unreal/Unity/Blender, JSON-roundtripping), the two-pass export driver (no partial exports, per-output color/data transfer, DirectX normal flip), format writers (PNG 8/16, EXR 32F, TIFF, JPEG), the §9 ocio bridge (stub-gated: built-in ACES 2.0 config surface, 9/9 with feature / 6/6 default), ICC iCCP embed (bundled sRGB profile, no lcms2), the headless CLI (inspect / bake-ao / bake-all --dilate / export --preset), and the egui app (Bakes panel, Export dialog, .umber Open/Save Project). Workspace 250+ tests green, CI both platforms every commit. Cross-review catches this wave: Bessa's sRGB-on-unit-vectors dilate fix (b5a2e2d), the claw brief-error rejections (Chebyshev square, DirectX fixed-point), the driver's partial-export hole.
-
-**Machine-load directive (2026-10-09 18:50, standing):** one cargo command at a time, no gate stacking, after stacked full-parallelism gates crashed Hermes. Claw dispatches must exclude files another session is editing.
-
-**Wave-4 progress (2026-10-09 23:32, FINAL for the evening):** ALL EIGHT ITEMS DONE — the full audit-driven re-prioritization executed in one evening. (1) seam-aware stamping (fb984d1 + aca7f8d + 7106a79; the time_ns fix revived production painting), (2) brush presets (f18a0ce + 57ce764 + 0d49d83), (3) properties panel (d58bdb4), (4) high→low transfer (057f9cf + bb9ec90 + 2cb7b08 — §3 closed, 8 bakers), (5) ID bake (ab1dec5) + bent normals (60324a4), (6) env-map IBL (8065908 — §5's P0 closed), (7) wireframe + grid (09eb4e9), (8) perf instrumentation (e4925a1 — first baselines: 4K stroke soak zero drops, P95 15ms). Evening totals: 18 commits, 15 claw kills all cross-reviewed, 6 brief errors caught by claws, 1 CI lint caught+fixed (4dde836). Test counts: mesh 22→43, gpu 37→46, app 27→41, brush 25→39, bake 48→70 CPU, core 31. CI green both platforms through 8065908; 09eb4e9 queued. Next session: wave-5 entry (node graph on umber-graph's DAG, UDIM, USD, async jobs, display panel + real-OCIO, specular IBL tier, per-texel TBN) — all wave-5 items named in the audit; wave-4's remaining dependency-weighted notes (painted-maps bridge, token sources) fold in as listed in the delivery audit.
-
-**WAVE-5 OPENED (2026-10-09 23:49):** the painted-maps export bridge LANDED (b1aa05a) — the delivery audit's remainder #1 + the token-sources row both closed: painted Base Color flows to export (decode-back can-fail test: the exported PNG MUST contain the painted pixels), the full TokenSources ($mesh/$layerName/$udim/$srcMap/$colorSpace) wired driver-side, the dialog shows its source honestly, the CLI path unchanged. Claw's corrections: PaintThread has NO background thread (same-thread readback is the honest pattern), the panel take()→as_deref_mut() fix so Export shares the live session. The app's core loop is WHOLE for the first time: paint → export → the PNG carries the paint.
-
-**WAVE-5 COMPLETE (2026-10-10 06:40):** the full named list shipped in one overnight-plus-morning run, ~20 claw kills across two clients (opencode for the graph slices, claude for the later ones after opencode's client wedged): (§4) the node graph — engine c7185e2 (typed Uniform/Image values, cached dirty eval, the run-counter proof) + .mtlx 2a5c1be (declared nodedefs, byte-identical round-trip) + the ~40-node set 2a/2b/2c (ddc62eb/8ec500c/e16a356) + app bridge abf04b6 (panel, three-way export source, persistence); TBN defer closed 388f661 (per-texel UV-derivative frame — after the first broad claw died on context length; the lean-brief doctrine born); specular IBL 05a5f1c (cone-scaled prefilter + Karis fit); UDIM complete — 82c694c/7d5251f/4346aa8/99a4cac/1cf058a/10cdffa (tile math, model, bake windows, paint routing, per-tile export with the collision-fix catch, tile UI); USD .usda a17e1c8 (hand parser, the last P1 format); async bake 7bf6140 (the FIRST real worker thread — PaintThread was a channel); display panel 956ecdd (viewer chain + persistence, CPU-honest). REMOTE BUILD MIGRATION mid-session per Bessa's directive: ALL cargo on centralhost (192.168.15.64, 16-core/31GB, rustc 1.97.0 installed, RTX 3070 discovered) — the flow: claw writes locally (cargo-free) -> rsync -> remote gate (VK_DRIVER_FILES=nvidia_icd.json + --test-threads=1 — the headless-NVIDIA parallel-device-request wedge, diagnosed+documented) -> fmt sync-back -> local commit. umber-app 59->101 tests; workspace green.
-
-**WAVE-6 COMPLETE (2026-10-10 09:52, head 7d2fcad):** the full named list shipped in one morning session — (1) the graph canvas ec0d9cc (the noodle editor: view affine, bezier noodles, the deterministic scatter, the full DragState machine — 22 pure-math tests; claude hit its session limit mid-write, the dragon finished the two lints and gated 127/127), (2) the CLI batch driver a6d297f (the JSON recipe: data-not-language, on_error stop/continue, the shared-internals refactor — 13 tests), (3) the WASM plugin arc 05f2e3c + 263df1f (wasmtime 50.0.0-rc.1 from the vendored artifacts, consume_fuel verified at config.rs:643, the wire format with the byte-identical SDK cross-check, three example plugins built on the remote's wasm32 target, the WASM-vs-native blur equivalence byte-for-byte, the app loader with first-registration-wins collisions, the mtlx heuristic gap the round-trip test caught — 28+9 tests), (4) cargo-dist packaging 18e8c46 (the release.yml workflow, MEASURED: app archive 11 MB = 7% of the 150 MB budget, installers ~50 KB; the release tag fires on Bessa's word), (5) i18n e493c60 (fluent 0.17, en-US + pt-BR catalogs compiled in, the honest fallback chain, the completeness grep — 145/145), (6) the AI agent session 7d2fcad (the JSONL loop over the batch vocabulary, error-then-continue, both exits clean — 17+6). INCIDENT + LESSON: one rsync-back lacked --exclude .git and the remote's partial .git rewound local refs mid-session — diagnosed via cat-file forensics, recovered on the true lineage, recorded as Pitfall 16 in hunt-loop-protocol (both-directions exclusion, never force-push this class). umber-app 101→145, umber-cli 13→17+6, umber-wasm 0→18, graph 74. ALL WAVES 0-6 NOW BUILT. The frontier past the named lists: the P2 rows (8K/PSD/MaterialX-export), the long-tail i18n, the .usdc reader, the perf baselines filling, the real-OCIO build — all tracked in the audit docs, none blocking.
-
-**Next items (RENEWED ROADMAP — full audit 2026-10-09 21:00, docs/specs/2026-10-09-full-project-audit.md):** the audit re-prioritized Wave 4 from the node graph to PAINTING COMPLETENESS — the thinnest P0 surface in the repo. Wave-4 order: (1) seam-aware stamping (§1 P0, unblocks §6 3D-neighbor padding), (2) brush presets (§1 P0), (3) brush properties panel (§11 P0), (4) high→low bake transfer (§3 P0 remainder: cage, match-by-name, height/normal-from-high), (5) ID bake + bent normals, (6) env-map IBL (§5 P0 shipped procedural-only), (7) wireframe/grid overlays, (8) the perf protocol (§12 — currently unmeasured targets; biggest honest gap). Wave 5: node graph (DAG exists in umber-graph), UDIM, USD, async jobs, display panel + real-OCIO. Wave 6: plugins/installers/i18n/CLI-scripting/AI hook. The prior wave-3 remainders (real-OCIO build, GPU display LUT, UV-derivative TBN, painted-maps bridge) fold into waves 4-5 as listed.
-
-Claw dispatch recipe (proven repeatedly): vendor dependency sources into docs/claw-artifacts/<crate>/ + verified-API-facts README before dispatch; opencode gets the brief pointing at the artifacts; claude gets --allowedTools with cargo read/write allowlist. Cross-review: the OTHER claw's model reviews each landing. Never trust claw self-reports: verify from artifacts (fmt/clippy/test + behavioral probes) before committing.
+**Claw lessons (both claws hit sandbox walls, both rescued the same way):**
+headless opencode cannot read the cargo registry (auto-rejects
+external_directory); headless claude cannot WebFetch/cargo-doc without
+pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
 
 ## Blocked / waiting
 
-None. Waiting only on background research claws (deleg_a2943965, 4 subagents).
-
-## Recent decisions affecting now
-
-See DECISIONS.md for all-time log. Last 3 inline:
-
-- [01:41] UI = egui on wgpu + egui_dock, custom stylus input layer, custom node canvas
-- [01:41] GPU = wgpu + WGSL, compute-first, naga_oil, hot-reload
-- [01:40] Name = Umber; License = GPL-3.0-or-later (MIT for standalone crates); Wave 1 = vertical slice MVP
+- B5's Windows Ink path: Windows-first CI gate applies; Linux path is
+  the queue item.
+- Remote build gate (centralhost) unreachable as of 2026-10-12 ~02:50
+  (ping + ssh dead). CI is the runtime gate until it returns.
+- Push-gate approval for wave pushes rides Bessa's word (Telegram or
+  in-session); the loop never flips it for itself.
 
 ## Handoff note (what the next session must know)
 
-**THE P1 TIER + THE CONVERGENCE (2026-10-11 overnight → 03:40, head c9a8482):** the loop extended to 23:59 Sunday per Bessa. THE P0 FLOOR CLOSED: all 57 rows built — the four-kill chain landed (fill layer 12124f3, view modes f1159d1, eraser+blend 21e1290), then the audit's last two gaps (wash mode 1c730da, GPU graph eval 8590ae2 — the hybrid split table). THE P1 TIER CLOSED IN ONE NIGHT (~30 kills): the smart layer tier 4cbaf21 (instancing+anchors+materials+masks), straight-line 33b796f, polygon fill 1329e8d, history window 9af4c2f, PWYS b2306c6, USD export 897e323 (runtime round-trip 8/8), bake UI 3733e5e, path tools cb3e435, mapimport 00ee9d7, merge-story a26d5e1, postfx (86e77ff+a523647+112b378), HDR eaa776a (the eframe boundary PROVEN in-module: no colorspace hook in 0.36), texsynth b0dba14 (the P1's last). THE CLAW PATTERN LIBRARY grew: the trap-gate (scripts/verify-kill.sh — brace balance, fmt auto-align, thiserror source-field trap, matches!-arity, doc-attachment; committed a26d5e1, fmt scoped .rs-only b6d5f7a); the wedge protocol (report-tail liveness reading, the reap+re-dispatch — claude's session cap → opencode mid-hunt, twice); the dragon-always-author rule (Pitfall 19 in hunt-loop-protocol: never idle between exits, work non-colliding surfaces). THE CI CONVERGENCE (12 rounds, each smaller): fmt debt → clippy derivable-impls/neg-cmp/type-complexity → too-many-args/lifetimes → the thiserror source-field trap → doc-lazy-continuation → redundant-guard → the P1-era app-crate cascade (E0596 mut bindings, E0507 moves, E0502 borrow-splits, the format-string field access, egui 0.36's DroppedFile::path METHOD) → the dead-code class resolved BY WIRING not deletion (FillLayerStates end-to-end 26aa671, the composite-aware publish + the skew trio's honest §6:57-v2 boundary c9a8482). THE GUI ROADMAP committed f3d86e4 (the nine-count indictment, the design language, the stranglehold pattern, four phases). IN FLIGHT at time of writing: the postfx viewport wiring (claude-capped pre-write, re-dispatched to opencode), GUI Phase 0a (the umber-gui crate), the curve-editor chrome.
+1. **Read docs/loop/loop-prompt.md first** — it is the loop contract
+   (rules, queue, iteration protocol, failure modes). Read
+   docs/loop/queue.md second — per-item state lives there.
+2. The four criticals landed as a commit chain in one evening
+   (e802f92 → bed9e0a). The CI red streak on their wake (5 reds:
+   compositor pin d1aeeb3-fixed, then the smudge test's stale one-entry
+   premise f78e6c1→9e4fb9e→bed9e0a) is closed: bed9e0a pushed, the
+   stacking contract (entries stack, one per stroke — sibling test
+   two_paint_strokes_undo_reverts_only_the_latest pins it) is the truth.
+3. B2 is the open kill: tile pool (1MiB/tile, 64MiB/layer-channel at 4K)
+   + compositor exist in umber-gpu, but the live paint target is still
+   512² (paint_state.rs:233 TARGET_SIZE). Wire 4K as the live target +
+   per-layer channel routing; the memory model is already prototyped in
+   the tilepool kill report (/tmp/umber-tilepool-*.json).
+4. The smudge-test lesson generalizes: when a feature changes a
+   cross-cutting invariant (every stroke = one history entry), grep the
+   test suite for every consumer of the OLD invariant before marking done.
+5. Kill-locks before dispatch (scripts/kill-locks.sh add|check|remove|list)
+   — no live locks; zero claws running as of this write.
+6. 599+ tests green on both platforms pre-core-loop-phase; expect the
+   count to move as B2/B5/B6 land.
 
-**Wave 0 is functionally complete.** All 5 research reports in docs/research/ (01 Painter inventory, 02 competitors + name sweep, 03 Rust ecosystem, 04 next-gen P0/P1/P2, 05 brush-engine architecture). Consolidation docs written: docs/specs/requirements.md (12 sections, P0/P1/P2 + wave tags), tech-stack.md (crate table + 3 budget-to-own bets + workspace shape), architecture.md (threading model, paint data flow, VT, project format, bus-factor defense). SPEC.md is at **v1.0 DRAFT with a ratification block for Bessa** — DO NOT start Wave 1 coding until he ticks the block. Do not re-run research; it is done.
+## History pointers (audit trail, preserved deliberately)
 
-On Bessa's wake: (1) he reads SPEC.md ratification block, (2) any edits → apply → re-check, (3) ratified → dragon-checkpoint umber --wave 0, (4) Wave 1 opens (workspace skeleton via rust-workspace-greenfield skill; claws opencode/claude available for implementation with cross-review per standing rule). Rename Patina→Umber was executed overnight under autonomy grant — he may revert (DECISIONS.md [02:41] has the one-command path).
-
-**Public repo: https://github.com/victorbessa96/umber** (old patina URL 301s). Community files, topics, discussions, wave-tracker issues #1–7 all live. Overnight autonomy grant (2026-10-09 02:15) remains active until Bessa wakes.
+- docs/specs/2026-10-09-full-project-audit.md — the full-project audit
+- docs/specs/2026-10-12-strategy-review.md — the adversarial review that
+  re-cut the roadmap around the six criticals (claude-opus, preserved
+  verbatim + the dragon's disposition)
+- DECISIONS.md — append-only, all-time decision log
+- CHANGELOG.md — the wave-by-wave build history (waves 0-6 + frontier)
+- Public repo: https://github.com/victorbessa96/umber (old patina URL 301s)
+- Rename trail: Patina → Umber (2026-10-09, DECISIONS.md [02:41]; Bessa
+  can revert — full trail there)

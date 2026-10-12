@@ -6,6 +6,20 @@ the source of truth.
 
 ## [Unreleased]
 
+### Core-loop phase — the user-path spine (2026-10-12, in flight)
+
+The strategy review (docs/specs/2026-10-12-strategy-review.md) found the
+engine crates real but the user-path joins missing; GUI/P2 frozen until
+Gate 0 (the journey test) passes. The six criticals, in queue order:
+
+- Strategy review + truth pass begins — six rows corrected (`d3516c6`)
+- Viewport texture binding + per-layer compositor — criticals 1+6 (`e802f92`)
+- App wires the viewport bind — paint reaches the screen (`9455885`)
+- Stroke undo journal — critical 3; every stroke one entry, v1 clear() dies (`f78e6c1`)
+- Compositor alpha is straight-alpha-over — CI's pin caught the divergent form (`d1aeeb3`)
+- Pixel save/load — critical 4; painted maps persist through the AssetStore, reopen loses nothing (`d834d77`)
+- Smudge test pins the stacking contract — 4-red streak root-caused: entries stack, one per stroke (`bed9e0a`)
+
 ### Wave 4 — painting completeness (2026-10-09/10)
 
 The brush engine's professional floor: seam-aware stamping, presets,
