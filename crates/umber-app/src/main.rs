@@ -48,15 +48,24 @@
 //!   atomic commit for both is deferred.
 //! * Save prunes `tile-*.png` files for tiles the session no longer holds,
 //!   so a re-save into a project dir never resurrects a dropped tile.
-//! * The session target size rides in `<project>/paint/target_size.txt`
-//!   (`"{width}x{height}"`), written on every save even with zero tiles
-//!   (a 4K choice with no paint yet survives the round trip). Open restores
-//!   it only when no tile PNGs exist — with pixels, the PNG dims lead, so
-//!   the bytes always fit the target they land in; a missing/unparseable
-//!   file keeps the live size. Any positive dims round-trip: the UI offers
-//!   squares only, but clamping a stored size down would drop pixels
-//!   silently. A sidecar file (not `project.json`) for the same
-//!   schema-ownership reason as the pixels above.
+//! * The per-set paint sizes ride in `<project>/paint/target_sizes.txt`
+//!   (v2: one `<set>=<width>x<height>` line per sized set plus one
+//!   `tile-<N>=<set>` assignment line per saved tile; `#` comments and
+//!   blank lines skipped). The v1 `<project>/paint/target_size.txt`
+//!   global is still written (the active set's size, for old readers) and
+//!   still read: a v1 project (tiles + global, no mapping) opens with its
+//!   global applied to every set (the migration — see `load_paint_tiles`).
+//!   With pixels, the PNG dims lead per tile: a tile whose PNG disagrees
+//!   with its set's size is SKIPPED loudly (warn log + the load report's
+//!   skip list), never silently resampled or torn. Any positive dims
+//!   round-trip: the UI offers squares only, but clamping a stored size
+//!   down would drop pixels silently. Sidecar files (not `project.json`)
+//!   for the same schema-ownership reason as the pixels above.
+//! * Save writes sizes for sets holding saved tiles plus the active set
+//!   (a size choice with no paint yet survives the round trip); sets the
+//!   session only ever read from an old mapping (no tiles, never
+//!   activated) are not rewritten — activating a set to edit it always
+//!   re-registers it first.
 
 mod bake_sources;
 mod bakes_panel;
@@ -260,7 +269,11 @@ impl TabViewer for PanelViewer<'_> {
                 }
             }
             Panel::TextureSets => {
-                texture_sets_panel_ui(ui, self.paint.as_deref_mut());
+                texture_sets_panel_ui(
+                    ui,
+                    self.paint.as_deref_mut(),
+                    self.mesh_import.session_set.name.as_str(),
+                );
             }
             Panel::Bakes => {
                 let ctx = BakesContext {
@@ -554,9 +567,14 @@ impl UmberApp {
                 match self.state.viewport.load_mesh(&self.gpu, &mesh) {
                     Ok(()) => {
                         // The import session set follows the mesh's set
-                        // name (channels kept).
+                        // name (channels kept); the paint session's active
+                        // set follows it too (new tiles join the mesh's
+                        // set — existing tiles keep their sets).
                         let set_name = umber_mesh::texture_set_name(&path, &mesh);
                         self.state.mesh_import.retarget_set(&set_name);
+                        if let Some(paint) = self.state.paint.as_mut() {
+                            paint.set_active_set(&set_name);
+                        }
                         self.state.mesh = Some(mesh);
                         self.state.mesh_path = Some(path);
                         log::info!("loaded mesh: {n} vertices");
@@ -716,34 +734,155 @@ fn parse_paint_tile_name(name: &str) -> Option<u16> {
     rest.parse::<u16>().ok()
 }
 
-/// The Texture Sets panel's paint-target size section (CORE-LOOP CRITICAL 2,
-/// the 2026-10-12 strategy review): the shared `SIZE_PRESETS` combo
-/// (512..8K — the same list the Bakes panel and the Export dialog offer)
-/// routed to [`paint_state::PaintState::resize_target`] on change. The
-/// resize is INTENTIONAL-clear (canvas contents, stroke-undo history and
-/// quick mask all reset — see `resize_target`): the hint string names it,
-/// so a size change is never a silent undo loss. The choice persists in
-/// the project (`target_size.txt` — see [`save_paint_tiles`]).
+/// The sidecar file holding the PER-SET paint-target sizes
+/// (`<project>/paint/target_sizes.txt`): one `<set>=<width>x<height>`
+/// line per sized set plus one `tile-<N>=<set>` assignment line per saved
+/// tile (see the module docs). Written on every save alongside the legacy
+/// global below.
+fn paint_set_sizes_path(project_dir: &Path) -> PathBuf {
+    paint_sidecar_dir(project_dir).join("target_sizes.txt")
+}
+
+/// The parsed `target_sizes.txt`: set sizes plus tile assignments (both
+/// may be empty — an empty mapping means "no per-set information", and
+/// the load path falls back to the legacy global).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PaintSetSizes {
+    /// Set name → `(width, height)`, sorted (BTreeMap wire order keeps
+    /// saves byte-deterministic).
+    sizes: std::collections::BTreeMap<String, (u32, u32)>,
+    /// Tile id → set name, sorted.
+    tiles: std::collections::BTreeMap<u16, String>,
+}
+
+/// Formats [`PaintSetSizes`] for `target_sizes.txt`: size lines first
+/// (sorted by set name), then tile assignments (sorted by tile). A `#`
+/// header names the version so a future format can branch on it.
+fn format_paint_set_sizes(mapping: &PaintSetSizes) -> String {
+    let mut out = String::from("# Umber paint-set sizes v1\n");
+    for (name, (width, height)) in &mapping.sizes {
+        out.push_str(&format!("{name}={width}x{height}\n"));
+    }
+    for (tile, set) in &mapping.tiles {
+        out.push_str(&format!("tile-{tile}={set}\n"));
+    }
+    out
+}
+
+/// Parses [`format_paint_set_sizes`]'s output; `None` (no mapping — the
+/// load path falls back to the legacy global) when NOTHING parsed, even
+/// if the file exists but holds only comments/garbage. Malformed lines
+/// are skipped (never a panic, never a zero-size target). The `tile-<N>`
+/// prefix is RESERVED for assignments: a set literally named `tile-1002`
+/// cannot be sized through this file (its line parses as an assignment) —
+/// set names are mesh/material-derived, so this never triggers in
+/// practice, and the load path never strands a tile over it (an
+/// assignment to an unknown name registers that name at the default size).
+fn parse_paint_set_sizes(text: &str) -> Option<PaintSetSizes> {
+    let mut mapping = PaintSetSizes::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((left, right)) = line.split_once('=') else {
+            continue;
+        };
+        let (left, right) = (left.trim(), right.trim());
+        if let Some(tile) = left
+            .strip_prefix("tile-")
+            .and_then(|n| n.parse::<u16>().ok())
+        {
+            if !right.is_empty() {
+                mapping.tiles.insert(tile, right.to_string());
+            }
+            continue;
+        }
+        if left.is_empty() || right.is_empty() {
+            continue;
+        }
+        if let Some((width, height)) = parse_paint_target_size(right) {
+            mapping.sizes.insert(left.to_string(), (width, height));
+        }
+    }
+    (!mapping.sizes.is_empty() || !mapping.tiles.is_empty()).then_some(mapping)
+}
+
+/// One tile the open path refused to restore: its PNG's dims disagree
+/// with its set's size (see `load_paint_tiles_reported`). Loud by
+/// construction — the report is logged and returned, never swallowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaintTileSkip {
+    /// The refused tile.
+    tile: u16,
+    /// The set's size the tile was expected at.
+    expected: (u32, u32),
+    /// The PNG's actual dims.
+    found: (u32, u32),
+}
+
+/// What `load_paint_tiles_reported` restored and what it refused.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PaintLoadReport {
+    /// Tiles uploaded byte-identically.
+    restored: usize,
+    /// Tiles skipped for size mismatch (loud — logged per tile).
+    skipped: Vec<PaintTileSkip>,
+}
+
+/// The Texture Sets panel's per-set paint-target size section (CORE-LOOP
+/// CRITICAL 2, the 2026-10-12 strategy review): one selectable row per
+/// known set (the session set is always listed — mesh load retargets it),
+/// and the shared `SIZE_PRESETS` combo (512..8K — the same list the Bakes
+/// panel and the Export dialog offer) editing the SELECTED set's size
+/// through [`paint_state::PaintState::resize_set`]. Selecting a set also
+/// activates it (new tiles join it; the mask rows read it). The resize is
+/// INTENTIONAL-clear (that set's canvas, the session stroke-undo history
+/// and that set's quick mask all reset — see `resize_set`): the hint
+/// string names it per set, so a size change is never a silent undo loss.
+/// The choice persists per set (`target_sizes.txt` — see
+/// [`save_paint_tiles`]).
 ///
-/// V1 boundary: ONE session size shared by every tile (the review's
-/// per-texture-set size is the named follow-up, alongside the per-layer
-/// tile pool). The combo is square-only: a non-square session (only a
-/// hand-edited project can produce one) shows its width, and picking any
-/// row normalizes it to that square. No paint session (no GPU target)
-/// shows the unavailable string instead of the combo.
-fn texture_sets_panel_ui(ui: &mut Ui, paint: Option<&mut paint_state::PaintState>) {
+/// Single-set sessions (everything today: one mesh, one session set) show
+/// one row and behave exactly as the v1 global combo did. No paint session
+/// (no GPU target) shows the unavailable string instead of the rows.
+fn texture_sets_panel_ui(
+    ui: &mut Ui,
+    paint: Option<&mut paint_state::PaintState>,
+    session_set: &str,
+) {
     let Some(paint) = paint else {
         ui.label(tr("texturesets.no-paint"));
         return;
     };
-    let (width, height) = paint.target_size();
+    paint.ensure_set(session_set);
+    // Selection first (owned, so the borrow ends before the size combo
+    // and the activation mutate the session below).
+    let mut active = paint.active_set().to_string();
+    let sets = paint.set_names();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(tr("texturesets.set"));
+        for name in &sets {
+            let (width, height) = paint.size_of_set(name);
+            let tiles = paint.tiles_of_set(name).len();
+            ui.selectable_value(
+                &mut active,
+                name.clone(),
+                format!("{name} ({width}×{height}, {tiles})"),
+            );
+        }
+    });
+    if active != paint.active_set() {
+        paint.set_active_set(&active);
+    }
+    let (width, height) = paint.size_of_set(&active);
     let mut size = width;
     ui.horizontal(|ui| {
         ui.label(tr("texturesets.size"));
         size_presets::size_combo(ui, "", &mut size);
     });
     if (size, size) != (width, height) {
-        paint.resize_target(size, size);
+        paint.resize_set(&active, size, size);
     }
     ui.label(tr("texturesets.resize-clears"));
 }
@@ -778,18 +917,43 @@ fn flip_rows_vertical(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 /// stroke-undo capture uses. Prunes `tile-*.png` files for tiles the
 /// session no longer holds, then returns how many tiles were stored.
 fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
-    // The session size rides along even with zero tiles (a 4K choice with
-    // no paint yet must survive the round trip); a write failure logs but
-    // keeps the metadata save (same torn-save window as the pixels).
+    // The session sizes ride along even with zero tiles (a size choice
+    // with no paint yet must survive the round trip); a write failure logs
+    // but keeps the metadata save (same torn-save window as the pixels).
     if let Err(e) = std::fs::create_dir_all(paint_sidecar_dir(project_dir)) {
         log::warn!("paint save: sidecar dir not created: {e:#}");
     } else {
+        // The legacy global (the active set's size — old readers apply one
+        // size to every tile, and with pixels the PNG dims lead anyway).
         let (width, height) = paint.target_size();
         if let Err(e) = std::fs::write(
             paint_target_size_path(project_dir),
             format_paint_target_size(width, height),
         ) {
             log::warn!("paint save: target size not stored: {e:#}");
+        }
+        // The per-set mapping: sizes for every set holding a saved tile
+        // plus the active set (a chooser with no paint yet survives), and
+        // one assignment line per saved tile. Sorted by construction
+        // (BTreeMap), so saves are byte-deterministic.
+        let tiles = paint.tiles_present();
+        let mut mapping = PaintSetSizes::default();
+        for tile in &tiles {
+            let set = paint.set_of_tile(*tile).to_string();
+            mapping.tiles.insert(*tile, set.clone());
+            mapping.sizes.insert(set, paint.tile_size(*tile));
+        }
+        let active = paint.active_set().to_string();
+        if !mapping.sizes.contains_key(&active) {
+            mapping
+                .sizes
+                .insert(active.clone(), paint.size_of_set(&active));
+        }
+        if let Err(e) = std::fs::write(
+            paint_set_sizes_path(project_dir),
+            format_paint_set_sizes(&mapping),
+        ) {
+            log::warn!("paint save: set sizes not stored: {e:#}");
         }
     }
     let mut saved = 0usize;
@@ -833,18 +997,32 @@ fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> 
 /// `WriteRegion` queue path (`PaintState::publish_fill` — the same call
 /// the fill-layer refresh uses, one full-tile write per tile, in FIFO
 /// order). Decodes each `tile-<N>.png`, flips it back out of the PNG
-/// reader's row order, resizes the session to the saved dims first (the
-/// resize drops the old contents and clears the session-scoped
-/// stroke-undo history with them), then drains so the pixels have landed
-/// before returning. Tiles whose dims disagree with the first tile's are
-/// skipped with a log (v1 keeps one size for all tiles). A project with
-/// no sidecar clears the session to transparent instead of keeping the
-/// previous document's pixels. Returns how many tiles were restored.
+/// reader's row order, applies the stored sizes first (each resize drops
+/// the old contents and the session-scoped stroke-undo history clears
+/// with the first one, so no stale rect can undo against the restored
+/// pixels), then drains so the pixels have landed before returning.
+///
+/// Per-set sizes come from `target_sizes.txt` when present (authoritative:
+/// each tile must match ITS set's size); without it the v1 shape holds —
+/// every tile joins the active set at the first tile's dims, and the
+/// legacy `target_size.txt` global only matters with no tiles (applied to
+/// every set — the v1→v2 migration). Tiles whose dims disagree with their
+/// set's size are skipped LOUDLY (warn log plus the report's skip list —
+/// never a silent resample). A project with no sidecar tiles clears the
+/// session to transparent instead of keeping the previous document's
+/// pixels. Returns how many tiles were restored and what was refused.
 fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
+    load_paint_tiles_reported(paint, project_dir).restored
+}
+
+fn load_paint_tiles_reported(
+    paint: &mut paint_state::PaintState,
+    project_dir: &Path,
+) -> PaintLoadReport {
     let dir = paint_sidecar_dir(project_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(_) => return 0,
+        Err(_) => return PaintLoadReport::default(),
     };
     let mut tiles: Vec<(u16, u32, u32, Vec<u8>)> = Vec::new();
     for entry in entries.flatten() {
@@ -867,41 +1045,118 @@ fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> 
             ),
         }
     }
+    let mapping = std::fs::read_to_string(paint_set_sizes_path(project_dir))
+        .ok()
+        .and_then(|text| parse_paint_set_sizes(&text));
+    let active = paint.active_set().to_string();
     if tiles.is_empty() {
         // No paint persisted: the newly opened document must not show the
         // previous document's pixels (the layer stack is replaced
-        // wholesale on open; the paint follows the same rule). The session
-        // resizes to the SAVED size when the sidecar stored one (a 4K
-        // choice with no paint yet survives the round trip); a
-        // missing/unparseable file keeps the live size — the clear still
-        // runs either way.
-        let (width, height) = std::fs::read_to_string(paint_target_size_path(project_dir))
-            .ok()
-            .and_then(|text| parse_paint_target_size(&text))
-            .unwrap_or_else(|| paint.target_size());
-        paint.resize_target(width, height);
+        // wholesale on open; the paint follows the same rule).
+        match &mapping {
+            Some(known) => {
+                // Every known set goes to its mapped size (unmapped sets
+                // resize to their live size — the resize still drops their
+                // stale contents); a missing/unparseable mapping degrades
+                // below, never a panic. Assignment-only sets (a tile line
+                // with no size line) join the resize at the default size,
+                // so no previous document's pixels survive on them either.
+                let mut names = paint.set_names();
+                for name in known.sizes.keys().chain(known.tiles.values()) {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                }
+                for name in &names {
+                    let (width, height) = known
+                        .sizes
+                        .get(name)
+                        .copied()
+                        .unwrap_or_else(|| paint.size_of_set(name));
+                    paint.resize_set(name, width, height);
+                }
+            }
+            None => {
+                // The v1 shape: the saved global (or the live size when the
+                // sidecar stored none) applies to EVERY set — the
+                // migration. Either way the pool is dropped: the clear
+                // still runs.
+                let (width, height) = std::fs::read_to_string(paint_target_size_path(project_dir))
+                    .ok()
+                    .and_then(|text| parse_paint_target_size(&text))
+                    .unwrap_or_else(|| paint.target_size());
+                for name in paint.set_names() {
+                    paint.resize_set(&name, width, height);
+                }
+            }
+        }
         if let Err(e) = paint.process_pending() {
             log::warn!("paint open: clearing the session failed: {e:#}");
         }
-        return 0;
+        return PaintLoadReport::default();
     }
     tiles.sort_by_key(|entry| entry.0);
-    let (first_width, first_height) = (tiles[0].1, tiles[0].2);
-    paint.resize_target(first_width, first_height);
+    match &mapping {
+        Some(known) => {
+            // The mapping is authoritative: every known set goes to its
+            // mapped size first (unmapped sets resize to their live size,
+            // dropping stale pixels), then assignments re-derive from the
+            // sidecar so a previous document's sets never steer this one.
+            let mut names = paint.set_names();
+            for name in known.sizes.keys().chain(known.tiles.values()) {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+            for name in &names {
+                let (width, height) = known
+                    .sizes
+                    .get(name)
+                    .copied()
+                    .unwrap_or_else(|| paint.size_of_set(name));
+                paint.resize_set(name, width, height);
+            }
+            paint.clear_tile_assignments();
+            for (tile, set) in &known.tiles {
+                paint.assign_tile_to_set(*tile, set);
+            }
+        }
+        None => {
+            // The v1 shape, byte-identical: every tile joins the active
+            // set and the first tile's dims lead (a resize drops the old
+            // contents and clears the session-scoped stroke-undo history
+            // with them).
+            paint.clear_tile_assignments();
+            for (tile, _, _, _) in &tiles {
+                paint.assign_tile_to_set(*tile, &active);
+            }
+            let (first_width, first_height) = (tiles[0].1, tiles[0].2);
+            paint.resize_set(&active, first_width, first_height);
+        }
+    }
     if let Err(e) = paint.process_pending() {
         log::warn!("paint open: resize to the saved size failed: {e:#}");
-        return 0;
+        return PaintLoadReport::default();
     }
-    let mut restored = 0usize;
+    let mut report = PaintLoadReport::default();
     for (tile, width, height, bytes) in tiles {
-        if (width, height) != (first_width, first_height) {
-            log::warn!(
-                "paint open: tile {tile} is {width}x{height}, want {first_width}x{first_height}; skipping"
-            );
+        // Tiles the mapping never assigned resolve to the active set;
+        // recording the resolution keeps the next save's mapping exact.
+        let set = paint.set_of_tile(tile).to_string();
+        paint.assign_tile_to_set(tile, &set);
+        let expected = paint.tile_size(tile);
+        if (width, height) != expected {
+            let (ew, eh) = expected;
+            log::warn!("paint open: tile {tile} is {width}x{height}, want {ew}x{eh}; skipping");
+            report.skipped.push(PaintTileSkip {
+                tile,
+                expected,
+                found: (width, height),
+            });
             continue;
         }
         if paint.publish_fill(tile, width, height, bytes) {
-            restored += 1;
+            report.restored += 1;
         } else {
             log::warn!("paint open: tile {tile} upload failed; skipping");
         }
@@ -909,7 +1164,7 @@ fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> 
     if let Err(e) = paint.process_pending() {
         log::warn!("paint open: upload drain failed: {e:#}");
     }
-    restored
+    report
 }
 
 impl UmberApp {
@@ -937,8 +1192,13 @@ impl UmberApp {
             return;
         };
         // Keep the import session set (and its user channels) as the saved
-        // set: a rename keeps channels (see `retarget_set`).
+        // set: a rename keeps channels (see `retarget_set`). The paint
+        // session's active set follows it (the saved set is the session
+        // set — the mapping's active entry names it).
         self.state.mesh_import.retarget_set(&set_name);
+        if let Some(paint) = self.state.paint.as_mut() {
+            paint.set_active_set(&set_name);
+        }
         let texture_set = self.state.mesh_import.session_set.clone();
         let graphs_mtlx = if self.state.graph.graph().nodes.is_empty() {
             Vec::new()
@@ -1020,12 +1280,17 @@ impl UmberApp {
                 // The import session set restores the saved set wholesale
                 // (channels included — user channels from earlier imports
                 // survive the open); unknown-name fallback is the default.
+                // The paint session's active set follows it (new tiles join
+                // the opened set; the sidecar re-derives the rest).
                 if let Some(saved) = model.texture_sets.iter().find(|ts| ts.name == name) {
                     self.state.mesh_import.set_session_set(saved.clone());
                 } else {
                     self.state
                         .mesh_import
                         .set_session_set(umber_core::TextureSet::new_default(&name));
+                }
+                if let Some(paint) = self.state.paint.as_mut() {
+                    paint.set_active_set(&name);
                 }
                 self.state.project_dir = Some(dir.clone());
                 // `load_from_dir` already replayed + truncated any journal
@@ -1561,6 +1826,266 @@ mod paint_persistence_tests {
         assert_eq!(
             after.data, before.data,
             "save→load must restore byte-identical texels"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_sizes_codec_round_trips_exactly_and_rejects_garbage() {
+        // Sizes sorted by set name, then assignments sorted by tile — the
+        // save is byte-deterministic, so the exact text is pinned (not a
+        // contains-check — a reordered save would fail).
+        let mut mapping = PaintSetSizes::default();
+        mapping.sizes.insert("Sword".to_string(), (4096, 4096));
+        mapping.sizes.insert("Shield".to_string(), (2048, 1024));
+        mapping.tiles.insert(1002, "Shield".to_string());
+        let text = format_paint_set_sizes(&mapping);
+        assert_eq!(
+            text,
+            "# Umber paint-set sizes v1\nShield=2048x1024\nSword=4096x4096\ntile-1002=Shield\n"
+        );
+        assert_eq!(parse_paint_set_sizes(&text), Some(mapping));
+        // A stored non-square survives (the load path honors stored dims —
+        // only the UI is square-only).
+        assert_eq!(
+            parse_paint_set_sizes("Shield=2048x1024\n"),
+            Some(PaintSetSizes {
+                sizes: std::collections::BTreeMap::from([("Shield".to_string(), (2048, 1024))]),
+                tiles: std::collections::BTreeMap::new(),
+            })
+        );
+        // Comments, blanks and malformed lines skip; the tile- prefix is
+        // reserved for assignments even when the right side is a size.
+        let mixed = "# header\n\nSword=512x512\nbogus\n=512x512\nA=\nA=0x512\ntile-1002=Sword\n";
+        let parsed = parse_paint_set_sizes(mixed).expect("one size + one assignment parse");
+        assert_eq!(parsed.sizes.len(), 1);
+        assert_eq!(parsed.sizes.get("Sword"), Some(&(512, 512)));
+        assert_eq!(parsed.tiles.get(&1002), Some(&"Sword".to_string()));
+        // Nothing parseable at all degrades to None (the load path falls
+        // back to the legacy global): empty, comments-only, and every
+        // malformed shape.
+        for bad in [
+            "",
+            "# only a comment\n\n",
+            "no-equals-here\n",
+            "=512x512\n",
+            "A=\n",
+            "A=0x512\n",
+            "tile-abc=X\n",
+            "tile-=X\n",
+        ] {
+            assert_eq!(
+                parse_paint_set_sizes(bad),
+                None,
+                "{bad:?} must yield no mapping"
+            );
+        }
+        assert_eq!(
+            paint_set_sizes_path(Path::new("/p")),
+            PathBuf::from("/p/paint/target_sizes.txt")
+        );
+    }
+
+    /// Deterministic RGBA8 pattern: texel `(x, y)` channel `c` holds
+    /// `(x*31 + y*17 + c*71 + seed) mod 251` (251 is prime, so the values
+    /// spread; the seed tells two sets' paint apart).
+    fn pattern_bytes(width: u32, height: u32, seed: u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                for c in 0..4u32 {
+                    out.push(((x * 31 + y * 17 + c * 71 + u32::from(seed)) % 251) as u8);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn two_sets_at_different_sizes_round_trip_byte_identical_per_set() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // Set A ("Body") at 2048, set B ("Cloak") at 4096 — the audit's
+        // gate: two sets, two sizes, one session.
+        let mut paint =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("paint builds");
+        paint.set_active_set("Body");
+        paint.resize_set("Body", 2048, 2048);
+        paint.ensure_set("Cloak");
+        assert_eq!(paint.size_of_set("Cloak"), (4096, 4096));
+        paint.assign_tile_to_set(1002, "Cloak");
+
+        let before_a = pattern_bytes(2048, 2048, 3);
+        let before_b = pattern_bytes(4096, 4096, 77);
+        // Can-fail guards against a vacuous pass: the patterns are
+        // non-blank and distinct, and the (0,0) texels pin the formula
+        // exactly (seed 3 → [3, 74, 145, 216]; seed 77 → [77, 148, 219, 39]).
+        assert_eq!(&before_a[..4], &[3u8, 74, 145, 216]);
+        assert_eq!(&before_b[..4], &[77u8, 148, 219, 39]);
+        assert_ne!(before_a[..64], before_b[..64]);
+        assert!(before_a.iter().any(|&b| b != 0));
+
+        assert!(paint.publish_fill(1001, 2048, 2048, before_a.clone()));
+        assert!(paint.publish_fill(1002, 4096, 4096, before_b.clone()));
+        paint.process_pending().expect("uploads land");
+        for (tile, bytes, (w, h)) in [
+            (&1001u16, &before_a, (2048u32, 2048u32)),
+            (&1002u16, &before_b, (4096u32, 4096u32)),
+        ] {
+            let image = paint.read_tile(*tile).expect("readback succeeds");
+            assert_eq!((image.width, image.height), (w, h));
+            assert_eq!(&image.data, bytes, "tile {tile} stages its set's bytes");
+        }
+
+        let dir = unique_temp_dir("perset-roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_paint_tiles(&mut paint, &dir);
+        assert_eq!(saved, 2, "both sets' tiles persist");
+        assert!(paint_tile_path(&dir, 1001).exists());
+        assert!(paint_tile_path(&dir, 1002).exists());
+        // The mapping is byte-exact (sorted sizes, then sorted tiles);
+        // the legacy global still carries the active ("Body") size.
+        let mapping_text = std::fs::read_to_string(paint_set_sizes_path(&dir)).unwrap();
+        assert_eq!(
+            mapping_text,
+            "# Umber paint-set sizes v1\nBody=2048x2048\nCloak=4096x4096\ntile-1001=Body\ntile-1002=Cloak\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paint_target_size_path(&dir)).unwrap(),
+            "2048x2048"
+        );
+
+        // Reopen in a fresh session (default set, 4K): each set's paint
+        // restores byte-identical AT ITS size — the load path re-derives
+        // sizes and assignments from the mapping, not from the live state.
+        let mut fresh = paint_state::PaintState::new(device.clone(), queue.clone())
+            .expect("fresh paint state builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 2,
+                skipped: Vec::new(),
+            }
+        );
+        assert_eq!(fresh.size_of_set("Body"), (2048, 2048));
+        assert_eq!(fresh.size_of_set("Cloak"), (4096, 4096));
+        assert_eq!(fresh.set_of_tile(1001), "Body");
+        assert_eq!(fresh.set_of_tile(1002), "Cloak");
+        let after_a = fresh.read_tile(1001).expect("tile 1001 reads back");
+        assert_eq!((after_a.width, after_a.height), (2048, 2048));
+        assert_eq!(
+            after_a.data, before_a,
+            "set A restores byte-identical at 2048"
+        );
+        let after_b = fresh.read_tile(1002).expect("tile 1002 reads back");
+        assert_eq!((after_b.width, after_b.height), (4096, 4096));
+        assert_eq!(
+            after_b.data, before_b,
+            "set B restores byte-identical at 4096"
+        );
+
+        // A size-mismatched restore fails LOUDLY: clobber tile 1002's PNG
+        // with 512² bytes (its set says 4096²) and reopen — tile 1001
+        // still restores, 1002 is refused with its expected/found dims on
+        // the record (never silently resampled).
+        let wrong = pattern_bytes(512, 512, 9);
+        umber_export::png::write_png(
+            &paint_tile_path(&dir, 1002),
+            512,
+            512,
+            &wrong,
+            umber_export::png::Transfer::Linear,
+        )
+        .expect("clobber writes");
+        let mut mismatch =
+            paint_state::PaintState::new(device, queue).expect("mismatch session builds");
+        let report = load_paint_tiles_reported(&mut mismatch, &dir);
+        assert_eq!(report.restored, 1, "only the matching tile restores");
+        assert_eq!(
+            report.skipped,
+            vec![PaintTileSkip {
+                tile: 1002,
+                expected: (4096, 4096),
+                found: (512, 512),
+            }],
+            "the mismatch is on the record with exact dims"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_project_without_mapping_migrates_its_global_to_every_set() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // A v1-shaped project: 512² tile PNGs + the global, NO mapping.
+        // Saved through the real save path, then the mapping deleted (a v1
+        // build never wrote one). Note v1 stored no set NAMES — only the
+        // global size migrates; tiles join the opening session's active set.
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        paint.set_active_set("Body");
+        let before = pattern_bytes(512, 512, 11);
+        assert_eq!(&before[..4], &[11u8, 82, 153, 224]);
+        assert!(paint.publish_fill(1001, 512, 512, before.clone()));
+        paint.process_pending().expect("upload lands");
+
+        let dir = unique_temp_dir("legacy-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
+        std::fs::remove_file(paint_set_sizes_path(&dir)).expect("a v1 project has no mapping");
+        assert_eq!(
+            std::fs::read_to_string(paint_target_size_path(&dir)).unwrap(),
+            "512x512"
+        );
+
+        // A fresh 4K session opens it: the 512 global leads (first tile's
+        // dims, exactly the v1 rule), and the pixels restore byte-identical.
+        let mut fresh =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 1,
+                skipped: Vec::new(),
+            }
+        );
+        assert_eq!(fresh.target_size(), (512, 512));
+        assert_eq!(
+            fresh.set_of_tile(1001),
+            fresh.active_set(),
+            "v1 tiles join the opening session's active set (v1 stored no names)"
+        );
+        let after = fresh.read_tile(1001).expect("readback succeeds");
+        assert_eq!((after.width, after.height), (512, 512));
+        assert_eq!(
+            after.data, before,
+            "v1 pixels restore byte-identical under the migrated size"
+        );
+
+        // Tiles-less and mapping-less: the legacy global still applies to
+        // every set (a size choice with no paint yet survives the round
+        // trip) while the pool clears.
+        std::fs::remove_file(paint_tile_path(&dir, 1001)).unwrap();
+        let mut empty = paint_state::PaintState::new(device, queue).expect("empty session builds");
+        let report = load_paint_tiles_reported(&mut empty, &dir);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 0,
+                skipped: Vec::new(),
+            }
+        );
+        assert_eq!(
+            empty.target_size(),
+            (512, 512),
+            "the stored global sizes the session with no paint yet"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

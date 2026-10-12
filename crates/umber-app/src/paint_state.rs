@@ -103,20 +103,60 @@
 //!   tiles × 64 MiB at 4K × (UDIM tile count): a 10-tile set holds
 //!   ~640 MiB of live targets before any undo entry.
 //! * Target size (CORE-LOOP CRITICAL 2, the 2026-10-12 strategy review):
-//!   [`Self::new`] builds every tile at [`DEFAULT_TARGET_SIZE`] (4096 —
-//!   the review's directive; the old 512 live target survives only as the
-//!   tests' explicit construction size). The user-facing setting lives in
-//!   the Texture Sets panel (the `SIZE_PRESETS` combo, 512..8K) and routes
-//!   through [`Self::resize_target`], which rebuilds the whole tile pool
-//!   at the new size. V1 boundary (the review asked for a per-texture-set
-//!   size): there is ONE session size shared by every tile — per-set or
-//!   per-channel sizes are the named follow-up alongside the per-layer
-//!   tile pool. `resize_target` takes arbitrary `(width, height)` but the
-//!   UI only offers squares; non-square sizes arise only from the project
+//!   every texture SET owns its square paint size, defaulting to
+//!   [`DEFAULT_TARGET_SIZE`] (4096 — the review's directive; the old 512
+//!   live target survives only as the tests' explicit construction size).
+//!   [`Self::set_sizes`] maps set name → `(width, height)` and
+//!   [`Self::tile_sets`] maps tile id → set name; [`Self::ensure_tile`]
+//!   creates each tile at ITS set's size, so one session can hold a 2048
+//!   set beside a 4096 set. Tiles with no assignment resolve to the
+//!   ACTIVE set ([`Self::active_set`]); the user-facing setting lives in
+//!   the Texture Sets panel (the `SIZE_PRESETS` combo, 512..8K), which
+//!   lists the sets, selects the active one, and routes through
+//!   [`Self::resize_set`]. `resize_set` rebuilds only that set's tiles at
+//!   the new size. The legacy [`Self::resize_target`] resizes the ACTIVE
+//!   set (single-set sessions behave byte-identically to v1), and
+//!   [`Self::with_target_size`] keeps its signature so the Gate-0 journey
+//!   test constructs unchanged.
+//! * Per-set sizes persist in the project's `paint/target_sizes.txt`
+//!   sidecar (set→size lines plus `tile-<N>=<set>` assignments; the v1
+//!   `target_size.txt` global still reads — a v1 project opens with its
+//!   global applied to every set — and is still written with the active
+//!   set's size for old readers). See `main.rs`'s persistence docs.
+//! * V1 boundary (per-CHANNEL sizes stay the named follow-up): one size
+//!   per set, shared by every channel and layer, alongside the per-layer
+//!   tile pool. `resize_set` takes arbitrary `(width, height)` but the UI
+//!   only offers squares; non-square sizes arise only from the project
 //!   load path's stored dims.
+//! * Judgment calls (why the size is NOT on `umber_core::TextureSet`):
+//!   that struct's `resolution` is the DOCUMENT/bake resolution (default
+//!   2048), a different quantity from the live paint-target size (default
+//!   4096), and its schema (`project.json`) is another kill's surface
+//!   (this kill's lock is umber-app only). The paint session owns the
+//!   registry keyed by set NAME — names are the app's set identity (the
+//!   mesh-derived `texture_set_name`, the import session set's name). A
+//!   rename is a new set: previously assigned tiles keep the old name
+//!   until reassigned (the open path re-derives assignments from the
+//!   sidecar, so renames across save/open do not strand tiles).
+//! * `resize_set` still clears the WHOLE stroke-undo history, not just
+//!   the resized set's entries (rects recorded at the old size no longer
+//!   fit, and one entry can span tiles of several sets — filtering by set
+//!   would leave half-entries). The UI names this per set (the Texture
+//!   Sets panel's hint string), so a size change is never a silent undo
+//!   loss.
+//! * The quick mask is per SET ([`Self::masks`]), not per tile: planes are
+//!   uniform within a set, so a set resize drops only that set's planes.
+//!   `umber-brush`'s `QuickMask` (single-size) is untouched — one instance
+//!   per set at the set's size. [`Self::quick_mask`] returns the ACTIVE
+//!   set's mask (every existing caller stays source-compatible).
+//! * `texels_per_uv` is the ACTIVE set's density (single-set sessions read
+//!   it exactly as v1 did); per-tile sites (routing, seam radius, clone
+//!   offset, fill replay) use [`Self::texels_per_uv_for`]. The symmetry
+//!   snapshot is taken at the stroke-START tile's density: a stroke
+//!   crossing into a different-sized tile applies the start tile's
+//!   transforms there (slightly off-center siblings — named follow-up).
 //! * Mask-mode strokes still leave the history alone (they touch the mask,
-//!   not the layer), and [`Self::resize_target`] still clears it (rects
-//!   recorded at the old size no longer fit).
+//!   not the layer).
 //!
 //! Symmetry (§2's P1 row, `umber_brush::symmetry`): the panel's
 //! [`SymmetrySettings`] are adopted between strokes ([`PaintState::sync_symmetry`])
@@ -265,6 +305,14 @@ pub enum PaintStateError {
 /// geometry stays byte-identical).
 pub const DEFAULT_TARGET_SIZE: u32 = 4096;
 
+/// The paint session's default texture-set name: what tiles resolve to
+/// before the app names a set (mesh load / project open retarget the
+/// active set), and what [`Self::with_target_size`] sizes. Mirrors the
+/// `texture_set_name` fallback chain (`umber_mesh::mesh_maps`) and the
+/// import session set's initial name, so a fresh session, a fresh import
+/// state and a set-less mesh all agree on one set.
+pub const DEFAULT_TEXTURE_SET: &str = "TextureSet";
+
 /// Brush radius in target texels.
 const BRUSH_RADIUS_TEXELS: f32 = 24.0;
 
@@ -326,9 +374,19 @@ pub struct PaintState {
     /// The tile the last original (non-mirror) event routed to; always a
     /// key of `targets`.
     active_tile: u16,
-    /// Edge lengths new tile targets are created at (tracks
-    /// [`Self::resize_target`]).
-    target_size: (u32, u32),
+    /// Every known texture set's paint-target size (square in practice —
+    /// see the module docs; the load path honors stored non-squares).
+    /// Unknown sets read as [`DEFAULT_TARGET_SIZE`]² (see
+    /// [`Self::size_of_set`]).
+    set_sizes: BTreeMap<String, (u32, u32)>,
+    /// Which set each present tile paints for. Tiles absent here resolve
+    /// to the active set (see [`Self::set_of_tile`]); [`Self::ensure_tile`]
+    /// records the active set at creation, and the project open path
+    /// re-derives the map from the sidecar.
+    tile_sets: BTreeMap<u16, String>,
+    /// The set new tiles join and the Texture Sets panel edits. Always a
+    /// key of `set_sizes` (see [`Self::set_active_set`]).
+    active_set: String,
     /// Whether the loaded mesh spans more than one UDIM tile. Routing by
     /// `tile_of_uv` is live only then; otherwise every event lands in
     /// [`FIRST_TILE`] (an edge click at `u == 1.0` must not spawn a blank
@@ -345,8 +403,9 @@ pub struct PaintState {
     conditioner: StrokeConditioner,
     /// Set on pointer-down inside the UV square; cleared on pointer-up.
     stroking: bool,
-    /// UV→texel scale (target texels per UV unit); tracks the live
-    /// target size (see [`Self::resize_target`]).
+    /// UV→texel scale (target texels per UV unit) of the ACTIVE set (see
+    /// [`Self::texels_per_uv_for`] for the per-tile form the routing
+    /// sites use).
     texels_per_uv: f32,
     last_stats: FrameStats,
     /// Seam topology of the loaded mesh (`None` until [`Self::set_mesh`]).
@@ -400,9 +459,10 @@ pub struct PaintState {
     /// The live stroke's tile-local texel transforms (identity first),
     /// snapshot at `begin_stroke`; `None` = symmetry off for this stroke.
     stroke_symmetry: Option<Vec<SymTransform>>,
-    /// The quick mask (session state: not in the project file, not in
-    /// any undo history).
-    quick_mask: QuickMask,
+    /// The quick mask, one instance per texture set at the set's size
+    /// (see the module docs — `umber-brush`'s single-size `QuickMask` is
+    /// untouched). [`Self::quick_mask`] returns the active set's.
+    masks: BTreeMap<String, QuickMask>,
     /// Tiles whose GPU mask texture matches `quick_mask`'s plane. Emptied
     /// by every whole-mask change (invert, clear, resize); a gated dab's
     /// tile is brought back in sync before it is staged.
@@ -466,12 +526,15 @@ impl PaintState {
         size: u32,
     ) -> Result<Self, PaintStateError> {
         let first = PaintThread::new(device.clone(), queue.clone(), size, size)?;
+        let default_set = DEFAULT_TEXTURE_SET.to_string();
         Ok(Self {
             device,
             queue,
             targets: BTreeMap::from([(FIRST_TILE, first)]),
             active_tile: FIRST_TILE,
-            target_size: (size, size),
+            set_sizes: BTreeMap::from([(default_set.clone(), (size, size))]),
+            tile_sets: BTreeMap::from([(FIRST_TILE, default_set.clone())]),
+            active_set: default_set.clone(),
             multi_tile: false,
             brush: BrushParams::default(),
             wash_mode: WashMode::BuildUp,
@@ -501,7 +564,7 @@ impl PaintState {
             projection: PaintProjection::default(),
             symmetry_from_view: false,
             stroke_symmetry: None,
-            quick_mask: QuickMask::new(size, size),
+            masks: BTreeMap::from([(default_set, QuickMask::new(size, size))]),
             mask_synced: BTreeSet::new(),
             stroke_mask_edit: false,
             stroke_mask_gate: false,
@@ -514,6 +577,103 @@ impl PaintState {
             #[cfg(test)]
             staged_dabs: 0,
         })
+    }
+
+    /// Registers `name` as a texture set at the default size (no-op when
+    /// known), with its own quick mask. Mesh load / project open call
+    /// this for the session set so the panel always lists it.
+    pub fn ensure_set(&mut self, name: &str) {
+        if !self.set_sizes.contains_key(name) {
+            self.set_sizes
+                .insert(name.to_string(), (DEFAULT_TARGET_SIZE, DEFAULT_TARGET_SIZE));
+        }
+        if !self.masks.contains_key(name) {
+            let (width, height) = self.size_of_set(name);
+            self.masks
+                .insert(name.to_string(), QuickMask::new(width, height));
+        }
+    }
+
+    /// Makes `name` the active set (see the `active_set` field docs):
+    /// newly routed tiles join it, [`Self::target_size`] and
+    /// [`Self::quick_mask`] read it, and the panel's size combo edits it.
+    /// Registers the set first, so the active set is always a key of
+    /// `set_sizes`. Between strokes only (like the `sync_*` adopts — a
+    /// mid-stroke switch would move the texel density under the live
+    /// conditioner).
+    pub fn set_active_set(&mut self, name: &str) {
+        self.ensure_set(name);
+        self.active_set = name.to_string();
+        self.texels_per_uv = self.size_of_set(name).0 as f32;
+    }
+
+    /// The active texture set's name.
+    pub fn active_set(&self) -> &str {
+        &self.active_set
+    }
+
+    /// Every known texture-set name, ascending.
+    pub fn set_names(&self) -> Vec<String> {
+        self.set_sizes.keys().cloned().collect()
+    }
+
+    /// `name`'s paint-target size; unknown sets read as
+    /// [`DEFAULT_TARGET_SIZE`]² (the load path registers mapped sets
+    /// before asking, so unknown here means "never seen" — default, never
+    /// a panic and never a zero-size target).
+    pub fn size_of_set(&self, name: &str) -> (u32, u32) {
+        self.set_sizes
+            .get(name)
+            .copied()
+            .unwrap_or((DEFAULT_TARGET_SIZE, DEFAULT_TARGET_SIZE))
+    }
+
+    /// The set `tile` paints for: its assignment, else the active set.
+    pub fn set_of_tile(&self, tile: u16) -> &str {
+        self.tile_sets
+            .get(&tile)
+            .map(String::as_str)
+            .unwrap_or(&self.active_set)
+    }
+
+    /// The paint-target size of `tile`'s set.
+    pub fn tile_size(&self, tile: u16) -> (u32, u32) {
+        let name = self.set_of_tile(tile).to_string();
+        self.size_of_set(&name)
+    }
+
+    /// The UV→texel density of `tile`'s set (the per-tile form of
+    /// `texels_per_uv`, which tracks the active set).
+    pub fn texels_per_uv_for(&self, tile: u16) -> f32 {
+        self.tile_size(tile).0 as f32
+    }
+
+    /// The tiles currently assigned to `set`, ascending.
+    pub fn tiles_of_set(&self, set: &str) -> Vec<u16> {
+        self.targets
+            .keys()
+            .copied()
+            .filter(|tile| self.set_of_tile(*tile) == set)
+            .collect()
+    }
+
+    /// Moves `tile` to `set` (registers the set first). Present tiles keep
+    /// their pixels — assignment only steers FUTURE `ensure_tile`
+    /// creations' sizes and the mask the tile gates against; use
+    /// [`Self::resize_set`] to rebuild at the set's size. Drops the tile's
+    /// mask-sync flag (its planes now gate against another set's mask).
+    pub fn assign_tile_to_set(&mut self, tile: u16, set: &str) {
+        self.ensure_set(set);
+        self.tile_sets.insert(tile, set.to_string());
+        self.mask_synced.remove(&tile);
+    }
+
+    /// Drops every tile→set assignment (the project open path re-derives
+    /// the map from the sidecar, so a previous document's sets never steer
+    /// the new one). Present tiles keep their targets; unassigned tiles
+    /// resolve to the active set until reassigned.
+    pub fn clear_tile_assignments(&mut self) {
+        self.tile_sets.clear();
     }
 
     /// Hands a mesh over for seam-aware stamping: builds its [`SeamGraph`]
@@ -555,17 +715,21 @@ impl PaintState {
         // the mirror math itself (`mirror_positions`) gates on UV-segment
         // distance, so checking the same distance up front arms exactly the
         // strokes that can produce mirrors.
-        self.stroke_near_seam = self.seam_near_uv([uv.x, uv.y], self.seam_radius_uv());
+        self.stroke_near_seam =
+            self.seam_near_uv([uv.x, uv.y], self.seam_radius_uv_for(self.route_tile(uv)));
         // Snapshot the symmetry for the whole stroke (before the retouch
-        // stroke opens — it takes the same transforms).
+        // stroke opens — it takes the same transforms), at the
+        // stroke-start tile's density (a cross-size-tile stroke applies
+        // these to its other tiles too — the module docs' boundary).
+        let start_tpv = self.texels_per_uv_for(self.route_tile(uv));
         self.stroke_symmetry = self
             .symmetry
             .is_active()
-            .then(|| texel_transforms(&self.symmetry, self.texels_per_uv));
+            .then(|| texel_transforms(&self.symmetry, start_tpv));
         // Snapshot the quick-mask modes too: X / I mid-stroke never split
         // one stroke between the mask and the layer.
-        self.stroke_mask_edit = self.quick_mask.is_editing();
-        self.stroke_mask_gate = self.quick_mask.gates();
+        self.stroke_mask_edit = self.quick_mask().is_editing();
+        self.stroke_mask_gate = self.quick_mask().gates();
         self.retouch = if self.stroke_mask_edit {
             // A mask stroke paints only the mask: no retouch mirror, and
             // the retouch history stays valid (the layer is untouched).
@@ -608,8 +772,9 @@ impl PaintState {
         }
         if let BrushTool::Clone(params) = self.tool {
             let tile = self.route_tile(uv);
-            let start = local_texel([uv.x, uv.y], tile, self.texels_per_uv);
-            let offset = clone_offset_texels(params.source_offset, self.texels_per_uv);
+            let tpv = self.texels_per_uv_for(tile);
+            let start = local_texel([uv.x, uv.y], tile, tpv);
+            let offset = clone_offset_texels(params.source_offset, tpv);
             stroke.begin_clone(tile, start, offset, params.follow);
         }
         stroke
@@ -759,52 +924,88 @@ impl PaintState {
     }
 
     /// The quick mask (the UV view draws its overlay from it, the panel
-    /// its rows).
+    /// its rows): the ACTIVE set's instance (see the `masks` field docs).
     pub fn quick_mask(&self) -> &QuickMask {
-        &self.quick_mask
+        self.masks
+            .get(&self.active_set)
+            .expect("the active set is always registered (set_active_set ensures it)")
+    }
+
+    /// `tile`'s set's mask (what the tile's strokes stamp and gate
+    /// against — the per-tile form of [`Self::quick_mask`]).
+    pub fn quick_mask_for_tile(&self, tile: u16) -> &QuickMask {
+        let name = self.set_of_tile(tile).to_string();
+        self.masks
+            .get(&name)
+            .expect("a tile's set is always registered (assign_tile_to_set ensures it)")
+    }
+
+    /// The active set's mask, mutably (the panel rows and shortcuts edit
+    /// through here).
+    fn active_mask_mut(&mut self) -> &mut QuickMask {
+        let active = self.active_set.clone();
+        self.masks
+            .get_mut(&active)
+            .expect("the active set is always registered (set_active_set ensures it)")
+    }
+
+    /// `tile`'s set's mask, mutably (registers the set first, so strokes
+    /// routing to a never-sized set gate against a correctly sized plane).
+    fn mask_of_tile_mut(&mut self, tile: u16) -> &mut QuickMask {
+        let name = self.set_of_tile(tile).to_string();
+        self.ensure_set(&name);
+        self.masks
+            .get_mut(&name)
+            .expect("ensure_set just registered it")
     }
 
     /// The X shortcut: enters or leaves mask mode (entering arms gating,
     /// see `umber_brush::quick_mask`); returns the new state. A live
     /// stroke keeps the mode it began with.
     pub fn toggle_mask_mode(&mut self) -> bool {
-        self.quick_mask.toggle_editing()
+        self.active_mask_mut().toggle_editing()
     }
 
     /// Enters (`true`) or leaves mask mode — the panel's toggle.
     pub fn set_mask_mode(&mut self, editing: bool) {
-        self.quick_mask.set_editing(editing);
+        self.active_mask_mut().set_editing(editing);
     }
 
     /// Arms or disarms gating. Disarming keeps the mask for the session.
     pub fn set_mask_active(&mut self, active: bool) {
-        self.quick_mask.set_active(active);
+        self.active_mask_mut().set_active(active);
     }
 
     /// What mask-mode strokes paint (white allows, black blocks).
     pub fn set_mask_paint(&mut self, paint: MaskPaint) {
-        self.quick_mask.set_paint(paint);
+        self.active_mask_mut().set_paint(paint);
     }
 
     /// Inverts the mask (the I shortcut in mask mode, or the panel
     /// button). Refused (`false`) mid-stroke: a live gated stroke must
-    /// keep reading one mask.
+    /// keep reading one mask. Applies to EVERY set's mask (the v1
+    /// whole-mask semantics — invert carries no size, so per-set sizes
+    /// are irrelevant to it).
     pub fn invert_mask(&mut self) -> bool {
         if self.stroking {
             return false;
         }
-        self.quick_mask.invert();
+        for mask in self.masks.values_mut() {
+            mask.invert();
+        }
         self.mask_synced.clear();
         true
     }
 
     /// Zeroes the mask (the panel's Clear). Refused (`false`) mid-stroke,
-    /// like [`Self::invert_mask`].
+    /// like [`Self::invert_mask`]. Like invert, session-wide across sets.
     pub fn clear_mask(&mut self) -> bool {
         if self.stroking {
             return false;
         }
-        self.quick_mask.clear();
+        for mask in self.masks.values_mut() {
+            mask.clear();
+        }
         self.mask_synced.clear();
         true
     }
@@ -1021,11 +1222,12 @@ impl PaintState {
         if self.stroking || !path.can_fill() {
             return false;
         }
-        let (width, height) = self.target_size;
+        let tile = self.active_tile;
+        let (width, height) = self.tile_size(tile);
         if width == 0 || height == 0 {
             return false;
         }
-        let tile = self.active_tile;
+        let tpv = self.texels_per_uv_for(tile);
         let mask = rasterize_polygon_mask(&path.loop_uv(), tile, width, height);
         let runs = fill_runs(&mask, width as usize, height as usize);
         if runs.is_empty() {
@@ -1035,10 +1237,10 @@ impl PaintState {
         self.tool = op.to_brush_tool();
         let (pressure, size) = path.mean_style();
         for run in &runs {
-            let start = texel_center_uv(tile, run.x0, run.y, self.texels_per_uv);
+            let start = texel_center_uv(tile, run.x0, run.y, tpv);
             self.begin_stroke_styled(Pos2::new(start[0], start[1]), pressure, size);
             for x in run.x0 + 1..=run.x1 {
-                let uv = texel_center_uv(tile, x, run.y, self.texels_per_uv);
+                let uv = texel_center_uv(tile, x, run.y, tpv);
                 self.extend_stroke_styled(Pos2::new(uv[0], uv[1]), pressure, size);
             }
             self.end_stroke();
@@ -1121,36 +1323,61 @@ impl PaintState {
         self.brush = params;
     }
 
-    /// The edge lengths every tile's paint target has (as of the last
-    /// [`Self::resize_target`]; applied on the next drain). The Export
+    /// The ACTIVE set's paint-target size (as of the last
+    /// [`Self::resize_set`] on it; applied on the next drain). The Export
     /// dialog's painted-source badge gates on this matching the export
-    /// size.
+    /// size. Per-tile sizes: [`Self::tile_size`].
     pub fn target_size(&self) -> (u32, u32) {
-        self.target_size
+        let active = self.active_set.clone();
+        self.size_of_set(&active)
     }
 
-    /// Switches every tile's paint target to `width`x`height` (contents
-    /// dropped); tiles created later use the same size. The Texture Sets
-    /// panel's size combo routes here; the stroke-soak and input→photon
-    /// harnesses resize to their own 4K target explicitly (they measure
-    /// relative perf, not the default — see their module docs).
+    /// Switches the ACTIVE set's paint targets to `width`x`height`
+    /// (contents dropped); that set's later tiles use the same size, other
+    /// sets are untouched. The legacy single-size path (every pre-per-set
+    /// caller — the perf harnesses, the old panel): single-set sessions
+    /// hold every tile in the active set, so they behave byte-identically.
+    /// Prefer [`Self::resize_set`] for a named set.
     ///
     /// INTENTIONAL: the resize clears the stroke-undo history (rects
     /// recorded at the old size no longer fit the targets) and resets the
-    /// quick mask with the targets' contents (the `Resize` command drops
-    /// each target's GPU mask too). The UI names this (the Texture Sets
-    /// panel's hint string), so a size change is never a silent undo loss.
+    /// set's quick mask with its targets' contents (the `Resize` command
+    /// drops each target's GPU mask too). The UI names this per set (the
+    /// Texture Sets panel's hint string), so a size change is never a
+    /// silent undo loss.
     pub fn resize_target(&mut self, width: u32, height: u32) {
-        self.texels_per_uv = width as f32;
-        self.target_size = (width, height);
+        let active = self.active_set.clone();
+        self.resize_set(&active, width, height);
+    }
+
+    /// Switches `set`'s paint targets to `width`x`height` (contents
+    /// dropped); the set's later tiles use the same size, other sets are
+    /// untouched. Registers the set first. The history-clear and mask
+    /// contracts are the same as [`Self::resize_target`]'s, scoped to the
+    /// set's tiles (the history itself is shared, so the clear is
+    /// session-wide — see the module docs).
+    pub fn resize_set(&mut self, set: &str, width: u32, height: u32) {
+        self.ensure_set(set);
+        self.set_sizes.insert(set.to_string(), (width, height));
+        if self.active_set == set {
+            self.texels_per_uv = width as f32;
+        }
         // Snapshots recorded at the old size no longer fit the targets.
         self.retouch_history.clear();
-        // Nor does the mask: it resets with the targets' contents (the
-        // `Resize` command drops each target's GPU mask too).
-        self.quick_mask.resize(width, height);
-        self.mask_synced.clear();
-        for thread in self.targets.values_mut() {
-            let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+        // Nor does the set's mask: it resets with the targets' contents
+        // (the `Resize` command drops each target's GPU mask too). Other
+        // sets' masks are untouched.
+        if let Some(mask) = self.masks.get_mut(set) {
+            mask.resize(width, height);
+        }
+        let tiles = self.tiles_of_set(set);
+        for tile in &tiles {
+            self.mask_synced.remove(tile);
+        }
+        for tile in &tiles {
+            if let Some(thread) = self.targets.get_mut(tile) {
+                let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+            }
         }
     }
 
@@ -1164,18 +1391,21 @@ impl PaintState {
         }
     }
 
-    /// Ensures `tile` has a paint thread, creating it at the current
-    /// target size on first use. Returns `false` (event dropped, logged)
+    /// Ensures `tile` has a paint thread, creating it at the TILE'S SET
+    /// size on first use (and recording the active set when the tile has
+    /// no assignment yet). Returns `false` (event dropped, logged)
     /// if creation fails — unreachable in practice, since tile 1001 was
     /// built on the same device.
     fn ensure_tile(&mut self, tile: u16) -> bool {
         if self.targets.contains_key(&tile) {
             return true;
         }
-        let (width, height) = self.target_size;
+        let (width, height) = self.tile_size(tile);
         match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
             Ok(thread) => {
                 self.targets.insert(tile, thread);
+                let active = self.active_set.clone();
+                self.tile_sets.entry(tile).or_insert(active);
                 true
             }
             Err(err) => {
@@ -1185,10 +1415,11 @@ impl PaintState {
         }
     }
 
-    /// Brush footprint in UV units: the mirror gate distance
-    /// (`BRUSH_RADIUS_TEXELS / texels_per_uv`, plus [`SEAM_MIRROR_MARGIN`).
-    fn seam_radius_uv(&self) -> f32 {
-        mirror_radius_uv(self.texels_per_uv)
+    /// Brush footprint in UV units for `tile`'s set: the mirror gate
+    /// distance (`BRUSH_RADIUS_TEXELS / texels_per_uv`, plus
+    /// [`SEAM_MIRROR_MARGIN`).
+    fn seam_radius_uv_for(&self, tile: u16) -> f32 {
+        mirror_radius_uv(self.texels_per_uv_for(tile))
     }
 
     /// UV-space seam proximity gate: true iff `uv` lies within `radius_uv`
@@ -1251,7 +1482,10 @@ impl PaintState {
             && self.stroke_near_seam
             && (self.stroke_mask_edit || !self.tool.is_retouch())
         {
-            let radius_uv = self.seam_radius_uv();
+            // Each event (and each seam mirror below) gates on its own
+            // tile's density: a mirror landing in a different-sized tile
+            // recurses with expand_seams = false and re-resolves there.
+            let radius_uv = self.seam_radius_uv_for(self.route_tile(uv));
             // Collect the mirrors first to end the graph borrow before the
             // recursive calls re-borrow `self`.
             let mirrors: Vec<[f32; 2]> = self
@@ -1284,7 +1518,7 @@ impl PaintState {
             }
             tile
         };
-        let texel = local_texel([uv.x, uv.y], tile, self.texels_per_uv);
+        let texel = local_texel([uv.x, uv.y], tile, self.texels_per_uv_for(tile));
         // Synthetic event clock (see EVENT_STEP_NS): every event — original
         // or mirror — advances time so the conditioner actually progresses.
         self.event_seq += 1;
@@ -1461,10 +1695,11 @@ impl PaintState {
             }
         }
         // The quick-mask gate: the retouch ops multiply their per-texel
-        // coverage by the tile's CPU plane (allocated empty if untouched).
+        // coverage by the tile's set's CPU plane (allocated empty if
+        // untouched).
         let mask = if self.stroke_mask_gate {
-            self.quick_mask.ensure_plane(tile);
-            self.quick_mask.view(tile)
+            self.mask_of_tile_mut(tile).ensure_plane(tile);
+            self.quick_mask_for_tile(tile).view(tile)
         } else {
             None
         };
@@ -1495,7 +1730,7 @@ impl PaintState {
                 alpha: dab.alpha,
                 hardness: dab.hardness,
             };
-            dirty = DirtyRect::union_opt(dirty, self.quick_mask.stamp(tile, &stamp));
+            dirty = DirtyRect::union_opt(dirty, self.mask_of_tile_mut(tile).stamp(tile, &stamp));
         }
         if let Some(rect) = dirty {
             if self.mask_synced.contains(&tile) {
@@ -1513,7 +1748,7 @@ impl PaintState {
         if self.mask_synced.contains(&tile) {
             return;
         }
-        let (width, height) = self.quick_mask.dimensions();
+        let (width, height) = self.quick_mask_for_tile(tile).dimensions();
         let full = DirtyRect {
             x0: 0,
             y0: 0,
@@ -1529,7 +1764,7 @@ impl PaintState {
         if rect.width() == 0 || rect.height() == 0 {
             return;
         }
-        let values = self.quick_mask.gpu_bytes(tile, rect);
+        let values = self.quick_mask_for_tile(tile).gpu_bytes(tile, rect);
         let Some(thread) = self.targets.get_mut(&tile) else {
             return;
         };
@@ -3199,5 +3434,127 @@ mod tests {
             "a resize must clear the stroke history (rects no longer fit)"
         );
         assert_eq!(state.target_size(), (512, 512));
+    }
+
+    // --- Per-texture-set paint-target sizes (audit Pass 4 item 4) ---
+
+    /// Each set owns its size: tiles are created at their set's size, the
+    /// active set drives `target_size()`, and unknown sets read the
+    /// default (never a panic, never zero).
+    #[test]
+    fn tiles_are_created_at_their_own_sets_size() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        assert_eq!(state.active_set(), DEFAULT_TEXTURE_SET);
+        assert_eq!(state.set_names(), vec![DEFAULT_TEXTURE_SET.to_string()]);
+        assert_eq!(state.set_of_tile(1001), DEFAULT_TEXTURE_SET);
+        assert_eq!(state.tile_size(1001), (512, 512));
+        assert_eq!(state.texels_per_uv_for(1001), 512.0);
+
+        state.resize_set("Cloak", 256, 256);
+        assert_eq!(state.size_of_set("Cloak"), (256, 256));
+        assert_eq!(
+            state.set_names(),
+            vec!["Cloak".to_string(), DEFAULT_TEXTURE_SET.to_string()]
+        );
+        // Unknown sets read the default (the load path registers mapped
+        // sets before asking — unseen means default).
+        assert_eq!(state.size_of_set("NeverSeen"), (4096, 4096));
+        assert_eq!(
+            state.tile_size(1002),
+            (512, 512),
+            "unassigned tiles resolve to the active set"
+        );
+
+        state.assign_tile_to_set(1002, "Cloak");
+        assert_eq!(state.set_of_tile(1002), "Cloak");
+        assert_eq!(state.tile_size(1002), (256, 256));
+        assert_eq!(state.texels_per_uv_for(1002), 256.0);
+        assert_eq!(
+            state.tiles_of_set("Cloak"),
+            Vec::<u16>::new(),
+            "assignment alone creates no target (lazy pool)"
+        );
+
+        // Creation pins the dims exactly (not a range check — a tile at
+        // the wrong size would fail).
+        assert!(state.ensure_tile(1002));
+        assert_eq!(
+            state.tile_target(1002).expect("created").dimensions(),
+            (256, 256)
+        );
+        assert_eq!(
+            state.tile_target(1001).expect("kept").dimensions(),
+            (512, 512)
+        );
+
+        // The active set drives the legacy single-size surface.
+        assert_eq!(state.target_size(), (512, 512));
+        state.set_active_set("Cloak");
+        assert_eq!(state.active_set(), "Cloak");
+        assert_eq!(state.target_size(), (256, 256));
+    }
+
+    /// A set resize rebuilds only that set's tiles, drops only that set's
+    /// mask planes, and still clears the shared history (the per-set
+    /// clears-undo contract — see the module docs for why the clear is
+    /// session-wide).
+    #[test]
+    fn resize_set_is_scoped_to_its_tiles_and_masks() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        state.resize_set("Cloak", 256, 256);
+        state.assign_tile_to_set(1002, "Cloak");
+        assert!(state.ensure_tile(1002));
+        state.process_pending().expect("tiles apply");
+
+        // A mask plane on the default set, so the scoped-drop below is
+        // non-vacuous (a resize that dropped nothing would pass anyway).
+        state.set_mask_mode(true);
+        state.begin_stroke(egui::pos2(0.25, 0.25));
+        for i in 1..=14 {
+            let t = i as f32 * 0.02;
+            state.extend_stroke(egui::pos2(0.25 + t, 0.25));
+        }
+        state.end_stroke();
+        state.set_mask_mode(false);
+        assert!(
+            state.quick_mask().coverage(1001).is_some(),
+            "the mask stroke must allocate the default set's plane"
+        );
+
+        // A paint stroke, so the history clear below is non-vacuous too.
+        drive_stroke(&mut state, [0.6, 0.6], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(state.can_undo_stroke());
+
+        state.resize_set("Cloak", 128, 128);
+        assert!(
+            !state.can_undo_stroke(),
+            "a set resize clears the shared stroke history"
+        );
+        assert_eq!(state.size_of_set("Cloak"), (128, 128));
+        assert_eq!(state.size_of_set(DEFAULT_TEXTURE_SET), (512, 512));
+        state.process_pending().expect("resize applies");
+        assert_eq!(
+            state.tile_target(1002).expect("resized").dimensions(),
+            (128, 128)
+        );
+        assert_eq!(
+            state.tile_target(1001).expect("untouched").dimensions(),
+            (512, 512)
+        );
+        assert!(
+            state.quick_mask().coverage(1001).is_some(),
+            "the other set's mask planes survive a set resize"
+        );
+        // ...while the resized set's own mask follows its new size.
+        assert_eq!(state.quick_mask_for_tile(1002).dimensions(), (128, 128));
     }
 }

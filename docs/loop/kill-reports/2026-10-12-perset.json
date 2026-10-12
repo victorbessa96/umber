@@ -1,0 +1,2357 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+Moving paint size to per-texture-set storage — reading the contract and current pool first.
+[0m→ [0mRead AGENTS.md
+[0m→ [0mRead docs/loop/audit-2026-10-12-c1.md
+[0m→ [0mRead docs/specs/2026-10-12-strategy-review.md
+[0m→ [0mRead crates/umber-app/src/size_presets.rs
+[0m→ [0mRead crates/umber-app/src/tile_selection.rs
+[0m→ [0mRead crates/umber-app/src/paint_state.rs
+[0m→ [0mRead crates/umber-app/src/mesh_map_import.rs
+[0m✱ [0mGrep "struct TextureSet|pub name|paint_size|target_size"[90m in crates/umber-core/src · 10 matches[0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=640, limit=300][0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1089, limit=300][0m
+[0m→ [0mRead crates/umber-core/src/lib.rs
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1, limit=120][0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=940, limit=300][0m
+I've mapped the global size flow; now digging into the persistence tests and set model.
+[0m✱ [0mGrep "texture_sets|TextureSet|mesh_import|session_set|active_texture|texture_set_name"[90m in crates/umber-app/src/main.rs · 58 matches[0m
+[0m→ [0mRead crates/umber-mesh/src/udim.rs
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1240, limit=330][0m
+[0m✱ [0mGrep "texturesets\."[90m in assets/i18n · 0 matches[0m
+[0m✱ [0mGrep "texture_set_name|fn texture_set|material.*set|sets.*vec|Vec<TextureSet>|texture_sets"[90m in crates/umber-mesh/src · 7 matches[0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=120, limit=260][0m
+[0m✱ [0mGrep "texturesets|texture-sets|texture_sets"[90m in assets/i18n · 6 matches[0m
+[0m→ [0mRead crates/umber-mesh/src/mesh_maps.rs[90m [offset=100, limit=130][0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1389, limit=280][0m
+[0m→ [0mRead assets/i18n/en-US.ftl[90m [offset=100, limit=40][0m
+[0m→ [0mRead assets/i18n/pt-BR.ftl[90m [offset=104, limit=40][0m
+[0m→ [0mRead crates/umber-app/tests/gate0_journey.rs[90m [offset=1, limit=120][0m
+Now checking how `TextureSet` is constructed across the tree to decide where per-set size should live.
+[0m✱ [0mGrep "TextureSet\s*\{|TextureSet::new_default|resolution"[90m in crates · 100 matches[0m
+[0m→ [0mRead crates/umber-core/src/project.rs
+[0m✱ [0mGrep "4K|4096|per-set|per-texture|target size|paint target"[90m in docs/specs/requirements.md · 28 matches[0m
+[0m
+[0m$ [0mbash scripts/kill-locks.sh list 2>&1 || cat scripts/kill-locks.sh | head -50
+perset.lock: crates/umber-app/src/paint_state.rs crates/umber-app/src/main.rs crates/umber-app/src/tile_selection.rs crates/umber-app/src/mesh_map_import.rs
+[0m
+[0m✱ [0mGrep "pub fn (resize|new|ensure_plane|dimensions|view|stamp|gpu_bytes|gates|is_editing)"[90m in crates/umber-brush/src/quick_mask.rs · 21 matches[0m
+[0m✱ [0mGrep "with_target_size|resize_target|target_size\(\)|tiles_present|publish_fill|set_brush_color|PaintState::new"[90m in crates/umber-app/src · 100 matches[0m
+[0m→ [0mRead docs/specs/requirements.md[90m [offset=30, limit=30][0m
+[0m✱ [0mGrep "Resize|WriteRegion|WriteMask|fn publish|fn process_pending|dimensions|byte_len"[90m in crates/umber-gpu/src/paint_thread.rs · 38 matches[0m
+[0m→ [0mRead crates/umber-brush/src/quick_mask.rs
+[0m→ [0mRead crates/umber-gpu/src/paint_thread.rs[90m [offset=60, limit=240][0m
+[0m→ [0mRead crates/umber-app/src/fill_layer.rs[90m [offset=370, limit=65][0m
+[0m✱ [0mGrep "invert_mask|clear_mask|quick_mask\(\)|set_mask_|toggle_mask"[90m in crates/umber-app/src · 42 matches[0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=380, limit=260][0m
+[0m✱ [0mGrep "fn mirror_radius_uv|fn uv_near_seam|fn try_request_device|fn texel_at|fn drive_stroke|mod tests"[90m in crates/umber-app/src/paint_state.rs · 34 matches[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1669, limit=240][0m
+I have the full picture. Setting up the task list and checking the remaining details.
+[0m
+[0m# [0mTodos
+[•] PaintState: per-set size registry + tile→set map + active set + per-set masks
+[ ] PaintState: per-tile texel density at all routing sites
+[ ] main.rs: per-set sidecar mapping + legacy migration + load report
+[ ] main.rs: per-set Texture Sets panel + set_active wiring
+[ ] Tests: two-sets-different-sizes + mismatch-loud + legacy migration (main.rs); per-set unit tests (paint_state.rs)
+[ ] i18n keys (en-US + pt-BR) + requirements row mark
+[ ] Gates: fmt, clippy umber-app, verify-kill
+[0m
+[0m→ [0mRead crates/umber-app/src/lib.rs
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=3100, limit=110][0m
+Locks confirm my surface is umber-app only (`perset.lock`), so per-set size lives in the paint session + sidecar, not in `umber-core::TextureSet` (whose `resolution` is document/bake resolution and whose schema is another kill's surface). Now implementing.
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -102,22 +102,62 @@
+ //!   the before/after rect pair above), plus the undo snapshot cost. N
+ //!   tiles × 64 MiB at 4K × (UDIM tile count): a 10-tile set holds
+ //!   ~640 MiB of live targets before any undo entry.
+ //! * Target size (CORE-LOOP CRITICAL 2, the 2026-10-12 strategy review):
+-//!   [`Self::new`] builds every tile at [`DEFAULT_TARGET_SIZE`] (4096 —
+-//!   the review's directive; the old 512 live target survives only as the
+-//!   tests' explicit construction size). The user-facing setting lives in
+-//!   the Texture Sets panel (the `SIZE_PRESETS` combo, 512..8K) and routes
+-//!   through [`Self::resize_target`], which rebuilds the whole tile pool
+-//!   at the new size. V1 boundary (the review asked for a per-texture-set
+-//!   size): there is ONE session size shared by every tile — per-set or
+-//!   per-channel sizes are the named follow-up alongside the per-layer
+-//!   tile pool. `resize_target` takes arbitrary `(width, height)` but the
+-//!   UI only offers squares; non-square sizes arise only from the project
++//!   every texture SET owns its square paint size, defaulting to
++//!   [`DEFAULT_TARGET_SIZE`] (4096 — the review's directive; the old 512
++//!   live target survives only as the tests' explicit construction size).
++//!   [`Self::set_sizes`] maps set name → `(width, height)` and
++//!   [`Self::tile_sets`] maps tile id → set name; [`Self::ensure_tile`]
++//!   creates each tile at ITS set's size, so one session can hold a 2048
++//!   set beside a 4096 set. Tiles with no assignment resolve to the
++//!   ACTIVE set ([`Self::active_set`]); the user-facing setting lives in
++//!   the Texture Sets panel (the `SIZE_PRESETS` combo, 512..8K), which
++//!   lists the sets, selects the active one, and routes through
++//!   [`Self::resize_set`]. `resize_set` rebuilds only that set's tiles at
++//!   the new size. The legacy [`Self::resize_target`] resizes the ACTIVE
++//!   set (single-set sessions behave byte-identically to v1), and
++//!   [`Self::with_target_size`] keeps its signature so the Gate-0 journey
++//!   test constructs unchanged.
++//! * Per-set sizes persist in the project's `paint/target_sizes.txt`
++//!   sidecar (set→size lines plus `tile-<N>=<set>` assignments; the v1
++//!   `target_size.txt` global still reads — a v1 project opens with its
++//!   global applied to every set — and is still written with the active
++//!   set's size for old readers). See `main.rs`'s persistence docs.
++//! * V1 boundary (per-CHANNEL sizes stay the named follow-up): one size
++//!   per set, shared by every channel and layer, alongside the per-layer
++//!   tile pool. `resize_set` takes arbitrary `(width, height)` but the UI
++//!   only offers squares; non-square sizes arise only from the project
+ //!   load path's stored dims.
++//! * Judgment calls (why the size is NOT on `umber_core::TextureSet`):
++//!   that struct's `resolution` is the DOCUMENT/bake resolution (default
++//!   2048), a different quantity from the live paint-target size (default
++//!   4096), and its schema (`project.json`) is another kill's surface
++//!   (this kill's lock is umber-app only). The paint session owns the
++//!   registry keyed by set NAME — names are the app's set identity (the
++//!   mesh-derived `texture_set_name`, the import session set's name). A
++//!   rename is a new set: previously assigned tiles keep the old name
++//!   until reassigned (the open path re-derives assignments from the
++//!   sidecar, so renames across save/open do not strand tiles).
++//! * `resize_set` still clears the WHOLE stroke-undo history, not just
++//!   the resized set's entries (rects recorded at the old size no longer
++//!   fit, and one entry can span tiles of several sets — filtering by set
++//!   would leave half-entries). The UI names this per set (the Texture
++//!   Sets panel's hint string), so a size change is never a silent undo
++//!   loss.
++//! * The quick mask is per SET ([`Self::masks`]), not per tile: planes are
++//!   uniform within a set, so a set resize drops only that set's planes.
++//!   `umber-brush`'s `QuickMask` (single-size) is untouched — one instance
++//!   per set at the set's size. [`Self::quick_mask`] returns the ACTIVE
++//!   set's mask (every existing caller stays source-compatible).
++//! * `texels_per_uv` is the ACTIVE set's density (single-set sessions read
++//!   it exactly as v1 did); per-tile sites (routing, seam radius, clone
++//!   offset, fill replay) use [`Self::texels_per_uv_for`]. The symmetry
++//!   snapshot is taken at the stroke-START tile's density: a stroke
++//!   crossing into a different-sized tile applies the start tile's
++//!   transforms there (slightly off-center siblings — named follow-up).
+ //! * Mask-mode strokes still leave the history alone (they touch the mask,
+-//!   not the layer), and [`Self::resize_target`] still clears it (rects
+-//!   recorded at the old size no longer fit).
++//!   not the layer).
+ //!
+ //! Symmetry (§2's P1 row, `umber_brush::symmetry`): the panel's
+ //! [`SymmetrySettings`] are adopted between strokes ([`PaintState::sync_symmetry`])
+ //! and snapshot into tile-local texel transforms at `begin_stroke`. The
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -304,8 +304,16 @@
+ /// square size (the wiring tests pin 512 explicitly so their seam/mask
+ /// geometry stays byte-identical).
+ pub const DEFAULT_TARGET_SIZE: u32 = 4096;
+ 
++/// The paint session's default texture-set name: what tiles resolve to
++/// before the app names a set (mesh load / project open retarget the
++/// active set), and what [`Self::with_target_size`] sizes. Mirrors the
++/// `texture_set_name` fallback chain (`umber_mesh::mesh_maps`) and the
++/// import session set's initial name, so a fresh session, a fresh import
++/// state and a set-less mesh all agree on one set.
++pub const DEFAULT_TEXTURE_SET: &str = "TextureSet";
++
+ /// Brush radius in target texels.
+ const BRUSH_RADIUS_TEXELS: f32 = 24.0;
+ 
+ /// Synthetic event-clock step: nominal nanoseconds between consecutive
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -373,11 +373,21 @@
+ targets: BTreeMap<u16, PaintThread>,
+ /// The tile the last original (non-mirror) event routed to; always a
+ /// key of `targets`.
+ active_tile: u16,
+-/// Edge lengths new tile targets are created at (tracks
+-/// [`Self::resize_target`]).
+-target_size: (u32, u32),
++/// Every known texture set's paint-target size (square in practice —
++/// see the module docs; the load path honors stored non-squares).
++/// Unknown sets read as [`DEFAULT_TARGET_SIZE`]² (see
++/// [`Self::size_of_set`]).
++set_sizes: BTreeMap<String, (u32, u32)>,
++/// Which set each present tile paints for. Tiles absent here resolve
++/// to the active set (see [`Self::set_of_tile`]); [`Self::ensure_tile`]
++/// records the active set at creation, and the project open path
++/// re-derives the map from the sidecar.
++tile_sets: BTreeMap<u16, String>,
++/// The set new tiles join and the Texture Sets panel edits. Always a
++/// key of `set_sizes` (see [`Self::set_active_set`]).
++active_set: String,
+ /// Whether the loaded mesh spans more than one UDIM tile. Routing by
+ /// `tile_of_uv` is live only then; otherwise every event lands in
+ /// [`FIRST_TILE`] (an edge click at `u == 1.0` must not spawn a blank
+ /// tile 1002 on a single-tile mesh).
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -402,10 +402,11 @@
+ wash_mode: WashMode,
+ conditioner: StrokeConditioner,
+ /// Set on pointer-down inside the UV square; cleared on pointer-up.
+ stroking: bool,
+-/// UV→texel scale (target texels per UV unit); tracks the live
+-/// target size (see [`Self::resize_target`]).
++/// UV→texel scale (target texels per UV unit) of the ACTIVE set (see
++/// [`Self::texels_per_uv_for`] for the per-tile form the routing
++/// sites use).
+ texels_per_uv: f32,
+ last_stats: FrameStats,
+ /// Seam topology of the loaded mesh (`None` until [`Self::set_mesh`]).
+ seam_graph: Option<SeamGraph>,
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -458,11 +458,12 @@
+ symmetry_from_view: bool,
+ /// The live stroke's tile-local texel transforms (identity first),
+ /// snapshot at `begin_stroke`; `None` = symmetry off for this stroke.
+ stroke_symmetry: Option<Vec<SymTransform>>,
+-/// The quick mask (session state: not in the project file, not in
+-/// any undo history).
+-quick_mask: QuickMask,
++/// The quick mask, one instance per texture set at the set's size
++/// (see the module docs — `umber-brush`'s single-size `QuickMask` is
++/// untouched). [`Self::quick_mask`] returns the active set's.
++masks: BTreeMap<String, QuickMask>,
+ /// Tiles whose GPU mask texture matches `quick_mask`'s plane. Emptied
+ /// by every whole-mask change (invert, clear, resize); a gated dab's
+ /// tile is brought back in sync before it is staged.
+ mask_synced: BTreeSet<u16>,
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -525,14 +525,17 @@
+     queue: umber_gpu::WgpuQueue,
+     size: u32,
+ ) -> Result<Self, PaintStateError> {
+     let first = PaintThread::new(device.clone(), queue.clone(), size, size)?;
++    let default_set = DEFAULT_TEXTURE_SET.to_string();
+     Ok(Self {
+         device,
+         queue,
+         targets: BTreeMap::from([(FIRST_TILE, first)]),
+         active_tile: FIRST_TILE,
+-        target_size: (size, size),
++        set_sizes: BTreeMap::from([(default_set.clone(), (size, size))]),
++        tile_sets: BTreeMap::from([(FIRST_TILE, default_set.clone())]),
++        active_set: default_set.clone(),
+         multi_tile: false,
+         brush: BrushParams::default(),
+         wash_mode: WashMode::BuildUp,
+         conditioner: StrokeConditioner::new(
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -563,9 +563,9 @@
+ line_constraint: LineConstraintMode::Off,
+ projection: PaintProjection::default(),
+ symmetry_from_view: false,
+ stroke_symmetry: None,
+-quick_mask: QuickMask::new(size, size),
++masks: BTreeMap::from([(default_set, QuickMask::new(size, size))]),
+ mask_synced: BTreeSet::new(),
+ stroke_mask_edit: false,
+ stroke_mask_gate: false,
+ #[cfg(test)]
+
+[0m
+Now the per-set registry API block:
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -578,8 +578,104 @@
+         staged_dabs: 0,
+     })
+ }
+ 
++/// Registers `name` as a texture set at the default size (no-op when
++/// known), with its own quick mask. Mesh load / project open call
++/// this for the session set so the panel always lists it.
++pub fn ensure_set(&mut self, name: &str) {
++    if !self.set_sizes.contains_key(name) {
++        self.set_sizes
++            .insert(name.to_string(), (DEFAULT_TARGET_SIZE, DEFAULT_TARGET_SIZE));
++    }
++    if !self.masks.contains_key(name) {
++        let (width, height) = self.size_of_set(name);
++        self.masks.insert(name.to_string(), QuickMask::new(width, height));
++    }
++}
++
++/// Makes `name` the active set (see the `active_set` field docs):
++/// newly routed tiles join it, [`Self::target_size`] and
++/// [`Self::quick_mask`] read it, and the panel's size combo edits it.
++/// Registers the set first, so the active set is always a key of
++/// `set_sizes`. Between strokes only (like the `sync_*` adopts — a
++/// mid-stroke switch would move the texel density under the live
++/// conditioner).
++pub fn set_active_set(&mut self, name: &str) {
++    self.ensure_set(name);
++    self.active_set = name.to_string();
++    self.texels_per_uv = self.size_of_set(name).0 as f32;
++}
++
++/// The active texture set's name.
++pub fn active_set(&self) -> &str {
++    &self.active_set
++}
++
++/// Every known texture-set name, ascending.
++pub fn set_names(&self) -> Vec<String> {
++    self.set_sizes.keys().cloned().collect()
++}
++
++/// `name`'s paint-target size; unknown sets read as
++/// [`DEFAULT_TARGET_SIZE`]² (the load path registers mapped sets
++/// before asking, so unknown here means "never seen" — default, never
++/// a panic and never a zero-size target).
++pub fn size_of_set(&self, name: &str) -> (u32, u32) {
++    self.set_sizes
++        .get(name)
++        .copied()
++        .unwrap_or((DEFAULT_TARGET_SIZE, DEFAULT_TARGET_SIZE))
++}
++
++/// The set `tile` paints for: its assignment, else the active set.
++pub fn set_of_tile(&self, tile: u16) -> &str {
++    self.tile_sets
++        .get(&tile)
++        .map(String::as_str)
++        .unwrap_or(&self.active_set)
++}
++
++/// The paint-target size of `tile`'s set.
++pub fn tile_size(&self, tile: u16) -> (u32, u32) {
++    let name = self.set_of_tile(tile).to_string();
++    self.size_of_set(&name)
++}
++
++/// The UV→texel density of `tile`'s set (the per-tile form of
++/// `texels_per_uv`, which tracks the active set).
++pub fn texels_per_uv_for(&self, tile: u16) -> f32 {
++    self.tile_size(tile).0 as f32
++}
++
++/// The tiles currently assigned to `set`, ascending.
++pub fn tiles_of_set(&self, set: &str) -> Vec<u16> {
++    self.targets
++        .keys()
++        .copied()
++        .filter(|tile| self.set_of_tile(*tile) == set)
++        .collect()
++}
++
++/// Moves `tile` to `set` (registers the set first). Present tiles keep
++/// their pixels — assignment only steers FUTURE `ensure_tile`
++/// creations' sizes and the mask the tile gates against; use
++/// [`Self::resize_set`] to rebuild at the set's size. Drops the tile's
++/// mask-sync flag (its planes now gate against another set's mask).
++pub fn assign_tile_to_set(&mut self, tile: u16, set: &str) {
++    self.ensure_set(set);
++    self.tile_sets.insert(tile, set.to_string());
++    self.mask_synced.remove(&tile);
++}
++
++/// Drops every tile→set assignment (the project open path re-derives
++/// the map from the sidecar, so a previous document's sets never steer
++/// the new one). Present tiles keep their targets; unassigned tiles
++/// resolve to the active set until reassigned.
++pub fn clear_tile_assignments(&mut self) {
++    self.tile_sets.clear();
++}
++
+ /// Hands a mesh over for seam-aware stamping: builds its [`SeamGraph`]
+ /// once (O(triangles)) and stores it for the stroke path, and arms
+ /// per-tile routing when the mesh's triangles span more than one UDIM
+ /// tile. Call once per mesh load, alongside the existing mesh handoff.
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -917,13 +917,43 @@
+     self.clone_source_fresh = true;
+ }
+ 
+ /// The quick mask (the UV view draws its overlay from it, the panel
+-/// its rows).
++/// its rows): the ACTIVE set's instance (see the `masks` field docs).
+ pub fn quick_mask(&self) -> &QuickMask {
+-    &self.quick_mask
++    self.masks.get(&self.active_set).expect(
++        "the active set is always registered (set_active_set ensures it)",
++    )
+ }
+ 
++/// `tile`'s set's mask (what the tile's strokes stamp and gate
++/// against — the per-tile form of [`Self::quick_mask`]).
++pub fn quick_mask_for_tile(&self, tile: u16) -> &QuickMask {
++    let name = self.set_of_tile(tile).to_string();
++    self.masks.get(&name).expect(
++        "a tile's set is always registered (assign_tile_to_set ensures it)",
++    )
++}
++
++/// The active set's mask, mutably (the panel rows and shortcuts edit
++/// through here).
++fn active_mask_mut(&mut self) -> &mut QuickMask {
++    let active = self.active_set.clone();
++    self.masks.get_mut(&active).expect(
++        "the active set is always registered (set_active_set ensures it)",
++    )
++}
++
++/// `tile`'s set's mask, mutably (registers the set first, so strokes
++/// routing to a never-sized set gate against a correctly sized plane).
++fn mask_of_tile_mut(&mut self, tile: u16) -> &mut QuickMask {
++    let name = self.set_of_tile(tile).to_string();
++    self.ensure_set(&name);
++    self.masks
++        .get_mut(&name)
++        .expect("ensure_set just registered it")
++}
++
+ /// The X shortcut: enters or leaves mask mode (entering arms gating,
+ /// see `umber_brush::quick_mask`); returns the new state. A live
+ /// stroke keeps the mode it began with.
+ pub fn toggle_mask_mode(&mut self) -> bool {
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -956,45 +956,51 @@
+ /// The X shortcut: enters or leaves mask mode (entering arms gating,
+ /// see `umber_brush::quick_mask`); returns the new state. A live
+ /// stroke keeps the mode it began with.
+ pub fn toggle_mask_mode(&mut self) -> bool {
+-    self.quick_mask.toggle_editing()
++    self.active_mask_mut().toggle_editing()
+ }
+ 
+ /// Enters (`true`) or leaves mask mode — the panel's toggle.
+ pub fn set_mask_mode(&mut self, editing: bool) {
+-    self.quick_mask.set_editing(editing);
++    self.active_mask_mut().set_editing(editing);
+ }
+ 
+ /// Arms or disarms gating. Disarming keeps the mask for the session.
+ pub fn set_mask_active(&mut self, active: bool) {
+-    self.quick_mask.set_active(active);
++    self.active_mask_mut().set_active(active);
+ }
+ 
+ /// What mask-mode strokes paint (white allows, black blocks).
+ pub fn set_mask_paint(&mut self, paint: MaskPaint) {
+-    self.quick_mask.set_paint(paint);
++    self.active_mask_mut().set_paint(paint);
+ }
+ 
+ /// Inverts the mask (the I shortcut in mask mode, or the panel
+ /// button). Refused (`false`) mid-stroke: a live gated stroke must
+-/// keep reading one mask.
++/// keep reading one mask. Applies to EVERY set's mask (the v1
++/// whole-mask semantics — invert carries no size, so per-set sizes
++/// are irrelevant to it).
+ pub fn invert_mask(&mut self) -> bool {
+     if self.stroking {
+         return false;
+     }
+-    self.quick_mask.invert();
++    for mask in self.masks.values_mut() {
++        mask.invert();
++    }
+     self.mask_synced.clear();
+     true
+ }
+ 
+ /// Zeroes the mask (the panel's Clear). Refused (`false`) mid-stroke,
+-/// like [`Self::invert_mask`].
++/// like [`Self::invert_mask`]. Like invert, session-wide across sets.
+ pub fn clear_mask(&mut self) -> bool {
+     if self.stroking {
+         return false;
+     }
+-    self.quick_mask.clear();
++    for mask in self.masks.values_mut() {
++        mask.clear();
++    }
+     self.mask_synced.clear();
+     true
+ }
+ 
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1315,39 +1315,64 @@
+ pub(crate) fn set_brush_params(&mut self, params: BrushParams) {
+     self.brush = params;
+ }
+ 
+-/// The edge lengths every tile's paint target has (as of the last
+-/// [`Self::resize_target`]; applied on the next drain). The Export
++/// The ACTIVE set's paint-target size (as of the last
++/// [`Self::resize_set`] on it; applied on the next drain). The Export
+ /// dialog's painted-source badge gates on this matching the export
+-/// size.
++/// size. Per-tile sizes: [`Self::tile_size`].
+ pub fn target_size(&self) -> (u32, u32) {
+-    self.target_size
++    let active = self.active_set.clone();
++    self.size_of_set(&active)
+ }
+ 
+-/// Switches every tile's paint target to `width`x`height` (contents
+-/// dropped); tiles created later use the same size. The Texture Sets
+-/// panel's size combo routes here; the stroke-soak and input→photon
+-/// harnesses resize to their own 4K target explicitly (they measure
+-/// relative perf, not the default — see their module docs).
++/// Switches the ACTIVE set's paint targets to `width`x`height`
++/// (contents dropped); that set's later tiles use the same size, other
++/// sets are untouched. The legacy single-size path (every pre-per-set
++/// caller — the perf harnesses, the old panel): single-set sessions
++/// hold every tile in the active set, so they behave byte-identically.
++/// Prefer [`Self::resize_set`] for a named set.
+ ///
+ /// INTENTIONAL: the resize clears the stroke-undo history (rects
+ /// recorded at the old size no longer fit the targets) and resets the
+-/// quick mask with the targets' contents (the `Resize` command drops
+-/// each target's GPU mask too). The UI names this (the Texture Sets
+-/// panel's hint string), so a size change is never a silent undo loss.
++/// set's quick mask with its targets' contents (the `Resize` command
++/// drops each target's GPU mask too). The UI names this per set (the
++/// Texture Sets panel's hint string), so a size change is never a
++/// silent undo loss.
+ pub fn resize_target(&mut self, width: u32, height: u32) {
+-    self.texels_per_uv = width as f32;
+-    self.target_size = (width, height);
++    let active = self.active_set.clone();
++    self.resize_set(&active, width, height);
++}
++
++/// Switches `set`'s paint targets to `width`x`height` (contents
++/// dropped); the set's later tiles use the same size, other sets are
++/// untouched. Registers the set first. The history-clear and mask
++/// contracts are the same as [`Self::resize_target`]'s, scoped to the
++/// set's tiles (the history itself is shared, so the clear is
++/// session-wide — see the module docs).
++pub fn resize_set(&mut self, set: &str, width: u32, height: u32) {
++    self.ensure_set(set);
++    self.set_sizes.insert(set.to_string(), (width, height));
++    if self.active_set == set {
++        self.texels_per_uv = width as f32;
++    }
+     // Snapshots recorded at the old size no longer fit the targets.
+     self.retouch_history.clear();
+-    // Nor does the mask: it resets with the targets' contents (the
+-    // `Resize` command drops each target's GPU mask too).
+-    self.quick_mask.resize(width, height);
+-    self.mask_synced.clear();
+-    for thread in self.targets.values_mut() {
+-        let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
++    // Nor does the set's mask: it resets with the targets' contents
++    // (the `Resize` command drops each target's GPU mask too). Other
++    // sets' masks are untouched.
++    if let Some(mask) = self.masks.get_mut(set) {
++        mask.resize(width, height);
+     }
++    let tiles = self.tiles_of_set(set);
++    for tile in &tiles {
++        self.mask_synced.remove(tile);
++    }
++    for tile in &tiles {
++        if let Some(thread) = self.targets.get_mut(tile) {
++            let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
++        }
++    }
+ }
+ 
+ /// The tile an event at `uv` routes to: `tile_of_uv` when the loaded
+ /// mesh spans several tiles, else [`FIRST_TILE`].
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1383,20 +1383,23 @@
+         FIRST_TILE
+     }
+ }
+ 
+-/// Ensures `tile` has a paint thread, creating it at the current
+-/// target size on first use. Returns `false` (event dropped, logged)
++/// Ensures `tile` has a paint thread, creating it at the TILE'S SET
++/// size on first use (and recording the active set when the tile has
++/// no assignment yet). Returns `false` (event dropped, logged)
+ /// if creation fails — unreachable in practice, since tile 1001 was
+ /// built on the same device.
+ fn ensure_tile(&mut self, tile: u16) -> bool {
+     if self.targets.contains_key(&tile) {
+         return true;
+     }
+-    let (width, height) = self.target_size;
++    let (width, height) = self.tile_size(tile);
+     match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
+         Ok(thread) => {
+             self.targets.insert(tile, thread);
++            let active = self.active_set.clone();
++            self.tile_sets.entry(tile).or_insert(active);
+             true
+         }
+         Err(err) => {
+             log::warn!("paint target for tile {tile} failed: {err:#}");
+@@ -1404,12 +1407,13 @@
+         }
+     }
+ }
+ 
+-/// Brush footprint in UV units: the mirror gate distance
+-/// (`BRUSH_RADIUS_TEXELS / texels_per_uv`, plus [`SEAM_MIRROR_MARGIN`).
+-fn seam_radius_uv(&self) -> f32 {
+-    mirror_radius_uv(self.texels_per_uv)
++/// Brush footprint in UV units for `tile`'s set: the mirror gate
++/// distance (`BRUSH_RADIUS_TEXELS / texels_per_uv`, plus
++/// [`SEAM_MIRROR_MARGIN`).
++fn seam_radius_uv_for(&self, tile: u16) -> f32 {
++    mirror_radius_uv(self.texels_per_uv_for(tile))
+ }
+ 
+ /// UV-space seam proximity gate: true iff `uv` lies within `radius_uv`
+ /// of any seam edge's `uv_a` or `uv_b` segment. `None` graph (no mesh
+
+[0m
+Now the per-tile density at routing sites:
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -713,15 +713,19 @@
+ // `PaintState`. UV-space segment gating is the app-side equivalent:
+ // the mirror math itself (`mirror_positions`) gates on UV-segment
+ // distance, so checking the same distance up front arms exactly the
+ // strokes that can produce mirrors.
+-self.stroke_near_seam = self.seam_near_uv([uv.x, uv.y], self.seam_radius_uv());
++self.stroke_near_seam =
++    self.seam_near_uv([uv.x, uv.y], self.seam_radius_uv_for(self.route_tile(uv)));
+ // Snapshot the symmetry for the whole stroke (before the retouch
+-// stroke opens — it takes the same transforms).
++// stroke opens — it takes the same transforms), at the
++// stroke-start tile's density (a cross-size-tile stroke applies
++// these to its other tiles too — the module docs' boundary).
++let start_tpv = self.texels_per_uv_for(self.route_tile(uv));
+ self.stroke_symmetry = self
+     .symmetry
+     .is_active()
+-    .then(|| texel_transforms(&self.symmetry, self.texels_per_uv));
++    .then(|| texel_transforms(&self.symmetry, start_tpv));
+ // Snapshot the quick-mask modes too: X / I mid-stroke never split
+ // one stroke between the mask and the layer.
+ self.stroke_mask_edit = self.quick_mask.is_editing();
+ self.stroke_mask_gate = self.quick_mask.gates();
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -770,10 +770,11 @@
+         stroke.set_symmetry(transforms.clone());
+     }
+     if let BrushTool::Clone(params) = self.tool {
+         let tile = self.route_tile(uv);
+-        let start = local_texel([uv.x, uv.y], tile, self.texels_per_uv);
+-        let offset = clone_offset_texels(params.source_offset, self.texels_per_uv);
++        let tpv = self.texels_per_uv_for(tile);
++        let start = local_texel([uv.x, uv.y], tile, tpv);
++        let offset = clone_offset_texels(params.source_offset, tpv);
+         stroke.begin_clone(tile, start, offset, params.follow);
+     }
+     stroke
+ }
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1512,9 +1512,9 @@
+         return;
+     }
+     tile
+ };
+-let texel = local_texel([uv.x, uv.y], tile, self.texels_per_uv);
++let texel = local_texel([uv.x, uv.y], tile, self.texels_per_uv_for(tile));
+ // Synthetic event clock (see EVENT_STEP_NS): every event — original
+ // or mirror — advances time so the conditioner actually progresses.
+ self.event_seq += 1;
+ let event = StrokeEvent {
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1220,13 +1220,14 @@
+ pub fn replay_filled_path(&mut self, path: &PaintPath, op: &PathOp) -> bool {
+     if self.stroking || !path.can_fill() {
+         return false;
+     }
+-    let (width, height) = self.target_size;
++    let tile = self.active_tile;
++    let (width, height) = self.tile_size(tile);
+     if width == 0 || height == 0 {
+         return false;
+     }
+-    let tile = self.active_tile;
++    let tpv = self.texels_per_uv_for(tile);
+     let mask = rasterize_polygon_mask(&path.loop_uv(), tile, width, height);
+     let runs = fill_runs(&mask, width as usize, height as usize);
+     if runs.is_empty() {
+         return false;
+@@ -1234,12 +1235,12 @@
+     let saved = self.tool;
+     self.tool = op.to_brush_tool();
+     let (pressure, size) = path.mean_style();
+     for run in &runs {
+-        let start = texel_center_uv(tile, run.x0, run.y, self.texels_per_uv);
++        let start = texel_center_uv(tile, run.x0, run.y, tpv);
+         self.begin_stroke_styled(Pos2::new(start[0], start[1]), pressure, size);
+         for x in run.x0 + 1..=run.x1 {
+-            let uv = texel_center_uv(tile, x, run.y, self.texels_per_uv);
++            let uv = texel_center_uv(tile, x, run.y, tpv);
+             self.extend_stroke_styled(Pos2::new(uv[0], uv[1]), pressure, size);
+         }
+         self.end_stroke();
+     }
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1690,12 +1690,13 @@
+         stroke.insert_tile(tile, image);
+     }
+ }
+ // The quick-mask gate: the retouch ops multiply their per-texel
+-// coverage by the tile's CPU plane (allocated empty if untouched).
++// coverage by the tile's set's CPU plane (allocated empty if
++// untouched).
+ let mask = if self.stroke_mask_gate {
+-    self.quick_mask.ensure_plane(tile);
+-    self.quick_mask.view(tile)
++    self.mask_of_tile_mut(tile).ensure_plane(tile);
++    self.quick_mask_for_tile(tile).view(tile)
+ } else {
+     None
+ };
+ if let Some(rect) = stroke.apply_masked(tile, dabs, mask) {
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1725,9 +1725,9 @@
+         radius: dab.radius,
+         alpha: dab.alpha,
+         hardness: dab.hardness,
+     };
+-    dirty = DirtyRect::union_opt(dirty, self.quick_mask.stamp(tile, &stamp));
++    dirty = DirtyRect::union_opt(dirty, self.mask_of_tile_mut(tile).stamp(tile, &stamp));
+ }
+ if let Some(rect) = dirty {
+     if self.mask_synced.contains(&tile) {
+         self.publish_mask(tile, rect);
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1743,9 +1743,9 @@
+ fn sync_mask_tile(&mut self, tile: u16) {
+     if self.mask_synced.contains(&tile) {
+         return;
+     }
+-    let (width, height) = self.quick_mask.dimensions();
++    let (width, height) = self.quick_mask_for_tile(tile).dimensions();
+     let full = DirtyRect {
+         x0: 0,
+         y0: 0,
+         x1: width,
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1759,9 +1759,9 @@
+ fn publish_mask(&mut self, tile: u16, rect: DirtyRect) {
+     if rect.width() == 0 || rect.height() == 0 {
+         return;
+     }
+-    let values = self.quick_mask.gpu_bytes(tile, rect);
++    let values = self.quick_mask_for_tile(tile).gpu_bytes(tile, rect);
+     let Some(thread) = self.targets.get_mut(&tile) else {
+         return;
+     };
+     let _ = thread.publish(vec![PaintThreadCommand::WriteMask {
+
+[0m
+[0m✱ [0mGrep "self\.quick_mask[^_]|self\.target_size[^_]|seam_radius_uv\(\)|self\.texels_per_uv\b"[90m in crates/umber-app/src/paint_state.rs · 5 matches[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=722, limit=20][0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1470, limit=35][0m
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -726,10 +726,10 @@
+     .is_active()
+     .then(|| texel_transforms(&self.symmetry, start_tpv));
+ // Snapshot the quick-mask modes too: X / I mid-stroke never split
+ // one stroke between the mask and the layer.
+-self.stroke_mask_edit = self.quick_mask.is_editing();
+-self.stroke_mask_gate = self.quick_mask.gates();
++self.stroke_mask_edit = self.quick_mask().is_editing();
++self.stroke_mask_gate = self.quick_mask().gates();
+ self.retouch = if self.stroke_mask_edit {
+     // A mask stroke paints only the mask: no retouch mirror, and
+     // the retouch history stays valid (the layer is untouched).
+     self.paint_capture = None;
+
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -1480,9 +1480,12 @@
+ if expand_seams
+     && self.stroke_near_seam
+     && (self.stroke_mask_edit || !self.tool.is_retouch())
+ {
+-    let radius_uv = self.seam_radius_uv();
++    // Each event (and each seam mirror below) gates on its own
++    // tile's density: a mirror landing in a different-sized tile
++    // recurses with expand_seams = false and re-resolves there.
++    let radius_uv = self.seam_radius_uv_for(self.route_tile(uv));
+     // Collect the mirrors first to end the graph borrow before the
+     // recursive calls re-borrow `self`.
+     let mirrors: Vec<[f32; 2]> = self
+         .seam_graph
+
+[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=1462, limit=55][0m
+PaintState core is done. Adding its per-set unit tests:
+[0m
+[0m← [0mEdit crates/umber-app/src/paint_state.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/paint_state.rs
+@@ -3433,5 +3433,108 @@
+             "a resize must clear the stroke history (rects no longer fit)"
+         );
+         assert_eq!(state.target_size(), (512, 512));
+     }
++
++    // --- Per-texture-set paint-target sizes (audit Pass 4 item 4) ---
++
++    /// Each set owns its size: tiles are created at their set's size, the
++    /// active set drives `target_size()`, and unknown sets read the
++    /// default (never a panic, never zero).
++    #[test]
++    fn tiles_are_created_at_their_own_sets_size() {
++        let Some((device, queue)) = try_request_device() else {
++            return;
++        };
++        let mut state =
++            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
++        assert_eq!(state.active_set(), DEFAULT_TEXTURE_SET);
++        assert_eq!(state.set_names(), vec![DEFAULT_TEXTURE_SET.to_string()]);
++        assert_eq!(state.set_of_tile(1001), DEFAULT_TEXTURE_SET);
++        assert_eq!(state.tile_size(1001), (512, 512));
++        assert_eq!(state.texels_per_uv_for(1001), 512.0);
++
++        state.resize_set("Cloak", 256, 256);
++        assert_eq!(state.size_of_set("Cloak"), (256, 256));
++        assert_eq!(state.set_names(), vec!["Cloak".to_string(), DEFAULT_TEXTURE_SET.to_string()]);
++        // Unknown sets read the default (the load path registers mapped
++        // sets before asking — unseen means default).
++        assert_eq!(state.size_of_set("NeverSeen"), (4096, 4096));
++        assert_eq!(state.tile_size(1002), (512, 512), "unassigned tiles resolve to the active set");
++
++        state.assign_tile_to_set(1002, "Cloak");
++        assert_eq!(state.set_of_tile(1002), "Cloak");
++        assert_eq!(state.tile_size(1002), (256, 256));
++        assert_eq!(state.texels_per_uv_for(1002), 256.0);
++        assert_eq!(
++            state.tiles_of_set("Cloak"),
++            Vec::<u16>::new(),
++            "assignment alone creates no target (lazy pool)"
++        );
++
++        // Creation pins the dims exactly (not a range check — a tile at
++        // the wrong size would fail).
++        assert!(state.ensure_tile(1002));
++        assert_eq!(state.tile_target(1002).expect("created").dimensions(), (256, 256));
++        assert_eq!(state.tile_target(1001).expect("kept").dimensions(), (512, 512));
++
++        // The active set drives the legacy single-size surface.
++        assert_eq!(state.target_size(), (512, 512));
++        state.set_active_set("Cloak");
++        assert_eq!(state.active_set(), "Cloak");
++        assert_eq!(state.target_size(), (256, 256));
++    }
++
++    /// A set resize rebuilds only that set's tiles, drops only that set's
++    /// mask planes, and still clears the shared history (the per-set
++    /// clears-undo contract — see the module docs for why the clear is
++    /// session-wide).
++    #[test]
++    fn resize_set_is_scoped_to_its_tiles_and_masks() {
++        let Some((device, queue)) = try_request_device() else {
++            return;
++        };
++        let mut state =
++            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
++        state.resize_set("Cloak", 256, 256);
++        state.assign_tile_to_set(1002, "Cloak");
++        assert!(state.ensure_tile(1002));
++        state.process_pending().expect("tiles apply");
++
++        // A mask plane on the default set, so the scoped-drop below is
++        // non-vacuous (a resize that dropped nothing would pass anyway).
++        state.set_mask_mode(true);
++        state.begin_stroke(egui::pos2(0.25, 0.25));
++        for i in 1..=14 {
++            let t = i as f32 * 0.02;
++            state.extend_stroke(egui::pos2(0.25 + t, 0.25));
++        }
++        state.end_stroke();
++        state.set_mask_mode(false);
++        assert!(
++            state.quick_mask().coverage(1001).is_some(),
++            "the mask stroke must allocate the default set's plane"
++        );
++
++        // A paint stroke, so the history clear below is non-vacuous too.
++        drive_stroke(&mut state, [0.6, 0.6], [0.0, 0.02], 15);
++        state.end_stroke();
++        assert!(state.can_undo_stroke());
++
++        state.resize_set("Cloak", 128, 128);
++        assert!(
++            !state.can_undo_stroke(),
++            "a set resize clears the shared stroke history"
++        );
++        assert_eq!(state.size_of_set("Cloak"), (128, 128));
++        assert_eq!(state.size_of_set(DEFAULT_TEXTURE_SET), (512, 512));
++        state.process_pending().expect("resize applies");
++        assert_eq!(state.tile_target(1002).expect("resized").dimensions(), (128, 128));
++        assert_eq!(state.tile_target(1001).expect("untouched").dimensions(), (512, 512));
++        assert!(
++            state.quick_mask().coverage(1001).is_some(),
++            "the other set's mask planes survive a set resize"
++        );
++        // ...while the resized set's own mask follows its new size.
++        assert_eq!(state.quick_mask_for_tile(1002).dimensions(), (128, 128));
++    }
+ }
+
+[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=2215, limit=60][0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=2780, limit=80][0m
+[0m✱ [0mGrep "fn drive_stroke"[90m in crates/umber-app/src/paint_state.rs · 1 match[0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=2440, limit=30][0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=2860, limit=75][0m
+Mask-stroke pattern confirmed. Now the main.rs persistence layer:
+[0m
+[0m# [0mTodos
+[✓] PaintState: per-set size registry + tile→set map + active set + per-set masks
+[✓] PaintState: per-tile texel density at all routing sites
+[•] main.rs: per-set sidecar mapping + legacy migration + load report
+[ ] main.rs: per-set Texture Sets panel + set_active wiring
+[ ] Tests: two-sets-different-sizes + mismatch-loud + legacy migration (main.rs); per-set unit tests (paint_state.rs)
+[ ] i18n keys (en-US + pt-BR) + requirements row mark
+[ ] Gates: fmt, clippy umber-app, verify-kill
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -47,17 +47,26 @@
+ //!   writes) can leave new metadata with old paint or vice versa; one
+ //!   atomic commit for both is deferred.
+ //! * Save prunes `tile-*.png` files for tiles the session no longer holds,
+ //!   so a re-save into a project dir never resurrects a dropped tile.
+-//! * The session target size rides in `<project>/paint/target_size.txt`
+-//!   (`"{width}x{height}"`), written on every save even with zero tiles
+-//!   (a 4K choice with no paint yet survives the round trip). Open restores
+-//!   it only when no tile PNGs exist — with pixels, the PNG dims lead, so
+-//!   the bytes always fit the target they land in; a missing/unparseable
+-//!   file keeps the live size. Any positive dims round-trip: the UI offers
+-//!   squares only, but clamping a stored size down would drop pixels
+-//!   silently. A sidecar file (not `project.json`) for the same
+-//!   schema-ownership reason as the pixels above.
++//! * The per-set paint sizes ride in `<project>/paint/target_sizes.txt`
++//!   (v2: one `<set>=<width>x<height>` line per sized set plus one
++//!   `tile-<N>=<set>` assignment line per saved tile; `#` comments and
++//!   blank lines skipped). The v1 `<project>/paint/target_size.txt`
++//!   global is still written (the active set's size, for old readers) and
++//!   still read: a v1 project (tiles + global, no mapping) opens with its
++//!   global applied to every set (the migration — see `load_paint_tiles`).
++//!   With pixels, the PNG dims lead per tile: a tile whose PNG disagrees
++//!   with its set's size is SKIPPED loudly (warn log + the load report's
++//!   skip list), never silently resampled or torn. Any positive dims
++//!   round-trip: the UI offers squares only, but clamping a stored size
++//!   down would drop pixels silently. Sidecar files (not `project.json`)
++//!   for the same schema-ownership reason as the pixels above.
++//! * Save writes sizes for sets holding saved tiles plus the active set
++//!   (a size choice with no paint yet survives the round trip); sets the
++//!   session only ever read from an old mapping (no tiles, never
++//!   activated) are not rewritten — activating a set to edit it always
++//!   re-registers it first.
+ 
+ mod bake_sources;
+ mod bakes_panel;
+ mod brush_panel;
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -724,8 +724,101 @@
+     let rest = name.strip_prefix("tile-")?.strip_suffix(".png")?;
+     rest.parse::<u16>().ok()
+ }
+ 
++/// The sidecar file holding the PER-SET paint-target sizes
++/// (`<project>/paint/target_sizes.txt`): one `<set>=<width>x<height>`
++/// line per sized set plus one `tile-<N>=<set>` assignment line per saved
++/// tile (see the module docs). Written on every save alongside the legacy
++/// global below.
++fn paint_set_sizes_path(project_dir: &Path) -> PathBuf {
++    paint_sidecar_dir(project_dir).join("target_sizes.txt")
++}
++
++/// The parsed `target_sizes.txt`: set sizes plus tile assignments (both
++/// may be empty — an empty mapping means "no per-set information", and
++/// the load path falls back to the legacy global).
++#[derive(Debug, Default, PartialEq, Eq)]
++struct PaintSetSizes {
++    /// Set name → `(width, height)`, sorted (BTreeMap wire order keeps
++    /// saves byte-deterministic).
++    sizes: std::collections::BTreeMap<String, (u32, u32)>,
++    /// Tile id → set name, sorted.
++    tiles: std::collections::BTreeMap<u16, String>,
++}
++
++/// Formats [`PaintSetSizes`] for `target_sizes.txt`: size lines first
++/// (sorted by set name), then tile assignments (sorted by tile). A `#`
++/// header names the version so a future format can branch on it.
++fn format_paint_set_sizes(mapping: &PaintSetSizes) -> String {
++    let mut out = String::from("# Umber paint-set sizes v1\n");
++    for (name, (width, height)) in &mapping.sizes {
++        out.push_str(&format!("{name}={width}x{height}\n"));
++    }
++    for (tile, set) in &mapping.tiles {
++        out.push_str(&format!("tile-{tile}={set}\n"));
++    }
++    out
++}
++
++/// Parses [`format_paint_set_sizes`]'s output; `None` (no mapping — the
++/// load path falls back to the legacy global) when NOTHING parsed, even
++/// if the file exists but holds only comments/garbage. Malformed lines
++/// are skipped (never a panic, never a zero-size target); a set line for
++/// a `tile-<N>`-shaped name is skipped too (that prefix is reserved for
++/// assignments — see the module docs).
++fn parse_paint_set_sizes(text: &str) -> Option<PaintSetSizes> {
++    let mut mapping = PaintSetSizes::default();
++    for line in text.lines() {
++        let line = line.trim();
++        if line.is_empty() || line.starts_with('#') {
++            continue;
++        }
++        let Some((left, right)) = line.split_once('=') else {
++            continue;
++        };
++        let (left, right) = (left.trim(), right.trim());
++        if let Some(tile) = left
++            .strip_prefix("tile-")
++            .and_then(|n| n.parse::<u16>().ok())
++        {
++            if !right.is_empty() {
++                mapping.tiles.insert(tile, right.to_string());
++            }
++            continue;
++        }
++        if left.is_empty() || right.is_empty() {
++            continue;
++        }
++        if let Some((width, height)) = parse_paint_target_size(right) {
++            mapping.sizes.insert(left.to_string(), (width, height));
++        }
++    }
++    (!mapping.sizes.is_empty() || !mapping.tiles.is_empty()).then_some(mapping)
++}
++
++/// One tile the open path refused to restore: its PNG's dims disagree
++/// with its set's size (see `load_paint_tiles_reported`). Loud by
++/// construction — the report is logged and returned, never swallowed.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++struct PaintTileSkip {
++    /// The refused tile.
++    tile: u16,
++    /// The set's size the tile was expected at.
++    expected: (u32, u32),
++    /// The PNG's actual dims.
++    found: (u32, u32),
++}
++
++/// What `load_paint_tiles_reported` restored and what it refused.
++#[derive(Debug, Default, PartialEq, Eq)]
++struct PaintLoadReport {
++    /// Tiles uploaded byte-identically.
++    restored: usize,
++    /// Tiles skipped for size mismatch (loud — logged per tile).
++    skipped: Vec<PaintTileSkip>,
++}
++
+ /// The Texture Sets panel's paint-target size section (CORE-LOOP CRITICAL 2,
+ /// the 2026-10-12 strategy review): the shared `SIZE_PRESETS` combo
+ /// (512..8K — the same list the Bakes panel and the Export dialog offer)
+ /// routed to [`paint_state::PaintState::resize_target`] on change. The
+
+[0m
+Now the per-set panel:
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -817,36 +817,61 @@
+     /// Tiles skipped for size mismatch (loud — logged per tile).
+     skipped: Vec<PaintTileSkip>,
+ }
+ 
+-/// The Texture Sets panel's paint-target size section (CORE-LOOP CRITICAL 2,
+-/// the 2026-10-12 strategy review): the shared `SIZE_PRESETS` combo
+-/// (512..8K — the same list the Bakes panel and the Export dialog offer)
+-/// routed to [`paint_state::PaintState::resize_target`] on change. The
+-/// resize is INTENTIONAL-clear (canvas contents, stroke-undo history and
+-/// quick mask all reset — see `resize_target`): the hint string names it,
+-/// so a size change is never a silent undo loss. The choice persists in
+-/// the project (`target_size.txt` — see [`save_paint_tiles`]).
++/// The Texture Sets panel's per-set paint-target size section (CORE-LOOP
++/// CRITICAL 2, the 2026-10-12 strategy review): one selectable row per
++/// known set (the session set is always listed — mesh load retargets it),
++/// and the shared `SIZE_PRESETS` combo (512..8K — the same list the Bakes
++/// panel and the Export dialog offer) editing the SELECTED set's size
++/// through [`paint_state::PaintState::resize_set`]. Selecting a set also
++/// activates it (new tiles join it; the mask rows read it). The resize is
++/// INTENTIONAL-clear (that set's canvas, the session stroke-undo history
++/// and that set's quick mask all reset — see `resize_set`): the hint
++/// string names it per set, so a size change is never a silent undo loss.
++/// The choice persists per set (`target_sizes.txt` — see
++/// [`save_paint_tiles`]).
+ ///
+-/// V1 boundary: ONE session size shared by every tile (the review's
+-/// per-texture-set size is the named follow-up, alongside the per-layer
+-/// tile pool). The combo is square-only: a non-square session (only a
+-/// hand-edited project can produce one) shows its width, and picking any
+-/// row normalizes it to that square. No paint session (no GPU target)
+-/// shows the unavailable string instead of the combo.
+-fn texture_sets_panel_ui(ui: &mut Ui, paint: Option<&mut paint_state::PaintState>) {
++/// Single-set sessions (everything today: one mesh, one session set) show
++/// one row and behave exactly as the v1 global combo did. No paint session
++/// (no GPU target) shows the unavailable string instead of the rows.
++fn texture_sets_panel_ui(
++    ui: &mut Ui,
++    paint: Option<&mut paint_state::PaintState>,
++    session_set: &str,
++) {
+     let Some(paint) = paint else {
+         ui.label(tr("texturesets.no-paint"));
+         return;
+     };
+-    let (width, height) = paint.target_size();
++    paint.ensure_set(session_set);
++    // Selection first (owned, so the borrow ends before the size combo
++    // and the activation mutate the session below).
++    let mut active = paint.active_set().to_string();
++    let sets = paint.set_names();
++    ui.horizontal_wrapped(|ui| {
++        ui.label(tr("texturesets.set"));
++        for name in &sets {
++            let (width, height) = paint.size_of_set(name);
++            let tiles = paint.tiles_of_set(name).len();
++            ui.selectable_value(
++                &mut active,
++                name.clone(),
++                format!("{name} ({width}×{height}, {tiles})"),
++            );
++        }
++    });
++    if active != paint.active_set() {
++        paint.set_active_set(&active);
++    }
++    let (width, height) = paint.size_of_set(&active);
+     let mut size = width;
+     ui.horizontal(|ui| {
+         ui.label(tr("texturesets.size"));
+         size_presets::size_combo(ui, "", &mut size);
+     });
+     if (size, size) != (width, height) {
+-        paint.resize_target(size, size);
++        paint.resize_set(&active, size, size);
+     }
+     ui.label(tr("texturesets.resize-clears"));
+ }
+ 
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -268,9 +268,13 @@
+         });
+     }
+ }
+ Panel::TextureSets => {
+-    texture_sets_panel_ui(ui, self.paint.as_deref_mut());
++    texture_sets_panel_ui(
++        ui,
++        self.paint.as_deref_mut(),
++        self.mesh_import.session_set.name.as_str(),
++    );
+ }
+ Panel::Bakes => {
+     let ctx = BakesContext {
+         gpu: Some(self.gpu),
+
+[0m
+Now save/load:
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -908,21 +908,44 @@
+ /// does the blocking `PaintTarget::read_back_rgba8` — the same call the
+ /// stroke-undo capture uses. Prunes `tile-*.png` files for tiles the
+ /// session no longer holds, then returns how many tiles were stored.
+ fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
+-    // The session size rides along even with zero tiles (a 4K choice with
+-    // no paint yet must survive the round trip); a write failure logs but
+-    // keeps the metadata save (same torn-save window as the pixels).
++    // The session sizes ride along even with zero tiles (a size choice
++    // with no paint yet must survive the round trip); a write failure logs
++    // but keeps the metadata save (same torn-save window as the pixels).
+     if let Err(e) = std::fs::create_dir_all(paint_sidecar_dir(project_dir)) {
+         log::warn!("paint save: sidecar dir not created: {e:#}");
+     } else {
++        // The legacy global (the active set's size — old readers apply one
++        // size to every tile, and with pixels the PNG dims lead anyway).
+         let (width, height) = paint.target_size();
+         if let Err(e) = std::fs::write(
+             paint_target_size_path(project_dir),
+             format_paint_target_size(width, height),
+         ) {
+             log::warn!("paint save: target size not stored: {e:#}");
+         }
++        // The per-set mapping: sizes for every set holding a saved tile
++        // plus the active set (a chooser with no paint yet survives), and
++        // one assignment line per saved tile. Sorted by construction
++        // (BTreeMap), so saves are byte-deterministic.
++        let tiles = paint.tiles_present();
++        let mut mapping = PaintSetSizes::default();
++        for tile in &tiles {
++            let set = paint.set_of_tile(*tile).to_string();
++            mapping.tiles.insert(*tile, set.clone());
++            mapping.sizes.insert(set, paint.tile_size(*tile));
++        }
++        let active = paint.active_set().to_string();
++        if !mapping.sizes.contains_key(&active) {
++            mapping.sizes.insert(active.clone(), paint.size_of_set(&active));
++        }
++        if let Err(e) = std::fs::write(
++            paint_set_sizes_path(project_dir),
++            format_paint_set_sizes(&mapping),
++        ) {
++            log::warn!("paint save: set sizes not stored: {e:#}");
++        }
+     }
+     let mut saved = 0usize;
+     let tiles = paint.tiles_present();
+     for tile in &tiles {
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -986,20 +986,34 @@
+ /// Restores the paint sidecar into `paint` through the EXISTING
+ /// `WriteRegion` queue path (`PaintState::publish_fill` — the same call
+ /// the fill-layer refresh uses, one full-tile write per tile, in FIFO
+ /// order). Decodes each `tile-<N>.png`, flips it back out of the PNG
+-/// reader's row order, resizes the session to the saved dims first (the
+-/// resize drops the old contents and clears the session-scoped
+-/// stroke-undo history with them), then drains so the pixels have landed
+-/// before returning. Tiles whose dims disagree with the first tile's are
+-/// skipped with a log (v1 keeps one size for all tiles). A project with
+-/// no sidecar clears the session to transparent instead of keeping the
+-/// previous document's pixels. Returns how many tiles were restored.
++/// reader's row order, applies the stored sizes first (each resize drops
++/// the old contents and the session-scoped stroke-undo history clears
++/// with the first one, so no stale rect can undo against the restored
++/// pixels), then drains so the pixels have landed before returning.
++///
++/// Per-set sizes come from `target_sizes.txt` when present (authoritative:
++/// each tile must match ITS set's size); without it the v1 shape holds —
++/// every tile joins the active set at the first tile's dims, and the
++/// legacy `target_size.txt` global only matters with no tiles (applied to
++/// every set — the v1→v2 migration). Tiles whose dims disagree with their
++/// set's size are skipped LOUDLY (warn log plus the report's skip list —
++/// never a silent resample). A project with no sidecar tiles clears the
++/// session to transparent instead of keeping the previous document's
++/// pixels. Returns how many tiles were restored and what was refused.
+ fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
++    load_paint_tiles_reported(paint, project_dir).restored
++}
++
++fn load_paint_tiles_reported(
++    paint: &mut paint_state::PaintState,
++    project_dir: &Path,
++) -> PaintLoadReport {
+     let dir = paint_sidecar_dir(project_dir);
+     let entries = match std::fs::read_dir(&dir) {
+         Ok(entries) => entries,
+-        Err(_) => return 0,
++        Err(_) => return PaintLoadReport::default(),
+     };
+     let mut tiles: Vec<(u16, u32, u32, Vec<u8>)> = Vec::new();
+     for entry in entries.flatten() {
+         let name = entry.file_name().to_string_lossy().into_owned();
+@@ -1020,51 +1034,129 @@
+                 entry.path().display()
+             ),
+         }
+     }
++    let mapping = std::fs::read_to_string(paint_set_sizes_path(project_dir))
++        .ok()
++        .and_then(|text| parse_paint_set_sizes(&text));
++    let active = paint.active_set().to_string();
+     if tiles.is_empty() {
+         // No paint persisted: the newly opened document must not show the
+         // previous document's pixels (the layer stack is replaced
+-        // wholesale on open; the paint follows the same rule). The session
+-        // resizes to the SAVED size when the sidecar stored one (a 4K
+-        // choice with no paint yet survives the round trip); a
+-        // missing/unparseable file keeps the live size — the clear still
+-        // runs either way.
+-        let (width, height) = std::fs::read_to_string(paint_target_size_path(project_dir))
+-            .ok()
+-            .and_then(|text| parse_paint_target_size(&text))
+-            .unwrap_or_else(|| paint.target_size());
+-        paint.resize_target(width, height);
++        // wholesale on open; the paint follows the same rule).
++        match &mapping {
++            Some(known) => {
++                // Every known set goes to its mapped size (unmapped sets
++                // resize to their live size — the resize still drops their
++                // stale contents); a missing/unparseable mapping degrades
++                // below, never a panic.
++                let mut names = paint.set_names();
++                for name in known.sizes.keys() {
++                    if !names.contains(name) {
++                        names.push(name.clone());
++                    }
++                }
++                for name in &names {
++                    let (width, height) = known
++                        .sizes
++                        .get(name)
++                        .copied()
++                        .unwrap_or_else(|| paint.size_of_set(name));
++                    paint.resize_set(name, width, height);
++                }
++            }
++            None => {
++                // The v1 shape: the saved global (or the live size when the
++                // sidecar stored none) applies to EVERY set — the
++                // migration. Either way the pool is dropped: the clear
++                // still runs.
++                let (width, height) = std::fs::read_to_string(paint_target_size_path(project_dir))
++                    .ok()
++                    .and_then(|text| parse_paint_target_size(&text))
++                    .unwrap_or_else(|| paint.target_size());
++                for name in paint.set_names() {
++                    paint.resize_set(&name, width, height);
++                }
++            }
++        }
+         if let Err(e) = paint.process_pending() {
+             log::warn!("paint open: clearing the session failed: {e:#}");
+         }
+-        return 0;
++        return PaintLoadReport::default();
+     }
+     tiles.sort_by_key(|entry| entry.0);
+-    let (first_width, first_height) = (tiles[0].1, tiles[0].2);
+-    paint.resize_target(first_width, first_height);
++    match &mapping {
++        Some(known) => {
++            // The mapping is authoritative: every known set goes to its
++            // mapped size first (unmapped sets resize to their live size,
++            // dropping stale pixels), then assignments re-derive from the
++            // sidecar so a previous document's sets never steer this one.
++            let mut names = paint.set_names();
++            for name in known.sizes.keys() {
++                if !names.contains(name) {
++                    names.push(name.clone());
++                }
++            }
++            for name in &names {
++                let (width, height) = known
++                    .sizes
++                    .get(name)
++                    .copied()
++                    .unwrap_or_else(|| paint.size_of_set(name));
++                paint.resize_set(name, width, height);
++            }
++            paint.clear_tile_assignments();
++            for (tile, set) in &known.tiles {
++                paint.assign_tile_to_set(*tile, set);
++            }
++        }
++        None => {
++            // The v1 shape, byte-identical: every tile joins the active
++            // set and the first tile's dims lead (a resize drops the old
++            // contents and clears the session-scoped stroke-undo history
++            // with them).
++            paint.clear_tile_assignments();
++            for (tile, _, _, _) in &tiles {
++                paint.assign_tile_to_set(*tile, &active);
++            }
++            let (first_width, first_height) = (tiles[0].1, tiles[0].2);
++            paint.resize_set(&active, first_width, first_height);
++        }
++    }
+     if let Err(e) = paint.process_pending() {
+         log::warn!("paint open: resize to the saved size failed: {e:#}");
+-        return 0;
++        return PaintLoadReport::default();
+     }
+-    let mut restored = 0usize;
++    let mut report = PaintLoadReport::default();
+     for (tile, width, height, bytes) in tiles {
+-        if (width, height) != (first_width, first_height) {
++        // Tiles the mapping never assigned resolve to the active set (and
++        // are recorded there, so the next save writes them back).
++        if paint.set_of_tile(tile) == paint.active_set() && mapping.is_some() {
++            paint.assign_tile_to_set(tile, &active);
++        }
++        let expected = paint.tile_size(tile);
++        if (width, height) != expected {
++            let (ew, eh) = expected;
+             log::warn!(
+-                "paint open: tile {tile} is {width}x{height}, want {first_width}x{first_height}; skipping"
++                "paint open: tile {tile} is {width}x{height}, want {ew}x{eh}; skipping"
+             );
++            report.skipped.push(PaintTileSkip {
++                tile,
++                expected,
++                found: (width, height),
++            });
+             continue;
+         }
+         if paint.publish_fill(tile, width, height, bytes) {
+-            restored += 1;
++            report.restored += 1;
+         } else {
+             log::warn!("paint open: tile {tile} upload failed; skipping");
+         }
+     }
+     if let Err(e) = paint.process_pending() {
+         log::warn!("paint open: upload drain failed: {e:#}");
+     }
+-    restored
++    report
+ }
+ 
+ impl UmberApp {
+     /// Saves the document as a `.umber` project directory via a save
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1127,13 +1127,12 @@
+     return PaintLoadReport::default();
+ }
+ let mut report = PaintLoadReport::default();
+ for (tile, width, height, bytes) in tiles {
+-    // Tiles the mapping never assigned resolve to the active set (and
+-    // are recorded there, so the next save writes them back).
+-    if paint.set_of_tile(tile) == paint.active_set() && mapping.is_some() {
+-        paint.assign_tile_to_set(tile, &active);
+-    }
++    // Tiles the mapping never assigned resolve to the active set;
++    // recording the resolution keeps the next save's mapping exact.
++    let set = paint.set_of_tile(tile).to_string();
++    paint.assign_tile_to_set(tile, &set);
+     let expected = paint.tile_size(tile);
+     if (width, height) != expected {
+         let (ew, eh) = expected;
+         log::warn!(
+
+[0m
+Now the active-set wiring at session-set transitions:
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -566,11 +566,16 @@
+ let n = mesh.vertex_count();
+ match self.state.viewport.load_mesh(&self.gpu, &mesh) {
+     Ok(()) => {
+         // The import session set follows the mesh's set
+-        // name (channels kept).
++        // name (channels kept); the paint session's active
++        // set follows it too (new tiles join the mesh's
++        // set — existing tiles keep their sets).
+         let set_name = umber_mesh::texture_set_name(&path, &mesh);
+         self.state.mesh_import.retarget_set(&set_name);
++        if let Some(paint) = self.state.paint.as_mut() {
++            paint.set_active_set(&set_name);
++        }
+         self.state.mesh = Some(mesh);
+         self.state.mesh_path = Some(path);
+         log::info!("loaded mesh: {n} vertices");
+     }
+
+[0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1215, limit=40][0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1195, limit=22][0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1180, limit=16][0m
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1186,10 +1186,15 @@
+ else {
+     return;
+ };
+ // Keep the import session set (and its user channels) as the saved
+-// set: a rename keeps channels (see `retarget_set`).
++// set: a rename keeps channels (see `retarget_set`). The paint
++// session's active set follows it (the saved set is the session
++// set — the mapping's active entry names it).
+ self.state.mesh_import.retarget_set(&set_name);
++if let Some(paint) = self.state.paint.as_mut() {
++    paint.set_active_set(&set_name);
++}
+ let texture_set = self.state.mesh_import.session_set.clone();
+ let graphs_mtlx = if self.state.graph.graph().nodes.is_empty() {
+     Vec::new()
+ } else {
+
+[0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1272, limit=30][0m
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1274,15 +1274,20 @@
+ self.state.doc.load_stack(entry.stack.clone());
+ // The import session set restores the saved set wholesale
+ // (channels included — user channels from earlier imports
+ // survive the open); unknown-name fallback is the default.
++// The paint session's active set follows it (new tiles join
++// the opened set; the sidecar re-derives the rest).
+ if let Some(saved) = model.texture_sets.iter().find(|ts| ts.name == name) {
+     self.state.mesh_import.set_session_set(saved.clone());
+ } else {
+     self.state
+         .mesh_import
+         .set_session_set(umber_core::TextureSet::new_default(&name));
+ }
++if let Some(paint) = self.state.paint.as_mut() {
++    paint.set_active_set(&name);
++}
+ self.state.project_dir = Some(dir.clone());
+ // `load_from_dir` already replayed + truncated any journal
+ // a crash left behind; resume journaling from its mark.
+ if let Err(e) = self
+
+[0m
+Fixing a doc inaccuracy I introduced (tile-prefixed lines are assignments, not skips):
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -771,11 +771,14 @@
+ 
+ /// Parses [`format_paint_set_sizes`]'s output; `None` (no mapping — the
+ /// load path falls back to the legacy global) when NOTHING parsed, even
+ /// if the file exists but holds only comments/garbage. Malformed lines
+-/// are skipped (never a panic, never a zero-size target); a set line for
+-/// a `tile-<N>`-shaped name is skipped too (that prefix is reserved for
+-/// assignments — see the module docs).
++/// are skipped (never a panic, never a zero-size target). The `tile-<N>`
++/// prefix is RESERVED for assignments: a set literally named `tile-1002`
++/// cannot be sized through this file (its line parses as an assignment) —
++/// set names are mesh/material-derived, so this never triggers in
++/// practice, and the load path never strands a tile over it (an
++/// assignment to an unknown name registers that name at the default size).
+ fn parse_paint_set_sizes(text: &str) -> Option<PaintSetSizes> {
+     let mut mapping = PaintSetSizes::default();
+     for line in text.lines() {
+         let line = line.trim();
+
+[0m
+Now the gate tests in main.rs:
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1827,5 +1827,188 @@
+         );
+ 
+         let _ = std::fs::remove_dir_all(&dir);
+     }
++
++    #[test]
++    fn set_sizes_codec_round_trips_exactly_and_rejects_garbage() {
++        // Sizes sorted by set name, then assignments sorted by tile — the
++        // save is byte-deterministic, so the exact text is pinned (not a
++        // contains-check — a reordered save would fail).
++        let mut mapping = PaintSetSizes::default();
++        mapping.sizes.insert("Sword".to_string(), (4096, 4096));
++        mapping
++            .sizes
++            .insert("Shield".to_string(), (2048, 1024));
++        mapping.tiles.insert(1002, "Shield".to_string());
++        let text = format_paint_set_sizes(&mapping);
++        assert_eq!(
++            text,
++            "# Umber paint-set sizes v1\nShield=2048x1024\nSword=4096x4096\ntile-1002=Shield\n"
++        );
++        assert_eq!(parse_paint_set_sizes(&text), Some(mapping));
++        // A stored non-square survives (the load path honors stored dims —
++        // only the UI is square-only).
++        assert_eq!(
++            parse_paint_set_sizes("Shield=2048x1024\n"),
++            Some(PaintSetSizes {
++                sizes: std::collections::BTreeMap::from([("Shield".to_string(), (2048, 1024))]),
++                tiles: std::collections::BTreeMap::new(),
++            })
++        );
++        // Comments, blanks and malformed lines skip; the tile- prefix is
++        // reserved for assignments even when the right side is a size.
++        let mixed = "# header\n\nSword=512x512\nbogus\n=512x512\nA=\nA=0x512\ntile-1002=Sword\n";
++        let parsed = parse_paint_set_sizes(mixed).expect("one size + one assignment parse");
++        assert_eq!(parsed.sizes.len(), 1);
++        assert_eq!(parsed.sizes.get("Sword"), Some(&(512, 512)));
++        assert_eq!(parsed.tiles.get(&1002), Some(&"Sword".to_string()));
++        // Nothing parseable at all degrades to None (the load path falls
++        // back to the legacy global): empty, comments-only, and every
++        // malformed shape.
++        for bad in [
++            "",
++            "# only a comment\n\n",
++            "no-equals-here\n",
++            "=512x512\n",
++            "A=\n",
++            "A=0x512\n",
++            "tile-abc=X\n",
++            "tile-=X\n",
++        ] {
++            assert_eq!(parse_paint_set_sizes(bad), None, "{bad:?} must yield no mapping");
++        }
++        assert_eq!(
++            paint_set_sizes_path(Path::new("/p")),
++            PathBuf::from("/p/paint/target_sizes.txt")
++        );
++    }
++
++    /// Deterministic RGBA8 pattern: texel `(x, y)` channel `c` holds
++    /// `(x*31 + y*17 + c*71 + seed) mod 251` (251 is prime, so the values
++    /// spread; the seed tells two sets' paint apart).
++    fn pattern_bytes(width: u32, height: u32, seed: u8) -> Vec<u8> {
++        let mut out = Vec::with_capacity(width as usize * height as usize * 4);
++        for y in 0..height {
++            for x in 0..width {
++                for c in 0..4u32 {
++                    out.push(((x * 31 + y * 17 + c * 71 + u32::from(seed)) % 251) as u8);
++                }
++            }
++        }
++        out
++    }
++
++    #[test]
++    fn two_sets_at_different_sizes_round_trip_byte_identical_per_set() {
++        let Some((device, queue)) = try_request_device() else {
++            return;
++        };
++        // Set A ("Body") at 2048, set B ("Cloak") at 4096 — the audit's
++        // gate: two sets, two sizes, one session.
++        let mut paint =
++            paint_state::PaintState::new(device.clone(), queue.clone()).expect("paint builds");
++        paint.set_active_set("Body");
++        paint.resize_set("Body", 2048, 2048);
++        paint.ensure_set("Cloak");
++        assert_eq!(paint.size_of_set("Cloak"), (4096, 4096));
++        paint.assign_tile_to_set(1002, "Cloak");
++
++        let before_a = pattern_bytes(2048, 2048, 3);
++        let before_b = pattern_bytes(4096, 4096, 77);
++        // Can-fail guards against a vacuous pass: the patterns are
++        // non-blank and distinct, and the (0,0) texels pin the formula
++        // exactly (seed 3 → [3, 74, 145, 216]; seed 77 → [77, 148, 219, 39]).
++        assert_eq!(&before_a[..4], &[3, 74, 145, 216]);
++        assert_eq!(&before_b[..4], &[77, 148, 219, 39]);
++        assert_ne!(before_a[..64], before_b[..64]);
++        assert!(before_a.iter().any(|&b| b != 0));
++
++        assert!(paint.publish_fill(1001, 2048, 2048, before_a.clone()));
++        assert!(paint.publish_fill(1002, 4096, 4096, before_b.clone()));
++        paint.process_pending().expect("uploads land");
++        for (tile, bytes, (w, h)) in [(&1001u16, &before_a, (2048, 2048)), (&1002, &before_b, (4096, 4096))] {
++            let image = paint.read_tile(*tile).expect("readback succeeds");
++            assert_eq!((image.width, image.height), (w, h));
++            assert_eq!(image.data, *bytes, "tile {tile} stages its set's bytes");
++        }
++
++        let dir = unique_temp_dir("perset-roundtrip");
++        std::fs::create_dir_all(&dir).unwrap();
++        let saved = save_paint_tiles(&mut paint, &dir);
++        assert_eq!(saved, 2, "both sets' tiles persist");
++        assert!(paint_tile_path(&dir, 1001).exists());
++        assert!(paint_tile_path(&dir, 1002).exists());
++        // The mapping is byte-exact (sorted sizes, then sorted tiles);
++        // the legacy global still carries the active ("Body") size.
++        let mapping_text = std::fs::read_to_string(paint_set_sizes_path(&dir)).unwrap();
++        assert_eq!(
++            mapping_text,
++            "# Umber paint-set sizes v1\nBody=2048x2048\nCloak=4096x4096\ntile-1001=Body\ntile-1002=Cloak\n"
++        );
++        assert_eq!(
++            std::fs::read_to_string(paint_target_size_path(&dir)).unwrap(),
++            "2048x2048"
++        );
++
++        // Reopen in a fresh session (default set, 4K): each set's paint
++        // restores byte-identical AT ITS size — the load path re-derives
++        // sizes and assignments from the mapping, not from the live state.
++        let mut fresh =
++            paint_state::PaintState::new(device, queue).expect("fresh paint state builds");
++        let report = load_paint_tiles_reported(&mut fresh, &dir);
++        assert_eq!(
++            report,
++            PaintLoadReport {
++                restored: 2,
++                skipped: Vec::new(),
++            }
++        );
++        assert_eq!(fresh.size_of_set("Body"), (2048, 2048));
++        assert_eq!(fresh.size_of_set("Cloak"), (4096, 4096));
++        assert_eq!(fresh.set_of_tile(1001), "Body");
++        assert_eq!(fresh.set_of_tile(1002), "Cloak");
++        let after_a = fresh.read_tile(1001).expect("tile 1001 reads back");
++        assert_eq!((after_a.width, after_a.height), (2048, 2048));
++        assert_eq!(after_a.data, before_a, "set A restores byte-identical at 2048");
++        let after_b = fresh.read_tile(1002).expect("tile 1002 reads back");
++        assert_eq!((after_b.width, after_b.height), (4096, 4096));
++        assert_eq!(after_b.data, before_b, "set B restores byte-identical at 4096");
++
++        // A size-mismatched restore fails LOUDLY: clobber tile 1002's PNG
++        // with 512² bytes (its set says 4096²) and reopen — tile 1001
++        // still restores, 1002 is refused with its expected/found dims on
++        // the record (never silently resampled).
++        let wrong = pattern_bytes(512, 512, 9);
++        umber_export::png::write_png(
++            &paint_tile_path(&dir, 1002),
++            512,
++            512,
++            &wrong,
++            umber_export::png::Transfer::Linear,
++        )
++        .expect("clobber writes");
++        let mut mismatch =
++            paint_state::PaintState::new(device_clone(), queue_clone()).expect("builds");
++        let _ = (device, queue);
++        let report = load_paint_tiles_reported(&mut mismatch, &dir);
++        assert_eq!(report.restored, 1, "only the matching tile restores");
++        assert_eq!(
++            report.skipped,
++            vec![PaintTileSkip {
++                tile: 1002,
++                expected: (4096, 4096),
++                found: (512, 512),
++            }],
++            "the mismatch is on the record with exact dims"
++        );
++
++        let _ = std::fs::remove_dir_all(&dir);
++
++        fn device_clone() -> wgpu::Device {
++            unreachable!("replaced below")
++        }
++        fn queue_clone() -> wgpu::Queue {
++            unreachable!("replaced below")
++        }
++    }
+ }
+
+[0m
+Fixing the device-handle reuse at the test tail (I left placeholder stubs):
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1953,9 +1953,10 @@
+ // Reopen in a fresh session (default set, 4K): each set's paint
+ // restores byte-identical AT ITS size — the load path re-derives
+ // sizes and assignments from the mapping, not from the live state.
+ let mut fresh =
+-    paint_state::PaintState::new(device, queue).expect("fresh paint state builds");
++    paint_state::PaintState::new(device.clone(), queue.clone())
++        .expect("fresh paint state builds");
+ let report = load_paint_tiles_reported(&mut fresh, &dir);
+ assert_eq!(
+     report,
+     PaintLoadReport {
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1988,10 +1988,9 @@
+             umber_export::png::Transfer::Linear,
+         )
+         .expect("clobber writes");
+         let mut mismatch =
+-            paint_state::PaintState::new(device_clone(), queue_clone()).expect("builds");
+-        let _ = (device, queue);
++            paint_state::PaintState::new(device, queue).expect("mismatch session builds");
+         let report = load_paint_tiles_reported(&mut mismatch, &dir);
+         assert_eq!(report.restored, 1, "only the matching tile restores");
+         assert_eq!(
+             report.skipped,
+@@ -2003,13 +2002,9 @@
+             "the mismatch is on the record with exact dims"
+         );
+ 
+         let _ = std::fs::remove_dir_all(&dir);
+-
+-        fn device_clone() -> wgpu::Device {
+-            unreachable!("replaced below")
+-        }
+-        fn queue_clone() -> wgpu::Queue {
+-            unreachable!("replaced below")
+-        }
+     }
++
++    #[test]
++    fn v1_project_without_mapping_migrates_its_global_to_every_set() {
+ }
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1917,10 +1917,10 @@
+ let before_b = pattern_bytes(4096, 4096, 77);
+ // Can-fail guards against a vacuous pass: the patterns are
+ // non-blank and distinct, and the (0,0) texels pin the formula
+ // exactly (seed 3 → [3, 74, 145, 216]; seed 77 → [77, 148, 219, 39]).
+-assert_eq!(&before_a[..4], &[3, 74, 145, 216]);
+-assert_eq!(&before_b[..4], &[77, 148, 219, 39]);
++assert_eq!(&before_a[..4], &[3u8, 74, 145, 216]);
++assert_eq!(&before_b[..4], &[77u8, 148, 219, 39]);
+ assert_ne!(before_a[..64], before_b[..64]);
+ assert!(before_a.iter().any(|&b| b != 0));
+ 
+ assert!(paint.publish_fill(1001, 2048, 2048, before_a.clone()));
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -2006,5 +2006,78 @@
+     }
+ 
+     #[test]
+     fn v1_project_without_mapping_migrates_its_global_to_every_set() {
++        let Some((device, queue)) = try_request_device() else {
++            return;
++        };
++        // A v1-shaped project: 512² tile PNGs + the global, NO mapping.
++        // Saved through the real save path, then the mapping deleted (a v1
++        // build never wrote one). Note v1 stored no set NAMES — only the
++        // global size migrates; tiles join the opening session's active set.
++        let mut paint =
++            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
++                .expect("paint builds");
++        paint.set_active_set("Body");
++        let before = pattern_bytes(512, 512, 11);
++        assert_eq!(&before[..4], &[11u8, 82, 153, 224]);
++        assert!(paint.publish_fill(1001, 512, 512, before.clone()));
++        paint.process_pending().expect("upload lands");
++
++        let dir = unique_temp_dir("legacy-migration");
++        std::fs::create_dir_all(&dir).unwrap();
++        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
++        std::fs::remove_file(paint_set_sizes_path(&dir)).expect("a v1 project has no mapping");
++        assert_eq!(
++            std::fs::read_to_string(paint_target_size_path(&dir)).unwrap(),
++            "512x512"
++        );
++
++        // A fresh 4K session opens it: the 512 global leads (first tile's
++        // dims, exactly the v1 rule), and the pixels restore byte-identical.
++        let mut fresh =
++            paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
++        let report = load_paint_tiles_reported(&mut fresh, &dir);
++        assert_eq!(
++            report,
++            PaintLoadReport {
++                restored: 1,
++                skipped: Vec::new(),
++            }
++        );
++        assert_eq!(fresh.target_size(), (512, 512));
++        assert_eq!(
++            fresh.set_of_tile(1001),
++            fresh.active_set().to_string(),
++            "v1 tiles join the opening session's active set (v1 stored no names)"
++        );
++        let after = fresh.read_tile(1001).expect("readback succeeds");
++        assert_eq!((after.width, after.height), (512, 512));
++        assert_eq!(
++            after.data, before,
++            "v1 pixels restore byte-identical under the migrated size"
++        );
++
++        // Tiles-less and mapping-less: the legacy global still applies to
++        // every set (a size choice with no paint yet survives the round
++        // trip) while the pool clears.
++        std::fs::remove_file(paint_tile_path(&dir, 1001)).unwrap();
++        let mut empty =
++            paint_state::PaintState::new(device, queue).expect("empty session builds");
++        let report = load_paint_tiles_reported(&mut empty, &dir);
++        assert_eq!(
++            report,
++            PaintLoadReport {
++                restored: 0,
++                skipped: Vec::new(),
++            }
++        );
++        assert_eq!(
++            empty.target_size(),
++            (512, 512),
++            "the stored global sizes the session with no paint yet"
++        );
++
++        let _ = std::fs::remove_dir_all(&dir);
++    }
+ }
++}
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -2046,9 +2046,9 @@
+ );
+ assert_eq!(fresh.target_size(), (512, 512));
+ assert_eq!(
+     fresh.set_of_tile(1001),
+-    fresh.active_set().to_string(),
++    fresh.active_set(),
+     "v1 tiles join the opening session's active set (v1 stored no names)"
+ );
+ let after = fresh.read_tile(1001).expect("readback succeeds");
+ assert_eq!((after.width, after.height), (512, 512));
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1925,9 +1925,12 @@
+ 
+ assert!(paint.publish_fill(1001, 2048, 2048, before_a.clone()));
+ assert!(paint.publish_fill(1002, 4096, 4096, before_b.clone()));
+ paint.process_pending().expect("uploads land");
+-for (tile, bytes, (w, h)) in [(&1001u16, &before_a, (2048, 2048)), (&1002, &before_b, (4096, 4096))] {
++for (tile, bytes, (w, h)) in [
++    (&1001u16, &before_a, (2048u32, 2048u32)),
++    (&1002u16, &before_b, (4096u32, 4096u32)),
++] {
+     let image = paint.read_tile(*tile).expect("readback succeeds");
+     assert_eq!((image.width, image.height), (w, h));
+     assert_eq!(image.data, *bytes, "tile {tile} stages its set's bytes");
+ }
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1931,9 +1931,9 @@
+     (&1002u16, &before_b, (4096u32, 4096u32)),
+ ] {
+     let image = paint.read_tile(*tile).expect("readback succeeds");
+     assert_eq!((image.width, image.height), (w, h));
+-    assert_eq!(image.data, *bytes, "tile {tile} stages its set's bytes");
++    assert_eq!(&image.data, bytes, "tile {tile} stages its set's bytes");
+ }
+ 
+ let dir = unique_temp_dir("perset-roundtrip");
+ std::fs::create_dir_all(&dir).unwrap();
+
+[0m
+Now i18n — checking the completeness-test rule first:
+[0m✱ [0mGrep "fn .*completeness|fn .*missing|ftl|fallback"[90m in crates/umber-app/src/i18n.rs · 51 matches[0m
+[0m→ [0mRead crates/umber-app/src/i18n.rs[90m [offset=540, limit=50][0m
+[0m→ [0mRead assets/i18n/en-US.ftl[90m [offset=108, limit=12][0m
+[0m
+[0m← [0mEdit assets/i18n/en-US.ftl
+Index: /home/bessa/Projects/umber/assets/i18n/en-US.ftl
+===================================================================
+--- /home/bessa/Projects/umber/assets/i18n/en-US.ftl
++++ /home/bessa/Projects/umber/assets/i18n/en-US.ftl
+@@ -109,10 +109,11 @@
+ 
+ ## Texture Sets panel
+ 
+ texturesets =
++    .set = Texture set
+     .size = Paint target size
+-    .resize-clears = Changing the size clears the canvas, the stroke undo history and the quick mask. This is intentional.
++    .resize-clears = Changing the selected set's size clears that set's canvas and the stroke undo history, and resets its quick mask. This is intentional.
+     .no-paint = No paint session — the GPU target is unavailable.
+ 
+ ## Bakes panel
+ 
+
+[0m
+[0m← [0mEdit assets/i18n/pt-BR.ftl
+Index: /home/bessa/Projects/umber/assets/i18n/pt-BR.ftl
+===================================================================
+--- /home/bessa/Projects/umber/assets/i18n/pt-BR.ftl
++++ /home/bessa/Projects/umber/assets/i18n/pt-BR.ftl
+@@ -113,10 +113,11 @@
+ 
+ ## Painel de conjuntos de texturas
+ 
+ texturesets =
++    .set = Conjunto de texturas
+     .size = Tamanho do alvo de pintura
+-    .resize-clears = Mudar o tamanho limpa a tela, o histórico de traços e a máscara rápida. Isso é intencional.
++    .resize-clears = Mudar o tamanho do conjunto selecionado limpa a tela dele e o histórico de traços, e redefine sua máscara rápida. Isso é intencional.
+     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
+ 
+ ## Painel de bakes
+ 
+
+[0m
+[0m← [0mEdit docs/specs/requirements.md
+Index: /home/bessa/Projects/umber/docs/specs/requirements.md
+===================================================================
+--- /home/bessa/Projects/umber/docs/specs/requirements.md
++++ /home/bessa/Projects/umber/docs/specs/requirements.md
+@@ -39,9 +39,9 @@
+ | Blending modes: full pro set (~32: normal, passthrough, multiply, screen, overlay family, HSV modes, normal-map combine/detail) | P0 core 12, full set 4 | 2/4 | ✓ core-12 math verified + Darken/Lighten/Subtract/Difference kept = 15 built (14 separable + Passthrough; `21e1290`); HSV + normal-map families deferred (Wave 4 compositor scope); the remainder open |
+ | Masks: grayscale paint mask, bitmap mask, black/white; mask stacks with effects | P0 | 2 | ✗-as-marked: METADATA ONLY (LayerMask in layers.rs); no mask pixels exist behind it — the review's critical 6 territory; part of the channel-pool work |
+ | Layer instancing (source-edits propagate, cycle detection) | P1 | 4 | ✓ built (`4cbaf21`) |
+ | Anchors (reference any layer/channel/mask as generator input within same texture set) | P1 | 4 | ✓ built (`4cbaf21`) |
+-| Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |  ✓ code (`133dd12`): DEFAULT_TARGET_SIZE=4096 (paint_state.rs:266), per-texture-set size via the Texture Sets panel's SIZE_PRESETS combo, persisted in the project; the 8K-only VRAM note preserved; per-set/per-channel sizes = deferred v1 boundary (module docs) — reachability = Gate 0 |
++| Per-channel resolution; in-app 4K default (8K export → §6, single source of truth) | P0 | 2 |  ✓ code (`133dd12`): DEFAULT_TARGET_SIZE=4096 (paint_state.rs:266), per-texture-set size via the Texture Sets panel's SIZE_PRESETS combo, persisted in the project; the 8K-only VRAM note preserved; per-set/per-channel sizes = deferred v1 boundary (module docs) — reachability = Gate 0; per-SET sizes ✓ built (`PENDING`) — each set owns its size in the paint session + `paint/target_sizes.txt` (v1 global migrates onto every set), per-CHANNEL sizes stay the boundary (paint_state module docs) |
+ | UDIM multi-tile texture sets; per-tile resolution; cross-tile painting | P0 | 4 (data model from 1) | ✓ built (`82c694c`..`10cdffa`) |
+ | Smart materials (folder presets applied with mesh-map-driven generators) | P1 | 4 | ✓ built (`4cbaf21`) — worn-metal + painted-wood examples ship |
+ | Dynamic material layering (shader-declared sub-stacks) | P2 | 6+ |
+ | Storage formats per channel: sRGB8/RGB16/RGB16F/RGB32F | P0 | 2 |  ✓ built (`579eb09` tile store formats) —
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1055,11 +1055,13 @@
+ Some(known) => {
+     // Every known set goes to its mapped size (unmapped sets
+     // resize to their live size — the resize still drops their
+     // stale contents); a missing/unparseable mapping degrades
+-    // below, never a panic.
++    // below, never a panic. Assignment-only sets (a tile line
++    // with no size line) join the resize at the default size,
++    // so no previous document's pixels survive on them either.
+     let mut names = paint.set_names();
+-    for name in known.sizes.keys() {
++    for name in known.sizes.keys().chain(known.tiles.values()) {
+         if !names.contains(name) {
+             names.push(name.clone());
+         }
+     }
+
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -1100,9 +1100,9 @@
+ // mapped size first (unmapped sets resize to their live size,
+ // dropping stale pixels), then assignments re-derive from the
+ // sidecar so a previous document's sets never steer this one.
+ let mut names = paint.set_names();
+-for name in known.sizes.keys() {
++for name in known.sizes.keys().chain(known.tiles.values()) {
+     if !names.contains(name) {
+         names.push(name.clone());
+     }
+ }
+
+[0m
+Now the gates — fmt first (alone, per contract):
+[0m$ [0mcargo fmt --all 2>&1 | tail -5; echo "FMT_EXIT:$?"
+2087 | }
+     | - ...matches this closing brace
+2088 | }
+     | ^ unexpected closing delimiter
+
+FMT_EXIT:0
+[0m
+[0m$ [0mcargo fmt --all --check 2>&1 | head -40
+error: unexpected closing delimiter: `}`
+    --> /home/bessa/Projects/umber/crates/umber-app/src/main.rs:2088:1
+     |
+1680 | mod paint_persistence_tests {
+     |                             - this opening brace...
+...
+2087 | }
+     | - ...matches this closing brace
+2088 | }
+     | ^ unexpected closing delimiter
+[0m
+My test insert left an extra closing brace. Inspecting the tail:
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=2070, limit=25][0m
+[0m
+[0m← [0mEdit crates/umber-app/src/main.rs
+Index: /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+===================================================================
+--- /home/bessa/Projects/umber/crates/umber-app/src/main.rs
++++ /home/bessa/Projects/umber/crates/umber-app/src/main.rs
+@@ -2084,5 +2084,4 @@
+ 
+         let _ = std::fs::remove_dir_all(&dir);
+     }
+ }
+-}
+
+[0m
+[0m$ [0mcargo fmt --all --check 2>&1 | head -60
+Diff in /home/bessa/Projects/umber/crates/umber-app/src/main.rs:945:
+         }
+         let active = paint.active_set().to_string();
+         if !mapping.sizes.contains_key(&active) {
+[31m-            mapping.sizes.insert(active.clone(), paint.size_of_set(&active));
+(B[m[32m+            mapping
+(B[m[32m+                .sizes
+(B[m[32m+                .insert(active.clone(), paint.size_of_set(&active));
+(B[m         }
+         if let Err(e) = std::fs::write(
+             paint_set_sizes_path(project_dir),
+Diff in /home/bessa/Projects/umber/crates/umber-app/src/main.rs:1145:
+         let expected = paint.tile_size(tile);
+         if (width, height) != expected {
+             let (ew, eh) = expected;
+[31m-            log::warn!(
+(B[m[31m-                "paint open: tile {tile} is {width}x{height}, want {ew}x{eh}; skipping"
+(B[m[31m-            );
+(B[m[32m+            log::warn!("paint open: tile {tile} is {width}x{height}, want {ew}x{eh}; skipping");
+(B[m             report.skipped.push(PaintTileSkip {
+                 tile,
+                 expected,
+Diff in /home/bessa/Projects/umber/crates/umber-app/src/main.rs:1838:
+         // contains-check — a reordered save would fail).
+         let mut mapping = PaintSetSizes::default();
+         mapping.sizes.insert("Sword".to_string(), (4096, 4096));
+[31m-        mapping
+(B[m[31m-            .sizes
+(B[m[31m-            .insert("Shield".to_string(), (2048, 1024));
+(B[m[32m+        mapping.sizes.insert("Shield".to_string(), (2048, 1024));
+(B[m         mapping.tiles.insert(1002, "Shield".to_string());
+         let text = format_paint_set_sizes(&mapping);
+         assert_eq!(
+Diff in /home/bessa/Projects/umber/crates/umber-app/src/main.rs:1877:
+             "tile-abc=X\n",
+             "tile-=X\n",
+         ] {
+[31m-            assert_eq!(parse_paint_set_sizes(bad), None, "{bad:?} must yield no mapping");
+(B[m[32m+            assert_eq!(
+(B[m[32m+                parse_paint_set_sizes(bad),
+(B[m[32m+                None,
+(B[m[32m+                "{bad:?} must yield no mapping"
+(B[m[32m+            );
+(B[m         }
+         assert_eq!(
+             paint_set_sizes_path(Path::new("/p")),
+Diff in /home/bessa/Projects/umber/crates/umber-app/src/main.rs:1958:
+         // Reopen in a fresh session (default set, 4K): each set's paint
+         // restores byte-identical AT ITS size — the load path re-derives
+         // sizes and assignments from the mapping, not from the live state.
+[31m-        let mut fresh =
+(B[m[31m-            paint_state::PaintState::new(device.clone(), queue.clone())
+(B[m[31m-                .expect("fresh paint state builds");
+(B[m[32m+        let mut fresh = paint_state::PaintState::new(device.clone(), queue.clone())
+(B[m[32m+            .expect("fresh paint state builds");
+(B[m         let report = load_paint_tiles_reported(&mut fresh, &dir);
+         assert_eq!(
+             report,
+Diff in /home/bessa/Projects/umber/crates/umber-app/src/main.rs:1975:
+         assert_eq!(fresh.set_of_tile(1002), "Cloak");
+[0m
+Only formatting — applying:
+[0m$ [0mcargo fmt --all && cargo fmt --all --check && echo FMT_CLEAN
+FMT_CLEAN
+[0m
+[0m$ [0mcargo clippy -p umber-app --all-targets -- -D warnings 2>&1 | tail -40
+Checking umber-app v0.1.0 (/home/bessa/Projects/umber/crates/umber-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 28.85s
+[0m
+Clippy clean. Now verify-kill on the touched files:
+[0m$ [0mbash scripts/verify-kill.sh crates/umber-app/src/paint_state.rs crates/umber-app/src/main.rs assets/i18n/en-US.ftl assets/i18n/pt-BR.ftl docs/specs/requirements.md 2>&1 | tail -20
+PASS: fmt clean
+== (3) the trap greps ==
+  WARN: crates/umber-app/src/paint_state.rs — possible thiserror source-field trap: 433:    clone_source: Option<Pos2>,
+  WARN: crates/umber-app/src/paint_state.rs — possible thiserror source-field trap: 556:            clone_source: None,
+  PASS: crates/umber-app/src/paint_state.rs matches!-arity: 0 suspicious
+  PASS: crates/umber-app/src/main.rs matches!-arity: 0 suspicious
+  WARN: assets/i18n/en-US.ftl — possible thiserror source-field trap: 172:    .source-painted = Base Color source: painted{ $tiles } — what you painted is what exports.
+  WARN: assets/i18n/en-US.ftl — possible thiserror source-field trap: 173:    .source-graph = Base Color source: graph node { $node }{ $tiles } — the panel's evaluated output.
+  PASS: assets/i18n/en-US.ftl matches!-arity: 0 suspicious
+  PASS: assets/i18n/pt-BR.ftl matches!-arity: 0 suspicious
+  WARN: docs/specs/requirements.md — possible thiserror source-field trap: 18:| Hardness/stamp falloff (radial gradient dabs); alpha source: bitmap textures + procedural | P0 | 2 |  ✓ built (umber-brush radial falloff + umber-graph procedural sources) —
+  PASS: docs/specs/requirements.md matches!-arity: 0 suspicious
+== (4) doc-comment attachment (blank line between doc blocks) ==
+  PASS: crates/umber-app/src/paint_state.rs doc-attachment: clean
+  PASS: crates/umber-app/src/main.rs doc-attachment: clean
+  PASS: assets/i18n/en-US.ftl doc-attachment: clean
+  PASS: assets/i18n/pt-BR.ftl doc-attachment: clean
+  PASS: docs/specs/requirements.md doc-attachment: clean
+
+VERIFY-KILL: crates/umber-app/src/paint_state.rs crates/umber-app/src/main.rs assets/i18n/en-US.ftl assets/i18n/pt-BR.ftl docs/specs/requirements.md — balanced, fmt-clean, trap-scanned
+[0m
+[0m→ [0mRead crates/umber-app/src/main.rs[90m [offset=1040, limit=130][0m
+[0m→ [0mRead crates/umber-app/src/paint_state.rs[90m [offset=560, limit=125][0m
+[0m
+[0m# [0mTodos
+[✓] PaintState: per-set size registry + tile→set map + active set + per-set masks
+[✓] PaintState: per-tile texel density at all routing sites
+[✓] main.rs: per-set sidecar mapping + legacy migration + load report
+[✓] main.rs: per-set Texture Sets panel + set_active wiring
+[✓] Tests: two-sets-different-sizes + mismatch-loud + legacy migration (main.rs); per-set unit tests (paint_state.rs)
+[✓] i18n keys (en-US + pt-BR) + requirements row mark
+[✓] Gates: fmt, clippy umber-app, verify-kill
+[0m
+1. **Built:** files touched, tests added (count each).
+   - `crates/umber-app/src/paint_state.rs` — per-set size registry (`set_sizes` name→`(w,h)`, `tile_sets` tile→set, `active_set`; `DEFAULT_TEXTURE_SET="TextureSet"`); `ensure_tile` creates at the tile's set size; `texels_per_uv_for` at every routing site (seam radius, symmetry snapshot, clone offset, texel map, fill replay); masks split per set (`masks` map, `quick_mask()` = active set's, invert/clear session-wide as v1); `resize_set` (scoped rebuild + shared-history clear) with `resize_target` kept as active-set legacy; `with_target_size`/`target_size`/`publish_fill`/all other pub APIs unchanged.
+   - `crates/umber-app/src/main.rs` — `paint/target_sizes.txt` mapping codec (`<set>=WxH` + `tile-<N>=<set>`, `#` comments, garbage-skipped, `None` when empty); save writes mapping + legacy `target_size.txt` (active size) side by side; `load_paint_tiles_reported` (mapping authoritative, legacy migrates global onto every set, per-tile expected-vs-found check, `PaintTileSkip` loud report) with `load_paint_tiles` as count wrapper; Texture Sets panel lists/selects sets with per-set size combo; `set_active_set` wired at mesh load, save, open.
+   - `assets/i18n/en-US.ftl` + `pt-BR.ftl` — new `texturesets.set` key, `resize-clears` reworded per set.
+   - `docs/specs/requirements.md` §2:43 — 4th cell extended: per-set sizes ✓ built (`PENDING`), per-channel stays the boundary.
+   - Tests added (5): paint_state `tiles_are_created_at_their_own_sets_size`, `resize_set_is_scoped_to_its_tiles_and_masks`; main.rs `set_sizes_codec_round_trips_exactly_and_rejects_garbage`, `two_sets_at_different_sizes_round_trip_byte_identical_per_set` (Body@2048 + Cloak@4096, byte-identical restore per set, exact mapping text, then 512-clobber → restored 1 + exact skip record), `v1_project_without_mapping_migrates_its_global_to_every_set` (pixels + empty-project global). Gate-0 journey + all existing tests untouched (their APIs kept).
+2. **Judgment calls:** (a) `umber-core::TextureSet` NOT extended — its `resolution` is document/bake resolution (2048) ≠ paint size (4096), and its schema is outside this kill's umber-app lock surface; registry keyed by set name in the session + sidecar (in paint_state module docs). (b) `resize_set` clears the shared history session-wide (entries can span sets; filtering would leave half-entries). (c) Mask per set, not per tile — `umber-brush QuickMask` untouched (outside surface). (d) Symmetry snapshot at stroke-start tile density; cross-size strokes approximate (named follow-up, docs). (e) `quick_mask()` = active set's (all outside-surface callers source-compatible; cross-set mask gating is follow-up). (f) Save persists sets-with-tiles + active set; assignment-only phantom sets re-register at default on load. (g) v2 boundary recorded: per-CHANNEL sizing stays the follow-up; not built.
+3. **Unverified:** no test was executed — contract forbids `cargo build`/`cargo test`; correctness rests on `clippy --all-targets` typecheck + review. GPU-pixel behavior (2048/4096 readbacks, lavapipe row pitch) needs CI; the two-set test's exact texel pins (`[3,74,145,216]`, `[77,148,219,39]`) are arithmetic derivations, unexecuted locally. Panel UI (egui selectables) is compile-checked only.
+4. **Deferred:** per-channel sizing (recorded in paint_state module docs + requirements row); unifying paint size with `TextureSet.resolution` (rides with multi-set document support); `tile_selection.rs`/`mesh_map_import.rs` in my lock surface needed no changes (read, left untouched).
+5. **Gates run:** `cargo fmt --all` + `--check` → clean (one real fix: extra brace from test insert; rest reflow). `cargo clippy -p umber-app --all-targets -- -D warnings` → pass, no warnings. `bash scripts/verify-kill.sh` on all 5 files → balanced + fmt-clean; the 4 WARNs are named false positives (pre-existing `clone_source` field, `.source-*` FTL strings, "alpha source" in requirements — none are thiserror `source` fields).

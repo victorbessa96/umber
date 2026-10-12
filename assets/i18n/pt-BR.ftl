@@ -114,8 +114,9 @@ shell =
 ## Painel de conjuntos de texturas
 
 texturesets =
+    .set = Conjunto de texturas
     .size = Tamanho do alvo de pintura
-    .resize-clears = Mudar o tamanho limpa a tela, o histórico de traços e a máscara rápida. Isso é intencional.
+    .resize-clears = Mudar o tamanho do conjunto selecionado limpa a tela dele e o histórico de traços, e redefine sua máscara rápida. Isso é intencional.
     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
 
 ## Painel de bakes
