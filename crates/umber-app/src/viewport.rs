@@ -207,23 +207,45 @@ impl Viewport {
                     .pick_uv(rect, mesh, pos)
                     .map(|uv| egui::Pos2::new(uv[0], uv[1]));
                 // CORE-LOOP CRITICAL 5 — real pressure: the digitizer's
-                // normalized force feeds the stroke. egui's multi-touch
-                // state carries `force` in 0..=1 (the average of active
-                // touches; a pen reports one). A 0.0 force is ambiguous —
-                // a very light touch OR a device that cannot measure
-                // force at all — so it maps to 1.0: a mouse drag paints
-                // at full pressure, never a ghost-faint stroke. This is
-                // the event layer egui already delivers (Wayland wl_touch
-                // and Windows touch); the stylus crate's OWNED pen
-                // backends (Windows Ink, XI2 valuators) remain the
-                // follow-up for full pen fidelity (tilt, proximity).
-                let pressure = ui.input(|i| i.multi_touch()).map_or(1.0, |t| {
-                    if t.force > 0.0 {
-                        t.force
-                    } else {
-                        1.0
-                    }
-                });
+                // per-event force feeds the stroke. The source is the RAW
+                // `Event::Touch` stream, NOT `multi_touch()`: the gesture
+                // aggregate returns `None` below two active touches
+                // (egui's own contract — "returns None for single-touch
+                // gestures"), so a single pen contact never carried force
+                // through it and painted at a constant 1.0 (the cross-review
+                // finding on f867215, receipt 2026-10-12-pressure-kill-
+                // cross-review-receipt.md). `Event::Touch` carries
+                // `force: Option<f32>` per event, single touches included,
+                // in 0..=1; `None`/0.0 maps to 1.0 — a mouse drag (no touch
+                // events at all) and a platform that cannot measure force
+                // both paint at full pressure, never a ghost-faint stroke.
+                // V1 takes the frame's LAST touch event's force (the
+                // single-pen case; per-touch-id tracking rides with the
+                // stylus-crate backends — Windows Ink, XI2 — the named
+                // follow-up for tilt, proximity, eraser).
+                let pressure = ui
+                    .input(|i| {
+                        let mut force: Option<f32> = None;
+                        for event in &i.events {
+                            if let egui::Event::Touch {
+                                phase: egui::TouchPhase::Start | egui::TouchPhase::Move,
+                                pos,
+                                force: f,
+                                ..
+                            } = event
+                            {
+                                // Only the touch stream inside this viewport
+                                // feeds the stroke: a second finger landing on
+                                // a panel mid-stroke must not override the
+                                // pen's force for the frame.
+                                if rect.contains(*pos) {
+                                    force = *f;
+                                }
+                            }
+                        }
+                        force
+                    })
+                    .map_or(1.0, |f| if f > 0.0 { f } else { 1.0 });
                 if !paint.is_stroking() {
                     paint.begin_screen_point_pressured(hit, pressure);
                 } else {
