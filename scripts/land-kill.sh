@@ -4,8 +4,24 @@
 # entry, docs commit+push) that the 2026-10-12 misses proved fragile: the
 # docs commit forgot the CHANGELOG staging twice.
 #
+# Doc-deltas mode (the claw-seat review's collision fix): with --doc-deltas
+# <file>, a kill report's `## Doc deltas` section is applied BY THIS SCRIPT
+# instead of the claw editing shared docs directly. The section's shape:
+#
+#   ## Doc deltas
+#   <!-- requirements row: <row-locator> -->
+#   <the full replacement row text, one line>
+#   <!-- ftl: en-US <key> -->
+#   <the key = value line>
+#   <!-- ftl: pt-BR <key> -->
+#   <the key = value line>
+#
+# The dragon reads the deltas at gate time; this script applies them one
+# kill at a time — the claw NEVER touches requirements.md/.ftl/CHANGELOG.
+#
 # Usage:
 #   bash scripts/land-kill.sh <kill-name> <commit-sha> <queue-row-id> <queue-done-text> <changelog-line> [report-src]
+#   bash scripts/land-kill.sh --doc-deltas <report-file>   # apply only the deltas
 # Example:
 #   bash scripts/land-kill.sh stylusxi2 d2fd7b7 7 \
 #     "done (d2fd7b7) — XI2 backend + StylusPoller wiring" \
@@ -17,6 +33,51 @@
 # file's established shape). Reports land in docs/loop/kill-reports/.
 set -eu
 cd "$(dirname "$0")/.."
+
+# --doc-deltas <report-file>: apply ONLY the report's Doc deltas section.
+if [ "${1:-}" = "--doc-deltas" ]; then
+  report_file="${2:?--doc-deltas needs the report file}"
+  python3 - "$report_file" << 'PYEOF'
+import re, sys
+report = open(sys.argv[1]).read()
+m = re.search(r'^## Doc deltas\s*$(.*?)(?=^## |\Z)', report, re.M | re.S)
+if not m:
+    sys.exit("land-kill: no '## Doc deltas' section in " + sys.argv[1])
+body = m.group(1)
+applied = 0
+# requirements rows: locator comment + the full replacement row
+for rm in re.finditer(r'<!--\s*requirements row:\s*(.+?)\s*-->\s*\n(.+)', body):
+    locator, new_row = rm.group(1).strip(), rm.group(2).rstrip()
+    req = open('docs/specs/requirements.md').read()
+    if locator not in req:
+        sys.exit(f"land-kill: requirements locator not found: {locator!r}")
+    # replace the WHOLE line containing the locator
+    lines = req.split('\n')
+    hits = [i for i, l in enumerate(lines) if locator in l]
+    if len(hits) != 1:
+        sys.exit(f"land-kill: locator {locator!r} matches {len(hits)} lines, need exactly 1")
+    lines[hits[0]] = new_row
+    open('docs/specs/requirements.md', 'w').write('\n'.join(lines))
+    print(f"  requirements row updated (locator: {locator[:60]}...)")
+    applied += 1
+# ftl keys: locale comment + the key = value line
+for fm in re.finditer(r'<!--\s*ftl:\s*(en-US|pt-BR)\s+(\S+)\s*-->\s*\n(.+)', body):
+    locale, key, line = fm.group(1), fm.group(2), fm.group(3).rstrip()
+    path = f'assets/i18n/{locale}.ftl'
+    s = open(path).read()
+    if key in s:
+        sys.exit(f"land-kill: ftl key {key} already exists in {path} — deltas are for NEW keys")
+    if not s.endswith('\n'):
+        s += '\n'
+    open(path, 'w').write(s + line + '\n')
+    print(f"  ftl {locale}: {key} appended")
+    applied += 1
+if applied == 0:
+    sys.exit("land-kill: Doc deltas section present but no parseable deltas")
+print(f"doc-deltas: {applied} applied")
+PYEOF
+  exit 0
+fi
 
 [ $# -ge 5 ] || { echo "land-kill: needs <name> <sha> <row> <row-text> <changelog-line> [report-src]" >&2; exit 2; }
 name="$1"; sha="$2"; row="$3"; row_text="$4"; changelog="$5"; report="${6:-}"
