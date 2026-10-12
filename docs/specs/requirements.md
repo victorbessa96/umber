@@ -164,7 +164,7 @@
 | Input-to-photon (stylus event → composited pixel on screen) | < 20 ms at 60Hz, measured by timestamp instrumentation (protocol in docs/perf); drain-events-then-acquire frame loop [05] |
 | Stroke throughput | 4K texture set, no dropped dabs at 200Hz input streams |
 | Viewport | 60 fps sustained (frame-time P95 < 16.7ms) on the reference GPU class (one named mid-range GPU — e.g. RTX 3060 / RX 6600 class, current driver), 1M-tri mesh, 4K set |
-| Undo RAM | 100 steps at 4K within ~2 GB (dirty-tile snapshots + cumulative merge), soak-tested in CI [05] |
+| Undo RAM | 100 steps at 4K within ~2 GB (dirty-tile snapshots + cumulative merge), soak-tested in CI [05] | ✓ code (`f78e6c1`): every stroke (paint + retouch) snapshots dirty rects on the shared UndoStack; the envelope is 64 entries / 256 MiB (both caps pre-existing, kept) — inside the 2 GB/100-step budget, with the byte budget the RAM guard at 4K (a full-tile 4K entry is 128 MiB; the third evicts the first); cumulative merge NOT built (v1 = whole-rect snapshots, merge = the named follow-up); the CI soak = the entry/byte-cap tests — reachability = Gate 0 |
 | Installer size | target < 150 MB (wasmtime + vendored OCIO + codecs make smaller dishonest — tracked per release, not gated); no runtime deps beyond installer contents |
 
 ---
