@@ -172,6 +172,11 @@ pub struct BrushPanel {
     /// Panel state, not preset state: the `.umberbrush` format is unchanged.
     /// The paint session adopts it via `PaintState::sync_tool`.
     pub tool: BrushTool,
+    /// The tool the strip shows (C1 worklist #10). The eyedropper is
+    /// strip-only: while `strip` is Pick, [`Self::tool`] keeps the last
+    /// real brush (its params stay editable) and the viewport suppresses
+    /// painting (`Viewport::set_pick_armed`) — Pick never strokes.
+    pub strip: crate::toolbar::ToolKind,
     /// The last-edited params of each retouch tool, kept while another
     /// tool is selected so switching back restores them.
     smudge: SmudgeParams,
@@ -219,6 +224,7 @@ impl BrushPanel {
             dirty: false,
             dirs,
             save_error: None,
+            strip: crate::toolbar::ToolKind::Paint,
             save_as_name: String::new(),
             tool: BrushTool::Paint,
             smudge: SmudgeParams::default(),
@@ -334,7 +340,13 @@ impl BrushPanel {
     /// (Generalizes the former `select_eraser`, which E called.)
     pub fn select_tool(&mut self, kind: crate::toolbar::ToolKind) {
         use crate::toolbar::ToolKind;
-        if ToolKind::of(&self.tool) == kind {
+        // The strip always follows the selection (Pick included — it is a
+        // strip state, not a brush state).
+        self.strip = kind;
+        if ToolKind::of(&self.tool) == kind || kind == ToolKind::Pick {
+            // Pick: the strip shows it, the brush stays the last real tool
+            // (the viewport suppresses painting while the strip is Pick).
+            // Same-kind: nothing to bank or switch.
             return;
         }
         // Bank first: an edit made this frame hasn't been banked by
@@ -350,6 +362,10 @@ impl BrushPanel {
             ToolKind::Smudge => BrushTool::Smudge(self.smudge),
             ToolKind::Clone => BrushTool::Clone(self.clone),
             ToolKind::Erase => BrushTool::Erase(self.eraser),
+            // Unreachable: the Pick early-return above exits before the
+            // match. Kept (not `_`) so a future ToolKind still fails the
+            // exhaustiveness check here.
+            ToolKind::Pick => return,
         };
     }
 

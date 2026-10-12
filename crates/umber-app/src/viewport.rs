@@ -42,6 +42,7 @@ use umber_gpu::{
     DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, PostFxViewport, SoloChannel,
     ViewMode, ViewportRoute,
 };
+use umber_mesh::tile_of_uv;
 
 use crate::i18n::tr;
 
@@ -57,6 +58,26 @@ const ORBIT_SENSITIVITY: f32 = 0.01;
 const PAN_SENSITIVITY: f32 = 0.0015;
 /// Zoom step per wheel notch (multiplicative, see `OrbitCamera::zoom`).
 const ZOOM_SENSITIVITY: f32 = 0.08;
+
+/// An eyedropper sample (C1 worklist #10): the sRGBA bytes the viewport
+/// read from the paint target at the clicked UV, one per Pick click.
+/// Carried to the shell so it can set the brush color (and later: the
+/// alpha, masks, anything color-keyed) from what the artist actually
+/// sees on the mesh.
+pub struct PickSample(pub [u8; 4]);
+
+/// One LINEAR u8 texel component to its sRGB byte (the eyedropper's
+/// per-texel conversion; matches umber-color's private `linear_to_srgb`
+/// math — the standard 0.0031308-threshold curve). Alpha passes through.
+fn linear_to_srgb_byte(linear: u8) -> u8 {
+    let l = linear as f32 / 255.0;
+    let s = if l <= 0.003_130_8 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (s.clamp(0.0, 1.0) * 255.0).round() as u8
+}
 
 /// Owns the camera and the currently-loaded mesh's GPU buffers.
 #[derive(Default)]
@@ -93,6 +114,11 @@ pub struct Viewport {
     /// pipelines; its HDR target and intermediates are released on every
     /// direct frame. `None` until then — the default path never builds it.
     postfx: Option<PostFxViewport>,
+    /// The eyedropper arm (C1 worklist #10): set by the shell when
+    /// ToolKind::Pick is the active tool. While armed, a primary click
+    /// samples the paint target at the picked UV instead of orbiting
+    /// or painting; the sample returns to the shell as [`PickSample`].
+    pick_armed: bool,
 }
 
 impl Viewport {
@@ -186,14 +212,52 @@ impl Viewport {
         mut paint: Option<&mut crate::paint_state::PaintState>,
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
-    ) {
+    ) -> Option<PickSample> {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
-            return;
+            return None;
         }
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
 
-        let painting = ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
+        // The eyedropper (C1 worklist #10): when armed, a PRIMARY CLICK (not
+        // a drag — a stray orbit still works) samples the paint target's
+        // texel at the picked UV. Returns the sRGBA sample for the shell to
+        // feed the brush; painting is disabled while the eyedropper is the
+        // active tool (it never strokes).
+        if self.pick_armed && response.clicked_by(PointerButton::Primary) {
+            if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if let Some(uv) = self.pick_uv(rect, mesh, pos) {
+                        // Read the texel from the tile the UV routes to: the
+                        // paint target holds LINEAR RGBA8, the shell wants
+                        // sRGB bytes — convert per-texel here (the identity
+                        // for the v1 no-LUT path; a display-transform-aware
+                        // sample is the follow-up when the picker meets the
+                        // display chain).
+                        let tile = tile_of_uv(uv);
+                        if let Some(image) = paint.read_tile(tile) {
+                            let x = ((uv[0].clamp(0.0, 1.0)) * (image.width as f32 - 1.0)).round()
+                                as u32;
+                            let y = ((uv[1].clamp(0.0, 1.0)) * (image.height as f32 - 1.0)).round()
+                                as u32;
+                            let i = (y * image.width + x) as usize * 4;
+                            if i + 3 < image.data.len() {
+                                let srgba = [
+                                    linear_to_srgb_byte(image.data[i]),
+                                    linear_to_srgb_byte(image.data[i + 1]),
+                                    linear_to_srgb_byte(image.data[i + 2]),
+                                    image.data[i + 3],
+                                ];
+                                return Some(PickSample(srgba));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let painting = !self.pick_armed
+            && ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
             && response.dragged_by(PointerButton::Primary)
             && self.mesh_data.is_some()
             && paint
@@ -336,6 +400,15 @@ impl Viewport {
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
             }
         }
+        // No eyedropper sample this frame: the signature is Option so the
+        // shell reads one Sample per click, `None` every other frame.
+        None
+    }
+
+    /// Arms or disarms the eyedropper (the shell syncs this from
+    /// ToolKind::Pick each frame; painting is suppressed while armed).
+    pub fn set_pick_armed(&mut self, armed: bool) {
+        self.pick_armed = armed;
     }
 
     /// Casts a ray through the pointer position and returns the mesh UV

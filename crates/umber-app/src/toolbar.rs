@@ -117,18 +117,25 @@ pub enum ToolKind {
     Clone,
     /// Eraser (retouch).
     Erase,
+    /// The eyedropper: click samples the paint target's texel at the
+    /// picked UV and makes it the brush color (C1 worklist #10). Not a
+    /// BrushTool — it never strokes; the viewport handles its click.
+    Pick,
 }
 
 impl ToolKind {
     /// The strip order.
-    pub const ALL: [ToolKind; 4] = [
+    pub const ALL: [ToolKind; 5] = [
         ToolKind::Paint,
         ToolKind::Smudge,
         ToolKind::Clone,
         ToolKind::Erase,
+        ToolKind::Pick,
     ];
 
-    /// The kind of a (param-carrying) brush tool.
+    /// The kind of a (param-carrying) brush tool. Pick has no BrushTool
+    /// and maps to Paint's params slot (the panel keeps showing the last
+    /// brush; the strip highlights the eyedropper itself).
     pub fn of(tool: &BrushTool) -> Self {
         match tool {
             BrushTool::Paint => ToolKind::Paint,
@@ -146,6 +153,7 @@ impl ToolKind {
             ToolKind::Smudge => "fingerprint",
             ToolKind::Clone => "stamp",
             ToolKind::Erase => "eraser",
+            ToolKind::Pick => "pipette",
         }
     }
 
@@ -156,6 +164,7 @@ impl ToolKind {
             ToolKind::Smudge => tr("brush.tool-smudge"),
             ToolKind::Clone => tr("brush.tool-clone"),
             ToolKind::Erase => tr("brush.tool-eraser"),
+            ToolKind::Pick => tr("brush.tool-pick"),
         }
     }
 }

@@ -340,6 +340,7 @@ brush =
     .tool-smudge = Smudge
     .tool-clone = Clone
     .tool-eraser = Eraser
+    .tool-pick = Eyedropper
     .erase-channels = Erase channels
     .erase-hint = Alpha-only by default (color data is kept, so undo restores it). Enabling R/G/B erases that color channel toward zero leaving alpha intact.
     .smudge-strength = Strength

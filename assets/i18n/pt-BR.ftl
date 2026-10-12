@@ -359,6 +359,7 @@ brush =
     .tool-smudge = Borrar
     .tool-clone = Clonar
     .tool-eraser = Borracha
+    .tool-pick = Conta-gotas
     .erase-channels = Canais da borracha
     .erase-hint = Só o alfa por padrão (os dados de cor são mantidos, então desfazer os restaura). Ativar R/G/B apaga aquele canal de cor até zero mantendo o alfa.
     .smudge-strength = Intensidade
