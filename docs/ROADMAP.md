@@ -61,6 +61,7 @@ first, blends rebases if needed).
 | wave-abr | .abr brush preset import (§1 optional) | the one Adobe format that is legal |
 | wave-dynamic-materials | §2 dynamic material layering (P2, 6+) | shader-declared sub-stacks; the deepest remaining material feature; design doc + likely 2 kills |
 | wave-wasm-shaders | §5 custom user shaders = WGSL plugins (P2) | umber-wasm runtime ✓ built; the shader-replacement host hook is the kill |
+| wave-spp-import | §7 (NEW): .spp IMPORT — best-effort read of user-provided Adobe project files | import-only (no .spp writing ever); clean-room from published community HDF5-layout docs; per-project import report; RATIFIER: Bessa (legal scope); slots after PSD-import (shared flatten machinery) |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
 | wave-tessellation | §5 displacement/tessellation preview (P2) | the height channel exists (tilepool); the preview pass + the displacement budget |
 | wave-hdr-surface | §5 HDR output (eframe upgrade gate) | tracks eframe 0.36→next; the capability model + probe ✓ built |
@@ -89,7 +90,7 @@ first, blends rebases if needed).
 
 ## Never (hard walls — requirements.md's guardrails, restated)
 
-- .spp — undocumented HDF5; the .umber directory format IS the kill-shot.
+- .spp WRITING — undocumented HDF5 + Adobe's format. (IMPORT reversed 2026-10-12: reading user-provided .spp files is interoperability, wave 4, pending Bessa's ratification — see decisions.md.) The .umber directory format stays the kill-shot.
 - .sbsar execution — Adobe Additional Terms, no FOSS license. The original
   node graph + MaterialX interchange is the legal answer, fully built.
 - Fake interchange: MaterialX exports declared custom nodedefs; consuming
