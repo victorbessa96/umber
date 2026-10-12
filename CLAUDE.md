@@ -38,6 +38,9 @@ Compile errors:
 - **No field access in format strings.** `"{ask.name}"` doesn't compile. Bind `let name = ask.name;` first.
 - **New module or dep:** exactly one `mod x;` line (a duplicate is E0428), and add the dep to that crate's `Cargo.toml` (E0432).
 - **Borrow splits (E0502):** take `&mut self.a` and `&self.b` separately. Don't call `&mut self` methods while holding a borrow.
+- **`Path::ends_with` matches whole components**, not string suffixes: `Path::from("Sword_baseColor.png").ends_with("baseColor.png")` is FALSE. Suffix-match via `file_name().and_then(|n| n.to_str())`. (Cost: an hour of probe archaeology on a working export.)
+- **A closure returning `&str` borrowed from its arg** can't feed `.iter().find()` — the borrow can't outlive the call. Return an owned `String`.
+- **`std::env::temp_dir()` under the agent harness is `~/.hermes/cache/scratch`**, not `/tmp` — CI-style `/tmp` assumptions don't hold locally; failed-run leftovers accumulate there and are evidence.
 
 Clippy `-D warnings`:
 - **Too many arguments**: >7 params fails. Bundle them into a context struct and state the call.
@@ -47,6 +50,7 @@ Clippy `-D warnings`:
   - The repo also uses `!x.is_finite() || x <= 0.0`, which additionally skips +∞. Use it only when that's intended.
 - **Doc-comment attachment**: no blank line between `///` blocks. Keep each doc block directly above its item.
 - **Doc lazy continuation**: indent continuation lines of a `///` list item to the item's text.
+- **`map_or(true, …)` → `is_none_or(…)`**, NOT `is_some_and`: an is_some_and rewrite flips the absent-arm default. If the absent arm is `true`, the semantic is "absent ⇒ enabled" — preserve it. (Cost: a silent behavior flip that starved every auto-rebake fire.)
 - **Redundant field shorthand**: `Foo { x }`, not `Foo { x: x }`.
 - **Needless or elided lifetimes**, and the `?` rewrite (`question_mark`).
 - **Unused `#[must_use]` results**: acknowledge them with `let _ =`, or use them.
