@@ -43,9 +43,8 @@ source of loop truth). Summary:
   front, verified). Runtime verdict = CI at push; the phase closes on
   that green.
 
-Phase A (truth pass) is partial: A0's row corrections landed (d3516c6);
-A1 (this rewrite), A2 (roadmap reconciliation), A3 (docs sweep) close
-with the phase.
+Phase A (truth pass): COMPLETE — A0 d3516c6, A1 e116729 (this rewrite),
+A2+A3 3e0278f; queue.md records the evidence per item.
 
 ## Machine-load directive (standing)
 
