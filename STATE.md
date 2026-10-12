@@ -37,8 +37,11 @@ source of loop truth). Summary:
   force, single pens included — the multi_touch 2+ gate never carried a
   pen, cross-review finding fixed same-night; stylus-crate backends =
   named follow-up)
-- B6 Gate 0 journey test — IN FLIGHT (the gate0 claw writes
-  tests/gate0_journey.rs + the lib.rs seams; live session owns it)
+- B6 Gate 0 journey test — DONE IN CODE (15c072e: the six-leg journey
+  test landed dragon-verified; umber-app gains a lib target for it; the
+  compositor's WGSL isNan corpse fixed — no such builtin in naga 30's
+  front, verified). Runtime verdict = CI at push; the phase closes on
+  that green.
 
 Phase A (truth pass) is partial: A0's row corrections landed (d3516c6);
 A1 (this rewrite), A2 (roadmap reconciliation), A3 (docs sweep) close

@@ -22,6 +22,7 @@ Gate 0 (the journey test) passes. The six criticals, in queue order:
 - Paint target goes 4K, sized per texture set — critical 2; DEFAULT_TARGET_SIZE=4096, size combo, sidecar persistence (`133dd12`)
 - Real pressure reaches the brush — critical 5; the pressured API pair + alpha shaping + can-fail test (`f867215`)
 - The pressure source lives — raw `Event::Touch` per-event force; the multi_touch 2+ gate never carried a single pen (`6430623`)
+- Gate 0 — the journey test, six legs joined: FBX → 4K pressured paint → compositor → undo/redo → save/reopen → ORM decode-verified; the compositor shader's isNan corpse dies on its first real compile (`15c072e`)
 
 ### Wave 4 — painting completeness (2026-10-09/10)
 
