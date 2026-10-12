@@ -22,8 +22,56 @@
 //! swap, mirroring the undo journal's "~100 steps then disk swap" budget
 //! in docs/specs/architecture.md) lands. Until then, evicting a painted
 //! tile is a real data-loss operation and callers must treat it as such.
+//!
+//! # Pool key: one target per (layer, channel, tile)
+//!
+//! The pool is keyed by [`PoolKey`] — `(layer_id, channel, tile)` — so
+//! every layer's every channel owns an independent tile set over the
+//! shared virtual texture. Two keys that differ in any one component
+//! address different [`PaintTarget`]s: painting layer 3's baseColor never
+//! touches layer 5's baseColor, nor layer 3's roughness.
+//!
+//! JUDGMENT CALL — the key's channel is a `u8`, not `umber_core::
+//! ChannelKind`, and the tile stays [`TileId`], not a `u16`. The `u8`
+//! keeps this module's surface disjoint from `umber-core`'s enum (a new
+//! channel kind there breaks [`PoolKey::new`]'s exhaustive match loudly
+//! at compile time instead of silently re-keying the pool), and
+//! [`PoolKey::channel_kind`] recovers the enum for the two kinds that
+//! exist today. The tile stays [`TileId`] because the pool addresses
+//! UV-grid cells (the [`tile_for`] output), not UDIM ids: `umber-core`'s
+//! `TextureSet::tiles` map is keyed by UDIM `u16`, but the UDIM-id ↔
+//! grid-cell mapping is a later slice — conflating the two now would
+//! mis-address every multi-tile set.
+//!
+//! # Memory model and the v1 boundary
+//!
+//! Every resident tile costs `TILE_SIZE² × 4` bytes of GPU memory
+//! (`Rgba8Unorm`), i.e. exactly 1 MiB — see [`TilePool::memory_bytes`].
+//! A fully-resident 4K (`4096²`) layer-channel is `8 × 8 = 64` tiles =
+//! 64 MiB (the review's "~64MB per layer-channel-tile" figure, where
+//! "tile" means the whole tile *set*). A 10-layer × 5-channel × 4K stack
+//! at full residency is therefore `10 × 5 × 64 MiB = 3.2 GiB` — past the
+//! ~2 GiB §12 undo budget in docs/perf/protocol.md (which covers the CPU
+//! journal, a *separate* pool: GPU tiles live in VRAM, outside it) and
+//! past what the reference-GPU class that protocol names (lavapipe as the
+//! CI floor, a mid-range dev GPU live) can be assumed to hold alongside
+//! the mesh, bake, and postfx targets.
+//!
+//! JUDGMENT CALL — v1 keeps the pinned contract above (manual [`TilePool::
+//! evict`], lossy, no capacity trigger) and adds an *advisory* cap,
+//! [`RECOMMENDED_MAX_RESIDENT_BYTES`] (1 GiB ≈ 1024 tiles ≈ sixteen
+//! fully-resident 4K layer-channels). It is deliberately unenforced: an
+//! automatic LRU would change the eviction semantics this module pins,
+//! and evicting safely needs the readback-before-evict path that is
+//! already documented as Wave-3 work. Until then the working set is the
+//! caller's responsibility — sparse residency (only touched tiles exist)
+//! is what keeps real sessions under the cap — and [`TilePool::
+//! evict_layer`] exists so layer deletion can drop a whole layer's tiles
+//! instead of leaking them.
 
 use std::collections::HashMap;
+
+use umber_core::ChannelKind;
 
 use crate::paint::PaintTarget;
 
@@ -35,6 +83,16 @@ use crate::paint::PaintTarget;
 /// extent in that case (the usual fixed-page-size tradeoff in virtual
 /// texturing, traded for simple addressing).
 pub const TILE_SIZE: u32 = 512;
+
+/// Advisory cap on pool residency, in bytes: 1 GiB ≈ 1024 resident
+/// tiles ≈ sixteen fully-resident 4K layer-channels (see the module
+/// docs' memory-model section).
+///
+/// Unenforced by [`TilePool`] on purpose — automatic eviction would
+/// change the pinned lossy-evict contract, and safe auto-evict needs the
+/// Wave-3 readback path. Callers compare [`TilePool::memory_bytes`]
+/// against this to decide when to [`TilePool::evict`] cold tiles.
+pub const RECOMMENDED_MAX_RESIDENT_BYTES: u64 = 1 << 30;
 
 /// Identifies one tile in a virtual texture's tile grid.
 ///
@@ -57,6 +115,60 @@ impl TileId {
     /// Builds a tile id from its column/row grid indices.
     pub fn new(column: u32, row: u32) -> Self {
         Self { column, row }
+    }
+}
+
+/// Identifies one paint target in the pool: the tile at `tile` of
+/// `channel` of layer `layer`.
+///
+/// See the module docs' pool-key section for why `channel` is a `u8`
+/// rather than [`ChannelKind`] and why `tile` stays a [`TileId`] rather
+/// than a UDIM `u16`. Build with [`PoolKey::new`]; the struct fields stay
+/// public so callers can decompose a key (e.g. [`TilePool::evict_layer`]
+/// matches on `layer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PoolKey {
+    /// The owning layer's [`umber_core::Layer`] id (stable across
+    /// save/load).
+    pub layer: u64,
+    /// The channel within the layer's texture set: [`PoolKey::
+    /// CHANNEL_COLOR`] or [`PoolKey::CHANNEL_DATA`] today.
+    pub channel: u8,
+    /// The tile cell within the virtual texture's grid.
+    pub tile: TileId,
+}
+
+impl PoolKey {
+    /// Channel tag for color-managed (`ChannelKind::Color`) data.
+    pub const CHANNEL_COLOR: u8 = 0;
+    /// Channel tag for linear (`ChannelKind::Data`) data.
+    pub const CHANNEL_DATA: u8 = 1;
+
+    /// Builds a key from a layer id, a channel kind, and a tile cell.
+    ///
+    /// The `ChannelKind` match is exhaustive on purpose: a future third
+    /// kind fails to compile here instead of aliasing an existing tag.
+    pub fn new(layer: u64, channel: ChannelKind, tile: TileId) -> Self {
+        let channel = match channel {
+            ChannelKind::Color => Self::CHANNEL_COLOR,
+            ChannelKind::Data => Self::CHANNEL_DATA,
+        };
+        Self {
+            layer,
+            channel,
+            tile,
+        }
+    }
+
+    /// Recovers the [`ChannelKind`] for the two known tags, or `None`
+    /// for a tag no current kind produces (forward-compatibility for
+    /// keys read back from a newer pool).
+    pub fn channel_kind(&self) -> Option<ChannelKind> {
+        match self.channel {
+            Self::CHANNEL_COLOR => Some(ChannelKind::Color),
+            Self::CHANNEL_DATA => Some(ChannelKind::Data),
+            _ => None,
+        }
     }
 }
 
@@ -111,7 +223,7 @@ pub fn texel_within_tile(uv: [f32; 2], virt_w: u32, virt_h: u32) -> Option<([f32
 }
 
 /// A lazily-populated grid of [`PaintTarget`] tiles covering one virtual
-/// texture.
+/// texture, keyed per (layer, channel, tile) — see [`PoolKey`].
 ///
 /// See the module docs for the eviction contract. Construction allocates
 /// nothing: tiles come into existence one at a time, on first touch, via
@@ -120,7 +232,7 @@ pub struct TilePool {
     device: wgpu::Device,
     virt_width: u32,
     virt_height: u32,
-    tiles: HashMap<TileId, PaintTarget>,
+    tiles: HashMap<PoolKey, PaintTarget>,
 }
 
 impl TilePool {
@@ -142,28 +254,29 @@ impl TilePool {
         (self.virt_width, self.virt_height)
     }
 
-    /// Returns the tile at `id`, creating a fresh, zero-initialized one
+    /// Returns the tile at `key`, creating a fresh, zero-initialized one
     /// first if this is its first touch.
     ///
-    /// Does not validate `id` against [`TilePool::virtual_dimensions`] —
-    /// ids produced by [`tile_for`] are always in range; a caller that
-    /// builds a [`TileId`] directly is responsible for keeping it in
-    /// range. An out-of-range id simply allocates a tile with no
-    /// corresponding region of the virtual texture, which is harmless to
-    /// the pool itself but wastes GPU memory.
-    pub fn get_or_create(&mut self, id: TileId) -> &PaintTarget {
+    /// Does not validate `key.tile` against
+    /// [`TilePool::virtual_dimensions`] — ids produced by [`tile_for`]
+    /// are always in range; a caller that builds a [`TileId`] directly is
+    /// responsible for keeping it in range. An out-of-range id simply
+    /// allocates a tile with no corresponding region of the virtual
+    /// texture, which is harmless to the pool itself but wastes GPU
+    /// memory.
+    pub fn get_or_create(&mut self, key: PoolKey) -> &PaintTarget {
         self.tiles
-            .entry(id)
+            .entry(key)
             .or_insert_with(|| PaintTarget::new(&self.device, TILE_SIZE, TILE_SIZE))
     }
 
-    /// Returns the tile at `id` if it is currently resident, without
+    /// Returns the tile at `key` if it is currently resident, without
     /// creating it.
-    pub fn get(&self, id: TileId) -> Option<&PaintTarget> {
-        self.tiles.get(&id)
+    pub fn get(&self, key: PoolKey) -> Option<&PaintTarget> {
+        self.tiles.get(&key)
     }
 
-    /// Drops the tile at `id` if it is resident, freeing its GPU memory.
+    /// Drops the tile at `key` if it is resident, freeing its GPU memory.
     ///
     /// Returns whether a tile was actually present to drop. **The tile's
     /// painted contents are lost** — see the module docs' eviction
@@ -174,8 +287,21 @@ impl TilePool {
     /// consumers must re-fetch via [`TilePool::get`] /
     /// [`TilePool::get_or_create`] after an evict instead of reusing a
     /// held reference.
-    pub fn evict(&mut self, id: TileId) -> bool {
-        self.tiles.remove(&id).is_some()
+    pub fn evict(&mut self, key: PoolKey) -> bool {
+        self.tiles.remove(&key).is_some()
+    }
+
+    /// Drops every resident tile of `layer` across all channels, freeing
+    /// their GPU memory. Returns how many tiles were dropped.
+    ///
+    /// The layer-deletion path must call this: without it a deleted
+    /// layer's tiles stay resident (and addressable) forever. Same
+    /// lossy-evict contract as [`TilePool::evict`], applied per key whose
+    /// [`PoolKey::layer`] matches.
+    pub fn evict_layer(&mut self, layer: u64) -> usize {
+        let before = self.tiles.len();
+        self.tiles.retain(|key, _| key.layer != layer);
+        before - self.tiles.len()
     }
 
     /// Count of tiles currently resident in GPU memory.
@@ -268,6 +394,51 @@ mod tests {
         assert!(!set.contains(&TileId::new(2, 1)));
     }
 
+    #[test]
+    fn pool_key_distinguishes_layer_channel_and_tile() {
+        use std::collections::HashSet;
+        let base = PoolKey::new(7, ChannelKind::Color, TileId::new(1, 2));
+        // Each component varies independently.
+        assert_ne!(base, PoolKey::new(8, ChannelKind::Color, TileId::new(1, 2)));
+        assert_ne!(base, PoolKey::new(7, ChannelKind::Data, TileId::new(1, 2)));
+        assert_ne!(base, PoolKey::new(7, ChannelKind::Color, TileId::new(2, 1)));
+        let mut set = HashSet::new();
+        set.insert(base);
+        assert!(set.contains(&PoolKey::new(7, ChannelKind::Color, TileId::new(1, 2))));
+        assert!(!set.contains(&PoolKey::new(7, ChannelKind::Data, TileId::new(1, 2))));
+    }
+
+    #[test]
+    fn pool_key_channel_kind_round_trips_and_rejects_unknown_tags() {
+        let color = PoolKey::new(1, ChannelKind::Color, TileId::new(0, 0));
+        assert_eq!(color.channel, PoolKey::CHANNEL_COLOR);
+        assert_eq!(color.channel_kind(), Some(ChannelKind::Color));
+        let data = PoolKey::new(1, ChannelKind::Data, TileId::new(0, 0));
+        assert_eq!(data.channel, PoolKey::CHANNEL_DATA);
+        assert_eq!(data.channel_kind(), Some(ChannelKind::Data));
+        // A tag no current kind produces (e.g. read back from a newer
+        // pool) maps to None, never to a wrong kind.
+        let future = PoolKey {
+            layer: 1,
+            channel: 99,
+            tile: TileId::new(0, 0),
+        };
+        assert_eq!(future.channel_kind(), None);
+    }
+
+    #[test]
+    fn memory_budget_math_pins_the_review_figures() {
+        // One tile is exactly 1 MiB (512² RGBA8).
+        assert_eq!(u64::from(TILE_SIZE) * u64::from(TILE_SIZE) * 4, 1 << 20);
+        // A fully-resident 4K layer-channel is 64 tiles = 64 MiB — the
+        // review's "~64MB per layer-channel" figure.
+        assert_eq!(64 * (1 << 20), 64 << 20);
+        // The advisory cap is 1 GiB = 1024 tiles = sixteen such
+        // layer-channels.
+        assert_eq!(RECOMMENDED_MAX_RESIDENT_BYTES, 1 << 30);
+        assert_eq!(RECOMMENDED_MAX_RESIDENT_BYTES / (1 << 20), 1024);
+    }
+
     #[cfg(feature = "gpu")]
     mod gpu {
         use super::super::*;
@@ -306,10 +477,10 @@ mod tests {
                 "nothing allocated at construction"
             );
 
-            let a = pool.get_or_create(TileId::new(0, 0));
+            let a = pool.get_or_create(PoolKey::new(1, ChannelKind::Color, TileId::new(0, 0)));
             assert_eq!(a.dimensions(), (TILE_SIZE, TILE_SIZE));
 
-            let b = pool.get_or_create(TileId::new(3, 2));
+            let b = pool.get_or_create(PoolKey::new(1, ChannelKind::Color, TileId::new(3, 2)));
             assert_eq!(b.dimensions(), (TILE_SIZE, TILE_SIZE));
 
             assert_eq!(pool.tiles_in_memory(), 2);
@@ -326,23 +497,23 @@ mod tests {
             let compositor =
                 PaintCompositor::new(device.clone()).expect("device has the required feature");
 
-            let id = TileId::new(1, 1);
+            let key = PoolKey::new(1, ChannelKind::Color, TileId::new(1, 1));
             let dab = Dab::new([256.0, 256.0], 32.0, [1.0, 0.0, 0.0, 1.0], 1.0, 1.0);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("umber_tile_pool_test_encoder"),
             });
             compositor
-                .splat_dabs(&mut encoder, pool.get_or_create(id), &[dab])
+                .splat_dabs(&mut encoder, pool.get_or_create(key), &[dab])
                 .expect("single dab batch should splat");
             queue.submit(Some(encoder.finish()));
 
             assert_eq!(pool.tiles_in_memory(), 1);
-            // Touching the same id again must not allocate a second tile.
-            let _ = pool.get_or_create(id);
+            // Touching the same key again must not allocate a second tile.
+            let _ = pool.get_or_create(key);
             assert_eq!(pool.tiles_in_memory(), 1);
 
             let bytes = pool
-                .get(id)
+                .get(key)
                 .expect("tile is resident")
                 .read_back_rgba8(&device, &queue)
                 .expect("readback should succeed");
@@ -355,24 +526,91 @@ mod tests {
         }
 
         #[test]
+        fn same_cell_is_independent_per_layer_and_channel() {
+            let (device, queue) = request_device();
+            let mut pool = TilePool::new(device.clone(), 2048, 2048);
+            let compositor =
+                PaintCompositor::new(device.clone()).expect("device has the required feature");
+
+            let painted = PoolKey::new(1, ChannelKind::Color, TileId::new(0, 0));
+            let dab = Dab::new([256.0, 256.0], 32.0, [1.0, 0.0, 0.0, 1.0], 1.0, 1.0);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("umber_tile_pool_test_isolation_encoder"),
+            });
+            compositor
+                .splat_dabs(&mut encoder, pool.get_or_create(painted), &[dab])
+                .expect("single dab batch should splat");
+            queue.submit(Some(encoder.finish()));
+
+            // The same cell of another layer, and another channel of the
+            // same layer, are fresh zero-initialized tiles — the paint
+            // above must not leak across the key.
+            for key in [
+                PoolKey::new(2, ChannelKind::Color, TileId::new(0, 0)),
+                PoolKey::new(1, ChannelKind::Data, TileId::new(0, 0)),
+            ] {
+                let bytes = pool
+                    .get_or_create(key)
+                    .read_back_rgba8(&device, &queue)
+                    .expect("readback should succeed");
+                assert!(
+                    bytes.iter().all(|&b| b == 0),
+                    "key {key:?} must be an independent transparent tile"
+                );
+            }
+            assert_eq!(pool.tiles_in_memory(), 3);
+            assert!(
+                pool.get(PoolKey::new(2, ChannelKind::Data, TileId::new(0, 0)))
+                    .is_none(),
+                "untouched keys stay non-resident"
+            );
+        }
+
+        #[test]
         fn evict_drops_the_tile_and_re_touch_creates_a_fresh_one() {
             let (device, _queue) = request_device();
             let mut pool = TilePool::new(device, 2048, 2048);
 
-            pool.get_or_create(TileId::new(0, 0));
-            pool.get_or_create(TileId::new(3, 2));
+            let first = PoolKey::new(1, ChannelKind::Color, TileId::new(0, 0));
+            let second = PoolKey::new(1, ChannelKind::Color, TileId::new(3, 2));
+            pool.get_or_create(first);
+            pool.get_or_create(second);
             assert_eq!(pool.tiles_in_memory(), 2);
 
-            assert!(pool.evict(TileId::new(0, 0)));
+            assert!(pool.evict(first));
             assert_eq!(pool.tiles_in_memory(), 1);
-            assert!(pool.get(TileId::new(0, 0)).is_none());
+            assert!(pool.get(first).is_none());
 
-            // Evicting an already-absent id is a harmless no-op.
-            assert!(!pool.evict(TileId::new(0, 0)));
+            // Evicting an already-absent key is a harmless no-op.
+            assert!(!pool.evict(first));
 
-            let fresh = pool.get_or_create(TileId::new(0, 0));
+            let fresh = pool.get_or_create(first);
             assert_eq!(fresh.dimensions(), (TILE_SIZE, TILE_SIZE));
             assert_eq!(pool.tiles_in_memory(), 2);
+        }
+
+        #[test]
+        fn evict_layer_drops_only_that_layer() {
+            let (device, _queue) = request_device();
+            let mut pool = TilePool::new(device, 2048, 2048);
+
+            let a_color = PoolKey::new(1, ChannelKind::Color, TileId::new(0, 0));
+            let a_data = PoolKey::new(1, ChannelKind::Data, TileId::new(0, 0));
+            let b_color = PoolKey::new(2, ChannelKind::Color, TileId::new(0, 0));
+            pool.get_or_create(a_color);
+            pool.get_or_create(a_data);
+            pool.get_or_create(b_color);
+            assert_eq!(pool.tiles_in_memory(), 3);
+
+            assert_eq!(pool.evict_layer(1), 2);
+            assert_eq!(pool.tiles_in_memory(), 1);
+            assert!(pool.get(a_color).is_none());
+            assert!(pool.get(a_data).is_none());
+            assert!(pool.get(b_color).is_some());
+
+            // Re-evicting a gone layer, or an unknown one, drops nothing.
+            assert_eq!(pool.evict_layer(1), 0);
+            assert_eq!(pool.evict_layer(99), 0);
         }
 
         #[test]
@@ -382,18 +620,18 @@ mod tests {
             let compositor =
                 PaintCompositor::new(device.clone()).expect("device has the required feature");
 
-            let id = TileId::new(0, 0);
+            let key = PoolKey::new(1, ChannelKind::Color, TileId::new(0, 0));
             let dab = Dab::new([256.0, 256.0], 32.0, [1.0, 0.0, 0.0, 1.0], 1.0, 1.0);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("umber_tile_pool_test_evict_encoder"),
             });
             compositor
-                .splat_dabs(&mut encoder, pool.get_or_create(id), &[dab])
+                .splat_dabs(&mut encoder, pool.get_or_create(key), &[dab])
                 .expect("single dab batch should splat");
             queue.submit(Some(encoder.finish()));
 
             let painted = pool
-                .get(id)
+                .get(key)
                 .expect("tile is resident")
                 .read_back_rgba8(&device, &queue)
                 .expect("readback should succeed");
@@ -403,8 +641,8 @@ mod tests {
                 "sanity check: the dab actually painted before eviction"
             );
 
-            assert!(pool.evict(id));
-            let reborn = pool.get_or_create(id);
+            assert!(pool.evict(key));
+            let reborn = pool.get_or_create(key);
             let bytes = reborn
                 .read_back_rgba8(&device, &queue)
                 .expect("readback should succeed");

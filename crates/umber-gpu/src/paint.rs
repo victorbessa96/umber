@@ -19,6 +19,16 @@
 //! orders successive compute passes on the same texture, so a second call
 //! always sees the first call's writes. See `shaders::PAINT_COMPUTE_SHADER`
 //! for the shader-side half of this contract.
+//!
+//! **Viewport sampling (core-loop kill 1):** a tile's [`PaintTarget::view`]
+//! binds straight into the mesh pass
+//! ([`crate::renderer::MeshBuffers::set_base_color_texture`]) as the
+//! base-color tile — no copy, no conversion. The target's `Rgba8Unorm`
+//! bytes ARE the sampled texels (row 0 is v 0 — mesh UVs are used
+//! as-is, no V flip; see [`crate::renderer::PaintParams`]' tile-select
+//! convention). Repainting the same target needs no re-bind (the view
+//! aliases the texture); recreating it (evict + recreate) does — the
+//! bind group holds the old texture alive (cloned view) until replaced.
 
 use std::borrow::Cow;
 use std::mem::size_of;
@@ -325,7 +335,8 @@ impl PaintTarget {
     }
 
     /// The texture's default view — for display callbacks sampling the
-    /// paint surface.
+    /// paint surface, and for the mesh pass's base-color tile binding
+    /// ([`crate::renderer::MeshBuffers::set_base_color_texture`]).
     pub fn view(&self) -> &wgpu::TextureView {
         &self.texture_view
     }

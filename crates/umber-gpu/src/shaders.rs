@@ -1,20 +1,27 @@
 //! WGSL shader sources for the viewport mesh pass.
-
-/// Normal-shaded mesh pass with a directional light and a hemispherical
-/// environment light: the procedural sky/ground irradiance by default,
-/// or a convolved environment map when one is bound (Wave-4 item 6 —
-/// see `crate::ibl`'s convention block for the equirect math shared
-/// with the convolve shader) plus the v1 specular IBL tier (three
-/// cone-scaled prefiltered levels × the analytic BRDF fit — see
-/// `crate::ibl::IBL_PREFILTER_SHADER`). Driven entirely by vertex
-/// normals (no textures yet — that lands with the paint engine).
-/// Matches the `Vertex` and `CameraUniform` layouts in `renderer.rs`;
-/// bindings 1–3 are the diffuse IBL set, 4–7 the specular tier (see
-/// `GpuContext`'s bind-group layout), binding 8 the view-mode
-/// selector (`crate::view_mode::VIEW_MODE_WGSL`, verbatim). Group 1 is the display LUT
-/// (`crate::display_lut`; the snippet is that module's
-/// `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
-/// the last step before the target.
+//!
+//! Normal-shaded mesh pass with a directional light and a hemispherical
+//! environment light: the procedural sky/ground irradiance by default,
+//! or a convolved environment map when one is bound (Wave-4 item 6 —
+//! see `crate::ibl`'s convention block for the equirect math shared
+//! with the convolve shader) plus the v1 specular IBL tier (three
+//! cone-scaled prefiltered levels × the analytic BRDF fit — see
+//! `crate::ibl::IBL_PREFILTER_SHADER`). Vertex normals drive the
+//! lighting; the albedo is the bound paint tile when one is set, else
+//! the `BASE_COLOR` constant (core-loop kill 1 — the viewport shows
+//! paint; see `paint_albedo` below for the fallback contract).
+//! Matches the `Vertex` and `CameraUniform` layouts in `renderer.rs`;
+//! bindings 1–3 are the diffuse IBL set, 4–7 the specular tier (see
+//! `GpuContext`'s bind-group layout), binding 8 the view-mode
+//! selector (`crate::view_mode::VIEW_MODE_WGSL`, verbatim), bindings
+//! 9–11 the base-color paint set (`paint_tex`, `paint_sampler`,
+//! `PaintParams` — group 0, not group 2, so every existing group-0
+//! bind group and draw keeps working with the fallback bound; the
+//! group-2 per-channel reservation in `crate::view_mode` stays the
+//! Wave-2 contract for the full channel set). Group 1 is the display LUT
+//! (`crate::display_lut`; the snippet is that module's
+//! `DISPLAY_LUT_WGSL`, verbatim), applied to the final shaded color as
+//! the last step before the target.
 ///
 /// Two fragment entries (the LUT gate, see [`MESH_ENTRY_DIRECT`] /
 /// [`MESH_ENTRY_SCENE_LINEAR`]): `fs_main` applies the LUT inline (the
@@ -117,9 +124,33 @@ fn view_mode_bypasses_lut(mode: u32, channel: u32) -> bool {
 }
 // ---- end view mode ----
 
+// ---- paint tile (core-loop kill 1 — the viewport shows paint) ----
+// The composited base-color tile: one `PaintTarget`'s view (rgba8,
+// filterable), a shared filtering clamp sampler, and the tile-select
+// uniform. All three are always bound (a 1x1 fallback texture +
+// `flags == 0` when no paint is set) so the pipeline layout never
+// changes at runtime — the same always-populated pattern as the IBL
+// set above. Appended AFTER the view-mode selector: additive bindings,
+// the classic layout-sync trap avoided by construction.
+@group(0) @binding(9) var paint_tex: texture_2d<f32>;
+@group(0) @binding(10) var paint_sampler: sampler;
+struct PaintParams {
+    uv_offset: vec2<f32>,
+    uv_scale: vec2<f32>,
+    flags: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+@group(0) @binding(11) var<uniform> paint_params: PaintParams;
+
+const PAINT_HAS_TEXTURE: u32 = 1u;
+// ---- end paint tile ----
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -128,6 +159,9 @@ struct VertexOutput {
     // World position for the position-map preview proxy (identity
     // transform in this pass — object space IS world space here).
     @location(1) world_pos: vec3<f32>,
+    // Interpolated paint UV (the mesh's own uvs, uploaded verbatim —
+    // see `renderer::Vertex`).
+    @location(2) uv: vec2<f32>,
 };
 
 @vertex
@@ -136,6 +170,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.world_normal = in.normal;
     out.world_pos = in.position;
+    out.uv = in.uv;
     return out;
 }
 
@@ -143,6 +178,29 @@ const SUN_COLOR: vec3<f32> = vec3<f32>(1.0, 0.96, 0.90);
 const SKY_COLOR: vec3<f32> = vec3<f32>(0.45, 0.55, 0.78);
 const GROUND_COLOR: vec3<f32> = vec3<f32>(0.30, 0.27, 0.24);
 const BASE_COLOR: vec3<f32> = vec3<f32>(0.72, 0.72, 0.75);
+
+/// Tile-space UV: the bound texture holds ONE tile's texels, so a
+/// global (possibly UDIM) uv is reduced to tile-local
+/// `(uv - offset) * scale` before sampling. The single-tile default
+/// (offset 0, scale 1) is the identity; UDIM tile (tu, tv) binds
+/// offset (tu, tv), scale (1, 1) — the fractional part for uvs inside
+/// the tile. Mirrors `renderer::PaintParams` byte-for-byte; see that
+/// type's docs for the convention and the v1 single-texture boundary.
+fn paint_tile_uv(uv: vec2<f32>) -> vec2<f32> {
+    return (uv - paint_params.uv_offset) * paint_params.uv_scale;
+}
+
+/// The textured albedo: the bound tile at the interpolated uv when a
+/// texture is set, else today's constant — so the unbound path renders
+/// pixel-identical to the pre-texture shader. The flag branch is
+/// uniform control flow, so the unsampled texture cannot leak into the
+/// output (the `fallback_ignores_bound_map` family pins this).
+fn paint_albedo(uv: vec2<f32>) -> vec3<f32> {
+    if ((paint_params.flags & PAINT_HAS_TEXTURE) == 0u) {
+        return BASE_COLOR;
+    }
+    return textureSample(paint_tex, paint_sampler, paint_tile_uv(uv)).rgb;
+}
 
 /// Hemispherical environment irradiance: the bound convolved map when
 /// `env_flags.flags == 1`, else the procedural stand-in — sky above the
@@ -206,14 +264,15 @@ fn prefiltered_env(r: vec3<f32>, roughness: f32) -> vec3<f32> {
 /// per-channel GPU textures have no bindings in v1 (the paint
 /// texture-set is document-model data; `SoloChannel::texture_binding`
 /// reserves the future group-2 slots), so each arm reads the closest
-/// bound source — the Wave-2 texture handoff swaps these arms to
-/// samples without renumbering the ids.
-fn solo_proxy(channel: u32, n: vec3<f32>) -> vec3<f32> {
+/// bound source — except base color, which samples the bound paint
+/// tile (core-loop kill 1): solo base-color IS the texture. The
+/// Wave-2 texture handoff swaps the remaining arms to samples without
+/// renumbering the ids.
+fn solo_proxy(channel: u32, n: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if (channel == VIEW_MODE_SOLO_BASE_COLOR) {
-        // This pass's albedo stand-in — "baseColor raw" in today's
-        // uniform-material world (the texture sample lands with the
-        // group-2 handoff).
-        return BASE_COLOR;
+        // The bound paint tile at the interpolated uv — or the
+        // uniform-material constant when nothing is bound.
+        return paint_albedo(uv);
     }
     if (channel == VIEW_MODE_SOLO_EMISSIVE) {
         // No emission source in this pass.
@@ -245,13 +304,13 @@ fn solo_proxy(channel: u32, n: vec3<f32>) -> vec3<f32> {
 /// each kind maps to the closest solo proxy; curvature, thickness,
 /// and ID (no bound source at all) render mid-gray stand-ins until
 /// the bake-texture handoff.
-fn preview_proxy(kind: u32, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+fn preview_proxy(kind: u32, n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if (kind == VIEW_MODE_PREVIEW_AO) {
-        return solo_proxy(VIEW_MODE_SOLO_AO, n);
+        return solo_proxy(VIEW_MODE_SOLO_AO, n, uv);
     }
     if (kind == VIEW_MODE_PREVIEW_NORMAL_BASE || kind == VIEW_MODE_PREVIEW_BENT_NORMAL
         || kind == VIEW_MODE_PREVIEW_WORLD_SPACE_NORMAL) {
-        return solo_proxy(VIEW_MODE_SOLO_NORMAL, n);
+        return solo_proxy(VIEW_MODE_SOLO_NORMAL, n, uv);
     }
     if (kind == VIEW_MODE_PREVIEW_POSITION) {
         // Unit-cell repeat of object space (this pass has no model
@@ -259,22 +318,23 @@ fn preview_proxy(kind: u32, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
         return fract(world_pos);
     }
     if (kind == VIEW_MODE_PREVIEW_HEIGHT) {
-        return solo_proxy(VIEW_MODE_SOLO_HEIGHT, n);
+        return solo_proxy(VIEW_MODE_SOLO_HEIGHT, n, uv);
     }
     return vec3<f32>(0.5);
 }
 
 /// Resolves the view-mode output: Lit keeps the PBR color, Unlit
-/// drops the lighting math, Solo/Preview substitute their proxy.
-fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+/// drops the lighting math (albedo only — the texture when bound),
+/// Solo/Preview substitute their proxy.
+fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if (mode == VIEW_MODE_UNLIT) {
-        return BASE_COLOR;
+        return paint_albedo(uv);
     }
     if (mode == VIEW_MODE_SOLO) {
-        return solo_proxy(channel, n);
+        return solo_proxy(channel, n, uv);
     }
     if (mode == VIEW_MODE_MESH_PREVIEW) {
-        return preview_proxy(channel, n, world_pos);
+        return preview_proxy(channel, n, world_pos, uv);
     }
     return lit;
 }
@@ -284,14 +344,16 @@ fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_
 /// direct path, LUT applied here) and `fs_scene_linear` (the post-effects
 /// path, scene-linear out; `crate::postfx_viewport`'s composite applies
 /// the LUT after the chain).
-fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let n = normalize(world_normal);
     let to_light = normalize(-camera.light_dir.xyz);
     let diffuse = max(dot(n, to_light), 0.0);
     let env = environment_irradiance(n);
     // Environment acts as the ambient term; the sun adds directional
     // energy on top, weighted so lit surfaces approach full brightness.
-    var color = BASE_COLOR * (env + diffuse * SUN_COLOR * 0.55);
+    // The albedo is the bound paint tile (or the constant fallback).
+    let albedo = paint_albedo(uv);
+    var color = albedo * (env + diffuse * SUN_COLOR * 0.55);
     // Specular IBL tier (wave-5 v1): Split-Sum factor one x factor two,
     // gated on the map flag — the diffuse term above is byte-untouched.
     // v1 stand-ins: a uniform view (camera.eye is the view source, not
@@ -304,18 +366,18 @@ fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
         let n_dot_v = clamp(dot(n, to_view), 0.0, 1.0);
         let rough = clamp(spec_params.roughness, 0.0, 1.0);
         let metal = clamp(spec_params.metallic, 0.0, 1.0);
-        let f0 = mix(vec3<f32>(0.04), BASE_COLOR, metal);
+        let f0 = mix(vec3<f32>(0.04), albedo, metal);
         let ab = env_brdf_approx(n_dot_v, rough);
         color = color + prefiltered_env(reflect_dir, rough) * (f0 * ab.x + ab.y);
     }
     // View modes (crate::view_mode): Lit keeps the PBR color
     // above; Unlit/Solo/Preview substitute their proxy.
-    return apply_view_mode(view_mode.mode, view_mode.channel, color, n, world_pos);
+    return apply_view_mode(view_mode.mode, view_mode.channel, color, n, world_pos, uv);
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = shade(in.world_normal, in.world_pos);
+    let color = shade(in.world_normal, in.world_pos, in.uv);
     // Data modes bypass the display LUT below (the §9 rule — the CPU
     // side binds the identity table for those modes, so the early
     // return agrees with the bound table; the branch additionally
@@ -336,7 +398,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// alpha through, and the composite blends on it.
 @fragment
 fn fs_scene_linear(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(shade(in.world_normal, in.world_pos), 1.0);
+    return vec4<f32>(shade(in.world_normal, in.world_pos, in.uv), 1.0);
 }
 "#;
 

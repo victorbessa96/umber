@@ -34,14 +34,18 @@ pub enum GpuError {
     IndexCountOverflow(usize),
 }
 
-/// Interleaved vertex layout uploaded to the GPU: position + normal,
-/// padded to 32 bytes.
+/// Interleaved vertex layout uploaded to the GPU: position + normal + uv,
+/// 32 bytes.
 ///
-/// UVs are intentionally omitted — this pass is normal-shaded only; texture
-/// sampling lands with the paint engine. `_pad` keeps the struct at a
-/// 16-byte multiple — portable across backends (review #2: some
-/// Vulkan/Metal drivers are stricter than the WebGPU floor) and leaves a
-/// natural slot for Wave-2 UV attributes.
+/// The uv slot is the core-loop kill-1 handoff: the shader samples the
+/// bound paint tile at the interpolated uv, so the viewport shows paint.
+/// Uploaded verbatim from [`umber_mesh::MeshData::uvs`] when the counts
+/// match; zero-filled when the source mesh has no (or mismatched) uvs —
+/// a uv-less mesh then samples tile-local (0, 0) everywhere, which only
+/// matters once a texture is bound (the unbound fallback ignores uv).
+/// Replacing the old `_pad` keeps the stride at 32 bytes, so the
+/// OpenPBR pipeline (which reads locations 0–1 only) and every buffer
+/// size in the tree are untouched.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -50,8 +54,93 @@ pub struct Vertex {
     /// Object-space normal (recomputed on upload if the source mesh lacks
     /// one — see [`MeshBuffers::upload`]).
     pub normal: [f32; 3],
-    /// Unused; pads the struct to 32 bytes.
-    pub _pad: [f32; 2],
+    /// Paint UV, in the mesh's own uv space (global UDIM uvs for a
+    /// multi-tile mesh — the `PaintParams` tile select reduces them).
+    pub uv: [f32; 2],
+}
+
+const _: () = assert!(
+    size_of::<Vertex>() == 32,
+    "Vertex must stay position + normal + uv (32 bytes)"
+);
+
+/// The mesh pass's base-color paint uniform (`MESH_SHADER` binding 11):
+/// the tile-select for the bound paint texture plus the bound flag.
+/// Byte-identical to the WGSL `PaintParams` struct (see that block's
+/// layout contract) — 32 bytes.
+///
+/// # UDIM scale convention (v1)
+///
+/// The bound texture holds ONE tile's texels; the shader samples
+/// `(uv - uv_offset) * uv_scale`. [`Self::identity`] (offset 0, scale 1)
+/// is the single-tile path (uvs already 0..1). [`Self::for_udim`] maps a
+/// UDIM tile number to its origin: tile (tu, tv) binds offset (tu, tv),
+/// scale (1, 1), i.e. the fractional part for uvs inside the tile.
+/// Mesh UVs are used as-is (no V flip): a paint upload's row 0 is v 0 —
+/// see `crate::paint::PaintTarget`'s viewport-sampling note.
+///
+/// # v1 boundary
+///
+/// One bound tile only (the app binds the active tile's `PaintTarget`;
+/// the tile-pool atlas + page-table indirection of the architecture
+/// doc's virtual texturing is a later slice). No per-channel textures —
+/// the group-2 reservation in `crate::view_mode` still holds for those.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PaintParams {
+    /// Tile origin subtracted from the global uv before scaling.
+    pub uv_offset: [f32; 2],
+    /// Scale applied after the offset (1, 1 for UDIM tiles).
+    pub uv_scale: [f32; 2],
+    /// Bit 0 ([`Self::HAS_TEXTURE`]) = a paint texture is bound.
+    pub flags: u32,
+    /// Padding to the 32-byte uniform multiple.
+    pub _pad: [u32; 3],
+}
+
+const _: () = assert!(
+    size_of::<PaintParams>() == 32,
+    "PaintParams must match the WGSL PaintParams layout"
+);
+
+impl PaintParams {
+    /// Flag bit: a paint texture is bound (the shader samples it).
+    pub const HAS_TEXTURE: u32 = 1;
+
+    /// No texture bound: the shader returns the `BASE_COLOR` constant
+    /// (pixel-identical to the pre-texture pass). The offset/scale are
+    /// still the identity so a stale uniform can never skew a re-bind.
+    pub fn disabled() -> Self {
+        Self {
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            flags: 0,
+            _pad: [0; 3],
+        }
+    }
+
+    /// A texture bound over single-tile (0..1) uvs: sample them directly.
+    pub fn identity() -> Self {
+        Self {
+            uv_offset: [0.0, 0.0],
+            uv_scale: [1.0, 1.0],
+            flags: Self::HAS_TEXTURE,
+            _pad: [0; 3],
+        }
+    }
+
+    /// A texture holding UDIM `tile`'s texels (1001..=1100, clamped),
+    /// sampled by global mesh uvs: offset = the tile's origin, scale 1.
+    pub fn for_udim(tile: u16) -> Self {
+        let clamped = tile.clamp(umber_mesh::FIRST_TILE, 1100);
+        let local = clamped - umber_mesh::FIRST_TILE;
+        Self {
+            uv_offset: [f32::from(local % 10), f32::from(local / 10)],
+            uv_scale: [1.0, 1.0],
+            flags: Self::HAS_TEXTURE,
+            _pad: [0; 3],
+        }
+    }
 }
 
 /// The specular tier's GPU handles: prefilter views + spec uniform.
@@ -62,6 +151,33 @@ pub(crate) struct MeshTier<'a> {
     pub prefilter_views: [&'a wgpu::TextureView; 3],
     /// The specular-params uniform bound at slot 7.
     pub spec_buffer: &'a wgpu::Buffer,
+}
+
+/// The base-color paint binding: tile texture + sampler + tile-select
+/// uniform. Bundled for the same reason as [`MeshTier`] (one param,
+/// bindings 9–11).
+pub(crate) struct MeshPaint<'a> {
+    /// The tile's texture view (a [`crate::paint::PaintTarget::view`], or
+    /// the context's 1×1 fallback when unbound).
+    pub view: &'a wgpu::TextureView,
+    /// The shared paint sampler (filtering, clamp-to-edge — v1 uses one
+    /// sampler for every tile; per-texture samplers are deferred).
+    pub sampler: &'a wgpu::Sampler,
+    /// The tile-select uniform bound at slot 11.
+    pub params_buffer: &'a wgpu::Buffer,
+}
+
+/// The tail of the mesh pass's group-0 bind group (bindings 4–11): the
+/// specular tier, the paint set, and the view-mode selector. One bundle
+/// so [`GpuContext::mesh_bind_group_full`] stays at clippy's 7-arg
+/// floor — it would otherwise take eight.
+pub(crate) struct MeshTail<'a> {
+    /// The specular tier (bindings 4–7).
+    pub tier: MeshTier<'a>,
+    /// The base-color paint set (bindings 9–11).
+    pub paint: MeshPaint<'a>,
+    /// The view-mode selector (binding 8).
+    pub view_mode_buffer: &'a wgpu::Buffer,
 }
 
 /// Per-frame camera uniform, matching `shaders::MESH_SHADER`'s `Camera`
@@ -174,6 +290,16 @@ pub struct GpuContext {
     /// Shared irradiance sampler (group 0 binding 2) — bilinear,
     /// repeat-U/clamp-V (see `crate::ibl::ibl_sampler`).
     env_sampler: wgpu::Sampler,
+    /// 1×1 fallback paint tile, bound at group 0 binding 9 whenever no
+    /// paint is set. Never sampled while the params flag is 0 (the
+    /// shader's constant arm doesn't touch it), but the bind group must
+    /// always be fully populated.
+    fallback_paint_view: wgpu::TextureView,
+    /// Shared paint sampler (group 0 binding 10) — filtering,
+    /// clamp-to-edge on both axes. Clamp (not repeat) so a tile-local
+    /// uv at exactly 1.0 reads the edge texel instead of wrapping into
+    /// the opposite edge.
+    paint_sampler: wgpu::Sampler,
     depth_format: Option<wgpu::TextureFormat>,
     /// The eframe surface format every display pipeline targets (kept
     /// for the post-effects composite, built lazily by
@@ -256,6 +382,17 @@ impl GpuContext {
     /// [`MeshBuffers`]' bind group binds straight through.
     pub(crate) fn mesh_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.bind_group_layout
+    }
+
+    /// The shared paint sampler (mesh-pass group 0 binding 10).
+    pub(crate) fn paint_sampler(&self) -> &wgpu::Sampler {
+        &self.paint_sampler
+    }
+
+    /// The 1×1 fallback paint tile (mesh-pass group 0 binding 9 when
+    /// no paint is set).
+    pub(crate) fn fallback_paint_view(&self) -> &wgpu::TextureView {
+        &self.fallback_paint_view
     }
 
     /// The surface format the display pipelines target.
@@ -549,6 +686,40 @@ impl GpuContext {
                     },
                     count: None,
                 },
+                // Base-color paint set (core-loop kill 1 — see
+                // `shaders::MESH_SHADER`'s paint block): the tile
+                // texture (rgba8, filterable), its sampler, and the
+                // tile-select uniform. Appended AFTER the view-mode
+                // selector — same additive pattern. Group 0 (not a
+                // new group) so every existing draw — tests, the
+                // post-effects scene pass, the wireframe overlay's
+                // layout reuse — binds unchanged with the fallback.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<PaintParams>() as u64),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -587,7 +758,7 @@ impl GpuContext {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -707,6 +878,7 @@ impl GpuContext {
         });
 
         let (fallback_env_view, env_sampler) = Self::fallback_env_resources(&device);
+        let (fallback_paint_view, paint_sampler) = Self::fallback_paint_resources(&device);
 
         // HDR surface probe (§5 P1 row 85, `crate::hdr`): `None` because
         // this context is never handed a `wgpu::Surface` to query (see
@@ -875,6 +1047,8 @@ impl GpuContext {
             openpbr_layout,
             fallback_env_view,
             env_sampler,
+            fallback_paint_view,
+            paint_sampler,
             wire_pipeline,
             wire_color_layout,
             grid_pipeline,
@@ -910,23 +1084,64 @@ impl GpuContext {
         )
     }
 
+    /// Builds the fallback paint resources for [`Self::new`]: a 1×1
+    /// `Rgba8Unorm` texture view (never sampled while the paint flags
+    /// are 0, but the bind group must stay fully populated) and the
+    /// shared paint sampler (filtering, clamp-to-edge).
+    fn fallback_paint_resources(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Sampler) {
+        let fallback = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("umber_mesh_fallback_paint"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("umber_mesh_paint_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        (
+            fallback.create_view(&wgpu::TextureViewDescriptor::default()),
+            sampler,
+        )
+    }
+
     /// Builds the mesh pass's group-0 bind group: camera + diffuse IBL
     /// set (irradiance view, sampler, flags buffer) + specular tier
     /// (prefilter views at bindings 4–6, spec uniform at 7) + the
-    /// view-mode selector (binding 8). Used by
-    /// [`MeshBuffers::upload`] (fallback views/sampler, procedural
-    /// flags, default spec, Lit mode) and [`MeshBuffers`]'s rebuild path
-    /// (`set_environment` / `set_spec_params`: the map's own views and
-    /// sampler, or the fallback pair).
+    /// view-mode selector (binding 8) + the base-color paint set (tile
+    /// view, sampler, params at bindings 9–11). Used by
+    /// [`MeshBuffers::upload`] (fallback views/samplers, procedural
+    /// flags, default spec, Lit mode, unbound paint) and
+    /// [`MeshBuffers`]'s rebuild path (`set_environment` /
+    /// `set_spec_params` / `set_base_color_texture`: the map's own views
+    /// and sampler, or the fallback pair).
     pub(crate) fn mesh_bind_group_full(
         &self,
         uniform_buffer: &wgpu::Buffer,
         flags_buffer: &wgpu::Buffer,
         env_view: &wgpu::TextureView,
         env_sampler: &wgpu::Sampler,
-        tier: MeshTier<'_>,
-        view_mode_buffer: &wgpu::Buffer,
+        tail: MeshTail<'_>,
     ) -> wgpu::BindGroup {
+        let MeshTail {
+            tier,
+            paint,
+            view_mode_buffer,
+        } = tail;
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("umber_mesh_camera_bind_group"),
             layout: &self.bind_group_layout,
@@ -983,16 +1198,42 @@ impl GpuContext {
                         size: None,
                     }),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(paint.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::Sampler(paint.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: paint.params_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
             ],
         })
     }
 }
 
+/// The retained half of a paint binding: the tile view plus the
+/// tile-select params the bind group was built with, so environment and
+/// spec rebuilds keep the paint without the caller re-binding it.
+struct BoundPaint {
+    /// Cloned tile view — keeps the `PaintTarget`'s texture alive.
+    view: wgpu::TextureView,
+    /// The params uploaded alongside (kept for introspection/rebuild).
+    params: PaintParams,
+}
+
 /// GPU-resident mesh data for the viewport: vertex/index buffers plus the
 /// per-mesh camera uniform buffer, the environment-flag uniform buffer,
-/// the specular-tier uniform buffer, the view-mode uniform buffer, and
-/// the combined bind group
-/// (camera + IBL set + specular tier + view mode).
+/// the specular-tier uniform buffer, the view-mode uniform buffer, the
+/// paint tile-select uniform buffer, and the combined bind group
+/// (camera + IBL set + specular tier + view mode + paint set).
 pub struct MeshBuffers {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -1006,10 +1247,21 @@ pub struct MeshBuffers {
     /// [`MeshPaintCallback::write_uniform`] from the callback's mode
     /// (see [`Self::paint_callback_with_mode`] — Lit by default).
     view_mode_buffer: wgpu::Buffer,
+    /// Tile-select uniform (mesh-pass binding 11): written by
+    /// [`Self::set_base_color_texture`] / [`Self::clear_base_color_texture`].
+    paint_params_buffer: wgpu::Buffer,
     /// Currently bound environment (if any): retained so
     /// [`Self::set_spec_params`] can rebuild the bind group without
     /// dropping the map. Cloned handles — no GPU cost.
     bound_env: Option<EnvIrradiance>,
+    /// Currently bound paint tile (if any): the texture view plus the
+    /// tile-select params, retained so [`Self::set_environment`] /
+    /// [`Self::set_spec_params`] rebuild the bind group without
+    /// dropping the paint. The cloned view keeps the tile's texture
+    /// alive (wgpu views hold their texture) until replaced or cleared
+    /// — see the bind-group lifetime note on
+    /// [`Self::set_base_color_texture`].
+    bound_paint: Option<BoundPaint>,
     bind_group: wgpu::BindGroup,
     /// Duplicated-vertex wireframe buffer (Wave-4 item 7): 3 verts per
     /// triangle with barycentric corners, built once at upload from the
@@ -1025,7 +1277,10 @@ impl MeshBuffers {
     /// Uploads `mesh` to GPU buffers. Recomputes vertex normals when the
     /// source mesh has none (or a mismatched count) rather than failing —
     /// OBJ files without `vn` lines and in-flight glTF/FBX loaders are
-    /// expected to hit this path.
+    /// expected to hit this path. UVs ride the same rule: uploaded
+    /// verbatim when the counts match, zero-filled otherwise (a uv-less
+    /// mesh samples tile-local (0, 0) once a texture is bound; unbound
+    /// it renders the constant fallback either way).
     pub fn upload(gpu: &GpuContext, mesh: &umber_mesh::MeshData) -> Result<Self, GpuError> {
         let device = &gpu.device;
         if mesh.positions.is_empty() {
@@ -1040,15 +1295,21 @@ impl MeshBuffers {
         } else {
             Cow::Owned(compute_vertex_normals(&mesh.positions, &mesh.indices))
         };
+        let uvs: Cow<'_, [[f32; 2]]> = if mesh.uvs.len() == mesh.positions.len() {
+            Cow::Borrowed(&mesh.uvs)
+        } else {
+            Cow::Owned(vec![[0.0; 2]; mesh.positions.len()])
+        };
 
         let vertices: Vec<Vertex> = mesh
             .positions
             .iter()
             .zip(normals.iter())
-            .map(|(p, n)| Vertex {
+            .zip(uvs.iter())
+            .map(|((p, n), uv)| Vertex {
                 position: *p,
                 normal: *n,
-                _pad: [0.0; 2],
+                uv: *uv,
             })
             .collect();
 
@@ -1110,13 +1371,29 @@ impl MeshBuffers {
             ],
             spec_buffer: &spec_buffer,
         };
+        // Unbound paint by default: the 1×1 fallback tile + the disabled
+        // params (flags == 0); `set_base_color_texture` flips this when
+        // the app binds a tile.
+        let paint_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_mesh_paint_params_buffer"),
+            contents: bytemuck::bytes_of(&PaintParams::disabled()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let paint = MeshPaint {
+            view: gpu.fallback_paint_view(),
+            sampler: gpu.paint_sampler(),
+            params_buffer: &paint_params_buffer,
+        };
         let bind_group = gpu.mesh_bind_group_full(
             &uniform_buffer,
             &flags_buffer,
             &gpu.fallback_env_view,
             &gpu.env_sampler,
-            tier,
-            &view_mode_buffer,
+            MeshTail {
+                tier,
+                paint,
+                view_mode_buffer: &view_mode_buffer,
+            },
         );
 
         let index_count = u32::try_from(mesh.indices.len())
@@ -1152,7 +1429,9 @@ impl MeshBuffers {
             flags_buffer,
             spec_buffer,
             view_mode_buffer,
+            paint_params_buffer,
             bound_env: None,
+            bound_paint: None,
             bind_group,
             wire_buffer,
             wire_count,
@@ -1160,8 +1439,9 @@ impl MeshBuffers {
     }
 
     /// Rebuilds the group-0 bind group from the current flags + bound
-    /// environment + spec buffer. Shared by [`Self::set_environment`]
-    /// and [`Self::set_spec_params`] (disjoint field borrows — no
+    /// environment + spec buffer + bound paint. Shared by
+    /// [`Self::set_environment`], [`Self::set_spec_params`], and
+    /// [`Self::set_base_color_texture`] (disjoint field borrows — no
     /// borrow of the whole `self`).
     fn rebuild_bind_group(&mut self, gpu: &GpuContext) {
         let (view, sampler) = match &self.bound_env {
@@ -1184,13 +1464,30 @@ impl MeshBuffers {
             prefilter_views: prefilter,
             spec_buffer: &self.spec_buffer,
         };
+        // Bound paint survives environment/spec rebuilds (and vice
+        // versa): each setter only replaces its own slice.
+        let paint = match &self.bound_paint {
+            Some(bound) => MeshPaint {
+                view: &bound.view,
+                sampler: gpu.paint_sampler(),
+                params_buffer: &self.paint_params_buffer,
+            },
+            None => MeshPaint {
+                view: gpu.fallback_paint_view(),
+                sampler: gpu.paint_sampler(),
+                params_buffer: &self.paint_params_buffer,
+            },
+        };
         self.bind_group = gpu.mesh_bind_group_full(
             &self.uniform_buffer,
             &self.flags_buffer,
             view,
             sampler,
-            tier,
-            &self.view_mode_buffer,
+            MeshTail {
+                tier,
+                paint,
+                view_mode_buffer: &self.view_mode_buffer,
+            },
         );
     }
 
@@ -1218,6 +1515,59 @@ impl MeshBuffers {
         gpu.queue
             .write_buffer(&self.spec_buffer, 0, bytemuck::bytes_of(&params));
         self.rebuild_bind_group(gpu);
+    }
+
+    /// Binds `target`'s view as the mesh pass's base-color tile
+    /// (bindings 9–11) with `params` selecting the tile region — the
+    /// viewport shows paint. Takes effect on the next
+    /// [`Self::paint_callback`], like [`Self::set_environment`]; the
+    /// bound environment and spec params are preserved.
+    ///
+    /// # Bind-group lifetime
+    ///
+    /// The rebuilt bind group clones `target`'s view, and a wgpu view
+    /// holds its texture alive — so `target` (a tile-pool entry, a
+    /// scratch surface, …) may be dropped or evicted right after this
+    /// call without breaking later draws: the bound texels stay valid
+    /// until replaced by another `set_base_color_texture` or
+    /// [`Self::clear_base_color_texture`]. Re-binding after repainting
+    /// the SAME `PaintTarget` is unnecessary (the view aliases the
+    /// texture, not a snapshot) — but re-binding after the tile's
+    /// texture was recreated (evict + recreate) IS required, since the
+    /// new texture is a different GPU object.
+    pub fn set_base_color_texture(
+        &mut self,
+        gpu: &GpuContext,
+        target: &crate::paint::PaintTarget,
+        params: PaintParams,
+    ) {
+        gpu.queue
+            .write_buffer(&self.paint_params_buffer, 0, bytemuck::bytes_of(&params));
+        self.bound_paint = Some(BoundPaint {
+            view: target.view().clone(),
+            params,
+        });
+        self.rebuild_bind_group(gpu);
+    }
+
+    /// Unbinds the paint tile: the 1×1 fallback returns and the params
+    /// flag goes to 0, so the shader takes the constant arm again —
+    /// pixel-identical to a mesh that never bound paint. The next
+    /// [`Self::paint_callback`] picks it up.
+    pub fn clear_base_color_texture(&mut self, gpu: &GpuContext) {
+        let params = PaintParams::disabled();
+        gpu.queue
+            .write_buffer(&self.paint_params_buffer, 0, bytemuck::bytes_of(&params));
+        self.bound_paint = None;
+        self.rebuild_bind_group(gpu);
+    }
+
+    /// The currently bound tile-select params (the last
+    /// [`Self::set_base_color_texture`] value, or [`PaintParams::disabled`]).
+    pub fn paint_params(&self) -> PaintParams {
+        self.bound_paint
+            .as_ref()
+            .map_or_else(PaintParams::disabled, |bound| bound.params)
     }
 
     /// Number of indices in this mesh's index buffer (3x the triangle count).
@@ -1594,6 +1944,47 @@ mod tests {
         for n in normals {
             assert!(glam::Vec3::from(n).is_finite());
         }
+    }
+
+    #[test]
+    fn vertex_stays_32_bytes_with_the_uv_slot() {
+        // The uv replaced the old `_pad` in place: stride is unchanged,
+        // so the OpenPBR pipeline (locations 0–1) needs no update.
+        assert_eq!(size_of::<Vertex>(), 32);
+        assert_eq!(size_of::<PaintParams>(), 32);
+    }
+
+    #[test]
+    fn paint_params_constructors_pin_the_tile_select() {
+        // Disabled: no flag, but still the identity transform — a stale
+        // uniform can never skew a re-bind.
+        let disabled = PaintParams::disabled();
+        assert_eq!(disabled.flags, 0);
+        assert_eq!(disabled.uv_offset, [0.0, 0.0]);
+        assert_eq!(disabled.uv_scale, [1.0, 1.0]);
+
+        // Single tile: sample uvs directly.
+        let identity = PaintParams::identity();
+        assert_eq!(identity.flags, PaintParams::HAS_TEXTURE);
+        assert_eq!(identity.uv_offset, [0.0, 0.0]);
+        assert_eq!(identity.uv_scale, [1.0, 1.0]);
+
+        // UDIM: offset = the tile's origin, scale 1 (the shader samples
+        // the fractional part for uvs inside the tile).
+        assert_eq!(PaintParams::for_udim(1001).uv_offset, [0.0, 0.0]);
+        assert_eq!(PaintParams::for_udim(1002).uv_offset, [1.0, 0.0]);
+        assert_eq!(PaintParams::for_udim(1011).uv_offset, [0.0, 1.0]);
+        assert_eq!(PaintParams::for_udim(1100).uv_offset, [9.0, 9.0]);
+        for tile in [1001, 1002, 1011, 1100] {
+            let params = PaintParams::for_udim(tile);
+            assert_eq!(params.flags, PaintParams::HAS_TEXTURE);
+            assert_eq!(params.uv_scale, [1.0, 1.0]);
+        }
+        // Out-of-range tiles clamp to the 10x10 grid (the udim crate's
+        // own clamp policy, mirrored here so a bad tile id can't
+        // address outside the texture).
+        assert_eq!(PaintParams::for_udim(999).uv_offset, [0.0, 0.0]);
+        assert_eq!(PaintParams::for_udim(9999).uv_offset, [9.0, 9.0]);
     }
 
     #[cfg(feature = "gpu")]
@@ -2768,14 +3159,23 @@ mod tests {
                 ],
                 spec_buffer: &spec,
             };
+            // Hand-built group binds the unbound-paint fallback (the
+            // flag-0 proof below is about the IBL set — paint stays off).
+            let paint = MeshPaint {
+                view: gpu.fallback_paint_view(),
+                sampler: gpu.paint_sampler(),
+                params_buffer: &masked.paint_params_buffer,
+            };
             masked.bind_group = gpu.mesh_bind_group_full(
                 &masked.uniform_buffer,
                 &flags,
                 env.view(),
                 env.sampler(),
-                tier,
-                &spec,
-                &masked.view_mode_buffer,
+                MeshTail {
+                    tier,
+                    paint,
+                    view_mode_buffer: &masked.view_mode_buffer,
+                },
             );
             let masked_bytes = render_mesh_offscreen(&gpu, &masked);
 
@@ -3006,6 +3406,305 @@ mod tests {
                     }
                 }
             }
+        }
+
+        // --- Core-loop kill 1 (the viewport shows paint) tests. Same
+        // offscreen pattern as above, plus a real `PaintTarget` as the
+        // bound tile: the paint engine's own surface, not a hand-made
+        // texture — so the test proves the paint → viewport edge, not
+        // just sampling in the abstract.
+
+        /// Full-screen triangle with per-vertex uvs (the big-triangle
+        /// trick + degenerate uvs): every fragment interpolates to `uv`,
+        /// so with all three verts at a texel center the whole frame
+        /// samples ONE texel — filtering- and orientation-independent.
+        /// CCW like `fullscreen_mesh`, so backface culling keeps it.
+        fn fullscreen_textured_mesh(uv: [f32; 2]) -> umber_mesh::MeshData {
+            umber_mesh::MeshData {
+                positions: vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                uvs: vec![uv; 3],
+                indices: vec![0, 1, 2],
+                material_names: vec![],
+            }
+        }
+
+        /// A 2×2 paint tile through the real `PaintTarget` write path:
+        /// row 0 (v 0) red/green, row 1 blue/white. All four corners use
+        /// 0/255 channels only, so the sampled + identity-LUT bytes are
+        /// bit-exact, never rounding-adjacent.
+        fn paint_2x2(gpu: &GpuContext) -> crate::paint::PaintTarget {
+            let target = crate::paint::PaintTarget::new(&gpu.device, 2, 2);
+            let rgba: [u8; 16] = [
+                255, 0, 0, 255, 0, 255, 0, 255, //
+                0, 0, 255, 255, 255, 255, 255, 255,
+            ];
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("umber_paint_test_upload_encoder"),
+                });
+            target
+                .write_region(&gpu.device, &mut encoder, (0, 0), (2, 2), &rgba)
+                .expect("2x2 region fits the 2x2 target");
+            gpu.queue.submit(Some(encoder.finish()));
+            target
+        }
+
+        /// Renders `buffers` in `mode` into a W×H linear target through
+        /// the real mesh pipeline (the `MeshPaintCallback::draw` state:
+        /// group 0 = the mesh's CURRENT bind group, group 1 = identity
+        /// LUT) and returns tightly-packed RGBA8 bytes.
+        fn render_mesh_mode(
+            gpu: &GpuContext,
+            buffers: &MeshBuffers,
+            mode: ViewMode,
+            w: u32,
+            h: u32,
+        ) -> Vec<u8> {
+            let device = &gpu.device;
+            gpu.queue.write_buffer(
+                &buffers.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y)),
+            );
+            gpu.queue.write_buffer(
+                &buffers.view_mode_buffer,
+                0,
+                bytemuck::bytes_of(&mode.uniform()),
+            );
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("umber_paint_viewport_test_target"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("umber_paint_viewport_test_encoder"),
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("umber_paint_viewport_test_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&gpu.pipeline);
+                pass.set_bind_group(0, &buffers.bind_group, &[]);
+                pass.set_bind_group(1, gpu.identity_lut.bind_group(), &[]);
+                pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+            readback_packed(device, &gpu.queue, &target, w, h)
+        }
+
+        /// THE CAN-FAIL END-TO-END: the quad mesh with the 2×2 paint
+        /// tile bound renders the painted texel colors in solo
+        /// base-color — every pixel within 1 LSB of the written texel.
+        /// A viewport that ignored the bound texture (constant gray)
+        /// misses by ~70+ LSB; a broken tile select lands on the wrong
+        /// texel (255 LSB). The ≤1 LSB bound admits only unorm rounding.
+        #[test]
+        fn paint_texture_sample_appears_in_solo_base_color() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping paint_texture_sample_appears_in_solo_base_color: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let target = paint_2x2(&gpu);
+            let mode = ViewMode::Solo(crate::SoloChannel::BaseColor);
+            // (texel-center uv, written texel bytes). Upload row 0 is v
+            // 0 (the no-V-flip convention — see `PaintParams`), so
+            // (0.25, 0.25) is red, (0.75, 0.75) white.
+            for (uv, want) in [
+                ([0.25, 0.25], [255u8, 0, 0, 255]),
+                ([0.75, 0.25], [0u8, 255, 0, 255]),
+                ([0.25, 0.75], [0u8, 0, 255, 255]),
+                ([0.75, 0.75], [255u8, 255, 255, 255]),
+            ] {
+                let mesh = fullscreen_textured_mesh(uv);
+                let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+                buffers.set_base_color_texture(&gpu, &target, PaintParams::identity());
+                let bytes = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+                assert_eq!(bytes.len(), 4 * 4 * 4);
+                for (i, px) in bytes.chunks_exact(4).enumerate() {
+                    for c in 0..4 {
+                        let diff = px[c].abs_diff(want[c]);
+                        assert!(
+                            diff <= 1,
+                            "uv {uv:?} pixel {i} ch{c}: got {px:?}, want {want:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// The unbound path in the color views: solo base-color AND
+        /// unlit render the `BASE_COLOR` constant through the identity
+        /// LUT — 0.72·255 = 183.6 → 184, 0.75·255 = 191.25 → 191.
+        /// Pixel-pins the fallback the textured test above compares
+        /// against (and the empty-mesh path the goldens pin).
+        #[test]
+        fn unbound_paint_renders_the_constant_in_color_views() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping unbound_paint_renders_the_constant_in_color_views: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let want = [184u8, 184, 191, 255];
+            for mode in [
+                ViewMode::Solo(crate::SoloChannel::BaseColor),
+                ViewMode::Unlit,
+            ] {
+                let mesh = fullscreen_textured_mesh([0.25, 0.25]);
+                let buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+                let bytes = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+                assert_eq!(bytes.len(), 4 * 4 * 4);
+                for (i, px) in bytes.chunks_exact(4).enumerate() {
+                    for c in 0..4 {
+                        let diff = px[c].abs_diff(want[c]);
+                        assert!(
+                            diff <= 1,
+                            "{mode:?} pixel {i} ch{c}: got {px:?}, want {want:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Paint feeds the lighting math, not just the solo proxy: the
+        /// red texel bound in Lit renders near (96, 0, 0) — red × the
+        /// +Z procedural env (t = 0.5, diffuse 0) — instead of the
+        /// constant's (69, 75, 98). Both halves pinned: the textured
+        /// bytes AND the unbound bytes they must differ from.
+        #[test]
+        fn lit_mode_multiplies_the_bound_texture_by_light() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping lit_mode_multiplies_the_bound_texture_by_light: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let target = paint_2x2(&gpu);
+            let mesh = fullscreen_textured_mesh([0.25, 0.25]);
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            let plain = render_mesh_mode(&gpu, &buffers, ViewMode::Lit, 4, 4);
+            let closed = expected_procedural_byte([0.0, 0.0, 1.0]);
+            assert_eq!(closed, [69, 75, 98, 255]);
+            for (i, px) in plain.chunks_exact(4).enumerate() {
+                for c in 0..4 {
+                    assert!(
+                        px[c].abs_diff(closed[c]) <= 1,
+                        "unbound lit pixel {i} ch{c}: got {px:?}, want {closed:?}"
+                    );
+                }
+            }
+
+            buffers.set_base_color_texture(&gpu, &target, PaintParams::identity());
+            let bytes = render_mesh_mode(&gpu, &buffers, ViewMode::Lit, 4, 4);
+            assert_eq!(bytes.len(), 4 * 4 * 4);
+            for (i, px) in bytes.chunks_exact(4).enumerate() {
+                // Red × env (0.375, 0.41, 0.51): 0.375·255 = 95.6 → 96.
+                assert!(
+                    px[0].abs_diff(96) <= 2,
+                    "bound lit pixel {i}: red got {px:?}, want ≈96"
+                );
+                assert_eq!(
+                    (px[1], px[2]),
+                    (0, 0),
+                    "bound lit pixel {i}: no green/blue may survive the red albedo: {px:?}"
+                );
+            }
+        }
+
+        /// Clearing restores the fallback byte-for-byte: bind → clear
+        /// renders IDENTICAL bytes to a mesh that never bound paint (the
+        /// `fallback_ignores_bound_map` pattern for the paint set — the
+        /// flag flip is uniform control flow, so no sampling residue).
+        #[test]
+        fn clear_base_color_texture_restores_the_fallback() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping clear_base_color_texture_restores_the_fallback: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let target = paint_2x2(&gpu);
+            let mode = ViewMode::Solo(crate::SoloChannel::BaseColor);
+            let mesh = fullscreen_textured_mesh([0.75, 0.75]);
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            let plain = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+
+            buffers.set_base_color_texture(&gpu, &target, PaintParams::identity());
+            let textured = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+            assert_ne!(
+                plain, textured,
+                "binding white over the constant must change the frame"
+            );
+
+            buffers.clear_base_color_texture(&gpu);
+            let restored = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+            assert_eq!(
+                plain, restored,
+                "clearing the paint must restore fallback bytes exactly"
+            );
+            assert_eq!(buffers.paint_params().flags, 0);
+            assert_eq!(
+                buffers.paint_params().uv_scale,
+                [1.0, 1.0],
+                "cleared params keep the identity transform"
+            );
         }
     }
 }

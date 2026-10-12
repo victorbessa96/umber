@@ -366,7 +366,9 @@ impl PostFxViewport {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                    // Same three attributes as the direct pipeline
+                    // (renderer.rs): position + normal + paint uv.
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -802,7 +804,9 @@ mod tests {
                 route.mesh_applies_lut(),
                 "{route:?}: {body}"
             );
-            let shared = "shade(in.world_normal, in.world_pos)";
+            // The shared helper call, uv included (core-loop kill 1
+            // threads the paint uv through `shade`).
+            let shared = "shade(in.world_normal, in.world_pos, in.uv)";
             assert!(body.contains(shared), "{body}");
         }
         assert!(

@@ -4834,6 +4834,7 @@ dependencies = [
  "profiling",
  "serde",
  "thiserror 2.0.21",
+ "umber-core",
  "umber-graph",
  "umber-mesh",
  "wgpu",

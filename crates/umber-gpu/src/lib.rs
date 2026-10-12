@@ -17,6 +17,7 @@
 
 pub mod bake_shaders;
 pub mod camera;
+pub mod compositor;
 pub mod display_lut;
 pub mod golden;
 pub mod graph_eval;
@@ -42,6 +43,10 @@ pub mod ref_scene;
 pub mod tile_pool;
 
 pub use camera::{world_from_ndc, OrbitCamera};
+pub use compositor::{
+    blend_mode_id, composite_pixel, composite_stack_cpu, f32_to_u8, u8_to_f32, CompositeError,
+    CpuStackLayer, GpuStackLayer, StackCompositor, COMPOSITE_ENTRY, COMPOSITE_WGSL,
+};
 pub use display_lut::{identity_lut_bytes, DisplayLut, DISPLAY_LUT_BYTES};
 pub use graph_eval::{
     compute_run_set, plan_dispatches, CpuPath, EvalBackend, GpuOp, GpuRoute, GraphGpuError,
@@ -54,7 +59,10 @@ pub use paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 pub use postfx_viewport::{
     postfx_paint_shape, PostFxPaintCallback, PostFxStatus, PostFxViewport, ViewportRoute,
 };
-pub use tile_pool::{texel_within_tile, tile_for, TileId, TilePool, TILE_SIZE};
+pub use tile_pool::{
+    texel_within_tile, tile_for, PoolKey, TileId, TilePool, RECOMMENDED_MAX_RESIDENT_BYTES,
+    TILE_SIZE,
+};
 pub use view_mode::{PixelSource, SoloChannel, ViewMode, ViewModeParams};
 /// The depth format the app must request from eframe
 /// (`NativeOptions::depth_buffer = 32`) so the egui renderer's render pass
