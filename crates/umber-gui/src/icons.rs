@@ -74,15 +74,15 @@ impl IconFamily {
 pub const TOOL_ICONS: [&str; 10] = [
     "paintbrush",
     "eraser",
-    "fingerprint", // smudge
-    "stamp",       // clone
-    "pipette",     // the eyedropper (Pick) — placeholder until the lucide
+    "fingerprint-pattern", // smudge (lucide renamed `fingerprint` in 1.55)
+    "stamp",               // clone
+    "pipette",             // the eyedropper (Pick) — placeholder until the lucide
     // raster step lands (unknown ids draw a box, never panic)
     "paint-bucket",
     "spline", // path
     "pentagon",
-    "square-dashed", // mask
-    "flip-horizontal-2",
+    "square-dashed",                          // mask
+    "triangles-centerline-dashed-horizontal", // symmetry (lucide renamed `flip-horizontal-2` in 1.55)
 ];
 
 /// Lucide ids of the top-strip family (file / edit / undo / redo / view /
@@ -970,14 +970,16 @@ mod tests {
             return;
         };
         assert_eq!(manifest.lucide, LUCIDE_VERSION);
-        // The 2026-10-12 finding, pinned: these two ids were renamed
-        // upstream (`fingerprint` -> `fingerprint-pattern`,
-        // `flip-horizontal-2` -> `triangles-centerline-dashed-horizontal`)
-        // and keep placeholder boxes. If lucide restores them, or renames
-        // more, this assertion fails loudly on purpose.
-        assert_eq!(
-            manifest.missing,
-            vec!["fingerprint".to_owned(), "flip-horizontal-2".to_owned()]
+        // The 2026-10-12 finding RESOLVED: `fingerprint` and
+        // `flip-horizontal-2` were renamed upstream; the successor ids
+        // (`fingerprint-pattern`, `triangles-centerline-dashed-horizontal`)
+        // are fetched and declared, so NOTHING may be missing anymore. If a
+        // FUTURE lucide pin renames again, this fails loudly on purpose —
+        // the empty list is the contract.
+        assert!(
+            manifest.missing.is_empty(),
+            "no icon may draw a placeholder box: missing {:?}",
+            manifest.missing
         );
         let sections = [
             &manifest.tool,
@@ -1025,12 +1027,18 @@ mod tests {
             );
             assert_eq!(section.order.len(), section.icons.len());
         }
-        // Exact hand-derived layout (pack_grid(8, 20) = 3 cols x 3 rows):
-        // the tool must reproduce these numbers, not just any valid grid.
-        assert_eq!(manifest.tool.atlas, [60, 60]);
-        assert_eq!(manifest.tool2x.atlas, [120, 120]);
+        // Exact hand-derived layout for the PREVIOUS census (pack_grid(8,
+        // 20) = 3 cols x 3 rows = 60x60); the successor-id resolution grew
+        // the tool family to 10, and pack_grid(10, 20) = 4 cols x 3 rows =
+        // 80x60. The packer-math assert above already proves the grid is
+        // pack_grid's own output; these pins catch an UNINTENDED census
+        // change — update them DELIBERATELY when the family grows again.
+        assert_eq!(manifest.tool.atlas, [80, 60]);
+        assert_eq!(manifest.tool2x.atlas, [160, 120]);
         assert_eq!(manifest.panel.atlas, [48, 48]);
         assert_eq!(manifest.panel2x.atlas, [96, 96]);
+        assert_eq!(manifest.tool.order.len(), 10, "the tool family census");
+        assert!(manifest.missing.is_empty());
     }
 
     /// The checked-in PNGs, once the tool has generated them. Absent files

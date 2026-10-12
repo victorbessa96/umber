@@ -2,29 +2,34 @@
   "atlas_version": 1,
   "lucide": "1.55.0",
   "source": "https://github.com/lucide-icons/lucide/releases/tag/1.55.0",
-  "missing": [
-    "fingerprint",
-    "flip-horizontal-2"
-  ],
+  "missing": [],
   "tool": {
     "cell": 20,
     "atlas": [
-      60,
+      80,
       60
     ],
     "order": [
       "paintbrush",
       "eraser",
+      "fingerprint-pattern",
       "stamp",
       "pipette",
       "paint-bucket",
       "spline",
       "pentagon",
-      "square-dashed"
+      "square-dashed",
+      "triangles-centerline-dashed-horizontal"
     ],
     "icons": {
       "eraser": {
         "x": 20,
+        "y": 0,
+        "w": 20,
+        "h": 20
+      },
+      "fingerprint-pattern": {
+        "x": 40,
         "y": 0,
         "w": 20,
         "h": 20
@@ -42,8 +47,8 @@
         "h": 20
       },
       "pentagon": {
-        "x": 0,
-        "y": 40,
+        "x": 60,
+        "y": 20,
         "w": 20,
         "h": 20
       },
@@ -60,14 +65,20 @@
         "h": 20
       },
       "square-dashed": {
-        "x": 20,
+        "x": 0,
         "y": 40,
         "w": 20,
         "h": 20
       },
       "stamp": {
-        "x": 40,
+        "x": 60,
         "y": 0,
+        "w": 20,
+        "h": 20
+      },
+      "triangles-centerline-dashed-horizontal": {
+        "x": 20,
+        "y": 40,
         "w": 20,
         "h": 20
       }
@@ -76,22 +87,30 @@
   "tool2x": {
     "cell": 40,
     "atlas": [
-      120,
+      160,
       120
     ],
     "order": [
       "paintbrush",
       "eraser",
+      "fingerprint-pattern",
       "stamp",
       "pipette",
       "paint-bucket",
       "spline",
       "pentagon",
-      "square-dashed"
+      "square-dashed",
+      "triangles-centerline-dashed-horizontal"
     ],
     "icons": {
       "eraser": {
         "x": 40,
+        "y": 0,
+        "w": 40,
+        "h": 40
+      },
+      "fingerprint-pattern": {
+        "x": 80,
         "y": 0,
         "w": 40,
         "h": 40
@@ -109,8 +128,8 @@
         "h": 40
       },
       "pentagon": {
-        "x": 0,
-        "y": 80,
+        "x": 120,
+        "y": 40,
         "w": 40,
         "h": 40
       },
@@ -127,14 +146,20 @@
         "h": 40
       },
       "square-dashed": {
-        "x": 40,
+        "x": 0,
         "y": 80,
         "w": 40,
         "h": 40
       },
       "stamp": {
-        "x": 80,
+        "x": 120,
         "y": 0,
+        "w": 40,
+        "h": 40
+      },
+      "triangles-centerline-dashed-horizontal": {
+        "x": 40,
+        "y": 80,
         "w": 40,
         "h": 40
       }
