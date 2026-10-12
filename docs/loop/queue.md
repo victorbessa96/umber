@@ -61,7 +61,7 @@ Pass 4), highest first:
 | 6 | Docs truth refresh (README/STATE/queue) | **done** | 9a7c078: README status/tree-diagram/contributing + STATE handoff 2/3/6 |
 | 7 | Stylus-crate backends (winink + XI2) | **done (d2fd7b7)** | XI2 backend + StylusPoller wiring landed (Linux half; claw-authored, orphan-consumed after wrapper death); winink = the Windows half, named follow-up |
 | 8 | OCIO bundled build | **todo** | the never-run C++ build; display chain off stub behind the feature |
-| 9 | Distribution: prove the installers | **todo** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
+| 9 | Distribution: prove the installers | **done (9f875b3) — local boundary PROVEN: real tarballs + installers + verified checksums; windows zip + PS installer + end-to-end release fetch = CI's on first tag** | MSI + Flatpak + AppImage produced + smoke-tested from the existing config |
 | 10 | Color picker / eyedropper | **done (7067cd3)** | Pick on the strip + viewport sampling + set_brush_color; display-chain-aware sample = the named follow-up |
 | 11 | ID-mask selection | **todo** | expansion row (unfrozen; queued in audit order) |
 | 12 | Height→normal live in viewport | **done (861ca9a) — Mikkelsen screen-space perturbation, goldens pinned under lavapipe; app wiring awaits the per-channel tile pool (documented)** | expansion row (unfrozen; queued in audit order) |
