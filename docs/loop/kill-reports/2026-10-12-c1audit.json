@@ -1,0 +1,207 @@
+[0m
+> build · muse-spark-1.3-contributor-free
+[0m
+Full-project audit — verifying requirements, tests, and docs against the landed core loop.
+[0m→ [0mRead CLAUDE.md
+[0m→ [0mRead docs/loop/loop-prompt.md
+[0m→ [0mRead docs/specs/2026-10-12-strategy-review.md
+[0m→ [0mRead docs/specs/requirements.md
+[0m→ [0mRead STATE.md
+[0m→ [0mRead CHANGELOG.md
+[0m→ [0mRead README.md
+[0m→ [0mRead docs/loop/queue.md
+[0m
+[0m$ [0mgit log --oneline -30 && echo --- && git status --porcelain | head -50
+d173a6a docs(loop): the push gate is STANDING approval — Bessa's word: keep it true, push autonomously when needed; the re-arm scope note was wrong and dies here
+70dc67a docs(loop): push gate flipped by Bessa's in-session word — 'Feel free to push the gates, do so autonomously' (2026-10-12 10:2x); scope: the local wave, re-arms for the next
+07ebd32 fix(tooling): verify-kill's fmt gate no longer reads a missing rustfmt as drift
+3559dea docs(loop): the push log names the three flip paths — the gate's mechanics recorded where the next session reads them
+78dcf29 docs(loop): push-gate.json instantiated at approved:false — the mechanism the contract names exists, Bessa flips it
+46f9ee5 docs(state): the Phase A line closes — stale mid-rewrite fragment replaced with the completed truth
+26ada6c docs(decisions): the core-loop night's four load-bearing entries — the record completes
+a66e102 docs: the Gate-0 landing ceremony — queue, STATE, CHANGELOG, the report refreshed
+15c072e feat(core-loop): Gate 0 — the journey test, six legs joined; WGSL's dead isNan dies on first real compile
+1ea4b7d docs(loop): the night's kill reports gain a durable home — /tmp is the live channel, the repo is the record
+bf8c0ba docs: the criticals 2+5 marks ride with the pressure source fix — the truth chain complete
+6430623 fix(core-loop): the pressure source lives — raw Event::Touch force, single pens included
+bc83fe8 docs(release-checklist): the ratification + dogfood gates named — the review's remaining checklist-audit items closed
+77821b0 docs(release-checklist): Gate 0 added as the first gate — the review's checklist-audit directive, executed
+81c8389 docs(loop): queue truth — B2+B5 landed, the ungated push recorded, Gate 0 is next
+472b774 docs(requirements): the §12 Undo-RAM row marked — the stroke-undo kill's deferred census row, closed by the dragon
+973e802 docs(requirements): critical 5's row marked — pressure flows, the stylus-crate follow-up named
+f867215 feat(core-loop): critical 5 — real pressure reaches the brush; the hardcoded 1.0 dies
+5a498ab docs(loop): queue truth — Phase A complete, bed9e0a CI green, push approval requested
+0c66840 docs(requirements): critical 2's row marked — the 4K default is code, per-set sizing wired
+133dd12 feat(core-loop): critical 2 — the paint target goes 4K, sized per texture set
+3e0278f docs: A2+A3 — README status + SPEC amendment note: the docs tell one story
+e116729 docs(state): A1 — STATE rewritten from current truth; the loop's state-on-disk instantiated
+bed9e0a fix(tests): the smudge test pins the stacking contract — 9e4fb9e's undo-the-setup lesson dies
+9e4fb9e fix(tests): the smudge test's one-entry premise restored — the setup stroke's entry undone first
+c999da6 docs(requirements): critical 4's rows marked — the pixel-persistence truth chain closed
+d834d77 feat(core-loop): critical 4 — paint pixels persist; save/reopen loses nothing
+d1aeeb3 fix(compositor): alpha is straight-alpha-over, not a lerp — CI's pin caught the divergent form
+f78e6c1 feat(core-loop): critical 3 — paint strokes undo; the v1 clear() dies
+9455885 feat(core-loop): the app wires the viewport bind — paint now reaches the screen
+---
+[0m
+Core-loop commits and queue state mapped — now digging into the artifacts row by row.
+[0m• [0mVerify core-loop artifacts[90m General Agent[0m
+[0m• [0mGrep stale test premises[90m General Agent[0m
+[0m• [0mVerify split rows + P2/GUI[90m General Agent[0m
+[0m• [0mDocs-vs-reality sweep[90m General Agent[0m
+[0m✓ [0mVerify core-loop artifacts[90m General Agent[0m
+[0m✓ [0mDocs-vs-reality sweep[90m General Agent[0m
+[0m✓ [0mVerify split rows + P2/GUI[90m General Agent[0m
+[0m✓ [0mGrep stale test premises[90m General Agent[0m
+All four verification passes are in — now pinning down the perf-baseline requirements for the worklist.
+[0m
+[0m$ [0mls docs/perf/ 2>/dev/null; echo ---; head -60 scripts/perf_compare.py 2>/dev/null; echo ---; head -40 .github/workflows/perf-nightly.yml 2>/dev/null
+protocol.md
+---
+#!/usr/bin/env python3
+"""perf_compare.py — the §12 nightly regression gate.
+
+Compares the fresh harness JSONs against perf/baseline.json:
+a >10% regression on any tracked metric fails (exit 1). Missing
+metrics report as U (unmeasured) and don't fail — the protocol's
+own honest-gap rule. A missing baseline file = first-run mode:
+the fresh numbers BECOME the baseline candidate (printed, exit 0
+— the commit of baseline.json is the human's call).
+
+Usage: perf_compare.py <ref-scene.json> <i2p.json> <baseline.json>
+"""
+
+import json
+import sys
+from pathlib import Path
+
+REGRESSION = 1.10  # >10% over baseline = fail
+
+
+def load(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        return {}
+    txt = p.read_text().strip()
+    # the harnesses print the JSON as one stdout line; files may carry
+    # surrounding log noise — take the last { ... } object on the line
+    # that parses.
+    for line in reversed(txt.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    return {}
+
+
+def metrics(ref: dict, i2p: dict) -> dict:
+    """Flatten the two harness reports into the tracked metric set."""
+    out = {}
+    if "p95_ms" in ref:
+        out["viewport_p95_ms"] = ref["p95_ms"]
+    if "mean_ms" in ref:
+        out["viewport_mean_ms"] = ref["mean_ms"]
+    if "p95_ms" in i2p:
+        out["input_photon_p95_ms"] = i2p["p95_ms"]
+    if "p50_ms" in i2p:
+        out["input_photon_p50_ms"] = i2p["p50_ms"]
+    return out
+
+
+def main() -> int:
+    if len(sys.argv) != 4:
+        print(__doc__)
+        return 2
+
+    fresh = metrics(load(sys.argv[1]), load(sys.argv[2]))
+    baseline_path = Path(sys.argv[3])
+    baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else {}
+---
+name: perf-nightly
+
+# The §12 protocol's regression gate (docs/perf/protocol.md): the nightly
+# job runs the perf harnesses headless and compares against
+# perf/baseline.json — a >10% regression on any budget fails the job.
+# NOT per-commit (the load directive): failures here don't block merges;
+# they surface the drift the protocol tracks.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC nightly
+  workflow_dispatch: {} # manual runs for the baseline refresh
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf:
+    runs-on: [self-hosted] # the 3070 runner when Bessa adds it; falls back to hosted with lavapipe
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install lavapipe (headless Vulkan)
+        if: runner.environment != 'self-hosted'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+
+      - name: Build the perf harnesses
+        run: cargo build --release -p umber-app -p umber-gpu --features perf
+
+      - name: Run the perf harnesses (JSON out)
+        env:
+          UMBER_REF_SCENE_FRAMES: "1000"
+          UMBER_REF_SCENE_JSON: /tmp/ref-scene.json
+[0m
+[0m✱ [0mGrep "baseline|metric|p95|P95|input.to.photon|frame_time"[90m in docs/perf · 20 matches[0m
+Evidence complete — writing the audit deliverable now.
+[0m
+[0m← [0mWrite docs/loop/audit-2026-10-12-c1.md
+Wrote file successfully.
+[0m
+[0m← [0mEdit docs/loop/audit-2026-10-12-c1.md
+Index: /home/bessa/Projects/umber/docs/loop/audit-2026-10-12-c1.md
+===================================================================
+--- /home/bessa/Projects/umber/docs/loop/audit-2026-10-12-c1.md
++++ /home/bessa/Projects/umber/docs/loop/audit-2026-10-12-c1.md
+@@ -379,9 +379,9 @@
+    CHANGELOG omissions rated minor — code history is intact in git log,
+    only the narrative skips the marks; (e) worklist puts truth/docs (items
+    1, 6) around integrity work rather than all-docs-first — item 1 first
+    because plans read the table, item 6 after because it needs items 2–5
+-   decided to word correctly. PROJECT AUDIT
++   decided to word correctly.
+ 3. **Unverified:** Gate 0's runtime verdict (CI run in flight at audit
+    time — ubuntu green / windows mid-run per queue state); any GPU-pixel
+    behavior beyond what lavapipe/WARP CI asserts (no local `cargo test`
+    per contract + brief); `stylus` Windows Ink path (Windows-only
+
+[0m
+[0m$ [0mbash scripts/verify-kill.sh docs/loop/audit-2026-10-12-c1.md
+== (1) brace balance + fn/test census ==
+  PASS: docs/loop/audit-2026-10-12-c1.md braces 2/2
+== (2) rustfmt canonical (.rs files only) ==
+  PASS: no .rs files to fmt
+== (3) the trap greps ==
+  PASS: docs/loop/audit-2026-10-12-c1.md matches!-arity: 0 suspicious
+== (4) doc-comment attachment (blank line between doc blocks) ==
+  PASS: docs/loop/audit-2026-10-12-c1.md doc-attachment: clean
+
+VERIFY-KILL: docs/loop/audit-2026-10-12-c1.md — balanced, fmt-clean, trap-scanned
+[0m
+C1 audit complete. `docs/loop/audit-2026-10-12-c1.md` written, verify-kill PASS.
+
+1. **Built:** one file, 5 sections (Passes 1–4 + Report). Tests added: 0 (read-only brief).
+2. **Judgment calls:** B1 gap CLOSED-in-code despite pending CI; Gate-0 leg weaknesses rated minor (self-documented); distribution under-marked not false; CHANGELOG omissions minor; worklist splits truth items (1 first, 6 after integrity work).
+3. **Unverified:** Gate 0 CI verdict (in flight); GPU-pixel behavior beyond CI; Windows Ink compile; OCIO C++ build; installers; dev-GPU perf numbers.
+4. **Deferred:** all re-marks, refreshes, worklist items — read-only brief; recorded in Pass 4 (12 capped, frozen listed, left-off named).
+5. **Gates run:** verify-kill PASS (balanced, fmt-clean, trap-scanned); NO cargo per brief; NO commits per brief.
+
+Headline findings: [major] §5 viewport row still claims critical 1 open after B1 closed it; [major] README + STATE handoff contradict the tree (four-landed/B2-open language); zero stale-premise tests (smudge class fully repaired); `baseline.json` key set specified with a `perf_compare.py` dab-drop/undo-RAM gating gap.
