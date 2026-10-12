@@ -43,6 +43,45 @@
 //!
 //! GPU access follows the `viewport`/`paint_state`/`bakes_panel` pattern:
 //! this module never names a `wgpu` type.
+//!
+//! GUI Phase 1 chrome, kill 3 (docs/specs/gui-audit-and-roadmap.md
+//! Phase 1, "Export dialog"): the dialog's sections render as
+//! [`umber_gui::ParamGroup`] collapsibles over the same backing state
+//! as the stock layout they replaced. Chrome only: no state struct,
+//! default, preset, validation, driver, or status path changed, and
+//! every test below is untouched.
+//!
+//! Deliberately NOT migrated (v1 boundaries of this pass):
+//! - The kill brief named resolution/quality/padding-width numeric
+//!   fields, but this dialog's only numeric control is the export-size
+//!   picker, and it is a closed preset set
+//!   ([`crate::size_presets::SIZE_PRESETS`], with the 8K VRAM note and
+//!   [`ExportDialog::set_size`]'s reject-non-preset validation), not a
+//!   free number: a scrubbing `umber_gui::ValueField` would accept sizes
+//!   the driver and the tests reject. JPEG quality is an `umber-export`
+//!   encode argument with no dialog binding, and padding is the
+//!   baked-map transparent-black rule, not a dialog knob — so scope item
+//!   (2) is a no-op. The size row reuses
+//!   [`crate::size_presets::size_combo`] (called with an empty combo
+//!   label; the row label carries the visible text) so its options can
+//!   never drift from the Bakes panel's.
+//! - No hand-rolled colors exist in this file (no `RichText::color`, no
+//!   custom strokes), so scope item (3) changes nothing; the groups
+//!   themselves paint from `umber-gui`'s theme tokens internally.
+//! - No `umber_style`/fonts call at panel level (the `brush_panel.rs`
+//!   rationale): `main.rs` applies no Umber style today, and a
+//!   panel-local style would diverge from the still-unmigrated panels.
+//! - Group titles reuse existing catalog keys (`export.preset`,
+//!   `tiles.label`): no `.ftl` edit, no pt-BR rendering change, hence
+//!   no new `tr()` keys. The preset names stay hardcoded, pinned by
+//!   test to the built preset's own `name`.
+//! - [`umber_gui::ParamGroup`]'s header count covers top-level
+//!   `ParamGroupUi::row` calls only: the preset group counts its two
+//!   combo rows (the MaterialX/USD checkboxes and the out-dir row draw
+//!   on `group.ui` verbatim, uncounted), and the tiles group draws
+//!   entirely on `group.ui` (its selector lives in `tile_selection.rs`,
+//!   outside this kill's file), so its header shows no count — the same
+//!   wart class `brush_panel.rs` documents.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -57,6 +96,7 @@ use crate::graph_panel::GraphPanel;
 use crate::i18n::{tr, tr_args};
 use crate::paint_state::PaintState;
 use crate::tile_selection::{MeshTilesCache, TileSelection};
+use umber_gui::ParamGroup;
 
 /// The four built-in engine presets the dialog can drive
 /// ([`umber_export::ExportPreset`]'s constructors).
@@ -448,8 +488,8 @@ impl ExportDialog {
         mesh_loaded && gpu_ready
     }
 
-    /// Draws the panel: preset combo, output-dir row, the synchronous
-    /// Export button, and the status line.
+    /// Draws the panel: the preset/output [`umber_gui::ParamGroup`]
+    /// sections, the synchronous Export button, and the status line.
     ///
     /// Gated: with no mesh (or no GPU) a reason line replaces the export
     /// controls' effect — the Export button is disabled either way.
@@ -462,25 +502,38 @@ impl ExportDialog {
             ui.label(tr("export.no-gpu"));
         }
 
-        egui::ComboBox::from_label(tr("export.preset"))
-            .selected_text(self.preset.label())
-            .show_ui(ui, |ui| {
-                for candidate in PresetChoice::ALL {
-                    ui.selectable_value(&mut self.preset, candidate, candidate.label());
+        let preset_title = tr("export.preset");
+        ParamGroup::new("export-preset", preset_title.as_str()).show(ui, |group| {
+            let preset_label = tr("export.preset");
+            group.row(preset_label.as_str(), |ui| {
+                egui::ComboBox::from_id_salt("export_preset_combo")
+                    .selected_text(self.preset.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in PresetChoice::ALL {
+                            ui.selectable_value(&mut self.preset, candidate, candidate.label());
+                        }
+                    });
+            });
+            let size_label = tr("export.size");
+            group.row(size_label.as_str(), |ui| {
+                // The shared helper owns the preset list and the 8K VRAM
+                // note; the empty combo label keeps its text out of the
+                // row (the row label above carries it).
+                crate::size_presets::size_combo(ui, "", &mut self.size);
+            });
+            group
+                .ui
+                .checkbox(&mut self.materialx, tr("export.materialx"));
+            group.ui.checkbox(&mut self.usda, tr("export.usda"));
+            group.ui.horizontal(|ui| {
+                let dir = self.output_dir.display().to_string();
+                ui.label(tr_args("common.out-dir", [("dir", FluentValue::from(dir))]));
+                if ui.button(tr("button.choose")).clicked() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.output_dir = dir;
+                    }
                 }
             });
-        crate::size_presets::size_combo(ui, &tr("export.size"), &mut self.size);
-        ui.checkbox(&mut self.materialx, tr("export.materialx"));
-        ui.checkbox(&mut self.usda, tr("export.usda"));
-
-        ui.horizontal(|ui| {
-            let dir = self.output_dir.display().to_string();
-            ui.label(tr_args("common.out-dir", [("dir", FluentValue::from(dir))]));
-            if ui.button(tr("button.choose")).clicked() {
-                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                    self.output_dir = dir;
-                }
-            }
         });
 
         // Source badge: the user must SEE which source feeds the Base
@@ -499,45 +552,52 @@ impl ExportDialog {
             );
             self.tiles.sync(&exportable);
         }
-        if self.tiles.known_len() > 1 {
-            self.tiles.show(ui);
-            if self.tiles.nothing_selected() {
-                ui.label(tr("export.select-tile"));
+        let tiles_title = tr("tiles.label");
+        ParamGroup::new("export-tiles", tiles_title.as_str()).show(ui, |group| {
+            let ui: &mut egui::Ui = &mut *group.ui;
+            if self.tiles.known_len() > 1 {
+                self.tiles.show(ui);
+                if self.tiles.nothing_selected() {
+                    ui.label(tr("export.select-tile"));
+                }
             }
-        }
-        let tiles_note = ctx
-            .paint
-            .and_then(|_| tile_badge(self.tiles.tiles().len()))
-            .map(|tiles| format!(" [{tiles}]"))
-            .unwrap_or_default();
-        let paint_size = ctx.paint.map(PaintState::target_size);
-        match prospective_base_source(painted_at_size(paint_size, self.size), ctx.graph, self.size)
-        {
-            BaseColorSource::Painted => {
-                let args = [("tiles", FluentValue::from(tiles_note))];
-                ui.label(tr_args("export.source-painted", args));
-            }
-            BaseColorSource::Graph(node) => {
-                let args = [
-                    ("node", FluentValue::from(node.to_string())),
-                    ("tiles", FluentValue::from(tiles_note)),
-                ];
-                ui.label(tr_args("export.source-graph", args));
-            }
-            BaseColorSource::FlatPlaceholder => match paint_size {
-                Some((w, h)) => {
+            let tiles_note = ctx
+                .paint
+                .and_then(|_| tile_badge(self.tiles.tiles().len()))
+                .map(|tiles| format!(" [{tiles}]"))
+                .unwrap_or_default();
+            let paint_size = ctx.paint.map(PaintState::target_size);
+            match prospective_base_source(
+                painted_at_size(paint_size, self.size),
+                ctx.graph,
+                self.size,
+            ) {
+                BaseColorSource::Painted => {
+                    let args = [("tiles", FluentValue::from(tiles_note))];
+                    ui.label(tr_args("export.source-painted", args));
+                }
+                BaseColorSource::Graph(node) => {
                     let args = [
-                        ("width", FluentValue::from(w.to_string())),
-                        ("height", FluentValue::from(h.to_string())),
-                        ("size", FluentValue::from(self.size.to_string())),
+                        ("node", FluentValue::from(node.to_string())),
+                        ("tiles", FluentValue::from(tiles_note)),
                     ];
-                    ui.label(tr_args("export.source-flat-size", args));
+                    ui.label(tr_args("export.source-graph", args));
                 }
-                None => {
-                    ui.label(tr("export.source-flat-none"));
-                }
-            },
-        }
+                BaseColorSource::FlatPlaceholder => match paint_size {
+                    Some((w, h)) => {
+                        let args = [
+                            ("width", FluentValue::from(w.to_string())),
+                            ("height", FluentValue::from(h.to_string())),
+                            ("size", FluentValue::from(self.size.to_string())),
+                        ];
+                        ui.label(tr_args("export.source-flat-size", args));
+                    }
+                    None => {
+                        ui.label(tr("export.source-flat-none"));
+                    }
+                },
+            }
+        });
 
         let enabled = self.can_export(mesh_loaded, gpu_ready) && !self.tiles.nothing_selected();
         if ui
