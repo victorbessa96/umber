@@ -66,6 +66,17 @@ const ZOOM_SENSITIVITY: f32 = 0.08;
 /// sees on the mesh.
 pub struct PickSample(pub [u8; 4]);
 
+/// What a strip-only tool's click resolved to (C1 worklist #10, extended
+/// by #11): the viewport never acts on these itself — the shell matches
+/// on the variant and routes through the paint session.
+pub enum ViewportClick {
+    /// The eyedropper's sRGBA sample at the picked UV.
+    Pick(PickSample),
+    /// The ID-mask select's click UV (mesh space, `0..1` frame): the shell
+    /// bakes the region IDs and selects through the paint session.
+    IdMask([f32; 2]),
+}
+
 /// One LINEAR u8 texel component to its sRGB byte (the eyedropper's
 /// per-texel conversion; matches umber-color's private `linear_to_srgb`
 /// math — the standard 0.0031308-threshold curve). Alpha passes through.
@@ -119,6 +130,12 @@ pub struct Viewport {
     /// samples the paint target at the picked UV instead of orbiting
     /// or painting; the sample returns to the shell as [`PickSample`].
     pick_armed: bool,
+    /// The ID-mask arm (C1 worklist #11): set by the shell when
+    /// ToolKind::IdMask is the active tool. While armed, a primary click
+    /// resolves to the mesh UV instead of orbiting or painting; the UV
+    /// returns to the shell (as [`ViewportClick::IdMask`]), which bakes
+    /// the region IDs and selects through the paint session.
+    idmask_armed: bool,
 }
 
 impl Viewport {
@@ -213,7 +230,7 @@ impl Viewport {
         stylus_pressure: Option<f32>,
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
-    ) -> Option<PickSample> {
+    ) -> Option<ViewportClick> {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
@@ -249,7 +266,7 @@ impl Viewport {
                                     linear_to_srgb_byte(image.data[i + 2]),
                                     image.data[i + 3],
                                 ];
-                                return Some(PickSample(srgba));
+                                return Some(ViewportClick::Pick(PickSample(srgba)));
                             }
                         }
                     }
@@ -257,7 +274,23 @@ impl Viewport {
             }
         }
 
+        // The ID-mask select (C1 worklist #11): when armed, a PRIMARY
+        // CLICK (not a drag — a stray orbit still works) resolves to the
+        // mesh UV. The shell bakes the region IDs and selects through the
+        // paint session; painting is disabled while armed (it never
+        // strokes). A miss falls through to orbit, like the eyedropper.
+        if self.idmask_armed && response.clicked_by(PointerButton::Primary) {
+            if let (Some(mesh), Some(_)) = (self.mesh_data.as_ref(), paint.as_ref()) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if let Some(uv) = self.pick_uv(rect, mesh, pos) {
+                        return Some(ViewportClick::IdMask(uv));
+                    }
+                }
+            }
+        }
+
         let painting = !self.pick_armed
+            && !self.idmask_armed
             && ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
             && response.dragged_by(PointerButton::Primary)
             && self.mesh_data.is_some()
@@ -408,8 +441,8 @@ impl Viewport {
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
             }
         }
-        // No eyedropper sample this frame: the signature is Option so the
-        // shell reads one Sample per click, `None` every other frame.
+        // No strip-tool click this frame: the signature is Option so the
+        // shell reads one click per primary press, `None` every other frame.
         None
     }
 
@@ -417,6 +450,12 @@ impl Viewport {
     /// ToolKind::Pick each frame; painting is suppressed while armed).
     pub fn set_pick_armed(&mut self, armed: bool) {
         self.pick_armed = armed;
+    }
+
+    /// Arms or disarms the ID-mask select (the shell syncs this from
+    /// ToolKind::IdMask each frame; painting is suppressed while armed).
+    pub fn set_idmask_armed(&mut self, armed: bool) {
+        self.idmask_armed = armed;
     }
 
     /// Casts a ray through the pointer position and returns the mesh UV

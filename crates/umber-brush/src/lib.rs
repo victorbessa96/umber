@@ -29,6 +29,7 @@ pub struct StrokeEvent {
 }
 
 pub mod dab_adapter;
+pub mod id_mask;
 pub mod lazy_mouse;
 pub mod line_constraint;
 pub mod one_euro;
@@ -42,6 +43,7 @@ pub mod symmetry;
 pub mod wiring;
 
 pub use dab_adapter::{opaque_linearize, wash_scale, BrushParams, DabAdapter, WashMode};
+pub use id_mask::{select_id, SelectIdError};
 pub use lazy_mouse::LazyMouse;
 pub use line_constraint::{
     constrain_point, sanitize_snap_deg, LineConstraint, LineConstraintMode, ANGLE_SNAP_DEFAULT_DEG,

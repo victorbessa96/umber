@@ -61,7 +61,9 @@
 //!   strip stays readable until the glyphs arrive. File/history/view
 //!   controls are text buttons for the same reason.
 //! - **The tool strip is the four brush tools** (`BrushTool`: paint,
-//!   smudge, clone, eraser), keyed by the fieldless [`ToolKind`].
+//!   smudge, clone, eraser), keyed by the fieldless [`ToolKind`], **plus
+//!   the two strip-only tools** (eyedropper, ID-mask select — they never
+//!   stroke; the viewport handles their clicks).
 //!   `BrushTool` itself can't key `ToolRow`: its `PartialEq` compares the
 //!   retouch params, so an edited smudge would never match its slot.
 //!   Fill, path and polygon are panel-armed modes, not brush tools, and
@@ -121,16 +123,22 @@ pub enum ToolKind {
     /// picked UV and makes it the brush color (C1 worklist #10). Not a
     /// BrushTool — it never strokes; the viewport handles its click.
     Pick,
+    /// ID-mask select: click resolves the baked ID map's region under the
+    /// cursor and gates paint to that region only (C1 worklist #11). Like
+    /// Pick, strip-only — it never strokes; the viewport handles its
+    /// click and the shell bakes + selects through the paint session.
+    IdMask,
 }
 
 impl ToolKind {
     /// The strip order.
-    pub const ALL: [ToolKind; 5] = [
+    pub const ALL: [ToolKind; 6] = [
         ToolKind::Paint,
         ToolKind::Smudge,
         ToolKind::Clone,
         ToolKind::Erase,
         ToolKind::Pick,
+        ToolKind::IdMask,
     ];
 
     /// The kind of a (param-carrying) brush tool. Pick has no BrushTool
@@ -154,6 +162,7 @@ impl ToolKind {
             ToolKind::Clone => "stamp",
             ToolKind::Erase => "eraser",
             ToolKind::Pick => "pipette",
+            ToolKind::IdMask => "square-dashed",
         }
     }
 
@@ -165,6 +174,7 @@ impl ToolKind {
             ToolKind::Clone => tr("brush.tool-clone"),
             ToolKind::Erase => tr("brush.tool-eraser"),
             ToolKind::Pick => tr("brush.tool-pick"),
+            ToolKind::IdMask => tr("brush.tool-id-mask"),
         }
     }
 }

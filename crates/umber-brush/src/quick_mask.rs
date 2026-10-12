@@ -294,6 +294,26 @@ impl QuickMask {
         wrote.then_some(rect)
     }
 
+    /// Replaces `tile`'s plane wholesale with `values` (the ID-mask
+    /// selection path, `umber_brush::id_mask`: exact `1.0`/`0.0` region
+    /// coverage, not a brush falloff). Resets the invert parity like
+    /// [`Self::clear`]/[`Self::resize`], so a tile plane created later
+    /// agrees with the selected one. Always bumps the generation (the
+    /// overlay redraws even when gating was already armed). Arms nothing —
+    /// the caller sets the mode flags.
+    ///
+    /// Returns `false` (leaving the mask untouched) when `values.len()`
+    /// is not `width * height`.
+    pub fn replace_plane(&mut self, tile: u16, values: Vec<f32>) -> bool {
+        if values.len() != self.width as usize * self.height as usize {
+            return false;
+        }
+        self.coverage.insert(tile, values);
+        self.inverted = false;
+        self.generation += 1;
+        true
+    }
+
     /// Flips the mask (`v -> 1 - v` on every plane, and the parity that
     /// untouched planes read): what was blocked paints, and vice versa.
     pub fn invert(&mut self) {
@@ -529,5 +549,21 @@ mod tests {
         let view = MaskView::new(4, 4, &plane).expect("16 = 4 x 4");
         assert_eq!(view.at(3, 3), 1.0);
         assert_eq!(view.at(4, 0), 0.0, "off the plane blocks");
+    }
+
+    #[test]
+    fn replace_plane_writes_wholesale_resets_parity_and_refuses_bad_lengths() {
+        let mut mask = QuickMask::new(4, 4);
+        mask.invert();
+        let g0 = mask.generation();
+        assert!(mask.replace_plane(TILE, vec![1.0; 16]));
+        assert!(mask.generation() > g0);
+        assert!(!mask.is_inverted(), "wholesale write resets the parity");
+        assert!(mask.coverage(TILE).unwrap().iter().all(|&v| v == 1.0));
+        assert!(!mask.replace_plane(TILE, vec![1.0; 15]));
+        assert!(
+            mask.coverage(TILE).unwrap().iter().all(|&v| v == 1.0),
+            "a refused write leaves the plane alone"
+        );
     }
 }

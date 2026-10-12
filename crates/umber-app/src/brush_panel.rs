@@ -172,10 +172,11 @@ pub struct BrushPanel {
     /// Panel state, not preset state: the `.umberbrush` format is unchanged.
     /// The paint session adopts it via `PaintState::sync_tool`.
     pub tool: BrushTool,
-    /// The tool the strip shows (C1 worklist #10). The eyedropper is
-    /// strip-only: while `strip` is Pick, [`Self::tool`] keeps the last
-    /// real brush (its params stay editable) and the viewport suppresses
-    /// painting (`Viewport::set_pick_armed`) — Pick never strokes.
+    /// The tool the strip shows (C1 worklist #10, extended by #11). The
+    /// eyedropper and the ID-mask select are strip-only: while `strip` is
+    /// Pick or IdMask, [`Self::tool`] keeps the last real brush (its params
+    /// stay editable) and the viewport suppresses painting
+    /// (`Viewport::set_pick_armed` / `set_idmask_armed`) — neither strokes.
     pub strip: crate::toolbar::ToolKind,
     /// The last-edited params of each retouch tool, kept while another
     /// tool is selected so switching back restores them.
@@ -340,12 +341,13 @@ impl BrushPanel {
     /// (Generalizes the former `select_eraser`, which E called.)
     pub fn select_tool(&mut self, kind: crate::toolbar::ToolKind) {
         use crate::toolbar::ToolKind;
-        // The strip always follows the selection (Pick included — it is a
-        // strip state, not a brush state).
+        // The strip always follows the selection (Pick and IdMask included:
+        // strip states, not brush states).
         self.strip = kind;
-        if ToolKind::of(&self.tool) == kind || kind == ToolKind::Pick {
-            // Pick: the strip shows it, the brush stays the last real tool
-            // (the viewport suppresses painting while the strip is Pick).
+        if ToolKind::of(&self.tool) == kind || matches!(kind, ToolKind::Pick | ToolKind::IdMask) {
+            // Pick / IdMask: the strip shows the tool, the brush stays the
+            // last real one (the viewport suppresses painting while either
+            // is the strip tool).
             // Same-kind: nothing to bank or switch.
             return;
         }
@@ -362,10 +364,10 @@ impl BrushPanel {
             ToolKind::Smudge => BrushTool::Smudge(self.smudge),
             ToolKind::Clone => BrushTool::Clone(self.clone),
             ToolKind::Erase => BrushTool::Erase(self.eraser),
-            // Unreachable: the Pick early-return above exits before the
-            // match. Kept (not `_`) so a future ToolKind still fails the
+            // Unreachable: the Pick/IdMask early-return above exits before
+            // the match. Kept (not `_`) so a future ToolKind still fails the
             // exhaustiveness check here.
-            ToolKind::Pick => return,
+            ToolKind::Pick | ToolKind::IdMask => return,
         };
     }
 

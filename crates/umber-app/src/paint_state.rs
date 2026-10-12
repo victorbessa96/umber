@@ -244,6 +244,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egui::Pos2;
+use umber_bake::id::{bake_id_mesh, IdBakeParams, IdFlavor};
+use umber_brush::id_mask::{select_id, SelectIdError};
 use umber_brush::path::{sanitize_size, PaintPath, PathOp};
 use umber_brush::retouch::{footprint, DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
@@ -308,6 +310,24 @@ pub enum PaintStateError {
     /// The stroke conditioner's parameters were invalid.
     #[error(transparent)]
     Conditioning(#[from] umber_brush::ConditionerError),
+}
+
+/// Errors from ID-mask selection ([`PaintState::select_id_mask`],
+/// [`PaintState::bake_and_select_id`]).
+#[derive(Debug, thiserror::Error)]
+pub enum IdSelectError {
+    /// The click-time ID bake failed.
+    #[error(transparent)]
+    Bake(#[from] umber_bake::id::IdBakeError),
+    /// The clicked bake bytes did not select (uncovered click, size
+    /// mismatch — see `umber_brush::id_mask`).
+    #[error(transparent)]
+    Selection(#[from] SelectIdError),
+    /// Refused: the live stroke snapshotted its mask gate at
+    /// `begin_stroke`, so a mid-stroke selection would split one stroke
+    /// across two masks (the same rule as `invert_mask`/`clear_mask`).
+    #[error("id-mask selection refused: a stroke is in flight")]
+    StrokeInFlight,
 }
 
 /// Default paint-target edge length in texels: 4096 (CORE-LOOP CRITICAL 2,
@@ -1023,6 +1043,79 @@ impl PaintState {
         }
         self.mask_synced.clear();
         true
+    }
+
+    /// Selects the baked ID under `uv` on `tile`'s set mask (C1 worklist
+    /// #11): `bake` is that set's ID bake (`width * height * 4` RGBA8,
+    /// row-major — what `umber_bake::id::bake_id_mesh` returns, at the
+    /// mask's own size). Fills `tile`'s plane with `1.0` on the clicked ID
+    /// and `0.0` elsewhere via `umber_brush::id_mask::select_id` (which
+    /// arms gating), then drops `tile`'s mask-sync flag so the next gated
+    /// dab uploads the fresh plane before staging (the `sync_mask_tile`
+    /// path — the upload rides the tile's FIFO with its `Stage` commands,
+    /// so no gated dab can read the pre-selection mask). Other tiles'
+    /// sync flags are kept: only this tile's plane changed. Returns the
+    /// selected region's four bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdSelectError::StrokeInFlight`] mid-stroke, or forwards
+    /// the bake/selection errors; on any error the mask is untouched.
+    pub fn select_id_mask(
+        &mut self,
+        tile: u16,
+        bake: &[u8],
+        width: u32,
+        height: u32,
+        uv: [f32; 2],
+    ) -> Result<[u8; 4], IdSelectError> {
+        if self.stroking {
+            return Err(IdSelectError::StrokeInFlight);
+        }
+        let id = select_id(self.mask_of_tile_mut(tile), tile, bake, width, height, uv)?;
+        self.mask_synced.remove(&tile);
+        Ok(id)
+    }
+
+    /// Click-time ID-mask selection: bakes `mesh`'s region IDs at the
+    /// clicked tile's set size, then [`Self::select_id_mask`]s the ID under
+    /// `uv` (see that method for the fill + sync contract).
+    ///
+    /// Judgment call — bake on every click, no cached store: no persistent
+    /// ID-bake store exists in the app yet (nothing calls `bake_id_mesh`
+    /// outside its own tests), and inventing a new global cache for v1
+    /// would split bake freshness across the Bakes panel's future ID rows.
+    /// The cost is one full-frame compute bake per click at the set size
+    /// (the 4K default = 16M texels); baking on tool-entry and re-baking
+    /// on mesh change is the named follow-up. Single-tile v1 (see
+    /// `umber_brush::id_mask`'s module docs): the tile routes by
+    /// [`Self::route_tile`], but the bake spans the mesh's `0..1` UV frame.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::select_id_mask`], plus the bake's own errors (empty
+    /// mesh, triangle budget — see `umber_bake::id`).
+    pub fn bake_and_select_id(
+        &mut self,
+        mesh: &umber_mesh::MeshData,
+        uv: [f32; 2],
+    ) -> Result<[u8; 4], IdSelectError> {
+        if self.stroking {
+            return Err(IdSelectError::StrokeInFlight);
+        }
+        let tile = self.route_tile(Pos2::new(uv[0], uv[1]));
+        let (width, height) = self.tile_size(tile);
+        let bytes = bake_id_mesh(
+            &self.device,
+            &self.queue,
+            mesh,
+            &IdBakeParams {
+                flavor: IdFlavor::Triangle,
+                width,
+                height,
+            },
+        )?;
+        self.select_id_mask(tile, &bytes, width, height, uv)
     }
 
     /// Reverts the last stroke (paint or retouch — one entry per stroke);
@@ -3082,6 +3175,189 @@ mod tests {
         state.end_stroke();
         let ungated = read_back(&mut state, &device, &queue);
         assert_ne!(texel_at(&ungated, state.target_size().0, 409, 256), CLEAR);
+    }
+
+    // --- ID-mask selection tests (C1 worklist #11) ---
+
+    /// Bake edge length for the ID-selection tests: matches the mask size
+    /// (the selection contract needs exact texel correspondence), small so
+    /// the click-time bake stays fast.
+    const ID_SIZE: u32 = 32;
+
+    /// Two triangles with clearly separated UV halves (the same geometry
+    /// as `umber_bake::id`'s GPU `split_halves_mesh` fixture, rebuilt here
+    /// because that fixture is test-private): triangle 0 owns `u` in
+    /// `[0, 0.5]` (UVs `(0,0)`, `(0.5,0)`, `(0,1)`), triangle 1 owns `u`
+    /// in `[0.5, 1]`.
+    fn split_halves_mesh() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 6],
+            uvs: vec![
+                [0.0, 0.0],
+                [0.5, 0.0],
+                [0.0, 1.0],
+                [0.5, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            material_names: vec!["m".into()],
+        }
+    }
+
+    /// The audit gate, model half: on a two-ID bake, selecting at a UV in
+    /// region A fills the coverage plane with exactly A-in / B-out (byte
+    /// equality against the bake, `1.0`/`0.0` with no falloff) and arms
+    /// gating. The click-time bake path returns the same ID.
+    #[test]
+    fn id_mask_selects_only_the_clicked_region() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mesh = split_halves_mesh();
+        let bytes = bake_id_mesh(
+            &device,
+            &queue,
+            &mesh,
+            &IdBakeParams {
+                flavor: IdFlavor::Triangle,
+                width: ID_SIZE,
+                height: ID_SIZE,
+            },
+        )
+        .expect("the two-region bake succeeds");
+        // Can-fail guards: the bake itself produced two distinct covered
+        // IDs at the probe texels BEFORE the mask is asserted. The goldens
+        // are FNV-1a over the triangle index's LE bytes (pinned against the
+        // bake's own mirror in `umber_bake::id`'s tests).
+        let id_a = texel_at(&bytes, ID_SIZE, 3, 16);
+        let id_b = texel_at(&bytes, ID_SIZE, 28, 16);
+        assert_eq!(id_a, [0x15, 0xF5, 0x95, 255], "texel (3, 16) is triangle 0");
+        assert_eq!(
+            id_b,
+            [0x04, 0xB6, 0x69, 255],
+            "texel (28, 16) is triangle 1"
+        );
+        assert_ne!(id_a, id_b, "test premise: two distinct regions");
+
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), ID_SIZE)
+            .expect("paint state builds");
+        // u = 3.5/32 -> x = round(3.5 - 0.5) = 3; v = 0.5 -> y =
+        // round(16 - 0.5) = 16: the bake's texel-center, V-flipped mapping.
+        let click = [3.5 / 32.0, 0.5];
+        let clicked = state
+            .select_id_mask(FIRST_TILE, &bytes, ID_SIZE, ID_SIZE, click)
+            .expect("a covered click selects");
+        assert_eq!(clicked, id_a);
+        assert!(state.quick_mask().gates(), "selection arms gating");
+        let plane = state
+            .quick_mask()
+            .coverage(FIRST_TILE)
+            .expect("plane")
+            .to_vec();
+        assert_eq!(plane.len(), bytes.len() / 4);
+        for (i, px) in bytes.chunks_exact(4).enumerate() {
+            let same = px[0] == id_a[0] && px[1] == id_a[1] && px[2] == id_a[2] && px[3] == id_a[3];
+            assert_eq!(plane[i], f32::from(same), "texel {i}: A-in / B-out exactly");
+        }
+        assert!(
+            plane.contains(&1.0) && plane.contains(&0.0),
+            "both regions present — a one-region bake cannot pass"
+        );
+
+        // The click-time bake path (no stored bytes): same ID, same gate.
+        let mut fresh =
+            PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
+        let baked = fresh
+            .bake_and_select_id(&mesh, click)
+            .expect("click-time bake");
+        assert_eq!(baked, id_a);
+        assert!(fresh.quick_mask().gates());
+    }
+
+    /// The audit gate, routing half: after an ID selection the live stroke
+    /// snapshots the gate (`stroke_mask_gate`), its dabs carry the shader's
+    /// `mask_gate` flag, and only the selected ID's texels change — the
+    /// non-selected region stays byte-identical. Selection is refused
+    /// mid-stroke.
+    #[test]
+    fn id_mask_gates_paint_to_the_selected_region() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mesh = split_halves_mesh();
+        let params = IdBakeParams {
+            flavor: IdFlavor::Triangle,
+            width: ID_SIZE,
+            height: ID_SIZE,
+        };
+        let bytes = bake_id_mesh(&device, &queue, &mesh, &params).expect("bake succeeds");
+        let clicked = texel_at(&bytes, ID_SIZE, 3, 16);
+        assert_eq!(clicked, [0x15, 0xF5, 0x95, 255], "guard: region A golden");
+
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), ID_SIZE)
+            .expect("paint state builds");
+        state.set_brush_params(hard_brush());
+        let blank = read_back(&mut state, &device, &queue);
+        let click = [3.5 / 32.0, 0.5];
+        assert_eq!(
+            state
+                .select_id_mask(FIRST_TILE, &bytes, ID_SIZE, ID_SIZE, click)
+                .expect("select"),
+            clicked
+        );
+
+        state.begin_stroke(egui::pos2(0.05, 0.5));
+        assert!(state.stroke_mask_gate, "the live stroke snapshots the gate");
+        for i in 1..=16 {
+            state.extend_stroke(egui::pos2(0.05 + 0.02 * i as f32, 0.5));
+        }
+        state.end_stroke();
+        let gated = read_back(&mut state, &device, &queue);
+        let mut changed = 0;
+        for (i, (a, b)) in blank.chunks_exact(4).zip(gated.chunks_exact(4)).enumerate() {
+            if a == b {
+                continue;
+            }
+            changed += 1;
+            let base = i * 4;
+            assert_eq!(
+                [
+                    bytes[base],
+                    bytes[base + 1],
+                    bytes[base + 2],
+                    bytes[base + 3]
+                ],
+                clicked,
+                "texel {i} changed but bakes to the non-selected ID"
+            );
+        }
+        assert!(changed > 0, "the selected region paints");
+        assert_eq!(
+            texel_at(&gated, ID_SIZE, 28, 16),
+            texel_at(&blank, ID_SIZE, 28, 16),
+            "a region-B texel is byte-identical"
+        );
+
+        // Refused mid-stroke (one stroke, one mask — like invert/clear).
+        state.begin_stroke(egui::pos2(0.5, 0.5));
+        assert!(matches!(
+            state.select_id_mask(FIRST_TILE, &bytes, ID_SIZE, ID_SIZE, click),
+            Err(IdSelectError::StrokeInFlight)
+        ));
+        assert!(matches!(
+            state.bake_and_select_id(&mesh, click),
+            Err(IdSelectError::StrokeInFlight)
+        ));
+        state.end_stroke();
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---

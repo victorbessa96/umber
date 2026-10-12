@@ -237,7 +237,14 @@ impl TabViewer for PanelViewer<'_> {
                 // the paint session's existing color seam.
                 let pick_armed = self.brush.strip == toolbar::ToolKind::Pick;
                 self.viewport.set_pick_armed(pick_armed);
-                if let Some(sample) = self.viewport.ui(
+                // The ID-mask arm (C1 worklist #11): same strip-only shape.
+                // A click bakes the mesh's region IDs at the paint target's
+                // size and selects the clicked region through the paint
+                // session (which arms the quick-mask gate); failures log
+                // and leave the mask alone.
+                let idmask_armed = self.brush.strip == toolbar::ToolKind::IdMask;
+                self.viewport.set_idmask_armed(idmask_armed);
+                if let Some(click) = self.viewport.ui(
                     ui,
                     self.gpu,
                     self.paint.as_deref_mut(),
@@ -245,21 +252,42 @@ impl TabViewer for PanelViewer<'_> {
                     self.display_lut,
                     self.postfx,
                 ) {
-                    // The sample is sRGBA bytes; the brush wants LINEAR
-                    // [f32; 4]. Convert here (the same curve the viewport
-                    // applied when reading).
-                    let [r, g, b, a] = sample.0;
-                    let lin = |v: u8| {
-                        let s = v as f32 / 255.0;
-                        if s <= 0.040_45 {
-                            s / 12.92
-                        } else {
-                            ((s + 0.055) / 1.055).powf(2.4)
+                    match click {
+                        viewport::ViewportClick::Pick(sample) => {
+                            // The sample is sRGBA bytes; the brush wants LINEAR
+                            // [f32; 4]. Convert here (the same curve the viewport
+                            // applied when reading).
+                            let [r, g, b, a] = sample.0;
+                            let lin = |v: u8| {
+                                let s = v as f32 / 255.0;
+                                if s <= 0.040_45 {
+                                    s / 12.92
+                                } else {
+                                    ((s + 0.055) / 1.055).powf(2.4)
+                                }
+                            };
+                            let color = [lin(r), lin(g), lin(b), a as f32 / 255.0];
+                            if let Some(paint) = self.paint.as_deref_mut() {
+                                paint.set_brush_color(color);
+                            }
                         }
-                    };
-                    let color = [lin(r), lin(g), lin(b), a as f32 / 255.0];
-                    if let Some(paint) = self.paint.as_deref_mut() {
-                        paint.set_brush_color(color);
+                        viewport::ViewportClick::IdMask(uv) => {
+                            if let (Some(paint), Some(mesh)) =
+                                (self.paint.as_mut(), self.mesh.as_ref())
+                            {
+                                match paint.bake_and_select_id(mesh, uv) {
+                                    Ok(id) => log::info!(
+                                        "id-mask: selected region [{}, {}, {}]",
+                                        id[0],
+                                        id[1],
+                                        id[2]
+                                    ),
+                                    Err(err) => {
+                                        log::warn!("id-mask: selection failed: {err:#}")
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
