@@ -21,11 +21,43 @@
 //! uploads them back through the fill layer's `WriteRegion` queue path
 //! (`PaintState::publish_fill`). Judgment calls (v1 boundaries):
 //!
-//! * Sidecar files, not `project.json`/`AssetStore`: the project schema is
-//!   owned by `umber-core` (another kill's surface) and this crate has no
-//!   serde dependency, so a `paint` section with `AssetRef`s cannot be
-//!   added here. Content-hash routing through `AssetStore` is the named
-//!   follow-up (it also closes requirements row §8:121).
+//! * Sidecar files, not `project.json`: the project schema is owned by
+//!   `umber-core` (another kill's surface) and this crate has no serde
+//!   dependency, so a `paint` section with `AssetRef`s cannot be added
+//!   here. The `AssetStore` sits BEHIND the sidecar instead: every saved
+//!   artifact is also stored by content hash under `<project>/assets/`
+//!   (the same store the mesh-map import uses — unchanged tiles dedupe),
+//!   and `paint/manifest.txt` records name → hash (provenance). The
+//!   sidecar files stay authoritative for the load path, so the layout
+//!   `load_paint_tiles` reads — and every v1/v2 project — is unchanged.
+//! * Crash-safe commit (the audit's paint-loss vector): a save (1) sweeps
+//!   or rolls forward any earlier interrupted save, (2) stages every
+//!   artifact as `paint/<name>.tmp.<pid>` plus its store blob, both
+//!   fsynced, (3) writes `paint/manifest.pending` by tmp+fsync+rename —
+//!   the ONE commit point — then (4) renames each temp over its sidecar,
+//!   prunes unlisted tiles, and renames the manifest to `manifest.txt`.
+//!   Open runs the same recovery first: a pending manifest rolls forward
+//!   (idempotent; the content-addressed blob re-materializes any sidecar
+//!   whose temp is gone), and with none pending every staged temp is an
+//!   uncommitted orphan and is deleted. Reopen is therefore the old paint
+//!   or the new paint, never a mix — provided the roll-forward can run
+//!   (v1 boundary: a post-commit crash on a project that is now
+//!   unwritable, or whose `assets/` blob went missing, logs a warning and
+//!   opens the sidecars as they lie; the next writable open finishes the
+//!   commit). Per-file renames alone could not
+//!   promise that (a crash between two renames is torn); the manifest
+//!   rename can. Judgment calls: a staging I/O failure aborts the whole
+//!   save (old paint intact) where the pre-commit code skipped the one
+//!   tile; a tile whose GPU readback fails re-stages its previous file so
+//!   the commit does not prune it; the store is the roll-forward source,
+//!   so its blob is fsynced through a mirrored shard path (pinned by a
+//!   test against the real store). Power-loss durability rests on
+//!   `sync_all` + the unix directory fsync; only process-crash states are
+//!   test-pinned. v1 boundaries: no store GC (superseded paint blobs
+//!   accumulate under `assets/` until a store-wide GC lands); each saved
+//!   tile is written twice (sidecar + blob) — hard-links were not worth
+//!   the cross-platform surface; a hand-clobbered sidecar is not checked
+//!   against `manifest.txt` on open (the sidecar wins).
 //! * Every present tile is written; the verified boundary is tile 1001
 //!   (the same tile the viewport bind shows).
 //! * `Transfer::Linear`: the export dialog's `Srgb` moves bytes through
@@ -42,10 +74,10 @@
 //! * Journal coexistence: the autosave journal records layer-metadata ops
 //!   only (`umber_core::journal::JournalOp` has no pixel op) and the stroke
 //!   undo history is RAM-only, so save/open and the journal share nothing
-//!   but the `journal_seq` stamp — paint pixels ride beside both. Torn-save
-//!   window (crash between the `project.json` commit and the sidecar
-//!   writes) can leave new metadata with old paint or vice versa; one
-//!   atomic commit for both is deferred.
+//!   but the `journal_seq` stamp — paint pixels ride beside both. The paint
+//!   commit is atomic on its own, but a crash between the `project.json`
+//!   commit and the paint commit can still leave new metadata with old
+//!   paint; one atomic commit spanning both is deferred.
 //! * Save prunes `tile-*.png` files for tiles the session no longer holds,
 //!   so a re-save into a project dir never resurrects a dropped tile.
 //! * The per-set paint sizes ride in `<project>/paint/target_sizes.txt`
@@ -193,13 +225,39 @@ impl TabViewer for PanelViewer<'_> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
-            Panel::Viewport => self.viewport.ui(
-                ui,
-                self.gpu,
-                self.paint.as_deref_mut(),
-                self.display_lut,
-                self.postfx,
-            ),
+            Panel::Viewport => {
+                // The eyedropper arm syncs from the strip's tool state each
+                // frame (Pick highlights; the brush keeps its last real
+                // tool — Pick never strokes, the viewport suppresses paint
+                // while armed). A sample becomes the brush color through
+                // the paint session's existing color seam.
+                let pick_armed = self.brush.strip == toolbar::ToolKind::Pick;
+                self.viewport.set_pick_armed(pick_armed);
+                if let Some(sample) = self.viewport.ui(
+                    ui,
+                    self.gpu,
+                    self.paint.as_deref_mut(),
+                    self.display_lut,
+                    self.postfx,
+                ) {
+                    // The sample is sRGBA bytes; the brush wants LINEAR
+                    // [f32; 4]. Convert here (the same curve the viewport
+                    // applied when reading).
+                    let [r, g, b, a] = sample.0;
+                    let lin = |v: u8| {
+                        let s = v as f32 / 255.0;
+                        if s <= 0.040_45 {
+                            s / 12.92
+                        } else {
+                            ((s + 0.055) / 1.055).powf(2.4)
+                        }
+                    };
+                    let color = [lin(r), lin(g), lin(b), a as f32 / 255.0];
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        paint.set_brush_color(color);
+                    }
+                }
+            }
             Panel::UvView => self.uv_view.ui(
                 ui,
                 self.mesh,
@@ -908,89 +966,414 @@ fn flip_rows_vertical(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// The pending paint commit (`<project>/paint/manifest.pending`): written
+/// (tmp+rename) only once every artifact of a save is staged. Its rename
+/// is the save's ONE commit point (see the module docs' commit protocol).
+fn paint_commit_pending_path(project_dir: &Path) -> PathBuf {
+    paint_sidecar_dir(project_dir).join("manifest.pending")
+}
+
+/// The applied commit, kept as the provenance record
+/// (`<project>/paint/manifest.txt`: each sidecar name → its content hash
+/// in the project's `AssetStore`). The load path never reads it — the
+/// sidecar files stay authoritative, so v1/v2 readers are unaffected.
+fn paint_manifest_path(project_dir: &Path) -> PathBuf {
+    paint_sidecar_dir(project_dir).join("manifest.txt")
+}
+
+/// Whether `name` is a file a paint commit may write under `paint/`: a
+/// `tile-<N>.png` or one of the two size files. Recovery refuses a
+/// manifest naming anything else (a hand-edited `../x` never escapes the
+/// folder).
+fn is_paint_sidecar_name(name: &str) -> bool {
+    parse_paint_tile_name(name).is_some() || name == "target_size.txt" || name == "target_sizes.txt"
+}
+
+/// The staged temp name for `name`: `<name>.tmp.<pid>` (the shape
+/// `parse_paint_tile_name` already ignores).
+fn paint_temp_name(name: &str) -> String {
+    format!("{name}.tmp.{}", std::process::id())
+}
+
+/// Whether `name` is a staged temp (`<anything>.tmp.<digits>`) — what an
+/// uncommitted save leaves behind, swept on the next open/save.
+fn is_paint_temp_name(name: &str) -> bool {
+    let Some((_, pid)) = name.rsplit_once(".tmp.") else {
+        return false;
+    };
+    !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// One staged artifact of a paint commit (one manifest line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaintCommitEntry {
+    /// Final sidecar name under `paint/` (`tile-1001.png`, …).
+    name: String,
+    /// Staged temp name under `paint/` (`<name>.tmp.<pid>`).
+    temp: String,
+    /// The content-hash blob in the project's `AssetStore` — dedupe plus
+    /// provenance, and the roll-forward source once the temp is gone.
+    asset: umber_core::AssetRef,
+}
+
+/// Formats a commit manifest: a `#` version header, then one
+/// `<name> <hash> <ext> <size> <temp>` line per entry (names never hold
+/// spaces — `is_paint_sidecar_name` admits none).
+fn format_paint_commit(entries: &[PaintCommitEntry]) -> String {
+    let mut out = String::from("# Umber paint commit v1\n");
+    for entry in entries {
+        let (name, temp, asset) = (&entry.name, &entry.temp, &entry.asset);
+        let (hash, ext, size) = (&asset.hash, &asset.ext, asset.size);
+        out.push_str(&format!("{name} {hash} {ext} {size} {temp}\n"));
+    }
+    out
+}
+
+/// Parses [`format_paint_commit`]'s output. `None` when ANY line is
+/// malformed: the manifest is renamed into place whole, so a bad line
+/// means tampering, and applying half of it would be the torn state the
+/// protocol exists to prevent.
+fn parse_paint_commit(text: &str) -> Option<Vec<PaintCommitEntry>> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(' ').collect();
+        let [name, hash, ext, size, temp] = fields.as_slice() else {
+            return None;
+        };
+        let asset = umber_core::AssetRef {
+            hash: hash.to_string(),
+            ext: ext.to_string(),
+            size: size.parse().ok()?,
+        };
+        let temp_ok = temp
+            .strip_prefix(*name)
+            .is_some_and(|rest| rest.starts_with(".tmp.") && is_paint_temp_name(temp));
+        if !is_paint_sidecar_name(name) || !temp_ok || asset.validate().is_err() {
+            return None;
+        }
+        entries.push(PaintCommitEntry {
+            name: name.to_string(),
+            temp: temp.to_string(),
+            asset,
+        });
+    }
+    Some(entries)
+}
+
+/// The on-disk blob path of a stored asset. Mirrors `AssetStore`'s
+/// private shard layout (`assets/<hash[..2]>/<hash>.<ext>`), needed only
+/// to fsync the blob before the commit; the
+/// `asset_blob_path_matches_the_store_layout` test pins it against a real
+/// store, so a layout change fails a test instead of durability.
+fn paint_asset_blob_path(project_dir: &Path, asset: &umber_core::AssetRef) -> PathBuf {
+    let (hash, ext) = (&asset.hash, &asset.ext);
+    project_dir
+        .join("assets")
+        .join(&hash[..2])
+        .join(format!("{hash}.{ext}"))
+}
+
+/// Flushes a file to stable storage (write access: Windows'
+/// `FlushFileBuffers` refuses a read-only handle).
+fn sync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
+/// Flushes a directory's entries (the renames) to stable storage. Unix
+/// only: Windows cannot open a directory as a file, and NTFS journals
+/// renames itself.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Finishes staging the temp already written at `paint/<temp>`: fsyncs
+/// it, stores its bytes in the project's `AssetStore` (deduped by
+/// content hash) and fsyncs the blob — both are durable before any
+/// manifest can name them.
+fn finish_paint_stage(
+    project_dir: &Path,
+    store: &umber_core::AssetStore,
+    name: &str,
+    temp: String,
+    bytes: &[u8],
+) -> std::io::Result<PaintCommitEntry> {
+    sync_file(&paint_sidecar_dir(project_dir).join(&temp))?;
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let asset = store.store(bytes, ext).map_err(std::io::Error::other)?;
+    sync_file(&paint_asset_blob_path(project_dir, &asset))?;
+    Ok(PaintCommitEntry {
+        name: name.to_string(),
+        temp,
+        asset,
+    })
+}
+
+/// Stages `bytes` as the next commit's `name` (temp + store blob).
+fn stage_paint_bytes(
+    project_dir: &Path,
+    store: &umber_core::AssetStore,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<PaintCommitEntry> {
+    let temp = paint_temp_name(name);
+    std::fs::write(paint_sidecar_dir(project_dir).join(&temp), bytes)?;
+    finish_paint_stage(project_dir, store, name, temp, bytes)
+}
+
+/// Stages one tile readback as a Linear-transfer PNG temp (the same
+/// `write_png` call the sidecar always used — byte-exact), then stores
+/// the encoded bytes.
+fn stage_paint_png(
+    project_dir: &Path,
+    store: &umber_core::AssetStore,
+    name: &str,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> std::io::Result<PaintCommitEntry> {
+    let temp = paint_temp_name(name);
+    let path = paint_sidecar_dir(project_dir).join(&temp);
+    umber_export::png::write_png(
+        &path,
+        width,
+        height,
+        rgba,
+        umber_export::png::Transfer::Linear,
+    )
+    .map_err(std::io::Error::other)?;
+    let bytes = std::fs::read(&path)?;
+    finish_paint_stage(project_dir, store, name, temp, &bytes)
+}
+
+/// Writes the commit manifest: temp, fsync, then the rename to
+/// `manifest.pending` — THE commit point. Before it returns, an
+/// interrupted save leaves the old sidecar intact; after, the next open
+/// rolls the new one forward.
+fn commit_paint_manifest(project_dir: &Path, entries: &[PaintCommitEntry]) -> std::io::Result<()> {
+    let dir = paint_sidecar_dir(project_dir);
+    let temp = dir.join(paint_temp_name("manifest.pending"));
+    std::fs::write(&temp, format_paint_commit(entries))?;
+    sync_file(&temp)?;
+    std::fs::rename(&temp, paint_commit_pending_path(project_dir))?;
+    // Past the commit point an error must not read as "not committed".
+    if let Err(e) = sync_dir(&dir) {
+        log::warn!("paint save: committed, directory fsync failed: {e:#}");
+    }
+    Ok(())
+}
+
+/// Applies a pending commit (idempotent — safe to re-run after a crash at
+/// any step): renames each staged temp over its sidecar name; an entry
+/// whose temp is already gone is checked against its store blob and
+/// re-materialized from it if the sidecar differs; tile PNGs the manifest
+/// does not list are pruned (a re-save never resurrects a dropped tile);
+/// finally `manifest.pending` becomes `manifest.txt`. Returns whether a
+/// commit was pending.
+///
+/// `max_steps` is the fault-injection seam: `None` runs to completion
+/// (every production caller); `Some(k)` fails the (k+1)-th mutating step
+/// with an injected error, leaving the disk exactly as a crash there
+/// would — including a half-written temp when the step was a write.
+fn apply_paint_commit(project_dir: &Path, max_steps: Option<usize>) -> std::io::Result<bool> {
+    let dir = paint_sidecar_dir(project_dir);
+    let pending = paint_commit_pending_path(project_dir);
+    let text = match std::fs::read_to_string(&pending) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let entries = parse_paint_commit(&text).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed paint manifest")
+    })?;
+    let store = umber_core::AssetStore::new(project_dir);
+    let mut steps = 0usize;
+    let mut step = || {
+        if max_steps.is_some_and(|max| steps >= max) {
+            return Err(std::io::Error::other("injected fault"));
+        }
+        steps += 1;
+        Ok(())
+    };
+    for entry in &entries {
+        let temp = dir.join(&entry.temp);
+        let target = dir.join(&entry.name);
+        if temp.exists() {
+            step()?;
+            std::fs::rename(&temp, &target)?;
+            continue;
+        }
+        // The temp is gone: this rename already ran, or the temp was lost.
+        // Either way the content-addressed blob is the committed truth.
+        let blob = store.load(&entry.asset).map_err(std::io::Error::other)?;
+        if std::fs::read(&target).is_ok_and(|bytes| bytes == blob) {
+            continue;
+        }
+        // Re-materialize through a temp the manifest never names: a crash
+        // mid-write leaves a torn `.restore` orphan (swept later), never a
+        // torn temp the next recovery would rename into place.
+        let restore = dir.join(paint_temp_name(&format!("{}.restore", entry.name)));
+        if let Err(fault) = step() {
+            let _ = std::fs::write(&restore, &blob[..blob.len() / 2]);
+            return Err(fault);
+        }
+        std::fs::write(&restore, &blob)?;
+        sync_file(&restore)?;
+        std::fs::rename(&restore, &target)?;
+    }
+    let listed: std::collections::HashSet<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if parse_paint_tile_name(&name).is_some() && !listed.contains(name.as_str()) {
+            step()?;
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    sync_dir(&dir)?;
+    step()?;
+    std::fs::rename(&pending, paint_manifest_path(project_dir))?;
+    sync_dir(&dir)?;
+    Ok(true)
+}
+
+/// Crash recovery, run before anything reads or stages `paint/`: rolls a
+/// pending commit forward (an interrupted save's NEW state), then sweeps
+/// staged temps no commit names (an interrupted save's uncommitted
+/// leftovers — the OLD state stands). A failed roll-forward keeps the
+/// temps (they are its source) and logs; the next open retries.
+fn recover_paint_sidecar(project_dir: &Path) {
+    match apply_paint_commit(project_dir, None) {
+        Ok(true) => log::info!("paint: rolled an interrupted save forward"),
+        Ok(false) => {}
+        Err(e) => {
+            log::warn!("paint: interrupted save not rolled forward yet: {e:#}");
+            return;
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(paint_sidecar_dir(project_dir)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_paint_temp_name(&name) {
+            let path = entry.path();
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("paint: orphan temp {} not removed: {e}", path.display());
+            }
+        }
+    }
+}
+
 /// Writes every present paint tile into the project sidecar as a
 /// Linear-transfer PNG (byte-exact — the export dialog's `Srgb` would
-/// move the bytes through the IEC curve). Reads through
+/// move the bytes through the IEC curve), crash-safely: every artifact is
+/// staged (temp + `AssetStore` blob) before ONE manifest rename commits
+/// the save (see the module docs). Reads through
 /// `PaintState::read_tile`, the REAL readback path: it drains the
 /// tile's queue first so earlier strokes' dabs are in the bytes, then
 /// does the blocking `PaintTarget::read_back_rgba8` — the same call the
 /// stroke-undo capture uses. Prunes `tile-*.png` files for tiles the
-/// session no longer holds, then returns how many tiles were stored.
+/// session no longer holds, then returns how many tiles were stored
+/// (0 when the save never committed — the previous paint stays intact).
 fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
-    // The session sizes ride along even with zero tiles (a size choice
-    // with no paint yet must survive the round trip); a write failure logs
-    // but keeps the metadata save (same torn-save window as the pixels).
-    if let Err(e) = std::fs::create_dir_all(paint_sidecar_dir(project_dir)) {
-        log::warn!("paint save: sidecar dir not created: {e:#}");
-    } else {
-        // The legacy global (the active set's size — old readers apply one
-        // size to every tile, and with pixels the PNG dims lead anyway).
-        let (width, height) = paint.target_size();
-        if let Err(e) = std::fs::write(
-            paint_target_size_path(project_dir),
-            format_paint_target_size(width, height),
-        ) {
-            log::warn!("paint save: target size not stored: {e:#}");
-        }
-        // The per-set mapping: sizes for every set holding a saved tile
-        // plus the active set (a chooser with no paint yet survives), and
-        // one assignment line per saved tile. Sorted by construction
-        // (BTreeMap), so saves are byte-deterministic.
-        let tiles = paint.tiles_present();
-        let mut mapping = PaintSetSizes::default();
-        for tile in &tiles {
-            let set = paint.set_of_tile(*tile).to_string();
-            mapping.tiles.insert(*tile, set.clone());
-            mapping.sizes.insert(set, paint.tile_size(*tile));
-        }
-        let active = paint.active_set().to_string();
-        if !mapping.sizes.contains_key(&active) {
-            mapping
-                .sizes
-                .insert(active.clone(), paint.size_of_set(&active));
-        }
-        if let Err(e) = std::fs::write(
-            paint_set_sizes_path(project_dir),
-            format_paint_set_sizes(&mapping),
-        ) {
-            log::warn!("paint save: set sizes not stored: {e:#}");
+    match commit_paint_tiles(paint, project_dir) {
+        Ok(saved) => saved,
+        Err(e) => {
+            log::warn!("paint save: not committed, the previous paint stays intact: {e:#}");
+            0
         }
     }
-    let mut saved = 0usize;
+}
+
+/// [`save_paint_tiles`]'s body: stage everything, commit, apply. An `Err`
+/// means the commit point was never reached.
+fn commit_paint_tiles(
+    paint: &mut paint_state::PaintState,
+    project_dir: &Path,
+) -> std::io::Result<usize> {
+    std::fs::create_dir_all(paint_sidecar_dir(project_dir))?;
+    // An earlier crash's pending commit lands (or its orphans go) before
+    // this save stages anything.
+    recover_paint_sidecar(project_dir);
+    let store = umber_core::AssetStore::new(project_dir);
+    let mut entries = Vec::new();
+    // The session sizes ride along even with zero tiles (a size choice
+    // with no paint yet must survive the round trip). The legacy global
+    // first (the active set's size — old readers apply one size to every
+    // tile, and with pixels the PNG dims lead anyway).
+    let (width, height) = paint.target_size();
+    entries.push(stage_paint_bytes(
+        project_dir,
+        &store,
+        "target_size.txt",
+        format_paint_target_size(width, height).as_bytes(),
+    )?);
+    // The per-set mapping: sizes for every set holding a saved tile
+    // plus the active set (a chooser with no paint yet survives), and
+    // one assignment line per saved tile. Sorted by construction
+    // (BTreeMap), so saves are byte-deterministic.
     let tiles = paint.tiles_present();
+    let mut mapping = PaintSetSizes::default();
     for tile in &tiles {
+        let set = paint.set_of_tile(*tile).to_string();
+        mapping.tiles.insert(*tile, set.clone());
+        mapping.sizes.insert(set, paint.tile_size(*tile));
+    }
+    let active = paint.active_set().to_string();
+    if !mapping.sizes.contains_key(&active) {
+        mapping
+            .sizes
+            .insert(active.clone(), paint.size_of_set(&active));
+    }
+    entries.push(stage_paint_bytes(
+        project_dir,
+        &store,
+        "target_sizes.txt",
+        format_paint_set_sizes(&mapping).as_bytes(),
+    )?);
+    let mut saved = 0usize;
+    for tile in &tiles {
+        let name = format!("tile-{tile}.png");
         let Some(image) = paint.read_tile(*tile) else {
-            log::warn!("paint save: tile {tile} readback failed; skipping");
+            // A failed readback keeps the tile's previous sidecar (if
+            // any): it is re-staged as-is so the commit does not prune it.
+            log::warn!("paint save: tile {tile} readback failed; keeping its previous file");
+            if let Ok(bytes) = std::fs::read(paint_tile_path(project_dir, *tile)) {
+                entries.push(stage_paint_bytes(project_dir, &store, &name, &bytes)?);
+            }
             continue;
         };
-        let path = paint_tile_path(project_dir, *tile);
-        if let Err(e) = umber_export::png::write_png(
-            &path,
+        entries.push(stage_paint_png(
+            project_dir,
+            &store,
+            &name,
             image.width,
             image.height,
             &image.data,
-            umber_export::png::Transfer::Linear,
-        ) {
-            log::warn!("paint save: tile {tile} PNG write failed: {e:#}");
-            continue;
-        }
+        )?);
         saved += 1;
     }
-    // A re-save into a project dir must never resurrect a dropped tile:
-    // delete sidecar files no present tile claims.
-    if let Ok(entries) = std::fs::read_dir(paint_sidecar_dir(project_dir)) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let stale = parse_paint_tile_name(&name).is_some_and(|t| !tiles.contains(&t));
-            if stale {
-                let path = entry.path();
-                if let Err(e) = std::fs::remove_file(&path) {
-                    log::warn!("paint save: stale {} not removed: {e}", path.display());
-                }
-            }
-        }
+    commit_paint_manifest(project_dir, &entries)?;
+    // Committed: from here an interruption rolls forward on the next open.
+    if let Err(e) = apply_paint_commit(project_dir, None) {
+        log::warn!("paint save: committed, apply stopped early ({e:#}); next open finishes it");
     }
-    saved
+    Ok(saved)
 }
 
 /// Restores the paint sidecar into `paint` through the EXISTING
@@ -1019,6 +1402,10 @@ fn load_paint_tiles_reported(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
 ) -> PaintLoadReport {
+    // An interrupted save resolves first (rolled forward when it had
+    // committed, its orphans swept when not), so the sidecar read below
+    // is the old project or the new one — never a torn mix.
+    recover_paint_sidecar(project_dir);
     let dir = paint_sidecar_dir(project_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -1224,9 +1611,10 @@ impl UmberApp {
             Ok(()) => {
                 log::info!("project saved: {}", dir.display());
                 // The painted pixels ride along as the `paint/` sidecar,
-                // after the commit so the directory exists (a pixel-write
-                // failure logs but keeps the metadata save — the torn-save
-                // window is documented in the module docs).
+                // after the commit so the directory exists (the paint
+                // commit is atomic on its own; a failed one logs, keeps
+                // the metadata save and leaves the old paint intact — the
+                // cross-commit window is in the module docs).
                 if let Some(paint) = self.state.paint.as_mut() {
                     let tiles = save_paint_tiles(paint, &dir);
                     log::info!("paint saved: {tiles} tile(s)");
@@ -1407,7 +1795,7 @@ impl eframe::App for UmberApp {
         // the central dock area, which takes what remains (egui_dock has
         // no top/bottom slots of its own).
         let toolbar_view = toolbar::ToolbarView {
-            tool: toolbar::ToolKind::of(&self.brush_panel.tool),
+            tool: self.brush_panel.strip,
             can_undo: self.state.doc.history.can_undo(),
             can_redo: self.state.doc.history.can_redo(),
             view: self.view,
@@ -1813,6 +2201,23 @@ mod paint_persistence_tests {
         let saved = save_paint_tiles(&mut paint, &dir);
         assert_eq!(saved, 1, "a single-tile session stores exactly tile 1001");
         assert!(paint_tile_path(&dir, umber_mesh::FIRST_TILE).exists());
+        // Store-routed: the commit applied (no pending manifest, no temps)
+        // and the provenance record names a store blob byte-identical to
+        // the sidecar PNG the reopen reads.
+        assert!(!paint_commit_pending_path(&dir).exists());
+        let manifest = std::fs::read_to_string(paint_manifest_path(&dir)).unwrap();
+        let entries = parse_paint_commit(&manifest).expect("the applied manifest parses");
+        let tile_entry = entries
+            .iter()
+            .find(|e| e.name == "tile-1001.png")
+            .expect("the manifest names the tile");
+        assert_eq!(
+            umber_core::AssetStore::new(&dir)
+                .load(&tile_entry.asset)
+                .unwrap(),
+            std::fs::read(paint_tile_path(&dir, umber_mesh::FIRST_TILE)).unwrap(),
+            "the store blob is the sidecar's exact bytes"
+        );
 
         let mut fresh =
             paint_state::PaintState::new(device, queue).expect("fresh paint state builds");
@@ -2100,5 +2505,324 @@ mod paint_persistence_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The paint-relevant files under `paint/` (sidecar names only — the
+    /// provenance manifest and temps are not what a reopen reads).
+    fn sidecar_snapshot(project: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        if let Ok(entries) = std::fs::read_dir(paint_sidecar_dir(project)) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_paint_sidecar_name(&name) {
+                    out.insert(name, std::fs::read(entry.path()).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    fn snapshot_of(files: &[(&str, &[u8])]) -> std::collections::BTreeMap<String, Vec<u8>> {
+        files
+            .iter()
+            .map(|(name, bytes)| (name.to_string(), bytes.to_vec()))
+            .collect()
+    }
+
+    /// Leftovers a reopen must never leave: staged/restore temps and an
+    /// unapplied manifest.
+    fn commit_leftovers(project: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(paint_sidecar_dir(project))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| is_paint_temp_name(name) || name == "manifest.pending")
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The save sequence `commit_paint_tiles` runs (stage each file →
+    /// commit the manifest → apply), driven from bytes so no GPU is
+    /// needed, with ONE step budget spanning all three phases: the
+    /// `budget`-th step (0-based) "crashes". A crashing stage leaves a
+    /// half-written temp; a crashing commit a half-written manifest temp;
+    /// apply's own faults come from its `max_steps` seam.
+    fn save_files_faulted(
+        project: &Path,
+        files: &[(&str, &[u8])],
+        budget: usize,
+    ) -> std::io::Result<()> {
+        let dir = paint_sidecar_dir(project);
+        std::fs::create_dir_all(&dir)?;
+        let store = umber_core::AssetStore::new(project);
+        let mut used = 0usize;
+        let mut entries = Vec::new();
+        for (name, bytes) in files {
+            if used == budget {
+                std::fs::write(dir.join(paint_temp_name(name)), &bytes[..bytes.len() / 2])?;
+                return Err(std::io::Error::other("injected fault"));
+            }
+            used += 1;
+            entries.push(stage_paint_bytes(project, &store, name, bytes)?);
+        }
+        if used == budget {
+            let text = format_paint_commit(&entries);
+            std::fs::write(
+                dir.join(paint_temp_name("manifest.pending")),
+                &text.as_bytes()[..text.len() / 2],
+            )?;
+            return Err(std::io::Error::other("injected fault"));
+        }
+        used += 1;
+        commit_paint_manifest(project, &entries)?;
+        apply_paint_commit(project, Some(budget - used)).map(|_| ())
+    }
+
+    const OLD_FILES: [(&str, &[u8]); 4] = [
+        ("tile-1001.png", b"old tile 1001 bytes"),
+        ("tile-1002.png", b"old tile 1002 bytes"),
+        ("target_size.txt", b"512x512"),
+        (
+            "target_sizes.txt",
+            b"# Umber paint-set sizes v1\nBody=512x512\ntile-1001=Body\ntile-1002=Body\n",
+        ),
+    ];
+
+    /// The NEW save differs in every way a torn mix could show: tile 1001
+    /// repainted, tile 1002 dropped (pruned), tile 1003 added, both size
+    /// files changed.
+    const NEW_FILES: [(&str, &[u8]); 4] = [
+        ("tile-1001.png", b"NEW tile 1001 bytes, repainted"),
+        ("tile-1003.png", b"NEW tile 1003 bytes"),
+        ("target_size.txt", b"1024x1024"),
+        (
+            "target_sizes.txt",
+            b"# Umber paint-set sizes v1\nBody=1024x1024\ntile-1001=Body\ntile-1003=Body\n",
+        ),
+    ];
+
+    #[test]
+    fn paint_commit_codec_round_trips_and_rejects_tampering() {
+        let asset = umber_core::AssetRef {
+            hash: "ab".repeat(32),
+            ext: "png".to_string(),
+            size: 42,
+        };
+        let entries = vec![PaintCommitEntry {
+            name: "tile-1001.png".to_string(),
+            temp: "tile-1001.png.tmp.77".to_string(),
+            asset: asset.clone(),
+        }];
+        let text = format_paint_commit(&entries);
+        let hash = "ab".repeat(32);
+        let line = format!("tile-1001.png {hash} png 42 tile-1001.png.tmp.77\n");
+        assert_eq!(text, format!("# Umber paint commit v1\n{line}"));
+        assert_eq!(parse_paint_commit(&text), Some(entries));
+        // Any bad line refuses the WHOLE manifest (never half-applied):
+        // an escaping name, a temp for another name, a non-temp, a short
+        // hash, a non-numeric size, a missing field.
+        for bad in [
+            format!("../x.png {hash} png 42 ../x.png.tmp.77\n"),
+            format!("tile-1001.png {hash} png 42 tile-1002.png.tmp.77\n"),
+            format!("tile-1001.png {hash} png 42 tile-1001.png\n"),
+            "tile-1001.png abc png 42 tile-1001.png.tmp.77\n".to_string(),
+            format!("tile-1001.png {hash} png x tile-1001.png.tmp.77\n"),
+            format!("tile-1001.png {hash} png 42\n"),
+        ] {
+            assert_eq!(parse_paint_commit(&bad), None, "{bad:?} must refuse");
+        }
+        assert!(is_paint_temp_name("tile-1001.png.tmp.123"));
+        assert!(is_paint_temp_name("tile-1001.png.restore.tmp.9"));
+        assert!(!is_paint_temp_name("tile-1001.png"));
+        assert!(!is_paint_temp_name("tile-1001.png.tmp."));
+        assert!(!is_paint_temp_name("manifest.txt"));
+    }
+
+    #[test]
+    fn asset_blob_path_matches_the_store_layout() {
+        // The fsync before the commit targets this mirrored path; pin it
+        // against a real store so a layout change fails here, not at a
+        // power cut.
+        let project = unique_temp_dir("blob-path");
+        std::fs::create_dir_all(&project).unwrap();
+        let asset = umber_core::AssetStore::new(&project)
+            .store(b"blob path probe", "png")
+            .unwrap();
+        let path = paint_asset_blob_path(&project, &asset);
+        assert_eq!(std::fs::read(&path).unwrap(), b"blob path probe");
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn interrupted_paint_save_reopens_old_or_new_never_torn() {
+        let old = snapshot_of(&OLD_FILES);
+        let new = snapshot_of(&NEW_FILES);
+        // The old project in both shapes a save can meet: one an earlier
+        // atomic save committed, and a legacy (pre-commit) direct write.
+        for legacy_old in [false, true] {
+            let mut saw_torn_disk = false;
+            let mut budget = 0usize;
+            loop {
+                let project = unique_temp_dir("torn");
+                if legacy_old {
+                    for (name, bytes) in OLD_FILES {
+                        std::fs::create_dir_all(paint_sidecar_dir(&project)).unwrap();
+                        std::fs::write(paint_sidecar_dir(&project).join(name), bytes).unwrap();
+                    }
+                } else {
+                    save_files_faulted(&project, &OLD_FILES, usize::MAX).unwrap();
+                }
+                assert_eq!(sidecar_snapshot(&project), old);
+
+                let completed = save_files_faulted(&project, &NEW_FILES, budget).is_ok();
+                let on_disk = sidecar_snapshot(&project);
+                if on_disk != old && on_disk != new {
+                    saw_torn_disk = true;
+                }
+                // "Reopen": the load path's recovery, then what it reads.
+                recover_paint_sidecar(&project);
+                let reopened = sidecar_snapshot(&project);
+                // Exact pin, not just old-or-new: 4 stages + the commit
+                // are steps 0..=4, so a crash at budget ≤ 4 predates the
+                // commit (OLD); any later crash rolls forward (NEW).
+                let committed = budget > NEW_FILES.len();
+                let expected = if committed { &new } else { &old };
+                assert_eq!(
+                    &reopened, expected,
+                    "legacy_old={legacy_old} crash at step {budget}: committed={committed}"
+                );
+                assert_eq!(
+                    commit_leftovers(&project),
+                    Vec::<String>::new(),
+                    "legacy_old={legacy_old} step {budget}: reopen sweeps every temp"
+                );
+                let _ = std::fs::remove_dir_all(&project);
+                if completed {
+                    break;
+                }
+                budget += 1;
+            }
+            // 4 stages + 1 commit + 4 renames + 1 prune (tile 1002) + 1
+            // manifest finalize = 11 steps; budget 11 is the first clean run.
+            assert_eq!(budget, 11, "legacy_old={legacy_old}: the step count");
+            // Can-fail guard: the disk WAS torn mid-apply at some step (a
+            // protocol that only ever exposed old-or-new states would make
+            // the recovery assertions above vacuous).
+            assert!(
+                saw_torn_disk,
+                "legacy_old={legacy_old}: no crash tore the disk"
+            );
+        }
+    }
+
+    #[test]
+    fn reopen_after_a_post_commit_crash_restores_the_new_paint() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // OLD saved for real; then a NEW tile staged and committed but
+        // never applied (the crash lands right after the commit point).
+        // The load path's own recovery must roll it forward: without it
+        // the reopen reads the OLD tile-1001.png and this test fails.
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        let old = pattern_bytes(512, 512, 5);
+        let new = pattern_bytes(512, 512, 99);
+        assert_ne!(old, new);
+        assert!(paint.publish_fill(1001, 512, 512, old.clone()));
+        paint.process_pending().expect("upload lands");
+        let dir = unique_temp_dir("post-commit-crash");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
+
+        let store = umber_core::AssetStore::new(&dir);
+        let entry = stage_paint_png(&dir, &store, "tile-1001.png", 512, 512, &new).unwrap();
+        commit_paint_manifest(&dir, &[entry]).unwrap();
+        assert!(paint_commit_pending_path(&dir).exists());
+
+        let mut fresh = paint_state::PaintState::with_target_size(device, queue, 512)
+            .expect("fresh paint state builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        assert_eq!(report.restored, 1);
+        assert_eq!(
+            fresh.read_tile(1001).expect("readback succeeds").data,
+            new,
+            "the committed NEW paint is what reopens"
+        );
+        assert!(!paint_commit_pending_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn committed_save_rolls_forward_from_the_store_when_a_temp_is_lost() {
+        let project = unique_temp_dir("lost-temp");
+        save_files_faulted(&project, &OLD_FILES, usize::MAX).unwrap();
+        // Commit NEW, then lose tile 1001's staged temp: the store blob is
+        // the roll-forward source. A first recovery attempt crashes mid
+        // re-materialization (leaving a half `.restore` temp); the next
+        // one must still land NEW byte-exactly and sweep the torn temp.
+        let store = umber_core::AssetStore::new(&project);
+        let entries: Vec<PaintCommitEntry> = NEW_FILES
+            .iter()
+            .map(|(name, bytes)| stage_paint_bytes(&project, &store, name, bytes).unwrap())
+            .collect();
+        commit_paint_manifest(&project, &entries).unwrap();
+        std::fs::remove_file(paint_sidecar_dir(&project).join(&entries[0].temp)).unwrap();
+        assert!(apply_paint_commit(&project, Some(0)).is_err());
+        let torn_restore = paint_temp_name("tile-1001.png.restore");
+        assert_eq!(
+            std::fs::read(paint_sidecar_dir(&project).join(&torn_restore)).unwrap(),
+            &NEW_FILES[0].1[..NEW_FILES[0].1.len() / 2],
+            "the injected crash left a half-written restore temp"
+        );
+        recover_paint_sidecar(&project);
+        assert_eq!(sidecar_snapshot(&project), snapshot_of(&NEW_FILES));
+        assert_eq!(commit_leftovers(&project), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn store_routed_save_reopens_byte_identical_and_dedupes() {
+        let project = unique_temp_dir("store-routed");
+        save_files_faulted(&project, &NEW_FILES, usize::MAX).unwrap();
+        recover_paint_sidecar(&project);
+        let reopened = sidecar_snapshot(&project);
+        assert_eq!(reopened, snapshot_of(&NEW_FILES));
+        // Every sidecar has a manifest line whose store blob is its exact
+        // bytes (the provenance record is complete and truthful).
+        let manifest = std::fs::read_to_string(paint_manifest_path(&project)).unwrap();
+        let entries = parse_paint_commit(&manifest).expect("the applied manifest parses");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        let want: Vec<&str> = NEW_FILES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, want, "one manifest line per sidecar, in save order");
+        let store = umber_core::AssetStore::new(&project);
+        for entry in &entries {
+            let blob = store.load(&entry.asset).unwrap();
+            assert_eq!(&blob, &reopened[&entry.name], "{} blob", entry.name);
+            assert_eq!(entry.asset.size, blob.len() as u64);
+        }
+        // Dedupe: re-saving identical content stores no new blob — 4
+        // distinct contents, 4 blobs, before and after.
+        let count_blobs = || {
+            std::fs::read_dir(project.join("assets"))
+                .unwrap()
+                .flatten()
+                .map(|shard| std::fs::read_dir(shard.path()).unwrap().count())
+                .sum::<usize>()
+        };
+        assert_eq!(count_blobs(), 4);
+        save_files_faulted(&project, &NEW_FILES, usize::MAX).unwrap();
+        assert_eq!(count_blobs(), 4, "identical content dedupes in the store");
+        let again = std::fs::read_to_string(paint_manifest_path(&project)).unwrap();
+        let again = parse_paint_commit(&again).unwrap();
+        assert_eq!(
+            again.iter().map(|e| &e.asset).collect::<Vec<_>>(),
+            entries.iter().map(|e| &e.asset).collect::<Vec<_>>(),
+            "the same bytes hash to the same refs"
+        );
+        assert_eq!(sidecar_snapshot(&project), snapshot_of(&NEW_FILES));
+        let _ = std::fs::remove_dir_all(&project);
     }
 }
