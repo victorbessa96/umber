@@ -111,6 +111,8 @@ pub enum HistoryKind {
     AddFill,
     /// [`LayerCommand::Add`] of a folder.
     AddFolder,
+    /// [`LayerCommand::Add`] of a material layer.
+    AddMaterial,
     /// [`LayerCommand::Add`] of an instance layer (§3:41).
     AddInstance,
     /// [`LayerCommand::Remove`].
@@ -125,6 +127,9 @@ pub enum HistoryKind {
     SetBlendMode,
     /// [`LayerCommand::SetFill`].
     SetFill,
+    /// [`LayerCommand::SetMaterial`] (a material layer's definition,
+    /// channel controls or param overrides changed).
+    SetMaterial,
     /// [`LayerCommand::SetInstanceSource`] (instance retarget).
     SetInstanceSource,
     /// [`LayerCommand::AttachMask`] (a layer gains a mask).
@@ -156,6 +161,7 @@ impl HistoryKind {
                 LayerKind::Paint => Self::AddPaint,
                 LayerKind::Fill => Self::AddFill,
                 LayerKind::Folder { .. } => Self::AddFolder,
+                LayerKind::Material => Self::AddMaterial,
                 LayerKind::Instance { .. } => Self::AddInstance,
             },
             LayerCommand::Remove { .. } => Self::Remove,
@@ -164,6 +170,7 @@ impl HistoryKind {
             LayerCommand::SetVisible { .. } => Self::SetVisible,
             LayerCommand::SetBlendMode { .. } => Self::SetBlendMode,
             LayerCommand::SetFill { .. } => Self::SetFill,
+            LayerCommand::SetMaterial { .. } => Self::SetMaterial,
             LayerCommand::SetInstanceSource { .. } => Self::SetInstanceSource,
             LayerCommand::AttachMask { .. } => Self::AttachMask,
             LayerCommand::DetachMask { .. } => Self::DetachMask,
@@ -178,6 +185,7 @@ impl HistoryKind {
             Self::AddPaint => tr("history.op-add-paint"),
             Self::AddFill => tr("history.op-add-fill"),
             Self::AddFolder => tr("history.op-add-folder"),
+            Self::AddMaterial => tr("history.op-add-material"),
             Self::AddInstance => tr("history.op-add-instance"),
             Self::Remove => tr("history.op-remove"),
             Self::Reorder => tr("history.op-reorder"),
@@ -185,6 +193,7 @@ impl HistoryKind {
             Self::SetVisible => tr("history.op-set-visible"),
             Self::SetBlendMode => tr("history.op-set-blend"),
             Self::SetFill => tr("history.op-set-fill"),
+            Self::SetMaterial => tr("history.op-set-material"),
             Self::SetInstanceSource => tr("history.op-set-instance-source"),
             Self::AttachMask => tr("history.op-attach-mask"),
             Self::DetachMask => tr("history.op-detach-mask"),
@@ -546,6 +555,11 @@ mod tests {
                 "Add folder layer",
             ),
             (
+                LayerCommand::add("m", LayerKind::Material),
+                HistoryKind::AddMaterial,
+                "Add material layer",
+            ),
+            (
                 LayerCommand::add("i", LayerKind::Instance { source_id: 0 }),
                 HistoryKind::AddInstance,
                 "Add instance layer",
@@ -581,8 +595,10 @@ mod tests {
             assert_eq!(HistoryKind::from_command(&command), kind);
             assert_eq!(kind.label(), label);
         }
-        // SetFill needs real FillParams; cover its label directly.
+        // SetFill needs real FillParams; SetMaterial needs real
+        // MaterialParams; cover their labels directly.
         assert_eq!(HistoryKind::SetFill.label(), "Fill layer");
+        assert_eq!(HistoryKind::SetMaterial.label(), "Set material");
         assert_eq!(HistoryKind::BrushStroke.label(), "Brush stroke");
         assert_eq!(HistoryKind::Bake.label(), "Bake");
         assert_eq!(HistoryKind::Export.label(), "Export");

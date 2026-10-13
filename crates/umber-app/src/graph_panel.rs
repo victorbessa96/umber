@@ -99,16 +99,15 @@ fn default_params(node_def: &str) -> Vec<(String, ParamValue)> {
     }
 }
 
-/// Builds the panel's registry: the engine seed plus every merged node
-/// family (slices 2a/2b/2c), plus the post-v1 `synth` addition.
+/// Builds the panel's registry: the shared [`umber_graph::full_registry`] —
+/// the engine seed plus every merged node family plus the dynamic-material
+/// nodes. A private delegation (not inlined at the call site) so the
+/// sharing contract reads at the one place the registry is built: the
+/// Graph panel and the material eval driver evaluate on identical
+/// registries, and the panel can open a definition containing
+/// `material_output`.
 fn full_registry() -> NodeRegistry {
-    let mut registry = NodeRegistry::seeded();
-    umber_graph::nodes::register_generator_nodes(&mut registry);
-    umber_graph::nodes::register_filter_color_nodes(&mut registry);
-    umber_graph::nodes::register_mask_spatial_nodes(&mut registry);
-    umber_graph::anchor::register_anchor_nodes(&mut registry);
-    umber_graph::nodes::register_synth_nodes(&mut registry);
-    registry
+    umber_graph::full_registry()
 }
 
 /// The Graph panel state: the editable graph, its eval cache, and the
@@ -1198,6 +1197,37 @@ mod tests {
     }
 
     #[test]
+    fn panel_registry_shares_the_material_nodes() {
+        // The delegation contract: the panel builds the shared registry, so
+        // a definition containing `material_output` opens AND evaluates
+        // here (not just in the headless driver).
+        let mut panel = GraphPanel::new();
+        assert!(
+            panel.registry().node_defs().contains(&"material_output"),
+            "panel registry must dispatch material_output"
+        );
+        let head = panel.add_node("uniform");
+        assert!(panel.set_param(head, "color", ParamValue::Color([0.0, 0.0, 1.0])));
+        let tail = panel.add_node("material_output");
+        assert!(panel.set_param(tail, "channel", ParamValue::Asset("baseColor".into())));
+        assert!(panel.add_edge(head, tail, "input"));
+        assert!(panel.set_output_node(tail));
+        panel.set_resolution((2, 2));
+        panel.evaluate();
+        assert!(
+            !panel.status().starts_with("Eval failed"),
+            "material chain must evaluate in the panel, got {:?}",
+            panel.status()
+        );
+        match panel.last_output().expect("output evaluated") {
+            NodeOutput::Image(buf) => {
+                assert!(buf.data.chunks_exact(4).all(|px| px == [0, 0, 255, 255]));
+            }
+            other => panic!("expected an Image, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn panel_eval_matches_direct_engine_eval_byte_exact() {
         // THE CAN-FAIL CORE: the panel's cached eval must equal a direct
         // engine eval of the same graph — any panel-side input mangling
@@ -1457,10 +1487,11 @@ mod tests {
     #[test]
     fn registry_listing_covers_all_merged_families() {
         // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c + 1 anchor
-        // + 1 synth (post-v1) = 26.
+        // + 1 synth (post-v1) + 1 material_output (the dynmat channel
+        // contract, Kill A) = 27.
         let panel = GraphPanel::new();
         let defs = panel.registry().node_defs();
-        assert_eq!(defs.len(), 26, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 27, "unexpected registry size: {defs:?}");
         for expected in [
             "uniform",
             "image_asset",

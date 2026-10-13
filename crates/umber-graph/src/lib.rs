@@ -17,6 +17,7 @@
 
 pub mod anchor;
 pub mod eval;
+pub mod material;
 pub mod mtlx;
 pub mod mtlx_doc;
 pub mod nodes;
@@ -29,6 +30,27 @@ pub use eval::{
 };
 pub use topo::{Edge, Graph, GraphError};
 pub use value::{decode_png_rgba8, encode_png_rgba8, ImageBuffer, ImageError, NodeOutput};
+
+/// Builds the shared registry: the engine seed plus every merged node
+/// family (generator, filter + color, mask + spatial, anchor, synth) plus
+/// the dynamic-material nodes (`material_output`).
+///
+/// The Graph panel and the material eval driver share this one registry —
+/// no drift between the surface a definition is authored on and the one it
+/// evaluates on — and the panel can open a definition containing
+/// `material_output`.
+///
+/// [`NodeRegistry::seeded`]: crate::NodeRegistry::seeded
+pub fn full_registry() -> NodeRegistry {
+    let mut registry = NodeRegistry::seeded();
+    nodes::register_generator_nodes(&mut registry);
+    nodes::register_filter_color_nodes(&mut registry);
+    nodes::register_mask_spatial_nodes(&mut registry);
+    anchor::register_anchor_nodes(&mut registry);
+    nodes::register_synth_nodes(&mut registry);
+    material::register_material_nodes(&mut registry);
+    registry
+}
 
 /// A node in a graph. The Wave-4 engine evaluates these topologically.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,5 +109,63 @@ mod tests {
             canvas: None,
         };
         assert_eq!(n.params.len(), 2);
+    }
+
+    #[test]
+    fn full_registry_holds_every_family_including_material_output() {
+        // The one shared registry (Graph panel + material driver): the seed
+        // plus every register_* family plus the material nodes. Each
+        // representative must dispatch — a name listed but unregistered
+        // would fail a definition at eval time, not at authoring time.
+        let registry = full_registry();
+        for def in [
+            "uniform",
+            "passthrough",
+            "noise_perlin",
+            "mix",
+            "flood_fill",
+            "mesh_map_generator",
+            "anchor",
+            "synth",
+            "material_output",
+        ] {
+            assert!(
+                registry.get(def).is_some(),
+                "full_registry must dispatch {def}"
+            );
+        }
+        // And a material_output chain evaluates through it (the driver's
+        // registry contract, headless).
+        let mut g = Graph::new();
+        g.add_node(Node {
+            id: 1,
+            node_def: "uniform".into(),
+            params: vec![("color".into(), ParamValue::Color([0.0, 1.0, 0.0]))],
+            canvas: None,
+        });
+        g.add_node(Node {
+            id: 2,
+            node_def: "material_output".into(),
+            params: vec![("channel".into(), ParamValue::Asset("baseColor".into()))],
+            canvas: None,
+        });
+        g.add_edge(Edge {
+            from: 1,
+            to: 2,
+            input: "input".into(),
+        });
+        let out = eval_graph(
+            &g,
+            &registry,
+            std::collections::HashMap::new(),
+            &EvalContext::new(1, 1),
+        )
+        .expect("material chain evaluates on the shared registry");
+        match &out[&2] {
+            NodeOutput::Image(buf) => {
+                assert_eq!(buf.data, vec![0, 255, 0, 255]);
+            }
+            other => panic!("expected an Image, got {other:?}"),
+        }
     }
 }

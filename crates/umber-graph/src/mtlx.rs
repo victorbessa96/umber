@@ -64,6 +64,7 @@
 //! | `direction_warp` | `input: color3`, `vector: vector3` — UV offset by a vector input |
 //! | `mesh_map_generator` | `map_name: string` — binds a baked map by name |
 //! | `anchor` | `layer_id: integer`, `channel: string` — binds a layer channel in the set |
+//! | `material_output` | `input: color3`, `channel: string` — declares one written channel of a dynamic material (the graph IS the channel declaration) |
 //! | `synth` | `example: string`, `map_mode: integer`, `tiling_mode: integer`, `randomness: float`, `seed: integer`, `mask: color3` — example-based texture synthesis (§4 P1 row) |
 
 use crate::{Edge, Graph, Node, ParamValue};
@@ -128,6 +129,14 @@ pub fn painter_nodedefs() -> Vec<NodedefDecl> {
             category: "anchor".into(),
             inputs: vec![
                 ("layer_id".into(), "integer".into()),
+                ("channel".into(), "string".into()),
+            ],
+        },
+        NodedefDecl {
+            name: "material_output".into(),
+            category: "material_output".into(),
+            inputs: vec![
+                ("input".into(), "color3".into()),
                 ("channel".into(), "string".into()),
             ],
         },
@@ -1150,5 +1159,62 @@ mod tests {
         assert_ne!(a.edges, b.edges, "fixture must differ in insertion order");
         let nd = painter_nodedefs();
         assert_eq!(to_mtlx(&a, &nd), to_mtlx(&b, &nd));
+    }
+
+    #[test]
+    fn material_output_declares_and_round_trips() {
+        // The declaration IS the graph: one material_output node per written
+        // channel, with the `channel` string surviving as an Asset.
+        let mut g = Graph::new();
+        g.add_node(Node {
+            id: 1,
+            node_def: "uniform".into(),
+            params: vec![("color".into(), ParamValue::Color([1.0, 0.0, 0.0]))],
+            canvas: None,
+        });
+        g.add_node(Node {
+            id: 2,
+            node_def: "material_output".into(),
+            params: vec![("channel".into(), ParamValue::Asset("baseColor".into()))],
+            canvas: None,
+        });
+        g.add_edge(Edge {
+            from: 1,
+            to: 2,
+            input: "input".into(),
+        });
+        let doc = to_mtlx(&g, &painter_nodedefs());
+        assert!(
+            doc.contains("<nodedef name=\"material_output\""),
+            "the declaration must be emitted before any node: {doc}"
+        );
+        assert!(
+            doc.contains(r#"type="string" value="baseColor""#),
+            "the channel string must ride a string input: {doc}"
+        );
+        let (back, decls, warnings) = from_mtlx(&doc).expect("material doc parses");
+        assert!(
+            warnings.is_empty(),
+            "declared customs must not warn, got {warnings:?}"
+        );
+        assert_eq!(back, g, "graph data must survive the round-trip");
+        assert!(
+            decls.iter().any(|d| d.name == "material_output"),
+            "the declaration must survive the round-trip"
+        );
+        let node = back
+            .nodes
+            .iter()
+            .find(|n| n.id == 2)
+            .expect("node survives");
+        assert_eq!(
+            node.params,
+            vec![("channel".to_string(), ParamValue::Asset("baseColor".into()))],
+            "the channel must round-trip as Asset, not degrade"
+        );
+        // Byte-identical re-emit (the determinism contract covers the new
+        // nodedef too).
+        let (g2, nd2, _) = from_mtlx(&doc).expect("reparse works");
+        assert_eq!(to_mtlx(&g2, &nd2), doc);
     }
 }

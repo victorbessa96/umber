@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::layers::{BlendMode, Layer, LayerCommand, LayerKind, LayerStack};
+use crate::layers::{BlendMode, Layer, LayerCommand, LayerKind, LayerStack, MaterialParams};
 use crate::project::ProjectModel;
 use crate::undo::Command;
 use umber_mesh::FillParams;
@@ -106,6 +106,16 @@ pub enum JournalOp {
         id: u64,
         /// The fill parameters after the apply.
         fill: Option<FillParams>,
+    },
+    /// A layer's material parameters ([`LayerCommand::SetMaterial`]):
+    /// `None` when the layer holds no material params after the apply (a
+    /// non-material layer, or a material layer whose params were cleared
+    /// by undo — the `SetFill` convention).
+    SetMaterial {
+        /// The layer's id.
+        id: u64,
+        /// The material parameters after the apply.
+        material: Option<MaterialParams>,
     },
     /// An instance layer's source ([`LayerCommand::SetInstanceSource`]):
     /// the source the stack holds after the apply.
@@ -187,6 +197,13 @@ impl JournalOp {
                     fill: layer.fill.clone(),
                 })
             }
+            LayerCommand::SetMaterial { id, old, .. } => {
+                old.as_ref()?;
+                stack.layer(*id).map(|layer| JournalOp::SetMaterial {
+                    id: *id,
+                    material: layer.material.clone(),
+                })
+            }
             LayerCommand::SetInstanceSource { id, old, .. } => {
                 old.as_ref()?;
                 stack
@@ -257,6 +274,9 @@ impl JournalOp {
             LayerCommand::SetFill { id, old, .. } => {
                 old.clone().map(|fill| JournalOp::SetFill { id: *id, fill })
             }
+            LayerCommand::SetMaterial { id, old, .. } => old
+                .clone()
+                .map(|material| JournalOp::SetMaterial { id: *id, material }),
             LayerCommand::SetInstanceSource { id, old, .. } => {
                 old.map(|source| JournalOp::SetInstanceSource { id: *id, source })
             }
@@ -297,9 +317,10 @@ impl JournalOp {
     /// - `Move` → [`LayerStack::reorder`] from the id's current index
     ///   (Reorder's apply); a second apply moves it onto itself.
     /// - `Set*` → [`LayerStack::set_opacity`] / [`LayerStack::set_visible`]
-    ///   / [`LayerStack::set_blend_mode`] / [`LayerStack::set_fill`] (the
-    ///   `Set*` applies); absolute. A `SetFill` with `fill: None` clears
-    ///   the layer's params (the undo-of-first-SetFill shape).
+    ///   / [`LayerStack::set_blend_mode`] / [`LayerStack::set_fill`] /
+    ///   [`LayerStack::set_material`] (the `Set*` applies); absolute. A
+    ///   `SetFill`/`SetMaterial` with `None` clears the layer's params (the
+    ///   undo-of-first-set shape).
     ///
     /// Ids of `u64::MAX` are skipped: both re-insert paths compute `id + 1`
     /// for the stack's id counter, and `project` rejects that id anyway.
@@ -344,6 +365,16 @@ impl JournalOp {
                 None => {
                     if let Some(layer) = stack.layer_mut(*id) {
                         layer.fill = None;
+                    }
+                }
+            },
+            JournalOp::SetMaterial { id, material } => match material.clone() {
+                Some(params) => {
+                    stack.set_material(*id, params);
+                }
+                None => {
+                    if let Some(layer) = stack.layer_mut(*id) {
+                        layer.material = None;
                     }
                 }
             },
@@ -721,6 +752,54 @@ mod tests {
                 },
             ]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_material_journals_absolute_state_and_replays() {
+        use crate::layers::{MaterialChannel, MaterialParams};
+        let dir = unique_temp_dir("set-material");
+        let model = saved_base_project(&dir);
+        let mut session = Session::start(&dir, &model);
+        session.run(LayerCommand::add("Steel", LayerKind::Material)); // id 1
+        let params = MaterialParams {
+            material_id: "umber.weathered-steel".into(),
+            channels: vec![MaterialChannel::named("baseColor")],
+            params: vec![],
+        };
+        session.run(LayerCommand::set_material(1, params.clone()));
+        session.undo(); // back to None
+        assert_eq!(session.stack.layer(1).unwrap().material, None);
+        session.redo();
+        assert_eq!(
+            session.stack.layer(1).unwrap().material,
+            Some(params.clone())
+        );
+        let live = session.stack.clone();
+        drop(session); // the crash: no save
+
+        // The committed prefix carries Add + SetMaterial + clear + SetMaterial.
+        let entries = read_journal(&dir).unwrap();
+        assert_eq!(entries.len(), 4);
+        assert!(
+            entries[1].op
+                == JournalOp::SetMaterial {
+                    id: 1,
+                    material: Some(params.clone()),
+                },
+            "the journal carries post-apply state, got {:?}",
+            entries[1].op
+        );
+        assert_eq!(
+            entries[2].op,
+            JournalOp::SetMaterial {
+                id: 1,
+                material: None
+            }
+        );
+
+        let recovered = load_from_dir(&dir).expect("recovering load");
+        assert_eq!(recovered.layers[0].stack, live);
         let _ = fs::remove_dir_all(&dir);
     }
 

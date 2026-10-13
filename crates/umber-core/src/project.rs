@@ -25,7 +25,7 @@
 //! (requirements.md §8: "save→load→export identical bytes"); see the
 //! round-trip tests at the bottom of this file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -206,6 +206,20 @@ pub struct ProjectModel {
     /// stays graph-agnostic). Empty for pre-graph projects; old files
     /// load unchanged via the `serde(default)` on the file schema.
     pub graphs_mtlx: Vec<String>,
+    /// Embedded dynamic-material definitions: `material_id` → the
+    /// definition graph's `.mtlx` string, opaque to umber-core (the
+    /// `graphs_mtlx` precedent). Saving writes every definition a layer
+    /// references, so a project opened on another machine evaluates
+    /// identically. `#[serde(default)]` on the file schema: pre-material
+    /// files load with an empty map, and the project version STAYS 1 (no
+    /// bump — bumping would make the new build refuse every existing
+    /// project, and serde does not need it).
+    ///
+    /// JUDGMENT CALL — a keyed sibling map over appending to `graphs_mtlx`:
+    /// `graphs_mtlx` is the Graph panel's unkeyed, panel-owned list, and
+    /// mixing material definitions into it would make the panel load them
+    /// as editable graphs and lose the `material_id` key.
+    pub material_defs_mtlx: BTreeMap<String, String>,
     /// The autosave journal's high-water mark: the seq of the last
     /// `journal.jsonl` entry this state already reflects (0 = none).
     /// Saves stamp it from the live journal; recovery advances it.
@@ -213,8 +227,9 @@ pub struct ProjectModel {
 }
 
 impl ProjectModel {
-    /// Builds a project at [`CURRENT_PROJECT_VERSION`], with no graphs
-    /// (use [`Self::with_graphs_mtlx`] to carry node graphs).
+    /// Builds a project at [`CURRENT_PROJECT_VERSION`], with no graphs and
+    /// no material definitions (use [`Self::with_graphs_mtlx`] /
+    /// [`Self::with_material_defs_mtlx`] to carry them).
     pub fn new(
         texture_sets: Vec<TextureSet>,
         layers: Vec<TextureSetLayers>,
@@ -226,6 +241,7 @@ impl ProjectModel {
             layers,
             settings,
             graphs_mtlx: Vec::new(),
+            material_defs_mtlx: BTreeMap::new(),
             journal_seq: 0,
         }
     }
@@ -235,6 +251,14 @@ impl ProjectModel {
     #[must_use]
     pub fn with_graphs_mtlx(mut self, graphs_mtlx: Vec<String>) -> Self {
         self.graphs_mtlx = graphs_mtlx;
+        self
+    }
+
+    /// Attaches embedded material-definition `.mtlx` strings, keyed by
+    /// `material_id` (builder).
+    #[must_use]
+    pub fn with_material_defs_mtlx(mut self, material_defs_mtlx: BTreeMap<String, String>) -> Self {
+        self.material_defs_mtlx = material_defs_mtlx;
         self
     }
 
@@ -261,6 +285,11 @@ struct ProjectFile {
     /// `default` keeps pre-graph files loading unchanged.
     #[serde(default)]
     graphs_mtlx: Vec<String>,
+    /// Additive dynamic-materials carry (see
+    /// [`ProjectModel::material_defs_mtlx`]): `default` keeps
+    /// pre-material files loading unchanged, at version 1.
+    #[serde(default)]
+    material_defs_mtlx: BTreeMap<String, String>,
     /// See [`ProjectModel::journal_seq`]. `default` (0) keeps
     /// pre-journal files loading unchanged.
     #[serde(default)]
@@ -519,6 +548,7 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
         layer_sets,
         settings: model.settings.clone(),
         graphs_mtlx: model.graphs_mtlx.clone(),
+        material_defs_mtlx: model.material_defs_mtlx.clone(),
         journal_seq: model.journal_seq,
     };
     write_atomic(&dir.join("project.json"), &to_pretty_json_bytes(&file)?)?;
@@ -592,6 +622,7 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
         layers,
         settings: file.settings,
         graphs_mtlx: file.graphs_mtlx,
+        material_defs_mtlx: file.material_defs_mtlx,
         journal_seq: file.journal_seq,
     };
     recover_from_journal(&mut model, dir);
@@ -716,12 +747,103 @@ mod tests {
                 .collect(),
             settings: model.settings.clone(),
             graphs_mtlx: model.graphs_mtlx.clone(),
+            material_defs_mtlx: model.material_defs_mtlx.clone(),
             journal_seq: model.journal_seq,
         };
 
         let bytes_1 = to_pretty_json_bytes(&file).unwrap();
         let bytes_2 = to_pretty_json_bytes(&file).unwrap();
         assert_eq!(bytes_1, bytes_2);
+    }
+
+    #[test]
+    fn pre_material_project_loads_load_identical_at_version_1() {
+        // Old files have no `material_defs_mtlx` key and no `material` key
+        // on layers: serde(default) yields an empty map and `None` — the
+        // same layers, kinds and ids, at the unchanged version 1.
+        use crate::layers::LayerKind;
+        let dir = unique_temp_dir("pre-material");
+        fs::create_dir_all(dir.join("layers").join("Body")).unwrap();
+        fs::write(
+            dir.join("project.json"),
+            br#"{"version":1,"texture_sets":[{"name":"Body","resolution":2048,"channels":[]}],"layer_sets":[{"texture_set":"Body","layer_ids":[0],"next_layer_id":1}],"settings":{"active_texture_set":null}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("layers").join("Body").join("0.json"),
+            br#"{"id":0,"name":"Base","kind":"Paint","opacity":1.0,"visible":true,"blend_mode":"Normal","mask":null,"fill":null}"#,
+        )
+        .unwrap();
+
+        let loaded = load_from_dir(&dir).expect("pre-material file must load");
+        assert_eq!(loaded.version, CURRENT_PROJECT_VERSION);
+        assert_eq!(loaded.version, 1, "no version bump for the material row");
+        assert!(loaded.material_defs_mtlx.is_empty());
+        assert_eq!(loaded.layers.len(), 1);
+        assert_eq!(loaded.layers[0].stack.layers.len(), 1);
+        let layer = &loaded.layers[0].stack.layers[0];
+        assert_eq!(layer.kind, LayerKind::Paint);
+        assert_eq!(layer.material, None);
+
+        // Re-saving writes no `"material"` key on the layer file.
+        save_to_dir(&loaded, &dir).expect("resave works");
+        let layer_json =
+            fs::read_to_string(dir.join("layers").join("Body").join("0.json")).unwrap();
+        assert!(
+            !layer_json.contains("material"),
+            "non-material layer files carry no material key, got {layer_json}"
+        );
+        let project_json = fs::read_to_string(dir.join("project.json")).unwrap();
+        assert!(
+            project_json.contains(r#""version": 1"#),
+            "re-saved project stays version 1, got {project_json}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn material_layer_and_definition_round_trip_exactly() {
+        // A project with a material layer + an embedded definition:
+        // save → load is exact on both, and save → load → save is
+        // byte-identical.
+        use crate::layers::{LayerKind, MaterialChannel, MaterialParams};
+        use std::collections::BTreeMap;
+        let mut model = fixture_model();
+        let steel = MaterialParams {
+            material_id: "umber.weathered-steel".into(),
+            channels: vec![MaterialChannel::named("baseColor")],
+            params: vec![],
+        };
+        let id = model.layers[0]
+            .stack
+            .add_layer("Steel", LayerKind::Material);
+        model.layers[0].stack.set_material(id, steel.clone());
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "umber.weathered-steel".into(),
+            "<materialx version=\"1.38\"></materialx>\n".to_string(),
+        );
+        model = model.with_material_defs_mtlx(defs);
+
+        let dir_a = unique_temp_dir("material-a");
+        let dir_b = unique_temp_dir("material-b");
+        save_to_dir(&model, &dir_a).expect("save material project");
+        let loaded = load_from_dir(&dir_a).expect("load material project");
+        assert_eq!(loaded, model, "material params + definition must survive");
+        assert_eq!(
+            loaded.layers[0].stack.layer(id).unwrap().material,
+            Some(steel)
+        );
+        assert_eq!(
+            loaded.material_defs_mtlx["umber.weathered-steel"],
+            "<materialx version=\"1.38\"></materialx>\n"
+        );
+        save_to_dir(&loaded, &dir_b).expect("resave material project");
+        assert_dirs_byte_identical(&dir_a, &dir_b);
+
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
     }
 
     #[test]

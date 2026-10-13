@@ -285,6 +285,7 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                     LayerKind::Paint => (tr("layers.kind-paint"), None),
                     LayerKind::Fill => (tr("layers.kind-fill"), None),
                     LayerKind::Folder { .. } => (tr("layers.kind-folder"), None),
+                    LayerKind::Material => (tr("layers.kind-material"), None),
                     LayerKind::Instance { source_id } => {
                         let source_name = match doc.stack.check_paintable(layer.id) {
                             Err(InstanceError::PaintOnInstance { source_id, .. }) => doc

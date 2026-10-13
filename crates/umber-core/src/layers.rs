@@ -54,6 +54,15 @@ pub enum LayerKind {
         /// The instanced layer's id (same texture set).
         source_id: u64,
     },
+    /// A live graph-declared material: writes one or more channels from
+    /// [`Layer::material`] (`Some` exactly for Material layers — the same
+    /// `#[serde(default)]` + inert-on-wrong-kind convention as
+    /// [`Layer::fill`]). A plain tag: the payload never rides the kind, so
+    /// the journal/project matches over `LayerKind` never churn when the
+    /// material model grows, no command mutates `kind` (re-pointing a layer
+    /// at another definition is an ordinary [`LayerCommand::SetMaterial`]),
+    /// and the by-value `match layer.kind` sites never bind a `String`.
+    Material,
 }
 
 /// Everything that can go wrong with layer instancing (§3:41).
@@ -91,6 +100,16 @@ pub enum InstanceError {
         instance: u64,
         /// The source to paint instead.
         source_id: u64,
+    },
+    /// Materials carry no paint pixels, only published graph outputs: there
+    /// is no source to redirect to (unlike [`InstanceError::PaintOnInstance`]),
+    /// so the error names only the layer. The field is `layer`, never
+    /// `source`: a struct-variant field named `source` becomes the error
+    /// source and breaks the thiserror derive for non-`Error` types.
+    #[error("layer {layer} is a material layer: materials publish graph outputs, they cannot be painted")]
+    PaintOnMaterial {
+        /// The material layer a paint was attempted on.
+        layer: u64,
     },
 }
 
@@ -692,6 +711,103 @@ pub fn mask_coverage(value: u8) -> f32 {
     f32::from(value) / 255.0
 }
 
+/// A dynamic material layer's per-layer parameters (requirements.md §2 P2
+/// row; `docs/specs/dynamic-materials-design.md` §1.1).
+///
+/// JUDGMENT CALL — a new [`LayerKind::Material`] variant rather than growing
+/// `FillParams`: a fill evaluates one RGBA result for one channel path while
+/// a material evaluates N per-channel results each with its own blend, so
+/// bolting N-channel semantics onto the fill pipeline would fork every
+/// branch of the fill refresh. The variant keeps the fill path untouched.
+///
+/// JUDGMENT CALL — the per-channel controls live ONLY here: not in the
+/// graph, not as mtlx nodedef inputs, not in the definition. One source of
+/// truth. When a layer's `channels` list disagrees with the definition's
+/// declared set, the definition wins: declared channels missing from the
+/// list use [`MaterialChannel::named`]'s defaults (Normal/1.0/enabled);
+/// listed channels the definition no longer declares are ignored.
+///
+/// Each material layer holds its own `MaterialParams`: definitions are
+/// embedded COPIES (editing the source graph after "save as material" does
+/// not propagate — the non-goal), and there is no material
+/// instancing/inheritance in v1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialParams {
+    /// Key into the project's embedded material definitions
+    /// (`ProjectModel::material_defs_mtlx`), e.g. `"umber.weathered-steel"`.
+    pub material_id: String,
+    /// Per-channel controls, one per channel the definition declares.
+    pub channels: Vec<MaterialChannel>,
+    /// Graph-param overrides on the embedded definition copy.
+    pub params: Vec<MaterialParamOverride>,
+}
+
+/// One declared channel's per-layer controls.
+///
+/// Defaults ([`MaterialChannel::named`]): `Normal` / `1.0` / enabled — the
+/// values a declared-but-unlisted channel evaluates with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialChannel {
+    /// A channel name of the layer's texture set.
+    pub name: String,
+    /// This channel's blend mode (default Normal).
+    pub blend: BlendMode,
+    /// This channel's opacity, multiplied by the layer opacity (default 1.0).
+    pub opacity: f32,
+    /// Disabled channels publish nothing (default true). An enable is not a
+    /// mask: per-channel mask planes are a named follow-up, while the
+    /// layer's single `LayerMask` gates every written channel.
+    pub enabled: bool,
+}
+
+impl MaterialChannel {
+    /// A channel entry with the definition-wins defaults (Normal / 1.0 /
+    /// enabled).
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            enabled: true,
+        }
+    }
+}
+
+/// One graph-param override on the embedded definition copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialParamOverride {
+    /// `umber_graph::Node::id` of the node carrying the param.
+    pub node_id: u64,
+    /// The node param name.
+    pub param: String,
+    /// The overriding value.
+    pub value: MaterialParamValue,
+}
+
+/// umber-core serde MIRROR of the overridable subset of
+/// `umber_graph::ParamValue` (umber-graph has no serde, and umber-core does
+/// not depend on umber-graph — the `AnchorRef` mirror precedent).
+///
+/// JUDGMENT CALL — only the six numeric variants: `NodeRef`, `Asset` and
+/// `Anchor` are graph STRUCTURE, edited in the definition, not per-layer
+/// overrides. An override naming a missing node or param is an eval error
+/// (whole-material no-op).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MaterialParamValue {
+    /// A scalar float.
+    Float(f32),
+    /// A 2-lane float vector.
+    Vec2([f32; 2]),
+    /// A 3-lane float vector.
+    Vec3([f32; 3]),
+    /// An RGB color triple.
+    Color([f32; 3]),
+    /// A scalar integer.
+    Int(i32),
+    /// A boolean.
+    Bool(bool),
+}
+
 /// One entry in a [`LayerStack`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
@@ -716,13 +832,25 @@ pub struct Layer {
     /// evaluatable fill.
     #[serde(default)]
     pub fill: Option<FillParams>,
+    /// The material parameters, `Some` exactly for [`LayerKind::Material`]
+    /// layers. `#[serde(default)]` so pre-material files (no such key)
+    /// load LOAD-IDENTICAL as material-less layers; `skip_serializing_if`
+    /// keeps re-saved non-material layer JSON free of a `"material": null`
+    /// key (the `fill` precedent writes `null` — materials do not repeat
+    /// it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<MaterialParams>,
 }
 
 impl Layer {
     /// Approximate RAM held by this layer, in bytes: the inline struct
-    /// plus heap name bytes plus the fill params' snapshot bytes (if any).
+    /// plus heap name bytes plus the fill params' snapshot bytes (if any)
+    /// plus the material params' heap (if any: the definition id, channel
+    /// names and override names — the embedded definition mtlx itself is
+    /// counted on the project, not per layer).
     /// See [`LayerStack::memory_bytes`] for the honesty contract (metadata
-    /// only, no GPU tiles yet).
+    /// only, no GPU tiles yet; the material eval cache is reported by the
+    /// app state, never here).
     pub fn memory_bytes(&self) -> usize {
         size_of::<Layer>()
             + self.name.len()
@@ -732,7 +860,26 @@ impl Layer {
                 .as_ref()
                 .map(FillParams::memory_bytes)
                 .unwrap_or(0)
+            + self.material.as_ref().map(material_bytes).unwrap_or(0)
     }
+}
+
+/// The heap bytes of a [`MaterialParams`] (the [`Layer::memory_bytes`]
+/// helper): inline vec storage plus every heap string. [`MaterialParamValue`]
+/// is inline (no heap), so overrides contribute their `param` names only.
+fn material_bytes(params: &MaterialParams) -> usize {
+    size_of::<MaterialParams>()
+        + params.material_id.len()
+        + params
+            .channels
+            .iter()
+            .map(|c| size_of::<MaterialChannel>() + c.name.len())
+            .sum::<usize>()
+        + params
+            .params
+            .iter()
+            .map(|o| size_of::<MaterialParamOverride>() + o.param.len())
+            .sum::<usize>()
 }
 
 /// An ordered stack of layers for one texture set.
@@ -811,6 +958,7 @@ impl LayerStack {
             blend_mode: BlendMode::Normal,
             mask: None,
             fill: None,
+            material: None,
         });
         id
     }
@@ -832,6 +980,7 @@ impl LayerStack {
             blend_mode: BlendMode::Normal,
             mask: None,
             fill: None,
+            material: None,
         });
         self.next_id = self.next_id.max(id + 1);
     }
@@ -901,6 +1050,20 @@ impl LayerStack {
         Some(layer.fill.replace(params))
     }
 
+    /// Sets a layer's material parameters, returning the previous value
+    /// (`None` when the layer had none — including non-material layers,
+    /// which accept the write but stay non-material: the evaluator only
+    /// runs `material` on [`LayerKind::Material`] layers, so a stray write
+    /// is inert data, never a behavior change — the `set_fill` convention).
+    pub fn set_material(
+        &mut self,
+        id: u64,
+        params: MaterialParams,
+    ) -> Option<Option<MaterialParams>> {
+        let layer = self.layer_mut(id)?;
+        Some(layer.material.replace(params))
+    }
+
     /// Attaches a fresh enabled mask named `name` to the layer, replacing
     /// any existing one. Returns the previous mask (`None` when there was
     /// none) — the undo handle. Unknown ids return `None` and change
@@ -968,6 +1131,7 @@ impl LayerStack {
             blend_mode: BlendMode::Normal,
             mask: None,
             fill: None,
+            material: None,
         });
         Ok(id)
     }
@@ -1184,12 +1348,21 @@ impl LayerStack {
 
     /// Rejects direct painting on an instance layer: instances carry no
     /// pixels, so a paint attempt is a typed error naming the source to
-    /// paint instead. `Ok(())` for paintable (non-instance) layers.
+    /// paint instead. Rejects direct painting on a material layer too:
+    /// materials carry no paint pixels, only published graph outputs
+    /// ([`InstanceError::PaintOnMaterial`]). `Ok(())` for paintable
+    /// (non-instance, non-material) layers.
+    ///
+    /// NOTE: called today only for a Layers-panel label and in tests — no
+    /// stroke path calls it. Wiring it into stroke begin is Kill B's. The
+    /// `_ => Ok(())` arm below means the compiler will not flag a future
+    /// variant here: keep this match exhaustive by hand.
     ///
     /// # Errors
     ///
     /// [`InstanceError::UnknownLayer`] for unknown ids;
-    /// [`InstanceError::PaintOnInstance`] for instances (names the source).
+    /// [`InstanceError::PaintOnInstance`] for instances (names the source);
+    /// [`InstanceError::PaintOnMaterial`] for materials.
     pub fn check_paintable(&self, id: u64) -> Result<(), InstanceError> {
         let layer = self.layer(id).ok_or(InstanceError::UnknownLayer(id))?;
         match &layer.kind {
@@ -1197,6 +1370,7 @@ impl LayerStack {
                 instance: id,
                 source_id: *source_id,
             }),
+            LayerKind::Material => Err(InstanceError::PaintOnMaterial { layer: id }),
             _ => Ok(()),
         }
     }
@@ -1285,6 +1459,19 @@ pub enum LayerCommand {
         /// Previous fill parameters (`None` when the layer had none),
         /// captured by `apply` for `revert`.
         old: Option<Option<FillParams>>,
+    },
+    /// Sets a layer's material parameters (definition id + per-channel
+    /// controls + graph-param overrides). Re-pointing a layer at another
+    /// definition is an ordinary `SetMaterial` (the kind tag never carries
+    /// the id, so no command mutates `kind`).
+    SetMaterial {
+        /// Id of the layer to update.
+        id: u64,
+        /// New material parameters.
+        new: MaterialParams,
+        /// Previous material parameters (`None` when the layer had none),
+        /// captured by `apply` for `revert`.
+        old: Option<Option<MaterialParams>>,
     },
     /// Retargets an instance layer onto a new source (§3:41). Cycle-safe:
     /// the apply reuses [`LayerStack::set_instance_source`], so a redo
@@ -1386,6 +1573,15 @@ impl LayerCommand {
         }
     }
 
+    /// Builds a [`SetMaterial`](LayerCommand::SetMaterial) command.
+    pub fn set_material(id: u64, params: MaterialParams) -> Self {
+        LayerCommand::SetMaterial {
+            id,
+            new: params,
+            old: None,
+        }
+    }
+
     /// Builds a [`SetInstanceSource`](LayerCommand::SetInstanceSource) command.
     pub fn set_instance_source(id: u64, source: u64) -> Self {
         LayerCommand::SetInstanceSource {
@@ -1440,6 +1636,9 @@ impl Command for LayerCommand {
             LayerCommand::SetVisible { id, new, old } => *old = doc.set_visible(*id, *new),
             LayerCommand::SetBlendMode { id, new, old } => *old = doc.set_blend_mode(*id, *new),
             LayerCommand::SetFill { id, new, old } => *old = doc.set_fill(*id, new.clone()),
+            LayerCommand::SetMaterial { id, new, old } => {
+                *old = doc.set_material(*id, new.clone());
+            }
             LayerCommand::SetInstanceSource { id, new, old } => {
                 *old = doc.set_instance_source(*id, *new).ok();
             }
@@ -1504,6 +1703,23 @@ impl Command for LayerCommand {
                         None => {
                             if let Some(layer) = doc.layer_mut(*id) {
                                 layer.fill = None;
+                            }
+                        }
+                    }
+                }
+            }
+            LayerCommand::SetMaterial { id, old, .. } => {
+                if let Some(previous) = old.take() {
+                    match previous {
+                        Some(params) => {
+                            doc.set_material(*id, params);
+                        }
+                        // The layer had no material params before: undo
+                        // removes what the apply set (the `SetFill`
+                        // pattern — `None`-before means absent-before).
+                        None => {
+                            if let Some(layer) = doc.layer_mut(*id) {
+                                layer.material = None;
                             }
                         }
                     }
@@ -1725,6 +1941,138 @@ mod tests {
         let back: FillParams = serde_json::from_value(unmasked).unwrap();
         assert_eq!(back.mask, None);
         assert_eq!(back, red);
+    }
+
+    /// A material layer's params: the plain-tag convention (`kind` carries
+    /// no payload) plus `SetMaterial` undo and the additive serde rule.
+    fn sample_material_params() -> MaterialParams {
+        MaterialParams {
+            material_id: "umber.weathered-steel".into(),
+            channels: vec![
+                MaterialChannel::named("baseColor"),
+                MaterialChannel {
+                    name: "roughness".into(),
+                    blend: BlendMode::Multiply,
+                    opacity: 0.5,
+                    enabled: false,
+                },
+            ],
+            params: vec![MaterialParamOverride {
+                node_id: 3,
+                param: "scale".into(),
+                value: MaterialParamValue::Float(4.0),
+            }],
+        }
+    }
+
+    #[test]
+    fn set_material_round_trips_through_undo_and_json() {
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Steel", LayerKind::Material);
+        assert_eq!(stack.layer(id).unwrap().material, None);
+
+        let steel = sample_material_params();
+        let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
+        undo.push(LayerCommand::set_material(id, steel.clone()), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().material, Some(steel.clone()));
+
+        let mut repointed = steel.clone();
+        repointed.material_id = "umber.clean-steel".into();
+        undo.push(
+            LayerCommand::set_material(id, repointed.clone()),
+            &mut stack,
+        );
+        assert_eq!(stack.layer(id).unwrap().material, Some(repointed));
+
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().material, Some(steel.clone()));
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().material, None);
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().material, Some(steel.clone()));
+
+        // JSON round-trip preserves the params …
+        let json = serde_json::to_string(stack.layer(id).unwrap()).unwrap();
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.material, Some(steel.clone()));
+        assert!(
+            json.contains(r#""material""#),
+            "material layers serialize the key"
+        );
+        // … pre-material saves (no `material` key) still load, as
+        // material-less layers — and re-saving a non-material layer writes
+        // no `"material"` key at all (unlike the `fill: null` precedent).
+        let legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut legacy = legacy.as_object().unwrap().clone();
+        legacy.remove("material");
+        let back: Layer = serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(back.material, None);
+        assert_eq!(back.kind, LayerKind::Material);
+        let mut paint = LayerStack::new();
+        let pid = paint.add_layer("Base", LayerKind::Paint);
+        let saved = serde_json::to_string(paint.layer(pid).unwrap()).unwrap();
+        assert!(
+            !saved.contains("material"),
+            "non-material layers must not serialize a material key, got {saved}"
+        );
+
+        // A stray write onto a non-material layer is inert data (the
+        // `set_fill` convention): accepted, never a behavior change.
+        assert_eq!(
+            paint.set_material(pid, steel.clone()),
+            Some(None),
+            "stray write reports the absent-before state"
+        );
+        assert_eq!(paint.layer(pid).unwrap().material, Some(steel));
+        assert_eq!(paint.layer(pid).unwrap().kind, LayerKind::Paint);
+    }
+
+    #[test]
+    fn material_channel_named_carries_the_definition_wins_defaults() {
+        // Declared-but-unlisted channels evaluate with Normal / 1.0 /
+        // enabled — pin the constructor so the driver default cannot drift.
+        let channel = MaterialChannel::named("roughness");
+        assert_eq!(channel.name, "roughness");
+        assert_eq!(channel.blend, BlendMode::Normal);
+        assert_eq!(channel.opacity, 1.0);
+        assert!(channel.enabled);
+        // Can-fail: deriving Default would pin opacity 0.0 + disabled,
+        // silently blacking out every unlisted channel.
+        assert_ne!(channel.opacity, 0.0);
+    }
+
+    #[test]
+    fn check_paintable_rejects_material_layers_with_a_typed_error() {
+        // §5.8's unit half: a material layer carries no paint pixels, only
+        // published outputs — painting it is a typed error (Kill B wires
+        // this into stroke begin and owns the stroke-level test).
+        let mut stack = LayerStack::new();
+        let paint = stack.add_layer("Base", LayerKind::Paint);
+        let material = stack.add_layer("Steel", LayerKind::Material);
+        assert_eq!(stack.check_paintable(paint), Ok(()));
+        assert_eq!(
+            stack.check_paintable(material),
+            Err(InstanceError::PaintOnMaterial { layer: material })
+        );
+        assert_eq!(
+            stack.check_paintable(999),
+            Err(InstanceError::UnknownLayer(999))
+        );
+    }
+
+    #[test]
+    fn material_memory_bytes_counts_heap_without_double_counting_tiles() {
+        // Metadata only (names + vec storage): the embedded definition mtlx
+        // lives on the project, and the eval cache on the app state.
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Steel", LayerKind::Material);
+        let bare = stack.layer(id).unwrap().memory_bytes();
+        stack.set_material(id, sample_material_params());
+        let with = stack.layer(id).unwrap().memory_bytes();
+        assert!(with > bare, "params must add heap bytes");
+        let params = sample_material_params();
+        let expect = bare + material_bytes(&params);
+        assert_eq!(with, expect, "every heap string counted exactly once");
     }
 
     fn blend(mode: BlendMode, src: f32, dst: f32) -> f32 {
