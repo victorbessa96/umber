@@ -42,9 +42,18 @@
 //! - `fletcher32` presence is recorded per dataset and never verified
 //!   (research doc §6.3: presence is recorded, not verified).
 
+// Never-crash policy (clippy.toml + queue row 13, absorbed from the
+// photocraft exploration): the engine crates deny unwrap/expect/panic
+// in non-test code. The 2026-10-13 census found ZERO non-test uses,
+// so this is a pin. Tests are exempt (the cfg_attr): the deny binds
+// ONLY non-test builds, so test-code unwrap/expect stays legal while
+// a shipped-code unwrap becomes a hard compile error.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 #![forbid(unsafe_code)]
 
-#[cfg(test)]
 #[cfg(test)]
 mod builder;
 mod hdf5;

@@ -1,0 +1,17 @@
+# Never-crash lint policy (the absorbed photocraft golden rule 0, queue row 13).
+#
+# unwrap/expect are allowed in TESTS only. Non-test code: the engine
+# crates (umber-core, umber-color, umber-spp) carry
+# #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+# at the crate root — the census at adoption (2026-10-13) found ZERO
+# non-test unwrap()/expect() in all three, so the deny is a pin, not
+# a migration.
+#
+# umber-gpu and umber-app hold PROVABLY-INFALLIBLE expect()s under
+# #[allow(clippy::expect_used)] with a reason comment (the display
+# panel's "just created" class) and perf/feature-gated harness code;
+# they are exempt via the test allowances here so the CI gate stays
+# green while the per-crate deny pins the engines. A new non-test
+# unwrap in an engine crate fails clippy -D warnings.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

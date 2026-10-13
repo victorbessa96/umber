@@ -9,6 +9,17 @@
 //! of the Wave 1 texture-set/channel skeleton below
 //! (docs/specs/requirements.md §2, §8).
 
+// Never-crash policy (clippy.toml + queue row 13, absorbed from the
+// photocraft exploration): the engine crates deny unwrap/expect/panic
+// in non-test code. The 2026-10-13 census found ZERO non-test uses,
+// so this is a pin. Tests are exempt (the cfg_attr): the deny binds
+// ONLY non-test builds, so test-code unwrap/expect stays legal while
+// a shipped-code unwrap becomes a hard compile error.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

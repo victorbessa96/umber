@@ -1113,9 +1113,21 @@ impl LayerStack {
         let mut indegree: HashMap<u64, usize> = instances.iter().map(|&id| (id, 0)).collect();
         let mut outs: HashMap<u64, Vec<u64>> = HashMap::new();
         for &id in &instances {
-            let src = self.instance_source(id).expect("instance checked");
+            let Some(src) = self.instance_source(id) else {
+                // Unreachable (validated above) but LOUD, never a panic:
+                // a legacy file with an instance kind but no source key
+                // fails the sweep, not the app.
+                return Err(InstanceError::UnknownSource {
+                    instance: id,
+                    source_id: id,
+                });
+            };
             if in_set.contains(&src) {
-                *indegree.get_mut(&id).expect("instance keyed") += 1;
+                // `id` keys `indegree` by construction (the loop's
+                // own collect above); the get cannot miss.
+                if let Some(d) = indegree.get_mut(&id) {
+                    *d += 1;
+                }
                 outs.entry(src).or_default().push(id);
             }
         }
@@ -1133,7 +1145,13 @@ impl LayerStack {
                 let mut next = next.clone();
                 next.sort_unstable();
                 for to in next {
-                    let d = indegree.get_mut(&to).expect("instance keyed");
+                    // Only in-set instances land in `outs` (the entry
+                    // above is gated on in_set), so `to` keys `indegree`
+                    // by construction; a miss would be a logic bug, and
+                    // skipping it keeps the sweep total.
+                    let Some(d) = indegree.get_mut(&to) else {
+                        continue;
+                    };
                     *d -= 1;
                     if *d == 0 {
                         queue.push(to);
