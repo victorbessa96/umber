@@ -44,8 +44,9 @@ pub mod tile_pool;
 
 pub use camera::{world_from_ndc, OrbitCamera};
 pub use compositor::{
-    blend_mode_id, composite_pixel, composite_stack_cpu, f32_to_u8, u8_to_f32, CompositeError,
-    CpuStackLayer, GpuStackLayer, StackCompositor, COMPOSITE_ENTRY, COMPOSITE_WGSL,
+    blend_mode_id, composite_pixel, composite_pixel_masked, composite_stack_cpu, f32_to_u8,
+    u8_to_f32, CompositeError, CpuStackLayer, GpuStackLayer, StackCompositor, COMPOSITE_ENTRY,
+    COMPOSITE_WGSL,
 };
 pub use display_lut::{identity_lut_bytes, DisplayLut, DISPLAY_LUT_BYTES};
 pub use graph_eval::{

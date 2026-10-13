@@ -656,15 +656,38 @@ impl BlendMode {
 
 /// A paint mask attached to a layer.
 ///
-/// Pixel data lives in the tile pool (painting core, Wave 2); this is only
-/// the metadata half — name and whether the mask currently affects
-/// compositing.
+/// The metadata half: name and whether the mask currently affects
+/// compositing. The pixel half — one grayscale `u8` plane per painted
+/// tile, keyed `(layer id, tile)` at the tile's set size — lives in the
+/// app's tile pool (`umber-app`'s `PaintState::layer_masks`, the
+/// per-channel pool's neighbor): `umber-core` is the dependency-minimal
+/// document model and owns no GPU or tile concepts, so planes cannot live
+/// here. An attached mask with no plane yet reads as fully white (a
+/// no-op gate) — attaching must never black out the layer. The
+/// compositor multiplies the layer's coverage by
+/// [`mask_coverage`] per texel while [`LayerMask::gates`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayerMask {
     /// Display name, shown in the layer-stack panel next to the layer's own.
     pub name: String,
     /// Whether the mask currently affects compositing.
     pub enabled: bool,
+}
+
+impl LayerMask {
+    /// Whether this mask gates its layer's compositing right now: present
+    /// and enabled. A disabled mask keeps its pixels (paint and save carry
+    /// them) but composites exactly as if absent.
+    pub fn gates(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// One grayscale mask byte as coverage: `0` = fully gated (the texel
+/// contributes nothing), `255` = fully open. The compositor's per-texel
+/// gate multiplies the layer's coverage (`src_alpha × opacity`) by this.
+pub fn mask_coverage(value: u8) -> f32 {
+    f32::from(value) / 255.0
 }
 
 /// One entry in a [`LayerStack`].
@@ -874,6 +897,41 @@ impl LayerStack {
     pub fn set_fill(&mut self, id: u64, params: FillParams) -> Option<Option<FillParams>> {
         let layer = self.layer_mut(id)?;
         Some(layer.fill.replace(params))
+    }
+
+    /// Attaches a fresh enabled mask named `name` to the layer, replacing
+    /// any existing one. Returns the previous mask (`None` when there was
+    /// none) — the undo handle. Unknown ids return `None` and change
+    /// nothing.
+    ///
+    /// The pixels are NOT created here (see [`LayerMask`]: planes live in
+    /// the app's mask pool and materialize white on the first mask stroke,
+    /// so attaching is a no-op gate until painted).
+    pub fn attach_mask(&mut self, id: u64, name: impl Into<String>) -> Option<Option<LayerMask>> {
+        let layer = self.layer_mut(id)?;
+        Some(layer.mask.replace(LayerMask {
+            name: name.into(),
+            enabled: true,
+        }))
+    }
+
+    /// Removes the layer's mask, returning it (`None` when there was none
+    /// — including unknown ids, which change nothing).
+    ///
+    /// The pixels are NOT dropped here either (same split as
+    /// [`Self::attach_mask`]): the app prunes the mask pool against live
+    /// layers on save, so an undone detach finds its planes intact.
+    pub fn detach_mask(&mut self, id: u64) -> Option<LayerMask> {
+        self.layer_mut(id)?.mask.take()
+    }
+
+    /// Enables or disables the layer's mask, returning the previous flag.
+    /// `None` when the layer is unknown or has no mask (nothing changes).
+    pub fn set_mask_enabled(&mut self, id: u64, enabled: bool) -> Option<bool> {
+        let mask = self.layer_mut(id)?.mask.as_mut()?;
+        let old = mask.enabled;
+        mask.enabled = enabled;
+        Some(old)
     }
 
     /// Pushes a new instance layer onto the top of the stack, rendering
@@ -1219,6 +1277,33 @@ pub enum LayerCommand {
         /// Previous source, captured by `apply` for `revert`.
         old: Option<u64>,
     },
+    /// Attaches a fresh enabled mask to a layer (see
+    /// [`LayerStack::attach_mask`]).
+    AttachMask {
+        /// Id of the layer gaining the mask.
+        id: u64,
+        /// Name of the new mask.
+        name: String,
+        /// Previous mask, captured by `apply` for `revert`.
+        old: Option<Option<LayerMask>>,
+    },
+    /// Removes a layer's mask (see [`LayerStack::detach_mask`]).
+    DetachMask {
+        /// Id of the layer losing the mask.
+        id: u64,
+        /// Removed mask, captured by `apply` for `revert`.
+        removed: Option<LayerMask>,
+    },
+    /// Enables or disables a layer's mask (see
+    /// [`LayerStack::set_mask_enabled`]).
+    SetMaskEnabled {
+        /// Id of the layer whose mask flips.
+        id: u64,
+        /// New flag value.
+        new: bool,
+        /// Previous flag, captured by `apply` for `revert`.
+        old: Option<bool>,
+    },
 }
 
 impl LayerCommand {
@@ -1289,6 +1374,29 @@ impl LayerCommand {
             old: None,
         }
     }
+
+    /// Builds an [`AttachMask`](LayerCommand::AttachMask) command.
+    pub fn attach_mask(id: u64, name: impl Into<String>) -> Self {
+        LayerCommand::AttachMask {
+            id,
+            name: name.into(),
+            old: None,
+        }
+    }
+
+    /// Builds a [`DetachMask`](LayerCommand::DetachMask) command.
+    pub fn detach_mask(id: u64) -> Self {
+        LayerCommand::DetachMask { id, removed: None }
+    }
+
+    /// Builds a [`SetMaskEnabled`](LayerCommand::SetMaskEnabled) command.
+    pub fn set_mask_enabled(id: u64, enabled: bool) -> Self {
+        LayerCommand::SetMaskEnabled {
+            id,
+            new: enabled,
+            old: None,
+        }
+    }
 }
 
 impl Command for LayerCommand {
@@ -1314,6 +1422,15 @@ impl Command for LayerCommand {
             LayerCommand::SetFill { id, new, old } => *old = doc.set_fill(*id, new.clone()),
             LayerCommand::SetInstanceSource { id, new, old } => {
                 *old = doc.set_instance_source(*id, *new).ok();
+            }
+            LayerCommand::AttachMask { id, name, old } => {
+                *old = doc.attach_mask(*id, name.clone());
+            }
+            LayerCommand::DetachMask { id, removed } => {
+                *removed = doc.detach_mask(*id);
+            }
+            LayerCommand::SetMaskEnabled { id, new, old } => {
+                *old = doc.set_mask_enabled(*id, *new);
             }
         }
     }
@@ -1378,6 +1495,36 @@ impl Command for LayerCommand {
                     // apply, it goes through the cycle guard (a redo/undo
                     // pair that now cycles is ignored, never forced).
                     let _ = doc.set_instance_source(*id, previous);
+                }
+            }
+            LayerCommand::AttachMask { id, old, .. } => {
+                if let Some(previous) = old.take() {
+                    match previous {
+                        Some(mask) => {
+                            if let Some(layer) = doc.layer_mut(*id) {
+                                layer.mask = Some(mask);
+                            }
+                        }
+                        // No mask before: undo removes what the apply
+                        // attached (there is no "clear mask" mutator —
+                        // `None`-before means absent-before, the `SetFill`
+                        // pattern).
+                        None => {
+                            doc.detach_mask(*id);
+                        }
+                    }
+                }
+            }
+            LayerCommand::DetachMask { id, removed, .. } => {
+                if let Some(mask) = removed.take() {
+                    if let Some(layer) = doc.layer_mut(*id) {
+                        layer.mask = Some(mask);
+                    }
+                }
+            }
+            LayerCommand::SetMaskEnabled { id, old, .. } => {
+                if let Some(value) = old.take() {
+                    doc.set_mask_enabled(*id, value);
                 }
             }
         }
@@ -1563,6 +1710,100 @@ mod tests {
     fn blend(mode: BlendMode, src: f32, dst: f32) -> f32 {
         mode.blend_channel(src, dst)
             .unwrap_or_else(|| panic!("{mode:?} should be a separable pixel op"))
+    }
+
+    #[test]
+    fn mask_coverage_pins_endpoints_and_midpoint() {
+        // Exact: 0 -> 0.0, 255 -> 1.0, 128 -> 128/255 (the compositor's
+        // half-mask golden depends on this exact fraction).
+        assert_eq!(mask_coverage(0), 0.0);
+        assert_eq!(mask_coverage(255), 1.0);
+        assert_eq!(mask_coverage(128), 128.0 / 255.0);
+        // Can-fail: integer division (`v / 255`) would pin every partial
+        // mask to 0.0 and gate every masked layer shut.
+        assert!(
+            mask_coverage(1) > 0.0,
+            "a 1/255 mask must gate almost-shut, not fully shut"
+        );
+    }
+
+    #[test]
+    fn mask_gates_reports_the_enabled_flag() {
+        let on = LayerMask {
+            name: "m".to_string(),
+            enabled: true,
+        };
+        let off = LayerMask {
+            name: "m".to_string(),
+            enabled: false,
+        };
+        assert!(on.gates());
+        assert!(!off.gates());
+    }
+
+    #[test]
+    fn mask_attach_detach_toggle_round_trip_through_undo_and_json() {
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Base", LayerKind::Paint);
+        assert_eq!(stack.layer(id).unwrap().mask, None);
+
+        // Attach replaces and reports the previous mask.
+        assert_eq!(stack.attach_mask(id, "m1"), Some(None));
+        let first = stack.layer(id).unwrap().mask.clone().unwrap();
+        assert_eq!(first.name, "m1");
+        assert!(first.enabled);
+        assert!(first.gates());
+        assert_eq!(
+            stack.attach_mask(id, "m2"),
+            Some(Some(first.clone())),
+            "re-attaching must report the replaced mask"
+        );
+        assert_eq!(stack.layer(id).unwrap().mask.as_ref().unwrap().name, "m2");
+
+        // Toggle reports the previous flag; unknown ids and mask-less
+        // layers change nothing and report None.
+        assert_eq!(stack.set_mask_enabled(id, false), Some(true));
+        assert!(!stack.layer(id).unwrap().mask.as_ref().unwrap().gates());
+        assert_eq!(stack.set_mask_enabled(id, false), Some(false));
+        let bare = stack.add_layer("Bare", LayerKind::Paint);
+        assert_eq!(stack.set_mask_enabled(bare, false), None);
+        assert_eq!(stack.attach_mask(999, "x"), None);
+        assert_eq!(stack.detach_mask(999), None);
+        assert_eq!(stack.detach_mask(bare), None);
+
+        // Detach returns the mask verbatim.
+        let detached = stack.detach_mask(id).expect("mask present");
+        assert_eq!(detached.name, "m2");
+        assert!(!detached.enabled);
+        assert_eq!(stack.layer(id).unwrap().mask, None);
+
+        // Undo journal round-trip across all three commands.
+        let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
+        undo.push(LayerCommand::attach_mask(id, "u"), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().mask.as_ref().unwrap().name, "u");
+        undo.push(LayerCommand::set_mask_enabled(id, false), &mut stack);
+        assert!(!stack.layer(id).unwrap().mask.as_ref().unwrap().enabled);
+        undo.push(LayerCommand::detach_mask(id), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().mask, None);
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().mask.as_ref().unwrap().name, "u");
+        assert!(undo.undo(&mut stack));
+        assert!(stack.layer(id).unwrap().mask.as_ref().unwrap().enabled);
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().mask, None);
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().mask.as_ref().unwrap().name, "u");
+
+        // JSON round-trip preserves the mask; pre-mask saves (no `mask`
+        // key) still load as mask-less layers.
+        let json = serde_json::to_string(stack.layer(id).unwrap()).unwrap();
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mask.as_ref().unwrap().name, "u");
+        let legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut legacy = legacy.as_object().unwrap().clone();
+        legacy.remove("mask");
+        let back: Layer = serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(back.mask, None);
     }
 
     #[test]

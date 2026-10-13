@@ -15,6 +15,7 @@ use umber_core::undo::UndoStack;
 
 use crate::history_panel::{HistoryKind, SessionHistory};
 use crate::i18n::{tr, tr_args};
+use crate::paint_state::PaintState;
 
 /// The open document: layer stack + undo history + autosave journal.
 ///
@@ -358,6 +359,112 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                 name,
                 LayerKind::Instance { source_id: source },
             ));
+        }
+    }
+}
+
+/// Draws the layer-mask section under the Layers panel: per-layer mask
+/// attach / enable-toggle / edit-select / remove.
+///
+/// Mask METADATA edits (attach, detach, enable) run undoably through the
+/// document journal ([`LayerCommand`]); the edit SELECTION is session
+/// state on the paint session ([`PaintState::set_mask_edit_layer`]), and
+/// detaching also drops the layer's planes there (a re-attach starts
+/// white). Strokes route to the selected layer's plane — see
+/// `paint_state`'s layer-mask docs. New `tr("layers.*")` keys are listed
+/// in the kill report's Doc deltas (the dragon owns the `.ftl` edits).
+pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintState) {
+    ui.separator();
+    ui.label(tr("layers.masks-section"));
+    // Snapshot the rows first so command runs below can't borrow-conflict
+    // with the iteration (the `layers_ui` E0502 pattern).
+    #[derive(Clone)]
+    struct MaskRow {
+        id: u64,
+        name: String,
+        mask_name: Option<String>,
+        mask_enabled: bool,
+        editing: bool,
+    }
+    let editing = paint.mask_edit_layer();
+    let rows: Vec<MaskRow> = doc
+        .layers()
+        .iter()
+        .rev()
+        .map(|layer| MaskRow {
+            id: layer.id,
+            name: layer.name.clone(),
+            mask_name: layer.mask.as_ref().map(|m| m.name.clone()),
+            mask_enabled: layer.mask.as_ref().is_some_and(|m| m.enabled),
+            editing: editing == Some(layer.id),
+        })
+        .collect();
+    enum MaskAction {
+        Attach(u64, String),
+        Toggle(u64, bool),
+        Select(Option<u64>),
+        Detach(u64),
+    }
+    let mut actions: Vec<MaskAction> = Vec::new();
+    for row in &rows {
+        ui.horizontal(|ui| {
+            ui.label(&row.name);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match &row.mask_name {
+                    None => {
+                        if ui.small_button(tr("layers.mask-add")).clicked() {
+                            let name = tr_args(
+                                "layers.mask-default-name",
+                                [("layer", FluentValue::from(row.name.as_str()))],
+                            );
+                            actions.push(MaskAction::Attach(row.id, name));
+                        }
+                    }
+                    Some(mask_name) => {
+                        if ui.small_button(tr("layers.mask-remove")).clicked() {
+                            actions.push(MaskAction::Detach(row.id));
+                        }
+                        if ui
+                            .small_button(if row.editing {
+                                tr("layers.mask-done")
+                            } else {
+                                tr("layers.mask-edit")
+                            })
+                            .clicked()
+                        {
+                            actions.push(MaskAction::Select(if row.editing {
+                                None
+                            } else {
+                                Some(row.id)
+                            }));
+                        }
+                        let label = if row.mask_enabled { "◐" } else { "○" };
+                        if ui.selectable_label(row.mask_enabled, label).clicked() {
+                            actions.push(MaskAction::Toggle(row.id, !row.mask_enabled));
+                        }
+                        ui.label(
+                            egui::RichText::new(mask_name.as_str())
+                                .small()
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                    }
+                }
+            });
+        });
+    }
+    for action in actions {
+        match action {
+            MaskAction::Attach(id, name) => {
+                doc.run(LayerCommand::attach_mask(id, name));
+            }
+            MaskAction::Toggle(id, enabled) => {
+                doc.run(LayerCommand::set_mask_enabled(id, enabled));
+            }
+            MaskAction::Select(layer) => paint.set_mask_edit_layer(layer),
+            MaskAction::Detach(id) => {
+                doc.run(LayerCommand::detach_mask(id));
+                paint.remove_layer_masks(id);
+            }
         }
     }
 }

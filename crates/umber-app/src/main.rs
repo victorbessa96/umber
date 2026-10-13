@@ -300,7 +300,15 @@ impl TabViewer for PanelViewer<'_> {
                 Some(&mut *self.polygon_fill),
                 Some(&mut *self.path_tool),
             ),
-            Panel::LayerStack => document::layers_ui(ui, self.doc),
+            Panel::LayerStack => {
+                document::layers_ui(ui, self.doc);
+                // Layer masks need the paint session too (the edit
+                // selection is session state there); without one the
+                // metadata rows have nothing to route strokes to.
+                if let Some(paint) = self.paint.as_deref_mut() {
+                    document::layer_mask_ui(ui, self.doc, paint);
+                }
+            }
             Panel::Properties => {
                 self.brush.show(ui, self.paint.as_deref_mut());
                 // The paint session adopts the panel's tool and symmetry
@@ -889,6 +897,48 @@ fn parse_paint_tile_name(name: &str) -> Option<u16> {
     rest.parse::<u16>().ok()
 }
 
+/// The sidecar PNG for one layer-mask plane: `paint/mask-<layer>-tile-<N>.png`
+/// (flat, not nested: mask planes are single-channel `u8` stored as RGBA8
+/// PNGs through the same writer the paint tiles use, and the flat `mask-`
+/// prefix keeps [`parse_paint_tile_name`] — which requires the `tile-`
+/// prefix — from ever colliding, while [`collect_paint_tiles`] skips them
+/// for the same reason: masks restore through their own pass, never as
+/// paint).
+fn paint_mask_name(layer: u64, tile: u16) -> String {
+    format!("mask-{layer}-tile-{tile}.png")
+}
+
+/// The sidecar path of [`paint_mask_name`].
+fn paint_mask_path(project_dir: &Path, layer: u64, tile: u16) -> PathBuf {
+    paint_sidecar_dir(project_dir).join(paint_mask_name(layer, tile))
+}
+
+/// Parses [`paint_mask_name`]'s output back to `(layer, tile)`; `None`
+/// for anything else (paint tiles, size files, temps, foreign files).
+fn parse_paint_mask_name(name: &str) -> Option<(u64, u16)> {
+    let rest = name.strip_prefix("mask-")?.strip_suffix(".png")?;
+    let (layer, tile) = rest.split_once("-tile-")?;
+    Some((layer.parse::<u64>().ok()?, tile.parse::<u16>().ok()?))
+}
+
+/// Expands one grayscale mask plane to RGBA8 (gray in RGB, opaque alpha)
+/// for the Linear-transfer PNG writer the paint tiles use — the mask
+/// sidecar stays decodable by the same reader.
+fn mask_to_rgba(values: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for &v in values {
+        out.extend_from_slice(&[v, v, v, 255]);
+    }
+    out
+}
+
+/// Takes the red channel back out of a decoded mask PNG (the inverse of
+/// [`mask_to_rgba`] — writer and reader agree the plane rides in R; G and
+/// B are the same gray by construction, alpha is the constant 255).
+fn rgba_to_mask(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4).map(|px| px[0]).collect()
+}
+
 /// The sidecar file holding the PER-SET paint-target sizes
 /// (`<project>/paint/target_sizes.txt`): one `<set>=<width>x<height>`
 /// line per sized set plus one `tile-<N>=<set>` assignment line per saved
@@ -981,6 +1031,8 @@ struct PaintTileSkip {
 struct PaintLoadReport {
     /// Tiles uploaded byte-identically.
     restored: usize,
+    /// Layer-mask planes uploaded byte-identically.
+    masks_restored: usize,
     /// Tiles skipped for size mismatch (loud — logged per tile).
     skipped: Vec<PaintTileSkip>,
 }
@@ -1080,11 +1132,13 @@ fn paint_manifest_path(project_dir: &Path) -> PathBuf {
 
 /// Whether `name` is a file a paint commit may write under `paint/`: a
 /// flat or channel-qualified `tile-<N>.png` (see
-/// [`parse_paint_sidecar_name`]) or one of the two size files. Recovery
+/// [`parse_paint_sidecar_name`]), a layer-mask `mask-<layer>-tile-<N>.png`
+/// (see [`parse_paint_mask_name`]), or one of the two size files. Recovery
 /// refuses a manifest naming anything else (a hand-edited `../x` never
 /// escapes the folder).
 fn is_paint_sidecar_name(name: &str) -> bool {
     parse_paint_sidecar_name(name).is_some()
+        || parse_paint_mask_name(name).is_some()
         || name == "target_size.txt"
         || name == "target_sizes.txt"
 }
@@ -1294,6 +1348,9 @@ fn commit_paint_manifest(project_dir: &Path, entries: &[PaintCommitEntry]) -> st
 /// the SAME relative name the manifest uses: a flat `tile-<N>.png` at the
 /// top level, or `<channel>/tile-<N>.png` one level into a channel
 /// subdirectory — exactly as deep as the per-channel layout ever nests.
+/// Layer-mask `mask-<layer>-tile-<N>.png` files are listed too (flat, top
+/// level only): the prune step must drop a detached layer's mask just
+/// like a dropped tile, or re-saves resurrect dead masks.
 /// Used by the prune step so a dropped tile OR a dropped channel's tile
 /// is pruned regardless of which directory it lives in.
 fn list_paint_tile_names(dir: &Path) -> std::io::Result<Vec<String>> {
@@ -1309,6 +1366,8 @@ fn list_paint_tile_names(dir: &Path) -> std::io::Result<Vec<String>> {
                 }
             }
         } else if parse_paint_tile_name(&name).is_some() {
+            names.push(name);
+        } else if parse_paint_mask_name(&name).is_some() {
             names.push(name);
         }
     }
@@ -1531,6 +1590,40 @@ fn commit_paint_tiles(
             saved += 1;
         }
     }
+    // Layer masks ride as their own flat sub-namespace (`mask-<layer>-
+    // tile-<N>.png` — see `paint_mask_name`): one Linear-transfer PNG per
+    // materialized plane, gray-expanded through `mask_to_rgba`. Only live
+    // layers' planes are staged — the caller prunes orphans against the
+    // document first (see `save_project`), so a deleted layer's mask can
+    // never be re-committed here (and the apply step prunes whatever the
+    // manifest does not list). A plane whose size disagrees with its tile
+    // is skipped loudly, like a failed readback (a torn plane must never
+    // gate the wrong texels on open).
+    for (layer, tile) in paint.layer_mask_tiles() {
+        let name = paint_mask_name(layer, tile);
+        let Some(plane) = paint.layer_mask(layer, tile) else {
+            continue;
+        };
+        let (width, height) = paint.tile_size(tile);
+        if plane.len() != width as usize * height as usize {
+            log::warn!(
+                "paint save: mask {layer}/tile {tile} is {} bytes, want {}x{}; skipping",
+                plane.len(),
+                width,
+                height
+            );
+            continue;
+        }
+        entries.push(stage_paint_png(
+            project_dir,
+            &store,
+            &name,
+            width,
+            height,
+            &mask_to_rgba(plane),
+        )?);
+        saved += 1;
+    }
     commit_paint_manifest(project_dir, &entries)?;
     // Committed: from here an interruption rolls forward on the next open.
     if let Err(e) = apply_paint_commit(project_dir, None) {
@@ -1620,6 +1713,33 @@ fn collect_paint_tiles(
     found
 }
 
+/// Every `(layer, tile)` mask artifact currently on disk under `dir`:
+/// flat `mask-<layer>-tile-<N>.png` files only (masks never nest — see
+/// [`paint_mask_name`]). Decoded like paint tiles (the PNG reader's row
+/// order flipped back); a decode failure skips that plane loudly.
+fn collect_paint_masks(
+    dir: &Path,
+) -> std::collections::BTreeMap<(u64, u16), (u32, u32, Vec<u8>)> {
+    let mut found = std::collections::BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((layer, tile)) = parse_paint_mask_name(&name) else {
+            continue;
+        };
+        if let Some(decoded) = decode_paint_png(&path) {
+            found.insert((layer, tile), decoded);
+        }
+    }
+    found
+}
+
 fn load_paint_tiles_reported(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
@@ -1630,11 +1750,12 @@ fn load_paint_tiles_reported(
     recover_paint_sidecar(project_dir);
     let dir = paint_sidecar_dir(project_dir);
     let found = collect_paint_tiles(&dir);
+    let masks = collect_paint_masks(&dir);
     let mapping = std::fs::read_to_string(paint_set_sizes_path(project_dir))
         .ok()
         .and_then(|text| parse_paint_set_sizes(&text));
     let active = paint.active_set().to_string();
-    if found.is_empty() {
+    if found.is_empty() && masks.is_empty() {
         // No paint persisted: the newly opened document must not show the
         // previous document's pixels (the layer stack is replaced
         // wholesale on open; the paint follows the same rule).
@@ -1767,6 +1888,28 @@ fn load_paint_tiles_reported(
             log::warn!("paint open: tile {tile}/{channel} upload failed; skipping");
         }
     }
+    // Layer masks restore through the size-checked publish path (the
+    // plane rides in the PNG's red channel — see `rgba_to_mask`); a plane
+    // whose dims disagree with its tile's set size is skipped loudly, the
+    // same rule as paint tiles. Masks for layers the document no longer
+    // holds stay session-side here — the caller prunes them against the
+    // loaded stack (see `open_project`), so a previous document's masks
+    // never gate the new one.
+    for ((layer, tile), (width, height, bytes)) in masks {
+        let expected = paint.tile_size(tile);
+        if (width, height) != expected {
+            let (ew, eh) = expected;
+            log::warn!(
+                "paint open: mask {layer}/tile {tile} is {width}x{height}, want {ew}x{eh}; skipping"
+            );
+            continue;
+        }
+        if paint.publish_layer_mask(layer, tile, rgba_to_mask(&bytes)) {
+            report.masks_restored += 1;
+        } else {
+            log::warn!("paint open: mask {layer}/tile {tile} upload failed; skipping");
+        }
+    }
     if let Err(e) = paint.process_pending() {
         log::warn!("paint open: upload drain failed: {e:#}");
     }
@@ -1835,6 +1978,19 @@ impl UmberApp {
                 // the metadata save and leaves the old paint intact — the
                 // cross-commit window is in the module docs).
                 if let Some(paint) = self.state.paint.as_mut() {
+                    // Layer-mask planes for deleted layers prune here, not
+                    // in the sidecar walk: only live layers' masks commit
+                    // (a re-save never resurrects a detached mask — the
+                    // apply step prunes whatever the manifest omits).
+                    let live: std::collections::HashSet<u64> = self
+                        .state
+                        .doc
+                        .stack
+                        .layers
+                        .iter()
+                        .map(|layer| layer.id)
+                        .collect();
+                    paint.prune_layer_masks(&live);
                     let tiles = save_paint_tiles(paint, &dir);
                     log::info!("paint saved: {tiles} tile(s)");
                 }
@@ -1919,6 +2075,18 @@ impl UmberApp {
                 if let Some(paint) = self.state.paint.as_mut() {
                     let tiles = load_paint_tiles(paint, &dir);
                     log::info!("paint restored: {tiles} tile(s)");
+                    // Masks restore session-side keyed by layer id: drop
+                    // whatever the loaded stack no longer holds, so a
+                    // previous document's masks never gate the new one.
+                    let live: std::collections::HashSet<u64> = self
+                        .state
+                        .doc
+                        .stack
+                        .layers
+                        .iter()
+                        .map(|layer| layer.id)
+                        .collect();
+                    paint.prune_layer_masks(&live);
                 }
                 if let Some(doc) = model.graphs_mtlx.first() {
                     if self.state.graph.load_mtlx(doc) {
@@ -2618,6 +2786,7 @@ mod paint_persistence_tests {
             report,
             PaintLoadReport {
                 restored: 2,
+                masks_restored: 0,
                 skipped: Vec::new(),
             }
         );
@@ -2745,6 +2914,7 @@ mod paint_persistence_tests {
             report,
             PaintLoadReport {
                 restored: 2,
+                masks_restored: 0,
                 skipped: Vec::new(),
             }
         );
@@ -2869,6 +3039,7 @@ mod paint_persistence_tests {
             report,
             PaintLoadReport {
                 restored: 1,
+                masks_restored: 0,
                 skipped: Vec::new(),
             }
         );
@@ -2930,6 +3101,7 @@ mod paint_persistence_tests {
             report,
             PaintLoadReport {
                 restored: 1,
+                masks_restored: 0,
                 skipped: Vec::new(),
             }
         );
@@ -2956,6 +3128,7 @@ mod paint_persistence_tests {
             report,
             PaintLoadReport {
                 restored: 0,
+                masks_restored: 0,
                 skipped: Vec::new(),
             }
         );

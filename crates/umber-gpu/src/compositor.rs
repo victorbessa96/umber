@@ -81,6 +81,18 @@
 //!    pins exact values on the CPU side instead (every byte asserted there is
 //!    derived by hand — see the tests), and the GPU side asserts near-equality
 //!    with the reason in the comment.
+//! 9. **Layer masks gate coverage, on both paths.** An entry's `mask` plane
+//!    (`width × height` grayscale bytes, `255` = open) multiplies the
+//!    coverage: `cov = src_alpha × opacity × mask`. The CPU oracle reads the
+//!    bytes directly; the GPU path uploads them per dispatch into an `R8Unorm`
+//!    `mask_tex` (binding 3) plus a `mask_enabled` uniform — the paint pass's
+//!    quick-mask shape (fallback 1×1 texture + per-dab flag), except the flag
+//!    is per LAYER here, not per dab. Absent mask ≡ all-`255`: `None` takes
+//!    the same code path with `m = 1.0` (CPU) or `mask_enabled = 0` (GPU),
+//!    so unmasked stacks are byte-identical to the pre-mask composite.
+//!    Wrong-length mask bytes fail loud on both paths
+//!    ([`CompositeError::InvalidMaskData`]), like pixel data. A mask on a
+//!    skipped entry (invisible, pixel-less, `Passthrough`) is never read.
 
 use std::borrow::Cow;
 use std::mem::size_of;
@@ -103,11 +115,16 @@ struct CompositeParams {
     opacity: f32,
     width: u32,
     height: u32,
+    mask_enabled: u32,
+    mask_pad0: u32,
+    mask_pad1: u32,
+    mask_pad2: u32,
 };
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var acc_tex: texture_storage_2d<rgba8unorm, read_write>;
 @group(0) @binding(2) var<uniform> params: CompositeParams;
+@group(0) @binding(3) var mask_tex: texture_2d<f32>;
 
 const BLEND_NORMAL: u32 = 0u;
 const BLEND_MULTIPLY: u32 = 1u;
@@ -392,7 +409,15 @@ fn cs_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     o = clamp(o, 0.0, 1.0);
     let sa = clamp01(s.w);
-    let cov = sa * o;
+    // The layer-mask gate (module-docs judgment 9): an enabled entry's
+    // coverage is multiplied by its mask texel (`255` = open). Disabled
+    // entries never sample the mask (the bound fallback is 1x1, so an
+    // out-of-range load there would be meaningless — but it is skipped).
+    var m = 1.0;
+    if (params.mask_enabled == 1u) {
+        m = clamp01(textureLoad(mask_tex, xy, 0).r);
+    }
+    let cov = sa * o * m;
     let dx = clamp01(d.x);
     let dy = clamp01(d.y);
     let dz = clamp01(d.z);
@@ -477,6 +502,12 @@ pub struct GpuStackLayer<'a> {
     pub visible: bool,
     /// This entry's tile texture, or `None` when it has no pixels.
     pub texture: Option<&'a PaintTarget>,
+    /// This entry's layer-mask plane (`width × height` grayscale bytes at
+    /// the OUTPUT dimensions, `255` = open), or `None` for an unmasked
+    /// layer. `Some` on an entry with an enabled [`umber_core::LayerMask`];
+    /// a disabled mask must pass `None` (it composites as if absent — see
+    /// the module docs), never an all-white plane.
+    pub mask: Option<&'a [u8]>,
 }
 
 impl<'a> GpuStackLayer<'a> {
@@ -484,12 +515,15 @@ impl<'a> GpuStackLayer<'a> {
     ///
     /// Folders and instances carry no pixels of their own — pass `None` for
     /// them (the composite treats that as transparent; see the module docs).
+    /// The mask defaults to `None` (unmasked); set `.mask` afterwards when
+    /// the layer carries an enabled [`umber_core::LayerMask`] with pixels.
     pub fn from_layer(layer: &Layer, texture: Option<&'a PaintTarget>) -> Self {
         Self {
             blend_mode: layer.blend_mode,
             opacity: layer.opacity,
             visible: layer.visible,
             texture,
+            mask: None,
         }
     }
 }
@@ -506,6 +540,10 @@ pub struct CpuStackLayer<'a> {
     pub visible: bool,
     /// This entry's texels, or `None` when it has no pixels.
     pub rgba: Option<&'a [u8]>,
+    /// This entry's layer-mask plane (`width × height` grayscale bytes,
+    /// `255` = open), or `None` for an unmasked layer — the CPU half of
+    /// [`GpuStackLayer::mask`]'s contract.
+    pub mask: Option<&'a [u8]>,
 }
 
 impl<'a> CpuStackLayer<'a> {
@@ -513,12 +551,15 @@ impl<'a> CpuStackLayer<'a> {
     ///
     /// Folders and instances carry no pixels of their own — pass `None` for
     /// them (the composite treats that as transparent; see the module docs).
+    /// The mask defaults to `None` (unmasked); set `.mask` afterwards when
+    /// the layer carries an enabled [`umber_core::LayerMask`] with pixels.
     pub fn from_layer(layer: &Layer, rgba: Option<&'a [u8]>) -> Self {
         Self {
             blend_mode: layer.blend_mode,
             opacity: layer.opacity,
             visible: layer.visible,
             rgba,
+            mask: None,
         }
     }
 }
@@ -540,6 +581,17 @@ pub enum CompositeError {
     #[error("layer pixel data has {found} bytes, expected {expected} (width * height * 4)")]
     InvalidPixelData {
         /// `width × height × 4`.
+        expected: usize,
+        /// The slice's actual length.
+        found: usize,
+    },
+    /// A stack entry carried a layer-mask plane whose length is not
+    /// `width × height`. Same fail-loud contract as
+    /// [`CompositeError::InvalidPixelData`]: a misaligned mask must never
+    /// silently gate the wrong texels.
+    #[error("layer mask data has {found} bytes, expected {expected} (width * height)")]
+    InvalidMaskData {
+        /// `width × height`.
         expected: usize,
         /// The slice's actual length.
         found: usize,
@@ -601,11 +653,38 @@ pub fn f32_to_u8(v: f32) -> u8 {
 /// per-channel `composite_channel` fold for separable modes (and to a
 /// `blend_rgb` + opacity fold for triplet modes) — pinned by test, not
 /// just claimed.
+///
+/// An unmasked texel: delegates to [`composite_pixel_masked`] with a fully
+/// open mask, so unmasked stacks are bit-identical to the pre-mask
+/// composite.)
 pub fn composite_pixel(
     src: [f32; 4],
     dst: [f32; 4],
     mode: BlendMode,
     opacity: f32,
+) -> Option<[f32; 4]> {
+    composite_pixel_masked(src, dst, mode, opacity, 1.0)
+}
+
+/// [`composite_pixel`] with the layer-mask gate: `mask` (`0` = fully
+/// gated, `1` = fully open — [`umber_core::mask_coverage`] maps the mask
+/// plane's bytes here) multiplies the coverage, so `cov = src_alpha ×
+/// opacity × mask` (module-docs judgment 9).
+///
+/// Non-finite `mask` clamps to `0.0` (gated shut) via the shared clamp —
+/// a `NaN` mask must block paint, never leak it (fail-closed, the same
+/// rule the quick mask applies off its plane).
+///
+/// The blend dispatch carries BOTH wave-1 kills: triplet modes (HSV +
+/// normal-map families) route through [`BlendMode::blend_rgb`] first,
+/// separable modes through the per-channel arms — then the mask gates
+/// the shared coverage.
+pub fn composite_pixel_masked(
+    src: [f32; 4],
+    dst: [f32; 4],
+    mode: BlendMode,
+    opacity: f32,
+    mask: f32,
 ) -> Option<[f32; 4]> {
     if matches!(mode, BlendMode::Passthrough) {
         return None;
@@ -618,13 +697,13 @@ pub fn composite_pixel(
             mode.blend_channel(src[1], dst[1])?,
             mode.blend_channel(src[2], dst[2])?,
         ]
-    };
+    };)
     let src_a = clamp01(src[3]);
     let base_r = clamp01(dst[0]);
     let base_g = clamp01(dst[1]);
     let base_b = clamp01(dst[2]);
     let base_a = clamp01(dst[3]);
-    let cov = src_a * clamped_opacity(opacity);
+    let cov = src_a * clamped_opacity(opacity) * clamp01(mask);
     // Alpha is straight-alpha-over (Porter-Duff), NOT a lerp: out_a must be
     // cov + base_a·(1−cov). The lerp (base_a + (src_a−base_a)·cov) coincides
     // with this when src is opaque (why the opaque-pins test passed) but
@@ -653,12 +732,21 @@ pub fn composite_stack_cpu(
     height: u32,
 ) -> Result<Vec<u8>, CompositeError> {
     let len = width as usize * height as usize * 4;
+    let mask_len = width as usize * height as usize;
     for layer in layers {
         if let Some(rgba) = layer.rgba {
             if rgba.len() != len {
                 return Err(CompositeError::InvalidPixelData {
                     expected: len,
                     found: rgba.len(),
+                });
+            }
+        }
+        if let Some(mask) = layer.mask {
+            if mask.len() != mask_len {
+                return Err(CompositeError::InvalidMaskData {
+                    expected: mask_len,
+                    found: mask.len(),
                 });
             }
         }
@@ -675,6 +763,9 @@ pub fn composite_stack_cpu(
             Some(rgba) => rgba,
             None => continue,
         };
+        // A mask on a skipped entry is never read (see the module docs):
+        // the `mask` lookup sits inside the contributing path only.
+        let mask = layer.mask;
         for (i, px) in rgba.chunks_exact(4).enumerate() {
             let src = [
                 u8_to_f32(px[0]),
@@ -682,9 +773,11 @@ pub fn composite_stack_cpu(
                 u8_to_f32(px[2]),
                 u8_to_f32(px[3]),
             ];
+            let m = mask.map_or(1.0, |plane| u8_to_f32(plane[i]));
             let base = i * 4;
             let dst = [acc[base], acc[base + 1], acc[base + 2], acc[base + 3]];
-            if let Some(out) = composite_pixel(src, dst, layer.blend_mode, layer.opacity) {
+            if let Some(out) = composite_pixel_masked(src, dst, layer.blend_mode, layer.opacity, m)
+            {
                 acc[base..base + 4].copy_from_slice(&out);
             }
         }
@@ -692,9 +785,10 @@ pub fn composite_stack_cpu(
     Ok(acc.iter().map(|v| f32_to_u8(*v)).collect())
 }
 
-/// Per-dispatch uniforms for [`COMPOSITE_WGSL`]: 16 bytes, 4-byte aligned
+/// Per-dispatch uniforms for [`COMPOSITE_WGSL`]: 32 bytes, 4-byte aligned
 /// throughout, so the `#[repr(C)]` layout matches the WGSL struct with no
-/// padding surprises.
+/// padding surprises (`mask_enabled` + three explicit pads keep the 16-byte
+/// WGSL alignment after the first four words).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CompositeParams {
@@ -702,11 +796,15 @@ struct CompositeParams {
     opacity: f32,
     width: u32,
     height: u32,
+    mask_enabled: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 const _: () = assert!(
-    size_of::<CompositeParams>() == 16,
-    "CompositeParams must stay one 16-byte uniform chunk"
+    size_of::<CompositeParams>() == 32,
+    "CompositeParams must stay two 16-byte uniform chunks"
 );
 
 /// The GPU stack compositor: one in-place compute dispatch per contributing
@@ -721,6 +819,11 @@ pub struct StackCompositor {
     device: wgpu::Device,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// The 1x1 mask bound for an entry with no layer mask (binding 3 must
+    /// always hold a view; unmasked dispatches set `mask_enabled = 0` so
+    /// they never sample it — the paint pass's fallback pattern).
+    _fallback_mask: wgpu::Texture,
+    fallback_mask_view: wgpu::TextureView,
 }
 
 impl StackCompositor {
@@ -778,8 +881,38 @@ impl StackCompositor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+
+        // The unmasked fallback (see the field docs): a 1x1 `R8Unorm`
+        // texture, the same format the per-dispatch uploads use. Its texel
+        // value is never read (`mask_enabled = 0` skips the sample).
+        let fallback_mask = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("umber_stack_composite_mask_fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let fallback_mask_view =
+            fallback_mask.create_view(&wgpu::TextureViewDescriptor::default());
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("umber_stack_composite_pipeline_layout"),
@@ -800,7 +933,78 @@ impl StackCompositor {
             device,
             pipeline,
             bind_group_layout,
+            _fallback_mask: fallback_mask,
+            fallback_mask_view,
         })
+    }
+
+    /// Uploads one layer-mask plane (`width × height` grayscale bytes) into
+    /// a fresh `R8Unorm` texture at the output dimensions, returning the
+    /// texture and its view (the caller keeps both alive until submit —
+    /// see [`Self::composite_stack`]).
+    ///
+    /// Rows are padded to a 256-byte pitch (the `WriteMask` rule from the
+    /// paint pass — `copy_buffer_to_texture` requires it); the staging
+    /// buffer is built per dispatch like the uniforms, so masked layers
+    /// cost one upload each per composite.
+    fn upload_mask(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("umber_stack_composite_mask"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let padding = (256 - (width % 256)) % 256;
+        let padded_row = width + padding;
+        let mut padded = Vec::with_capacity(padded_row as usize * height as usize);
+        for row in bytes.chunks_exact(width as usize) {
+            padded.extend_from_slice(row);
+            padded.resize(padded.len() + padding as usize, 0);
+        }
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_stack_composite_mask_upload"),
+                contents: &padded,
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
     }
 
     /// Records the composite of `layers` (bottom-to-top) into `output`.
@@ -811,6 +1015,15 @@ impl StackCompositor {
     /// dispatch. `output` must not alias any entry texture (see the module
     /// docs); entries SHOULD match `output`'s dimensions (out-of-range
     /// reads are transparent, never an error).
+    ///
+    /// A contributing entry with `mask: Some` uploads its plane per
+    /// dispatch into an `R8Unorm` texture at the output dimensions (a
+    /// staging buffer plus `copy_buffer_to_texture` on the caller's
+    /// encoder — the `WriteMask` row-padding rule, 256-byte pitch) and
+    /// sets `mask_enabled`; wrong-length planes are
+    /// [`CompositeError::InvalidMaskData`], even when the entry would
+    /// otherwise contribute. Unmasked entries bind the 1x1 fallback with
+    /// `mask_enabled = 0`.
     pub fn composite_stack(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -822,6 +1035,11 @@ impl StackCompositor {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        // Per-dispatch mask textures: created here, referenced by the
+        // recorded passes. Dropping them at the end of this call is safe —
+        // the encoder holds the GPU-side refs (the paint pass's per-call
+        // dab buffer follows the same rule).
+        let mut owned_masks: Vec<(wgpu::Texture, wgpu::TextureView)> = Vec::new();
         for layer in layers {
             if !layer.visible {
                 continue;
@@ -834,11 +1052,33 @@ impl StackCompositor {
                 Some(mode) => mode,
                 None => continue,
             };
+            let (mask_view, mask_enabled) = match layer.mask {
+                Some(bytes) => {
+                    let expected = width as usize * height as usize;
+                    if bytes.len() != expected {
+                        return Err(CompositeError::InvalidMaskData {
+                            expected,
+                            found: bytes.len(),
+                        });
+                    }
+                    owned_masks.push(self.upload_mask(encoder, bytes, width, height));
+                    let view = &owned_masks
+                        .last()
+                        .expect("just pushed")
+                        .1;
+                    (view, 1u32)
+                }
+                None => (&self.fallback_mask_view, 0u32),
+            };
             let params = CompositeParams {
                 mode,
                 opacity: layer.opacity,
                 width,
                 height,
+                mask_enabled,
+                pad0: 0,
+                pad1: 0,
+                pad2: 0,
             };
             let uniform = self
                 .device
@@ -866,6 +1106,10 @@ impl StackCompositor {
                             offset: 0,
                             size: None,
                         }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(mask_view),
                     },
                 ],
             });
@@ -905,12 +1149,43 @@ mod tests {
                 opacity: 1.0,
                 visible: true,
                 rgba: Some(bottom_bytes.as_slice()),
+                mask: None,
             },
             CpuStackLayer {
                 blend_mode: mode,
                 opacity,
                 visible: true,
                 rgba: Some(top_bytes.as_slice()),
+                mask: None,
+            },
+        ];
+        composite_stack_cpu(&layers, 1, 1).expect("1x1 oracle input is well-formed")
+    }
+
+    /// One bottom + one masked top texel through the CPU oracle at 1×1.
+    fn two_layer_masked(
+        top: [u8; 4],
+        mode: BlendMode,
+        opacity: f32,
+        bottom: [u8; 4],
+        mask: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let top_bytes = top.to_vec();
+        let bottom_bytes = bottom.to_vec();
+        let layers = [
+            CpuStackLayer {
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
+                visible: true,
+                rgba: Some(bottom_bytes.as_slice()),
+                mask: None,
+            },
+            CpuStackLayer {
+                blend_mode: mode,
+                opacity,
+                visible: true,
+                rgba: Some(top_bytes.as_slice()),
+                mask,
             },
         ];
         composite_stack_cpu(&layers, 1, 1).expect("1x1 oracle input is well-formed")
@@ -1365,12 +1640,14 @@ mod tests {
                 opacity: 1.0,
                 visible: true,
                 rgba: Some(white.as_slice()),
+                mask: None,
             },
             CpuStackLayer {
                 blend_mode: BlendMode::Normal,
                 opacity: 1.0,
                 visible: true,
                 rgba: Some(red.as_slice()),
+                mask: None,
             },
         ];
         let with_folder = [
@@ -1379,24 +1656,28 @@ mod tests {
                 opacity: 1.0,
                 visible: true,
                 rgba: Some(white.as_slice()),
+                mask: None,
             },
             CpuStackLayer {
                 blend_mode: BlendMode::Passthrough,
                 opacity: 1.0,
                 visible: true,
                 rgba: None,
+                mask: None,
             },
             CpuStackLayer {
                 blend_mode: BlendMode::Multiply,
                 opacity: 1.0,
                 visible: false,
                 rgba: Some(white.as_slice()),
+                mask: None,
             },
             CpuStackLayer {
                 blend_mode: BlendMode::Normal,
                 opacity: 1.0,
                 visible: true,
                 rgba: Some(red.as_slice()),
+                mask: None,
             },
         ];
         let bare_out = composite_stack_cpu(&bare, 1, 1).expect("well-formed");
@@ -1420,6 +1701,7 @@ mod tests {
             opacity: 1.0,
             visible: false,
             rgba: Some(red.as_slice()),
+            mask: None,
         }];
         assert_eq!(
             composite_stack_cpu(&hidden, 1, 1).expect("hidden stack succeeds"),
@@ -1431,11 +1713,146 @@ mod tests {
             opacity: 1.0,
             visible: true,
             rgba: None,
+            mask: None,
         }];
         assert_eq!(
             composite_stack_cpu(&pixel_less, 1, 1).expect("pixel-less stack succeeds"),
             TRANSPARENT.to_vec()
         );
+    }
+
+    #[test]
+    fn masked_layer_gates_coverage_with_exact_bytes() {
+        // Red over white, Normal, full opacity, 1x1 — the mask is the only
+        // variable, so the gate math is pinned per texel by hand.
+        let open = [255u8; 1];
+        let shut = [0u8; 1];
+        let half = [128u8; 1];
+        // Absent mask: the red top wins outright.
+        assert_eq!(
+            two_layer_masked(RED, BlendMode::Normal, 1.0, WHITE, None),
+            RED.to_vec()
+        );
+        // All-white mask: identical to absent (the no-op-gate contract).
+        assert_eq!(
+            two_layer_masked(RED, BlendMode::Normal, 1.0, WHITE, Some(&open)),
+            RED.to_vec()
+        );
+        // All-black mask: the top contributes nothing — byte-identical to
+        // the bottom, the Substance-parity gate closed.
+        assert_eq!(
+            two_layer_masked(RED, BlendMode::Normal, 1.0, WHITE, Some(&shut)),
+            WHITE.to_vec()
+        );
+        // Half mask: cov = 128/255; r = 1 + (1-1)*cov = 1 -> 255;
+        // g = b = 1 + (0-1)*128/255 = 127/255 -> 127 (exact: 255-128);
+        // a = cov + 1*(1-cov) = 1 -> 255.
+        assert_eq!(
+            two_layer_masked(RED, BlendMode::Normal, 1.0, WHITE, Some(&half)),
+            [255, 127, 127, 255].to_vec()
+        );
+        // The gate multiplies, not replaces: the same half mask under
+        // Multiply gives the same bytes here (blend red*white = red, so
+        // the coverages coincide — while a FULL mask under Multiply over
+        // white is still red, proving the blend arm ran under the gate).
+        assert_eq!(
+            two_layer_masked(RED, BlendMode::Multiply, 1.0, WHITE, Some(&half)),
+            [255, 127, 127, 255].to_vec()
+        );
+        assert_eq!(
+            two_layer_masked(RED, BlendMode::Multiply, 1.0, WHITE, Some(&open)),
+            RED.to_vec()
+        );
+    }
+
+    #[test]
+    fn composite_pixel_masked_pins_partial_alpha_math() {
+        // Half-alpha red over opaque white, mask 0.5: cov = 0.5*1*0.5 =
+        // 0.25 (exact binary fractions throughout); rgb = white +
+        // (red-white)*0.25 = [1, 0.75, 0.75]; a = 0.25 + 1*0.75 = 1.
+        assert_eq!(
+            composite_pixel_masked(
+                [1.0, 0.0, 0.0, 0.5],
+                [1.0, 1.0, 1.0, 1.0],
+                BlendMode::Normal,
+                1.0,
+                0.5
+            ),
+            Some([1.0, 0.75, 0.75, 1.0])
+        );
+        // Mask 1.0 is exactly the unmasked pixel op (the no-op-gate
+        // contract at the texel level, for every mode).
+        for mode in [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen] {
+            assert_eq!(
+                composite_pixel_masked([0.9, 0.1, 0.4, 0.8], [0.2, 0.6, 0.3, 1.0], mode, 0.7, 1.0),
+                composite_pixel([0.9, 0.1, 0.4, 0.8], [0.2, 0.6, 0.3, 1.0], mode, 0.7),
+                "{mode:?}"
+            );
+        }
+        // Non-finite masks gate shut (fail-closed): NaN and +inf leave the
+        // base untouched, never leak the source.
+        for m in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                composite_pixel_masked(
+                    [1.0, 0.0, 0.0, 1.0],
+                    [0.25, 0.5, 0.75, 1.0],
+                    BlendMode::Normal,
+                    1.0,
+                    m
+                ),
+                Some([0.25, 0.5, 0.75, 1.0]),
+                "mask={m} must gate shut"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_length_mask_data_fails_loud() {
+        let red = RED.to_vec();
+        let white = WHITE.to_vec();
+        // A 1x1 stack with a 2-byte mask: the oracle must refuse, not gate
+        // the wrong texel.
+        let bad = [255u8; 2];
+        let layers = [
+            CpuStackLayer {
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
+                visible: true,
+                rgba: Some(white.as_slice()),
+                mask: None,
+            },
+            CpuStackLayer {
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
+                visible: true,
+                rgba: Some(red.as_slice()),
+                mask: Some(bad.as_slice()),
+            },
+        ];
+        assert!(matches!(
+            composite_stack_cpu(&layers, 1, 1),
+            Err(CompositeError::InvalidMaskData {
+                expected: 1,
+                found: 2
+            })
+        ));
+        // Can-fail: an empty plane is wrong-length too (a never-painted
+        // mask must arrive as None, not as `Some(&[])`).
+        let empty: [u8; 0] = [];
+        let layers = [CpuStackLayer {
+            blend_mode: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            rgba: Some(red.as_slice()),
+            mask: Some(empty.as_slice()),
+        }];
+        assert!(matches!(
+            composite_stack_cpu(&layers, 1, 1),
+            Err(CompositeError::InvalidMaskData {
+                expected: 1,
+                found: 0
+            })
+        ));
     }
 
     #[test]
@@ -1446,6 +1863,7 @@ mod tests {
             opacity: 1.0,
             visible: true,
             rgba: Some(short.as_slice()),
+            mask: None,
         }];
         assert!(matches!(
             composite_stack_cpu(&layers, 1, 1),
@@ -1470,11 +1888,13 @@ mod tests {
         assert_eq!(gpu.opacity, 0.25);
         assert!(!gpu.visible);
         assert!(gpu.texture.is_none());
+        assert_eq!(gpu.mask, None, "from_layer builds unmasked entries");
         let cpu = CpuStackLayer::from_layer(layer, Some(red.as_slice()));
         assert_eq!(cpu.blend_mode, BlendMode::Multiply);
         assert_eq!(cpu.opacity, 0.25);
         assert!(!cpu.visible);
         assert_eq!(cpu.rgba, Some(red.as_slice()));
+        assert_eq!(cpu.mask, None, "from_layer builds unmasked entries");
     }
 
     #[test]
@@ -1577,12 +1997,14 @@ mod tests {
                         opacity: 1.0,
                         visible: true,
                         texture: Some(&bottom_tex),
+                        mask: None,
                     },
                     GpuStackLayer {
                         blend_mode: mode,
                         opacity,
                         visible: true,
                         texture: Some(&top_tex),
+                        mask: None,
                     },
                 ];
                 let got = self.composite(&gpu_entries);
@@ -1592,17 +2014,85 @@ mod tests {
                         opacity: 1.0,
                         visible: true,
                         rgba: Some(bottom),
+                        mask: None,
                     },
                     CpuStackLayer {
                         blend_mode: mode,
                         opacity,
                         visible: true,
                         rgba: Some(top),
+                        mask: None,
                     },
                 ];
                 let want = composite_stack_cpu(&cpu_entries, self.size, self.size)
                     .expect("oracle input well-formed");
                 assert_bytes_near_lenient(&got, &want);
+            }
+
+            /// [`Self::compare`] with a layer mask on the top entry: the
+            /// GPU's per-dispatch `R8Unorm` upload must reproduce the
+            /// oracle's byte gate to ±1 LSB.
+            fn compare_masked(
+                &self,
+                bottom: &[u8],
+                top: &[u8],
+                mode: BlendMode,
+                opacity: f32,
+                mask: &[u8],
+            ) {
+                let bottom_tex = self.upload(bottom).expect("upload");
+                let top_tex = self.upload(top).expect("upload");
+                let gpu_entries = [
+                    GpuStackLayer {
+                        blend_mode: BlendMode::Normal,
+                        opacity: 1.0,
+                        visible: true,
+                        texture: Some(&bottom_tex),
+                        mask: None,
+                    },
+                    GpuStackLayer {
+                        blend_mode: mode,
+                        opacity,
+                        visible: true,
+                        texture: Some(&top_tex),
+                        mask: Some(mask),
+                    },
+                ];
+                let got = self.composite(&gpu_entries);
+                let cpu_entries = [
+                    CpuStackLayer {
+                        blend_mode: BlendMode::Normal,
+                        opacity: 1.0,
+                        visible: true,
+                        rgba: Some(bottom),
+                        mask: None,
+                    },
+                    CpuStackLayer {
+                        blend_mode: mode,
+                        opacity,
+                        visible: true,
+                        rgba: Some(top),
+                        mask: Some(mask),
+                    },
+                ];
+                let want = composite_stack_cpu(&cpu_entries, self.size, self.size)
+                    .expect("oracle input well-formed");
+                assert_bytes_near_lenient(&got, &want);
+            }
+
+            /// A two-tone grayscale mask plane (`size`×`size` bytes): shut
+            /// on the left half, open on the right — so a dispatch-offset
+            /// bug that shifts the mask against the pixels fails instead
+            /// of hiding.
+            fn two_tone_mask(&self, shut: u8, open: u8) -> Vec<u8> {
+                let size = self.size as usize;
+                let mut out = Vec::with_capacity(size * size);
+                for _ in 0..size {
+                    for x in 0..size {
+                        out.push(if x < size / 2 { shut } else { open });
+                    }
+                }
+                out
             }
         }
 
@@ -1662,7 +2152,7 @@ mod tests {
             // exercises the dodge/burn-helper path plus the mid-gray no-op
             // branch on GPU — the other nine new scalar arms share this
             // exact dispatch shape (branch inside one kernel), so one
-            // golden pins the shape and the CPU tests pin each arm's math.
+            // golden pins the shape and the CPU tests pin each arm's math.)
             let (device, queue) = request_device();
             let compositor =
                 StackCompositor::new(device.clone()).expect("device has the required feature");
@@ -1713,6 +2203,21 @@ mod tests {
         }
 
         #[test]
+        fn gpu_matches_cpu_for_masked_stacks() {
+            let red = two_tone(size, RED, RED);
+            // Shut-left / open-right: the left half must composite to the
+            // bottom, the right half to the top — a mask/pixel misalignment
+            // fails on both halves at once.
+            let split = fix.two_tone_mask(0, 255);
+            fix.compare_masked(&white, &red, BlendMode::Normal, 1.0, &split);
+            fix.compare_masked(&white, &red, BlendMode::Multiply, 1.0, &split);
+            // Uniform half mask over the whole tile (the CPU golden pins
+            // [255, 127, 127, 255] here; the GPU asserts ±1 LSB of it).
+            let half = vec![128u8; size as usize * size as usize];
+            fix.compare_masked(&white, &red, BlendMode::Normal, 1.0, &half);
+        }
+
+        #[test]
         fn gpu_passthrough_folder_matches_cpu() {
             let (device, queue) = request_device();
             let compositor =
@@ -1731,24 +2236,28 @@ mod tests {
                     opacity: 1.0,
                     visible: true,
                     texture: Some(&bottom_tex),
+                    mask: None,
                 },
                 GpuStackLayer {
                     blend_mode: BlendMode::Passthrough,
                     opacity: 1.0,
                     visible: true,
                     texture: None,
+                    mask: None,
                 },
                 GpuStackLayer {
                     blend_mode: BlendMode::Multiply,
                     opacity: 1.0,
                     visible: false,
                     texture: Some(&bottom_tex),
+                    mask: None,
                 },
                 GpuStackLayer {
                     blend_mode: BlendMode::Normal,
                     opacity: 1.0,
                     visible: true,
                     texture: Some(&top_tex),
+                    mask: None,
                 },
             ];
             let got = fix.composite(&gpu_entries);
@@ -1758,24 +2267,28 @@ mod tests {
                     opacity: 1.0,
                     visible: true,
                     rgba: Some(white.as_slice()),
+                    mask: None,
                 },
                 CpuStackLayer {
                     blend_mode: BlendMode::Passthrough,
                     opacity: 1.0,
                     visible: true,
                     rgba: None,
+                    mask: None,
                 },
                 CpuStackLayer {
                     blend_mode: BlendMode::Multiply,
                     opacity: 1.0,
                     visible: false,
                     rgba: Some(white.as_slice()),
+                    mask: None,
                 },
                 CpuStackLayer {
                     blend_mode: BlendMode::Normal,
                     opacity: 1.0,
                     visible: true,
                     rgba: Some(red.as_slice()),
+                    mask: None,
                 },
             ];
             let want =

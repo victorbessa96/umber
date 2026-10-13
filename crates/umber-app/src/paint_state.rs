@@ -230,6 +230,42 @@
 //! Mask off (the default) changes nothing: no plane is allocated, no
 //! upload is queued, and the staged dabs are byte-identical.
 //!
+//! Layer masks (requirements §2, the "METADATA ONLY" row):
+//! per-LAYER paintable grayscale masks that gate the stack compositor.
+//! Unlike the session-scoped quick mask (never persisted, never undoable),
+//! layer masks persist through the `paint/` sidecar (`main.rs`) and their
+//! METADATA (attach/detach/enable) is undoable through the document's
+//! layer journal — but mask STROKES are not undoable (the quick-mask rule,
+//! same reason: planes are not journal entries).
+//!
+//! * Storage ([`PaintState::layer_masks`]): one `u8` plane per
+//!   `(layer id, tile)` at the tile's set size, `255` = open. Lazy like
+//!   the channel pool: a layer with no stroke costs nothing, and a fresh
+//!   plane starts WHITE (attaching a mask must be a no-op gate — a black
+//!   start would hide the layer on attach). Planes are keyed by layer id,
+//!   not by channel: the mask gates the layer's composited alpha whatever
+//!   channel it composites.
+//! * Routing ([`PaintState::mask_edit_layer`]): the Layers panel selects
+//!   which layer's mask strokes paint (`Some(id)`) or none (paints layers).
+//!   `begin_stroke` snapshots the selection into `stroke_mask_layer`, so a
+//!   mid-stroke switch never splits one stroke across two planes. A mask
+//!   stroke stamps the same conditioned dabs (symmetry siblings and seam
+//!   mirrors included) into the `u8` plane via [`stamp_grayscale_mask`]
+//!   and stages nothing — the layer pixels and the stroke-undo history
+//!   are untouched. Quick-mask mode and layer-mask mode are independent:
+//!   a layer-mask stroke paints NEITHER the layer NOR the quick mask, and
+//!   it is NOT gated by the quick mask either (one gate per stroke — the
+//!   compositor's layer gate is where the two meet; gating a mask stroke
+//!   by another mask composes poorly and no tool selects it).
+//! * Sizing: [`Self::resize_set`] drops that set's tiles' planes with the
+//!   targets (a rect recorded at the old size no longer fits — the same
+//!   rule as the quick mask).
+//! * The gate itself lives in the compositor (`umber_gpu::compositor`,
+//!   `cov = src_alpha × opacity × mask`), not here: this module only owns
+//!   the planes and the stroke routing. No GPU mask texture is kept per
+//!   layer — the compositor uploads the plane per dispatch from these
+//!   bytes, so there is nothing to sync.
+//!
 //! Paint paths (§2 line 26's P1 row, `umber_brush::path`): a
 //! [`PaintPath`](umber_brush::path::PaintPath) replays as ONE stroke
 //! through this same pipeline ([`Self::replay_path`] — paint/erase/smudge
@@ -249,7 +285,7 @@ use egui::Pos2;
 use umber_bake::id::{bake_id_mesh, IdBakeParams, IdFlavor};
 use umber_brush::id_mask::{select_id, SelectIdError};
 use umber_brush::path::{sanitize_size, PaintPath, PathOp};
-use umber_brush::retouch::{footprint, DirtyRect, RetouchDab};
+use umber_brush::retouch::{coverage, footprint, DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
     wash_scale, BrushParams, BrushTool, DabAdapter, LineConstraintMode, MaskPaint, QuickMask,
@@ -586,6 +622,20 @@ pub struct PaintState {
     stroke_mask_edit: bool,
     /// The live stroke is gated by the mask (gating at `begin_stroke`).
     stroke_mask_gate: bool,
+    /// The layer-mask planes: one grayscale `u8` plane per
+    /// `(layer id, tile)` at the tile's set size, `255` = open (see the
+    /// module docs). Lazy — a layer with no mask stroke costs nothing.
+    layer_masks: BTreeMap<(u64, u16), Vec<u8>>,
+    /// Which layer's mask strokes paint (`None` = strokes paint layers).
+    /// The Layers panel edits this; `begin_stroke` snapshots it into
+    /// `stroke_mask_layer` so a mid-stroke switch never splits one stroke.
+    mask_edit_layer: Option<u64>,
+    /// The live stroke's mask target, snapshotted at `begin_stroke` (like
+    /// `stroke_mask_edit`/`stroke_channel`).
+    stroke_mask_layer: Option<u64>,
+    /// What layer-mask strokes paint (white opens, black closes — the
+    /// quick mask's [`MaskPaint`] semantics on a `u8` plane).
+    layer_mask_paint: MaskPaint,
     /// Queued `WriteMask` commands since construction (test
     /// observability for the mask-stroke and zero-cost contracts).
     #[cfg(test)]
@@ -693,6 +743,10 @@ impl PaintState {
             mask_synced: BTreeSet::new(),
             stroke_mask_edit: false,
             stroke_mask_gate: false,
+            layer_masks: BTreeMap::new(),
+            mask_edit_layer: None,
+            stroke_mask_layer: None,
+            layer_mask_paint: MaskPaint::default(),
             #[cfg(test)]
             mask_uploads: 0,
             #[cfg(test)]
@@ -872,6 +926,9 @@ impl PaintState {
         // one stroke between the mask and the layer.
         self.stroke_mask_edit = self.quick_mask().is_editing();
         self.stroke_mask_gate = self.quick_mask().gates();
+        // Snapshot the layer-mask target too: a mid-stroke panel switch
+        // never splits one stroke across two planes.
+        self.stroke_mask_layer = self.mask_edit_layer;
         // Snapshot the active channel: a mid-stroke `set_active_channel`
         // (refused anyway — see its own docs) must never retarget a live
         // stroke partway through.
@@ -1154,6 +1211,120 @@ impl PaintState {
         }
         self.mask_synced.clear();
         true
+    }
+
+    /// Which layer's mask strokes paint (`None` = strokes paint layers).
+    /// The Layers panel edits this; the live stroke keeps its snapshot.
+    pub fn mask_edit_layer(&self) -> Option<u64> {
+        self.mask_edit_layer
+    }
+
+    /// Selects the layer whose mask strokes paint (`None` leaves mask
+    /// mode and paints layers again). Takes effect at the next
+    /// `begin_stroke` — a live stroke keeps its snapshot, so a mid-stroke
+    /// switch never splits one stroke across two planes.
+    pub fn set_mask_edit_layer(&mut self, layer: Option<u64>) {
+        self.mask_edit_layer = layer;
+    }
+
+    /// What layer-mask strokes paint (white opens, black closes).
+    pub fn set_layer_mask_paint(&mut self, paint: MaskPaint) {
+        self.layer_mask_paint = paint;
+    }
+
+    /// `(layer, tile)`'s mask plane (`width × height` grayscale bytes at
+    /// the tile's set size), or `None` while no stroke has touched it
+    /// (it gates as fully open — see the module docs).
+    pub fn layer_mask(&self, layer: u64, tile: u16) -> Option<&[u8]> {
+        self.layer_masks.get(&(layer, tile)).map(Vec::as_slice)
+    }
+
+    /// Every `(layer, tile)` with a mask plane, ascending. The save path's
+    /// census (filtered against live layers there).
+    pub fn layer_mask_tiles(&self) -> Vec<(u64, u16)> {
+        self.layer_masks.keys().copied().collect()
+    }
+
+    /// Allocates `(layer, tile)`'s plane white (fully open) at the tile's
+    /// set size when it has none yet. White, not black: attaching a mask
+    /// must be a no-op gate until painted.
+    pub fn ensure_layer_mask(&mut self, layer: u64, tile: u16) {
+        if self.layer_masks.contains_key(&(layer, tile)) {
+            return;
+        }
+        let (width, height) = self.tile_size(tile);
+        self.layer_masks.insert(
+            (layer, tile),
+            vec![u8::MAX; width as usize * height as usize],
+        );
+    }
+
+    /// Restores one mask plane from the load path (the save path's
+    /// byte-identical bytes). Rejects (`false`, plane untouched) when
+    /// `values` is not the tile's set size — a torn sidecar must never
+    /// gate the wrong texels. Materializes the tile first (like the
+    /// channel pool's first-route rule); a tile that cannot be created
+    /// also rejects.
+    pub fn publish_layer_mask(&mut self, layer: u64, tile: u16, values: Vec<u8>) -> bool {
+        if !self.ensure_tile(tile) {
+            return false;
+        }
+        let (width, height) = self.tile_size(tile);
+        if values.len() != width as usize * height as usize {
+            return false;
+        }
+        self.layer_masks.insert((layer, tile), values);
+        true
+    }
+
+    /// Drops every plane of `layer` (the Layers panel calls this when its
+    /// mask is detached, so a re-attach starts white rather than
+    /// resurrecting the old paint).
+    pub fn remove_layer_masks(&mut self, layer: u64) {
+        self.layer_masks.retain(|(id, _), _| *id != layer);
+        if self.mask_edit_layer == Some(layer) {
+            self.mask_edit_layer = None;
+        }
+    }
+
+    /// Drops planes whose layer is not in `live` (the open path calls
+    /// this after loading the stack, so a previous document's masks never
+    /// gate the new one).
+    pub fn prune_layer_masks(&mut self, live: &std::collections::HashSet<u64>) {
+        self.layer_masks.retain(|(id, _), _| live.contains(id));
+        if self.mask_edit_layer.is_some_and(|id| !live.contains(&id)) {
+            self.mask_edit_layer = None;
+        }
+    }
+
+    /// One layer-mask event on `tile`: stamps every dab into `(layer,
+    /// tile)`'s `u8` plane toward the [`MaskPaint`] value. Stages nothing
+    /// (the layer pixels are untouched) and records no undo (mask strokes
+    /// are not journal entries — the quick-mask rule).
+    fn layer_mask_event(&mut self, layer: u64, tile: u16, dabs: &[Dab]) {
+        self.ensure_layer_mask(layer, tile);
+        let target = self.layer_mask_paint.value();
+        let target_byte = (target.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let (width, height) = self.tile_size(tile);
+        let Some(plane) = self.layer_masks.get_mut(&(layer, tile)) else {
+            return;
+        };
+        // A resize between `ensure_layer_mask` and now cannot happen
+        // (both run between strokes on the same tile size), but a stale
+        // plane must never gate the wrong texels: skip rather than stamp
+        // misaligned.
+        if plane.len() != width as usize * height as usize {
+            return;
+        }
+        for dab in dabs {
+            let stamp = RetouchDab {
+                pos: dab.pos,
+                radius: dab.radius,
+                alpha: dab.alpha,
+                hardness: dab.hardness,
+            };
+            stamp_grayscale_mask(plane, width, height, &stamp, target_byte);
+        }
     }
 
     /// Selects the baked ID under `uv` on `tile`'s set mask (C1 worklist
@@ -1754,6 +1925,11 @@ impl PaintState {
         for tile in &tiles {
             self.mask_synced.remove(tile);
         }
+        // That set's layer-mask planes drop with the targets (a plane
+        // recorded at the old size no longer fits — the quick-mask rule).
+        // Other sets' tiles' planes are untouched.
+        self.layer_masks
+            .retain(|(_, tile), _| !tiles.contains(tile));
         for tile in &tiles {
             if let Some(tile_targets) = self.targets.get_mut(tile) {
                 for thread in tile_targets.threads_mut() {
@@ -1994,6 +2170,19 @@ impl PaintState {
         let radius = BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale);
         let dabs = DabAdapter::stamps_to_dabs(&stamps, radius, &self.brush);
         if dabs.is_empty() {
+            return;
+        }
+        // The layer-mask hook: a mask-edit stroke stamps the SELECTED
+        // layer's mask plane with the same dabs (symmetry siblings
+        // included) and stages nothing. It runs before the quick-mask
+        // hook, so selecting a layer mask wins over quick-mask mode —
+        // one stroke paints exactly one plane.
+        if let Some(layer) = self.stroke_mask_layer {
+            let dabs = match (&self.stroke_symmetry, expand_seams) {
+                (Some(transforms), true) => expand_dabs(&dabs, transforms),
+                _ => dabs,
+            };
+            self.layer_mask_event(layer, tile, &dabs);
             return;
         }
         // The quick-mask edit hook: a mask-mode stroke stamps the MASK
@@ -2429,6 +2618,48 @@ fn fill_runs(mask: &[bool], width: usize, height: usize) -> Vec<FillRun> {
 /// [`PaintState`].
 fn mirror_radius_uv(texels_per_uv: f32) -> f32 {
     (BRUSH_RADIUS_TEXELS * SEAM_MIRROR_MARGIN) / texels_per_uv
+}
+
+/// Paints one dab into a layer-mask `u8` plane: every covered texel moves
+/// toward `target` by the dab's coverage (`alpha * falloff` — the same
+/// [`coverage`] the quick mask stamps through), so a hard full-alpha dab
+/// sets its disc exactly. Returns the rect it touched, or `None` when the
+/// dab covers nothing.
+///
+/// Free function (like [`mirror_radius_uv`]) so the arithmetic is
+/// unit-testable without a GPU-backed [`PaintState`]: the `u8` rounding
+/// (`round`, half away from zero) is pinned by the tests below — a
+/// truncating cast would bias every soft mask edge shut by half an LSB.
+pub(crate) fn stamp_grayscale_mask(
+    plane: &mut [u8],
+    width: u32,
+    height: u32,
+    dab: &RetouchDab,
+    target: u8,
+) -> Option<DirtyRect> {
+    if plane.len() != width as usize * height as usize {
+        return None;
+    }
+    let rect = footprint(dab.pos, dab.radius, width, height)?;
+    let stride = width as usize;
+    let target = f32::from(target);
+    let mut wrote = false;
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let Some(cov) = coverage(dab, x, y) else {
+                continue;
+            };
+            let cov = cov.clamp(0.0, 1.0);
+            if cov <= 0.0 {
+                continue;
+            }
+            let m = &mut plane[y as usize * stride + x as usize];
+            let next = f32::from(*m) + (target - f32::from(*m)) * cov;
+            *m = next.round().clamp(0.0, 255.0) as u8;
+            wrote = true;
+        }
+    }
+    wrote.then_some(rect)
 }
 
 /// The wash-mode hook in `push_event_styled`, factored out so it is
@@ -3601,6 +3832,189 @@ mod tests {
         assert!(state.clear_mask());
         let plane = state.quick_mask().coverage(FIRST_TILE).expect("plane");
         assert!(plane.iter().all(|&v| v == 0.0), "clear zeroes");
+    }
+
+    /// Layer masks (§2, the "METADATA ONLY" row), headless half: the
+    /// `u8` stamp arithmetic pins exact values without a GPU-backed
+    /// `PaintState` (the free function takes the plane directly).
+    #[test]
+    fn stamp_grayscale_mask_pins_exact_rounding() {
+        use umber_brush::retouch::RetouchDab;
+        const SIZE: u32 = 64;
+        fn hard_dab(pos: [f32; 2], radius: f32) -> RetouchDab {
+            RetouchDab {
+                pos,
+                radius,
+                alpha: 1.0,
+                hardness: 1.0,
+            }
+        }
+        // A misaligned plane stamps nothing (never a panic, never a torn
+        // write — the torn-sidecar rule).
+        let mut short = vec![0u8; 15];
+        assert_eq!(
+            stamp_grayscale_mask(&mut short, 4, 4, &hard_dab([8.0, 8.0], 4.0), 255),
+            None
+        );
+        // A hard full-alpha white dab on a black plane sets its disc
+        // exactly (coverage 1.0 at the center, QuickMask's stamp rule).
+        let mut plane = vec![0u8; SIZE as usize * SIZE as usize];
+        let rect = stamp_grayscale_mask(&mut plane, SIZE, SIZE, &hard_dab([32.0, 32.0], 8.0), 255)
+            .expect("covers texels");
+        assert!(rect.x0 <= 24 && rect.x1 >= 40, "{rect:?}");
+        assert_eq!(plane[32 * SIZE as usize + 32], 255, "white sets exactly");
+        assert_eq!(plane[0], 0, "outside the disc never moves");
+        assert_eq!(
+            plane[32 * SIZE as usize + 45],
+            0,
+            "just past the radius stays"
+        );
+        // A hard black dab takes the same disc back to exactly 0.
+        stamp_grayscale_mask(&mut plane, SIZE, SIZE, &hard_dab([32.0, 32.0], 8.0), 0);
+        assert_eq!(plane[32 * SIZE as usize + 32], 0, "black closes exactly");
+        // A half-alpha white dab on black moves halfway with HALF-AWAY
+        // rounding: 0.5 * 255 = 127.5 -> 128. Can-fail: a truncating `as`
+        // cast pins 127 and biases every soft mask edge shut by half an
+        // LSB (the byte the compositor's half-mask golden reads).
+        let half = RetouchDab {
+            alpha: 0.5,
+            ..hard_dab([10.0, 10.0], 2.0)
+        };
+        stamp_grayscale_mask(&mut plane, SIZE, SIZE, &half, 255);
+        assert_eq!(
+            plane[10 * SIZE as usize + 10],
+            128,
+            "half coverage must round half-away, not truncate"
+        );
+        // A dab entirely off the plane touches nothing.
+        assert_eq!(
+            stamp_grayscale_mask(&mut plane, SIZE, SIZE, &hard_dab([-50.0, 32.0], 4.0), 255),
+            None
+        );
+    }
+
+    /// Layer masks, plane-pool half: fresh planes are white and lazy,
+    /// publishes are size-checked, and resize/remove/prune drop planes.
+    #[test]
+    fn layer_mask_planes_are_white_lazy_sized_and_pruned() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 512)
+            .expect("paint state builds");
+        assert_eq!(state.mask_edit_layer(), None);
+        assert_eq!(state.layer_mask(7, FIRST_TILE), None, "no plane until touched");
+        assert!(state.layer_mask_tiles().is_empty());
+
+        // Fresh planes start WHITE (attaching is a no-op gate).
+        state.ensure_layer_mask(7, FIRST_TILE);
+        let plane = state.layer_mask(7, FIRST_TILE).expect("plane");
+        assert_eq!(plane.len(), 512 * 512);
+        assert!(plane.iter().all(|&v| v == 255), "fresh planes gate open");
+        assert_eq!(state.layer_mask_tiles(), vec![(7, FIRST_TILE)]);
+        // Re-ensuring keeps painted data (never re-whites).
+        state.publish_layer_mask(7, FIRST_TILE, vec![0u8; 512 * 512]);
+        state.ensure_layer_mask(7, FIRST_TILE);
+        assert_eq!(state.layer_mask(7, FIRST_TILE).unwrap()[0], 0);
+
+        // Wrong-size publishes are refused, plane untouched.
+        assert!(!state.publish_layer_mask(7, FIRST_TILE, vec![0u8; 10]));
+        assert_eq!(state.layer_mask(7, FIRST_TILE).unwrap().len(), 512 * 512);
+        // Exact bytes round-trip byte-identical.
+        let bytes: Vec<u8> = (0..512 * 512).map(|i| (i % 251) as u8).collect();
+        assert!(state.publish_layer_mask(7, FIRST_TILE, bytes.clone()));
+        assert_eq!(state.layer_mask(7, FIRST_TILE).unwrap(), bytes.as_slice());
+
+        // Removing the layer's masks clears the edit selection too.
+        state.set_mask_edit_layer(Some(7));
+        state.remove_layer_masks(7);
+        assert_eq!(state.layer_mask(7, FIRST_TILE), None);
+        assert_eq!(state.mask_edit_layer(), None, "editing a removed mask ends");
+        assert!(state.layer_mask_tiles().is_empty());
+
+        // Pruning keeps only live layers' planes.
+        state.ensure_layer_mask(7, FIRST_TILE);
+        state.ensure_layer_mask(8, FIRST_TILE);
+        state.set_mask_edit_layer(Some(7));
+        let mut live = std::collections::HashSet::new();
+        live.insert(8u64);
+        state.prune_layer_masks(&live);
+        assert_eq!(state.layer_mask(7, FIRST_TILE), None);
+        assert!(state.layer_mask(8, FIRST_TILE).is_some());
+        assert_eq!(state.mask_edit_layer(), None, "pruned selection ends");
+
+        // Resizing the set drops its tiles' planes with the targets.
+        state.ensure_layer_mask(8, FIRST_TILE);
+        let active = state.active_set().to_string();
+        state.resize_set(&active, 256, 256);
+        assert_eq!(
+            state.layer_mask(8, FIRST_TILE),
+            None,
+            "a resized set's planes drop with its targets"
+        );
+    }
+
+    /// Layer masks, routing half: a mask-edit stroke paints ONLY the
+    /// selected layer's plane (the layer pixels stay byte-identical, the
+    /// quick mask stays unallocated), and wins over quick-mask mode.
+    #[test]
+    fn layer_mask_stroke_paints_only_the_mask_plane() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
+        state.set_brush_params(hard_brush());
+        state.set_layer_mask_paint(MaskPaint::Block);
+        let blank = read_back(&mut state, &device, &queue);
+
+        // Mask mode AND a layer selection: the stroke paints the layer
+        // mask, neither the quick mask nor the layer.
+        state.set_mask_mode(true);
+        state.set_mask_edit_layer(Some(7));
+        drive_stroke(&mut state, [0.3, 0.5], [0.02, 0.0], 15);
+        state.end_stroke();
+        assert_eq!(state.staged_batch_count(), 0, "a mask stroke stages nothing");
+        assert_eq!(state.staged_dab_count(), 0);
+        assert_eq!(
+            read_back(&mut state, &device, &queue),
+            blank,
+            "the layer is untouched by a mask stroke"
+        );
+        assert!(
+            state.quick_mask().coverage(FIRST_TILE).is_none(),
+            "the quick mask is untouched by a layer-mask stroke"
+        );
+        let plane = state
+            .layer_mask(7, FIRST_TILE)
+            .expect("the stroke materialized the plane");
+        let shut = plane.iter().filter(|&&v| v == 0).count();
+        assert!(shut > 0, "the stroke closed texels in the plane");
+        assert!(
+            shut < plane.len(),
+            "only the stroke's discs closed ({} of {})",
+            shut,
+            plane.len()
+        );
+        assert_eq!(plane[0], 255, "far from the stroke stays open");
+        state.set_mask_mode(false);
+
+        // Back to layers: a paint stroke changes the layer but leaves the
+        // mask plane byte-identical.
+        let painted_mask = plane.to_vec();
+        state.set_mask_edit_layer(None);
+        drive_stroke(&mut state, [0.3, 0.5], [0.02, 0.0], 15);
+        state.end_stroke();
+        assert_ne!(
+            read_back(&mut state, &device, &queue),
+            blank,
+            "a layer stroke paints the layer"
+        );
+        assert_eq!(
+            state.layer_mask(7, FIRST_TILE).unwrap(),
+            painted_mask.as_slice(),
+            "a layer stroke leaves the mask plane alone"
+        );
     }
 
     /// Test (b), end to end: inverting flips the gating — the window the

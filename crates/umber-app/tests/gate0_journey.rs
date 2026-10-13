@@ -249,6 +249,7 @@ fn gate0_journey_fbx_to_decode_verified_orm() {
         opacity: 1.0,
         visible: true,
         texture: Some(paint.paint_target()),
+        mask: None,
     }];
     compositor
         .composite_stack(&mut encoder, &layers, &output)
