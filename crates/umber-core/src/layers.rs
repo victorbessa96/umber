@@ -110,35 +110,38 @@ pub enum InstanceError {
 /// a mismatch, but resolving that precisely is left open for Wave 2's
 /// compositor work.
 ///
-/// # Blend-set census (2026-10-10)
+/// # Blend-set census (2026-10-12: full 32)
 ///
-/// Task core-12 was: normal, passthrough, multiply, screen, overlay,
-/// soft-light, hard-light, color-dodge, color-burn, linear-dodge,
-/// linear-burn, add. Found in the enum before this task: Normal,
-/// Passthrough, Multiply, Screen, Overlay, SoftLight, HardLight, Add
-/// (8 of 12 — `Add` *is* Painter's "Linear Dodge (Add)", vocabulary item
-/// 10 in docs/research/01-painter-feature-inventory.md §2, so it covers
-/// both the `linear-dodge` and the `add` slots). Missing and added here:
-/// `ColorDodge`, `ColorBurn`, `LinearBurn` (see each variant's docs for
-/// the math and the divide-by-zero guards).
+/// The 32 modes of Painter's blending-modes doc page (verified 2026-10-12
+/// against the live page, which also confirms every mode runs in linear
+/// gamma space internally), in the doc's order: Normal, Passthrough,
+/// Disable, Replace, Multiply, Divide, Inverse Divide, Darken, Lighten,
+/// Linear Dodge (Add), Subtract, Inverse Subtract, Difference, Exclusion,
+/// Signed Addition (AddSub), Overlay, Screen, Linear Burn, Color Burn,
+/// Color Dodge, Soft Light, Hard Light, Vivid Light, Linear Light,
+/// Pin Light, Tint, Saturation, Color, Value, Normal Map Combine,
+/// Normal Map Detail, Normal Map Inverse Detail.
 ///
-/// Already present beyond the task's core-12, kept as-is (all four are
-/// separable members of Painter's full-32 list, so they stay valid):
-/// `Darken` (Min), `Lighten` (Max), `Subtract`, `Difference`.
+/// Before this task 15 were built (14 separable + Passthrough). This task
+/// adds the remaining 17: 10 separable (Divide, InverseDivide,
+/// InverseSubtract, Exclusion, AddSub, VividLight, LinearLight, PinLight,
+/// Disable, Replace) and 7 triplet (Tint, Saturation, Color, Value,
+/// NormalCombine, NormalDetail, NormalInverseDetail) — see
+/// [`BlendMode::blend_rgb`] for why the triplets cannot live in the
+/// per-channel scalar primitive.
 ///
-/// P0-full remainder — deliberately NOT added (Wave 4 compositor scope;
-/// adding enum variants with no consumer would be dead code, and two of
-/// the three families cannot be expressed in this function's per-channel
-/// scalar plumbing at all):
-/// - HSV modes (Tint, Saturation, Color, Value): non-separable, need an
-///   RGB-triplet fn, not a per-channel scalar.
-/// - Normal-map modes (Combine/Whiteout, Detail/RNM, Inverse Detail):
-///   need decoded normal vectors plus channel-aware routing (and Detail
-///   is the default for the normal channel, per the inventory doc).
-/// - Other separable Painter modes with no variant yet (Divide, Inverse
-///   Divide, Inverse Subtract, Exclusion, Signed Addition/AddSub, Vivid
-///   Light, Linear Light, Pin Light, Disable, Replace): expressible in
-///   [`BlendMode::blend_channel`]'s shape when the compositor needs them.
+/// Two corrections to early-wave guesses, verified against the doc page:
+/// - Combine is Whiteout and Detail is Reoriented Normal Mapping ("more
+///   precise than Combine"); Inverse Detail is RNM with the roles
+///   exchanged (the bottom fitted to the top). An early brief had
+///   Combine=RNM guesswork — the doc page rules it out.
+/// - Reflect/Glow are not in Painter's list, so they stay out. The
+///   separable remainder is Divide/Inverse-Divide/Inverse-Subtract/
+///   Exclusion/AddSub/Vivid/Linear/Pin/Disable/Replace.
+/// - Painter's Dissolve is noise-based (needs RNG/seed plumbing per texel)
+///   and is the one documented mode with no variant: deliberately excluded,
+///   not separable-safe (see the [`BlendMode::NormalDetail`] docs for the
+///   other v1 boundaries this census takes on).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BlendMode {
     /// Top layer fully replaces what's below it, modulated by opacity.
@@ -185,6 +188,98 @@ pub enum BlendMode {
     /// [`BlendMode::Subtract`] (`dst - src`): e.g. src=0.6, dst=0.7 gives
     /// 0.3 here, 0.1 under Subtract.
     LinearBurn,
+    /// Painter's "Divide": `dst / src` — lightens, often to burned-out
+    /// white. `src <= 0` yields white (guarded — a naive division gives
+    /// `+inf`, and `0/0` gives `NaN`), else `min(1, dst / src)`.
+    Divide,
+    /// Painter's "Inverse Divide": Divide with top and bottom exchanged,
+    /// i.e. `src / dst`. `dst <= 0` yields white (guarded), else
+    /// `min(1, src / dst)`.
+    InverseDivide,
+    /// Painter's "Inverse Subtract": Subtract with top and bottom
+    /// exchanged, i.e. `max(0, src - dst)` — the blend minus the base;
+    /// clamps at black.
+    InverseSubtract,
+    /// Exclusion: `src + dst - 2·src·dst` — Difference's lower-contrast
+    /// sibling; identical to Difference at the corners, grayer mid-range.
+    Exclusion,
+    /// Painter's "Signed Addition (AddSub)": `src + dst - 0.5`, clamped —
+    /// mid-gray blend is a no-op, darker blends subtract, lighter add.
+    AddSub,
+    /// Vivid Light: Color Burn below mid-gray blend, Color Dodge above —
+    /// `burn(dst, 2·src)` for `src <= 0.5`, `dodge(dst, 2·src - 1)`
+    /// otherwise (exact no-op at `src = 0.5`; the dodge/burn guards carry
+    /// over, so black blend burns to black and white dodges to white).
+    VividLight,
+    /// Linear Light: Linear Dodge above mid-gray, Linear Burn below —
+    /// `dst + 2·src - 1`, clamped (exact no-op at `src = 0.5`).
+    LinearLight,
+    /// Pin Light: Darken below mid-gray blend, Lighten above —
+    /// `min(dst, 2·src)` for `src <= 0.5`, `max(dst, 2·src - 1)`
+    /// otherwise (exact no-op at `src = 0.5`; drops mid-tones by design).
+    PinLight,
+    /// Painter's "Disable": discards the layer, showing only the layers
+    /// below — a dispatch skip spelled as a pixel op (`dst` unchanged at
+    /// any opacity, so [`BlendMode::composite_channel`] is already exact).
+    Disable,
+    /// Painter's "Replace": overwrites the base with the source. At the
+    /// [`BlendMode::blend_channel`] level this is `src` (Normal's math);
+    /// what distinguishes Replace in Painter is ignoring the layer's
+    /// opacity and the source alpha — an opacity-bypass the compositor
+    /// does NOT implement yet (it gates every mode by coverage), so v1
+    /// Replace composites exactly like Normal and the bypass is a named
+    /// follow-up for the channel-routing work. See
+    /// [`BlendMode::NormalDetail`]'s docs for the family's v1 boundaries.
+    Replace,
+    /// Painter's "Tint" (Hue): hue of the top, saturation and value of
+    /// the bottom, via the HSV cylinder in linear working space (see
+    /// [`BlendMode::blend_rgb`]). An achromatic top (no hue to take —
+    /// black, gray, white) leaves the bottom unchanged, per the doc's
+    /// "very dark colors remain unchanged" (v1 reads "very dark" as the
+    /// exactly-achromatic guard; near-black chromatic texels still take
+    /// hue 0 — a documented approximation).
+    Tint,
+    /// Painter's "Saturation": saturation of the top, hue and value of
+    /// the bottom. A black top desaturates the bottom to gray at the
+    /// bottom's value (e.g. red becomes white) — the doc's pinned
+    /// behavior, not a guard bug.
+    Saturation,
+    /// Painter's "Color": hue and saturation of the top, value of the
+    /// bottom. Achromatic top leaves the bottom unchanged (same guard as
+    /// [`BlendMode::Tint`]).
+    Color,
+    /// Painter's "Value" (Luminosity slot): hue and saturation of the
+    /// bottom, value of the top. Always defined — no guard.
+    Value,
+    /// Painter's "Normal Map Combine": Whiteout blending
+    /// (`n1.xy + n2.xy`, `n1.z·n2.z`, renormalized — Oat 2007, per
+    /// Barré-Brisebois & Hill's survey). Flat normals are identities on
+    /// both sides. Normal-channel-only: see [`BlendMode::is_normal_map`].
+    NormalCombine,
+    /// Painter's "Normal Map Detail": Reoriented Normal Mapping — the top
+    /// (detail) is reoriented to follow the bottom (base) surface before
+    /// combining, preserving both intensities ("more precise than
+    /// Combine"). Normal-channel-only: see [`BlendMode::is_normal_map`].
+    ///
+    /// # v1 boundaries (all load-bearing; read before extending)
+    ///
+    /// - No DirectX/OpenGL Y-flip is applied: the engine operates on raw
+    ///   encoded triplets in whatever Y convention the channel holds. The
+    ///   flip belongs to import/export color management, not the blend.
+    /// - The normal-channel gate is a routing contract, not a math check:
+    ///   [`BlendMode::is_normal_map`] tells the channel-routing layer
+    ///   (the viewport-texture kill's surface, per the compositor docs)
+    ///   which modes may only be selected for the normal channel. The
+    ///   math itself runs on any triplet it is handed.
+    /// - Degenerate triplets (a mid-gray texel decodes to the zero vector,
+    ///   which is not a direction) fall back to the base unchanged rather
+    ///   than producing `NaN`.
+    NormalDetail,
+    /// Painter's "Normal Map Inverse Detail": RNM with the roles
+    /// exchanged — the bottom is fitted to the top's surface, i.e.
+    /// `rnm(base = top, detail = bottom)`. Same v1 boundaries as
+    /// [`BlendMode::NormalDetail`].
+    NormalInverseDetail,
 }
 
 impl BlendMode {
@@ -207,13 +302,17 @@ impl BlendMode {
     /// value, `dst` the accumulated base below — the same src/dst
     /// convention as the stamp composite (`src * cov + dst * (1 - …)`).
     ///
-    /// Returns `None` for [`BlendMode::Passthrough`], which is structural
-    /// (folder children blend directly below) rather than a pixel op —
-    /// callers must handle folders before reaching per-pixel math.
+    /// Returns `None` for [`BlendMode::Passthrough`] (structural: folder
+    /// children blend directly below) and for the seven triplet modes
+    /// (Tint, Saturation, Color, Value, NormalCombine, NormalDetail,
+    /// NormalInverseDetail), which need an RGB triplet and live in [`BlendMode::blend_rgb`] instead — callers
+    /// must handle folders before reaching per-pixel math, and must route
+    /// triplet modes through `blend_rgb` (single-channel use of those is
+    /// meaningless, so `None` is the honest answer, not a panic).
     /// Every other variant returns `Some` finite `0.0..=1.0` value for any
     /// finite *or* non-finite input (inputs pass through [`BlendMode`]'s
-    /// private clamp first, and the dodge/burn guards below keep the
-    /// `1 - src` / `src` divisors off zero).
+    /// private clamp first, and the dodge/burn/divide guards below keep
+    /// the `1 - src` / `src` / `dst` divisors off zero).
     ///
     /// Soft-light is the Pegtop approximation
     /// `((1 - 2·src)·dst + 2·src)·dst`: exact no-op at 50% gray
@@ -246,21 +345,50 @@ impl BlendMode {
                     1.0 - 2.0 * (1.0 - s) * (1.0 - d)
                 }
             }
-            BlendMode::ColorDodge => {
-                if s >= 1.0 {
+            BlendMode::ColorDodge => Self::color_dodge(s, d),
+            BlendMode::ColorBurn => Self::color_burn(s, d),
+            BlendMode::LinearBurn => (s + d - 1.0).max(0.0),
+            BlendMode::Divide => {
+                if s <= 0.0 {
                     1.0
                 } else {
-                    (d / (1.0 - s)).min(1.0)
+                    (d / s).min(1.0)
                 }
             }
-            BlendMode::ColorBurn => {
-                if s <= 0.0 {
-                    0.0
+            BlendMode::InverseDivide => {
+                if d <= 0.0 {
+                    1.0
                 } else {
-                    1.0 - ((1.0 - d) / s).min(1.0)
+                    (s / d).min(1.0)
                 }
             }
-            BlendMode::LinearBurn => (s + d - 1.0).max(0.0),
+            BlendMode::InverseSubtract => (s - d).max(0.0),
+            BlendMode::Exclusion => s + d - 2.0 * s * d,
+            BlendMode::AddSub => (d + s - 0.5).clamp(0.0, 1.0),
+            BlendMode::VividLight => {
+                if s <= 0.5 {
+                    Self::color_burn(2.0 * s, d)
+                } else {
+                    Self::color_dodge(2.0 * s - 1.0, d)
+                }
+            }
+            BlendMode::LinearLight => (d + 2.0 * s - 1.0).clamp(0.0, 1.0),
+            BlendMode::PinLight => {
+                if s <= 0.5 {
+                    d.min(2.0 * s)
+                } else {
+                    d.max(2.0 * (s - 0.5))
+                }
+            }
+            BlendMode::Disable => d,
+            BlendMode::Replace => s,
+            BlendMode::Tint
+            | BlendMode::Saturation
+            | BlendMode::Color
+            | BlendMode::Value
+            | BlendMode::NormalCombine
+            | BlendMode::NormalDetail
+            | BlendMode::NormalInverseDetail => return None,
         };
         Some(Self::clamp01(v))
     }
@@ -272,7 +400,8 @@ impl BlendMode {
     /// Non-finite `opacity` is treated as `0.0` (base unchanged), mirroring
     /// [`LayerStack::set_opacity`]'s refusal to store non-finite input.
     /// Returns `None` exactly when [`BlendMode::blend_channel`] does
-    /// (`Passthrough`).
+    /// (`Passthrough` plus the seven triplet modes, which have no
+    /// single-channel meaning — use [`BlendMode::blend_rgb`]).
     pub fn composite_channel(self, src: f32, dst: f32, opacity: f32) -> Option<f32> {
         let blend = self.blend_channel(src, dst)?;
         let base = Self::clamp01(dst);
@@ -282,6 +411,246 @@ impl BlendMode {
             0.0
         };
         Some(Self::clamp01(base + (blend - base) * o))
+    }
+
+    /// The guarded Color Dodge primitive shared by [`BlendMode::ColorDodge`]
+    /// and [`BlendMode::VividLight`]: `src >= 1` dodges to white, else
+    /// `min(1, dst / (1 - src))`. Inputs are already clamped by the caller.
+    fn color_dodge(s: f32, d: f32) -> f32 {
+        if s >= 1.0 {
+            1.0
+        } else {
+            (d / (1.0 - s)).min(1.0)
+        }
+    }
+
+    /// The guarded Color Burn primitive shared by [`BlendMode::ColorBurn`]
+    /// and [`BlendMode::VividLight`]: `src <= 0` burns to black, else
+    /// `1 - min(1, (1 - dst) / src)`. Inputs are already clamped.
+    fn color_burn(s: f32, d: f32) -> f32 {
+        if s <= 0.0 {
+            0.0
+        } else {
+            1.0 - ((1.0 - d) / s).min(1.0)
+        }
+    }
+
+    /// `true` for the seven non-separable modes (the HSV family plus the
+    /// normal-map family), which operate on an RGB triplet rather than one
+    /// channel at a time. Separated out so the compositor and the census
+    /// test can pin the split without repeating the variant list.
+    pub fn is_triplet(self) -> bool {
+        matches!(
+            self,
+            BlendMode::Tint
+                | BlendMode::Saturation
+                | BlendMode::Color
+                | BlendMode::Value
+                | BlendMode::NormalCombine
+                | BlendMode::NormalDetail
+                | BlendMode::NormalInverseDetail
+        )
+    }
+
+    /// `true` for the three normal-map modes. This is the normal-channel
+    /// gate as a routing predicate: the channel-routing layer must only
+    /// offer these modes for the normal channel (Painter: "the Normal map
+    /// blending modes are only useful for the Normal channel"). The math
+    /// in [`BlendMode::blend_rgb`] does not re-check the channel — it runs
+    /// on whatever triplet it is handed (see the [`BlendMode::NormalDetail`]
+    /// docs for why the gate lives at routing time, not blend time).
+    pub fn is_normal_map(self) -> bool {
+        matches!(
+            self,
+            BlendMode::NormalCombine | BlendMode::NormalDetail | BlendMode::NormalInverseDetail
+        )
+    }
+
+    /// Converts a clamped linear RGB triplet to HSV: hue in degrees
+    /// `0.0..<360.0`, saturation and value in `0.0..=1.0`.
+    ///
+    /// Achromatic inputs (including black) yield hue `0.0` — the red axis —
+    /// by convention, since they carry no hue. Callers that need "no hue"
+    /// semantics ([`BlendMode::Tint`]/[`BlendMode::Color`]) check the
+    /// saturation first and never read this fallback hue.
+    fn rgb_to_hsv(c: [f32; 3]) -> [f32; 3] {
+        let mx = c[0].max(c[1]).max(c[2]);
+        let mn = c[0].min(c[1]).min(c[2]);
+        let d = mx - mn;
+        let s = if mx <= 0.0 { 0.0 } else { d / mx };
+        let mut h = 0.0;
+        if d > 0.0 {
+            if mx == c[0] {
+                h = 60.0 * ((c[1] - c[2]) / d);
+            } else if mx == c[1] {
+                h = 60.0 * ((c[2] - c[0]) / d + 2.0);
+            } else {
+                h = 60.0 * ((c[0] - c[1]) / d + 4.0);
+            }
+            if h < 0.0 {
+                h += 360.0;
+            }
+        }
+        [h, s, mx]
+    }
+
+    /// Converts an HSV triplet (hue degrees, saturation, value) back to
+    /// linear RGB. The `t mod 2` is written without `%` so the WGSL twin
+    /// in the compositor stays a line-for-line transliteration.
+    fn hsv_to_rgb(c: [f32; 3]) -> [f32; 3] {
+        let (h, s, v) = (c[0], c[1], c[2]);
+        let chroma = v * s;
+        let t = h / 60.0;
+        let t_mod_2 = t - (t / 2.0).floor() * 2.0;
+        let x = chroma * (1.0 - (t_mod_2 - 1.0).abs());
+        let m = v - chroma;
+        let (r, g, b) = if h < 60.0 {
+            (chroma, x, 0.0)
+        } else if h < 120.0 {
+            (x, chroma, 0.0)
+        } else if h < 180.0 {
+            (0.0, chroma, x)
+        } else if h < 240.0 {
+            (0.0, x, chroma)
+        } else if h < 300.0 {
+            (x, 0.0, chroma)
+        } else {
+            // `h >= 300.0`, including the `h == 360.0` wraparound: red.
+            (chroma, 0.0, x)
+        };
+        [r + m, g + m, b + m]
+    }
+
+    /// Decodes one tangent-space normal lane-triplet (`n * 0.5 + 0.5`
+    /// encoding) to a signed direction. No Y-flip is applied (see the
+    /// [`BlendMode::NormalDetail`] docs).
+    fn decode_normal(c: [f32; 3]) -> [f32; 3] {
+        [2.0 * c[0] - 1.0, 2.0 * c[1] - 1.0, 2.0 * c[2] - 1.0]
+    }
+
+    /// Normalizes `n`, falling back to `fallback` when it is degenerate:
+    /// a zero-length vector (e.g. a mid-gray texel decodes to `(0, 0, 0)`,
+    /// which is not a direction) or a non-finite one normalizes to `NaN`
+    /// and would poison the composite, so the base is kept instead.
+    fn normalize_or(n: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
+        let len_sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if !len_sq.is_finite() || len_sq <= 1e-12 {
+            return fallback;
+        }
+        let inv = 1.0 / len_sq.sqrt();
+        [n[0] * inv, n[1] * inv, n[2] * inv]
+    }
+
+    /// Painter's "Normal Map Combine": Whiteout blending (Oat 2007, via
+    /// Barré-Brisebois & Hill's "Blending in Detail" survey:
+    /// `r = (n1.xy + n2.xy, n1.z·n2.z)`, renormalized). Flat normals are
+    /// identities on both sides: detail-flat returns the base, base-flat
+    /// returns the detail.
+    fn whiteout(base: [f32; 3], detail: [f32; 3]) -> [f32; 3] {
+        let n1 = Self::decode_normal(base);
+        let n2 = Self::decode_normal(detail);
+        let r = [n1[0] + n2[0], n1[1] + n2[1], n1[2] * n2[2]];
+        let n = Self::normalize_or(r, n1);
+        [0.5 * n[0] + 0.5, 0.5 * n[1] + 0.5, 0.5 * n[2] + 0.5]
+    }
+
+    /// Reoriented Normal Mapping (RNM — Barré-Brisebois & Hill, "Blending
+    /// in Detail", 2012): rotates the detail normal so it follows the base
+    /// surface, via the shortest-arc quaternion reduced to
+    /// `r = t·(t·u) − u·t.z` with `t = base + (0,0,1)` and
+    /// `u = (−detail.x, −detail.y, detail.z)`, renormalized (the article's
+    /// HLSL Appendix form, with its recommended normalize kept — decoded
+    /// texels are rarely exactly unit length after quantization). Unity's
+    /// contemporary basis-transform variant from the same article is
+    /// deliberately NOT used: its basis degenerates away from flat
+    /// normals (the article's Figure 8), while the quaternion form does
+    /// not. Flat base or flat detail are both identities.
+    fn rnm(base: [f32; 3], detail: [f32; 3]) -> [f32; 3] {
+        let b = Self::decode_normal(base);
+        let d = Self::decode_normal(detail);
+        let t = [b[0], b[1], b[2] + 1.0];
+        let u = [-d[0], -d[1], d[2]];
+        let dot = t[0] * u[0] + t[1] * u[1] + t[2] * u[2];
+        let r = [
+            t[0] * dot - u[0] * t[2],
+            t[1] * dot - u[1] * t[2],
+            t[2] * dot - u[2] * t[2],
+        ];
+        let n = Self::normalize_or(r, b);
+        [0.5 * n[0] + 0.5, 0.5 * n[1] + 0.5, 0.5 * n[2] + 0.5]
+    }
+
+    /// Blends one linear-space RGB triplet: `src` is the top layer, `dst`
+    /// the accumulated base below.
+    ///
+    /// Separable modes fold the per-channel [`BlendMode::blend_channel`]
+    /// primitive lane-by-lane. The seven triplet modes need the whole
+    /// pixel: the HSV family converts in the linear working space (no sRGB
+    /// round-trip — Painter runs every mode in linear gamma internally,
+    /// and converting in the working space keeps the CPU oracle and the
+    /// WGSL mirror bit-agreeing), and the normal-map family decodes
+    /// tangent-space directions (see [`BlendMode::NormalDetail`]).
+    /// Returns `None` exactly for [`BlendMode::Passthrough`].
+    pub fn blend_rgb(self, src: [f32; 3], dst: [f32; 3]) -> Option<[f32; 3]> {
+        if matches!(self, BlendMode::Passthrough) {
+            return None;
+        }
+        let s = [
+            Self::clamp01(src[0]),
+            Self::clamp01(src[1]),
+            Self::clamp01(src[2]),
+        ];
+        let d = [
+            Self::clamp01(dst[0]),
+            Self::clamp01(dst[1]),
+            Self::clamp01(dst[2]),
+        ];
+        let v = match self {
+            BlendMode::Tint => {
+                let hs = Self::rgb_to_hsv(s);
+                if hs[1] <= 0.0 {
+                    // Achromatic top carries no hue — the bottom stays.
+                    d
+                } else {
+                    let hd = Self::rgb_to_hsv(d);
+                    Self::hsv_to_rgb([hs[0], hd[1], hd[2]])
+                }
+            }
+            BlendMode::Saturation => {
+                let hs = Self::rgb_to_hsv(s);
+                let hd = Self::rgb_to_hsv(d);
+                Self::hsv_to_rgb([hd[0], hs[1], hd[2]])
+            }
+            BlendMode::Color => {
+                let hs = Self::rgb_to_hsv(s);
+                if hs[1] <= 0.0 {
+                    d
+                } else {
+                    let hd = Self::rgb_to_hsv(d);
+                    Self::hsv_to_rgb([hs[0], hs[1], hd[2]])
+                }
+            }
+            BlendMode::Value => {
+                let hs = Self::rgb_to_hsv(s);
+                let hd = Self::rgb_to_hsv(d);
+                Self::hsv_to_rgb([hd[0], hd[1], hs[2]])
+            }
+            BlendMode::NormalCombine => Self::whiteout(d, s),
+            BlendMode::NormalDetail => Self::rnm(d, s),
+            BlendMode::NormalInverseDetail => Self::rnm(s, d),
+            // Every remaining variant is a separable per-channel op
+            // (Passthrough returned above): fold the scalar primitive.
+            _ => [
+                self.blend_channel(s[0], d[0])?,
+                self.blend_channel(s[1], d[1])?,
+                self.blend_channel(s[2], d[2])?,
+            ],
+        };
+        Some([
+            Self::clamp01(v[0]),
+            Self::clamp01(v[1]),
+            Self::clamp01(v[2]),
+        ])
     }
 }
 
@@ -1279,13 +1648,483 @@ mod tests {
         }
     }
 
+    fn blend3(mode: BlendMode, src: [f32; 3], dst: [f32; 3]) -> [f32; 3] {
+        mode.blend_rgb(src, dst)
+            .unwrap_or_else(|| panic!("{mode:?} should be a triplet-capable pixel op"))
+    }
+
+    #[test]
+    fn divide_pins_known_value_and_guards_zero_src() {
+        // Known value: base 0.25 divided by 0.5 -> 0.5 (exact binary).
+        assert_eq!(
+            blend(BlendMode::Divide, 0.5, 0.25),
+            0.5,
+            "divide src=0.5 dst=0.25 should be 0.5"
+        );
+        // Can-fail: a naive `dst / src` divides by zero here (0.7/0 = +inf,
+        // 0/0 = NaN). Zero blend must divide to white regardless of base.
+        assert_eq!(
+            blend(BlendMode::Divide, 0.0, 0.7),
+            1.0,
+            "divide by black must be white, not inf"
+        );
+        assert_eq!(
+            blend(BlendMode::Divide, 0.0, 0.0),
+            1.0,
+            "divide 0/0 must be white, not NaN-black"
+        );
+        // Over-unity quotients clamp at white (the burned-out look).
+        assert_eq!(
+            blend(BlendMode::Divide, 0.25, 1.0),
+            1.0,
+            "divide 1.0/0.25 saturates to white"
+        );
+    }
+
+    #[test]
+    fn inverse_divide_pins_value_guards_and_mirrors_divide() {
+        // Known value: 0.25 over base 0.5 -> 0.5 (exact binary).
+        assert_eq!(
+            blend(BlendMode::InverseDivide, 0.25, 0.5),
+            0.5,
+            "inverse divide src=0.25 dst=0.5 should be 0.5"
+        );
+        // Zero base guards to white (the divisor is the bottom here).
+        assert_eq!(
+            blend(BlendMode::InverseDivide, 0.7, 0.0),
+            1.0,
+            "inverse divide over black must be white"
+        );
+        // Role exchange with Divide: identical math on swapped inputs, so
+        // strictly-positive pairs must agree bit-exactly (same f32 ops).
+        for (s, d) in [(0.3, 0.8), (0.9, 0.1), (0.6, 0.6)] {
+            assert_eq!(
+                blend(BlendMode::InverseDivide, s, d),
+                blend(BlendMode::Divide, d, s),
+                "InverseDivide({s}, {d}) must equal Divide({d}, {s})"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_subtract_pins_value_clamp_and_mirrors_subtract() {
+        // Known value: 0.75 minus base 0.25 -> 0.5 (exact binary).
+        assert_eq!(
+            blend(BlendMode::InverseSubtract, 0.75, 0.25),
+            0.5,
+            "inverse subtract src=0.75 dst=0.25 should be 0.5"
+        );
+        // Can-fail: blend-under-base goes negative and must clamp at black.
+        assert_eq!(
+            blend(BlendMode::InverseSubtract, 0.25, 0.75),
+            0.0,
+            "inverse subtract 0.25/0.75 must clamp to black"
+        );
+        // Role exchange with Subtract: same f32 ops on swapped inputs.
+        for (s, d) in [(0.3, 0.8), (0.9, 0.1), (0.0, 1.0)] {
+            assert_eq!(
+                blend(BlendMode::InverseSubtract, s, d),
+                blend(BlendMode::Subtract, d, s),
+                "InverseSubtract({s}, {d}) must equal Subtract({d}, {s})"
+            );
+        }
+    }
+
+    #[test]
+    fn exclusion_pins_value_and_endpoints() {
+        // Known value: 0.5 ^ 0.25 = 0.5 + 0.25 - 2*0.5*0.25 = 0.5 (exact).
+        assert_eq!(
+            blend(BlendMode::Exclusion, 0.5, 0.25),
+            0.5,
+            "exclusion src=0.5 dst=0.25 should be 0.5"
+        );
+        // Can-fail: Exclusion agrees with Difference at the corners (both
+        // give 0 for identical inputs, identity for black) — a sign error
+        // in the `- 2·s·d` term breaks these while keeping mid-range gray.
+        assert_eq!(blend(BlendMode::Exclusion, 1.0, 1.0), 0.0);
+        assert_eq!(blend(BlendMode::Exclusion, 1.0, 0.0), 1.0);
+        assert_eq!(blend(BlendMode::Exclusion, 0.0, 0.0), 0.0);
+        // Lower contrast than Difference mid-range: 0.5/0.5 gives 0.5 here,
+        // 0.0 under Difference.
+        assert_eq!(blend(BlendMode::Exclusion, 0.5, 0.5), 0.5);
+        assert_eq!(blend(BlendMode::Difference, 0.5, 0.5), 0.0);
+    }
+
+    #[test]
+    fn addsub_gray_is_noop_and_clamps() {
+        // Can-fail: AddSub is `dst + src - 0.5`, NOT LinearLight's
+        // `dst + 2·src - 1`. Mid-gray blend must leave every base exactly
+        // alone (the doc's "grayscale values have no effect").
+        for d in [0.0, 0.25, 1.0] {
+            assert_eq!(
+                blend(BlendMode::AddSub, 0.5, d),
+                d,
+                "addsub by mid-gray over {d} must be a no-op"
+            );
+        }
+        // Lighter adds (0.2 + 0.7 - 0.5 = 0.4), darker subtracts with a
+        // black clamp (0.3 + 0.2 - 0.5 underflows).
+        let v = blend(BlendMode::AddSub, 0.7, 0.2);
+        assert!(
+            (v - 0.4).abs() < 1e-6,
+            "addsub src=0.7 dst=0.2 should be 0.4, got {v}"
+        );
+        let v = blend(BlendMode::AddSub, 0.2, 0.3);
+        assert!(
+            v.abs() < 1e-6,
+            "addsub src=0.2 dst=0.3 must clamp to black, got {v}"
+        );
+    }
+
+    #[test]
+    fn vivid_light_mid_gray_is_noop_and_pins_halves() {
+        // Mid-gray blend is an exact no-op (burn(dst, 1) = dodge(dst, 0)).
+        for d in [0.0, 0.25, 0.8, 1.0] {
+            assert_eq!(
+                blend(BlendMode::VividLight, 0.5, d),
+                d,
+                "vivid light by mid-gray over {d} must be a no-op"
+            );
+        }
+        // Dark half burns: vivid(0.25, 0.8) = burn(0.8, 0.5) = 0.6.
+        let v = blend(BlendMode::VividLight, 0.25, 0.8);
+        assert!(
+            (v - 0.6).abs() < 1e-6,
+            "vivid light src=0.25 dst=0.8 should be 0.6, got {v}"
+        );
+        // Light half dodges: vivid(0.75, 0.5) = dodge(0.5, 0.5) = 1.0.
+        assert_eq!(
+            blend(BlendMode::VividLight, 0.75, 0.5),
+            1.0,
+            "vivid light src=0.75 dst=0.5 should dodge to white"
+        );
+        // The dodge/burn guards carry over: black burns to black, white
+        // dodges to white (a naive burn/dodge divides by zero here).
+        assert_eq!(blend(BlendMode::VividLight, 0.0, 0.3), 0.0);
+        assert_eq!(blend(BlendMode::VividLight, 1.0, 0.3), 1.0);
+    }
+
+    #[test]
+    fn linear_light_mid_gray_is_noop_and_pins_value_and_clamp() {
+        // Mid-gray blend is an exact no-op (`d + 2·0.5 - 1 = d`).
+        for d in [0.0, 0.25, 1.0] {
+            assert_eq!(
+                blend(BlendMode::LinearLight, 0.5, d),
+                d,
+                "linear light by mid-gray over {d} must be a no-op"
+            );
+        }
+        // Known value: 0.25 + 2·0.75 - 1 = 0.75 (exact binary).
+        assert_eq!(
+            blend(BlendMode::LinearLight, 0.75, 0.25),
+            0.75,
+            "linear light src=0.75 dst=0.25 should be 0.75"
+        );
+        // Can-fail: LinearLight is NOT AddSub (`d + 2·s - 1` vs `d + s`).
+        // src=0.75, dst=0.25 gives 0.75 here, 0.5 under AddSub.
+        assert_eq!(blend(BlendMode::AddSub, 0.75, 0.25), 0.5);
+        // Both clamps: black blend underflows, white blend overflows.
+        assert_eq!(blend(BlendMode::LinearLight, 0.0, 0.2), 0.0);
+        assert_eq!(blend(BlendMode::LinearLight, 1.0, 0.2), 1.0);
+    }
+
+    #[test]
+    fn pin_light_mid_gray_is_noop_and_pins_min_max() {
+        // Mid-gray blend is an exact no-op (min(d, 1) = max(d, 0) = d).
+        for d in [0.0, 0.25, 1.0] {
+            assert_eq!(
+                blend(BlendMode::PinLight, 0.5, d),
+                d,
+                "pin light by mid-gray over {d} must be a no-op"
+            );
+        }
+        // Dark half darkens via min: pin(0.25, 0.8) = min(0.8, 0.5) = 0.5.
+        assert_eq!(
+            blend(BlendMode::PinLight, 0.25, 0.8),
+            0.5,
+            "pin light src=0.25 dst=0.8 should be 0.5"
+        );
+        // Light half lightens via max: pin(0.75, 0.2) = max(0.2, 0.5).
+        assert_eq!(
+            blend(BlendMode::PinLight, 0.75, 0.2),
+            0.5,
+            "pin light src=0.75 dst=0.2 should be 0.5"
+        );
+    }
+
+    #[test]
+    fn disable_returns_base_and_replace_returns_source() {
+        // Disable discards the layer at any opacity (Painter's compute
+        // skip spelled as a pixel op).
+        assert_eq!(blend(BlendMode::Disable, 0.9, 0.2), 0.2);
+        for opacity in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                BlendMode::Disable
+                    .composite_channel(0.9, 0.2, opacity)
+                    .expect("separable op"),
+                0.2,
+                "disable must show the base at opacity {opacity}"
+            );
+        }
+        // Replace overwrites with the source at the primitive level (the
+        // opacity-bypass delta is documented on the variant and deferred).
+        assert_eq!(blend(BlendMode::Replace, 0.9, 0.2), 0.9);
+        assert_eq!(
+            BlendMode::Replace
+                .composite_channel(0.9, 0.2, 1.0)
+                .expect("separable op"),
+            0.9,
+            "replace at full opacity must be the source"
+        );
+    }
+
+    #[test]
+    fn hsv_round_trip_is_identity_on_wheel_colors() {
+        // Can-fail: a swapped sector or a wrong `t mod 2` in either
+        // conversion breaks the round trip while leaving primaries intact
+        // (primaries sit on sector boundaries). The dusty-blue
+        // (0.2, 0.4, 0.8) sits mid-sector and catches those.
+        for c in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.5, 0.5, 0.5],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.2, 0.4, 0.8],
+        ] {
+            let back = BlendMode::hsv_to_rgb(BlendMode::rgb_to_hsv(c));
+            for (got, want) in back.iter().zip(c.iter()) {
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "hsv round trip of {c:?} drifted to {back:?}"
+                );
+            }
+        }
+        // Primaries pin known conversions exactly (sector boundaries).
+        assert_eq!(BlendMode::rgb_to_hsv([1.0, 0.0, 0.0]), [0.0, 1.0, 1.0]);
+        assert_eq!(BlendMode::rgb_to_hsv([0.0, 1.0, 0.0]), [120.0, 1.0, 1.0]);
+        assert_eq!(BlendMode::rgb_to_hsv([0.0, 0.0, 1.0]), [240.0, 1.0, 1.0]);
+        assert_eq!(
+            BlendMode::rgb_to_hsv([0.5, 0.5, 0.5]),
+            [0.0, 0.0, 0.5],
+            "gray carries no saturation (hue is the 0.0 convention)"
+        );
+    }
+
+    #[test]
+    fn tint_keeps_src_hue_and_guards_achromatic_source() {
+        // Red over blue takes red's hue with blue's sat/val: still red.
+        assert_eq!(
+            blend3(BlendMode::Tint, [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            [1.0, 0.0, 0.0]
+        );
+        // Yellow hue (60°) over dark blue (v=0.5): (0.5, 0.5, 0.0) —
+        // exact binary fractions, so this pins the sector math, not just
+        // a primary passthrough.
+        assert_eq!(
+            blend3(BlendMode::Tint, [1.0, 1.0, 0.0], [0.0, 0.0, 0.5]),
+            [0.5, 0.5, 0.0]
+        );
+        // Can-fail: black/gray/white carry no hue, so the bottom must come
+        // back byte-identical (a naive hue-0 substitution reddens it).
+        for src in [[0.0; 3], [0.5; 3], [1.0; 3]] {
+            assert_eq!(
+                blend3(BlendMode::Tint, src, [0.0, 0.0, 1.0]),
+                [0.0, 0.0, 1.0],
+                "tint by achromatic {src:?} must leave the bottom unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn saturation_takes_src_saturation_and_grays_on_black() {
+        // Red saturation at gray's value: dark red (0.5, 0, 0), exact.
+        assert_eq!(
+            blend3(BlendMode::Saturation, [1.0, 0.0, 0.0], [0.5; 3]),
+            [0.5, 0.0, 0.0]
+        );
+        // Can-fail: black's zero saturation must actively desaturate — red
+        // at value 1 with saturation 0 is WHITE, not red and not black.
+        assert_eq!(
+            blend3(BlendMode::Saturation, [0.0; 3], [1.0, 0.0, 0.0]),
+            [1.0, 1.0, 1.0],
+            "black saturation over red must gray to white (v=1)"
+        );
+    }
+
+    #[test]
+    fn color_takes_src_hue_sat_and_guards_achromatic() {
+        // Green hue+sat at dark blue's value: (0, 0.5, 0), exact binary.
+        assert_eq!(
+            blend3(BlendMode::Color, [0.0, 1.0, 0.0], [0.0, 0.0, 0.5]),
+            [0.0, 0.5, 0.0]
+        );
+        // Red over blue is red (hue+sat from red, value 1 from blue).
+        assert_eq!(
+            blend3(BlendMode::Color, [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            [1.0, 0.0, 0.0]
+        );
+        // Achromatic top leaves the bottom unchanged (same guard as Tint).
+        assert_eq!(
+            blend3(BlendMode::Color, [0.5; 3], [0.0, 0.0, 1.0]),
+            [0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn value_takes_src_value() {
+        // Dark green's value (0.5) at red's hue+sat: (0.5, 0, 0), exact.
+        assert_eq!(
+            blend3(BlendMode::Value, [0.0, 0.5, 0.0], [1.0, 0.0, 0.0]),
+            [0.5, 0.0, 0.0]
+        );
+        // Black's value is 0 regardless of bottom: always black.
+        assert_eq!(
+            blend3(BlendMode::Value, [0.0; 3], [1.0, 0.0, 0.0]),
+            [0.0; 3]
+        );
+        // White's value is 1: dark red (0.5, 0, 0) becomes full red.
+        assert_eq!(
+            blend3(BlendMode::Value, [1.0; 3], [0.5, 0.0, 0.0]),
+            [1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn normal_combine_is_whiteout_with_flat_identities() {
+        // Flat is the identity on both sides (the Whiteout guarantee).
+        let flat = [0.5, 0.5, 1.0];
+        assert_eq!(blend3(BlendMode::NormalCombine, flat, flat), flat);
+        // A 45° +X tilt over flat returns the tilt (within f32 noise —
+        // decode/normalize round-trip, not bit-exact by construction).
+        let tilt = [
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+            0.5,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        let got = blend3(BlendMode::NormalCombine, tilt, flat);
+        for (g, w) in got.iter().zip(tilt.iter()) {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "combine of tilt over flat must return the tilt, got {got:?}"
+            );
+        }
+        // Non-trivial Whiteout anchor, hand-derived in f64: +X tilt over
+        // +Y tilt gives r = (t, t, 0.5) with t = √2/2, |r|² = 1.25, so
+        // n = (0.63245553, 0.63245553, 0.44721360) and the encoding is
+        // (0.816_227_8, 0.816_227_8, 0.723_606_8). Tolerance 1e-5 covers f32
+        // normalize noise; a swapped z-term (e.g. UDN's `n1.z`) lands at
+        // (0.85355339, …) and fails.
+        let tilt_y = [
+            0.5,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        let got = blend3(BlendMode::NormalCombine, tilt, tilt_y);
+        for (g, w) in got.iter().zip([0.816_227_8, 0.816_227_8, 0.723_606_8]) {
+            assert!(
+                (g - w).abs() < 1e-5,
+                "whiteout tilt-over-tilt should be ~(0.8162, 0.8162, 0.7236), got {got:?}"
+            );
+        }
+        // Whiteout is symmetric in its inputs (xy add, z multiply commute).
+        assert_eq!(
+            blend3(BlendMode::NormalCombine, tilt, tilt_y),
+            blend3(BlendMode::NormalCombine, tilt_y, tilt)
+        );
+        // Degenerate detail (mid-gray decodes to the zero vector) keeps
+        // the base instead of producing NaN.
+        assert_eq!(blend3(BlendMode::NormalCombine, [0.5; 3], flat), flat);
+    }
+
+    #[test]
+    fn normal_detail_is_rnm_with_flat_identities_and_pins_double_tilt() {
+        // Flat is the identity on both sides (the RNM guarantee: detail on
+        // a flat base returns the detail, flat detail returns the base).
+        let flat = [0.5, 0.5, 1.0];
+        let tilt = [
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+            0.5,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        assert_eq!(blend3(BlendMode::NormalDetail, flat, flat), flat);
+        for (name, got) in [
+            (
+                "detail-on-flat",
+                blend3(BlendMode::NormalDetail, tilt, flat),
+            ),
+            ("flat-on-base", blend3(BlendMode::NormalDetail, flat, tilt)),
+        ] {
+            for (g, w) in got.iter().zip(tilt.iter()) {
+                assert!(
+                    (g - w).abs() < 1e-6,
+                    "{name} must return the tilt, got {got:?}"
+                );
+            }
+        }
+        // Discriminating RNM anchor, hand-derived in f64: the same 45° +X
+        // tilt as base AND detail composes the two rotations to a 90°
+        // grazing normal — r = (1.70710678, 0, ~0), normalized (1, 0, 0),
+        // encoded (1.0, 0.5, 0.5). Whiteout on the same inputs gives
+        // (0.9714, 0.5, 0.6667), so this test cannot pass under the wrong
+        // algorithm (and the combine test above pins the other side).
+        let got = blend3(BlendMode::NormalDetail, tilt, tilt);
+        for (g, w) in got.iter().zip([1.0, 0.5, 0.5]) {
+            assert!(
+                (g - w).abs() < 1e-5,
+                "rnm double-tilt should be ~(1.0, 0.5, 0.5), got {got:?}"
+            );
+        }
+        // Degenerate detail keeps the base instead of producing NaN.
+        assert_eq!(blend3(BlendMode::NormalDetail, [0.5; 3], flat), flat);
+    }
+
+    #[test]
+    fn normal_inverse_detail_swaps_rnm_roles() {
+        // Inverse Detail fits the bottom to the top: bit-exact role swap
+        // with Detail (same f32 op sequence on exchanged inputs).
+        let flat = [0.5, 0.5, 1.0];
+        let tilt_x = [
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+            0.5,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        let tilt_y = [
+            0.5,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+            0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2,
+        ];
+        for (s, d) in [(tilt_x, tilt_y), (tilt_x, flat), (flat, tilt_y)] {
+            assert_eq!(
+                blend3(BlendMode::NormalInverseDetail, s, d),
+                blend3(BlendMode::NormalDetail, d, s),
+                "InverseDetail({s:?}, {d:?}) must equal Detail({d:?}, {s:?})"
+            );
+        }
+        // Absolute anchor: bottom tilt fitted to a flat top returns the
+        // tilt (flat top contributes no reorientation).
+        let got = blend3(BlendMode::NormalInverseDetail, flat, tilt_x);
+        for (g, w) in got.iter().zip(tilt_x.iter()) {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "inverse detail of tilt under flat must return the tilt, got {got:?}"
+            );
+        }
+    }
+
     #[test]
     fn blend_census_every_separable_mode_returns_finite_clamped_math() {
-        // The static census pin: every variant except Passthrough must be
-        // a total pixel op — Some finite 0..=1 value for corner and
-        // mid-range inputs alike. The `len` assert below is the tripwire:
-        // add a variant without extending this list and it fails, forcing
-        // the census (and the enum docs above) to be updated with the enum.
+        // The static census pin: every separable variant must be a total
+        // scalar pixel op — Some finite 0..=1 value for corner and
+        // mid-range inputs alike. (The seven triplet modes are pinned by
+        // the triplet census below: None here, total RGB ops there.) The
+        // `len` assert below is the tripwire: add a variant without
+        // extending this list and it fails, forcing the census (and the
+        // enum docs above) to be updated with the enum.
         let separable = [
             BlendMode::Normal,
             BlendMode::Multiply,
@@ -1301,8 +2140,18 @@ mod tests {
             BlendMode::ColorDodge,
             BlendMode::ColorBurn,
             BlendMode::LinearBurn,
+            BlendMode::Divide,
+            BlendMode::InverseDivide,
+            BlendMode::InverseSubtract,
+            BlendMode::Exclusion,
+            BlendMode::AddSub,
+            BlendMode::VividLight,
+            BlendMode::LinearLight,
+            BlendMode::PinLight,
+            BlendMode::Disable,
+            BlendMode::Replace,
         ];
-        assert_eq!(separable.len(), 14, "census list must track the enum");
+        assert_eq!(separable.len(), 24, "census list must track the enum");
         for mode in separable {
             for (s, d) in [
                 (0.0, 0.0),
@@ -1326,6 +2175,98 @@ mod tests {
             None,
             "Passthrough is structural, not a pixel op"
         );
+        assert_eq!(
+            BlendMode::Passthrough.blend_rgb([0.5; 3], [0.5; 3]),
+            None,
+            "Passthrough has no triplet math either"
+        );
+    }
+
+    #[test]
+    fn blend_census_every_triplet_mode_returns_finite_clamped_rgb() {
+        // The triplet census pin: all seven non-separable modes must be
+        // total RGB ops — Some finite 0..=1 triplet for corner and
+        // mid-range inputs — while the scalar primitive honestly returns
+        // None for them (single-channel use is meaningless). The `len`
+        // assert is the tripwire, mirroring the separable census above.
+        // `is_triplet`/`is_normal_map` membership is pinned here too, so a
+        // variant added to the enum without updating the predicates fails.
+        let triplets = [
+            BlendMode::Tint,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Value,
+            BlendMode::NormalCombine,
+            BlendMode::NormalDetail,
+            BlendMode::NormalInverseDetail,
+        ];
+        assert_eq!(triplets.len(), 7, "triplet census must track the enum");
+        for mode in triplets {
+            assert!(mode.is_triplet(), "{mode:?} must report as triplet");
+            assert_eq!(
+                mode.is_normal_map(),
+                matches!(
+                    mode,
+                    BlendMode::NormalCombine
+                        | BlendMode::NormalDetail
+                        | BlendMode::NormalInverseDetail
+                ),
+                "{mode:?} normal-map membership must be exactly the three normal modes"
+            );
+            assert_eq!(
+                mode.blend_channel(0.5, 0.5),
+                None,
+                "{mode:?} must not answer the scalar primitive"
+            );
+            for (s, d) in [
+                ([0.0; 3], [0.0; 3]),
+                ([1.0; 3], [1.0; 3]),
+                ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+                ([0.5; 3], [0.25, 0.5, 0.75]),
+                ([0.75, 0.25, 0.5], [0.5; 3]),
+            ] {
+                let v = mode
+                    .blend_rgb(s, d)
+                    .unwrap_or_else(|| panic!("{mode:?} must return Some"));
+                for lane in v {
+                    assert!(
+                        lane.is_finite() && (0.0..=1.0).contains(&lane),
+                        "{mode:?}({s:?}, {d:?}) must be finite 0..=1, got {v:?}"
+                    );
+                }
+            }
+        }
+        // And the separable census is exactly the complement (plus
+        // Passthrough, which is neither): no variant may hide from both.
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::Add,
+            BlendMode::Subtract,
+            BlendMode::Difference,
+            BlendMode::SoftLight,
+            BlendMode::HardLight,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::LinearBurn,
+            BlendMode::Divide,
+            BlendMode::InverseDivide,
+            BlendMode::InverseSubtract,
+            BlendMode::Exclusion,
+            BlendMode::AddSub,
+            BlendMode::VividLight,
+            BlendMode::LinearLight,
+            BlendMode::PinLight,
+            BlendMode::Disable,
+            BlendMode::Replace,
+        ] {
+            assert!(!mode.is_triplet(), "{mode:?} must stay separable");
+            assert!(!mode.is_normal_map(), "{mode:?} must not claim normal-map");
+        }
     }
 
     #[test]

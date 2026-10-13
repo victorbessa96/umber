@@ -2,16 +2,20 @@
 //!
 //! Wave-2 core-loop scope (docs/specs/2026-10-12-strategy-review.md, critical 6):
 //! the tile pool ([`crate::tile_pool`]) owns one GPU target per (layer, channel,
-//! tile); this module owns the composite over the stack — bottom-to-top, per-channel
-//! linear blending with opacity and the [`umber_core::BlendMode`] set — into one
-//! output [`PaintTarget`]. The caller binds the right tiles (one pool [`PoolKey`]
-//! per layer for the channel being composited); per-channel routing above the tile
-//! (which pool keys feed a given composite) is the viewport-texture kill's surface,
-//! not this module's.
+//! tile); this module owns the composite over the stack — bottom-to-top,
+//! linear blending with opacity and the [`umber_core::BlendMode`] set —
+//! into one output [`PaintTarget`]. Separable modes blend per channel;
+//! the seven triplet modes (HSV + normal-map families) blend the RGB
+//! triplet at once via [`umber_core::BlendMode::blend_rgb`]. The caller
+//! binds the right tiles (one pool [`PoolKey`] per layer for the channel
+//! being composited); per-channel routing above the tile (which pool keys
+//! feed a given composite, including the normal-channel gate for the
+//! normal-map modes) is the viewport-texture kill's surface, not this
+//! module's.
 //!
 //! The WGSL below is transliterated FROM the Rust reference —
-//! [`umber_core::BlendMode::blend_channel`] plus
-//! [`umber_core::BlendMode::composite_channel`] (layers.rs) — NOT invented: every
+//! [`umber_core::BlendMode::blend_channel`] plus [`umber_core::BlendMode::blend_rgb`]
+//! plus [`umber_core::BlendMode::composite_channel`] (layers.rs) — NOT invented: every
 //! match arm, clamp, and divide-by-zero guard has a one-to-one counterpart, in the
 //! same order, under the same ids ([`blend_mode_id`]). `crate::shaders` is locked
 //! by the concurrent viewport-texture kill, so the shader lives here as an inline
@@ -58,9 +62,13 @@
 //!    for both). `output` must not alias a layer texture (same-texture sampled +
 //!    storage bind is a GPU validation hazard); this is a documented precondition,
 //!    not a runtime check.
-//! 6. **Mode census: 15 variants, 14 pixel ops.** The enum carries `Normal`,
-//!    `Passthrough`, and 13 other separable modes; `Passthrough` is structural
-//!    (never reaches the shader). Unknown WGSL ids fall back to `Normal` —
+//! 6. **Mode census: 32 variants, 31 pixel ops.** The enum carries `Normal`,
+//!    `Passthrough`, 24 separable modes, and 7 triplet modes (the HSV and
+//!    normal-map families); `Passthrough` is structural (never reaches the
+//!    shader). Triplet modes share the SAME per-layer dispatch shape as the
+//!    separable ones — the kernel branches to the triplet path inside one
+//!    dispatch, so opacity/coverage gating and alpha handling are identical
+//!    across families. Unknown WGSL ids fall back to `Normal` —
 //!    unreachable via [`blend_mode_id`], defense in depth.
 //! 7. **Bounds.** Entries SHOULD match the output dimensions. A smaller entry's
 //!    out-of-range texels read as transparent black (defined zero-fill on
@@ -115,6 +123,23 @@ const BLEND_HARD_LIGHT: u32 = 10u;
 const BLEND_COLOR_DODGE: u32 = 11u;
 const BLEND_COLOR_BURN: u32 = 12u;
 const BLEND_LINEAR_BURN: u32 = 13u;
+const BLEND_DIVIDE: u32 = 14u;
+const BLEND_INVERSE_DIVIDE: u32 = 15u;
+const BLEND_INVERSE_SUBTRACT: u32 = 16u;
+const BLEND_EXCLUSION: u32 = 17u;
+const BLEND_ADD_SUB: u32 = 18u;
+const BLEND_VIVID_LIGHT: u32 = 19u;
+const BLEND_LINEAR_LIGHT: u32 = 20u;
+const BLEND_PIN_LIGHT: u32 = 21u;
+const BLEND_DISABLE: u32 = 22u;
+const BLEND_REPLACE: u32 = 23u;
+const BLEND_TINT: u32 = 24u;
+const BLEND_SATURATION: u32 = 25u;
+const BLEND_COLOR: u32 = 26u;
+const BLEND_VALUE: u32 = 27u;
+const BLEND_NORMAL_COMBINE: u32 = 28u;
+const BLEND_NORMAL_DETAIL: u32 = 29u;
+const BLEND_NORMAL_INVERSE_DETAIL: u32 = 30u;
 
 fn clamp01(v: f32) -> f32 {
     // WGSL has NO isNan/isnan builtin (removed from the spec; naga 30's
@@ -128,8 +153,30 @@ fn clamp01(v: f32) -> f32 {
     return clamp(v, 0.0, 1.0);
 }
 
+fn clamp01v(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(clamp01(c.x), clamp01(c.y), clamp01(c.z));
+}
+
+// Guarded dodge/burn shared by the plain arms and Vivid Light — mirrors
+// BlendMode::color_dodge/color_burn (the guards, not just the math).
+fn color_dodge(s: f32, d: f32) -> f32 {
+    if (s >= 1.0) {
+        return 1.0;
+    }
+    return min(d / (1.0 - s), 1.0);
+}
+
+fn color_burn(s: f32, d: f32) -> f32 {
+    if (s <= 0.0) {
+        return 0.0;
+    }
+    return 1.0 - min((1.0 - d) / s, 1.0);
+}
+
 // Mirrors BlendMode::blend_channel arm-for-arm (NaN -> 0, inf saturates,
-// dodge/burn guards intact). Unknown modes fall back to Normal.
+// dodge/burn/divide guards intact). Triplet modes (24-30) never reach
+// here — the kernel routes them to blend_triplet. Unknown modes fall back
+// to Normal.
 fn blend_channel(mode: u32, src: f32, dst: f32) -> f32 {
     let s = clamp01(src);
     let d = clamp01(dst);
@@ -165,21 +212,167 @@ fn blend_channel(mode: u32, src: f32, dst: f32) -> f32 {
             v = 1.0 - 2.0 * (1.0 - s) * (1.0 - d);
         }
     } else if (mode == BLEND_COLOR_DODGE) {
-        if (s >= 1.0) {
-            v = 1.0;
-        } else {
-            v = min(d / (1.0 - s), 1.0);
-        }
+        v = color_dodge(s, d);
     } else if (mode == BLEND_COLOR_BURN) {
-        if (s <= 0.0) {
-            v = 0.0;
-        } else {
-            v = 1.0 - min((1.0 - d) / s, 1.0);
-        }
+        v = color_burn(s, d);
     } else if (mode == BLEND_LINEAR_BURN) {
         v = max(s + d - 1.0, 0.0);
+    } else if (mode == BLEND_DIVIDE) {
+        if (s <= 0.0) {
+            v = 1.0;
+        } else {
+            v = min(d / s, 1.0);
+        }
+    } else if (mode == BLEND_INVERSE_DIVIDE) {
+        if (d <= 0.0) {
+            v = 1.0;
+        } else {
+            v = min(s / d, 1.0);
+        }
+    } else if (mode == BLEND_INVERSE_SUBTRACT) {
+        v = max(s - d, 0.0);
+    } else if (mode == BLEND_EXCLUSION) {
+        v = s + d - 2.0 * s * d;
+    } else if (mode == BLEND_ADD_SUB) {
+        v = clamp(d + s - 0.5, 0.0, 1.0);
+    } else if (mode == BLEND_VIVID_LIGHT) {
+        if (s <= 0.5) {
+            v = color_burn(2.0 * s, d);
+        } else {
+            v = color_dodge(2.0 * s - 1.0, d);
+        }
+    } else if (mode == BLEND_LINEAR_LIGHT) {
+        v = clamp(d + 2.0 * s - 1.0, 0.0, 1.0);
+    } else if (mode == BLEND_PIN_LIGHT) {
+        if (s <= 0.5) {
+            v = min(d, 2.0 * s);
+        } else {
+            v = max(d, 2.0 * (s - 0.5));
+        }
+    } else if (mode == BLEND_DISABLE) {
+        v = d;
+    } else if (mode == BLEND_REPLACE) {
+        v = s;
     }
     return clamp01(v);
+}
+
+// Mirrors BlendMode::rgb_to_hsv: hue degrees in 0..<360, achromatic inputs
+// yield hue 0. The red-max arm needs no modulo (its quotient sits in
+// -1..1, and the negative fixup below folds it into 300..<360).
+fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    let dd = mx - mn;
+    var h: f32 = 0.0;
+    var s: f32 = 0.0;
+    if (mx > 0.0) {
+        s = dd / mx;
+    }
+    if (dd > 0.0) {
+        if (mx == c.r) {
+            h = 60.0 * ((c.g - c.b) / dd);
+        } else if (mx == c.g) {
+            h = 60.0 * ((c.b - c.r) / dd + 2.0);
+        } else {
+            h = 60.0 * ((c.r - c.g) / dd + 4.0);
+        }
+        if (h < 0.0) {
+            h += 360.0;
+        }
+    }
+    return vec3<f32>(h, s, mx);
+}
+
+// Mirrors BlendMode::hsv_to_rgb. The t-mod-2 is written without % (WGSL %
+// on floats is a portability smell next to naga 30) — same shape as Rust.
+fn hsv_to_rgb(c: vec3<f32>) -> vec3<f32> {
+    let cc = c.z * c.y;
+    let t = c.x / 60.0;
+    let tm = t - floor(t / 2.0) * 2.0;
+    let xx = cc * (1.0 - abs(tm - 1.0));
+    let mm = c.z - cc;
+    var rgb = vec3<f32>(0.0, 0.0, 0.0);
+    if (c.x < 60.0) {
+        rgb = vec3<f32>(cc, xx, 0.0);
+    } else if (c.x < 120.0) {
+        rgb = vec3<f32>(xx, cc, 0.0);
+    } else if (c.x < 180.0) {
+        rgb = vec3<f32>(0.0, cc, xx);
+    } else if (c.x < 240.0) {
+        rgb = vec3<f32>(0.0, xx, cc);
+    } else if (c.x < 300.0) {
+        rgb = vec3<f32>(xx, 0.0, cc);
+    } else {
+        rgb = vec3<f32>(cc, 0.0, xx);
+    }
+    return rgb + vec3<f32>(mm, mm, mm);
+}
+
+// Normalizes r, falling back to the encoded base when r is degenerate —
+// mirrors BlendMode::normalize_or. Inputs here are bounded (decoded from
+// clamped lanes), so inf/NaN are unreachable, but the guard is kept so the
+// mirror stays line-for-line: NaN fails every comparison (see clamp01),
+// and the upper bound additionally catches +inf.
+fn normal_encode_or_base(r: vec3<f32>, base_enc: vec3<f32>) -> vec3<f32> {
+    let l2 = dot(r, r);
+    if (!(l2 > 0.000000000001) || !(l2 <= 1000000.0)) {
+        return base_enc;
+    }
+    return r / sqrt(l2) * 0.5 + vec3<f32>(0.5, 0.5, 0.5);
+}
+
+// Mirrors BlendMode::whiteout (Painter's Normal Map Combine).
+fn whiteout(s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    let n1 = d * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    let n2 = s * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    let r = vec3<f32>(n1.x + n2.x, n1.y + n2.y, n1.z * n2.z);
+    return normal_encode_or_base(r, d);
+}
+
+// Mirrors BlendMode::rnm (Reoriented Normal Mapping, Detail family).
+fn rnm(base: vec3<f32>, det: vec3<f32>) -> vec3<f32> {
+    let b = base * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    let dd = det * 2.0 - vec3<f32>(1.0, 1.0, 1.0);
+    let t = b + vec3<f32>(0.0, 0.0, 1.0);
+    let u = vec3<f32>(-dd.x, -dd.y, dd.z);
+    let r = t * dot(t, u) - u * t.z;
+    return normal_encode_or_base(r, base);
+}
+
+// Mirrors BlendMode::blend_rgb for the seven triplet modes (inputs already
+// clamped by the caller). Separable modes never reach here.
+fn blend_triplet(mode: u32, s: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+    if (mode == BLEND_TINT) {
+        let hs = rgb_to_hsv(s);
+        if (hs.y <= 0.0) {
+            return d;
+        }
+        let hd = rgb_to_hsv(d);
+        return clamp01v(hsv_to_rgb(vec3<f32>(hs.x, hd.y, hd.z)));
+    } else if (mode == BLEND_SATURATION) {
+        let hs = rgb_to_hsv(s);
+        let hd = rgb_to_hsv(d);
+        return clamp01v(hsv_to_rgb(vec3<f32>(hd.x, hs.y, hd.z)));
+    } else if (mode == BLEND_COLOR) {
+        let hs = rgb_to_hsv(s);
+        if (hs.y <= 0.0) {
+            return d;
+        }
+        let hd = rgb_to_hsv(d);
+        return clamp01v(hsv_to_rgb(vec3<f32>(hs.x, hs.y, hd.z)));
+    } else if (mode == BLEND_VALUE) {
+        let hs = rgb_to_hsv(s);
+        let hd = rgb_to_hsv(d);
+        return clamp01v(hsv_to_rgb(vec3<f32>(hd.x, hd.y, hs.z)));
+    } else if (mode == BLEND_NORMAL_COMBINE) {
+        return clamp01v(whiteout(s, d));
+    } else if (mode == BLEND_NORMAL_DETAIL) {
+        return clamp01v(rnm(d, s));
+    } else if (mode == BLEND_NORMAL_INVERSE_DETAIL) {
+        return clamp01v(rnm(s, d));
+    }
+    return d;
 }
 
 @compute @workgroup_size(8, 8)
@@ -204,9 +397,21 @@ fn cs_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dy = clamp01(d.y);
     let dz = clamp01(d.z);
     let dw = clamp01(d.w);
-    let r = dx + (blend_channel(params.mode, s.x, d.x) - dx) * cov;
-    let g = dy + (blend_channel(params.mode, s.y, d.y) - dy) * cov;
-    let b = dz + (blend_channel(params.mode, s.z, d.z) - dz) * cov;
+    // Triplet modes (HSV + normal-map families) blend the RGB pixel at
+    // once via blend_triplet; separable modes fold blend_channel per lane.
+    // Both paths share this dispatch, the coverage gating, and the alpha
+    // handling below — one golden per family pins each path (see tests).
+    var b3 = vec3<f32>(
+        blend_channel(params.mode, s.x, d.x),
+        blend_channel(params.mode, s.y, d.y),
+        blend_channel(params.mode, s.z, d.z),
+    );
+    if (params.mode == BLEND_TINT || params.mode == BLEND_SATURATION || params.mode == BLEND_COLOR || params.mode == BLEND_VALUE || params.mode == BLEND_NORMAL_COMBINE || params.mode == BLEND_NORMAL_DETAIL || params.mode == BLEND_NORMAL_INVERSE_DETAIL) {
+        b3 = blend_triplet(params.mode, clamp01v(vec3<f32>(s.x, s.y, s.z)), clamp01v(vec3<f32>(d.x, d.y, d.z)));
+    }
+    let r = dx + (b3.x - dx) * cov;
+    let g = dy + (b3.y - dy) * cov;
+    let b = dz + (b3.z - dz) * cov;
     // Straight-alpha over (Porter-Duff): the lerp form diverges at partial
     // src alpha — half-alpha red over opaque white must remain opaque.
     let a = cov + dw * (1.0 - cov);
@@ -236,6 +441,23 @@ pub fn blend_mode_id(mode: BlendMode) -> Option<u32> {
         BlendMode::ColorDodge => Some(11),
         BlendMode::ColorBurn => Some(12),
         BlendMode::LinearBurn => Some(13),
+        BlendMode::Divide => Some(14),
+        BlendMode::InverseDivide => Some(15),
+        BlendMode::InverseSubtract => Some(16),
+        BlendMode::Exclusion => Some(17),
+        BlendMode::AddSub => Some(18),
+        BlendMode::VividLight => Some(19),
+        BlendMode::LinearLight => Some(20),
+        BlendMode::PinLight => Some(21),
+        BlendMode::Disable => Some(22),
+        BlendMode::Replace => Some(23),
+        BlendMode::Tint => Some(24),
+        BlendMode::Saturation => Some(25),
+        BlendMode::Color => Some(26),
+        BlendMode::Value => Some(27),
+        BlendMode::NormalCombine => Some(28),
+        BlendMode::NormalDetail => Some(29),
+        BlendMode::NormalInverseDetail => Some(30),
         BlendMode::Passthrough => None,
     }
 }
@@ -370,20 +592,33 @@ pub fn f32_to_u8(v: f32) -> u8 {
 /// Blends one RGBA texel: `src` over `dst` under `mode` at `opacity`.
 ///
 /// Returns `None` exactly for [`BlendMode::Passthrough`] (structural, no
-/// pixel op) — the same contract as `composite_channel`. Otherwise the RGB
-/// channels follow the reference arms gated by coverage `src_alpha ×
-/// opacity` (module-docs judgment 2), and alpha follows straight-alpha over
-/// (judgment 3). For opaque sources the RGB result is bit-identical to a
-/// per-channel `composite_channel` fold — pinned by test, not just claimed.
+/// pixel op) — the same contract as `composite_channel`. Separable modes
+/// follow the reference arms gated by coverage `src_alpha × opacity`
+/// (module-docs judgment 2); triplet modes (HSV + normal-map families)
+/// route through [`BlendMode::blend_rgb`] first and share the same gating
+/// after that. Alpha follows straight-alpha over (judgment 3) under every
+/// mode. For opaque sources the RGB result is bit-identical to a
+/// per-channel `composite_channel` fold for separable modes (and to a
+/// `blend_rgb` + opacity fold for triplet modes) — pinned by test, not
+/// just claimed.
 pub fn composite_pixel(
     src: [f32; 4],
     dst: [f32; 4],
     mode: BlendMode,
     opacity: f32,
 ) -> Option<[f32; 4]> {
-    let blend_r = mode.blend_channel(src[0], dst[0])?;
-    let blend_g = mode.blend_channel(src[1], dst[1])?;
-    let blend_b = mode.blend_channel(src[2], dst[2])?;
+    if matches!(mode, BlendMode::Passthrough) {
+        return None;
+    }
+    let [blend_r, blend_g, blend_b] = if mode.is_triplet() {
+        mode.blend_rgb([src[0], src[1], src[2]], [dst[0], dst[1], dst[2]])?
+    } else {
+        [
+            mode.blend_channel(src[0], dst[0])?,
+            mode.blend_channel(src[1], dst[1])?,
+            mode.blend_channel(src[2], dst[2])?,
+        ]
+    };
     let src_a = clamp01(src[3]);
     let base_r = clamp01(dst[0]);
     let base_g = clamp01(dst[1]);
@@ -656,6 +891,8 @@ mod tests {
     const WHITE: [u8; 4] = [255, 255, 255, 255];
     const BLACK: [u8; 4] = [0, 0, 0, 255];
     const RED: [u8; 4] = [255, 0, 0, 255];
+    const CYAN: [u8; 4] = [0, 255, 255, 255];
+    const GRAY128: [u8; 4] = [128, 128, 128, 255];
     const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
     /// One bottom + one top texel through the CPU oracle at 1×1.
@@ -698,6 +935,23 @@ mod tests {
             (BlendMode::ColorDodge, 11),
             (BlendMode::ColorBurn, 12),
             (BlendMode::LinearBurn, 13),
+            (BlendMode::Divide, 14),
+            (BlendMode::InverseDivide, 15),
+            (BlendMode::InverseSubtract, 16),
+            (BlendMode::Exclusion, 17),
+            (BlendMode::AddSub, 18),
+            (BlendMode::VividLight, 19),
+            (BlendMode::LinearLight, 20),
+            (BlendMode::PinLight, 21),
+            (BlendMode::Disable, 22),
+            (BlendMode::Replace, 23),
+            (BlendMode::Tint, 24),
+            (BlendMode::Saturation, 25),
+            (BlendMode::Color, 26),
+            (BlendMode::Value, 27),
+            (BlendMode::NormalCombine, 28),
+            (BlendMode::NormalDetail, 29),
+            (BlendMode::NormalInverseDetail, 30),
         ];
         for (mode, id) in cases {
             assert_eq!(blend_mode_id(mode), Some(id), "{mode:?}");
@@ -747,6 +1001,9 @@ mod tests {
     fn all_modes_pin_exact_dyadic_pixels() {
         // s = 0.5 over d = 0.25, opaque, full opacity: every value below
         // is an exact binary fraction, so f32 == the hand arithmetic.
+        // (Mid-gray blend is a no-op for Vivid/Linear/Pin/AddSub, which is
+        // why four rows share 0.25 here — the dedicated layers.rs tests pin
+        // their off-center behavior.)
         let cases = [
             (BlendMode::Normal, 0.5),
             (BlendMode::Multiply, 0.125),
@@ -762,6 +1019,16 @@ mod tests {
             (BlendMode::ColorDodge, 0.5),
             (BlendMode::ColorBurn, 0.0),
             (BlendMode::LinearBurn, 0.0),
+            (BlendMode::Divide, 0.5),
+            (BlendMode::InverseDivide, 1.0),
+            (BlendMode::InverseSubtract, 0.25),
+            (BlendMode::Exclusion, 0.5),
+            (BlendMode::AddSub, 0.25),
+            (BlendMode::VividLight, 0.25),
+            (BlendMode::LinearLight, 0.25),
+            (BlendMode::PinLight, 0.25),
+            (BlendMode::Disable, 0.25),
+            (BlendMode::Replace, 0.5),
         ];
         for (mode, want) in cases {
             assert_eq!(
@@ -769,6 +1036,152 @@ mod tests {
                 Some([want, want, want, 1.0]),
                 "{mode:?}"
             );
+        }
+    }
+
+    #[test]
+    fn new_separable_modes_pin_exact_bytes() {
+        // Endpoint-driven spots for the ten wave-blends separable modes:
+        // every byte below is hand-derived from blend_channel (0/1 inputs
+        // round-trip exactly; the 0.5 AddSub row pins the 127.5→128
+        // half-away rounding, same as the opacity-ramp test).
+        let cases = [
+            (RED, BlendMode::Divide, WHITE, WHITE),
+            (BLACK, BlendMode::Divide, RED, WHITE),
+            (RED, BlendMode::InverseDivide, WHITE, RED),
+            (WHITE, BlendMode::InverseSubtract, RED, CYAN),
+            (RED, BlendMode::Exclusion, RED, BLACK),
+            (WHITE, BlendMode::Exclusion, BLACK, WHITE),
+            (BLACK, BlendMode::AddSub, WHITE, GRAY128),
+            // VividLight(RED over WHITE): the R channel s=1 dodges to
+            // white, G/B s=0 burns to black -> [255, 0, 0] = RED. (The
+            // claw's first pin expected WHITE — a hand-derivation miss
+            // caught by the engine at the dragon gate; this comment IS
+            // the derivation.)
+            (RED, BlendMode::VividLight, WHITE, RED),
+            (BLACK, BlendMode::VividLight, WHITE, BLACK),
+            (RED, BlendMode::LinearLight, BLACK, RED),
+            (BLACK, BlendMode::LinearLight, WHITE, BLACK),
+            // PinLight(RED over WHITE): R s=1 -> max(1, 1.0)=255; G/B
+            // s=0 -> min(1, 0)=0 -> RED (same derivation-miss class as
+            // VividLight above — engine correct, pin corrected).
+            (RED, BlendMode::PinLight, WHITE, RED),
+            (BLACK, BlendMode::PinLight, RED, BLACK),
+            (RED, BlendMode::Disable, WHITE, WHITE),
+            (RED, BlendMode::Replace, WHITE, RED),
+        ];
+        for (top, mode, bottom, want) in cases {
+            assert_eq!(two_layer(top, mode, 1.0, bottom), want.to_vec(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn triplet_modes_pin_exact_rgb() {
+        // One exact RGB anchor per triplet mode through composite_pixel
+        // (opaque, full opacity): primaries round-trip exactly, and the
+        // opacity rows pin the shared coverage gating on the triplet path.
+        let cases = [
+            (
+                [1.0, 0.0, 0.0, 1.0],
+                BlendMode::Tint,
+                [0.0, 0.0, 1.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+            ),
+            (
+                [1.0, 0.0, 0.0, 1.0],
+                BlendMode::Saturation,
+                [0.5, 0.5, 0.5, 1.0],
+                [0.5, 0.0, 0.0, 1.0],
+            ),
+            (
+                [0.0, 1.0, 0.0, 1.0],
+                BlendMode::Color,
+                [0.0, 0.0, 0.5, 1.0],
+                [0.0, 0.5, 0.0, 1.0],
+            ),
+            (
+                [0.0, 0.5, 0.0, 1.0],
+                BlendMode::Value,
+                [1.0, 0.0, 0.0, 1.0],
+                [0.5, 0.0, 0.0, 1.0],
+            ),
+            (
+                [0.5, 0.5, 1.0, 1.0],
+                BlendMode::NormalCombine,
+                [0.5, 0.5, 1.0, 1.0],
+                [0.5, 0.5, 1.0, 1.0],
+            ),
+            (
+                [0.5, 0.5, 1.0, 1.0],
+                BlendMode::NormalDetail,
+                [0.5, 0.5, 1.0, 1.0],
+                [0.5, 0.5, 1.0, 1.0],
+            ),
+            (
+                [0.5, 0.5, 1.0, 1.0],
+                BlendMode::NormalInverseDetail,
+                [0.5, 0.5, 1.0, 1.0],
+                [0.5, 0.5, 1.0, 1.0],
+            ),
+        ];
+        for (src, mode, dst, want) in cases {
+            assert_eq!(composite_pixel(src, dst, mode, 1.0), Some(want), "{mode:?}");
+        }
+        // Opacity gating is mode-agnostic: Tint at o=0 keeps the base, at
+        // o=0.5 mixes exactly halfway (blend red, base blue).
+        assert_eq!(
+            composite_pixel(
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+                BlendMode::Tint,
+                0.0
+            ),
+            Some([0.0, 0.0, 1.0, 1.0])
+        );
+        assert_eq!(
+            composite_pixel(
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+                BlendMode::Tint,
+                0.5
+            ),
+            Some([0.5, 0.0, 0.5, 1.0])
+        );
+    }
+
+    #[test]
+    fn triplet_oracle_matches_blend_rgb_fold() {
+        // composite_pixel's RGB MUST equal a blend_rgb + opacity fold for
+        // opaque sources under triplet modes: same calls, same op order —
+        // the triplet twin of the separable naive-fold test below. Alpha
+        // follows straight-alpha over, pinned to its own formula.
+        let modes = [
+            BlendMode::Tint,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Value,
+            BlendMode::NormalCombine,
+            BlendMode::NormalDetail,
+            BlendMode::NormalInverseDetail,
+        ];
+        for mode in modes {
+            for s in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                for d in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    for o in [0.0, 0.5, 1.0] {
+                        let src = [s, s, s, 1.0];
+                        let dst = [d, d, d, 0.5];
+                        let got = composite_pixel(src, dst, mode, o).expect("non-passthrough");
+                        let b = mode.blend_rgb([s, s, s], [d, d, d]).expect("triplet op");
+                        assert_eq!(
+                            [got[0], got[1], got[2]],
+                            [d + (b[0] - d) * o, d + (b[1] - d) * o, d + (b[2] - d) * o],
+                            "{mode:?} s={s} d={d} o={o}"
+                        );
+                        // Alpha: da + (1 - da) * o, independent of mode.
+                        assert_eq!(got[3], 0.5 + (1.0 - 0.5) * o, "{mode:?} alpha o={o}");
+                    }
+                }
+            }
         }
     }
 
@@ -793,6 +1206,16 @@ mod tests {
             BlendMode::ColorDodge,
             BlendMode::ColorBurn,
             BlendMode::LinearBurn,
+            BlendMode::Divide,
+            BlendMode::InverseDivide,
+            BlendMode::InverseSubtract,
+            BlendMode::Exclusion,
+            BlendMode::AddSub,
+            BlendMode::VividLight,
+            BlendMode::LinearLight,
+            BlendMode::PinLight,
+            BlendMode::Disable,
+            BlendMode::Replace,
         ];
         for mode in modes {
             for s in [0.0, 0.25, 0.5, 0.75, 1.0] {
@@ -1231,6 +1654,62 @@ mod tests {
             for opacity in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 fix.compare(&white, &red, BlendMode::Normal, opacity);
             }
+        }
+
+        #[test]
+        fn gpu_matches_cpu_for_new_separable_family() {
+            // One golden for the wave-blends separable family: Vivid Light
+            // exercises the dodge/burn-helper path plus the mid-gray no-op
+            // branch on GPU — the other nine new scalar arms share this
+            // exact dispatch shape (branch inside one kernel), so one
+            // golden pins the shape and the CPU tests pin each arm's math.
+            let (device, queue) = request_device();
+            let compositor =
+                StackCompositor::new(device.clone()).expect("device has the required feature");
+            let fix = fixture(&device, &queue, &compositor);
+            let size = fix.size;
+            let white = two_tone(size, WHITE, WHITE);
+            let red = two_tone(size, RED, WHITE);
+            let black = two_tone(size, BLACK, BLACK);
+            fix.compare(&white, &red, BlendMode::VividLight, 1.0);
+            fix.compare(&white, &black, BlendMode::VividLight, 1.0);
+            fix.compare(&white, &red, BlendMode::LinearLight, 0.5);
+        }
+
+        #[test]
+        fn gpu_matches_cpu_for_hsv_family() {
+            // One golden for the HSV family: Tint routes the kernel's
+            // triplet path (rgb_to_hsv/hsv_to_rgb) with the achromatic
+            // guard live on the two-tone split (white half has no hue, so
+            // that half must come back as the base).
+            let (device, queue) = request_device();
+            let compositor =
+                StackCompositor::new(device.clone()).expect("device has the required feature");
+            let fix = fixture(&device, &queue, &compositor);
+            let size = fix.size;
+            let blue = two_tone(size, [0, 0, 255, 255], [0, 0, 255, 255]);
+            let red_white = two_tone(size, RED, WHITE);
+            fix.compare(&blue, &red_white, BlendMode::Tint, 1.0);
+            fix.compare(&blue, &red_white, BlendMode::Color, 0.5);
+        }
+
+        #[test]
+        fn gpu_matches_cpu_for_normal_map_family() {
+            // One golden for the normal-map family: Detail routes the RNM
+            // path on encoded-normal texels (flat vs a tilted normal — the
+            // tilt encoding is just bytes to the upload; the oracle decodes
+            // the same bytes, so any unpack/pack skew fails the compare).
+            let (device, queue) = request_device();
+            let compositor =
+                StackCompositor::new(device.clone()).expect("device has the required feature");
+            let fix = fixture(&device, &queue, &compositor);
+            let size = fix.size;
+            const FLAT: [u8; 4] = [128, 128, 255, 255];
+            const TILT: [u8; 4] = [218, 128, 218, 255];
+            let flat = two_tone(size, FLAT, FLAT);
+            let tilt = two_tone(size, TILT, FLAT);
+            fix.compare(&flat, &tilt, BlendMode::NormalDetail, 1.0);
+            fix.compare(&flat, &tilt, BlendMode::NormalCombine, 1.0);
         }
 
         #[test]
