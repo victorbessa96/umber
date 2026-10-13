@@ -469,6 +469,7 @@ history =
     .strokes = Smudge / clone / eraser strokes
     .undo-stroke = ↶ Undo stroke
     .redo-stroke = ↷ Redo stroke
+    .travel-note = Layer rows rewind layers, stroke rows rewind paint — each travels on its own.
 
 ## UDIM tile selector (Bakes + Export)
 

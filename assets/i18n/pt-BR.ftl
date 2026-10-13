@@ -488,6 +488,7 @@ history =
     .strokes = Traços de borrar / clonar / borracha
     .undo-stroke = ↶ Desfazer traço
     .redo-stroke = ↷ Refazer traço
+    .travel-note = Linhas de camada rebobinam camadas, linhas de traço rebobinam a pintura — cada uma por si.
 
 ## Seletor de tiles UDIM (Bakes + Exportação)
 

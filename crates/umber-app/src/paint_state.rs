@@ -157,7 +157,9 @@
 //!   fit, and one entry can span tiles of several sets — filtering by set
 //!   would leave half-entries). The UI names this per set (the Texture
 //!   Sets panel's hint string), so a size change is never a silent undo
-//!   loss.
+//!   loss. The clear also drops queued commits and bumps the stroke epoch,
+//!   so the History window's next drain drops the rows that described the
+//!   evicted entries (see [`StrokeCommit`]).
 //! * The quick mask is per SET ([`Self::masks`]), not per tile: planes are
 //!   uniform within a set, so a set resize drops only that set's planes.
 //!   `umber-brush`'s `QuickMask` (single-size) is untouched — one instance
@@ -437,6 +439,27 @@ struct PaintStrokeCapture {
     tiles: BTreeMap<u16, PaintTileCapture>,
 }
 
+/// One recorded stroke awaiting its History-window row: the stroke
+/// journal's length before the stroke's push (`cursor`) and after
+/// (`depth`). Queued by [`PaintState::end_stroke`] — the one chokepoint
+/// that sees the journal on both sides of the push — and drained into
+/// session-history rows by the app shell's per-frame stroke drain (the
+/// `history_panel` module, which this library target does not include).
+/// A fresh entry lands at `depth == cursor + 1`; a stroke merged into the
+/// top entry (the cumulative merge) lands at `depth == cursor` — same
+/// depth as its predecessor, one shared undo step. A stroke that wrote no
+/// texels (the identity rule) or painted only the quick mask queues
+/// nothing: there is no entry to travel to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrokeCommit {
+    /// `retouch_history` length before the stroke recorded: the dead-redo
+    /// truncation point, mirroring `Document::run`'s cursor.
+    pub cursor: usize,
+    /// `retouch_history` length after the stroke recorded: the row's jump
+    /// target.
+    pub depth: usize,
+}
+
 /// The paint session: one GPU target per UDIM tile plus the live stroke
 /// conditioner.
 pub struct PaintState {
@@ -525,6 +548,15 @@ pub struct PaintState {
     /// Region writes the retouch history's undo/redo produced, drained
     /// into the tiles' queues right after each call.
     retouch_writes: PaintWrites,
+    /// Strokes recorded since the last History-window drain (usually zero
+    /// or one — the app drains every frame). Queued in [`Self::end_stroke`],
+    /// cleared beside the journal in [`Self::resize_set`].
+    pending_commits: Vec<StrokeCommit>,
+    /// The stroke-history generation: bumped every time the journal is
+    /// cleared wholesale ([`Self::resize_set`]), so the History window can
+    /// drop rows that describe evicted commands. Starts at 0, matching a
+    /// fresh session-history log.
+    stroke_epoch: u64,
     /// The symmetry settings (synced from the brush panel between
     /// strokes; the UV view's mirror manipulator edits the offset here).
     symmetry: SymmetrySettings,
@@ -650,6 +682,8 @@ impl PaintState {
             retouch_history: UndoStack::new(RETOUCH_HISTORY_MAX_ENTRIES)
                 .with_memory_budget(RETOUCH_HISTORY_MAX_BYTES),
             retouch_writes: PaintWrites::default(),
+            pending_commits: Vec::new(),
+            stroke_epoch: 0,
             symmetry: SymmetrySettings::default(),
             line_constraint: LineConstraintMode::Off,
             projection: PaintProjection::default(),
@@ -1221,6 +1255,58 @@ impl PaintState {
         self.retouch_history.can_redo()
     }
 
+    /// Click-to-time-travel for strokes: drives the single-step
+    /// [`Self::undo_stroke`]/[`Self::redo_stroke`] to `target` stroke depth
+    /// — the stroke-side twin of `Document::jump_to_depth`, and
+    /// deliberately the same shape: a loop of single steps, never a
+    /// truncate shortcut, saturating when a step returns `false` (an
+    /// evicted depth stops at the journal's bottom instead of failing). A
+    /// merged entry travels as one unit: the wall-clock strokes coalesced
+    /// into it share one depth, so one step undoes them all (see the
+    /// cumulative-merge docs above). Returns how many steps were actually
+    /// taken.
+    ///
+    /// Housed here rather than in the History panel so both crate targets
+    /// (the binary shell and the `lib.rs` test surface, which has no
+    /// history module) drive and test the same loop: the panel calls this
+    /// once per row click, and the body stays exactly the n-single-steps
+    /// loop — the stacks are the source of truth, never a snapshot.
+    pub fn jump_to_stroke_depth(&mut self, target: usize) -> usize {
+        let mut steps = 0;
+        while self.stroke_len() > target {
+            if !self.undo_stroke() {
+                break;
+            }
+            steps += 1;
+        }
+        while self.stroke_len() < target {
+            if !self.redo_stroke() {
+                break;
+            }
+            steps += 1;
+        }
+        steps
+    }
+
+    /// Number of entries on the stroke-undo journal (the History window's
+    /// stroke-depth cursor: stroke rows jump here).
+    pub fn stroke_len(&self) -> usize {
+        self.retouch_history.len()
+    }
+
+    /// The stroke-history generation: bumped every time the journal is
+    /// cleared wholesale ([`Self::resize_set`]), so the History window can
+    /// drop rows that describe evicted commands.
+    pub fn stroke_epoch(&self) -> u64 {
+        self.stroke_epoch
+    }
+
+    /// Takes the [`StrokeCommit`]s queued since the last drain (usually
+    /// zero or one — the app drains every frame).
+    pub fn take_stroke_commits(&mut self) -> Vec<StrokeCommit> {
+        std::mem::take(&mut self.pending_commits)
+    }
+
     /// Queues the retouch history's pending region writes on their
     /// targets (tile + channel — the undo key, see the module docs).
     fn flush_retouch_writes(&mut self) {
@@ -1340,6 +1426,11 @@ impl PaintState {
     /// history entry, and so does a paint-tool stroke that wrote texels
     /// (its before snapshot plus the drained after-bytes — see the module
     /// docs).
+    ///
+    /// Each path that records also queues one [`StrokeCommit`] (the
+    /// journal length on both sides of the push): the History window's
+    /// per-frame drain turns commits into rows. A stroke that recorded
+    /// nothing (identity, or mask-mode) queues nothing.
     pub fn end_stroke(&mut self) {
         self.stroking = false;
         // Both paths record through `retouch::record_stroke`: merged into
@@ -1348,10 +1439,22 @@ impl PaintState {
         // bytes (retouch event by event; paint on the GPU, drained to read
         // them back).
         if let Some(stroke) = self.retouch.take() {
-            let _ = stroke.record(&mut self.retouch_history, &mut self.retouch_writes);
+            let cursor = self.retouch_history.len();
+            if stroke.record(&mut self.retouch_history, &mut self.retouch_writes) {
+                self.pending_commits.push(StrokeCommit {
+                    cursor,
+                    depth: self.retouch_history.len(),
+                });
+            }
         }
         if let Some(capture) = self.paint_capture.take() {
-            self.record_paint_capture(capture);
+            let cursor = self.retouch_history.len();
+            if self.record_paint_capture(capture) {
+                self.pending_commits.push(StrokeCommit {
+                    cursor,
+                    depth: self.retouch_history.len(),
+                });
+            }
         }
     }
 
@@ -1361,8 +1464,9 @@ impl PaintState {
     /// Tiles with no dirty rect, an unreadable tile, a rect that no longer
     /// fits the target (a resize landed mid-stroke), or byte-identical
     /// before/after over the rect (a fully gated-away stroke) contribute no
-    /// region; no regions means no entry.
-    fn record_paint_capture(&mut self, capture: PaintStrokeCapture) {
+    /// region; no regions means no entry. Returns whether an entry was
+    /// recorded (a merge into the top entry counts — it rewrote history).
+    fn record_paint_capture(&mut self, capture: PaintStrokeCapture) -> bool {
         let channel = self.stroke_channel.clone();
         let mut finished = Vec::new();
         for (tile, entry) in capture.tiles {
@@ -1396,7 +1500,7 @@ impl PaintState {
                 end,
             })
             .collect();
-        let _ = record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles);
+        record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles)
     }
 
     /// Replays `path` as ONE stroke in the `op` mode: each point becomes a
@@ -1635,6 +1739,11 @@ impl PaintState {
         }
         // Snapshots recorded at the old size no longer fit the targets.
         self.retouch_history.clear();
+        // Nor do their History-window rows (which the per-frame drain
+        // drops when it sees the bumped epoch below), nor the queued
+        // commits describing them.
+        self.pending_commits.clear();
+        self.stroke_epoch += 1;
         // Nor does the set's mask: it resets with the targets' contents
         // (the `Resize` command drops each target's GPU mask too). Other
         // sets' masks are untouched.
@@ -3114,6 +3223,128 @@ mod tests {
         assert!(state.redo_stroke());
         assert_eq!(read_back(&mut state, &device, &queue), second);
         assert!(!state.can_redo_stroke());
+    }
+
+    /// Stroke time-travel end to end: two far-apart paint strokes queue
+    /// exactly two commits (`cursor`/`depth` pin the journal on both sides
+    /// of each push), and jumping the stroke journal travels exactly n
+    /// single steps — byte-identical to stepwise undo/redo. (The commits'
+    /// mapping into History-window rows lives in `history_panel`'s
+    /// headless feed tests; this crate's library target has no history
+    /// module, so the row half cannot be driven from here.)
+    #[test]
+    fn stroke_commits_queue_exact_pairs_and_jump_travels_exactly() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
+        assert!(state.take_stroke_commits().is_empty());
+        let blank = read_back(&mut state, &device, &queue);
+
+        // The `two_paint_strokes` spacing (~200 texels apart at r = 24):
+        // far enough that the second cannot merge into the first, so each
+        // stroke is its own entry — depths 1 then 2.
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        let first = read_back(&mut state, &device, &queue);
+        assert_ne!(first, blank, "the first stroke must paint");
+        drive_stroke(&mut state, [0.7, 0.7], [0.0, 0.02], 15);
+        state.end_stroke();
+        let second = read_back(&mut state, &device, &queue);
+        assert_ne!(second, first, "the second stroke must paint");
+        assert_eq!(state.stroke_len(), 2);
+
+        assert_eq!(
+            state.take_stroke_commits(),
+            vec![
+                StrokeCommit { cursor: 0, depth: 1 },
+                StrokeCommit { cursor: 1, depth: 2 },
+            ]
+        );
+        assert!(state.take_stroke_commits().is_empty());
+
+        // The jump is n single steps: depth 2 -> 0 is 2 undos, restoring
+        // the exact blank bytes; back up is 2 redos.
+        assert_eq!(state.jump_to_stroke_depth(0), 2);
+        assert_eq!(read_back(&mut state, &device, &queue), blank);
+        assert!(!state.can_undo_stroke());
+        assert_eq!(state.jump_to_stroke_depth(2), 2);
+        assert_eq!(read_back(&mut state, &device, &queue), second);
+        assert!(!state.can_redo_stroke());
+        // Already there: no steps.
+        assert_eq!(state.jump_to_stroke_depth(2), 0);
+    }
+
+    /// The commit cursor tracks the live journal, not the wall clock: two
+    /// strokes, one undone, then a fresh third stroke commits at cursor 1
+    /// (the pre-push depth) back to depth 2 — the pair the drain's
+    /// redo-future truncation reads.
+    #[test]
+    fn fresh_stroke_over_undone_state_commits_at_the_live_cursor() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
+        let blank = read_back(&mut state, &device, &queue);
+
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        drive_stroke(&mut state, [0.7, 0.7], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(state.undo_stroke());
+        assert_eq!(state.stroke_len(), 1);
+        // Far from both predecessors, so no merge: the commit's cursor is
+        // the pre-push depth (1), its depth the post-push depth (2).
+        drive_stroke(&mut state, [0.75, 0.25], [0.0, 0.02], 15);
+        state.end_stroke();
+        let third = read_back(&mut state, &device, &queue);
+        assert_ne!(third, blank, "the third stroke must paint");
+
+        assert_eq!(
+            state.take_stroke_commits(),
+            vec![
+                StrokeCommit { cursor: 0, depth: 1 },
+                StrokeCommit { cursor: 1, depth: 2 },
+                StrokeCommit { cursor: 1, depth: 2 },
+            ]
+        );
+        // Both live entries undo to the exact blank canvas.
+        assert_eq!(state.jump_to_stroke_depth(0), 2);
+        assert_eq!(read_back(&mut state, &device, &queue), blank);
+    }
+
+    /// A resize clears the queued commits with the entries and bumps the
+    /// epoch, so the next drain can neither record evicted strokes nor
+    /// alias the new history's depths. (The epoch's row-clearing half is
+    /// pinned in `history_panel`'s headless tests.)
+    #[test]
+    fn resize_clears_pending_commits_and_bumps_epoch() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
+        assert_eq!(state.stroke_epoch(), 0);
+
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert_eq!(state.stroke_len(), 1);
+
+        let active = state.active_set().to_string();
+        state.resize_set(&active, 256, 256);
+        assert_eq!(state.stroke_len(), 0);
+        assert_eq!(state.stroke_epoch(), 1);
+        assert!(state.take_stroke_commits().is_empty());
+
+        // New strokes record against the new epoch at depth 1 again.
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert_eq!(
+            state.take_stroke_commits(),
+            vec![StrokeCommit { cursor: 0, depth: 1 }]
+        );
     }
 
     // --- Paint-stroke pressure (CORE-LOOP CRITICAL 5) ---

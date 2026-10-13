@@ -340,10 +340,10 @@ impl TabViewer for PanelViewer<'_> {
                 );
             }
             Panel::History => {
-                history_panel::history_ui(ui, self.doc);
-                // Retouch (smudge/clone) strokes keep their own per-stroke
-                // history in v1 — the layer journal above can't hold texel
-                // snapshots yet.
+                history_panel::history_ui(ui, self.doc, self.paint.as_deref_mut());
+                // Single-step stroke buttons below the session log: the
+                // log's stroke rows above jump whole depths on the same
+                // journal; these step one entry at a time.
                 if let Some(paint) = self.paint.as_deref_mut() {
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -2044,6 +2044,15 @@ impl eframe::App for UmberApp {
         // while Assets is the visible tab of that node.
         if let Some(paint) = self.state.paint.as_mut() {
             paint.sync_tool(&mut self.brush_panel.tool);
+        }
+        // Stroke-commit drain: finished strokes queue their History-window
+        // rows on the paint session (which owns the stroke journal), and
+        // the rows live on the document — drained here, not only in the
+        // History tab's `show` (egui_dock skips hidden tabs — same pattern
+        // as the bake poll above), so strokes painted while History is
+        // hidden still get rows.
+        if let Some(paint) = self.state.paint.as_mut() {
+            history_panel::drain_stroke_commits(&mut self.state.doc, paint);
         }
 
         // Stylus (XI2) poll, once per frame BEFORE the paint arm reads

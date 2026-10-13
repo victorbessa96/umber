@@ -587,6 +587,77 @@ mod tests {
         assert_eq!(doc.jump_to_depth(3), 0);
     }
 
+    /// Rewinding n layer commands restores the exact stack state: the
+    /// layer count and content at each depth, plus the undo/redo counts
+    /// the panel's buttons and highlight read.
+    #[test]
+    fn jump_to_depth_restores_counts_and_content() {
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("A", LayerKind::Paint));
+        doc.run(LayerCommand::add("B", LayerKind::Fill));
+        doc.run(LayerCommand::set_visible(0, false));
+        assert_eq!(doc.layers().len(), 2);
+        assert!(doc.history.can_undo());
+        assert!(!doc.history.can_redo());
+
+        // Depth 3 -> 0: 3 undos, empty stack, redo armed, undo spent.
+        assert_eq!(doc.jump_to_depth(0), 3);
+        assert!(doc.layers().is_empty());
+        assert_eq!(doc.history.len(), 0);
+        assert!(!doc.history.can_undo());
+        assert!(doc.history.can_redo());
+
+        // Depth 0 -> 3: 3 redos, both layers back, the hide restored.
+        assert_eq!(doc.jump_to_depth(3), 3);
+        assert_eq!(doc.layers().len(), 2);
+        assert_eq!(doc.layers()[0].name, "A");
+        assert_eq!(doc.layers()[1].name, "B");
+        assert!(!doc.layers()[0].visible);
+        assert_eq!(doc.history.len(), 3);
+        assert!(doc.history.can_undo());
+        assert!(!doc.history.can_redo());
+
+        // One step back: exactly one layer hides the difference.
+        assert_eq!(doc.jump_to_depth(2), 1);
+        assert_eq!(doc.layers().len(), 2);
+        assert!(doc.layers()[0].visible);
+        assert!(doc.history.can_undo());
+        assert!(doc.history.can_redo());
+    }
+
+    /// Cross-journal truncate independence, headless: a layer push drops
+    /// dead LAYER rows but keeps stroke rows (the layer push leaves the
+    /// stroke journal alone) — the mirror image of the stroke drain's
+    /// `truncate_stroke_future`, pinned here without a GPU session.
+    #[test]
+    fn layer_push_keeps_stroke_rows_while_dropping_dead_layer_rows() {
+        use crate::history_panel::HistoryKind;
+
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("A", LayerKind::Paint));
+        doc.run(LayerCommand::add("B", LayerKind::Fill));
+        // A stroke recorded between the layer ops (the drain's row).
+        doc.session_history.record_stroke(1);
+        assert!(doc.undo());
+
+        // Fresh layer push over the undone state: the depth-2 layer row
+        // describes the cleared redo future and goes; the stroke row and
+        // the surviving depth-1 layer row stay.
+        doc.run(LayerCommand::set_visible(0, false));
+        assert_eq!(
+            doc.session_history
+                .entries()
+                .iter()
+                .map(|e| (e.kind, e.undo_depth, e.stroke_depth))
+                .collect::<Vec<_>>(),
+            vec![
+                (HistoryKind::AddPaint, Some(1), None),
+                (HistoryKind::BrushStroke, None, Some(1)),
+                (HistoryKind::SetVisible, Some(2), None),
+            ]
+        );
+    }
+
     /// Journal-truncate equivalence, both halves:
     /// (a) a jump lands the document in exactly the state stepwise
     /// undo/redo reaches (same layers, same undo depth) — the jump is N
