@@ -36,6 +36,7 @@ rfd = "0.15"
 # no lock churn. The `mod psd_import;` + menu wiring lands at the
 # wave-end merge (another claw owns main.rs' import section this wave).
 ag-psd = "0.3.0"
+umber-spp = { workspace = true }
 # UI string catalogs (docs/specs/i18n-design.md): Fluent bundles over
 # assets/i18n/*.ftl. umber-app only — no other crate renders UI text.
 fluent = "0.17"

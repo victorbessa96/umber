@@ -129,6 +129,7 @@ mod postfx_panel;
 mod psd_import;
 mod retouch;
 mod size_presets;
+mod spp_import;
 mod status_bar;
 mod stylus_input;
 mod tile_selection;
@@ -184,6 +185,7 @@ struct PanelViewer<'a> {
     mesh_import: &'a mut mesh_map_import::MeshMapImportState,
     /// The PSD import state (the Assets tab's PSD section).
     psd_import: &'a mut psd_import::PsdImportState,
+    spp_import: &'a mut spp_import::SppImportState,
     /// The project's asset store (`None` before the first Save/Open —
     /// the mesh-map import Apply path waits for it; see `mesh_map_import`).
     store: Option<&'a umber_core::AssetStore>,
@@ -360,6 +362,8 @@ impl TabViewer for PanelViewer<'_> {
                 );
                 ui.separator();
                 psd_import::show_section(ui, self.psd_import);
+                ui.separator();
+                spp_import::show_section(ui, self.spp_import);
             }
             Panel::History => {
                 history_panel::history_ui(ui, self.doc, self.paint.as_deref_mut());
@@ -511,6 +515,9 @@ pub struct AppState {
     /// shape (composite-first; the honest rasterizer fallback reports
     /// every deviation). The panel section lives in the Assets tab.
     pub psd_import: psd_import::PsdImportState,
+    /// The .spp import state (ruling 1: import-only; the reader crate's
+    /// report is the artifact this presents).
+    pub spp_import: spp_import::SppImportState,
     /// The project directory of the last Save/Open (`None` for a
     /// never-saved document — the import Apply path and the autosave
     /// journal both wait for it).
@@ -2368,6 +2375,7 @@ impl eframe::App for UmberApp {
         // PSD drops route the same frame (the state's scan filters .psd;
         // mesh files were taken above).
         self.state.psd_import.poll_drops(ui.ctx());
+        self.state.spp_import.poll_drops(ui.ctx());
         self.load_dropped_mesh(ui.ctx());
         // Shell shortcuts (`toolbar`'s key table): the overlay keys (W
         // wireframe, G grid — Wave-4 item 7), V lit ↔ unlit (§5's P0 row),
@@ -2527,6 +2535,7 @@ impl eframe::App for UmberApp {
                 postfx_panel: &mut self.state.postfx_panel,
                 mesh_import: &mut self.state.mesh_import,
                 psd_import: &mut self.state.psd_import,
+                spp_import: &mut self.state.spp_import,
                 store: store.as_ref(),
                 hdr_mode: &mut self.hdr_mode,
                 stylus_pressure,

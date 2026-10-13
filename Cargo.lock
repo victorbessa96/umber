@@ -4736,6 +4736,7 @@ dependencies = [
  "umber-graph",
  "umber-gui",
  "umber-mesh",
+ "umber-spp",
  "umber-wasm",
  "wgpu",
 ]

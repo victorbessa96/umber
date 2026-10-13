@@ -546,6 +546,19 @@ psd-import =
     .row-unmatched = { $file } — { $reason }
     .reason-not-psd = not a .psd file
 
+## .spp import (ruling 1 — import-only forever; the report is the artifact)
+
+spp-import =
+    .title = Substance .spp import
+    .hint = Drop an Adobe Substance 3D Painter .spp project. The reader imports texture-set channels it can honestly parse and reports every dataset — HBO graphs are listed by era, not imported; geometry stays FBX/USD.
+    .no-files = No .spp file scanned yet.
+    .apply = Import .spp
+    .row-pending = { $file } waiting
+    .report-title = { $file } — Substance { $version }
+    .set-row = Set “{ $set }” — { $count } channel(s)
+    .channel-row = { $channel } ({ $w}×{ $h}, { $c} component(s))
+    .note-row = { $note }
+
 ## 2D UV view
 
 uv =

@@ -532,6 +532,19 @@ psd-import =
     .row-unmatched = { $file } — { $reason }
     .reason-not-psd = não é um arquivo .psd
 
+## .spp import (ruling 1 — import-only forever; the report is the artifact)
+
+spp-import =
+    .title = Importar .spp do Substance
+    .hint = Solte um projeto .spp do Adobe Substance 3D Painter. O leitor importa os canais que consegue analisar com honestidade e relata cada conjunto de dados — grafos HBO são listados por era, não importados; a geometria continua FBX/USD.
+    .no-files = Nenhum arquivo .spp escaneado ainda.
+    .apply = Importar .spp
+    .row-pending = { $file } aguardando
+    .report-title = { $file } — Substance { $version }
+    .set-row = Conjunto “{ $set }” — { $count } canal(is)
+    .channel-row = { $channel } ({ $w}×{ $h}, { $c} componente(s))
+    .note-row = { $note }
+
 
 uv =
     .no-mesh = nenhuma malha carregada
