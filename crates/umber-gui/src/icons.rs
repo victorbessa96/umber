@@ -707,18 +707,36 @@ pub fn icon_button(
     size: f32,
     active: bool,
 ) -> Response {
+    icon_button_enabled(ui, atlas, name, size, active, true)
+}
+
+/// [`icon_button`] with an enable gate: a disabled icon paints at half
+/// the muted tint, never hovers, never reports clicks (the response's
+/// `clicked()` is always false — the caller keeps its guard).
+pub fn icon_button_enabled(
+    ui: &mut Ui,
+    atlas: &IconAtlas,
+    name: &str,
+    size: f32,
+    active: bool,
+    enabled: bool,
+) -> Response {
     let edge = size + 2.0 * ICON_BUTTON_PAD;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
     if ui.is_rect_visible(rect) {
-        let hovered = response.hovered();
-        if hovered || response.is_pointer_button_down_on() {
+        let hovered = enabled && response.hovered();
+        if hovered || (enabled && response.is_pointer_button_down_on()) {
             ui.painter().rect_filled(rect, 3.0, theme::hover());
         }
-        let tint = match (active, hovered) {
-            (true, false) => theme::accent(),
-            (true, true) => theme::accent_hover(),
-            (false, true) => theme::text(),
-            (false, false) => theme::muted(),
+        let tint = if !enabled {
+            theme::muted().gamma_multiply(0.5)
+        } else {
+            match (active, hovered) {
+                (true, false) => theme::accent(),
+                (true, true) => theme::accent_hover(),
+                (false, true) => theme::text(),
+                (false, false) => theme::muted(),
+            }
         };
         paint_icon(ui, atlas, name, rect.shrink(ICON_BUTTON_PAD), tint);
     }

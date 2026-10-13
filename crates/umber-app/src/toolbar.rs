@@ -76,6 +76,7 @@
 use egui::{Key, Modifiers, RichText, Ui};
 use umber_brush::BrushTool;
 use umber_gpu::ViewMode;
+use umber_gui::icons;
 use umber_gui::theme;
 use umber_gui::{IconAtlas, Tool, ToolRow};
 
@@ -290,25 +291,27 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
     ui.set_style(theme::umber_style(theme::Density::Comfortable));
     let mut actions = Vec::new();
     ui.horizontal(|ui| {
-        // File ops.
+        // File ops. The baked Panel family (icon-raster §11) draws the
+        // glyphs; the localized labels moved to tooltips (Photoshop's own
+        // shape — its top strip is icons). "New" stays a disabled text
+        // button: it has no glyph in the family and its deferred state
+        // reads better as text.
         ui.add_enabled(false, egui::Button::new(tr("shell.new")))
             .on_disabled_hover_text(tr("shell.new-deferred"));
-        if ui
-            .button(tr("menu.open-mesh"))
-            .on_hover_text(tr("shell.tip-open-mesh"))
+        let icon_size = 16.0;
+        if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
+            .on_hover_text(tr("menu.open-mesh"))
             .clicked()
         {
             actions.push(ShellAction::OpenMesh);
         }
-        if ui
-            .button(tr("shell.open"))
+        if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
             .on_hover_text(tr("shell.tip-open-project"))
             .clicked()
         {
             actions.push(ShellAction::OpenProject);
         }
-        if ui
-            .button(tr("button.save"))
+        if icons::icon_button(ui, atlas, "save", icon_size, false)
             .on_hover_text(tr("shell.tip-save-project"))
             .clicked()
         {
@@ -317,18 +320,14 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         ui.separator();
 
         // History.
-        if ui
-            .add_enabled(view.can_undo, egui::Button::new(tr("shell.undo")))
-            .on_hover_text(tr("shell.tip-undo"))
-            .clicked()
-        {
+        let undo = icons::icon_button_enabled(ui, atlas, "undo-2", icon_size, false, view.can_undo)
+            .on_hover_text(tr("shell.tip-undo"));
+        if undo.clicked() && view.can_undo {
             actions.push(ShellAction::Undo);
         }
-        if ui
-            .add_enabled(view.can_redo, egui::Button::new(tr("shell.redo")))
-            .on_hover_text(tr("shell.tip-redo"))
-            .clicked()
-        {
+        let redo = icons::icon_button_enabled(ui, atlas, "redo-2", icon_size, false, view.can_redo)
+            .on_hover_text(tr("shell.tip-redo"));
+        if redo.clicked() && view.can_redo {
             actions.push(ShellAction::Redo);
         }
         ui.separator();
@@ -353,19 +352,17 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         ui.label(RichText::new(view.tool.label()).color(theme::muted()));
         ui.separator();
 
-        // View toggles (the View menu's checkboxes, W / G / V).
-        if ui
-            .selectable_label(view.view.wireframe, tr("shell.wireframe"))
-            .on_hover_text(tr("shell.tip-wireframe"))
-            .clicked()
-        {
+        // View toggles (the View menu's checkboxes, W / G / V). The eye
+        // glyph carries all three — active-tinted for the toggles, the
+        // cycle button keeps the mode's name as its tooltip.
+        let wireframe = icons::icon_button(ui, atlas, "eye", icon_size, view.view.wireframe)
+            .on_hover_text(tr("shell.tip-wireframe"));
+        if wireframe.clicked() {
             actions.push(ShellAction::ToggleWireframe);
         }
-        if ui
-            .selectable_label(view.view.grid, tr("shell.grid"))
-            .on_hover_text(tr("shell.tip-grid"))
-            .clicked()
-        {
+        let grid = icons::icon_button(ui, atlas, "eye", icon_size, view.view.grid)
+            .on_hover_text(tr("shell.tip-grid"));
+        if grid.clicked() {
             actions.push(ShellAction::ToggleGrid);
         }
         let lit = view.view.view_mode == ViewMode::Lit;
@@ -374,33 +371,30 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         } else {
             tr("shell.view-other")
         };
-        if ui
-            .button(mode)
-            .on_hover_text(tr("shell.tip-view-cycle"))
-            .clicked()
-        {
+        let cycle = icons::icon_button(ui, atlas, "eye", icon_size, lit).on_hover_text(mode);
+        if cycle.clicked() {
             actions.push(ShellAction::CycleViewMode);
         }
         ui.separator();
 
-        // Quick mask (X / I).
-        let mask = ui
-            .add_enabled(
-                view.paint_available,
-                egui::Button::selectable(view.mask_editing, tr("shell.mask")),
-            )
-            .on_hover_text(tr("shell.tip-mask"));
-        if mask.clicked() {
+        // Quick mask (X / I): the pencil glyph paints the mask's edit
+        // state as the active tint.
+        let mask = icons::icon_button_enabled(
+            ui,
+            atlas,
+            "pencil",
+            icon_size,
+            view.mask_editing,
+            view.paint_available,
+        )
+        .on_hover_text(tr("shell.tip-mask"));
+        if mask.clicked() && view.paint_available {
             actions.push(ShellAction::ToggleMaskMode);
         }
-        if ui
-            .add_enabled(
-                view.mask_editing,
-                egui::Button::new(tr("shell.invert-mask")),
-            )
-            .on_hover_text(tr("shell.tip-invert-mask"))
-            .clicked()
-        {
+        let invert =
+            icons::icon_button_enabled(ui, atlas, "pencil", icon_size, false, view.mask_editing)
+                .on_hover_text(tr("shell.tip-invert-mask"));
+        if invert.clicked() && view.mask_editing {
             actions.push(ShellAction::InvertMask);
         }
     });
