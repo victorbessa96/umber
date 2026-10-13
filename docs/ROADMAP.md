@@ -124,15 +124,20 @@ first, blends rebases if needed).
 | Dynamic materials | ✗ open = wave 4 |
 | Custom user shaders | runtime ✓; host hook = wave 4 |
 
-## The wave protocol (standing)
+## The wave protocol (standing, revised 2026-10-12 — cargo ONLY at wave end)
 
 1. Dispatch: 4-5 claws, per-kill worktrees (kill-worktree.sh), staggered
    launches (60s+ apart — the opencode DB lock), briefs written fresh at
-   dispatch from live anchors.
-2. Land: dragon gates each branch under the flock (fmt, verify-kill, clippy
-   ONE crate at a time, the kill's tests), fast-forward via the tool,
-   CI per landed branch.
-3. Consume: exit notifications land; the dragon re-verifies from artifacts
-   (never the report tail), applies Doc-deltas, marks the queue/roadmap.
-4. Roll: the next wave's briefs get written at landing (anchors shift);
+   dispatch from live anchors. Briefs say: NO cargo of any kind, mid-wave or
+   at exit — the wave-end battery runs everything.
+2. Consume: the dragon reads each kill's artifacts at exit (the report, the
+   full diff, brace-balance, verify-kill's zero-cargo legs) and stages the
+   branch — but runs NO cargo.
+3. Gate ONCE at wave end: fmt --all once; clippy once per touched crate; the
+   touched crates' test suites once; the wave's kills' own tests in that
+   same battery. Fix what breaks (the claws are gone; the dragon fixes at
+   the battery).
+4. Land in order: fast-forward each branch (rebase when diverged), CI per
+   landed branch delivers the cross-platform verdict.
+5. Roll: the next wave's briefs get written at landing (anchors shift);
    this roadmap's rows update their status in the same commit.

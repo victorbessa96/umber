@@ -4,6 +4,24 @@ The loop's rulings, one entry each, newest first. A decision lands here when
 it changes standing behavior (not per-kill choices, which live in kill
 reports). Bessa's overrides are BINDING and marked.
 
+## 2026-10-12 — Cargo ONLY at the end of the wave (BINDING, Bessa)
+
+Per-kill cargo gating is abolished. The wave protocol: claws write in
+isolation (worktrees) with ZERO cargo — no fmt, no clippy, no tests mid-wave,
+not even per-kill at consumption; the dragon consumes each kill's artifacts
+(read, brace-balance, verify-kill's zero-cargo legs) and stages the branches,
+then runs ONE full gate battery at the END of the wave: fmt once, clippy once
+per touched crate, the touched crates' test suites once, then lands in order.
+CI remains the per-branch suite verdict afterward. Reasoning: per-kill cargo
+was the last serial bottleneck (each gate = a cold-ish build + minutes on the
+locked flock); with worktrees there is no correctness reason to gate
+serially — branches can't contaminate each other, and the one battery
+catches the same defect classes at a fraction of the wall-clock. The kill's
+OWN tests still run in the end-of-wave battery (the briefs keep writing
+them; they just don't run until the wave closes). The exception: a kill the
+dragon lands SOLO (no wave in flight) may gate itself — the rule binds
+WAVES, not single kills.
+
 ## 2026-10-12 — .spp IMPORT: in scope for wave 4, pending Bessa's ratification
 
 Earlier framing ("never touch .spp") reversed for the IMPORT direction.
