@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Umber
+GenericName=3D Texture Painter
+Comment=Open-source Rust-native 3D texture painting
+Exec=umber
+Icon=org.umber.Umber
+Type=Application
+Terminal=false
+Categories=Graphics;3DGraphics;
+StartupWMClass=umber
+Keywords=3D;texturing;painting;PBR;materials;

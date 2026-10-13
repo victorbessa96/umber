@@ -1,0 +1,182 @@
+# Linux packaging: AppImage build + Flatpak manifest validation.
+#
+# Split from ci.yml on purpose: the heavy jobs (a full release-profile
+# compile plus ~1 GB of Flatpak SDK downloads) must NOT run on every push.
+# Per-push proof is the `lint-packaging` job (manifest parse, desktop-file
+# and AppStream validation — seconds, no SDK). Artifact production runs on
+# release tags, `workflow_dispatch`, and (AppImage only) pushes that touch
+# the packaging surface. See flatpak/README.md and appimage/README.md for
+# the v1 boundaries each job proves.
+
+name: packaging
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'appimage/**'
+      - 'flatpak/**'
+      - '.github/workflows/packaging.yml'
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+  pull_request:
+    paths:
+      - 'appimage/**'
+      - 'flatpak/**'
+      - '.github/workflows/packaging.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned packaging tools (re-verify at gate; see appimage/README.md).
+  APPIMAGETOOL_VERSION: '1.9.1'
+  APPIMAGETOOL_URL: 'https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage'
+  LINUXDEPLOY_URL: 'https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage'
+
+jobs:
+  lint-packaging:
+    name: lint packaging files (no SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Flatpak manifest parses as JSON
+        run: python3 -m json.tool flatpak/org.umber.Umber.json > /dev/null
+
+      - name: Install lint tools (no runtimes)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream flatpak-builder
+
+      - name: Validate desktop files
+        run: |
+          desktop-file-validate flatpak/org.umber.Umber.desktop
+          desktop-file-validate appimage/org.umber.Umber.desktop
+
+      - name: Validate AppStream metainfo
+        run: |
+          appstreamcli validate flatpak/org.umber.Umber.metainfo.xml
+          appstreamcli validate appimage/org.umber.Umber.metainfo.xml
+
+      - name: Metainfo copies stay in sync
+        run: diff -u flatpak/org.umber.Umber.metainfo.xml appimage/org.umber.Umber.metainfo.xml
+
+      - name: Flatpak manifest schema smoke (--show-manifest parses, no SDK needed)
+        run: flatpak-builder --show-manifest flatpak/org.umber.Umber.json > /dev/null
+
+  appimage:
+    name: build AppImage (x86_64)
+    # Heavy (full release compile + tool downloads): tags, manual dispatch,
+    # or a push that touched the packaging surface — never every PR.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        # pinned via rust-toolchain.toml (1.97.0) — see file at repo root
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the staged binary
+        run: cargo --locked build --release -p umber-app
+
+      - name: Stage the AppDir tree (see appimage/README.md)
+        run: |
+          set -eu
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/metainfo
+          cp target/release/umber AppDir/usr/bin/umber
+          cp LICENSE AppDir/usr/bin/LICENSE
+          cp appimage/org.umber.Umber.desktop AppDir/org.umber.Umber.desktop
+          cp appimage/org.umber.Umber.desktop AppDir/usr/share/applications/org.umber.Umber.desktop
+          cp appimage/umber.svg AppDir/umber.svg
+          cp appimage/umber.svg AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg
+          cp appimage/org.umber.Umber.metainfo.xml AppDir/usr/share/metainfo/org.umber.Umber.metainfo.xml
+
+      - name: Fetch pinned packaging tools
+        run: |
+          set -eu
+          curl -LsSf -o linuxdeploy.AppImage "${LINUXDEPLOY_URL}"
+          curl -LsSf -o appimagetool.AppImage "${APPIMAGETOOL_URL}"
+          chmod +x linuxdeploy.AppImage appimagetool.AppImage
+
+      - name: Bundle deps + pack the AppImage
+        run: |
+          set -eu
+          ./linuxdeploy.AppImage --appdir AppDir \
+            --executable AppDir/usr/bin/umber \
+            --desktop-file AppDir/usr/share/applications/org.umber.Umber.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/umber.svg \
+            --output appimage
+
+      - name: Assert the Vulkan loader was NOT bundled
+        run: |
+          set -eu
+          if find AppDir -iname 'libvulkan*' -o -iname '*Vulkan*' | grep -q .; then
+            echo 'packaging bug: Vulkan loader/ICD files must stay host-provided'
+            find AppDir -iname 'libvulkan*' -o -iname '*Vulkan*'
+            exit 1
+          fi
+
+      - name: Payload-integrity smoke (headless — no display needed)
+        run: |
+          set -eu
+          ls -la Umber-*.AppImage
+          ./Umber-*.AppImage --appimage-extract usr/bin/umber
+          cmp squashfs-root/usr/bin/umber AppDir/usr/bin/umber
+          rm -rf squashfs-root
+          echo 'OK: extracted payload is byte-identical to the staged binary'
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Umber-x86_64-AppImage
+          path: 'Umber-*.AppImage'
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" Umber-*.AppImage --clobber
+
+  flatpak:
+    name: build Flatpak bundle (x86_64)
+    # Heaviest job (~1 GB runtime+SDK): release tags or manual dispatch only.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak + builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+
+      - name: Add Flathub + install 24.08 platform/SDK
+        run: |
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+
+      - name: Build the Flatpak
+        run: |
+          sudo flatpak-builder --force-clean --repo=repo build-dir flatpak/org.umber.Umber.json
+
+      - name: Export single-file bundle
+        run: |
+          sudo flatpak build-bundle repo Umber.flatpak org.umber.Umber --arch=x86_64
+          sudo chown "$(id -u):$(id -g)" Umber.flatpak
+          ls -la Umber.flatpak
+
+      # Honest boundary: launching the GUI needs a display, so CI proves
+      # build + bundle, not first-run. A human runs:
+      #   flatpak install Umber.flatpak && flatpak run org.umber.Umber
+      - name: Upload Flatpak bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Umber-flatpak-bundle
+          path: Umber.flatpak
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" Umber.flatpak --clobber
