@@ -66,6 +66,11 @@ Pass 4), highest first:
 | 11 | ID-mask selection | **done (e2bed70) — click region → only that ID paints; 5 headless + 2 GPU goldens green under lavapipe; cached-bake + multi-tile = named follow-ups** | expansion row (unfrozen; queued in audit order) |
 | 12 | Height→normal live in viewport | **done end-to-end (be11fe5) — the (c) seam closes it: the height channel binds through set_height_texture, NOT-REACHABLE dead, 317/317 green** | expansion row (unfrozen; queued in audit order) |
 
+| 13 | never-crash lint gate (absorbed from storytold/photocraft) | **queued** | clippy.toml tests-only unwrap/expect/panic + deny lints on engine crates + a panic-hunt test fuzzing public seams; the exploration receipt: vault 2026-10-13-photocraft-exploration.md |
+| 14 | control protocol v0 (absorbed) | **queued** | TCP loopback + token file + JSON lines + strict param validation + serde UI-state read/drive — the agent surface; mirrors photocraft's docs/control-protocol.md |
+| 15 | offscreen snapshot harness (absorbed) | **queued** | full panel tree rendered to PNG per theme, --script of control calls; visual regression without a window. Depends on 14 |
+| 16 | corpus pattern for importers (absorbed) | **queued** | pinned sha256-verified never-committed oracle corpus repo + feature-gated tests; lands WITH wave-3 spp-import (the spp oracles ARE its tests) |
+
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work
 in this project"). Items 10-12 are regular queue work in their audit
