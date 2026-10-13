@@ -2211,6 +2211,12 @@ mod tests {
 
         #[test]
         fn gpu_matches_cpu_for_masked_stacks() {
+            let (device, queue) = request_device();
+            let compositor =
+                StackCompositor::new(device.clone()).expect("device has the required feature");
+            let fix = fixture(&device, &queue, &compositor);
+            let size = fix.size;
+            let white = two_tone(size, WHITE, WHITE);
             let red = two_tone(size, RED, RED);
             // Shut-left / open-right: the left half must composite to the
             // bottom, the right half to the top — a mask/pixel misalignment
