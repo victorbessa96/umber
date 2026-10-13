@@ -6,15 +6,28 @@ one-off kills. Updated at dispatch, at landing, at consumption.
 
 Format: | kill | wave | claw | worktree/branch | status | next action |
 
+## Wave 1 — LANDED (2026-10-12, the first big-wave cycle complete)
+
+| Kill | Commit | Notes |
+|---|---|---|
+| wave-blends | d861482 | 17 modes, HSV + RNM families; 2 claw pins corrected at gate |
+| wave-dist | 43180f4 | Flatpak + AppImage + packaging CI |
+| wave-history | 638fb2b | click-to-time-travel, dual-journal depths |
+| wave-masks | 770162f | per-layer mask planes + the compositor gate; claw died at report step, dragon wrote it from the diff |
+| battery fixes | 1f28048 | merge typo, journal arms, mask-mode test premise, i18n keys |
+
+The wave protocol's first full cycle: 4 claws in worktrees (one DB-lock
+relaunch round), zero cargo mid-wave, ONE battery at the end (4 classes
+caught: a merge typo, 2 E0004s, a wrong test premise, 6 missing i18n
+keys), land-in-order with one hand-rebase + one conflict resolution,
+332/332 green, CI per branch.
+
 ## In flight
 
 | Kill | Wave | Claw | Branch/Worktree | Status | Next |
 |---|---|---|---|---|---|
-| wave-masks | 1 | opencode | kill/wave-masks @ ../umber-kill-wave-masks | writing (2 files dirty, 900KB+) | exit → gate → land |
-| wave-blends | 1 | opencode | kill/wave-blends @ ../umber-kill-wave-blends | writing (3 files dirty) | exit → gate → land |
-| wave-history | 1 | opencode | kill/wave-history @ ../umber-kill-wave-history | writing (read phase done, dual-depth travel design) | exit → gate → land |
-| wave-dist | 1 | opencode | kill/wave-dist @ ../umber-kill-wave-dist | writing (2 files dirty) | exit → gate → land |
 | perf-baseline (#2) | — | CI nightly | run 38304995746 | queued (runner starved since 10:10Z; 38234644651 cancelled after 10h) | poll; on completion seed baseline.json |
+| wave-2 dispatch | 2 | — | — | WAITING on wave-1 CI green | write briefs fresh, stagger launches |
 
 ## Landed today (2026-10-12)
 
