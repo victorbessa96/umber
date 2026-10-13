@@ -6,6 +6,22 @@ the source of truth.
 
 ## [Unreleased]
 
+### Wave 2 — the persistence + adoption wave (2026-10-13)
+
+- Post-effects chain persists — the postfx settings carry, save/load
+  round-trips exactly (`f35cf48`; the C1 audit's 1c boundary closed)
+- Per-channel resolution — channel overrides in state, sidecar, and
+  panel; overrides beat set-resize on load; save/reopen byte-identical
+  (`f4e7524`)
+- The perf baseline seeds + the nightly's --ignored invocation bug dies
+  (`fd49627`; perf-nightly.yml ran NOTHING for weeks — one filter per
+  line now, three harnesses)
+- OCIO adoption — the ACES 2.0 CG/Studio configs select in the Display
+  panel, persist, and drive the display LUT through the real OCIO
+  processor; the icon boot swaps to the baked atlas (hidpi-aware,
+  placeholder fallback) (`9a1a808`)
+
+
 ### Core-loop phase — CLOSED: Gate 0 PASSED (2026-10-12, both platforms)
 
 The strategy review (docs/specs/2026-10-12-strategy-review.md) found the
