@@ -72,6 +72,51 @@ pub fn create_builtin_config(name: &str) -> Result<(), OcioBridgeError> {
     Ok(())
 }
 
+/// A live built-in config held for the session (the §9 "in panel"
+/// adoption: the Display panel creates it on selection, keeps it, and
+/// tabulates display LUTs through it). The config owns nothing else —
+/// dropping the handle is the whole teardown.
+pub struct OcioBuiltinConfig {
+    config: ocio_rs::Config,
+}
+
+impl OcioBuiltinConfig {
+    /// Creates the named built-in config (an OCIO registry name —
+    /// [`ACES_CG_CONFIG`] / [`ACES_STUDIO_CONFIG`], the enum forms).
+    /// Stub mode: the handle allocation fails and this errors — the
+    /// panel's honest "unavailable" path.
+    pub fn create(name: &str) -> Result<Self, OcioBridgeError> {
+        Ok(Self {
+            config: ocio_rs::Config::create_from_builtin_config(name)?,
+        })
+    }
+
+    /// The config's color-space names, in registry order (the panel's
+    /// display-space dropdown). Stub-unreachable (needs a live config).
+    pub fn display_spaces(&self) -> Vec<String> {
+        let n = self.config.num_color_spaces();
+        (0..n)
+            .filter_map(|i| self.config.color_space_name_by_index(i))
+            .collect()
+    }
+
+    /// The scene-linear → display-space CPU processor. The LUT
+    /// tabulation drives it entry by entry so the viewer chain
+    /// (exposure before, gamma after) composes around the OCIO
+    /// transform — the same chain semantics as [`apply_display_chain`].
+    pub fn display_processor(
+        &self,
+        display_space: &str,
+    ) -> Result<ocio_rs::CPUProcessor, OcioBridgeError> {
+        let src = self
+            .config
+            .role_color_space("scene_linear")
+            .ok_or_else(|| OcioBridgeError::Ocio("config lacks the scene_linear role".into()))?;
+        let processor = self.config.processor(&src, display_space)?;
+        Ok(processor.default_cpu_processor()?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +185,50 @@ mod tests {
         // architecture, now executed).
         create_builtin_config(ACES_CG_CONFIG)
             .expect("the real OCIO creates the ACES 2.0 CG config");
+    }
+
+    #[cfg(feature = "ocio-bundled")]
+    #[test]
+    fn real_mode_config_tabulates_a_display_lut() {
+        // The panel adoption's payload: a held config lists its color
+        // spaces and hands out the scene-linear → display CPU
+        // processor. Probed values pinned (2026-10-13): the CG config
+        // carries 25 spaces, scene_linear = ACEScg, "sRGB - Display"
+        // is among them. The processor must be a real transform: mid
+        // gray encodes inside the tone curve (not identity, not clip).
+        let config = OcioBuiltinConfig::create(ACES_CG_CONFIG).expect("the CG config creates");
+        let spaces = config.display_spaces();
+        assert_eq!(
+            spaces.len(),
+            25,
+            "probed space count (25) — got {}",
+            spaces.len()
+        );
+        assert!(
+            spaces.iter().any(|s| s == "sRGB - Display"),
+            "the sRGB display space is in the dropdown list"
+        );
+        let cpu = config
+            .display_processor("sRGB - Display")
+            .expect("the sRGB display processor builds");
+        assert_eq!(lut_byte(&cpu, 0), 0, "black stays black");
+        let mid = lut_byte(&cpu, 128);
+        assert!(
+            mid > 40 && mid < 200,
+            "mid-gray sits inside the tone curve: {mid}"
+        );
+        let top = lut_byte(&cpu, 250);
+        assert!(top > 180, "near-white encodes bright: {top}");
+    }
+
+    /// Drives a CPU processor on one gray value, returning the red
+    /// byte (the chain is near-neutral; one channel tells the curve).
+    #[cfg(feature = "ocio-bundled")]
+    fn lut_byte(cpu: &ocio_rs::CPUProcessor, v: u8) -> u8 {
+        let l = v as f32 / 255.0;
+        let mut rgb = [l, l, l];
+        cpu.apply_rgb(&mut rgb);
+        (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8
     }
 
     #[test]

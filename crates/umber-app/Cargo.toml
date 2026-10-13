@@ -41,6 +41,13 @@ profiling = { workspace = true }
 # off, every profiling::span! in the workspace compiles to nothing.
 perf = ["profiling/profile-with-tracy"]
 
+# §9 OCIO adoption: the Display panel's config selector + the OCIO view
+# stage in the viewer chain (stub mode when ocio-bundled is absent: the
+# section renders disabled with the honest "unavailable" note). The
+# bundled C++ build is the heavy path (umber-color's ocio-bundled);
+# CI runs the stub arm on every pass and the bundled leg on Linux.
+ocio = ["umber-color/ocio"]
+
 # Linux tablets: the stylus crate's XI2 backend ships with the app on
 # Linux (x11-dl dlopens libX11/libXi at runtime; without an X display
 # the backend reports unavailable and the Touch fallback rules).

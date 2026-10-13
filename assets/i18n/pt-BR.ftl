@@ -258,6 +258,15 @@ display =
     .rebuilding = Reconstruindo a LUT de exibição da GPU para o viewport 3D e a vista UV.
     .active-chain = Cadeia ativa: { $chain }. { $status }
 
+## OCIO config adoption (Display panel section, §9 "in panel")
+display-ocio =
+    .title = OCIO / ACES
+    .config = Configuração
+    .space = Espaço de exibição
+    .space-pick = Escolha um espaço de exibição
+    .none = Apenas curvas embutidas
+    .unavailable = OCIO indisponível nesta compilação — a biblioteca OCIO não foi compilada, então as configurações ACES 2.0 embutidas não podem carregar. As transformações fixas permanecem ativas.
+
 ## Pós-efeitos (seção do painel de exibição, §7 P1)
 
 postfx =

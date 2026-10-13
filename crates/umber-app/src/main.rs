@@ -189,6 +189,10 @@ struct PanelViewer<'a> {
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
     display_lut_state: &'a mut display_panel::DisplayLutState,
+    /// The OCIO section's state (the `ocio` feature; the no-feature
+    /// build has no field and the call site compiles without it).
+    #[cfg(feature = "ocio")]
+    ocio_state: &'a mut display_panel::OcioSectionState,
     /// The device display LUT both GPU views sample, already narrowed
     /// by the EFFECTIVE HDR mode (`HdrMode::select_lut` — `None` once
     /// HDR is live: the SDR table's transfer function must not apply to
@@ -425,7 +429,13 @@ impl TabViewer for PanelViewer<'_> {
             Panel::Display => {
                 // Scrolls: the postfx section grows one group per effect.
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    display_panel::show(ui, self.display, self.display_lut_state);
+                    display_panel::show(
+                        ui,
+                        self.display,
+                        self.display_lut_state,
+                        #[cfg(feature = "ocio")]
+                        self.ocio_state,
+                    );
                     ui.separator();
                     display_panel::hdr_row(ui, self.hdr_mode, &self.gpu.hdr_probe);
                     ui.separator();
@@ -471,6 +481,13 @@ pub struct AppState {
     /// Whether the device display LUT matches `display` (starts dirty;
     /// the frame loop rebuilds + uploads).
     pub display_lut: display_panel::DisplayLutState,
+    /// The OCIO section's session state (the `ocio` feature): the held
+    /// config + the adopted processor. Never serialized — the selection
+    /// saves in `display` (DisplaySettings::ocio) and this rebuilds on
+    /// load. Absent in no-ocio builds (a zero-sized field compiles the
+    /// same call sites with the feature off).
+    #[cfg(feature = "ocio")]
+    pub ocio_state: display_panel::OcioSectionState,
     /// The post-effects chain (§7:84; Display panel's postfx section).
     /// Live in the viewport whenever an effect is enabled (see
     /// `umber_gpu::postfx_viewport`); saved in the project through the
@@ -605,6 +622,24 @@ impl UmberApp {
             .and_then(|path| display_panel::read_hdr_pref(&path))
             .unwrap_or_default();
 
+        // The baked atlas (§11): real pixels from the icon-raster step. The
+        // 2x family loads when the screen is hidpi (native scale ≥ 1.75,
+        // egui's convention — eframe publishes pixels_per_point into the
+        // input BEFORE app creation, wgpu_integration.rs:246-252). Any
+        // load failure keeps the empty atlas: every lookup misses cleanly
+        // and callers keep their text placeholders (icons.rs' contract) —
+        // a missing atlas is never a startup error. Only the Tool family
+        // has consumers today (the toolbar's ToolRow); the Panel family's
+        // consumers arrive with the panel-icon wave, and its loader call
+        // lands with them.
+        let hidpi = cc.egui_ctx.input(|input| input.pixels_per_point) >= 1.75;
+        let icons =
+            umber_gui::icons::load_baked_atlas(&cc.egui_ctx, umber_gui::IconFamily::Tool, hidpi)
+                .unwrap_or_else(|err| {
+                    log::warn!("icon atlas unavailable ({err}); falling back to empty");
+                    umber_gui::IconAtlas::empty()
+                });
+
         Ok(Self {
             state: AppState {
                 paint,
@@ -622,7 +657,7 @@ impl UmberApp {
             #[cfg(feature = "perf")]
             last_dabs_composited: 0,
             view: toolbar::ViewToggles::default(),
-            icons: umber_gui::IconAtlas::empty(),
+            icons,
             hdr_mode,
         })
     }
@@ -2147,7 +2182,7 @@ impl UmberApp {
             }],
             umber_core::project::ProjectSettings {
                 active_texture_set: Some(set_name.clone()),
-                display: self.state.display,
+                display: self.state.display.clone(),
                 postfx: postfx_panel::carry_from_chain(&self.state.postfx),
             },
         )
@@ -2472,6 +2507,8 @@ impl eframe::App for UmberApp {
                 path_tool: &mut self.state.path_tool,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
+                #[cfg(feature = "ocio")]
+                ocio_state: &mut self.state.ocio_state,
                 display_lut: effective_lut,
                 postfx: &mut self.state.postfx,
                 postfx_panel: &mut self.state.postfx_panel,
@@ -2497,7 +2534,18 @@ impl eframe::App for UmberApp {
         // views just built (same texture, unchanged bind group) already
         // draw with the new table. One more frame refreshes the panel's
         // status line, which read "Rebuilding" while the LUT was dirty.
-        if let Some(bytes) = self.state.display_lut.take_rebuild(&self.state.display) {
+        // The adopted OCIO processor for the CURRENT selection (built if
+        // stale — the same call the panel makes; None = fixed path).
+        #[cfg(feature = "ocio")]
+        let ocio_processor = self.state.ocio_state.processor_for(&self.state.display);
+        #[cfg(feature = "ocio")]
+        let bytes = self
+            .state
+            .display_lut
+            .take_rebuild(&self.state.display, ocio_processor);
+        #[cfg(not(feature = "ocio"))]
+        let bytes = self.state.display_lut.take_rebuild(&self.state.display);
+        if let Some(bytes) = bytes {
             self.display_lut.upload(&self.gpu, &bytes);
             ui.ctx().request_repaint();
         }

@@ -81,9 +81,9 @@ use crate::i18n;
 use egui::{Color32, Ui};
 use fluent::FluentValue;
 use std::path::{Path, PathBuf};
-use umber_color::{
-    apply_display_chain, build_display_lut, DisplaySettings, DisplayTransform, DISPLAY_LUT_BYTES,
-};
+#[cfg(not(feature = "ocio"))]
+use umber_color::apply_display_chain;
+use umber_color::{build_display_lut, DisplaySettings, DisplayTransform, DISPLAY_LUT_BYTES};
 use umber_gui::{ParamGroup, ValueField};
 
 /// The GPU display LUT's CPU-side sync state: whether the table on the
@@ -91,7 +91,7 @@ use umber_gui::{ParamGroup, ValueField};
 /// dirty; the frame loop calls [`Self::take_rebuild`] once per frame and
 /// uploads what it returns. Starts dirty, so the first frame builds the
 /// LUT from whatever settings the app holds.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DisplayLutState {
     dirty: bool,
     /// The settings the device LUT was last built from.
@@ -117,13 +117,32 @@ impl DisplayLutState {
     /// from other settings than `settings` (a safety net — a write path
     /// that forgot to mark still converges in one frame). Clears the
     /// dirty flag and records `settings` as built.
+    #[cfg(not(feature = "ocio"))]
     pub fn take_rebuild(&mut self, settings: &DisplaySettings) -> Option<[u8; DISPLAY_LUT_BYTES]> {
         if !self.dirty && self.built.as_ref() == Some(settings) {
             return None;
         }
         self.dirty = false;
-        self.built = Some(*settings);
+        self.built = Some(settings.clone());
         Some(build_display_lut(settings))
+    }
+
+    /// The ocio-feature rebuild: the adopted processor threads through
+    /// (the same staleness rule — the settings comparison includes the
+    /// OCIO selection, so a selection change rebuilds even when the
+    /// cached processor was already live).
+    #[cfg(feature = "ocio")]
+    pub fn take_rebuild(
+        &mut self,
+        settings: &DisplaySettings,
+        ocio_processor: Option<&umber_color::ocio_rs::CPUProcessor>,
+    ) -> Option<[u8; DISPLAY_LUT_BYTES]> {
+        if !self.dirty && self.built.as_ref() == Some(settings) {
+            return None;
+        }
+        self.dirty = false;
+        self.built = Some(settings.clone());
+        Some(build_display_lut(settings, ocio_processor))
     }
 
     /// Whether the device LUT holds `settings` (what the status line
@@ -155,10 +174,214 @@ pub const PREVIEW_RAMP: [f32; PREVIEW_STOPS] = [
 /// Swatch strip height (points).
 const SWATCH_HEIGHT: f32 = 28.0;
 
+/// The OCIO section's session state (§9 "in panel", the `ocio`
+/// feature): the held config + the cached scene-linear → display
+/// processor for the CURRENT selection. Rebuilt when the selection
+/// changes; never serialized (the selection itself lives in
+/// `DisplaySettings::ocio` and saves with the project — this is the
+/// materialized handle for it, rebuilt on load).
+#[cfg(feature = "ocio")]
+#[derive(Default)]
+pub struct OcioSectionState {
+    /// The live built-in config handle (`None` until a selection
+    /// materializes one — and permanently in stub mode).
+    config: Option<umber_color::ocio::OcioBuiltinConfig>,
+    /// What `processor` was built for (config name + display space);
+    /// `None` = no processor yet.
+    built_for: Option<(String, String)>,
+    /// The cached CPU processor for the current selection.
+    processor: Option<umber_color::ocio_rs::CPUProcessor>,
+    /// The last selection error, shown under the section (a failed
+    /// config creation is a visible status, not a silent fallback).
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "ocio")]
+impl OcioSectionState {
+    /// The processor for the selection in `settings.ocio`, building it
+    /// when the selection changed since the last call. `None` when the
+    /// selection is `None` (the fixed path) or the config cannot
+    /// materialize (stub mode / a rejected name — `error` says why).
+    pub fn processor_for(
+        &mut self,
+        settings: &DisplaySettings,
+    ) -> Option<&umber_color::ocio_rs::CPUProcessor> {
+        let selection = settings.ocio.as_ref()?;
+        let wanted = (selection.config.clone(), selection.display_space.clone());
+        if self.built_for.as_ref() == Some(&wanted) {
+            return self.processor.as_ref();
+        }
+        self.error = None;
+        if self.config.is_none() {
+            match umber_color::ocio::OcioBuiltinConfig::create(&selection.config) {
+                Ok(config) => self.config = Some(config),
+                Err(err) => {
+                    self.error = Some(err.to_string());
+                    self.processor = None;
+                    self.built_for = None;
+                    return None;
+                }
+            }
+        }
+        let config = self.config.as_ref().expect("just created");
+        match config.display_processor(&selection.display_space) {
+            Ok(cpu) => {
+                self.processor = Some(cpu);
+                self.built_for = Some(wanted);
+                self.processor.as_ref()
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+                self.processor = None;
+                self.built_for = None;
+                None
+            }
+        }
+    }
+
+    /// Whether OCIO is available AT ALL in this build (stub mode: the
+    /// registry enumerates nothing — the section's disabled arm).
+    fn available() -> bool {
+        !umber_color::ocio::builtin_configs().is_empty()
+    }
+}
+
+/// The OCIO section (the `ocio` feature): the config + display-space
+/// pickers that adopt an ACES 2.0 built-in into the viewer chain.
+/// Any change marks the LUT dirty (the chain's view stage is now the
+/// config's processor — the rebuild path threads it).
+#[cfg(feature = "ocio")]
+fn ocio_section(
+    ui: &mut Ui,
+    settings: &mut DisplaySettings,
+    ocio_state: &mut OcioSectionState,
+    lut: &mut DisplayLutState,
+) -> bool {
+    let mut changed = false;
+    let title = i18n::tr("display-ocio.title");
+    ParamGroup::new("display-ocio", title.as_str()).show(ui, |group| {
+        if !OcioSectionState::available() {
+            // Stub mode (the honest arm): every control disabled, the
+            // visible reason readable without hunting for a hover.
+            group.ui.add_enabled(
+                false,
+                egui::Label::new(i18n::tr("display-ocio.unavailable")),
+            );
+            return;
+        }
+        // The config picker: the registry's pairs (enum name is the
+        // selection's stored value; the UI name is what shows).
+        let configs = umber_color::ocio::builtin_configs();
+        let current_config = settings
+            .ocio
+            .as_ref()
+            .map(|s| s.config.clone())
+            .unwrap_or_default();
+        let mut picked_config = current_config.clone();
+        group.row(&i18n::tr("display-ocio.config"), |ui| {
+            egui::ComboBox::from_id_salt("ocio_config_combo")
+                .selected_text(
+                    configs
+                        .iter()
+                        .find(|(n, _)| *n == current_config)
+                        .map(|(_, ui)| ui.clone())
+                        .unwrap_or_else(|| i18n::tr("display-ocio.none")),
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut picked_config,
+                        String::new(),
+                        i18n::tr("display-ocio.none"),
+                    );
+                    for (name, ui_name) in &configs {
+                        ui.selectable_value(&mut picked_config, name.clone(), ui_name.clone());
+                    }
+                });
+        });
+        // The display-space picker: enabled once a config is picked;
+        // the spaces come from the HELD config (already created for
+        // the current selection — a first pick lists after adoption).
+        let spaces = ocio_state
+            .config
+            .as_ref()
+            .map(|c| c.display_spaces())
+            .unwrap_or_default();
+        let current_space = settings
+            .ocio
+            .as_ref()
+            .map(|s| s.display_space.clone())
+            .unwrap_or_default();
+        let mut picked_space = current_space.clone();
+        group.row(&i18n::tr("display-ocio.space"), |ui| {
+            egui::ComboBox::from_id_salt("ocio_space_combo")
+                .selected_text(if current_space.is_empty() {
+                    i18n::tr("display-ocio.space-pick")
+                } else {
+                    current_space.clone()
+                })
+                .show_ui(ui, |ui| {
+                    for space in &spaces {
+                        ui.selectable_value(&mut picked_space, space.clone(), space.clone());
+                    }
+                });
+        });
+        if picked_config != current_config {
+            // A config switch: adopt it with the default space (the
+            // first sRGB display space the config names — probed CG:
+            // "sRGB - Display" at index 0; a config without one keeps
+            // the space empty and the chain stays fixed until picked).
+            if picked_config.is_empty() {
+                settings.ocio = None;
+            } else {
+                let space = spaces
+                    .iter()
+                    .find(|s| s.contains("sRGB"))
+                    .cloned()
+                    .unwrap_or_default();
+                settings.ocio = Some(umber_color::OcioDisplaySelection {
+                    config: picked_config.clone(),
+                    display_space: space,
+                });
+            }
+            ocio_state.config = None;
+            ocio_state.built_for = None;
+            ocio_state.processor = None;
+            ocio_state.error = None;
+            changed = true;
+        } else if picked_space != current_space {
+            // A space switch on the same config.
+            if let Some(selection) = settings.ocio.as_mut() {
+                selection.display_space = picked_space.clone();
+                changed = true;
+            }
+        }
+        if let Some(err) = ocio_state.error.clone() {
+            group
+                .ui
+                .label(egui::RichText::new(err).color(egui::Color32::from_rgb(200, 90, 90)));
+        }
+    });
+    if changed {
+        lut.mark_display_lut_dirty();
+    }
+    changed
+}
+
 /// The chain applied to each gray ramp stop (display-encoded 0..=1,
-/// or raw values under the Raw view).
+/// or raw values under the Raw view). With the ocio feature and an
+/// adopted selection, the OCIO processor is the view stage (threaded
+/// from the section state).
+#[cfg(not(feature = "ocio"))]
 fn preview_values(s: &DisplaySettings) -> [[f32; 3]; PREVIEW_STOPS] {
     PREVIEW_RAMP.map(|l| apply_display_chain([l, l, l], s))
+}
+
+#[cfg(feature = "ocio")]
+fn preview_values(
+    s: &DisplaySettings,
+    ocio_processor: Option<&umber_color::ocio_rs::CPUProcessor>,
+) -> [[f32; 3]; PREVIEW_STOPS] {
+    PREVIEW_RAMP.map(|l| umber_color::apply_display_chain_with([l, l, l], s, ocio_processor))
 }
 
 /// Display-encoded 0..=1 → egui color. `Color32` is already sRGB-
@@ -169,11 +392,9 @@ fn to_color32(v: [f32; 3]) -> Color32 {
     Color32::from_rgb(byte(v[0]), byte(v[1]), byte(v[2]))
 }
 
-/// The preview strip's swatch colors for `s`.
-fn swatches(s: &DisplaySettings) -> [Color32; PREVIEW_STOPS] {
-    preview_values(s).map(to_color32)
-}
-
+/// The preview strip's swatch colors for `s` (test-side helper; the
+/// panel path threads the OCIO processor through `preview_values`
+/// directly when the feature is on).
 /// The status line: the active chain, and where it is live — the two
 /// LUT consumers once the device table matches (`live`), else that the
 /// LUT is being rebuilt (the frame loop uploads it this frame).
@@ -203,7 +424,41 @@ fn chain_label(s: &DisplaySettings, live: bool) -> String {
 /// Draws the panel and edits `settings` in place; any change marks `lut`
 /// dirty (the frame loop rebuilds it). Returns whether any value changed
 /// this frame.
+#[cfg(not(feature = "ocio"))]
 pub fn show(ui: &mut Ui, settings: &mut DisplaySettings, lut: &mut DisplayLutState) -> bool {
+    let changed = transform_section(ui, settings, lut);
+    preview_section(ui, settings, lut, preview_values);
+    ui.add_space(4.0);
+    language_row(ui);
+    changed
+}
+
+/// The ocio-feature entry: the OCIO section threads the section state
+/// in, and the preview strip runs the adopted processor (rebuilt for
+/// whatever selection the section left this frame).
+#[cfg(feature = "ocio")]
+pub fn show(
+    ui: &mut Ui,
+    settings: &mut DisplaySettings,
+    lut: &mut DisplayLutState,
+    ocio_state: &mut OcioSectionState,
+) -> bool {
+    let mut changed = transform_section(ui, settings, lut);
+    changed |= ocio_section(ui, settings, ocio_state, lut);
+    let processor = ocio_state.processor_for(settings);
+    preview_section(ui, settings, lut, |s| preview_values(s, processor));
+    ui.add_space(4.0);
+    language_row(ui);
+    changed
+}
+
+/// The transform group: view / exposure / gamma / reset. Marks the LUT
+/// dirty on any change.
+fn transform_section(
+    ui: &mut Ui,
+    settings: &mut DisplaySettings,
+    lut: &mut DisplayLutState,
+) -> bool {
     let mut changed = false;
 
     let transform_title = i18n::tr("display.transform");
@@ -248,7 +503,18 @@ pub fn show(ui: &mut Ui, settings: &mut DisplaySettings, lut: &mut DisplayLutSta
     if changed {
         lut.mark_display_lut_dirty();
     }
+    changed
+}
 
+/// The preview strip + the status line: the chain (through `values`,
+/// which threads the OCIO processor when adopted) over the synthetic
+/// ramp, painted as swatches.
+fn preview_section(
+    ui: &mut Ui,
+    settings: &DisplaySettings,
+    lut: &DisplayLutState,
+    values: impl Fn(&DisplaySettings) -> [[f32; 3]; PREVIEW_STOPS],
+) {
     ui.add_space(4.0);
     let preview_title = i18n::tr("display.preview");
     ParamGroup::new("display-preview", preview_title.as_str()).show(ui, |group| {
@@ -258,7 +524,7 @@ pub fn show(ui: &mut Ui, settings: &mut DisplaySettings, lut: &mut DisplayLutSta
         let (strip, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let painter = ui.painter_at(strip);
         let step = strip.width() / PREVIEW_STOPS as f32;
-        for (i, color) in swatches(settings).into_iter().enumerate() {
+        for (i, color) in values(settings).map(to_color32).into_iter().enumerate() {
             let cell = egui::Rect::from_min_size(
                 egui::pos2(strip.left() + i as f32 * step, strip.top()),
                 egui::vec2(step, strip.height()),
@@ -267,10 +533,6 @@ pub fn show(ui: &mut Ui, settings: &mut DisplaySettings, lut: &mut DisplayLutSta
         }
         ui.label(chain_label(settings, lut.is_live(settings)));
     });
-
-    ui.add_space(4.0);
-    language_row(ui);
-    changed
 }
 
 /// The picker's label for a locale tag: the language's own name for the
@@ -384,6 +646,34 @@ pub fn write_hdr_pref(path: &Path, mode: umber_gpu::HdrMode) -> std::io::Result<
 mod tests {
     use super::*;
 
+    /// The chain values for a settings snapshot, per feature arm (the
+    /// ocio arm threads the fixed path — no adopted selection in tests).
+    #[cfg(not(feature = "ocio"))]
+    fn test_chain_values(s: &DisplaySettings) -> [[f32; 3]; PREVIEW_STOPS] {
+        preview_values(s)
+    }
+
+    #[cfg(feature = "ocio")]
+    fn test_chain_values(s: &DisplaySettings) -> [[f32; 3]; PREVIEW_STOPS] {
+        preview_values(s, None)
+    }
+
+    /// A DisplaySettings literal with the per-feature ocio field filled
+    /// (tests construct via this — the literals stay feature-blind).
+    fn test_settings(
+        view: DisplayTransform,
+        exposure: f32,
+        gamma: f32,
+    ) -> DisplaySettings {
+        DisplaySettings {
+            view,
+            exposure,
+            gamma,
+            #[cfg(feature = "ocio")]
+            ocio: None,
+        }
+    }
+
     #[test]
     fn ramp_is_one_stop_per_swatch_below_the_clamp() {
         for pair in PREVIEW_RAMP.windows(2) {
@@ -401,13 +691,7 @@ mod tests {
         // for every view and with or without display gamma.
         for view in DisplayTransform::ALL {
             for gamma in [1.0, 2.2, 0.5] {
-                let at = |exposure: f32| {
-                    preview_values(&DisplaySettings {
-                        view,
-                        exposure,
-                        gamma,
-                    })
-                };
+                let at = |exposure: f32| test_chain_values(&test_settings(view, exposure, gamma));
                 let (e0, e1, e2) = (at(0.0), at(1.0), at(2.0));
                 for k in 0..PREVIEW_STOPS {
                     for c in 0..3 {
@@ -429,7 +713,7 @@ mod tests {
     fn identity_swatches_are_the_raw_ramp_bytes() {
         // Raw / 0 / 1: the chain is the identity, so each swatch is the
         // linear value quantized directly (0.2·255 = 51 at the top).
-        let colors = swatches(&DisplaySettings::default());
+        let colors = test_chain_values(&DisplaySettings::default()).map(to_color32);
         for (color, l) in colors.iter().zip(PREVIEW_RAMP) {
             let b = (l * 255.0).round() as u8;
             assert_eq!(*color, Color32::from_rgb(b, b, b));
@@ -439,11 +723,9 @@ mod tests {
 
     #[test]
     fn srgb_view_brightens_the_preview() {
-        let raw = swatches(&DisplaySettings::default());
-        let srgb = swatches(&DisplaySettings {
-            view: DisplayTransform::Srgb,
-            ..DisplaySettings::default()
-        });
+        let raw = test_chain_values(&DisplaySettings::default()).map(to_color32);
+        let srgb = test_chain_values(&test_settings(DisplayTransform::Srgb, 0.0, 1.0))
+            .map(to_color32);
         for (r, s) in raw.iter().zip(srgb.iter()) {
             assert!(s.r() > r.r(), "sRGB {s:?} vs raw {r:?}");
         }
@@ -476,11 +758,7 @@ mod tests {
             "{identity}"
         );
         assert!(!identity.contains("Preview only"), "{identity}");
-        let s = DisplaySettings {
-            view: DisplayTransform::Rec709,
-            exposure: 1.5,
-            gamma: 2.2,
-        };
+        let s = test_settings(DisplayTransform::Rec709, 1.5, 2.2);
         let label = chain_label(&s, true);
         assert!(
             label.contains("exposure +1.50 EV → Rec.709 → gamma 2.20"),
@@ -504,12 +782,25 @@ mod tests {
         // Startup is dirty: the first frame builds the identity table —
         // the exact bytes the GPU side's identity fallback holds.
         assert!(!lut.is_live(&settings));
-        let first = lut.take_rebuild(&settings).expect("startup build");
+        let first = lut
+            .take_rebuild(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None,
+            )
+            .expect("startup build");
         assert_eq!(first, umber_gpu::identity_lut_bytes());
         assert!(lut.is_live(&settings));
         assert!(chain_label(&settings, lut.is_live(&settings)).contains("Live in"));
         // Clean + unchanged: no upload this frame.
-        assert_eq!(lut.take_rebuild(&settings), None);
+        assert_eq!(
+            lut.take_rebuild(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None
+            ),
+            None
+        );
 
         // The panel's write path: +1 EV, marked dirty → not live yet.
         settings.exposure = 1.0;
@@ -518,19 +809,47 @@ mod tests {
         assert!(chain_label(&settings, lut.is_live(&settings)).contains("Rebuilding"));
         // The frame loop rebuilds: the chain's table (entry 100 → 200
         // under Raw +1 EV), and the status flips back to live.
-        let rebuilt = lut.take_rebuild(&settings).expect("dirty → rebuild");
-        assert_eq!(rebuilt, build_display_lut(&settings));
+        let rebuilt = lut
+            .take_rebuild(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None,
+            )
+            .expect("dirty → rebuild");
+        assert_eq!(
+            rebuilt,
+            build_display_lut(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None
+            )
+        );
         assert_eq!(&rebuilt[400..404], &[200, 200, 200, 255]);
         assert!(lut.is_live(&settings));
-        assert_eq!(lut.take_rebuild(&settings), None);
+        assert_eq!(
+            lut.take_rebuild(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None
+            ),
+            None
+        );
 
         // A write path that forgot to mark (e.g. a project load) is
         // still caught: the built settings no longer match.
         settings.view = DisplayTransform::Srgb;
         assert!(!lut.is_live(&settings));
         assert_eq!(
-            lut.take_rebuild(&settings),
-            Some(build_display_lut(&settings))
+            lut.take_rebuild(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None
+            ),
+            Some(build_display_lut(
+                &settings,
+                #[cfg(feature = "ocio")]
+                None
+            ))
         );
         assert!(lut.is_live(&settings));
     }
@@ -541,7 +860,11 @@ mod tests {
         // uploads them — same length, same identity table.
         assert_eq!(DISPLAY_LUT_BYTES, umber_gpu::DISPLAY_LUT_BYTES);
         assert_eq!(
-            build_display_lut(&DisplaySettings::default()),
+            build_display_lut(
+                &DisplaySettings::default(),
+                #[cfg(feature = "ocio")]
+                None,
+            ),
             umber_gpu::identity_lut_bytes()
         );
     }

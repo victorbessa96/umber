@@ -78,7 +78,14 @@ pub fn invert_display(display: [f32; 3], transform: DisplayTransform) -> [f32; 3
 /// view transform, then display gamma. Persisted in the `.umber`
 /// project (`ProjectSettings::display`); `serde(default)` fills any
 /// missing key, so pre-display projects load as [`Self::default`].
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// The OCIO adoption (§9 "in panel", the ocio feature): `ocio` names
+/// the adopted built-in config + its display space; when set, the
+/// viewer chain's view transform is that config's scene-linear →
+/// display processor instead of the fixed curves. `None` (every
+/// pre-OCIO file, and every build without the feature) keeps the
+/// fixed path — additive by construction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplaySettings {
     /// The view transform.
@@ -89,6 +96,25 @@ pub struct DisplaySettings {
     /// Display gamma, applied after the view as `v^(1/gamma)` (the
     /// viewer convention: > 1 brightens). UI range [`Self::GAMMA_RANGE`].
     pub gamma: f32,
+    /// The adopted OCIO config (registry name) + display space, or
+    /// `None` for the fixed view transforms. Only meaningful in
+    /// builds with the `ocio` feature; serialized regardless so a
+    /// project saved on a real-OCIO build loads identically.
+    #[cfg(feature = "ocio")]
+    pub ocio: Option<OcioDisplaySelection>,
+}
+
+/// The OCIO config + display-space selection stored in
+/// [`DisplaySettings`] (the §9 panel adoption, persisted).
+#[cfg(feature = "ocio")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OcioDisplaySelection {
+    /// The OCIO built-in config's registry name
+    /// ([`crate::ACES_CG_CONFIG`] / [`crate::ACES_STUDIO_CONFIG`]).
+    pub config: String,
+    /// The display color space's name inside that config (e.g.
+    /// "sRGB - Display").
+    pub display_space: String,
 }
 
 impl Default for DisplaySettings {
@@ -100,6 +126,8 @@ impl Default for DisplaySettings {
             view: DisplayTransform::None,
             exposure: 0.0,
             gamma: 1.0,
+            #[cfg(feature = "ocio")]
+            ocio: None,
         }
     }
 }
@@ -126,6 +154,8 @@ impl DisplaySettings {
             view: self.view,
             exposure: fix(self.exposure, &Self::EXPOSURE_RANGE, defaults.exposure),
             gamma: fix(self.gamma, &Self::GAMMA_RANGE, defaults.gamma),
+            #[cfg(feature = "ocio")]
+            ocio: self.ocio,
         }
     }
 
@@ -141,6 +171,18 @@ impl DisplaySettings {
 /// the Raw view never produces NaN). Exposure 0 and gamma 1 are exact
 /// fast paths: the identity settings return the input bit-for-bit.
 /// A non-positive or non-finite gamma is treated as 1.
+///
+/// With the `ocio` feature and an adopted config, the view stage is
+/// the OCIO scene-linear → display processor instead — through
+/// [`apply_display_chain_with`]; this entry point keeps the fixed
+/// path (and stays the no-feature whole truth).
+#[cfg(feature = "ocio")]
+pub fn apply_display_chain(linear: [f32; 3], s: &DisplaySettings) -> [f32; 3] {
+    apply_display_chain_with(linear, s, None)
+}
+
+/// The no-feature chain: the fixed view transforms, unconditionally.
+#[cfg(not(feature = "ocio"))]
 pub fn apply_display_chain(linear: [f32; 3], s: &DisplaySettings) -> [f32; 3] {
     let exposed = if s.exposure == 0.0 {
         linear
@@ -149,6 +191,42 @@ pub fn apply_display_chain(linear: [f32; 3], s: &DisplaySettings) -> [f32; 3] {
         linear.map(|c| c * scale)
     };
     let viewed = apply_display(exposed, s.view);
+    let gamma_usable = s.gamma.is_finite() && s.gamma > 0.0;
+    if s.gamma == 1.0 || !gamma_usable {
+        viewed
+    } else {
+        let inv = 1.0 / s.gamma;
+        viewed.map(|c| c.max(0.0).powf(inv))
+    }
+}
+
+/// The chain with the OCIO view stage: when `ocio_processor` is set
+/// (the adopted config's scene-linear → display CPU processor, cached
+/// by the caller — [`crate::ocio::OcioBuiltinConfig::display_processor`])
+/// it replaces the fixed view transform. Exposure and gamma compose
+/// the same way around it. A `None` processor falls back to the fixed
+/// path — the honest degraded mode when the config cannot materialize
+/// (stub builds never get this far; the panel gates on availability).
+#[cfg(feature = "ocio")]
+pub fn apply_display_chain_with(
+    linear: [f32; 3],
+    s: &DisplaySettings,
+    ocio_processor: Option<&ocio_rs::CPUProcessor>,
+) -> [f32; 3] {
+    let exposed = if s.exposure == 0.0 {
+        linear
+    } else {
+        let scale = s.exposure.exp2();
+        linear.map(|c| c * scale)
+    };
+    let viewed = match (s.ocio.as_ref(), ocio_processor) {
+        (Some(_), Some(cpu)) => {
+            let mut rgb = exposed;
+            cpu.apply_rgb(&mut rgb);
+            rgb
+        }
+        _ => apply_display(exposed, s.view),
+    };
     let gamma_usable = s.gamma.is_finite() && s.gamma > 0.0;
     if s.gamma == 1.0 || !gamma_usable {
         viewed
@@ -175,12 +253,31 @@ pub const DISPLAY_LUT_BYTES: usize = DISPLAY_LUT_ENTRIES * 4;
 /// The identity settings produce the identity table (`i → i`) byte-for-
 /// byte: the chain returns `i/255` bit-exactly and `(i/255)·255` rounds
 /// back to `i`.
+#[cfg(not(feature = "ocio"))]
 pub fn build_display_lut(settings: &DisplaySettings) -> [u8; DISPLAY_LUT_BYTES] {
     let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
     let mut lut = [0u8; DISPLAY_LUT_BYTES];
     for (i, entry) in lut.chunks_exact_mut(4).enumerate() {
         let l = i as f32 / 255.0;
         let [r, g, b] = apply_display_chain([l, l, l], settings);
+        entry.copy_from_slice(&[byte(r), byte(g), byte(b), 255]);
+    }
+    lut
+}
+
+/// The ocio-feature LUT build: the adopted processor is the view
+/// stage (see [`apply_display_chain_with`]); `None` keeps the fixed
+/// path — the no-adopted-config case AND the degraded mode.
+#[cfg(feature = "ocio")]
+pub fn build_display_lut(
+    settings: &DisplaySettings,
+    ocio_processor: Option<&ocio_rs::CPUProcessor>,
+) -> [u8; DISPLAY_LUT_BYTES] {
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut lut = [0u8; DISPLAY_LUT_BYTES];
+    for (i, entry) in lut.chunks_exact_mut(4).enumerate() {
+        let l = i as f32 / 255.0;
+        let [r, g, b] = apply_display_chain_with([l, l, l], settings, ocio_processor);
         entry.copy_from_slice(&[byte(r), byte(g), byte(b), 255]);
     }
     lut
@@ -229,6 +326,34 @@ fn rec709_to_linear(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The LUT for a settings snapshot, per feature arm (the ocio arm
+    /// threads the fixed path — no adopted selection in tests).
+    #[cfg(not(feature = "ocio"))]
+    fn lut_for(s: &DisplaySettings) -> [u8; DISPLAY_LUT_BYTES] {
+        build_display_lut(s)
+    }
+
+    /// A DisplaySettings literal with the per-feature ocio field filled
+    /// (tests construct via this — the literals stay feature-blind).
+    fn settings(
+        view: DisplayTransform,
+        exposure: f32,
+        gamma: f32,
+    ) -> DisplaySettings {
+        DisplaySettings {
+            view,
+            exposure,
+            gamma,
+            #[cfg(feature = "ocio")]
+            ocio: None,
+        }
+    }
+
+    #[cfg(feature = "ocio")]
+    fn lut_for(s: &DisplaySettings) -> [u8; DISPLAY_LUT_BYTES] {
+        build_display_lut(s, None)
+    }
 
     #[test]
     fn srgb_anchors_match_spec() {
@@ -365,11 +490,7 @@ mod tests {
 
     #[test]
     fn gamma_on_srgb_view_matches_the_derived_chain() {
-        let s = DisplaySettings {
-            view: DisplayTransform::Srgb,
-            exposure: 0.0,
-            gamma: 2.2,
-        };
+        let s = settings(DisplayTransform::Srgb, 0.0, 2.2);
         let out = apply_display_chain([0.18, 0.0, 1.0], &s);
         // Mirrored chain, same f32 ops in the same order (1e-6, not eq:
         // opt-level 1 may const-fold one powf call site, not the other).
@@ -394,22 +515,14 @@ mod tests {
     fn chain_order_is_exposure_view_gamma() {
         // sRGB clamps after exposure: +1 EV on 0.6 saturates (1.2 → 1),
         // which only happens if exposure runs BEFORE the view.
-        let s = DisplaySettings {
-            view: DisplayTransform::Srgb,
-            exposure: 1.0,
-            gamma: 1.0,
-        };
+        let s = settings(DisplayTransform::Srgb, 1.0, 1.0);
         let out = apply_display_chain([0.6, 0.6, 0.6], &s);
         assert!((out[0] - 1.0).abs() < 1e-6, "got {out:?}");
     }
 
     #[test]
     fn raw_view_gamma_never_produces_nan() {
-        let s = DisplaySettings {
-            view: DisplayTransform::None,
-            exposure: 0.0,
-            gamma: 2.2,
-        };
+        let s = settings(DisplayTransform::None, 0.0, 2.2);
         let out = apply_display_chain([-0.5, 0.25, 4.0], &s);
         assert_eq!(out[0], 0.0);
         assert!(out.iter().all(|c| c.is_finite()), "{out:?}");
@@ -429,29 +542,15 @@ mod tests {
 
     #[test]
     fn sanitized_clamps_and_repairs() {
-        let s = DisplaySettings {
-            view: DisplayTransform::Rec709,
-            exposure: 9.0,
-            gamma: f32::NAN,
-        }
-        .sanitized();
+        let s = settings(DisplayTransform::Rec709, 9.0, f32::NAN).sanitized();
         assert_eq!(s.view, DisplayTransform::Rec709);
         assert_eq!(s.exposure, 5.0);
         assert_eq!(s.gamma, 1.0);
-        let s = DisplaySettings {
-            view: DisplayTransform::None,
-            exposure: -7.5,
-            gamma: 0.1,
-        }
-        .sanitized();
+        let s = settings(DisplayTransform::None, -7.5, 0.1).sanitized();
         assert_eq!((s.exposure, s.gamma), (-5.0, 0.5));
         // In-range values pass through untouched.
-        let ok = DisplaySettings {
-            view: DisplayTransform::Srgb,
-            exposure: 1.25,
-            gamma: 2.2,
-        };
-        assert_eq!(ok.sanitized(), ok);
+        let ok = settings(DisplayTransform::Srgb, 1.25, 2.2);
+        assert_eq!(ok.clone().sanitized(), ok);
     }
 
     // ---- the GPU display LUT ------------------------------------------
@@ -461,7 +560,7 @@ mod tests {
         // The design's test 1: Raw / 0 EV / gamma 1 → entry i = (i, i,
         // i, 255) for every i, no exceptions (the golden render's
         // no-regression contract rests on this table).
-        let lut = build_display_lut(&DisplaySettings::default());
+        let lut = lut_for(&DisplaySettings::default());
         assert_eq!(lut.len(), 1024);
         for (i, entry) in lut.chunks_exact(4).enumerate() {
             let b = i as u8;
@@ -474,7 +573,7 @@ mod tests {
         // The design's test 2: the LUT is the chain's math, tabulated.
         // Raw +1 EV: entry i = 2i (exact — doubling is an exponent bump,
         // and (2i/255)·255 rounds to 2i), saturating at 255 from i = 128.
-        let plus_one = build_display_lut(&DisplaySettings {
+        let plus_one = lut_for(&DisplaySettings {
             exposure: 1.0,
             ..DisplaySettings::default()
         });
@@ -492,7 +591,7 @@ mod tests {
             view: DisplayTransform::Srgb,
             ..DisplaySettings::default()
         };
-        let lut = build_display_lut(&srgb);
+        let lut = lut_for(&srgb);
         let at = |i: usize| lut[i * 4];
         assert_eq!((at(0), at(1), at(128), at(255)), (0, 13, 188, 255));
 
@@ -501,12 +600,8 @@ mod tests {
         // linear 0.18 (46/255 = 0.180 392) lands on the chain test's
         // byte 179: sRGB 0.461 825, ^(1/2.2) = 0.703 865 · 255 = 179.486
         // → 179 (0.014 below the tie — f32 error is ~1e-4 here).
-        let s = DisplaySettings {
-            view: DisplayTransform::Srgb,
-            exposure: 0.0,
-            gamma: 2.2,
-        };
-        let lut = build_display_lut(&s);
+        let s = settings(DisplayTransform::Srgb, 0.0, 2.2);
+        let lut = lut_for(&s);
         for (i, entry) in lut.chunks_exact(4).enumerate() {
             let l = i as f32 / 255.0;
             let v = apply_display_chain([l, l, l], &s)[0];
@@ -525,16 +620,20 @@ mod tests {
         // Default round-trips byte-identical, and "Raw" names None.
         let d = DisplaySettings::default();
         let json = serde_json::to_string(&d).unwrap();
+        // The ocio feature adds its (None) selection to the serialized
+        // shape — additive, and absent-key loads stay identical.
+        #[cfg(feature = "ocio")]
+        assert_eq!(
+            json,
+            r#"{"view":"Raw","exposure":0.0,"gamma":1.0,"ocio":null}"#
+        );
+        #[cfg(not(feature = "ocio"))]
         assert_eq!(json, r#"{"view":"Raw","exposure":0.0,"gamma":1.0}"#);
         let back: DisplaySettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
         assert_eq!(serde_json::to_string(&back).unwrap(), json);
         // Modified settings: exact f32 round-trip.
-        let m = DisplaySettings {
-            view: DisplayTransform::Rec709,
-            exposure: -1.37,
-            gamma: 2.2,
-        };
+        let m = settings(DisplayTransform::Rec709, -1.37, 2.2);
         let json = serde_json::to_string(&m).unwrap();
         let back: DisplaySettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);

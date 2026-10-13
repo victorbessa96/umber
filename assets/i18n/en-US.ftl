@@ -248,6 +248,15 @@ display =
     .rebuilding = Rebuilding the GPU display LUT for the 3D viewport and the UV view.
     .active-chain = Active chain: { $chain }. { $status }
 
+## OCIO config adoption (Display panel section, §9 "in panel")
+display-ocio =
+    .title = OCIO / ACES
+    .config = Config
+    .space = Display space
+    .space-pick = Pick a display space
+    .none = Built-in curves only
+    .unavailable = OCIO unavailable in this build — the vendored OCIO library is not compiled in, so the built-in ACES 2.0 configs cannot load. The fixed view transforms remain active.
+
 ## Post effects (Display panel section, §7 P1 row)
 
 postfx =
