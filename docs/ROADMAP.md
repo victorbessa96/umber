@@ -43,15 +43,17 @@ first, blends rebases if needed).
 | wave-perf-baseline | §5 perf floor NOT-REACHABLE: baseline.json on the 4K path | the nightly run (runner-starved, #2) | consume the nightly's artifact, seed baseline.json, wire the compare gate |
 | wave-icons-boot | §11 icon-raster NOT-REACHABLE: boot swaps IconAtlas::empty() → load_baked_atlas | icon-raster (✓ cb4d2bf) | one-line boot change + the atlas path resolution; closes the row's reachability clause |
 
-## Wave 3 — the interchange + depth wave
+## Wave 3 — the pull-users + depth wave (reordered 2026-10-12 ~23:20, BINDING)
 
 | Kill | Closes | Notes |
 |---|---|---|
-| wave-psd-import | §6 designed-deferred: flatten-on-import semantics | the ag-psd reader exists; blend-mode/mask/group flattening is the honest-verification surface; lands AFTER wave-blends so the blend semantics match |
-| wave-stylus-win32 | §10 the Windows dual-path: Wintab32 polling beside Windows Ink | winink.rs decode exists (passive); the WndProc hook + dual-path switch is the kill |
-| wave-8k-export | §2/§6 the 8K export path | export-time supersampling from the 4K working set; VRAM note honored (8K never a working size) |
-| wave-hsv-goldens | wave-blends' GPU family goldens (if CPU-oracle-only lands) | the compositor's per-family goldens |
+| wave-spp-import | §7 (NEW): .spp IMPORT — RATIFIED by Bessa, pulled BEFORE PSD | import-only forever, clean-room from published community HDF5-layout docs, per-project import report, geometry stays FBX/USD; the pull-users-from-Substance story (the .umber kill-shot's front door) |
+| wave-psd-import | §6 designed-deferred: flatten-on-import semantics | the ag-psd reader exists; blend-mode/mask/group flattening rides the wave-blends machinery that LANDED (d861482) |
+| wave-dynamic-materials | §2 dynamic material layering (P2, 6+) | the deepest Substance feature left; design-doc first, likely 2 kills |
+| wave-hsv-goldens | wave-blends' GPU family goldens | the compositor's per-family goldens (if not landed in the wave-2 battery) |
 | wave-camera-ortho | §5 the named camera gap: orthographic projection | the turntable orbit exists; add ortho mode + the projection toggle |
+| wave-stylus-win32 | §10 the Windows dual-path: Wintab32 polling beside Windows Ink | BELOW THE CUT per ruling 5 — wave 4 |
+| wave-8k-export | §2/§6 the 8K export path | BELOW THE CUT per ruling 5 — wave 4 |
 
 ## Wave 4 — the differentiators (P1s that Substance lacks or does worse)
 
@@ -61,7 +63,6 @@ first, blends rebases if needed).
 | wave-abr | .abr brush preset import (§1 optional) | the one Adobe format that is legal |
 | wave-dynamic-materials | §2 dynamic material layering (P2, 6+) | shader-declared sub-stacks; the deepest remaining material feature; design doc + likely 2 kills |
 | wave-wasm-shaders | §5 custom user shaders = WGSL plugins (P2) | umber-wasm runtime ✓ built; the shader-replacement host hook is the kill |
-| wave-spp-import | §7 (NEW): .spp IMPORT — best-effort read of user-provided Adobe project files | import-only (no .spp writing ever); clean-room from published community HDF5-layout docs; per-project import report; RATIFIER: Bessa (legal scope); slots after PSD-import (shared flatten machinery) |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
 | wave-tessellation | §5 displacement/tessellation preview (P2) | the height channel exists (tilepool); the preview pass + the displacement budget |
 | wave-hdr-surface | §5 HDR output (eframe upgrade gate) | tracks eframe 0.36→next; the capability model + probe ✓ built |

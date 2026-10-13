@@ -4,6 +4,28 @@ The loop's rulings, one entry each, newest first. A decision lands here when
 it changes standing behavior (not per-kill choices, which live in kill
 reports). Bessa's overrides are BINDING and marked.
 
+## 2026-10-12 ~23:20 — The five-ruling alignment pass (ALL BINDING, Bessa)
+
+1. **.spp import RATIFIED, pulled to wave 3 BEFORE PSD import** — the
+   pull-users-from-Substance story matters most; scope unchanged
+   (import-only forever, clean-room from published community HDF5-layout
+   docs, per-project import report, geometry stays FBX/USD, writing .spp
+   stays the hard wall).
+2. **Claude Code RATIONED**: design reviews + the biggest architectural
+   kills only; opencode for everything else. (Today burned ~$22 of the
+   Pro sub and hit the weekly wall mid-kill; the wall resets 2am and the
+   tier is a budget, not a default.)
+3. **Waves run 24/7** — the flock + one-cargo rule already protects the
+   machine; Magentrix workdays do NOT pause the loop. **The work window
+   extends to Friday 23:59** (the "until midnight" scope is now "until
+   Friday 23:59").
+4. **Perf baseline seeded LOCALLY** — this machine's lavapipe produces
+   the 4K-path numbers now; baseline.json commits and CI compares
+   thereafter. The starved nightly queue stops being the blocker.
+5. **Wave-3 priorities**: .spp import (per ruling 1), PSD import, then
+   dynamic material layering (design-doc first, likely 2 kills). The
+   stylus-Win32 dual-path and 8K export drop below the cut.
+
 ## 2026-10-12 — Cargo ONLY at the end of the wave (BINDING, Bessa)
 
 Per-kill cargo gating is abolished. The wave protocol: claws write in
