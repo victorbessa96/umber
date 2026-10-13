@@ -533,6 +533,19 @@ import =
     .reason-empty-suffix = nothing after the “_” — no map name
     .reason-tile-suffixed = tile-suffixed UDIM output (Set_map_tile) — import the per-tile files individually
 
+## PSD flatten-import (§7 row 101 — the composite-first honest flatten)
+
+psd-import =
+    .title = PSD import
+    .hint = Drop a Photoshop .psd file. The flattened composite imports as a texture set at its native resolution; when a composite is absent the honest rasterizer applies pixel layers, group opacity and 1:1 masks, and every deviation lands in the import report.
+    .no-files = No PSD scanned yet.
+    .scanned = { $matched } PSD file(s) routed, { $unmatched } skipped.
+    .apply = Import PSD
+    .report-title = Import report
+    .row-matched = { $file } → set “{ $set }”
+    .row-unmatched = { $file } — { $reason }
+    .reason-not-psd = not a .psd file
+
 ## 2D UV view
 
 uv =

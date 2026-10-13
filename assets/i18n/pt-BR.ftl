@@ -519,6 +519,19 @@ size =
     .vram-note = { $size } × { $size } (~{ $mib } MB/buffer de texels)
 
 ## Vista UV 2D
+## PSD flatten-import (§7 row 101 — the composite-first honest flatten)
+
+psd-import =
+    .title = Importar PSD
+    .hint = Solte um arquivo .psd do Photoshop. A composição achatada importa como um conjunto de texturas na resolução nativa; sem composição, o rasterizador honesto aplica camadas de pixel, opacidade de grupo e máscaras 1:1, e todo desvio entra no relatório de importação.
+    .no-files = Nenhum PSD escaneado ainda.
+    .scanned = { $matched } arquivo(s) PSD roteado(s), { $unmatched } ignorado(s).
+    .apply = Importar PSD
+    .report-title = Relatório de importação
+    .row-matched = { $file } → conjunto “{ $set }”
+    .row-unmatched = { $file } — { $reason }
+    .reason-not-psd = não é um arquivo .psd
+
 
 uv =
     .no-mesh = nenhuma malha carregada

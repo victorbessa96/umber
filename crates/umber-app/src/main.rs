@@ -126,6 +126,7 @@ mod path_tool;
 mod perf_soak;
 mod plugins;
 mod postfx_panel;
+mod psd_import;
 mod retouch;
 mod size_presets;
 mod status_bar;
@@ -181,6 +182,8 @@ struct PanelViewer<'a> {
     doc: &'a mut document::Document,
     brush: &'a mut BrushPanel,
     mesh_import: &'a mut mesh_map_import::MeshMapImportState,
+    /// The PSD import state (the Assets tab's PSD section).
+    psd_import: &'a mut psd_import::PsdImportState,
     /// The project's asset store (`None` before the first Save/Open —
     /// the mesh-map import Apply path waits for it; see `mesh_map_import`).
     store: Option<&'a umber_core::AssetStore>,
@@ -355,6 +358,8 @@ impl TabViewer for PanelViewer<'_> {
                     self.store,
                     mesh_map_import::read_pending_from_disk,
                 );
+                ui.separator();
+                psd_import::show_section(ui, self.psd_import);
             }
             Panel::History => {
                 history_panel::history_ui(ui, self.doc, self.paint.as_deref_mut());
@@ -501,6 +506,11 @@ pub struct AppState {
     /// on apply). Owns the session set so imported user channels survive
     /// until the next save (see `mesh_map_import`).
     pub mesh_import: mesh_map_import::MeshMapImportState,
+    /// PSD flatten-import (requirements §7 row 101, the designed-deferred
+    /// clause now built): drop-scan + import state mirroring the mesh-map
+    /// shape (composite-first; the honest rasterizer fallback reports
+    /// every deviation). The panel section lives in the Assets tab.
+    pub psd_import: psd_import::PsdImportState,
     /// The project directory of the last Save/Open (`None` for a
     /// never-saved document — the import Apply path and the autosave
     /// journal both wait for it).
@@ -2355,6 +2365,9 @@ impl eframe::App for UmberApp {
         // is hidden still routes.
         // (Mesh files are filtered out there; `load_dropped_mesh` takes them.)
         self.state.mesh_import.poll_drops(ui.ctx());
+        // PSD drops route the same frame (the state's scan filters .psd;
+        // mesh files were taken above).
+        self.state.psd_import.poll_drops(ui.ctx());
         self.load_dropped_mesh(ui.ctx());
         // Shell shortcuts (`toolbar`'s key table): the overlay keys (W
         // wireframe, G grid — Wave-4 item 7), V lit ↔ unlit (§5's P0 row),
@@ -2513,6 +2526,7 @@ impl eframe::App for UmberApp {
                 postfx: &mut self.state.postfx,
                 postfx_panel: &mut self.state.postfx_panel,
                 mesh_import: &mut self.state.mesh_import,
+                psd_import: &mut self.state.psd_import,
                 store: store.as_ref(),
                 hdr_mode: &mut self.hdr_mode,
                 stylus_pressure,
