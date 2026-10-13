@@ -1,0 +1,9 @@
+{
+  "seeded": "2026-10-13",
+  "adapter": "Mesa Intel(R) HD Graphics 530 (SKL GT2), IntegratedGpu, GL backend",
+  "note": "Seeded per Bessa's ruling (local seed, CI compares thereafter). Seeded on the machine's iGPU via GL, NOT lavapipe as CI runs — CI's first compare against this baseline will read high on the iGPU numbers; reseed from a CI run once the nightly produces authentic runner numbers (the nightly's --ignored invocation bug, fixed separately, starved it to date). Extra keys (seeded/adapter/note) are inert to perf_compare.py, which reads the flat metric keys.",
+  "viewport_p95_ms": 6.2434,
+  "viewport_mean_ms": 5.4898,
+  "input_photon_p95_ms": 10.5263,
+  "input_photon_p50_ms": 0.6263
+}

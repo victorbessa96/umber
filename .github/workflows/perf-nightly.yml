@@ -42,8 +42,13 @@ jobs:
           UMBER_I2P_JSON: /tmp/i2p.json
           VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lxd/lavapipe.icd.json # CI's headless adapter; the 3070 runner overrides
         run: |
-          cargo test -p umber-gpu --features perf --release ref_scene -- --nocapture --ignored || true
-          cargo test -p umber-app --features perf --release input_photon perf_soak -- --nocapture --ignored || true
+          # The harness tests are NOT #[ignore] (the 2026-10-12 seed run
+          # proved: --ignored filtered EVERYTHING and the job compared an
+          # empty report). One filter per invocation — cargo test takes
+          # exactly one TESTNAME.
+          cargo test -p umber-gpu --features perf --release ref_scene_bench -- --nocapture || true
+          cargo test -p umber-app --features perf --release input_photon_session -- --nocapture || true
+          cargo test -p umber-app --features perf --release stroke_soak -- --nocapture || true
 
       - name: Compare against perf/baseline.json (>10% fails)
         run: python3 scripts/perf_compare.py /tmp/ref-scene.json /tmp/i2p.json perf/baseline.json

@@ -114,6 +114,9 @@ texturesets =
     .set = Texture set
     .size = Paint target size
     .resize-clears = Changing the selected set's size clears that set's canvas and the stroke undo history, and resets its quick mask. This is intentional.
+    .inherit = Inherit document resolution
+    .per-channel = Per-channel sizes
+    .channel-resize-clears = Resizing a channel clears its tiles
     .no-paint = No paint session — the GPU target is unavailable.
 
 ## Bakes panel
