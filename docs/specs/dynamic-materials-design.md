@@ -1,5 +1,53 @@
 # Dynamic Material Layering — Design
 
+> **STATUS: NOT READY TO IMPLEMENT — the 2026-10-13 adversarial review
+> (claude-opus, receipt: vault projects/umber/2026-10-13-dynmat-claude-review.json)
+> found 4 BLOCKERs. The normative corrections:**
+>
+> 1. **The per-layer stack walk DOES NOT EXIST in the app.** The pixel
+>    pool is one flattened target per tile/channel (paint_state TileTargets);
+>    fills read the flattened canvas, blend over it, and write it back.
+>    §2's per-tile walk, the anchors-below claim, the pass-through claim,
+>    and the Instance-zero-code claim are all unbuildable as written.
+>    v1 RE-SPECs as the fill precedent's destructive publish
+>    (read_channel → composite → publish_channel), stating plainly:
+>    order is not preserved, re-eval compounds on non-Normal modes,
+>    a failed re-eval leaves the last result in place.
+> 2. **Kill A is NOT headless** — LayerKind::Material breaks exhaustive
+>    matches in document.rs/history_panel.rs/journal.rs + needs 2 ftl
+>    keys (layers.kind-material, history.op-set-material) in BOTH
+>    locales. The kill's surface includes umber-app.
+> 3. **The inner-then-outer composition counts "below" twice.** v1:
+>    each declared channel composites ONCE via
+>    composite_pixel_masked(src, dst, channel.blend, layer.opacity ×
+>    channel.opacity, mask); the layer's own blend_mode is inert on
+>    Material layers (documented).
+> 4. **The §5.2 golden can't fail as parameterized** — pin opacity
+>    0.5 × 0.5 with Multiply and hand-derive; add a second
+>    ordering-sensitive case.
+>
+> **The MAJORs (same revision): out:\<channel\> is a custom nodedef
+> `material_output {input: color3, channel: string}` (Node has no
+> name field; mtlx writes N{id}); per-channel failure isolation is
+> FALSE (eval_graph_cached errs whole-graph — an eval error is a
+> whole-material no-op with a badge, not per-channel); NO version
+> bump (project.rs rejects != CURRENT); the resampler must be BUILT
+> (bilinear + normal-renormalize iff name=="normal", masks
+> nearest-neighbour-resampled per written channel); Material is a
+> plain TAG with material_id inside MaterialParams (the plain-tag
+> rule); MaterialParamValue is an umber-core serde MIRROR (ParamValue
+> has no serde, umber-core doesn't depend on umber-graph); definitions
+> EMBED in the project (ProjectFile.graphs_mtlx precedent — the asset
+> store is a library, not a home); the mask/channel-override collision
+> is real (compositor fails loudly on wrong-length masks).
+> **Cut from v1:** the outer blend mode, export-JSON/re-import, the
+> Properties exposed-params section, the word "sub-stack" (with one
+> material_output per channel it's per-channel blending).
+>
+> **The sections below are the ORIGINAL draft; where they contradict
+> this block, THIS BLOCK WINS.** A full rewrite folds the corrections
+> in before Kill A dispatches.
+
 Date: 2026-10-13 (wave-3 kill 3, doc-only kill per BINDING ruling 5 #3:
 "dynamic material layering (design-doc first, likely 2 kills)").
 Status: DRAFT (pre-review; the two implementation kills derive from this doc).
