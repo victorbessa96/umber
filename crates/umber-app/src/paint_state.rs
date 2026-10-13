@@ -137,11 +137,34 @@
 //!   `target_size.txt` global still reads — a v1 project opens with its
 //!   global applied to every set — and is still written with the active
 //!   set's size for old readers). See `main.rs`'s persistence docs.
-//! * V1 boundary (per-CHANNEL sizes stay the named follow-up): one size
-//!   per set, shared by every channel and layer, alongside the per-layer
-//!   tile pool. `resize_set` takes arbitrary `(width, height)` but the UI
-//!   only offers squares; non-square sizes arise only from the project
-//!   load path's stored dims.
+//! * Per-CHANNEL sizes (requirements §2's sizing row, the deferred half):
+//!   each channel of a set can carry its own resolution in
+//!   [`Self::channel_sizes()`], keyed `(set, channel)`; absent = inherit
+//!   the set's size ([`Self::size_of_channel`] falls back to
+//!   [`Self::size_of_set`]). [`Self::ensure_channel`] builds at the
+//!   channel's size when overridden, the set's when not, and
+//!   [`Self::resize_channel`] is the channel's `resize_set`: it resizes
+//!   ONLY that channel's materialized targets, clears the shared stroke
+//!   history (same semantics — snapshots no longer fit), and resizes
+//!   nothing else. [`Self::resize_set`] preserves overrides (an
+//!   overridden channel keeps its size while baseColor and inheriting
+//!   channels rebuild). `resize_set` takes arbitrary `(width, height)`
+//!   but the UI only offers squares; non-square sizes arise only from
+//!   the project load path's stored dims.
+//! * Judgment calls (why the channel rule is shaped this way):
+//!   [`BASE_COLOR_CHANNEL`] never carries an override — it IS the set's
+//!   canvas, so [`Self::size_of_channel`] short-circuits it to the set
+//!   size and [`Self::resize_channel`] on it delegates to
+//!   [`Self::resize_set`] (one size cannot both lead and follow).
+//!   Strokes still condition at the SET's texel density
+//!   ([`Self::texels_per_uv_for`]) whatever channel they land in —
+//!   per-channel dab density is the named follow-up, so painting a
+//!   smaller channel today lands set-scale dabs on fewer texels. The
+//!   quick mask stays per-SET (it gates baseColor's thread only) and
+//!   layer-mask planes stay set-sized: neither follows a channel resize.
+//!   Deferred beside the sizing: 8K-per-channel VRAM guidance (the set
+//!   combo's note covers 8K once) and per-TILE channel sizes (the key
+//!   would grow a tile id — no caller needs it while sets stay square).
 //! * Judgment calls (why the size is NOT on `umber_core::TextureSet`):
 //!   that struct's `resolution` is the DOCUMENT/bake resolution (default
 //!   2048), a different quantity from the live paint-target size (default
@@ -446,9 +469,10 @@ struct TileTargets {
 
 impl TileTargets {
     /// Every materialized thread, `base_color` first — `process_pending`'s
-    /// per-tile drain and `resize_set`'s per-tile `Resize` publish both
-    /// walk this so a materialized channel is never left undrained or
-    /// stale-sized (channels share their tile's set size).
+    /// per-tile drain walks this so a materialized channel is never left
+    /// undrained. `resize_set` does NOT walk this blindly: an overridden
+    /// channel keeps its own size (see `PaintState::resize_set`), so the
+    /// resize publishes per-thread sizes explicitly.
     fn threads_mut(&mut self) -> impl Iterator<Item = &mut PaintThread> {
         std::iter::once(&mut self.base_color).chain(self.channels.values_mut())
     }
@@ -521,6 +545,14 @@ pub struct PaintState {
     /// Unknown sets read as [`DEFAULT_TARGET_SIZE`]² (see
     /// [`Self::size_of_set`]).
     set_sizes: BTreeMap<String, (u32, u32)>,
+    /// Every channel's paint-target size override, keyed `(set, channel)`
+    /// (square in practice — see the module docs). Absent = inherit the
+    /// set's size (see [`Self::size_of_channel`]);
+    /// [`BASE_COLOR_CHANNEL`] never has an entry (it IS the set's
+    /// canvas). Written to the project's `paint/target_sizes.txt` as
+    /// `channel/<set>/<channel>` lines (see `main.rs`'s codec); a file
+    /// without them loads every channel at its set's size.
+    channel_sizes: BTreeMap<(String, String), (u32, u32)>,
     /// Which set each present tile paints for. Tiles absent here resolve
     /// to the active set (see [`Self::set_of_tile`]); [`Self::ensure_tile`]
     /// records the active set at creation, and the project open path
@@ -706,6 +738,7 @@ impl PaintState {
             active_channel: BASE_COLOR_CHANNEL.to_string(),
             stroke_channel: BASE_COLOR_CHANNEL.to_string(),
             set_sizes: BTreeMap::from([(default_set.clone(), (size, size))]),
+            channel_sizes: BTreeMap::new(),
             tile_sets: BTreeMap::from([(FIRST_TILE, default_set.clone())]),
             active_set: default_set.clone(),
             multi_tile: false,
@@ -822,6 +855,50 @@ impl PaintState {
             .get(name)
             .copied()
             .unwrap_or((DEFAULT_TARGET_SIZE, DEFAULT_TARGET_SIZE))
+    }
+
+    /// `channel`'s paint-target size in `set`: its override when one is
+    /// recorded, else the set's size (the inherit rule — see the module
+    /// docs). [`BASE_COLOR_CHANNEL`] always reads the set's size (it is
+    /// the set's canvas, never overridden). Unknown sets read as
+    /// [`DEFAULT_TARGET_SIZE`]² through [`Self::size_of_set`].
+    pub fn size_of_channel(&self, set: &str, channel: &str) -> (u32, u32) {
+        if channel == BASE_COLOR_CHANNEL {
+            return self.size_of_set(set);
+        }
+        let key = (set.to_string(), channel.to_string());
+        self.channel_sizes
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| self.size_of_set(set))
+    }
+
+    /// `channel`'s recorded override in `set`, or `None` when it inherits
+    /// the set's size ([`BASE_COLOR_CHANNEL`] is always `None`). The
+    /// Texture Sets panel's channel rows read this for their inherit
+    /// default; the save path's census walks [`Self::channel_sizes()`].
+    pub fn channel_override(&self, set: &str, channel: &str) -> Option<(u32, u32)> {
+        if channel == BASE_COLOR_CHANNEL {
+            return None;
+        }
+        let key = (set.to_string(), channel.to_string());
+        self.channel_sizes.get(&key).copied()
+    }
+
+    /// Every recorded `(set, channel)` size override, sorted (the save
+    /// path writes exactly these for the sets it persists — see
+    /// `main.rs`'s `commit_paint_tiles`).
+    pub fn channel_sizes(&self) -> &BTreeMap<(String, String), (u32, u32)> {
+        &self.channel_sizes
+    }
+
+    /// The paint-target size of `tile`'s `channel` (the tile's set is
+    /// resolved first, then [`Self::size_of_channel`]). The load path's
+    /// per-artifact size check reads this — not [`Self::tile_size`]: a
+    /// channel PNG must match ITS size, not its set's.
+    pub fn tile_channel_size(&self, tile: u16, channel: &str) -> (u32, u32) {
+        let set = self.set_of_tile(tile).to_string();
+        self.size_of_channel(&set, channel)
     }
 
     /// The set `tile` paints for: its assignment, else the active set.
@@ -1898,7 +1975,10 @@ impl PaintState {
 
     /// Switches `set`'s paint targets to `width`x`height` (contents
     /// dropped); the set's later tiles use the same size, other sets are
-    /// untouched. Registers the set first. The history-clear and mask
+    /// untouched. Registers the set first. Channel overrides SURVIVE: an
+    /// overridden channel keeps ITS size while baseColor and inheriting
+    /// channels rebuild at the set's (the per-channel sizing contract —
+    /// see the module docs). The history-clear and mask
     /// contracts are the same as [`Self::resize_target`]'s, scoped to the
     /// set's tiles (the history itself is shared, so the clear is
     /// session-wide — see the module docs).
@@ -1930,9 +2010,93 @@ impl PaintState {
         // Other sets' tiles' planes are untouched.
         self.layer_masks
             .retain(|(_, tile), _| !tiles.contains(tile));
+        // Channel overrides survive the set resize: an overridden
+        // channel keeps ITS size while baseColor and inheriting channels
+        // rebuild at the set's. Snapshotted first — the loop below holds
+        // each tile's targets mutably while the sizes come from the
+        // session map (E0502 otherwise).
+        let overrides: BTreeMap<String, (u32, u32)> = self
+            .channel_sizes
+            .iter()
+            .filter(|(key, _)| key.0.as_str() == set)
+            .map(|(key, size)| (key.1.clone(), *size))
+            .collect();
         for tile in &tiles {
             if let Some(tile_targets) = self.targets.get_mut(tile) {
-                for thread in tile_targets.threads_mut() {
+                let _ = tile_targets
+                    .base_color
+                    .publish(vec![PaintThreadCommand::Resize { width, height }]);
+                for (channel, thread) in tile_targets.channels.iter_mut() {
+                    let (cw, ch) = overrides.get(channel).copied().unwrap_or((width, height));
+                    let _ = thread.publish(vec![PaintThreadCommand::Resize {
+                        width: cw,
+                        height: ch,
+                    }]);
+                }
+            }
+        }
+    }
+
+    /// Switches `channel`'s paint targets in `set` to `width`x`height`
+    /// (contents dropped) and records the override for later tiles: the
+    /// channel's `resize_set`. ONLY that channel's materialized targets
+    /// on that set's tiles are rebuilt — every other channel (and every
+    /// other set) is untouched. Registers the set first. The history
+    /// clear is the same session-wide contract as [`Self::resize_set`]'s
+    /// (snapshots recorded at the old size no longer fit), and the
+    /// stroke-epoch bump drops the History window's rows the same way.
+    /// The quick mask and the layer-mask planes are per-SET (see the
+    /// module docs) and stay at the set's size. [`BASE_COLOR_CHANNEL`]
+    /// delegates to [`Self::resize_set`] (it IS the set's canvas).
+    pub fn resize_channel(&mut self, set: &str, channel: &str, width: u32, height: u32) {
+        if channel == BASE_COLOR_CHANNEL {
+            self.resize_set(set, width, height);
+            return;
+        }
+        self.ensure_set(set);
+        self.channel_sizes
+            .insert((set.to_string(), channel.to_string()), (width, height));
+        // Snapshots recorded at the old size no longer fit the targets.
+        self.retouch_history.clear();
+        self.pending_commits.clear();
+        self.stroke_epoch += 1;
+        // ONLY this channel's materialized targets on this set's tiles:
+        // a never-materialized channel costs nothing (its size is
+        // recorded above for `ensure_channel`), and inheriting channels
+        // keep the set's size from `resize_set`.
+        let tiles = self.tiles_of_set(set);
+        for tile in tiles {
+            if let Some(tile_targets) = self.targets.get_mut(&tile) {
+                if let Some(thread) = tile_targets.channels.get_mut(channel) {
+                    let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+                }
+            }
+        }
+    }
+
+    /// Drops `channel`'s override in `set` (it inherits the set's size
+    /// again) and rebuilds that channel's materialized targets at the
+    /// set's size. A no-op (history kept) when no override was recorded.
+    /// Otherwise the same history-clear contract as
+    /// [`Self::resize_channel`] (the rebuilt contents no longer fit old
+    /// snapshots). [`BASE_COLOR_CHANNEL`] is always a no-op (never
+    /// overridden).
+    pub fn clear_channel_size(&mut self, set: &str, channel: &str) {
+        if channel == BASE_COLOR_CHANNEL {
+            return;
+        }
+        let key = (set.to_string(), channel.to_string());
+        if self.channel_sizes.remove(&key).is_none() {
+            return;
+        }
+        self.retouch_history.clear();
+        self.pending_commits.clear();
+        self.stroke_epoch += 1;
+        let (width, height) = self.size_of_set(set);
+        let tiles = self.tiles_of_set(set);
+        for tile in tiles {
+            if let Some(tile_targets) = self.targets.get_mut(&tile) {
+                if let Some(thread) = tile_targets.channels.get_mut(channel) {
                     let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
                 }
             }
@@ -1980,9 +2144,10 @@ impl PaintState {
     }
 
     /// Ensures `tile` has a paint thread for `channel`, creating it at the
-    /// tile's SET size on first use — the lazy materialization contract
-    /// (see the module docs): a channel's thread appears on first route
-    /// (a stroke, a bake write, or this explicit pre-warm call).
+    /// CHANNEL's size on first use — its override when one is recorded,
+    /// else the tile's set size (the lazy materialization contract, see
+    /// the module docs): a channel's thread appears on first route (a
+    /// stroke, a bake write, or this explicit pre-warm call).
     /// [`BASE_COLOR_CHANNEL`] defers to [`Self::ensure_tile`] and never
     /// allocates a `channels` entry. Returns `false` (logged) on creation
     /// failure, same as `ensure_tile`.
@@ -2000,7 +2165,7 @@ impl PaintState {
         {
             return true;
         }
-        let (width, height) = self.tile_size(tile);
+        let (width, height) = self.tile_channel_size(tile, channel);
         match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
             Ok(thread) => {
                 self.targets
@@ -4989,6 +5154,180 @@ mod tests {
         );
         // ...while the resized set's own mask follows its new size.
         assert_eq!(state.quick_mask_for_tile(1002).dimensions(), (128, 128));
+    }
+
+    /// Per-channel sizing: an overridden channel materializes at ITS size
+    /// while baseColor keeps the set's, and a channel without an override
+    /// inherits the set's size (the channel → set fallback rule).
+    #[test]
+    fn overridden_channel_materializes_at_its_size_while_base_color_keeps_the_set() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // The default session paints 4096 (DEFAULT_TARGET_SIZE); the
+        // height override pins 512 — a swapped fallback fails here.
+        let mut state = PaintState::new(device, queue).expect("paint state builds");
+        assert_eq!(state.size_of_set(DEFAULT_TEXTURE_SET), (4096, 4096));
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, "height"),
+            (4096, 4096)
+        );
+        assert_eq!(state.channel_override(DEFAULT_TEXTURE_SET, "height"), None);
+        assert_eq!(
+            state.channel_override(DEFAULT_TEXTURE_SET, BASE_COLOR_CHANNEL),
+            None,
+            "baseColor never carries an override"
+        );
+
+        state.resize_channel(DEFAULT_TEXTURE_SET, "height", 512, 512);
+        assert_eq!(
+            state.channel_override(DEFAULT_TEXTURE_SET, "height"),
+            Some((512, 512))
+        );
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, "height"),
+            (512, 512)
+        );
+        // Inherit still reads the set size, and baseColor never overrides.
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, "roughness"),
+            (4096, 4096)
+        );
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, BASE_COLOR_CHANNEL),
+            (4096, 4096)
+        );
+
+        assert!(state.ensure_channel(1001, "height"));
+        state.process_pending().expect("creation lands");
+        assert_eq!(state.channels_present(1001), vec!["height".to_string()]);
+        let height = state
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!((height.width, height.height), (512, 512));
+        let base = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("baseColor reads back");
+        assert_eq!((base.width, base.height), (4096, 4096));
+        // A never-routed channel still reads None (reads never
+        // materialize, even beside an override).
+        assert!(state.read_channel_tile(1001, "roughness").is_none());
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, "roughness"),
+            (4096, 4096)
+        );
+    }
+
+    /// `resize_channel` rebuilds ONLY that channel's targets: baseColor
+    /// keeps its dims AND its bytes, the set size is unchanged, the
+    /// shared history still clears (the channel's resize_set semantics),
+    /// a later set resize preserves the override, and clearing the
+    /// override rebuilds at the set's size.
+    #[test]
+    fn resize_channel_touches_only_its_channel() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // Deterministic patterns (the same x*31+y*17+c*71+seed mod 251
+        // formula the channel isolation test pins): seed 5 pins texel
+        // (0,0) to [5, 76, 147, 218], seed 9 to [9, 80, 151, 222].
+        fn channel_pattern(seed: u8) -> Vec<u8> {
+            let mut out = Vec::with_capacity(512 * 512 * 4);
+            for y in 0..512u32 {
+                for x in 0..512u32 {
+                    for c in 0..4u32 {
+                        out.push(((x * 31 + y * 17 + c * 71 + u32::from(seed)) % 251) as u8);
+                    }
+                }
+            }
+            out
+        }
+        let base_bytes = channel_pattern(5);
+        let height_bytes = channel_pattern(9);
+        assert_eq!(&base_bytes[..4], &[5u8, 76, 147, 218]);
+        assert_eq!(&height_bytes[..4], &[9u8, 80, 151, 222]);
+        assert_ne!(base_bytes, height_bytes);
+        assert!(state.publish_fill(1001, 512, 512, base_bytes.clone()));
+        assert!(state.ensure_channel(1001, "height"));
+        assert!(state.publish_fill_channel(1001, "height", 512, 512, height_bytes.clone()));
+        state.process_pending().expect("uploads land");
+        // A height stroke (baseColor stays exactly the fill pattern, so
+        // the isolation assert below is byte-exact), so the history clear
+        // is non-vacuous too.
+        state.set_active_channel("height");
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(state.can_undo_stroke());
+
+        state.resize_channel(DEFAULT_TEXTURE_SET, "height", 256, 256);
+        assert!(
+            !state.can_undo_stroke(),
+            "a channel resize clears the shared stroke history"
+        );
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, "height"),
+            (256, 256)
+        );
+        assert_eq!(state.size_of_set(DEFAULT_TEXTURE_SET), (512, 512));
+        state.process_pending().expect("resize applies");
+
+        let height = state
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!((height.width, height.height), (256, 256));
+        let base = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("baseColor reads back");
+        assert_eq!((base.width, base.height), (512, 512));
+        assert_eq!(
+            base.data, base_bytes,
+            "baseColor bytes survive a channel resize"
+        );
+
+        // A set resize preserves the override: baseColor rebuilds at the
+        // new set size while height keeps ITS size.
+        state.resize_set(DEFAULT_TEXTURE_SET, 1024, 1024);
+        state.process_pending().expect("set resize applies");
+        assert_eq!(
+            state.tile_target(1001).expect("base rebuilt").dimensions(),
+            (1024, 1024)
+        );
+        let height_kept = state
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!(
+            (height_kept.width, height_kept.height),
+            (256, 256),
+            "a set resize preserves the channel override"
+        );
+
+        // Clearing the override rebuilds at the set's size; clearing what
+        // was never overridden keeps the history (no-op, not a resize).
+        state.clear_channel_size(DEFAULT_TEXTURE_SET, "height");
+        assert_eq!(state.channel_override(DEFAULT_TEXTURE_SET, "height"), None);
+        assert_eq!(
+            state.size_of_channel(DEFAULT_TEXTURE_SET, "height"),
+            (1024, 1024)
+        );
+        state.process_pending().expect("clear applies");
+        let height_inherited = state
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!(
+            (height_inherited.width, height_inherited.height),
+            (1024, 1024)
+        );
+        state.set_active_channel(BASE_COLOR_CHANNEL);
+        drive_stroke(&mut state, [0.6, 0.6], [0.0, 0.02], 15);
+        state.end_stroke();
+        assert!(state.can_undo_stroke());
+        state.clear_channel_size(DEFAULT_TEXTURE_SET, "roughness");
+        assert!(
+            state.can_undo_stroke(),
+            "clearing a never-overridden channel must not clear history"
+        );
     }
 
     /// The binding seam's routing contract (audit #12's (c) landing): the

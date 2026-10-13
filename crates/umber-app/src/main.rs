@@ -82,7 +82,10 @@
 //!   so a re-save into a project dir never resurrects a dropped tile.
 //! * The per-set paint sizes ride in `<project>/paint/target_sizes.txt`
 //!   (v2: one `<set>=<width>x<height>` line per sized set plus one
-//!   `tile-<N>=<set>` assignment line per saved tile; `#` comments and
+//!   `tile-<N>=<set>` assignment line per saved tile, plus one
+//!   `channel/<set>/<channel>=<width>x<height>` line per recorded
+//!   per-channel override — absent means that channel inherits its set's
+//!   size, so every pre-channel file loads all-inherit; `#` comments and
 //!   blank lines skipped). The v1 `<project>/paint/target_size.txt`
 //!   global is still written (the active set's size, for old readers) and
 //!   still read: a v1 project (tiles + global, no mapping) opens with its
@@ -97,7 +100,9 @@
 //!   (a size choice with no paint yet survives the round trip); sets the
 //!   session only ever read from an old mapping (no tiles, never
 //!   activated) are not rewritten — activating a set to edit it always
-//!   re-registers it first.
+//!   re-registers it first. Channel overrides ride for exactly those same
+//!   sets (an override on an unwritten set is dropped from the file, the
+//!   set-size rule applied to channels).
 
 mod bake_sources;
 mod bakes_panel;
@@ -368,10 +373,18 @@ impl TabViewer for PanelViewer<'_> {
                 }
             }
             Panel::TextureSets => {
+                let channels: Vec<String> = self
+                    .mesh_import
+                    .session_set
+                    .channels
+                    .iter()
+                    .map(|channel| channel.name.clone())
+                    .collect();
                 texture_sets_panel_ui(
                     ui,
                     self.paint.as_deref_mut(),
                     self.mesh_import.session_set.name.as_str(),
+                    &channels,
                 );
             }
             Panel::Bakes => {
@@ -944,25 +957,35 @@ fn paint_set_sizes_path(project_dir: &Path) -> PathBuf {
     paint_sidecar_dir(project_dir).join("target_sizes.txt")
 }
 
-/// The parsed `target_sizes.txt`: set sizes plus tile assignments (both
-/// may be empty — an empty mapping means "no per-set information", and
-/// the load path falls back to the legacy global).
+/// The parsed `target_sizes.txt`: set sizes, per-channel overrides, plus
+/// tile assignments (all may be empty — an empty mapping means "no per-set
+/// information", and the load path falls back to the legacy global).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PaintSetSizes {
     /// Set name → `(width, height)`, sorted (BTreeMap wire order keeps
     /// saves byte-deterministic).
     sizes: std::collections::BTreeMap<String, (u32, u32)>,
+    /// `(set, channel)` → `(width, height)` overrides, sorted. Absent =
+    /// inherit the set's size (see `paint_state`'s channel-sizing docs).
+    channels: std::collections::BTreeMap<(String, String), (u32, u32)>,
     /// Tile id → set name, sorted.
     tiles: std::collections::BTreeMap<u16, String>,
 }
 
 /// Formats [`PaintSetSizes`] for `target_sizes.txt`: size lines first
-/// (sorted by set name), then tile assignments (sorted by tile). A `#`
-/// header names the version so a future format can branch on it.
+/// (sorted by set name), then channel overrides (sorted by set, then
+/// channel), then tile assignments (sorted by tile). A `#` header names
+/// the version so a future format can branch on it. The header stays the
+/// `v1` line on purpose: channel lines are ADDITIVE (no file without
+/// them changes by a byte), and the parser never branched on the header
+/// (it skips `#` lines), so old readers keep their exact behavior.
 fn format_paint_set_sizes(mapping: &PaintSetSizes) -> String {
     let mut out = String::from("# Umber paint-set sizes v1\n");
     for (name, (width, height)) in &mapping.sizes {
         out.push_str(&format!("{name}={width}x{height}\n"));
+    }
+    for ((set, channel), (width, height)) in &mapping.channels {
+        out.push_str(&format!("channel/{set}/{channel}={width}x{height}\n"));
     }
     for (tile, set) in &mapping.tiles {
         out.push_str(&format!("tile-{tile}={set}\n"));
@@ -979,6 +1002,14 @@ fn format_paint_set_sizes(mapping: &PaintSetSizes) -> String {
 /// set names are mesh/material-derived, so this never triggers in
 /// practice, and the load path never strands a tile over it (an
 /// assignment to an unknown name registers that name at the default size).
+/// The `channel/` prefix is likewise RESERVED for per-channel overrides:
+/// a line `channel/<set>/<channel>=<WxH>` records that channel's size in
+/// that set (absent = inherit the set's size, so every pre-channel file
+/// loads all-inherit). A set or channel name holding `/` cannot round-trip
+/// (the first `/` splits set from channel — the same reserved-separator
+/// class as the `tile-` prefix above); the sidecar PNG layout already
+/// nests channels as `<channel>/tile-<N>.png`, so `/` in a channel name
+/// never reaches this file in practice.
 fn parse_paint_set_sizes(text: &str) -> Option<PaintSetSizes> {
     let mut mapping = PaintSetSizes::default();
     for line in text.lines() {
@@ -999,6 +1030,18 @@ fn parse_paint_set_sizes(text: &str) -> Option<PaintSetSizes> {
             }
             continue;
         }
+        if let Some(rest) = left.strip_prefix("channel/") {
+            if let Some((set, channel)) = rest.split_once('/') {
+                if !set.is_empty() && !channel.is_empty() {
+                    if let Some((width, height)) = parse_paint_target_size(right) {
+                        mapping
+                            .channels
+                            .insert((set.to_string(), channel.to_string()), (width, height));
+                    }
+                }
+            }
+            continue;
+        }
         if left.is_empty() || right.is_empty() {
             continue;
         }
@@ -1006,17 +1049,22 @@ fn parse_paint_set_sizes(text: &str) -> Option<PaintSetSizes> {
             mapping.sizes.insert(left.to_string(), (width, height));
         }
     }
-    (!mapping.sizes.is_empty() || !mapping.tiles.is_empty()).then_some(mapping)
+    (!mapping.sizes.is_empty() || !mapping.channels.is_empty() || !mapping.tiles.is_empty())
+        .then_some(mapping)
 }
 
 /// One tile the open path refused to restore: its PNG's dims disagree
 /// with its set's size (see `load_paint_tiles_reported`). Loud by
 /// construction — the report is logged and returned, never swallowed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PaintTileSkip {
     /// The refused tile.
     tile: u16,
-    /// The set's size the tile was expected at.
+    /// The refused channel (`baseColor` for the flat tiles — one tile can
+    /// skip its channels independently, so the channel rides the record).
+    channel: String,
+    /// The set's size the tile was expected at (the CHANNEL's size when
+    /// overridden — see `PaintState::tile_channel_size`).
     expected: (u32, u32),
     /// The PNG's actual dims.
     found: (u32, u32),
@@ -1031,6 +1079,39 @@ struct PaintLoadReport {
     masks_restored: usize,
     /// Tiles skipped for size mismatch (loud — logged per tile).
     skipped: Vec<PaintTileSkip>,
+}
+
+/// One Texture Sets channel row's combo state: inherit the set's size
+/// (the default — no override recorded), a square `SIZE_PRESETS` pick, or
+/// a stored non-square override the combo only DISPLAYS (the UI writes
+/// squares; the load path honors what it stored — the set combo's rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelSizeChoice {
+    Inherit,
+    Preset(u32),
+    Custom(u32, u32),
+}
+
+impl ChannelSizeChoice {
+    /// The combo's initial state for a recorded override (`None` =
+    /// inherit): a square size becomes its preset row, a non-square its
+    /// display-only custom.
+    fn from_override(current: Option<(u32, u32)>) -> Self {
+        match current {
+            None => Self::Inherit,
+            Some((size, other)) if size == other => Self::Preset(size),
+            Some((width, height)) => Self::Custom(width, height),
+        }
+    }
+
+    /// The combo's selected text for this state.
+    fn label(self) -> String {
+        match self {
+            Self::Inherit => tr("texturesets.inherit"),
+            Self::Preset(size) => size_presets::preset_label(size),
+            Self::Custom(width, height) => format!("{width} × {height}"),
+        }
+    }
 }
 
 /// The Texture Sets panel's per-set paint-target size section (CORE-LOOP
@@ -1049,10 +1130,23 @@ struct PaintLoadReport {
 /// Single-set sessions (everything today: one mesh, one session set) show
 /// one row and behave exactly as the v1 global combo did. No paint session
 /// (no GPU target) shows the unavailable string instead of the rows.
+///
+/// Per-channel sizes (requirements §2's sizing row, the deferred half)
+/// ride the same panel: one row per document channel under the set's
+/// combo, each the shared `SIZE_PRESETS` combo plus the `inherit` default.
+/// A channel WITHOUT an override reads the set's size — inherit stays the
+/// default row state, and baseColor has no row (it IS the set's size —
+/// the set combo above edits it). Picking a size records the override and
+/// rebuilds that channel's targets through
+/// [`paint_state::PaintState::resize_channel`]; picking inherit drops the
+/// override and rebuilds at the set's size. The same intentional-clear
+/// contract as the set resize (that channel's canvas plus the session
+/// stroke-undo history) — the hint string below names it.
 fn texture_sets_panel_ui(
     ui: &mut Ui,
     paint: Option<&mut paint_state::PaintState>,
     session_set: &str,
+    channels: &[String],
 ) {
     let Some(paint) = paint else {
         ui.label(tr("texturesets.no-paint"));
@@ -1088,6 +1182,59 @@ fn texture_sets_panel_ui(
         paint.resize_set(&active, size, size);
     }
     ui.label(tr("texturesets.resize-clears"));
+    // Per-channel rows for the SELECTED set: the document's channels plus
+    // any materialized-but-unlisted one (an override outliving its import
+    // still edits — dropping it from the panel would strand it).
+    let mut rows: Vec<String> = channels.to_vec();
+    for tile in paint.tiles_of_set(&active) {
+        for channel in paint.channels_present(tile) {
+            if !rows.contains(&channel) {
+                rows.push(channel);
+            }
+        }
+    }
+    rows.sort();
+    rows.retain(|channel| channel.as_str() != paint_state::BASE_COLOR_CHANNEL);
+    if rows.is_empty() {
+        return;
+    }
+    ui.label(tr("texturesets.per-channel"));
+    for channel in &rows {
+        let current = paint.channel_override(&active, channel);
+        let initial = ChannelSizeChoice::from_override(current);
+        let mut picked = initial;
+        ui.horizontal(|ui| {
+            ui.label(channel.as_str());
+            egui::ComboBox::from_id_salt(format!("channel-size:{active}/{channel}"))
+                .selected_text(picked.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut picked,
+                        ChannelSizeChoice::Inherit,
+                        tr("texturesets.inherit"),
+                    );
+                    for size in size_presets::SIZE_PRESETS {
+                        ui.selectable_value(
+                            &mut picked,
+                            ChannelSizeChoice::Preset(size),
+                            size_presets::preset_label(size),
+                        );
+                    }
+                });
+        });
+        if picked != initial {
+            match picked {
+                ChannelSizeChoice::Inherit => paint.clear_channel_size(&active, channel),
+                ChannelSizeChoice::Preset(size) => {
+                    paint.resize_channel(&active, channel, size, size);
+                }
+                // Display-only (never offered as a row): a changed pick is
+                // always inherit or a square preset.
+                ChannelSizeChoice::Custom(..) => {}
+            }
+        }
+    }
+    ui.label(tr("texturesets.channel-resize-clears"));
 }
 
 /// Vertical row flip over tightly-packed RGBA8 bytes: output row 0 is
@@ -1543,6 +1690,16 @@ fn commit_paint_tiles(
             .sizes
             .insert(active.clone(), paint.size_of_set(&active));
     }
+    // The per-channel overrides for exactly those same sets (the set-size
+    // rule applied to channels — see the module docs); sorted by
+    // construction (BTreeMap), so saves stay byte-deterministic.
+    for ((set, channel), (width, height)) in paint.channel_sizes() {
+        if mapping.sizes.contains_key(set) {
+            mapping
+                .channels
+                .insert((set.clone(), channel.clone()), (*width, *height));
+        }
+    }
     entries.push(stage_paint_bytes(
         project_dir,
         &store,
@@ -1759,8 +1916,15 @@ fn load_paint_tiles_reported(
                 // below, never a panic. Assignment-only sets (a tile line
                 // with no size line) join the resize at the default size,
                 // so no previous document's pixels survive on them either.
+                // Channel-only sets (an override line with no size line)
+                // join for the same reason — their override applies below.
                 let mut names = paint.set_names();
-                for name in known.sizes.keys().chain(known.tiles.values()) {
+                for name in known
+                    .sizes
+                    .keys()
+                    .chain(known.tiles.values())
+                    .chain(known.channels.keys().map(|(set, _)| set))
+                {
                     if !names.contains(name) {
                         names.push(name.clone());
                     }
@@ -1772,6 +1936,13 @@ fn load_paint_tiles_reported(
                         .copied()
                         .unwrap_or_else(|| paint.size_of_set(name));
                     paint.resize_set(name, width, height);
+                }
+                // Channel overrides land AFTER the set resizes (a set
+                // resize rebuilds inheriting channels at the set's size —
+                // the override must win). No paint persisted, so this only
+                // records sizes for later tiles and drops stale targets.
+                for ((set, channel), (width, height)) in &known.channels {
+                    paint.resize_channel(set, channel, *width, *height);
                 }
             }
             None => {
@@ -1799,8 +1970,15 @@ fn load_paint_tiles_reported(
             // mapped size first (unmapped sets resize to their live size,
             // dropping stale pixels), then assignments re-derive from the
             // sidecar so a previous document's sets never steer this one.
+            // Channel-only sets join the resize (their override applies
+            // below); see the empty-sidecar branch above.
             let mut names = paint.set_names();
-            for name in known.sizes.keys().chain(known.tiles.values()) {
+            for name in known
+                .sizes
+                .keys()
+                .chain(known.tiles.values())
+                .chain(known.channels.keys().map(|(set, _)| set))
+            {
                 if !names.contains(name) {
                     names.push(name.clone());
                 }
@@ -1821,6 +1999,15 @@ fn load_paint_tiles_reported(
                     .copied()
                     .unwrap_or_else(|| paint.size_of_set(name));
                 paint.resize_set(name, width, height);
+            }
+            // Channel overrides land AFTER the set resizes (which rebuild
+            // inheriting channels at the set's size — the override must
+            // win) and BEFORE the PNG uploads below (which size-check
+            // against the channel's size): a reopened override is in place
+            // before its pixels land, so a later `ensure_channel` — or the
+            // upload's own materialization — builds at the override.
+            for ((set, channel), (width, height)) in &known.channels {
+                paint.resize_channel(set, channel, *width, *height);
             }
         }
         None => {
@@ -1856,7 +2043,9 @@ fn load_paint_tiles_reported(
         // recording the resolution keeps the next save's mapping exact.
         let set = paint.set_of_tile(tile).to_string();
         paint.assign_tile_to_set(tile, &set);
-        let expected = paint.tile_size(tile);
+        // The CHANNEL's size (its override, else the set's — a channel
+        // PNG must match ITS size, never silently resample).
+        let expected = paint.tile_channel_size(tile, &channel);
         if (width, height) != expected {
             let (ew, eh) = expected;
             log::warn!(
@@ -1864,6 +2053,7 @@ fn load_paint_tiles_reported(
             );
             report.skipped.push(PaintTileSkip {
                 tile,
+                channel: channel.clone(),
                 expected,
                 found: (width, height),
             });
@@ -2667,6 +2857,7 @@ mod paint_persistence_tests {
             parse_paint_set_sizes("Shield=2048x1024\n"),
             Some(PaintSetSizes {
                 sizes: std::collections::BTreeMap::from([("Shield".to_string(), (2048, 1024))]),
+                channels: std::collections::BTreeMap::new(),
                 tiles: std::collections::BTreeMap::new(),
             })
         );
@@ -2677,6 +2868,10 @@ mod paint_persistence_tests {
         assert_eq!(parsed.sizes.len(), 1);
         assert_eq!(parsed.sizes.get("Sword"), Some(&(512, 512)));
         assert_eq!(parsed.tiles.get(&1002), Some(&"Sword".to_string()));
+        assert!(
+            parsed.channels.is_empty(),
+            "no channel lines means all-inherit"
+        );
         // Nothing parseable at all degrades to None (the load path falls
         // back to the legacy global): empty, comments-only, and every
         // malformed shape.
@@ -2700,6 +2895,68 @@ mod paint_persistence_tests {
             paint_set_sizes_path(Path::new("/p")),
             PathBuf::from("/p/paint/target_sizes.txt")
         );
+    }
+
+    #[test]
+    fn channel_sizes_codec_round_trips_and_old_files_load_all_inherit() {
+        // Channel lines sort between sizes and assignments (set, then
+        // channel) — the save is byte-deterministic, so the exact text is
+        // pinned, and the header stays the v1 line on purpose (additive —
+        // see `format_paint_set_sizes`).
+        let mut mapping = PaintSetSizes::default();
+        mapping.sizes.insert("Sword".to_string(), (4096, 4096));
+        mapping
+            .channels
+            .insert(("Sword".to_string(), "roughness".to_string()), (512, 512));
+        mapping
+            .channels
+            .insert(("Sword".to_string(), "height".to_string()), (1024, 2048));
+        mapping.tiles.insert(1001, "Sword".to_string());
+        let text = format_paint_set_sizes(&mapping);
+        assert_eq!(
+            text,
+            "# Umber paint-set sizes v1\n\
+             Sword=4096x4096\n\
+             channel/Sword/height=1024x2048\n\
+             channel/Sword/roughness=512x512\n\
+             tile-1001=Sword\n"
+        );
+        assert_eq!(parse_paint_set_sizes(&text), Some(mapping));
+        // A channel-only file still parses (never None while something
+        // parsed — the load path must see the overrides).
+        let only = parse_paint_set_sizes("channel/Body/height=256x256\n")
+            .expect("a lone channel line parses");
+        assert!(only.sizes.is_empty() && only.tiles.is_empty());
+        assert_eq!(
+            only.channels
+                .get(&("Body".to_string(), "height".to_string())),
+            Some(&(256, 256))
+        );
+        // Malformed channel lines skip without killing the good ones:
+        // empty set, empty channel, missing size, zero size, and the
+        // double-`=` shape (the second `=` lands in the size field, which
+        // rejects it — the codec stays single-`=`).
+        let messy = "channel/Body/height=256x256\n\
+                     channel//height=128x128\n\
+                     channel/Body/=128x128\n\
+                     channel/Body/roughness\n\
+                     channel/Body/metallic=0x128\n\
+                     channel=Body/ao=64x64\n";
+        let parsed = parse_paint_set_sizes(messy).expect("the one good line parses");
+        assert_eq!(parsed.channels.len(), 1);
+        assert_eq!(
+            parsed
+                .channels
+                .get(&("Body".to_string(), "height".to_string())),
+            Some(&(256, 256))
+        );
+        // A pre-channel file (no channel lines — the shape the tile-pool
+        // kill writes) loads all-inherit: sizes and tiles parse, channels
+        // stay empty.
+        let old = "# Umber paint-set sizes v1\nBody=2048x2048\ntile-1001=Body\n";
+        let parsed_old = parse_paint_set_sizes(old).expect("a pre-channel file parses");
+        assert!(parsed_old.channels.is_empty());
+        assert_eq!(parsed_old.sizes.get("Body"), Some(&(2048, 2048)));
     }
 
     /// Deterministic RGBA8 pattern: texel `(x, y)` channel `c` holds
@@ -2830,6 +3087,7 @@ mod paint_persistence_tests {
             report.skipped,
             vec![PaintTileSkip {
                 tile: 1002,
+                channel: paint_state::BASE_COLOR_CHANNEL.to_string(),
                 expected: (4096, 4096),
                 found: (512, 512),
             }],
@@ -2934,6 +3192,113 @@ mod paint_persistence_tests {
         assert_eq!(
             after_height.data, before_height,
             "height restores byte-identical"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_size_override_round_trips_and_mismatches_skip_per_channel() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // The default set at 512 with height overridden to 256: two sizes,
+        // one session (the per-channel sizing gate).
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        paint.resize_channel(paint_state::DEFAULT_TEXTURE_SET, "height", 256, 256);
+        let before_base = pattern_bytes(512, 512, 3);
+        let before_height = pattern_bytes(256, 256, 77);
+        assert_eq!(&before_base[..4], &[3u8, 74, 145, 216]);
+        // Seed 77 pins (0,0) to [77, 148, 219, 39] — the same derivation
+        // as the two-channel test (dims never enter it).
+        assert_eq!(&before_height[..4], &[77u8, 148, 219, 39]);
+        assert!(paint.publish_fill(1001, 512, 512, before_base.clone()));
+        assert!(paint.publish_fill_channel(1001, "height", 256, 256, before_height.clone()));
+        paint.process_pending().expect("uploads land");
+
+        let dir = unique_temp_dir("per-channel-size-roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = save_paint_tiles(&mut paint, &dir);
+        assert_eq!(saved, 2, "baseColor + height persist as two artifacts");
+        // The mapping pins the override line exactly (sorted between the
+        // size and the assignment — the codec test pins the grammar; this
+        // pins the save path emitting it).
+        let mapping_text = std::fs::read_to_string(paint_set_sizes_path(&dir)).unwrap();
+        assert_eq!(
+            mapping_text,
+            "# Umber paint-set sizes v1\n\
+             TextureSet=512x512\n\
+             channel/TextureSet/height=256x256\n\
+             tile-1001=TextureSet\n"
+        );
+
+        // Reopen fresh (4K default): the override restores BEFORE its
+        // pixels land, so height materializes at 256 while baseColor
+        // restores at 512 — both byte-identical.
+        let mut fresh =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 2,
+                masks_restored: 0,
+                skipped: Vec::new(),
+            }
+        );
+        assert_eq!(
+            fresh.size_of_channel("TextureSet", "height"),
+            (256, 256),
+            "the override survives the round trip"
+        );
+        assert_eq!(
+            fresh.size_of_channel("TextureSet", "roughness"),
+            (512, 512),
+            "no line means inherit the set's size"
+        );
+        let after_base = fresh.read_tile(1001).expect("baseColor reads back");
+        assert_eq!((after_base.width, after_base.height), (512, 512));
+        assert_eq!(
+            after_base.data, before_base,
+            "baseColor restores byte-identical"
+        );
+        let after_height = fresh
+            .read_channel_tile(1001, "height")
+            .expect("height reads back");
+        assert_eq!((after_height.width, after_height.height), (256, 256));
+        assert_eq!(
+            after_height.data, before_height,
+            "height restores byte-identical at ITS size"
+        );
+
+        // A size-mismatched CHANNEL refuses loudly per channel: clobber
+        // height's PNG with 512² bytes (its override says 256²) and
+        // reopen — baseColor still restores, height refuses with its
+        // channel on the record (never silently resampled).
+        let wrong = pattern_bytes(512, 512, 9);
+        umber_export::png::write_png(
+            &paint_channel_tile_path(&dir, "height", 1001),
+            512,
+            512,
+            &wrong,
+            umber_export::png::Transfer::Linear,
+        )
+        .expect("clobber writes");
+        let mut mismatch =
+            paint_state::PaintState::new(device, queue).expect("mismatch session builds");
+        let report = load_paint_tiles_reported(&mut mismatch, &dir);
+        assert_eq!(report.restored, 1, "only the matching channel restores");
+        assert_eq!(
+            report.skipped,
+            vec![PaintTileSkip {
+                tile: 1001,
+                channel: "height".to_string(),
+                expected: (256, 256),
+                found: (512, 512),
+            }],
+            "the channel mismatch is on the record with exact dims"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
