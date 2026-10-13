@@ -32,3 +32,11 @@
 
 pub mod paint_state;
 pub mod retouch;
+
+/// Dynamic material layers: the headless eval driver (Kill A). Declared
+/// here — not only behind the binary's `mod` list — so the driver and its
+/// goldens are reachable and testable without the shell (the
+/// `paint_state`/`retouch` library-surface precedent). Kill B adds the
+/// `main.rs` `mod` line and the frame wiring; until then nothing in the
+/// binary names this module.
+pub mod material_layer;
