@@ -371,7 +371,7 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
 /// state on the paint session ([`PaintState::set_mask_edit_layer`]), and
 /// detaching also drops the layer's planes there (a re-attach starts
 /// white). Strokes route to the selected layer's plane — see
-/// `paint_state`'s layer-mask docs. New `tr("layers.*")` keys are listed
+/// `paint_state`'s layer-mask docs. New Layers-panel keys are listed
 /// in the kill report's Doc deltas (the dragon owns the `.ftl` edits).
 pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintState) {
     ui.separator();
@@ -409,8 +409,9 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
     for row in &rows {
         ui.horizontal(|ui| {
             ui.label(&row.name);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                match &row.mask_name {
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match &row.mask_name {
                     None => {
                         if ui.small_button(tr("layers.mask-add")).clicked() {
                             let name = tr_args(
@@ -448,8 +449,8 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
                                 .color(egui::Color32::from_gray(140)),
                         );
                     }
-                }
-            });
+                },
+            );
         });
     }
     for action in actions {

@@ -908,11 +908,6 @@ fn paint_mask_name(layer: u64, tile: u16) -> String {
     format!("mask-{layer}-tile-{tile}.png")
 }
 
-/// The sidecar path of [`paint_mask_name`].
-fn paint_mask_path(project_dir: &Path, layer: u64, tile: u16) -> PathBuf {
-    paint_sidecar_dir(project_dir).join(paint_mask_name(layer, tile))
-}
-
 /// Parses [`paint_mask_name`]'s output back to `(layer, tile)`; `None`
 /// for anything else (paint tiles, size files, temps, foreign files).
 fn parse_paint_mask_name(name: &str) -> Option<(u64, u16)> {
@@ -1365,9 +1360,7 @@ fn list_paint_tile_names(dir: &Path) -> std::io::Result<Vec<String>> {
                     names.push(format!("{name}/{inner_name}"));
                 }
             }
-        } else if parse_paint_tile_name(&name).is_some() {
-            names.push(name);
-        } else if parse_paint_mask_name(&name).is_some() {
+        } else if parse_paint_tile_name(&name).is_some() || parse_paint_mask_name(&name).is_some() {
             names.push(name);
         }
     }
@@ -1717,9 +1710,7 @@ fn collect_paint_tiles(
 /// flat `mask-<layer>-tile-<N>.png` files only (masks never nest — see
 /// [`paint_mask_name`]). Decoded like paint tiles (the PNG reader's row
 /// order flipped back); a decode failure skips that plane loudly.
-fn collect_paint_masks(
-    dir: &Path,
-) -> std::collections::BTreeMap<(u64, u16), (u32, u32, Vec<u8>)> {
+fn collect_paint_masks(dir: &Path) -> std::collections::BTreeMap<(u64, u16), (u32, u32, Vec<u8>)> {
     let mut found = std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return found;

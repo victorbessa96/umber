@@ -3489,8 +3489,14 @@ mod tests {
         assert_eq!(
             state.take_stroke_commits(),
             vec![
-                StrokeCommit { cursor: 0, depth: 1 },
-                StrokeCommit { cursor: 1, depth: 2 },
+                StrokeCommit {
+                    cursor: 0,
+                    depth: 1
+                },
+                StrokeCommit {
+                    cursor: 1,
+                    depth: 2
+                },
             ]
         );
         assert!(state.take_stroke_commits().is_empty());
@@ -3536,9 +3542,18 @@ mod tests {
         assert_eq!(
             state.take_stroke_commits(),
             vec![
-                StrokeCommit { cursor: 0, depth: 1 },
-                StrokeCommit { cursor: 1, depth: 2 },
-                StrokeCommit { cursor: 1, depth: 2 },
+                StrokeCommit {
+                    cursor: 0,
+                    depth: 1
+                },
+                StrokeCommit {
+                    cursor: 1,
+                    depth: 2
+                },
+                StrokeCommit {
+                    cursor: 1,
+                    depth: 2
+                },
             ]
         );
         // Both live entries undo to the exact blank canvas.
@@ -3574,7 +3589,10 @@ mod tests {
         state.end_stroke();
         assert_eq!(
             state.take_stroke_commits(),
-            vec![StrokeCommit { cursor: 0, depth: 1 }]
+            vec![StrokeCommit {
+                cursor: 0,
+                depth: 1
+            }]
         );
     }
 
@@ -3900,10 +3918,14 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        let mut state = PaintState::with_target_size(device, queue, 512)
-            .expect("paint state builds");
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         assert_eq!(state.mask_edit_layer(), None);
-        assert_eq!(state.layer_mask(7, FIRST_TILE), None, "no plane until touched");
+        assert_eq!(
+            state.layer_mask(7, FIRST_TILE),
+            None,
+            "no plane until touched"
+        );
         assert!(state.layer_mask_tiles().is_empty());
 
         // Fresh planes start WHITE (attaching is a no-op gate).
@@ -3974,7 +3996,11 @@ mod tests {
         state.set_mask_edit_layer(Some(7));
         drive_stroke(&mut state, [0.3, 0.5], [0.02, 0.0], 15);
         state.end_stroke();
-        assert_eq!(state.staged_batch_count(), 0, "a mask stroke stages nothing");
+        assert_eq!(
+            state.staged_batch_count(),
+            0,
+            "a mask stroke stages nothing"
+        );
         assert_eq!(state.staged_dab_count(), 0);
         assert_eq!(
             read_back(&mut state, &device, &queue),
@@ -3997,11 +4023,23 @@ mod tests {
             plane.len()
         );
         assert_eq!(plane[0], 255, "far from the stroke stays open");
+        // Snapshot BEFORE the mutable calls below end the plane borrow
+        // (E0502: `plane` borrows `state` immutably; set_mask_mode and the
+        // stroke driver take it mutably).
+        let painted_mask = plane.to_vec();
+        // Leaving mask MODE is not leaving the mask: `set_mask_mode(false)`
+        // clears `editing` but keeps the quick mask ARMED (`gates()` still
+        // true — `set_editing` never clears `active`, by design: the X
+        // toggle owns arming). An armed-but-never-painted quick mask gates
+        // every staged dab to zero (its plane is all-black until painted
+        // open), so this stroke MUST also disarm the gate — exactly what the
+        // panel's flow does (the artist toggles X off, or paints the mask
+        // white first).
         state.set_mask_mode(false);
+        state.set_mask_active(false);
 
         // Back to layers: a paint stroke changes the layer but leaves the
         // mask plane byte-identical.
-        let painted_mask = plane.to_vec();
         state.set_mask_edit_layer(None);
         drive_stroke(&mut state, [0.3, 0.5], [0.02, 0.0], 15);
         state.end_stroke();

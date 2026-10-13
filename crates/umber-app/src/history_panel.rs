@@ -127,6 +127,12 @@ pub enum HistoryKind {
     SetFill,
     /// [`LayerCommand::SetInstanceSource`] (instance retarget).
     SetInstanceSource,
+    /// [`LayerCommand::AttachMask`] (a layer gains a mask).
+    AttachMask,
+    /// [`LayerCommand::DetachMask`] (a layer loses its mask).
+    DetachMask,
+    /// [`LayerCommand::SetMaskEnabled`] (a mask flips enabled).
+    SetMaskEnabled,
     /// A brush stroke committed by the paint session. Undoable when recorded
     /// with a stroke depth (the per-frame drain's commit): clicking the row
     /// drives the stroke journal to it. Context-recorded strokes (no depth)
@@ -159,6 +165,9 @@ impl HistoryKind {
             LayerCommand::SetBlendMode { .. } => Self::SetBlendMode,
             LayerCommand::SetFill { .. } => Self::SetFill,
             LayerCommand::SetInstanceSource { .. } => Self::SetInstanceSource,
+            LayerCommand::AttachMask { .. } => Self::AttachMask,
+            LayerCommand::DetachMask { .. } => Self::DetachMask,
+            LayerCommand::SetMaskEnabled { .. } => Self::SetMaskEnabled,
         }
     }
 
@@ -177,6 +186,9 @@ impl HistoryKind {
             Self::SetBlendMode => tr("history.op-set-blend"),
             Self::SetFill => tr("history.op-set-fill"),
             Self::SetInstanceSource => tr("history.op-set-instance-source"),
+            Self::AttachMask => tr("history.op-attach-mask"),
+            Self::DetachMask => tr("history.op-detach-mask"),
+            Self::SetMaskEnabled => tr("history.op-set-mask-enabled"),
             Self::BrushStroke => tr("history.op-brush-stroke"),
             Self::Bake => tr("history.op-bake"),
             Self::Export => tr("history.op-export"),
@@ -351,11 +363,7 @@ impl SessionHistory {
 /// stroke row at the live stroke depth (`None` — no paint session — is
 /// never current), context rows never. Pure so the highlight rule is
 /// headless-testable; [`history_ui`] is the only caller.
-pub fn entry_is_current(
-    entry: &HistoryEntry,
-    layer_len: usize,
-    stroke_len: Option<usize>,
-) -> bool {
+pub fn entry_is_current(entry: &HistoryEntry, layer_len: usize, stroke_len: Option<usize>) -> bool {
     match (entry.jump_target(), entry.stroke_target()) {
         (Some(depth), None) => depth == layer_len,
         (None, Some(depth)) => stroke_len.is_some_and(|len| len == depth),
@@ -705,10 +713,7 @@ mod tests {
         assert!(log.adopt_stroke_epoch(1), "the resize's bump");
         assert_eq!(log.stroke_epoch(), 1);
         assert_eq!(
-            log.entries()
-                .iter()
-                .map(|e| e.kind)
-                .collect::<Vec<_>>(),
+            log.entries().iter().map(|e| e.kind).collect::<Vec<_>>(),
             vec![HistoryKind::AddPaint, HistoryKind::Export]
         );
         // New strokes record against the new epoch at depth 1 again.
@@ -748,18 +753,21 @@ mod tests {
             &mut doc,
             0,
             vec![
-                StrokeCommit { cursor: 0, depth: 1 },
-                StrokeCommit { cursor: 1, depth: 2 },
+                StrokeCommit {
+                    cursor: 0,
+                    depth: 1,
+                },
+                StrokeCommit {
+                    cursor: 1,
+                    depth: 2,
+                },
             ],
         );
         let rows = doc.session_history.entries();
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows.iter().map(|e| (e.kind, e.op_id)).collect::<Vec<_>>(),
-            vec![
-                (HistoryKind::BrushStroke, 0),
-                (HistoryKind::BrushStroke, 1),
-            ]
+            vec![(HistoryKind::BrushStroke, 0), (HistoryKind::BrushStroke, 1),]
         );
         assert_eq!(
             rows.iter().map(|e| e.stroke_target()).collect::<Vec<_>>(),
@@ -779,8 +787,14 @@ mod tests {
             &mut doc,
             0,
             vec![
-                StrokeCommit { cursor: 0, depth: 1 },
-                StrokeCommit { cursor: 1, depth: 2 },
+                StrokeCommit {
+                    cursor: 0,
+                    depth: 1,
+                },
+                StrokeCommit {
+                    cursor: 1,
+                    depth: 2,
+                },
             ],
         );
         // A merged successor coalesces into the top entry (cursor ==
@@ -789,7 +803,10 @@ mod tests {
         apply_stroke_commits(
             &mut doc,
             0,
-            vec![StrokeCommit { cursor: 2, depth: 2 }],
+            vec![StrokeCommit {
+                cursor: 2,
+                depth: 2,
+            }],
         );
         assert_eq!(
             doc.session_history
@@ -810,7 +827,10 @@ mod tests {
         apply_stroke_commits(
             &mut doc,
             0,
-            vec![StrokeCommit { cursor: 1, depth: 2 }],
+            vec![StrokeCommit {
+                cursor: 1,
+                depth: 2,
+            }],
         );
         assert_eq!(
             doc.session_history
@@ -834,7 +854,10 @@ mod tests {
         apply_stroke_commits(
             &mut doc,
             0,
-            vec![StrokeCommit { cursor: 0, depth: 1 }],
+            vec![StrokeCommit {
+                cursor: 0,
+                depth: 1,
+            }],
         );
         assert_eq!(doc.session_history.len(), 2);
 
@@ -844,7 +867,10 @@ mod tests {
         apply_stroke_commits(
             &mut doc,
             1,
-            vec![StrokeCommit { cursor: 0, depth: 1 }],
+            vec![StrokeCommit {
+                cursor: 0,
+                depth: 1,
+            }],
         );
         assert_eq!(
             doc.session_history

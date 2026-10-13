@@ -115,6 +115,25 @@ pub enum JournalOp {
         /// The source after the apply.
         source: u64,
     },
+    /// A layer's mask presence ([`LayerCommand::AttachMask`] forward,
+    /// [`LayerCommand::DetachMask`] revert): `Some(name)` when the layer
+    /// holds a mask after the op, `None` when it does not. The mask's
+    /// PIXELS live in the paint session (the pool the app prunes against
+    /// live stacks — see `LayerStack::attach_mask`'s docs); the journal
+    /// carries only the metadata half, exactly like the document.
+    SetLayerMask {
+        /// The layer's id.
+        id: u64,
+        /// The mask after the op (`None` = no mask).
+        mask: Option<String>,
+    },
+    /// A layer's mask enabled flag ([`LayerCommand::SetMaskEnabled`]).
+    SetMaskEnabled {
+        /// The layer's id.
+        id: u64,
+        /// The flag after the op.
+        enabled: bool,
+    },
 }
 
 impl JournalOp {
@@ -174,6 +193,33 @@ impl JournalOp {
                     .instance_source(*id)
                     .map(|source| JournalOp::SetInstanceSource { id: *id, source })
             }
+            LayerCommand::AttachMask { id, old, .. } => {
+                old.as_ref()?;
+                stack
+                    .layer(*id)
+                    .and_then(|layer| layer.mask.as_ref())
+                    .map(|mask| JournalOp::SetLayerMask {
+                        id: *id,
+                        mask: Some(mask.name.clone()),
+                    })
+            }
+            LayerCommand::DetachMask { id, removed, .. } => {
+                removed.as_ref()?;
+                stack.layer(*id).map(|_| JournalOp::SetLayerMask {
+                    id: *id,
+                    mask: None,
+                })
+            }
+            LayerCommand::SetMaskEnabled { id, old, .. } => {
+                old.as_ref()?;
+                stack
+                    .layer(*id)
+                    .and_then(|layer| layer.mask.as_ref())
+                    .map(|mask| JournalOp::SetMaskEnabled {
+                        id: *id,
+                        enabled: mask.enabled,
+                    })
+            }
         }
     }
 
@@ -213,6 +259,25 @@ impl JournalOp {
             }
             LayerCommand::SetInstanceSource { id, old, .. } => {
                 old.map(|source| JournalOp::SetInstanceSource { id: *id, source })
+            }
+            // Reverting AttachMask restores the captured `old` (Some(Some)
+            // = had a different mask, Some(None) = had none); reverting
+            // DetachMask re-attaches the removed one. Both map to the
+            // mask's NAME (the pixels re-derive from the paint sidecars).
+            LayerCommand::AttachMask { id, old, .. } => {
+                old.clone().flatten().map(|mask| JournalOp::SetLayerMask {
+                    id: *id,
+                    mask: Some(mask.name),
+                })
+            }
+            LayerCommand::DetachMask { id, removed, .. } => {
+                removed.clone().map(|mask| JournalOp::SetLayerMask {
+                    id: *id,
+                    mask: Some(mask.name),
+                })
+            }
+            LayerCommand::SetMaskEnabled { id, old, .. } => {
+                old.map(|enabled| JournalOp::SetMaskEnabled { id: *id, enabled })
             }
         }
     }
@@ -287,6 +352,24 @@ impl JournalOp {
                 // a retarget that now cycles is ignored, like the live
                 // redo path).
                 let _ = stack.set_instance_source(*id, *source);
+            }
+            JournalOp::SetLayerMask { id, mask } => {
+                // Replay converges on the mask's PRESENCE: attach when the
+                // op says one exists (a fresh metadata mask under the
+                // recorded name — the pixel pool re-derives from the
+                // sidecars), detach when it says none. A replay running on
+                // a stack that already matches is a no-op by construction.
+                match mask {
+                    Some(name) => {
+                        let _ = stack.attach_mask(*id, name.clone());
+                    }
+                    None => {
+                        let _ = stack.detach_mask(*id);
+                    }
+                }
+            }
+            JournalOp::SetMaskEnabled { id, enabled } => {
+                let _ = stack.set_mask_enabled(*id, *enabled);
             }
         }
     }

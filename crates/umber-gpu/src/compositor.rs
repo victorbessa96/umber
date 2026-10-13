@@ -697,7 +697,7 @@ pub fn composite_pixel_masked(
             mode.blend_channel(src[1], dst[1])?,
             mode.blend_channel(src[2], dst[2])?,
         ]
-    };)
+    };
     let src_a = clamp01(src[3]);
     let base_r = clamp01(dst[0]);
     let base_g = clamp01(dst[1]);
@@ -911,8 +911,7 @@ impl StackCompositor {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let fallback_mask_view =
-            fallback_mask.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_mask_view = fallback_mask.create_view(&wgpu::TextureViewDescriptor::default());
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("umber_stack_composite_pipeline_layout"),
@@ -1062,10 +1061,7 @@ impl StackCompositor {
                         });
                     }
                     owned_masks.push(self.upload_mask(encoder, bytes, width, height));
-                    let view = &owned_masks
-                        .last()
-                        .expect("just pushed")
-                        .1;
+                    let view = &owned_masks.last().expect("just pushed").1;
                     (view, 1u32)
                 }
                 None => (&self.fallback_mask_view, 0u32),

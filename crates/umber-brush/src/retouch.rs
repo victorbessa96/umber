@@ -302,7 +302,7 @@ pub fn footprint(pos: [f32; 2], radius: f32, width: u32, height: u32) -> Option<
 
 /// The per-texel coverage the paint shader would give `(x, y)` under
 /// `dab` (`alpha * falloff`), or `None` outside the disc.
-pub(crate) fn coverage(dab: &RetouchDab, x: u32, y: u32) -> Option<f32> {
+pub fn coverage(dab: &RetouchDab, x: u32, y: u32) -> Option<f32> {
     let r = dab.radius.max(1e-5);
     let cx = x as f32 + 0.5 - dab.pos[0];
     let cy = y as f32 + 0.5 - dab.pos[1];
