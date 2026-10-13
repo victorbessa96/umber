@@ -25,7 +25,8 @@ Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, th
    - Fluent ids can't contain dots, so `tr("menu.open-mesh")` maps to message `menu`, attribute `.open-mesh`. Use kebab-case attributes under an existing group header.
 8. **State judgment calls in the module docs**: constants, v1 boundaries, deliberate deferrals. The next agent reads those before extending.
 9. **Mark your requirements row.** If your task completes a row in `docs/specs/requirements.md`, add a 4th cell: `` | ✓ built (`PENDING`) — <v1 boundary, if any> | ``. The dragon fills in the sha.
-10. **Don't touch the hard walls**: no .sbsar/.spp execution or parsing, no Adobe SDKs. License stays GPL-3.0-or-later.
+10. **Hard walls**: no .sbsar execution, no Adobe SDKs, no WRITING .spp. `.spp` IMPORT is ratified (binding ruling 2026-10-12): read-only through `crates/spp` (umber-spp), clean-room per `docs/research/spp-hdf5-layout.md` — never a write path. License stays GPL-3.0-or-later.
+11. **Never crash in the engine crates** (the never-crash gate, 2026-10-13): `umber-core`, `umber-color`, `umber-spp` deny `unwrap`/`expect`/`panic` in non-test code (`cfg_attr(not(test), deny(...))` at the crate root + `clippy.toml`). Return typed errors; a provably-infallible case needs `#[allow(clippy::expect_used)]` + the reason. `umber-gpu`/`umber-app` are exempt (harness + UI code), but the discipline is the same there.
 
 ## Rust traps (each one cost a CI round; check your diff for all of them)
 
@@ -43,6 +44,7 @@ Compile errors:
 - **`std::env::temp_dir()` under the agent harness is `~/.hermes/cache/scratch`**, not `/tmp` — CI-style `/tmp` assumptions don't hold locally; failed-run leftovers accumulate there and are evidence.
 
 Clippy `-D warnings`:
+- **Crate-root deny lints beat clippy.toml's allowances.** A plain `#![deny(clippy::unwrap_used)]` also binds TEST code (clippy.toml's `allow-unwrap-in-tests` can't override a crate-level deny). The working shape is `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` — see umber-core/umber-color/umber-spp's lib.rs.
 - **Too many arguments**: >7 params fails. Bundle them into a context struct and state the call.
 - **Derivable `Default`**: use `#[derive(Default)]`, with `#[default]` on the enum variant. Tuned defaults (non-zero, non-first) stay manual.
 - **`neg_cmp_op_on_partial_ord`**:
