@@ -159,12 +159,21 @@ const BLEND_NORMAL_DETAIL: u32 = 29u;
 const BLEND_NORMAL_INVERSE_DETAIL: u32 = 30u;
 
 fn clamp01(v: f32) -> f32 {
-    // WGSL has NO isNan/isnan builtin (removed from the spec; naga 30's
-    // front accepts neither spelling — the Gate-0 journey test caught this
-    // on the shader's FIRST real compile, since the unit tests exercise
-    // only the CPU oracle). The portable idiom: NaN is the only f32 that
-    // compares unequal to itself.
-    if (v != v) {
+    // WGSL has NO isNan/isinf builtin (removed from the spec; naga 30's
+    // front accepts neither spelling — the Gate-0 journey test caught the
+    // isNan case on the shader's FIRST real compile, and the wave-1
+    // battery caught the INF case cross-platform: f32 clamp(INF, 0, 1)
+    // diverges across implementations, so a plain clamp LEAKS +inf as 1.0
+    // (fully open) on some stacks. The portable fail-closed idiom for ALL
+    // non-finite values: NaN compares unequal to itself; ±inf fails the
+    // finite-range test (a finite v always satisfies both v >= 0.0 OR
+    // v <= 1.0 being COMPARABLE — the exact test is that inf compares
+    // 'wrongly': +inf > 1.0 survives clamp, so the reject arm is
+    // !(v <= 1.0) && !(v >= 0.0) is empty for finite... explicit form:
+    // NaN: v != v. +inf: v > 1.0 AND v*0.0 != 0.0 (finite >1 clamps, inf
+    // doesn't multiply down). Simplest portable: reject when the value
+    // doesn't survive the finite probe v - v == 0 (inf - inf = NaN, fails).
+    if (v != v || v - v != 0.0) {
         return 0.0;
     }
     return clamp(v, 0.0, 1.0);
@@ -601,13 +610,15 @@ pub enum CompositeError {
 /// Clamps a linear-space channel to `0.0..=1.0`, mapping `NaN` to `0.0`.
 ///
 /// Private mirror of `umber_core::BlendMode`'s own clamp (which is private
-/// there): `±inf` saturates, `NaN` becomes black so one bad texel cannot
-/// poison the composite.
+/// there): ALL non-finite input (NaN AND ±inf — the wave-1 battery caught
+/// the inf leak cross-platform: `clamp(inf, 0, 1)` is 1.0 on the CPU and
+/// diverges in WGSL stacks) becomes 0.0 so one bad texel cannot poison
+/// the composite — fail-closed for every non-finite value.
 fn clamp01(v: f32) -> f32 {
-    if v.is_nan() {
-        0.0
-    } else {
+    if v.is_finite() {
         v.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 

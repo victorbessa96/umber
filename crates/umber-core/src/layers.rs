@@ -285,16 +285,18 @@ pub enum BlendMode {
 impl BlendMode {
     /// Clamps a linear-space channel value to `0.0..=1.0` for blending.
     ///
-    /// `±inf` saturates to the nearer end; `NaN` maps to `0.0` rather than
-    /// poisoning the composite (a `NaN` texel must still composite to
-    /// *something* finite — black is the safe choice, matching how
+    /// Fail-closed for ALL non-finite input: `NaN` AND `±inf` map to `0.0`
+    /// rather than poisoning the composite (the wave-1 battery caught the
+    /// inf leak cross-platform: `clamp(inf, 0, 1)` is 1.0 on the CPU and
+    /// diverges in WGSL stacks — a `±inf` texel must composite to
+    /// *something* finite; black is the safe choice, matching how
     /// [`LayerStack::set_opacity`] refuses to store non-finite input
     /// instead of letting it through).
     fn clamp01(v: f32) -> f32 {
-        if v.is_nan() {
-            0.0
-        } else {
+        if v.is_finite() {
             v.clamp(0.0, 1.0)
+        } else {
+            0.0
         }
     }
 
