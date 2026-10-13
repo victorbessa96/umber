@@ -12,13 +12,17 @@
 //!
 //! The status line says whether the chain is live in the viewport
 //! ([`PostFxStatus`]: idle with nothing enabled, live, or bypassed under
-//! a data view mode — see `umber_gpu::postfx_viewport`). v1 limit (also
-//! said there): the chain is session state, not saved in the `.umber`
-//! project yet.
+//! a data view mode — see `umber_gpu::postfx_viewport`). The chain
+//! persists in the `.umber` project through the `postfx` settings carry
+//! (`umber_core::project::PostFxCarry`, converted at the save/load seam
+//! by `carry_from_chain`/`chain_from_carry` below); only the panel's own
+//! state ([`PostFxPanel`]: the add pick, the drag in flight) stays
+//! session-only.
 
 use crate::i18n;
 use egui::Ui;
 use fluent::FluentValue;
+use umber_core::project::{PostFxCarry, PostFxEffect, PostFxToneMapMode};
 use umber_gpu::postfx::{PostChain, PostEffect, PostPass, ToneMapMode};
 use umber_gpu::{PostFxStatus, ViewMode};
 
@@ -100,6 +104,88 @@ fn status_label(status: PostFxStatus) -> String {
         PostFxStatus::Live => i18n::tr("postfx.status-live"),
         PostFxStatus::BypassedDataMode => i18n::tr("postfx.status-bypassed"),
     }
+}
+
+/// Builds the project carry from the live chain (the save path):
+/// params ride as-is — the model is already the clamp point (every panel
+/// edit writes back through `PostEffect::clamped`), so a save is exact.
+#[must_use]
+pub fn carry_from_chain(chain: &PostChain) -> PostFxCarry {
+    PostFxCarry {
+        effects: chain
+            .effects
+            .iter()
+            .map(|effect| match *effect {
+                PostEffect::Dof { focus, aperture } => PostFxEffect::Dof { focus, aperture },
+                PostEffect::Bloom {
+                    threshold,
+                    intensity,
+                    radius,
+                } => PostFxEffect::Bloom {
+                    threshold,
+                    intensity,
+                    radius,
+                },
+                PostEffect::Vignette { strength, softness } => {
+                    PostFxEffect::Vignette { strength, softness }
+                }
+                PostEffect::Sharpen { amount, radius } => PostFxEffect::Sharpen { amount, radius },
+                PostEffect::ToneMap { mode, exposure } => PostFxEffect::ToneMap {
+                    mode: match mode {
+                        ToneMapMode::Aces => PostFxToneMapMode::Aces,
+                        ToneMapMode::Filmic => PostFxToneMapMode::Filmic,
+                        ToneMapMode::Reinhard => PostFxToneMapMode::Reinhard,
+                    },
+                    exposure,
+                },
+            })
+            .collect(),
+        enabled: chain.enabled.clone(),
+    }
+}
+
+/// Rebuilds a chain from a loaded carry (the load path): params clamp
+/// through `PostEffect::clamped` (hand-edited files can carry
+/// out-of-range values — the same rule as the display `sanitized`
+/// restore), and a short `enabled` vec reads as enabled (absent ⇒
+/// enabled). The matches are exhaustive on both enums: a variant added
+/// to either the carry or the model breaks the build here — the
+/// mirror-drift guard (see `umber_core::project::PostFxToneMapMode`).
+#[must_use]
+pub fn chain_from_carry(carry: &PostFxCarry) -> PostChain {
+    let mut chain = PostChain::new();
+    for (index, effect) in carry.effects.iter().enumerate() {
+        let mapped = match *effect {
+            PostFxEffect::Dof { focus, aperture } => PostEffect::Dof { focus, aperture },
+            PostFxEffect::Bloom {
+                threshold,
+                intensity,
+                radius,
+            } => PostEffect::Bloom {
+                threshold,
+                intensity,
+                radius,
+            },
+            PostFxEffect::Vignette { strength, softness } => {
+                PostEffect::Vignette { strength, softness }
+            }
+            PostFxEffect::Sharpen { amount, radius } => PostEffect::Sharpen { amount, radius },
+            PostFxEffect::ToneMap { mode, exposure } => PostEffect::ToneMap {
+                mode: match mode {
+                    PostFxToneMapMode::Aces => ToneMapMode::Aces,
+                    PostFxToneMapMode::Filmic => ToneMapMode::Filmic,
+                    PostFxToneMapMode::Reinhard => ToneMapMode::Reinhard,
+                },
+                exposure,
+            },
+        };
+        // `push` clamps and appends enabled; the index is the one just
+        // pushed, so the flag write cannot miss.
+        chain.push(mapped);
+        let on = carry.enabled.get(index).copied().unwrap_or(true);
+        chain.set_enabled(index, on);
+    }
+    chain
 }
 
 /// One effect's param sliders; true when a value changed. Ranges mirror
@@ -306,7 +392,6 @@ fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: 
     ui.label(summary_label(chain));
     // After this frame's edits, so a toggle reads right immediately.
     ui.weak(status_label(PostFxStatus::of(chain, mode)));
-    ui.weak(i18n::tr("postfx.session-only"));
     changed
 }
 
@@ -365,6 +450,48 @@ mod tests {
         assert_ne!(idle, live);
         assert_ne!(live, bypassed);
         assert_ne!(idle, bypassed);
+    }
+
+    #[test]
+    fn carry_round_trip_is_exact() {
+        // One effect of each kind (the bloom row disabled): across the
+        // save/load seam the chain comes back equal — order, params and
+        // flags (in-memory; the byte-exact file leg lives in
+        // `umber_core::project`'s `postfx_carry_round_trip_byte_identical`).
+        let mut chain = PostChain::new();
+        for pass in PostPass::ALL {
+            chain.push(PostEffect::default_for(pass));
+        }
+        assert!(chain.set_enabled(1, false));
+        let carry = carry_from_chain(&chain);
+        assert_eq!(carry.effects.len(), PostPass::ALL.len());
+        assert_eq!(carry.enabled, vec![true, false, true, true, true]);
+        assert_eq!(chain_from_carry(&carry), chain);
+    }
+
+    #[test]
+    fn chain_from_carry_clamps_and_defaults_missing_flags() {
+        // Hand-edited values clamp through the model (the pins mirror
+        // `umber_gpu::postfx`'s `params_clamp_at_construct`); a missing
+        // flag reads as enabled (absent ⇒ enabled).
+        let carry = PostFxCarry {
+            effects: vec![PostFxEffect::Bloom {
+                threshold: 99.0,
+                intensity: -4.0,
+                radius: 1000,
+            }],
+            enabled: vec![],
+        };
+        let chain = chain_from_carry(&carry);
+        assert_eq!(
+            chain.effects,
+            vec![PostEffect::Bloom {
+                threshold: 4.0,
+                intensity: 0.0,
+                radius: 64,
+            }]
+        );
+        assert_eq!(chain.enabled, vec![true]);
     }
 
     #[test]

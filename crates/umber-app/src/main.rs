@@ -460,8 +460,9 @@ pub struct AppState {
     pub display_lut: display_panel::DisplayLutState,
     /// The post-effects chain (§7:84; Display panel's postfx section).
     /// Live in the viewport whenever an effect is enabled (see
-    /// `umber_gpu::postfx_viewport`); session state in v1, not yet saved
-    /// in the project.
+    /// `umber_gpu::postfx_viewport`); saved in the project through the
+    /// `postfx` settings carry (only the panel's add-pick + drag state
+    /// stays session-only — see `postfx_panel::PostFxPanel`).
     pub postfx: umber_gpu::postfx::PostChain,
     /// The postfx section's UI state (never serialized).
     pub postfx_panel: postfx_panel::PostFxPanel,
@@ -1913,7 +1914,10 @@ impl UmberApp {
     /// layer stack + project settings through `umber_core::project`,
     /// plus the graph panel's graph as a `.mtlx` string (the additive
     /// wave-5 carry — omitted when the panel's graph is empty, so
-    /// graph-less projects save exactly the old shape).
+    /// graph-less projects save exactly the old shape) and the postfx
+    /// chain as the `postfx` settings carry (empty chains save the empty
+    /// list, which loads back as the identity — the additive rule is
+    /// load-compat: pre-postfx files simply lack the key).
     ///
     /// Paint pixels ride along as the `paint/` sidecar
     /// (`save_paint_tiles`, after the `project.json` commit so the
@@ -1954,6 +1958,7 @@ impl UmberApp {
             umber_core::project::ProjectSettings {
                 active_texture_set: Some(set_name.clone()),
                 display: self.state.display,
+                postfx: postfx_panel::carry_from_chain(&self.state.postfx),
             },
         )
         .with_graphs_mtlx(graphs_mtlx)
@@ -2009,7 +2014,8 @@ impl UmberApp {
     /// starts fresh; the journal is session-scoped by design), the paint
     /// sidecar's pixels into the paint session (`load_paint_tiles` — the
     /// stroke-undo history restarts empty with them), attaches
-    /// the project's autosave journal, and the first carried
+    /// the project's autosave journal, the carried postfx chain into the
+    /// Display panel's postfx section, and the first carried
     /// `.mtlx` graph into the graph panel (a parse failure keeps the
     /// current panel graph and logs — the panel's status line says so).
     fn open_project(&mut self) {
@@ -2060,6 +2066,11 @@ impl UmberApp {
                 // sliders' ranges are the contract.
                 self.state.display = model.settings.display.sanitized();
                 self.state.display_lut.mark_display_lut_dirty();
+                // The carried postfx chain (the conversion clamps — the
+                // same hand-edited-file rule). No dirty flag: the viewport
+                // reads the chain every frame and `PostStack` builds a
+                // newly-seen kind on first use (params ride uniforms).
+                self.state.postfx = postfx_panel::chain_from_carry(&model.settings.postfx);
                 // The painted pixels (or a clear to transparent when the
                 // project predates the sidecar — never the previous
                 // document's paint).

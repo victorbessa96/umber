@@ -103,6 +103,64 @@ pub enum ProjectError {
     LayerIdOverflow(String),
 }
 
+/// The tone-map curve family, as persisted: a plain-data mirror of
+/// `umber_gpu::postfx::ToneMapMode`. `umber-core` takes no GPU dep (see
+/// the workspace map), so the file schema mirrors the enum instead of
+/// naming it; the exhaustive match in the app's carry conversion is the
+/// drift guard — a variant added on either side breaks the build there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PostFxToneMapMode {
+    /// The ACES 1.0 fitted curve.
+    #[default]
+    Aces,
+    /// Hable's filmic shoulder.
+    Filmic,
+    /// The simple Reinhard curve.
+    Reinhard,
+}
+
+/// One post-effect with its parameters, as persisted: a plain-data mirror
+/// of `umber_gpu::postfx::PostEffect` (see [`PostFxToneMapMode`] for why
+/// it is a mirror). Ranges are documented on the GPU side; the load path
+/// clamps through `PostEffect::clamped`, so hand-edited files may carry
+/// out-of-range values safely.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum PostFxEffect {
+    /// Depth-of-field: focus distance (world units) + aperture 0..=1.
+    Dof { focus: f32, aperture: f32 },
+    /// Bright-pass bloom: threshold + intensity (scene-linear) + blur radius.
+    Bloom {
+        threshold: f32,
+        intensity: f32,
+        radius: u32,
+    },
+    /// Radial vignette: edge darkening + inward reach.
+    Vignette { strength: f32, softness: f32 },
+    /// Unsharp-mask sharpen: blend amount + kernel radius.
+    Sharpen { amount: f32, radius: u32 },
+    /// Scene-linear tone-map: curve family + exposure stops.
+    ToneMap {
+        mode: PostFxToneMapMode,
+        exposure: f32,
+    },
+}
+
+/// The persisted post-effects chain (requirements §7:84): the effect list
+/// in execution order plus the per-effect enable flags index-aligned with
+/// it. Empty (the default) = no effects = the identity, so pre-postfx
+/// files (no `postfx` key) load unchanged via `serde(default)` — the same
+/// additive rule as `display` below. Versioned by the project version
+/// stamp; no separate version field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PostFxCarry {
+    /// The effects in execution order.
+    pub effects: Vec<PostFxEffect>,
+    /// Per-effect enable flags, index-aligned with `effects`. A short vec
+    /// reads as enabled (absent ⇒ enabled — the load path's rule).
+    pub enabled: Vec<bool>,
+}
+
 /// Project-wide settings that aren't scoped to a single texture set.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSettings {
@@ -115,6 +173,11 @@ pub struct ProjectSettings {
     /// files as the identity chain (Raw / 0 EV / gamma 1).
     #[serde(default)]
     pub display: umber_color::DisplaySettings,
+    /// The post-effects chain (Display panel's postfx section).
+    /// Additive carry: `default` loads pre-postfx files as the empty
+    /// (identity) chain — the same rule as `display` above.
+    #[serde(default)]
+    pub postfx: PostFxCarry,
 }
 
 /// One texture set's layer stack, as stored in a [`ProjectModel`].
@@ -821,6 +884,97 @@ mod tests {
         assert_dirs_byte_identical(&dir_c, &dir_d);
 
         for dir in [dir_a, dir_b, dir_c, dir_d] {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn pre_postfx_project_json_loads_empty_chain() {
+        // Old files have no "postfx" key in settings: serde(default)
+        // yields the empty chain (no effects) — the additive rule, same
+        // as display.
+        let dir = unique_temp_dir("pre-postfx");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("project.json"),
+            br#"{"version":1,"texture_sets":[{"name":"Body","resolution":2048,"channels":[]}],"layer_sets":[{"texture_set":"Body","layer_ids":[],"next_layer_id":0}],"settings":{"active_texture_set":"Body"}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_from_dir(&dir).expect("pre-postfx file must load");
+        assert_eq!(loaded.settings.active_texture_set.as_deref(), Some("Body"));
+        assert_eq!(loaded.settings.postfx, PostFxCarry::default());
+        assert!(loaded.settings.postfx.effects.is_empty());
+        assert!(loaded.settings.postfx.enabled.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn postfx_carry_round_trip_byte_identical() {
+        // One effect of each kind with exact params (the bloom row
+        // disabled): save -> load is exact, and save -> load -> save is
+        // byte-identical. The JSON assertions pin the stable wire names.
+        let mut model = fixture_model();
+        model.settings.postfx = PostFxCarry {
+            effects: vec![
+                PostFxEffect::Dof {
+                    focus: 5.0,
+                    aperture: 0.3,
+                },
+                PostFxEffect::Bloom {
+                    threshold: 1.0,
+                    intensity: 0.5,
+                    radius: 8,
+                },
+                PostFxEffect::Vignette {
+                    strength: 0.3,
+                    softness: 0.5,
+                },
+                PostFxEffect::Sharpen {
+                    amount: 0.5,
+                    radius: 1,
+                },
+                PostFxEffect::ToneMap {
+                    mode: PostFxToneMapMode::Filmic,
+                    exposure: -1.5,
+                },
+            ],
+            enabled: vec![true, false, true, true, true],
+        };
+        let dir_a = unique_temp_dir("postfx-a");
+        let dir_b = unique_temp_dir("postfx-b");
+
+        save_to_dir(&model, &dir_a).expect("save postfx");
+        let json = fs::read_to_string(dir_a.join("project.json")).unwrap();
+        assert!(json.contains(r#""Dof""#), "{json}");
+        assert!(json.contains(r#""Bloom""#), "{json}");
+        assert!(json.contains(r#""Vignette""#), "{json}");
+        assert!(json.contains(r#""Sharpen""#), "{json}");
+        assert!(json.contains(r#""ToneMap""#), "{json}");
+        assert!(json.contains(r#""Filmic""#), "{json}");
+
+        let loaded = load_from_dir(&dir_a).expect("load postfx");
+        assert_eq!(loaded.settings.postfx, model.settings.postfx);
+        // Bit-exactness on a non-representable float (0.3): serde_json's
+        // shortest round-trip repr parses back to the same bits (the same
+        // guarantee the display test pins for 1.37).
+        match loaded.settings.postfx.effects[0] {
+            PostFxEffect::Dof { aperture, .. } => {
+                assert_eq!(aperture.to_bits(), 0.3f32.to_bits());
+            }
+            other => panic!("expected Dof first, got {other:?}"),
+        }
+        assert_eq!(
+            loaded.settings.postfx.enabled,
+            vec![true, false, true, true, true]
+        );
+        assert_eq!(loaded, model);
+
+        save_to_dir(&loaded, &dir_b).expect("resave postfx");
+        assert_dirs_byte_identical(&dir_a, &dir_b);
+
+        for dir in [dir_a, dir_b] {
             let _ = fs::remove_dir_all(&dir);
         }
     }
