@@ -71,6 +71,10 @@ Pass 4), highest first:
 | 15 | offscreen snapshot harness (absorbed) | **queued** | full panel tree rendered to PNG per theme, --script of control calls; visual regression without a window. Depends on 14 |
 | 16 | corpus pattern for importers (absorbed) | **queued** | pinned sha256-verified never-committed oracle corpus repo + feature-gated tests; lands WITH wave-3 spp-import (the spp oracles ARE its tests) |
 
+| 17 | .spp import — reader crate (ruling 1) | **done (`30b966e`)** | umber-spp: the HDF5-subset reader (superblock v0-v3, OHDR v1/v2+OCHK, the strict datatype allow-list, deflate/shuffle/fletcher32, chunked v1 B-trees, symbol-table groups), HBO detection-only with era labels, the first-class import report; 21 synthetic tests from the research doc's own grids; real-file corpus = the named follow-up (research doc §8) |
+| 18 | PSD import — flatten-on-import (ruling 5 #2) | **done (`a4bf81a`)** | composite-first + honest fallback rasterizer, every deviation reported; 18 byte-pinned tests + the Assets panel section; the #[default]-Composite report-path defect found by the battery's empirical probe |
+| 19 | Dynamic materials design doc (ruling 5 #3) | **done (`83aa242`)** | docs/specs/dynamic-materials-design.md — the material model (LayerKind::Material + out:<channel> graph contract), eval order, persistence, UI, test plan, the 2-kill split. Implementation dispatches after Bessa reads it |
+
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work
 in this project"). Items 10-12 are regular queue work in their audit

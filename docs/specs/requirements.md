@@ -98,7 +98,7 @@
 | Padding: dilation (finite/infinite), transparent/default-color fill; 3D-neighbor aware | P0 | 3 |  ✓ built (`6df5824` UV-padding + `a04e243` infinite) —
 | 8K export (up-sampled from 4K in-app) — canonical row for this requirement (also referenced in §2) | P1 | 5 |  ✓ built (`cd668a3`) —
 | PSD export (layered) | P2 | 6+ |  ✓ built (`40909ea` ag-psd round trip) —
-| PSD import (flatten-on-import; layer maps to texture-set layers) — DESIGNED, deferred: the ag-psd reader exists, but flattening semantics (blend modes, masks, groups) are a large honest-verification surface; deferred until a user need arrives, NOT a technical wall | P3 (designed) | later |
+| PSD import (flatten-on-import; layer maps to texture-set layers) | P3 → P2 delivered | 3 | ✓ built (`a4bf81a`): composite-first (Photoshop's own flatten, verbatim), the honest fallback rasterizer (pixel layers bottom-to-top, group opacity, 1:1 masks, real blend math for normal/multiply/screen) with every deviation reported, never silent; unsupported color modes refuse typed; the Assets panel section + drop routing wired; layer-maps-to-texture-set-layers = the named v2 (always the report's last line) |
 | MaterialX document export (OpenPBR nodedef + image/UDIM tokens) — "beyond raster" interchange | P0 | 3 (basic), 4 (full) |  ✓ built (`14d98fa` + `897e323` mtlx+USD) —
 | USD export (textures + .usda + material binding via UsdShade→OpenPBR) | P1 | 5 | ✓ built (`897e323`) — the importer round-trip proven at runtime, 8/8 tests |
 
@@ -111,7 +111,7 @@
 | USD import (openusd pure-Rust: usda first, usdc when stable) | P1 | 5 |  ✓ built (`a17e1c8` usda hand-parser + `19ccc42` usdc/usdz) —
 | Image formats: png/jpeg/tiff/exr/hdr (image + exr crates); SVG (later) | P0 (png/exr) | 2 |  ✓ built (png/exr first-class via image+exr; SVG later holds) —
 | Mesh-map import by naming convention (TextureSetName_map) | P1 | 3 | ✓ built (`00ee9d7`) — the folder-drop importer, every import a new layer, the unmatched report |
-| **Never:** .spp (undocumented HDF5), .sbsar execution (Adobe Developer Additional Terms — closed, no FOSS license exists) | hard wall | — |
+| ~~Never: .spp~~ — REVERSED for IMPORT ONLY (binding ruling 1, 2026-10-12): the .spp reader crate exists (`30b966e` umber-spp — HDF5-subset, clean-room from published community docs per docs/research/spp-hdf5-layout.md; every HBO graph reports not-imported by era, never an error; writing .spp stays the hard wall). .sbsar execution stays the hard wall | split | — |
 
 ## 8. Project format (.umber — the .spp kill-shot) — [04]
 

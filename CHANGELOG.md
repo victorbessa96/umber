@@ -6,6 +6,18 @@ the source of truth.
 
 ## [Unreleased]
 
+### Wave 3 — the importers wave (2026-10-13, in flight)
+
+- .spp import — the umber-spp reader crate, clean-room HDF5-subset per
+  the binding ruling; HBO graphs report by era, never error; the
+  synthetic 21-test suite from the research doc's own byte grids
+  (`30b966e`)
+- PSD import — composite-first + the honest fallback rasterizer, in
+  the Assets panel with drop routing; every flattening deviation is a
+  report line (`a4bf81a`)
+- Dynamic materials design doc — the ruling-5 design deliverable; the
+  implementation kills dispatch after review (`83aa242`)
+
 ### Wave 2 — the persistence + adoption wave (2026-10-13)
 
 - Post-effects chain persists — the postfx settings carry, save/load
