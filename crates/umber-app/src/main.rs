@@ -530,6 +530,40 @@ pub struct AppState {
     pub stylus: stylus_input::StylusPoller,
 }
 
+impl AppState {
+    /// Resets the document-scoped state for File > New (the headless half
+    /// of [`UmberApp::new_project`], which adds the paint-session rebuild
+    /// that needs the GPU): a fresh document (fresh stack + fresh undo
+    /// journal + detached autosave journal — the same outcome as
+    /// [`document::Document::load_stack`] minus the load), defaulted
+    /// import session states, identity display settings with a dirty LUT
+    /// flag (the frame loop rebuilds + uploads), the identity postfx
+    /// chain ([`umber_gpu::postfx::PostChain::new`]), and no project
+    /// directory (unsaved).
+    ///
+    /// Deliberately NOT reset: the loaded mesh + viewport (mesh buffers
+    /// have no unload path; clearing the handle alone would leave a ghost
+    /// on screen), the viewport environment (a studio asset, not document
+    /// state — [`Viewport::set_environment`](viewport::Viewport::set_environment)
+    /// is never called here), the graph panel (its plugin paths load at
+    /// construction), and the fill/path/bake/export panel states
+    /// (session-scoped caches keyed by layer id sit unused once their
+    /// layers are gone — the same shape as deleting a layer today). The
+    /// dirty-document confirm is the named follow-up: the repo has no
+    /// modal pattern (the only `egui::Window` is the Perf HUD), and a
+    /// half-modal would be worse than none.
+    pub fn reset_for_new(&mut self) {
+        self.doc = document::Document::default();
+        self.mesh_import = mesh_map_import::MeshMapImportState::default();
+        self.psd_import = psd_import::PsdImportState::default();
+        self.spp_import = spp_import::SppImportState::default();
+        self.display = umber_color::DisplaySettings::default();
+        self.display_lut.mark_display_lut_dirty();
+        self.postfx = umber_gpu::postfx::PostChain::new();
+        self.project_dir = None;
+    }
+}
+
 /// The eframe app.
 pub struct UmberApp {
     pub state: AppState,
@@ -692,6 +726,7 @@ impl UmberApp {
             return;
         }
         match action {
+            ShellAction::NewProject => self.new_project(),
             ShellAction::OpenMesh => self.open_mesh(),
             ShellAction::OpenProject => self.open_project(),
             ShellAction::SaveProject => self.save_project(),
@@ -2151,6 +2186,36 @@ fn load_paint_tiles_reported(
 }
 
 impl UmberApp {
+    /// File > New / the toolbar button: resets the document-scoped state
+    /// to the boot-fresh shape ([`AppState::reset_for_new`]) and rebuilds
+    /// the paint session on the eframe-owned device/queue — the same
+    /// default texture set + channel stack the boot builds, so no stroke,
+    /// mask, or tile from the previous document survives. The viewport
+    /// keeps its environment: the IBL is a studio asset, not document
+    /// state (and the loaded mesh stays too — see `reset_for_new`'s
+    /// boundary note).
+    ///
+    /// v1 skips the dirty check: the repo has no modal pattern (the only
+    /// `egui::Window` is the Perf HUD), and a half-modal would be worse
+    /// than none. Unsaved work is discarded — the confirm dialog is the
+    /// named follow-up.
+    fn new_project(&mut self) {
+        self.state.reset_for_new();
+        // The boot shape (see `UmberApp::new`): a fresh default session on
+        // the same device/queue, degrading to view-only with a logged
+        // warning on feature-missing devices, never a failure. The old
+        // session (its tiles, stroke history, masks) drops here.
+        self.state.paint =
+            match paint_state::PaintState::new(self.gpu.device.clone(), self.gpu.queue.clone()) {
+                Ok(session) => Some(session),
+                Err(err) => {
+                    log::warn!("paint disabled: {err:#}");
+                    None
+                }
+            };
+        log::info!("new project: document reset (unsaved)");
+    }
+
     /// Saves the document as a `.umber` project directory via a save
     /// dialog: one texture set (named from the loaded mesh), the
     /// layer stack + project settings through `umber_core::project`,
@@ -2388,6 +2453,9 @@ impl eframe::App for UmberApp {
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
             MenuButton::new(tr("menu.file")).ui(ui, |ui| {
+                if ui.button(tr("shell.new")).clicked() {
+                    actions.push(toolbar::ShellAction::NewProject);
+                }
                 if ui.button(tr("menu.open-mesh")).clicked() {
                     actions.push(toolbar::ShellAction::OpenMesh);
                 }
@@ -2731,6 +2799,86 @@ fn main() -> eframe::Result<()> {
             Err(err) => Err(format!("{err:#}").into()),
         }),
     )
+}
+
+/// File > New tests: the headless reset half (`AppState::reset_for_new` —
+/// every field pinned to its exact boot-fresh value, not a range check).
+/// The GPU half (the paint-session rebuild inside `new_project`) needs an
+/// `eframe::CreationContext`, so it is unverified headless — see the kill
+/// report.
+#[cfg(test)]
+mod new_project_tests {
+    use super::*;
+
+    #[test]
+    fn reset_for_new_restores_the_boot_fresh_shape() {
+        let mut state = AppState::default();
+        // Dirty every reset field away from its default first, so the
+        // asserts below cannot pass vacuously.
+        state.doc.run(umber_core::layers::LayerCommand::add(
+            "Paint 1".to_owned(),
+            umber_core::layers::LayerKind::Paint,
+        ));
+        assert!(state.doc.history.can_undo());
+        state.mesh_import.retarget_set("OldSet");
+        state.mesh_import.applied = 7;
+        state.psd_import.retarget_set("OldSet");
+        state.psd_import.applied = 3;
+        state.spp_import.pending.push(("a.spp".to_owned(), None));
+        state.spp_import.status = "waiting".to_owned();
+        state.display.exposure = 2.0;
+        #[cfg(not(feature = "ocio"))]
+        let built = state.display_lut.take_rebuild(&state.display);
+        #[cfg(feature = "ocio")]
+        let built = state.display_lut.take_rebuild(&state.display, None);
+        assert!(
+            built.is_some(),
+            "a dirty LUT must offer a rebuild (else the live assert below is vacuous)"
+        );
+        assert!(state.display_lut.is_live(&state.display));
+        state.postfx.push(umber_gpu::postfx::PostEffect::Vignette {
+            strength: 0.5,
+            softness: 0.5,
+        });
+        assert_eq!(state.postfx.effects.len(), 1);
+        state.project_dir = Some(PathBuf::from("/tmp/umber-new-project-test"));
+
+        state.reset_for_new();
+
+        assert!(
+            state.doc.stack.layers.is_empty(),
+            "a fresh document has no layers"
+        );
+        assert!(
+            !state.doc.history.can_undo(),
+            "a fresh document has no undo"
+        );
+        assert!(
+            !state.doc.history.can_redo(),
+            "a fresh document has no redo"
+        );
+        assert_eq!(
+            state.doc.journal_seq(),
+            0,
+            "a fresh document journals nowhere"
+        );
+        assert_eq!(state.mesh_import.session_set.name, "TextureSet");
+        assert_eq!(state.mesh_import.applied, 0);
+        assert_eq!(state.psd_import.session_set_name, "TextureSet");
+        assert_eq!(state.psd_import.applied, 0);
+        assert!(state.spp_import.pending.is_empty());
+        assert_eq!(state.spp_import.status, "");
+        assert!(
+            state.display.is_identity(),
+            "display resets to the identity chain (Raw, 0 EV, gamma 1)"
+        );
+        assert!(
+            !state.display_lut.is_live(&state.display),
+            "the reset must dirty the LUT so the frame loop rebuilds it"
+        );
+        assert_eq!(state.postfx, umber_gpu::postfx::PostChain::new());
+        assert!(state.project_dir.is_none(), "a new project is unsaved");
+    }
 }
 
 /// Paint-sidecar persistence tests (CORE-LOOP CRITICAL 4): the filename

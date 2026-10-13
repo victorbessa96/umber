@@ -4725,6 +4725,7 @@ dependencies = [
  "pollster 1.0.1",
  "profiling",
  "rfd",
+ "serde_json",
  "stylus",
  "thiserror 2.0.21",
  "umber-bake",

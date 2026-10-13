@@ -48,11 +48,14 @@
 //! - **Ctrl+S is Save Project as it exists today**: `save_project` always
 //!   shows the save dialog (Save As semantics). A silent re-save to
 //!   `project_dir` would need its own overwrite-safety story.
-//! - **New is shown but disabled.** A real New has to clear the paint
-//!   targets, the fill caches, the mesh and the graph as well as the
-//!   document. A Document-only reset would leave the old painting on
-//!   screen under an empty layer stack. It is deferred, with the reason in
-//!   its tooltip, and has no `ShellAction` until it can be honored.
+//! - **New resets the document, not the studio.** `ShellAction::NewProject`
+//!   rebuilds the document (fresh stack + journal), the paint session,
+//!   the import session states, and the display/postfx settings back to
+//!   the boot-fresh shape (`UmberApp::new_project`). The loaded mesh, the
+//!   viewport environment, and the graph stay: the mesh has no unload
+//!   path (clearing the handle alone would leave a ghost on screen) and
+//!   the IBL is a studio asset, not document state. No shortcut: Ctrl+N
+//!   stays unbound in v1, so [`resolve_shortcut`] never returns it.
 //! - **The tool strip shows placeholder glyphs.** `ToolRow` draws from an
 //!   [`IconAtlas`], and the lucide rasterizing step (`umber_gui::icons`'
 //!   `icon-raster` follow-up) has not landed, so the only atlas is
@@ -85,6 +88,8 @@ use crate::i18n::tr;
 /// Everything the toolbar and the shell shortcuts can ask the app to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellAction {
+    /// Start a new empty project (unsaved). Toolbar button + File menu.
+    NewProject,
     /// File > Open Mesh (dialog).
     OpenMesh,
     /// Open a `.umber` project (dialog). Ctrl+O.
@@ -293,11 +298,15 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
     ui.horizontal(|ui| {
         // File ops. The baked Panel family (icon-raster §11) draws the
         // glyphs; the localized labels moved to tooltips (Photoshop's own
-        // shape — its top strip is icons). "New" stays a disabled text
-        // button: it has no glyph in the family and its deferred state
-        // reads better as text.
-        ui.add_enabled(false, egui::Button::new(tr("shell.new")))
-            .on_disabled_hover_text(tr("shell.new-deferred"));
+        // shape — its top strip is icons). "New" stays a text button: it
+        // has no glyph in the family.
+        if ui
+            .button(tr("shell.new"))
+            .on_hover_text(tr("shell.tip-new"))
+            .clicked()
+        {
+            actions.push(ShellAction::NewProject);
+        }
         let icon_size = 16.0;
         if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
             .on_hover_text(tr("menu.open-mesh"))
@@ -512,6 +521,25 @@ mod tests {
     }
 
     #[test]
+    fn new_project_has_no_shortcut() {
+        // Ctrl+N stays unbound in v1 (see the module docs): no polled
+        // key under any modifier combination resolves to it.
+        let shift = Modifiers {
+            shift: true,
+            ..bare()
+        };
+        for key in SHORTCUT_KEYS {
+            for mods in [bare(), shift, cmd(), cmd_shift()] {
+                assert_ne!(
+                    resolve_shortcut(key, mods),
+                    Some(ShellAction::NewProject),
+                    "{key:?} {mods:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn view_toggles_apply_the_view_actions_only() {
         let mut v = ViewToggles::default();
         assert!(v.apply(ShellAction::ToggleWireframe));
@@ -536,6 +564,7 @@ mod tests {
         // Non-view actions are refused and change nothing.
         let before = v;
         for action in [
+            ShellAction::NewProject,
             ShellAction::Undo,
             ShellAction::Redo,
             ShellAction::OpenMesh,
@@ -570,6 +599,38 @@ mod tests {
             assert!(
                 umber_gui::icons::TOOL_ICONS.contains(&kind.icon()),
                 "{kind:?}"
+            );
+        }
+    }
+
+    /// The glyphs the top strip's icon buttons name (the §11 Panel
+    /// family's consumers, post-`icon_button` conversion) must be in
+    /// the family's list AND in the baked atlas's manifest — a glyph
+    /// the raster step dropped renders an invisible button, and the
+    /// census catches it before CI's screenshot would.
+    #[test]
+    fn panel_icon_buttons_have_baked_glyphs() {
+        for name in ["folder-open", "save", "undo-2", "redo-2", "eye", "pencil"] {
+            assert!(
+                umber_gui::icons::PANEL_ICONS.contains(&name),
+                "{name} missing from PANEL_ICONS"
+            );
+        }
+        let manifest_path = umber_gui::icons::atlas_dir().join(umber_gui::icons::MANIFEST_FILE);
+        let Ok(bytes) = std::fs::read(&manifest_path) else {
+            // A tree without the baked atlas (the placeholder contract)
+            // skips the manifest half — the family census above still ran.
+            return;
+        };
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the baked manifest parses");
+        let order = manifest["panel"]["order"]
+            .as_array()
+            .expect("the manifest has a panel order");
+        for name in ["folder-open", "save", "undo-2", "redo-2", "eye", "pencil"] {
+            assert!(
+                order.iter().any(|v| v.as_str() == Some(name)),
+                "{name} missing from the baked panel atlas"
             );
         }
     }
