@@ -66,14 +66,17 @@ Pass 4), highest first:
 | 11 | ID-mask selection | **done (e2bed70) — click region → only that ID paints; 5 headless + 2 GPU goldens green under lavapipe; cached-bake + multi-tile = named follow-ups** | expansion row (unfrozen; queued in audit order) |
 | 12 | Height→normal live in viewport | **done end-to-end (be11fe5) — the (c) seam closes it: the height channel binds through set_height_texture, NOT-REACHABLE dead, 317/317 green** | expansion row (unfrozen; queued in audit order) |
 
-| 13 | never-crash lint gate (absorbed from storytold/photocraft) | **queued** | clippy.toml tests-only unwrap/expect/panic + deny lints on engine crates + a panic-hunt test fuzzing public seams; the exploration receipt: vault 2026-10-13-photocraft-exploration.md |
+| 13 | never-crash lint gate (absorbed from storytold/photocraft) | **done (`4bf0d94`)** | clippy.toml + cfg_attr(not(test), deny(...)) on umber-core/color/spp; the census found the engines already clean (a pin) but caught 3 real expects in layers.rs's instance sweep (now typed errors); the deny FIRES (probe-proven — a planted unwrap lints). The panic-hunt fuzz test = the named follow-up |
 | 14 | control protocol v0 (absorbed) | **queued** | TCP loopback + token file + JSON lines + strict param validation + serde UI-state read/drive — the agent surface; mirrors photocraft's docs/control-protocol.md |
 | 15 | offscreen snapshot harness (absorbed) | **queued** | full panel tree rendered to PNG per theme, --script of control calls; visual regression without a window. Depends on 14 |
 | 16 | corpus pattern for importers (absorbed) | **queued** | pinned sha256-verified never-committed oracle corpus repo + feature-gated tests; lands WITH wave-3 spp-import (the spp oracles ARE its tests) |
 
 | 17 | .spp import — reader crate (ruling 1) | **done (`30b966e`)** | umber-spp: the HDF5-subset reader (superblock v0-v3, OHDR v1/v2+OCHK, the strict datatype allow-list, deflate/shuffle/fletcher32, chunked v1 B-trees, symbol-table groups), HBO detection-only with era labels, the first-class import report; 21 synthetic tests from the research doc's own grids; real-file corpus = the named follow-up (research doc §8) |
 | 18 | PSD import — flatten-on-import (ruling 5 #2) | **done (`a4bf81a`)** | composite-first + honest fallback rasterizer, every deviation reported; 18 byte-pinned tests + the Assets panel section; the #[default]-Composite report-path defect found by the battery's empirical probe |
-| 19 | Dynamic materials design doc (ruling 5 #3) | **done (`83aa242`)** | docs/specs/dynamic-materials-design.md — the material model (LayerKind::Material + out:<channel> graph contract), eval order, persistence, UI, test plan, the 2-kill split. Implementation dispatches after Bessa reads it |
+| 19 | Dynamic materials design doc (ruling 5 #3) | **done (`83aa242` → reviewed → rewritten r2 `7ecea60`, READY TO IMPLEMENT)** | the claude-opus adversarial review (19 findings, 4 BLOCKERs — the per-layer stack walk premise was unbuildable; the artifact: docs/loop/artifacts/2026-10-13-dynmat-review.json) then the r2 rewrite folding every finding in. Kill A (headless impl) DISPATCHED and hunting; Kill B (UI) follows |
+| 20 | Toolbar icon-first (the redirect: UI/GUI improvements) | **done (`40c755f`, CI GREEN)** | the Panel family's glyphs consumed: file/history/view/mask as icon buttons with tooltips; icon_button_enabled (the gated variant); dock-tabs honestly stay text (no image WidgetText in egui 0.36 — boundary recorded) |
+| 21 | File > New (the redirect: missing tools) | **done (`cd60ede`)** | the last disabled shell action live; AppState::reset_for_new test-pinned field-exact; the dead new-deferred key pruned; the dirty-check honestly skipped (no modal pattern — named follow-up) |
+
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work
