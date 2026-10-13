@@ -660,11 +660,7 @@ mod tests {
 
     /// A DisplaySettings literal with the per-feature ocio field filled
     /// (tests construct via this — the literals stay feature-blind).
-    fn test_settings(
-        view: DisplayTransform,
-        exposure: f32,
-        gamma: f32,
-    ) -> DisplaySettings {
+    fn test_settings(view: DisplayTransform, exposure: f32, gamma: f32) -> DisplaySettings {
         DisplaySettings {
             view,
             exposure,
@@ -724,8 +720,8 @@ mod tests {
     #[test]
     fn srgb_view_brightens_the_preview() {
         let raw = test_chain_values(&DisplaySettings::default()).map(to_color32);
-        let srgb = test_chain_values(&test_settings(DisplayTransform::Srgb, 0.0, 1.0))
-            .map(to_color32);
+        let srgb =
+            test_chain_values(&test_settings(DisplayTransform::Srgb, 0.0, 1.0)).map(to_color32);
         for (r, s) in raw.iter().zip(srgb.iter()) {
             assert!(s.r() > r.r(), "sRGB {s:?} vs raw {r:?}");
         }

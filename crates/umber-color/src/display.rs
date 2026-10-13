@@ -336,11 +336,7 @@ mod tests {
 
     /// A DisplaySettings literal with the per-feature ocio field filled
     /// (tests construct via this — the literals stay feature-blind).
-    fn settings(
-        view: DisplayTransform,
-        exposure: f32,
-        gamma: f32,
-    ) -> DisplaySettings {
+    fn settings(view: DisplayTransform, exposure: f32, gamma: f32) -> DisplaySettings {
         DisplaySettings {
             view,
             exposure,
