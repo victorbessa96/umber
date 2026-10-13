@@ -4713,6 +4713,7 @@ dependencies = [
 name = "umber-app"
 version = "0.1.0"
 dependencies = [
+ "ag-psd",
  "anyhow",
  "eframe",
  "egui",
@@ -4877,6 +4878,14 @@ dependencies = [
 [[package]]
 name = "umber-plugin-sdk"
 version = "0.1.0"
+
+[[package]]
+name = "umber-spp"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "umber-wasm"

@@ -1,0 +1,12 @@
+[package]
+name = "umber-spp"
+description = "Umber .spp importer (read-only): HDF5-subset reader plus HBO classifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+flate2 = { workspace = true }
