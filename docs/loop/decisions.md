@@ -16,7 +16,7 @@ reports). Bessa's overrides are BINDING and marked.
    Pro sub and hit the weekly wall mid-kill; the wall resets 2am and the
    tier is a budget, not a default.)
 3. **Waves run 24/7** — the flock + one-cargo rule already protects the
-   machine; Magentrix workdays do NOT pause the loop. **The work window
+   machine; workdays do NOT pause the loop. **The work window
    extends to Friday 23:59** (the "until midnight" scope is now "until
    Friday 23:59").
 4. **Perf baseline seeded LOCALLY** — this machine's lavapipe produces
