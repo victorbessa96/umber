@@ -1365,20 +1365,29 @@ impl Session {
     /// composites against the session's snapshot.
     fn paint_stroke(&mut self, s: PaintStrokeStep) -> Result<Fields> {
         if s.points.is_empty() {
-            return Err(anyhow::anyhow!("paint_stroke: points must hold at least one [u, v]"));
+            return Err(anyhow::anyhow!(
+                "paint_stroke: points must hold at least one [u, v]"
+            ));
         }
         for (j, p) in s.points.iter().enumerate() {
             if !p[0].is_finite() || !p[1].is_finite() {
                 return Err(anyhow::anyhow!("points[{j}]: {p:?} is not finite"));
             }
         }
-        if s.color.iter().any(|c| !c.is_finite() || !(0.0..=1.0).contains(c)) {
+        if s.color
+            .iter()
+            .any(|c| !c.is_finite() || !(0.0..=1.0).contains(c))
+        {
             let color = s.color;
-            return Err(anyhow::anyhow!("color {color:?}: each channel must be in 0..=1"));
+            return Err(anyhow::anyhow!(
+                "color {color:?}: each channel must be in 0..=1"
+            ));
         }
         if !s.radius_scale.is_finite() || s.radius_scale <= 0.0 {
             let scale = s.radius_scale;
-            return Err(anyhow::anyhow!("radius_scale {scale} must be finite and > 0"));
+            return Err(anyhow::anyhow!(
+                "radius_scale {scale} must be finite and > 0"
+            ));
         }
         let held = self.project_mut()?;
         let (target, verdict, index) = {

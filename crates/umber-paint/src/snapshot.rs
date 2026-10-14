@@ -28,7 +28,9 @@ pub fn build_composite_snapshot(
     base_visible: bool,
     displayed: Vec<(u16, String)>,
 ) -> crate::paint_state::CompositeSnapshot {
-    use crate::paint_state::{PlaneOwner, SnapshotLayer, SnapshotLayerKind, SnapshotMaterialChannel};
+    use crate::paint_state::{
+        PlaneOwner, SnapshotLayer, SnapshotLayerKind, SnapshotMaterialChannel,
+    };
     let mut layers = vec![SnapshotLayer {
         owner: PlaneOwner::Base,
         layer_id: None,

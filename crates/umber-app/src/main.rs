@@ -138,12 +138,12 @@ mod perf_soak;
 mod plugins;
 mod postfx_panel;
 mod psd_import;
-use umber_paint::retouch;
-use umber_paint::snapshot::{build_composite_snapshot, resolve_instance_source};
 use umber_paint::persistence::{
     dormancy_for, load_paint_tiles_reported, paint_manifest_path, paint_save_version,
     parse_manifest_header, save_paint_tiles, LayerDormancy, OpenSeedRow,
 };
+use umber_paint::retouch;
+use umber_paint::snapshot::{build_composite_snapshot, resolve_instance_source};
 mod size_presets;
 mod spp_import;
 mod status_bar;
@@ -2844,4 +2844,3 @@ mod pool_stage4_tests {
         assert!(resolve_instance_source(&stack, dangling).is_none());
     }
 }
-

@@ -81,7 +81,9 @@ pub fn paint_sidecar_name(channel: &str, tile: u16) -> String {
 /// (texture-set channel names are arbitrary user/import-derived strings,
 /// and the manifest line is space-delimited — this is the trust boundary,
 /// not `is_paint_sidecar_name`'s whitelist alone).
-pub fn parse_paint_sidecar_name(name: &str) -> Option<(crate::paint_state::PlaneOwner, String, u16)> {
+pub fn parse_paint_sidecar_name(
+    name: &str,
+) -> Option<(crate::paint_state::PlaneOwner, String, u16)> {
     let base = crate::paint_state::PlaneOwner::Base;
     let base_color = crate::paint_state::BASE_COLOR_CHANNEL.to_string();
     let parts: Vec<&str> = name.split('/').collect();
@@ -119,10 +121,16 @@ pub fn parse_paint_sidecar_name(name: &str) -> Option<(crate::paint_state::Plane
 /// `layers/<id>/<channel>/` (design §6.1). NOT a 6th manifest column (see
 /// [`paint_sidecar_name`'s docs] — `parse_paint_commit`'s exact 5-field
 /// destructure is unchanged).
-pub fn paint_plane_sidecar_name(owner: crate::paint_state::PlaneOwner, channel: &str, tile: u16) -> String {
+pub fn paint_plane_sidecar_name(
+    owner: crate::paint_state::PlaneOwner,
+    channel: &str,
+    tile: u16,
+) -> String {
     match owner {
         crate::paint_state::PlaneOwner::Base => paint_sidecar_name(channel, tile),
-        crate::paint_state::PlaneOwner::Layer(id) => format!("layers/{id}/{channel}/tile-{tile}.png"),
+        crate::paint_state::PlaneOwner::Layer(id) => {
+            format!("layers/{id}/{channel}/tile-{tile}.png")
+        }
     }
 }
 
@@ -1296,7 +1304,9 @@ pub fn collect_paint_tiles(dir: &Path) -> LoadedPlaneSidecars {
 /// flat `mask-<layer>-tile-<N>.png` files only (masks never nest — see
 /// [`paint_mask_name`]). Decoded like paint tiles (the PNG reader's row
 /// order flipped back); a decode failure skips that plane loudly.
-pub fn collect_paint_masks(dir: &Path) -> std::collections::BTreeMap<(u64, u16), (u32, u32, Vec<u8>)> {
+pub fn collect_paint_masks(
+    dir: &Path,
+) -> std::collections::BTreeMap<(u64, u16), (u32, u32, Vec<u8>)> {
     let mut found = std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return found;
