@@ -107,6 +107,7 @@ enum AgentStep {
     LayerRemove(LayerRemoveStep),
     LayerSetOpacity(LayerSetOpacityStep),
     LayerReorder(LayerReorderStep),
+    LayerRename(LayerRenameStep),
     LayerSetMaterial(LayerSetMaterialStep),
     Undo(NoFields),
     Redo(NoFields),
@@ -226,6 +227,15 @@ struct LayerRemoveStep {
 struct LayerSetOpacityStep {
     id: u64,
     opacity: f32,
+}
+
+/// `layer_rename` — renames one layer (one undoable `Rename` op; the
+/// name-only journal entry rides the core's `JournalOp::Rename`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerRenameStep {
+    id: u64,
+    name: String,
 }
 
 /// `layer_reorder` — move one layer to stack position `to` (index 0 =
@@ -803,6 +813,7 @@ impl Session {
             AgentStep::LayerRemove(s) => self.layer_remove(s),
             AgentStep::LayerSetOpacity(s) => self.layer_set_opacity(s),
             AgentStep::LayerReorder(s) => self.layer_reorder(s),
+            AgentStep::LayerRename(s) => self.layer_rename(s),
             AgentStep::LayerSetMaterial(s) => self.layer_set_material(s),
             AgentStep::Undo(NoFields {}) => self.project_undo(),
             AgentStep::Redo(NoFields {}) => self.project_redo(),
@@ -1069,6 +1080,28 @@ impl Session {
             "id": id,
             "from": from,
             "to": landed,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
+    }
+
+    /// `layer_rename`: renames one layer (one undoable `Rename` op).
+    /// An empty name is rejected (the stack has no unnamed layers);
+    /// the reply carries the stored name verbatim.
+    fn layer_rename(&mut self, s: LayerRenameStep) -> Result<Fields> {
+        let (id, name) = (s.id, s.name);
+        if name.trim().is_empty() {
+            anyhow::bail!("layer_rename: name must not be empty");
+        }
+        let report = self.apply_edit(LayerCommand::rename(id, name))?;
+        let stored = active_stack(self.project()?)?
+            .layer(id)
+            .map(|l| l.name.clone())
+            .ok_or_else(|| anyhow::anyhow!("internal: layer {id} missing after rename"))?;
+        fields(serde_json::json!({
+            "id": id,
+            "name": stored,
             "journal_seq": report.journal_seq,
             "can_undo": report.can_undo,
             "can_redo": report.can_redo,

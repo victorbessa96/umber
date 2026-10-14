@@ -518,6 +518,7 @@ history =
     .op-set-opacity = Definir opacidade
     .op-set-visible = Definir visibilidade
     .op-set-blend = Definir modo de mesclagem
+    .op-rename = Renomear camada
     .op-set-fill = Camada de preenchimento
     .op-set-material = Definir material
     .op-set-instance-source = Definir origem da instância

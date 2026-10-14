@@ -1090,6 +1090,14 @@ impl LayerStack {
         self.layer_mut(id)?.mask.take()
     }
 
+    /// Renames a layer, returning the previous name. `None` when the
+    /// layer is unknown (nothing changes). Names are not unique keys —
+    /// the id is — so a rename never collides.
+    pub fn rename_layer(&mut self, id: u64, name: String) -> Option<String> {
+        let layer = self.layer_mut(id)?;
+        Some(std::mem::replace(&mut layer.name, name))
+    }
+
     /// Enables or disables the layer's mask, returning the previous flag.
     /// `None` when the layer is unknown or has no mask (nothing changes).
     pub fn set_mask_enabled(&mut self, id: u64, enabled: bool) -> Option<bool> {
@@ -1450,6 +1458,15 @@ pub enum LayerCommand {
         /// Previous blend mode, captured by `apply` for `revert`.
         old: Option<BlendMode>,
     },
+    /// Renames a layer.
+    Rename {
+        /// Id of the layer to update.
+        id: u64,
+        /// New name.
+        new: String,
+        /// Previous name, captured by `apply` for `revert`.
+        old: Option<String>,
+    },
     /// Sets a layer's fill parameters (source + projection + mask).
     SetFill {
         /// Id of the layer to update.
@@ -1534,6 +1551,15 @@ impl LayerCommand {
             from,
             to,
             applied_to: None,
+        }
+    }
+
+    /// Builds a [`Rename`](LayerCommand::Rename) command.
+    pub fn rename(id: u64, name: String) -> Self {
+        LayerCommand::Rename {
+            id,
+            new: name,
+            old: None,
         }
     }
 
@@ -1635,6 +1661,7 @@ impl Command for LayerCommand {
             LayerCommand::SetOpacity { id, new, old } => *old = doc.set_opacity(*id, *new),
             LayerCommand::SetVisible { id, new, old } => *old = doc.set_visible(*id, *new),
             LayerCommand::SetBlendMode { id, new, old } => *old = doc.set_blend_mode(*id, *new),
+            LayerCommand::Rename { id, new, old } => *old = doc.rename_layer(*id, new.clone()),
             LayerCommand::SetFill { id, new, old } => *old = doc.set_fill(*id, new.clone()),
             LayerCommand::SetMaterial { id, new, old } => {
                 *old = doc.set_material(*id, new.clone());
@@ -1689,6 +1716,11 @@ impl Command for LayerCommand {
             LayerCommand::SetBlendMode { id, old, .. } => {
                 if let Some(value) = old.take() {
                     doc.set_blend_mode(*id, value);
+                }
+            }
+            LayerCommand::Rename { id, old, .. } => {
+                if let Some(value) = old.take() {
+                    doc.rename_layer(*id, value);
                 }
             }
             LayerCommand::SetFill { id, old, .. } => {
@@ -2039,6 +2071,62 @@ mod tests {
         // Can-fail: deriving Default would pin opacity 0.0 + disabled,
         // silently blacking out every unlisted channel.
         assert_ne!(channel.opacity, 0.0);
+    }
+
+    #[test]
+    fn rename_roundtrips_through_undo_and_the_journal() {
+        use crate::undo::UndoStack;
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Base", LayerKind::Paint);
+        let mut history = UndoStack::new(8);
+        let cmd = LayerCommand::Rename {
+            id,
+            new: "Renamed".into(),
+            old: None,
+        };
+        history.push(cmd, &mut stack);
+        assert_eq!(stack.layer(id).unwrap().name, "Renamed");
+        // The journal's forward op carries the post-apply name.
+        let cmd = history.peek_undo().expect("pushed");
+        let op = crate::journal::JournalOp::applied(cmd, &stack).unwrap();
+        assert_eq!(
+            op,
+            crate::journal::JournalOp::Rename {
+                id,
+                name: "Renamed".into()
+            }
+        );
+        // The reverting op names the captured old name.
+        let reverting = crate::journal::JournalOp::reverting(cmd, &stack).unwrap();
+        assert_eq!(
+            reverting,
+            crate::journal::JournalOp::Rename {
+                id,
+                name: "Base".into()
+            }
+        );
+        history.undo(&mut stack);
+        assert_eq!(stack.layer(id).unwrap().name, "Base");
+        history.redo(&mut stack);
+        assert_eq!(stack.layer(id).unwrap().name, "Renamed");
+    }
+
+    #[test]
+    fn rename_on_unknown_layer_is_a_no_op() {
+        use crate::undo::UndoStack;
+        let mut stack = LayerStack::new();
+        let mut history = UndoStack::new(8);
+        history.push(
+            LayerCommand::Rename {
+                id: 999,
+                new: "Ghost".into(),
+                old: None,
+            },
+            &mut stack,
+        );
+        // Unknown id: nothing changed, and the journal records no op.
+        let cmd = history.peek_undo().expect("pushed");
+        assert!(crate::journal::JournalOp::applied(cmd, &stack).is_none());
     }
 
     #[test]

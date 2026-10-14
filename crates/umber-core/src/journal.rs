@@ -144,6 +144,13 @@ pub enum JournalOp {
         /// The flag after the op.
         enabled: bool,
     },
+    /// A layer's name ([`LayerCommand::Rename`]).
+    Rename {
+        /// The layer's id.
+        id: u64,
+        /// The name the stack holds after the op.
+        name: String,
+    },
 }
 
 impl JournalOp {
@@ -237,6 +244,10 @@ impl JournalOp {
                         enabled: mask.enabled,
                     })
             }
+            LayerCommand::Rename { id, .. } => stack.layer(*id).map(|layer| JournalOp::Rename {
+                id: *id,
+                name: layer.name.clone(),
+            }),
         }
     }
 
@@ -299,6 +310,10 @@ impl JournalOp {
             LayerCommand::SetMaskEnabled { id, old, .. } => {
                 old.map(|enabled| JournalOp::SetMaskEnabled { id: *id, enabled })
             }
+            LayerCommand::Rename { id, old, .. } => old.as_ref().map(|name| JournalOp::Rename {
+                id: *id,
+                name: name.clone(),
+            }),
         }
     }
 
@@ -401,6 +416,9 @@ impl JournalOp {
             }
             JournalOp::SetMaskEnabled { id, enabled } => {
                 let _ = stack.set_mask_enabled(*id, *enabled);
+            }
+            JournalOp::Rename { id, name } => {
+                let _ = stack.rename_layer(*id, name.clone());
             }
         }
     }

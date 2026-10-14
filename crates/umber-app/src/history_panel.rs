@@ -125,6 +125,8 @@ pub enum HistoryKind {
     SetVisible,
     /// [`LayerCommand::SetBlendMode`].
     SetBlendMode,
+    /// [`LayerCommand::Rename`] (a layer renamed).
+    Rename,
     /// [`LayerCommand::SetFill`].
     SetFill,
     /// [`LayerCommand::SetMaterial`] (a material layer's definition,
@@ -169,6 +171,7 @@ impl HistoryKind {
             LayerCommand::SetOpacity { .. } => Self::SetOpacity,
             LayerCommand::SetVisible { .. } => Self::SetVisible,
             LayerCommand::SetBlendMode { .. } => Self::SetBlendMode,
+            LayerCommand::Rename { .. } => Self::Rename,
             LayerCommand::SetFill { .. } => Self::SetFill,
             LayerCommand::SetMaterial { .. } => Self::SetMaterial,
             LayerCommand::SetInstanceSource { .. } => Self::SetInstanceSource,
@@ -192,6 +195,7 @@ impl HistoryKind {
             Self::SetOpacity => tr("history.op-set-opacity"),
             Self::SetVisible => tr("history.op-set-visible"),
             Self::SetBlendMode => tr("history.op-set-blend"),
+            Self::Rename => tr("history.op-rename"),
             Self::SetFill => tr("history.op-set-fill"),
             Self::SetMaterial => tr("history.op-set-material"),
             Self::SetInstanceSource => tr("history.op-set-instance-source"),

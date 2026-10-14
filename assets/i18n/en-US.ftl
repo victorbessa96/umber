@@ -502,6 +502,7 @@ history =
     .op-set-opacity = Set opacity
     .op-set-visible = Set visibility
     .op-set-blend = Set blend mode
+    .op-rename = Rename layer
     .op-set-fill = Fill layer
     .op-set-material = Set material
     .op-set-instance-source = Set instance source

@@ -605,3 +605,42 @@ fn edits_without_an_open_project_are_typed_errors() {
     agent.close_stdin();
     assert!(agent.wait_exit().success());
 }
+
+#[test]
+fn layer_rename_round_trips_and_journals() {
+    let (mut agent, dir) = open_fixture("rename");
+    let id = body_layers(&agent.call(&json!({ "project_state": {} })))[0]["id"]
+        .as_u64()
+        .expect("id");
+    let before = body_names(&agent.call(&json!({ "project_state": {} })));
+
+    let renamed = agent.call(&json!({ "layer_rename": { "id": id, "name": "New" } }));
+    assert_ok(&renamed, "layer_rename");
+    assert_eq!(renamed["name"], "New", "{renamed}");
+
+    // Undo restores the old name; redo re-applies.
+    assert_ok(&agent.call(&json!({ "undo": {} })), "undo");
+    let undone = body_names(&agent.call(&json!({ "project_state": {} })));
+    assert_eq!(undone, before, "undo restored the pre-rename names");
+    assert_ok(&agent.call(&json!({ "redo": {} })), "redo");
+    let redone = body_names(&agent.call(&json!({ "project_state": {} })));
+    assert!(
+        redone.contains(&"New".to_string()),
+        "redo re-applied: {redone:?}"
+    );
+
+    // Empty name rejected typed; unknown id rejected typed; the session
+    // survives both.
+    let empty = agent.call(&json!({ "layer_rename": { "id": id, "name": "  " } }));
+    assert_eq!(empty["ok"], false, "{empty}");
+    let ghost = agent.call(&json!({ "layer_rename": { "id": 999, "name": "X" } }));
+    assert_eq!(ghost["ok"], false, "{ghost}");
+    assert_ok(
+        &agent.call(&json!({ "project_state": {} })),
+        "project_state",
+    );
+
+    agent.close_stdin();
+    agent.wait_exit();
+    let _ = dir;
+}
