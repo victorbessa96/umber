@@ -302,9 +302,15 @@ mod tests {
         // One past the side bound, either axis.
         assert!(matches!(
             check_exr_size(MAX_EXR_SIDE + 1, 1),
-            Err(ExrError::TooLarge { width: 16_385, height: 1 })
+            Err(ExrError::TooLarge {
+                width: 16_385,
+                height: 1
+            })
         ));
-        assert!(matches!(check_exr_size(1, MAX_EXR_SIDE + 1), Err(ExrError::TooLarge { .. })));
+        assert!(matches!(
+            check_exr_size(1, MAX_EXR_SIDE + 1),
+            Err(ExrError::TooLarge { .. })
+        ));
         // Both sides legal, the area not: 16K² RGBA f32 = 4 GiB.
         assert!(matches!(
             check_exr_size(MAX_EXR_SIDE, MAX_EXR_SIDE),
