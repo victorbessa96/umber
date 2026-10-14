@@ -48,7 +48,7 @@ per kill, one CI run per wave) runs the march now.
 | wave-dynamic-materials | ✓ LANDED END TO END | 83aa242 → review → 7ecea60 → Kill A f85cb0a → Kill B 2c6497e |
 | wave-camera-ortho | OPEN | the named camera gap — moves to the post-pool list |
 | wave-stylus-win32 | OPEN (wave 5 now) | Wintab32 dual-path |
-| wave-8k-export | OPEN (wave 5 now) | the 8K export path |
+| wave-8k-export | ✓ built earlier (`cd668a3`, 2026-10-10) | the 8K presets + bake→export→decode proof at 8192²; roadmap row was stale |
 
 ## The per-layer pool arc — THE CURRENT WAVE (2026-10-14, in flight)
 
@@ -77,7 +77,7 @@ Arc threading; un-premultiply exactness on GPU vendors.
 |---|---|---|
 | wave-camera-ortho | §5 the named camera gap | ✓ landed (40f3e5d); follow-up: ortho-aware DoF |
 | wave-stylus-win32 | §10 the Windows dual-path | Wintab32 polling beside Windows Ink |
-| wave-8k-export | §2/§6 the 8K export path | the per-channel pool carries it; export-side budget rows |
+| wave-8k-export | §2/§6 the 8K export path | ✓ already built (`cd668a3`); requirements row 99 carries it. Open remainder: none named |
 | wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
 | wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
 | wave-harness-script | the snapshot harness's --script arm | drive the agent session, snapshot after each step — visual regression over driven state |
@@ -175,7 +175,7 @@ between "feature-complete" and "a tool a studio trusts".
 | Performance floor | pending baseline (nightly starved) |
 | Paint-what-you-see buffer | live-raycast ✓; the pwys stroke buffer stays a design-first wave-5 candidate |
 | Ortho camera | ✓ landed (40f3e5d) |
-| 8K export | ✗ open = wave 5 (post-pool) |
+| 8K export | ✓ built (`cd668a3`) |
 | Per-layer pixel planes | ✓ the pool arc complete (stages 1a-5, 2026-10-14) |
 | Custom user shaders | runtime ✓; host hook = wave 6 |
 | Rename layers | ✓ LayerCommand::Rename + the wire step (2026-10-14) |
