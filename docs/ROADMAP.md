@@ -1,8 +1,10 @@
 # Umber Long-Horizon Roadmap — the Substance-Parity March and Beyond
 
-Version: 2026-10-12 (post-wave-1-dispatch). Supersedes the wave column in
+Version: 2026-10-14 (the per-layer pool era). Supersedes the wave column in
 requirements.md as the PLAN of record; requirements.md stays the CONTRACT of
 record (each kill's Doc-delta updates its rows, this roadmap orders the work).
+Wave numbering here is the ROADMAP's thematic march; the loop's wave counter
+(the two-gate model) is separate — a loop wave batches 3-5 of these kills.
 
 Method: full census of all 12 requirements sections, every row classified
 done / partial-with-named-boundary / open, every open item dependency-ordered
@@ -11,64 +13,87 @@ inventory), exceeded where [04] (next-gen bar) points.
 
 ---
 
-## Where we stand (2026-10-12, post-core-loop)
+## Where we stand (2026-10-14, the per-layer pool era)
 
 The core loop is Gate-0-proven end to end: mesh → 4K pressured paint →
-compositor → undo/redo → save/reopen → export, both CI platforms. The
-2026-10-12 core-loop day closed 11 of 12 audit worklist items plus the
-follow-up kills (per-channel tile pool, height→normal live end to end,
-icon-raster, ID-mask, OCIO bundled build run, installers proven). The
-Substance-parity march starts from a real engine, not a shell.
+compositor → undo/redo → save/reopen → export, both CI platforms.
+2026-10-13/14 closed the importers wave (the .spp reader crate, PSD
+flatten-on-import), the dynamic-materials arc end to end (design → hostile
+review → r2 → headless Kill A → UI Kill B — per-channel material layers
+live), the never-crash lint gate + panic-hunt fuzz (850 garbage cases, the
+four public seams), the File > New dirty-check, the agent protocol v0 +
+its five wire edit steps (projects, layers, undo over JSONL), the
+offscreen snapshot harness (egui_kittest), the importer corpus harness
+(arms on real .spp files), LayerCommand::Rename, and the per-layer pool's
+first three stages (the compositor's premultiplied mode; the plane
+storage + save v2 round-trip; the selection + stroke gate). Stage 4
+(per-layer pixels) is in flight. The two-gate wave model (local battery
+per kill, one CI run per wave) runs the march now.
 
-## Wave 1 — IN FLIGHT (4 claws, per-kill worktrees)
+## Waves 1-3 of the march — LANDED (2026-10-13/14)
 
-| Kill | Closes | Parity |
+| Kill | State | Proof |
 |---|---|---|
-| wave-masks | LayerMask pixels + compositor gate (critical 6) | paintable per-layer masks |
-| wave-blends | the ~32-mode census (HSV + normal-map families) | full pro blend set |
-| wave-history | click-to-time-travel | the history panel Substance users expect |
-| wave-dist | Flatpak + AppImage + packaging CI | real Linux distribution |
+| wave-masks (per-layer paintable masks) | ✓ landed | 770162f + 21e1290; compositor gate both paths |
+| wave-blends (the 32-mode census) | ✓ landed | d861482 + the HSV/normal-map family goldens |
+| wave-history (click-to-time-travel) | ✓ landed | the History panel's journey rows |
+| wave-dist (Flatpak + AppImage) | ✓ packaging proven | the shell+PS+CI stack; images published per release |
+| wave-postfx-persist | ✓ landed | f35cf48 (project persistence + panel round-trip) |
+| wave-ocio-panel | ✓ landed | 9a1a808 (ACES configs selectable; OCIO adoption) |
+| wave-perchan-res | ✓ landed | f4e7524 (per-channel sizing end to end) |
+| wave-icons-boot | ✓ landed | the icon-first toolbar (40c755f) + the boot atlas |
+| wave-perf-baseline | ✓ landed | fd49627 + the nightly's fixed invocation (17:08 fix) |
+| wave-spp-import | ✓ landed | 30b966e + 0a5c20d; the corpus harness arms on real files |
+| wave-psd-import | ✓ landed | a4bf81a (flatten-on-import, every deviation reported) |
+| wave-dynamic-materials | ✓ LANDED END TO END | 83aa242 → review → 7ecea60 → Kill A f85cb0a → Kill B 2c6497e |
+| wave-camera-ortho | OPEN | the named camera gap — moves to the post-pool list |
+| wave-stylus-win32 | OPEN (wave 5 now) | Wintab32 dual-path |
+| wave-8k-export | OPEN (wave 5 now) | the 8K export path |
 
-Landing order: dist → history → masks → blends (compositor shared: masks
-first, blends rebases if needed).
+## The per-layer pool arc — THE CURRENT WAVE (2026-10-14, in flight)
 
-## Wave 2 — dispatch on wave-1 landing (briefs written THEN; anchors shift)
+The pool redesign that closes the four v1 boundary warts (order not
+preserved, re-eval compounds, nothing un-publishes, anchors self-feedback)
+and gives every layer its own pixels — the architectural heart Substance
+users know as "real layers". Design r2 hostile-reviewed READY TO IMPLEMENT
+(docs/specs/per-layer-pool-design.md).
 
-| Kill | Closes | Depends on | Notes |
-|---|---|---|---|
-| wave-postfx-persist | §5 postfx session-only boundary (C1 audit 1c) | nothing | the chain is wired; add project persistence + panel round-trip |
-| wave-ocio-panel | §9 "in panel": ACES 2.0 configs selectable in Display panel | ocio-bundled (✓ 60b04d0) | the real-mode APIs are live-verified; panel UI + config adoption into the display chain |
-| wave-perchan-res | §2 per-CHANNEL resolution (the deferred half of the sizing row) | wave-1 (same file as masks/blends) | set_sizes gains the channel dimension; the tilepool's TileTargets already isolates per-channel targets |
-| wave-pwys | §1 Mari-style paint buffer (camera moves mid-stroke) | wave-1 | the deepest architectural row: stroke-space buffer decoupled from camera; DESIGN DOC FIRST |
-| wave-perf-baseline | §5 perf floor NOT-REACHABLE: baseline.json on the 4K path | the nightly run (runner-starved, #2) | consume the nightly's artifact, seed baseline.json, wire the compare gate |
-| wave-icons-boot | §11 icon-raster NOT-REACHABLE: boot swaps IconAtlas::empty() → load_baked_atlas | icon-raster (✓ cb4d2bf) | one-line boot change + the atlas path resolution; closes the row's reachability clause |
+| Stage | State | Proof |
+|---|---|---|
+| 1a compositor premultiplied mode | ✓ landed | b1ceb2c (byte-identical, flag off) |
+| 1b plane storage + budgets | ✓ landed | f2aff9f |
+| 2 save v2 (layers/<id>/ round-trip) | ✓ landed | f2aff9f (24 persistence tests byte-identical) |
+| 3 selection + stroke gate | ✓ landed | ed64a58 (explicit, typed refusals, the Base row) |
+| 4 per-layer pixels (Kill-B-class) | IN FLIGHT | the claw hunts: strokes/fills/materials/imports on own planes, dormancy + v2 header [B2], the composite-on-read flush [M7], the perf gate [M8] |
+| 5 anchors + instances | queued | SelfAnchor/ForwardAnchor, CPU prefix flatten |
 
-## Wave 3 — the pull-users + depth wave (reordered 2026-10-12 ~23:20, BINDING)
+Post-pool probe kills (the r2's open verifications): eframe 0.36's GPU
+error-handler behavior; wgpu 30's error-scope API shape; PaintCompositor
+Arc threading; un-premultiply exactness on GPU vendors.
+
+## Wave 5 — the pull-users + depth wave (post-pool)
 
 | Kill | Closes | Notes |
 |---|---|---|
-| wave-spp-import | §7 (NEW): .spp IMPORT — RATIFIED by Bessa, pulled BEFORE PSD | import-only forever, clean-room from published community HDF5-layout docs, per-project import report, geometry stays FBX/USD; the pull-users-from-Substance story (the .umber kill-shot's front door) |
-| wave-psd-import | §6 designed-deferred: flatten-on-import semantics | the ag-psd reader exists; blend-mode/mask/group flattening rides the wave-blends machinery that LANDED (d861482) |
-| wave-dynamic-materials | §2 dynamic material layering (P2, 6+) | the deepest Substance feature left; design-doc first, likely 2 kills |
-| wave-hsv-goldens | wave-blends' GPU family goldens | the compositor's per-family goldens (if not landed in the wave-2 battery) |
-| wave-camera-ortho | §5 the named camera gap: orthographic projection | the turntable orbit exists; add ortho mode + the projection toggle |
-| wave-stylus-win32 | §10 the Windows dual-path: Wintab32 polling beside Windows Ink | BELOW THE CUT per ruling 5 — wave 4 |
-| wave-8k-export | §2/§6 the 8K export path | BELOW THE CUT per ruling 5 — wave 4 |
-
-## Wave 4 — the differentiators (P1s that Substance lacks or does worse)
-
-| Kill | Closes | Notes |
-|---|---|---|
+| wave-camera-ortho | §5 the named camera gap | ortho mode + the projection toggle; small, headless-testable |
+| wave-stylus-win32 | §10 the Windows dual-path | Wintab32 polling beside Windows Ink |
+| wave-8k-export | §2/§6 the 8K export path | the per-channel pool carries it; export-side budget rows |
 | wave-materialx-roundtrip | MaterialX import (export ✓ built) | consuming DCC graphs = the differentiator [04]; the declared-custom-nodedef contract already ships |
-| wave-abr | .abr brush preset import (§1 optional) | the one Adobe format that is legal |
-| wave-dynamic-materials | §2 dynamic material layering (P2, 6+) | shader-declared sub-stacks; the deepest remaining material feature; design doc + likely 2 kills |
-| wave-wasm-shaders | §5 custom user shaders = WGSL plugins (P2) | umber-wasm runtime ✓ built; the shader-replacement host hook is the kill |
+| wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
+| wave-harness-script | the snapshot harness's --script arm | drive the agent session, snapshot after each step — visual regression over driven state |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
+
+## Wave 6 — the differentiators (P1s that Substance lacks or does worse)
+
+| Kill | Closes | Notes |
+|---|---|---|
+| wave-abr | .abr brush preset import (§1 optional) | the one Adobe format that is legal |
+| wave-wasm-shaders | §5 custom user shaders = WGSL plugins (P2) | umber-wasm runtime ✓ built; the shader-replacement host hook is the kill |
 | wave-tessellation | §5 displacement/tessellation preview (P2) | the height channel exists (tilepool); the preview pass + the displacement budget |
 | wave-hdr-surface | §5 HDR output (eframe upgrade gate) | tracks eframe 0.36→next; the capability model + probe ✓ built |
 | wave-ray-query | §3 wgpu ray-query acceleration | tracks wgpu stability; the compute-shader path ✓ built |
 
-## Wave 5 — the moonshots (P2, 2+ years, from [04])
+## Wave 7 — the moonshots (P2, 2+ years, from [04])
 
 | Kill | Closes |
 |---|---|
@@ -78,10 +103,9 @@ first, blends rebases if needed).
 
 ## Standing debts (ride every wave, not wave-gated)
 
-- CI: the perf-nightly runner starvation (GitHub-hosted queue; 38234644651
-  cancelled + re-queued 38304995746 — still waiting; nothing fixable
-  workflow-side).
-- The nightly's baseline artifact → #2's gate (wave-perf-baseline consumes).
+- The perf nightly's invocation was FIXED (2026-10-13 17:08); the
+  baseline artifact seeds the compare gate — the pool's stage-4 perf
+  gate re-measures under the new frame path.
 - AssetStore GC (§8's v1 boundary: sidecars authoritative, no store GC).
 - Split-redo under merged undo entries (#5's named follow-up).
 - Merge below the top undo entry (#5's deferred arm).
@@ -107,8 +131,12 @@ first, blends rebases if needed).
 | Seam-aware stamping + 3D-space strokes | ✓ complete |
 | Texture sets + channel stacks + UDIM | ✓ + per-channel pool (2026-10-12) |
 | Layers: types, instancing, anchors, smart materials | ✓ complete |
-| Blend modes | 15/32 → wave-1 blends closes |
-| Masks (paintable per-layer) | metadata-only → wave-1 masks closes |
+| Blend modes | ✓ 32-mode census landed (d861482) |
+| Masks (paintable per-layer) | ✓ landed (770162f); per-plane masks ride the pool |
+| Dynamic materials | ✓ LANDED end to end (Kill A + Kill B, 2026-10-14); per-layer pixels = the pool arc, stage 4 in flight |
+| Agent/automation | ✓ protocol v0 + wire edit steps (projects, layers, undo over JSONL) |
+| Headless testing | ✓ the offscreen snapshot harness + the never-crash fuzz (2026-10-14) |
+| Importers (.spp/PSD) | ✓ both landed; the corpus harness arms on real .spp files |
 | Baking (all 8 maps, cage, skew, auto-rebake) | ✓ complete |
 | Node graph + MaterialX | ✓ complete (original engine) |
 | Viewport (OpenPBR, IBL, view modes, postfx) | ✓ + height→normal live (2026-10-12); postfx persistence = wave 2 |
@@ -119,26 +147,33 @@ first, blends rebases if needed).
 | History panel | ✓ panel; time-travel = wave 1 |
 | Distribution | ✓ shell+PS proven + CI; Flatpak/AppImage = wave 1 |
 | Performance floor | pending baseline (nightly starved) |
-| Paint-what-you-see buffer | live-raycast ✓; full buffer = wave 2 |
-| Ortho camera | ✗ open = wave 3 |
-| 8K export | ✗ open = wave 3 |
-| Dynamic materials | ✗ open = wave 4 |
-| Custom user shaders | runtime ✓; host hook = wave 4 |
+| Paint-what-you-see buffer | live-raycast ✓; the pwys stroke buffer stays a design-first wave-5 candidate |
+| Ortho camera | ✗ open = wave 5 (post-pool) |
+| 8K export | ✗ open = wave 5 (post-pool) |
+| Per-layer pixel planes | stage 4 in flight (the pool arc; 1a/1b/2/3 landed) |
+| Custom user shaders | runtime ✓; host hook = wave 6 |
+| Rename layers | ✓ LayerCommand::Rename + the wire step (2026-10-14) |
+| Dirty-check confirm | ✓ the File > New gate (2026-10-14) |
 
-## The wave protocol (standing, revised 2026-10-12 — cargo ONLY at wave end)
+## The wave protocol (standing, REVISED 2026-10-14 — the two-gate model)
 
-1. Dispatch: 4-5 claws, per-kill worktrees (kill-worktree.sh), staggered
-   launches (60s+ apart — the opencode DB lock), briefs written fresh at
-   dispatch from live anchors. Briefs say: NO cargo of any kind, mid-wave or
-   at exit — the wave-end battery runs everything.
+Bessa's ruling: big development waves, tests+CI after. Per-push CI is
+retired. Gate 1 = scripts/wave-battery.sh per kill (fmt + clippy -D
+warnings + full suites, local, the flock at /tmp/umber-cargo.lock).
+Gate 2 = ONE push per wave + ONE CI run (scripts/ci-watch.sh backgrounded
+with a notify pattern — verdicts ping between turns, nothing foreground-
+sleeps). Kills batch as unpushed commits between gates. The 2026-10-12
+per-kill-worktree variant is retired; the MAIN-tree kill-locks pattern
+(claw dispatches on locked surfaces) replaced it. The old protocol's
+steps, kept where still true:
+
+1. Dispatch: claws on MAIN-tree locked surfaces (kill-locks.sh), staggered
+   launches (60s+ apart — the opencode DB lock), briefs written fresh from
+   live anchors. NO cargo of any kind for claws.
 2. Consume: the dragon reads each kill's artifacts at exit (the report, the
-   full diff, brace-balance, verify-kill's zero-cargo legs) and stages the
-   branch — but runs NO cargo.
-3. Gate ONCE at wave end: fmt --all once; clippy once per touched crate; the
-   touched crates' test suites once; the wave's kills' own tests in that
-   same battery. Fix what breaks (the claws are gone; the dragon fixes at
-   the battery).
-4. Land in order: fast-forward each branch (rebase when diverged), CI per
-   landed branch delivers the cross-platform verdict.
-5. Roll: the next wave's briefs get written at landing (anchors shift);
+   full diff, verify-kill) and runs Gate 1's battery; the dragon fixes what
+   breaks.
+3. Land: kills commit as they pass Gate 1; the wave's push + ONE CI run is
+   Gate 2 (ci-watch.sh pings the verdict).
+4. Roll: the next wave's briefs get written at landing (anchors shift);
    this roadmap's rows update their status in the same commit.
