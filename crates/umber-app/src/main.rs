@@ -142,8 +142,7 @@ use umber_paint::persistence::{
     dormancy_for, load_paint_tiles_reported, paint_manifest_path, paint_save_version,
     parse_manifest_header, save_paint_tiles, LayerDormancy, OpenSeedRow,
 };
-use umber_paint::retouch;
-use umber_paint::snapshot::{build_composite_snapshot, resolve_instance_source};
+use umber_paint::snapshot::build_composite_snapshot;
 mod size_presets;
 mod spp_import;
 mod status_bar;
@@ -2664,6 +2663,7 @@ mod new_project_tests {
 mod pool_stage4_tests {
     use super::*;
     use umber_paint::persistence::{format_paint_commit, parse_paint_commit};
+    use umber_paint::snapshot::resolve_instance_source;
 
     #[test]
     fn dormancy_keys_on_provenance_not_absence() {
