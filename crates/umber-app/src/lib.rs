@@ -37,9 +37,9 @@ pub mod retouch;
 /// for the kittest snapshot harness (tests/panel_snapshot.rs renders both
 /// headless; i18n::init() must run first — the tests call it).
 pub mod display_panel;
-pub mod psd_import;
 /// The i18n catalog (the snapshot tests init it before rendering).
 pub mod i18n;
+pub mod psd_import;
 
 /// Dynamic material layers: the headless eval driver (Kill A). Declared
 /// here — not only behind the binary's `mod` list — so the driver and its
