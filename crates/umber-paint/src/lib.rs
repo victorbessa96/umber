@@ -14,6 +14,7 @@
 //! - [`retouch`] — smudge/clone/erase stroke mirrors and their undo
 //!   records.
 //! - [`material_layer`] — the dynamic-material refresh driver.
+//! - [`snapshot`] — the stack → composite-rows builder (shell + agent).
 //! - [`persistence`] — the `paint/` sidecar: byte-exact planes, the
 //!   two-phase commit, the dual-read loader (one implementation for the
 //!   shell's Save/Open and the agent session's `project_save`).
@@ -22,3 +23,4 @@ pub mod material_layer;
 pub mod paint_state;
 pub mod persistence;
 pub mod retouch;
+pub mod snapshot;
