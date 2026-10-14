@@ -1,0 +1,336 @@
+{
+  "review_of": "docs/specs/per-layer-pool-design.md (DRAFT, pre-review)",
+  "date": "2026-10-14",
+  "lock": "pool-review",
+  "method": "Read the doc in full (1193 lines), then every cited seam in the LIVE tree. Every citation below was opened and read; line numbers are live as of HEAD 171d695. Goldens recomputed by hand: T1, T2, T5, T6, T8, T12, T13.",
+  "verdict": "NOT-READY",
+  "summary": "The core architecture is sound and most citations hold: composite-on-read, the premultiplied flag plus bottom-copy seed (the 50-vs-100 arithmetic is right, and bottom-copy is verbatim-exact on the CPU oracle), the (owner, tile, channel) key, and the paths-under-paint/ layout. Three findings block landing. B1: the clean-plane save skip re-stages 'existing sidecar bytes' from the TARGET directory, and every save goes through a file dialog, so saving into a new directory silently drops every clean plane. B2: dormancy is staged in 5, but stage 4 already moves fills onto their own planes, and FillLayerStates::ensure dirties every fresh state, so every v1 project with a Fill opened by a stage-4 build double-counts the fill. B3: the doc redefines read_tile/read_channel_tile as 'cache if materialized' and claims every reader is untouched, but the save loop reads Base through exactly those accessors. Once stage 4 materializes caches, a save bakes the composite into Base and every reopen double-counts every layer. Twelve MAJORs follow. The premultiplied invariant is broken by the default alpha-only eraser. The version-bump mechanism contradicts ProjectModel::new. Base becomes unreachable for the eraser, smudge and clone. The memory table under-counts by 1.2-1.9x and the advisory budget ends in a wgpu OOM panic, not a refusal. The tombstone cap is smaller than one ordinary delete. Layer-mask strokes are a composite writer the dirt model misses. The per-frame flush runs before the fill and material producers. Metadata-drag recomposite cost is unbudgeted. The mesh-map import producer is missed. Cross-document plane bleed. Dormancy misfires on v2 projects. Mid-stroke stage-3 refusals have no recovery path. Every finding carries a binding fix; folding them in is an r2 rewrite of §2.3, §4.1-4.2, §5.4, §6.2-6.3, §7 and §8, not a redesign.",
+  "blockers": [
+    {
+      "id": "B1",
+      "severity": "BLOCKER",
+      "surface": "§6.2 save cost / §1.1 Plane.dirty_since_save (stage 2)",
+      "claim_in_doc": "per-layer-pool-design.md:846-852: 'The dirty_since_save flag skips the readback of a clean plane and re-stages its existing sidecar bytes. That is the path the save already takes for a failed readback (main.rs:1949-1962).'",
+      "evidence": [
+        "crates/umber-app/src/main.rs:1955-1962: the failed-readback path re-stages from paint_channel_tile_path(project_dir, channel, tile), where project_dir is the save TARGET, and silently does nothing when the file is absent (`if let Ok(bytes) = std::fs::read(&path)`).",
+        "crates/umber-app/src/main.rs:2397-2404: save_project ALWAYS opens rfd::FileDialog::save_file(). There is no 'save in place' path, and Ctrl+S/menu (main.rs:2662,2712) call the same fn. Every save can target a new directory.",
+        "crates/umber-app/src/main.rs:2439-2461: save_paint_tiles(paint, &dir) receives the dialog's dir."
+      ],
+      "failure": "Paint L1 and L2, save to A (all planes written, flags cleared). Paint L1 only, then save to B. L2's planes and Base are clean, so their readback is skipped, and B has no sidecar to re-stage from, so nothing is staged. The manifest omits them, and B opens with L2 and Base empty. The loss is silent: the warning path is only logged on readback FAILURE, not on a clean skip. The failure is already live at stage 2, for Base alone: open, save, then save to a new dir loses all Base paint.",
+      "fix_ref": "B1"
+    },
+    {
+      "id": "B2",
+      "severity": "BLOCKER",
+      "surface": "§7 staging (dormancy in stage 5) vs §5.1 (fills to own planes in stage 4)",
+      "claim_in_doc": "per-layer-pool-design.md:959 'Every stage lands green and leaves the app whole'; :973 stage 5 carries '§6.3's dormancy'; :891-901 dormancy exists precisely so a v1 open is byte-identical and never double-counts.",
+      "evidence": [
+        "crates/umber-app/src/fill_layer.rs:850-859: FillLayerStates::ensure pushes every FRESH layer id onto `dirty` (`if fresh || state.params() != params`).",
+        "crates/umber-app/src/main.rs:2906-2950: the per-frame adoption runs ensure for every Fill layer, then refresh_fill_layer as soon as a mesh exists.",
+        "docs/specs/dynamic-materials-design.md:469-475 names this exact behavior: 'the fill path compounds on open today; that is a fill bug noted here, not fixed by this row'. Materials are seeded clean on open (material_layer.rs:34-38); fills are not."
+      ],
+      "failure": "With stage 4 landed and stage 5 not, opening any v1 project that has a Fill layer and a mesh re-evaluates the fill on the first frame into (Layer(id), tile, baseColor). That plane composites over Base, which already holds the fill's destructive v1 output. The result is a double-counted fill on every v1 open, silently. The first save then writes version 2 with both copies, and the doubling persists across reopen. The stage-4 build is therefore not 'whole'.",
+      "fix_ref": "B2"
+    },
+    {
+      "id": "B3",
+      "severity": "BLOCKER",
+      "surface": "§1.1 reader redefinition + §6.1 'Base keeps the legacy paths byte-for-byte' (stages 1b/2/4)",
+      "claim_in_doc": "per-layer-pool-design.md:148-152: 'The reader accessors (tile_target, channel_target, paint_target, read_tile, read_channel_tile) resolve \"cache if materialized, else the Base plane\". Every reader of them is therefore untouched: viewport.rs:256,550,558, uv_view.rs:351, bake_sources.rs:82,99 and main.rs:1006.'",
+      "evidence": [
+        "crates/umber-app/src/main.rs:1948-1952: save_paint_tiles reads Base via `paint.read_tile(*tile)` / `paint.read_channel_tile(*tile, channel)`. These are the very accessors redefined to return the CACHE. This reader is absent from the doc's list.",
+        "Other unlisted readers of the redefined accessors: main.rs:652 (PaintMaterialIo::read_channel), fill_layer.rs:414, paint_state.rs:2510 (retouch mirror) and paint_state.rs:2473 (capture via read_target). The doc changes these elsewhere, but the 'untouched' sentence covers them too.",
+        "crates/umber-app/src/main.rs:3120: the Perf HUD reports paint_target().byte_len(), which becomes the cache, not plane_bytes()."
+      ],
+      "failure": "A stage-2 implementer following 'Base keeps the legacy paths byte-for-byte' plus 'every reader is untouched' leaves the save loop on read_tile. Once stage 4 materializes a cache for (1001, baseColor), save writes the COMPOSITE (Base + every layer) into paint/tile-1001.png, and the layer planes into paint/layers/... as well. On reopen, Base = old composite, and the layers composite over it again. Every save/reopen cycle adds one more copy of every layer, silently.",
+      "fix_ref": "B3"
+    }
+  ],
+  "majors": [
+    {
+      "id": "M1",
+      "severity": "MAJOR",
+      "surface": "§4.3 item 1 'Every v2 plane is premultiplied, and every writer converts' vs §3 Eraser",
+      "evidence": [
+        "crates/umber-brush/src/retouch.rs:75-82,98-108: EraseParams defaults to alpha-only ('color data is left in place (unassociated)').",
+        "crates/umber-brush/src/retouch.rs:530-540: an enabled channel is scaled by k = 1 - cov, and disabled channels are byte-identical. So the alpha-only erase scales a, not rgb.",
+        "crates/umber-core/src/layers.rs:343: blend_channel clamps src to 0..1, so an un-premultiplied s = p/a > 1 clamps."
+      ],
+      "failure": "Opaque premultiplied red (200,0,0,255) under a 50% alpha-only erase becomes (200,0,0,128), which is invalid premultiplied data (p > a). The composite over opaque white: s_r = 200/128 = 1.5625, clamped to 1.0, cov = 0.501961, out_r = 1 + (1-1)·cov = 1.0, giving 255. The correct premultiplied erase (100,0,0,128) gives out_r = 1 + (0.78125-1)·0.501961 = 0.890196, giving 227. So every soft eraser edge renders 28 LSB too bright in red. §3 calls the eraser 'literally true' to row 19 without noting the conflict. Smudge (per-channel lerp, retouch.rs:408-411) and clone (copy) preserve p ≤ a; only the eraser breaks it.",
+      "fix_ref": "M1"
+    },
+    {
+      "id": "M2",
+      "severity": "MAJOR",
+      "surface": "§6.3 the version bump",
+      "evidence": [
+        "crates/umber-core/src/project.rs:39-40 CURRENT_PROJECT_VERSION = 1; :230-240 ProjectModel::new stamps `version: CURRENT_PROJECT_VERSION`.",
+        "crates/umber-app/src/main.rs:2419 (the app save) and crates/umber-cli/src/agent.rs:1585 (the CLI) both build via ProjectModel::new; agent.rs:662 reports model.version on the wire.",
+        "project.rs:368 (save-side validate) and :570 (load probe) both test `!= CURRENT_PROJECT_VERSION`; save_to_dir writes model.version (:546)."
+      ],
+      "failure": "'Bump CURRENT_PROJECT_VERSION 1 → 2, written only when it must be' cannot be implemented as written. Bumping the constant makes every ProjectModel::new, including every umber-cli batch/agent session, stamp 2. Old builds then refuse layer-less and headless projects, which is the exact outcome §6.3:886-889 promises to avoid. The doc also says 'a loaded model is stamped 2' (:871-872) while 'the save writes 2 iff the session holds a layer-owned plane, else 1' (:872-875); both cannot hold. The CLI agent's wire `version` field silently changes meaning.",
+      "fix_ref": "M2"
+    },
+    {
+      "id": "M3",
+      "severity": "MAJOR",
+      "surface": "§2.1/§2.3 selection (active_layer: Option<u64>, None only while the stack is empty) + §3 retouch samples the layer's plane",
+      "evidence": [
+        "per-layer-pool-design.md:266-269 and :343-345: None becomes 'the topmost paintable layer' whenever the stack is non-empty. Base is never a selectable target, and the Base pseudo-row (:909-911) is 'visibility only' and lands in stage 5.",
+        "crates/umber-app/src/paint_state.rs:2504-2513: today's retouch already pays ONE full-tile readback per stroke per tile (read_tile into the CPU mirror), so 'sample merged needs a composite readback per stroke, which is a follow-up' (:413-415) mis-states the cost. Sampling the composite costs one additional readback of the cache, not a new class of cost."
+      ],
+      "failure": "Every migrated v1 project holds ALL its paint in Base (§6.3). The moment the stack has any layer, which is every real project, the eraser, smudge and clone can never touch that paint again: they act on the selected layer's (empty) plane. The same applies to a fresh session that paints with an empty stack and then adds a layer. Clone and smudge on a newly added layer, the standard clone-to-new-layer workflow, sample an EMPTY plane and do nothing. Today they sample the visible canvas. That is a user-visible regression of three P0 tools that the doc defers as a 'follow-up'.",
+      "fix_ref": "M3"
+    },
+    {
+      "id": "M4",
+      "severity": "MAJOR",
+      "surface": "§1.3 the memory story + the advisory-only budget",
+      "evidence": [
+        "per-layer-pool-design.md:210-215: the table labels today's targets 'Cache' and then keeps that 320 MiB as the cache in the per-layer rows. Under §1.4 those targets BECOME Base planes, and the cache is ADDITIONAL (lazy, one per (tile, channel) with a layer plane, :519-523). Both must be counted.",
+        "crates/umber-gpu/src/paint.rs:247-250,529-545: every PaintTarget lazily owns a full-size R8 quick-mask texture (+25%, 16 MiB at 4K) on its first WriteMask. Under §3 every plane a gated stroke touches gets its own mask, plus a full-plane mask upload on first sync (paint_state.rs:2567-2579).",
+        "crates/umber-gpu/src/paint_thread.rs:175 + paint.rs:627-640: every PaintThread builds its own PaintCompositor (create_shader_module + bind-group layout + pipeline + 1x1 fallback). Per plane, that is a shader compile on the stroke's FIRST batch on a new layer/tile, a mid-stroke hitch.",
+        "Unlisted line items: the anchor partial-flatten scratch PaintTarget per (anchor, tile) (§5.3) and retired CPU RAM (§5.4, up to 512 MiB).",
+        "grep for on_uncaptured_error / push_error_scope over crates/: zero hits. wgpu texture creation does not return Result, so VRAM exhaustion surfaces through the default uncaptured-error handler (panic) unless eframe installs one (see unverified U1).",
+        "docs/specs/requirements.md:166: the reference GPU class is 'RTX 3060 / RX 6600' (the RX 6600 is 8 GB)."
+      ],
+      "recomputed_table": "4K, 5 Base channels, as the doc assumes. Row 2 (6 paint layers × 2 ch): planes 768 + Base 320 + cache 2×64 = 1,216 MiB (doc: 1,088). Row 3 (+2 materials × 4 ch): planes 1,280 + Base 320 + cache ≤5×64 = 1,920 MiB (doc: 1,600). Row 4 (×4 UDIM): 5,120 + 1,280 + 1,280 = 7,680 MiB (doc: 6,400). Add +16 MiB per quick-mask-gated plane.",
+      "failure": "The honest row-4 figure (7.5 GiB) exceeds the 8 GB reference card once the framebuffer, mesh and env maps are counted. The 'advisory, never enforced' judgment (:230-236) rests on 'refusing is a silent data-path failure the never-crash doctrine forbids'. The actual alternative it picks is an allocation failure the app has no handler for: a crash, the outcome the doctrine forbids most.",
+      "fix_ref": "M4"
+    },
+    {
+      "id": "M5",
+      "severity": "MAJOR",
+      "surface": "§5.4 tombstones + RETIRED_BUDGET_BYTES",
+      "evidence": [
+        "per-layer-pool-design.md:747-749: the doc's own example, 'Deleting one 4-channel material across 4 tiles retires 16 planes = 1 GiB at 4K', is TWICE the 512 MiB cap. A single-tile 4-channel material is 256 MiB, so two deletes fill the cap.",
+        "per-layer-pool-design.md:735-739: retirement is a 'read back to CPU' in the per-frame census. That is 16 blocking 64 MiB readbacks (PaintTarget::read_back_rgba8, as in paint_state.rs:2654) in ONE frame.",
+        "Fills and materials are EVAL-owned (§5.1:631-635, §5.2) and re-evaluable from layer params, which the revived layer carries (journal.rs:59-66, Insert holds the full Layer)."
+      ],
+      "failure": "(a) The doc doesn't specify what happens when one tombstone alone exceeds the cap. 'Free the OLDEST first' then frees the tombstone just created, so the delete is immediately un-undoable, with a status line, on every ordinary material delete at 4 tiles. (b) A multi-hundred-ms to multi-second hitch on delete. (c) 'Resize drops contents' (§5.5) says nothing about tombstones, so a revive after a resize uploads old-size bytes that publish rejects, and the layer revives empty. (d) 1 GiB of RAM is spent preserving pixels that one re-eval regenerates.",
+      "fix_ref": "M5"
+    },
+    {
+      "id": "M6",
+      "severity": "MAJOR",
+      "surface": "§4.2 dirt model vs layer-mask strokes",
+      "evidence": [
+        "crates/umber-app/src/paint_state.rs:2340-2352: a mask-edit stroke stamps layer_masks and returns before staging. :1377-1405 layer_mask_event mutates a CPU Vec only and 'records no undo'.",
+        "per-layer-pool-design.md:435-437 marks dirt only for 'the event's dab footprints … per (tile, channel)' of the STROKE channel. :514-518 lists 'mask enable or plane' as METADATA, discovered by the shell 'diffing the snapshot' (:504-508, :527-529). A metadata snapshot cannot see a pixel edit inside a mask plane.",
+        "§4.4:606-613: under CoR, layer masks 'finally gate something live', for every channel of the layer."
+      ],
+      "failure": "A literal implementation either never recomposites a mask stroke, so the mask paints invisibly until some unrelated edit raises Full, or diffs whole mask planes per frame / raises Full on every mask frame. That is a 16.8M-texel recomposite per channel per frame, plus full-plane mask uploads, for the duration of every mask stroke. A material layer's mask edit dirties ALL its declared channels, not stroke_channel.",
+      "fix_ref": "M6"
+    },
+    {
+      "id": "M7",
+      "severity": "MAJOR",
+      "surface": "§4.1 judgment part 1 (flush placement) + §5.3 anchor partial flatten",
+      "evidence": [
+        "crates/umber-app/src/main.rs:2894-2899 is the drain. The fill refresh (:2906-2955) and material refresh (:2958-3041) run AFTER it in the same update and publish WriteRegion into thread queues that are only executed by the NEXT process_pending.",
+        "per-layer-pool-design.md:485-493: the flush 'runs right after the existing per-frame drain … GPU binders … see the end-of-frame flush'. It does not run at the end of the frame, and the plane commands queued after it are not yet on the GPU.",
+        "crates/umber-gpu/src/paint_thread.rs:150-160: each plane has its own mpsc command queue. The composite reads plane TEXTURES, so queued-but-unprocessed commands are invisible to it."
+      ],
+      "failure": "(a) A fill/material refresh displays one frame late. (b) Worse, an anchored material whose anchor prefix contains a fill refreshed THIS frame: §5.3's GPU partial flatten composites the prefix planes while the fill's WriteRegion still sits in that plane's mpsc queue. The anchor reads the stale fill, the material evaluates on stale input, and nothing re-dirties it. The anchor read is silently one edit stale, with no next-frame self-heal, because the material is now clean.",
+      "fix_ref": "M7"
+    },
+    {
+      "id": "M8",
+      "severity": "MAJOR",
+      "surface": "§4.1 cost table + §4.2 Full marks (perf, requirements.md:164-166)",
+      "evidence": [
+        "per-layer-pool-design.md:462,514-518: any opacity/blend/visibility/reorder/mask-enable/material-channel-param change marks Full for every (tile, channel) the layer has a plane on, recomposited on the per-frame flush.",
+        "egui sliders emit a change every frame while dragged, so a material layer at 5 channels × 4 tiles raises 20 Full recomposites per frame, each L_c × 16.8M texel-ops. Every masked entry in each re-uploads its whole 16 MiB mask (compositor.rs:1029-1036) and, for overridden channels, CPU-resamples the set-size mask (§4.4:611-613, resample_mask_nearest).",
+        "per-layer-pool-design.md:467-472 sizes the per-frame rect for strokes only ('a 4-dab event union ≈ 7,500 texels'). DirtyRegion is ONE union rect (:512-513), and symmetry siblings and seam mirrors (paint_state.rs:2287-2305, 2402-2405) land on the far side of the tile in the same event. A mirrored dab pair at x≈100 and x≈3996 unions to a near-full-width rect, and diagonal seam mirrors to the full tile."
+      ],
+      "failure": "Neither the opacity-drag nor the symmetry/seam path is costed, and both plausibly blow the 16.7 ms frame and the 20 ms input-to-photon budgets the doc claims the region path protects. The stage-4 perf gate re-measures input-to-photon only for plain strokes.",
+      "fix_ref": "M8"
+    },
+    {
+      "id": "M9",
+      "severity": "MAJOR",
+      "surface": "missed producer: mesh-map/channel import (attack surface 5, 'importers writing into the pool')",
+      "evidence": [
+        "crates/umber-app/src/mesh_map_import.rs:296-345: import_bytes stores the bytes in the AssetStore and pushes a NEW LayerKind::Paint layer 'Imported <map>' on TOP of the stack. The bytes are never published to the pool, and Layer carries no asset ref (grep 'AssetRef' in umber-core/src/layers.rs: none). The AssetRef is only returned in ImportApplied (:293).",
+        "spp_import.rs / psd_import.rs make no PaintState call (grep 'paint\\.|publish' over both: no hits), so they are not pool writers. The mesh-map import is the one that is, semantically."
+      ],
+      "failure": "The doc never mentions the import path. After an import, §2.3's revalidation auto-selects the topmost paintable layer, which is the just-imported 'Imported AO' Paint layer. The user's next baseColor stroke lands in the AO import layer's plane. The imported map itself renders nothing under CoR (the layer has no plane), although per-layer storage is exactly what would let it render.",
+      "fix_ref": "M9"
+    },
+    {
+      "id": "M10",
+      "severity": "MAJOR",
+      "surface": "§6 open path / session lifecycle (missing)",
+      "evidence": [
+        "crates/umber-core/src/layers.rs:905-911 (cited by the doc itself): layer ids start at 0 per LayerStack, so every document reuses ids 0,1,2…",
+        "crates/umber-app/src/main.rs:603-615: reset_for_new resets doc, imports, material_states and material_defs, but NOT fill_states (main.rs:502). Nothing in the doc drops the session's Layer-owned planes, caches, RetiredPlanes or cache_dirty on open/new.",
+        "crates/umber-app/src/paint_state.rs:1985-2030: open's resize drops CONTENTS, but the threads stay materialized."
+      ],
+      "failure": "Open B after working in A. A's Layer(3) planes stay materialized, transparent after the resize, under the same key B's layer 3 uses. That breaks three things. First, the 'save writes 2 iff the session holds a layer-owned plane' decision (§6.3:872-875) misfires on a layer-less B. Second, B's Fill 3 is not 'planeless', so dormancy (§6.3:894-896) misfires. Third, A's tombstones, keyed by bare id, can be revived into B by an Insert of the same id. The sidecar loader 'materializes exactly the planes the sidecar lists' but never states that it first clears.",
+      "fix_ref": "M10"
+    },
+    {
+      "id": "M11",
+      "severity": "MAJOR",
+      "surface": "§6.3 dormancy derivation",
+      "evidence": [
+        "per-layer-pool-design.md:894-896 and :905-906: 'Dormancy is DERIVED (\"Base non-empty AND no planes AND open-path state\"), never persisted.'",
+        "crates/umber-app/src/main.rs:2952-2954: a fill first seen without a mesh never evaluates, so a v2 session can legitimately save a Fill layer with NO planes beside a non-empty Base."
+      ],
+      "failure": "Reopening that v2 project marks the fill dormant and badges it 'its pre-v2 result lives in the Base paint'. That badge is false: its result lives nowhere, and the fill silently doesn't render until the user edits a param. The same applies to a v2 Material whose eval failed on every refresh before save. The derivation can't distinguish 'legacy v1 output baked into Base' from 'never evaluated'.",
+      "fix_ref": "M11"
+    },
+    {
+      "id": "M12",
+      "severity": "MAJOR",
+      "surface": "§7 stage 3 gate: auto-selection with no escape",
+      "evidence": [
+        "per-layer-pool-design.md:343-345: 'If none is paintable, the topmost layer is selected anyway, so the refusal names a reason instead of falling back to Base.'",
+        "per-layer-pool-design.md:971: stage 3 lands this while 'accepted strokes still land in Base', with no Base row (stage 5)."
+      ],
+      "failure": "From stage 3 on, any document whose stack holds only Fill/Material/Instance/Folder layers refuses EVERY stroke, including the quick-mask-gated paint the user did yesterday on that same document. At stage 3, the strokes would have landed in Base anyway, so the refusal protects nothing. It is a pure regression of the stage-3 build, and it breaks 'Coherent: only the gate is new'.",
+      "fix_ref": "M12"
+    }
+  ],
+  "minors": [
+    {
+      "id": "m1",
+      "severity": "MINOR",
+      "surface": "§8 T4 'asserted by not editing them'",
+      "evidence": "crates/umber-gpu/src/compositor.rs: 30 `CpuStackLayer {` / `GpuStackLayer {` struct literals in its tests (grep count 32 minus the 2 declarations). Adding a pub field is E0063 at every one. The doc names only gate0_journey.rs:247.",
+      "fix_ref": "m1"
+    },
+    {
+      "id": "m2",
+      "severity": "MINOR",
+      "surface": "§8 T14 staged at 1b/2",
+      "evidence": "per-layer-pool-design.md:1088-1094: 'One stroke on L1 adds exactly (L1, 1001, baseColor)'. Per-layer stroke routing only exists from stage 4 (:971-972); stage 3 forces Base.",
+      "fix_ref": "m2"
+    },
+    {
+      "id": "m3",
+      "severity": "MINOR",
+      "surface": "§8 T5 sentinel",
+      "evidence": "per-layer-pool-design.md:1030-1031 'v1's destructive refresh after painting L2 yields 106 WHATEVER the stack order'. In v1, strokes ignore layer opacity (layers are metadata, F1), so an opaque 50 stroke REPLACES the flat 200 with 50, and the M refresh gives 50·0.848039 = 42.402, which rounds to 42, not 106. 42.402 is also 0.098 from the 42.5 boundary, violating the doc's own ≥0.1 rule (:983). The 110/106 stack-order goldens themselves recompute correctly (169.608 → 109.804 → 110; 125.0 → 106.005 → 106).",
+      "fix_ref": "m3"
+    },
+    {
+      "id": "m4",
+      "severity": "MINOR",
+      "surface": "§8: existing destructive goldens not retired",
+      "evidence": "docs/specs/dynamic-materials-design.md:656-667: goldens 2b (171/187, 'proving order matters under destructive publish') and 2c (144, 'pins the v1 boundary so a future non-destructive fix flips this test on purpose') live as driver tests in material_layer.rs. Stage 4 removes the read→composite→publish path, but the doc names neither test.",
+      "fix_ref": "m4"
+    },
+    {
+      "id": "m5",
+      "severity": "MINOR",
+      "surface": "§2.2/§2.3: mask_edit_layer vs active_layer",
+      "evidence": "paint_state.rs:2345-2352: a set mask_edit_layer wins over everything. document.rs:521: layer_mask_ui sets it independently. per-layer-pool-design.md:311-313: 'add buttons select the new layer'.",
+      "failure": "The user is editing L2's mask, clicks 'add paint layer' (selected) and paints, and the stroke goes into L2's MASK. The doc's two selections never reconcile.",
+      "fix_ref": "m5"
+    },
+    {
+      "id": "m6",
+      "severity": "MINOR",
+      "surface": "§2.3 revalidation 'nearest layer below'",
+      "evidence": "per-layer-pool-design.md:346-348: the shell only holds the vanished id. The id's former index is gone with it, and prune_layer_masks (paint_state.rs:1370-1374, the cited precedent) just sets None; it has no 'nearest below' logic to copy.",
+      "fix_ref": "m6"
+    },
+    {
+      "id": "m7",
+      "severity": "MINOR",
+      "surface": "§2.3 boundary: owner deleted while stroking",
+      "evidence": "per-layer-pool-design.md:373-378 retires the orphan plane 'next frame'. A multi-frame stroke then re-materializes the same (owner, tile, channel) lazily (§1.2) on its next event, gets retired again, and the RetiredPlanes entry is overwritten or merged in an unspecified way.",
+      "fix_ref": "m7"
+    },
+    {
+      "id": "m8",
+      "severity": "MINOR",
+      "surface": "§5.1 fill plane size",
+      "evidence": "per-layer-pool-design.md:643 'size_of_channel(set, \"baseColor\")'. Tiles belong to different sets (paint_state.rs:556-560 tile_sets), and refresh_fill_layer loops over every tile (fill_layer.rs:398). The size must be per tile.",
+      "fix_ref": "m8"
+    },
+    {
+      "id": "m9",
+      "severity": "MINOR",
+      "surface": "§3 quick-mask sync rekey: unlisted touch points",
+      "evidence": "paint_state.rs:1435 select_id_mask does `mask_synced.remove(&tile)`, and the invert/clear/resize paths empty it (paint_state.rs:649-652). With the key becoming (owner, tile, channel), each needs a retain over all owners/channels of that tile.",
+      "fix_ref": "m9"
+    },
+    {
+      "id": "m10",
+      "severity": "MINOR",
+      "surface": "§6.1 pruning nested plane dirs",
+      "evidence": "main.rs:1750-1756: the apply step prunes unlisted FILES. A deleted layer's planes leave empty paint/layers/<id>/<channel>/ directories forever.",
+      "fix_ref": "m10"
+    },
+    {
+      "id": "m11",
+      "severity": "MINOR",
+      "surface": "§5.3 anchors on the GPU vs §6.5 merge story",
+      "evidence": "per-layer-pool-design.md:692-697: the anchor input is GPU-composited (±1 LSB, implementation-defined, compositor.rs judgment 8) and fed to CPU graph eval. Saved material planes (§6.1:835-842) then differ byte-wise across machines and GPUs, so two artists re-saving an untouched anchored material produce different PNGs, which contradicts §6.5's 'disjoint PNGs'. This is a binary-conflict source.",
+      "fix_ref": "m11"
+    },
+    {
+      "id": "m12",
+      "severity": "MINOR",
+      "surface": "§8 GPU twins '±1 LSB' for deep stacks",
+      "evidence": "compositor.rs judgment 5 (:57-64): the GPU accumulator is an in-place Rgba8Unorm storage texture, quantized after EVERY dispatch. The CPU oracle quantizes once (compositor.rs:765,796). The error compounds per layer (up to ~0.5 LSB per dispatch, attenuated by 1-cov), so T9's '±1' holds for 1-3 entries but is unproven for the 6-layer stacks §4.1 sizes.",
+      "fix_ref": "m12"
+    },
+    {
+      "id": "m13",
+      "severity": "MINOR",
+      "surface": "§7 stage-4 surface completeness",
+      "evidence": "bake_sources.rs:77-104: painted_base_color/painted_base_color_tile take `Option<&PaintState>`. Moving them to a &mut flushing accessor changes bake_sources.rs signatures, and the stage-4 surface row names only 'their export/bake call sites'. main.rs:3120: the Perf HUD should report plane_bytes(). The cited headless caller main.rs:3386 is test code (cfg(test) at main.rs:3273), not a production caller.",
+      "fix_ref": "m13"
+    }
+  ],
+  "verified_holds": [
+    "F3/§4.3 arithmetic: the dab splat is premultiplied over (shaders.rs:584-587: src = dab.color*coverage; out = src + dst*(1-src.a)), and Dab.color is premultiplied (paint.rs:43). composite_pixel_masked is the straight-alpha lerp with Porter-Duff alpha (compositor.rs:693-729). Over a transparent accumulator, P=100, A=128 treated as straight: 0.392157·0.501961 = 0.196847, ×255 = 50.196, giving 50; with un-premultiply, s = 0.78125 and out = 0.392157 → 100. Both correct and ≥0.1 from the rounding boundaries.",
+    "Un-premultiply then lerp equals premultiplied over for Normal at any accumulator, in exact arithmetic: base + (p/a − base)·a = p + base·(1−a). Bottom-copy on CPU is exact: acc = b/255, f32_to_u8 (compositor.rs:644-653) returns b. Empty stack: output clears (judgment 7). Masked first entry: bottom-copy correctly does NOT fire (requires unmasked). A texture copy for the GPU seed is feasible: PaintTarget has COPY_SRC|COPY_DST (paint.rs:276-280).",
+    "T2: s = 200/100 = 2.0, clamped to 1.0 by blend_channel (layers.rs:343), out = 100/255, giving 100; bottom-copy keeps 200. Correct.",
+    "T6/T13: 200·(1 − 0.25·155/255) = 169.608 → 170; compounded: 170·0.848039 = 144.167 → 144. Matches dynmat 2a/2c (dynamic-materials-design.md:649-667).",
+    "T8: 200 + (100−200)·0.5 = 150.0 → 150, exact. T12: 255·0.25 = 63.75 → 64 (0.25 from boundary).",
+    "§6.1 prune hazard is real: prune_stale_layer_files remove_dir_all (project.rs:436-480, :467-469/:475). Keeping planes under paint/ is correct.",
+    "F2: TilePool keys a u8 ChannelKind tag (tile_pool.rs:127-145), so Data channels collide. Rejecting it as the store is correct.",
+    "§2.3: check_paintable's `_ => Ok(())` arm and NOTE are live (layers.rs:1356-1376). InstanceError derives Clone (layers.rs:76), so storing Result<(), InstanceError> on PaintState is buildable. Path replays go through begin_stroke_styled (paint_state.rs:1764-1840) and inherit the gate. The quick-mask edit hook ordering (paint_state.rs:2340-2364) matches the doc.",
+    "spp_import.rs and psd_import.rs do not write the pool (no PaintState calls). The autosave journal carries no pixel op (journal.rs:48-66; main.rs:74-80), so §6.4 holds."
+  ],
+  "unverified": [
+    "U1: whether eframe/egui-wgpu 0.36 installs a device uncaptured-error handler. No handler exists in crates/ (grep). If eframe installs one that logs instead of panicking, M4's failure becomes 'silently black/garbage planes' rather than a crash. That is still not acceptable for an advisory budget, but it changes the severity framing. Read ~/.cargo/registry/src/*/egui-wgpu-0.36*/ before stage 4.",
+    "U2: WGSL un-premultiply exactness (p/a·a on f32 after an Rgba8Unorm load) per vendor. The CPU derivation is exact to <1e-6, and the GPU is expected within the existing ±1.",
+    "U3: whether the stage-2 loader's publish into planes sets dirty_since_save (the doc says 'every write'). If the implementer treats load as clean, B1 fires on the FIRST save-as after open rather than the second.",
+    "U4: the egui per-frame change cadence of the material channel opacity widgets during a drag (M8 assumes one change event per frame, which is the standard egui Slider behavior)."
+  ],
+  "binding_fixes": {
+    "B1": "§6.2 rewrite. A clean plane may skip its readback ONLY when (a) the save target dir equals the dir that plane was last committed to, AND (b) that dir's sidecar file hashes to the plane's recorded content hash. Store `committed: Option<(PathBuf, blake3::Hash)>` on Plane instead of a bare `dirty_since_save: bool`; any write clears it. Otherwise read back. Never re-stage from a dir the plane was not committed to; the failed-readback re-stage (main.rs:1955-1962) keeps its current semantics only for an in-place save. Add golden test T20: paint L1+L2, save to A, paint L1, save to B, reopen B; L2's and Base's planes are byte-identical to the pre-save readback. Also log at warn level when a clean skip finds no source file (never silent).",
+    "B2": "Move §6.3 dormancy, together with a fill open-seeding rule mirroring MaterialLayerStates::ensure_open (open-path fill states seeded CLEAN, fixing fill_layer.rs:850-859 for the open path only), from stage 5 INTO stage 4. Stage 4 must not land without it. Stage 5 keeps only the anchors, instances and the dormant badge's UI polish if it must be split. Add T18 to stage 4's gate. Restate the §7 ordering rule as a third bullet: 'No producer moves to its own plane before the open path stops re-evaluating it over legacy Base output.'",
+    "B3": "§1.1: delete 'Every reader of them is therefore untouched' and replace it with an exhaustive reader census split into two classes. COMPOSITE readers (resolve cache-else-Base): viewport.rs:256,550,558, uv_view.rs:351, bake_sources.rs:82,99, main.rs:1006. PLANE readers (must call read_plane(owner, …) and NEVER the cache-resolving accessors): main.rs:1948-1952 save loop (Base via read_plane(Base, …)), paint_state.rs:2473 capture, paint_state.rs:2510 retouch mirror, main.rs:652 (retired for publish; anchor path per §5.3). Retired: fill_layer.rs:414. Stage 2 lands the save loop on read_plane from day one. Add a regression test: with a materialized cache holding a non-Base layer, save → the bytes of paint/tile-1001.png equal Base's plane, NOT the cache.",
+    "M1": "§3 Eraser + §4.3: state the invariant 'every plane write preserves p ≤ a'. On premultiplied planes, EraseChannels.a scales ALL FOUR channels by k (the premultiplied erase); the r/g/b flags mean straight-space color removal: unpremultiply, scale, re-premultiply, all inside retouch_event before WriteRegion. Add golden: (200,0,0,255) at 50% alpha-only erase → plane (100,0,0,128); over opaque white composite → r 227 (sentinel 255 = the unscaled-rgb bug). Derivation: 1 + (100/128 − 1)·128/255 = 0.890196 → 227.",
+    "M2": "§6.3 rewrite. Keep CURRENT_PROJECT_VERSION = 1 as the DEFAULT WRITE version, so ProjectModel::new and umber-cli are unchanged. Add `pub const LAYER_PLANES_PROJECT_VERSION: u32 = 2` and `pub const MAX_SUPPORTED_PROJECT_VERSION: u32 = 2`. validate_project_structure (project.rs:368) and the load probe (:570) accept `1..=MAX_SUPPORTED_PROJECT_VERSION`. The app's save_project sets `model.version = LAYER_PLANES_PROJECT_VERSION` iff it will stage at least one plane whose owner is LIVE in the stack. Drop 'a loaded model is stamped 2'. UnsupportedVersion's message names the range. Stage 2's surface adds umber-core/src/lib.rs (re-export). Test: a CLI agent session save still writes version 1.",
+    "M3": "§2.1: `active_layer: Option<u64>` becomes `active_target: PlaneOwner`, with Base a first-class selectable target. Move the Base pseudo-row (selectable + visibility) from stage 5 INTO stage 3. Revalidation never auto-moves OFF an explicit Base selection; it only resolves a vanished Layer(id). §3 retouch: clone and smudge SAMPLE the composite cache (one extra full-tile readback per stroke per tile, beside the plane mirror that is already read) and WRITE the active plane. 'Sample current layer only' becomes the follow-up toggle, not the default. Strike the 'readback per stroke' cost argument (:413-415); paint_state.rs:2510 already pays one. Add a test: a v1 project with one Paint layer; select Base; erase → Base's plane alpha changes.",
+    "M4": "§1.3: replace the table with the recomputed one (Base + cache + planes + 16 MiB per gated plane), and list the scratch and retired line items. §1.3 budget judgment, reversed: enforcement happens at MATERIALIZATION, not at stroke time. A stroke/refresh that would create a NEW plane past a hard cap (PLANE_HARD_CAP_BYTES, default 2× the advisory) is refused LOUDLY with a typed `stroke_refusal = Some(PaintRefusal::PlaneBudget { bytes })` and a status line. Existing planes keep painting. That is a typed refusal, not a silent drop, so it satisfies the never-crash doctrine. Additionally wrap plane creation in `device.push_error_scope(wgpu::ErrorFilter::OutOfMemory)`/pop and treat an error as the same refusal. §1.1: PaintThread shares ONE PaintCompositor (Arc) across planes; add `PaintThread::with_compositor` in umber-gpu (stage 1b surface) so materializing a plane never compiles a shader mid-stroke.",
+    "M5": "§5.4 rewrite. (1) Tombstones hold PAINT-owned planes only. Eval-owned planes (Fill/Material) are dropped on retire; their revive re-dirties the layer (params ride the Insert, journal.rs:59-66). This shrinks the doc's 1 GiB example to 0. (2) A single tombstone larger than RETIRED_BUDGET_BYTES is still retained if it is the newest. The cap evicts oldest-first EXCLUDING the newest entry, so the last delete is always undoable. (3) Retirement readbacks are amortized: at most one plane read back per frame, with the GPU thread kept alive until its bytes land. (4) resize_set/resize_channel drop the tombstones of the resized set's tiles (contents are dropped anyway, per §5.5). Update T7 accordingly: the material delete/undo revives by re-eval → 170.",
+    "M6": "§4.2: add an explicit writer: `layer_mask_event` (paint_state.rs:1381) marks a Rect dirty, the stamped footprint union in SET-size texels, for EVERY (tile, channel) on which that layer (and every Instance whose source is that layer) has a plane. For overridden channels, scale the rect to the channel size, rounding outward. Mask ENABLE/DETACH remains metadata (Full). Add a test: a mask stroke on a 2-channel material dirties exactly 2 (tile, channel) rects and no Full.",
+    "M7": "§4.1 judgment part 1: the flush runs at the END of the shell's update, after the fill AND material refresh blocks (main.rs:2906-3041). It begins by draining (process_pending) every plane in the composite set of each dirty (tile, channel), then composites. §5.3: the anchor partial flatten drains every prefix plane before its composite, and a material whose anchor prefix contains a layer dirtied this frame refreshes AFTER that layer's publish (anchor sources are ordered before their consumers, which is already the bottom-to-top refresh order, main.rs:2979). Add a test: a fill and an anchored material refreshed in one frame; the anchor bytes include the new fill.",
+    "M8": "§4.1: add cost rows for (a) a metadata drag: L_c × 16.8M × channels × tiles per frame, plus mask uploads, and (b) symmetry/seam mirrors. Mitigations, binding: (1) DirtyRegion = up to 8 disjoint rects, merging the closest pair past 8, instead of one union. (2) Metadata Full marks coalesce: at most one Full recomposite per (tile, channel) per frame, and only for the ACTIVE tile's displayed channels (baseColor + height, viewport.rs:550-563) during the frame. Non-displayed (tile, channel)s stay Full-dirty and composite lazily on read (CPU readers already flush-on-read, §4.1 part 3). (3) The stage-4 perf gate adds 'drag opacity of a 5-channel masked material at 4K' and 'X-symmetry stroke near the tile edge' to docs/perf/protocol.md measurements, with the 16.7 ms frame budget as pass/fail.",
+    "M9": "§5 add '5.6 Imported maps': at stage 4, mesh_map_import's apply (mesh_map_import.rs:542) decodes the stored PNG and publishes it via publish_plane(Layer(layer_id), tile, channel, …). The tile comes from the file's UDIM token when present, else FIRST_TILE. Size mismatches are refused loudly, exactly as the sidecar load does (main.rs:2280-2290). If stage 4 cannot carry it, record it as a named v2 boundary in §9 AND exclude import-created layers from §2.3's auto-selection until it lands.",
+    "M10": "§6.3 add 'Session lifecycle': open_project and reset_for_new call `PaintState::clear_layer_planes()`, which drops every Layer-owned plane, every cache texture, cache_dirty, RetiredPlanes and the active/stroke owner, BEFORE the sidecar load. reset_for_new also resets fill_states (main.rs:603-615, currently omitted). Add a test: open A (Layer(3) painted) then B (Layer(3) is a Fill, no planes) → B's (Layer(3), …) planes are absent and B saves version 1.",
+    "M11": "§6.3: key dormancy on PROVENANCE, not absence. A Fill/Material is dormant iff the LOADED project.json version is 1 (equivalently, the sidecar manifest lacks the '# Umber paint commit v2' header) AND the layer has no planes. A v2 project's planeless fill/material is dirty on open, and evaluates normally when a mesh is present. Add a test: a v2 project with a planeless fill opens non-dormant and refreshes on mesh arrival.",
+    "M12": "§2.3: when no layer is paintable and the user has not explicitly selected one, select Base (requires M3's PlaneOwner selection), never a refusing layer. The refusal fires only on an EXPLICIT user selection of an unpaintable layer. Stage 3's 'behavior after' adds: 'a stack of only fills/materials still paints (into Base)'. Add a test: a stack holding only a Fill → stroke accepted into Base; explicitly selecting the Fill → refused PaintOnFill.",
+    "m1": "§8 T4: 'Every existing compositor test passes with `premultiplied: false` added mechanically to its struct literals (30 sites in compositor.rs tests + gate0_journey.rs:247); no expected byte changes.' Alternatively, give both structs a `fn new(...)`/Default-based constructor in stage 1a. Name the 31 literal sites in stage 1a's surface.",
+    "m2": "§8 T14: drive the second plane through `publish_plane(PlaneOwner::Layer(1), 1001, \"baseColor\", 512, 512, bytes)` (stage 1b surface), not a stroke. Move the stroke-routed variant to T9 (stage 4).",
+    "m3": "§8 T5: drop the v1 sentinel, or replace it with a derivable one at ≥0.1 from a boundary. For example, L2 opaque 60 instead of 50: v1 = 60·0.848039 = 50.882 → 51. With 60, the stack-order golden becomes 169.608 + (60 − 169.608)·0.5 = 114.804 → 115, and the reordered one (200+60)/2 = 130.0, then 130·0.848039 = 110.245 → 110. All ≥0.1 from boundaries.",
+    "m4": "§8: name the material_layer.rs driver tests pinning 2b (171/187) and 2c (144) as RETIRED in stage 4, and their composite-level replacements: T6 (170, 170) and T5 order goldens. State it in material_layer.rs's module docs (the v1 boundaries block at :20-28 is rewritten in the same kill).",
+    "m5": "§2.2: `set_active_target(id)` clears mask_edit_layer unless it equals id. Selecting a row's mask in layer_mask_ui (document.rs:521) also sets active_target to that layer. Test: editing L2's mask, add a layer, stroke → the new layer's plane changes and L2's mask does not.",
+    "m6": "§2.3: PaintState keeps `active_index: usize` (the selected layer's stack index at the last sync). On a vanished id, select stack[min(active_index, len) − 1], walking down to the nearest paintable layer, else up, else Base.",
+    "m7": "§2.3 boundary: the retire census skips the live stroke_owner while is_stroking(). end_stroke on an owner no longer in the last snapshot retires its planes immediately and discards the stroke's undo capture with a log.",
+    "m8": "§5.1: plane size = `tile_channel_size(tile, \"baseColor\")` (paint_state.rs:899), evaluated per tile; refresh_fill_layer's `size` parameter becomes per-tile.",
+    "m9": "§3: list select_id_mask (paint_state.rs:1435) and the invert/clear/resize mask_synced resets as stage-4 touch points; each becomes `mask_synced.retain(|(_, t, _)| *t != tile)` (or `.clear()`).",
+    "m10": "§6.1: apply_paint_commit's prune step removes now-empty directories under paint/layers/ bottom-up after pruning files. T17 asserts that no empty layer dir survives a delete+save.",
+    "m11": "§5.3: either compute the anchor prefix with composite_stack_cpu over read-back planes (deterministic; costs L_prefix readbacks), or record GPU-dependent anchor bytes as a named boundary in §6.5. Pick one; the current text claims both determinism (§6.1:835-838) and a GPU path.",
+    "m12": "§8: GPU twins assert `|gpu − cpu| ≤ n_contributing` LSB (reason: per-dispatch Rgba8Unorm quantization of the in-place accumulator, compositor.rs judgment 5), or ±1 only for ≤2-entry stacks. T9 states its entry count.",
+    "m13": "§7 stage 4 surface: add bake_sources.rs (the painted_base_color/_tile signature change to &mut PaintState) and main.rs:3120 (Perf HUD → plane_bytes()). §1.4: drop main.rs:3386 from the headless-caller list (it is test code)."
+  }
+}
