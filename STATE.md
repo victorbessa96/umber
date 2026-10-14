@@ -11,18 +11,19 @@
 
 ## Status line
 
-Current phase: **THE PER-LAYER POOL ARC (2026-10-14) — three of five
-stages landed, the fourth hunting.** The core loop stays closed (Gate 0
-PASSED 2026-10-12, run 38255484123); the active hunt is the pool design
-(docs/specs/per-layer-pool-design.md r2, hostile-reviewed READY TO
-IMPLEMENT): 1a the compositor's premultiplied mode (`b1ceb2c`), 1b the
-plane storage + 2 save v2 (`f2aff9f`), 3 the selection + stroke gate
-(`ed64a58`); stage 4 (per-layer pixels, the Kill-B-class landing) is in
-flight; stage 5 (anchors + instances) queued. Around it: the agent
-protocol drives projects + layer edits over the wire, the offscreen
-snapshot harness renders panels headless, the never-crash gate + the
-panic-hunt fuzz hold, the corpus harness arms on real .spp files.
-State: POOL-ARC-STAGE-4-IN-FLIGHT
+Current phase: **THE PER-LAYER POOL ARC (2026-10-14) — four of five
+stages landed.** The core loop stays closed (Gate 0 PASSED 2026-10-12, run
+38255484123); the pool design (docs/specs/per-layer-pool-design.md r2,
+hostile-reviewed): 1a the compositor's premultiplied mode (`b1ceb2c`), 1b
+the plane storage + 2 save v2 (`f2aff9f`), 3 the selection + stroke gate
+(`ed64a58`), 4 per-layer pixels (strokes/fills/materials/imports on own
+planes, the composite-on-read flush, tombstones, dormancy); stage 5
+(anchors + instances) next. Wave 5 in parallel: the ortho camera and the
+MaterialX import Kill A (parse + report) are with claws; the stage-4 perf
+gate re-measures input-to-photon against the stage-3 baseline (p95
+10.19 ms). Around it: the agent protocol, the offscreen snapshot harness,
+the never-crash gate + panic-hunt fuzz, the .spp corpus harness.
+State: POOL-ARC-STAGE-4-LANDED
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate.
 No tag, no release, no v0.1 claim until Gate 0 passes.

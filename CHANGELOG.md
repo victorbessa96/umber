@@ -23,6 +23,21 @@ the source of truth.
 - Pool stage 3 — the active-layer seam + the stroke gate: explicit
   selection refuses unpaintable layers typed, the selectable Base row,
   check_paintable's Fill/Folder arms (`ed64a58`)
+- Pool stage 4 — per-layer pixels: strokes, fills, materials and mesh-map
+  imports write their OWN layer planes (`plane_of_mut` routing); the
+  composite-on-read flush runs at END-of-update against a per-frame
+  `CompositeSnapshot` (dirty rects, `Full`-only-if-displayed coalescing
+  [M8], cache-else-Base reads for every CPU reader [M7]); the
+  premultiplied eraser + composite-sampled smudge/clone [M1][M3];
+  tombstones (retire pump, revive-by-reupload, oldest-first cap
+  eviction); dormancy + the v2 manifest header [B2]; undo/redo keys
+  `(owner, tile, channel)` and dirties the composite cache. Dragon fixes at
+  consume: the smudge test's snapshot shape (Base row + displayed) and the
+  6 persistence fixtures' `base_nonempty` expectation
+- MaterialX reader nesting cap (`MAX_ELEM_DEPTH = 256`): hostile nesting is
+  a typed parse error, not a process-aborting stack overflow
+- Research: MaterialX import round-trip (`bf4718e`, the honest subset +
+  staged kills A/S/B/C/U) and the PWYS stroke buffer (`ca0fd09`)
 - LayerCommand::Rename — the name-only op with its journal entry and
   wire step (`3a16536`); the agent protocol's five wire edit steps
   (layer_add/remove/set_opacity/reorder/set_material, all journaled +
