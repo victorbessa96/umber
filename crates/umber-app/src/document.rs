@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 
 use fluent::FluentValue;
 use umber_core::journal::{Journal, JournalOp};
-use umber_core::layers::{Layer, LayerCommand, LayerKind, LayerStack};
+use umber_core::layers::{InstanceError, Layer, LayerCommand, LayerKind, LayerStack};
 use umber_core::undo::UndoStack;
 
 use crate::history_panel::{HistoryKind, SessionHistory};
 use crate::i18n::{tr, tr_args};
-use crate::paint_state::PaintState;
+use crate::paint_state::{PaintState, PlaneOwner};
 
 /// The open document: layer stack + undo history + autosave journal.
 ///
@@ -257,7 +257,132 @@ impl Document {
     }
 }
 
-/// Draws the Layers panel: per-layer visibility toggle, name, kind badge.
+/// What the Layers rows asked for this frame (per-layer-pool design
+/// §2.2). `layers_ui` takes no `PaintState` — the material context borrows
+/// the shell's state mutably, so the selection cannot be written from
+/// inside it — and the shell applies the outcome to the paint session
+/// OUTSIDE that borrow, through `PaintState::set_active_target`.
+#[derive(Debug, Default)]
+pub struct LayersUiOutcome {
+    /// `Some(target)` = a row's name was clicked (select it). The Base
+    /// pseudo-row yields `Some(PlaneOwner::Base)`; an add button yields the
+    /// new layer. `None` = no row asked (the common case).
+    pub select: Option<PlaneOwner>,
+    /// `Some(visible)` = the Base row's visibility was toggled (stage 4 —
+    /// always `None` until the toggle lands; see `layers_ui`).
+    pub base_visible: Option<bool>,
+}
+
+/// The shell's per-frame selection sync, decided (per-layer-pool design
+/// §2.3): the resolved target, its fresh verdict and its stack index. The
+/// shell pushes it through `PaintState::sync_active_target`, which owns
+/// the `active_explicit` bookkeeping (same target = keep, moved = auto).
+pub struct ActiveSync {
+    /// The resolved target (explicit Base stays, auto Base resolves,
+    /// live layers keep, vanished ids resolve to a neighbour or Base).
+    pub target: PlaneOwner,
+    /// `stack.check_paintable(id)` for layers, `Ok(())` for Base.
+    pub verdict: Result<(), InstanceError>,
+    /// The target's stack index (preserved untouched for Base, which has
+    /// none — the vanished-id walk reads it only for `Layer` targets).
+    pub index: usize,
+}
+
+/// Revalidates the stroke selection against the live stack: the pure half
+/// of the shell's per-frame sync (per-layer-pool design §2.3). `current` /
+/// `explicit` / `index` are the paint session's last-synced state.
+///
+/// - An explicit Base selection never auto-moves ([M3]): Base is always
+///   paintable.
+/// - An auto Base resolves to the topmost PAINTABLE layer, else Base
+///   ([M12]): auto-resolution never picks a refusing layer, so a stack of
+///   only fills/materials still paints (into Base).
+/// - A live `Layer(id)` keeps its target with a fresh verdict and index.
+/// - A vanished `Layer(id)` ([m6]) resolves against `index` (the id's
+///   position at the last sync). With `i = min(index, len)`, the walk goes
+///   DOWN from `stack[i − 1]` (the layer that sat directly below) to the
+///   nearest paintable layer — `(0..i).rev()`, so no `usize` underflow is
+///   possible — then UP from `stack[i]`, else Base.
+pub fn revalidate_active(
+    stack: &LayerStack,
+    current: PlaneOwner,
+    explicit: bool,
+    index: usize,
+) -> ActiveSync {
+    match current {
+        PlaneOwner::Base if explicit => ActiveSync {
+            target: PlaneOwner::Base,
+            verdict: Ok(()),
+            index,
+        },
+        PlaneOwner::Base => match topmost_paintable(stack) {
+            Some((id, at)) => ActiveSync {
+                target: PlaneOwner::Layer(id),
+                // Paintable by selection (the finder only returns `Ok`).
+                verdict: Ok(()),
+                index: at,
+            },
+            None => ActiveSync {
+                target: PlaneOwner::Base,
+                verdict: Ok(()),
+                index,
+            },
+        },
+        PlaneOwner::Layer(id) => match stack.index_of(id) {
+            Some(at) => ActiveSync {
+                target: current,
+                verdict: stack.check_paintable(id),
+                index: at,
+            },
+            None => {
+                let len = stack.layers.len();
+                let i = index.min(len);
+                let mut resolved: Option<(u64, usize)> = None;
+                for pos in (0..i).rev() {
+                    let candidate = &stack.layers[pos];
+                    if stack.check_paintable(candidate.id).is_ok() {
+                        resolved = Some((candidate.id, pos));
+                        break;
+                    }
+                }
+                if resolved.is_none() {
+                    for pos in i..len {
+                        let candidate = &stack.layers[pos];
+                        if stack.check_paintable(candidate.id).is_ok() {
+                            resolved = Some((candidate.id, pos));
+                            break;
+                        }
+                    }
+                }
+                match resolved {
+                    Some((id, at)) => ActiveSync {
+                        target: PlaneOwner::Layer(id),
+                        verdict: Ok(()),
+                        index: at,
+                    },
+                    None => ActiveSync {
+                        target: PlaneOwner::Base,
+                        verdict: Ok(()),
+                        index,
+                    },
+                }
+            }
+        },
+    }
+}
+
+/// The topmost paintable layer and its stack index, or `None` when every
+/// layer refuses (or the stack is empty).
+fn topmost_paintable(stack: &LayerStack) -> Option<(u64, usize)> {
+    for (at, layer) in stack.layers.iter().enumerate().rev() {
+        if stack.check_paintable(layer.id).is_ok() {
+            return Some((layer.id, at));
+        }
+    }
+    None
+}
+/// Draws the Layers panel: per-layer visibility toggle, SELECTABLE name,
+/// kind badge, and the pinned Base pseudo-row.
 ///
 /// Dynamic-material layers (Kill B, `docs/specs/dynamic-materials-design.md`
 /// §4) render their row here like every other kind, plus — under their own
@@ -274,23 +399,45 @@ impl Document {
 /// an instance row exists exactly when painting it is refused), and the
 /// row carries the "paint the source" hint. Every paintable layer offers
 /// a ⧉ button that instances it on top (undoable, through the journal).
+///
+/// Selection (per-layer-pool design §2.2): every row's name is a
+/// `selectable_label` against `active`, and the Base pseudo-row
+/// (`tr("layers.base-paint")`, always shown — tile-1001 Base baseColor is
+/// created in `PaintState::new`, so Base always holds a plane) selects
+/// `PlaneOwner::Base`. The add buttons select the new layer explicitly
+/// (Painter's add-then-paint). Nothing here writes the selection: the
+/// clicks accumulate into the returned [`LayersUiOutcome`], which the shell
+/// applies to the paint session outside the material-context borrow.
+/// `base_visible` is stage 4's Base-visibility state: accepted now so the
+/// signature is stage-4-stable, read when the toggle lands (stage 3
+/// renders no toggle, so the outcome's `base_visible` stays `None`).
 pub fn layers_ui(
     ui: &mut egui::Ui,
     doc: &mut Document,
     mut mats: crate::layers_panel::MaterialPanelContext<'_>,
-) {
-    use umber_core::InstanceError;
-
+    active: PlaneOwner,
+    base_visible: bool,
+) -> LayersUiOutcome {
+    let _ = base_visible;
+    let mut outcome = LayersUiOutcome::default();
     ui.horizontal_wrapped(|ui| {
         if ui.button(tr("layers.add-paint")).clicked() {
             let n = doc.layers().len() + 1;
             let name = tr_args("layers.default-paint-name", [("n", FluentValue::from(n))]);
             doc.run(LayerCommand::add(name, LayerKind::Paint));
+            // Add-then-paint (Painter): the new layer is the stack top
+            // after the run, and it is selected explicitly.
+            if let Some(top) = doc.layers().last() {
+                outcome.select = Some(PlaneOwner::Layer(top.id));
+            }
         }
         if ui.button(tr("layers.add-fill")).clicked() {
             let n = doc.layers().len() + 1;
             let name = tr_args("layers.default-fill-name", [("n", FluentValue::from(n))]);
             doc.run(LayerCommand::add(name, LayerKind::Fill));
+            if let Some(top) = doc.layers().last() {
+                outcome.select = Some(PlaneOwner::Layer(top.id));
+            }
         }
         if ui.button(tr("layers.add-material")).clicked() {
             let n = doc.layers().len() + 1;
@@ -299,6 +446,9 @@ pub fn layers_ui(
                 [("n", FluentValue::from(n))],
             );
             doc.run(LayerCommand::add(name, LayerKind::Material));
+            if let Some(top) = doc.layers().last() {
+                outcome.select = Some(PlaneOwner::Layer(top.id));
+            }
         }
     });
     let mut remove_id = None;
@@ -314,6 +464,10 @@ pub fn layers_ui(
             visible: bool,
             /// `Some(source name)` for instance rows, `None` otherwise.
             instance_of: Option<String>,
+            /// The refusal hint for fill/folder rows (`None` for the rest:
+            /// instances carry the "paint the source" hint, materials the
+            /// refresh badge line below their row).
+            paint_hint: Option<String>,
         }
         let rows: Vec<Row> = doc
             .layers()
@@ -341,12 +495,18 @@ pub fn layers_ui(
                         (tr("layers.kind-instance"), Some(of))
                     }
                 };
+                let paint_hint = match layer.kind {
+                    LayerKind::Fill => Some(tr("layers.fill-unpaintable")),
+                    LayerKind::Folder { .. } => Some(tr("layers.folder-unpaintable")),
+                    _ => None,
+                };
                 Row {
                     id: layer.id,
                     name: layer.name.clone(),
                     kind,
                     visible: layer.visible,
                     instance_of,
+                    paint_hint,
                 }
             })
             .collect();
@@ -359,10 +519,26 @@ pub fn layers_ui(
                     doc.run(LayerCommand::set_visible(layer.id, !layer.visible));
                 }
                 if layer.instance_of.is_some() {
-                    ui.label(&layer.name)
-                        .on_hover_text(tr("layers.instance-paint-hint"));
-                } else {
-                    ui.label(&layer.name);
+                    if ui
+                        .selectable_label(active == PlaneOwner::Layer(layer.id), &layer.name)
+                        .on_hover_text(tr("layers.instance-paint-hint"))
+                        .clicked()
+                    {
+                        outcome.select = Some(PlaneOwner::Layer(layer.id));
+                    }
+                } else if let Some(hint) = &layer.paint_hint {
+                    if ui
+                        .selectable_label(active == PlaneOwner::Layer(layer.id), &layer.name)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        outcome.select = Some(PlaneOwner::Layer(layer.id));
+                    }
+                } else if ui
+                    .selectable_label(active == PlaneOwner::Layer(layer.id), &layer.name)
+                    .clicked()
+                {
+                    outcome.select = Some(PlaneOwner::Layer(layer.id));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -396,6 +572,20 @@ pub fn layers_ui(
                 crate::layers_panel::material_section(ui, doc, layer.id, &mut mats);
             }
         }
+        // [M3] The Base pseudo-row, pinned at the bottom of the list:
+        // session paint that belongs to no layer (v1 projects, strokes with
+        // no layer selected). Selectable like every layer row; its
+        // visibility toggle lands in stage 4, when a live composite exists
+        // for it to affect.
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(active == PlaneOwner::Base, tr("layers.base-paint"))
+                .on_hover_text(tr("layers.base-paint-hint"))
+                .clicked()
+            {
+                outcome.select = Some(PlaneOwner::Base);
+            }
+        });
     });
     if let Some(id) = remove_id {
         doc.run(LayerCommand::remove(id));
@@ -418,6 +608,7 @@ pub fn layers_ui(
         ui.separator();
         ui.weak(status);
     }
+    outcome
 }
 
 /// Draws the layer-mask section under the Layers panel: per-layer mask
@@ -518,7 +709,21 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
             MaskAction::Toggle(id, enabled) => {
                 doc.run(LayerCommand::set_mask_enabled(id, enabled));
             }
-            MaskAction::Select(layer) => paint.set_mask_edit_layer(layer),
+            MaskAction::Select(layer) => {
+                // [m5] Selecting a row's mask also selects the layer
+                // EXPLICITLY for strokes: without this, adding a layer (or
+                // any selection) while editing L2's mask would paint L2's
+                // MASK, because a set `mask_edit_layer` wins over
+                // everything. Target first (it clears a foreign mask edit),
+                // then the mask selection. Deselecting the mask leaves the
+                // stroke target alone.
+                if let Some(id) = layer {
+                    paint.set_active_target(PlaneOwner::Layer(id));
+                    paint.set_mask_edit_layer(Some(id));
+                } else {
+                    paint.set_mask_edit_layer(None);
+                }
+            }
             MaskAction::Detach(id) => {
                 doc.run(LayerCommand::detach_mask(id));
                 paint.remove_layer_masks(id);
@@ -944,5 +1149,96 @@ mod tests {
         doc.run(LayerCommand::add("B-new", LayerKind::Paint));
         assert_eq!(doc.session_history.entries()[0].op_id, 0);
         assert_eq!(doc.session_history.entries()[0].undo_depth, Some(1));
+    }
+
+    /// The selection outcome carries no intent until a row asks: the common
+    /// frame applies nothing.
+    #[test]
+    fn layers_ui_outcome_defaults_to_no_intent() {
+        let outcome = LayersUiOutcome::default();
+        assert_eq!(outcome.select, None);
+        assert_eq!(outcome.base_visible, None);
+    }
+
+    /// §8 T11 (auto half) + [M12]: an auto Base resolves to the topmost
+    /// paintable layer, else Base. An explicit Base never auto-moves, even
+    /// with paintable layers above the fold.
+    #[test]
+    fn revalidate_auto_base_resolves_topmost_paintable_else_base() {
+        let mut stack = LayerStack::new();
+        // Empty stack: auto Base stays Base (the headless callers'
+        // contract — `perf_soak` strokes land in Base).
+        let sync = revalidate_active(&stack, PlaneOwner::Base, false, 0);
+        assert_eq!(sync.target, PlaneOwner::Base);
+        assert_eq!(sync.verdict, Ok(()));
+        // Fill-only stack: Base (a refusing layer is never picked).
+        let fill = stack.add_layer("F", LayerKind::Fill);
+        assert_eq!(fill, 0);
+        let sync = revalidate_active(&stack, PlaneOwner::Base, false, 0);
+        assert_eq!(sync.target, PlaneOwner::Base);
+        // Paint below a fill: the topmost PAINTABLE wins, with its index.
+        let paint = stack.add_layer("P", LayerKind::Paint);
+        let sync = revalidate_active(&stack, PlaneOwner::Base, false, 0);
+        assert_eq!(sync.target, PlaneOwner::Layer(paint));
+        assert_eq!(sync.verdict, Ok(()));
+        assert_eq!(sync.index, 1);
+        // An explicit Base survives the same stack untouched.
+        let sync = revalidate_active(&stack, PlaneOwner::Base, true, 0);
+        assert_eq!(sync.target, PlaneOwner::Base);
+    }
+
+    /// §8 T11 [m6]: a vanished id resolves to its former neighbour — down
+    /// first (the layer that sat directly below), then up, else Base.
+    /// Stack `[P0, P1, F2, P3]`, ids 0..=3 in order.
+    #[test]
+    fn revalidate_vanished_id_resolves_to_its_former_neighbour() {
+        let mut stack = LayerStack::new();
+        let p0 = stack.add_layer("P0", LayerKind::Paint);
+        let p1 = stack.add_layer("P1", LayerKind::Paint);
+        let _f2 = stack.add_layer("F2", LayerKind::Fill);
+        let p3 = stack.add_layer("P3", LayerKind::Paint);
+        assert_eq!((p0, p1, p3), (0, 1, 3));
+        // Live layers keep their target with a fresh verdict + index.
+        let sync = revalidate_active(&stack, PlaneOwner::Layer(p3), true, 3);
+        assert_eq!(sync.target, PlaneOwner::Layer(p3));
+        assert_eq!(sync.verdict, Ok(()));
+        assert_eq!(sync.index, 3);
+        // Removing P3 (active, index 3): down from stack[2] = F2
+        // (unpaintable) to P1.
+        stack.remove_layer(p3);
+        let sync = revalidate_active(&stack, PlaneOwner::Layer(p3), true, 3);
+        assert_eq!(sync.target, PlaneOwner::Layer(p1));
+        assert_eq!(sync.verdict, Ok(()));
+        assert_eq!(sync.index, 1);
+        // Removing P0 while IT is active (index 0): no below, so up to the
+        // nearest paintable layer.
+        stack.remove_layer(p0);
+        let sync = revalidate_active(&stack, PlaneOwner::Layer(p0), true, 0);
+        assert_eq!(sync.target, PlaneOwner::Layer(p1));
+        assert_eq!(sync.index, 0);
+        // Empty stack with a stale layer target: Base (no underflow: the
+        // vanished bottom skips the down-walk by construction).
+        stack.remove_layer(p1);
+        assert!(stack.layers.iter().all(|l| l.kind == LayerKind::Fill));
+        stack.remove_layer(2);
+        assert!(stack.layers.is_empty());
+        let sync = revalidate_active(&stack, PlaneOwner::Layer(p1), true, 1);
+        assert_eq!(sync.target, PlaneOwner::Base);
+        assert_eq!(sync.verdict, Ok(()));
+    }
+
+    /// A live explicit selection keeps its target but gets a fresh verdict:
+    /// selecting a fill explicitly is what the gate refuses on.
+    #[test]
+    fn revalidate_live_layer_keeps_target_with_a_fresh_verdict() {
+        let mut stack = LayerStack::new();
+        let fill = stack.add_layer("F", LayerKind::Fill);
+        let sync = revalidate_active(&stack, PlaneOwner::Layer(fill), true, 0);
+        assert_eq!(sync.target, PlaneOwner::Layer(fill));
+        assert_eq!(
+            sync.verdict,
+            Err(InstanceError::PaintOnFill { layer: fill })
+        );
+        assert_eq!(sync.index, 0);
     }
 }

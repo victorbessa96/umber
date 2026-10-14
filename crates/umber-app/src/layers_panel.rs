@@ -40,13 +40,13 @@
 //!   drift, doc §1.2). Definitions are small graphs; the parse costs
 //!   microseconds and runs only for expanded rows.
 //! * The stroke gate lives here as [`paint_gate_allows`]: `check_paintable`
-//!   (armed for materials by Kill A) is the single paintability truth, and
-//!   the row renders its verdict as the unpaintable hint. Wiring the gate
-//!   INTO stroke begin waits on a selected-layer seam that does not exist in
-//!   v1 — strokes begin in `viewport.rs`/`uv_view.rs` against the
-//!   layer-agnostic pool session, both outside this kill's surface — so the
-//!   helper plus its test plus the row badge are the delivered gate, and the
-//!   viewport call sites are the named follow-up (see the kill report).
+//!   is the single paintability truth (armed for materials by Kill A, for
+//!   fills and folders by the per-layer-pool stage-3 kill), and the row
+//!   renders its verdict as the unpaintable hint. The gate is WIRED into
+//!   stroke begin in `PaintState::begin_stroke_styled` (stage 3's
+//!   selection seam), so this helper plus its test plus the row badge are
+//!   the belt-and-braces layer, and the viewport call sites need no change
+//!   (they address the session, which gates).
 //! * The section defaults open (the `fill_section_ui` precedent): the
 //!   channel controls sit beside the badge that explains them.
 
@@ -612,6 +612,10 @@ mod tests {
         let paint = stack.add_layer("P", LayerKind::Paint);
         let material = stack.add_layer("M", LayerKind::Material);
         let instance = stack.add_layer("I", LayerKind::Instance { source_id: paint });
+        // Stage 3 (per-layer-pool §2.3): fills and folders refuse too — a
+        // fill's plane is eval-owned, a folder holds no pixels.
+        let fill = stack.add_layer("F", LayerKind::Fill);
+        let folder = stack.add_layer("D", LayerKind::Folder { passthrough: false });
         assert!(
             paint_gate_allows(&stack, paint),
             "paint layers stay paintable"
@@ -631,6 +635,25 @@ mod tests {
         assert!(
             !paint_gate_allows(&stack, instance),
             "instances stay rejected too"
+        );
+        assert!(
+            !paint_gate_allows(&stack, fill),
+            "fills are eval-owned: strokes would be destroyed by refresh"
+        );
+        assert!(
+            matches!(
+                stack.check_paintable(fill),
+                Err(umber_core::InstanceError::PaintOnFill { layer }) if layer == fill
+            ),
+            "the fill rejection is the typed stage-3 error, naming the layer"
+        );
+        assert!(!paint_gate_allows(&stack, folder), "folders hold no pixels");
+        assert!(
+            matches!(
+                stack.check_paintable(folder),
+                Err(umber_core::InstanceError::PaintOnFolder { layer }) if layer == folder
+            ),
+            "the folder rejection is the typed stage-3 error, naming the layer"
         );
         assert!(
             !paint_gate_allows(&stack, 999),

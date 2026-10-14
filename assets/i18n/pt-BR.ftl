@@ -453,6 +453,10 @@ layers =
     .material-badge-missing-def = Definição { $id } ausente — escolha outra ou salve de novo.
     .material-ignored = Ignora canais não declarados: { $channels }
     .material-unpaintable = Publica via refresh — os traços não o pintam.
+    .fill-unpaintable = Publica por procedimento — os traços não o pintam. Pinte a máscara.
+    .folder-unpaintable = Não tem pixels — selecione uma camada de pintura.
+    .base-paint = Pintura base
+    .base-paint-hint = Pintura que não pertence a nenhuma camada: projetos v1 e traços feitos sem camada selecionada.
 
 ## Propriedades da camada de preenchimento
 

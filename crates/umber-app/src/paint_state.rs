@@ -342,6 +342,31 @@
 //!   `CompositeSnapshot`, drain-then-composite ordering and region
 //!   dispatches land in stage 4 (§4.1). The hook's fire condition (dirty
 //!   entries pending) is already its body.
+//!
+//! Per-layer pool storage, stage 3 (docs/specs/per-layer-pool-design.md
+//! §2): the selection + the stroke gate. WHO a stroke paints is explicit
+//! (`active_target`, edited through the shell) and gated (`active_verdict`,
+//! pushed by the shell once per frame); accepted strokes still land in
+//! Base — stage 4 moves the pixels.
+//!
+//! Judgment calls (stage-3 boundaries — read before extending):
+//!
+//! * `stroke_owner` is forced to `Base` on every accepted stroke. §2.3's
+//!   end state snapshots `active_target`, but stage-3 routing is unchanged
+//!   (every batch stages into Base targets), so recording a `Layer` id
+//!   would point at a plane the stroke never painted. Stage 4 switches the
+//!   snapshot to `active_target` alongside the routing.
+//! * `sync_active_target` keeps `active_explicit` on a same-target push and
+//!   clears it when the target moves (see its docs): the shell moves the
+//!   target only when it resolved it (open, new, vanished id), and a
+//!   resolved target is auto by §2.3.
+//! * `active_index` is meaningless for `Base` (no stack index): the sync
+//!   preserves whatever it holds, and the vanished-id walk reads it only
+//!   for `Layer` targets.
+//! * `stroke_refusal` is stored, not rendered: the status line is
+//!   `status_bar.rs`, outside this kill's lock, so stage 4 wires the
+//!   display. The refusal is exact today (`staged_batch_count() == 0`,
+//!   `is_stroking() == false`) and the user's way out is one click.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -357,6 +382,7 @@ use umber_brush::{
     wash_scale, BrushParams, BrushTool, DabAdapter, LineConstraintMode, MaskPaint, QuickMask,
     RgbaBuffer, StrokeConditioner, StrokeEvent, SymTransform, SymmetrySettings, WashMode,
 };
+use umber_core::layers::InstanceError;
 use umber_core::undo::UndoStack;
 use umber_gpu::paint::{Dab, PaintCompositor};
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
@@ -565,10 +591,13 @@ impl Plane {
 
 /// Every reason a stroke can be refused (per-layer-pool design §2.1,
 /// [M4]). One enum, so the status line has one surface. No field is named
-/// `source` (the thiserror trap). The `Layer` arm lands in stage 3 with
-/// the selection gate; stage 1b carries the budget arm only.
+/// `source` (the thiserror trap).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PaintRefusal {
+    /// The explicitly selected layer is unpaintable (`check_paintable`'s
+    /// verdict, pushed by the shell — stage 3's stroke gate, §2.3).
+    #[error("paint refused: {0}")]
+    Layer(InstanceError),
     /// Materializing a new plane would cross the hard cap, or wgpu
     /// reported `OutOfMemory` creating it (§1.3). `bytes` is the total
     /// `plane_bytes()` would have reached.
@@ -925,6 +954,28 @@ pub struct PaintState {
     /// The live stroke's mask target, snapshotted at `begin_stroke` (like
     /// `stroke_mask_edit`/`stroke_channel`).
     stroke_mask_layer: Option<u64>,
+    /// [M3] The target new strokes paint (per-layer-pool design §2.1).
+    /// Base is first-class and selectable. The Layers panel edits this
+    /// through the shell ([`Self::set_active_target`]); `begin_stroke`
+    /// snapshots it into [`Self::stroke_owner`].
+    active_target: PlaneOwner,
+    /// [M12] `true` when the user chose `active_target` (row click, add
+    /// button, mask-row selection); `false` when the shell's revalidation
+    /// resolved it. Only an EXPLICIT unpaintable selection refuses (§2.3).
+    active_explicit: bool,
+    /// [m6] `active_target`'s stack index at the last sync, so a vanished
+    /// id can resolve to its former neighbour (§2.3). Meaningless for
+    /// Base (which has no stack index); preserved untouched.
+    active_index: usize,
+    /// The shell's last paintability verdict for `active_target`
+    /// (`LayerStack::check_paintable`; `Ok(())` for Base), pushed between
+    /// strokes via [`Self::sync_active_target`].
+    active_verdict: Result<(), InstanceError>,
+    /// The live stroke's owner, snapshotted at `begin_stroke`.
+    stroke_owner: PlaneOwner,
+    /// Why the last `begin_stroke` (or a mid-stroke materialization)
+    /// refused. `None` after an accepted stroke.
+    stroke_refusal: Option<PaintRefusal>,
     /// What layer-mask strokes paint (white opens, black closes — the
     /// quick mask's [`MaskPaint`] semantics on a `u8` plane).
     layer_mask_paint: MaskPaint,
@@ -1052,6 +1103,12 @@ impl PaintState {
             layer_masks: BTreeMap::new(),
             mask_edit_layer: None,
             stroke_mask_layer: None,
+            active_target: PlaneOwner::Base,
+            active_explicit: false,
+            active_index: 0,
+            active_verdict: Ok(()),
+            stroke_owner: PlaneOwner::Base,
+            stroke_refusal: None,
             layer_mask_paint: MaskPaint::default(),
             #[cfg(test)]
             mask_uploads: 0,
@@ -1247,6 +1304,29 @@ impl PaintState {
     /// scale (the path replay's per-point style; live strokes use `1.0`
     /// for both through [`Self::begin_stroke`]).
     pub fn begin_stroke_styled(&mut self, uv: Pos2, pressure: f32, radius_scale: f32) {
+        // Per-layer-pool stage 3 (§2.3): the stroke gate. A layer-mask
+        // stroke paints the mask (never pixels) and a quick-mask-mode
+        // stroke paints the session mask, so both bypass the gate — painting
+        // a fill's or material's MASK stays legitimate. Otherwise an
+        // EXPLICIT unpaintable selection (the only way `active_verdict` is
+        // `Err`: auto-resolution never picks a refusing layer) refuses:
+        // nothing stages, no capture opens, and the typed reason waits on
+        // `stroke_refusal` for the status line. `replay_path` /
+        // `replay_filled_path` begin through this function, so they inherit
+        // the gate.
+        if self.mask_edit_layer.is_none() && !self.quick_mask().is_editing() {
+            if let Err(verdict) = self.active_verdict.clone() {
+                self.stroking = false;
+                self.stroke_refusal = Some(PaintRefusal::Layer(verdict));
+                return;
+            }
+        }
+        // Stage-3 boundary (§7): every accepted stroke still lands in Base
+        // (routing moves in stage 4), so the snapshot is forced to Base
+        // with the pixels — never a `Layer` id pointing at a plane the
+        // stroke did not paint.
+        self.stroke_owner = PlaneOwner::Base;
+        self.stroke_refusal = None;
         self.conditioner.reset();
         self.event_seq = 0;
         self.stroking = true;
@@ -1575,6 +1655,95 @@ impl PaintState {
     /// switch never splits one stroke across two planes.
     pub fn set_mask_edit_layer(&mut self, layer: Option<u64>) {
         self.mask_edit_layer = layer;
+    }
+
+    /// The target new strokes paint (per-layer-pool design §2.1, [M3]).
+    pub fn active_target(&self) -> PlaneOwner {
+        self.active_target
+    }
+
+    /// Whether the user chose [`Self::active_target`] explicitly ([M12]).
+    pub fn active_explicit(&self) -> bool {
+        self.active_explicit
+    }
+
+    /// [`Self::active_target`]'s stack index at the last sync ([m6]).
+    pub fn active_index(&self) -> usize {
+        self.active_index
+    }
+
+    /// The shell's last paintability verdict for the active target.
+    /// Stage 4's status line reads this beside `stroke_refusal`.
+    #[allow(
+        dead_code,
+        reason = "stage-4 status-line consumer; the gate reads the field"
+    )]
+    pub fn active_verdict(&self) -> Result<(), InstanceError> {
+        self.active_verdict.clone()
+    }
+
+    /// The live stroke's owner, snapshotted at `begin_stroke` (like
+    /// `stroke_channel`): a mid-stroke selection change never splits a
+    /// stroke across two planes. Stage 4's routing reads this; stage 3
+    /// forces it to `Base` (see `begin_stroke_styled`).
+    #[allow(dead_code, reason = "stage-4 routing consumer; stage-3 tests read it")]
+    pub fn stroke_owner(&self) -> PlaneOwner {
+        self.stroke_owner
+    }
+
+    /// Why the last `begin_stroke` refused (`None` after an accepted
+    /// stroke). Stage 4's status line renders this.
+    #[allow(
+        dead_code,
+        reason = "stage-4 status-line consumer; stage-3 tests read it"
+    )]
+    pub fn stroke_refusal(&self) -> Option<PaintRefusal> {
+        self.stroke_refusal.clone()
+    }
+
+    /// Selects the target new strokes paint (the Layers panel's row click,
+    /// add button or mask-row selection, applied by the shell — §2.2).
+    /// Explicit by construction: sets `active_explicit`, so an unpaintable
+    /// target refuses at the next `begin_stroke`. Takes effect for the next
+    /// stroke — a live stroke keeps its `stroke_owner` snapshot, so a
+    /// mid-stroke change never splits one stroke across two planes.
+    ///
+    /// [m5] Reconciles with mask editing: clears `mask_edit_layer` unless
+    /// it equals the target's layer id. Without this, a user editing L2's
+    /// mask who adds a layer and paints would paint L2's MASK, because a
+    /// set `mask_edit_layer` wins over everything in `push_event_styled`.
+    pub fn set_active_target(&mut self, target: PlaneOwner) {
+        let keep_mask = matches!(target, PlaneOwner::Layer(id) if self.mask_edit_layer == Some(id));
+        if !keep_mask {
+            self.mask_edit_layer = None;
+        }
+        self.active_target = target;
+        self.active_explicit = true;
+    }
+
+    /// Pushes the shell's per-frame revalidation (§2.3): the target the
+    /// shell resolved, its fresh `check_paintable` verdict (`Ok(())` for
+    /// Base) and its current stack index. The `sync_tool`/`sync_symmetry`
+    /// precedent: the shell owns the stack, this session does not.
+    ///
+    /// Judgment call — `active_explicit` survives a same-target push and
+    /// clears when the target moves. The shell only moves the target when
+    /// IT resolved it (open, new, or a vanished id), and a resolved target
+    /// is auto (`false`) by §2.3; an untouched target keeps whatever the
+    /// user chose. So an explicit Base selection survives adds, removes
+    /// and reorders, while a vanished id's neighbour arrives auto.
+    pub fn sync_active_target(
+        &mut self,
+        target: PlaneOwner,
+        verdict: Result<(), InstanceError>,
+        index: usize,
+    ) {
+        if target != self.active_target {
+            self.active_explicit = false;
+        }
+        self.active_target = target;
+        self.active_verdict = verdict;
+        self.active_index = index;
     }
 
     /// What layer-mask strokes paint (white opens, black closes).
@@ -2085,11 +2254,20 @@ impl PaintState {
     /// open-path and `reset_for_new` call before loading, so a document
     /// never inherits another document's planes). Base's `targets` stay:
     /// the open path re-materializes them from the sidecars it loads.
+    /// The selection resets to auto Base (§6.3 [M10]): layer ids restart
+    /// at 0 in every `LayerStack`, so a carried selection would point at
+    /// another document's layer. The next sync auto-resolves it (§2.3).
     pub fn clear_layer_planes(&mut self) {
         self.planes.clear();
         self.plane_committed.clear();
         self.cache.clear();
         self.cache_dirty.clear();
+        self.active_target = PlaneOwner::Base;
+        self.active_explicit = false;
+        self.active_index = 0;
+        self.active_verdict = Ok(());
+        self.stroke_owner = PlaneOwner::Base;
+        self.stroke_refusal = None;
     }
 
     /// Backing-store bytes (§1.3's accounting, exactly): Σ `w·h·4` over
@@ -3863,6 +4041,252 @@ mod tests {
                 vec![2u8; 512 * 512 * 4],
             )
             .expect("writes into an existing plane ignore the cap");
+    }
+
+    // --- Per-layer pool stage 3: selection + stroke gate (§2, §8 T10/T11/T32) ---
+    //
+    // Verdicts are pushed by the shell in production (`sync_active_target`,
+    // once per frame); these tests perform the shell's dance directly. The
+    // stack half of the dance (auto-resolution, the vanished-id neighbour
+    // walk) is pinned in `document.rs`'s revalidate tests — here the verdict
+    // is crafted, and the gate + snapshot + reconcile behavior is pinned.
+
+    /// Drives a converging diagonal stroke: 1 begin + 24 extends (the
+    /// conditioner needs a run of events before it emits its first dab —
+    /// the `save_open_round_trip` precedent).
+    fn drive_converged_diagonal(state: &mut PaintState) {
+        state.begin_stroke(egui::pos2(0.2, 0.2));
+        for i in 1..=24 {
+            let t = i as f32 * 0.02;
+            state.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+        }
+        state.end_stroke();
+    }
+
+    #[test]
+    fn gate_refuses_explicit_unpaintable_selection() {
+        // §8 T10. Every EXPLICITLY selected unpaintable kind refuses with
+        // its typed verdict: no stroke opens, nothing stages, and the
+        // refusal names the layer.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let cases = [
+            (7u64, InstanceError::PaintOnMaterial { layer: 7 }),
+            (
+                9u64,
+                InstanceError::PaintOnInstance {
+                    instance: 9,
+                    source_id: 2,
+                },
+            ),
+            (3u64, InstanceError::PaintOnFill { layer: 3 }),
+            (5u64, InstanceError::PaintOnFolder { layer: 5 }),
+            (999u64, InstanceError::UnknownLayer(999)),
+        ];
+        for (id, verdict) in cases {
+            // The shell's dance: explicit row click, then the frame's
+            // verdict push for the same target (same-target sync keeps the
+            // explicit flag — see the lifecycle test below).
+            state.set_active_target(PlaneOwner::Layer(id));
+            state.sync_active_target(PlaneOwner::Layer(id), Err(verdict.clone()), 0);
+            assert!(
+                state.active_explicit(),
+                "the dance keeps layer {id} explicit"
+            );
+            state.begin_stroke(egui::pos2(0.5, 0.5));
+            assert!(
+                !state.is_stroking(),
+                "a refused stroke opens nothing on layer {id}"
+            );
+            assert_eq!(
+                state.stroke_refusal(),
+                Some(PaintRefusal::Layer(verdict)),
+                "the refusal is the typed verdict for layer {id}"
+            );
+        }
+        // Exact zero: the refusal returns before conditioning, so no
+        // refused stroke can stage a batch whatever the brush does.
+        assert_eq!(
+            state.staged_batch_count(),
+            0,
+            "no refused stroke staged anything"
+        );
+    }
+
+    #[test]
+    fn gate_accepts_auto_base_and_mask_strokes() {
+        // §8 T10 [M12]. A fill-only stack with NO explicit selection
+        // resolves to Base (the resolution itself is `document.rs`'s
+        // revalidate test); the pushed auto verdict is accepted into Base.
+        // An explicit fill verdict refuses. A mask stroke with a fill
+        // selected for mask editing bypasses the gate: the mask plane
+        // changes and no pixel plane does.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // Auto Base: accepted, lands in Base, refusal cleared.
+        state.sync_active_target(PlaneOwner::Base, Ok(()), 0);
+        assert!(!state.active_explicit());
+        drive_converged_diagonal(&mut state);
+        assert_eq!(state.stroke_owner(), PlaneOwner::Base);
+        assert_eq!(state.stroke_refusal(), None);
+        let accepted_batches = state.staged_batch_count();
+        assert!(
+            accepted_batches > 0,
+            "a converged Base stroke must stage batches (got {accepted_batches})"
+        );
+        // Explicit fill: refused, staging frozen.
+        state.set_active_target(PlaneOwner::Layer(3));
+        state.sync_active_target(
+            PlaneOwner::Layer(3),
+            Err(InstanceError::PaintOnFill { layer: 3 }),
+            0,
+        );
+        state.begin_stroke(egui::pos2(0.5, 0.5));
+        assert!(!state.is_stroking());
+        assert_eq!(
+            state.stroke_refusal(),
+            Some(PaintRefusal::Layer(InstanceError::PaintOnFill { layer: 3 }))
+        );
+        assert_eq!(
+            state.staged_batch_count(),
+            accepted_batches,
+            "the refused stroke staged nothing"
+        );
+        // Mask stroke on the same fill: accepted despite the verdict, the
+        // mask plane materializes, no pixel batch stages, refusal clears.
+        // Order mirrors `layer_mask_ui`: target first (keeps its own mask),
+        // then the mask selection.
+        state.set_active_target(PlaneOwner::Layer(3));
+        state.set_mask_edit_layer(Some(3));
+        state.sync_active_target(
+            PlaneOwner::Layer(3),
+            Err(InstanceError::PaintOnFill { layer: 3 }),
+            0,
+        );
+        state.begin_stroke(egui::pos2(0.5, 0.5));
+        assert!(
+            state.is_stroking(),
+            "a mask stroke bypasses the gate even on a refusing layer"
+        );
+        for i in 1..=24 {
+            let t = i as f32 * 0.02;
+            state.extend_stroke(egui::pos2(0.5 + t, 0.5));
+        }
+        state.end_stroke();
+        assert!(
+            state.layer_mask(3, 1001).is_some(),
+            "the mask stroke painted the fill's mask plane"
+        );
+        assert_eq!(
+            state.staged_batch_count(),
+            accepted_batches,
+            "a mask stroke stages no pixel batches"
+        );
+        assert_eq!(state.stroke_refusal(), None);
+    }
+
+    #[test]
+    fn selection_survives_same_target_sync_and_flips_on_resolve() {
+        // §2.3 + §8 T11. The shell pushes the same target every frame: the
+        // explicit flag survives adds, removes and reorders (the stack half
+        // is `document.rs`'s revalidate test). A moved target is a shell
+        // resolution (open, new, vanished id) and arrives auto.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        assert_eq!(state.active_target(), PlaneOwner::Base);
+        assert!(!state.active_explicit());
+        // An explicit Base selection survives the frame push.
+        state.set_active_target(PlaneOwner::Base);
+        assert!(state.active_explicit());
+        state.sync_active_target(PlaneOwner::Base, Ok(()), 0);
+        assert!(
+            state.active_explicit(),
+            "same-target sync keeps an explicit Base selection"
+        );
+        // An explicit layer with a fresh verdict and index stays explicit.
+        state.set_active_target(PlaneOwner::Layer(1));
+        state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 2);
+        assert!(state.active_explicit());
+        assert_eq!(state.active_index(), 2);
+        // A moved target (the shell resolved elsewhere) arrives auto.
+        state.sync_active_target(PlaneOwner::Layer(0), Ok(()), 0);
+        assert!(!state.active_explicit());
+        assert_eq!(state.active_target(), PlaneOwner::Layer(0));
+        assert_eq!(state.active_index(), 0);
+    }
+
+    #[test]
+    fn mid_stroke_selection_change_does_not_split_the_stroke() {
+        // §8 T11. Begin on auto Base, move the selection mid-stroke: the
+        // live stroke keeps its begin-time owner and every staged batch
+        // lands there.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        state.sync_active_target(PlaneOwner::Base, Ok(()), 0);
+        state.begin_stroke(egui::pos2(0.2, 0.2));
+        assert!(state.is_stroking());
+        assert_eq!(state.stroke_owner(), PlaneOwner::Base);
+        state.set_active_target(PlaneOwner::Layer(4));
+        for i in 1..=24 {
+            let t = i as f32 * 0.02;
+            state.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+        }
+        assert_eq!(
+            state.stroke_owner(),
+            PlaneOwner::Base,
+            "the live stroke keeps its begin-time owner"
+        );
+        state.end_stroke();
+        assert!(
+            state.staged_batch_count() > 0,
+            "the converged stroke must stage batches"
+        );
+        assert_eq!(
+            state.staged_batch_count_for(1001),
+            state.staged_batch_count(),
+            "every staged batch landed in the begin-time owner's tile"
+        );
+    }
+
+    #[test]
+    fn set_active_target_reconciles_mask_editing() {
+        // §8 T32 [m5]. Selecting a new layer (the add button's add-select)
+        // clears a stale mask edit; selecting the mask's own layer keeps
+        // it; Base clears it.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        state.set_mask_edit_layer(Some(2));
+        state.set_active_target(PlaneOwner::Layer(5));
+        assert_eq!(
+            state.mask_edit_layer(),
+            None,
+            "a new layer's selection clears L2's mask edit"
+        );
+        assert!(state.active_explicit());
+        state.set_mask_edit_layer(Some(2));
+        state.set_active_target(PlaneOwner::Layer(2));
+        assert_eq!(
+            state.mask_edit_layer(),
+            Some(2),
+            "selecting the mask's own layer keeps the edit"
+        );
+        state.set_active_target(PlaneOwner::Base);
+        assert_eq!(state.mask_edit_layer(), None);
     }
 
     // --- Paint-what-you-see projection (§2's P1 row) ---

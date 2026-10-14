@@ -437,6 +437,10 @@ layers =
     .material-badge-missing-def = Missing definition { $id } — re-point or re-save it.
     .material-ignored = Ignores undeclared channels: { $channels }
     .material-unpaintable = Publishes through refresh — strokes cannot paint it.
+    .fill-unpaintable = Publishes procedurally — strokes cannot paint it. Paint the mask instead.
+    .folder-unpaintable = Holds no pixels — select a paint layer.
+    .base-paint = Base paint
+    .base-paint-hint = Paint that belongs to no layer: v1 projects, and strokes made with no layer selected.
 
 ## Fill layer properties (projection picker + v1 source editor)
 

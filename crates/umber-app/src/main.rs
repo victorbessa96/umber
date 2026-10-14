@@ -342,7 +342,24 @@ impl TabViewer for PanelViewer<'_> {
                     status: self.material_status,
                     states: &mut *self.material_states,
                 };
-                document::layers_ui(ui, self.doc, mats);
+                // Per-layer pool stage 3 (§2.2): the panel returns the
+                // selection intent; the shell applies it to the paint
+                // session OUTSIDE the material-context borrow above.
+                let active = self
+                    .paint
+                    .as_ref()
+                    .map(|paint| paint.active_target())
+                    .unwrap_or(paint_state::PlaneOwner::Base);
+                // Stage 3 renders no Base-visibility toggle (§2.2: stage
+                // 4), so Base is always visible here.
+                let outcome = document::layers_ui(ui, self.doc, mats, active, true);
+                // … and the outcome never carries one — pinned, not assumed.
+                debug_assert!(outcome.base_visible.is_none());
+                if let Some(target) = outcome.select {
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        paint.set_active_target(target);
+                    }
+                }
                 // Layer masks need the paint session too (the edit
                 // selection is session state there); without one the
                 // metadata rows have nothing to route strokes to.
@@ -3244,6 +3261,23 @@ impl eframe::App for UmberApp {
             .hdr_mode
             .effective(&self.gpu.hdr_probe)
             .select_lut(Some(&self.display_lut));
+        // Per-layer pool stage 3 (§2.3): revalidate the stroke selection
+        // once per frame, before panels run (the fill-adoption precedent
+        // below re-resolves adopted params the same way). An explicit Base
+        // never auto-moves; an auto Base resolves to the topmost paintable
+        // layer or Base; a vanished id resolves to its former neighbour or
+        // Base; the verdict is fresh for the next `begin_stroke`. The
+        // explicit bookkeeping rides `sync_active_target` (same target =
+        // keep, moved = auto).
+        if let Some(paint) = self.state.paint.as_mut() {
+            let sync = document::revalidate_active(
+                &self.state.doc.stack,
+                paint.active_target(),
+                paint.active_explicit(),
+                paint.active_index(),
+            );
+            paint.sync_active_target(sync.target, sync.verdict, sync.index);
+        }
         CentralPanel::default().show(ui, |ui| {
             let mut viewer = PanelViewer {
                 viewport: &mut self.state.viewport,

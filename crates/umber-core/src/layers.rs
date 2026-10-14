@@ -73,7 +73,7 @@ pub enum LayerKind {
 /// graph crate in for one DFS would invert the layering. The algorithm is
 /// the same shape (Kahn sweep for ordering, DFS for the would-be-cycle
 /// probe) and is documented as a structural mirror.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InstanceError {
     /// No layer with this id exists in the stack.
     #[error("unknown layer {0}")]
@@ -109,6 +109,23 @@ pub enum InstanceError {
     #[error("layer {layer} is a material layer: materials publish graph outputs, they cannot be painted")]
     PaintOnMaterial {
         /// The material layer a paint was attempted on.
+        layer: u64,
+    },
+    /// A fill's pixels are its evaluation: the next refresh overwrites the
+    /// plane whole, so a stroke there would be silently destroyed (paint the
+    /// mask instead). The field is `layer`, never `source` (the
+    /// [`InstanceError::PaintOnMaterial`] thiserror trap).
+    #[error("layer {layer} is a fill layer: fills publish procedurally, they cannot be painted")]
+    PaintOnFill {
+        /// The fill layer a paint was attempted on.
+        layer: u64,
+    },
+    /// A folder holds no pixels of its own (membership is not modeled yet),
+    /// so there is nothing to paint. The field is `layer`, never `source`
+    /// (the [`InstanceError::PaintOnMaterial`] thiserror trap).
+    #[error("layer {layer} is a folder: folders hold no pixels, they cannot be painted")]
+    PaintOnFolder {
+        /// The folder a paint was attempted on.
         layer: u64,
     },
 }
@@ -1358,28 +1375,38 @@ impl LayerStack {
     /// pixels, so a paint attempt is a typed error naming the source to
     /// paint instead. Rejects direct painting on a material layer too:
     /// materials carry no paint pixels, only published graph outputs
-    /// ([`InstanceError::PaintOnMaterial`]). `Ok(())` for paintable
-    /// (non-instance, non-material) layers.
+    /// ([`InstanceError::PaintOnMaterial`]). Rejects fills and folders as
+    /// well: a fill's plane is eval-owned (the next refresh overwrites it
+    /// whole, so a stroke there would be silently destroyed — paint the
+    /// mask instead) and a folder holds no pixels
+    /// ([`InstanceError::PaintOnFill`], [`InstanceError::PaintOnFolder`]).
+    /// `Ok(())` for paint layers.
     ///
-    /// NOTE: called today only for a Layers-panel label and in tests — no
-    /// stroke path calls it. Wiring it into stroke begin is Kill B's. The
-    /// `_ => Ok(())` arm below means the compiler will not flag a future
-    /// variant here: keep this match exhaustive by hand.
+    /// NOTE: the shell pushes this verdict into the paint session once per
+    /// frame, and `begin_stroke` refuses on an explicit unpaintable
+    /// selection (per-layer-pool design §2.3, stage 3); the Layers panel
+    /// renders the same verdict as the row badge. The match below stays
+    /// exhaustive by hand (every [`LayerKind`] variant named, no wildcard):
+    /// a future kind must decide its paintability here.
     ///
     /// # Errors
     ///
     /// [`InstanceError::UnknownLayer`] for unknown ids;
     /// [`InstanceError::PaintOnInstance`] for instances (names the source);
-    /// [`InstanceError::PaintOnMaterial`] for materials.
+    /// [`InstanceError::PaintOnMaterial`] for materials;
+    /// [`InstanceError::PaintOnFill`] for fills;
+    /// [`InstanceError::PaintOnFolder`] for folders.
     pub fn check_paintable(&self, id: u64) -> Result<(), InstanceError> {
         let layer = self.layer(id).ok_or(InstanceError::UnknownLayer(id))?;
         match &layer.kind {
+            LayerKind::Paint => Ok(()),
+            LayerKind::Fill => Err(InstanceError::PaintOnFill { layer: id }),
+            LayerKind::Folder { .. } => Err(InstanceError::PaintOnFolder { layer: id }),
             LayerKind::Instance { source_id } => Err(InstanceError::PaintOnInstance {
                 instance: id,
                 source_id: *source_id,
             }),
             LayerKind::Material => Err(InstanceError::PaintOnMaterial { layer: id }),
-            _ => Ok(()),
         }
     }
 
@@ -2145,6 +2172,39 @@ mod tests {
         assert_eq!(
             stack.check_paintable(999),
             Err(InstanceError::UnknownLayer(999))
+        );
+    }
+
+    #[test]
+    fn check_paintable_rejects_fill_and_folder_with_typed_errors() {
+        // Per-layer-pool design §2.3 (stage 3): a fill's plane is
+        // eval-owned (the next refresh overwrites it whole) and a folder
+        // holds no pixels, so both are typed refusals — never silent.
+        let mut stack = LayerStack::new();
+        let paint = stack.add_layer("Base", LayerKind::Paint);
+        let fill = stack.add_layer("Tint", LayerKind::Fill);
+        let folder = stack.add_layer("Group", LayerKind::Folder { passthrough: true });
+        assert_eq!(paint, 0, "ids allocate from 0 in order");
+        assert_eq!(fill, 1);
+        assert_eq!(folder, 2);
+        assert_eq!(stack.check_paintable(paint), Ok(()));
+        assert_eq!(
+            stack.check_paintable(fill),
+            Err(InstanceError::PaintOnFill { layer: fill })
+        );
+        assert_eq!(
+            stack.check_paintable(folder),
+            Err(InstanceError::PaintOnFolder { layer: folder })
+        );
+        // Can-fail: a wildcard `Ok(())` arm would admit both. The message
+        // names the layer and the reason (the status line renders it).
+        assert_eq!(
+            stack.check_paintable(fill).unwrap_err().to_string(),
+            "layer 1 is a fill layer: fills publish procedurally, they cannot be painted"
+        );
+        assert_eq!(
+            stack.check_paintable(folder).unwrap_err().to_string(),
+            "layer 2 is a folder: folders hold no pixels, they cannot be painted"
         );
     }
 
