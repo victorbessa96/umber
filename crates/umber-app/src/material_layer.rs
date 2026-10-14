@@ -36,10 +36,15 @@
 //!   channel carries `pixels: None`, a delete DROPS the eval-owned planes
 //!   (no tombstone — revive re-evaluates from the `Insert` params).
 //!   Pinned by §8 T7.
-//! * Anchors read the flattened channel (self-feedback on re-eval) —
-//!   STAGE 5 (downward partial flatten + typed self/forward errors). Until
-//!   then `anchor_image` keeps the documented full-flatten read: a known
-//!   v1 state, not a regression.
+//! * ~~Anchors read the flattened channel (self-feedback on re-eval)~~ —
+//!   CLOSED (stage 5): an anchor on layer `A`, channel `c` resolves to the
+//!   composite of the stack from the bottom (Base included) THROUGH `A` —
+//!   the downward partial flatten, on the CPU oracle so the bytes are
+//!   bit-exact (`PaintState::read_anchor_prefix`). A material may anchor
+//!   only layers strictly below it: itself is [`MaterialError::SelfAnchor`],
+//!   a layer above is [`MaterialError::ForwardAnchor`] — both checked
+//!   before eval ([`validate_anchor_order`]), so self-feedback is
+//!   impossible by construction. Pinned by §8 T8.
 //! * Instances render nothing — STAGE 5 (they read their source's planes).
 //!   Until then `pixels: None`, a known v1 state, not a regression.
 //! * The layer's own `blend_mode` is INERT on Material layers (carried,
@@ -180,6 +185,23 @@ pub enum MaterialError {
         layer: u64,
         /// What went wrong.
         message: String,
+    },
+    /// The material anchors ITSELF (§5.3): a layer may anchor only layers
+    /// strictly below it, so self-feedback is impossible by construction.
+    /// Whole-material, badged, never silent.
+    #[error("material layer {layer} anchors itself")]
+    SelfAnchor {
+        /// The layer that cannot evaluate.
+        layer: u64,
+    },
+    /// The material anchors a layer ABOVE it in the stack (§5.3): the
+    /// anchor's prefix would include the material's own output.
+    #[error("material layer {layer} anchors layer {anchor}, which sits above it")]
+    ForwardAnchor {
+        /// The layer that cannot evaluate.
+        layer: u64,
+        /// The anchored layer above it.
+        anchor: u64,
     },
     /// The plane budget refused a publish (§1.3): the total
     /// `plane_bytes()` the materialization would have reached. The layer
@@ -767,9 +789,9 @@ impl MaterialLayerStates {
 }
 
 /// The tile-store seam the refresh driver runs against (the headless
-/// boundary: tests drive an in-memory implementation, Kill B adapts the
-/// paint session — whose `read_channel_tile` never side-effect-creates and
-/// whose `publish_fill_channel` materializes — at the call site).
+/// boundary: tests drive an in-memory implementation, the shell adapts the
+/// paint session at the call site — its anchor reads never
+/// side-effect-create, its publishes materialize the layer's own plane).
 pub trait MaterialTileIo {
     /// The set's paint-target size (the eval resolution — never a literal).
     fn set_size(&self) -> (u32, u32);
@@ -777,11 +799,6 @@ pub trait MaterialTileIo {
     fn channel_size(&self, channel: &str) -> (u32, u32);
     /// The tiles to refresh, ascending.
     fn tiles(&self) -> Vec<u16>;
-    /// `tile`'s `channel` texels, or `None` when never routed (composites
-    /// over transparent; never side-effect-creates). Survives for the
-    /// ANCHOR path (which keeps the documented full-flatten read until
-    /// stage 5); the publish path no longer reads.
-    fn read_channel(&mut self, tile: u16, channel: &str) -> Option<(u32, u32, Vec<u8>)>;
     /// Uploads the resampled, premultiplied output into the layer's OWN
     /// `(Layer(layer), tile, channel)` plane (§5.2), materializing it. A
     /// budget refusal propagates (the driver records `budget_blocked`
@@ -795,9 +812,11 @@ pub trait MaterialTileIo {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<(), PaintRefusal>;
-    /// One anchor's composited channel image for `tile`, or `None` when the
-    /// source layer was deleted or never composited (an eval error, never a
-    /// silent default).
+    /// One anchor's channel image for `tile`: the stack composited from
+    /// the bottom THROUGH `layer` (the downward partial flatten, §5.3), or
+    /// `None` when the source layer was deleted (an eval error, never a
+    /// silent default). The driver has already refused self and forward
+    /// anchors, so `layer` sits strictly below the material.
     fn anchor_image(&mut self, tile: u16, layer: u64, channel: &str)
         -> Option<(u32, u32, Vec<u8>)>;
     /// One baked-map image by name, or `None` when unprovided (Kill B
@@ -866,6 +885,7 @@ pub fn refresh_dirty_materials(
         let result = refresh_one(
             state,
             layer,
+            layers,
             &params,
             definitions,
             set_channels,
@@ -895,9 +915,11 @@ pub fn refresh_dirty_materials(
 /// discovery/validation → eval (whole-material on `Err`) → per-channel
 /// plane publish. Reads `state`'s caches and engine dirty set; updates
 /// them on success.
+#[allow(clippy::too_many_arguments)]
 fn refresh_one(
     state: &mut MaterialLayerState,
     layer: &Layer,
+    layers: &[Layer],
     params: &MaterialParams,
     definitions: &HashMap<String, String>,
     set_channels: &[String],
@@ -934,6 +956,11 @@ fn refresh_one(
         Err(err) => return MaterialResult::Failed(err),
     };
     if let Err(err) = validate_material_channels(layer_id, &outputs, set_channels) {
+        return MaterialResult::Failed(err);
+    }
+    // §5.3: anchors point strictly DOWN the stack, checked before any eval
+    // or anchor read (a forward/self anchor never reaches `anchor_image`).
+    if let Err(err) = validate_anchor_order(layer_id, &collect_anchor_refs(&graph), layers) {
         return MaterialResult::Failed(err);
     }
 
@@ -1132,6 +1159,37 @@ fn collect_anchor_refs(graph: &Graph) -> Vec<AnchorRef> {
         .collect()
 }
 
+/// §5.3's anchor-order rule: every anchor must name a layer strictly BELOW
+/// `layer` in `layers` (stack order, bottom-to-top). An anchor on `layer`
+/// itself is [`MaterialError::SelfAnchor`]; one on a layer above it is
+/// [`MaterialError::ForwardAnchor`]. An anchor naming a layer absent from
+/// `layers` passes here: the io's `anchor_image` returns `None` for it and
+/// the eval fails loud (the deleted-source contract, unchanged). Anchors
+/// are checked in their deterministic (sorted) order, so the first
+/// violation reported is stable.
+fn validate_anchor_order(
+    layer: u64,
+    anchors: &[AnchorRef],
+    layers: &[Layer],
+) -> Result<(), MaterialError> {
+    let own = layers.iter().position(|l| l.id == layer);
+    for anchor in anchors {
+        if anchor.layer_id == layer {
+            return Err(MaterialError::SelfAnchor { layer });
+        }
+        let at = layers.iter().position(|l| l.id == anchor.layer_id);
+        if let (Some(own), Some(at)) = (own, at) {
+            if at > own {
+                return Err(MaterialError::ForwardAnchor {
+                    layer,
+                    anchor: anchor.layer_id,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Collects every baked-map name the graph reads, sorted.
 fn collect_mesh_map_names(graph: &Graph) -> Vec<String> {
     let mut names = BTreeSet::new();
@@ -1303,7 +1361,6 @@ mod tests {
         tiles: HashMap<(u16, String), (u32, u32, Vec<u8>)>,
         anchors: AnchorPlanes,
         meshes: HashMap<String, (u32, u32, Vec<u8>)>,
-        read_log: Vec<(u16, String)>,
         publish_log: Vec<(u16, String)>,
         anchor_log: Vec<(u16, u64, String)>,
         mesh_log: Vec<String>,
@@ -1347,11 +1404,6 @@ mod tests {
 
         fn tiles(&self) -> Vec<u16> {
             self.tile_list.clone()
-        }
-
-        fn read_channel(&mut self, tile: u16, channel: &str) -> Option<(u32, u32, Vec<u8>)> {
-            self.read_log.push((tile, channel.to_string()));
-            self.tiles.get(&(tile, channel.to_string())).cloned()
         }
 
         fn publish_channel(
@@ -1602,13 +1654,9 @@ mod tests {
             .tile_bytes(1001, "roughness")
             .chunks_exact(4)
             .all(|px| px == [128, 128, 128, 255]));
-        // Metallic: byte-identical, never read, never published.
+        // Metallic: byte-identical, never published (the io seam has no
+        // channel read since stage 5 — "never read" holds by construction).
         assert_eq!(io.tile_bytes(1001, "metallic"), before_metallic);
-        assert!(
-            io.read_log.iter().all(|(_, c)| c != "metallic"),
-            "undeclared channels are never read: {:?}",
-            io.read_log
-        );
         assert!(
             io.publish_log.iter().all(|(_, c)| c != "metallic"),
             "undeclared channels are never published: {:?}",
@@ -2743,6 +2791,113 @@ mod tests {
         assert!(opened.is_dirty(layer_a.id));
     }
 
+    /// A one-output definition reading an anchor on `(anchor_layer,
+    /// baseColor)` straight into baseColor.
+    fn anchored_def(anchor_layer: i32) -> String {
+        let mut graph = Graph::new();
+        graph.add_node(Node {
+            id: 1,
+            node_def: "anchor".into(),
+            params: vec![
+                ("layer_id".into(), ParamValue::Int(anchor_layer)),
+                ("channel".into(), ParamValue::Asset("baseColor".into())),
+            ],
+            canvas: None,
+        });
+        graph.add_node(output_node(2, "baseColor"));
+        graph.add_edge(edge(1, 2));
+        to_mtlx(&graph, &painter_nodedefs())
+    }
+
+    #[test]
+    fn self_anchor_is_a_typed_error_and_reads_nothing() {
+        // §8 T8 (stage 5): `anchor(M)` → `SelfAnchor { layer: M }`, refused
+        // BEFORE any anchor read (self-feedback impossible by construction).
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("M", LayerKind::Material);
+        let params = channel_params("umber.self", vec![MaterialChannel::named("baseColor")]);
+        stack.set_material(id, params);
+        let layer = stack.layer(id).unwrap().clone();
+        let mut definitions = HashMap::new();
+        definitions.insert("umber.self".into(), anchored_def(id as i32));
+        let mut io = FakeTileIo {
+            set_size: (1, 1),
+            tile_list: vec![1001],
+            anchors: HashMap::from([((1001, id, "baseColor".into()), (1, 1, vec![9, 9, 9, 255]))]),
+            ..Default::default()
+        };
+        let (_, reports) = drive(std::slice::from_ref(&layer), &definitions, &mut io);
+        match &reports[0].result {
+            MaterialResult::Failed(MaterialError::SelfAnchor { layer }) => assert_eq!(*layer, id),
+            other => panic!("expected SelfAnchor, got {other:?}"),
+        }
+        assert!(io.anchor_log.is_empty(), "a self anchor must never be read");
+        assert!(
+            io.publish_log.is_empty(),
+            "a refused material publishes nothing"
+        );
+    }
+
+    #[test]
+    fn forward_anchor_is_a_typed_error_and_below_anchor_evaluates() {
+        // §8 T8: an anchor on a layer ABOVE `M` → `ForwardAnchor`; the same
+        // definition anchored on a layer BELOW evaluates and publishes the
+        // anchor's bytes. Stack (bottom-to-top): below, M, above.
+        let mut stack = LayerStack::new();
+        let below = stack.add_layer("below", LayerKind::Paint);
+        let m = stack.add_layer("M", LayerKind::Material);
+        let above = stack.add_layer("above", LayerKind::Paint);
+        let params = channel_params("umber.fwd", vec![MaterialChannel::named("baseColor")]);
+        stack.set_material(m, params);
+        let layers = stack.layers.clone();
+        let mut definitions = HashMap::new();
+        definitions.insert("umber.fwd".into(), anchored_def(above as i32));
+        let anchors = HashMap::from([
+            (
+                (1001, above, "baseColor".into()),
+                (1, 1, vec![1, 2, 3, 255]),
+            ),
+            (
+                (1001, below, "baseColor".into()),
+                (1, 1, vec![40, 50, 60, 255]),
+            ),
+        ]);
+        let mut io = FakeTileIo {
+            set_size: (1, 1),
+            tile_list: vec![1001],
+            anchors: anchors.clone(),
+            ..Default::default()
+        };
+        let (_, reports) = drive(&layers, &definitions, &mut io);
+        let report = reports.iter().find(|r| r.layer == m).expect("M reports");
+        match &report.result {
+            MaterialResult::Failed(MaterialError::ForwardAnchor { layer, anchor }) => {
+                assert_eq!((*layer, *anchor), (m, above));
+            }
+            other => panic!("expected ForwardAnchor, got {other:?}"),
+        }
+        assert!(
+            io.anchor_log.is_empty(),
+            "a forward anchor must never be read"
+        );
+
+        // Control: anchored BELOW → published with the anchor's bytes.
+        definitions.insert("umber.fwd".into(), anchored_def(below as i32));
+        let mut io = FakeTileIo {
+            set_size: (1, 1),
+            tile_list: vec![1001],
+            anchors,
+            ..Default::default()
+        };
+        let (_, reports) = drive(&layers, &definitions, &mut io);
+        assert_eq!(
+            status_of(&reports, m, "baseColor"),
+            ChannelStatus::Published
+        );
+        assert_eq!(io.anchor_log, vec![(1001, below, "baseColor".to_string())]);
+        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![40, 50, 60, 255]);
+    }
+
     #[test]
     fn anchor_graphs_eval_per_tile_others_share() {
         // §5.4: a graph with an `anchor` node gets a per-tile cache (each
@@ -2914,7 +3069,7 @@ mod tests {
             states.is_dirty(hidden.id),
             "invisible layers keep their dirty flag"
         );
-        assert!(io.read_log.is_empty(), "invisible layers read nothing");
+        assert!(io.anchor_log.is_empty(), "invisible layers read nothing");
 
         // Visible again with no other change: the pending refresh publishes.
         let reports = refresh_dirty_materials(
@@ -2984,8 +3139,8 @@ mod tests {
         assert_eq!(io.tile_bytes(1001, "baseColor"), vec![255, 0, 0, 255]);
         assert_eq!(io.tile_bytes(1001, "roughness"), vec![200, 200, 200, 255]);
         assert!(
-            io.read_log.iter().all(|(_, c)| c != "roughness"),
-            "undeclared channels are never read even when listed"
+            io.publish_log.iter().all(|(_, c)| c != "roughness"),
+            "undeclared channels are never published even when listed"
         );
     }
 

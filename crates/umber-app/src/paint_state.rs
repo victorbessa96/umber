@@ -847,9 +847,12 @@ pub struct SnapshotMaterialChannel {
 /// One stack row's composite metadata, bottom-to-top.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotLayer {
-    /// Whose plane this row composites.
+    /// Whose plane this row composites. For an instance row, its SOURCE
+    /// (resolved through instance chains): instances carry no planes of
+    /// their own and render the source's pixels (§5.3, stage 5).
     pub owner: PlaneOwner,
-    /// The layer id for mask lookup (`None` = Base, unmasked).
+    /// The row's OWN layer id: mask lookup and row identity (`None` =
+    /// Base, unmasked). Differs from `owner` only on instance rows.
     pub layer_id: Option<u64>,
     /// Paint/Fill rows use these; Material rows use `material_channels`.
     pub kind: SnapshotLayerKind,
@@ -865,6 +868,28 @@ pub struct SnapshotLayer {
     pub mask_enabled: bool,
     /// `Some` for Material rows: one entry per contributing channel.
     pub material_channels: Option<Vec<SnapshotMaterialChannel>>,
+}
+
+/// Whether `row` IS `who`'s row: Base by owner, a layer by its
+/// `layer_id`. Not by owner — an instance row carries its SOURCE's owner
+/// (it composites the source's planes), so owner equality would conflate
+/// the two. An anchor on an instance therefore truncates at the instance's
+/// row, and an anchor on its source at the source's.
+fn row_is(row: &SnapshotLayer, who: PlaneOwner) -> bool {
+    match who {
+        PlaneOwner::Base => row.owner == PlaneOwner::Base,
+        PlaneOwner::Layer(id) => row.layer_id == Some(id),
+    }
+}
+
+/// One resolved composite entry (the flush's entry builder output — see
+/// `PaintState::resolve_composite_entries`).
+struct ResolvedEntry {
+    owner: PlaneOwner,
+    blend: BlendMode,
+    opacity: f32,
+    visible: bool,
+    mask_index: Option<usize>,
 }
 
 /// The per-frame composite input (§4.2): the stack's rows bottom-to-top
@@ -921,7 +946,13 @@ impl CompositeSnapshot {
         }
         let mut owners = Vec::new();
         for layer in &next.layers {
-            let same = prev.layers.iter().find(|l| l.owner == layer.owner);
+            // Identity = (owner, layer_id): an instance row shares its
+            // source's owner (it composites the source's planes) but keeps
+            // its own `layer_id`, so the two rows never cross-compare.
+            let same = prev
+                .layers
+                .iter()
+                .find(|l| l.owner == layer.owner && l.layer_id == layer.layer_id);
             let changed = match same {
                 None => true,
                 Some(old) => {
@@ -2103,10 +2134,11 @@ impl PaintState {
     /// (in SET-size texels) lands as a `Rect` on EVERY `(tile, channel)`
     /// where the layer has a plane — a material's mask edit dirties all
     /// its declared channels, not `stroke_channel`. Channels with an
-    /// overridden size get the rect scaled, rounding outward. Instances
-    /// contribute where their SOURCE has planes (stage 5 renders them;
-    /// until then the source's own marking covers the same
-    /// `(tile, channel)`s, so no extra walk is needed).
+    /// overridden size get the rect scaled, rounding outward. An instance
+    /// has no planes of its own: its row in the last frame's snapshot
+    /// names the SOURCE owner it composites (stage 5), and the dirt lands
+    /// on the source's `(tile, channel)`s — the ones the instance's entry
+    /// reads.
     fn layer_mask_event(&mut self, layer: u64, tile: u16, dabs: &[Dab]) {
         self.ensure_layer_mask(layer, tile);
         let target = self.layer_mask_paint.value();
@@ -2138,10 +2170,21 @@ impl PaintState {
         // The dirt half ([M6]): every `(tile, channel)` carrying this
         // layer's planes recomposites with the edited mask.
         if let Some(rect) = stamped {
+            let plane_owner = self
+                .last_snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .layers
+                        .iter()
+                        .find(|row| row.layer_id == Some(layer))
+                        .map(|row| row.owner)
+                })
+                .unwrap_or(PlaneOwner::Layer(layer));
             let channels: Vec<String> = self
                 .planes
                 .keys()
-                .filter(|(owner, t, _)| *owner == PlaneOwner::Layer(layer) && *t == tile)
+                .filter(|(owner, t, _)| *owner == plane_owner && *t == tile)
                 .map(|(_, _, channel)| channel.clone())
                 .collect();
             for channel in channels {
@@ -3207,6 +3250,115 @@ impl PaintState {
             .insert((tile, channel.to_string()), DirtyRegion::Full);
     }
 
+    /// The flush's entry builder (§4.2), shared with the anchor prefix
+    /// (§5.3 [m11]): resolves `snapshot`'s rows for `(tile, channel)` into
+    /// per-entry blend/opacity/visibility + resampled mask bytes, in
+    /// bottom-to-top order. A row without a plane contributes nothing (the
+    /// transparent no-op). `stop_after = Some(owner)` truncates THROUGH
+    /// that row (inclusive) — the downward partial flatten; `None` keeps
+    /// every row (the flush).
+    fn resolve_composite_entries(
+        &self,
+        snapshot: &CompositeSnapshot,
+        tile: u16,
+        channel: &str,
+        width: u32,
+        height: u32,
+        stop_after: Option<PlaneOwner>,
+    ) -> (Vec<ResolvedEntry>, Vec<Vec<u8>>) {
+        let (set_w, set_h) = self.tile_size(tile);
+        let mut owned_masks: Vec<Vec<u8>> = Vec::new();
+        let mut resolved: Vec<ResolvedEntry> = Vec::new();
+        for layer in &snapshot.layers {
+            if let Some(entry) = self.resolve_row(
+                layer,
+                tile,
+                channel,
+                width,
+                height,
+                set_w,
+                set_h,
+                &mut owned_masks,
+            ) {
+                resolved.push(entry);
+            }
+            // The truncation is by ROW, not by entry: a stop row without a
+            // plane (or with no entry on this channel) still ends the
+            // prefix — nothing above the anchor may leak in.
+            if stop_after.is_some_and(|stop| row_is(layer, stop)) {
+                break;
+            }
+        }
+        (resolved, owned_masks)
+    }
+
+    /// One snapshot row → its entry on `(tile, channel)`, or `None` when it
+    /// contributes nothing: no plane there (a layer touched only on 1002
+    /// has no entry on 1001 by construction), or a Material row with no
+    /// contributing entry for this channel. A masked row pushes its
+    /// resampled mask into `owned_masks` and records the index.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_row(
+        &self,
+        layer: &SnapshotLayer,
+        tile: u16,
+        channel: &str,
+        width: u32,
+        height: u32,
+        set_w: u32,
+        set_h: u32,
+        owned_masks: &mut Vec<Vec<u8>>,
+    ) -> Option<ResolvedEntry> {
+        self.plane_thread(layer.owner, tile, channel)?;
+        if layer.owner == PlaneOwner::Base {
+            return Some(ResolvedEntry {
+                owner: layer.owner,
+                blend: BlendMode::Normal,
+                opacity: 1.0,
+                visible: layer.visible,
+                mask_index: None,
+            });
+        }
+        let layer_id = layer.layer_id?;
+        let (blend, opacity) = if matches!(layer.kind, SnapshotLayerKind::Material) {
+            // Material rows expand per contributing channel (§5.2); the
+            // layer's own blend stays inert. A `None` channel list
+            // (disabled, undeclared or forbidden on every channel)
+            // contributes NO entry (`pixels: None`).
+            let entry = layer
+                .material_channels
+                .as_ref()?
+                .iter()
+                .find(|c| c.channel == channel)?;
+            (entry.blend, entry.opacity)
+        } else if layer.blend == BlendMode::Passthrough
+            && matches!(layer.kind, SnapshotLayerKind::Fill)
+        {
+            // A fill carrying `Passthrough` composites as `Normal`
+            // (structural for folders, not a pixel op — §5.1).
+            (BlendMode::Normal, layer.opacity)
+        } else {
+            (layer.blend, layer.opacity)
+        };
+        let mask_index = if layer.mask_enabled {
+            self.layer_masks.get(&(layer_id, tile)).map(|plane| {
+                owned_masks.push(crate::material_layer::resample_mask_nearest(
+                    plane, set_w, set_h, width, height,
+                ));
+                owned_masks.len() - 1
+            })
+        } else {
+            None
+        };
+        Some(ResolvedEntry {
+            owner: layer.owner,
+            blend,
+            opacity,
+            visible: layer.visible,
+            mask_index,
+        })
+    }
+
     /// Records one `(tile, channel)`'s dirt into the encoder against
     /// `snapshot` (the cache thread exists — the caller ensured it).
     /// `true` when dispatches were recorded. On a composite error the
@@ -3233,90 +3385,8 @@ impl PaintState {
         // The owned mask bytes every masked entry samples (rect uploads
         // are the compositor's per-dispatch affair — entries borrow these
         // full-size planes, §4.3 item 3).
-        let (set_w, set_h) = self.tile_size(tile);
-        let mut owned_masks: Vec<Vec<u8>> = Vec::new();
-        // Per-layer textures, in snapshot (bottom-to-top) order. A layer
-        // without a plane on `(tile, channel)` contributes nothing (the
-        // transparent no-op — a layer touched only on 1002 has no entry
-        // on 1001 by construction). Resolved keys first (the `&mut` map
-        // phase ends here); entries borrow the shared reborrow below, so
-        // no raw pointers cross the mask-owned Vec.
-        struct ResolvedEntry {
-            owner: PlaneOwner,
-            blend: BlendMode,
-            opacity: f32,
-            visible: bool,
-            mask_index: Option<usize>,
-        }
-        let mut resolved: Vec<ResolvedEntry> = Vec::new();
-        for layer in &snapshot.layers {
-            if self.plane_thread(layer.owner, tile, channel).is_none() {
-                continue;
-            }
-            if layer.owner == PlaneOwner::Base {
-                resolved.push(ResolvedEntry {
-                    owner: layer.owner,
-                    blend: BlendMode::Normal,
-                    opacity: 1.0,
-                    visible: layer.visible,
-                    mask_index: None,
-                });
-                continue;
-            }
-            let Some(layer_id) = layer.layer_id else {
-                continue;
-            };
-            let mask_index = if layer.mask_enabled {
-                let bytes = self.layer_masks.get(&(layer_id, tile)).map(|plane| {
-                    crate::material_layer::resample_mask_nearest(plane, set_w, set_h, width, height)
-                });
-                match bytes {
-                    Some(bytes) => {
-                        owned_masks.push(bytes);
-                        Some(owned_masks.len() - 1)
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
-            if matches!(layer.kind, SnapshotLayerKind::Material) {
-                // Material rows expand per contributing channel (§5.2);
-                // the layer's own blend stays inert. A `None` channel list
-                // (disabled, undeclared or forbidden on every channel)
-                // contributes NO entry (`pixels: None`).
-                let Some(channels) = layer.material_channels.as_ref() else {
-                    continue;
-                };
-                let Some(entry) = channels.iter().find(|c| c.channel == channel) else {
-                    continue;
-                };
-                resolved.push(ResolvedEntry {
-                    owner: layer.owner,
-                    blend: entry.blend,
-                    opacity: entry.opacity,
-                    visible: layer.visible,
-                    mask_index,
-                });
-            } else {
-                let blend = if layer.blend == BlendMode::Passthrough
-                    && matches!(layer.kind, SnapshotLayerKind::Fill)
-                {
-                    // A fill carrying `Passthrough` composites as `Normal`
-                    // (structural for folders, not a pixel op — §5.1).
-                    BlendMode::Normal
-                } else {
-                    layer.blend
-                };
-                resolved.push(ResolvedEntry {
-                    owner: layer.owner,
-                    blend,
-                    opacity: layer.opacity,
-                    visible: layer.visible,
-                    mask_index,
-                });
-            }
-        }
+        let (resolved, owned_masks) =
+            self.resolve_composite_entries(snapshot, tile, channel, width, height, None);
         // The dispatch phase reborrows shared (every `&mut` use above
         // ended — NLL): entries borrow the planes, the owned masks and
         // the compositor together, and the encoder records onto the
@@ -3510,6 +3580,70 @@ impl PaintState {
             };
         }
         self.read_target(tile, channel)
+    }
+
+    /// The anchor read (§5.3, stage 5): the composite of `snapshot`'s
+    /// entries for `(tile, channel)` from the bottom (Base included)
+    /// THROUGH `anchor`'s row (inclusive) — the downward partial flatten.
+    /// Runs on the CPU oracle [m11]: every prefix plane is `read_plane`d
+    /// (each drains its queue first, so a layer refreshed earlier this
+    /// frame is read post-publish — [M7]) and folded through
+    /// `composite_stack_cpu` with the flush's own entry builder, so the
+    /// bytes are bit-exact across machines and GPUs.
+    ///
+    /// `None` when `anchor` has no row in the snapshot (deleted or not a
+    /// pixel layer — the caller reports it as an eval error, never a
+    /// silent default), or when a prefix read or the composite fails
+    /// (logged). An anchor whose prefix holds no planes on this tile
+    /// composites to transparent at the channel size — "nothing painted
+    /// below yet" is real content, not an error.
+    pub fn read_anchor_prefix(
+        &mut self,
+        snapshot: &CompositeSnapshot,
+        tile: u16,
+        channel: &str,
+        anchor: PlaneOwner,
+    ) -> Option<RgbaBuffer> {
+        use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
+        if !snapshot.layers.iter().any(|row| row_is(row, anchor)) {
+            return None;
+        }
+        let (width, height) = self.tile_channel_size(tile, channel);
+        let (resolved, owned_masks) =
+            self.resolve_composite_entries(snapshot, tile, channel, width, height, Some(anchor));
+        let mut planes: Vec<Vec<u8>> = Vec::with_capacity(resolved.len());
+        for entry in &resolved {
+            let plane = self.read_plane(entry.owner, tile, channel)?;
+            if (plane.width, plane.height) != (width, height) {
+                log::warn!(
+                    "anchor: {:?}/{tile}/{channel} is {}x{}, expected {width}x{height}; refusing",
+                    entry.owner,
+                    plane.width,
+                    plane.height
+                );
+                return None;
+            }
+            planes.push(plane.data);
+        }
+        let layers: Vec<CpuStackLayer<'_>> = resolved
+            .iter()
+            .zip(&planes)
+            .map(|(entry, bytes)| CpuStackLayer {
+                blend_mode: entry.blend,
+                opacity: entry.opacity,
+                visible: entry.visible,
+                rgba: Some(bytes.as_slice()),
+                mask: entry.mask_index.map(|i| owned_masks[i].as_slice()),
+                premultiplied: true,
+            })
+            .collect();
+        match composite_stack_cpu(&layers, width, height) {
+            Ok(bytes) => RgbaBuffer::new(width, height, bytes),
+            Err(err) => {
+                log::warn!("anchor: prefix composite {tile}/{channel} failed: {err}");
+                None
+            }
+        }
     }
 
     /// Latches the advisory-budget warn (§1.3): crossing
@@ -6181,6 +6315,247 @@ mod tests {
             cache.data[0]
         );
         assert_ne!(cache.data[0], 51);
+    }
+
+    #[test]
+    fn anchor_prefix_flattens_downward_through_the_anchored_layer() {
+        // §8 T8 (stage 5, the downward partial flatten). Stack: Base
+        // (transparent), L0 paint opaque 200, L1 paint Normal opacity 0.5
+        // opaque 100, M material on top (src 37 — its output must never
+        // reach an anchor below it).
+        // - anchor(L0) = 200 (Base transparent seeds nothing).
+        // - anchor(L1) = 200 + (100 − 200)·0.5 = 150.0 → 150.
+        // CPU oracle → bit-exact: assert_eq, no GPU tolerance.
+        // Sentinel: v1's full-flatten read (the flush cache) folds M too.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let flat = |v: u8| {
+            let mut bytes = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+            bytes
+        };
+        for (id, v) in [(20u64, 200u8), (21, 100), (22, 37)] {
+            state
+                .publish_plane(
+                    PlaneOwner::Layer(id),
+                    1001,
+                    BASE_COLOR_CHANNEL,
+                    512,
+                    512,
+                    flat(v),
+                )
+                .expect("plane publishes");
+        }
+        let paint_row = |id: u64, opacity: f32| SnapshotLayer {
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        let snapshot = CompositeSnapshot {
+            layers: vec![
+                SnapshotLayer {
+                    owner: PlaneOwner::Base,
+                    layer_id: None,
+                    kind: SnapshotLayerKind::Paint,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+                paint_row(20, 1.0),
+                paint_row(21, 0.5),
+                SnapshotLayer {
+                    owner: PlaneOwner::Layer(22),
+                    layer_id: Some(22),
+                    kind: SnapshotLayerKind::Material,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: Some(vec![SnapshotMaterialChannel {
+                        channel: BASE_COLOR_CHANNEL.to_string(),
+                        blend: BlendMode::Normal,
+                        opacity: 1.0,
+                    }]),
+                },
+            ],
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+        };
+        let l0 = state
+            .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(20))
+            .expect("anchor(L0) composites");
+        assert_eq!((l0.width, l0.height), (512, 512));
+        assert!(l0.data.chunks_exact(4).all(|px| px == [200, 200, 200, 255]));
+        let l1 = state
+            .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(21))
+            .expect("anchor(L1) composites");
+        assert!(l1.data.chunks_exact(4).all(|px| px == [150, 150, 150, 255]));
+        // Bit-exact and deterministic: a second read is byte-identical.
+        let again = state
+            .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(21))
+            .expect("anchor(L1) re-reads");
+        assert_eq!(again.data, l1.data);
+        // A layer absent from the snapshot (deleted) is `None`, never a
+        // silent full flatten.
+        assert!(state
+            .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(99))
+            .is_none());
+        // Sentinel: the full flatten includes M's 37 — the v1 anchor read.
+        state.flush_composite(&snapshot);
+        let full = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        assert!(
+            (full.data[0] as i16 - 37).abs() <= 3,
+            "the full flatten is M on top (37 ± twin), got {}",
+            full.data[0]
+        );
+        assert_ne!(full.data[0], l1.data[0], "the prefix must exclude M");
+    }
+
+    #[test]
+    fn anchor_prefix_stops_at_a_planeless_anchor_row() {
+        // The truncation is by ROW: an anchor on a layer with no plane on
+        // this tile still ends the prefix, so a layer ABOVE it never leaks
+        // in. L0 opaque 200 below, L1 (no plane), L2 opaque 60 above.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let flat = |v: u8| {
+            let mut bytes = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+            bytes
+        };
+        for (id, v) in [(30u64, 200u8), (32, 60)] {
+            state
+                .publish_plane(
+                    PlaneOwner::Layer(id),
+                    1001,
+                    BASE_COLOR_CHANNEL,
+                    512,
+                    512,
+                    flat(v),
+                )
+                .expect("plane publishes");
+        }
+        let row = |id: u64| SnapshotLayer {
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        let snapshot = CompositeSnapshot {
+            layers: vec![row(30), row(31), row(32)],
+            base_visible: true,
+            displayed: Vec::new(),
+        };
+        let prefix = state
+            .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(31))
+            .expect("anchor(L1) composites");
+        assert!(
+            prefix
+                .data
+                .chunks_exact(4)
+                .all(|px| px == [200, 200, 200, 255]),
+            "L2's 60 above the anchor must not leak in, got {:?}",
+            &prefix.data[..4]
+        );
+    }
+
+    #[test]
+    fn instance_row_renders_its_source_planes_with_its_own_opacity() {
+        // §5.3 stage 5: an instance row carries its SOURCE's owner and its
+        // own opacity. Source L0 opaque 200; instance at opacity 0.5 over
+        // it composites the same 200 plane again: 200 + (200 − 200)·0.5 =
+        // 200 — so the source sits on a 100 layer first to make the
+        // instance visible: L_bottom 100, L0 200 at opacity 0.5 → 150;
+        // instance of L0 at 0.5 → 150 + (200 − 150)·0.5 = 175.
+        // Sentinel: without the instance row the cache holds 150.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let flat = |v: u8| {
+            let mut bytes = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+            bytes
+        };
+        for (id, v) in [(40u64, 100u8), (41, 200)] {
+            state
+                .publish_plane(
+                    PlaneOwner::Layer(id),
+                    1001,
+                    BASE_COLOR_CHANNEL,
+                    512,
+                    512,
+                    flat(v),
+                )
+                .expect("plane publishes");
+        }
+        let row = |owner: u64, id: u64, opacity: f32| SnapshotLayer {
+            owner: PlaneOwner::Layer(owner),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        let without = CompositeSnapshot {
+            layers: vec![row(40, 40, 1.0), row(41, 41, 0.5)],
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+        };
+        let mut with = without.clone();
+        with.layers.push(row(41, 42, 0.5));
+        // CPU prefix through the instance row (exact) and through the
+        // source row (excludes the instance above it).
+        let through_instance = state
+            .read_anchor_prefix(&with, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(42))
+            .expect("prefix through the instance");
+        assert_eq!(&through_instance.data[..4], &[175, 175, 175, 255]);
+        let through_source = state
+            .read_anchor_prefix(&with, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(41))
+            .expect("prefix through the source");
+        assert_eq!(&through_source.data[..4], &[150, 150, 150, 255]);
+        // GPU flush: the instance row renders (≤ 3 LSB twin, 3 entries).
+        state.flush_composite(&with);
+        let cache = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        assert!(
+            (cache.data[0] as i16 - 175).abs() <= 3,
+            "instance renders: got {}",
+            cache.data[0]
+        );
+        assert!(
+            (cache.data[0] as i16 - 150).abs() > 3,
+            "the no-instance sentinel (150) must not appear"
+        );
     }
 
     #[test]

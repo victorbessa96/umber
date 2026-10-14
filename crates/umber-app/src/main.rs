@@ -743,8 +743,8 @@ impl AppState {
 /// each layer's [`material_layer::MaterialLayerStates`] plans and forms
 /// `layer.opacity × channel.opacity` here, so opacity edits propagate
 /// without a re-eval. The layer's own `blend_mode` stays inert on
-/// materials; folders and instances carry no planes (no entries — stage
-/// 5 renders instances).
+/// materials; folders carry no planes (no entry); instances emit a row
+/// over their SOURCE's planes (stage 5, see the Instance arm).
 fn build_composite_snapshot(
     stack: &umber_core::layers::LayerStack,
     states: &material_layer::MaterialLayerStates,
@@ -816,10 +816,69 @@ fn build_composite_snapshot(
                     material_channels: None,
                 });
             }
-            umber_core::LayerKind::Folder { .. } | umber_core::LayerKind::Instance { .. } => {
-                // Folders carry no pixels (compositor judgment 4) and
-                // instances render nothing until stage 5: no entry either
-                // way (a missing plane is the transparent no-op).
+            umber_core::LayerKind::Instance { .. } => {
+                // Stage 5 (§5.3): an instance renders its SOURCE's planes
+                // (resolved through instance chains) with its OWN
+                // visibility, opacity and mask. A Paint/Fill source takes
+                // the instance's own blend; a Material source keeps its
+                // per-channel blends with the instance's opacity folded in
+                // (the material row's `layer.opacity × entry.opacity`
+                // shape). A dangling or Folder source contributes nothing.
+                let Some(source) = resolve_instance_source(stack, layer.id) else {
+                    continue;
+                };
+                let source_owner = PlaneOwner::Layer(source.id);
+                match source.kind {
+                    umber_core::LayerKind::Material => {
+                        let channels: Vec<SnapshotMaterialChannel> = states
+                            .state(source.id)
+                            .map(|state| {
+                                state
+                                    .composite_channels()
+                                    .iter()
+                                    .map(|entry| SnapshotMaterialChannel {
+                                        channel: entry.channel.clone(),
+                                        blend: entry.blend,
+                                        opacity: layer.opacity * entry.opacity,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        layers.push(SnapshotLayer {
+                            owner: source_owner,
+                            layer_id: Some(layer.id),
+                            kind: SnapshotLayerKind::Material,
+                            blend: layer.blend_mode,
+                            opacity: layer.opacity,
+                            visible: layer.visible,
+                            mask_enabled,
+                            material_channels: Some(channels),
+                        });
+                    }
+                    umber_core::LayerKind::Paint | umber_core::LayerKind::Fill => {
+                        let kind = if source.kind == umber_core::LayerKind::Fill {
+                            SnapshotLayerKind::Fill
+                        } else {
+                            SnapshotLayerKind::Paint
+                        };
+                        layers.push(SnapshotLayer {
+                            owner: source_owner,
+                            layer_id: Some(layer.id),
+                            kind,
+                            blend: layer.blend_mode,
+                            opacity: layer.opacity,
+                            visible: layer.visible,
+                            mask_enabled,
+                            material_channels: None,
+                        });
+                    }
+                    umber_core::LayerKind::Folder { .. }
+                    | umber_core::LayerKind::Instance { .. } => {}
+                }
+            }
+            umber_core::LayerKind::Folder { .. } => {
+                // Folders carry no pixels (compositor judgment 4): no
+                // entry (a missing plane is the transparent no-op).
             }
         }
     }
@@ -828,6 +887,27 @@ fn build_composite_snapshot(
         base_visible,
         displayed,
     }
+}
+
+/// Follows `id`'s instance chain to the first non-instance layer (§5.3:
+/// instances render their source transitively). `None` when the chain
+/// dangles or loops — `set_instance_source` refuses cycles at attach
+/// time, but a corrupt load must not hang the frame, so the walk is
+/// bounded by the stack's length.
+fn resolve_instance_source(
+    stack: &umber_core::layers::LayerStack,
+    id: u64,
+) -> Option<&umber_core::layers::Layer> {
+    let mut current = stack.layer(id)?;
+    for _ in 0..=stack.layers.len() {
+        match current.kind {
+            umber_core::LayerKind::Instance { source_id } => {
+                current = stack.layer(source_id)?;
+            }
+            _ => return Some(current),
+        }
+    }
+    None
 }
 
 /// One fill/material layer's open-seeding verdict (§6.3 [B2, M11]):
@@ -995,10 +1075,11 @@ fn parse_manifest_header(text: &str) -> (bool, Vec<u64>) {
 /// session's channel-aware paths (non-side-effecting reads), publishes
 /// land in the refreshed layer's OWN plane (premultiplied — never the
 /// flattened target, so refreshes replace instead of compounding),
-/// anchors resolve to the FLATTENED tile channel (the design §2 truth —
-/// which includes layers above and the material's own last output —
-/// UNTIL stage 5's downward partial flatten; a documented v1 state, not
-/// a regression), and mesh maps are the Graph panel's flat placeholders
+/// anchors resolve to the stack composited THROUGH the anchored layer
+/// (stage 5's downward partial flatten, §5.3 — the CPU prefix over
+/// `snapshot`, the same rows the frame's flush folds, so an anchor never
+/// sees layers above it nor the material's own output), and mesh maps
+/// are the Graph panel's flat placeholders
 /// at the set size. The bake bridge exposes no live in-memory bakes yet,
 /// so the placeholders mirror `graph_panel`'s private stand-ins (same
 /// bytes: opaque white AO, tangent-space-up Normal); unknown map names
@@ -1007,6 +1088,9 @@ struct PaintMaterialIo<'a> {
     paint: &'a mut paint_state::PaintState,
     set: String,
     live_layers: Vec<u64>,
+    /// The stack's composite rows (built once per refresh pass from the
+    /// document — the anchor prefix folds exactly what the flush will).
+    snapshot: paint_state::CompositeSnapshot,
 }
 
 impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
@@ -1020,12 +1104,6 @@ impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
 
     fn tiles(&self) -> Vec<u16> {
         self.paint.tiles_present()
-    }
-
-    fn read_channel(&mut self, tile: u16, channel: &str) -> Option<(u32, u32, Vec<u8>)> {
-        self.paint
-            .read_channel_tile(tile, channel)
-            .map(|buffer| (buffer.width, buffer.height, buffer.data))
     }
 
     fn publish_channel(
@@ -1054,11 +1132,18 @@ impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
         channel: &str,
     ) -> Option<(u32, u32, Vec<u8>)> {
         // A deleted source layer is an eval error (never a silent default);
-        // a live one resolves to the flattened channel (design §2).
+        // a live one resolves to the prefix composite through it (§5.3).
         if !self.live_layers.contains(&layer) {
             return None;
         }
-        self.read_channel(tile, channel)
+        self.paint
+            .read_anchor_prefix(
+                &self.snapshot,
+                tile,
+                channel,
+                paint_state::PlaneOwner::Layer(layer),
+            )
+            .map(|buffer| (buffer.width, buffer.height, buffer.data))
     }
 
     fn mesh_map_image(&mut self, name: &str) -> Option<(u32, u32, Vec<u8>)> {
@@ -3983,10 +4068,22 @@ impl eframe::App for UmberApp {
                 .retry_budget_freed(paint.plane_bytes());
             if !self.state.material_states.dirty_ids().is_empty() {
                 let registry = umber_graph::full_registry();
+                // Anchor rows = the flush's rows (§5.3: "the same entry
+                // builder the flush uses" — visibility and Base visibility
+                // included, so an anchor reads what the stack shows through
+                // that layer). `displayed` stays empty: the prefix
+                // composites on the CPU and never touches [M8]'s gate.
+                let snapshot = build_composite_snapshot(
+                    &self.state.doc.stack,
+                    &self.state.material_states,
+                    self.state.base_visible,
+                    Vec::new(),
+                );
                 let mut io = PaintMaterialIo {
                     paint,
                     set: set_name,
                     live_layers: live.clone(),
+                    snapshot,
                 };
                 // The driver takes `HashMap`; the session keeps the
                 // `BTreeMap` the project model sorts by — cloned on dirty
@@ -4443,7 +4540,8 @@ mod pool_stage4_tests {
         let fill = stack.add_layer("F", LayerKind::Fill);
         let material = stack.add_layer("M", LayerKind::Material);
         let _folder = stack.add_layer("G", LayerKind::Folder { passthrough: true });
-        let _instance = stack.add_layer("I", LayerKind::Instance { source_id: paint });
+        let instance = stack.add_layer("I", LayerKind::Instance { source_id: paint });
+        stack.set_opacity(instance, 0.25);
         // Material plans: one contributing channel (Multiply 0.5).
         let mut states = material_layer::MaterialLayerStates::default();
         let params = umber_core::MaterialParams {
@@ -4464,9 +4562,24 @@ mod pool_stage4_tests {
         let snapshot =
             build_composite_snapshot(&stack, &states, true, vec![(1001, "baseColor".into())]);
         let owners: Vec<Option<u64>> = snapshot.layers.iter().map(|layer| layer.layer_id).collect();
-        // Base first, then stack order; folders and instances carry no
-        // entry (their planes can never exist).
-        assert_eq!(owners, vec![None, Some(paint), Some(fill), Some(material)]);
+        // Base first, then stack order; folders carry no entry (their
+        // planes can never exist); the instance (stage 5) emits its own row.
+        assert_eq!(
+            owners,
+            vec![
+                None,
+                Some(paint),
+                Some(fill),
+                Some(material),
+                Some(instance)
+            ]
+        );
+        // The instance row composites its SOURCE's planes with its OWN
+        // opacity (§5.3): owner = the paint source, id = the instance.
+        let instance_row = &snapshot.layers[4];
+        assert_eq!(instance_row.owner, paint_state::PlaneOwner::Layer(paint));
+        assert_eq!(instance_row.opacity, 0.25);
+        assert_eq!(instance_row.kind, paint_state::SnapshotLayerKind::Paint);
         assert!(snapshot.base_visible);
         // The paint row carries the layer's own blend/opacity...
         let paint_row = &snapshot.layers[1];
@@ -4479,6 +4592,52 @@ mod pool_stage4_tests {
         let hidden = build_composite_snapshot(&stack, &states, false, vec![]);
         assert!(!hidden.layers[0].visible);
         assert!(!hidden.base_visible);
+    }
+
+    #[test]
+    fn instance_rows_resolve_chains_and_skip_dangling_sources() {
+        // §5.3: an instance of an instance renders the ROOT source's planes;
+        // a material source keeps its per-channel blend with the
+        // instance's opacity folded in; a dangling source contributes
+        // nothing (no row, never a panic).
+        use umber_core::layers::{LayerKind, LayerStack};
+        let mut stack = LayerStack::new();
+        let material = stack.add_layer("M", LayerKind::Material);
+        let first = stack.add_layer(
+            "I1",
+            LayerKind::Instance {
+                source_id: material,
+            },
+        );
+        let second = stack.add_layer("I2", LayerKind::Instance { source_id: first });
+        stack.set_opacity(second, 0.5);
+        let dangling = stack.add_layer("I3", LayerKind::Instance { source_id: 999 });
+        let mut states = material_layer::MaterialLayerStates::default();
+        let params = umber_core::MaterialParams {
+            material_id: "umber.m".into(),
+            channels: vec![umber_core::layers::MaterialChannel {
+                name: "baseColor".into(),
+                blend: umber_core::BlendMode::Multiply,
+                opacity: 0.5,
+                enabled: true,
+            }],
+            params: vec![],
+        };
+        stack.set_material(material, params.clone());
+        states.ensure(material, &params, "", (64, 64));
+        let snapshot = build_composite_snapshot(&stack, &states, true, vec![]);
+        let ids: Vec<Option<u64>> = snapshot.layers.iter().map(|l| l.layer_id).collect();
+        assert_eq!(ids, vec![None, Some(material), Some(first), Some(second)]);
+        assert!(!ids.contains(&Some(dangling)));
+        let row = &snapshot.layers[3];
+        assert_eq!(row.owner, paint_state::PlaneOwner::Layer(material));
+        assert_eq!(row.kind, paint_state::SnapshotLayerKind::Material);
+        assert_eq!(row.opacity, 0.5);
+        assert_eq!(
+            resolve_instance_source(&stack, second).map(|l| l.id),
+            Some(material)
+        );
+        assert!(resolve_instance_source(&stack, dangling).is_none());
     }
 }
 
