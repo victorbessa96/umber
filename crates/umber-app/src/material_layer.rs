@@ -1193,7 +1193,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use umber_core::layers::{
-        LayerStack, MaterialChannel, MaterialParamOverride, MaterialParamValue,
+        LayerMask, LayerStack, MaterialChannel, MaterialParamOverride, MaterialParamValue,
     };
     use umber_graph::mtlx::{painter_nodedefs, to_mtlx};
     use umber_graph::{Edge, Node};
@@ -1340,6 +1340,12 @@ mod tests {
             channels,
             params: vec![],
         }
+    }
+
+    /// The stack's live view of `layer_id` (the drain must see post-edit
+    /// params — a stale snapshot would composite pre-edit plans).
+    fn layer_snapshot(stack: &LayerStack, layer_id: u64) -> Layer {
+        stack.layer(layer_id).expect("layer exists").clone()
     }
 
     fn material_layer(
@@ -1909,7 +1915,10 @@ mod tests {
             set_size: (1, 1),
             channel_sizes: HashMap::from([("roughness".to_string(), (2, 2))]),
             tile_list: vec![1001],
-            tiles: HashMap::from([((1001, "roughness".to_string()), (2, 2, vec![200u8; 16]))]),
+            tiles: HashMap::from([(
+                (1001, "roughness".to_string()),
+                (2, 2, [200u8, 200, 200, 255].repeat(4).to_vec()),
+            )]),
             masks: HashMap::from([((layer_id, 1001), (1, 1, vec![255u8]))]),
             ..Default::default()
         };
@@ -1918,23 +1927,42 @@ mod tests {
             status_of(&reports, layer.id, "roughness"),
             ChannelStatus::Published
         );
-        assert_eq!(io.tile_bytes(1001, "roughness"), vec![170u8; 16]);
+        assert_eq!(
+            io.tile_bytes(1001, "roughness"),
+            [170u8, 170, 170, 255].repeat(4).to_vec()
+        );
 
         // A fully-gated mask (0) publishes nothing: bytes identical.
+        // (The layer needs an enabled LayerMask — the meta gates whether
+        // the plane is fetched at all; without it `gates()` is false and
+        // the mask plane is ignored.)
+        let mut gated = layer.clone();
+        gated.mask = Some(LayerMask {
+            name: "M".into(),
+            enabled: true,
+        });
         let mut io = FakeTileIo {
             set_size: (1, 1),
             channel_sizes: HashMap::from([("roughness".to_string(), (2, 2))]),
             tile_list: vec![1001],
-            tiles: HashMap::from([((1001, "roughness".to_string()), (2, 2, vec![200u8; 16]))]),
+            tiles: HashMap::from([(
+                (1001, "roughness".to_string()),
+                (2, 2, [200u8, 200, 200, 255].repeat(4).to_vec()),
+            )]),
             masks: HashMap::from([((layer_id, 1001), (1, 1, vec![0u8]))]),
             ..Default::default()
         };
-        let (_, reports) = drive(std::slice::from_ref(&layer), &definitions, &mut io);
+        let (_, reports) = drive(std::slice::from_ref(&gated), &definitions, &mut io);
         assert_eq!(
-            status_of(&reports, layer.id, "roughness"),
+            status_of(&reports, gated.id, "roughness"),
             ChannelStatus::Published
         );
-        assert_eq!(io.tile_bytes(1001, "roughness"), vec![200u8; 16]);
+        // Fully gated: the publish writes back the UNCHANGED destination
+        // (cov 0 ⇒ out = base everywhere), so the opaque fixture bytes.
+        assert_eq!(
+            io.tile_bytes(1001, "roughness"),
+            [200u8, 200, 200, 255].repeat(4).to_vec()
+        );
     }
 
     #[test]
@@ -2452,16 +2480,27 @@ mod tests {
         let mut stack = LayerStack::new();
         let params = channel_params("umber.counted", vec![MaterialChannel::named("baseColor")]);
         let layer = material_layer(&mut stack, "C", params, 1.0);
-        let layers = std::slice::from_ref(&layer);
         let mut definitions = HashMap::new();
         definitions.insert("umber.counted".into(), definition);
         let mut io = FakeTileIo::flat((2, 2), 1001, "baseColor", [0, 0, 0, 255]);
 
-        let mut states = drive_states(layers, &definitions, (2, 2));
-        let drain = |states: &mut MaterialLayerStates, io: &mut FakeTileIo| {
+        // The layer snapshots the DRAIN sees must track the stack: each
+        // edit lands via `set_material` and the slice is rebuilt — the
+        // refresh reads its channel plans from `layer.material`, so a
+        // stale snapshot would composite with pre-edit plans.
+        let mut states = drive_states(
+            std::slice::from_ref(&layer_snapshot(&stack, layer.id)),
+            &definitions,
+            (2, 2),
+        );
+        let drain = |states: &mut MaterialLayerStates, io: &mut FakeTileIo, layers: &[Layer]| {
             refresh_dirty_materials(states, layers, &definitions, &set_channels(), &registry, io)
         };
-        drain(&mut states, &mut io);
+        drain(
+            &mut states,
+            &mut io,
+            std::slice::from_ref(&layer_snapshot(&stack, layer.id)),
+        );
         assert_eq!(run_counts(&counts), [1, 1]);
         assert!(io
             .tile_bytes(1001, "baseColor")
@@ -2469,18 +2508,24 @@ mod tests {
             .all(|px| px == [10, 0, 0, 255]));
 
         // Channel-only edit (blend flip): the composite re-runs, the graph
-        // does not — warm caches serve byte-identical outputs.
+        // does not — warm caches serve byte-identical outputs. The edit
+        // lands through the stack so the drain's snapshot sees it.
         let mut changed = layer.material.clone().unwrap();
         changed.channels[0].blend = BlendMode::Multiply;
+        stack.set_material(layer.id, changed.clone());
         states.ensure(layer.id, &changed, &definitions["umber.counted"], (2, 2));
-        drain(&mut states, &mut io);
+        drain(
+            &mut states,
+            &mut io,
+            std::slice::from_ref(&layer_snapshot(&stack, layer.id)),
+        );
         assert_eq!(
             run_counts(&counts),
             [1, 1],
             "channel-only edits reuse the caches"
         );
-        // Multiply by [10,0,0] over black stays black (sanity: the composite
-        // really re-ran with the new blend, not just skipped).
+        // Multiply by [10,0,0] over the published [10,0,0] stays black
+        // (sanity: the composite really re-ran with the new blend).
         assert!(io
             .tile_bytes(1001, "baseColor")
             .chunks_exact(4)
@@ -2495,8 +2540,13 @@ mod tests {
             value: MaterialParamValue::Int(5),
         }];
         changed.channels[0].blend = BlendMode::Normal;
+        stack.set_material(layer.id, changed.clone());
         states.ensure(layer.id, &changed, &definitions["umber.counted"], (2, 2));
-        drain(&mut states, &mut io);
+        drain(
+            &mut states,
+            &mut io,
+            std::slice::from_ref(&layer_snapshot(&stack, layer.id)),
+        );
         assert_eq!(
             run_counts(&counts),
             [1, 2],
@@ -2514,8 +2564,13 @@ mod tests {
             param: "bias".into(),
             value: MaterialParamValue::Int(20),
         }];
+        stack.set_material(layer.id, changed.clone());
         states.ensure(layer.id, &changed, &definitions["umber.counted"], (2, 2));
-        drain(&mut states, &mut io);
+        drain(
+            &mut states,
+            &mut io,
+            std::slice::from_ref(&layer_snapshot(&stack, layer.id)),
+        );
         assert_eq!(run_counts(&counts), [2, 3]);
         assert!(io
             .tile_bytes(1001, "baseColor")
