@@ -36,6 +36,16 @@ pub enum ExrError {
     /// truncated file — wrapped `exr` error text).
     #[error("exr decode failed: {0}")]
     Decode(String),
+    /// A layer's declared size exceeds [`MAX_EXR_SIDE`] or
+    /// [`MAX_EXR_BYTES`] — refused from the header, before any pixel
+    /// buffer is allocated (the decompression-bomb guard).
+    #[error("exr layer {width}x{height} exceeds the decode limit")]
+    TooLarge {
+        /// Declared layer width, pixels.
+        width: usize,
+        /// Declared layer height, pixels.
+        height: usize,
+    },
     /// The OS refused the write (missing dir, permissions, …).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -89,6 +99,26 @@ pub fn write_exr_f32(path: &Path, width: u32, height: u32, rgba: &[f32]) -> Resu
     Ok(())
 }
 
+/// Longest allowed EXR layer side on read, pixels: 16K, double the
+/// largest texture-set size (8K) — room for a 16K×8K equirect.
+pub const MAX_EXR_SIDE: usize = 16_384;
+/// Largest allowed decoded RGBA f32 layer, bytes: 2 GiB (exactly one
+/// 16K×8K RGBA f32 equirect). The reader's working set is about twice
+/// this (the row buffer plus the flat output).
+pub const MAX_EXR_BYTES: usize = 2 << 30;
+
+/// Refuses a layer size over [`MAX_EXR_SIDE`] / [`MAX_EXR_BYTES`]
+/// (16 bytes per texel: RGBA f32). Pure, so the limits test without a
+/// file.
+fn check_exr_size(width: usize, height: usize) -> Result<(), ExrError> {
+    let bytes = width.checked_mul(height).and_then(|n| n.checked_mul(16));
+    let over_side = width > MAX_EXR_SIDE || height > MAX_EXR_SIDE;
+    if over_side || bytes.is_none_or(|b| b > MAX_EXR_BYTES) {
+        return Err(ExrError::TooLarge { width, height });
+    }
+    Ok(())
+}
+
 /// Reads an EXR file's first RGBA layer into floats
 /// (width×height×4 f32, row-major) — the inverse direction of
 /// [`write_exr_f32`], for HDR environment maps and float interchange.
@@ -112,9 +142,19 @@ pub fn write_exr_f32(path: &Path, width: u32, height: u32, rgba: &[f32]) -> Resu
 /// # Errors
 ///
 /// [`ExrError::Decode`] for unreadable files or files with no RGBA
-/// layer; [`ExrError::Io`] is folded into decode (the `exr` crate
-/// reports missing files as its own error, not `std::io`).
+/// layer; [`ExrError::TooLarge`] when any layer's header declares a
+/// size over the limits (checked before the pixel buffer exists — a
+/// crafted 1e9×1e9 data window must not reach the allocator);
+/// [`ExrError::Io`] is folded into decode (the `exr` crate reports
+/// missing files as its own error, not `std::io`).
 pub fn read_exr_rgba_f32(path: &Path) -> Result<(u32, u32, Vec<f32>), ExrError> {
+    // Header preflight: every layer, because the prelude picks the
+    // first RGBA layer itself and any of them may be the one it reads.
+    let meta = exr::meta::MetaData::read_from_file(path, false)
+        .map_err(|e| ExrError::Decode(e.to_string()))?;
+    for header in meta.headers.iter() {
+        check_exr_size(header.layer_size.width(), header.layer_size.height())?;
+    }
     let image = exr_prelude::read_first_rgba_layer_from_file(
         path,
         |resolution, _| {
@@ -251,6 +291,37 @@ mod tests {
         // Output row 0 = file bottom = the slice's row 1 = green.
         assert!((out[1] - 1.0).abs() < 1e-6, "row 0 must be green: {out:?}");
         assert!((out[4] - 1.0).abs() < 1e-6, "row 1 must be red: {out:?}");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn size_limits_refuse_just_past_each_bound_and_accept_at_it() {
+        // At the bounds: a 16K×8K equirect is exactly MAX_EXR_BYTES.
+        assert!(check_exr_size(MAX_EXR_SIDE, MAX_EXR_SIDE / 2).is_ok());
+        assert!(check_exr_size(1, 1).is_ok());
+        // One past the side bound, either axis.
+        assert!(matches!(
+            check_exr_size(MAX_EXR_SIDE + 1, 1),
+            Err(ExrError::TooLarge { width: 16_385, height: 1 })
+        ));
+        assert!(matches!(check_exr_size(1, MAX_EXR_SIDE + 1), Err(ExrError::TooLarge { .. })));
+        // Both sides legal, the area not: 16K² RGBA f32 = 4 GiB.
+        assert!(matches!(
+            check_exr_size(MAX_EXR_SIDE, MAX_EXR_SIDE),
+            Err(ExrError::TooLarge { .. })
+        ));
+        // The crate's own maximum data window (i32::MAX / 2 - 1): the
+        // bomb shape — refused, and the size math must not overflow.
+        assert!(check_exr_size(1_073_741_822, 1_073_741_822).is_err());
+        assert!(check_exr_size(usize::MAX, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn a_legal_file_still_reads_through_the_preflight() {
+        let path = tmp_path("preflight");
+        write_exr_f32(&path, 2, 2, &[0.5f32; 16]).unwrap();
+        let (w, h, out) = read_exr_rgba_f32(&path).expect("2x2 is far under the limits");
+        assert_eq!((w, h, out.len()), (2, 2, 16));
         std::fs::remove_file(&path).unwrap();
     }
 
