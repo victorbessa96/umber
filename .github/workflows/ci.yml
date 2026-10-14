@@ -9,6 +9,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Cargo-free gates: seconds, no toolchain, fail before the matrix spends
+  # a build. scripts/check-layers.py = the crate layering contract.
+  gates:
+    name: layering gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Crate layering
+        run: python3 scripts/check-layers.py
+
   check:
     name: fmt + clippy + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

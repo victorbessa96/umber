@@ -23,6 +23,14 @@ LOGDIR=$(mktemp -d /tmp/wave-battery.XXXXXX)
 trap '[ "$FAIL" = 0 ] && rm -rf "$LOGDIR"' EXIT
 FAIL=0
 
+echo "=== layers ==="
+if python3 scripts/check-layers.py; then
+    echo "PASS layers"
+else
+    echo "FAIL layers (scripts/check-layers.py)"
+    FAIL=1
+fi
+
 echo "=== fmt ==="
 if flock /tmp/umber-cargo.lock cargo fmt --all; then
     echo "PASS fmt (applied)"
