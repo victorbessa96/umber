@@ -4807,7 +4807,6 @@ version = "0.1.0"
 dependencies = [
  "ag-psd",
  "anyhow",
- "blake3",
  "eframe",
  "egui",
  "egui_dock",
@@ -4985,6 +4984,7 @@ dependencies = [
  "umber-bake",
  "umber-brush",
  "umber-core",
+ "umber-export",
  "umber-gpu",
  "umber-graph",
  "umber-mesh",
