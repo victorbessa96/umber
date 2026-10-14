@@ -89,11 +89,6 @@ impl Agent {
         self.recv(STEP_TIMEOUT)
     }
 
-    /// Closes stdin (EOF).
-    fn close_stdin(&mut self) {
-        drop(self.stdin.take());
-    }
-
     /// Waits for the exit (killing the child past the deadline), then
     /// asserts stdout carried nothing after the last reply.
     fn wait_exit(&mut self) -> ExitStatus {

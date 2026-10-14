@@ -5185,19 +5185,6 @@ mod tests {
     use umber_mesh::seam_mirror::mirror_positions;
 
     #[test]
-    fn uv_mapping_round_trips_and_rejects_outside() {
-        let rect = emath::Rect::from_min_size(emath::pos2(0.0, 0.0), emath::vec2(100.0, 100.0));
-        // Bottom-left of the square = UV origin (0,0).
-        let uv = uv_from_pointer(rect, emath::pos2(0.0, 100.0)).expect("inside");
-        assert!((uv.x - 0.0).abs() < 1e-6 && (uv.y - 0.0).abs() < 1e-6);
-        // Top-right = UV (1,1).
-        let uv = uv_from_pointer(rect, emath::pos2(100.0, 0.0)).expect("inside");
-        assert!((uv.x - 1.0).abs() < 1e-6 && (uv.y - 1.0).abs() < 1e-6);
-        // Outside rejected.
-        assert!(uv_from_pointer(rect, emath::pos2(101.0, 50.0)).is_none());
-    }
-
-    #[test]
     fn clone_offset_texels_matches_local_texel_deltas() {
         // The tracker's texel offset must land exactly where local_texel
         // maps the alt-clicked source (V flip included).

@@ -630,6 +630,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uv_mapping_round_trips_and_rejects_outside() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        // Bottom-left of the square = UV origin (0,0).
+        let uv = uv_from_pointer(rect, egui::pos2(0.0, 100.0)).expect("inside");
+        assert!((uv.x - 0.0).abs() < 1e-6 && (uv.y - 0.0).abs() < 1e-6);
+        // Top-right = UV (1,1).
+        let uv = uv_from_pointer(rect, egui::pos2(100.0, 0.0)).expect("inside");
+        assert!((uv.x - 1.0).abs() < 1e-6 && (uv.y - 1.0).abs() < 1e-6);
+        // Outside rejected.
+        assert!(uv_from_pointer(rect, egui::pos2(101.0, 50.0)).is_none());
+    }
+
+    #[test]
     fn uv_view_default_holds_only_the_mask_overlay_cache() {
         // The panel's only state is the quick-mask overlay cache (empty
         // until a mask shows); the default exists so AppState can derive
