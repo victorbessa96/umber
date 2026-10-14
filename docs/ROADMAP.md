@@ -141,7 +141,7 @@ between "feature-complete" and "a tool a studio trusts".
 
 ## Never (hard walls — requirements.md's guardrails, restated)
 
-- .spp WRITING — undocumented HDF5 + Adobe's format. (IMPORT reversed 2026-10-12: reading user-provided .spp files is interoperability, wave 4, pending Bessa's ratification — see decisions.md.) The .umber directory format stays the kill-shot.
+- .spp WRITING — undocumented HDF5 + Adobe's format. IMPORT is RATIFIED (Bessa, 2026-10-12 ruling 1 in docs/loop/decisions.md) and landed in wave 3 (`30b966e` + `0a5c20d`): reading user-provided .spp files is interoperability. The .umber directory format stays the kill-shot.
 - .sbsar execution — Adobe Additional Terms, no FOSS license. The original
   node graph + MaterialX interchange is the legal answer, fully built.
 - Fake interchange: MaterialX exports declared custom nodedefs; consuming
