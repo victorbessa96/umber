@@ -27,15 +27,20 @@ milestone pings and the repo; he does not sign off between kills.
 
 ## 1. NON-NEGOTIABLE RULES
 
-1. **No cargo build/test. CI is the runtime gate — consumed ASYNCHRONOUSLY.**
-   Never wait on a CI run: push, keep working, read verdicts at the next
-   wakeup (loop-status.sh lists them). A red verdict is consumed the same
-   way (fix-forward or roll back at the next wakeup, not mid-dispatch).
-   Allowed local cargo, ONE command at a time, never chained after other
-   commands in the same shell line: `cargo fmt --all`, and
-   `cargo clippy -p <crate> --all-targets -- -D warnings` for every crate
-   you touched. That is the entire local cargo budget. Machine stability
-   outranks speed.
+1. **TWO-GATE WAVES (Bessa's ruling 2026-10-14). Claws: no cargo at all;
+   the dragon runs the battery.**
+   - Gate 1 (per kill, local): `bash scripts/wave-battery.sh <crates…>` —
+     fmt + clippy -D warnings + the FULL test suites, under the flock at
+     /tmp/umber-cargo.lock. This gate catches what CI catches; runs
+     minutes warm. A RED battery is consumed fix-forward before the
+     kill's commit.
+   - Gate 2 (per wave): kills batch as commits UNPUSHED; ONE push per
+     wave (a thematic family or 3-5 kills); ONE CI run —
+     `bash scripts/ci-watch.sh <run-id>` backgrounded with a notify
+     pattern, so the verdict PINGS between turns. Never foreground-sleep
+     on a CI run; never push per-kill.
+   - Machine stability outranks speed: one battery at a time, never
+     chained cargo commands in one shell line.
 2. **E2E tests stay MINIMAL.** Gate 0 (the journey test) is the one E2E
    harness — it exists, it runs in CI, do not build more of its class.
    New kills pin behavior with unit tests and the existing suite; a new
