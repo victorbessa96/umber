@@ -6,6 +6,7 @@
 //! the layer journal, the autosave journal and the project file. Mask
 //! strokes, invert and clear are never undo entries.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use fluent::FluentValue;
@@ -268,9 +269,29 @@ pub struct LayersUiOutcome {
     /// pseudo-row yields `Some(PlaneOwner::Base)`; an add button yields the
     /// new layer. `None` = no row asked (the common case).
     pub select: Option<PlaneOwner>,
-    /// `Some(visible)` = the Base row's visibility was toggled (stage 4 —
-    /// always `None` until the toggle lands; see `layers_ui`).
+    /// `Some(visible)` = the Base row's visibility was toggled (stage 4:
+    /// the shell applies it to its `base_visible` session state, which
+    /// rides the next composite snapshot).
     pub base_visible: Option<bool>,
+}
+
+/// Per-row badge state for [`layers_ui`] (stage 4): the shell owns these
+/// (fill eval states, import refusals, dormancy) and the rows render
+/// them. Material budget badges ride the existing `material_badges` slot
+/// (`layers_panel::material_section`); fills and dormancy have no slot
+/// there, so the rows carry them here.
+#[derive(Debug, Default)]
+pub struct LayerRowBadges {
+    /// Fill layers blocked by the plane budget: layer id → badge line.
+    pub fill_budget: HashMap<u64, String>,
+    /// Import-created layers whose plane publish was refused (size
+    /// mismatch or budget): layer id → badge line. The layer still
+    /// exists, empty — the badge says why (§5.6).
+    pub import_refusals: HashMap<u64, String>,
+    /// Dormant fill/material layers (their pre-v2 result lives in the
+    /// Base paint — §6.3): layer ids. The badge names it
+    /// (`layers.dormant-badge`).
+    pub dormant: HashSet<u64>,
 }
 
 /// The shell's per-frame selection sync, decided (per-layer-pool design
@@ -408,17 +429,17 @@ fn topmost_paintable(stack: &LayerStack) -> Option<(u64, usize)> {
 /// (Painter's add-then-paint). Nothing here writes the selection: the
 /// clicks accumulate into the returned [`LayersUiOutcome`], which the shell
 /// applies to the paint session outside the material-context borrow.
-/// `base_visible` is stage 4's Base-visibility state: accepted now so the
-/// signature is stage-4-stable, read when the toggle lands (stage 3
-/// renders no toggle, so the outcome's `base_visible` stays `None`).
+/// `base_visible` is the Base row's visibility (stage 4's toggle); the
+/// outcome carries the toggle intent back. `badges` renders the per-row
+/// badge lines (fill budget blocks, import refusals, dormancy).
 pub fn layers_ui(
     ui: &mut egui::Ui,
     doc: &mut Document,
     mut mats: crate::layers_panel::MaterialPanelContext<'_>,
     active: PlaneOwner,
     base_visible: bool,
+    badges: &LayerRowBadges,
 ) -> LayersUiOutcome {
-    let _ = base_visible;
     let mut outcome = LayersUiOutcome::default();
     ui.horizontal_wrapped(|ui| {
         if ui.button(tr("layers.add-paint")).clicked() {
@@ -571,13 +592,35 @@ pub fn layers_ui(
             {
                 crate::layers_panel::material_section(ui, doc, layer.id, &mut mats);
             }
+            // Stage-4 row badges (the shell owns the state, the rows render
+            // it): a dormant layer names where its pixels live; a blocked
+            // fill or a refused import names why its plane is missing.
+            if badges.dormant.contains(&layer.id) {
+                ui.label(
+                    egui::RichText::new(tr("layers.dormant-badge"))
+                        .small()
+                        .color(egui::Color32::from_gray(140)),
+                );
+            }
+            if let Some(line) = badges.fill_budget.get(&layer.id) {
+                ui.label(egui::RichText::new(line.as_str()).color(ui.visuals().error_fg_color));
+            }
+            if let Some(line) = badges.import_refusals.get(&layer.id) {
+                ui.label(egui::RichText::new(line.as_str()).color(ui.visuals().error_fg_color));
+            }
         }
         // [M3] The Base pseudo-row, pinned at the bottom of the list:
         // session paint that belongs to no layer (v1 projects, strokes with
-        // no layer selected). Selectable like every layer row; its
-        // visibility toggle lands in stage 4, when a live composite exists
-        // for it to affect.
+        // no layer selected). Selectable like every layer row; the eye
+        // toggles its composite visibility (stage 4 — there is a live
+        // composite for it to affect now).
         ui.horizontal(|ui| {
+            if ui
+                .selectable_label(base_visible, if base_visible { "👁" } else { "·" })
+                .clicked()
+            {
+                outcome.base_visible = Some(!base_visible);
+            }
             if ui
                 .selectable_label(active == PlaneOwner::Base, tr("layers.base-paint"))
                 .on_hover_text(tr("layers.base-paint-hint"))

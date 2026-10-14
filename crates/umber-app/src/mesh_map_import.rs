@@ -34,12 +34,20 @@
 //! * Imported maps become `LayerKind::Paint` layers pushed on TOP of the
 //!   target set's stack. Pixel bytes are stored in the project's
 //!   [`umber_core::AssetStore`] (content-hash refs — the binary-neutrality
-//!   half of docs/merge-story.md); the GPU-tile upload of those bytes is
-//!   the named follow-up (same boundary as the painted Base Color bridge
-//!   in `bake_sources`: the paint pool owns texels, this module owns
-//!   routing + layer records). The layer-not-overwrite contract
-//!   ([`import_bytes`]) is pinned by test: existing layers are never
-//!   mutated, only pushed after.
+//!   half of docs/merge-story.md); the shell publishes the decoded PNG
+//!   into the new layer's OWN plane via `PaintState::publish_plane`
+//!   (premultiplied — straight PNG `(c, α)` → `(c·α, α)`), draining
+//!   [`MeshMapImportState::to_publish`] every frame (§5.6, stage 4). The
+//!   layer-not-overwrite contract ([`import_bytes`]) is pinned by test:
+//!   existing layers are never mutated, only pushed after.
+//! * Tile routing: the file stem's trailing `_NNNN` UDIM token selects the
+//!   tile when present (else [`umber_mesh::FIRST_TILE`]). Tile-suffixed
+//!   KNOWN maps stay unmatched (never misrouted — see below), so tokens
+//!   only arrive on user-channel routes in practice.
+//! * A size mismatch against the plane's `tile_channel_size` is refused
+//!   loudly (warn log + status line + row badge) — the layer still
+//!   exists, exactly like the sidecar load's loud skip. Import never
+//!   moves an existing selection (§2.2).
 //! * Missing channels are auto-created as user channels
 //!   ([`ensure_channel`]): `baseColor`/`emissive` (any case — matched
 //!   case-insensitively ONLY for the kind decision) are `Color`, everything
@@ -291,6 +299,37 @@ pub struct ImportApplied {
     pub layer_name: String,
     /// The content-hash ref of the stored PNG bytes.
     pub asset: AssetRef,
+    /// The tile the plane publishes on: the file stem's UDIM token when
+    /// present, else [`umber_mesh::FIRST_TILE`].
+    pub tile: u16,
+    /// Where the PNG bytes came from (the pending item's path, when the
+    /// scan saw the filesystem): the shell decodes through this when it
+    /// can, falling back to the stored asset bytes. Filled by
+    /// [`MeshMapImportState::apply_session_set`], never by
+    /// [`import_bytes`] (which never sees the filesystem).
+    pub source_path: Option<PathBuf>,
+}
+
+/// The tile one imported file publishes on (§5.6): the file stem's
+/// trailing `_NNNN` UDIM token when present, else
+/// [`umber_mesh::FIRST_TILE`]. Pure (no I/O): the shell and the tests
+/// both drive this.
+pub fn tile_for_file_name(file_name: &str) -> u16 {
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    if let Some((_, token)) = stem.rsplit_once('_') {
+        // A trailing `_NNNN` UDIM token (four ASCII digits). Plain
+        // nested `if`s, not let-chains: the kill gate formats with
+        // `--edition 2021`, which cannot parse let-chains.
+        if token.len() == 4 && token.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(tile) = token.parse::<u16>() {
+                return tile;
+            }
+        }
+    }
+    umber_mesh::FIRST_TILE
 }
 
 /// Imports one file's PNG `bytes` (named `file_name`) into `set`'s channel:
@@ -342,6 +381,8 @@ pub fn import_bytes(
         layer_id,
         layer_name,
         asset,
+        tile: tile_for_file_name(file_name),
+        source_path: None,
     })
 }
 
@@ -381,6 +422,10 @@ pub struct MeshMapImportState {
     pub unmatched: Vec<UnmatchedFile>,
     /// How many files the apply path has imported as layers this session.
     pub applied: usize,
+    /// Applied imports awaiting their plane publish (§5.6): the shell
+    /// drains this every frame (decode + `publish_plane` into the new
+    /// layer's own plane, or a loud refusal leaving the layer empty).
+    pub to_publish: Vec<ImportApplied>,
     /// The session texture set (channels are ensured here on apply; the
     /// name follows the mesh / project via [`Self::retarget_set`]).
     pub session_set: TextureSet,
@@ -394,6 +439,7 @@ impl Default for MeshMapImportState {
             pending: Vec::new(),
             unmatched: Vec::new(),
             applied: 0,
+            to_publish: Vec::new(),
             session_set: TextureSet::new_default("TextureSet"),
             status: String::new(),
         }
@@ -535,17 +581,23 @@ impl MeshMapImportState {
     /// layer on `doc`'s stack (other sets' files stay queued — see the
     /// module docs). `store` is the project's [`AssetStore`]; `read` loads
     /// one pending file's bytes (the panel passes `std::fs::read`, tests
-    /// pass a fixture map). Returns how many layers were created.
+    /// pass a fixture map). Returns what each file created, in apply
+    /// order (the count is its length).
     ///
     /// Each file goes through [`import_bytes`], so the layer-not-overwrite
-    /// contract holds per file: pushes only, never mutation.
+    /// contract holds per file: pushes only, never mutation. Every
+    /// applied import is ALSO queued on [`Self::to_publish`] (with its
+    /// source path when the scan saw the filesystem): the shell drains
+    /// that queue every frame, decodes each PNG and publishes it into
+    /// the new layer's own plane (§5.6). Import never moves an existing
+    /// selection (§2.2 — this function touches no selection).
     pub fn apply_session_set(
         &mut self,
         doc: &mut Document,
         store: &AssetStore,
         read: impl Fn(&PendingImport) -> Option<Vec<u8>>,
-    ) -> usize {
-        let mut created = 0usize;
+    ) -> Vec<ImportApplied> {
+        let mut applied = Vec::new();
         let mut still_pending = Vec::with_capacity(self.pending.len());
         // Borrow-split: `session_set` mutably for channel-ensure while the
         // pending vec drains (the vec itself is swapped out first).
@@ -569,8 +621,10 @@ impl MeshMapImportState {
                 &item.file,
                 &bytes,
             ) {
-                Ok(_) => {
-                    created += 1;
+                Ok(mut done) => {
+                    done.source_path = item.path.clone();
+                    self.to_publish.push(done.clone());
+                    applied.push(done);
                 }
                 Err(MeshMapImportError::Unmatched { file, reason }) => {
                     self.unmatched.push(UnmatchedFile { file, reason });
@@ -582,12 +636,13 @@ impl MeshMapImportState {
             }
         }
         self.pending = still_pending;
+        let created = applied.len();
         self.applied += created;
         self.status = tr_args(
             "import.applied",
             [("count", FluentValue::from(created as i64))],
         );
-        created
+        applied
     }
 
     /// Drains egui's dropped files into this state. Call once per frame
@@ -998,10 +1053,10 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let created = state.apply_session_set(&mut doc, &store, |item| {
+        let applied = state.apply_session_set(&mut doc, &store, |item| {
             bytes.get(item.file.as_str()).cloned()
         });
-        assert_eq!(created, 2);
+        assert_eq!(applied.len(), 2);
         assert_eq!(doc.stack.layers.len(), 2);
         // The other set's file stays queued (never dropped, never applied).
         assert_eq!(state.pending.len(), 1);
@@ -1013,6 +1068,38 @@ mod tests {
             .iter()
             .any(|c| c.name == "curvature"));
         assert!(state.session_set.channels.iter().any(|c| c.name == "wear"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §8 T29 (headless half): the tile comes from the file's UDIM token
+    /// when present, else `FIRST_TILE` — and the apply path queues the
+    /// publish (returning the list instead of a bare count).
+    #[test]
+    fn import_tile_routing_and_publish_queue() {
+        assert_eq!(tile_for_file_name("Sword_ambient_occlusion.png"), 1001);
+        assert_eq!(tile_for_file_name("Sword_1002.png"), 1002);
+        assert_eq!(tile_for_file_name("dir/Sword_1002.PNG"), 1002);
+        assert_eq!(tile_for_file_name("Sword_wear.png"), 1001);
+
+        let (store, dir) = tmp_store("tile-routing");
+        let mut state = MeshMapImportState::default();
+        state.retarget_set("Sword");
+        state.ingest_name("Sword_curvature.png", None);
+        let mut doc = Document::default();
+        let bytes: HashMap<&str, Vec<u8>> = [("Sword_curvature.png", b"a".to_vec())]
+            .into_iter()
+            .collect();
+        let applied = state.apply_session_set(&mut doc, &store, |item| {
+            bytes.get(item.file.as_str()).cloned()
+        });
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].tile, 1001);
+        assert_eq!(applied[0].channel, "curvature");
+        // The shell's publish queue holds the same import (bytes-only
+        // fixtures carry no source path).
+        assert_eq!(state.to_publish.len(), 1);
+        assert_eq!(state.to_publish[0].layer_id, applied[0].layer_id);
+        assert_eq!(state.to_publish[0].source_path, None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

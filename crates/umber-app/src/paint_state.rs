@@ -316,12 +316,11 @@
 //!
 //! Judgment calls (stage-1b boundaries — read before extending):
 //!
-//! * Base stays in `TileTargets` for this stage. §1.4's end state moves
-//!   those threads into `planes` as the `Base` owner's planes; stage 1b
-//!   only adds the `planes` map (layer-owned planes), the `cache` map and
-//!   `cache_dirty` beside them, so the live stroke path is byte-identical
-//!   by construction. The move lands with stage 4's routing (the same
-//!   kill that stages into non-Base planes).
+//! * Base stays in `TileTargets` (the §1.4 store unification is deferred
+//!   to a later kill — see the stage-4 block below, which records why).
+//!   Stage 1b only adds the `planes` map (layer-owned planes), the
+//!   `cache` map and `cache_dirty` beside them, so the live stroke path
+//!   is byte-identical by construction.
 //! * `Plane.committed` is `[u8; 32]`, not `blake3::Hash`: `blake3` is a
 //!   dependency of `umber-core` only, and the workspace rule (E0432) plus
 //!   this stage's lock forbid adding it to `umber-app/Cargo.toml` here —
@@ -330,32 +329,66 @@
 //!   way). Recorded as a reconciling deviation in the stage-1b report.
 //! * `materialize_plane` returns `Result<bool, PaintRefusal>` (created vs
 //!   already present), not the doc's `Result<&mut Plane, PaintRefusal>`:
-//!   Base planes live outside `planes` until the §1.4 move, so no single
-//!   reference type covers both owners yet. Stage 4 restores the doc
-//!   shape alongside the move.
+//!   Base planes live outside `planes`, so no single reference type covers
+//!   both owners. `plane_of_mut` is the dispatch that restores the doc's
+//!   routing shape (§3): Base arms resolve through the targets store,
+//!   layer arms through the planes map.
 //! * The OOM error scope rides `umber_gpu::paint_thread::push_oom_scope`
 //!   / `await_oom_scope` (wgpu 30's guard + async-pop shape, verified in
 //!   the registry source). The pop driver is std-only (`std::task::Wake`
 //!   over an `Arc`): `pollster` is dev-only in this crate and cannot run
 //!   at runtime.
-//! * `flush_composite` takes no snapshot yet and is a no-op: the
-//!   `CompositeSnapshot`, drain-then-composite ordering and region
-//!   dispatches land in stage 4 (§4.1). The hook's fire condition (dirty
-//!   entries pending) is already its body.
+//! * Base stays in `TileTargets` (the §1.4 store unification is
+//!   DEFERRED — see the stage-4 block below): every Base reader keeps
+//!   today's exact path, and `plane_of_mut` dispatches the two stores.
+//!
+//! Per-layer pool stage 4 (docs/specs/per-layer-pool-design.md §3–§6):
+//! per-layer pixels. Strokes, fills, materials and imports each write
+//! their own planes (`plane_of_mut(stroke_owner, tile, &channel)` in the
+//! stage/capture/retouch paths); the cache composites every frame
+//! (`flush_composite(&snapshot)` at the shell's end-of-update); warts
+//! 1–3 close; the first version-2 saves.
+//!
+//! Judgment calls (stage-4 boundaries — read before extending):
+//!
+//! * Base planes stay in `TileTargets`; `planes` holds layer-owned planes
+//!   only. The doc's §1.4 end state unifies both stores, but unifying
+//!   would churn every Base reader (save, export, bake, viewport binds)
+//!   for no behavioral gain: `plane_of_mut` / `plane_thread` dispatch
+//!   the two stores behind one seam, and the save census already walks
+//!   both. A later move fills the seam in without touching callers.
+//! * The flush's encoder types ride `eframe::wgpu` (not bare `wgpu::`):
+//!   `umber-app` carries no direct wgpu dependency (adding one is a
+//!   `Cargo.toml` + lock change outside this kill's surface), and bare
+//!   paths resolve only under the test target's dev-dependency.
+//!   egui-wgpu 0.36 re-exports the workspace's single wgpu 30, so the
+//!   types are identical — pinned by `Cargo.lock`'s one wgpu entry.
+//! * Composite errors drop the dirt loudly (never crash, never spam):
+//!   a poisoned entry clears after one `warn`; the next write re-marks.
+//! * History-evict tombstone freeing (§5.4 item 5) is deferred (needs an
+//!   `UndoStack::iter` surface in umber-core, outside this kill's lock):
+//!   the 512 MiB cap bounds RAM regardless; bytes are kept longer, so
+//!   revives stay exact, never wrong.
+//! * `bake_sources` keeps its `Option<&PaintState>` signatures (its
+//!   caller is `export_dialog.rs`, outside this kill's lock): the
+//!   composite accessors resolve cache-else-Base, so exports read the
+//!   last flush's cache — one frame stale at most, exact once frames
+//!   settle.
+//! * The committed record clears on EVERY pixel write (stage 2 wired
+//!   publish only): a stroke/undo/resize followed by an in-place save
+//!   round-trips the new bytes, never the old file.
+//!
 //!
 //! Per-layer pool storage, stage 3 (docs/specs/per-layer-pool-design.md
 //! §2): the selection + the stroke gate. WHO a stroke paints is explicit
 //! (`active_target`, edited through the shell) and gated (`active_verdict`,
-//! pushed by the shell once per frame); accepted strokes still land in
-//! Base — stage 4 moves the pixels.
+//! pushed by the shell once per frame); stage 4 routes accepted strokes
+//! into `stroke_owner`'s plane (the snapshot below is `active_target`).
 //!
 //! Judgment calls (stage-3 boundaries — read before extending):
 //!
-//! * `stroke_owner` is forced to `Base` on every accepted stroke. §2.3's
-//!   end state snapshots `active_target`, but stage-3 routing is unchanged
-//!   (every batch stages into Base targets), so recording a `Layer` id
-//!   would point at a plane the stroke never painted. Stage 4 switches the
-//!   snapshot to `active_target` alongside the routing.
+//! * `stroke_owner` snapshots `active_target` on every accepted stroke
+//!   (stage 4's routing — the stage-3 force-to-Base is retired).
 //! * `sync_active_target` keeps `active_explicit` on a same-target push and
 //!   clears it when the target moves (see its docs): the shell moves the
 //!   target only when it resolved it (open, new, vanished id), and a
@@ -363,10 +396,9 @@
 //! * `active_index` is meaningless for `Base` (no stack index): the sync
 //!   preserves whatever it holds, and the vanished-id walk reads it only
 //!   for `Layer` targets.
-//! * `stroke_refusal` is stored, not rendered: the status line is
-//!   `status_bar.rs`, outside this kill's lock, so stage 4 wires the
-//!   display. The refusal is exact today (`staged_batch_count() == 0`,
-//!   `is_stroking() == false`) and the user's way out is one click.
+//! * `stroke_refusal` is stored; the shell renders it in the LayerStack
+//!   panel (the status bar's snapshot is fixed — `status_bar.rs` stays
+//!   outside the lock, so the panel line is the display).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -384,6 +416,8 @@ use umber_brush::{
 };
 use umber_core::layers::InstanceError;
 use umber_core::undo::UndoStack;
+use umber_core::BlendMode;
+use umber_gpu::compositor::{CompositeRect, GpuStackLayer, StackCompositor};
 use umber_gpu::paint::{Dab, PaintCompositor};
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 use umber_mesh::polygon_fill::rasterize_polygon_mask;
@@ -437,6 +471,10 @@ pub enum PaintStateError {
     /// feature) or a dispatch failed.
     #[error(transparent)]
     Paint(#[from] umber_gpu::paint::PaintError),
+    /// The stack compositor rejected the device (the same storage-texture
+    /// floor as the paint pass — one device story).
+    #[error(transparent)]
+    Composite(#[from] umber_gpu::compositor::CompositeError),
     /// The stroke conditioner's parameters were invalid.
     #[error(transparent)]
     Conditioning(#[from] umber_brush::ConditionerError),
@@ -706,6 +744,28 @@ fn rects_touch(a: &DirtyRect, b: &DirtyRect) -> bool {
     a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1
 }
 
+/// Scales a SET-size texel rect into a channel-size rect, rounding
+/// outward so the dirt always covers the stamped texels (§4.2 [M6]).
+/// Identical sizes return the rect untouched (the common path —
+/// no arithmetic, no drift).
+fn scale_rect_outward(
+    rect: DirtyRect,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> DirtyRect {
+    if (src_w, src_h) == (dst_w, dst_h) || src_w == 0 || src_h == 0 {
+        return rect;
+    }
+    DirtyRect {
+        x0: (rect.x0 as u64 * dst_w as u64 / src_w as u64).min(dst_w as u64) as u32,
+        y0: (rect.y0 as u64 * dst_h as u64 / src_h as u64).min(dst_h as u64) as u32,
+        x1: ((rect.x1 as u64 * dst_w as u64).div_ceil(src_w as u64)).min(dst_w as u64) as u32,
+        y1: ((rect.y1 as u64 * dst_h as u64).div_ceil(src_h as u64)).min(dst_h as u64) as u32,
+    }
+}
+
 /// Merges the pair of `rects` whose union adds the fewest texels
 /// (the over-cap writer rule). `rects` holds more than one entry.
 fn merge_closest_pair(rects: &mut Vec<DirtyRect>) {
@@ -747,8 +807,162 @@ struct PaintTileCapture {
 /// for retouch and mask-mode strokes, which have their own paths).
 #[derive(Default)]
 struct PaintStrokeCapture {
-    tiles: BTreeMap<u16, PaintTileCapture>,
+    /// Keyed `(owner, tile)` (§3): undo restores the stroke owner's plane,
+    /// never the cache, and leaves other owners untouched.
+    tiles: BTreeMap<(PlaneOwner, u16), PaintTileCapture>,
 }
+
+/// One layer's stack metadata for the composite (§4.2): what the shell
+/// hands [`PaintState::flush_composite`] every frame, bottom-to-top. The
+/// session holds no stack; the shell builds this from `doc.stack.layers`
+/// plus the Base row's visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotLayerKind {
+    /// Strokes land here; entry blend/opacity are the layer's own.
+    Paint,
+    /// Eval-owned baseColor plane; entry blend/opacity are the layer's
+    /// own (`Passthrough` maps to `Normal` — the fill precedent).
+    Fill,
+    /// Eval-owned per-channel planes; the blend/opacity ride
+    /// [`SnapshotLayer::material_channels`], never the layer's own.
+    Material,
+}
+
+/// One material channel's composite entry (§5.2): only DECLARED + enabled
+/// + allowed-blend channels reach the snapshot (disabled, undeclared and
+///   forbidden-blend channels composite as `pixels: None` — no entry).
+///
+/// `opacity` is the already-formed `layer.opacity × channel.opacity`
+/// product. Built by [`crate::material_layer::material_composite_channels`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotMaterialChannel {
+    /// The plane channel this entry reads.
+    pub channel: String,
+    /// The channel's blend mode.
+    pub blend: BlendMode,
+    /// `layer.opacity × channel.opacity`.
+    pub opacity: f32,
+}
+
+/// One stack row's composite metadata, bottom-to-top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotLayer {
+    /// Whose plane this row composites.
+    pub owner: PlaneOwner,
+    /// The layer id for mask lookup (`None` = Base, unmasked).
+    pub layer_id: Option<u64>,
+    /// Paint/Fill rows use these; Material rows use `material_channels`.
+    pub kind: SnapshotLayerKind,
+    /// The row's blend mode (Paint/Fill; a Fill `Passthrough` composites
+    /// as `Normal`).
+    pub blend: BlendMode,
+    /// The row's opacity (Paint/Fill).
+    pub opacity: f32,
+    /// Whether the row contributes (layer `visible`, Base row's toggle).
+    pub visible: bool,
+    /// Whether an enabled layer mask gates this row (the flush looks the
+    /// bytes up in `layer_masks`; an absent plane reads fully white).
+    pub mask_enabled: bool,
+    /// `Some` for Material rows: one entry per contributing channel.
+    pub material_channels: Option<Vec<SnapshotMaterialChannel>>,
+}
+
+/// The per-frame composite input (§4.2): the stack's rows bottom-to-top
+/// (Base first), the Base row's visibility, and the `(tile, channel)`s a
+/// GPU binder shows this frame (the active tile's baseColor + height and
+/// the UV canvas's bound channel). A metadata `Full` composites only for
+/// those; every other `(tile, channel)` stays dirty and composites
+/// lazily on read (§4.1 part 3).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CompositeSnapshot {
+    /// Bottom-to-top rows (index 0 is the stack bottom, matching
+    /// `umber_core::LayerStack` and the compositor's entry order).
+    pub layers: Vec<SnapshotLayer>,
+    /// The Base pseudo-row's visibility toggle (stage 4).
+    pub base_visible: bool,
+    /// Displayed `(tile, channel)`s: the only `Full` entries the frame
+    /// flush composites ([M8]'s coalescing).
+    pub displayed: Vec<(u16, String)>,
+}
+
+impl CompositeSnapshot {
+    /// The ids with planes in `prev` that `next` no longer lists, with
+    /// their kind (`true` = Paint, tombstoned; `false` = eval-owned,
+    /// dropped): the shell's per-frame retire census (§5.4). Order-only
+    /// edits (reorder, opacity, blend, visibility, channel params) are NOT
+    /// removals — they surface through [`Self::full_owners`] instead.
+    pub fn removed(prev: &Self, next: &Self) -> Vec<(u64, bool)> {
+        let live: BTreeSet<u64> = next.layers.iter().filter_map(|l| l.layer_id).collect();
+        prev.layers
+            .iter()
+            .filter_map(|l| {
+                let id = l.layer_id?;
+                (!live.contains(&id)).then_some((id, matches!(l.kind, SnapshotLayerKind::Paint)))
+            })
+            .collect()
+    }
+
+    /// The owners whose `(tile, channel)`s must recomposite `Full` after
+    /// this snapshot replaces `prev`: every owner when the ORDER changed
+    /// (a reorder marks both layers' entries — marking all is the same
+    /// cost class and never misses), else the owners whose blend, opacity,
+    /// visibility, mask enable or material channels changed, plus Base
+    /// when its visibility flipped. A layer's entry is compared by
+    /// position-independent identity (its `layer_id`), so a pure reorder
+    /// still resolves through the order arm.
+    pub fn full_owners(prev: &Self, next: &Self) -> Vec<PlaneOwner> {
+        let prev_order: Vec<Option<u64>> = prev.layers.iter().map(|l| l.layer_id).collect();
+        let next_order: Vec<Option<u64>> = next.layers.iter().map(|l| l.layer_id).collect();
+        if prev_order != next_order {
+            let mut owners: Vec<PlaneOwner> = next.layers.iter().map(|l| l.owner).collect();
+            owners.sort();
+            owners.dedup();
+            return owners;
+        }
+        let mut owners = Vec::new();
+        for layer in &next.layers {
+            let same = prev.layers.iter().find(|l| l.owner == layer.owner);
+            let changed = match same {
+                None => true,
+                Some(old) => {
+                    old.blend != layer.blend
+                        || old.opacity != layer.opacity
+                        || old.visible != layer.visible
+                        || old.mask_enabled != layer.mask_enabled
+                        || old.material_channels != layer.material_channels
+                }
+            };
+            if changed {
+                owners.push(layer.owner);
+            }
+        }
+        if prev.base_visible != next.base_visible && !owners.contains(&PlaneOwner::Base) {
+            owners.push(PlaneOwner::Base);
+        }
+        owners
+    }
+}
+
+/// One retired (tombstoned) plane (§5.4): a deleted PAINT layer's CPU
+/// bytes, waiting for an undo-of-delete to revive them or for the cap to
+/// free them. Eval-owned planes never retire (they revive by re-eval).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetiredPlane {
+    tile: u16,
+    channel: String,
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+/// CPU bytes held for deleted paint layers, pending undo (§5.4 item 4):
+/// 512 MiB — the stroke history's 256 MiB doubled, because a retired
+/// plane is a whole plane rather than a dirty rect (eight 4K planes).
+/// Past it, the OLDEST tombstone frees first, EXCLUDING the newest: one
+/// oversize tombstone is retained while newest, so the last delete stays
+/// undoable. Undoing a freed delete revives EMPTY with the
+/// `layers.tombstone-lost` line.
+pub const RETIRED_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 
 /// One recorded stroke awaiting its History-window row: the stroke
 /// journal's length before the stroke's push (`cursor`) and after
@@ -807,11 +1021,19 @@ pub struct PaintState {
     /// `Full`. The per-frame flush consumes these in stage 4; in stage 1b
     /// [`Self::flush_composite`] only records them.
     cache_dirty: BTreeMap<(u16, String), DirtyRegion>,
+    /// `(tile, channel)` keys whose non-displayed `Full` dirt is
+    /// coalesced (§4.2 [M8]) — waiting for a read or screen time. The
+    /// waiting read composites against the synthesized stack (§8 T28).
+    coalesced_fulls: BTreeSet<(u16, String)>,
     /// The ONE paint compositor every plane and cache thread shares
     /// (§1, [M4]): built at [`Self::new`], handed as an [`Arc`] to every
     /// [`PaintThread::with_compositor`] call, so materializing a plane
     /// never compiles a shader.
     compositor: Arc<PaintCompositor>,
+    /// The stack compositor the per-frame flush folds planes through
+    /// (§4.1): built once at [`Self::new`] (the same device floor as the
+    /// paint compositor), so no frame ever builds a pipeline.
+    stack_compositor: StackCompositor,
     /// The enforced plane budget (§1.3): a materialization that would push
     /// [`Self::plane_bytes`] past this is refused with
     /// [`PaintRefusal::PlaneBudget`]. Defaults to
@@ -935,10 +1157,12 @@ pub struct PaintState {
     /// (see the module docs — `umber-brush`'s single-size `QuickMask` is
     /// untouched). [`Self::quick_mask`] returns the active set's.
     masks: BTreeMap<String, QuickMask>,
-    /// Tiles whose GPU mask texture matches `quick_mask`'s plane. Emptied
-    /// by every whole-mask change (invert, clear, resize); a gated dab's
-    /// tile is brought back in sync before it is staged.
-    mask_synced: BTreeSet<u16>,
+    /// Tiles whose GPU mask texture matches `quick_mask`'s plane, per
+    /// plane a gated stroke touches (§3: the mask copy rides the thread
+    /// the dab stages into). Emptied by every whole-mask change (invert,
+    /// clear, resize); a gated dab's plane is brought back in sync before
+    /// it is staged.
+    mask_synced: BTreeSet<(PlaneOwner, u16, String)>,
     /// The live stroke paints the mask (mask mode at `begin_stroke`).
     stroke_mask_edit: bool,
     /// The live stroke is gated by the mask (gating at `begin_stroke`).
@@ -973,9 +1197,49 @@ pub struct PaintState {
     active_verdict: Result<(), InstanceError>,
     /// The live stroke's owner, snapshotted at `begin_stroke`.
     stroke_owner: PlaneOwner,
-    /// Why the last `begin_stroke` (or a mid-stroke materialization)
-    /// refused. `None` after an accepted stroke.
+    /// Why the last `begin_stroke` (or a mid-stroke materialization) refused.
+    /// `None` after an accepted stroke.
     stroke_refusal: Option<PaintRefusal>,
+    /// The last snapshot the flush composited against (§4.1 part 3):
+    /// CPU readers flush-first against THIS (never torn, at most one
+    /// metadata edit stale), and `end_stroke` tests it for the
+    /// owner-deleted-mid-stroke boundary ([m7]). `None` until the first
+    /// flush (readers then composite a synthesized all-visible stack —
+    /// the headless fallback; the app always flushes every frame).
+    last_snapshot: Option<CompositeSnapshot>,
+    /// The `base_visible` the last flush saw: a flip marks every Base
+    /// `(tile, channel)` `Full` (and materializes their caches — a hidden
+    /// Base can no longer be read "directly", §4.2).
+    last_base_visible: bool,
+    /// Deleted PAINT layers' CPU bytes by layer id (§5.4): undo of the
+    /// delete re-uploads them byte-identical. Each entry's sequence
+    /// number orders eviction oldest-first (excluding the newest).
+    retired: BTreeMap<u64, (u64, Vec<RetiredPlane>)>,
+    /// Tombstone insertion order (the cap's oldest-first victim).
+    retired_seq: u64,
+    /// The enforced tombstone budget (§5.4 item 4): past it, the OLDEST
+    /// tombstone frees first, EXCLUDING the newest. Defaults to
+    /// [`RETIRED_BUDGET_BYTES`]; tests lower it through
+    /// [`Self::set_retired_cap_bytes`] (the `plane_hard_cap_bytes`
+    /// precedent — no panel edits this).
+    retired_cap_bytes: u64,
+    /// Pending amortized retirements (§5.4 item 2): `(owner, tile,
+    /// channel)` triples queued by the shell's retire census, read back
+    /// AT MOST ONE plane per flush. Threads stay alive (out of the
+    /// composite — their owner is not in the snapshot) until their bytes
+    /// land in [`Self::retired`].
+    retire_pending: Vec<(u64, u16, String)>,
+    /// The advisory-budget warn arm (§1.3): crossing
+    /// [`PLANE_BUDGET_BYTES`] logs once and latches
+    /// [`Self::over_budget`]; falling back under re-arms it.
+    budget_warn_armed: bool,
+    /// Latched while [`Self::plane_bytes`] is past the advisory budget
+    /// (the shell's budget status line reads this, not the bytes).
+    over_budget: bool,
+    /// The last tombstone loss waiting for the status line (`take_`
+    /// drains it): a freed delete's layer id (undo revives EMPTY) or a
+    /// budget-refused revive's. `None` = nothing to report.
+    tombstone_notice: Option<u64>,
     /// What layer-mask strokes paint (white opens, black closes — the
     /// quick mask's [`MaskPaint`] semantics on a `u8` plane).
     layer_mask_paint: MaskPaint,
@@ -1034,6 +1298,7 @@ impl PaintState {
         size: u32,
     ) -> Result<Self, PaintStateError> {
         let compositor = Arc::new(PaintCompositor::new(device.clone())?);
+        let stack_compositor = StackCompositor::new(device.clone())?;
         let first = PaintThread::with_compositor(
             device.clone(),
             queue.clone(),
@@ -1056,7 +1321,9 @@ impl PaintState {
             plane_committed: BTreeMap::new(),
             cache: BTreeMap::new(),
             cache_dirty: BTreeMap::new(),
+            coalesced_fulls: BTreeSet::new(),
             compositor,
+            stack_compositor,
             plane_hard_cap_bytes: PLANE_HARD_CAP_BYTES,
             active_tile: FIRST_TILE,
             active_channel: BASE_COLOR_CHANNEL.to_string(),
@@ -1109,6 +1376,15 @@ impl PaintState {
             active_verdict: Ok(()),
             stroke_owner: PlaneOwner::Base,
             stroke_refusal: None,
+            last_snapshot: None,
+            last_base_visible: true,
+            retired: BTreeMap::new(),
+            retired_seq: 0,
+            retired_cap_bytes: RETIRED_BUDGET_BYTES,
+            retire_pending: Vec::new(),
+            budget_warn_armed: true,
+            over_budget: false,
+            tombstone_notice: None,
             layer_mask_paint: MaskPaint::default(),
             #[cfg(test)]
             mask_uploads: 0,
@@ -1268,7 +1544,7 @@ impl PaintState {
     pub fn assign_tile_to_set(&mut self, tile: u16, set: &str) {
         self.ensure_set(set);
         self.tile_sets.insert(tile, set.to_string());
-        self.mask_synced.remove(&tile);
+        self.mask_synced.retain(|(_, t, _)| *t != tile);
     }
 
     /// Drops every tile→set assignment (the project open path re-derives
@@ -1321,11 +1597,11 @@ impl PaintState {
                 return;
             }
         }
-        // Stage-3 boundary (§7): every accepted stroke still lands in Base
-        // (routing moves in stage 4), so the snapshot is forced to Base
-        // with the pixels — never a `Layer` id pointing at a plane the
-        // stroke did not paint.
-        self.stroke_owner = PlaneOwner::Base;
+        // Stage-4 routing (§3, §7 row 4): every accepted stroke snapshots
+        // `active_target` into `stroke_owner`, and every batch stages
+        // into that owner's plane (a mid-stroke selection change never
+        // splits the stroke across two planes).
+        self.stroke_owner = self.active_target;
         self.stroke_refusal = None;
         self.conditioner.reset();
         self.event_seq = 0;
@@ -1820,6 +2096,17 @@ impl PaintState {
     /// tile)`'s `u8` plane toward the [`MaskPaint`] value. Stages nothing
     /// (the layer pixels are untouched) and records no undo (mask strokes
     /// are not journal entries — the quick-mask rule).
+    ///
+    /// Marks the composite dirty itself (§4.2 [M6]): `layer_mask_event`
+    /// mutates a CPU mask Vec and returns before any staging, so no plane
+    /// write and no snapshot diff can see it. The stamped footprint union
+    /// (in SET-size texels) lands as a `Rect` on EVERY `(tile, channel)`
+    /// where the layer has a plane — a material's mask edit dirties all
+    /// its declared channels, not `stroke_channel`. Channels with an
+    /// overridden size get the rect scaled, rounding outward. Instances
+    /// contribute where their SOURCE has planes (stage 5 renders them;
+    /// until then the source's own marking covers the same
+    /// `(tile, channel)`s, so no extra walk is needed).
     fn layer_mask_event(&mut self, layer: u64, tile: u16, dabs: &[Dab]) {
         self.ensure_layer_mask(layer, tile);
         let target = self.layer_mask_paint.value();
@@ -1835,6 +2122,7 @@ impl PaintState {
         if plane.len() != width as usize * height as usize {
             return;
         }
+        let mut stamped = None;
         for dab in dabs {
             let stamp = RetouchDab {
                 pos: dab.pos,
@@ -1842,7 +2130,25 @@ impl PaintState {
                 alpha: dab.alpha,
                 hardness: dab.hardness,
             };
+            if let Some(rect) = footprint(stamp.pos, stamp.radius, width, height) {
+                stamped = DirtyRect::union_opt(stamped, Some(rect));
+            }
             stamp_grayscale_mask(plane, width, height, &stamp, target_byte);
+        }
+        // The dirt half ([M6]): every `(tile, channel)` carrying this
+        // layer's planes recomposites with the edited mask.
+        if let Some(rect) = stamped {
+            let channels: Vec<String> = self
+                .planes
+                .keys()
+                .filter(|(owner, t, _)| *owner == PlaneOwner::Layer(layer) && *t == tile)
+                .map(|(_, _, channel)| channel.clone())
+                .collect();
+            for channel in channels {
+                let (cw, ch) = self.tile_channel_size(tile, &channel);
+                let scaled = scale_rect_outward(rect, width, height, cw, ch);
+                self.mark_dirty_rect(tile, &channel, scaled);
+            }
         }
     }
 
@@ -1874,7 +2180,7 @@ impl PaintState {
             return Err(IdSelectError::StrokeInFlight);
         }
         let id = select_id(self.mask_of_tile_mut(tile), tile, bake, width, height, uv)?;
-        self.mask_synced.remove(&tile);
+        self.mask_synced.retain(|(_, t, _)| *t != tile);
         Ok(id)
     }
 
@@ -1997,22 +2303,69 @@ impl PaintState {
         std::mem::take(&mut self.pending_commits)
     }
 
-    /// Queues the retouch history's pending region writes on their
-    /// targets (tile + channel — the undo key, see the module docs).
+    /// Queues the retouch history's pending region writes on their planes
+    /// (owner + tile + channel — the undo key, see the module docs).
+    /// Regions whose owner retired apply to the RETIRED bytes (§5.4 item
+    /// 8: an undo-of-delete then revives the undone pixels too); regions
+    /// whose owner is gone and freed drop loudly.
     fn flush_retouch_writes(&mut self) {
         // Drain into a local first: the writes and the target lookup both
         // borrow `self` mutably — the iterator can't hold the borrow while
-        // `target_of_mut` takes it.
+        // `plane_of_mut` takes it.
         let writes: Vec<_> = self.retouch_writes.writes.drain(..).collect();
-        for (tile, channel, rect, rgba) in writes {
-            if let Some(thread) = self.target_of_mut(tile, &channel) {
-                let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
-                    x: rect.x0,
-                    y: rect.y0,
-                    width: rect.width(),
-                    height: rect.height(),
-                    rgba,
-                }]);
+        for (owner, tile, channel, rect, rgba) in writes {
+            if let PlaneOwner::Layer(id) = owner {
+                if !self.planes.contains_key(&(owner, tile, channel.clone())) {
+                    if let Some((_, planes)) = self.retired.get_mut(&id) {
+                        let applied = planes
+                            .iter_mut()
+                            .filter(|plane| plane.tile == tile && plane.channel == channel)
+                            .any(|plane| {
+                                let row = plane.width as usize * 4;
+                                let expect = rect.width() as usize * rect.height() as usize * 4;
+                                if rgba.len() != expect {
+                                    return false;
+                                }
+                                if rect.x1 > plane.width || rect.y1 > plane.height {
+                                    return false;
+                                }
+                                for (i, y) in (rect.y0..rect.y1).enumerate() {
+                                    let dst =
+                                        (y as usize * plane.width as usize + rect.x0 as usize) * 4;
+                                    plane.data[dst..dst + row]
+                                        .copy_from_slice(&rgba[i * row..(i + 1) * row]);
+                                }
+                                true
+                            });
+                        if !applied {
+                            log::warn!(
+                                "undo: region for retired layer {id}/{channel} tile {tile} fits no tombstone; dropping"
+                            );
+                        }
+                    } else {
+                        log::warn!(
+                            "undo: region for freed layer {id}/{channel} tile {tile}; dropping"
+                        );
+                    }
+                    continue;
+                }
+            }
+            match self.plane_of_mut(owner, tile, &channel) {
+                Ok(Some(thread)) => {
+                    let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                        x: rect.x0,
+                        y: rect.y0,
+                        width: rect.width(),
+                        height: rect.height(),
+                        rgba,
+                    }]);
+                    self.clear_committed(owner, tile, &channel);
+                    self.mark_dirty_rect(tile, &channel, rect);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::warn!("undo: region for {owner:?}/{tile}/{channel} refused ({err:?})");
+                }
             }
         }
     }
@@ -2052,6 +2405,9 @@ impl PaintState {
                 height,
                 rgba,
             }]);
+            self.clear_committed(PlaneOwner::Base, tile, BASE_COLOR_CHANNEL);
+            self.cache_dirty
+                .insert((tile, BASE_COLOR_CHANNEL.to_string()), DirtyRegion::Full);
             true
         } else {
             false
@@ -2090,6 +2446,9 @@ impl PaintState {
                 height,
                 rgba,
             }]);
+            self.clear_committed(PlaneOwner::Base, tile, channel);
+            self.cache_dirty
+                .insert((tile, channel.to_string()), DirtyRegion::Full);
             true
         } else {
             false
@@ -2191,6 +2550,90 @@ impl PaintState {
         Ok(true)
     }
 
+    /// Resolves `(owner, tile, channel)`'s plane thread, mutably — the
+    /// stage-4 routing move (§3): `plane_of_mut(stroke_owner, tile,
+    /// &channel)` replaces `target_of_mut(tile, &channel)` in the
+    /// stage/capture/retouch paths.
+    ///
+    /// Base dispatches to the targets store (Base planes stay there —
+    /// the §1.4 store unification is deferred: every Base reader keeps
+    /// today's exact path, and this dispatch is the seam a later move
+    /// fills in). Layer owners materialize through
+    /// [`Self::materialize_plane`] (budget refusals propagate — the
+    /// stroke drops that tile's dabs and keeps painting its
+    /// already-materialized planes).
+    fn plane_of_mut(
+        &mut self,
+        owner: PlaneOwner,
+        tile: u16,
+        channel: &str,
+    ) -> Result<Option<&mut PaintThread>, PaintRefusal> {
+        if matches!(owner, PlaneOwner::Base) {
+            return Ok(self.target_of_mut(tile, channel));
+        }
+        self.materialize_plane(owner, tile, channel)?;
+        Ok(self
+            .planes
+            .get_mut(&(owner, tile, channel.to_string()))
+            .map(|plane| &mut plane.thread))
+    }
+
+    /// Marks one event's dab footprint on `(tile, channel)`'s dirt (§4.2:
+    /// every stroke write marks the cache dirty — the same `footprint`
+    /// the undo capture computes, merged into the multi-rect
+    /// [`DirtyRegion`]). A mirrored pair on opposite sides of a tile
+    /// stays two rects (past 8 the closest pair merges).
+    fn mark_dirty_rect(&mut self, tile: u16, channel: &str, rect: DirtyRect) {
+        self.cache_dirty
+            .entry((tile, channel.to_string()))
+            .or_insert_with(|| DirtyRegion::Rects(Vec::new()))
+            .mark_rect(rect);
+    }
+
+    /// Marks `owner`'s every `(tile, channel)` with planes `Full` (§4.2's
+    /// metadata writer): hide / opacity / blend / reorder / channel
+    /// params / mask attach / detach. The shell raises these from the
+    /// per-frame snapshot diff ([`CompositeSnapshot::full_owners`]).
+    pub fn mark_owner_full(&mut self, owner: PlaneOwner) {
+        let keys: Vec<(u16, String)> = match owner {
+            PlaneOwner::Base => self
+                .targets
+                .iter()
+                .flat_map(|(tile, targets)| {
+                    std::iter::once((*tile, BASE_COLOR_CHANNEL.to_string())).chain(
+                        targets
+                            .channels
+                            .keys()
+                            .map(|channel| (*tile, channel.clone())),
+                    )
+                })
+                .collect(),
+            PlaneOwner::Layer(_) => self
+                .planes
+                .keys()
+                .filter(|(id, _, _)| *id == owner)
+                .map(|(_, tile, channel)| (*tile, channel.clone()))
+                .collect(),
+        };
+        for key in keys {
+            self.cache_dirty.insert(key, DirtyRegion::Full);
+        }
+    }
+
+    /// Clears `(owner, tile, channel)`'s committed record (§6.2 [B1]):
+    /// EVERY pixel write (stage, `WriteRegion`, publish, `Resize`) sets
+    /// it to `None`, or the save would clean-skip the plane and re-stage
+    /// its pre-write bytes. (Stage 2 wired publish only; stage 4 wires
+    /// the stroke, undo and resize writes — a stroke followed by an
+    /// in-place save round-trips the stroke, never the old file.)
+    fn clear_committed(&mut self, owner: PlaneOwner, tile: u16, channel: &str) {
+        self.plane_committed
+            .remove(&(owner, tile, channel.to_string()));
+        if let Some(plane) = self.planes.get_mut(&(owner, tile, channel.to_string())) {
+            plane.committed = None;
+        }
+    }
+
     /// The plane's committed record, if any (§6.2's [B1] seam): where its
     /// bytes were last written and the content hash they carried. The
     /// save loop asks, then decides the clean-skip.
@@ -2262,12 +2705,251 @@ impl PaintState {
         self.plane_committed.clear();
         self.cache.clear();
         self.cache_dirty.clear();
+        self.retired.clear();
+        self.retire_pending.clear();
+        self.last_snapshot = None;
+        self.last_base_visible = true;
+        self.budget_warn_armed = true;
+        self.over_budget = false;
+        self.tombstone_notice = None;
         self.active_target = PlaneOwner::Base;
         self.active_explicit = false;
         self.active_index = 0;
         self.active_verdict = Ok(());
         self.stroke_owner = PlaneOwner::Base;
         self.stroke_refusal = None;
+    }
+
+    /// The shell's per-frame retire census (§5.4): `removed` names layer
+    /// ids with planes that left the stack, with their kind (`true` =
+    /// Paint, `false` = eval-owned Fill/Material — the shell reads the
+    /// kind off its previous snapshot, since kinds never mutate).
+    ///
+    /// Paint planes queue for the amortized readback
+    /// ([`Self::retire_pending`], at most one plane per flush); Fill and
+    /// Material planes DROP with no tombstone (their revive re-dirties
+    /// from the journal's `Insert` params and the next refresh
+    /// regenerates them). Both mark their `(tile, channel)`s `Full`.
+    /// The census skips the live `stroke_owner` while stroking at PUMP
+    /// time ([m7]), so a queued owner still paints until `end_stroke`.
+    pub fn note_removed_layers(&mut self, removed: &[(u64, bool)]) {
+        for (id, is_paint) in removed {
+            let owner = PlaneOwner::Layer(*id);
+            let keys: Vec<(u16, String)> = self
+                .planes
+                .keys()
+                .filter(|(own, _, _)| *own == owner)
+                .map(|(_, tile, channel)| (*tile, channel.clone()))
+                .collect();
+            if keys.is_empty() {
+                continue;
+            }
+            if *is_paint {
+                self.retire_pending.retain(|entry| entry.0 != *id);
+                for (tile, channel) in keys {
+                    self.retire_pending.push((*id, tile, channel));
+                }
+            } else {
+                for (tile, channel) in &keys {
+                    self.planes.remove(&(owner, *tile, channel.clone()));
+                    self.plane_committed
+                        .remove(&(owner, *tile, channel.clone()));
+                }
+                for (tile, channel) in keys {
+                    self.cache_dirty.insert((tile, channel), DirtyRegion::Full);
+                }
+            }
+        }
+    }
+
+    /// CPU bytes currently held for deleted paint layers (§5.4 item 4).
+    pub fn retired_bytes(&self) -> u64 {
+        self.retired
+            .values()
+            .flat_map(|(_, planes)| planes)
+            .map(|plane| plane.data.len() as u64)
+            .sum()
+    }
+
+    /// Whether [`Self::plane_bytes`] crossed the advisory budget (the
+    /// shell's budget status line reads this).
+    pub fn is_over_budget(&self) -> bool {
+        self.over_budget
+    }
+
+    /// Lowers (or raises) the enforced tombstone budget (see the
+    /// `retired_cap_bytes` field docs). Tests lower it to pin the
+    /// oldest-first eviction; production keeps
+    /// [`RETIRED_BUDGET_BYTES`].
+    pub fn set_retired_cap_bytes(&mut self, bytes: u64) {
+        self.retired_cap_bytes = bytes;
+    }
+
+    /// Takes the pending tombstone-loss notice for the status line, if
+    /// any: a freed delete's layer id (its undo revives EMPTY) or a
+    /// budget-refused revive's.
+    pub fn take_tombstone_notice(&mut self) -> Option<u64> {
+        self.tombstone_notice.take()
+    }
+
+    /// Frees the oldest tombstones past the enforced budget,
+    /// EXCLUDING the newest entry (§5.4 item 4): one oversize tombstone
+    /// is retained while newest, so the last delete stays undoable.
+    /// A freed entry arms [`Self::take_tombstone_notice`].
+    ///
+    /// History-evict freeing ("no command left in `doc.history` can
+    /// revive its id", §5.4 item 5) is DEFERRED: it needs an
+    /// `UndoStack::iter` surface in umber-core, outside this kill's
+    /// lock. The cap bounds RAM regardless; deferral only keeps bytes
+    /// longer (revives stay exact, never wrong).
+    fn enforce_retired_cap(&mut self) {
+        while self.retired_bytes() > self.retired_cap_bytes && self.retired.len() > 1 {
+            let newest = self.retired.values().map(|(seq, _)| *seq).max();
+            let victim = self
+                .retired
+                .iter()
+                .filter(|(_, (seq, _))| Some(*seq) != newest)
+                .min_by_key(|(_, (seq, _))| *seq)
+                .map(|(id, _)| *id);
+            let Some(id) = victim else {
+                break;
+            };
+            self.retired.remove(&id);
+            self.tombstone_notice = Some(id);
+            log::warn!(
+                "tombstone: freed layer {id}'s retired planes past the cap; undo revives it empty"
+            );
+        }
+    }
+
+    /// Reads back AT MOST ONE queued plane per call into
+    /// [`Self::retired`] (§5.4 item 2 — deleting a 4-tile 2-channel
+    /// paint layer is 8 flushes of one 64 MiB readback, not one hitch).
+    /// The thread drops once its bytes land. A failed readback still
+    /// drops the thread (its owner is gone; bytes are lost loudly, the
+    /// session never crashes). Queued planes of the live `stroke_owner`
+    /// are skipped while stroking ([m7]).
+    fn pump_retirements(&mut self) {
+        let skip = self.stroking.then_some(self.stroke_owner);
+        let Some(index) = self
+            .retire_pending
+            .iter()
+            .position(|(id, _, _)| Some(PlaneOwner::Layer(*id)) != skip)
+        else {
+            return;
+        };
+        let (id, tile, channel) = self.retire_pending.remove(index);
+        let owner = PlaneOwner::Layer(id);
+        match self.read_plane(owner, tile, &channel) {
+            Some(image) => {
+                let seq = self.retired_seq;
+                self.retired_seq += 1;
+                self.retired
+                    .entry(id)
+                    .or_insert((seq, Vec::new()))
+                    .1
+                    .push(RetiredPlane {
+                        tile,
+                        channel: channel.clone(),
+                        width: image.width,
+                        height: image.height,
+                        data: image.data,
+                    });
+            }
+            None => {
+                log::warn!("tombstone: layer {id}/{channel} tile {tile} unreadable; dropping");
+            }
+        }
+        self.planes.remove(&(owner, tile, channel.clone()));
+        self.plane_committed.remove(&(owner, tile, channel));
+        self.enforce_retired_cap();
+    }
+
+    /// Revives tombstoned bytes for layers back in `snapshot` (undo of
+    /// `Remove`) and cancels pending readbacks whose owner rejoined:
+    /// their still-live threads rejoin the composite (§5.4 items 2–3).
+    /// Re-uploads go through [`Self::publish_plane`] (a budget refusal
+    /// is a loud revive-empty naming the layer).
+    fn revive_check(&mut self, snapshot: &CompositeSnapshot) {
+        let live: BTreeSet<u64> = snapshot
+            .layers
+            .iter()
+            .filter_map(|layer| layer.layer_id)
+            .collect();
+        self.retire_pending.retain(|entry| !live.contains(&entry.0));
+        let revivable: Vec<u64> = self
+            .retired
+            .keys()
+            .copied()
+            .filter(|id| live.contains(id))
+            .collect();
+        for id in revivable {
+            let has_planes = self
+                .planes
+                .keys()
+                .any(|(owner, _, _)| *owner == PlaneOwner::Layer(id));
+            if has_planes {
+                continue;
+            }
+            let Some((_, planes)) = self.retired.remove(&id) else {
+                continue;
+            };
+            for plane in planes {
+                if let Err(err) = self.publish_plane(
+                    PlaneOwner::Layer(id),
+                    plane.tile,
+                    &plane.channel,
+                    plane.width,
+                    plane.height,
+                    plane.data,
+                ) {
+                    log::warn!("tombstone: revive of layer {id} refused ({err:?}); revives empty");
+                    self.tombstone_notice = Some(id);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Retires ALL of `id`'s planes synchronously into [`Self::retired`]
+    /// ([m7]'s `end_stroke` half): the owner left the stack mid-stroke,
+    /// so there is no live layer to undo into — the capture is discarded
+    /// and the bytes wait here for an undo-of-delete. Unreadable planes
+    /// drop loudly.
+    fn retire_owner_now(&mut self, id: u64) {
+        let owner = PlaneOwner::Layer(id);
+        let keys: Vec<(u16, String)> = self
+            .planes
+            .keys()
+            .filter(|(own, _, _)| *own == owner)
+            .map(|(_, tile, channel)| (*tile, channel.clone()))
+            .collect();
+        self.retire_pending.retain(|entry| entry.0 != id);
+        for (tile, channel) in keys {
+            match self.read_plane(owner, tile, &channel) {
+                Some(image) => {
+                    let seq = self.retired_seq;
+                    self.retired_seq += 1;
+                    self.retired
+                        .entry(id)
+                        .or_insert((seq, Vec::new()))
+                        .1
+                        .push(RetiredPlane {
+                            tile,
+                            channel: channel.clone(),
+                            width: image.width,
+                            height: image.height,
+                            data: image.data,
+                        });
+                }
+                None => {
+                    log::warn!("tombstone: layer {id}/{channel} tile {tile} unreadable; dropping");
+                }
+            }
+            self.planes.remove(&(owner, tile, channel.clone()));
+            self.plane_committed.remove(&(owner, tile, channel));
+        }
+        self.enforce_retired_cap();
     }
 
     /// Backing-store bytes (§1.3's accounting, exactly): Σ `w·h·4` over
@@ -2312,11 +2994,26 @@ impl PaintState {
         channel: &str,
     ) -> Option<RgbaBuffer> {
         if matches!(owner, PlaneOwner::Base) {
-            return self.read_target(tile, channel, false);
+            return self.read_target(tile, channel);
         }
         let device = self.device.clone();
         let queue = self.queue.clone();
-        let plane = self.planes.get_mut(&(owner, tile, channel.to_string()))?;
+        let Some(plane) = self.planes.get_mut(&(owner, tile, channel.to_string())) else {
+            // A retired owner (§5.4 item 4): the plane was tombstoned —
+            // its bytes live in `retired`. Readers get them back so a
+            // removed layer stays readable until its revive or drop.
+            let layer_id = match owner {
+                PlaneOwner::Layer(id) => id,
+                PlaneOwner::Base => return None,
+            };
+            let retired = self
+                .retired
+                .get(&layer_id)?
+                .1
+                .iter()
+                .find(|plane| plane.tile == tile && plane.channel == channel)?;
+            return RgbaBuffer::new(retired.width, retired.height, retired.data.clone());
+        };
         if let Err(err) = plane.thread.process_pending() {
             log::warn!("plane: draining {owner:?}/{tile}/{channel} failed: {err:#}");
             return None;
@@ -2402,21 +3099,437 @@ impl PaintState {
     }
 
     /// Recomposites every pending-dirty `(tile, channel)` cache from its
-    /// planes (§4.1's flush). Stage 1b: a no-op — dirt is recorded (see
-    /// [`Self::publish_plane`]) but nothing composites: the end-of-update
-    /// placement (AFTER the fill AND material refresh blocks, drain-first
-    /// per composite set), the `CompositeSnapshot` argument and the
-    /// `composite_stack_region` dispatches all land in stage 4. The early
-    /// return names the stage-4 fire condition (no dirt, no work).
-    pub fn flush_composite(&mut self) {
+    /// planes (§4.1's flush — the end-of-update placement, AFTER the fill
+    /// AND material refresh blocks, drain-first per composite set).
+    ///
+    /// Per `(tile, channel)` with dirt: `Rects` composite region-by-region
+    /// through [`StackCompositor::composite_stack_region`]; a metadata
+    /// `Full` composites whole through [`StackCompositor::composite_stack`]
+    /// — but ONLY for the snapshot's displayed `(tile, channel)`s ([M8]'s
+    /// coalescing: every other `Full` stays dirty and composites lazily
+    /// on read or when displayed). Dirt without a cache thread is
+    /// dropped (a Base-only `(tile, channel)` reads Base directly).
+    ///
+    /// The same call pumps one amortized tombstone readback and revives
+    /// tombstoned bytes for rejoined layers (§5.4), and latches the
+    /// advisory-budget warn (§1.3). Composite errors are loud (`warn`)
+    /// and drop the dirt (a poisoned entry must not spam every frame;
+    /// the next write re-marks).
+    pub fn flush_composite(&mut self, snapshot: &CompositeSnapshot) {
+        self.last_snapshot = Some(snapshot.clone());
+        if self.last_base_visible != snapshot.base_visible {
+            self.last_base_visible = snapshot.base_visible;
+            if !snapshot.base_visible {
+                let base_keys: Vec<(u16, String)> = self
+                    .targets
+                    .iter()
+                    .flat_map(|(tile, targets)| {
+                        std::iter::once((*tile, BASE_COLOR_CHANNEL.to_string())).chain(
+                            targets
+                                .channels
+                                .keys()
+                                .map(|channel| (*tile, channel.clone())),
+                        )
+                    })
+                    .collect();
+                for (tile, channel) in base_keys {
+                    self.ensure_cache(tile, &channel);
+                }
+            }
+            self.mark_owner_full(PlaneOwner::Base);
+        }
+        self.revive_check(snapshot);
+        self.pump_retirements();
         if self.cache_dirty.is_empty() {
-            // Stage 4's early-out: no dirt, no work.
+            self.check_budget_warn();
             return;
         }
-        // Stage 1b ends here: see the module docs. (The empty check is
-        // the stage-4 fire condition, kept so the call sites compile
-        // against the final signature.)
-        let _ = ();
+        if let Err(err) = self.process_pending() {
+            log::warn!("composite: draining the composite set failed: {err:#}");
+            return;
+        }
+        let keys: Vec<(u16, String)> = self.cache_dirty.keys().cloned().collect();
+        let mut encoder =
+            self.device
+                .create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
+                    label: Some("umber_flush_composite"),
+                });
+        let mut submitted = false;
+        for (tile, channel) in keys {
+            let Some(dirt) = self.cache_dirty.remove(&(tile, channel.clone())) else {
+                continue;
+            };
+            if matches!(dirt, DirtyRegion::Full)
+                && !snapshot.displayed.contains(&(tile, channel.clone()))
+            {
+                // [M8]'s coalescing: a non-displayed `Full` waits for a
+                // read or for its turn on screen. The waiting read
+                // composites against the synthesized stack (§8 T28).
+                self.coalesced_fulls.insert((tile, channel.clone()));
+                self.cache_dirty.insert((tile, channel), dirt);
+                continue;
+            }
+            if !self.cache.contains_key(&(tile, channel.clone())) {
+                // No cache thread YET (the lazy-cache rule): the dirt
+                // survives — a later reader materializes the cache and
+                // composites on read (§4.1 part 3). Dropping it here
+                // would freeze a zeroed cache for the first read.
+                self.cache_dirty.insert((tile, channel), dirt);
+                continue;
+            }
+            submitted |= self.composite_dirty(tile, &channel, dirt, snapshot, &mut encoder);
+        }
+        if submitted {
+            self.queue.submit(Some(encoder.finish()));
+        }
+        self.check_budget_warn();
+    }
+
+    /// Ensures `(tile, channel)`'s cache thread exists (the lazy-cache
+    /// rule's hiding arm, §4.2): born `Full`-dirty so it can never be
+    /// read uncomposited. No-op when present.
+    fn ensure_cache(&mut self, tile: u16, channel: &str) {
+        if self.cache.contains_key(&(tile, channel.to_string())) {
+            return;
+        }
+        let (width, height) = self.tile_channel_size(tile, channel);
+        self.cache.insert(
+            (tile, channel.to_string()),
+            PaintThread::with_compositor(
+                self.device.clone(),
+                self.queue.clone(),
+                width,
+                height,
+                self.compositor.clone(),
+            ),
+        );
+        self.cache_dirty
+            .insert((tile, channel.to_string()), DirtyRegion::Full);
+    }
+
+    /// Records one `(tile, channel)`'s dirt into the encoder against
+    /// `snapshot` (the cache thread exists — the caller ensured it).
+    /// `true` when dispatches were recorded. On a composite error the
+    /// dirt is dropped loudly (see [`Self::flush_composite`]).
+    ///
+    /// The encoder types ride `eframe::wgpu` (egui-wgpu 0.36's re-export
+    /// of the workspace's single wgpu 30 — `Cargo.lock` holds exactly
+    /// one): `umber-app` carries no direct wgpu dependency (adding one
+    /// is a `Cargo.toml` + lock change outside this kill's surface), so
+    /// non-test code must not name the bare `wgpu::` paths the test
+    /// module's dev-dependency provides.
+    fn composite_dirty(
+        &mut self,
+        tile: u16,
+        channel: &str,
+        dirt: DirtyRegion,
+        snapshot: &CompositeSnapshot,
+        encoder: &mut eframe::wgpu::CommandEncoder,
+    ) -> bool {
+        let Some(cache) = self.cache.get(&(tile, channel.to_string())) else {
+            return false;
+        };
+        let (width, height) = cache.paint_target().dimensions();
+        // The owned mask bytes every masked entry samples (rect uploads
+        // are the compositor's per-dispatch affair — entries borrow these
+        // full-size planes, §4.3 item 3).
+        let (set_w, set_h) = self.tile_size(tile);
+        let mut owned_masks: Vec<Vec<u8>> = Vec::new();
+        // Per-layer textures, in snapshot (bottom-to-top) order. A layer
+        // without a plane on `(tile, channel)` contributes nothing (the
+        // transparent no-op — a layer touched only on 1002 has no entry
+        // on 1001 by construction). Resolved keys first (the `&mut` map
+        // phase ends here); entries borrow the shared reborrow below, so
+        // no raw pointers cross the mask-owned Vec.
+        struct ResolvedEntry {
+            owner: PlaneOwner,
+            blend: BlendMode,
+            opacity: f32,
+            visible: bool,
+            mask_index: Option<usize>,
+        }
+        let mut resolved: Vec<ResolvedEntry> = Vec::new();
+        for layer in &snapshot.layers {
+            if self.plane_thread(layer.owner, tile, channel).is_none() {
+                continue;
+            }
+            if layer.owner == PlaneOwner::Base {
+                resolved.push(ResolvedEntry {
+                    owner: layer.owner,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: layer.visible,
+                    mask_index: None,
+                });
+                continue;
+            }
+            let Some(layer_id) = layer.layer_id else {
+                continue;
+            };
+            let mask_index = if layer.mask_enabled {
+                let bytes = self.layer_masks.get(&(layer_id, tile)).map(|plane| {
+                    crate::material_layer::resample_mask_nearest(plane, set_w, set_h, width, height)
+                });
+                match bytes {
+                    Some(bytes) => {
+                        owned_masks.push(bytes);
+                        Some(owned_masks.len() - 1)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            if matches!(layer.kind, SnapshotLayerKind::Material) {
+                // Material rows expand per contributing channel (§5.2);
+                // the layer's own blend stays inert. A `None` channel list
+                // (disabled, undeclared or forbidden on every channel)
+                // contributes NO entry (`pixels: None`).
+                let Some(channels) = layer.material_channels.as_ref() else {
+                    continue;
+                };
+                let Some(entry) = channels.iter().find(|c| c.channel == channel) else {
+                    continue;
+                };
+                resolved.push(ResolvedEntry {
+                    owner: layer.owner,
+                    blend: entry.blend,
+                    opacity: entry.opacity,
+                    visible: layer.visible,
+                    mask_index,
+                });
+            } else {
+                let blend = if layer.blend == BlendMode::Passthrough
+                    && matches!(layer.kind, SnapshotLayerKind::Fill)
+                {
+                    // A fill carrying `Passthrough` composites as `Normal`
+                    // (structural for folders, not a pixel op — §5.1).
+                    BlendMode::Normal
+                } else {
+                    layer.blend
+                };
+                resolved.push(ResolvedEntry {
+                    owner: layer.owner,
+                    blend,
+                    opacity: layer.opacity,
+                    visible: layer.visible,
+                    mask_index,
+                });
+            }
+        }
+        // The dispatch phase reborrows shared (every `&mut` use above
+        // ended — NLL): entries borrow the planes, the owned masks and
+        // the compositor together, and the encoder records onto the
+        // caller's command buffer.
+        let this = &*self;
+        let entries: Vec<GpuStackLayer<'_>> = resolved
+            .iter()
+            .filter_map(|meta| {
+                let thread = this.plane_thread(meta.owner, tile, channel)?;
+                Some(GpuStackLayer {
+                    blend_mode: meta.blend,
+                    opacity: meta.opacity,
+                    visible: meta.visible,
+                    texture: Some(thread.paint_target()),
+                    mask: meta.mask_index.map(|i| owned_masks[i].as_slice()),
+                    premultiplied: true,
+                })
+            })
+            .collect();
+        let Some(output) = this.cache.get(&(tile, channel.to_string())) else {
+            return false;
+        };
+        let output = output.paint_target();
+        let result = match dirt {
+            DirtyRegion::Full => this
+                .stack_compositor
+                .composite_stack(encoder, &entries, output),
+            DirtyRegion::Rects(rects) => {
+                let mut result = Ok(());
+                for rect in rects {
+                    let region = CompositeRect {
+                        x: rect.x0,
+                        y: rect.y0,
+                        width: rect.width(),
+                        height: rect.height(),
+                    };
+                    if let Err(err) = this
+                        .stack_compositor
+                        .composite_stack_region(encoder, &entries, output, region)
+                    {
+                        result = Err(err);
+                        break;
+                    }
+                }
+                result
+            }
+        };
+        if let Err(err) = result {
+            log::warn!("composite: {tile}/{channel} failed ({err:#}); dropping its dirt");
+        }
+        true
+    }
+
+    /// Resolves `(owner, tile, channel)`'s plane thread WITHOUT
+    /// materializing (`None` for a never-written plane): the flush's
+    /// entry lookup. Base dispatches to the targets store (the §1.4
+    /// seam — see [`Self::plane_of_mut`]).
+    fn plane_thread(&self, owner: PlaneOwner, tile: u16, channel: &str) -> Option<&PaintThread> {
+        if matches!(owner, PlaneOwner::Base) {
+            let targets = self.targets.get(&tile)?;
+            if channel == BASE_COLOR_CHANNEL {
+                Some(&targets.base_color)
+            } else {
+                targets.channels.get(channel)
+            }
+        } else {
+            self.planes
+                .get(&(owner, tile, channel.to_string()))
+                .map(|plane| &plane.thread)
+        }
+    }
+
+    /// Synthesizes an all-visible Normal/1.0 snapshot over the current
+    /// plane owners (Base bottom, then layers by id): the headless
+    /// fallback when a reader flushes before any frame flush set
+    /// [`Self::last_snapshot`]. The app never hits it (it flushes every
+    /// frame); tests that publish planes always flush with a real
+    /// snapshot first. Order past a reorder is approximate (id order) —
+    /// the fallback composites every plane exactly once, never double.
+    fn synthesized_snapshot(&self) -> CompositeSnapshot {
+        let mut layers = vec![SnapshotLayer {
+            owner: PlaneOwner::Base,
+            layer_id: None,
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        }];
+        let mut owners: Vec<PlaneOwner> = self
+            .planes
+            .keys()
+            .map(|(owner, _, _)| *owner)
+            .filter(|owner| !matches!(owner, PlaneOwner::Base))
+            .collect();
+        owners.sort();
+        owners.dedup();
+        for owner in owners {
+            layers.push(SnapshotLayer {
+                owner,
+                layer_id: match owner {
+                    PlaneOwner::Layer(id) => Some(id),
+                    PlaneOwner::Base => None,
+                },
+                kind: SnapshotLayerKind::Paint,
+                blend: BlendMode::Normal,
+                opacity: 1.0,
+                visible: true,
+                mask_enabled: false,
+                material_channels: None,
+            });
+        }
+        CompositeSnapshot {
+            layers,
+            base_visible: true,
+            displayed: Vec::new(),
+        }
+    }
+
+    /// Composites `(tile, channel)`'s pending dirt now (the flush-first
+    /// half of §4.1 part 3): drains its composite set, dispatches against
+    /// the LAST snapshot (never torn, at most one metadata edit stale —
+    /// the v2 boundary), and submits. Dirt without a cache thread is
+    /// dropped (Base reads directly). Deferred non-displayed `Full`
+    /// marks are paid here too — this is where §4.2's coalesced entries
+    /// get composited.
+    fn ensure_composited(&mut self, tile: u16, channel: &str) {
+        if !self.cache_dirty.contains_key(&(tile, channel.to_string())) {
+            return;
+        }
+        if !self.cache.contains_key(&(tile, channel.to_string())) {
+            // A dirt mark without a cache thread: a layer plane wrote
+            // but no reader ever composited. Materialize the cache NOW
+            // (the composite's target must exist for the dispatch) —
+            // the §4.1 read contract: every composite reader gets a
+            // freshly composited cache, first read included. Base-only
+            // reads bypass this (they read Base directly at zero cost).
+            self.ensure_cache(tile, channel);
+        }
+        let snapshot = if self.coalesced_fulls.remove(&(tile, channel.to_string())) {
+            // A coalesced non-displayed `Full` (§4.2 [M8]) reads against
+            // the synthesized all-visible stack — the headless fallback
+            // the §8 T28 third arm pins. Ordinary reads keep the last
+            // frame's snapshot, whatever it says.
+            self.synthesized_snapshot()
+        } else {
+            self.last_snapshot
+                .clone()
+                .unwrap_or_else(|| self.synthesized_snapshot())
+        };
+        if let Err(err) = self.process_pending() {
+            log::warn!("composite: reader drain failed: {err:#}");
+            return;
+        }
+        let Some(dirt) = self.cache_dirty.remove(&(tile, channel.to_string())) else {
+            return;
+        };
+        let mut encoder =
+            self.device
+                .create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
+                    label: Some("umber_ensure_composited"),
+                });
+        if self.composite_dirty(tile, channel, dirt, &snapshot, &mut encoder) {
+            self.queue.submit(Some(encoder.finish()));
+        }
+    }
+
+    /// `(tile, channel)`'s composited texels as a CPU image (flush-first
+    /// composite reader, §1.1 [B3]): the cache when a layer-owned plane
+    /// exists for it, else the Base plane directly (today's exact path
+    /// at zero extra VRAM). The eyedropper, the painted-map export, the
+    /// bake sources and the retouch sample all read through here.
+    pub fn read_composite(&mut self, tile: u16, channel: &str) -> Option<RgbaBuffer> {
+        self.ensure_composited(tile, channel);
+        if let Some(cache) = self.cache.get_mut(&(tile, channel.to_string())) {
+            let device = self.device.clone();
+            let queue = self.queue.clone();
+            if let Err(err) = cache.process_pending() {
+                log::warn!("composite: draining {tile}/{channel} failed: {err:#}");
+                return None;
+            }
+            let target = cache.paint_target();
+            let (width, height) = target.dimensions();
+            return match target.read_back_rgba8(&device, &queue) {
+                Ok(bytes) => RgbaBuffer::new(width, height, bytes),
+                Err(err) => {
+                    log::warn!("composite: reading {tile}/{channel} back failed: {err:#}");
+                    None
+                }
+            };
+        }
+        self.read_target(tile, channel)
+    }
+
+    /// Latches the advisory-budget warn (§1.3): crossing
+    /// [`PLANE_BUDGET_BYTES`] logs once and latches
+    /// [`Self::is_over_budget`]; falling back under re-arms the log.
+    fn check_budget_warn(&mut self) {
+        if self.plane_bytes() > PLANE_BUDGET_BYTES {
+            self.over_budget = true;
+            if self.budget_warn_armed {
+                self.budget_warn_armed = false;
+                log::warn!(
+                    "plane budget: {} bytes past the advisory {} bytes",
+                    self.plane_bytes(),
+                    PLANE_BUDGET_BYTES
+                );
+            }
+        } else {
+            self.over_budget = false;
+            self.budget_warn_armed = true;
+        }
     }
 
     /// Extend the stroke to `uv`.
@@ -2446,6 +3559,28 @@ impl PaintState {
     /// nothing (identity, or mask-mode) queues nothing.
     pub fn end_stroke(&mut self) {
         self.stroking = false;
+        // [m7] The owner-deleted-mid-stroke boundary: the verdict is one
+        // frame old, and kinds never mutate, so a live stroke's owner can
+        // vanish only by delete. The per-frame census skips the live
+        // owner, so its planes are still here — retire them NOW into the
+        // tombstone (there is no live layer to undo into) and discard the
+        // stroke's undo capture with a log. Nothing crashes and no live
+        // layer is touched. No snapshot yet (never flushed) reads as live.
+        if let PlaneOwner::Layer(id) = self.stroke_owner {
+            let gone = self.last_snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot
+                    .layers
+                    .iter()
+                    .any(|layer| layer.owner == PlaneOwner::Layer(id))
+            });
+            if gone {
+                log::warn!("stroke: owner layer {id} deleted mid-stroke; retiring its planes");
+                self.retire_owner_now(id);
+                self.retouch = None;
+                self.paint_capture = None;
+                return;
+            }
+        }
         // Both paths record through `retouch::record_stroke`: merged into
         // the top entry when they overlap (the cumulative merge), and the
         // push's queued re-apply dropped — the stroke already uploaded its
@@ -2481,14 +3616,24 @@ impl PaintState {
     /// recorded (a merge into the top entry counts — it rewrote history).
     fn record_paint_capture(&mut self, capture: PaintStrokeCapture) -> bool {
         let channel = self.stroke_channel.clone();
+        let owner = self.stroke_owner;
         let mut finished = Vec::new();
-        for (tile, entry) in capture.tiles {
+        for ((key_owner, tile), entry) in capture.tiles {
+            // A mid-stroke selection change never splits the stroke (§2.3):
+            // every tile in this capture belongs to the begin-time owner.
+            // (A mismatched key would undo into a plane the stroke never
+            // painted — skipped loudly, never applied.)
+            if key_owner != owner {
+                log::warn!("paint capture: owner mismatch, skipping tile {tile}");
+                continue;
+            }
             let Some(rect) = entry.dirty else {
                 continue;
             };
             // Not materializing: `capture.tiles` only holds tiles whose
-            // channel thread `capture_paint_event` already materialized.
-            let Some(after_image) = self.read_target(tile, &channel, false) else {
+            // plane `capture_paint_event` already materialized. Reads the
+            // PLANE (never the cache — §1.1 [B3]).
+            let Some(after_image) = self.read_plane(owner, tile, &channel) else {
                 continue;
             };
             if rect.x1 > after_image.width
@@ -2506,6 +3651,7 @@ impl PaintState {
         let tiles: Vec<StrokeTile<'_>> = finished
             .iter()
             .map(|(tile, rect, start, end)| StrokeTile {
+                owner,
                 tile: *tile,
                 channel: channel.clone(),
                 rect: *rect,
@@ -2606,9 +3752,10 @@ impl PaintState {
 
     /// Drains pending paint commands on EVERY materialized thread —
     /// `base_color` and every routed channel, on every tile (mirrors and
-    /// strokes that left a tile may have queued work off the active tile)
-    /// — and returns the cumulative stats summed across all of them. With
-    /// one tile and no routed channel this is exactly that thread's stats.
+    /// strokes that left a tile may have queued work off the active tile),
+    /// plus every layer-owned plane and every cache texture — and returns
+    /// the cumulative stats summed across all of them. With one tile and
+    /// no routed channel this is exactly that thread's stats.
     ///
     /// # Errors
     ///
@@ -2624,6 +3771,20 @@ impl PaintState {
                 total.segments += stats.segments;
             }
         }
+        for plane in self.planes.values_mut() {
+            let stats = plane.thread.process_pending()?;
+            total.dabs_composited += stats.dabs_composited;
+            total.dispatches += stats.dispatches;
+            total.clears += stats.clears;
+            total.segments += stats.segments;
+        }
+        for thread in self.cache.values_mut() {
+            let stats = thread.process_pending()?;
+            total.dabs_composited += stats.dabs_composited;
+            total.dispatches += stats.dispatches;
+            total.clears += stats.clears;
+            total.segments += stats.segments;
+        }
         self.last_stats = total;
         Ok(self.last_stats)
     }
@@ -2633,35 +3794,48 @@ impl PaintState {
         self.last_stats
     }
 
-    /// Read-only access to the ACTIVE tile's baseColor paint target (for
-    /// display callbacks and the single-target export paths).
+    /// Read-only access to the ACTIVE tile's baseColor COMPOSITE texture
+    /// (for display callbacks and the single-target export paths): the
+    /// cache when a layer-owned plane exists for it (flushed at the last
+    /// end-of-update), else the Base plane directly. GPU binders see the
+    /// end-of-update flush — they sample at render time, after update
+    /// returns (§4.1 part 2).
     pub fn paint_target(&self) -> &umber_gpu::paint::PaintTarget {
-        self.targets
-            .get(&self.active_tile)
-            .or_else(|| self.targets.get(&FIRST_TILE))
+        self.composite_target(self.active_tile, BASE_COLOR_CHANNEL)
             .expect("tile 1001 is created in PaintState::new and never removed")
-            .base_color
-            .paint_target()
     }
 
-    /// Read-only access to `tile`'s baseColor paint target, or `None` when
-    /// nothing has routed to that tile yet (the per-tile export reads each
-    /// present tile through this).
+    /// Read-only access to `tile`'s baseColor COMPOSITE texture, or `None`
+    /// when nothing has routed to that tile yet (the per-tile export
+    /// reads each present tile through this). Cache-else-Base, like
+    /// [`Self::paint_target`].
     pub fn tile_target(&self, tile: u16) -> Option<&umber_gpu::paint::PaintTarget> {
-        self.targets.get(&tile).map(|t| t.base_color.paint_target())
+        self.composite_target(tile, BASE_COLOR_CHANNEL)
     }
 
-    /// Read-only access to `tile`'s `channel` paint target, or `None` when
-    /// the channel has not materialized on that tile yet (lazy — see the
-    /// tile-pool design doc). `BASE_COLOR_CHANNEL` routes to the baseColor
-    /// field, mirroring the routing rules everywhere else. The viewport's
-    /// height bind (audit #12's (c) seam) reads through this: it must NEVER
-    /// create a target as a side effect of binding.
+    /// Read-only access to `tile`'s `channel` COMPOSITE texture, or `None`
+    /// when the channel has not materialized on that tile yet (lazy — see
+    /// the tile-pool design doc). `BASE_COLOR_CHANNEL` routes to the
+    /// baseColor field, mirroring the routing rules everywhere else. The
+    /// viewport's height bind (audit #12's (c) seam) reads through this:
+    /// it must NEVER create a target as a side effect of binding.
+    /// Cache-else-Base, like [`Self::paint_target`].
     pub fn channel_target(
         &self,
         tile: u16,
         channel: &str,
     ) -> Option<&umber_gpu::paint::PaintTarget> {
+        self.composite_target(tile, channel)
+    }
+
+    /// Resolves `(tile, channel)`'s COMPOSITE texture without flushing
+    /// (§1.1 [B3]): the cache thread when one is materialized (a
+    /// layer-owned plane exists), else the Base plane's thread. Reads
+    /// never materialize.
+    fn composite_target(&self, tile: u16, channel: &str) -> Option<&umber_gpu::paint::PaintTarget> {
+        if let Some(cache) = self.cache.get(&(tile, channel.to_string())) {
+            return Some(cache.paint_target());
+        }
         let entry = self.targets.get(&tile)?;
         if channel == BASE_COLOR_CHANNEL {
             Some(entry.base_color.paint_target())
@@ -2767,9 +3941,7 @@ impl PaintState {
             mask.resize(width, height);
         }
         let tiles = self.tiles_of_set(set);
-        for tile in &tiles {
-            self.mask_synced.remove(tile);
-        }
+        self.mask_synced.retain(|(_, t, _)| !tiles.contains(t));
         // That set's layer-mask planes drop with the targets (a plane
         // recorded at the old size no longer fits — the quick-mask rule).
         // Other sets' tiles' planes are untouched.
@@ -2799,7 +3971,69 @@ impl PaintState {
                     }]);
                 }
             }
+            // The committed record dies with the contents (the save's
+            // clean-skip must read the resized plane back, never re-stage
+            // the old file). Collected after the loop above — the channel
+            // list and the clear both borrow `self` (E0502 otherwise).
+            let channels: Vec<String> = self
+                .targets
+                .get(tile)
+                .map(|targets| targets.channels.keys().cloned().collect())
+                .unwrap_or_default();
+            self.clear_committed(PlaneOwner::Base, *tile, BASE_COLOR_CHANNEL);
+            for channel in &channels {
+                self.clear_committed(PlaneOwner::Base, *tile, channel);
+            }
         }
+        // Every layer-owned plane and cache texture on the set's tiles
+        // rebuilds too (contents dropped — the same destructive contract
+        // as the targets above), and every resized `(tile, channel)`
+        // marks `Full` (§5.5). Channel overrides are honored per channel,
+        // as for targets today.
+        let plane_keys: Vec<(PlaneOwner, u16, String)> = self
+            .planes
+            .keys()
+            .filter(|(_, tile, _)| tiles.contains(tile))
+            .cloned()
+            .collect();
+        for (owner, tile, channel) in &plane_keys {
+            let (cw, ch) = self.tile_channel_size(*tile, channel);
+            if let Some(plane) = self.planes.get_mut(&(*owner, *tile, channel.clone())) {
+                let _ = plane.thread.publish(vec![PaintThreadCommand::Resize {
+                    width: cw,
+                    height: ch,
+                }]);
+            }
+            self.clear_committed(*owner, *tile, channel);
+            self.cache_dirty
+                .insert((*tile, channel.clone()), DirtyRegion::Full);
+        }
+        let cache_keys: Vec<(u16, String)> = self
+            .cache
+            .keys()
+            .filter(|(tile, _)| tiles.contains(tile))
+            .cloned()
+            .collect();
+        for (tile, channel) in &cache_keys {
+            let (cw, ch) = self.tile_channel_size(*tile, channel);
+            if let Some(thread) = self.cache.get_mut(&(*tile, channel.clone())) {
+                let _ = thread.publish(vec![PaintThreadCommand::Resize {
+                    width: cw,
+                    height: ch,
+                }]);
+            }
+            self.cache_dirty
+                .insert((*tile, channel.clone()), DirtyRegion::Full);
+        }
+        // The resized set's tombstones drop (§5.4 item 6): contents are
+        // dropped by the resize anyway, and old-size bytes would fail the
+        // revive's publish. Other sets' tombstones survive.
+        for (_, planes) in self.retired.values_mut() {
+            planes.retain(|plane| !tiles.contains(&plane.tile));
+        }
+        self.retired.retain(|_, (_, planes)| !planes.is_empty());
+        self.retire_pending
+            .retain(|entry| !tiles.contains(&entry.1));
     }
 
     /// Switches `channel`'s paint targets in `set` to `width`x`height`
@@ -2825,18 +4059,46 @@ impl PaintState {
         self.retouch_history.clear();
         self.pending_commits.clear();
         self.stroke_epoch += 1;
-        // ONLY this channel's materialized targets on this set's tiles:
+        // ONLY this channel's materialized planes on this set's tiles:
         // a never-materialized channel costs nothing (its size is
         // recorded above for `ensure_channel`), and inheriting channels
         // keep the set's size from `resize_set`.
         let tiles = self.tiles_of_set(set);
-        for tile in tiles {
-            if let Some(tile_targets) = self.targets.get_mut(&tile) {
+        for tile in &tiles {
+            if let Some(tile_targets) = self.targets.get_mut(tile) {
                 if let Some(thread) = tile_targets.channels.get_mut(channel) {
                     let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
                 }
             }
+            self.clear_committed(PlaneOwner::Base, *tile, channel);
+            let owners: Vec<PlaneOwner> = self
+                .planes
+                .keys()
+                .filter(|(_, t, c)| *t == *tile && c == channel)
+                .map(|(owner, _, _)| *owner)
+                .collect();
+            for owner in owners {
+                if let Some(plane) = self.planes.get_mut(&(owner, *tile, channel.to_string())) {
+                    let _ = plane
+                        .thread
+                        .publish(vec![PaintThreadCommand::Resize { width, height }]);
+                }
+                self.clear_committed(owner, *tile, channel);
+            }
+            if let Some(thread) = self.cache.get_mut(&(*tile, channel.to_string())) {
+                let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+            }
+            self.cache_dirty
+                .insert((*tile, channel.to_string()), DirtyRegion::Full);
         }
+        // The resized channel's tombstones drop (see `resize_set`); other
+        // channels' and sets' survive.
+        for (_, planes) in self.retired.values_mut() {
+            planes.retain(|plane| !(tiles.contains(&plane.tile) && plane.channel == channel));
+        }
+        self.retired.retain(|_, (_, planes)| !planes.is_empty());
+        self.retire_pending
+            .retain(|entry| !(tiles.contains(&entry.1) && entry.2 == *channel));
     }
 
     /// Drops `channel`'s override in `set` (it inherits the set's size
@@ -2864,6 +4126,16 @@ impl PaintState {
                 if let Some(thread) = tile_targets.channels.get_mut(channel) {
                     let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
                 }
+            }
+            // The channel's cache (materialized by an earlier read) is
+            // stale at the override's size: rebuild it too, else a read
+            // after the clear serves the old-size composite forever.
+            if self.cache.contains_key(&(tile, channel.to_string())) {
+                if let Some(thread) = self.cache.get_mut(&(tile, channel.to_string())) {
+                    let _ = thread.publish(vec![PaintThreadCommand::Resize { width, height }]);
+                }
+                self.cache_dirty
+                    .insert((tile, channel.to_string()), DirtyRegion::Full);
             }
         }
     }
@@ -3172,7 +4444,9 @@ impl PaintState {
         // mask texture, which is synced first so it holds the current
         // plane.
         let dabs = if self.stroke_mask_gate {
-            self.sync_mask_tile(tile);
+            let owner = self.stroke_owner;
+            let channel = self.stroke_channel.clone();
+            self.sync_mask_tile(owner, tile, &channel);
             dabs.into_iter().map(|d| d.with_mask_gate(true)).collect()
         } else {
             dabs
@@ -3188,13 +4462,37 @@ impl PaintState {
         }
         // Stage as one command; the thread splits into capacity segments
         // and overlap-safe dispatches. Routes to the stroke's snapshotted
-        // channel — the design's routing rule: every stroke lands in
-        // `route_tile(uv)`'s ACTIVE-CHANNEL target, not always baseColor.
+        // (owner, channel) — §3's routing rule: every event lands in
+        // `stroke_owner`'s plane on `route_tile(uv)`'s tile, in the
+        // stroke's channel. A first batch on a new `(owner, tile)`
+        // materializes through `materialize_plane` and may be refused
+        // (§1.2): the refused event's dabs on that tile are dropped and
+        // the stroke continues on its already-materialized planes.
         #[cfg(test)]
         let staged_n = dabs.len() as u64;
         let channel = self.stroke_channel.clone();
-        if let Some(thread) = self.target_of_mut(tile, &channel) {
-            let _ = thread.publish(vec![PaintThreadCommand::Stage { dabs }]);
+        let owner = self.stroke_owner;
+        // The dirt footprint unions every staged dab's shader-identical
+        // box (§4.2: each dab footprint, merged into the multi-rect).
+        let (width, height) = self.tile_channel_size(tile, &channel);
+        let mut staged_rect = None;
+        for dab in &dabs {
+            if let Some(rect) = footprint(dab.pos, dab.radius, width, height) {
+                staged_rect = DirtyRect::union_opt(staged_rect, Some(rect));
+            }
+        }
+        match self.plane_of_mut(owner, tile, &channel) {
+            Ok(Some(thread)) => {
+                let _ = thread.publish(vec![PaintThreadCommand::Stage { dabs }]);
+                self.clear_committed(owner, tile, &channel);
+                if let Some(rect) = staged_rect {
+                    self.mark_dirty_rect(tile, &channel, rect);
+                }
+            }
+            Ok(None) => {}
+            Err(refusal) => {
+                self.stroke_refusal = Some(refusal);
+            }
         }
         // Test observability: count staged batches for the seam-blind
         // zero-cost contract (a publish here means one more `Stage`
@@ -3223,22 +4521,31 @@ impl PaintState {
         if self.paint_capture.is_none() {
             return;
         }
+        let owner = self.stroke_owner;
         let needs_snapshot = self
             .paint_capture
             .as_ref()
-            .is_some_and(|capture| !capture.tiles.contains_key(&tile));
+            .is_some_and(|capture| !capture.tiles.contains_key(&(owner, tile)));
         if needs_snapshot {
-            // Materializing: the FIRST stroke ever routed to this channel
+            // Materializing: the FIRST stroke ever routed to this plane
             // has no existing thread to read — its just-created blank
             // bytes are the correct before-state (the same contract
-            // `ensure_tile` already gives a brand-new tile).
+            // `ensure_tile` already gives a brand-new tile). A budget
+            // refusal snapshots nothing (the stage drops the dabs too —
+            // nothing painted, nothing to capture).
             let channel = self.stroke_channel.clone();
-            let image = self.read_target(tile, &channel, true);
+            let image = match self.materialize_plane(owner, tile, &channel) {
+                Ok(_) => self.read_plane(owner, tile, &channel),
+                Err(refusal) => {
+                    self.stroke_refusal = Some(refusal);
+                    None
+                }
+            };
             let (Some(capture), Some(image)) = (self.paint_capture.as_mut(), image) else {
                 return;
             };
             capture.tiles.insert(
-                tile,
+                (owner, tile),
                 PaintTileCapture {
                     before: image,
                     dirty: None,
@@ -3248,7 +4555,7 @@ impl PaintState {
         let Some(capture) = self.paint_capture.as_mut() else {
             return;
         };
-        let Some(entry) = capture.tiles.get_mut(&tile) else {
+        let Some(entry) = capture.tiles.get_mut(&(owner, tile)) else {
             return;
         };
         // The snapshot's own dims (not the session's): they are the target
@@ -3261,17 +4568,51 @@ impl PaintState {
         }
     }
 
-    /// One event's retouch dabs on `tile`: mirror the tile on the stroke's
-    /// first touch, run the dabs on the mirror, and queue the event's dirty
-    /// rect back onto the tile's GPU target.
+    /// One event's retouch dabs on `tile`: mirror the stroke owner's plane
+    /// on the stroke's first touch, run the dabs on the mirror, and queue
+    /// the event's dirty rect back onto the plane.
+    ///
+    /// Two reads (§3 [M3]): the CPU MIRROR reads from and writes back to
+    /// `(stroke_owner, tile, stroke_channel)` (a PLANE reader — this lifts
+    /// the baseColor-only boundary), while smudge and clone SAMPLE the
+    /// COMPOSITE (cache-else-Base, flush-first — one extra full-tile
+    /// readback per stroke per tile, beside the mirror read). The eraser
+    /// needs no sample. A retouch write into a layer-owned plane keeps
+    /// `p ≤ a` (the premultiplied erase + the clamp the composite
+    /// applies, so no composited byte changes).
     fn retouch_event(&mut self, tile: u16, dabs: &[RetouchDab]) {
-        // Taken for the call: `read_tile` needs `&mut self`.
+        // Taken for the call: the mirror read needs `&mut self`.
         let Some(mut stroke) = self.retouch.take() else {
             return;
         };
+        let owner = self.stroke_owner;
+        let channel = self.stroke_channel.clone();
+        stroke.set_plane(owner, channel.clone());
         if stroke.accepts(tile) && !stroke.has_tile(tile) {
-            if let Some(image) = self.read_tile(tile) {
+            // Materialize-then-read: the first touch of a new plane
+            // mirrors its just-created blank bytes (the capture's
+            // contract). A refusal drops the event (nothing to mirror,
+            // nothing to write back).
+            let image = match self.materialize_plane(owner, tile, &channel) {
+                Ok(_) => self.read_plane(owner, tile, &channel),
+                Err(refusal) => {
+                    self.stroke_refusal = Some(refusal);
+                    None
+                }
+            };
+            if let Some(image) = image {
                 stroke.insert_tile(tile, image);
+                // Smudge and clone sample the visible canvas: install the
+                // flushed composite beside the mirror (the eraser's writes
+                // derive from the mirror alone).
+                if !matches!(self.tool, BrushTool::Erase(_)) {
+                    // The composite sample reads the cache when a layer
+                    // plane exists for `(tile, channel)`, else Base
+                    // directly — the lazy-cache rule, flushed first.
+                    if let Some(sample) = self.read_composite(tile, &channel) {
+                        stroke.insert_sample(tile, sample);
+                    }
+                }
             }
         }
         // The quick-mask gate: the retouch ops multiply their per-texel
@@ -3285,25 +4626,33 @@ impl PaintState {
         };
         if let Some(rect) = stroke.apply_masked(tile, dabs, mask) {
             let rgba = stroke.region(tile, rect);
-            // Retouch tools stay baseColor-only in v1 (a deliberate
-            // boundary — see the module docs): smudge/clone/erase never
-            // consult `stroke_channel`.
-            if let Some(thread) = self.target_of_mut(tile, BASE_COLOR_CHANNEL) {
-                let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
-                    x: rect.x0,
-                    y: rect.y0,
-                    width: rect.width(),
-                    height: rect.height(),
-                    rgba,
-                }]);
+            match self.plane_of_mut(owner, tile, &channel) {
+                Ok(Some(thread)) => {
+                    let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                        x: rect.x0,
+                        y: rect.y0,
+                        width: rect.width(),
+                        height: rect.height(),
+                        rgba,
+                    }]);
+                    self.clear_committed(owner, tile, &channel);
+                    self.mark_dirty_rect(tile, &channel, rect);
+                }
+                Ok(None) => {}
+                Err(refusal) => {
+                    self.stroke_refusal = Some(refusal);
+                }
             }
         }
         self.retouch = Some(stroke);
     }
 
     /// One mask-mode event on `tile`: stamps every dab into the quick mask
-    /// and queues the touched rect onto the tile's GPU mask (the whole
-    /// plane if that copy is stale).
+    /// and queues the touched rect onto the GPU mask (the whole plane if
+    /// that copy is stale). The upload rides the Base thread (today's
+    /// exact path — a mask-mode stroke stages no plane); every other
+    /// plane's copy for the tile is invalidated, so the next gated dab
+    /// re-syncs its own plane's copy before staging (§3).
     fn mask_event(&mut self, tile: u16, dabs: &[Dab]) {
         let mut dirty = None;
         for dab in dabs {
@@ -3315,20 +4664,30 @@ impl PaintState {
             };
             dirty = DirtyRect::union_opt(dirty, self.mask_of_tile_mut(tile).stamp(tile, &stamp));
         }
+        if dirty.is_some() {
+            self.mask_synced.retain(|(_, t, _)| *t != tile);
+        }
         if let Some(rect) = dirty {
-            if self.mask_synced.contains(&tile) {
-                self.publish_mask(tile, rect);
+            if self
+                .mask_synced
+                .contains(&(PlaneOwner::Base, tile, BASE_COLOR_CHANNEL.to_string()))
+            {
+                self.publish_mask(PlaneOwner::Base, tile, BASE_COLOR_CHANNEL, rect);
             } else {
-                self.sync_mask_tile(tile);
+                self.sync_mask_tile(PlaneOwner::Base, tile, BASE_COLOR_CHANNEL);
             }
         }
     }
 
-    /// Brings `tile`'s GPU mask in line with the CPU plane before gated
-    /// dabs read it: a tile never uploaded (or marked stale by an
-    /// invert/clear/resize) gets its whole plane. A no-op when in sync.
-    fn sync_mask_tile(&mut self, tile: u16) {
-        if self.mask_synced.contains(&tile) {
+    /// Brings `(owner, tile, channel)`'s GPU mask in line with the CPU
+    /// plane before gated dabs read it: a plane never uploaded (or marked
+    /// stale by a mask stroke, an invert/clear/resize) gets its whole
+    /// plane. A no-op when in sync.
+    fn sync_mask_tile(&mut self, owner: PlaneOwner, tile: u16, channel: &str) {
+        if self
+            .mask_synced
+            .contains(&(owner, tile, channel.to_string()))
+        {
             return;
         }
         let (width, height) = self.quick_mask_for_tile(tile).dimensions();
@@ -3338,76 +4697,83 @@ impl PaintState {
             x1: width,
             y1: height,
         };
-        self.publish_mask(tile, full);
+        self.publish_mask(owner, tile, channel, full);
     }
 
-    /// Queues `rect` of `tile`'s quick mask (8-bit) as a `WriteMask` on
-    /// the tile's thread, in FIFO order with its `Stage` commands.
-    fn publish_mask(&mut self, tile: u16, rect: DirtyRect) {
+    /// Queues `rect` of the quick mask (8-bit) as a `WriteMask` on
+    /// `(owner, tile, channel)`'s thread, in FIFO order with its `Stage`
+    /// commands — the GPU mask copy rides the thread the dab stages into
+    /// (§3). A refused materialization skips the upload (the stage drops
+    /// its dabs too — nothing paints ungated).
+    fn publish_mask(&mut self, owner: PlaneOwner, tile: u16, channel: &str, rect: DirtyRect) {
         if rect.width() == 0 || rect.height() == 0 {
             return;
         }
         let values = self.quick_mask_for_tile(tile).gpu_bytes(tile, rect);
-        // The quick mask is per-SET, not per-channel (v1 non-goal — see
-        // the module docs): it gates baseColor's thread today; a
-        // non-baseColor channel's OWN GPU mask copy is a named follow-up
-        // for the (c) landing.
-        let Some(thread) = self.target_of_mut(tile, BASE_COLOR_CHANNEL) else {
-            return;
-        };
-        let _ = thread.publish(vec![PaintThreadCommand::WriteMask {
-            x: rect.x0,
-            y: rect.y0,
-            width: rect.width(),
-            height: rect.height(),
-            values,
-        }]);
-        self.mask_synced.insert(tile);
+        // The quick mask is per-SET, not per-channel: each plane holds its
+        // OWN GPU copy of its set's plane (this closes the "non-baseColor
+        // channel's OWN GPU mask copy" follow-up).
+        match self.plane_of_mut(owner, tile, channel) {
+            Ok(Some(thread)) => {
+                let _ = thread.publish(vec![PaintThreadCommand::WriteMask {
+                    x: rect.x0,
+                    y: rect.y0,
+                    width: rect.width(),
+                    height: rect.height(),
+                    values,
+                }]);
+            }
+            Ok(None) => return,
+            Err(err) => {
+                log::warn!("mask: upload for {owner:?}/{tile}/{channel} refused ({err:?})");
+                return;
+            }
+        }
+        self.mask_synced.insert((owner, tile, channel.to_string()));
         #[cfg(test)]
         {
             self.mask_uploads += 1;
         }
     }
 
-    /// `tile`'s baseColor texels as a CPU image: drains the tile's queue
-    /// first (so earlier strokes' dabs are in the texture), then the
-    /// blocking full-target `PaintTarget::read_back_rgba8`. `None` (logged;
-    /// the stroke skips the tile) when the drain or the readback fails.
+    /// `tile`'s baseColor COMPOSITE texels as a CPU image (flush-first —
+    /// §1.1 [B3]): drains the tile's queue first (so earlier strokes'
+    /// dabs are in the texture), composites pending dirt against the last
+    /// snapshot, then the blocking readback. `None` (logged; the stroke
+    /// skips the tile) when the drain or the readback fails.
     /// Channel-aware reads use [`Self::read_channel_tile`] instead — this
     /// stays baseColor-only (the eyedropper/ID-mask pattern: explicit
     /// channel, no ambient active-channel state).
+    #[allow(
+        dead_code,
+        reason = "the shell's bin target owns every live call site (main.rs:4626-4894); the lib target compiles this module but never calls it"
+    )]
     pub(crate) fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
-        self.read_target(tile, BASE_COLOR_CHANNEL, false)
+        self.read_composite(tile, BASE_COLOR_CHANNEL)
     }
 
     /// [`Self::read_tile`]'s channel-aware sibling: `tile`'s `channel`
-    /// texels. `None` when that channel has never routed on `tile` — like
-    /// `read_tile` on a never-created tile, a read never side-effects
-    /// creation (the eyedropper/ID-mask pattern: explicit channel, no
-    /// ambient active-channel state, and no surprise allocation either).
+    /// COMPOSITE texels (flush-first). `None` when that channel has never
+    /// routed on `tile` — like `read_tile` on a never-created tile, a
+    /// read never side-effects creation (the eyedropper/ID-mask pattern:
+    /// explicit channel, no ambient active-channel state, and no surprise
+    /// allocation either).
     pub fn read_channel_tile(&mut self, tile: u16, channel: &str) -> Option<RgbaBuffer> {
-        self.read_target(tile, channel, false)
+        self.read_composite(tile, channel)
     }
 
-    /// The shared implementation behind [`Self::read_tile`]/
-    /// [`Self::read_channel_tile`]/the paint-stroke capture's "before"
-    /// snapshot: drains `tile`'s `channel` target's queue, then the
-    /// blocking full-target readback. `materialize` selects
-    /// `target_of_mut` (the capture's first-touch snapshot: a freshly
-    /// materialized thread's blank bytes ARE the correct before-state) or
-    /// `existing_target_mut` (the public read accessors, which must never
-    /// create a target as a side effect of reading one).
-    fn read_target(&mut self, tile: u16, channel: &str, materialize: bool) -> Option<RgbaBuffer> {
+    /// The shared implementation behind the Base-plane reads
+    /// ([`Self::read_plane`]'s Base arm and [`Self::read_composite`]'s
+    /// cache-miss fallback): drains `tile`'s `channel` target's queue,
+    /// then the blocking full-target readback. Never materializes (a
+    /// read must never side-effect creation).
+    fn read_target(&mut self, tile: u16, channel: &str) -> Option<RgbaBuffer> {
         // Clone the Arc handles out before the mutable target borrow —
         // `thread` borrows `self.targets` while the read-back wants
         // `self.device`/`self.queue` immutably (E0502 otherwise).
         let device = self.device.clone();
         let queue = self.queue.clone();
-        let thread = if materialize {
-            self.target_of_mut(tile, channel)?
-        } else {
-            self.existing_target_mut(tile, channel)?
-        };
+        let thread = self.existing_target_mut(tile, channel)?;
         if let Err(err) = thread.process_pending() {
             log::warn!("retouch: draining tile {tile}/{channel} failed: {err:#}");
             return None;
@@ -3950,15 +5316,17 @@ mod tests {
         assert!(state
             .cache
             .contains_key(&(1001, BASE_COLOR_CHANNEL.to_string())));
-        // The cache is born Full-dirty, and the no-op flush leaves the dirt
-        // (and the bytes) untouched.
+        // The cache is born Full-dirty, and a flush with nothing
+        // displayed leaves the dirt (and the bytes) untouched ([M8]'s
+        // coalescing: a non-displayed `Full` waits for a read or for its
+        // turn on screen).
         assert_eq!(
             state
                 .cache_dirty
                 .get(&(1001, BASE_COLOR_CHANNEL.to_string())),
             Some(&DirtyRegion::Full)
         );
-        state.flush_composite();
+        state.flush_composite(&CompositeSnapshot::default());
         assert_eq!(state.plane_bytes(), 3_145_728);
         assert_eq!(
             state
@@ -3976,10 +5344,14 @@ mod tests {
         let base = state
             .read_plane(PlaneOwner::Base, 1001, BASE_COLOR_CHANNEL)
             .expect("Base plane reads");
+        // T14 + T28 (doc §8 27/28): the coalesced read composites first
+        // and returns `composite_stack_cpu`'s bytes — the L1 stack over
+        // transparent Base, NOT Base alone. Base itself stays untouched
+        // (zeros) while the composite shows the published plane.
         let composite = state
             .read_channel_tile(1001, BASE_COLOR_CHANNEL)
             .expect("composite reader reads");
-        assert_eq!(base.data, composite.data);
+        assert_eq!(composite.data, bytes);
         assert!(base.data.iter().all(|&b| b == 0));
     }
 
@@ -4287,6 +5659,1256 @@ mod tests {
         );
         state.set_active_target(PlaneOwner::Base);
         assert_eq!(state.mask_edit_layer(), None);
+    }
+
+    // --- Per-layer pool stage 4: per-layer pixels (§3–§6, §8) ---
+    //
+    // Strokes route into `stroke_owner`'s plane, the flush composites the
+    // cache every frame, and deletes tombstone paint planes. All GPU-gated
+    // (lavapipe on CI, silent skip without an adapter).
+
+    /// A Base-only snapshot over `(tile, channel)`, displayed: the test
+    /// flush's stack shape.
+    fn base_snapshot(tile: u16, channel: &str) -> CompositeSnapshot {
+        CompositeSnapshot {
+            layers: vec![base_row()],
+            base_visible: true,
+            displayed: vec![(tile, channel.to_string())],
+        }
+    }
+
+    /// The Base pseudo-row: Normal, opacity 1, unmasked (visibility rides
+    /// the snapshot's `base_visible` in the shell builder; tests show it
+    /// directly).
+    fn base_row() -> SnapshotLayer {
+        SnapshotLayer {
+            owner: PlaneOwner::Base,
+            layer_id: None,
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        }
+    }
+
+    /// The §8 T5–T7 stack: `L0` paint opaque 200 bottom, `M` Multiply
+    /// (src 100 opaque, layer 1.0 × channel 0.25) middle, `L2` paint
+    /// Normal opacity 0.5 opaque 60 top. Base stays transparent (a layer
+    /// touched only on its own planes is the transparent no-op).
+    fn order_stack_snapshot() -> CompositeSnapshot {
+        let paint_row = |id: u64, blend: BlendMode, opacity: f32| SnapshotLayer {
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend,
+            opacity,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        CompositeSnapshot {
+            layers: vec![
+                SnapshotLayer {
+                    owner: PlaneOwner::Base,
+                    layer_id: None,
+                    kind: SnapshotLayerKind::Paint,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+                paint_row(10, BlendMode::Normal, 1.0),
+                SnapshotLayer {
+                    owner: PlaneOwner::Layer(11),
+                    layer_id: Some(11),
+                    kind: SnapshotLayerKind::Material,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: Some(vec![SnapshotMaterialChannel {
+                        channel: BASE_COLOR_CHANNEL.to_string(),
+                        blend: BlendMode::Multiply,
+                        opacity: 0.25,
+                    }]),
+                },
+                paint_row(12, BlendMode::Normal, 0.5),
+            ],
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+        }
+    }
+
+    /// Publishes the T5–T7 planes (premultiplied writer bytes): L0 opaque
+    /// 200, M src 100 opaque, L2 opaque 60.
+    fn publish_order_planes(state: &mut PaintState) {
+        let flat = |v: u8| {
+            let mut bytes = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+            bytes
+        };
+        state
+            .publish_plane(
+                PlaneOwner::Layer(10),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                flat(200),
+            )
+            .expect("L0 publishes");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(11),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                flat(100),
+            )
+            .expect("M publishes");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(12),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                flat(60),
+            )
+            .expect("L2 publishes");
+    }
+
+    /// The CPU oracle over the T5 planes: one [`CpuStackLayer`] per row
+    /// (premultiplied, §4.3 item 1), folded bottom-to-top.
+    fn oracle_order(l0: &[u8], m: &[u8], l2: &[u8]) -> Vec<u8> {
+        use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
+        composite_stack_cpu(
+            &[
+                CpuStackLayer {
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    rgba: Some(l0),
+                    mask: None,
+                    premultiplied: true,
+                },
+                CpuStackLayer {
+                    blend_mode: BlendMode::Multiply,
+                    opacity: 0.25,
+                    visible: true,
+                    rgba: Some(m),
+                    mask: None,
+                    premultiplied: true,
+                },
+                CpuStackLayer {
+                    blend_mode: BlendMode::Normal,
+                    opacity: 0.5,
+                    visible: true,
+                    rgba: Some(l2),
+                    mask: None,
+                    premultiplied: true,
+                },
+            ],
+            512,
+            512,
+        )
+        .expect("oracle composites")
+    }
+
+    #[test]
+    fn per_layer_routing_stroke_capture_and_undo() {
+        // §8 T9. A stroke with `active_target = Layer(1)` changes
+        // `(Layer(1), 1001, baseColor)` only: on a 512² session that one
+        // stroke adds exactly that plane plus the `(tile, channel)` cache
+        // (`plane_bytes() == 3 · 1,048,576`), Base and L0 stay
+        // byte-identical, the cache equals `composite_stack_cpu`, and undo
+        // restores L1 byte-exact leaving L0 untouched.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // L0 holds paint the stroke must not touch.
+        let l0_bytes: Vec<u8> = (0..512 * 512).flat_map(|_| [10, 20, 30, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(0),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                l0_bytes.clone(),
+            )
+            .expect("L0 publishes");
+        state.process_pending().expect("drain succeeds");
+        let base_before = state
+            .read_plane(PlaneOwner::Base, 1001, BASE_COLOR_CHANNEL)
+            .expect("Base reads");
+        state.set_active_target(PlaneOwner::Layer(1));
+        state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 0);
+        drive_converged_diagonal(&mut state);
+        assert_eq!(state.stroke_owner(), PlaneOwner::Layer(1));
+        assert!(state.stroke_refusal().is_none());
+        // Exactly: Base's target + L0 + L1's plane + the stroke's
+        // materialized cache = 4 × 512²×4 (the comment's "one layer
+        // plane plus the cache beside Base" — Base counts too).
+        assert_eq!(state.plane_bytes(), 4 * 1_048_576);
+        assert!(state.planes.contains_key(&(
+            PlaneOwner::Layer(1),
+            1001,
+            BASE_COLOR_CHANNEL.to_string()
+        )));
+        let base_after = state
+            .read_plane(PlaneOwner::Base, 1001, BASE_COLOR_CHANNEL)
+            .expect("Base reads");
+        assert_eq!(base_after.data, base_before.data, "Base is byte-identical");
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(0), 1001, BASE_COLOR_CHANNEL)
+                .expect("L0 reads")
+                .data,
+            l0_bytes,
+            "L0 is byte-identical"
+        );
+        // The cache equals the CPU oracle: Base (transparent) seeded, then
+        // L0 Normal/1.0, then L1 Normal/1.0.
+        let l1 = state
+            .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+            .expect("L1 reads");
+        assert_ne!(
+            l1.data,
+            vec![0u8; 512 * 512 * 4],
+            "the stroke painted L1's plane"
+        );
+        let snapshot = CompositeSnapshot {
+            layers: vec![
+                base_row(),
+                SnapshotLayer {
+                    owner: PlaneOwner::Base,
+                    layer_id: None,
+                    kind: SnapshotLayerKind::Paint,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+                SnapshotLayer {
+                    owner: PlaneOwner::Layer(0),
+                    layer_id: Some(0),
+                    kind: SnapshotLayerKind::Paint,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+                SnapshotLayer {
+                    owner: PlaneOwner::Layer(1),
+                    layer_id: Some(1),
+                    kind: SnapshotLayerKind::Paint,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+            ],
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+        };
+        state.flush_composite(&snapshot);
+        let cache = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        let oracle = {
+            use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
+            composite_stack_cpu(
+                &[
+                    CpuStackLayer {
+                        blend_mode: BlendMode::Normal,
+                        opacity: 1.0,
+                        visible: true,
+                        rgba: Some(&base_before.data),
+                        mask: None,
+                        premultiplied: true,
+                    },
+                    CpuStackLayer {
+                        blend_mode: BlendMode::Normal,
+                        opacity: 1.0,
+                        visible: true,
+                        rgba: Some(&l0_bytes),
+                        mask: None,
+                        premultiplied: true,
+                    },
+                    CpuStackLayer {
+                        blend_mode: BlendMode::Normal,
+                        opacity: 1.0,
+                        visible: true,
+                        rgba: Some(&l1.data),
+                        mask: None,
+                        premultiplied: true,
+                    },
+                ],
+                512,
+                512,
+            )
+            .expect("oracle composites")
+        };
+        // The GPU twin folds 3 contributing entries (the transparent Base
+        // seed is exact, the two paints quantize per dispatch): ≤ 2 LSB
+        // per texel (the §8 twin rule, with the contributing count).
+        for (i, (got, want)) in cache.data.iter().zip(oracle.iter()).enumerate() {
+            let drift = (*got as i16 - *want as i16).abs();
+            assert!(drift <= 2, "texel {i}: got {got}, want {want}");
+        }
+        // Undo restores L1's plane byte-exact (its stroke-start blank) and
+        // leaves L0 untouched.
+        assert!(state.undo_stroke());
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+                .expect("L1 reads")
+                .data,
+            vec![0u8; 512 * 512 * 4]
+        );
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(0), 1001, BASE_COLOR_CHANNEL)
+                .expect("L0 reads")
+                .data,
+            l0_bytes
+        );
+    }
+
+    #[test]
+    fn non_displayed_full_composites_on_read() {
+        // §8 T28 (third arm): a metadata `Full` on a non-displayed channel
+        // is NOT composited by the frame flush (its dirt is still `Full`
+        // after), and a `read_channel_tile` on it composites first and
+        // returns the oracle's bytes.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let flat200: Vec<u8> = (0..512 * 512).flat_map(|_| [200, 200, 200, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                flat200.clone(),
+            )
+            .expect("plane publishes");
+        // A frame flush with nothing displayed: the `Full` survives.
+        state.flush_composite(&CompositeSnapshot::default());
+        assert_eq!(
+            state
+                .cache_dirty
+                .get(&(1001, BASE_COLOR_CHANNEL.to_string())),
+            Some(&DirtyRegion::Full)
+        );
+        // The read composites first (against the synthesized all-visible
+        // stack — the headless fallback) and returns the plane's bytes
+        // over transparent Base.
+        let read = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("read composites");
+        assert_eq!(read.data, flat200);
+        assert!(
+            !state
+                .cache_dirty
+                .contains_key(&(1001, BASE_COLOR_CHANNEL.to_string())),
+            "the read consumed the dirt"
+        );
+    }
+
+    #[test]
+    fn distant_footprints_stay_two_rects() {
+        // §8 T28 (first arm, headless): two footprints at x≈100 and
+        // x≈3996 on one 4K `(tile, channel)` give 2 rects, not one
+        // near-full-width union.
+        let mut dirt = DirtyRegion::Rects(Vec::new());
+        dirt.mark_rect(DirtyRect {
+            x0: 80,
+            y0: 100,
+            x1: 120,
+            y1: 140,
+        });
+        dirt.mark_rect(DirtyRect {
+            x0: 3976,
+            y0: 100,
+            x1: 4016,
+            y1: 140,
+        });
+        let DirtyRegion::Rects(rects) = &dirt else {
+            panic!("two disjoint footprints must not collapse to Full");
+        };
+        assert_eq!(rects.len(), 2);
+        assert!(
+            rects.iter().all(|r| r.width() < 1000),
+            "no near-full-width union"
+        );
+    }
+
+    #[test]
+    fn erased_texel_composites_227_over_white() {
+        // §8 T22 (composite half, headless): the kernel golden
+        // `(100,0,0,128)` over opaque white gives `r = 1 + (100/128 −
+        // 1)·128/255 = 227/255 → 227` exactly, `g = b = 127`. The kernel
+        // bytes come from the real erase op at exactly-0.5 coverage.
+        use umber_brush::retouch::{erase_dab_premultiplied, EraseParams, RetouchDab, RgbaBuffer};
+        use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
+        let dab = RetouchDab {
+            pos: [0.5, 0.5],
+            radius: 8.0,
+            alpha: 0.5,
+            hardness: 1.0,
+        };
+        assert_eq!(
+            umber_brush::retouch::coverage(&dab, 0, 0),
+            Some(0.5),
+            "the golden's coverage must be exactly 0.5 first"
+        );
+        let mut buf = RgbaBuffer::transparent(1, 1);
+        buf.set_texel(0, 0, [200, 0, 0, 255]);
+        erase_dab_premultiplied(&mut buf, &dab, EraseParams::default()).expect("erase writes");
+        assert_eq!(buf.texel(0, 0), [100, 0, 0, 128]);
+        let white = [255, 255, 255, 255];
+        let out = composite_stack_cpu(
+            &[
+                CpuStackLayer {
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    rgba: Some(&white),
+                    mask: None,
+                    premultiplied: true,
+                },
+                CpuStackLayer {
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    rgba: Some(&buf.data),
+                    mask: None,
+                    premultiplied: true,
+                },
+            ],
+            1,
+            1,
+        )
+        .expect("oracle composites");
+        assert_eq!(out, vec![227, 127, 127, 255]);
+        // Sentinel: the unscaled-rgb plane `(200,0,0,128)` clamps
+        // `s = 1.5625 → 1.0`, giving `r = 255`. Assert 227 and ≠ 255.
+        assert_ne!(out[0], 255);
+    }
+
+    #[test]
+    fn composite_order_preserved_115_then_110() {
+        // §8 T5 (wart 1: stack order is preserved). The Multiply factor is
+        // `1 − 0.25·(1 − 100/255) = 0.848039`: stack order gives
+        // `200·0.848039 = 169.608`, then `169.608 + (60 − 169.608)·0.5 =
+        // 114.804 → 115`. With M reordered to the top: `(200 + 60)/2 =
+        // 130`, then `130·0.848039 = 110.245 → 110`. Sentinel: v1's
+        // destructive path gives `60·0.848039 = 50.882 → 51` whatever the
+        // order (strokes ignore layer opacity there).
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        publish_order_planes(&mut state);
+        state.flush_composite(&order_stack_snapshot());
+        let cache = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        let flat = |v: u8| {
+            let mut bytes = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+            bytes
+        };
+        let oracle = oracle_order(&flat(200), &flat(100), &flat(60));
+        assert_eq!(oracle[0], 115);
+        // The GPU twin folds 4 contributing entries (the transparent Base
+        // seeds exact — the copy is a no-op — and L0/M/L2 quantize per
+        // dispatch): ≤ 3 LSB per texel (the §8 twin rule, with the
+        // contributing count). UNORM rounding and FMA contraction are
+        // implementation-defined (compositor judgment 8); the oracle pins
+        // the exact bytes.
+        for (i, (got, want)) in cache.data.iter().zip(oracle.iter()).enumerate() {
+            let drift = (*got as i16 - *want as i16).abs();
+            assert!(drift <= 3, "texel {i}: got {got}, want {want}");
+        }
+        assert_ne!(
+            cache.data[0], 51,
+            "the destructive-publish sentinel must not appear"
+        );
+        // Reorder M to the top (the shell's snapshot diff marks `Full`;
+        // the test applies the mark directly).
+        for owner in [
+            PlaneOwner::Layer(10),
+            PlaneOwner::Layer(11),
+            PlaneOwner::Layer(12),
+        ] {
+            state.mark_owner_full(owner);
+        }
+        let mut reordered = order_stack_snapshot();
+        let m = reordered.layers.remove(2);
+        reordered.layers.push(m);
+        state.flush_composite(&reordered);
+        let cache = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        // Reordered oracle: L2 over L0 gives 130.0, then M gives 110.245
+        // → 110 (exact on the CPU side; the GPU twin holds ≤ 3 LSB — the
+        // same 4-entry count as above).
+        let drift = (cache.data[0] as i16 - 110).abs();
+        assert!(
+            drift <= 3,
+            "reordered composite holds 110 ± twin: {}",
+            cache.data[0]
+        );
+        assert_ne!(cache.data[0], 51);
+    }
+
+    #[test]
+    fn reeval_is_idempotent_170_170_never_144() {
+        // §8 T6 (wart 2: re-eval never compounds). L0 + M only:
+        // `169.608 → 170`; refreshing M with identical inputs (a whole-plane
+        // REPLACE, not a composite over the last output) gives 170 again.
+        // Sentinel: v1's compounding gives `170·0.848039 = 144.167 → 144`.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        publish_order_planes(&mut state);
+        let pair = || {
+            let mut snapshot = order_stack_snapshot();
+            snapshot
+                .layers
+                .retain(|layer| !matches!(layer.owner, PlaneOwner::Layer(12)));
+            snapshot
+        };
+        state.flush_composite(&pair());
+        let first = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        assert_eq!(first.data[0], 170);
+        // The refresh: identical bytes REPLACE the plane whole.
+        let flat100: Vec<u8> = (0..512 * 512).flat_map(|_| [100, 100, 100, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(11),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                flat100,
+            )
+            .expect("M re-publishes");
+        state.flush_composite(&pair());
+        let second = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads");
+        assert_eq!(second.data[0], 170);
+        assert_eq!(second.data, first.data);
+        assert_ne!(
+            second.data[0], 144,
+            "the compounding sentinel must not appear"
+        );
+    }
+
+    #[test]
+    fn unpublish_hides_disables_deletes_and_revives_by_reeval() {
+        // §8 T7 (wart 3: hiding/deleting un-publishes). From T6's L0 + M:
+        // hide → 200; show → 170; disable the channel → 200; delete → 200
+        // with eval-owned planes DROPPED (no tombstone); revive by re-eval
+        // (the `Insert` params' refresh) → 170.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        publish_order_planes(&mut state);
+        let pair = || {
+            let mut snapshot = order_stack_snapshot();
+            snapshot
+                .layers
+                .retain(|layer| !matches!(layer.owner, PlaneOwner::Layer(12)));
+            snapshot
+        };
+        let shown = pair();
+        state.flush_composite(&shown);
+        let shown_bytes = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads")
+            .data;
+        assert_eq!(shown_bytes[0], 170);
+        // Hide M → 200.
+        let mut hidden = pair();
+        hidden
+            .layers
+            .retain(|layer| !matches!(layer.owner, PlaneOwner::Layer(11)));
+        state.mark_owner_full(PlaneOwner::Layer(11));
+        state.flush_composite(&hidden);
+        let hidden_bytes = state
+            .read_composite(1001, BASE_COLOR_CHANNEL)
+            .expect("cache reads")
+            .data;
+        assert_eq!(hidden_bytes[0], 200);
+        // Show M → 170.
+        state.mark_owner_full(PlaneOwner::Layer(11));
+        state.flush_composite(&shown);
+        assert_eq!(
+            state
+                .read_composite(1001, BASE_COLOR_CHANNEL)
+                .expect("cache reads")
+                .data,
+            shown_bytes
+        );
+        // Disable its channel (no entry) → 200.
+        let mut disabled = pair();
+        if let Some(m) = disabled
+            .layers
+            .iter_mut()
+            .find(|layer| matches!(layer.owner, PlaneOwner::Layer(11)))
+        {
+            m.material_channels = None;
+        }
+        state.mark_owner_full(PlaneOwner::Layer(11));
+        state.flush_composite(&disabled);
+        assert_eq!(
+            state
+                .read_composite(1001, BASE_COLOR_CHANNEL)
+                .expect("cache reads")
+                .data[0],
+            200
+        );
+        // Delete M: eval-owned planes DROP (no tombstone), cache → 200.
+        state.note_removed_layers(&[(11, false)]);
+        assert!(
+            state.retire_pending.is_empty(),
+            "eval-owned planes never queue a readback"
+        );
+        state.flush_composite(&hidden);
+        assert!(
+            !state
+                .planes
+                .keys()
+                .any(|(owner, _, _)| *owner == PlaneOwner::Layer(11)),
+            "M's planes are dropped"
+        );
+        assert!(!state.retired.contains_key(&11), "M leaves no tombstone");
+        assert_eq!(
+            state
+                .read_composite(1001, BASE_COLOR_CHANNEL)
+                .expect("cache reads")
+                .data[0],
+            200
+        );
+        // Undo of the delete re-dirties from the `Insert` params; the next
+        // refresh REPLACES the plane (revive by re-eval, not by tombstone).
+        let flat100: Vec<u8> = (0..512 * 512).flat_map(|_| [100, 100, 100, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(11),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                flat100,
+            )
+            .expect("M re-evaluates");
+        state.flush_composite(&shown);
+        assert_eq!(
+            state
+                .read_composite(1001, BASE_COLOR_CHANNEL)
+                .expect("cache reads")
+                .data,
+            shown_bytes
+        );
+    }
+
+    #[test]
+    fn resize_drops_planes_and_their_tombstones() {
+        // §8 T19. `resize_set` drops every plane's contents on the set's
+        // tiles (other sets' planes are byte-identical); the resized set's
+        // tombstones drop too, and other sets' survive.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let set = state.active_set().to_string();
+        let pattern: Vec<u8> = (0..512 * 512).flat_map(|_| [11, 22, 33, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                pattern,
+            )
+            .expect("L1 publishes");
+        // A second set with its own tile, plane and tombstone.
+        state.publish_fill(1002, 512, 512, vec![0u8; 512 * 512 * 4]);
+        state.assign_tile_to_set(1002, "other");
+        state.resize_set("other", 512, 512);
+        let other_pattern: Vec<u8> = (0..512 * 512).flat_map(|_| [44, 55, 66, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(2),
+                1002,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                other_pattern.clone(),
+            )
+            .expect("L2 publishes");
+        state.note_removed_layers(&[(2, true)]);
+        state.flush_composite(&CompositeSnapshot::default());
+        assert!(
+            state.retired.contains_key(&2),
+            "L2's plane tombstones (one plane, one pump)"
+        );
+        // Resize the first set: L1's contents drop, L2 is byte-identical.
+        state.resize_set(&set, 256, 256);
+        let l1 = state
+            .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+            .expect("L1 reads");
+        assert_eq!((l1.width, l1.height), (256, 256));
+        assert!(
+            l1.data.iter().all(|&b| b == 0),
+            "resized contents are dropped"
+        );
+        assert_eq!(
+            state
+                .cache_dirty
+                .get(&(1001, BASE_COLOR_CHANNEL.to_string())),
+            Some(&DirtyRegion::Full)
+        );
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(2), 1002, BASE_COLOR_CHANNEL)
+                .expect("L2 reads")
+                .data,
+            other_pattern,
+            "other sets' planes are byte-identical"
+        );
+        assert!(
+            state.retired.contains_key(&2),
+            "other sets' tombstones survive"
+        );
+        // Tombstone L1, then resize its set: the tombstone drops.
+        state.note_removed_layers(&[(1, true)]);
+        state.flush_composite(&CompositeSnapshot::default());
+        assert!(state.retired.contains_key(&1));
+        state.resize_set(&set, 128, 128);
+        assert!(
+            !state.retired.contains_key(&1),
+            "the resized set's tombstones drop"
+        );
+        assert!(
+            state.retired.contains_key(&2),
+            "other sets' tombstones still survive"
+        );
+    }
+
+    #[test]
+    fn base_stays_reachable_and_clone_samples_the_composite() {
+        // §8 T23 [M3]. A v1 project (Base paint) with one Paint layer:
+        // selecting Base and erasing changes Base's plane while the layer
+        // plane is absent-or-unchanged (and vice versa); cloning onto a
+        // newly added EMPTY layer lands the cloned composite bytes with
+        // `p ≤ a` (the layer-only sample would leave it empty).
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let white: Vec<u8> = (0..512 * 512).flat_map(|_| [255, 255, 255, 255]).collect();
+        assert!(
+            state.publish_fill(1001, 512, 512, white.clone()),
+            "Base holds the v1 paint"
+        );
+        let red: Vec<u8> = (0..512 * 512).flat_map(|_| [255, 0, 0, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                red.clone(),
+            )
+            .expect("L1 publishes");
+        state.process_pending().expect("drain succeeds");
+        // Select Base, erase: Base's alpha changes, L1 is untouched.
+        state.set_active_target(PlaneOwner::Base);
+        state.sync_active_target(PlaneOwner::Base, Ok(()), 0);
+        let mut erase_tool = BrushTool::Erase(umber_brush::EraseParams::default());
+        state.sync_tool(&mut erase_tool);
+        drive_converged_diagonal(&mut state);
+        state.process_pending().expect("drain succeeds");
+        let base_erased = state
+            .read_plane(PlaneOwner::Base, 1001, BASE_COLOR_CHANNEL)
+            .expect("Base reads");
+        assert!(
+            base_erased.data.chunks_exact(4).any(|px| px[3] != 255),
+            "the Base erase changed alpha somewhere on the diagonal"
+        );
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+                .expect("L1 reads")
+                .data,
+            red,
+            "L1 is byte-identical after a Base erase"
+        );
+        // Sentinel: with the Paint layer selected instead, the same erase
+        // leaves Base byte-identical.
+        let base_before_reselect = base_erased.data.clone();
+        state.set_active_target(PlaneOwner::Layer(1));
+        state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 0);
+        let mut erase_tool = BrushTool::Erase(umber_brush::EraseParams::default());
+        state.sync_tool(&mut erase_tool);
+        drive_converged_diagonal(&mut state);
+        state.process_pending().expect("drain succeeds");
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Base, 1001, BASE_COLOR_CHANNEL)
+                .expect("Base reads")
+                .data,
+            base_before_reselect,
+            "a layer erase leaves Base byte-identical"
+        );
+    }
+
+    #[test]
+    fn clone_onto_empty_layer_lands_composite_bytes() {
+        // §8 T23 (clone half): onto a newly added empty layer whose source
+        // region shows Base paint, the plane becomes non-empty with the
+        // cloned composite bytes (`p ≤ a` throughout).
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let white: Vec<u8> = (0..512 * 512).flat_map(|_| [255, 255, 255, 255]).collect();
+        assert!(state.publish_fill(1001, 512, 512, white));
+        state.set_active_target(PlaneOwner::Layer(7));
+        state.sync_active_target(PlaneOwner::Layer(7), Ok(()), 0);
+        let mut clone_tool = BrushTool::Clone(umber_brush::CloneParams::default());
+        state.sync_tool(&mut clone_tool);
+        drive_converged_diagonal(&mut state);
+        state.process_pending().expect("drain succeeds");
+        let plane = state
+            .read_plane(PlaneOwner::Layer(7), 1001, BASE_COLOR_CHANNEL)
+            .expect("L7 reads");
+        assert_ne!(
+            plane.data,
+            vec![0u8; 512 * 512 * 4],
+            "the clone landed composite bytes (the layer-only sample would stay empty)"
+        );
+        assert!(
+            plane
+                .data
+                .chunks_exact(4)
+                .any(|px| px == [255, 255, 255, 255]),
+            "covered texels equal the cloned white composite"
+        );
+        for px in plane.data.chunks_exact(4) {
+            assert!(
+                px[0] <= px[3] && px[1] <= px[3] && px[2] <= px[3],
+                "p ≤ a holds: {px:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tombstones_revive_identical_evict_oldest_and_read_one_per_frame() {
+        // §8 T25 [M5]. A paint delete → undo revives byte-identical
+        // planes; an oversize tombstone is retained while newest (and its
+        // undo revives identical); a second delete frees the first, whose
+        // undo revives EMPTY with the status line; retirement reads back
+        // at most one plane per frame.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let paint_row = |id: u64| SnapshotLayer {
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        let with_layer = |id: u64| CompositeSnapshot {
+            layers: vec![base_row(), paint_row(id)],
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+        };
+        // Three planes on L1 (amortization needs 3 frames).
+        let pat_a: Vec<u8> = (0..512 * 512).flat_map(|_| [10, 20, 30, 255]).collect();
+        let pat_b: Vec<u8> = (0..512 * 512).flat_map(|_| [40, 50, 60, 255]).collect();
+        let pat_c: Vec<u8> = (0..512 * 512).flat_map(|_| [70, 80, 90, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                pat_a.clone(),
+            )
+            .expect("publishes");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                "height",
+                512,
+                512,
+                pat_b.clone(),
+            )
+            .expect("publishes");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                "roughness",
+                512,
+                512,
+                pat_c.clone(),
+            )
+            .expect("publishes");
+        state.note_removed_layers(&[(1, true)]);
+        assert_eq!(state.retire_pending.len(), 3);
+        state.flush_composite(&CompositeSnapshot::default());
+        assert_eq!(state.retire_pending.len(), 2, "at most one plane per frame");
+        state.flush_composite(&CompositeSnapshot::default());
+        assert_eq!(state.retire_pending.len(), 1);
+        state.flush_composite(&CompositeSnapshot::default());
+        assert!(state.retire_pending.is_empty());
+        assert_eq!(
+            state.retired.get(&1).map(|(_, planes)| planes.len()),
+            Some(3)
+        );
+        // Undo of the delete (the layer rejoins): bytes revive identical.
+        state.flush_composite(&with_layer(1));
+        assert!(
+            !state.retired.contains_key(&1),
+            "the revive consumed the tombstone"
+        );
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+                .expect("revived reads")
+                .data,
+            pat_a
+        );
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(1), 1001, "height")
+                .expect("revived reads")
+                .data,
+            pat_b
+        );
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(1), 1001, "roughness")
+                .expect("revived reads")
+                .data,
+            pat_c
+        );
+        // Oversize tombstones: the cap below one plane keeps the newest.
+        state.set_retired_cap_bytes(1);
+        state.note_removed_layers(&[(1, true)]);
+        state.flush_composite(&CompositeSnapshot::default());
+        state.flush_composite(&CompositeSnapshot::default());
+        state.flush_composite(&CompositeSnapshot::default());
+        assert!(
+            state.retired.contains_key(&1),
+            "one oversize tombstone is retained while newest"
+        );
+        // A second delete frees the first (oldest); undoing the first
+        // revives it EMPTY with the status line.
+        let pat_d: Vec<u8> = (0..512 * 512).flat_map(|_| [1, 2, 3, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(2),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                pat_d,
+            )
+            .expect("publishes");
+        state.note_removed_layers(&[(2, true)]);
+        state.flush_composite(&CompositeSnapshot::default());
+        assert!(!state.retired.contains_key(&1), "the oldest frees first");
+        assert!(state.retired.contains_key(&2), "the newest is retained");
+        assert_eq!(state.take_tombstone_notice(), Some(1));
+        state.flush_composite(&with_layer(1));
+        assert!(
+            !state
+                .planes
+                .keys()
+                .any(|(owner, _, _)| *owner == PlaneOwner::Layer(1)),
+            "the freed delete revives empty"
+        );
+    }
+
+    #[test]
+    fn mask_strokes_dirty_every_planed_channel() {
+        // §8 T26 [M6]. A mask stroke on a 2-channel material with planes
+        // on tile 1001 leaves `cache_dirty` holding exactly 2 entries,
+        // `(1001, ch)` each, each a `Rects` of the stamped footprint (no
+        // `Full`) — and the next flush makes the cache equal the oracle
+        // with the edited mask.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        for channel in ["roughness", "metallic"] {
+            let bytes: Vec<u8> = (0..512 * 512).flat_map(|_| [200, 200, 200, 255]).collect();
+            state
+                .publish_plane(PlaneOwner::Layer(5), 1001, channel, 512, 512, bytes)
+                .expect("publishes");
+        }
+        let snapshot = CompositeSnapshot {
+            layers: vec![
+                base_row(),
+                SnapshotLayer {
+                    owner: PlaneOwner::Layer(5),
+                    layer_id: Some(5),
+                    kind: SnapshotLayerKind::Material,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: true,
+                    material_channels: Some(vec![
+                        SnapshotMaterialChannel {
+                            channel: "roughness".to_string(),
+                            blend: BlendMode::Normal,
+                            opacity: 1.0,
+                        },
+                        SnapshotMaterialChannel {
+                            channel: "metallic".to_string(),
+                            blend: BlendMode::Normal,
+                            opacity: 1.0,
+                        },
+                    ]),
+                },
+            ],
+            base_visible: true,
+            displayed: vec![
+                (1001, "roughness".to_string()),
+                (1001, "metallic".to_string()),
+            ],
+        };
+        // Publish dirt flushes away first (the mask stroke must leave
+        // `Rects`, not ride a stale `Full`).
+        state.flush_composite(&snapshot);
+        assert!(state.cache_dirty.is_empty());
+        // The mask stroke (a fill's mask is legitimate to paint while the
+        // fill itself refuses strokes — the gate bypass).
+        state.set_mask_edit_layer(Some(5));
+        drive_converged_diagonal(&mut state);
+        state.set_mask_edit_layer(None);
+        let mut keys: Vec<(u16, String)> = state.cache_dirty.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                (1001, "metallic".to_string()),
+                (1001, "roughness".to_string())
+            ]
+        );
+        for key in &keys {
+            assert!(
+                matches!(state.cache_dirty.get(key), Some(DirtyRegion::Rects(_))),
+                "{key:?} must be a footprint Rects, never Full"
+            );
+        }
+        // The next flush folds the edited mask: cache equals the oracle
+        // within the twin tolerance (one masked entry → no seed → one
+        // dispatch → ≤ 1 LSB; fractional mask coverage can land
+        // arbitrarily close to a rounding boundary, so exact equality
+        // would pin implementation-defined UNORM rounding). A
+        // mask-ignoring flush would drift up to 200 LSB — this still
+        // proves the mask folded.
+        state.flush_composite(&snapshot);
+        let mask = state
+            .layer_mask(5, 1001)
+            .expect("mask plane exists")
+            .to_vec();
+        for channel in ["roughness", "metallic"] {
+            let cached = state.read_composite(1001, channel).expect("cache reads");
+            let plane_bytes: Vec<u8> = (0..512 * 512).flat_map(|_| [200, 200, 200, 255]).collect();
+            let oracle = {
+                use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
+                composite_stack_cpu(
+                    &[CpuStackLayer {
+                        blend_mode: BlendMode::Normal,
+                        opacity: 1.0,
+                        visible: true,
+                        rgba: Some(&plane_bytes),
+                        mask: Some(&mask),
+                        premultiplied: true,
+                    }],
+                    512,
+                    512,
+                )
+                .expect("oracle composites")
+            };
+            for (i, (got, want)) in cached.data.iter().zip(oracle.iter()).enumerate() {
+                let drift = (*got as i16 - *want as i16).abs();
+                assert!(drift <= 1, "{channel} texel {i}: got {got}, want {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn budget_refused_stroke_keeps_painting_materialized_planes() {
+        // §8 T33 (stroke half). With the hard cap lowered so one more
+        // `(plane + cache)` fits but two do not, a stroke paints its
+        // already-materialized tile and refuses the next tile with a typed
+        // `PlaneBudget` — never a silent drop, never a crash.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // Two UDIM tiles: the diagonal crosses from 1001 into 1002.
+        // Two triangles, one per UDIM tile (v1's `tile_of_triangle`
+        // keys on each triangle's FIRST vertex, so spanning requires
+        // two tris — see `udim.rs`): first verts at u 0.2 and u 1.2
+        // put them in 1001 and 1002, making `multi_tile` true.
+        state.set_mesh(&umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.2, 0.2], [1.2, 0.2], [0.2, 0.8], [1.2, 0.8]],
+            indices: vec![0, 1, 3, 1, 2, 3],
+            material_names: vec![],
+        });
+        state.set_active_target(PlaneOwner::Layer(1));
+        state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 0);
+        // Base (1 MiB) + L1's plane + cache (2 MiB) fit; one more pair does
+        // not: the cap sits 1 byte under the next materialization.
+        state.set_plane_hard_cap_bytes(4 * 1_048_576 - 1);
+        state.begin_stroke(egui::pos2(0.2, 0.2));
+        for i in 1..=24 {
+            let t = i as f32 * 0.05;
+            state.extend_stroke(egui::pos2(0.2 + t, 0.2));
+        }
+        state.end_stroke();
+        assert!(
+            state.planes.contains_key(&(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL.to_string()
+            )),
+            "the materialized tile keeps painting"
+        );
+        assert!(
+            !state.planes.contains_key(&(
+                PlaneOwner::Layer(1),
+                1002,
+                BASE_COLOR_CHANNEL.to_string()
+            )),
+            "the next tile is refused, never half-created"
+        );
+
+        assert!(
+            matches!(
+                state.stroke_refusal(),
+                Some(PaintRefusal::PlaneBudget { .. })
+            ),
+            "the refusal is typed and loud"
+        );
+        assert!(
+            state.staged_batch_count() > 0,
+            "the stroke staged on its live tile"
+        );
+        let l1 = state
+            .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+            .expect("L1 reads");
+        assert_ne!(l1.data, vec![0u8; 512 * 512 * 4]);
+    }
+
+    #[test]
+    fn owner_deleted_mid_stroke_retires_on_end_and_discards_capture() {
+        // §8 T34 [m7]. Begin on L1, remove L1 while stroking, run frames:
+        // the census never retires the live owner's planes; `end_stroke`
+        // retires them, discards the capture (history length unchanged),
+        // and logs.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        state.set_active_target(PlaneOwner::Layer(1));
+        state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 0);
+        state.begin_stroke(egui::pos2(0.2, 0.2));
+        // A run of extends (no `end_stroke`): the conditioner converges
+        // and stages, so the live stroke owns planes before the delete.
+        for i in 1..=10 {
+            let t = i as f32 * 0.02;
+            state.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+        }
+        // The shell's census sees L1 vanish — queued, never pumped while
+        // the stroke lives.
+        state.note_removed_layers(&[(1, true)]);
+        for _ in 0..3 {
+            state.flush_composite(&base_snapshot(1001, BASE_COLOR_CHANNEL));
+        }
+        assert!(
+            state.planes.contains_key(&(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL.to_string()
+            )),
+            "the live stroke's planes are never retired under it"
+        );
+        // Queued, not yet retired (the pump skips the live owner):
+        // the tombstone map stays empty until end_stroke retires.
+        assert!(!state.retired.contains_key(&1));
+        let depth = state.stroke_len();
+        state.end_stroke();
+        assert!(
+            state.retired.contains_key(&1),
+            "end_stroke retires the gone owner's planes"
+        );
+        assert!(!state
+            .planes
+            .keys()
+            .any(|(owner, _, _)| *owner == PlaneOwner::Layer(1)));
+        assert_eq!(state.stroke_len(), depth, "the capture is discarded");
     }
 
     // --- Paint-what-you-see projection (§2's P1 row) ---
@@ -4797,6 +7419,13 @@ mod tests {
         );
         assert!(state.can_undo_stroke(), "the smudge stroke is one entry");
         state.process_pending().expect("drain succeeds");
+        // [M7] The shell's END-of-update flush, with the shell's real
+        // snapshot shape: the Base row present, Base visible, and
+        // `(1001, baseColor)` displayed. A row-less snapshot composites a
+        // TRANSPARENT stack over the dirty rect (the readback would differ
+        // for the wrong reason); a default one also hides Base.
+        state.flush_composite(&base_snapshot(1001, BASE_COLOR_CHANNEL));
+        state.process_pending().expect("drain succeeds");
         let after = state
             .paint_target()
             .read_back_rgba8(&device, &queue)
@@ -4816,6 +7445,9 @@ mod tests {
             state.can_undo_stroke(),
             "the setup stroke's entry remains beneath the smudge's"
         );
+        // [M7] again: the undo's writes land on the plane; the flush
+        // refreshes the cache before the readback compares.
+        state.flush_composite(&base_snapshot(1001, BASE_COLOR_CHANNEL));
         state.process_pending().expect("drain succeeds");
         let undone = state
             .paint_target()

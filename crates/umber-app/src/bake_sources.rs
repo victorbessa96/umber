@@ -54,7 +54,7 @@ pub fn pick_base_color_source(painted_len_ok: bool, graph: Option<(u64, bool)>) 
     }
 }
 
-/// Reads the live paint target back as tightly-packed RGBA8 bytes
+/// Reads the live paint composite back as tightly-packed RGBA8 bytes
 /// (`width×height×4`, the format `umber_export::png::write_png`
 /// consumes) for the export's Base Color output.
 ///
@@ -64,6 +64,14 @@ pub fn pick_base_color_source(painted_len_ok: bool, graph: Option<(u64, bool)>) 
 /// races with nothing. The display callback and the File > Export-PNG
 /// path read back the same way. Note the readback reflects the last
 /// drained frame: dabs staged but not yet processed are not included.
+///
+/// Stage-4 composite note: `paint_target()` resolves cache-else-Base
+/// (the per-layer composite, flushed at the last end-of-update), so this
+/// reads the composite — but WITHOUT a same-frame flush (the signature
+/// stays `Option<&PaintState>`: the Export dialog's session handle is
+/// shared, and it lives outside this kill's lock). One frame stale at
+/// most, exact once frames settle (see `paint_state`'s stage-4
+/// boundaries).
 ///
 /// Returns `None` when there is no session (`paint` is `None`) or the
 /// GPU readback fails (logged) — the caller falls back to
@@ -82,13 +90,14 @@ pub fn painted_base_color(
     read_back(paint?.paint_target(), device, queue)
 }
 
-/// The per-tile painted source (UDIM slice 5): `tile`'s paint target
+/// The per-tile painted source (UDIM slice 5): `tile`'s composite texture
 /// read back as RGBA8, via [`PaintState::tile_target`]. `None` when there
 /// is no session, nothing ever routed to `tile`, the target isn't
 /// `size`×`size` (no readback is paid for bytes the size gate would
 /// reject — up to 256 MiB at 8K), or the readback fails (logged) — the
 /// caller then falls back to the flat placeholder. Same-thread reasoning
-/// as [`painted_base_color`].
+/// as [`painted_base_color`], and the same stage-4 one-frame-staleness
+/// note (the signature stays shared for the Export dialog).
 pub fn painted_base_color_tile(
     paint: Option<&PaintState>,
     tile: u16,

@@ -30,6 +30,10 @@
 //!   (`umber_export::png::{write_png, read_png_rgba8}`) and the same
 //!   session calls, and names that boundary in its own module docs.
 
+/// Dual-declared with the shell (main.rs keeps its own `mod
+/// paint_state;`): retouch + material_layer's lib-target compiles need
+/// its types (PlaneOwner, PaintRefusal, SnapshotMaterialChannel), and
+/// the integration harnesses (tests/) drive it directly.
 pub mod paint_state;
 pub mod retouch;
 

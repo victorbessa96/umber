@@ -441,6 +441,11 @@ layers =
     .folder-unpaintable = Holds no pixels — select a paint layer.
     .base-paint = Base paint
     .base-paint-hint = Paint that belongs to no layer: v1 projects, and strokes made with no layer selected.
+    .budget-blocked = Plane budget blocked ({ $bytes } bytes)
+    .budget-line = Plane memory { $used } / { $cap } bytes
+    .stroke-refused = Stroke refused
+    .tombstone-lost = Layer { $layer } revives empty on undo (its tombstone was freed)
+    .dormant-badge = Pre-v2 result lives in the Base paint
 
 ## Fill layer properties (projection picker + v1 source editor)
 
@@ -562,6 +567,9 @@ import =
     .reason-empty-set = nothing before the “_” — no texture-set name
     .reason-empty-suffix = nothing after the “_” — no map name
     .reason-tile-suffixed = tile-suffixed UDIM output (Set_map_tile) — import the per-tile files individually
+    .size-mismatch = Size mismatch — layer left empty
+    .budget-refused = Plane budget refused ({ $bytes } bytes) — layer left empty
+    .decode-failed = File undecodable — layer left empty
 
 ## PSD flatten-import (§7 row 101 — the composite-first honest flatten)
 

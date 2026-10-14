@@ -363,6 +363,52 @@ pub fn smudge_dab_masked(
     motion: [f32; 2],
     mask: Option<MaskView<'_>>,
 ) -> Option<DirtyRect> {
+    let (rect, blur, tilt) = smudge_windows(dab, params, motion, buf.width, buf.height)?;
+    // The table borrows `buf` only while building (its sums are owned),
+    // so the write loop below holds it alone (E0502).
+    let sat = smudge_table(buf, &rect, blur, tilt);
+    smudge_loop(buf, &sat, dab, params, mask, rect, blur, tilt)
+}
+
+/// [`smudge_dab_masked`] sampling a separate `sample` image instead of the
+/// destination buffer: the blur window reads `sample`, the mix writes
+/// `buf` (per-layer-pool design §3 [M3] — a smudge into a layer plane
+/// smears the visible composite, not the plane's own bytes, so
+/// clone-to-new-layer's sibling workflow works for smudge too).
+///
+/// `sample` must match `buf`'s dimensions (the plane and its composite
+/// cache are the same tile size by construction); a mismatch falls back
+/// to the self-sampled [`smudge_dab_masked`] rather than sampling
+/// misaligned rows.
+pub fn smudge_dab_masked_sampled(
+    buf: &mut RgbaBuffer,
+    sample: &RgbaBuffer,
+    dab: &RetouchDab,
+    params: SmudgeParams,
+    motion: [f32; 2],
+    mask: Option<MaskView<'_>>,
+) -> Option<DirtyRect> {
+    if sample.width != buf.width || sample.height != buf.height {
+        return smudge_dab_masked(buf, dab, params, motion, mask);
+    }
+    let (rect, blur, tilt) = smudge_windows(dab, params, motion, buf.width, buf.height)?;
+    // The table borrows `sample` only while building (its sums are
+    // owned), so the write loop below holds `buf` alone (E0502).
+    let sat = smudge_table(sample, &rect, blur, tilt);
+    smudge_loop(buf, &sat, dab, params, mask, rect, blur, tilt)
+}
+
+/// The smudge identity checks plus the dab footprint, blur half-width and
+/// motion tilt. `None` when the dab writes nothing (strength 0,
+/// alpha 0, zero-width blur with no tilt, or a footprint missing the
+/// image) — the exact-identity early-outs.
+fn smudge_windows(
+    dab: &RetouchDab,
+    params: SmudgeParams,
+    motion: [f32; 2],
+    width: u32,
+    height: u32,
+) -> Option<(DirtyRect, i64, [i32; 2])> {
     let strength = params.strength.clamp(0.0, 1.0);
     let smear = params.smear.clamp(0.0, 1.0);
     if strength <= 0.0 || dab.alpha <= 0.0 {
@@ -373,20 +419,41 @@ pub fn smudge_dab_masked(
     if blur == 0 && tilt == [0, 0] {
         return None;
     }
-    let rect = footprint(dab.pos, dab.radius, buf.width, buf.height)?;
+    let rect = footprint(dab.pos, dab.radius, width, height)?;
+    Some((rect, blur, tilt))
+}
 
-    // The sample region: the footprint grown by the blur half-width and
-    // the tilt, clamped to the image. A summed-area table over it gives
-    // every window's average in O(1).
-    let (w, h) = (i64::from(buf.width), i64::from(buf.height));
+/// The summed-area table over the sample region: the footprint grown by
+/// the blur half-width and the tilt, clamped to the image. A table over
+/// it gives every window's average in O(1).
+fn smudge_table(sample: &RgbaBuffer, rect: &DirtyRect, blur: i64, tilt: [i32; 2]) -> SummedArea {
+    let (w, h) = (i64::from(sample.width), i64::from(sample.height));
     let reach_x = blur + i64::from(tilt[0].unsigned_abs());
     let reach_y = blur + i64::from(tilt[1].unsigned_abs());
     let sx0 = (i64::from(rect.x0) - reach_x).max(0);
     let sy0 = (i64::from(rect.y0) - reach_y).max(0);
     let sx1 = (i64::from(rect.x1) + reach_x).min(w);
     let sy1 = (i64::from(rect.y1) + reach_y).min(h);
-    let sat = SummedArea::build(buf, sx0, sy0, sx1, sy1);
+    SummedArea::build(sample, sx0, sy0, sx1, sy1)
+}
 
+/// Runs one dab's mix from the prebuilt `sat` into `buf` over `rect`
+/// (symmetry siblings are the caller's loop — see the app-side stroke).
+/// The argument count is the algorithm's shape (buffer + table + dab +
+/// params + mask + the smudge window's three members); bundling the
+/// window trio saves nothing at one call site.
+#[allow(clippy::too_many_arguments)]
+fn smudge_loop(
+    buf: &mut RgbaBuffer,
+    sat: &SummedArea,
+    dab: &RetouchDab,
+    params: SmudgeParams,
+    mask: Option<MaskView<'_>>,
+    rect: DirtyRect,
+    blur: i64,
+    tilt: [i32; 2],
+) -> Option<DirtyRect> {
+    let strength = params.strength.clamp(0.0, 1.0);
     let mut wrote = false;
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
@@ -492,6 +559,10 @@ pub fn clone_dab_masked(
 /// row's "non-destructive" contract: no clear, no layer delete, and the
 /// before-state is restorable.
 ///
+/// On a premultiplied layer-owned plane use
+/// [`erase_dab_masked_premultiplied`] instead (per-layer-pool design §3
+/// [M1]): this op scales alpha alone and would leave `p > a`.
+///
 /// Returns the texels written, or `None` for the identity cases
 /// (`alpha <= 0`, no channel enabled, or zero coverage everywhere) —
 /// which return before touching a byte, so the identity is exact.
@@ -539,6 +610,97 @@ pub fn erase_dab_masked(
                     (f32::from(orig[c]) * k).round().clamp(0.0, 255.0) as u8
                 }
             });
+            if out != orig {
+                buf.set_texel(x, y, out);
+                wrote = true;
+            }
+        }
+    }
+    wrote.then_some(rect)
+}
+
+/// The eraser op for one dab on a PREMULTIPLIED layer-owned plane
+/// (per-layer-pool design §3 [M1]): every write preserves `p ≤ a` per
+/// channel (valid premultiplied data), where [`erase_dab_masked`] would
+/// scale alpha alone and leave `p > a`.
+///
+/// * `EraseChannels.a` scales ALL FOUR channels by `k = 1 − coverage`:
+///   the premultiplied erase (alpha goes to zero and so does the
+///   premultiplied color, so requirement row 19 holds literally).
+/// * `EraseChannels.r/g/b` mean straight-space color removal: the texel
+///   is unpremultiplied (`s = clamp(p / a)`, `a == 0` leaves the texel
+///   untouched — there is no color to remove), the enabled color
+///   channels are scaled by `k`, and the result is re-premultiplied
+///   under the (possibly `a`-scaled) alpha. An `a`-enabled erase scales
+///   the color channels directly, so the `r/g/b` flags are redundant
+///   beside it, never contradictory.
+/// * The result clamps `p` to `a` per channel either way.
+///
+/// On Base ([`erase_dab_masked`]'s straight semantics) this op is never
+/// used: Base keeps today's bytes exactly (the §1.4 exemption).
+///
+/// Returns the texels written, or `None` for the identity cases
+/// (`alpha <= 0`, no channel enabled, or zero coverage everywhere).
+pub fn erase_dab_premultiplied(
+    buf: &mut RgbaBuffer,
+    dab: &RetouchDab,
+    params: EraseParams,
+) -> Option<DirtyRect> {
+    erase_dab_masked_premultiplied(buf, dab, params, None)
+}
+
+/// [`erase_dab_premultiplied`] gated by the quick mask: each texel's
+/// coverage is scaled by `mask` at that texel (`None` = ungated,
+/// byte-identical to [`erase_dab_premultiplied`]) — the same gate point
+/// the paint shader uses.
+pub fn erase_dab_masked_premultiplied(
+    buf: &mut RgbaBuffer,
+    dab: &RetouchDab,
+    params: EraseParams,
+    mask: Option<MaskView<'_>>,
+) -> Option<DirtyRect> {
+    if dab.alpha <= 0.0 {
+        return None;
+    }
+    if !(params.channels.r || params.channels.g || params.channels.b || params.channels.a) {
+        return None;
+    }
+    let rect = footprint(dab.pos, dab.radius, buf.width, buf.height)?;
+    let mut wrote = false;
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let Some(cov) = gated_coverage(dab, x, y, mask) else {
+                continue;
+            };
+            let k = (1.0 - cov.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+            if k >= 1.0 {
+                continue;
+            }
+            let orig = buf.texel(x, y);
+            let mut out = orig;
+            if params.channels.a {
+                // The premultiplied erase: alpha scales all four channels.
+                // `k <= 1` preserves `p ≤ a` (`round` is monotonic), and
+                // the clamp below keeps it exact in f32.
+                for c in 0..4 {
+                    out[c] = (f32::from(orig[c]) * k).round().clamp(0.0, 255.0) as u8;
+                }
+            } else {
+                let a = f32::from(orig[3]);
+                if a > 0.0 {
+                    let enabled = [params.channels.r, params.channels.g, params.channels.b];
+                    for c in 0..3 {
+                        if !enabled[c] {
+                            continue;
+                        }
+                        let straight = (f32::from(orig[c]) / a).clamp(0.0, 1.0);
+                        out[c] = (straight * k * a).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            for c in 0..3 {
+                out[c] = out[c].min(out[3]);
+            }
             if out != orig {
                 buf.set_texel(x, y, out);
                 wrote = true;
@@ -1083,9 +1245,136 @@ mod tests {
         assert_eq!(none, gray_opaque());
     }
 
+    /// Per-layer-pool §8 T22: the premultiplied erase golden. Layer-plane
+    /// texel `(200,0,0,255)`, alpha-only erase at exactly 0.5 coverage
+    /// (`k = 0.5`, exact in f32) → `(100,0,0,128)`: `200·0.5 = 100.0`
+    /// exactly, and `255·0.5 = 127.5` is a TIE, which `f32::round`
+    /// rounds half away from zero (a defined rule, not
+    /// implementation-defined) → 128.
+    #[test]
+    fn premultiplied_erase_alpha_scales_all_four_channels() {
+        // A hard dab at texel-center with alpha 0.5: `falloff(0, 1) = 1`
+        // exactly, so the center texel's coverage is exactly 0.5.
+        let dab = RetouchDab {
+            alpha: 0.5,
+            ..hard_dab([32.0, 32.0], 8.0)
+        };
+        assert_eq!(
+            coverage(&dab, 32, 32),
+            Some(0.5),
+            "the golden's coverage must be exactly 0.5 first"
+        );
+        let mut buf = RgbaBuffer::transparent(SIZE, SIZE);
+        buf.set_texel(32, 32, [200, 0, 0, 255]);
+        erase_dab_premultiplied(&mut buf, &dab, EraseParams::default()).expect("erase must write");
+        assert_eq!(buf.texel(32, 32), [100, 0, 0, 128]);
+        // Companion: the same erase on straight (Base) semantics gives
+        // today's `(200,0,0,128)` byte-for-byte (§1.4's exemption).
+        let mut base = RgbaBuffer::transparent(SIZE, SIZE);
+        base.set_texel(32, 32, [200, 0, 0, 255]);
+        erase_dab(&mut base, &dab, EraseParams::default()).expect("erase must write");
+        assert_eq!(base.texel(32, 32), [200, 0, 0, 128]);
+    }
+
+    /// The `r/g/b` flags on a premultiplied plane mean straight-space
+    /// color removal: unpremultiply, scale the enabled channels by `k`,
+    /// re-premultiply. `(100,0,0,128)` at `k = 0.5`, red-only:
+    /// `s = 100/128 = 0.78125`, `0.78125·0.5·128 = 50.0` exactly.
+    #[test]
+    fn premultiplied_erase_rgb_unpremultiplies_scales_and_repremultiplies() {
+        let dab = RetouchDab {
+            alpha: 0.5,
+            ..hard_dab([32.0, 32.0], 8.0)
+        };
+        let red_only = EraseParams {
+            channels: EraseChannels {
+                r: true,
+                g: false,
+                b: false,
+                a: false,
+            },
+        };
+        let mut buf = RgbaBuffer::transparent(SIZE, SIZE);
+        buf.set_texel(32, 32, [100, 0, 0, 128]);
+        erase_dab_masked_premultiplied(&mut buf, &dab, red_only, None).expect("erase must write");
+        assert_eq!(buf.texel(32, 32), [50, 0, 0, 128]);
+        // Alpha-zero texels carry no color to remove: untouched.
+        let mut zero = RgbaBuffer::transparent(SIZE, SIZE);
+        zero.set_texel(32, 32, [0, 0, 0, 0]);
+        assert_eq!(
+            erase_dab_masked_premultiplied(&mut zero, &dab, red_only, None),
+            None,
+            "an all-zero texel erases to itself: no write"
+        );
+        assert_eq!(zero.texel(32, 32), [0, 0, 0, 0]);
+    }
+
+    /// Invalid premultiplied input (`p > a`) composites as "clamp `p` to
+    /// `a`": the rgb-flag path clamps the un-premultiply to `0..=1`, and
+    /// every path clamps the result. `(200,0,0,128)` red-only at 0.5:
+    /// `s = min(200/128, 1) = 1.0`, `1.0·0.5·128 = 64`.
+    #[test]
+    fn premultiplied_erase_clamps_p_to_a() {
+        let dab = RetouchDab {
+            alpha: 0.5,
+            ..hard_dab([32.0, 32.0], 8.0)
+        };
+        let red_only = EraseParams {
+            channels: EraseChannels {
+                r: true,
+                g: false,
+                b: false,
+                a: false,
+            },
+        };
+        let mut buf = RgbaBuffer::transparent(SIZE, SIZE);
+        buf.set_texel(32, 32, [200, 0, 0, 128]);
+        erase_dab_masked_premultiplied(&mut buf, &dab, red_only, None).expect("erase must write");
+        assert_eq!(buf.texel(32, 32), [64, 0, 0, 128]);
+    }
+
+    /// The sampled smudge (§3 [M3]): the blur reads the sample image and
+    /// writes the destination, so a smudge into an empty plane drags the
+    /// visible composite's color in.
+    #[test]
+    fn sampled_smudge_blurs_the_sample_into_the_buffer() {
+        let sample = hard_edge();
+        let mut buf = RgbaBuffer::transparent(SIZE, SIZE);
+        let params = SmudgeParams {
+            strength: 1.0,
+            smear: 0.25,
+        };
+        let dab = hard_dab([32.0, 32.0], 8.0);
+        smudge_dab_masked_sampled(&mut buf, &sample, &dab, params, [0.0, 0.0], None)
+            .expect("sampled smudge must write");
+        assert_ne!(buf, RgbaBuffer::transparent(SIZE, SIZE));
+        // The sample is never written.
+        assert_eq!(sample, hard_edge());
+        // The destination started transparent: every written texel's color
+        // came from the sample's blur, mixed over transparent black.
+        let t = buf.texel(32, 32);
+        assert!(
+            t[0] > 0 && t[0] < 255,
+            "the edge blur lands mid-gray: {t:?}"
+        );
+        assert_eq!(t[3], 255, "the opaque sample blurs to opaque");
+        // A size-mismatched sample falls back to the self-sampled path
+        // (byte-identical to `smudge_dab_masked`).
+        let small = RgbaBuffer::transparent(8, 8);
+        let mut fallback = hard_edge();
+        let mut classic = hard_edge();
+        let r1 = smudge_dab_masked_sampled(&mut fallback, &small, &dab, params, [0.0, 0.0], None);
+        let r2 = smudge_dab_masked(&mut classic, &dab, params, [0.0, 0.0], None);
+        assert_eq!(r1, r2);
+        assert_eq!(fallback, classic);
+    }
+
     #[test]
     fn footprint_matches_the_shader_box() {
         // pos 2,2 r 6 → floor(-4) clamps to 0, ceil(8) → 8 inclusive.
+        // (Stage-4 tests above: T22's premultiplied-erase golden, the
+        // rgb-flag unpremultiply path, the p≤a clamp, and the sampled
+        // smudge live just above this anchor.)
         assert_eq!(
             footprint([2.0, 2.0], 6.0, 64, 64),
             Some(DirtyRect {

@@ -237,6 +237,15 @@ struct PanelViewer<'a> {
     /// This frame's stylus pressure (XI2), or `None` when no stylus
     /// Motion drained this frame — the viewport prefers it over Touch.
     stylus_pressure: Option<f32>,
+    /// The Base pseudo-row's composite visibility (stage 4's toggle):
+    /// the Layers panel edits this; the end-of-update flush reads it.
+    base_visible: &'a mut bool,
+    /// Fill layers blocked by the plane budget: layer id → badge line.
+    fill_badges: &'a std::collections::HashMap<u64, String>,
+    /// Import-created layers with refused publishes: layer id → line.
+    import_badges: &'a std::collections::HashMap<u64, String>,
+    /// Dormant fill/material layers (§6.3): layer ids.
+    dormant: &'a std::collections::HashSet<u64>,
 }
 
 impl TabViewer for PanelViewer<'_> {
@@ -342,22 +351,63 @@ impl TabViewer for PanelViewer<'_> {
                     status: self.material_status,
                     states: &mut *self.material_states,
                 };
-                // Per-layer pool stage 3 (§2.2): the panel returns the
-                // selection intent; the shell applies it to the paint
-                // session OUTSIDE the material-context borrow above.
+                // Per-layer pool stage 3 (§2.2) + stage 4 (§4–§6): the panel
+                // returns the selection intent; the shell applies it to the
+                // paint session OUTSIDE the material-context borrow above.
                 let active = self
                     .paint
                     .as_ref()
                     .map(|paint| paint.active_target())
                     .unwrap_or(paint_state::PlaneOwner::Base);
-                // Stage 3 renders no Base-visibility toggle (§2.2: stage
-                // 4), so Base is always visible here.
-                let outcome = document::layers_ui(ui, self.doc, mats, active, true);
-                // … and the outcome never carries one — pinned, not assumed.
-                debug_assert!(outcome.base_visible.is_none());
+                let badges = document::LayerRowBadges {
+                    fill_budget: (*self.fill_badges).clone(),
+                    import_refusals: (*self.import_badges).clone(),
+                    dormant: (*self.dormant).clone(),
+                };
+                let outcome =
+                    document::layers_ui(ui, self.doc, mats, active, *self.base_visible, &badges);
                 if let Some(target) = outcome.select {
                     if let Some(paint) = self.paint.as_deref_mut() {
                         paint.set_active_target(target);
+                    }
+                }
+                if let Some(visible) = outcome.base_visible {
+                    *self.base_visible = visible;
+                }
+                // Stage-4 status lines (the status bar's snapshot is fixed
+                // — `status_bar.rs` stays outside the lock — so the
+                // LayerStack panel carries them): the plane-budget line and
+                // the last stroke refusal. The paint borrow ends first
+                // (the panel borrows end here).
+                let plane_line = self.paint.as_ref().map(|paint| {
+                    (
+                        paint.plane_bytes(),
+                        paint.is_over_budget(),
+                        paint.stroke_refusal().clone(),
+                    )
+                });
+                if let Some((bytes, over, refusal)) = plane_line {
+                    if over {
+                        ui.separator();
+                        ui.label(crate::i18n::tr_args(
+                            "layers.budget-line",
+                            [
+                                ("used", fluent::FluentValue::from(bytes as i64)),
+                                (
+                                    "cap",
+                                    fluent::FluentValue::from(
+                                        paint_state::PLANE_BUDGET_BYTES as i64,
+                                    ),
+                                ),
+                            ],
+                        ));
+                    }
+                    if let Some(refusal) = refusal {
+                        ui.separator();
+                        ui.label(format!(
+                            "{}: {refusal}",
+                            crate::i18n::tr("layers.stroke-refused")
+                        ));
                     }
                 }
                 // Layer masks need the paint session too (the edit
@@ -548,6 +598,26 @@ pub struct AppState {
     /// resize would otherwise never re-dirty (the design's "size changed
     /// invalidates the caches").
     pub material_sizes: Option<MaterialSizesSnapshot>,
+    /// The Base pseudo-row's composite visibility (stage 4's toggle):
+    /// session state, never in the layer JSON, never journaled. Rides
+    /// every composite snapshot; shown whenever the stack is non-empty
+    /// or Base holds planes.
+    pub base_visible: bool,
+    /// Dormant fill/material layers (§6.3 [B2, M11]): their pre-v2 result
+    /// lives in the Base paint, so they seed CLEAN and never re-evaluate
+    /// until an explicit edit. Survives save/reopen via `# dormant <id>`
+    /// manifest lines while untouched.
+    pub dormant: std::collections::HashSet<u64>,
+    /// The last frame's composite snapshot (the retire census + `Full`
+    /// diff baseline, §4.2/§5.4).
+    pub prev_snapshot: Option<paint_state::CompositeSnapshot>,
+    /// Fill layers blocked by the plane budget: layer id → badge line
+    /// (the Layers rows render these — fills have no `material_badges`
+    /// slot).
+    pub fill_badges: std::collections::HashMap<u64, String>,
+    /// Import-created layers whose plane publish was refused: layer id →
+    /// badge line (the layer still exists, empty — §5.6).
+    pub import_badges: std::collections::HashMap<u64, String>,
     /// The paint-path tool: the editable polyline replayed as
     /// paint/erase/smudge strokes (session state, never serialized).
     pub path_tool: path_tool::PaintPathTool,
@@ -644,6 +714,14 @@ impl AppState {
         // without this reset document B's Fill 3 inherits document A's
         // Fill 3 state (§8 T30).
         self.fill_states = fill_layer::FillLayerStates::default();
+        // Stage-4 session pixel state: Base shows again, dormancy and
+        // badges die with their document, and the snapshot baseline
+        // restarts (the next frame diffs against nothing).
+        self.base_visible = true;
+        self.dormant.clear();
+        self.prev_snapshot = None;
+        self.fill_badges.clear();
+        self.import_badges.clear();
         // §6.3's session lifecycle: layer ids restart at 0 per document,
         // so layer-owned pixel state must not outlive its document. (The
         // File > New path rebuilds the paint session wholesale right
@@ -654,17 +732,277 @@ impl AppState {
     }
 }
 
+/// Builds the per-frame composite snapshot (§4.2) from the document
+/// stack plus the Base row's visibility: bottom-to-top rows (index 0 is
+/// the stack bottom, matching `LayerStack` and the compositor), Base
+/// first, and the displayed `(tile, channel)`s (the active tile's
+/// baseColor + height — plus the UV canvas's bound channel when the
+/// caller passes it).
+///
+/// Material rows expand per contributing channel (§5.2): the shell reads
+/// each layer's [`material_layer::MaterialLayerStates`] plans and forms
+/// `layer.opacity × channel.opacity` here, so opacity edits propagate
+/// without a re-eval. The layer's own `blend_mode` stays inert on
+/// materials; folders and instances carry no planes (no entries — stage
+/// 5 renders instances).
+fn build_composite_snapshot(
+    stack: &umber_core::layers::LayerStack,
+    states: &material_layer::MaterialLayerStates,
+    base_visible: bool,
+    displayed: Vec<(u16, String)>,
+) -> paint_state::CompositeSnapshot {
+    use paint_state::{PlaneOwner, SnapshotLayer, SnapshotLayerKind, SnapshotMaterialChannel};
+    let mut layers = vec![SnapshotLayer {
+        owner: PlaneOwner::Base,
+        layer_id: None,
+        kind: SnapshotLayerKind::Paint,
+        blend: umber_core::BlendMode::Normal,
+        opacity: 1.0,
+        visible: base_visible,
+        mask_enabled: false,
+        material_channels: None,
+    }];
+    for layer in &stack.layers {
+        let owner = PlaneOwner::Layer(layer.id);
+        let mask_enabled = layer.mask.as_ref().is_some_and(|mask| mask.gates());
+        match layer.kind {
+            umber_core::LayerKind::Material => {
+                let channels: Vec<SnapshotMaterialChannel> = states
+                    .state(layer.id)
+                    .map(|state| {
+                        state
+                            .composite_channels()
+                            .iter()
+                            .map(|entry| SnapshotMaterialChannel {
+                                channel: entry.channel.clone(),
+                                blend: entry.blend,
+                                opacity: layer.opacity * entry.opacity,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                layers.push(SnapshotLayer {
+                    owner,
+                    layer_id: Some(layer.id),
+                    kind: SnapshotLayerKind::Material,
+                    blend: layer.blend_mode,
+                    opacity: layer.opacity,
+                    visible: layer.visible,
+                    mask_enabled,
+                    material_channels: Some(channels),
+                });
+            }
+            umber_core::LayerKind::Fill => {
+                layers.push(SnapshotLayer {
+                    owner,
+                    layer_id: Some(layer.id),
+                    kind: SnapshotLayerKind::Fill,
+                    blend: layer.blend_mode,
+                    opacity: layer.opacity,
+                    visible: layer.visible,
+                    mask_enabled,
+                    material_channels: None,
+                });
+            }
+            umber_core::LayerKind::Paint => {
+                layers.push(SnapshotLayer {
+                    owner,
+                    layer_id: Some(layer.id),
+                    kind: SnapshotLayerKind::Paint,
+                    blend: layer.blend_mode,
+                    opacity: layer.opacity,
+                    visible: layer.visible,
+                    mask_enabled,
+                    material_channels: None,
+                });
+            }
+            umber_core::LayerKind::Folder { .. } | umber_core::LayerKind::Instance { .. } => {
+                // Folders carry no pixels (compositor judgment 4) and
+                // instances render nothing until stage 5: no entry either
+                // way (a missing plane is the transparent no-op).
+            }
+        }
+    }
+    paint_state::CompositeSnapshot {
+        layers,
+        base_visible,
+        displayed,
+    }
+}
+
+/// One fill/material layer's open-seeding verdict (§6.3 [B2, M11]):
+/// dormant (provenance says its result is baked into Base), clean (its
+/// planes hold the result), or dirty (nothing holds a result — evaluate
+/// when a mesh is present).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerDormancy {
+    /// Seeded CLEAN + badged: a legacy flat plane already contains the
+    /// output (v1 header, no planes, non-empty Base), or a previous save
+    /// listed it still-dormant (v2 header + `# dormant <id>`). Never
+    /// re-evaluates until an explicit edit.
+    Dormant,
+    /// Seeded CLEAN, unbadged: its planes loaded (or it never needed
+    /// any).
+    Clean,
+    /// Seeded DIRTY: planeless with nothing baked anywhere (v1 + empty
+    /// Base, or v2 + not listed) — evaluates normally on mesh arrival.
+    Dirty,
+}
+
+/// The dormancy decision (§6.3, pure — §8 T18/T31 pin it headless):
+/// provenance (the paint manifest's header), not absence. "Planeless"
+/// alone cannot tell legacy output baked into Base from never-evaluated.
+fn dormancy_for(
+    has_planes: bool,
+    header_is_v2: bool,
+    listed_dormant: bool,
+    base_nonempty: bool,
+) -> LayerDormancy {
+    if has_planes {
+        LayerDormancy::Clean
+    } else if header_is_v2 {
+        if listed_dormant {
+            LayerDormancy::Dormant
+        } else {
+            // A v2 planeless fill/material never evaluated (a fill first
+            // seen without a mesh, or a material whose every eval failed):
+            // its result lives nowhere, so it is dirty, never dormant.
+            LayerDormancy::Dirty
+        }
+    } else if base_nonempty {
+        // A legacy flat plane already contains every fill's and
+        // material's destructive output (Multiply and compounded publishes
+        // are not invertible): re-evaluating over it would double-count.
+        LayerDormancy::Dormant
+    } else {
+        // A v1 project with an empty Base baked nothing: the layer must
+        // evaluate (nothing to double-count).
+        LayerDormancy::Dirty
+    }
+}
+
+/// Publishes one applied mesh-map import into its layer's own plane
+/// (§5.6): decodes the PNG (the source path when the scan saw the
+/// filesystem, else the stored asset bytes through a temp file),
+/// converts straight → premultiplied, and publishes
+/// `(Layer(layer_id), tile, channel)`.
+///
+/// A size mismatch against the plane's `tile_channel_size` is refused
+/// loudly (warn log + row badge — the layer still exists, exactly like
+/// the sidecar load's loud skip); a plane-budget refusal badges the
+/// same way; an undecodable file badges too (imports store raw bytes —
+/// only PNG decodes). Import never moves an existing selection.
+fn publish_import_plane(
+    paint: &mut paint_state::PaintState,
+    store: Option<&umber_core::AssetStore>,
+    badges: &mut std::collections::HashMap<u64, String>,
+    applied: &mesh_map_import::ImportApplied,
+) {
+    use paint_state::{PaintRefusal, PlaneOwner};
+    let id = applied.layer_id;
+    let refuse = |badges: &mut std::collections::HashMap<u64, String>, key: &str| {
+        badges.insert(id, crate::i18n::tr(key));
+    };
+    // The PNG bytes: the source path decodes directly; bytes-only
+    // fixtures (drops carrying bytes, tests) round-trip through a temp
+    // file (`read_png_rgba8` is path-based — `umber-app` carries no
+    // direct PNG decoder, and adding one is a dependency change outside
+    // this kill's surface).
+    let decoded = match applied.source_path.as_ref() {
+        Some(path) => umber_export::png::read_png_rgba8(path).map_err(|e| e.to_string()),
+        None => (|| -> Result<(u32, u32, std::vec::Vec<u8>), String> {
+            let store = store.ok_or_else(|| "no project store".to_string())?;
+            let bytes = store.load(&applied.asset).map_err(|e| e.to_string())?;
+            static IMPORT_TMP_SEQ: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let seq = IMPORT_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp =
+                std::env::temp_dir().join(format!("umber-import-{}-{seq}.png", std::process::id()));
+            std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+            let decoded = umber_export::png::read_png_rgba8(&tmp).map_err(|e| e.to_string())?;
+            std::fs::remove_file(&tmp).ok();
+            Ok(decoded)
+        })(),
+    };
+    let Ok((width, height, rgba)) = decoded else {
+        log::warn!("import: layer {id} PNG undecodable; leaving the layer empty");
+        refuse(badges, "import.decode-failed");
+        return;
+    };
+    // The reader yields GPU row order (output row 0 = the file's last
+    // stored row): the plane's row order, no flip (unlike the sidecar
+    // load, whose files store GPU order and flip back).
+    let expected = paint.tile_channel_size(applied.tile, &applied.channel);
+    if (width, height) != expected {
+        let (ew, eh) = expected;
+        log::warn!(
+            "import: layer {id} is {width}x{height}, want {ew}x{eh}; leaving the layer empty"
+        );
+        badges.insert(id, crate::i18n::tr("import.size-mismatch"));
+        return;
+    }
+    let plane = material_layer::straight_to_premultiplied(&rgba);
+    match paint.publish_plane(
+        PlaneOwner::Layer(id),
+        applied.tile,
+        &applied.channel,
+        width,
+        height,
+        plane,
+    ) {
+        Ok(()) => {
+            badges.remove(&id);
+        }
+        Err(PaintRefusal::PlaneBudget { bytes }) => {
+            log::warn!("import: layer {id} plane budget refused ({bytes} bytes)");
+            badges.insert(
+                id,
+                crate::i18n::tr_args(
+                    "import.budget-refused",
+                    [("bytes", fluent::FluentValue::from(bytes as i64))],
+                ),
+            );
+        }
+        Err(other) => {
+            log::warn!("import: layer {id} publish refused ({other:?})");
+            refuse(badges, "import.decode-failed");
+        }
+    }
+}
+
+/// Reads the paint manifest's header lines (§6.1 [B2, M11]): whether the
+/// commit is v2 (any stage-4+ save), and which layer ids are still
+/// dormant. An absent or unreadable manifest counts as legacy (v1, no
+/// dormant ids) — erring toward dormancy, the byte-identical side.
+fn parse_manifest_header(text: &str) -> (bool, Vec<u64>) {
+    let mut is_v2 = false;
+    let mut dormant = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "# Umber paint commit v2" {
+            is_v2 = true;
+        } else if let Some(id) = line.strip_prefix("# dormant ") {
+            if let Ok(id) = id.trim().parse::<u64>() {
+                dormant.push(id);
+            }
+        }
+    }
+    (is_v2, dormant)
+}
+
 /// Adapts the live paint session to the headless material seam
-/// ([`material_layer::MaterialTileIo`], Kill A): sizes/tiles/readback/upload
-/// ride the session's channel-aware paths (non-side-effecting reads,
-/// materializing publishes), masks ride the session's layer-mask planes at
-/// the tile's set size, anchors resolve to the FLATTENED tile channel (the
-/// design §2 truth — which includes layers above and the material's own last
-/// output), and mesh maps are the Graph panel's flat placeholders at the set
-/// size. The bake bridge exposes no live in-memory bakes yet, so the
-/// placeholders mirror `graph_panel`'s private stand-ins (same bytes: opaque
-/// white AO, tangent-space-up Normal); unknown map names read as absent, so
-/// the eval fails loud — never a silent default.
+/// ([`material_layer::MaterialTileIo`], Kill A): sizes/tiles stay on the
+/// session's channel-aware paths (non-side-effecting reads), publishes
+/// land in the refreshed layer's OWN plane (premultiplied — never the
+/// flattened target, so refreshes replace instead of compounding),
+/// anchors resolve to the FLATTENED tile channel (the design §2 truth —
+/// which includes layers above and the material's own last output —
+/// UNTIL stage 5's downward partial flatten; a documented v1 state, not
+/// a regression), and mesh maps are the Graph panel's flat placeholders
+/// at the set size. The bake bridge exposes no live in-memory bakes yet,
+/// so the placeholders mirror `graph_panel`'s private stand-ins (same
+/// bytes: opaque white AO, tangent-space-up Normal); unknown map names
+/// read as absent, so the eval fails loud — never a silent default.
 struct PaintMaterialIo<'a> {
     paint: &'a mut paint_state::PaintState,
     set: String,
@@ -692,21 +1030,21 @@ impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
 
     fn publish_channel(
         &mut self,
+        layer: u64,
         tile: u16,
         channel: &str,
         width: u32,
         height: u32,
         rgba: Vec<u8>,
-    ) -> bool {
-        self.paint
-            .publish_fill_channel(tile, channel, width, height, rgba)
-    }
-
-    fn mask_plane(&mut self, layer_id: u64, tile: u16) -> Option<(u32, u32, Vec<u8>)> {
-        let (width, height) = self.paint.tile_size(tile);
-        self.paint
-            .layer_mask(layer_id, tile)
-            .map(|plane| (width, height, plane.to_vec()))
+    ) -> Result<(), paint_state::PaintRefusal> {
+        self.paint.publish_plane(
+            paint_state::PlaneOwner::Layer(layer),
+            tile,
+            channel,
+            width,
+            height,
+            rgba,
+        )
     }
 
     fn anchor_image(
@@ -877,6 +1215,9 @@ impl UmberApp {
             state: AppState {
                 paint,
                 graph,
+                // The Base row shows until the user hides it (stage 4's
+                // toggle — `Default` would hide it; see `reset_for_new`).
+                base_visible: true,
                 ..AppState::default()
             },
             dock,
@@ -1030,6 +1371,14 @@ impl UmberApp {
     /// Readback is blocking (one full-target copy); acceptable for a
     /// user-triggered export at the session target size.
     fn export_paint_png(&mut self) {
+        // Flush-first composite read (§1.1 [B3]): the export sees the
+        // composite (cache-else-Base), never a stale cache.
+        let tile = self.state.paint.as_ref().map(|paint| paint.active_tile());
+        if let Some(paint) = self.state.paint.as_mut() {
+            if let Some(tile) = tile {
+                let _ = paint.read_composite(tile, paint_state::BASE_COLOR_CHANNEL);
+            }
+        }
         let Some(paint) = self.state.paint.as_ref() else {
             return;
         };
@@ -1415,6 +1764,11 @@ struct PaintLoadReport {
     masks_restored: usize,
     /// Tiles skipped for size mismatch (loud — logged per tile).
     skipped: Vec<PaintTileSkip>,
+    /// Whether any loaded Base plane holds a non-zero byte (§6.3): the
+    /// dormancy decision's "Base is non-empty" arm. Scanned once at open
+    /// (a fully-transparent Base baked nothing — its fills must evaluate,
+    /// not doze).
+    base_nonempty: bool,
 }
 
 /// One Texture Sets channel row's combo state: inherit the set's size
@@ -1650,11 +2004,20 @@ struct PaintCommitEntry {
     asset: umber_core::AssetRef,
 }
 
-/// Formats a commit manifest: a `#` version header, then one
-/// `<name> <hash> <ext> <size> <temp>` line per entry (names never hold
-/// spaces — `is_paint_sidecar_name` admits none).
-fn format_paint_commit(entries: &[PaintCommitEntry]) -> String {
-    let mut out = String::from("# Umber paint commit v1\n");
+/// Formats a commit manifest: the `# Umber paint commit v2` provenance
+/// header (§6.1 [B2, M11] — every save from stage 4 on, regardless of
+/// `project.json`'s version), one `# dormant <id>` line per still-dormant
+/// layer (§6.3 — so dormancy survives a save/reopen the user never
+/// touched), then one `<name> <hash> <ext> <size> <temp>` line per entry
+/// (names never hold spaces — `is_paint_sidecar_name` admits none).
+fn format_paint_commit(entries: &[PaintCommitEntry], dormant: &[u64]) -> String {
+    let mut out = String::from("# Umber paint commit v2\n");
+    let mut dormant = dormant.to_vec();
+    dormant.sort_unstable();
+    dormant.dedup();
+    for id in dormant {
+        out.push_str(&format!("# dormant {id}\n"));
+    }
     for entry in entries {
         let (name, temp, asset) = (&entry.name, &entry.temp, &entry.asset);
         let (hash, ext, size) = (&asset.hash, &asset.ext, asset.size);
@@ -1811,10 +2174,14 @@ fn stage_paint_png(
 /// `manifest.pending` — THE commit point. Before it returns, an
 /// interrupted save leaves the old sidecar intact; after, the next open
 /// rolls the new one forward.
-fn commit_paint_manifest(project_dir: &Path, entries: &[PaintCommitEntry]) -> std::io::Result<()> {
+fn commit_paint_manifest(
+    project_dir: &Path,
+    entries: &[PaintCommitEntry],
+    dormant: &[u64],
+) -> std::io::Result<()> {
     let dir = paint_sidecar_dir(project_dir);
     let temp = dir.join(paint_temp_name("manifest.pending"));
-    std::fs::write(&temp, format_paint_commit(entries))?;
+    std::fs::write(&temp, format_paint_commit(entries, dormant))?;
     sync_file(&temp)?;
     std::fs::rename(&temp, paint_commit_pending_path(project_dir))?;
     // Past the commit point an error must not read as "not committed".
@@ -2122,8 +2489,9 @@ fn save_paint_tiles(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
     live: &std::collections::HashSet<u64>,
+    dormant: &[u64],
 ) -> usize {
-    match commit_paint_tiles(paint, project_dir, live) {
+    match commit_paint_tiles(paint, project_dir, live, dormant) {
         Ok(report) => report.staged,
         Err(e) => {
             log::warn!("paint save: not committed, the previous paint stays intact: {e:#}");
@@ -2138,6 +2506,7 @@ fn commit_paint_tiles(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
     live: &std::collections::HashSet<u64>,
+    dormant: &[u64],
 ) -> std::io::Result<PaintSaveReport> {
     std::fs::create_dir_all(paint_sidecar_dir(project_dir))?;
     // An earlier crash's pending commit lands (or its orphans go) before
@@ -2319,7 +2688,7 @@ fn commit_paint_tiles(
         )?);
         report.staged += 1;
     }
-    commit_paint_manifest(project_dir, &entries)?;
+    commit_paint_manifest(project_dir, &entries, dormant)?;
     // Committed: from here an interruption rolls forward on the next open.
     if let Err(e) = apply_paint_commit(project_dir, None) {
         log::warn!("paint save: committed, apply stopped early ({e:#}); next open finishes it");
@@ -2359,14 +2728,6 @@ fn commit_paint_tiles(
 /// never a silent resample). A project with no sidecar tiles clears the
 /// session to transparent instead of keeping the previous document's
 /// pixels. Returns how many tiles were restored and what was refused.
-fn load_paint_tiles(
-    paint: &mut paint_state::PaintState,
-    project_dir: &Path,
-    live: &std::collections::HashSet<u64>,
-) -> usize {
-    load_paint_tiles_reported(paint, project_dir, live).restored
-}
-
 /// Decodes one sidecar PNG, flipped back out of the reader's row order.
 /// `None` (logged) on a decode failure — the caller skips that artifact.
 fn decode_paint_png(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
@@ -2380,6 +2741,17 @@ fn decode_paint_png(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
         }
     }
 }
+/// One layer's open-path seeding row: everything the fill/material
+/// open-seeding needs, cloned out for the borrow-split.
+type OpenSeedRow = (
+    u64,
+    umber_core::LayerKind,
+    Option<umber_mesh::FillParams>,
+    Option<umber_core::MaterialParams>,
+    umber_core::BlendMode,
+    f32,
+);
+
 /// One loaded plane sidecar's decoded payload, keyed by its plane
 /// identity (owner, channel, tile) — the open-path plane census.
 type LoadedPlaneSidecars =
@@ -2669,6 +3041,14 @@ fn load_paint_tiles_reported(
                 continue;
             }
         }
+        // §6.3's "Base is non-empty" arm (see `PaintLoadReport`): any
+        // non-zero byte in any loaded Base plane.
+        if matches!(owner, paint_state::PlaneOwner::Base)
+            && !report.base_nonempty
+            && bytes.iter().any(|&b| b != 0)
+        {
+            report.base_nonempty = true;
+        }
         // Tiles the mapping never assigned resolve to the active set;
         // recording the resolution keeps the next save's mapping exact.
         let set = paint.set_of_tile(tile).to_string();
@@ -2890,7 +3270,26 @@ impl UmberApp {
                     // same `live` set filters orphan pixel planes in the
                     // sidecar walk itself (§6.4).
                     paint.prune_layer_masks(&live);
-                    let tiles = save_paint_tiles(paint, &dir, &live);
+                    // Still-dormant layers ride the v2 header's `# dormant`
+                    // lines (§6.3): only live fill/material ids, sorted by
+                    // the formatter.
+                    let dormant: Vec<u64> = self
+                        .state
+                        .dormant
+                        .iter()
+                        .filter(|id| {
+                            live.contains(*id)
+                                && self.state.doc.stack.layer(**id).is_some_and(|layer| {
+                                    matches!(
+                                        layer.kind,
+                                        umber_core::LayerKind::Fill
+                                            | umber_core::LayerKind::Material
+                                    )
+                                })
+                        })
+                        .copied()
+                        .collect();
+                    let tiles = save_paint_tiles(paint, &dir, &live, &dormant);
                     log::info!("paint saved: {tiles} tile(s)");
                 }
                 // The import Apply path (and future drops) now have a
@@ -2988,15 +3387,35 @@ impl UmberApp {
                     .iter()
                     .map(|layer| layer.id)
                     .collect();
+                // The paint commit's provenance header (§6.1 [B2, M11]):
+                // v2 + `# dormant` lines, or legacy (absent/unreadable
+                // counts as v1 — erring toward dormancy).
+                let (header_v2, header_dormant) =
+                    std::fs::read_to_string(paint_manifest_path(&dir))
+                        .ok()
+                        .map(|text| parse_manifest_header(&text))
+                        .unwrap_or((false, Vec::new()));
+                let mut base_nonempty = false;
                 if let Some(paint) = self.state.paint.as_mut() {
                     paint.clear_layer_planes();
-                    let tiles = load_paint_tiles(paint, &dir, &live);
-                    log::info!("paint restored: {tiles} tile(s)");
+                    let report = load_paint_tiles_reported(paint, &dir, &live);
+                    base_nonempty = report.base_nonempty;
+                    log::info!("paint restored: {} tile(s)", report.restored);
                     // Masks restore session-side keyed by layer id: drop
                     // whatever the loaded stack no longer holds, so a
                     // previous document's masks never gate the new one.
                     paint.prune_layer_masks(&live);
                 }
+                // Session pixel state keyed by layer id dies with the
+                // document: queued import publishes (another document's
+                // ids), Base visibility, dormancy, badges and the snapshot
+                // baseline all reset.
+                self.state.mesh_import.to_publish.clear();
+                self.state.base_visible = true;
+                self.state.dormant.clear();
+                self.state.prev_snapshot = None;
+                self.state.fill_badges.clear();
+                self.state.import_badges.clear();
                 if let Some(doc) = model.graphs_mtlx.first() {
                     if self.state.graph.load_mtlx(doc) {
                         log::info!("project graph restored into the Graph panel");
@@ -3013,26 +3432,89 @@ impl UmberApp {
                 self.state.material_defs = model.material_defs_mtlx.clone();
                 // Project-open seeding is CLEAN (design §2): the paint
                 // sidecars already hold the published result, so
-                // re-publishing on open would compound every non-Normal
-                // material on every open. Only a CHANGED state dirties
-                // (through `sync`, the `ensure` path). Without a paint
-                // session there is nothing to size against — states
-                // materialize dirty at runtime instead.
+                // re-publishing on open would double-count over the legacy
+                // Base. `ensure_open` inserts every fill/material state
+                // clean; then §6.3's dormancy decides (§8 T18/T31):
+                // dormant layers stay clean AND badged (their pre-v2
+                // result lives in Base — never re-evaluated until an
+                // explicit edit), v2 planeless layers seed DIRTY (their
+                // result lives nowhere). Without a paint session there is
+                // nothing to size against — states materialize dirty at
+                // runtime instead.
                 if let Some(paint) = self.state.paint.as_ref() {
                     let size = paint.size_of_set(&name);
-                    for layer in self.state.doc.stack.layers.iter() {
-                        if layer.kind == umber_core::LayerKind::Material {
-                            if let Some(params) = layer.material.as_ref() {
-                                let def = self
-                                    .state
-                                    .material_defs
-                                    .get(&params.material_id)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                self.state
-                                    .material_states
-                                    .ensure_open(layer.id, params, &def, size);
+                    let planed: std::collections::HashSet<u64> = paint
+                        .planes_present()
+                        .into_iter()
+                        .filter_map(|(owner, _, _)| match owner {
+                            paint_state::PlaneOwner::Layer(id) => Some(id),
+                            paint_state::PlaneOwner::Base => None,
+                        })
+                        .collect();
+                    // Borrow-split: the layer rows clone out first (the
+                    // seeding mutates sibling state below).
+                    let rows: Vec<OpenSeedRow> = self
+                        .state
+                        .doc
+                        .stack
+                        .layers
+                        .iter()
+                        .map(|layer| {
+                            (
+                                layer.id,
+                                layer.kind.clone(),
+                                layer.fill.clone(),
+                                layer.material.clone(),
+                                layer.blend_mode,
+                                layer.opacity,
+                            )
+                        })
+                        .collect();
+                    for (id, kind, fill, material, blend, opacity) in &rows {
+                        let has_planes = planed.contains(id);
+                        let listed = header_dormant.contains(id);
+                        match kind {
+                            umber_core::LayerKind::Fill => {
+                                if let Some(params) = fill {
+                                    self.state
+                                        .fill_states
+                                        .ensure_open(*id, params, *blend, *opacity);
+                                    match dormancy_for(has_planes, header_v2, listed, base_nonempty)
+                                    {
+                                        LayerDormancy::Dormant => {
+                                            self.state.dormant.insert(*id);
+                                        }
+                                        LayerDormancy::Dirty => {
+                                            self.state.fill_states.mark_dirty(*id);
+                                        }
+                                        LayerDormancy::Clean => {}
+                                    }
+                                }
                             }
+                            umber_core::LayerKind::Material => {
+                                if let Some(params) = material {
+                                    let def = self
+                                        .state
+                                        .material_defs
+                                        .get(&params.material_id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    self.state
+                                        .material_states
+                                        .ensure_open(*id, params, &def, size);
+                                    match dormancy_for(has_planes, header_v2, listed, base_nonempty)
+                                    {
+                                        LayerDormancy::Dormant => {
+                                            self.state.dormant.insert(*id);
+                                        }
+                                        LayerDormancy::Dirty => {
+                                            self.state.material_states.mark_dirty(*id);
+                                        }
+                                        LayerDormancy::Clean => {}
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     // The size-census baseline: set now, so the first frame's
@@ -3307,6 +3789,10 @@ impl eframe::App for UmberApp {
                 mesh_import: &mut self.state.mesh_import,
                 psd_import: &mut self.state.psd_import,
                 spp_import: &mut self.state.spp_import,
+                base_visible: &mut self.state.base_visible,
+                fill_badges: &self.state.fill_badges,
+                import_badges: &self.state.import_badges,
+                dormant: &self.state.dormant,
                 store: store.as_ref(),
                 hdr_mode: &mut self.hdr_mode,
                 stylus_pressure,
@@ -3352,10 +3838,13 @@ impl eframe::App for UmberApp {
         }
 
         // Fill-layer refresh: adopt every doc-side fill change, then
-        // re-evaluate and stage the tiles of any layer the adoption pass
+        // re-evaluate and publish the tiles of any layer the adoption pass
         // marked (panel edits, undo/redo and journal replays all land in
         // Layer::fill before this point in the frame — one adoption link
-        // covers every producer of fill-param changes).
+        // covers every producer of fill-param changes). Each refresh
+        // REPLACES the layer's own planes (re-eval is idempotent, hides
+        // un-publish — §5.1); the end-of-update flush composites them the
+        // same frame ([M7]).
         if let Some(paint) = self.state.paint.as_mut() {
             let layers: Vec<_> = self
                 .state
@@ -3375,6 +3864,11 @@ impl eframe::App for UmberApp {
             for (id, params, blend, opacity) in &layers {
                 self.state.fill_states.ensure(*id, params, *blend, *opacity);
             }
+            // Budget-blocked fills retry when bytes fell (a plane freed);
+            // param edits requeue through `ensure` above.
+            self.state
+                .fill_states
+                .retry_budget_freed(paint.plane_bytes());
             if !self.state.fill_states.dirty.is_empty() {
                 if let Some(mesh) = self.state.mesh.clone() {
                     let dirty: Vec<u64> = self.state.fill_states.dirty.drain(..).collect();
@@ -3394,11 +3888,25 @@ impl eframe::App for UmberApp {
                         let Some(state) = self.state.fill_states.map.get_mut(&layer) else {
                             continue;
                         };
-                        let staged = fill_layer::refresh_fill_layer(
-                            state, &mesh, paint, &tiles, 1024, &symmetry,
-                        );
-                        if staged.is_empty() {
+                        let staged =
+                            fill_layer::refresh_fill_layer(state, &mesh, paint, &tiles, &symmetry);
+                        // A refreshed dormant layer wakes: its old Base
+                        // contribution stays, and the badge said so
+                        // beforehand (§6.3).
+                        self.state.dormant.remove(&layer);
+                        if staged.is_empty() && state.budget_blocked().is_none() {
                             log::warn!("fill refresh for layer {layer} staged no tiles");
+                        }
+                        if let Some(bytes) = state.budget_blocked() {
+                            self.state.fill_badges.insert(
+                                layer,
+                                crate::i18n::tr_args(
+                                    "layers.budget-blocked",
+                                    [("bytes", fluent::FluentValue::from(bytes as i64))],
+                                ),
+                            );
+                        } else {
+                            self.state.fill_badges.remove(&layer);
                         }
                     }
                 }
@@ -3409,15 +3917,15 @@ impl eframe::App for UmberApp {
         }
 
         // Dynamic-material refresh (Kill B, `docs/specs/dynamic-materials-
-        // design.md` §2): adopt every doc-side material change, then drain
-        // the dirty queue bottom-to-top through the headless driver. Panel
-        // edits, undo/redo replays of `SetMaterial`, "Save as material"
-        // definition writes and resizes all land in `Layer::material` /
-        // `material_defs` before this point in the frame — one adoption pass
-        // covers every producer. Publishes destructively into the flattened
-        // per-channel tile pool (the fill precedent's truth: re-eval
-        // compounds, nothing un-publishes — see `material_layer`'s docs).
-        // Evaluates at the set size, never a literal.
+        // design.md` §2, stage-4 planes): adopt every doc-side material
+        // change, then drain the dirty queue bottom-to-top through the
+        // headless driver. Panel edits, undo/redo replays of `SetMaterial`,
+        // "Save as material" definition writes and resizes all land in
+        // `Layer::material` / `material_defs` before this point in the
+        // frame — one adoption pass covers every producer. Each refresh
+        // REPLACES the layer's own planes (re-eval is idempotent, hides
+        // un-publish — §5.2); the end-of-update flush composites them the
+        // same frame ([M7]). Evaluates at the set size, never a literal.
         if let Some(paint) = self.state.paint.as_mut() {
             let set_name = paint.active_set().to_string();
             let set_size = paint.size_of_set(&set_name);
@@ -3468,6 +3976,11 @@ impl eframe::App for UmberApp {
                     self.state.material_states.mark_dirty(layer.id);
                 }
             }
+            // Budget-blocked materials retry when bytes fell (a plane
+            // freed); param edits requeue through `ensure` above.
+            self.state
+                .material_states
+                .retry_budget_freed(paint.plane_bytes());
             if !self.state.material_states.dirty_ids().is_empty() {
                 let registry = umber_graph::full_registry();
                 let mut io = PaintMaterialIo {
@@ -3502,11 +4015,26 @@ impl eframe::App for UmberApp {
                             self.state.material_badges.insert(id, msg.clone());
                             status = Some(format!("material layer {id}: {msg}"));
                         }
+                        material_layer::MaterialResult::BudgetBlocked { bytes } => {
+                            // The existing badge slot names the block (the
+                            // fill precedent's row badge is `fill_badges` —
+                            // materials reuse this one). The layer stays
+                            // dirty and retries per §1.3, never every frame.
+                            let line = crate::i18n::tr_args(
+                                "layers.budget-blocked",
+                                [("bytes", fluent::FluentValue::from(*bytes as i64))],
+                            );
+                            log::warn!("material layer {id} refresh blocked: {line}");
+                            self.state.material_badges.insert(id, line.clone());
+                            status = Some(format!("material layer {id}: {line}"));
+                        }
                         material_layer::MaterialResult::Refreshed {
                             channels,
                             ignored_undeclared,
                         } => {
                             self.state.material_badges.remove(&id);
+                            // A refreshed dormant layer wakes (§6.3).
+                            self.state.dormant.remove(&id);
                             // Per-channel outcomes in declaration order — the
                             // doc's status-line contract. Skips (disabled/
                             // uniform) are named once per drain; publishes
@@ -3545,6 +4073,71 @@ impl eframe::App for UmberApp {
             }
         }
 
+        // Composite-on-read flush (§4.1 [M7]): at the END of the update,
+        // AFTER the fill AND material refresh blocks — the producers
+        // publish `WriteRegion`s into per-plane queues, and the composite
+        // reads plane textures, so queued-but-unprocessed commands would
+        // be invisible without the drain-first flush. Strokes show the
+        // same frame they splat; fills and materials show the same frame
+        // they refresh (never one frame late).
+        if let Some(paint) = self.state.paint.as_mut() {
+            // The displayed `(tile, channel)`s ([M8]'s coalescing): the
+            // active tile's baseColor + height (the viewport's binds and
+            // the UV canvas's — which shows the active baseColor too).
+            let active = paint.active_tile();
+            let displayed = vec![
+                (active, paint_state::BASE_COLOR_CHANNEL.to_string()),
+                (active, paint_state::HEIGHT_CHANNEL.to_string()),
+            ];
+            let snapshot = build_composite_snapshot(
+                &self.state.doc.stack,
+                &self.state.material_states,
+                self.state.base_visible,
+                displayed,
+            );
+            // Metadata edits surface through the snapshot diff (order,
+            // visibility, opacity, blend, mask attach/detach/enable,
+            // channel params, Base visibility): changed owners mark
+            // `Full` (§4.2). Removed ids retire (paint) or drop (eval).
+            if let Some(prev) = self.state.prev_snapshot.as_ref() {
+                for owner in paint_state::CompositeSnapshot::full_owners(prev, &snapshot) {
+                    paint.mark_owner_full(owner);
+                }
+                paint
+                    .note_removed_layers(&paint_state::CompositeSnapshot::removed(prev, &snapshot));
+            }
+            self.state.prev_snapshot = Some(snapshot.clone());
+            // §5.6 import-as-producer: every applied import publishes its
+            // decoded PNG into the new layer's own plane (or refuses
+            // loudly, leaving the layer empty — the row badges it).
+            let store = self
+                .state
+                .project_dir
+                .as_ref()
+                .map(|dir| umber_core::AssetStore::new(dir));
+            let imports = std::mem::take(&mut self.state.mesh_import.to_publish);
+            for applied in &imports {
+                publish_import_plane(
+                    paint,
+                    store.as_ref(),
+                    &mut self.state.import_badges,
+                    applied,
+                );
+            }
+            paint.flush_composite(&snapshot);
+            // Tombstone losses surface on the Layers rows (undo revives
+            // EMPTY — the `layers.tombstone-lost` line).
+            if let Some(lost) = paint.take_tombstone_notice() {
+                self.state.import_badges.insert(
+                    lost,
+                    crate::i18n::tr_args(
+                        "layers.tombstone-lost",
+                        [("layer", fluent::FluentValue::from(lost as i64))],
+                    ),
+                );
+            }
+        }
+
         // Perf HUD (read-only overlay, `perf` feature only): frame ms from
         // egui's input-time delta, dab throughput from FrameStats deltas,
         // paint-target bytes, undo depth. No budget enforcement — display
@@ -3570,7 +4163,7 @@ impl eframe::App for UmberApp {
                     .state
                     .paint
                     .as_ref()
-                    .map(|p| p.paint_target().byte_len())
+                    .map(|p| p.plane_bytes())
                     .unwrap_or(0);
                 let undo_depth = self.state.doc.history.len();
                 egui::Window::new("Perf HUD").show(ui.ctx(), |ui| {
@@ -3578,7 +4171,7 @@ impl eframe::App for UmberApp {
                     ui.label(format!(
                         "dabs this frame: {dabs_delta} (total {dabs_total})"
                     ));
-                    ui.label(format!("paint target: {target_bytes} bytes"));
+                    ui.label(format!("plane bytes: {target_bytes} bytes"));
                     ui.label(format!("undo depth: {undo_depth}"));
                 });
             }
@@ -3682,6 +4275,11 @@ mod new_project_tests {
         });
         assert_eq!(state.postfx.effects.len(), 1);
         state.project_dir = Some(PathBuf::from("/tmp/umber-new-project-test"));
+        // Stage-4 session pixel state, dirtied away from reset.
+        state.base_visible = false;
+        state.dormant.insert(3);
+        state.fill_badges.insert(3, "blocked".to_string());
+        state.import_badges.insert(5, "refused".to_string());
 
         state.reset_for_new();
 
@@ -3718,6 +4316,20 @@ mod new_project_tests {
         );
         assert_eq!(state.postfx, umber_gpu::postfx::PostChain::new());
         assert!(state.project_dir.is_none(), "a new project is unsaved");
+        assert!(state.base_visible, "Base shows again on a new document");
+        assert!(state.dormant.is_empty(), "dormancy dies with its document");
+        assert!(
+            state.prev_snapshot.is_none(),
+            "the snapshot baseline restarts"
+        );
+        assert!(
+            state.fill_badges.is_empty(),
+            "fill badges die with their document"
+        );
+        assert!(
+            state.import_badges.is_empty(),
+            "import badges die with their document"
+        );
     }
 
     /// Stage-2 §8 T30 (`reset_for_new` half): document B's Fill 3 must not
@@ -3742,6 +4354,131 @@ mod new_project_tests {
             state.fill_states.dirty.is_empty(),
             "no fill dirty queued survives a new document"
         );
+    }
+}
+
+/// Per-layer pool stage-4 shell tests (§8 T18/T31 + snapshot): the
+/// dormancy decision, the v2 manifest header, and the composite-snapshot
+/// builder — all headless (no GPU session needed).
+#[cfg(test)]
+mod pool_stage4_tests {
+    use super::*;
+
+    #[test]
+    fn dormancy_keys_on_provenance_not_absence() {
+        // §8 T18 [B2]: a v1 project (v1 manifest header) with a Fill
+        // layer, a mesh and non-empty Base opens dormant — clean,
+        // planeless, never re-evaluated (no double-count).
+        assert_eq!(
+            dormancy_for(false, false, false, true),
+            LayerDormancy::Dormant
+        );
+        // ... and saving while still dormant writes the v2 header plus
+        // `# dormant <id>`, so reopening is dormant again.
+        let text = format_paint_commit(&[], &[7]);
+        assert_eq!(text, "# Umber paint commit v2\n# dormant 7\n");
+        let (is_v2, dormant) = parse_manifest_header(&text);
+        assert!(is_v2);
+        assert_eq!(dormant, vec![7]);
+        assert_eq!(
+            dormancy_for(false, true, true, true),
+            LayerDormancy::Dormant,
+            "the listed id reopens dormant"
+        );
+        // Loaded planes seed clean (their bytes hold the result).
+        assert_eq!(dormancy_for(true, false, false, true), LayerDormancy::Clean);
+        assert_eq!(dormancy_for(true, true, false, false), LayerDormancy::Clean);
+        // A v1 project with an EMPTY Base baked nothing: dirty, so the
+        // layer evaluates on mesh arrival (nothing to double-count).
+        assert_eq!(
+            dormancy_for(false, false, false, false),
+            LayerDormancy::Dirty
+        );
+    }
+
+    #[test]
+    fn v2_planeless_fill_is_not_dormant() {
+        // §8 T31 [M11]: a v2 header with a planeless Fill NOT listed
+        // dormant (never evaluated, or every eval failed) opens dirty —
+        // and its row shows no dormant badge.
+        assert_eq!(dormancy_for(false, true, false, true), LayerDormancy::Dirty);
+        assert_eq!(
+            dormancy_for(false, true, false, false),
+            LayerDormancy::Dirty
+        );
+    }
+
+    #[test]
+    fn manifest_header_parses_v2_and_dormant_ids() {
+        assert_eq!(
+            parse_manifest_header("# Umber paint commit v2\ntile-1001.png h png 1 t\n"),
+            (true, vec![])
+        );
+        assert_eq!(
+            parse_manifest_header("# Umber paint commit v2\n# dormant 3\n# dormant 9\n"),
+            (true, vec![3, 9])
+        );
+        // Legacy: v1, absent, unreadable, or malformed dormant lines.
+        assert_eq!(
+            parse_manifest_header("# Umber paint commit v1\n"),
+            (false, vec![])
+        );
+        assert_eq!(parse_manifest_header(""), (false, vec![]));
+        assert_eq!(
+            parse_manifest_header("# Umber paint commit v2\n# dormant x\n"),
+            (true, vec![])
+        );
+        // `parse_paint_commit` still skips every `#` line for the artifact
+        // table (the header is provenance, never artifacts).
+        let text = format_paint_commit(&[], &[3, 9]);
+        assert_eq!(parse_paint_commit(&text), Some(Vec::new()));
+    }
+
+    #[test]
+    fn snapshot_orders_base_first_and_expands_materials() {
+        use umber_core::layers::{LayerKind, LayerStack};
+        let mut stack = LayerStack::new();
+        let paint = stack.add_layer("P", LayerKind::Paint);
+        stack.set_opacity(paint, 0.5);
+        let fill = stack.add_layer("F", LayerKind::Fill);
+        let material = stack.add_layer("M", LayerKind::Material);
+        let _folder = stack.add_layer("G", LayerKind::Folder { passthrough: true });
+        let _instance = stack.add_layer("I", LayerKind::Instance { source_id: paint });
+        // Material plans: one contributing channel (Multiply 0.5).
+        let mut states = material_layer::MaterialLayerStates::default();
+        let params = umber_core::MaterialParams {
+            material_id: "umber.m".into(),
+            channels: vec![umber_core::layers::MaterialChannel {
+                name: "baseColor".into(),
+                blend: umber_core::BlendMode::Multiply,
+                opacity: 0.5,
+                enabled: true,
+            }],
+            params: vec![],
+        };
+        stack.set_material(material, params.clone());
+        states.ensure(material, &params, "", (64, 64));
+        // The builder reads whatever the states carry: empty before any
+        // refresh (a never-evaluated material contributes no entries —
+        // exactly like `pixels: None`).
+        let snapshot =
+            build_composite_snapshot(&stack, &states, true, vec![(1001, "baseColor".into())]);
+        let owners: Vec<Option<u64>> = snapshot.layers.iter().map(|layer| layer.layer_id).collect();
+        // Base first, then stack order; folders and instances carry no
+        // entry (their planes can never exist).
+        assert_eq!(owners, vec![None, Some(paint), Some(fill), Some(material)]);
+        assert!(snapshot.base_visible);
+        // The paint row carries the layer's own blend/opacity...
+        let paint_row = &snapshot.layers[1];
+        assert_eq!(paint_row.opacity, 0.5);
+        // ... while the material row expands per channel (none yet — the
+        // layer never refreshed, so nothing contributes).
+        let material_row = &snapshot.layers[3];
+        assert!(material_row.material_channels.as_ref().unwrap().is_empty());
+        // Hidden Base flips the row's visibility (the flush marks Full).
+        let hidden = build_composite_snapshot(&stack, &states, false, vec![]);
+        assert!(!hidden.layers[0].visible);
+        assert!(!hidden.base_visible);
     }
 }
 
@@ -3887,7 +4624,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]);
         assert_eq!(saved, 1, "a single-tile session stores exactly tile 1001");
         assert!(paint_tile_path(&dir, umber_mesh::FIRST_TILE).exists());
         // Store-routed: the commit applied (no pending manifest, no temps)
@@ -3910,8 +4647,8 @@ mod paint_persistence_tests {
 
         let mut fresh =
             paint_state::PaintState::new(device, queue).expect("fresh paint state builds");
-        let restored = load_paint_tiles(&mut fresh, &dir, &no_live_layers());
-        assert_eq!(restored, 1);
+        let restored = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
+        assert_eq!(restored.restored, 1);
         let after = fresh
             .read_tile(umber_mesh::FIRST_TILE)
             .expect("fresh readback succeeds");
@@ -4108,7 +4845,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("perset-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]);
         assert_eq!(saved, 2, "both sets' tiles persist");
         assert!(paint_tile_path(&dir, 1001).exists());
         assert!(paint_tile_path(&dir, 1002).exists());
@@ -4136,6 +4873,9 @@ mod paint_persistence_tests {
                 restored: 2,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture paints Base (non-zero bytes): the §6.3
+                // non-empty arm fires.
+                base_nonempty: true,
             }
         );
         assert_eq!(fresh.size_of_set("Body"), (2048, 2048));
@@ -4220,7 +4960,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("per-channel-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]);
         assert_eq!(saved, 2, "baseColor + height persist as two artifacts");
         // baseColor keeps the v2 FLAT layout byte-for-byte
         // (paint/tile-1001.png — paint_tile_path, deliberately
@@ -4265,6 +5005,9 @@ mod paint_persistence_tests {
                 restored: 2,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture paints Base (non-zero bytes): the §6.3
+                // non-empty arm fires.
+                base_nonempty: true,
             }
         );
         assert_eq!(fresh.channels_present(1001), vec!["height".to_string()]);
@@ -4309,7 +5052,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("per-channel-size-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]);
         assert_eq!(saved, 2, "baseColor + height persist as two artifacts");
         // The mapping pins the override line exactly (sorted between the
         // size and the assignment — the codec test pins the grammar; this
@@ -4335,6 +5078,9 @@ mod paint_persistence_tests {
                 restored: 2,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture paints Base (non-zero bytes): the §6.3
+                // non-empty arm fires.
+                base_nonempty: true,
             }
         );
         assert_eq!(
@@ -4479,7 +5225,10 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("channel-migration");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir, &no_live_layers()), 1);
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]),
+            1
+        );
         assert!(
             !paint_sidecar_dir(&dir).join("height").exists(),
             "no channel was routed, so no channel directory is written"
@@ -4509,6 +5258,9 @@ mod paint_persistence_tests {
                 restored: 1,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture paints Base (non-zero bytes): the §6.3
+                // non-empty arm fires.
+                base_nonempty: true,
             }
         );
         assert!(
@@ -4553,7 +5305,10 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("legacy-migration");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir, &no_live_layers()), 1);
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]),
+            1
+        );
         std::fs::remove_file(paint_set_sizes_path(&dir)).expect("a v1 project has no mapping");
         assert_eq!(
             std::fs::read_to_string(paint_target_size_path(&dir)).unwrap(),
@@ -4571,6 +5326,9 @@ mod paint_persistence_tests {
                 restored: 1,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture paints Base (non-zero bytes): the §6.3
+                // non-empty arm fires.
+                base_nonempty: true,
             }
         );
         assert_eq!(fresh.target_size(), (512, 512));
@@ -4598,6 +5356,9 @@ mod paint_persistence_tests {
                 restored: 0,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture's Base is empty (fully transparent): the
+                // dormancy decision's non-empty arm stays off.
+                base_nonempty: false,
             }
         );
         assert_eq!(
@@ -4735,16 +5496,17 @@ mod paint_persistence_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let live = live_layers(&[7]);
         assert_eq!(
-            save_paint_tiles(&mut paint, &dir, &live),
+            save_paint_tiles(&mut paint, &dir, &live, &[]),
             2,
             "Base + one layer plane persist as two artifacts"
         );
-        // The manifest header STAYS v1 (the v2 header is stage 4's — §6.1).
+        // The manifest header is v2 from stage 4 on (§6.1 [B2, M11] —
+        // every save, regardless of `project.json`'s version).
         let manifest = std::fs::read_to_string(paint_manifest_path(&dir)).unwrap();
         assert_eq!(
             manifest.lines().next(),
-            Some("# Umber paint commit v1"),
-            "stage 2 never writes the v2 header"
+            Some("# Umber paint commit v2"),
+            "stage 4 writes the v2 header on every save"
         );
         let entries = parse_paint_commit(&manifest).expect("the applied manifest parses");
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
@@ -4774,6 +5536,9 @@ mod paint_persistence_tests {
                 restored: 2,
                 masks_restored: 0,
                 skipped: Vec::new(),
+                // The fixture paints Base (non-zero bytes): the §6.3
+                // non-empty arm fires.
+                base_nonempty: true,
             }
         );
         let after_base = fresh
@@ -4834,7 +5599,7 @@ mod paint_persistence_tests {
 
         let dir_a = unique_temp_dir("saveas-a");
         std::fs::create_dir_all(&dir_a).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir_a, &live), 3);
+        assert_eq!(save_paint_tiles(&mut paint, &dir_a, &live, &[]), 3);
 
         // Corrupt L2's sidecar on disk, then save in place: L2 reads back
         // (hash mismatch), Base + L1 skip (same dir, same bytes).
@@ -4848,7 +5613,8 @@ mod paint_persistence_tests {
             umber_export::png::Transfer::Linear,
         )
         .expect("clobber writes");
-        let report = commit_paint_tiles(&mut paint, &dir_a, &live).expect("in-place save commits");
+        let report =
+            commit_paint_tiles(&mut paint, &dir_a, &live, &[]).expect("in-place save commits");
         assert_eq!(
             report,
             PaintSaveReport {
@@ -4866,7 +5632,7 @@ mod paint_persistence_tests {
         );
 
         // In-place save right after that commit reads back NOTHING.
-        let report = commit_paint_tiles(&mut paint, &dir_a, &live).expect("re-save commits");
+        let report = commit_paint_tiles(&mut paint, &dir_a, &live, &[]).expect("re-save commits");
         assert_eq!(
             report,
             PaintSaveReport {
@@ -4894,7 +5660,7 @@ mod paint_persistence_tests {
         paint.process_pending().expect("the L1 change lands");
         let dir_b = unique_temp_dir("saveas-b");
         std::fs::create_dir_all(&dir_b).unwrap();
-        let report = commit_paint_tiles(&mut paint, &dir_b, &live).expect("save-as commits");
+        let report = commit_paint_tiles(&mut paint, &dir_b, &live, &[]).expect("save-as commits");
         assert_eq!(
             report,
             PaintSaveReport {
@@ -4977,7 +5743,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("base-not-cache");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir, &live), 2);
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &live, &[]), 2);
 
         let (width, height, file_bytes) =
             decode_paint_png(&paint_tile_path(&dir, 1001)).expect("the flat tile decodes");
@@ -5043,7 +5809,10 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("layer-dirs");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir, &live_layers(&[7, 9])), 3);
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &live_layers(&[7, 9]), &[]),
+            3
+        );
         let l7 = paint_sidecar_dir(&dir).join("layers/7/baseColor/tile-1001.png");
         let l9 = paint_sidecar_dir(&dir).join("layers/9/baseColor/tile-1001.png");
         assert!(l7.exists());
@@ -5051,7 +5820,10 @@ mod paint_persistence_tests {
         let l9_bytes = std::fs::read(&l9).unwrap();
 
         // Save → save keeps every paint/layers file byte-identical.
-        assert_eq!(save_paint_tiles(&mut paint, &dir, &live_layers(&[7, 9])), 3);
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &live_layers(&[7, 9]), &[]),
+            3
+        );
         assert!(l7.exists());
         assert_eq!(
             std::fs::read(&l9).unwrap(),
@@ -5062,7 +5834,7 @@ mod paint_persistence_tests {
         // Delete layer 7 (its planes go orphan), then save: no
         // paint/layers/7 directory survives, and layer 9's does.
         assert_eq!(
-            save_paint_tiles(&mut paint, &dir, &live_layers(&[9])),
+            save_paint_tiles(&mut paint, &dir, &live_layers(&[9]), &[]),
             2,
             "the orphan plane never stages"
         );
@@ -5260,7 +6032,7 @@ mod paint_persistence_tests {
             entries.push(stage_paint_bytes(project, &store, name, bytes)?);
         }
         if used == budget {
-            let text = format_paint_commit(&entries);
+            let text = format_paint_commit(&entries, &[]);
             std::fs::write(
                 dir.join(paint_temp_name("manifest.pending")),
                 &text.as_bytes()[..text.len() / 2],
@@ -5268,7 +6040,7 @@ mod paint_persistence_tests {
             return Err(std::io::Error::other("injected fault"));
         }
         used += 1;
-        commit_paint_manifest(project, &entries)?;
+        commit_paint_manifest(project, &entries, &[])?;
         apply_paint_commit(project, Some(budget - used)).map(|_| ())
     }
 
@@ -5307,10 +6079,10 @@ mod paint_persistence_tests {
             temp: "tile-1001.png.tmp.77".to_string(),
             asset: asset.clone(),
         }];
-        let text = format_paint_commit(&entries);
+        let text = format_paint_commit(&entries, &[]);
         let hash = "ab".repeat(32);
         let line = format!("tile-1001.png {hash} png 42 tile-1001.png.tmp.77\n");
-        assert_eq!(text, format!("# Umber paint commit v1\n{line}"));
+        assert_eq!(text, format!("# Umber paint commit v2\n{line}"));
         assert_eq!(parse_paint_commit(&text), Some(entries));
         // Any bad line refuses the WHOLE manifest (never half-applied):
         // an escaping name, a temp for another name, a non-temp, a short
@@ -5428,11 +6200,14 @@ mod paint_persistence_tests {
         paint.process_pending().expect("upload lands");
         let dir = unique_temp_dir("post-commit-crash");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir, &no_live_layers()), 1);
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]),
+            1
+        );
 
         let store = umber_core::AssetStore::new(&dir);
         let entry = stage_paint_png(&dir, &store, "tile-1001.png", 512, 512, &new).unwrap();
-        commit_paint_manifest(&dir, &[entry]).unwrap();
+        commit_paint_manifest(&dir, &[entry], &[]).unwrap();
         assert!(paint_commit_pending_path(&dir).exists());
 
         let mut fresh = paint_state::PaintState::with_target_size(device, queue, 512)
@@ -5461,7 +6236,7 @@ mod paint_persistence_tests {
             .iter()
             .map(|(name, bytes)| stage_paint_bytes(&project, &store, name, bytes).unwrap())
             .collect();
-        commit_paint_manifest(&project, &entries).unwrap();
+        commit_paint_manifest(&project, &entries, &[]).unwrap();
         std::fs::remove_file(paint_sidecar_dir(&project).join(&entries[0].temp)).unwrap();
         assert!(apply_paint_commit(&project, Some(0)).is_err());
         let torn_restore = paint_temp_name("tile-1001.png.restore");

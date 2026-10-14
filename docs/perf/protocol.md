@@ -69,7 +69,6 @@ UMBER_I2P_EVENTS=5000 UMBER_I2P_JSON=i2p.json \
   with every row (lavapipe and the dev GPU are separate baselines).
 
 ## The reference-scene bench (viewport row)
-
 `crates/umber-gpu/src/ref_scene.rs`, behind umber-gpu's `perf` feature:
 
 ```
@@ -94,6 +93,41 @@ UMBER_REF_SCENE_FRAMES=1000 UMBER_REF_SCENE_JSON=ref-scene.json \
   type, backend). Set `UMBER_REF_SCENE_JSON` to also write the JSON to a
   file. Record the adapter with every row, since lavapipe and the dev GPU
   are separate baselines.
+
+## The per-layer-pool stage-4 gate ([M8], composite-on-read)
+
+Stage 4 replaces the flat-target splat with splat-plus-region-recomposite.
+Two scenarios gate the landing (both pass/fail against the 16.7 ms frame
+budget — the arithmetic does NOT prove them inside budget, so measurement
+does):
+
+1. **Metadata drag**: drag the opacity slider of a 5-channel MASKED
+   material at 4K (all channels enabled, every entry masked). egui emits
+   one change per frame; uncoalesced that is `L_c × 16.8M × channels ×
+   tiles` per frame plus every masked entry's mask upload. Coalesced
+   (§4.2: at most ONE `Full` per DISPLAYED `(tile, channel)` per frame)
+   it costs ≤ 3 full-tile recomposites per frame; everything else stays
+   dirty and composites on read. Procedure: `cargo test -p umber-app
+   --features perf --release pool_drag` (harness TBD — same shape as the
+   input-to-photon session: synthetic slider values through the real
+   adoption + refresh + flush path, `device.poll(Wait)` per frame).
+   Gate: P95 frame < 16.7 ms.
+2. **X-symmetry stroke near the tile edge**: a mirrored pair at x≈100 and
+   x≈3996 on one 4K `(tile, channel)` must stay TWO rects (≤ 8 per
+   `(tile, channel)`), costing `2 × L_c × |R|`, not a near-full-width
+   union. Past 8 rects the closest pair merges (smooth degrade toward
+   `Full`). Procedure: same harness family (`pool_mirror`), one stroke
+   with X symmetry straddling the edge, per-frame flush wall time.
+   Gate: P95 frame < 16.7 ms, and the dirt census asserts 2 rects (unit:
+   `distant_footprints_stay_two_rects` in `paint_state.rs`).
+
+Both harnesses are nightly-gated like the soak tests (NOT per-commit);
+their rows land in the baselines table below with the hardware class
+(lavapipe and the dev GPU are separate baselines). Until the harnesses
+land, the gate is the two unit pins (rect count + coalescing) plus the
+input-to-photon re-measurement under composite-on-read (the stroke frame
+is now splat + region recomposite — re-run the i2p session before stage
+4 lands and record the row).
 
 ## Baselines (fill as instrumentation lands)
 

@@ -9,33 +9,51 @@
 //! testable without a GPU session. Kill B owns the frame wiring (`main.rs`),
 //! the Layers-panel rows and the badges.
 //!
-//! # Data flow (the fill precedent's destructive publish)
+//! # Data flow (per-layer planes — the stage-4 publish)
 //!
-//! There is no per-layer stack walk: the pool holds one flattened target per
-//! tile and channel. A refresh, per dirty material layer, per present tile,
-//! per declared + enabled channel: `read_channel_tile` (the CURRENT
-//! flattened texels) → composite the resampled material output over it
-//! (§1.3, one composite per channel) → `publish_fill_channel`.
+//! There is no destructive read-modify-publish: each material layer owns
+//! its planes, `(Layer(id), tile, channel)`, and a refresh REPLACES them
+//! whole. Per dirty material layer, per present tile, per declared +
+//! enabled + allowed-blend channel: eval once at the SET size, resample
+//! to the channel size, convert straight → premultiplied, `publish_plane`.
+//! The per-channel blend/opacity/enable apply at COMPOSITE time (the
+//! shell's snapshot carries one entry per contributing channel, §5.2).
 //!
-//! # v1 boundaries (each fixed only by per-layer pool storage)
+//! # v1 boundaries (warts 1–3 CLOSED by per-layer planes; wart 4 lands in
+//! stage 5)
 //!
-//! * Stack order is not preserved: a material composites over whatever the
-//!   tile holds when it refreshes. Dirty layers refresh bottom-to-top.
-//! * Re-eval compounds (Multiply darkens each time — pinned by test).
-//! * Nothing un-publishes: hiding, disabling, deleting or failing stops
-//!   FUTURE publishes; published pixels stay. Undo of `SetMaterial` restores
-//!   PARAMS, not pixels.
-//! * Anchors read the flattened channel (self-feedback on re-eval).
+//! * ~~Stack order is not preserved~~ — CLOSED: the composite folds
+//!   entries in stack order on every flush, and a material's plane holds
+//!   only ITS output. Reorder marks `Full` (§4.2). Pinned by §8 T5 (115,
+//!   then 110 — the destructive path's 51 never appears).
+//! * ~~Re-eval compounds~~ — CLOSED: a refresh REPLACES the plane, and the
+//!   composite of identical plane bytes is identical. Pinned by §8 T6
+//!   (170, 170, never 144). The driver tests that pinned the destructive
+//!   publish (`refresh_order_is_bottom_to_top_171_and_reversed_187`,
+//!   `reeval_compounds_the_documented_boundary`) are RETIRED with the
+//!   path they pinned.
+//! * ~~Nothing un-publishes~~ — CLOSED: hide skips the entry, a disabled
+//!   channel carries `pixels: None`, a delete DROPS the eval-owned planes
+//!   (no tombstone — revive re-evaluates from the `Insert` params).
+//!   Pinned by §8 T7.
+//! * Anchors read the flattened channel (self-feedback on re-eval) —
+//!   STAGE 5 (downward partial flatten + typed self/forward errors). Until
+//!   then `anchor_image` keeps the documented full-flatten read: a known
+//!   v1 state, not a regression.
+//! * Instances render nothing — STAGE 5 (they read their source's planes).
+//!   Until then `pixels: None`, a known v1 state, not a regression.
 //! * The layer's own `blend_mode` is INERT on Material layers (carried,
-//!   never read); layer `opacity` multiplies every channel's opacity and the
-//!   layer mask gates every written channel.
+//!   never read); layer `opacity` multiplies every channel's opacity at
+//!   SNAPSHOT time (so opacity edits propagate without a re-eval) and the
+//!   layer mask gates every entry at composite time.
 //! * Eval runs ONCE per material per refresh at the SET size (never a
 //!   literal) and resamples per channel — never once per channel size.
 //! * A state created by the project-open path is seeded CLEAN (the saved
 //!   sidecars already hold the published result; re-publishing on open
-//!   would compound every non-Normal material). Runtime states start dirty.
-//!   This deliberately departs from `FillLayerStates::ensure`, which dirties
-//!   every fresh state.
+//!   would double-count over the legacy Base). Runtime states start dirty.
+//!   Dormant v1 fills/materials (provenance: pre-v2 manifest) stay clean
+//!   until an explicit edit; v2 planeless layers seed DIRTY (§6.3 — the
+//!   shell decides, `ensure_open` + `mark_dirty` are the arms).
 //! * Memory: each cached Image node costs `w·h·4` bytes — nodes × 64 MiB at
 //!   4096² per cache, times tiles when per-tile. `Layer::memory_bytes`
 //!   counts metadata only; the cache is reported here, never there.
@@ -64,16 +82,19 @@
 //!   silent wrong pixels. Every eval `Err` is whole-material (nothing
 //!   publishes); a `Uniform` at a `material_output` or a forbidden blend on
 //!   that channel skips ONLY that channel.
-//! * A `publish_channel` rejection (`false`) is not modeled in the report:
-//!   the publish was attempted destructively like every other path, and the
-//!   pool logs the drop. Surfacing per-tile publish failures is a Kill B
-//!   follow-up if the wiring needs it.
+//! * A `publish_channel` plane-budget refusal surfaces as
+//!   [`MaterialResult::BudgetBlocked`] (the state records the bytes and
+//!   stays dirty — it retries when `plane_bytes()` falls or params
+//!   change, never every frame). Any other publish failure is a loud
+//!   whole-material error, never a silent partial plane.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use umber_core::layers::{BlendMode, Layer, LayerKind, MaterialParamValue};
 use umber_core::MaterialParams;
-use umber_gpu::{composite_pixel_masked, f32_to_u8};
+use umber_gpu::f32_to_u8;
+
+use crate::paint_state::{PaintRefusal, SnapshotMaterialChannel};
 use umber_graph::mtlx::from_mtlx;
 use umber_graph::{
     eval_graph_cached, AnchorRef, EvalCache, EvalContext, EvalError, Graph, ImageBuffer,
@@ -160,6 +181,16 @@ pub enum MaterialError {
         /// What went wrong.
         message: String,
     },
+    /// The plane budget refused a publish (§1.3): the total
+    /// `plane_bytes()` the materialization would have reached. The layer
+    /// stays dirty and retries per §1.3 — never a silent partial plane.
+    #[error("material layer {layer} plane budget refused ({bytes} bytes)")]
+    BudgetBlocked {
+        /// The layer that cannot publish.
+        layer: u64,
+        /// The total the materialization would have reached.
+        bytes: u64,
+    },
 }
 
 /// One channel's refresh outcome.
@@ -200,6 +231,13 @@ pub enum MaterialResult {
     /// The layer is invisible: tiles not read, not composited, not written.
     /// The dirty flag is KEPT (see the module docs).
     SkippedInvisible,
+    /// The plane budget refused a publish (§1.3): nothing further staged,
+    /// the state records the bytes and stays dirty (retries when
+    /// `plane_bytes()` falls or params change).
+    BudgetBlocked {
+        /// The total `plane_bytes()` the materialization would have reached.
+        bytes: u64,
+    },
     /// Whole-material no-op: nothing published for ANY channel (the last
     /// published result stays).
     Failed(MaterialError),
@@ -361,7 +399,7 @@ pub fn apply_material_overrides(
 /// BEFORE quantizing: decode RGB `v/255·2 − 1`, normalize, length `< 1e-6`
 /// (or non-finite) → `(0, 0, 1)`, re-encode `(n + 1)/2·255`, then `round`.
 /// Alpha is untouched. The composite-time lerp that follows stays
-/// UNNORMALIZED, exactly as `composite_pixel_masked` does today —
+/// UNNORMALIZED, exactly as the stack compositor's pixel primitive does —
 /// documented, not fixed here.
 ///
 /// Malformed input (zero dims, wrong-length bytes) yields a transparent
@@ -483,62 +521,6 @@ pub fn resample_mask_nearest(
     out
 }
 
-/// Composites one material output over the channel's current texels in
-/// place: per texel `composite_pixel_masked(src, dst, blend, opacity, mask)`
-/// with u8 → f32 as `byte / 255` and f32 → u8 through the compositor's
-/// quantizer. `opacity` is the already-formed `layer.opacity ×
-/// channel.opacity` product (clamped once inside the primitive, so a
-/// non-finite factor zeroes coverage). `mask` is the resampled mask plane
-/// (`None` = fully open).
-///
-/// Length contract: composites the shared texel prefix, never a panic (tile
-/// resizes mid-session reorder evaluations — they must not crash).
-pub fn composite_material_channel(
-    dst: &mut [u8],
-    src: &[u8],
-    width: u32,
-    height: u32,
-    blend: BlendMode,
-    opacity: f32,
-    mask: Option<&[u8]>,
-) {
-    let texels = width as usize * height as usize;
-    let n = (dst.len() / 4)
-        .min(src.len() / 4)
-        .min(texels)
-        .min(mask.map(|m| m.len()).unwrap_or(usize::MAX));
-    for i in 0..n {
-        let s = &src[i * 4..i * 4 + 4];
-        let d = &dst[i * 4..i * 4 + 4];
-        let src_px = [
-            f32::from(s[0]) / 255.0,
-            f32::from(s[1]) / 255.0,
-            f32::from(s[2]) / 255.0,
-            f32::from(s[3]) / 255.0,
-        ];
-        let dst_px = [
-            f32::from(d[0]) / 255.0,
-            f32::from(d[1]) / 255.0,
-            f32::from(d[2]) / 255.0,
-            f32::from(d[3]) / 255.0,
-        ];
-        let mask_px = mask.map(|m| f32::from(m[i]) / 255.0).unwrap_or(1.0);
-        let Some(out) = composite_pixel_masked(src_px, dst_px, blend, opacity, mask_px) else {
-            // Unreachable by construction (the driver gates `Passthrough`
-            // before compositing, and every other mode is total) — keep the
-            // destination byte rather than inventing pixels.
-            continue;
-        };
-        let quantized = [
-            f32_to_u8(out[0]),
-            f32_to_u8(out[1]),
-            f32_to_u8(out[2]),
-            f32_to_u8(out[3]),
-        ];
-        dst[i * 4..i * 4 + 4].copy_from_slice(&quantized);
-    }
-}
-
 /// One material layer's live eval state: its params, its embedded
 /// definition, and its eval caches.
 #[derive(Debug)]
@@ -552,6 +534,16 @@ pub struct MaterialLayerState {
     engine_dirty: HashSet<u64>,
     full_eval: bool,
     dirty: bool,
+    /// The plane-budget refusal blocking this layer, if any (see the fill
+    /// precedent's `budget_blocked`): the total `plane_bytes()` the
+    /// materialization would have reached.
+    budget_blocked: Option<u64>,
+    /// The last refresh's contributing channels (§5.2): one entry per
+    /// DECLARED + enabled + allowed-blend channel, with the CHANNEL-level
+    /// blend/opacity (the shell forms `layer.opacity × channel.opacity`
+    /// at snapshot time, so opacity edits propagate without a re-eval).
+    /// Refreshed whole on every successful refresh.
+    composite_channels: Vec<SnapshotMaterialChannel>,
 }
 
 impl MaterialLayerState {
@@ -575,6 +567,8 @@ impl MaterialLayerState {
             engine_dirty: HashSet::new(),
             full_eval: true,
             dirty,
+            budget_blocked: None,
+            composite_channels: Vec::new(),
         }
     }
 
@@ -588,6 +582,18 @@ impl MaterialLayerState {
         self.dirty
     }
 
+    /// The plane-budget refusal blocking this layer, if any.
+    pub fn budget_blocked(&self) -> Option<u64> {
+        self.budget_blocked
+    }
+
+    /// The last refresh's contributing channels for the shell's composite
+    /// snapshot (§5.2): channel-level blend/opacity per declared + enabled
+    /// + allowed-blend channel.
+    pub fn composite_channels(&self) -> &[SnapshotMaterialChannel] {
+        &self.composite_channels
+    }
+
     /// The params the next refresh evaluates.
     pub fn params(&self) -> &MaterialParams {
         &self.params
@@ -599,6 +605,8 @@ impl MaterialLayerState {
     /// params change dirties the LAYER (the composite re-runs); only
     /// override/material-id changes dirty the ENGINE (channel-only edits
     /// reuse warm caches); definition and size changes clear the caches.
+    /// Any newly-dirtying change clears a budget block (new inputs may fit;
+    /// the retry below re-blocks loudly, never silently).
     fn sync(&mut self, params: &MaterialParams, definition: &str, set_size: (u32, u32)) -> bool {
         if *params != self.params {
             if params.material_id != self.params.material_id {
@@ -616,16 +624,19 @@ impl MaterialLayerState {
             }
             self.params = params.clone();
             self.dirty = true;
+            self.budget_blocked = None;
         }
         if definition != self.definition {
             self.definition = definition.to_string();
             self.full_eval = true;
             self.dirty = true;
+            self.budget_blocked = None;
         }
         if set_size != self.set_size {
             self.set_size = set_size;
             self.full_eval = true;
             self.dirty = true;
+            self.budget_blocked = None;
         }
         self.dirty
     }
@@ -705,6 +716,33 @@ impl MaterialLayerStates {
         self.states.get(&layer_id).is_some_and(|s| s.is_dirty())
     }
 
+    /// Requeues budget-blocked layers whose block may have cleared (the
+    /// fill precedent's `retry_budget_freed`): a state blocked at
+    /// `blocked_bytes` retries when the session now holds fewer plane
+    /// bytes. Retrying every frame would spam; the shell calls this when
+    /// bytes fall (params changes requeue through `ensure`).
+    pub fn retry_budget_freed(&mut self, plane_bytes: u64) {
+        let retry: Vec<u64> = self
+            .states
+            .iter()
+            .filter(|(_, state)| {
+                state
+                    .budget_blocked
+                    .is_some_and(|blocked| plane_bytes < blocked)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in retry {
+            if let Some(state) = self.states.get_mut(&id) {
+                state.budget_blocked = None;
+                state.dirty = true;
+            }
+            if !self.dirty.contains(&id) {
+                self.dirty.push(id);
+            }
+        }
+    }
+
     /// Queues a refresh for a tracked layer without changing its params
     /// (the explicit "refresh material" action: re-publish on demand and
     /// the re-eval-compounds probe). No-op for untracked layers.
@@ -740,20 +778,23 @@ pub trait MaterialTileIo {
     /// The tiles to refresh, ascending.
     fn tiles(&self) -> Vec<u16>;
     /// `tile`'s `channel` texels, or `None` when never routed (composites
-    /// over transparent; never side-effect-creates).
+    /// over transparent; never side-effect-creates). Survives for the
+    /// ANCHOR path (which keeps the documented full-flatten read until
+    /// stage 5); the publish path no longer reads.
     fn read_channel(&mut self, tile: u16, channel: &str) -> Option<(u32, u32, Vec<u8>)>;
-    /// Uploads composited texels into `tile`'s `channel`, materializing it.
+    /// Uploads the resampled, premultiplied output into the layer's OWN
+    /// `(Layer(layer), tile, channel)` plane (§5.2), materializing it. A
+    /// budget refusal propagates (the driver records `budget_blocked`
+    /// and writes nothing further).
     fn publish_channel(
         &mut self,
+        layer: u64,
         tile: u16,
         channel: &str,
         width: u32,
         height: u32,
         rgba: Vec<u8>,
-    ) -> bool;
-    /// The layer's SET-sized mask plane bytes, or `None` when absent (reads
-    /// as fully white — attaching never blacks out).
-    fn mask_plane(&mut self, layer_id: u64, tile: u16) -> Option<(u32, u32, Vec<u8>)>;
+    ) -> Result<(), PaintRefusal>;
     /// One anchor's composited channel image for `tile`, or `None` when the
     /// source layer was deleted or never composited (an eval error, never a
     /// silent default).
@@ -831,7 +872,13 @@ pub fn refresh_dirty_materials(
             registry,
             io,
         );
-        state.dirty = false;
+        // A budget block keeps the dirty flag (the retry contract —
+        // `retry_budget_freed` / param edits requeue) but leaves the
+        // queue: retrying every frame would spam. Every other attempt
+        // (published or failed) clears it.
+        if !matches!(result, MaterialResult::BudgetBlocked { .. }) {
+            state.dirty = false;
+        }
         reports.push(MaterialRefreshReport {
             layer: layer.id,
             result,
@@ -846,7 +893,7 @@ pub fn refresh_dirty_materials(
 
 /// The per-layer refresh: definition lookup → parse → overrides →
 /// discovery/validation → eval (whole-material on `Err`) → per-channel
-/// composite + publish. Reads `state`'s caches and engine dirty set; updates
+/// plane publish. Reads `state`'s caches and engine dirty set; updates
 /// them on success.
 fn refresh_one(
     state: &mut MaterialLayerState,
@@ -983,7 +1030,7 @@ fn refresh_one(
                 }
             };
             if let Err(err) = publish_tile(layer, &active, tile, &outputs_map, io, &mut statuses) {
-                return MaterialResult::Failed(err);
+                return map_publish_error(state, err);
             }
         }
     } else {
@@ -1007,7 +1054,7 @@ fn refresh_one(
         };
         for tile in io.tiles() {
             if let Err(err) = publish_tile(layer, &active, tile, &outputs_map, io, &mut statuses) {
-                return MaterialResult::Failed(err);
+                return map_publish_error(state, err);
             }
         }
     }
@@ -1023,11 +1070,38 @@ fn refresh_one(
             status,
         });
     }
+    // The shell's composite snapshot reads these (channel-level
+    // blend/opacity per contributing channel — the layer opacity multiplies
+    // in at snapshot time).
+    state.composite_channels = active
+        .iter()
+        .map(|plan| SnapshotMaterialChannel {
+            channel: plan.output.channel.clone(),
+            blend: plan.blend,
+            opacity: plan.opacity,
+        })
+        .collect();
+    state.budget_blocked = None;
     state.engine_dirty.clear();
     state.full_eval = false;
     MaterialResult::Refreshed {
         channels,
         ignored_undeclared,
+    }
+}
+
+/// Maps a per-tile publish failure onto the refresh outcome: a plane
+/// budget records the bytes on the state (which stays dirty — the drain
+/// keeps it dirty and unqueued, so it retries only when bytes fall or
+/// params change) and reports [`MaterialResult::BudgetBlocked`]; anything
+/// else is a whole-material [`MaterialResult::Failed`].
+fn map_publish_error(state: &mut MaterialLayerState, err: MaterialError) -> MaterialResult {
+    match err {
+        MaterialError::BudgetBlocked { bytes, .. } => {
+            state.budget_blocked = Some(bytes);
+            MaterialResult::BudgetBlocked { bytes }
+        }
+        other => MaterialResult::Failed(other),
     }
 }
 
@@ -1117,15 +1191,38 @@ fn build_externals(
     external
 }
 
-/// The per-tile publish: resample each active output to its channel size,
-/// composite over the current texels (transparent when never routed) with
-/// the resampled mask, publish. Records each channel's outcome in
-/// `statuses` (tile-independent skips land once; publishes accumulate).
+/// Converts straight-alpha eval bytes to the premultiplied plane bytes
+/// (§5.2): texel = `(c · α, α)`, quantized by `f32_to_u8`. Every writer
+/// into a layer-owned plane keeps `p ≤ a` (§3's invariant); opaque texels
+/// pass through byte-identical. Shared with the mesh-map import publish
+/// (straight PNG → plane, §5.6).
+pub fn straight_to_premultiplied(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        let alpha = f32::from(px[3]) / 255.0;
+        out.push(f32_to_u8(f32::from(px[0]) / 255.0 * alpha));
+        out.push(f32_to_u8(f32::from(px[1]) / 255.0 * alpha));
+        out.push(f32_to_u8(f32::from(px[2]) / 255.0 * alpha));
+        out.push(f32_to_u8(alpha));
+    }
+    out
+}
+
+/// The per-tile publish: resample each active output to its channel size
+/// and write it, premultiplied, into the layer's OWN plane (a refresh
+/// REPLACES the plane whole — re-eval is idempotent, hides un-publish).
+/// Records each channel's outcome in `statuses` (tile-independent skips
+/// land once; publishes accumulate). The mask is NOT read here (it gates
+/// at composite time); the flattened channel is NOT read (wart 2's
+/// read-modify-publish is retired with the destructive path).
 ///
 /// # Errors
 ///
 /// [`MaterialError::Internal`] when a successfully-evaluated node has no
-/// output (allegedly unreachable — loud, never wrong pixels).
+/// output (allegedly unreachable — loud, never wrong pixels), and
+/// [`MaterialError::BudgetBlocked`] when the plane budget refuses (the
+/// driver records the bytes and stops the tile — earlier channels'
+/// planes stand, and the retry replaces them whole).
 fn publish_tile(
     layer: &Layer,
     active: &[&ChannelPlan],
@@ -1154,30 +1251,21 @@ fn publish_tile(
         };
         let (cw, ch) = io.channel_size(&channel);
         let src = resample_image_rgba8(&image.data, image.width, image.height, cw, ch, &channel);
-        let mut dst = match io.read_channel(tile, &channel) {
-            Some((w, h, bytes))
-                if w == cw && h == ch && bytes.len() == cw as usize * ch as usize * 4 =>
-            {
-                bytes
-            }
-            Some(_) => {
-                // A wrong-size readback is a bridge bug: composite over
-                // transparent rather than misaligning texels.
-                vec![0u8; cw as usize * ch as usize * 4]
-            }
-            None => vec![0u8; cw as usize * ch as usize * 4],
-        };
-        let mask = layer
-            .mask
-            .as_ref()
-            .filter(|mask_meta| mask_meta.gates())
-            .and_then(|_| io.mask_plane(layer.id, tile))
-            .map(|(mw, mh, bytes)| resample_mask_nearest(&bytes, mw, mh, cw, ch));
-        // The opacity product is formed first and clamped once inside the
-        // primitive, so a non-finite factor zeroes coverage.
-        let opacity = layer.opacity * plan.opacity;
-        composite_material_channel(&mut dst, &src, cw, ch, plan.blend, opacity, mask.as_deref());
-        let _ = io.publish_channel(tile, &channel, cw, ch, dst);
+        let plane = straight_to_premultiplied(&src);
+        io.publish_channel(layer.id, tile, &channel, cw, ch, plane)
+            .map_err(|refusal| match refusal {
+                PaintRefusal::PlaneBudget { bytes } => MaterialError::BudgetBlocked {
+                    layer: layer.id,
+                    bytes,
+                },
+                // `publish_channel`'s only other refusal arms a gate the
+                // driver never trips (unpaintable layers never evaluate):
+                // loud, never wrong pixels.
+                other => MaterialError::Internal {
+                    layer: layer.id,
+                    message: format!("publish refused: {other:?}"),
+                },
+            })?;
         statuses.insert(channel, ChannelStatus::Published);
     }
     Ok(())
@@ -1205,20 +1293,23 @@ mod tests {
     }
 
     /// Scripted in-memory tile store: the headless stand-in for the paint
-    /// session (sizes, tiles, masks, anchors, mesh maps — all explicit).
+    /// session (sizes, tiles, anchors, mesh maps — all explicit; masks
+    /// gate at composite time now, so the store carries none).
     #[derive(Debug, Default)]
     struct FakeTileIo {
         set_size: (u32, u32),
         channel_sizes: HashMap<String, (u32, u32)>,
         tile_list: Vec<u16>,
         tiles: HashMap<(u16, String), (u32, u32, Vec<u8>)>,
-        masks: HashMap<(u64, u16), (u32, u32, Vec<u8>)>,
         anchors: AnchorPlanes,
         meshes: HashMap<String, (u32, u32, Vec<u8>)>,
         read_log: Vec<(u16, String)>,
         publish_log: Vec<(u16, String)>,
         anchor_log: Vec<(u16, u64, String)>,
         mesh_log: Vec<String>,
+        /// When set, `publish_channel` refuses with
+        /// `PlaneBudget { bytes }` (the §1.3 path).
+        refuse_publish: Option<u64>,
     }
 
     impl FakeTileIo {
@@ -1265,20 +1356,23 @@ mod tests {
 
         fn publish_channel(
             &mut self,
+            // The fake store is not owner-keyed (one tile map for all
+            // layers — owner routing is the paint session's pin, §8 T9),
+            // so the layer id rides along unrecorded.
+            _layer: u64,
             tile: u16,
             channel: &str,
             width: u32,
             height: u32,
             rgba: Vec<u8>,
-        ) -> bool {
+        ) -> Result<(), PaintRefusal> {
             self.publish_log.push((tile, channel.to_string()));
+            if let Some(bytes) = self.refuse_publish {
+                return Err(PaintRefusal::PlaneBudget { bytes });
+            }
             self.tiles
                 .insert((tile, channel.to_string()), (width, height, rgba));
-            true
-        }
-
-        fn mask_plane(&mut self, layer_id: u64, tile: u16) -> Option<(u32, u32, Vec<u8>)> {
-            self.masks.get(&(layer_id, tile)).cloned()
+            Ok(())
         }
 
         fn anchor_image(
@@ -1523,11 +1617,15 @@ mod tests {
     }
 
     #[test]
-    fn opacity_product_golden_170_with_wrong_order_sentinels() {
-        // §5.2a: dst 200, src 100 (s = 0.392157), Multiply at layer 0.5 ×
-        // channel 0.5 → cov 0.25 → 200·(1 − 0.25·0.607843) = 169.608 → 170.
-        // The r1 two-level order would give 97, a single 0.5 would give 139:
-        // the test asserts both sentinels to pin the single-composite model.
+    fn opacity_product_golden_publishes_src_for_composite() {
+        // §5.2a (stage-4 shape): the driver publishes the resampled SRC —
+        // opaque 100 stays `(100,100,100,255)` (premultiply is identity on
+        // opaque) — and the 0.5 × 0.5 opacity product rides the composite
+        // snapshot (see `material_composite_channels` below and §8 T13's
+        // stack: 200·(1 − 0.25·0.607843) = 169.608 → 170 THERE, never in
+        // the plane). The r1 two-level (97) and lone-0.5 (139) composite
+        // sentinels retire with the destructive path (T13 pins 170 at the
+        // composite level instead).
         let gray100 = 100.0f32 / 255.0;
         let mut stack = LayerStack::new();
         let params = channel_params(
@@ -1547,84 +1645,29 @@ mod tests {
         );
 
         let mut io = FakeTileIo::flat((1, 1), 1001, "baseColor", [200, 200, 200, 255]);
-        let (_, reports) = drive(std::slice::from_ref(&layer), &definitions, &mut io);
+        let (states, reports) = drive(std::slice::from_ref(&layer), &definitions, &mut io);
         assert_eq!(
             status_of(&reports, layer.id, "baseColor"),
             ChannelStatus::Published
         );
-        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![170, 170, 170, 255]);
-        // The wrong-order sentinels (commented as such in the design): the
-        // r1 inner-then-outer order gives 97, a lone 0.5 gives 139.
-        let r = io.tile_bytes(1001, "baseColor")[0];
-        assert_ne!(r, 97, "two-level Multiply order must not appear");
-        assert_ne!(r, 139, "single-0.5 coverage must not appear");
+        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![100, 100, 100, 255]);
+        // ... and the snapshot carries the product for composite time.
+        let channels = states
+            .state(layer.id)
+            .expect("state tracked")
+            .composite_channels();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].channel, "baseColor");
+        assert_eq!(channels[0].blend, BlendMode::Multiply);
+        assert_eq!(channels[0].opacity, 0.5);
     }
 
+    /// §8 T13: one channel, Multiply, layer 0.5 × channel 0.5 over
+    /// `L0 = 200` gives 170 — the dynmat 2a golden reproduced through the
+    /// STACK composite instead of the destructive publish.
     #[test]
-    fn refresh_order_is_bottom_to_top_171_and_reversed_187() {
-        // §5.2b (ordering-sensitive): M1 below (Normal, src 204, 1.0 × 0.5),
-        // M2 above (Multiply, src 100, 0.5 × 0.5) over dst 200. Stack order
-        // M1 → M2: 202 then 171. Reversed call order: 170 then 187 — proving
-        // order matters under destructive publish.
-        let gray100 = 100.0f32 / 255.0;
-        let gray204 = 204.0f32 / 255.0;
-        let mut stack = LayerStack::new();
-        let m1 = material_layer(
-            &mut stack,
-            "M1",
-            channel_params(
-                "umber.m1",
-                vec![MaterialChannel {
-                    name: "baseColor".into(),
-                    blend: BlendMode::Normal,
-                    opacity: 0.5,
-                    enabled: true,
-                }],
-            ),
-            1.0,
-        );
-        let m2 = material_layer(
-            &mut stack,
-            "M2",
-            channel_params(
-                "umber.m2",
-                vec![MaterialChannel {
-                    name: "baseColor".into(),
-                    blend: BlendMode::Multiply,
-                    opacity: 0.5,
-                    enabled: true,
-                }],
-            ),
-            0.5,
-        );
-        let mut definitions = HashMap::new();
-        definitions.insert(
-            "umber.m1".into(),
-            solid_def([gray204, gray204, gray204], "baseColor"),
-        );
-        definitions.insert(
-            "umber.m2".into(),
-            solid_def([gray100, gray100, gray100], "baseColor"),
-        );
-
-        let mut io = FakeTileIo::flat((1, 1), 1001, "baseColor", [200, 200, 200, 255]);
-        let (_, reports) = drive(&[m1.clone(), m2.clone()], &definitions, &mut io);
-        assert_eq!(reports.len(), 2);
-        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![171, 171, 171, 255]);
-
-        // Reversed call order over a fresh store: 170 (M2 first) then 187.
-        let mut io = FakeTileIo::flat((1, 1), 1001, "baseColor", [200, 200, 200, 255]);
-        let (_, reports) = drive(&[m2, m1], &definitions, &mut io);
-        assert_eq!(reports.len(), 2);
-        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![187, 187, 187, 255]);
-    }
-
-    #[test]
-    fn reeval_compounds_the_documented_boundary() {
-        // §5.2c: refreshing 2a's layer a second time over the published 170
-        // gives 170·0.848039 = 144.167 → 144. Pins the v1 destructive-publish
-        // boundary so a future non-destructive fix flips this test on
-        // purpose.
+    fn material_entry_composites_170_through_the_stack() {
+        use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
         let gray100 = 100.0f32 / 255.0;
         let mut stack = LayerStack::new();
         let params = channel_params(
@@ -1642,31 +1685,51 @@ mod tests {
             "umber.multiply".into(),
             solid_def([gray100, gray100, gray100], "baseColor"),
         );
-
         let mut io = FakeTileIo::flat((1, 1), 1001, "baseColor", [200, 200, 200, 255]);
-        let layers = std::slice::from_ref(&layer);
-        let (mut states, _) = drive(layers, &definitions, &mut io);
-        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![170, 170, 170, 255]);
-        // A second explicit refresh (the re-publish): compounds to 144.
-        states.mark_dirty(layer.id);
-        let reports = refresh_dirty_materials(
-            &mut states,
-            layers,
-            &definitions,
-            &set_channels(),
-            &umber_graph::full_registry(),
-            &mut io,
-        );
-        assert_eq!(reports.len(), 1);
-        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![144, 144, 144, 255]);
+        let (states, _) = drive(std::slice::from_ref(&layer), &definitions, &mut io);
+        let plane = io.tile_bytes(1001, "baseColor");
+        assert_eq!(plane, vec![100, 100, 100, 255]);
+        // The shell forms `layer.opacity × channel.opacity` at snapshot
+        // time (0.5 × 0.5 = 0.25) and folds the entry over L0 = 200.
+        let snapshot = states
+            .state(layer.id)
+            .expect("state tracked")
+            .composite_channels();
+        assert_eq!(snapshot.len(), 1);
+        let l0 = [200, 200, 200, 255];
+        let out = composite_stack_cpu(
+            &[
+                CpuStackLayer {
+                    blend_mode: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    rgba: Some(&l0),
+                    mask: None,
+                    premultiplied: true,
+                },
+                CpuStackLayer {
+                    blend_mode: snapshot[0].blend,
+                    opacity: layer.opacity * snapshot[0].opacity,
+                    visible: true,
+                    rgba: Some(&plane),
+                    mask: None,
+                    premultiplied: true,
+                },
+            ],
+            1,
+            1,
+        )
+        .expect("oracle composites");
+        assert_eq!(out, vec![170, 170, 170, 255]);
     }
 
     #[test]
     fn triplet_modes_route_through_blend_rgb_with_pinned_bytes() {
-        // §5.3: Saturation (red over gray 128) is EXACT through the HSV
-        // path: hue+sat from red at gray's value → [128, 0, 0, 255]. A
-        // scalar-primitive routing would return None (channel unpublished);
-        // asserting the bytes proves blend_rgb ran.
+        // §5.3: the eval still routes Saturation through `blend_rgb` (a
+        // scalar-primitive routing would fail loud and publish nothing) —
+        // but the PLANE holds the graph's src bytes now (red, opaque):
+        // blend modes apply at composite time, so [128, 0, 0] moves to
+        // the stack level (see §8 T5's Multiply order pin).
         let mut graph = Graph::new();
         graph.add_node(uniform_node(1, [1.0, 0.0, 0.0]));
         graph.add_node(output_node(2, "baseColor"));
@@ -1693,16 +1756,18 @@ mod tests {
             status_of(&reports, layer.id, "baseColor"),
             ChannelStatus::Published
         );
-        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![128, 0, 0, 255]);
+        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![255, 0, 0, 255]);
     }
 
     #[test]
     fn normal_combine_pins_whiteout_bytes_not_identity() {
-        // §5.3: tilt-over-tilt through NormalCombine gives the Whiteout
-        // result [248, 128, 170] — NOT the src bytes back (a blend_rgb
-        // bypass/identity shortcut would return [218, 128, 218], and the
-        // scalar path would publish nothing). Byte 128 decodes to +0.0039,
-        // not exactly flat, so this also pins the non-flat math.
+        // §5.3: the eval resolves tilt-over-tilt through NormalCombine to
+        // the Whiteout src bytes [218, 128, 218] — NOT a bypass/identity
+        // shortcut (which would hand back something else) and NOT nothing
+        // (the scalar path publishes nothing). The Whiteout composite
+        // ([248, 128, 170]) now forms at composite time, through the stack
+        // like every other mode. Byte 128 decodes to +0.0039, not exactly
+        // flat, so this also pins the non-flat math.
         let tilt = 218.0f32 / 255.0;
         let flat = 128.0f32 / 255.0;
         let mut graph = Graph::new();
@@ -1731,7 +1796,7 @@ mod tests {
             status_of(&reports, layer.id, "normal"),
             ChannelStatus::Published
         );
-        assert_eq!(io.tile_bytes(1001, "normal"), vec![248, 128, 170, 255]);
+        assert_eq!(io.tile_bytes(1001, "normal"), vec![218, 128, 218, 255]);
     }
 
     #[test]
@@ -1878,20 +1943,21 @@ mod tests {
     }
 
     #[test]
-    fn mask_nearest_resample_pins_blocks_and_drives_composite() {
+    fn mask_nearest_resample_pins_blocks_and_publish_holds_src() {
         // §5.7: a 2×2 mask nearest-resampled to 4×4 replicates 2×2 blocks,
-        // and a set-sized mask resampled to an overridden channel
-        // composites with pinned bytes (no InvalidMaskData class of
-        // failure — the headless analogue is exact output bytes).
+        // and a set-sized mask resampled to an overridden channel is
+        // exact (no InvalidMaskData class of failure — the headless
+        // analogue is exact output bytes).
         assert_eq!(
             resample_mask_nearest(&[0, 255, 255, 0], 2, 2, 4, 4),
             vec![0, 0, 255, 255, 0, 0, 255, 255, 255, 255, 0, 0, 255, 255, 0, 0,]
         );
 
         // End to end: set 1×1, roughness overridden to 2×2. The graph
-        // evaluates once at the set size (1×1 src 100), the output AND the
-        // 1×1 mask resample to 2×2, and every texel composites the §5.2a
-        // golden (Multiply 0.5 × 0.5 over 200 → 170).
+        // evaluates once at the set size (1×1 src 100), the output
+        // resamples to 2×2, and the plane holds the premultiplied src
+        // (blend/opacity/mask all apply at composite time now — the
+        // composite half is §8 T5/T13's stack, not this driver).
         let gray100 = 100.0f32 / 255.0;
         let mut stack = LayerStack::new();
         let params = channel_params(
@@ -1904,7 +1970,6 @@ mod tests {
             }],
         );
         let layer = material_layer(&mut stack, "O", params, 0.5);
-        let layer_id = layer.id;
         let mut definitions = HashMap::new();
         definitions.insert(
             "umber.override".into(),
@@ -1919,7 +1984,6 @@ mod tests {
                 (1001, "roughness".to_string()),
                 (2, 2, [200u8, 200, 200, 255].repeat(4).to_vec()),
             )]),
-            masks: HashMap::from([((layer_id, 1001), (1, 1, vec![255u8]))]),
             ..Default::default()
         };
         let (_, reports) = drive(std::slice::from_ref(&layer), &definitions, &mut io);
@@ -1929,13 +1993,12 @@ mod tests {
         );
         assert_eq!(
             io.tile_bytes(1001, "roughness"),
-            [170u8, 170, 170, 255].repeat(4).to_vec()
+            [100u8, 100, 100, 255].repeat(4).to_vec(),
+            "the plane holds the resampled src (opaque: premultiply is identity)"
         );
 
-        // A fully-gated mask (0) publishes nothing: bytes identical.
-        // (The layer needs an enabled LayerMask — the meta gates whether
-        // the plane is fetched at all; without it `gates()` is false and
-        // the mask plane is ignored.)
+        // A mask on the layer changes NOTHING at publish time (it gates
+        // the composite entry instead): the plane holds the same src.
         let mut gated = layer.clone();
         gated.mask = Some(LayerMask {
             name: "M".into(),
@@ -1949,7 +2012,6 @@ mod tests {
                 (1001, "roughness".to_string()),
                 (2, 2, [200u8, 200, 200, 255].repeat(4).to_vec()),
             )]),
-            masks: HashMap::from([((layer_id, 1001), (1, 1, vec![0u8]))]),
             ..Default::default()
         };
         let (_, reports) = drive(std::slice::from_ref(&gated), &definitions, &mut io);
@@ -1957,11 +2019,10 @@ mod tests {
             status_of(&reports, gated.id, "roughness"),
             ChannelStatus::Published
         );
-        // Fully gated: the publish writes back the UNCHANGED destination
-        // (cov 0 ⇒ out = base everywhere), so the opaque fixture bytes.
         assert_eq!(
             io.tile_bytes(1001, "roughness"),
-            [200u8, 200, 200, 255].repeat(4).to_vec()
+            [100u8, 100, 100, 255].repeat(4).to_vec(),
+            "masks gate at composite time, never at publish"
         );
     }
 
@@ -2507,9 +2568,12 @@ mod tests {
             .chunks_exact(4)
             .all(|px| px == [10, 0, 0, 255]));
 
-        // Channel-only edit (blend flip): the composite re-runs, the graph
-        // does not — warm caches serve byte-identical outputs. The edit
-        // lands through the stack so the drain's snapshot sees it.
+        // Channel-only edit (blend flip): the graph does not re-run —
+        // warm caches serve byte-identical outputs — and the plane is
+        // republished identically (blend applies at composite time now).
+        // The edit lands through the stack so the drain's snapshot sees
+        // it, and the state's composite channels carry the new blend for
+        // the shell's snapshot.
         let mut changed = layer.material.clone().unwrap();
         changed.channels[0].blend = BlendMode::Multiply;
         stack.set_material(layer.id, changed.clone());
@@ -2524,12 +2588,19 @@ mod tests {
             [1, 1],
             "channel-only edits reuse the caches"
         );
-        // Multiply by [10,0,0] over the published [10,0,0] stays black
-        // (sanity: the composite really re-ran with the new blend).
         assert!(io
             .tile_bytes(1001, "baseColor")
             .chunks_exact(4)
-            .all(|px| px == [0, 0, 0, 255]));
+            .all(|px| px == [10, 0, 0, 255]));
+        assert_eq!(
+            states
+                .state(layer.id)
+                .expect("state tracked")
+                .composite_channels()[0]
+                .blend,
+            BlendMode::Multiply,
+            "the new blend rides the snapshot, not a re-composite"
+        );
 
         // Override edit on node 2: node 1 stays at 1 run, node 2 re-runs.
         // (Node 2 echoes its input, so the bytes are unchanged — the pin is
@@ -2916,5 +2987,59 @@ mod tests {
             io.read_log.iter().all(|(_, c)| c != "roughness"),
             "undeclared channels are never read even when listed"
         );
+    }
+
+    /// §1.3's budget path: a refused publish records `budget_blocked`,
+    /// keeps the layer dirty but unqueued (no every-frame spam), badges
+    /// through `BudgetBlocked`, and retries when bytes fall.
+    #[test]
+    fn budget_refusal_blocks_stays_dirty_and_retries_when_bytes_fall() {
+        let mut stack = LayerStack::new();
+        let params = channel_params("umber.budget", vec![MaterialChannel::named("baseColor")]);
+        let layer = material_layer(&mut stack, "B", params, 1.0);
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "umber.budget".into(),
+            solid_def([1.0, 0.0, 0.0], "baseColor"),
+        );
+        let mut io = FakeTileIo::flat((1, 1), 1001, "baseColor", [10, 20, 30, 255]);
+        io.refuse_publish = Some(9_999_999);
+        let layers = std::slice::from_ref(&layer);
+        let (mut states, reports) = drive(layers, &definitions, &mut io);
+        assert!(
+            matches!(
+                &reports[0].result,
+                MaterialResult::BudgetBlocked { bytes: 9_999_999 }
+            ),
+            "got {:?}",
+            reports[0].result
+        );
+        let state = states.state(layer.id).expect("state tracked");
+        assert_eq!(state.budget_blocked(), Some(9_999_999));
+        assert!(state.is_dirty(), "the layer stays dirty");
+        assert!(
+            states.dirty_ids().is_empty(),
+            "but leaves the queue (no every-frame spam)"
+        );
+        // Bytes fall (a plane freed): the retry requeues, and the publish
+        // lands on the next drain.
+        io.refuse_publish = None;
+        states.retry_budget_freed(1_000);
+        assert!(states.dirty_ids().contains(&layer.id));
+        let reports = refresh_dirty_materials(
+            &mut states,
+            layers,
+            &definitions,
+            &set_channels(),
+            &umber_graph::full_registry(),
+            &mut io,
+        );
+        assert!(
+            matches!(&reports[0].result, MaterialResult::Refreshed { .. }),
+            "got {:?}",
+            reports[0].result
+        );
+        assert_eq!(io.tile_bytes(1001, "baseColor"), vec![255, 0, 0, 255]);
+        assert_eq!(states.state(layer.id).unwrap().budget_blocked(), None);
     }
 }

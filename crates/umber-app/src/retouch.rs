@@ -98,19 +98,31 @@
 use std::collections::BTreeMap;
 
 use umber_brush::retouch::{
-    clone_dab_masked, erase_dab_masked, smudge_dab_masked, CloneStroke, DirtyRect, RetouchDab,
+    clone_dab_masked, erase_dab_masked, erase_dab_masked_premultiplied, smudge_dab_masked,
+    smudge_dab_masked_sampled, CloneStroke, DirtyRect, RetouchDab,
 };
 use umber_brush::symmetry::{sibling_positions, COINCIDENT_EPS_TEXELS};
 use umber_brush::{BrushTool, MaskView, RgbaBuffer, SymTransform};
 use umber_core::undo::{Command, UndoStack};
 
+use crate::paint_state::PlaneOwner;
+
 /// One tile's CPU mirror for the current stroke.
 struct TileMirror {
     /// The live copy every dab edits.
     live: RgbaBuffer,
-    /// The stroke-start snapshot: clone's sample source and the undo
-    /// record's "before".
+    /// The stroke-start snapshot: the undo record's "before". Clone's
+    /// sample source only when no composite sample was installed (see
+    /// [`RetouchStroke::insert_sample`]): with one, clone samples the
+    /// composite and this stays the plane's own bytes.
     before: RgbaBuffer,
+    /// The stroke-start COMPOSITE snapshot (cache-else-Base, flush-first —
+    /// per-layer-pool design §3 [M3]): smudge blurs from it and clone
+    /// samples it, so both tools work onto an empty plane. `None` until
+    /// the owner installs it (Base strokes may skip it: the mirror IS the
+    /// bottom of the composite there — still installed by the caller for
+    /// uniformity, so above-stack layers smudge too).
+    sample: Option<RgbaBuffer>,
     /// Union of every rect the stroke wrote on this tile.
     dirty: Option<DirtyRect>,
 }
@@ -127,6 +139,16 @@ struct CloneState {
 /// motion history the smudge tilt derives from.
 pub(crate) struct RetouchStroke {
     tool: BrushTool,
+    /// The plane every mirror reads from and writes back to
+    /// (per-layer-pool design §3: `(stroke_owner, tile, stroke_channel)`).
+    /// Snapshot at stroke begin; defaults to Base baseColor (the v1 path
+    /// the headless tests drive without a session).
+    owner: PlaneOwner,
+    channel: String,
+    /// Erase into [`Self::owner`]'s plane with premultiplied semantics
+    /// ([M1]) when the owner is a layer; Base keeps today's straight
+    /// semantics (§1.4's exemption).
+    premultiplied_erase: bool,
     tiles: BTreeMap<u16, TileMirror>,
     /// The previous dab (tile, texel position) of each symmetry sibling,
     /// indexed like `symmetry`: each smudge dab's motion vector is its
@@ -148,11 +170,25 @@ impl RetouchStroke {
     pub(crate) fn new(tool: BrushTool) -> Self {
         Self {
             tool,
+            owner: PlaneOwner::Base,
+            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+            premultiplied_erase: false,
             tiles: BTreeMap::new(),
             last_dab: vec![None],
             clone: None,
             symmetry: vec![SymTransform::IDENTITY],
         }
+    }
+
+    /// Points the stroke at `(owner, channel)`'s plane: the mirror reads
+    /// and writes there, and the undo record keys there. Call before the
+    /// first [`Self::apply`] (the session calls it at stroke begin from
+    /// `stroke_owner` + `stroke_channel`, so a mid-stroke selection never
+    /// splits the stroke).
+    pub(crate) fn set_plane(&mut self, owner: PlaneOwner, channel: String) {
+        self.owner = owner;
+        self.channel = channel;
+        self.premultiplied_erase = !matches!(owner, PlaneOwner::Base);
     }
 
     /// Arms symmetry for the stroke: `texel_transforms` from
@@ -205,9 +241,26 @@ impl RetouchStroke {
             TileMirror {
                 before: image.clone(),
                 live: image,
+                sample: None,
                 dirty: None,
             },
         );
+    }
+
+    /// Installs `tile`'s composite sample (the visible canvas at the
+    /// stroke's first touch of the tile): smudge blurs from it and clone
+    /// samples it ([M3]). No-op for a tile with no mirror yet (the mirror
+    /// lands first — see the session's first-touch order). A
+    /// size-mismatched sample is dropped (the ops fall back to the
+    /// mirror's own bytes rather than sampling misaligned rows).
+    pub(crate) fn insert_sample(&mut self, tile: u16, image: RgbaBuffer) {
+        let Some(mirror) = self.tiles.get_mut(&tile) else {
+            return;
+        };
+        if image.width != mirror.live.width || image.height != mirror.live.height {
+            return;
+        }
+        mirror.sample = Some(image);
     }
 
     /// Runs one event's dabs on `tile`'s mirror (in stroke order, each
@@ -250,17 +303,36 @@ impl RetouchStroke {
                             }
                             _ => [0.0, 0.0],
                         };
-                        smudge_dab_masked(&mut mirror.live, &dab, params, motion, mask)
+                        match mirror.sample.as_ref() {
+                            Some(sample) => smudge_dab_masked_sampled(
+                                &mut mirror.live,
+                                sample,
+                                &dab,
+                                params,
+                                motion,
+                                mask,
+                            ),
+                            None => smudge_dab_masked(&mut mirror.live, &dab, params, motion, mask),
+                        }
                     }
                     BrushTool::Clone(_) => primary_src.and_then(|src| {
                         let src = self.symmetry[k].apply(src);
-                        clone_dab_masked(&mut mirror.live, &mirror.before, &dab, src, mask)
+                        // [M3]: the composite sample when installed, else
+                        // the stroke-start snapshot (the v1 shape).
+                        let source = mirror.sample.as_ref().unwrap_or(&mirror.before);
+                        clone_dab_masked(&mut mirror.live, source, &dab, src, mask)
                     }),
                     // The eraser is motion-independent (like clone, unlike
                     // smudge): every sibling erases at its own texels with
                     // the same channel flags, so the mirror image is exact.
+                    // On a layer-owned plane the erase is premultiplied
+                    // ([M1]); on Base it keeps today's semantics.
                     BrushTool::Erase(params) => {
-                        erase_dab_masked(&mut mirror.live, &dab, params, mask)
+                        if self.premultiplied_erase {
+                            erase_dab_masked_premultiplied(&mut mirror.live, &dab, params, mask)
+                        } else {
+                            erase_dab_masked(&mut mirror.live, &dab, params, mask)
+                        }
                     }
                 };
                 self.last_dab[k] = Some((tile, pos));
@@ -286,12 +358,9 @@ impl RetouchStroke {
             .iter()
             .filter_map(|(&tile, mirror)| {
                 Some(StrokeTile {
+                    owner: self.owner,
                     tile,
-                    // Retouch tools (smudge/clone/erase) stay baseColor-only
-                    // in v1 — a deliberate boundary (see `PaintState`'s
-                    // module docs): they never consult the session's
-                    // active channel.
-                    channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+                    channel: self.channel.clone(),
                     rect: mirror.dirty?,
                     start: &mirror.before,
                     end: &mirror.live,
@@ -323,12 +392,12 @@ impl RetouchStroke {
 
 /// One tile of a finished stroke, before it becomes an undo record: the
 /// dirty rect plus the FULL-tile stroke-start and stroke-end images (the
-/// merge reads texels outside the rect — see the module docs). `channel`
-/// is the per-channel tile pool's undo key extension
-/// (docs/specs/per-channel-tile-pool-design.md): a stroke only ever
-/// touches ONE channel, so every `StrokeTile` a single stroke produces
-/// shares it.
+/// merge reads texels outside the rect — see the module docs). `owner` +
+/// `channel` are the per-layer pool's undo key extension
+/// (docs/specs/per-layer-pool-design.md §3): a stroke only ever touches
+/// ONE plane, so every `StrokeTile` a single stroke produces shares them.
 pub(crate) struct StrokeTile<'a> {
+    pub owner: PlaneOwner,
     pub tile: u16,
     pub channel: String,
     pub rect: DirtyRect,
@@ -352,6 +421,7 @@ pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeComm
     let regions: Vec<TileRegion> = tiles
         .iter()
         .map(|t| TileRegion {
+            owner: t.owner,
             tile: t.tile,
             channel: t.channel.clone(),
             rect: t.rect,
@@ -363,17 +433,18 @@ pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeComm
 }
 
 /// Whether `tiles` coalesce into `top` (the module docs' eligibility
-/// rule): at least one shared (tile, channel), and every shared one's
-/// rects intersect, pass the size guard, and fit the stroke's images. A
-/// height stroke never coalesces with a baseColor entry on the same
-/// tile — the channel is part of the undo key, not just the tile.
+/// rule): at least one shared (owner, tile, channel), and every shared
+/// one's rects intersect, pass the size guard, and fit the stroke's
+/// images. A height stroke never coalesces with a baseColor entry on the
+/// same tile — the channel is part of the undo key, not just the tile —
+/// and neither coalesces across owners.
 fn can_merge(top: &PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> bool {
     let mut shared = 0;
     for t in tiles {
         let Some(old) = top
             .regions
             .iter()
-            .find(|r| r.tile == t.tile && r.channel == t.channel)
+            .find(|r| r.owner == t.owner && r.tile == t.tile && r.channel == t.channel)
         else {
             continue;
         };
@@ -391,16 +462,16 @@ fn can_merge(top: &PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> bool {
 }
 
 /// Folds the stroke into `top` (eligibility already checked by
-/// [`can_merge`]): shared (tile, channel) pairs grow to the union with
-/// the oldest before and the newest after, the rest carry over.
+/// [`can_merge`]): shared (owner, tile, channel) triples grow to the union
+/// with the oldest before and the newest after, the rest carry over.
 fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrokeCommand {
-    let mut regions: BTreeMap<(u16, String), TileRegion> = top
+    let mut regions: BTreeMap<(PlaneOwner, u16, String), TileRegion> = top
         .regions
         .into_iter()
-        .map(|r| ((r.tile, r.channel.clone()), r))
+        .map(|r| ((r.owner, r.tile, r.channel.clone()), r))
         .collect();
     for t in tiles {
-        let key = (t.tile, t.channel.clone());
+        let key = (t.owner, t.tile, t.channel.clone());
         let region = match regions.remove(&key) {
             Some(old) => {
                 let union = old.rect.union(t.rect);
@@ -418,6 +489,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
                 };
                 before.write_region(local, &old.before);
                 TileRegion {
+                    owner: t.owner,
                     tile: t.tile,
                     channel: t.channel.clone(),
                     rect: union,
@@ -426,6 +498,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
                 }
             }
             None => TileRegion {
+                owner: t.owner,
                 tile: t.tile,
                 channel: t.channel.clone(),
                 rect: t.rect,
@@ -468,6 +541,8 @@ pub(crate) fn record_stroke(
 /// One tile's slice of a stroke's undo record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TileRegion {
+    /// The undo key's owner component (see [`StrokeTile::owner`]).
+    pub owner: PlaneOwner,
     pub tile: u16,
     /// The undo key's channel component (see [`StrokeTile::channel`]).
     pub channel: String,
@@ -485,11 +560,11 @@ pub(crate) struct PaintStrokeCommand {
 }
 
 /// The pending region writes undo/redo produce: the [`Command::Doc`] of
-/// [`PaintStrokeCommand`]. The owner drains `writes` into the GPU targets.
+/// [`PaintStrokeCommand`]. The owner drains `writes` into the GPU planes.
 #[derive(Debug, Default)]
 pub(crate) struct PaintWrites {
-    /// `(tile, channel, rect, bytes)`, in order.
-    pub writes: Vec<(u16, String, DirtyRect, Vec<u8>)>,
+    /// `(owner, tile, channel, rect, bytes)`, in order.
+    pub writes: Vec<(PlaneOwner, u16, String, DirtyRect, Vec<u8>)>,
 }
 
 impl Command for PaintStrokeCommand {
@@ -498,6 +573,7 @@ impl Command for PaintStrokeCommand {
     fn apply(&mut self, doc: &mut PaintWrites) {
         for region in &self.regions {
             doc.writes.push((
+                region.owner,
                 region.tile,
                 region.channel.clone(),
                 region.rect,
@@ -509,6 +585,7 @@ impl Command for PaintStrokeCommand {
     fn revert(&mut self, doc: &mut PaintWrites) {
         for region in &self.regions {
             doc.writes.push((
+                region.owner,
                 region.tile,
                 region.channel.clone(),
                 region.rect,
@@ -626,7 +703,11 @@ mod tests {
     }
 
     fn drain(writes: &mut PaintWrites, image: &mut RgbaBuffer) {
-        for (tile, channel, rect, bytes) in writes.writes.drain(..) {
+        for (owner, tile, channel, rect, bytes) in writes.writes.drain(..) {
+            // Stage-4: the drained write keys the STROKED owner — Base for
+            // Base strokes, `Layer(id)` for layer-plane strokes (the plane
+            // is the undo's restore target, never the Base target).
+            let _ = owner;
             assert_eq!(tile, TILE);
             assert_eq!(channel, crate::paint_state::BASE_COLOR_CHANNEL);
             image.write_region(rect, &bytes);
@@ -1186,6 +1267,7 @@ mod tests {
     ) {
         let (start, end) = fill_stroke(image, r, value);
         let tiles = [StrokeTile {
+            owner: PlaneOwner::Base,
             tile: TILE,
             channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
             rect: r,
@@ -1194,6 +1276,104 @@ mod tests {
         }];
         assert!(record_stroke(history, writes, &tiles));
         assert!(writes.writes.is_empty(), "the push's re-apply is dropped");
+    }
+
+    /// §8 T22 (app half): an eraser stroke into a layer-owned plane erases
+    /// premultiplied — alpha scales all four channels — while the undo
+    /// record keys `(owner, tile, channel)` and restores the exact
+    /// before-state.
+    #[test]
+    fn premultiplied_erase_stroke_keys_owner_and_restores_bytes() {
+        use umber_brush::retouch::RetouchDab;
+
+        let owner = PlaneOwner::Layer(4);
+        let mut image = gray_opaque();
+        image.set_texel(32, 32, [200, 0, 0, 255]);
+        let original = image.clone();
+        // The golden's exact-0.5 coverage: a hard dab at texel center with
+        // alpha 0.5 (`falloff(0, 1) = 1` exactly).
+        let dab = RetouchDab {
+            pos: [32.0, 32.0],
+            radius: 8.0,
+            alpha: 0.5,
+            hardness: 1.0,
+        };
+        assert_eq!(umber_brush::retouch::coverage(&dab, 32, 32), Some(0.5));
+
+        let mut stroke = RetouchStroke::new(eraser());
+        stroke.set_plane(owner, crate::paint_state::BASE_COLOR_CHANNEL.to_string());
+        stroke.insert_tile(TILE, image.clone());
+        let rect = stroke.apply(TILE, &[dab]).expect("erase must write");
+        image.write_region(rect, &stroke.region(TILE, rect));
+        assert_eq!(image.texel(32, 32), [100, 0, 0, 128]);
+
+        let cmd = stroke.finish().expect("erase records");
+        assert_eq!(cmd.regions.len(), 1);
+        assert_eq!(cmd.regions[0].owner, owner);
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(16);
+        let mut writes = PaintWrites::default();
+        history.push(cmd, &mut writes);
+        writes.writes.clear();
+        assert!(history.undo(&mut writes));
+        // The queued write keys the layer owner (the session drains it
+        // into the plane, never the Base target).
+        assert_eq!(writes.writes.len(), 1);
+        assert_eq!(writes.writes[0].0, owner);
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
+    }
+
+    /// §3 [M3]: clone samples the installed composite, not the mirror's
+    /// own bytes — onto an empty plane the cloned composite bytes land
+    /// (the clone-to-new-layer workflow), satisfying `p ≤ a`.
+    #[test]
+    fn clone_samples_the_installed_composite() {
+        // The composite shows opaque white where the plane is empty.
+        let mut sample = RgbaBuffer::transparent(SIZE, SIZE);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                sample.set_texel(x, y, [255, 255, 255, 255]);
+            }
+        }
+        let mut plane = RgbaBuffer::transparent(SIZE, SIZE);
+        let mut stroke = RetouchStroke::new(BrushTool::Clone(CloneParams {
+            source_offset: (0.0, 0.0),
+            follow: true,
+        }));
+        stroke.set_plane(
+            PlaneOwner::Layer(9),
+            crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+        );
+        stroke.insert_tile(TILE, plane.clone());
+        stroke.insert_sample(TILE, sample);
+        stroke.begin_clone(TILE, [32.0, 32.0], [0.0, 0.0], true);
+        let dab = RetouchDab {
+            pos: [32.0, 32.0],
+            radius: 4.0,
+            alpha: 1.0,
+            hardness: 1.0,
+        };
+        let rect = stroke.apply(TILE, &[dab]).expect("clone must write");
+        plane.write_region(rect, &stroke.region(TILE, rect));
+        // The plane was empty: every written texel came from the sample.
+        let t = plane.texel(32, 32);
+        assert_eq!(t, [255, 255, 255, 255]);
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let px = plane.texel(x, y);
+                assert!(
+                    px[0] <= px[3] && px[1] <= px[3] && px[2] <= px[3],
+                    "p ≤ a holds: {px:?}"
+                );
+            }
+        }
+        // Control: without a clone tracker the mirror clones nothing —
+        // no `begin_clone`, so `source_for` is `None` for every dab
+        // ([M3]'s tracker gate; the sample-or-before fallback needs the
+        // tracker's source first).
+        let mut stroke2 = RetouchStroke::new(BrushTool::Clone(CloneParams::default()));
+        stroke2.insert_tile(TILE, RgbaBuffer::transparent(SIZE, SIZE));
+        assert_eq!(stroke2.apply(TILE, &[dab]), None);
     }
 
     /// The soak: N = 8 strokes, each a 16×16 rect shifted 4 texels right
@@ -1234,6 +1414,7 @@ mod tests {
             let r = rect(8 + 4 * k, 8, 24 + 4 * k, 24);
             let (start, end) = fill_stroke(&mut scratch, r, 10 * (k as u8 + 1));
             let cmd = stroke_command(&[StrokeTile {
+                owner: PlaneOwner::Base,
                 tile: TILE,
                 channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                 rect: r,
@@ -1345,6 +1526,7 @@ mod tests {
         let r1 = rect(8, 8, 24, 24);
         let (s1, e1) = fill_stroke(images.get_mut(&TILE).unwrap(), r1, 30);
         let tiles = [StrokeTile {
+            owner: PlaneOwner::Base,
             tile: TILE,
             channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
             rect: r1,
@@ -1361,6 +1543,7 @@ mod tests {
         let (s2o, e2o) = fill_stroke(images.get_mut(&OTHER).unwrap(), r2_other, 120);
         let tiles = [
             StrokeTile {
+                owner: PlaneOwner::Base,
                 tile: TILE,
                 channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                 rect: r2,
@@ -1368,6 +1551,7 @@ mod tests {
                 end: &e2,
             },
             StrokeTile {
+                owner: PlaneOwner::Base,
                 tile: OTHER,
                 channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
                 rect: r2_other,
@@ -1385,6 +1569,7 @@ mod tests {
         let r3 = rect(40, 40, 48, 48);
         let (s3, e3) = fill_stroke(images.get_mut(&TILE).unwrap(), r3, 200);
         let tiles = [StrokeTile {
+            owner: PlaneOwner::Base,
             tile: TILE,
             channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
             rect: r3,
@@ -1407,7 +1592,7 @@ mod tests {
 
     /// [`drain`] across several tiles.
     fn drain_tiles(writes: &mut PaintWrites, images: &mut BTreeMap<u16, RgbaBuffer>) {
-        for (tile, channel, r, bytes) in writes.writes.drain(..) {
+        for (_owner, tile, channel, r, bytes) in writes.writes.drain(..) {
             assert_eq!(channel, crate::paint_state::BASE_COLOR_CHANNEL);
             images
                 .get_mut(&tile)

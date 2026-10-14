@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use umber_mesh::FillParams;
@@ -1668,8 +1669,31 @@ impl LayerCommand {
     }
 }
 
+impl LayerCommand {
+    /// The ids this command can put BACK into the stack when undone or
+    /// redone — the tombstone census's revive set (the per-layer pool
+    /// design, §5.4 item 5). Only the insert family qualifies:
+    /// `Remove` (undo re-inserts the captured layer) and `Add` after
+    /// its first `apply` (redo re-adds the same id; the `None` form
+    /// contributes nothing because it holds no id until it runs).
+    /// Every other variant's revert against a stack missing its id is
+    /// already a no-op, so those ids never revive pixels and are not
+    /// reported.
+    pub fn revive_ids(&self) -> BTreeSet<u64> {
+        match self {
+            LayerCommand::Add { id: Some(id), .. } => BTreeSet::from([*id]),
+            LayerCommand::Remove { id, .. } => BTreeSet::from([*id]),
+            _ => BTreeSet::new(),
+        }
+    }
+}
+
 impl Command for LayerCommand {
     type Doc = LayerStack;
+
+    fn referenced_layer_ids(&self) -> BTreeSet<u64> {
+        self.revive_ids()
+    }
 
     fn apply(&mut self, doc: &mut LayerStack) {
         match self {

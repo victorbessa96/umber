@@ -5,7 +5,7 @@
 //! and any future document-mutating command (stroke commits, procedural-graph
 //! edits, ...) without this module needing to know about them.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 /// A reversible edit to a document of type [`Command::Doc`].
 ///
@@ -35,6 +35,22 @@ pub trait Command {
     /// counts — the command may be re-applied by a later `redo`).
     fn memory_bytes(&self) -> usize {
         0
+    }
+
+    /// The layer ids this command can put BACK into the stack when
+    /// undone or redone — the insert family. The tombstone census
+    /// ([`UndoStack::referenced_layer_ids`]) unions these across the
+    /// journal: a retired layer's CPU pixels may be freed exactly when
+    /// no held command can revive its id (the per-layer pool design,
+    /// §5.4 item 5).
+    ///
+    /// Defaults to empty: only the insert commands override. Mutating
+    /// commands (`Set*`, `Rename`, mask edits) deliberately do NOT
+    /// contribute their target id — reverting them against a stack
+    /// without the layer is already a no-op (the setters swallow
+    /// unknown ids), so they can never revive pixels.
+    fn referenced_layer_ids(&self) -> BTreeSet<u64> {
+        BTreeSet::new()
     }
 }
 
@@ -232,6 +248,28 @@ impl<C: Command> UndoStack<C> {
     /// what the memory budget is compared against.
     pub fn bytes_held(&self) -> usize {
         self.bytes_held
+    }
+
+    /// The union of [`Command::referenced_layer_ids`] over every held
+    /// entry — undo and redo both. This is the tombstone census (the
+    /// per-layer pool design, §5.4 item 5): a retired layer's pixels may
+    /// be freed exactly when its id is absent from this set, because no
+    /// command left in the journal can put the layer back.
+    ///
+    /// The redo stack is deliberately included: an undone `Remove` sits
+    /// there, and redoing it would remove the layer again — but the undo
+    /// of that redo re-inserts it, so the bytes must survive while the
+    /// entry lives. The window opened by
+    /// [`take_top_unreverted`](Self::take_top_unreverted) (top taken,
+    /// successor not yet pushed) under-counts by at most that one
+    /// in-flight command; callers that mutate the stack mid-census own
+    /// that ordering.
+    pub fn referenced_layer_ids(&self) -> BTreeSet<u64> {
+        let mut ids = BTreeSet::new();
+        for command in self.undo.iter().chain(self.redo.iter()) {
+            ids.extend(command.referenced_layer_ids());
+        }
+        ids
     }
 
     /// Number of entries currently held in the undo journal.

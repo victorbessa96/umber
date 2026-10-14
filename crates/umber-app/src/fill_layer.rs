@@ -26,16 +26,12 @@
 //!    session mask at each texel, AFTER symmetry expansion like every
 //!    retouch consumer, and texels gated to zero go transparent black so
 //!    the `WriteRegion` upload below erases them on both paths.
-//! 4. [`PaintState::publish_fill`](crate::paint_state::PaintState::publish_fill)
-//!    — the tile/texture-set plumbing: the evaluated bytes ride the same
-//!    `WriteRegion` queue as retouch strokes into the tile's GPU target.
-//! 5. [`composite_fill_over`] — the stack composite step for readers that
-//!    composite on the CPU: the fill blends over the accumulated base with
-//!    the layer's own [`BlendMode`](umber_core::BlendMode) + opacity, per
-//!    channel, through the SAME [`BlendMode::blend_channel`](umber_core::BlendMode::blend_channel)
-//!    primitive every other layer uses. (`Passthrough` is structural for
-//!    folders, not a pixel op — a fill layer carrying it composites as
-//!    `Normal`, documented at the function.)
+//! 4. [`PaintState::publish_plane`](crate::paint_state::PaintState::publish_plane)
+//!    — the tile/texture-set plumbing: the premultiplied bytes ride a
+//!    whole-plane `WriteRegion` into `(Layer(id), tile, "baseColor")`'s
+//!    own plane. The layer's blend/opacity apply at COMPOSITE time (the
+//!    flush folds the stack in order) — never baked into the plane, so
+//!    refreshes replace instead of compounding and hides un-publish.
 //!
 //! The property rows ([`fill_section_ui`]) edit through [`Document::run`](crate::document::Document::run)
 //! with [`LayerCommand::SetFill`](umber_core::LayerCommand::SetFill), so
@@ -45,7 +41,7 @@ use std::collections::HashMap;
 
 use umber_brush::symmetry::{symmetrize_coverage, texel_transforms};
 use umber_brush::{QuickMask, SymTransform, SymmetrySettings};
-use umber_core::{BlendMode, Layer, LayerCommand, LayerKind};
+use umber_core::{Layer, LayerCommand, LayerKind};
 use umber_mesh::{
     evaluate_fill_tile, uv_triangle_at, FillMask, FillParams, FillProjection, FillSource, FillTile,
     MeshData, ProjAxis, LASSO_MAX_POINTS,
@@ -84,14 +80,24 @@ pub struct FillLayerState {
     /// The symmetry settings the cache was evaluated with: a symmetry
     /// change must re-evaluate just like a source change.
     last_symmetry: SymmetrySettings,
-    /// The layer's blend + opacity for the composite-aware publish
-    /// (`composite_fill_over`); set by [`FillLayerStates::ensure`] from the
-    /// live layer, updated on every ensure (the panel re-sees the layer
-    /// each frame, so blend edits propagate without a second path).
+    /// The layer's blend + opacity, adopted per frame for the entry
+    /// builder's future use (today the shell reads them off the document
+    /// layer straight into the composite snapshot — blend/opacity apply
+    /// at composite time, never baked into the plane); set by
+    /// [`FillLayerStates::ensure`] from the live layer, updated on every
+    /// ensure (the panel re-sees the layer each frame, so blend edits
+    /// propagate without a second path).
     blend: umber_core::BlendMode,
     opacity: f32,
     dirty: bool,
     cache: HashMap<u16, CachedTile>,
+    /// The plane-budget refusal that blocked the last refresh, if any
+    /// (§1.3): the total `plane_bytes()` the materialization would have
+    /// reached. The layer stays dirty but leaves the queue — it retries
+    /// only when `plane_bytes()` falls (a plane freed) or its params
+    /// change (see [`FillLayerStates::retry_budget_freed`]). The row
+    /// badge shows it (the Layers panel reads this through the shell).
+    budget_blocked: Option<u64>,
 }
 
 impl FillLayerState {
@@ -111,6 +117,7 @@ impl FillLayerState {
             opacity: 1.0,
             dirty: true,
             cache: HashMap::new(),
+            budget_blocked: None,
         }
     }
 
@@ -128,6 +135,12 @@ impl FillLayerState {
     /// successful [`Self::evaluate`].
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// The plane-budget refusal blocking this layer, if any (see the
+    /// `budget_blocked` field docs).
+    pub fn budget_blocked(&self) -> Option<u64> {
+        self.budget_blocked
     }
 
     /// Marks the cache stale (the source-change hook: a fill layer
@@ -243,7 +256,7 @@ impl FillLayerState {
 /// mask blocks everything, an inverted one allows it), and texels gated
 /// to exactly zero go transparent black so the full-tile `WriteRegion`
 /// upload erases them on the GPU path too. Fractional coverage keeps its
-/// sampled color for [`composite_fill_over`]'s Porter-Duff blend.
+/// sampled color for the premultiplied fold below.
 pub fn apply_quick_mask(tile: FillTile, mask: &QuickMask, tile_id: u16) -> FillTile {
     if !mask.gates() {
         return tile;
@@ -314,117 +327,97 @@ pub fn apply_symmetry(tile: FillTile, symmetry: &SymmetrySettings) -> FillTile {
     }
 }
 
-/// Composites one evaluated fill tile over `base` in place — the fill
-/// layer's step in the stack composite, honoring its blend mode + opacity
-/// exactly like any other layer.
+/// Folds one evaluated fill tile into premultiplied plane bytes (§5.1):
+/// texel = `(c · α, α)` with `α = sample_a · coverage`, quantized by
+/// `f32_to_u8`. Coverage is FOLDED IN — this retires the fast path's
+/// silent drop (which published the sampled bytes and discarded
+/// fractional quick-mask coverage). The layer's blend/opacity are NOT
+/// applied here (they ride the composite snapshot); a `Passthrough` fill
+/// composites as `Normal` at read time.
 ///
-/// Per texel: `src_alpha = fill_alpha * coverage * opacity`, the RGB blend
-/// runs through [`BlendMode::blend_channel`](umber_core::BlendMode::blend_channel)
-/// (the shared per-channel primitive), and the result combines
-/// Porter-Duff-over (`blend * src_alpha + dst * dst_alpha * (1 - src_alpha)`,
-/// renormalized). Coverage `0.0` (or zero effective alpha) leaves the base
-/// byte-identical. `Passthrough` — structural for folders, not a pixel op —
-/// composites as `Normal` here (a fill layer carrying it behaves like a
-/// regular layer, not a folder).
-///
-/// Length contract: `base` and the tile hold the same texel count and the
-/// tile's coverage matches its RGBA; mismatches composite the shared prefix
-/// and ignore the rest (never a panic — tile resizes mid-session reorder
-/// evaluations, they must not crash the composite).
-pub fn composite_fill_over(base: &mut [u8], fill: &FillTile, blend: BlendMode, opacity: f32) {
-    let op = if opacity.is_finite() {
-        opacity.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let n = (base.len() / 4)
-        .min(fill.rgba.len() / 4)
-        .min(fill.coverage.len());
+/// Length contract: folds the shared texel prefix, never a panic (tile
+/// resizes mid-session reorder evaluations — they must not crash the
+/// refresh).
+pub fn fold_coverage_to_premultiplied(rgba: &[u8], coverage: &[f32]) -> Vec<u8> {
+    use umber_gpu::f32_to_u8;
+    let n = (rgba.len() / 4).min(coverage.len());
+    let mut out = Vec::with_capacity(n * 4);
     for i in 0..n {
-        let cov = fill.coverage[i];
-        if !cov.is_finite() || cov <= 0.0 || op <= 0.0 {
-            continue;
-        }
-        let f = &fill.rgba[i * 4..i * 4 + 4];
-        let sa = f[3] as f32 / 255.0 * cov * op;
-        if !sa.is_finite() || sa <= 0.0 {
-            continue;
-        }
-        let b = &base[i * 4..i * 4 + 4];
-        let da = b[3] as f32 / 255.0;
-        let oa = sa + da * (1.0 - sa);
-        if !oa.is_finite() || oa <= 0.0 {
-            continue;
-        }
-        let mut out = [0u8; 4];
-        for c in 0..3 {
-            let (s, d) = (f[c] as f32 / 255.0, b[c] as f32 / 255.0);
-            // `None` is Passthrough (see the fn docs): plain Normal.
-            let blended = blend.blend_channel(s, d).unwrap_or(s);
-            out[c] = ((blended * sa + d * da * (1.0 - sa)) / oa * 255.0 + 0.5)
-                .floor()
-                .clamp(0.0, 255.0) as u8;
-        }
-        out[3] = ((oa * 255.0 + 0.5).floor()).clamp(0.0, 255.0) as u8;
-        base[i * 4..i * 4 + 4].copy_from_slice(&out);
+        let cov = if coverage[i].is_finite() {
+            coverage[i].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let alpha = f32::from(rgba[i * 4 + 3]) / 255.0 * cov;
+        out.push(f32_to_u8(f32::from(rgba[i * 4]) / 255.0 * alpha));
+        out.push(f32_to_u8(f32::from(rgba[i * 4 + 1]) / 255.0 * alpha));
+        out.push(f32_to_u8(f32::from(rgba[i * 4 + 2]) / 255.0 * alpha));
+        out.push(f32_to_u8(alpha));
     }
+    out
 }
 
-/// Re-evaluates `state` for every tile in `tiles` at `size`x`size`, gates
-/// each through the session quick mask ([`apply_quick_mask`]), and stages
-/// each through the paint session's tile plumbing
-/// ([`PaintState::publish_fill`](crate::paint_state::PaintState::publish_fill)).
+/// Re-evaluates `state` for every tile in `tiles` — each at ITS
+/// tile/channel size ([m8]: tiles belong to different sets, so the one
+/// `size` parameter is retired) — gates each through the session quick
+/// mask ([`apply_quick_mask`]), folds coverage into premultiplied plane
+/// bytes ([`fold_coverage_to_premultiplied`]), and publishes each into
+/// `(Layer(state), tile, "baseColor")`'s own plane (a refresh REPLACES
+/// the plane whole: re-eval is idempotent, hides un-publish).
 ///
-/// Call after any fill-param edit (panel, undo, redo), after mesh load, and
-/// after a target resize (a size change invalidates the cache inside
-/// [`FillLayerState::evaluate`]). Returns the tiles actually staged —
-/// tiles whose target publish failed (dropped, logged inside `publish_fill`)
-/// are absent, so the caller can surface them honestly instead of assuming.
+/// Call after any fill-param edit (panel, undo, redo), after mesh load,
+/// and after a target resize (a size change invalidates the cache inside
+/// [`FillLayerState::evaluate`]). Returns the tiles actually staged.
+/// A plane-budget refusal records `budget_blocked` on the state and
+/// stages nothing further (the layer stays dirty and retries per §1.3);
+/// torn uploads drop loudly with a log, like the fill precedent.
 pub fn refresh_fill_layer(
     state: &mut FillLayerState,
     mesh: &MeshData,
     paint: &mut PaintState,
     tiles: &[u16],
-    size: u32,
     symmetry: &SymmetrySettings,
 ) -> Vec<u16> {
-    // The layer's blend + opacity for the composite-aware publish (the
-    // `composite_fill_over` read path; Normal/1.0 is the fast path that
-    // publishes the gated bytes unchanged).
-    let (blend, opacity) = state.layer_blend_opacity();
+    use crate::paint_state::{PlaneOwner, BASE_COLOR_CHANNEL};
+    let layer_id = state.layer_id();
     let mut staged = Vec::new();
     for &tile in tiles {
-        let rgba = state.evaluate(mesh, tile, size, symmetry).to_vec();
-        let coverage = state.coverage_of(tile, size).unwrap_or(&[]).to_vec();
-        let mut gated = apply_quick_mask(
+        let (width, height) = paint.tile_channel_size(tile, BASE_COLOR_CHANNEL);
+        if width == 0 || height == 0 {
+            continue;
+        }
+        let rgba = state.evaluate(mesh, tile, width, symmetry).to_vec();
+        let coverage = state.coverage_of(tile, width).unwrap_or(&[]).to_vec();
+        let gated = apply_quick_mask(
             FillTile {
-                width: size,
-                height: size,
+                width,
+                height,
                 rgba,
                 coverage,
             },
             paint.quick_mask(),
             tile,
         );
-        // The composite-aware publish: a non-Normal blend (or opacity < 1)
-        // composites the fill over the readback through the SAME
-        // blend_channel primitive every other layer uses; Normal/1.0
-        // publishes the gated bytes unchanged (the fast path).
-        if blend != umber_core::BlendMode::Normal || opacity < 1.0 {
-            if let Some(base) = paint.read_tile(tile) {
-                let fill = FillTile {
-                    width: gated.width,
-                    height: gated.height,
-                    rgba: gated.rgba,
-                    coverage: gated.coverage,
-                };
-                let mut base_bytes = base.data;
-                composite_fill_over(&mut base_bytes, &fill, blend, opacity);
-                gated.rgba = base_bytes;
+        let plane = fold_coverage_to_premultiplied(&gated.rgba, &gated.coverage);
+        match paint.publish_plane(
+            PlaneOwner::Layer(layer_id),
+            tile,
+            BASE_COLOR_CHANNEL,
+            width,
+            height,
+            plane,
+        ) {
+            Ok(()) => {
+                state.budget_blocked = None;
+                staged.push(tile);
             }
-        }
-        if paint.publish_fill(tile, size, size, gated.rgba) {
-            staged.push(tile);
+            Err(crate::paint_state::PaintRefusal::PlaneBudget { bytes }) => {
+                state.budget_blocked = Some(bytes);
+                log::warn!("fill layer {layer_id}: plane budget refused ({bytes} bytes)");
+            }
+            Err(refusal) => {
+                log::warn!("fill layer {layer_id}: publish refused ({refusal:?})");
+            }
         }
     }
     staged
@@ -854,12 +847,84 @@ impl FillLayerStates {
             .or_insert_with(|| FillLayerState::new(layer, params.clone()));
         if fresh || state.params() != params {
             state.set_params(params.clone());
+            // A param edit clears a budget block: new inputs may fit
+            // (or the retry below re-blocks loudly — never silent).
+            state.budget_blocked = None;
             if !self.dirty.contains(&layer) {
                 self.dirty.push(layer);
             }
         }
         state.blend = blend;
         state.opacity = opacity;
+    }
+
+    /// The project-open path ([B2]'s open-seeding, the shape of
+    /// [`MaterialLayerStates::ensure_open`](crate::material_layer::MaterialLayerStates::ensure_open)):
+    /// inserts the state CLEAN — it does NOT push onto `dirty`. Today's
+    /// `ensure` pushes every FRESH id, which is the "fill compounds on
+    /// open" bug (`dynamic-materials-design.md:469-475`): under per-layer
+    /// planes the same bug would double-count every v1 fill over its
+    /// legacy Base output. The per-frame `ensure` keeps its semantics
+    /// for runtime-added layers and param edits; §6.3's dormancy and the
+    /// "v2 planeless ⇒ dirty" rule decide which open-seeded fills become
+    /// dirty (the shell calls [`Self::mark_dirty`] for those).
+    pub fn ensure_open(
+        &mut self,
+        layer: u64,
+        params: &FillParams,
+        blend: umber_core::BlendMode,
+        opacity: f32,
+    ) {
+        let state = self
+            .map
+            .entry(layer)
+            .or_insert_with(|| FillLayerState::new(layer, params.clone()));
+        if state.params() != params {
+            state.params = params.clone();
+        }
+        state.blend = blend;
+        state.opacity = opacity;
+        state.dirty = false;
+    }
+
+    /// Queues a refresh for a tracked layer without changing its params
+    /// (the shell's "v2 planeless ⇒ dirty" seeding and the explicit
+    /// refresh path). No-op for untracked layers.
+    pub fn mark_dirty(&mut self, layer: u64) {
+        if let Some(state) = self.map.get_mut(&layer) {
+            state.dirty = true;
+            state.budget_blocked = None;
+            if !self.dirty.contains(&layer) {
+                self.dirty.push(layer);
+            }
+        }
+    }
+
+    /// Requeues budget-blocked layers whose block may have cleared: a
+    /// state blocked at `blocked_bytes` retries when the session now
+    /// holds fewer plane bytes (a plane freed). Retrying every frame
+    /// would spam; the shell calls this when bytes fall (or params
+    /// change, which requeues through [`Self::ensure`]).
+    pub fn retry_budget_freed(&mut self, plane_bytes: u64) {
+        let retry: Vec<u64> = self
+            .map
+            .iter()
+            .filter(|(_, state)| {
+                state
+                    .budget_blocked
+                    .is_some_and(|blocked| plane_bytes < blocked)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in retry {
+            if let Some(state) = self.map.get_mut(&id) {
+                state.budget_blocked = None;
+                state.dirty = true;
+            }
+            if !self.dirty.contains(&id) {
+                self.dirty.push(id);
+            }
+        }
     }
 }
 
@@ -1108,6 +1173,7 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
 mod tests {
     use super::*;
     use umber_brush::{MirrorAxis, MirrorSettings};
+    use umber_core::BlendMode;
     use umber_mesh::MeshData;
 
     /// Quad with UVs squashed into the LEFT half ([0, 0.5] x [0, 1]):
@@ -1274,69 +1340,6 @@ mod tests {
         assert!(left_is(&third, [0, 255, 0, 255]), "left half green now");
     }
 
-    /// Compositing: the fill honors blend mode + opacity like any layer —
-    /// Normal at full opacity replaces covered texels, opacity 0 and
-    /// coverage 0 keep the base byte-identical, Multiply darkens by the
-    /// book, and Passthrough degrades to Normal (never a hole).
-    #[test]
-    fn fill_composites_like_any_layer() {
-        // 2x1: texel 0 covered red, texel 1 uncovered.
-        let fill = FillTile {
-            width: 2,
-            height: 1,
-            rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
-            coverage: vec![1.0, 0.0],
-        };
-        let base_of = |px: [u8; 4]| vec![px[0], px[1], px[2], px[3], px[0], px[1], px[2], px[3]];
-
-        // Normal, opacity 1: covered texel becomes the fill exactly.
-        let mut base = base_of([10, 128, 200, 255]);
-        composite_fill_over(&mut base, &fill, BlendMode::Normal, 1.0);
-        assert_eq!(&base[0..4], &[255, 0, 0, 255]);
-        assert_eq!(&base[4..8], &[10, 128, 200, 255], "uncovered untouched");
-
-        // Opacity 0: the base is byte-identical everywhere.
-        let mut base = base_of([10, 128, 200, 255]);
-        composite_fill_over(&mut base, &fill, BlendMode::Normal, 0.0);
-        assert_eq!(base, base_of([10, 128, 200, 255]));
-
-        // Multiply by the book: 1.0 * dst = dst for red-on-gray's R,
-        // 0.0 * dst = 0 for G/B.
-        let mut base = base_of([100, 150, 200, 255]);
-        composite_fill_over(&mut base, &fill, BlendMode::Multiply, 1.0);
-        assert_eq!(&base[0..4], &[100, 0, 0, 255]);
-        assert_eq!(&base[4..8], &[100, 150, 200, 255]);
-
-        // Half opacity mixes halfway (10 -> (255+10)/2 = 132.5 -> 132/133
-        // by rounding; assert the band, not the byte — encoders differ).
-        let mut base = base_of([10, 128, 200, 255]);
-        composite_fill_over(&mut base, &fill, BlendMode::Normal, 0.5);
-        assert!(
-            (120..=140).contains(&base[0]),
-            "R mixes halfway: {}",
-            base[0]
-        );
-        assert_eq!(&base[4..8], &[10, 128, 200, 255]);
-
-        // Passthrough is Normal for a fill's own step, never a hole.
-        let mut base = base_of([10, 128, 200, 255]);
-        composite_fill_over(&mut base, &fill, BlendMode::Passthrough, 1.0);
-        assert_eq!(&base[0..4], &[255, 0, 0, 255]);
-
-        // Partial coverage scales the alpha: coverage 0.5 at opacity 1
-        // over transparent black yields half-alpha fill color.
-        let half = FillTile {
-            width: 1,
-            height: 1,
-            rgba: vec![255, 0, 0, 255],
-            coverage: vec![0.5],
-        };
-        let mut base = vec![0, 0, 0, 0];
-        composite_fill_over(&mut base, &half, BlendMode::Normal, 1.0);
-        assert_eq!(&base[0..3], &[255, 0, 0]);
-        assert!((126..=130).contains(&base[3]), "alpha ~= 128: {}", base[3]);
-    }
-
     /// Helper: a session mask allowing exactly the left half (one hard
     /// dab per texel — texel centers stamp to exactly 1.0, the right
     /// half stays at the empty 0.0).
@@ -1491,15 +1494,14 @@ mod tests {
                 assert_eq!(gated.coverage[y * 16 + x], want, "gated ({x},{y})");
             }
         }
-        let mut base = vec![128u8; 16 * 16 * 4];
-        composite_fill_over(&mut base, &gated, BlendMode::Normal, 1.0);
+        let plane = fold_coverage_to_premultiplied(&gated.rgba, &gated.coverage);
         for y in 0..16 {
             for x in 0..16 {
-                let px = &base[(y * 16 + x) * 4..][..4];
+                let px = &plane[(y * 16 + x) * 4..][..4];
                 if x < 8 && y < 8 {
-                    assert_eq!(px, &[255, 0, 0, 255], "composite ({x},{y})");
+                    assert_eq!(px, &[255, 0, 0, 255], "fold ({x},{y})");
                 } else {
-                    assert_eq!(px, &[128, 128, 128, 128], "composite ({x},{y})");
+                    assert_eq!(px, &[0, 0, 0, 0], "fold ({x},{y})");
                 }
             }
         }
@@ -1713,5 +1715,65 @@ mod tests {
         let (blend_now, opacity_now) = states.map.get(&id).unwrap().layer_blend_opacity();
         assert_eq!(blend_now, BlendMode::Multiply);
         assert_eq!(opacity_now, 0.5);
+    }
+
+    /// §8 T12: sample `(255,0,0,255)` at quick-mask coverage 0.25 folds
+    /// to the plane texel `(64,0,0,64)` (`255·0.25 = 63.75 → 64`).
+    /// Sentinel: the v1 fast path published `(255,0,0,255)`, dropping
+    /// coverage.
+    #[test]
+    fn fold_premultiplies_with_coverage_folded_in() {
+        let plane = fold_coverage_to_premultiplied(&[255, 0, 0, 255], &[0.25]);
+        assert_eq!(plane, vec![64, 0, 0, 64]);
+        assert_ne!(plane, vec![255, 0, 0, 255], "coverage must not drop");
+        // Full coverage is the identity on opaque texels; zero coverage
+        // (and non-finite coverage) goes transparent black; every output
+        // satisfies `p ≤ a`.
+        assert_eq!(
+            fold_coverage_to_premultiplied(&[10, 20, 30, 255], &[1.0]),
+            vec![10, 20, 30, 255]
+        );
+        assert_eq!(
+            fold_coverage_to_premultiplied(&[10, 20, 30, 255], &[0.0]),
+            vec![0, 0, 0, 0]
+        );
+        assert_eq!(
+            fold_coverage_to_premultiplied(&[10, 20, 30, 255], &[f32::NAN]),
+            vec![0, 0, 0, 0]
+        );
+        // Straight-alpha in, premultiplied out: half-alpha red at full
+        // coverage folds to `(128,0,0,128)` (`α = 128/255`, `c·α =
+        // 128/255·255 = 128.0` exactly).
+        let half = fold_coverage_to_premultiplied(&[255, 0, 0, 128], &[1.0]);
+        assert_eq!(half, vec![128, 0, 0, 128]);
+        for px in half.chunks_exact(4) {
+            assert!(px[0] <= px[3] && px[1] <= px[3] && px[2] <= px[3]);
+        }
+    }
+
+    /// [B2]'s open-seeding: `ensure_open` inserts CLEAN (never queued),
+    /// while the per-frame `ensure` keeps queuing fresh layers. A v1
+    /// fill opened over legacy Base output therefore never re-evaluates
+    /// on open (no double-count); runtime adds still evaluate.
+    #[test]
+    fn ensure_open_seeds_clean_while_ensure_queues_fresh() {
+        let params = solid_fill([1.0, 0.0, 0.0, 1.0]);
+        let mut states = FillLayerStates::default();
+        states.ensure_open(7, &params, BlendMode::Normal, 1.0);
+        let state = states.map.get(&7).expect("open seeds the state");
+        assert!(!state.is_dirty(), "open-seeded fills start clean");
+        assert!(states.dirty.is_empty(), "open never queues");
+        // A second open over the same id stays clean too.
+        states.ensure_open(7, &params, BlendMode::Normal, 1.0);
+        assert!(states.dirty.is_empty());
+        // The runtime path still queues first sight (panel adds, undo of
+        // an add, journal replay).
+        states.ensure(9, &params, BlendMode::Normal, 1.0);
+        assert!(states.dirty.contains(&9));
+        assert!(states.map.get(&9).unwrap().is_dirty());
+        // ... and an explicit/bitten refresh dirties on demand.
+        states.mark_dirty(7);
+        assert!(states.dirty.contains(&7));
+        assert!(states.map.get(&7).unwrap().is_dirty());
     }
 }

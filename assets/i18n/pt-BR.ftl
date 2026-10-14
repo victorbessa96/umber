@@ -457,6 +457,18 @@ layers =
     .folder-unpaintable = Não tem pixels — selecione uma camada de pintura.
     .base-paint = Pintura base
     .base-paint-hint = Pintura que não pertence a nenhuma camada: projetos v1 e traços feitos sem camada selecionada.
+    .budget-blocked = Orçamento de planos estourado ({ $bytes } bytes)
+    .budget-line = Memória de planos { $used } / { $cap } bytes
+    .stroke-refused = Traço recusado
+    .tombstone-lost = Camada { $layer } recriada vazia ao desfazer (pixels aposentados liberados)
+    .dormant-badge = Resultado pré-v2 vive na pintura base
+
+## Importação de mapas (§5.6 — chaves novas; as demais caem no en-US)
+
+import =
+    .size-mismatch = Tamanho incompatível — camada vazia
+    .budget-refused = Orçamento estourado na importação ({ $bytes } bytes) — camada vazia
+    .decode-failed = Arquivo ilegível — camada vazia
 
 ## Propriedades da camada de preenchimento
 
