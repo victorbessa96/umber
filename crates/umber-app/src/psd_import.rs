@@ -1657,7 +1657,12 @@ mod tests {
         // toward white (writer.rs' "weird white matte"), so only opaque
         // composites round-trip byte-identically — correctly, since map
         // sets are opaque (same rule as the export's own test).
-        let dir = std::env::temp_dir().join(format!("umber-psd-test-{}", std::process::id()));
+        // A per-TEST dir: the sibling test at the end of this module
+        // `remove_dir_all`s its own dir, and libtest runs them in parallel —
+        // a shared `umber-psd-test-<pid>` raced (the create here, the
+        // sibling's delete, then this write → ENOENT).
+        let dir =
+            std::env::temp_dir().join(format!("umber-psd-test-roundtrip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roundtrip.psd");
         umber_export::psd::write_psd_maps(&set, &path).unwrap();
@@ -1736,7 +1741,7 @@ mod tests {
 
     #[test]
     fn scan_routes_psd_and_reports_the_rest() {
-        let dir = std::env::temp_dir().join(format!("umber-psd-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("umber-psd-test-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Sword.psd"), b"fake").unwrap();
