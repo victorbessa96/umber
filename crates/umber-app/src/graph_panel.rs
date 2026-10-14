@@ -41,7 +41,7 @@
 //! one listing), dispatch through the same `eval_graph_cached`, and save
 //! as custom nodedefs declared after [`umber_graph::mtlx::painter_nodedefs`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use fluent::FluentValue;
@@ -543,6 +543,60 @@ impl GraphPanel {
                 false
             }
         }
+    }
+
+    /// Copies the open graph into `defs` under a fresh `material_id` (Kill B,
+    /// `docs/specs/dynamic-materials-design.md` §4 — the Graph panel's "Save
+    /// as material"). A COPY: the definition is the `.mtlx` string as it
+    /// reads now (canvas positions and plugin declarations included), so
+    /// later Graph-panel edits to the source graph never propagate (the
+    /// design's non-goal 3). Ids mint as `umber.material-<n>` (smallest `n`
+    /// unused — never an overwrite). Returns the new id, or `None` when the
+    /// graph is empty (nothing to save — an honest no-op, never an empty
+    /// definition).
+    pub fn save_as_material(&mut self, defs: &mut BTreeMap<String, String>) -> Option<String> {
+        if self.graph.nodes.is_empty() {
+            return None;
+        }
+        let doc = self.to_mtlx();
+        let mut n = defs.len() + 1;
+        loop {
+            let id = format!("umber.material-{n}");
+            if !defs.contains_key(&id) {
+                defs.insert(id.clone(), doc);
+                return Some(id);
+            }
+            n += 1;
+        }
+    }
+
+    /// The "Save as material" section, drawn under the panel (the button the
+    /// Layers panel's `material_id` combo then offers). Writes into the
+    /// session's definition map; the status line reports the new id (or the
+    /// empty-graph refusal). The egui drawing is untested by construction;
+    /// [`Self::save_as_material`] carries the headless tests.
+    pub fn show_material_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        defs: &mut BTreeMap<String, String>,
+    ) {
+        ui.add_space(4.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(tr("graph.save-material")).clicked() {
+                match self.save_as_material(defs) {
+                    Some(id) => {
+                        let args = [("id", FluentValue::from(id.as_str()))];
+                        self.status = tr_args("graph.saved-material", args);
+                        self.status_is_error = false;
+                    }
+                    None => {
+                        self.status = tr("graph.save-material-empty");
+                        self.status_is_error = true;
+                    }
+                }
+            }
+        });
     }
 
     /// Re-runs dirty nodes (+ downstream) through the cache and refreshes
@@ -1758,5 +1812,51 @@ mod tests {
 
         assert_eq!(tail, tail2);
         assert_eq!(auto_out, cpu_out, "auto-without-gpu == explicit cpu");
+    }
+
+    #[test]
+    fn save_as_material_copies_the_open_graph_under_a_fresh_id() {
+        // "Save as material" COPIES the open graph into the project's
+        // definitions (later source edits never propagate — non-goal 3),
+        // minting `umber.material-<n>` without overwriting.
+        let mut panel = GraphPanel::new();
+        let head = panel.add_node("uniform");
+        assert!(panel.set_param(head, "color", ParamValue::Color([1.0, 0.0, 0.0])));
+        let mut defs = BTreeMap::from([("umber.material-1".to_string(), "stale".to_string())]);
+        let snapshot = panel.to_mtlx();
+
+        let id = panel
+            .save_as_material(&mut defs)
+            .expect("a non-empty graph saves");
+        assert_eq!(id, "umber.material-2", "occupied ids are skipped");
+        assert_eq!(
+            defs["umber.material-1"], "stale",
+            "an existing entry is never overwritten"
+        );
+        assert_eq!(
+            defs[&id], snapshot,
+            "the definition is the open graph's bytes"
+        );
+
+        // Later Graph-panel edits to the source graph do not propagate.
+        assert!(panel.set_param(head, "color", ParamValue::Color([0.0, 1.0, 0.0])));
+        assert_eq!(defs[&id], snapshot, "the copy is frozen at save time");
+        assert_ne!(
+            panel.to_mtlx(),
+            snapshot,
+            "the edit really changed the source (else the freeze assert is vacuous)"
+        );
+    }
+
+    #[test]
+    fn save_as_material_on_an_empty_graph_saves_nothing() {
+        let mut panel = GraphPanel::new();
+        let mut defs = BTreeMap::new();
+        assert_eq!(
+            panel.save_as_material(&mut defs),
+            None,
+            "an empty graph has no definition to copy"
+        );
+        assert!(defs.is_empty(), "the no-op stores nothing");
     }
 }

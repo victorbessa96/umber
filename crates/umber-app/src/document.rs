@@ -241,13 +241,26 @@ impl Document {
 
 /// Draws the Layers panel: per-layer visibility toggle, name, kind badge.
 ///
+/// Dynamic-material layers (Kill B, `docs/specs/dynamic-materials-design.md`
+/// §4) render their row here like every other kind, plus — under their own
+/// row, via [`crate::layers_panel::material_section`] — the badge line and
+/// the expandable per-declared-channel sub-rows (enable, blend, opacity) and
+/// the `material_id` re-point combo. Sub-row edits run through
+/// [`Document::run`] as undoable, journaled `SetMaterial` ops. The `mats`
+/// context (session definitions, refresh badges, drain status, live states)
+/// is built per frame by the shell — this module never owns it.
+///
 /// Instance layers (§3:41) render as `instance of <source>` rows: the
 /// source name comes from the paint gate itself
 /// ([`LayerStack::check_paintable`](umber_core::LayerStack::check_paintable) —
 /// an instance row exists exactly when painting it is refused), and the
 /// row carries the "paint the source" hint. Every paintable layer offers
 /// a ⧉ button that instances it on top (undoable, through the journal).
-pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
+pub fn layers_ui(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    mut mats: crate::layers_panel::MaterialPanelContext<'_>,
+) {
     use umber_core::InstanceError;
 
     ui.horizontal_wrapped(|ui| {
@@ -260,6 +273,14 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
             let n = doc.layers().len() + 1;
             let name = tr_args("layers.default-fill-name", [("n", FluentValue::from(n))]);
             doc.run(LayerCommand::add(name, LayerKind::Fill));
+        }
+        if ui.button(tr("layers.add-material")).clicked() {
+            let n = doc.layers().len() + 1;
+            let name = tr_args(
+                "layers.default-material-name",
+                [("n", FluentValue::from(n))],
+            );
+            doc.run(LayerCommand::add(name, LayerKind::Material));
         }
     });
     let mut remove_id = None;
@@ -345,6 +366,17 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                     }
                 });
             });
+            // Dynamic-material expandable rows (Kill B): under their own row,
+            // never replacing it — the badge line above stays visible while
+            // collapsed. Re-fetched by id (the snapshot rows above carry no
+            // material payload).
+            if doc
+                .stack
+                .layer(layer.id)
+                .is_some_and(|live| live.kind == LayerKind::Material)
+            {
+                crate::layers_panel::material_section(ui, doc, layer.id, &mut mats);
+            }
         }
     });
     if let Some(id) = remove_id {
@@ -361,6 +393,12 @@ pub fn layers_ui(ui: &mut egui::Ui, doc: &mut Document) {
                 LayerKind::Instance { source_id: source },
             ));
         }
+    }
+    // The material drain's one-line status (ignored undeclared channels, last
+    // failure): named once per drain, rendered under the rows.
+    if let Some(status) = mats.status {
+        ui.separator();
+        ui.weak(status);
     }
 }
 

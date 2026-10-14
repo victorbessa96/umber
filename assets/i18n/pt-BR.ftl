@@ -232,6 +232,9 @@ graph =
        *[other] { $count } nós avaliados em { $width }x{ $height }.
     }
     .eval-failed = Falha na avaliação: { $error }
+    .save-material = Salvar como material
+    .saved-material = Salvo como { $id } — edições futuras do grafo não propagam.
+    .save-material-empty = Nada a salvar — o grafo está vazio.
 
 ## Canvas do grafo (editor de nós)
 
@@ -431,6 +434,19 @@ layers =
     .instance-of = instância de { $source }
     .instance-name = { $source } (instância)
     .instance-paint-hint = Pinte a origem, não a instância.
+    .add-material = ＋ Adicionar camada de material
+    .default-material-name = Material { $n }
+    .material-channels = Canais do material
+    .material-id = Material
+    .material-id-none = (sem material)
+    .material-no-defs = Sem materiais — salve um grafo como material primeiro.
+    .material-reset-channels = Redefinir canais
+    .material-refresh = Atualizar material
+    .material-channel-opacity = Opacidade
+    .material-badge-no-params = Sem material — escolha abaixo.
+    .material-badge-missing-def = Definição { $id } ausente — escolha outra ou salve de novo.
+    .material-ignored = Ignora canais não declarados: { $channels }
+    .material-unpaintable = Publica via refresh — os traços não o pintam.
 
 ## Propriedades da camada de preenchimento
 

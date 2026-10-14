@@ -222,6 +222,9 @@ graph =
     .no-output-node = No output node — select one first.
     .evaluated = Evaluated { $count } node(s) at { $width }x{ $height }.
     .eval-failed = Eval failed: { $error }
+    .save-material = Save as material
+    .saved-material = Saved as { $id } — later graph edits never propagate.
+    .save-material-empty = Nothing to save — the graph is empty.
 
 ## Graph canvas (noodle editor)
 
@@ -415,6 +418,19 @@ layers =
     .instance-of = instance of { $source }
     .instance-name = { $source } (instance)
     .instance-paint-hint = Paint the source, not the instance.
+    .add-material = ＋ Add material layer
+    .default-material-name = Material { $n }
+    .material-channels = Material channels
+    .material-id = Material
+    .material-id-none = (no material)
+    .material-no-defs = No materials yet — save a graph as a material first.
+    .material-reset-channels = Reset channels
+    .material-refresh = Refresh material
+    .material-channel-opacity = Opacity
+    .material-badge-no-params = No material — pick one below.
+    .material-badge-missing-def = Missing definition { $id } — re-point or re-save it.
+    .material-ignored = Ignores undeclared channels: { $channels }
+    .material-unpaintable = Publishes through refresh — strokes cannot paint it.
 
 ## Fill layer properties (projection picker + v1 source editor)
 

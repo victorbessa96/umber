@@ -119,6 +119,8 @@ mod history_panel;
 mod i18n;
 #[cfg(test)]
 mod input_photon;
+mod layers_panel;
+mod material_layer;
 mod mesh_map_import;
 mod paint_state;
 mod path_tool;
@@ -191,6 +193,16 @@ struct PanelViewer<'a> {
     store: Option<&'a umber_core::AssetStore>,
     polygon_fill: &'a mut fill_layer::PolygonFillTool,
     path_tool: &'a mut path_tool::PaintPathTool,
+    /// Embedded material definitions (the session copy of
+    /// `ProjectModel::material_defs_mtlx` — the frame refresh reads them,
+    /// the Layers panel lists them, the Graph panel extends them).
+    material_defs: &'a mut std::collections::BTreeMap<String, String>,
+    /// The last failed-refresh message per material layer (the row badge source).
+    material_badges: &'a std::collections::HashMap<u64, String>,
+    /// The last material drain's one-line summary (`None` = quiet).
+    material_status: Option<&'a str>,
+    /// The material live-eval states (the explicit-refresh button marks dirty here).
+    material_states: &'a mut material_layer::MaterialLayerStates,
     display: &'a mut umber_color::DisplaySettings,
     /// The display LUT's sync state (the Display panel marks it dirty).
     display_lut_state: &'a mut display_panel::DisplayLutState,
@@ -315,7 +327,13 @@ impl TabViewer for PanelViewer<'_> {
                 Some(&mut *self.path_tool),
             ),
             Panel::LayerStack => {
-                document::layers_ui(ui, self.doc);
+                let mats = layers_panel::MaterialPanelContext {
+                    defs: &*self.material_defs,
+                    badges: self.material_badges,
+                    status: self.material_status,
+                    states: &mut *self.material_states,
+                };
+                document::layers_ui(ui, self.doc, mats);
                 // Layer masks need the paint session too (the edit
                 // selection is session state there); without one the
                 // metadata rows have nothing to route strokes to.
@@ -434,6 +452,7 @@ impl TabViewer for PanelViewer<'_> {
                     .collect();
                 self.graph.set_anchor_layers(layers);
                 self.graph.show(ui);
+                self.graph.show_material_section(ui, self.material_defs);
             }
             Panel::Display => {
                 // Scrolls: the postfx section grows one group per effect.
@@ -458,6 +477,12 @@ impl TabViewer for PanelViewer<'_> {
     }
 }
 
+/// The last-observed material sizing: the set's size plus every set
+/// channel's size (the re-dirty trigger for channel-override resizes —
+/// `MaterialLayerState` tracks the set size but not per-channel
+/// overrides, so this snapshot is what a resize compares against).
+type MaterialSizesSnapshot = ((u32, u32), Vec<(String, (u32, u32))>);
+
 /// Shared application state (grows per wave).
 #[derive(Default)]
 pub struct AppState {
@@ -475,6 +500,28 @@ pub struct AppState {
     pub polygon_fill: fill_layer::PolygonFillTool,
     /// The fill layers' evaluation caches + the panel's dirty queue.
     pub fill_states: fill_layer::FillLayerStates,
+    /// The dynamic-material live eval states beside the document (the
+    /// `fill_states` precedent): one state per live material layer plus the
+    /// dirty queue the frame's refresh drain consumes (Kill B).
+    pub material_states: material_layer::MaterialLayerStates,
+    /// Embedded material definitions (`material_id` → definition `.mtlx`):
+    /// the session copy of `ProjectModel::material_defs_mtlx` — restored on
+    /// open, committed on save, extended by the Graph panel's "Save as
+    /// material". A copy store (the design's non-goal 3): later
+    /// source-graph edits never propagate into saved definitions.
+    pub material_defs: std::collections::BTreeMap<String, String>,
+    /// The last failed-refresh message per material layer (the Layers
+    /// panel's error-badge source; pruned against live layers every drain).
+    pub material_badges: std::collections::HashMap<u64, String>,
+    /// The last material drain's one-line summary for the Layers panel
+    /// (`None` = nothing to report — the status line stays quiet).
+    pub material_status: Option<String>,
+    /// The channel-size census the last material adoption saw: the active
+    /// set's size plus every set channel's size. `MaterialLayerState` tracks
+    /// the set size but not per-channel overrides, so a channel-override
+    /// resize would otherwise never re-dirty (the design's "size changed
+    /// invalidates the caches").
+    pub material_sizes: Option<MaterialSizesSnapshot>,
     /// The paint-path tool: the editable polyline replayed as
     /// paint/erase/smudge strokes (session state, never serialized).
     pub path_tool: path_tool::PaintPathTool,
@@ -538,8 +585,9 @@ impl AppState {
     /// [`document::Document::load_stack`] minus the load), defaulted
     /// import session states, identity display settings with a dirty LUT
     /// flag (the frame loop rebuilds + uploads), the identity postfx
-    /// chain ([`umber_gpu::postfx::PostChain::new`]), and no project
-    /// directory (unsaved).
+    /// chain ([`umber_gpu::postfx::PostChain::new`]), fresh (empty) material
+    /// states/definitions/badges/status/size census (document-scoped — a new
+    /// document carries no materials), and no project directory (unsaved).
     ///
     /// Deliberately NOT reset: the loaded mesh + viewport (mesh buffers
     /// have no unload path; clearing the handle alone would leave a ghost
@@ -561,6 +609,97 @@ impl AppState {
         self.display_lut.mark_display_lut_dirty();
         self.postfx = umber_gpu::postfx::PostChain::new();
         self.project_dir = None;
+        self.material_states = material_layer::MaterialLayerStates::default();
+        self.material_defs = std::collections::BTreeMap::new();
+        self.material_badges = std::collections::HashMap::new();
+        self.material_status = None;
+        self.material_sizes = None;
+    }
+}
+
+/// Adapts the live paint session to the headless material seam
+/// ([`material_layer::MaterialTileIo`], Kill A): sizes/tiles/readback/upload
+/// ride the session's channel-aware paths (non-side-effecting reads,
+/// materializing publishes), masks ride the session's layer-mask planes at
+/// the tile's set size, anchors resolve to the FLATTENED tile channel (the
+/// design §2 truth — which includes layers above and the material's own last
+/// output), and mesh maps are the Graph panel's flat placeholders at the set
+/// size. The bake bridge exposes no live in-memory bakes yet, so the
+/// placeholders mirror `graph_panel`'s private stand-ins (same bytes: opaque
+/// white AO, tangent-space-up Normal); unknown map names read as absent, so
+/// the eval fails loud — never a silent default.
+struct PaintMaterialIo<'a> {
+    paint: &'a mut paint_state::PaintState,
+    set: String,
+    live_layers: Vec<u64>,
+}
+
+impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
+    fn set_size(&self) -> (u32, u32) {
+        self.paint.size_of_set(&self.set)
+    }
+
+    fn channel_size(&self, channel: &str) -> (u32, u32) {
+        self.paint.size_of_channel(&self.set, channel)
+    }
+
+    fn tiles(&self) -> Vec<u16> {
+        self.paint.tiles_present()
+    }
+
+    fn read_channel(&mut self, tile: u16, channel: &str) -> Option<(u32, u32, Vec<u8>)> {
+        self.paint
+            .read_channel_tile(tile, channel)
+            .map(|buffer| (buffer.width, buffer.height, buffer.data))
+    }
+
+    fn publish_channel(
+        &mut self,
+        tile: u16,
+        channel: &str,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> bool {
+        self.paint
+            .publish_fill_channel(tile, channel, width, height, rgba)
+    }
+
+    fn mask_plane(&mut self, layer_id: u64, tile: u16) -> Option<(u32, u32, Vec<u8>)> {
+        let (width, height) = self.paint.tile_size(tile);
+        self.paint
+            .layer_mask(layer_id, tile)
+            .map(|plane| (width, height, plane.to_vec()))
+    }
+
+    fn anchor_image(
+        &mut self,
+        tile: u16,
+        layer: u64,
+        channel: &str,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        // A deleted source layer is an eval error (never a silent default);
+        // a live one resolves to the flattened channel (design §2).
+        if !self.live_layers.contains(&layer) {
+            return None;
+        }
+        self.read_channel(tile, channel)
+    }
+
+    fn mesh_map_image(&mut self, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let (width, height) = self.set_size();
+        let texels = width as usize * height as usize;
+        match name {
+            "AO" => Some((width, height, vec![255u8; texels * 4])),
+            "Normal" => {
+                let mut bytes = Vec::with_capacity(texels * 4);
+                for _ in 0..texels {
+                    bytes.extend_from_slice(&[128, 128, 255, 255]);
+                }
+                Some((width, height, bytes))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -2224,7 +2363,9 @@ impl UmberApp {
     /// graph-less projects save exactly the old shape) and the postfx
     /// chain as the `postfx` settings carry (empty chains save the empty
     /// list, which loads back as the identity — the additive rule is
-    /// load-compat: pre-postfx files simply lack the key).
+    /// load-compat: pre-postfx files simply lack the key), and the session's
+    /// embedded material definitions (unreferenced ids ride along — a
+    /// save-as-material entry not yet layered survives the save).
     ///
     /// Paint pixels ride along as the `paint/` sidecar
     /// (`save_paint_tiles`, after the `project.json` commit so the
@@ -2269,6 +2410,10 @@ impl UmberApp {
             },
         )
         .with_graphs_mtlx(graphs_mtlx)
+        // Embedded material definitions (the session map — every definition
+        // a material layer references is in there, so the saved project
+        // evaluates identically on another machine).
+        .with_material_defs_mtlx(self.state.material_defs.clone())
         // The journal high-water mark: every entry recorded so far is in
         // this saved state, so none may replay on top of it.
         .with_journal_seq(self.state.doc.journal_seq());
@@ -2406,6 +2551,51 @@ impl UmberApp {
                             self.state.graph.status()
                         );
                     }
+                }
+                // Embedded material definitions: the session copy the frame
+                // refresh and the Layers panel read (a pre-material project
+                // simply carries none).
+                self.state.material_defs = model.material_defs_mtlx.clone();
+                // Project-open seeding is CLEAN (design §2): the paint
+                // sidecars already hold the published result, so
+                // re-publishing on open would compound every non-Normal
+                // material on every open. Only a CHANGED state dirties
+                // (through `sync`, the `ensure` path). Without a paint
+                // session there is nothing to size against — states
+                // materialize dirty at runtime instead.
+                if let Some(paint) = self.state.paint.as_ref() {
+                    let size = paint.size_of_set(&name);
+                    for layer in self.state.doc.stack.layers.iter() {
+                        if layer.kind == umber_core::LayerKind::Material {
+                            if let Some(params) = layer.material.as_ref() {
+                                let def = self
+                                    .state
+                                    .material_defs
+                                    .get(&params.material_id)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                self.state
+                                    .material_states
+                                    .ensure_open(layer.id, params, &def, size);
+                            }
+                        }
+                    }
+                    // The size-census baseline: set now, so the first frame's
+                    // adoption sees no change and marks nothing dirty.
+                    let census: Vec<(String, (u32, u32))> = self
+                        .state
+                        .mesh_import
+                        .session_set
+                        .channels
+                        .iter()
+                        .map(|channel| {
+                            (
+                                channel.name.clone(),
+                                paint.size_of_channel(&name, &channel.name),
+                            )
+                        })
+                        .collect();
+                    self.state.material_sizes = Some((size, census));
                 }
                 log::info!(
                     "project loaded: {} ({} layers in {name:?})",
@@ -2594,6 +2784,10 @@ impl eframe::App for UmberApp {
                 brush: &mut self.brush_panel,
                 polygon_fill: &mut self.state.polygon_fill,
                 path_tool: &mut self.state.path_tool,
+                material_defs: &mut self.state.material_defs,
+                material_badges: &self.state.material_badges,
+                material_status: self.state.material_status.as_deref(),
+                material_states: &mut self.state.material_states,
                 display: &mut self.state.display,
                 display_lut_state: &mut self.state.display_lut,
                 #[cfg(feature = "ocio")]
@@ -2702,6 +2896,143 @@ impl eframe::App for UmberApp {
                 // No mesh loaded: LEAVE the queue — a fill layer first seen
                 // without a mesh stages its tiles on the mesh's arrival
                 // (ensure's dedup keeps the queue from growing meanwhile).
+            }
+        }
+
+        // Dynamic-material refresh (Kill B, `docs/specs/dynamic-materials-
+        // design.md` §2): adopt every doc-side material change, then drain
+        // the dirty queue bottom-to-top through the headless driver. Panel
+        // edits, undo/redo replays of `SetMaterial`, "Save as material"
+        // definition writes and resizes all land in `Layer::material` /
+        // `material_defs` before this point in the frame — one adoption pass
+        // covers every producer. Publishes destructively into the flattened
+        // per-channel tile pool (the fill precedent's truth: re-eval
+        // compounds, nothing un-publishes — see `material_layer`'s docs).
+        // Evaluates at the set size, never a literal.
+        if let Some(paint) = self.state.paint.as_mut() {
+            let set_name = paint.active_set().to_string();
+            let set_size = paint.size_of_set(&set_name);
+            let set_channels: Vec<String> = self
+                .state
+                .mesh_import
+                .session_set
+                .channels
+                .iter()
+                .map(|channel| channel.name.clone())
+                .collect();
+            // Stack order is bottom-to-top — the drain's refresh order.
+            let layers: Vec<umber_core::layers::Layer> = self.state.doc.stack.layers.clone();
+            let live: Vec<u64> = layers.iter().map(|layer| layer.id).collect();
+            for layer in layers
+                .iter()
+                .filter(|l| l.kind == umber_core::layers::LayerKind::Material)
+            {
+                // A `material: None` Material layer gets no state (nothing to
+                // evaluate); the Layers panel badges it statically.
+                if let Some(params) = layer.material.as_ref() {
+                    let def = self
+                        .state
+                        .material_defs
+                        .get(&params.material_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.state
+                        .material_states
+                        .ensure(layer.id, params, &def, set_size);
+                }
+            }
+            // Channel-override census: `MaterialLayerState` tracks the set
+            // size but not per-channel overrides, so an override resize
+            // would otherwise never re-dirty (the design's "size changed
+            // invalidates the caches"). Mesh-map revisions need no census:
+            // the maps are flat placeholders in v1 and never bump.
+            let census: Vec<(String, (u32, u32))> = set_channels
+                .iter()
+                .map(|channel| (channel.clone(), paint.size_of_channel(&set_name, channel)))
+                .collect();
+            if self.state.material_sizes.as_ref() != Some(&(set_size, census.clone())) {
+                self.state.material_sizes = Some((set_size, census));
+                for layer in layers
+                    .iter()
+                    .filter(|l| l.kind == umber_core::layers::LayerKind::Material)
+                {
+                    self.state.material_states.mark_dirty(layer.id);
+                }
+            }
+            if !self.state.material_states.dirty_ids().is_empty() {
+                let registry = umber_graph::full_registry();
+                let mut io = PaintMaterialIo {
+                    paint,
+                    set: set_name,
+                    live_layers: live.clone(),
+                };
+                // The driver takes `HashMap`; the session keeps the
+                // `BTreeMap` the project model sorts by — cloned on dirty
+                // frames only (definitions are KB-scale).
+                let definitions: std::collections::HashMap<String, String> = self
+                    .state
+                    .material_defs
+                    .iter()
+                    .map(|(id, def)| (id.clone(), def.clone()))
+                    .collect();
+                let reports = material_layer::refresh_dirty_materials(
+                    &mut self.state.material_states,
+                    &layers,
+                    &definitions,
+                    &set_channels,
+                    &registry,
+                    &mut io,
+                );
+                let mut status: Option<String> = None;
+                for report in &reports {
+                    let id = report.layer;
+                    match &report.result {
+                        material_layer::MaterialResult::Failed(err) => {
+                            let msg = err.to_string();
+                            log::warn!("material layer {id} refresh failed: {msg}");
+                            self.state.material_badges.insert(id, msg.clone());
+                            status = Some(format!("material layer {id}: {msg}"));
+                        }
+                        material_layer::MaterialResult::Refreshed {
+                            channels,
+                            ignored_undeclared,
+                        } => {
+                            self.state.material_badges.remove(&id);
+                            // Per-channel outcomes in declaration order — the
+                            // doc's status-line contract. Skips (disabled/
+                            // uniform) are named once per drain; publishes
+                            // stay silent (the happy path is no noise).
+                            let skipped: Vec<String> = channels
+                                .iter()
+                                .filter(|c| {
+                                    !matches!(c.status, material_layer::ChannelStatus::Published)
+                                })
+                                .map(|c| format!("{} ({:?})", c.name, c.status))
+                                .collect();
+                            if !skipped.is_empty() {
+                                let names = skipped.join(", ");
+                                log::info!("material layer {id} channels skipped: {names}");
+                                status =
+                                    Some(format!("material layer {id} channels skipped: {names}"));
+                            }
+                            if !ignored_undeclared.is_empty() {
+                                let names = ignored_undeclared.join(", ");
+                                log::warn!(
+                                    "material layer {id} ignores undeclared channels: {names}"
+                                );
+                                status = Some(format!(
+                                    "material layer {id} ignores undeclared channels: {names}"
+                                ));
+                            }
+                        }
+                        material_layer::MaterialResult::SkippedInvisible => {}
+                    }
+                }
+                self.state.material_status = status;
+                let live_set: std::collections::HashSet<u64> = live.into_iter().collect();
+                self.state
+                    .material_badges
+                    .retain(|id, _| live_set.contains(id));
             }
         }
 
