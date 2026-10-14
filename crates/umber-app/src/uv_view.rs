@@ -98,7 +98,7 @@ impl UvView {
         // on top of `response` and would take its hover.
         self.hover_uv = ui
             .input(|i| i.pointer.hover_pos())
-            .and_then(|pos| crate::paint_state::uv_from_pointer(square, pos))
+            .and_then(|pos| uv_from_pointer(square, pos))
             .map(|uv| [uv.x, uv.y]);
 
         // UV-space -> screen-space: v is flipped (UV origin is bottom-left,
@@ -183,7 +183,7 @@ impl UvView {
                         }
                         if handle.dragged() {
                             if let Some(pos) = handle.interact_pointer_pos() {
-                                if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
+                                if let Some(uv) = uv_from_pointer(square, pos) {
                                     ptool.move_point(i, [uv.x, uv.y]);
                                     ptool.select(Some(i));
                                     path_point_active = true;
@@ -263,13 +263,13 @@ impl UvView {
                 if !handle_active && !path_point_active {
                     if let Some(pos) = interact.interact_pointer_pos() {
                         if interact.secondary_clicked() {
-                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
+                            if let Some(uv) = uv_from_pointer(square, pos) {
                                 if let Some(ptool) = path_tool.as_deref_mut() {
                                     ptool.delete_near([uv.x, uv.y], PATH_CLICK_TOL_PX / side);
                                 }
                             }
                         } else if interact.clicked() {
-                            if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
+                            if let Some(uv) = uv_from_pointer(square, pos) {
                                 if let Some(ptool) = path_tool.as_deref_mut() {
                                     let clicked = [uv.x, uv.y];
                                     let tol = PATH_CLICK_TOL_PX / side;
@@ -286,7 +286,7 @@ impl UvView {
             } else if tool_armed {
                 if pointer_down {
                     if let Some(pos) = interact.interact_pointer_pos() {
-                        if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
+                        if let Some(uv) = uv_from_pointer(square, pos) {
                             if let Some(tool) = tool.as_mut() {
                                 let uv = [uv.x, uv.y];
                                 if tool.mode() == PolygonFillMode::Polygon {
@@ -308,14 +308,14 @@ impl UvView {
                 if pointer_down {
                     if let Some(uv) = interact
                         .interact_pointer_pos()
-                        .and_then(|pos| crate::paint_state::uv_from_pointer(square, pos))
+                        .and_then(|pos| uv_from_pointer(square, pos))
                     {
                         paint.set_clone_source(uv);
                     }
                 }
             } else if pointer_down {
                 if let Some(pos) = interact.interact_pointer_pos() {
-                    if let Some(uv) = crate::paint_state::uv_from_pointer(square, pos) {
+                    if let Some(uv) = uv_from_pointer(square, pos) {
                         if !paint.is_stroking() {
                             paint.begin_stroke(uv);
                         } else {
@@ -610,6 +610,19 @@ fn draw_symmetry_guides(painter: &egui::Painter, square: egui::Rect, symmetry: &
         }
         painter.circle_stroke(center, 4.0, stroke);
     }
+}
+
+/// Extracts a UV-space position from a pointer interaction on a UV-square
+/// `rect` (the UV view's square layout), or `None` outside. Lives
+/// here, not in the headless paint engine: it is screen geometry.
+pub fn uv_from_pointer(rect: egui::Rect, pos: egui::Pos2) -> Option<egui::Pos2> {
+    if !rect.contains(pos) {
+        return None;
+    }
+    Some(egui::Pos2::new(
+        (pos.x - rect.left()) / rect.width(),
+        1.0 - (pos.y - rect.top()) / rect.height(),
+    ))
 }
 
 #[cfg(test)]

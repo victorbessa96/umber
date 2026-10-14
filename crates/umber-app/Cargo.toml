@@ -21,6 +21,7 @@ umber-graph = { workspace = true }
 umber-color = { workspace = true }
 umber-wasm = { workspace = true }
 umber-gui = { workspace = true }
+umber-paint = { workspace = true }
 stylus = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
@@ -50,7 +51,7 @@ profiling = { workspace = true }
 [features]
 # Perf instrumentation backend (tracy). Off by default: with the feature
 # off, every profiling::span! in the workspace compiles to nothing.
-perf = ["profiling/profile-with-tracy"]
+perf = ["profiling/profile-with-tracy", "umber-paint/perf"]
 
 # §9 OCIO adoption: the Display panel's config selector + the OCIO view
 # stage in the viewer chain (stub mode when ocio-bundled is absent: the
@@ -66,6 +67,9 @@ ocio = ["umber-color/ocio"]
 stylus = { workspace = true, features = ["xi2"] }
 
 [dev-dependencies]
+# The paint engine's cross-crate test hooks (staged_dab_count,
+# two_tile_strip) for the soak + per-tile export tests.
+umber-paint = { workspace = true, features = ["test-hooks"] }
 pollster = { workspace = true }
 wgpu = { workspace = true }
 serde_json = { workspace = true }

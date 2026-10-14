@@ -4831,6 +4831,7 @@ dependencies = [
  "umber-graph",
  "umber-gui",
  "umber-mesh",
+ "umber-paint",
  "umber-spp",
  "umber-wasm",
  "wgpu",
@@ -4969,6 +4970,25 @@ dependencies = [
  "thiserror 2.0.21",
  "tobj",
  "ufbx",
+]
+
+[[package]]
+name = "umber-paint"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "emath",
+ "log",
+ "pollster 1.0.1",
+ "profiling",
+ "thiserror 2.0.21",
+ "umber-bake",
+ "umber-brush",
+ "umber-core",
+ "umber-gpu",
+ "umber-graph",
+ "umber-mesh",
+ "wgpu",
 ]
 
 [[package]]

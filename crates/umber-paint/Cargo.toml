@@ -1,0 +1,36 @@
+[package]
+name = "umber-paint"
+description = "Umber's headless paint engine: per-layer planes, strokes, retouch, fills/materials, the composite-on-read flush"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+umber-core = { workspace = true }
+umber-mesh = { workspace = true }
+umber-gpu = { workspace = true }
+umber-brush = { workspace = true }
+umber-bake = { workspace = true }
+umber-graph = { workspace = true }
+# The UV-space point/rect types only (egui's math crate: no UI, no
+# windowing). `emath::Pos2` IS `egui::Pos2`, so the app passes its points
+# through unchanged.
+emath = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+profiling = { workspace = true }
+
+[features]
+# Tracy spans in the engine (the shell's `perf` feature forwards here, so
+# `stroke_eval` and friends show up in the same capture).
+perf = ["profiling/profile-with-tracy"]
+# Test observability hooks for downstream crates' tests (umber-app's
+# soak + per-tile export tests): a dependency's own `cfg(test)` is never
+# set for its users. Enabled only from umber-app's [dev-dependencies].
+test-hooks = []
+
+[dev-dependencies]
+pollster = { workspace = true }
+wgpu = { workspace = true }

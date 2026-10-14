@@ -129,16 +129,16 @@ mod i18n;
 #[cfg(test)]
 mod input_photon;
 mod layers_panel;
-mod material_layer;
+use umber_paint::material_layer;
 mod mesh_map_import;
-mod paint_state;
+use umber_paint::paint_state;
 mod path_tool;
 #[cfg(test)]
 mod perf_soak;
 mod plugins;
 mod postfx_panel;
 mod psd_import;
-mod retouch;
+use umber_paint::retouch;
 mod size_presets;
 mod spp_import;
 mod status_bar;

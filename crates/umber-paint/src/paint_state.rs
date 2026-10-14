@@ -357,12 +357,12 @@
 //!   for no behavioral gain: `plane_of_mut` / `plane_thread` dispatch
 //!   the two stores behind one seam, and the save census already walks
 //!   both. A later move fills the seam in without touching callers.
-//! * The flush's encoder types ride `eframe::wgpu` (not bare `wgpu::`):
-//!   `umber-app` carries no direct wgpu dependency (adding one is a
-//!   `Cargo.toml` + lock change outside this kill's surface), and bare
-//!   paths resolve only under the test target's dev-dependency.
-//!   egui-wgpu 0.36 re-exports the workspace's single wgpu 30, so the
-//!   types are identical — pinned by `Cargo.lock`'s one wgpu entry.
+//! * The flush's encoder types ride `umber_gpu`'s re-exports
+//!   (`WgpuCommandEncoder`, `WgpuCommandEncoderDescriptor`), never bare
+//!   `wgpu::` paths: GPU objects stay behind umber-gpu (the architecture
+//!   rule), and bare paths resolve only under the test target's
+//!   dev-dependency. One wgpu 30 in `Cargo.lock`, so the types are the
+//!   ones eframe hands the shell.
 //! * Composite errors drop the dirt loudly (never crash, never spam):
 //!   a poisoned entry clears after one `warn`; the next write re-marks.
 //! * History-evict tombstone freeing (§5.4 item 5) is deferred (needs an
@@ -404,7 +404,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use egui::Pos2;
+use emath::Pos2;
 use umber_bake::id::{bake_id_mesh, IdBakeParams, IdFlavor};
 use umber_brush::id_mask::{select_id, SelectIdError};
 use umber_brush::path::{sanitize_size, PaintPath, PathOp};
@@ -520,7 +520,7 @@ pub const DEFAULT_TEXTURE_SET: &str = "TextureSet";
 /// resolves to [`TileTargets::base_color`] and never allocates a
 /// `channels` entry — every pre-channel caller (`targets.get_mut(&tile)`
 /// reading `.base_color`) stays byte-identical.
-pub(crate) const BASE_COLOR_CHANNEL: &str = "baseColor";
+pub const BASE_COLOR_CHANNEL: &str = "baseColor";
 
 /// The height channel's canonical name (audit worklist #12's binding seam):
 /// the channel the viewport binds through `MeshBuffers::set_height_texture`
@@ -1289,7 +1289,7 @@ pub struct PaintState {
     /// Staged dabs since construction (test observability for the stroke
     /// soak's zero-drop assert — staged here must equal composited at
     /// drain — and the symmetry sibling count).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     staged_dabs: u64,
 }
 
@@ -1423,7 +1423,7 @@ impl PaintState {
             staged_batches: 0,
             #[cfg(test)]
             staged_batches_per_tile: BTreeMap::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             staged_dabs: 0,
         })
     }
@@ -3194,7 +3194,7 @@ impl PaintState {
         let keys: Vec<(u16, String)> = self.cache_dirty.keys().cloned().collect();
         let mut encoder =
             self.device
-                .create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
+                .create_command_encoder(&umber_gpu::WgpuCommandEncoderDescriptor {
                     label: Some("umber_flush_composite"),
                 });
         let mut submitted = false;
@@ -3364,19 +3364,15 @@ impl PaintState {
     /// `true` when dispatches were recorded. On a composite error the
     /// dirt is dropped loudly (see [`Self::flush_composite`]).
     ///
-    /// The encoder types ride `eframe::wgpu` (egui-wgpu 0.36's re-export
-    /// of the workspace's single wgpu 30 — `Cargo.lock` holds exactly
-    /// one): `umber-app` carries no direct wgpu dependency (adding one
-    /// is a `Cargo.toml` + lock change outside this kill's surface), so
-    /// non-test code must not name the bare `wgpu::` paths the test
-    /// module's dev-dependency provides.
+    /// The encoder types ride `umber_gpu`'s re-exports (see the module
+    /// docs): non-test code must not name bare `wgpu::` paths.
     fn composite_dirty(
         &mut self,
         tile: u16,
         channel: &str,
         dirt: DirtyRegion,
         snapshot: &CompositeSnapshot,
-        encoder: &mut eframe::wgpu::CommandEncoder,
+        encoder: &mut umber_gpu::WgpuCommandEncoder,
     ) -> bool {
         let Some(cache) = self.cache.get(&(tile, channel.to_string())) else {
             return false;
@@ -3547,7 +3543,7 @@ impl PaintState {
         };
         let mut encoder =
             self.device
-                .create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor {
+                .create_command_encoder(&umber_gpu::WgpuCommandEncoderDescriptor {
                     label: Some("umber_ensure_composited"),
                 });
         if self.composite_dirty(tile, channel, dirt, &snapshot, &mut encoder) {
@@ -4602,7 +4598,7 @@ impl PaintState {
         // materializes through `materialize_plane` and may be refused
         // (§1.2): the refused event's dabs on that tile are dropped and
         // the stroke continues on its already-materialized planes.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         let staged_n = dabs.len() as u64;
         let channel = self.stroke_channel.clone();
         let owner = self.stroke_owner;
@@ -4638,7 +4634,7 @@ impl PaintState {
             *self.staged_batches_per_tile.entry(tile).or_default() += 1;
         }
         // Soak/symmetry observability: total staged dabs.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         {
             self.staged_dabs += staged_n;
         }
@@ -4878,11 +4874,7 @@ impl PaintState {
     /// Channel-aware reads use [`Self::read_channel_tile`] instead — this
     /// stays baseColor-only (the eyedropper/ID-mask pattern: explicit
     /// channel, no ambient active-channel state).
-    #[allow(
-        dead_code,
-        reason = "the shell's bin target owns every live call site (main.rs:4626-4894); the lib target compiles this module but never calls it"
-    )]
-    pub(crate) fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
+    pub fn read_tile(&mut self, tile: u16) -> Option<RgbaBuffer> {
         self.read_composite(tile, BASE_COLOR_CHANNEL)
     }
 
@@ -4948,10 +4940,11 @@ impl PaintState {
     }
 
     /// Staged dabs since construction (test observability; see the
-    /// stroke soak's zero-drop assert in `perf_soak` and the symmetry
-    /// staging test).
-    #[cfg(test)]
-    pub(crate) fn staged_dab_count(&self) -> u64 {
+    /// stroke soak's zero-drop assert in umber-app's `perf_soak` and the
+    /// symmetry staging test). Behind `test-hooks` for the cross-crate
+    /// callers (a dependency's `cfg(test)` is never set for its users).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn staged_dab_count(&self) -> u64 {
         self.staged_dabs
     }
 
@@ -5158,25 +5151,13 @@ fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// Extracts a UV-space position from a pointer interaction on a UV-square
-/// `rect` (same layout math as `uv_view::square_for`), or `None` outside.
-pub fn uv_from_pointer(rect: egui::Rect, pos: Pos2) -> Option<Pos2> {
-    if !rect.contains(pos) {
-        return None;
-    }
-    Some(Pos2::new(
-        (pos.x - rect.left()) / rect.width(),
-        1.0 - (pos.y - rect.top()) / rect.height(),
-    ))
-}
-
 /// Seam-free 2x1 strip with continuous UVs spanning [0,2]x[0,1]
 /// (position == UV): the left quad's triangles start at u=0 (tile 1001),
 /// the right quad's at u=1 (tile 1002). Shared vertices, so no seam
 /// edges — tile routing is the only thing under test. Shared by the
 /// routing tests here and the per-tile export test in `bake_sources`.
-#[cfg(test)]
-pub(crate) fn two_tile_strip() -> umber_mesh::MeshData {
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn two_tile_strip() -> umber_mesh::MeshData {
     let uvs = vec![
         [0.0, 0.0], // 0
         [1.0, 0.0], // 1
@@ -5205,15 +5186,15 @@ mod tests {
 
     #[test]
     fn uv_mapping_round_trips_and_rejects_outside() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let rect = emath::Rect::from_min_size(emath::pos2(0.0, 0.0), emath::vec2(100.0, 100.0));
         // Bottom-left of the square = UV origin (0,0).
-        let uv = uv_from_pointer(rect, egui::pos2(0.0, 100.0)).expect("inside");
+        let uv = uv_from_pointer(rect, emath::pos2(0.0, 100.0)).expect("inside");
         assert!((uv.x - 0.0).abs() < 1e-6 && (uv.y - 0.0).abs() < 1e-6);
         // Top-right = UV (1,1).
-        let uv = uv_from_pointer(rect, egui::pos2(100.0, 0.0)).expect("inside");
+        let uv = uv_from_pointer(rect, emath::pos2(100.0, 0.0)).expect("inside");
         assert!((uv.x - 1.0).abs() < 1e-6 && (uv.y - 1.0).abs() < 1e-6);
         // Outside rejected.
-        assert!(uv_from_pointer(rect, egui::pos2(101.0, 50.0)).is_none());
+        assert!(uv_from_pointer(rect, emath::pos2(101.0, 50.0)).is_none());
     }
 
     #[test]
@@ -5561,10 +5542,10 @@ mod tests {
     /// conditioner needs a run of events before it emits its first dab —
     /// the `save_open_round_trip` precedent).
     fn drive_converged_diagonal(state: &mut PaintState) {
-        state.begin_stroke(egui::pos2(0.2, 0.2));
+        state.begin_stroke(emath::pos2(0.2, 0.2));
         for i in 1..=24 {
             let t = i as f32 * 0.02;
-            state.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+            state.extend_stroke(emath::pos2(0.2 + t, 0.2 + t * 0.5));
         }
         state.end_stroke();
     }
@@ -5602,7 +5583,7 @@ mod tests {
                 state.active_explicit(),
                 "the dance keeps layer {id} explicit"
             );
-            state.begin_stroke(egui::pos2(0.5, 0.5));
+            state.begin_stroke(emath::pos2(0.5, 0.5));
             assert!(
                 !state.is_stroking(),
                 "a refused stroke opens nothing on layer {id}"
@@ -5653,7 +5634,7 @@ mod tests {
             Err(InstanceError::PaintOnFill { layer: 3 }),
             0,
         );
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         assert!(!state.is_stroking());
         assert_eq!(
             state.stroke_refusal(),
@@ -5675,14 +5656,14 @@ mod tests {
             Err(InstanceError::PaintOnFill { layer: 3 }),
             0,
         );
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         assert!(
             state.is_stroking(),
             "a mask stroke bypasses the gate even on a refusing layer"
         );
         for i in 1..=24 {
             let t = i as f32 * 0.02;
-            state.extend_stroke(egui::pos2(0.5 + t, 0.5));
+            state.extend_stroke(emath::pos2(0.5 + t, 0.5));
         }
         state.end_stroke();
         assert!(
@@ -5741,13 +5722,13 @@ mod tests {
         let mut state =
             PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.sync_active_target(PlaneOwner::Base, Ok(()), 0);
-        state.begin_stroke(egui::pos2(0.2, 0.2));
+        state.begin_stroke(emath::pos2(0.2, 0.2));
         assert!(state.is_stroking());
         assert_eq!(state.stroke_owner(), PlaneOwner::Base);
         state.set_active_target(PlaneOwner::Layer(4));
         for i in 1..=24 {
             let t = i as f32 * 0.02;
-            state.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+            state.extend_stroke(emath::pos2(0.2 + t, 0.2 + t * 0.5));
         }
         assert_eq!(
             state.stroke_owner(),
@@ -7196,10 +7177,10 @@ mod tests {
         // Base (1 MiB) + L1's plane + cache (2 MiB) fit; one more pair does
         // not: the cap sits 1 byte under the next materialization.
         state.set_plane_hard_cap_bytes(4 * 1_048_576 - 1);
-        state.begin_stroke(egui::pos2(0.2, 0.2));
+        state.begin_stroke(emath::pos2(0.2, 0.2));
         for i in 1..=24 {
             let t = i as f32 * 0.05;
-            state.extend_stroke(egui::pos2(0.2 + t, 0.2));
+            state.extend_stroke(emath::pos2(0.2 + t, 0.2));
         }
         state.end_stroke();
         assert!(
@@ -7249,12 +7230,12 @@ mod tests {
             PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         state.set_active_target(PlaneOwner::Layer(1));
         state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 0);
-        state.begin_stroke(egui::pos2(0.2, 0.2));
+        state.begin_stroke(emath::pos2(0.2, 0.2));
         // A run of extends (no `end_stroke`): the conditioner converges
         // and stages, so the live stroke owns planes before the delete.
         for i in 1..=10 {
             let t = i as f32 * 0.02;
-            state.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+            state.extend_stroke(emath::pos2(0.2 + t, 0.2 + t * 0.5));
         }
         // The shell's census sees L1 vanish — queued, never pumped while
         // the stroke lives.
@@ -7307,7 +7288,7 @@ mod tests {
     fn drive_screen(state: &mut PaintState, points: &[Option<[f32; 2]>]) {
         let mut first = true;
         for point in points {
-            let hit = point.map(|[x, y]| egui::pos2(x, y));
+            let hit = point.map(|[x, y]| emath::pos2(x, y));
             if first {
                 state.begin_screen_point(hit);
                 first = false;
@@ -7358,9 +7339,9 @@ mod tests {
         let hits = [[0.3, 0.3], [0.32, 0.32], [0.34, 0.34], [0.36, 0.36]];
         let mut direct = PaintState::with_target_size(device.clone(), queue.clone(), 512)
             .expect("paint state builds");
-        direct.begin_stroke(egui::pos2(hits[0][0], hits[0][1]));
+        direct.begin_stroke(emath::pos2(hits[0][0], hits[0][1]));
         for [x, y] in &hits[1..] {
-            direct.extend_stroke(egui::pos2(*x, *y));
+            direct.extend_stroke(emath::pos2(*x, *y));
         }
         direct.end_stroke();
 
@@ -7406,7 +7387,7 @@ mod tests {
         state.sync_projection(PaintProjection::Uv);
         assert_eq!(state.projection(), PaintProjection::Uv);
         // A mid-stroke swap would split one stroke across two surfaces.
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         state.sync_projection(PaintProjection::Screen);
         assert_eq!(state.projection(), PaintProjection::Uv);
         state.end_stroke();
@@ -7435,7 +7416,7 @@ mod tests {
         drive_screen(&mut base, &march);
         let base_converged = base.staged_batch_count();
         assert!(base_converged >= 1);
-        base.extend_screen_point(Some(egui::pos2(
+        base.extend_screen_point(Some(emath::pos2(
             start[0] + step[0] * 16.0,
             start[1] + step[1] * 16.0,
         )));
@@ -7455,7 +7436,7 @@ mod tests {
             seam_converged > base_converged,
             "near-seam screen stroke must stage MORE than the baseline"
         );
-        seam.extend_screen_point(Some(egui::pos2(
+        seam.extend_screen_point(Some(emath::pos2(
             start[0] + step[0] * 16.0,
             start[1] + step[1] * 16.0,
         )));
@@ -7635,9 +7616,9 @@ mod tests {
     /// Drives a stroke that stays inside the mirror gate the whole time:
     /// `begin` at `start`, then `steps` extends marching `step` per event.
     fn drive_stroke(state: &mut PaintState, start: [f32; 2], step: [f32; 2], steps: usize) {
-        state.begin_stroke(egui::pos2(start[0], start[1]));
+        state.begin_stroke(emath::pos2(start[0], start[1]));
         for i in 1..=steps {
-            state.extend_stroke(egui::pos2(
+            state.extend_stroke(emath::pos2(
                 start[0] + step[0] * i as f32,
                 start[1] + step[1] * i as f32,
             ));
@@ -7666,7 +7647,7 @@ mod tests {
             base_converged >= 1,
             "converged baseline stroke must stage something (got {base_converged})"
         );
-        base.extend_stroke(egui::pos2(
+        base.extend_stroke(emath::pos2(
             start[0] + step[0] * 16.0,
             start[1] + step[1] * 16.0,
         ));
@@ -7689,7 +7670,7 @@ mod tests {
             "near-seam stroke must stage MORE than the seam-free baseline \
              (seam {seam_converged} vs base {base_converged})"
         );
-        seam.extend_stroke(egui::pos2(
+        seam.extend_stroke(emath::pos2(
             start[0] + step[0] * 16.0,
             start[1] + step[1] * 16.0,
         ));
@@ -7715,7 +7696,7 @@ mod tests {
         base.set_mesh(&single_island_quad());
         drive_stroke(&mut base, start, step, 15);
         let base_converged = base.staged_batch_count();
-        base.extend_stroke(egui::pos2(
+        base.extend_stroke(emath::pos2(
             start[0] + step[0] * 16.0,
             start[1] + step[1] * 16.0,
         ));
@@ -7734,7 +7715,7 @@ mod tests {
             base_converged,
             "far-from-seam convergence must match the baseline exactly"
         );
-        far.extend_stroke(egui::pos2(
+        far.extend_stroke(emath::pos2(
             start[0] + step[0] * 16.0,
             start[1] + step[1] * 16.0,
         ));
@@ -8077,10 +8058,10 @@ mod tests {
         let paint_at = |pressure: f32| -> Vec<u8> {
             let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
                 .expect("paint state builds");
-            state.begin_screen_point_pressured(Some(egui::pos2(0.3, 0.3)), pressure);
+            state.begin_screen_point_pressured(Some(emath::pos2(0.3, 0.3)), pressure);
             for i in 1..=15 {
                 state.extend_screen_point_pressured(
-                    Some(egui::pos2(0.3, 0.3 + 0.02 * i as f32)),
+                    Some(emath::pos2(0.3, 0.3 + 0.02 * i as f32)),
                     pressure,
                 );
             }
@@ -8550,7 +8531,7 @@ mod tests {
             "what was allowed is blocked"
         );
         // Invert/clear are refused mid-stroke (one stroke, one mask).
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         assert!(!state.invert_mask() && !state.clear_mask());
         state.end_stroke();
     }
@@ -8741,10 +8722,10 @@ mod tests {
             clicked
         );
 
-        state.begin_stroke(egui::pos2(0.05, 0.5));
+        state.begin_stroke(emath::pos2(0.05, 0.5));
         assert!(state.stroke_mask_gate, "the live stroke snapshots the gate");
         for i in 1..=16 {
-            state.extend_stroke(egui::pos2(0.05 + 0.02 * i as f32, 0.5));
+            state.extend_stroke(emath::pos2(0.05 + 0.02 * i as f32, 0.5));
         }
         state.end_stroke();
         let gated = read_back(&mut state, &device, &queue);
@@ -8774,7 +8755,7 @@ mod tests {
         );
 
         // Refused mid-stroke (one stroke, one mask — like invert/clear).
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         assert!(matches!(
             state.select_id_mask(FIRST_TILE, &bytes, ID_SIZE, ID_SIZE, click),
             Err(IdSelectError::StrokeInFlight)
@@ -8800,11 +8781,11 @@ mod tests {
         assert_eq!(state.tiles_present(), vec![1001]);
         // A routed 1002 event adds 1002; listing is ascending (1002 was
         // created after 1001 but the order is by tile, not creation).
-        state.begin_stroke(egui::pos2(1.2, 0.5));
+        state.begin_stroke(emath::pos2(1.2, 0.5));
         state.end_stroke();
         assert_eq!(state.tiles_present(), vec![1001, 1002]);
         // Re-routing to an existing tile adds nothing.
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         state.end_stroke();
         assert_eq!(state.tiles_present(), vec![1001, 1002]);
     }
@@ -8894,15 +8875,15 @@ mod tests {
         state.set_mesh(&two_tile_strip());
         assert_eq!(state.tile_count(), 1, "only tile 1001 exists up front");
 
-        state.begin_stroke(egui::pos2(1.2, 0.5));
+        state.begin_stroke(emath::pos2(1.2, 0.5));
         state.end_stroke();
         assert_eq!(state.tile_count(), 2, "first route to 1002 creates it");
 
-        state.begin_stroke(egui::pos2(1.7, 0.3));
+        state.begin_stroke(emath::pos2(1.7, 0.3));
         state.end_stroke();
         assert_eq!(state.tile_count(), 2, "re-routing to 1002 reuses it");
 
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         state.end_stroke();
         assert_eq!(state.tile_count(), 2, "1001 already existed");
         assert_eq!(state.active_tile(), 1001);
@@ -9076,7 +9057,7 @@ mod tests {
         // No mesh: even an out-of-[0,1] UV stays in 1001.
         let mut bare = PaintState::with_target_size(device.clone(), queue.clone(), 512)
             .expect("paint state builds");
-        bare.begin_stroke(egui::pos2(1.5, 0.5));
+        bare.begin_stroke(emath::pos2(1.5, 0.5));
         bare.end_stroke();
         assert_eq!(bare.tile_count(), 1);
         assert_eq!(bare.active_tile(), 1001);
@@ -9236,7 +9217,7 @@ mod tests {
         assert!(!state.replay_filled_path(&PaintPath::new(), &PathOp::Paint));
         // A replay never splits a live stroke.
         let path = straight_path([0.2, 0.3], [0.0, 0.02], 15);
-        state.begin_stroke(egui::pos2(0.5, 0.5));
+        state.begin_stroke(emath::pos2(0.5, 0.5));
         assert!(!state.replay_path(&path, &PathOp::Paint));
         assert!(!state.replay_filled_path(&path, &PathOp::Paint));
         state.end_stroke();
@@ -9405,10 +9386,10 @@ mod tests {
         // A mask plane on the default set, so the scoped-drop below is
         // non-vacuous (a resize that dropped nothing would pass anyway).
         state.set_mask_mode(true);
-        state.begin_stroke(egui::pos2(0.25, 0.25));
+        state.begin_stroke(emath::pos2(0.25, 0.25));
         for i in 1..=14 {
             let t = i as f32 * 0.02;
-            state.extend_stroke(egui::pos2(0.25 + t, 0.25));
+            state.extend_stroke(emath::pos2(0.25 + t, 0.25));
         }
         state.end_stroke();
         state.set_mask_mode(false);

@@ -12,6 +12,7 @@ members = [
     "crates/umber-color",
     "crates/stylus",
     "crates/umber-cli",
+    "crates/umber-paint",
     "crates/umber-app",
     "crates/umber-gui",
     "crates/umber-wasm",
@@ -41,6 +42,7 @@ egui = "0.36"
 egui_dock = "0.21"
 egui-wgpu = "0.36"
 epaint = "0.36"
+emath = "0.36"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
 
@@ -83,6 +85,7 @@ umber-graph = { path = "crates/umber-graph" }
 umber-export = { path = "crates/umber-export" }
 umber-color = { path = "crates/umber-color" }
 umber-gui = { path = "crates/umber-gui" }
+umber-paint = { path = "crates/umber-paint" }
 stylus = { path = "crates/stylus" }
 umber-wasm = { path = "crates/umber-wasm" }
 umber-plugin-sdk = { path = "crates/umber-plugin-sdk" }
