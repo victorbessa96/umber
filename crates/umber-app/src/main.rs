@@ -708,6 +708,12 @@ pub struct UmberApp {
     pub state: AppState,
     dock: DockState<Panel>,
     gpu: GpuContext,
+    /// File > New with unsaved work arms this; the confirm window
+    /// (drawn in `ui` beside the Perf HUD) offers Save / Discard /
+    /// Cancel. `None` = no confirmation pending. `Some(true)` = a
+    /// discard was confirmed; `Some(false)` = the user asked to save
+    /// first (the save dialog runs, then the reset).
+    pending_new: Option<bool>,
     /// The device display LUT (created at startup on eframe's device;
     /// rewritten in place when `state.display_lut` is dirty). Handed to
     /// the viewport's mesh pass and the UV view's paint display.
@@ -849,6 +855,7 @@ impl UmberApp {
             view: toolbar::ViewToggles::default(),
             icons,
             hdr_mode,
+            pending_new: None,
         })
     }
 }
@@ -2334,11 +2341,23 @@ impl UmberApp {
     /// state (and the loaded mesh stays too — see `reset_for_new`'s
     /// boundary note).
     ///
-    /// v1 skips the dirty check: the repo has no modal pattern (the only
-    /// `egui::Window` is the Perf HUD), and a half-modal would be worse
-    /// than none. Unsaved work is discarded — the confirm dialog is the
-    /// named follow-up.
+    /// Unsaved work gates through the confirm window
+    /// ([`Self::pending_new`]): Save offers the save dialog first,
+    /// Discard resets now, Cancel disarms.
     fn new_project(&mut self) {
+        if self.state.doc.is_dirty() && self.pending_new.is_none() {
+            // Unsaved work exists: arm the confirm window instead of
+            // discarding silently (the never-lose-work doctrine).
+            self.pending_new = Some(false);
+            log::info!("new project: unsaved edits — confirm dialog armed");
+            return;
+        }
+        self.confirm_new_project();
+    }
+
+    /// The File > New reset itself, post-confirmation (or when clean).
+    fn confirm_new_project(&mut self) {
+        self.pending_new = None;
         self.state.reset_for_new();
         // The boot shape (see `UmberApp::new`): a fresh default session on
         // the same device/queue, degrading to view-only with a logged
@@ -2617,6 +2636,43 @@ impl eframe::App for UmberApp {
         // input, so the result would sit until the mouse moved. (The click
         // frame itself starts the job after this poll; the tab's spinner
         // requests the next frame, and this keeps it going from there.)
+        // The File > New confirm (the dirty-document gate): one small
+        // centered window — Save (the save dialog, then the reset),
+        // Discard (reset now), Cancel (disarm). Nothing else in the
+        // shell is blocked: egui has no true modal in 0.36, and a
+        // half-modal that blocks input would fight the dock — the
+        // dialog is the honest v1 shape (the Perf HUD's Window
+        // precedent).
+        if self.pending_new.is_some() {
+            use egui::Window;
+            Window::new(tr("shell.new-confirm-title"))
+                .collapsible(false)
+                .resizable(false)
+                .min_width(280.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label(tr("shell.new-confirm-body"));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("shell.new-confirm-save")).clicked() {
+                            // Save-then-reset: the save dialog runs
+                            // (rfd, modal at the OS level), then the
+                            // document is on-disk current — the reset
+                            // proceeds this frame.
+                            self.save_project();
+                            if !self.state.doc.is_dirty() {
+                                self.confirm_new_project();
+                            }
+                        }
+                        if ui.button(tr("shell.new-confirm-discard")).clicked() {
+                            self.confirm_new_project();
+                        }
+                        if ui.button(tr("shell.new-confirm-cancel")).clicked() {
+                            self.pending_new = None;
+                        }
+                    });
+                });
+        }
         if self.state.bakes.poll_job() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));

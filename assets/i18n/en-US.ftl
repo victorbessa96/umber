@@ -84,6 +84,12 @@ shell =
     .filter-meshes = Meshes
     .new = New
     .tip-new = Start a new empty project (unsaved; the current one stays on disk if saved)
+    .new-confirm-title = Unsaved changes
+    .new-confirm-body = The project has unsaved edits. Save them first, or discard and start fresh?
+    .new-confirm-save = Save…
+    .new-confirm-discard = Discard
+    .new-confirm-cancel = Cancel
+
     .open = Open…
     .tip-open-mesh = Load a mesh to paint (or drop one on the viewport)
     .tip-open-project = Open a .umber project (Ctrl+O)

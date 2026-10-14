@@ -87,6 +87,12 @@ shell =
     .filter-environment = Ambiente
     .filter-meshes = Malhas
     .new = Novo
+    .new-confirm-title = Alterações não salvas
+    .new-confirm-body = O projeto tem edições não salvas. Salvar primeiro, ou descartar e recomeçar?
+    .new-confirm-save = Salvar…
+    .new-confirm-discard = Descartar
+    .new-confirm-cancel = Cancelar
+
     .tip-new = Começar um novo projeto vazio (não salvo; o atual permanece no disco se foi salvo)
     .open = Abrir…
     .tip-open-mesh = Carregar uma malha para pintar (ou soltar uma na viewport)

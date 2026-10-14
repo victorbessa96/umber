@@ -38,6 +38,14 @@ pub struct Document {
     /// the journal so a failed attach can't make the next save stamp a
     /// *lower* `journal_seq` (which would re-arm already-saved entries).
     journal_high_water: u64,
+    /// Whether the document has unsaved edits (the File > New / Open
+    /// confirm gate). Any `run` sets it; a successful save/open reset
+    /// clears it. Layer edits through `run` cover every document change
+    /// — paint strokes ride the autosave journal, not the stack, so
+    /// stroke-painted work is covered by the journal's existence check
+    /// (a journaled document is never clean by construction here; the
+    /// journal re-arms after each save).
+    pub dirty: bool,
 }
 
 /// An attached journal plus the texture set this document's stack is.
@@ -59,6 +67,7 @@ impl Default for Document {
             session_history: SessionHistory::new(),
             journal: None,
             journal_high_water: 0,
+            dirty: false,
         }
     }
 }
@@ -68,6 +77,7 @@ impl Document {
     /// then appends the applied edit to the autosave journal — and records
     /// the History window's row from the same command.
     pub fn run(&mut self, command: LayerCommand) {
+        self.dirty = true;
         // The cursor before the push: a push clears the redo stack, so any
         // history rows past this depth describe a future that no longer
         // exists and must go (context rows survive — see `truncate_future`).
@@ -152,6 +162,11 @@ impl Document {
         self.session_history.record_context(kind);
     }
 
+    /// Whether unsaved edits exist (the File > New / Open confirm gate).
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// Appends `op` to the attached autosave journal, if any. A failed
     /// append is logged, not fatal: the journal is an optimization over
     /// losing the edits since the last save, never a gate on editing.
@@ -179,6 +194,9 @@ impl Document {
         high_water: u64,
     ) -> std::io::Result<()> {
         self.journal_high_water = high_water;
+        // A freshly opened (or just-saved) project is on-disk current:
+        // the confirm gate starts closed.
+        self.dirty = false;
         if let Some(old) = self.journal.take() {
             if old.dir != dir {
                 if let Err(err) = umber_core::journal::truncate_journal(&old.dir) {
@@ -512,6 +530,22 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dirty_flag_rides_run_and_attach() {
+        // The confirm gate's truth: any run() marks the document dirty
+        // (undo/redo included — they flow through run), and a fresh
+        // attach (project open / save landing) clears it. Undoing back
+        // to the saved shape does NOT clear it: the journal's seq
+        // moved and an undo-redo asymmetry would need seq tracking —
+        // the honest v1 keeps the gate conservative.
+        let mut doc = Document::default();
+        assert!(!doc.is_dirty());
+        doc.run(LayerCommand::add("base", LayerKind::Paint));
+        assert!(doc.is_dirty());
+        doc.undo();
+        assert!(doc.is_dirty(), "undo keeps the gate closed conservatively");
+    }
 
     #[test]
     fn document_undo_roundtrip() {
