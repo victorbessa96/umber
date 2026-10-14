@@ -6,7 +6,35 @@ the source of truth.
 
 ## [Unreleased]
 
-### Wave 3 — the importers wave (2026-10-13, in flight)
+### The per-layer pool arc (2026-10-14, waves 1-4 of the wave model)
+
+- Pool stage 1a — the compositor's premultiplied mode: the
+  straight/premultiplied seam (the paint pipeline writes premultiplied;
+  the CPU compositor read straight — texel 100/128 over transparent
+  read 50, not 100), the bottom-copy identity, composite_stack_region.
+  Byte-identical: flag off = existing goldens unchanged (`b1ceb2c`)
+- The design arc — r1 doc, the claude-opus hostile review (3 BLOCKERs,
+  12 MAJORs, binding fixes; artifact preserved), the r2 fold-in
+  (`48f2c53` → `9b04ff8` → `60b7084`)
+- Pool stages 1b + 2 — the plane storage (PlaneOwner, budgets, the OOM
+  error scope, the committed registry) + save v2 (the paint/layers/
+  <id>/<channel>/ layout, the content-hash clean-skip, dual-read, 24
+  persistence tests byte-identical) (`f2aff9f`)
+- Pool stage 3 — the active-layer seam + the stroke gate: explicit
+  selection refuses unpaintable layers typed, the selectable Base row,
+  check_paintable's Fill/Folder arms (`ed64a58`)
+- LayerCommand::Rename — the name-only op with its journal entry and
+  wire step (`3a16536`); the agent protocol's five wire edit steps
+  (layer_add/remove/set_opacity/reorder/set_material, all journaled +
+  undoable) (`cfa0b19`)
+- The File > New dirty-check — unsaved work confirms before reset
+  (`2124b66`); the never-crash lint gate + the panic-hunt fuzz (850
+  garbage cases through the four public seams) (`4bf0d94`, `fc4ba4c`)
+- The corpus harness for importers — pinned oracle files arm the .spp
+  tests on arrival (`8634918`); the offscreen snapshot harness on
+  egui_kittest (`4210f17`)
+
+### Wave 3 — the importers wave (2026-10-13, complete)
 
 - .spp import — the umber-spp reader crate, clean-room HDF5-subset per
   the binding ruling; HBO graphs report by era, never error; the

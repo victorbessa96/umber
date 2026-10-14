@@ -11,11 +11,18 @@
 
 ## Status line
 
-Current phase: **CORE-LOOP — CLOSED (Gate 0 PASSED 2026-10-12, run 38255484123,
-both platforms green).** The user path is whole end to end; the next phase's
-queue comes from the C1 audit's refreshed worklist. GUI/P2 unfreeze is
-Bessa's explicit call.
-State: GATE-0-PASSED-PHASE-CLOSED
+Current phase: **THE PER-LAYER POOL ARC (2026-10-14) — three of five
+stages landed, the fourth hunting.** The core loop stays closed (Gate 0
+PASSED 2026-10-12, run 38255484123); the active hunt is the pool design
+(docs/specs/per-layer-pool-design.md r2, hostile-reviewed READY TO
+IMPLEMENT): 1a the compositor's premultiplied mode (`b1ceb2c`), 1b the
+plane storage + 2 save v2 (`f2aff9f`), 3 the selection + stroke gate
+(`ed64a58`); stage 4 (per-layer pixels, the Kill-B-class landing) is in
+flight; stage 5 (anchors + instances) queued. Around it: the agent
+protocol drives projects + layer edits over the wire, the offscreen
+snapshot harness renders panels headless, the never-crash gate + the
+panic-hunt fuzz hold, the corpus harness arms on real .spp files.
+State: POOL-ARC-STAGE-4-IN-FLIGHT
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate.
 No tag, no release, no v0.1 claim until Gate 0 passes.
@@ -48,15 +55,20 @@ source of loop truth). Summary:
 Phase A (truth pass): COMPLETE — A0 d3516c6, A1 e116729 (this rewrite),
 A2+A3 3e0278f; queue.md records the evidence per item.
 
-## Machine-load directive (standing)
+## Machine-load + wave model (standing)
 
-One cargo command at a time, no gate stacking, never chained after other
-commands in the same shell line — stacked full-parallelism gates crashed
-Hermes (2026-10-12, Bessa's order). Local cargo budget: `cargo fmt --all`,
-`cargo clippy -p <crate> --all-targets -- -D warnings` per touched crate,
-ONE at a time. No local cargo build/test — CI (ubuntu+windows) is the
-runtime gate. Remote gate (centralhost 192.168.15.64, 16-core/31GB, RTX
-3070) is the sanctioned heavy-build path when reachable.
+One cargo command at a time, no gate stacking, never chained after
+other commands in the same shell line — stacked full-parallelism gates
+crashed Hermes (2026-10-12, Bessa's order). Local cargo now runs under
+the flock at /tmp/umber-cargo.lock.
+
+TWO-GATE WAVES (Bessa's ruling 2026-10-14, replacing per-push CI):
+Gate 1 = scripts/wave-battery.sh per kill (fmt + clippy -D warnings +
+full suites, local, minutes — this gate catches what CI catches);
+Gate 2 = ONE push per wave + ONE CI run (scripts/ci-watch.sh
+backgrounded with a notify pattern; the verdict pings between turns).
+Kills batch as commits unpushed between gates; nothing idles on a
+foreground sleep. Proven Waves 1-4: every real bug caught by Gate 1.
 
 ## Claw dispatch recipe (proven)
 
