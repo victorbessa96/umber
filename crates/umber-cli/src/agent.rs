@@ -88,7 +88,7 @@ use umber_core::{
     MaterialChannel, MaterialParams, ProjectModel, TextureSet, TileSet, UndoStack,
 };
 
-use umber_paint::paint_state::{PaintState, PlaneOwner};
+use umber_paint::paint_state::{CompositeSnapshot, PaintState, PlaneOwner};
 use umber_paint::persistence::{
     list_paint_tile_names, load_paint_tiles_reported, paint_save_version, paint_set_sizes_path,
     paint_sidecar_dir, parse_paint_set_sizes, save_paint_tiles, PaintSetSizes,
@@ -458,7 +458,7 @@ struct ProjectSession {
     /// caller marks changed owners `Full` (`CompositeSnapshot::full_owners`)
     /// and retires removed layers, exactly as the app's frame does, or a
     /// wire `layer_set_opacity` would leave a stale composite cache.
-    prev_snapshot: Option<umber_paint::paint_state::CompositeSnapshot>,
+    prev_snapshot: Option<CompositeSnapshot>,
 }
 
 /// A session's state between steps.
@@ -707,7 +707,7 @@ impl ProjectSession {
     /// `umber_paint::snapshot`): no material states (the CLI evaluates no
     /// materials, so their rows contribute nothing), Base visible, nothing
     /// displayed (every composite happens on read, flush-first).
-    fn snapshot(&self) -> Result<umber_paint::paint_state::CompositeSnapshot> {
+    fn snapshot(&self) -> Result<CompositeSnapshot> {
         let stack = self
             .model
             .layers
@@ -733,12 +733,10 @@ impl ProjectSession {
             return Ok(());
         };
         if let Some(prev) = self.prev_snapshot.as_ref() {
-            for owner in umber_paint::paint_state::CompositeSnapshot::full_owners(prev, &snapshot) {
+            for owner in CompositeSnapshot::full_owners(prev, &snapshot) {
                 paint.mark_owner_full(owner);
             }
-            paint.note_removed_layers(&umber_paint::paint_state::CompositeSnapshot::removed(
-                prev, &snapshot,
-            ));
+            paint.note_removed_layers(&CompositeSnapshot::removed(prev, &snapshot));
         }
         paint.flush_composite(&snapshot);
         self.prev_snapshot = Some(snapshot);
