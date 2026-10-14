@@ -30,18 +30,26 @@ opacity vs mask params). Same-field edits conflict loudly — as they should:
 they are genuinely contradictory intentions, and the conflict markers name
 the exact field.
 
-### Property 3 — textures are content-addressed and binary-neutral
+### Property 3 — paint sidecars are binary-neutral
 
-Painted pixels live as `assets/<sha256-of-content>.png` (or `.exr` for
-float channels). Two consequences:
+Painted pixels live under `paint/` as one sidecar PNG per plane —
+`tile-<N>.png`, `paint/<channel>/tile-<N>.png`, and (from the
+per-layer pool) `paint/layers/<id>/<channel>/tile-<N>.png` —
+byte-exact PNGs keyed by their location, not yet content-addressed.
+(The save stages each sidecar through the project's asset store, whose
+blobs ARE content-addressed; the sidecar name stays the merge key.)
+Two consequences:
 
-- **Binary neutrality**: git's merge treats assets as opaque content —
-  no diff noise, no false conflicts, no merge-translation attempts.
-  Two artists painting the same tile produce two different hashes;
-  the layer file's asset reference is the single point of contention
-  and it merges textually like any other field.
-- **Deduplication as a side effect**: identical content = identical hash
-  = one stored blob, project-wide and across saves.
+- **Binary neutrality**: git's merge treats the sidecars as opaque
+  content — no diff noise, no false conflicts. Two artists painting
+  the same tile produce a real conflict (same path, different bytes)
+  that git resolves by picking one side; with the per-layer pool
+  (stage 4+), two artists painting DIFFERENT layers never collide —
+  the layer id is in the path, which is the merge story's core.
+- **Path as the contract**: the sidecar's name is the layer file's
+  paint reference and merges textually like any other field. A
+  content-addressed layout remains a named upgrade (dedup across
+  saves), not the shipped contract.
 
 ### Property 4 — the journal is append-only local state
 
