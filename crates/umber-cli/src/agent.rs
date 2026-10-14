@@ -33,6 +33,27 @@
 //! open like the app does, so undo/redo record the edit they perform
 //! and saves stamp the live high-water mark.
 //!
+//! Edit steps (queue row 14's follow-up): `layer_add`, `layer_remove`,
+//! `layer_set_opacity`, `layer_reorder` and `layer_set_material` drive the
+//! active set's stack through the same per-set `histories` + attached
+//! autosave journal the undo/redo arms use (one `Document::run` chokepoint
+//! each — see `Session::apply_edit`), so every edit is undoable and every
+//! save stamps it. Unknown layer ids and a missing project are typed
+//! errors; a failed step never ends the session.
+//!
+//! Judgment calls (v1 boundaries): there is no `layer_rename` —
+//! [`LayerCommand`] carries no rename op and the journal has no name-only
+//! entry (the app itself never renames: names are fixed at add time), so a
+//! wire rename could be neither undone nor recovered; it waits on a core
+//! `Rename` command plus a journal entry. `layer_set_material` with absent
+//! `channels` stores the sparse form (empty list): the definition wins at
+//! eval time (declared-but-unlisted channels read as
+//! [`MaterialChannel::named`] defaults), so the sparse form and the app's
+//! eagerly-materialized list evaluate identically. `layer_add` with
+//! `opacity` records two undo entries (add, then set-opacity): one wire
+//! step but two undos. Replies carry the affected row plus `journal_seq` /
+//! `can_undo` / `can_redo` (the undo reply's shape), never a full census.
+//!
 //! `bake` runs asynchronously on a session-owned thread, and the client
 //! polls it with `bake_status`. The app's async bake worker (7bf6140)
 //! lives in umber-app, which umber-cli does not depend on and should not
@@ -52,8 +73,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use umber_core::{
-    BlendMode, ChannelKind, Journal, JournalOp, LayerCommand, LayerKind, LayerStack, ProjectModel,
-    TextureSet, TileSet, UndoStack,
+    BlendMode, ChannelKind, Journal, JournalOp, Layer, LayerCommand, LayerKind, LayerStack,
+    MaterialChannel, MaterialParams, ProjectModel, TextureSet, TileSet, UndoStack,
 };
 
 use crate::batch::{default_rays, default_size, BakeTransferStep, InspectStep};
@@ -66,7 +87,8 @@ use crate::{
 /// recipe structs. `bake` / `export` drop the recipe's `mesh` field
 /// because they act on the held mesh. The `project_*` / `set_active` /
 /// `undo` / `redo` steps are the control-protocol v0 surface: they act
-/// on the held project, never on the mesh.
+/// on the held project, never on the mesh. The `layer_*` steps are the
+/// edit family (row-14 follow-up): they act on the active set's stack.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AgentStep {
@@ -81,6 +103,11 @@ enum AgentStep {
     ProjectState(NoFields),
     ProjectSave(ProjectSaveStep),
     SetActive(SetActiveStep),
+    LayerAdd(LayerAddStep),
+    LayerRemove(LayerRemoveStep),
+    LayerSetOpacity(LayerSetOpacityStep),
+    LayerReorder(LayerReorderStep),
+    LayerSetMaterial(LayerSetMaterialStep),
     Undo(NoFields),
     Redo(NoFields),
     Quit(NoFields),
@@ -159,6 +186,99 @@ struct ProjectSaveStep {
 #[serde(deny_unknown_fields)]
 struct SetActiveStep {
     set: String,
+}
+
+/// The layer kinds a wire `layer_add` may create: paint, fill or material.
+/// Folders and instances exist in [`LayerKind`] but have no wire
+/// constructor (a folder needs members the flat stack cannot name yet; an
+/// instance needs a source the step does not take) — v1 boundary.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LayerAddKind {
+    Paint,
+    Fill,
+    Material,
+}
+
+/// `layer_add` — push a layer onto the top of the active set's stack.
+/// `opacity` (absent = the stack default 1.0) records a second undo entry
+/// when present (see the module docs).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerAddStep {
+    name: String,
+    kind: LayerAddKind,
+    #[serde(default)]
+    opacity: Option<f32>,
+}
+
+/// `layer_remove` — remove one layer by id.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerRemoveStep {
+    id: u64,
+}
+
+/// `layer_set_opacity` — set one layer's opacity (clamped `0..=1`;
+/// non-finite input is a typed error, never stored).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerSetOpacityStep {
+    id: u64,
+    opacity: f32,
+}
+
+/// `layer_reorder` — move one layer to stack position `to` (index 0 =
+/// bottom; past-the-end clamps onto the top — the [`LayerStack::reorder`]
+/// rule, with the landed index in the reply).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerReorderStep {
+    id: u64,
+    to: usize,
+}
+
+/// One channel entry of a wire `layer_set_material`: the per-layer
+/// controls for one channel. Absent fields read as the
+/// [`MaterialChannel::named`] defaults (Normal / 1.0 / enabled); opacity
+/// clamps `0..=1` with non-finite mapping to `0.0` (the app panel's
+/// `upsert_channel` rule).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MaterialChannelStep {
+    name: String,
+    #[serde(default)]
+    blend: BlendMode,
+    #[serde(default = "default_material_channel_opacity")]
+    opacity: f32,
+    #[serde(default = "default_material_channel_enabled")]
+    enabled: bool,
+}
+
+/// `layer_set_material` — re-point one layer at `material_id` with a full
+/// channel list. `channels` absent stores the sparse form (see the module
+/// docs); present replaces the whole list, exactly like the app panel's
+/// per-widget `SetMaterial` ops. An unknown definition id still points
+/// (the app badges it `MissingDefinition` — never a refused edit).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerSetMaterialStep {
+    id: u64,
+    material_id: String,
+    #[serde(default)]
+    channels: Option<Vec<MaterialChannelStep>>,
+}
+
+/// The [`MaterialChannel::named`] opacity default for a wire channel entry
+/// that omits it.
+fn default_material_channel_opacity() -> f32 {
+    1.0
+}
+
+/// The [`MaterialChannel::named`] enabled default for a wire channel entry
+/// that omits it (serde's bool default is `false` — wrong here).
+fn default_material_channel_enabled() -> bool {
+    true
 }
 
 /// The async bake's state, as `bake_status` reports it
@@ -309,6 +429,29 @@ struct ProjectStateBody {
     texture_sets: Vec<TextureSetCensus>,
 }
 
+/// What every edit reply shares: the live journal mark plus the active
+/// set's undo capabilities (the undo/redo reply's shape).
+struct EditReport {
+    journal_seq: u64,
+    can_undo: bool,
+    can_redo: bool,
+}
+
+/// The active set's stack, shared, or the honest error. The edit steps
+/// pre/post-read through this; [`Session::apply_edit`] takes the `&mut`
+/// half for the push.
+fn active_stack(held: &ProjectSession) -> Result<&LayerStack> {
+    held.model
+        .layers
+        .iter()
+        .find(|e| e.texture_set == held.active)
+        .map(|e| &e.stack)
+        .ok_or_else(|| {
+            let active = held.active.clone();
+            anyhow::anyhow!("texture set {active:?} has no layers entry")
+        })
+}
+
 /// The paint sidecar's size model as the census reads it: a structural
 /// mirror of the app's `target_sizes.txt` size/channel arms (main.rs's
 /// `parse_paint_set_sizes` + `parse_paint_target_size`). It lives here
@@ -427,6 +570,19 @@ fn resolve_active(model: &ProjectModel) -> Result<String> {
     Ok(name)
 }
 
+/// One layer's census row. Shared by [`texture_set_census`] and the edit
+/// replies, so the two can never disagree.
+fn layer_census_row(layer: &Layer) -> LayerCensus {
+    LayerCensus {
+        id: layer.id,
+        name: layer.name.clone(),
+        kind: layer.kind.clone(),
+        opacity: layer.opacity,
+        visible: layer.visible,
+        blend: layer.blend_mode,
+    }
+}
+
 /// One set's census: the model channels sized through the sidecar
 /// mapping (override, else set size, else the model resolution), the
 /// present tiles (an empty tile map means the implied 1001 — the
@@ -458,18 +614,7 @@ fn texture_set_census(
         });
     }
     let layers: Vec<LayerCensus> = match stack {
-        Some(stack) => stack
-            .layers
-            .iter()
-            .map(|layer| LayerCensus {
-                id: layer.id,
-                name: layer.name.clone(),
-                kind: layer.kind.clone(),
-                opacity: layer.opacity,
-                visible: layer.visible,
-                blend: layer.blend_mode,
-            })
-            .collect(),
+        Some(stack) => stack.layers.iter().map(layer_census_row).collect(),
         None => Vec::new(),
     };
     TextureSetCensus {
@@ -576,6 +721,14 @@ impl Session {
             .ok_or_else(|| anyhow::anyhow!("no project open (send a `project_open` step first)"))
     }
 
+    /// The held project, shared, or the honest error (the pre/post-read
+    /// half of the edit steps — [`Session::project_mut`] is the push half).
+    fn project(&self) -> Result<&ProjectSession> {
+        self.project
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no project open (send a `project_open` step first)"))
+    }
+
     /// Runs one step and returns its result fields. `Quit` is handled by
     /// the caller ([`Session::reply`]).
     fn run(&mut self, step: AgentStep) -> Result<Fields> {
@@ -646,6 +799,11 @@ impl Session {
             AgentStep::ProjectState(NoFields {}) => self.project_state(),
             AgentStep::ProjectSave(s) => self.project_save(s),
             AgentStep::SetActive(s) => self.set_active(s),
+            AgentStep::LayerAdd(s) => self.layer_add(s),
+            AgentStep::LayerRemove(s) => self.layer_remove(s),
+            AgentStep::LayerSetOpacity(s) => self.layer_set_opacity(s),
+            AgentStep::LayerReorder(s) => self.layer_reorder(s),
+            AgentStep::LayerSetMaterial(s) => self.layer_set_material(s),
             AgentStep::Undo(NoFields {}) => self.project_undo(),
             AgentStep::Redo(NoFields {}) => self.project_redo(),
             AgentStep::Quit(NoFields {}) => unreachable!("quit is answered by Session::reply"),
@@ -759,6 +917,207 @@ impl Session {
         }
         held.active = s.set.clone();
         fields(serde_json::json!({ "active_set": s.set }))
+    }
+
+    /// Runs one model edit through the active set's undo journal and the
+    /// attached autosave journal — the session's `Document::run`
+    /// chokepoint (see the app's `document.rs`): push through the per-set
+    /// history, then journal the applied op (read after the push); a
+    /// failed append is a stderr note, never fatal. Callers pre-validate
+    /// (unknown ids, non-finite input) so a pushed command always lands on
+    /// a live layer — a no-op push would still occupy undo depth while
+    /// journaling nothing. Field borrows split (`model` / `histories` /
+    /// `journal`) so no `&mut self` method runs under a borrow (E0502).
+    fn apply_edit(&mut self, command: LayerCommand) -> Result<EditReport> {
+        let held = self.project_mut()?;
+        let active = held.active.clone();
+        let stack = held
+            .model
+            .layers
+            .iter_mut()
+            .find(|e| e.texture_set == active)
+            .map(|e| &mut e.stack)
+            .ok_or_else(|| anyhow::anyhow!("texture set {active:?} has no layers entry"))?;
+        let history = held
+            .histories
+            .entry(active.clone())
+            .or_insert_with(|| UndoStack::new(HISTORY_MAX_ENTRIES));
+        history.push(command, stack);
+        let op = history
+            .peek_undo()
+            .and_then(|c| JournalOp::applied(c, stack));
+        if let (Some(journal), Some(op)) = (held.journal.as_mut(), op) {
+            if let Err(e) = journal.record(&active, op) {
+                eprintln!("agent: autosave journal append failed: {e}");
+            }
+        }
+        // Inline `ProjectSession::journal_seq` (not the method): the
+        // method borrows all of `held` while `history` is still alive.
+        let live = held.journal.as_ref().map(Journal::last_seq).unwrap_or(0);
+        let journal_seq = held.model.journal_seq.max(live);
+        let (can_undo, can_redo) = (history.can_undo(), history.can_redo());
+        Ok(EditReport {
+            journal_seq,
+            can_undo,
+            can_redo,
+        })
+    }
+
+    /// `layer_add`: pushes an add through [`Session::apply_edit`] (the new
+    /// id is the stack's next counter — captured before the push, verified
+    /// after), then an optional opacity as its own undo entry. The reply
+    /// carries the new row plus the post-add count (the census delta).
+    fn layer_add(&mut self, s: LayerAddStep) -> Result<Fields> {
+        if let Some(value) = s.opacity {
+            if !value.is_finite() {
+                return Err(anyhow::anyhow!(
+                    "opacity {value} is not finite (expected 0..=1)"
+                ));
+            }
+        }
+        let kind = match s.kind {
+            LayerAddKind::Paint => LayerKind::Paint,
+            LayerAddKind::Fill => LayerKind::Fill,
+            LayerAddKind::Material => LayerKind::Material,
+        };
+        let id = active_stack(self.project()?)?.next_layer_id();
+        let mut report = self.apply_edit(LayerCommand::add(s.name, kind))?;
+        if let Some(value) = s.opacity {
+            report = self.apply_edit(LayerCommand::set_opacity(id, value))?;
+        }
+        let stack = active_stack(self.project()?)?;
+        let row = stack
+            .layer(id)
+            .map(layer_census_row)
+            .ok_or_else(|| anyhow::anyhow!("internal: added layer {id} missing"))?;
+        let layers = stack.layers.len();
+        fields(serde_json::json!({
+            "id": id,
+            "layer": row,
+            "layers": layers,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
+    }
+
+    /// `layer_remove`: the remove path. The reply names the removed row
+    /// (id, name, former index) plus the post-remove count.
+    fn layer_remove(&mut self, s: LayerRemoveStep) -> Result<Fields> {
+        let id = s.id;
+        let (name, index) = {
+            let stack = active_stack(self.project()?)?;
+            let index = stack
+                .index_of(id)
+                .ok_or_else(|| anyhow::anyhow!("unknown layer {id}"))?;
+            (stack.layers[index].name.clone(), index)
+        };
+        let report = self.apply_edit(LayerCommand::remove(id))?;
+        let layers = active_stack(self.project()?)?.layers.len();
+        fields(serde_json::json!({
+            "id": id,
+            "name": name,
+            "index": index,
+            "layers": layers,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
+    }
+
+    /// `layer_set_opacity`: clamped `0..=1` through the command path (the
+    /// stack clamps; the reply carries what it actually holds). Non-finite
+    /// input is a typed error — the stack would silently ignore it, which
+    /// would journal nothing while occupying undo depth.
+    fn layer_set_opacity(&mut self, s: LayerSetOpacityStep) -> Result<Fields> {
+        let (id, value) = (s.id, s.opacity);
+        if !value.is_finite() {
+            return Err(anyhow::anyhow!(
+                "opacity {value} is not finite (expected 0..=1)"
+            ));
+        }
+        if active_stack(self.project()?)?.layer(id).is_none() {
+            return Err(anyhow::anyhow!("unknown layer {id}"));
+        }
+        let report = self.apply_edit(LayerCommand::set_opacity(id, value))?;
+        let stored = active_stack(self.project()?)?
+            .layer(id)
+            .map(|layer| layer.opacity)
+            .ok_or_else(|| anyhow::anyhow!("internal: layer {id} missing after set_opacity"))?;
+        fields(serde_json::json!({
+            "id": id,
+            "opacity": stored,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
+    }
+
+    /// `layer_reorder`: resolves the id to its current index, then runs
+    /// the index-based reorder command (index 0 = bottom). The reply
+    /// carries where the layer actually landed (past-the-end clamps).
+    fn layer_reorder(&mut self, s: LayerReorderStep) -> Result<Fields> {
+        let (id, to) = (s.id, s.to);
+        let from = active_stack(self.project()?)?
+            .index_of(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown layer {id}"))?;
+        let report = self.apply_edit(LayerCommand::reorder(from, to))?;
+        let landed = active_stack(self.project()?)?
+            .index_of(id)
+            .ok_or_else(|| anyhow::anyhow!("internal: layer {id} missing after reorder"))?;
+        fields(serde_json::json!({
+            "id": id,
+            "from": from,
+            "to": landed,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
+    }
+
+    /// `layer_set_material`: re-points one layer (one undoable
+    /// `SetMaterial` op). An absent list stores the sparse form; a present
+    /// one replaces the whole list (see the module docs).
+    fn layer_set_material(&mut self, s: LayerSetMaterialStep) -> Result<Fields> {
+        let id = s.id;
+        if active_stack(self.project()?)?.layer(id).is_none() {
+            return Err(anyhow::anyhow!("unknown layer {id}"));
+        }
+        let channels = s
+            .channels
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| MaterialChannel {
+                name: c.name,
+                blend: c.blend,
+                opacity: if c.opacity.is_finite() {
+                    c.opacity.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+                enabled: c.enabled,
+            })
+            .collect::<Vec<_>>();
+        let report = self.apply_edit(LayerCommand::set_material(
+            id,
+            MaterialParams {
+                material_id: s.material_id,
+                channels,
+                params: Vec::new(),
+            },
+        ))?;
+        let stored = active_stack(self.project()?)?
+            .layer(id)
+            .and_then(|layer| layer.material.clone())
+            .ok_or_else(|| anyhow::anyhow!("internal: layer {id} missing after set_material"))?;
+        fields(serde_json::json!({
+            "id": id,
+            "material_id": stored.material_id,
+            "channels": stored.channels,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
     }
 
     /// `undo`: reverts the active set's most recent journaled edit
