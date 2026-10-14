@@ -93,6 +93,32 @@ Arc threading; un-premultiply exactness on GPU vendors.
 | wave-hdr-surface | §5 HDR output (eframe upgrade gate) | tracks eframe 0.36→next; the capability model + probe ✓ built |
 | wave-ray-query | §3 wgpu ray-query acceleration | tracks wgpu stability; the compute-shader path ✓ built |
 
+## Wave 8 — the ecosystem + quality horizon (suggested 2026-10-14, dragon-authored)
+
+The march's plan of record had no rows for these; each closes a real gap
+between "feature-complete" and "a tool a studio trusts".
+
+| Kill | Closes | Notes |
+|---|---|---|
+| wave-perf-protocol | the perf discipline as a standing gate | docs/perf/protocol.md gains the regression-triage flow: every nightly red names its owning wave; the baseline becomes a release artifact, not a CI afterthought |
+| wave-plugin-sdk-docs | the WASM plugin SDK's author docs | umber-wasm's runtime is built; the marketplace (wave 7) needs the author guide + the API stability contract first |
+| wave-fuzz-corpus | the panic-hunt's structured corpus | today: 850 synthetic garbage cases; next: byte-replays of the corpus harness's real files' structure (headers valid, bodies broken — the middle ground that finds real parser bugs) |
+| wave-a11y-first-pass | keyboard navigation + focus states | the icon toolbar + panels need tab order, focus rings, shortcut discoverability — Substance's UI is dense but fully keyboard-driven; ours isn't yet |
+| wave-i18n-audit | the pt-BR completeness beyond the test | the completeness test pins key parity; a native-speaker review pass (Bessa's call who) for the strings' actual quality |
+| wave-crash-reporter | the never-crash doctrine's last mile | a structured crash handler that writes the last 10 journal ops + the frame state to a user-readable file — the bug report a user can attach without a debugger |
+| wave-benchmark-public | the public benchmark story | a `umber-cli bench` subcommand: the bake/export/paint paths timed on a reference mesh, so community perf reports are comparable |
+
+## Wave 9 — the far horizon (suggested 2026-10-14 — the differentiators beyond parity)
+
+| Kill | Closes | Notes |
+|---|---|---|
+| wave-procedural-history | node-graph edits as first-class undo | the graph panel's param edits ride Document::run today; the GRAPH TOPOLOGY edits (add/remove/rewire nodes) need their own journaled command family — the last non-undoable edit class |
+| wave-smart-material-params | exposed parameter UI for materials | the dynmat design's cut §6 row: per-layer param editors driven by the definition's declared exposed params — Substance's "instance parameters" |
+| wave-bake-farm | distributed bake jobs | the bake is async + headless already (the agent session drives it); a job-queue shape over the protocol = multi-machine bake on a LAN |
+| wave-texture-inpainting | the healing-brush class | inpainting (patch-match based fill from the sampled region) — the one retouch tool class the engine lacks; rides the composite-sample seam stage 4 builds |
+| wave-live-mesh-edit | re-topo / live mesh reload | today a mesh reload resets the session; a UV-stable reload (matching by UV islands) keeps paint across topology edits — the deepest engineering row here |
+| wave-community-templates | the .umber template library | ship 10 curated material templates (weathered steel, leather, sci-fi panel — built with the own engine) as first-class File > New options; the fastest way to show what the tool does
+
 ## Wave 7 — the moonshots (P2, 2+ years, from [04])
 
 | Kill | Closes |
