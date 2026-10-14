@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shape: Blender Hydra-path MaterialX export, flat (kill A fixture).
+  Source claims (docs/research/materialx-roundtrip.md):
+    1.2.1 closed export vocabulary: principled + image/noise + math/invert;
+    1.2.2 OpenPBR surface terminal, MaterialX 1.39;
+    1.2.3 flat node list under the root, no nodegraph wrapper;
+    1.2.5 the UV binding is data to preserve, never a fixed name.
+  Hand-authored from those documented behaviors, NOT a corpus file (7 Q1).
+  Category spellings are illustrative; kill A keeps categories opaque.
+-->
+<materialx version="1.39">
+  <geompropvalue name="uv_UVMap" type="vector2">
+    <input name="geomprop" type="string" value="UVMap" />
+  </geompropvalue>
+  <image name="Image_Texture" type="color3">
+    <input name="file" type="filename" value="textures/rust_albedo.png" colorspace="srgb_texture" />
+    <input name="texcoord" type="vector2" nodename="uv_UVMap" />
+  </image>
+  <noise2d name="Noise_Texture" type="float">
+    <input name="texcoord" type="vector2" nodename="uv_UVMap" />
+    <input name="amplitude" type="float" value="1.0" />
+  </noise2d>
+  <invert name="Invert" type="float">
+    <input name="in" type="float" nodename="Noise_Texture" />
+  </invert>
+  <mix name="Mix" type="color3">
+    <input name="fg" type="color3" nodename="Image_Texture" />
+    <input name="bg" type="color3" value="0.1, 0.1, 0.1" />
+    <input name="mix" type="float" nodename="Invert" />
+  </mix>
+  <open_pbr_surface name="Principled_BSDF" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="Mix" />
+    <input name="specular_roughness" type="float" nodename="Invert" />
+    <input name="base_metalness" type="float" value="0.0" />
+  </open_pbr_surface>
+  <surfacematerial name="Material" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="Principled_BSDF" />
+  </surfacematerial>
+</materialx>

@@ -20,6 +20,7 @@ pub mod eval;
 pub mod material;
 pub mod mtlx;
 pub mod mtlx_doc;
+pub mod mtlx_import;
 pub mod nodes;
 pub mod topo;
 pub mod value;

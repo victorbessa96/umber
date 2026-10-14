@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shape: pre-OpenPBR Blender export, Standard Surface terminal (kill A).
+  Source claims (docs/research/materialx-roundtrip.md):
+    1.2.2 older Blender-origin documents terminate in standard_surface;
+    1.2.1 closed vocabulary (image + checker feeding the principled shader);
+    1.2.3 flat node list under the root;
+    1.4.1 the terminal set an importer must name includes standard_surface.
+  Hand-authored from those documented behaviors, NOT a corpus file (7 Q1).
+-->
+<materialx version="1.38">
+  <image name="Image_Texture" type="color3">
+    <input name="file" type="filename" value="//textures/wood.jpg" colorspace="srgb_texture" />
+  </image>
+  <checkerboard name="Checker_Texture" type="color3">
+    <input name="color1" type="color3" value="0.8, 0.8, 0.8" />
+    <input name="color2" type="color3" value="0.2, 0.2, 0.2" />
+  </checkerboard>
+  <standard_surface name="Principled_BSDF" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="Image_Texture" />
+    <input name="specular_color" type="color3" nodename="Checker_Texture" />
+    <input name="metalness" type="float" value="0" />
+  </standard_surface>
+  <surfacematerial name="Material" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="Principled_BSDF" />
+  </surfacematerial>
+</materialx>

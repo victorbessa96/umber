@@ -544,8 +544,11 @@ impl<'a> Cursor<'a> {
 
     /// Skip `<!-- … -->` or generic `<! … >`.
     fn skip_bang(&mut self) -> Result<(), MtlxError> {
-        if self.starts_with("!--") {
-            for _ in 0..3 {
+        // Callers have consumed `<!`, so a comment is `--` here. (The arm
+        // once tested `!--`, which never matched after the consume: every
+        // comment fell to the generic arm and ended at its first `>`.)
+        if self.starts_with("--") {
+            for _ in 0..2 {
                 self.bump();
             }
             loop {
@@ -962,6 +965,17 @@ pub fn from_mtlx(s: &str) -> Result<(Graph, Vec<NodedefDecl>, Vec<String>), Mtlx
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A comment containing `>` is skipped whole. Before the fix the
+    /// comment arm was dead (callers consume `<!` before `skip_bang` tested
+    /// `!--`), so the generic arm ended the comment at its first `>` and
+    /// the rest (`still comment -->`) parsed as text outside the root.
+    #[test]
+    fn comment_containing_gt_is_skipped_whole() {
+        let doc = "<!-- a > b, still comment -->\n<materialx version=\"1.38\">\n  <!-- x > y -->\n</materialx>\n";
+        let (graph, nodedefs, warnings) = from_mtlx(doc).expect("comments with '>' parse");
+        assert!(graph.nodes.is_empty() && nodedefs.is_empty() && warnings.is_empty());
+    }
 
     /// Hostile nesting is a typed error, never a stack overflow. Without
     /// the cap this test aborts the test binary (the 2 MiB test-thread

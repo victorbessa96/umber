@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shape: the parse-level hazard checklist in one document (kill A, lossy).
+  Source claims (docs/research/materialx-roundtrip.md):
+    4.1.1 / 4.1.2 a 1.36-era version is recorded, never upgraded;
+    4.4.1 / 4.4.2 working colorspace, cms, cmsconfig: preserved, reported;
+    4.5.1 XInclude reported, never followed;
+    4.5.2 namespace preserved, never stripped;
+    4.3.2 fileprefix recorded, never joined;
+    4.5.4 output= in both spellings (legacy N-id edge, port select);
+    4.5.6 member selection reported;
+    2.6(e) duplicate names, 2.6(i) DOCTYPE, 2.6(k) text content.
+  Hand-authored from those documented behaviors, NOT a corpus file (7 Q1).
+-->
+<!DOCTYPE materialx [
+  <!ENTITY tex "textures">
+]>
+<materialx version="1.36" colorspace="lin_rec709" cms="ocio" cmsconfig="studio_config.ocio" namespace="studio" xmlns:xi="http://www.w3.org/2001/XInclude">
+  <xi:include href="stdlib_custom.mtlx" />
+  <look name="default_look">
+    <materialassign name="ma1" material="Material" geom="/sword" />
+  </look>
+  <image name="tex_a" type="color3" fileprefix="textures/">
+    <input name="file" type="filename" value="a_&lt;UDIM&gt;.png" colorspace="acescg" />
+  </image>
+  <image name="tex_a" type="color3">
+    <input name="file" type="filename" value="dup.png" />
+  </image>
+  <dot name="legacy_wire" type="color3">
+    <input name="in" type="color3" output="N12" />
+  </dot>
+  <swizzle name="port_only" type="float">
+    <input name="in" type="color3" output="outr" />
+  </swizzle>
+  <mix name="dangling" type="color3">
+    <input name="fg" type="color3" nodename="missing_node" />
+    <input name="bg" type="color3" nodename="tex_a" value="0, 0, 0" />
+    <input name="mix" type="float" nodename="tex_a" interfacename="amount" />
+  </mix>
+  <split name="multi" type="multioutput">
+    <input name="in" type="color3" nodename="tex_a" member="r" />
+  </split>
+  <sticky>a note nobody parses</sticky>
+  loose text
+</materialx>

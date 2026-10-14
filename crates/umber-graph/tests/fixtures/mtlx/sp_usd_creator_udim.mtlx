@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shape: Painter-adjacent baked-texture wiring, SP USD Creator style (kill A).
+  Source claims (docs/research/materialx-roundtrip.md):
+    1.1.3 Painter-origin mtlx is a baked-texture wiring (images feeding a
+          fixed shader), not a procedural graph;
+    1.1.4 metalness and roughness wired as float inputs end-to-end; ONE
+          surface model per material (the OpenPBR path here);
+    1.4.3 UDIM filename tokens retained, never baked out;
+    1.4.4 per-input colorspace names are CMS-relative strings.
+  Hand-authored from those documented behaviors, NOT a corpus file (7 Q1).
+-->
+<materialx version="1.39">
+  <image name="Sword_basecolor" type="color3">
+    <input name="file" type="filename" value="textures/Sword_BaseColor.&lt;UDIM&gt;.png" colorspace="srgb_texture" />
+  </image>
+  <image name="Sword_metalness" type="float">
+    <input name="file" type="filename" value="textures/Sword_Metalness.&lt;UDIM&gt;.png" colorspace="raw" />
+  </image>
+  <image name="Sword_roughness" type="float">
+    <input name="file" type="filename" value="textures/Sword_Roughness.&lt;UDIM&gt;.png" colorspace="raw" />
+  </image>
+  <image name="Sword_normal" type="vector3">
+    <input name="file" type="filename" value="textures/Sword_Normal.&lt;UDIM&gt;.png" colorspace="raw" />
+  </image>
+  <normalmap name="Sword_normalmap" type="vector3">
+    <input name="in" type="vector3" nodename="Sword_normal" />
+  </normalmap>
+  <open_pbr_surface name="Sword_openpbr" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="Sword_basecolor" />
+    <input name="base_metalness" type="float" nodename="Sword_metalness" />
+    <input name="specular_roughness" type="float" nodename="Sword_roughness" />
+    <input name="geometry_normal" type="vector3" nodename="Sword_normalmap" />
+  </open_pbr_surface>
+  <surfacematerial name="Sword_mat" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="Sword_openpbr" />
+  </surfacematerial>
+</materialx>
