@@ -1,6 +1,6 @@
 # Agent paint ops — design (wave 7 row `wave-agent-paint-ops`)
 
-Status: DRAFT 2026-10-14, dragon-authored. Built on the umber-paint
+Status: WRITTEN (uncompiled) 2026-10-14, dragon-authored — `crates/umber-cli/src/agent.rs` paint steps + `tests/agent_paint_ops.rs` (7 tests). Built on the umber-paint
 extraction (`dbc3d1f` engine, `989ba7f` persistence — both uncompiled
 until Bessa lifts the cargo hold).
 
@@ -33,7 +33,8 @@ which `bake_context` does not request — a separate `paint_context()` asks
 for it and fails typed ("adapter lacks read-write storage textures") on
 adapters without it. Lavapipe has it (CI).
 
-`project_open` with an existing `paint/` sidecar loads it immediately into
+`project_open` with paint PNGs in the sidecar (`list_paint_tile_names`
+non-empty — a sizes-only `paint/` costs no device) loads it immediately into
 a fresh `PaintHalf` (so `paint_read` after open sees the saved pixels),
 mirroring `open_project`: `set_active_set`, `clear_layer_planes`,
 `load_paint_tiles_reported(paint, dir, live)`, `prune_layer_masks(live)`.
@@ -109,6 +110,18 @@ exactly as in the shell.
 6. `paint_read` with > 64 texels → typed error.
 7. a session that never paints: `project_save` still reports `painted: 0`
    and creates no `paint/` (no GPU device requested).
+
+## As written — deltas from the draft
+
+- `paint_read` gained `composite` (absent → composite iff `layer` is
+  absent); `composite: true` + `layer` is a typed error. A never-written
+  plane replies `exists: false` instead of inventing zeros.
+- The census's sidecar-size mirror (`SidecarSizes`, a hand-kept copy of
+  the app parser with a "drift guard" comment) is GONE: the census reads
+  `target_sizes.txt` through `umber_paint::persistence::parse_paint_set_sizes`
+  — the parser the app's open path uses.
+- The brush color arrives straight and is premultiplied on the way in
+  (`BrushParams::color` is premultiplied).
 
 ## Order of work (once cargo is allowed)
 

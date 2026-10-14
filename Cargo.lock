@@ -4866,6 +4866,7 @@ name = "umber-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "emath",
  "env_logger",
  "log",
  "pollster 1.0.1",
@@ -4876,6 +4877,7 @@ dependencies = [
  "umber-export",
  "umber-gpu",
  "umber-mesh",
+ "umber-paint",
  "wgpu",
 ]
 
