@@ -425,10 +425,23 @@ impl Elem {
     }
 }
 
+/// Element nesting cap for the tokenizer. `parse_elem` recurses once per
+/// open element, so an unbounded depth is a stack-overflow vector: a
+/// hostile file of 10^5 nested tags aborts the process (an overflow is not
+/// a catchable panic — the never-crash doctrine's worst case). Umber's own
+/// documents nest 4 deep (`materialx > nodegraph > node > input`) and no
+/// surveyed DCC shape exceeds a handful (docs/research/materialx-
+/// roundtrip.md §4.2.2), so 256 is generous for real files and a few
+/// hundred stack frames for hostile ones. `walk_node_list`'s recursion is
+/// bounded by the same cap: it descends only through parsed elements.
+pub(crate) const MAX_ELEM_DEPTH: usize = 256;
+
 struct Cursor<'a> {
     b: &'a [u8],
     pos: usize,
     line: usize, // 1-based line of `pos`.
+    /// Open-element depth (see [`MAX_ELEM_DEPTH`]).
+    depth: usize,
 }
 
 impl<'a> Cursor<'a> {
@@ -437,6 +450,7 @@ impl<'a> Cursor<'a> {
             b: s.as_bytes(),
             pos: 0,
             line: 1,
+            depth: 0,
         }
     }
 
@@ -557,6 +571,18 @@ impl<'a> Cursor<'a> {
     }
 
     fn parse_elem(&mut self) -> Result<Elem, MtlxError> {
+        if self.depth >= MAX_ELEM_DEPTH {
+            return self.err(format!(
+                "element nesting exceeds the cap of {MAX_ELEM_DEPTH}"
+            ));
+        }
+        self.depth += 1;
+        let result = self.parse_elem_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_elem_inner(&mut self) -> Result<Elem, MtlxError> {
         let line = self.line;
         self.expect("<", "'<'")?;
         if self.peek() == Some(b'/') {
@@ -936,6 +962,51 @@ pub fn from_mtlx(s: &str) -> Result<(Graph, Vec<NodedefDecl>, Vec<String>), Mtlx
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hostile nesting is a typed error, never a stack overflow. Without
+    /// the cap this test aborts the test binary (the 2 MiB test-thread
+    /// stack cannot hold 10^5 `parse_elem` frames), so it can fail.
+    #[test]
+    fn deep_nesting_is_a_parse_error_not_a_stack_overflow() {
+        let depth = 100_000;
+        let mut doc = String::from("<materialx>");
+        for _ in 0..depth {
+            doc.push_str("<nodegraph>");
+        }
+        for _ in 0..depth {
+            doc.push_str("</nodegraph>");
+        }
+        doc.push_str("</materialx>");
+        match from_mtlx(&doc) {
+            Err(MtlxError::Parse { message, .. }) => assert_eq!(
+                message,
+                format!("element nesting exceeds the cap of {MAX_ELEM_DEPTH}")
+            ),
+            other => panic!("expected the nesting-cap parse error, got {other:?}"),
+        }
+    }
+
+    /// The cap is exact: `MAX_ELEM_DEPTH` open elements parse (the root
+    /// counts as one), one more refuses.
+    #[test]
+    fn nesting_cap_boundary_is_exact() {
+        let build = |n: usize| {
+            let mut doc = String::from("<materialx>");
+            for _ in 0..n {
+                doc.push_str("<nodegraph>");
+            }
+            for _ in 0..n {
+                doc.push_str("</nodegraph>");
+            }
+            doc.push_str("</materialx>");
+            doc
+        };
+        assert!(from_mtlx(&build(MAX_ELEM_DEPTH - 1)).is_ok());
+        assert!(matches!(
+            from_mtlx(&build(MAX_ELEM_DEPTH)),
+            Err(MtlxError::Parse { .. })
+        ));
+    }
 
     /// Representative chain covering every value-carrying ParamValue
     /// variant: standard `noise` → custom `flood_fill` → `mix`.
