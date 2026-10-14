@@ -5,10 +5,14 @@ Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, th
 
 ## Hard rules
 
-1. **No `cargo build`, no `cargo test`.** CI (ubuntu + windows) is the runtime gate.
-   Before finishing you MUST run, one cargo command at a time (never parallel — the machine has crashed under stacked builds):
-   - `cargo fmt --all`
-   - `cargo clippy -p <crate> --all-targets -- -D warnings` for every crate you touched (`-D warnings` is what CI uses; without it you pass locally and fail CI).
+1. **Claws: no cargo at all** (the dispatch amendment forbids it; the dragon
+   runs the battery). Dragon-side (the wave model, 2026-10-14): Gate 1 =
+   `bash scripts/wave-battery.sh <crates…>` per kill — fmt + clippy -D
+   warnings + the FULL test suites, locally under the flock at
+   /tmp/umber-cargo.lock, one battery at a time. Gate 2 = ONE push per
+   wave + ONE CI run (ubuntu + windows). Kills batch unpushed between
+   gates. Never stack cargo commands in one shell line — the machine has
+   crashed under stacked builds.
 2. **Never commit.** No `git add/commit/push/stash/checkout/reset`. The orchestrator ("the dragon") reviews, gates and commits. The exception is a brief that explicitly gives you the tree.
 3. **Extend, don't revert.** Other agents edit the tree concurrently. If a file you didn't write changed, build on it, and never "clean up" someone else's hunk. Concurrent kills own DISJOINT file surfaces: the dragon registers each kill's files via `bash scripts/kill-locks.sh add <name> <files…>` and refuses any dispatch whose surface intersects a live lock.
 4. **Don't guess dependency APIs.** Read the source first: `docs/claw-artifacts/<crate>/` (vendored, with a verified-facts README), then `~/.cargo/registry/src/*/`.
