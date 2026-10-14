@@ -25,7 +25,9 @@
 use std::time::{Duration, Instant};
 
 use egui::Pos2;
-use umber_app::paint_state::{CompositeSnapshot, PlaneOwner, SnapshotLayer, SnapshotLayerKind};
+use umber_app::paint_state::{
+    CompositeSnapshot, PlaneOwner, SnapshotLayer, SnapshotLayerKind, SnapshotMaterialChannel,
+};
 use umber_core::BlendMode;
 
 /// The adapter request (perf_soak's proven shape, inlined: dev-deps
@@ -117,14 +119,62 @@ fn wait_gpu(device: &wgpu::Device) {
     });
 }
 
-/// [M8] scenario 1 — the metadata drag: one opacity edit per frame
-/// through the adoption + refresh + end-of-update flush path.
+/// The five material channels the drag scenario composites (§8 [M8]:
+/// "a 5-channel masked material").
+const DRAG_CHANNELS: [&str; 5] = ["baseColor", "roughness", "metallic", "normal", "height"];
+
+/// The drag scenario's stack: Base + one 5-channel MASKED material
+/// (`Layer(1)`), every channel Normal at `opacity` (the shell folds layer
+/// opacity into each channel entry at snapshot time — main.rs's
+/// `build_composite_snapshot`).
+fn drag_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnapshot {
+    let channels = DRAG_CHANNELS
+        .iter()
+        .map(|channel| SnapshotMaterialChannel {
+            channel: (*channel).to_string(),
+            blend: BlendMode::Normal,
+            opacity,
+        })
+        .collect();
+    CompositeSnapshot {
+        layers: vec![
+            SnapshotLayer {
+                owner: PlaneOwner::Base,
+                layer_id: None,
+                kind: SnapshotLayerKind::Paint,
+                blend: BlendMode::Normal,
+                opacity: 1.0,
+                visible: true,
+                mask_enabled: false,
+                material_channels: None,
+            },
+            SnapshotLayer {
+                owner: PlaneOwner::Layer(1),
+                layer_id: Some(1),
+                kind: SnapshotLayerKind::Material,
+                blend: BlendMode::Normal,
+                opacity,
+                visible: true,
+                mask_enabled: std::env::var("UMBER_POOL_DRAG_NOMASK").is_err(),
+                material_channels: Some(channels),
+            },
+        ],
+        base_visible: true,
+        displayed: displayed.to_vec(),
+    }
+}
+
+/// [M8] scenario 1 — the metadata drag: one opacity edit per frame on a
+/// 5-channel masked material at 4K, through the shell's real per-frame
+/// cycle: snapshot diff (`CompositeSnapshot::full_owners`) → owners marked
+/// `Full` → the end-of-update flush. The shell displays the active tile's
+/// baseColor + height (main.rs), so those two recomposite per frame and
+/// the other three coalesce per [M8] — exactly what the frame pays.
 ///
-/// Stage-4 shape note: this harness drives whatever `flush_composite`
-/// does TODAY. Pre-stage-4 it is the no-op (the number is the control
-/// row); post-stage-4 it is the coalesced full-tile recomposite — the
-/// delta IS the gate's evidence. The same property holds for the mirror
-/// session below. This is why both ship now, before stage 4 lands.
+/// History: the first version of this harness (stage-4 kill) published no
+/// layer planes and never marked dirt, so every frame flushed nothing and
+/// it reported a meaningless ~0.003 ms. The sanity pin after the session
+/// makes that failure mode impossible to repeat silently.
 #[test]
 fn pool_drag_session() {
     const TARGET: u32 = 4096; // 4K per the protocol
@@ -140,25 +190,82 @@ fn pool_drag_session() {
         umber_app::paint_state::PaintState::new(device, queue).expect("paint state builds");
     paint.resize_target(TARGET, TARGET);
     paint.process_pending().expect("resize applies");
+
+    // The material's five planes (premultiplied, opaque mid-grey) and its
+    // mask (a left-half-open gradient: every entry is MASKED for real, not
+    // a white no-op plane).
+    let texels = TARGET as usize * TARGET as usize;
+    let plane: Vec<u8> = [96u8, 96, 96, 255].repeat(texels);
+    for channel in DRAG_CHANNELS {
+        paint
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                channel,
+                TARGET,
+                TARGET,
+                plane.clone(),
+            )
+            .expect("material plane publishes");
+    }
+    let width = TARGET as usize;
+    let mask: Vec<u8> = (0..texels)
+        .map(|i| if i % width < width / 2 { 255 } else { 64 })
+        .collect();
+    assert!(paint.publish_layer_mask(1, 1001, mask), "mask publishes");
+    // The displayed caches exist (the viewport's binds read them every
+    // frame — materialize them the way a reader does).
+    let displayed: Vec<(u16, String)> = vec![
+        (1001, "baseColor".to_string()),
+        (1001, "height".to_string()),
+    ];
+    let mut prev = drag_snapshot(0.0, &displayed);
+    paint.flush_composite(&prev);
+    for (tile, channel) in &displayed {
+        paint
+            .read_composite(*tile, channel)
+            .expect("displayed cache reads");
+    }
+    paint.process_pending().expect("drain succeeds");
     wait_gpu(&poll_device);
 
-    // The drag: opacity 0.0 → 1.0 → 0.0, one step per frame (egui's
-    // per-frame slider emission shape), each step driven through the
-    // flush the frame would run.
+    // The drag: opacity 0 → 1 → 0, one step per frame (egui's per-frame
+    // slider emission shape).
     let steps = frames.max(2);
     let mut samples = Vec::with_capacity(steps);
     for i in 0..steps {
-        let t = i as f64 / steps as f64;
+        let t = (i + 1) as f64 / (steps + 1) as f64;
         let opacity = (t * std::f64::consts::PI).sin().abs() as f32;
         let start = Instant::now();
-        // The per-frame cycle: the shell's snapshot with this frame's
-        // opacity edit, then the end-of-update flush the frame runs.
-        let displayed = vec![(1001u16, "baseColor".to_string())];
-        let snapshot = harness_snapshot(opacity, &displayed);
-        paint.flush_composite(&snapshot);
+        let next = drag_snapshot(opacity, &displayed);
+        for owner in CompositeSnapshot::full_owners(&prev, &next) {
+            paint.mark_owner_full(owner);
+        }
+        paint.flush_composite(&next);
         paint.process_pending().expect("drain succeeds");
         wait_gpu(&poll_device);
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        prev = next;
+    }
+
+    // Sanity pin: the session really composited. Opacity 1.0 over a
+    // transparent Base gives the material's 96 in the mask-open half; the
+    // opacity-0 frame gives 0. A harness that flushes nothing fails here.
+    for (opacity, want) in [(1.0f32, 96u8), (0.0, 0)] {
+        let next = drag_snapshot(opacity, &displayed);
+        for owner in CompositeSnapshot::full_owners(&prev, &next) {
+            paint.mark_owner_full(owner);
+        }
+        paint.flush_composite(&next);
+        prev = next;
+        let cache = paint
+            .read_composite(1001, "baseColor")
+            .expect("cache reads");
+        let got = cache.data[0];
+        assert!(
+            (got as i16 - want as i16).abs() <= 2,
+            "pool-drag sanity: opacity {opacity} must composite {want}, got {got}"
+        );
     }
 
     let (p50, p95, p99) = percentiles(samples);
@@ -219,6 +326,24 @@ fn pool_mirror_session() {
     paint.flush_composite(&snapshot);
     paint.process_pending().expect("drain succeeds");
     wait_gpu(&poll_device);
+
+    // Sanity pin: the stroke really landed and composited. Both mirrored
+    // footprints sit on row y = 0.5: the cache must be non-transparent at
+    // the stroke's left start AND at its X-mirror (a harness whose flush
+    // composited nothing, or whose symmetry was off, fails here).
+    let cache = paint
+        .read_composite(1001, "baseColor")
+        .expect("cache reads");
+    let row = (TARGET / 2) as usize;
+    let alpha_at = |x: usize| cache.data[(row * TARGET as usize + x) * 4 + 3];
+    let left = (0.03 * TARGET as f32) as usize;
+    let mirror = TARGET as usize - 1 - left;
+    assert!(
+        alpha_at(left) > 0 && alpha_at(mirror) > 0,
+        "pool-mirror sanity: stroke + X mirror must composite (alpha {} / {})",
+        alpha_at(left),
+        alpha_at(mirror)
+    );
 
     let (p50, p95, p99) = percentiles(samples);
     print_verdict(

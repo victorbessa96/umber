@@ -108,9 +108,10 @@ does):
    (§4.2: at most ONE `Full` per DISPLAYED `(tile, channel)` per frame)
    it costs ≤ 3 full-tile recomposites per frame; everything else stays
    dirty and composites on read. Procedure: `cargo test -p umber-app
-   --features perf --release pool_drag` (harness TBD — same shape as the
-   input-to-photon session: synthetic slider values through the real
-   adoption + refresh + flush path, `device.poll(Wait)` per frame).
+   --features perf --release --test pool_perf pool_drag` (built —
+   synthetic slider values through the shell's snapshot-diff + flush
+   path, `device.poll(Wait)` per frame; `UMBER_POOL_DRAG_NOMASK=1` isolates
+   the mask cost).
    Gate: P95 frame < 16.7 ms.
 2. **X-symmetry stroke near the tile edge**: a mirrored pair at x≈100 and
    x≈3996 on one 4K `(tile, channel)` must stay TWO rects (≤ 8 per
@@ -134,6 +135,29 @@ is now splat + region recomposite — re-run the i2p session before stage
 | Date | Commit | Input→photon P95 | Dab drop @200Hz | Viewport P95 (ref scene) | Undo RAM @100 steps | Notes |
 |---|---|---|---|---|---|---|
 | 2026-10-10 | 19e71c5 | — (tracy session pending) | **0** (2914/2914 staged=composited; inter-dispatch mean 8.56ms, p50 10ms, p95 15ms; 4096² target, 3070) | — (ref-scene bench not built) | 19016 B final, sub-linear (first-10 Δ 1746B > last-10 Δ 980B), empirical ceiling 38032B | First real row. Undo numbers are the metadata-only model (no GPU-tile bytes in Document yet — the ceiling pins shape, NOT the §12 ~2GB@4K budget). Stroke soak ran the `perf` feature suite remotely (single-threaded, ICD pinned). |
+
+| 2026-10-14 | cfb205c (stage 5) | **10.18 ms** (p50 0.22, p99 10.24; 4998/5000 presented) | — | — | — | Stage-3 baseline was p95 10.19 ms: composite-on-read + stage 5 cost nothing measurable on the stroke path. **Adapter: llvmpipe (CPU rasterizer, LLVM 20, 8 threads)** — this host's iGPU (HD 530) is not reachable (`/dev/dri/renderD128` is `root:render`, user not in `render`). Present proxy = PaintThread GPU completion (lower bound). |
+
+### Stage-4 [M8] gate rows (2026-10-14, cfb205c, llvmpipe)
+
+| Scenario | P95 | p50 / p99 | Budget | Verdict on this adapter |
+|---|---|---|---|---|
+| Metadata drag, 5-ch MASKED material @4K, 120 frames | **318.28 ms** | 223.87 / 374.76 | 16.7 ms | FAIL on llvmpipe |
+| Same, masks off (`UMBER_POOL_DRAG_NOMASK=1`, 30 frames) | 241.13 ms | 191.54 / 262.22 | 16.7 ms | FAIL on llvmpipe — the mask path adds ~30% |
+| X-symmetry stroke near the tile edge @4K, 120 frames | **2.67 ms** | 1.58 / 3.39 | 16.7 ms | PASS |
+
+Read these as the CI-floor class, not the gate: the budget is a [HW]
+criterion on the reference GPU class (the 2026-10-10 row's 3070), and a
+CPU rasterizer recompositing two full 4K tiles per frame was always going
+to miss it. The drag gate stays UNDECIDED until the reference-GPU run.
+
+Harness correction: the stage-4 kill's `pool_drag` published no planes and
+marked no dirt, so it flushed nothing and printed p95 0.003 ms — a false
+PASS. It now builds the real scenario (5 material planes + a real mask,
+the shell's `full_owners` → `mark_owner_full` → flush cycle, the two
+displayed caches materialized) and ends with a sanity pin that fails if
+the session composited nothing. `pool_mirror` gained the same kind of pin
+(stroke + its X mirror must both land).
 
 ## Rules
 
