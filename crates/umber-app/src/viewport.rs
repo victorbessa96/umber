@@ -34,6 +34,34 @@
 //!   to the constant arm — pixel-identical to a mesh that never bound
 //!   paint, and the mesh-less empty-state hero path is untouched (it binds
 //!   nothing at all).
+//!
+//! Orthographic mode (P while hovered — P is free: the shell's
+//! `SHORTCUT_KEYS` in `toolbar.rs` bind W/G/V/X/I/E/Z/S/O and the graph
+//! canvas takes Delete/Backspace/Escape): the camera's
+//! [`umber_gpu::camera::Projection`]
+//! flips, `load_mesh` keeps it across re-framing like yaw/pitch, and
+//! picking unprojects the NEAR point as the ray origin (parallel rays have
+//! no eye to fan out from).
+//!
+//! Orthographic frames always take [`ViewportRoute::Direct`], even with an
+//! active post chain: the chain's only depth reader is DoF, whose WGSL
+//! `linearize_depth` (`postfx_exec.rs`, `POSTFX_SHADER`) inverts the
+//! perspective depth encoding (`near * far / (far - d * (far - near))`,
+//! mirrored by `postfx_exec::linearize_depth`) — under orthographic
+//! projection the depth buffer is linear (`near + d * (far - near)`), so
+//! that formula would defocus by the wrong distance. Bloom / vignette /
+//! sharpen / tone-map are color-only and need no such gate. Named
+//! follow-up: an ortho-aware DoF (linear-depth branch) that re-admits the
+//! PostFx route under [`umber_gpu::camera::Projection::Orthographic`].
+//!
+//! Ortho-safety of the shared unprojection: [`umber_gpu::world_from_ndc`]
+//! divides by `w`, and the orthographic matrix keeps `w = 1` (last row
+//! `0,0,0,1` — pinned by the camera test), so the perspective divide is a
+//! no-op there. The ground grid (`GpuContext::grid_callback`, whose
+//! `GRID_SHADER` carries the WGSL copy of `world_from_ndc` and rebuilds
+//! its ray from the NDC near/far unprojections) therefore works unchanged:
+//! ortho rays come out parallel instead of fanning, and the y=0 plane
+//! intersection is the same arithmetic.
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 use umber_gpu::postfx::PostChain;
@@ -141,7 +169,10 @@ pub struct Viewport {
 impl Viewport {
     /// Uploads `mesh` to the GPU and re-frames the camera on its bounds,
     /// keeping the current yaw/pitch so loading a new mesh doesn't spin
-    /// the view out from under the user.
+    /// the view out from under the user. The current projection
+    /// (perspective/orthographic) is kept the same way: `framing` always
+    /// builds Perspective, so without this the toggle would reset on every
+    /// load.
     pub fn load_mesh(
         &mut self,
         gpu: &GpuContext,
@@ -151,7 +182,9 @@ impl Viewport {
         // Fresh buffers default to procedural — re-apply our env.
         buffers.set_environment(gpu, self.env.as_ref());
         if let Some((min, max)) = mesh.bounds() {
+            let projection = self.camera.projection;
             self.camera = OrbitCamera::framing(min, max, self.camera.yaw, self.camera.pitch);
+            self.camera.projection = projection;
         }
         self.mesh_data = Some(mesh.clone());
         self.mesh = Some(buffers);
@@ -371,6 +404,14 @@ impl Viewport {
             Some(_) => ViewportRoute::select(postfx, self.view_mode),
             None => ViewportRoute::Direct,
         };
+        // Orthographic frames stay Direct even with an active chain: DoF's
+        // depth linearization is the perspective formula (see the module
+        // docs), so the PostFx route would defocus by the wrong distance.
+        let route = if self.camera.projection == umber_gpu::camera::Projection::Orthographic {
+            ViewportRoute::Direct
+        } else {
+            route
+        };
         // Direct frame: drop the HDR target + the chain's intermediates
         // (last frame's callbacks have already run; a no-op once empty).
         if route == ViewportRoute::Direct {
@@ -479,7 +520,15 @@ impl Viewport {
         let near = umber_gpu::world_from_ndc(inv, glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0));
         let far = umber_gpu::world_from_ndc(inv, glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0));
         let dir = far - near;
-        let hit = umber_mesh::ray_intersect(mesh, self.camera.eye(), dir)?;
+        // Orthographic rays are parallel: the origin is the unprojected
+        // NEAR point on the sight ray, not the eye (fanning from the eye
+        // would slant every pick). The perspective arm below is exactly
+        // today's code.
+        let origin = match self.camera.projection {
+            umber_gpu::camera::Projection::Perspective => self.camera.eye(),
+            umber_gpu::camera::Projection::Orthographic => near,
+        };
+        let hit = umber_mesh::ray_intersect(mesh, origin, dir)?;
         umber_mesh::uv_at(mesh, hit)
     }
 
@@ -503,6 +552,15 @@ impl Viewport {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 self.camera.zoom(scroll.signum() * ZOOM_SENSITIVITY);
+            }
+            // Projection toggle (P, mnemonic: Projection): free because the
+            // shell's SHORTCUT_KEYS (toolbar.rs: W/G/V/X/I/E/Z/S/O) and the
+            // graph canvas (Delete/Backspace/Escape) bind nothing else;
+            // hover-gated and modifier-free so it never fires while typing
+            // in a panel. No i18n string by design (the .ftl catalogs are
+            // owned by another surface) — same as the drag/scroll inputs.
+            if ui.input(|i| i.key_pressed(egui::Key::P)) {
+                self.camera.toggle_projection();
             }
         }
     }
@@ -723,5 +781,57 @@ mod tests {
         assert!(viewport.show_cage());
         viewport.set_show_cage(false);
         assert!(!viewport.show_cage());
+    }
+
+    #[test]
+    fn ortho_pick_at_center_matches_perspective_pick() {
+        // Parallel-vs-fan consistency: head-on at the quad, the ortho ray
+        // through the rect centre must meet the quad's centre (0.5, 0.5) —
+        // the same UV the perspective pick returns. An eye-origin ortho
+        // ray would still hit centre here (symmetry), so this also pins
+        // the exact UV rather than just hitting; the off-centre geometry
+        // is what distinguishes the origins, and the camera tests pin the
+        // ortho matrix itself.
+        let quad_mesh = quad();
+        let center = egui::pos2(100.0, 100.0);
+        let perspective_uv = head_on_viewport()
+            .pick_uv(rect200(), &quad_mesh, center)
+            .expect("perspective center ray must hit the quad");
+        let mut ortho_viewport = head_on_viewport();
+        ortho_viewport.camera.projection = umber_gpu::camera::Projection::Orthographic;
+        let ortho_uv = ortho_viewport
+            .pick_uv(rect200(), &quad_mesh, center)
+            .expect("ortho center ray must hit the quad");
+        for (got, name) in [(perspective_uv, "perspective"), (ortho_uv, "ortho")] {
+            assert!(
+                (got[0] - 0.5).abs() < 1e-4 && (got[1] - 0.5).abs() < 1e-4,
+                "{name} center must map to center UV, got {got:?}"
+            );
+        }
+        assert!(
+            (ortho_uv[0] - perspective_uv[0]).abs() < 1e-5
+                && (ortho_uv[1] - perspective_uv[1]).abs() < 1e-5,
+            "ortho {ortho_uv:?} must match perspective {perspective_uv:?}"
+        );
+    }
+
+    #[test]
+    fn ortho_off_centre_pick_uses_the_near_point_origin() {
+        // The test that separates the two origins. Default distance 5,
+        // fov 45°: ortho half-height at the target plane = 5·tan(22.5°) =
+        // 2.0710678, so pixel x = 140 in the 200-px rect (NDC x = 0.4)
+        // meets the quad at world x = 0.4 × 2.0710678 = 0.8284271 →
+        // u = (0.8284271 + 1) / 2 = 0.9142136 (positions == UVs on x/y).
+        // An eye-origin ray with the parallel direction (0, 0, -1) would
+        // drop straight onto (0, 0) → u = 0.5 — off by 0.41.
+        let mut viewport = head_on_viewport();
+        viewport.camera.projection = umber_gpu::camera::Projection::Orthographic;
+        let uv = viewport
+            .pick_uv(rect200(), &quad(), egui::pos2(140.0, 100.0))
+            .expect("the off-centre ortho ray must hit the quad");
+        assert!(
+            (uv[0] - 0.914_213_6).abs() < 1e-4 && (uv[1] - 0.5).abs() < 1e-4,
+            "ortho off-centre pick must land at u = 0.9142136, got {uv:?}"
+        );
     }
 }
