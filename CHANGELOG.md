@@ -34,6 +34,15 @@ the source of truth.
   `(owner, tile, channel)` and dirties the composite cache. Dragon fixes at
   consume: the smudge test's snapshot shape (Base row + displayed) and the
   6 persistence fixtures' `base_nonempty` expectation
+- Pool stage 5 — anchors flatten downward (Base through the anchored
+  layer, CPU-exact; self/forward anchors are typed errors refused before
+  eval — wart 4 closed) and instances render their source's planes with
+  their own visibility/opacity/mask (`ec6d552`). The per-layer pool arc is
+  complete
+- MaterialX import Kill A — parse-only lossless IR + machine-readable
+  import report, never-panic with typed resource caps; mtlx.rs's dead
+  comment arm fixed (`bb287cd`)
+- Orthographic viewport projection, P toggles while hovered (`40f3e5d`)
 - MaterialX reader nesting cap (`MAX_ELEM_DEPTH = 256`): hostile nesting is
   a typed parse error, not a process-aborting stack overflow
 - Research: MaterialX import round-trip (`bf4718e`, the honest subset +

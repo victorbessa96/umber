@@ -65,7 +65,7 @@ users know as "real layers". Design r2 hostile-reviewed READY TO IMPLEMENT
 | 2 save v2 (layers/<id>/ round-trip) | ✓ landed | f2aff9f (24 persistence tests byte-identical) |
 | 3 selection + stroke gate | ✓ landed | ed64a58 (explicit, typed refusals, the Base row) |
 | 4 per-layer pixels (Kill-B-class) | ✓ landed (2026-10-14) | strokes/fills/materials/imports on own planes, dormancy + v2 header [B2], the composite-on-read flush [M7]; the perf gate [M8] re-measures in the wave-5 perf row |
-| 5 anchors + instances | queued | SelfAnchor/ForwardAnchor, CPU prefix flatten |
+| 5 anchors + instances | ✓ landed (2026-10-14) | `ec6d552`: downward CPU prefix flatten, typed Self/ForwardAnchor, instances render |
 
 Post-pool probe kills (the r2's open verifications): eframe 0.36's GPU
 error-handler behavior; wgpu 30's error-scope API shape; PaintCompositor
@@ -75,10 +75,10 @@ Arc threading; un-premultiply exactness on GPU vendors.
 
 | Kill | Closes | Notes |
 |---|---|---|
-| wave-camera-ortho | §5 the named camera gap | ortho mode + the projection toggle; in flight (claw) |
+| wave-camera-ortho | §5 the named camera gap | ✓ landed (40f3e5d); follow-up: ortho-aware DoF |
 | wave-stylus-win32 | §10 the Windows dual-path | Wintab32 polling beside Windows Ink |
 | wave-8k-export | §2/§6 the 8K export path | the per-channel pool carries it; export-side budget rows |
-| wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e: kills A/S/B/C/U); Kill A (parse + report) in flight |
+| wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
 | wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
 | wave-harness-script | the snapshot harness's --script arm | drive the agent session, snapshot after each step — visual regression over driven state |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
@@ -174,9 +174,9 @@ between "feature-complete" and "a tool a studio trusts".
 | Distribution | ✓ shell+PS proven + CI; Flatpak/AppImage = wave 1 |
 | Performance floor | pending baseline (nightly starved) |
 | Paint-what-you-see buffer | live-raycast ✓; the pwys stroke buffer stays a design-first wave-5 candidate |
-| Ortho camera | ✗ open = wave 5 (post-pool) |
+| Ortho camera | ✓ landed (40f3e5d) |
 | 8K export | ✗ open = wave 5 (post-pool) |
-| Per-layer pixel planes | ✓ stage 4 landed (the pool arc; stage 5 anchors + instances next) |
+| Per-layer pixel planes | ✓ the pool arc complete (stages 1a-5, 2026-10-14) |
 | Custom user shaders | runtime ✓; host hook = wave 6 |
 | Rename layers | ✓ LayerCommand::Rename + the wire step (2026-10-14) |
 | Dirty-check confirm | ✓ the File > New gate (2026-10-14) |
