@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: A capability Patina should have
+about: A capability Umber should have
 labels: enhancement
 ---
 

@@ -60,7 +60,7 @@ umber/
 ├── docs/
 │   ├── research/      # claw research reports (Painter inventory, competitors, ecosystem)
 │   └── specs/         # design specs per subsystem
-└── crates/            # Rust workspace — 14 crates, 599+ tests, CI green
+└── crates/            # Rust workspace — 15 crates, ~1500 tests, CI on Linux + Windows
 ```
 
 ## Contributing

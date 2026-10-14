@@ -102,11 +102,33 @@ between "feature-complete" and "a tool a studio trusts".
 |---|---|---|
 | wave-perf-protocol | the perf discipline as a standing gate | docs/perf/protocol.md gains the regression-triage flow: every nightly red names its owning wave; the baseline becomes a release artifact, not a CI afterthought |
 | wave-plugin-sdk-docs | the WASM plugin SDK's author docs | umber-wasm's runtime is built; the marketplace (wave 7) needs the author guide + the API stability contract first |
-| wave-fuzz-corpus | the panic-hunt's structured corpus | today: 850 synthetic garbage cases; next: byte-replays of the corpus harness's real files' structure (headers valid, bodies broken — the middle ground that finds real parser bugs) |
+| wave-fuzz-corpus | the panic-hunt's structured corpus | today: 850 synthetic garbage cases over mtlx / PSD / .spp / project dirs; next: (a) the **mesh importers** (FBX, glTF, USD/USDC — untrusted files with no garbage coverage yet; found writing SECURITY.md's threat table, 2026-10-14), (b) byte-replays of the corpus harness's real files' structure (headers valid, bodies broken — the middle ground that finds real parser bugs) |
 | wave-a11y-first-pass | keyboard navigation + focus states | the icon toolbar + panels need tab order, focus rings, shortcut discoverability — Substance's UI is dense but fully keyboard-driven; ours isn't yet |
 | wave-i18n-audit | the pt-BR completeness beyond the test | the completeness test pins key parity; a native-speaker review pass (Bessa's call who) for the strings' actual quality |
 | wave-crash-reporter | the never-crash doctrine's last mile | a structured crash handler that writes the last 10 journal ops + the frame state to a user-readable file — the bug report a user can attach without a debugger |
 | wave-benchmark-public | the public benchmark story | a `umber-cli bench` subcommand: the bake/export/paint paths timed on a reference mesh, so community perf reports are comparable |
+
+## Wave 8b — absorbed from photocraft + Blender (2026-10-14)
+
+Every row verified against Umber's code first; the ledger with sources,
+the already-have list and the declines is
+[`docs/research/absorption-2026-10-14-photocraft-blender.md`](research/absorption-2026-10-14-photocraft-blender.md).
+
+| Kill | Closes | Notes |
+|---|---|---|
+| wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | Blender's Margin Type "Adjacent Faces": fill the margin from the faces across each seam, not by extending border pixels (today's `dilate_map`). The seam graph the brush uses is the input. Per-bake + per-export enum beside the pixel size |
+| wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading |
+| wave-brush-dynamics-angle-jitter | per-dab rotation + jitter | fixed / rake (follows stroke direction) / random angle; size, opacity and position jitter. `BrushParams` has none today |
+| wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) |
+| wave-stroke-methods | the missing stroke idioms | airbrush (deposit at a rate while held), anchored + drag-dot (decal placement), dash ratio/length (stitches, seams) |
+| wave-stencil | paint-through screen stencil | an image overlay you move/scale/rotate and paint through — the logo/decal workflow |
+| wave-brush-cavity-mask | edge-wear without building a mask layer | per-brush "mask by cavity / ridge" reusing the baked curvature map |
+| wave-normal-object-space | object-space normal bakes | Normal Space: Object beside today's tangent-only bake |
+| wave-gpu-safe-start | a driver crash at device creation repeating every launch | photocraft's startup marker: write before device creation, clear after the first frames; an uncleared marker steps the backend down next launch; `--safe-gpu` override |
+| wave-save-completeness | a new document field silently not saved | destructure every doc struct in the save converters with no `..`: a new field fails to compile until the save path handles it |
+| wave-scorecard | handwritten headline numbers drifting | generate README/STATE counts (crates, tests, rows) from the tree; `--check` in the battery + CI (this pass found 4 drifted docs) |
+| wave-ci-path-filter | Windows CI time on docs-only PRs | a `platforms` job: the Windows leg runs when platform-sensitive paths change or a `full-ci` label is set; master always runs both |
+| wave-release-phases | integrators broken by late protocol changes | alpha → beta (agent protocol + file format frozen) → RC, written into the 0.1.0 release checklist |
 
 ## Wave 9 — the far horizon (suggested 2026-10-14 — the differentiators beyond parity)
 

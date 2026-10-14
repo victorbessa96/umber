@@ -6,6 +6,22 @@ the source of truth.
 
 ## [Unreleased]
 
+### Absorbed from photocraft + Blender (2026-10-14)
+
+- EXR read refuses decompression bombs: a header preflight rejects a
+  layer over 16K per side or 2 GiB decoded before any pixel buffer is
+  allocated (`ExrError::TooLarge`) — the HDR environment-map path took
+  any declared size before
+- `scripts/check-layers.py`: the crate layering gate (L0–L6, deps point
+  down, UI crates confined to the shell side). Cargo-free; a CI `gates`
+  job and the battery's first step
+- SECURITY.md carries the threat surface and each surface's defence;
+  CONTRIBUTING.md rewritten for the open-contribution stage; the bug
+  template asks for build, GPU and logs; AGENTS.md re-synced with
+  CLAUDE.md (it had lost the never-crash rule and the .spp ruling)
+- 13 ROADMAP rows (wave 8b) verified against the code first — the
+  ledger is `docs/research/absorption-2026-10-14-photocraft-blender.md`
+
 ### The per-layer pool arc (2026-10-14, waves 1-4 of the wave model)
 
 - Pool stage 1a — the compositor's premultiplied mode: the

@@ -1,6 +1,6 @@
 # Umber — agent contract
 
-Rust 3D texture-painting DCC. 14-crate workspace, wgpu 30 + egui/eframe 0.36, toolchain pinned 1.97.0.
+Rust 3D texture-painting DCC. 15-crate workspace, wgpu 30 + egui/eframe 0.36, toolchain pinned 1.97.0.
 Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, then traps, tooling, pointers.
 
 ## Hard rules
@@ -31,6 +31,7 @@ Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, th
 9. **Mark your requirements row.** If your task completes a row in `docs/specs/requirements.md`, add a 4th cell: `` | ✓ built (`PENDING`) — <v1 boundary, if any> | ``. The dragon fills in the sha.
 10. **Hard walls**: no .sbsar execution, no Adobe SDKs, no WRITING .spp. `.spp` IMPORT is ratified (binding ruling 2026-10-12): read-only through `crates/spp` (umber-spp), clean-room per `docs/research/spp-hdf5-layout.md` — never a write path. License stays GPL-3.0-or-later.
 11. **Never crash in the engine crates** (the never-crash gate, 2026-10-13): `umber-core`, `umber-color`, `umber-spp` deny `unwrap`/`expect`/`panic` in non-test code (`cfg_attr(not(test), deny(...))` at the crate root + `clippy.toml`). Return typed errors; a provably-infallible case needs `#[allow(clippy::expect_used)]` + the reason. `umber-gpu`/`umber-app` are exempt (harness + UI code), but the discipline is the same there.
+12. **Crate layering** (2026-10-14, absorbed from photocraft): every crate sits in a layer in `scripts/check-layers.py` (L0 leaves … L6 the shell); dependencies point DOWN only, and UI crates (egui/eframe/winit/rfd/egui_dock) stay in umber-gpu (egui-wgpu only) / umber-gui / umber-app. A NEW crate fails the gate until registered there in the same commit. Pure Python, no cargo — run it any time: `python3 scripts/check-layers.py`.
 
 ## Rust traps (each one cost a CI round; check your diff for all of them)
 
