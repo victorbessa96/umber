@@ -51,7 +51,7 @@
 //! efficiency, but false negatives would reintroduce the race, so the test
 //! is deliberately biased to never under-split.
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use crate::paint::{Dab, DabBuffer, PaintCompositor, PaintError, PaintTarget};
 
@@ -145,12 +145,12 @@ pub struct FrameStats {
 }
 
 /// Orchestrates [`crate::paint`] on behalf of a decoupled producer: owns the
-/// paint surface, the compositor, and the command channel that lets a
+/// paint surface, the (shared) compositor, and the command channel that lets a
 /// caller describe paint-surface mutations without touching wgpu directly.
 pub struct PaintThread {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    compositor: PaintCompositor,
+    compositor: Arc<PaintCompositor>,
     target: PaintTarget,
     dab_buffer: DabBuffer,
     sender: mpsc::Sender<PaintThreadCommand>,
@@ -172,12 +172,31 @@ impl PaintThread {
         width: u32,
         height: u32,
     ) -> Result<Self, PaintError> {
-        let compositor = PaintCompositor::new(device.clone())?;
+        let compositor = Arc::new(PaintCompositor::new(device.clone())?);
+        Ok(Self::with_compositor(
+            device, queue, width, height, compositor,
+        ))
+    }
+
+    /// Builds a new `width`x`height` paint thread sharing `compositor`
+    /// (per-layer-pool design §1, [M4]): the compositor owns the compiled
+    /// dab-splat pipeline, so sharing one [`Arc`] across every plane and
+    /// cache thread means materializing a plane never compiles a shader —
+    /// no mid-stroke hitch on a stroke's first batch on a new layer/tile.
+    /// Infallible: the target is zero-initialized by construction (see
+    /// [`PaintTarget::new`]) and the pipeline already exists.
+    pub fn with_compositor(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+        compositor: Arc<PaintCompositor>,
+    ) -> Self {
         let target = PaintTarget::new(&device, width, height);
         let capacity = STAGING_CAPACITY.min(compositor.max_dabs_per_batch());
         let dab_buffer = DabBuffer::new(capacity);
         let (sender, receiver) = mpsc::channel();
-        Ok(Self {
+        Self {
             device,
             queue,
             compositor,
@@ -186,7 +205,7 @@ impl PaintThread {
             sender,
             receiver,
             stats: FrameStats::default(),
-        })
+        }
     }
 
     /// Queues `cmds` for the next [`PaintThread::process_pending`] call, in
@@ -333,6 +352,54 @@ impl PaintThread {
     /// compositing.
     pub fn paint_target(&self) -> &PaintTarget {
         &self.target
+    }
+}
+
+/// Pushes a wgpu `OutOfMemory` error scope around plane creation
+/// (per-layer-pool design §1.3, [M4]): the caller creates its plane (and
+/// cache) threads, then drains the scope with [`await_oom_scope`]. A
+/// captured error is the pool's typed budget refusal — texture creation
+/// returns no `Result`, and the tree installs no uncaptured-error handler,
+/// so without the scope an over-budget materialization is a crash, which
+/// the never-crash doctrine forbids most.
+///
+/// Verified shape (wgpu 30.0.1 registry source): `push_error_scope` returns
+/// a `#[must_use]` `ErrorScopeGuard` (which is `!Send + !Sync` — it never
+/// leaves this thread) whose `pop` is a future, not a pair.
+pub fn push_oom_scope(device: &wgpu::Device) -> wgpu::ErrorScopeGuard {
+    device.push_error_scope(wgpu::ErrorFilter::OutOfMemory)
+}
+
+/// Pops a scope pushed by [`push_oom_scope`]: `true` when it captured an
+/// error (the scope filters to `OutOfMemory`, so any capture is one).
+///
+/// The pop is a future; this drives it on a std-only noop waker
+/// (`std::task::Wake` over an `Arc`, no unsafe, no executor): each
+/// `Pending` pumps the device with a blocking poll until the backend
+/// resolves the pop. `false` when nothing was captured, or when the pump
+/// itself failed (logged — a failed pump means no observation, and
+/// refusing on no observation would block painting on a transient).
+pub fn await_oom_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> bool {
+    use std::future::Future;
+    let waker = std::task::Waker::noop();
+    let mut context = std::task::Context::from_waker(waker);
+    let mut popped = Box::pin(scope.pop());
+    loop {
+        match popped.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(captured) => return captured.is_some(),
+            std::task::Poll::Pending => {
+                if device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    })
+                    .is_err()
+                {
+                    log::warn!("oom scope: device poll failed while awaiting the pop");
+                    return false;
+                }
+            }
+        }
     }
 }
 

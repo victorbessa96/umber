@@ -31,6 +31,11 @@ thiserror = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
 rfd = "0.15"
+# blake3 for the per-layer-pool §6.2 clean-skip (the sidecar file's hash is
+# compared against the plane's recorded commit hash): umber-app's own entry
+# (the E0432 trap — paint_state.rs's `Plane.committed` hash is this crate's
+# use, not umber-core's), same workspace pin umber-core uses.
+blake3 = { workspace = true }
 # PSD import (flatten-on-import): the same ag-psd reader the export path
 # uses (umber-export's `psd.rs`). Version already locked in Cargo.lock —
 # no lock churn. The `mod psd_import;` + menu wiring lands at the

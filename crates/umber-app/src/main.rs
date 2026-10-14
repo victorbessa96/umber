@@ -16,10 +16,14 @@
 //! lands with the paint engine.
 //!
 //! Paint-pixel persistence (CORE-LOOP CRITICAL 4, the 2026-10-12 strategy
-//! review): `save_project` also writes every present paint tile as a
-//! byte-exact PNG under `<project>/paint/tile-<N>.png`, and `open_project`
-//! uploads them back through the fill layer's `WriteRegion` queue path
-//! (`PaintState::publish_fill`). Judgment calls (v1 boundaries):
+//! review): `save_project` also writes every materialized plane (Base AND
+//! every live layer-owned one — per-layer-pool stage 2,
+//! docs/specs/per-layer-pool-design.md §6) as a byte-exact PNG under
+//! `<project>/paint/` (Base keeps the `<project>/paint/tile-<N>.png` and
+//! `<channel>/` layout; layer planes nest under
+//! `paint/layers/<id>/<channel>/`), and `open_project` publishes them back
+//! through the per-plane publish path (`PaintState::publish_plane`).
+//! Judgment calls (v1 boundaries):
 //!
 //! * Sidecar files, not `project.json`: the project schema is owned by
 //!   `umber-core` (another kill's surface) and this crate has no serde
@@ -48,8 +52,13 @@
 //!   promise that (a crash between two renames is torn); the manifest
 //!   rename can. Judgment calls: a staging I/O failure aborts the whole
 //!   save (old paint intact) where the pre-commit code skipped the one
-//!   tile; a tile whose GPU readback fails re-stages its previous file so
-//!   the commit does not prune it; the store is the roll-forward source,
+//!   tile; a plane whose GPU readback fails re-stages its previous file so
+//!   the commit does not prune it — but ONLY for an in-place save (the
+//!   re-stage reads the target dir, and a save-as must never re-stage bytes
+//!   from a dir the plane was not committed to: there it is a loud
+//!   per-plane failure instead); a clean plane (same dir + same blake3 as
+//!   its recorded commit) re-stages its on-disk bytes with no readback at
+//!   all (§6.2); the store is the roll-forward source,
 //!   so its blob is fsynced through a mirrored shard path (pinned by a
 //!   test against the real store). Power-loss durability rests on
 //!   `sync_all` + the unix directory fsync; only process-crash states are
@@ -614,6 +623,17 @@ impl AppState {
         self.material_badges = std::collections::HashMap::new();
         self.material_status = None;
         self.material_sizes = None;
+        // §6.3 [M10]: fill states are session state keyed by layer id —
+        // without this reset document B's Fill 3 inherits document A's
+        // Fill 3 state (§8 T30).
+        self.fill_states = fill_layer::FillLayerStates::default();
+        // §6.3's session lifecycle: layer ids restart at 0 per document,
+        // so layer-owned pixel state must not outlive its document. (The
+        // File > New path rebuilds the paint session wholesale right
+        // after; this covers every other reset caller.)
+        if let Some(paint) = self.paint.as_mut() {
+            paint.clear_layer_planes();
+        }
     }
 }
 
@@ -1088,24 +1108,90 @@ fn paint_sidecar_name(channel: &str, tile: u16) -> String {
     }
 }
 
-/// Parses a manifest `name`/sidecar listing back to its `(channel,
-/// tile)`: a bare `tile-<N>.png` is the reserved baseColor channel (the
-/// v2 shape — see [`paint_sidecar_name`]'s docs); `<channel>/tile-<N>.png`
-/// names an explicit channel. `None` for anything else, including a
-/// channel component that is empty, `..`, or holds a backslash (texture-
-/// set channel names are arbitrary user/import-derived strings, and the
-/// manifest line is space-delimited — this is the trust boundary, not
-/// `is_paint_sidecar_name`'s whitelist alone).
-fn parse_paint_sidecar_name(name: &str) -> Option<(String, u16)> {
-    if let Some(tile) = parse_paint_tile_name(name) {
-        return Some((paint_state::BASE_COLOR_CHANNEL.to_string(), tile));
+/// Parses a manifest `name`/sidecar listing back to its `(owner,
+/// channel, tile)` (per-layer-pool design §6.1's parse rule — the trust
+/// boundary): a bare `tile-<N>.png` is the reserved baseColor channel's
+/// Base plane; `<channel>/tile-<N>.png` is that channel's Base plane;
+/// EXACTLY `layers/<u64>/<channel>/tile-<N>.png` is a layer-owned plane.
+/// `None` for anything else — including `..`, a backslash, an empty
+/// channel, a non-numeric id, and 3 components (`layers/7/tile-<N>.png`
+/// rejects). Depth disambiguates a texture-set channel literally named
+/// `layers`: `layers/tile-<N>.png` is that channel's Base plane. `None`
+/// also for a channel component that is empty, `..`, or holds a backslash
+/// (texture-set channel names are arbitrary user/import-derived strings,
+/// and the manifest line is space-delimited — this is the trust boundary,
+/// not `is_paint_sidecar_name`'s whitelist alone).
+fn parse_paint_sidecar_name(name: &str) -> Option<(paint_state::PlaneOwner, String, u16)> {
+    let base = paint_state::PlaneOwner::Base;
+    let base_color = paint_state::BASE_COLOR_CHANNEL.to_string();
+    let parts: Vec<&str> = name.split('/').collect();
+    match parts.as_slice() {
+        [tile] => {
+            let tile = parse_paint_tile_name(tile)?;
+            Some((base, base_color, tile))
+        }
+        [channel, tile] => {
+            if channel.is_empty() || *channel == ".." || channel.contains('\\') {
+                return None;
+            }
+            let tile = parse_paint_tile_name(tile)?;
+            Some((base, channel.to_string(), tile))
+        }
+        ["layers", id, channel, tile] => {
+            if channel.is_empty() || *channel == ".." || channel.contains('\\') {
+                return None;
+            }
+            let id: u64 = id.parse().ok()?;
+            let tile = parse_paint_tile_name(tile)?;
+            Some((
+                paint_state::PlaneOwner::Layer(id),
+                channel.to_string(),
+                tile,
+            ))
+        }
+        _ => None,
     }
-    let (channel, rest) = name.split_once('/')?;
-    if channel.is_empty() || channel == ".." || channel.contains('\\') {
-        return None;
+}
+
+/// The manifest `name`/sidecar-listing form of one plane: Base keeps the
+/// legacy flat/channel-qualified shape byte-for-byte
+/// ([`paint_sidecar_name`]); a layer-owned plane nests under
+/// `layers/<id>/<channel>/` (design §6.1). NOT a 6th manifest column (see
+/// [`paint_sidecar_name`'s docs] — `parse_paint_commit`'s exact 5-field
+/// destructure is unchanged).
+fn paint_plane_sidecar_name(owner: paint_state::PlaneOwner, channel: &str, tile: u16) -> String {
+    match owner {
+        paint_state::PlaneOwner::Base => paint_sidecar_name(channel, tile),
+        paint_state::PlaneOwner::Layer(id) => format!("layers/{id}/{channel}/tile-{tile}.png"),
     }
-    let tile = parse_paint_tile_name(rest)?;
-    Some((channel.to_string(), tile))
+}
+
+/// The sidecar file holding one plane's PNG: Base keeps the legacy paths
+/// byte-for-byte ([`paint_channel_tile_path`]); a layer-owned plane lives
+/// under `paint/layers/<id>/<channel>/`. Never under `layers/<set>/` (the
+/// layer-JSON tree — `prune_stale_layer_files` deletes every entry there
+/// that is not a live `<id>.json`, directories included).
+fn paint_plane_path(
+    project_dir: &Path,
+    owner: paint_state::PlaneOwner,
+    channel: &str,
+    tile: u16,
+) -> PathBuf {
+    match owner {
+        paint_state::PlaneOwner::Base => paint_channel_tile_path(project_dir, channel, tile),
+        paint_state::PlaneOwner::Layer(_) => {
+            paint_sidecar_dir(project_dir).join(paint_plane_sidecar_name(owner, channel, tile))
+        }
+    }
+}
+
+/// One-line tag for a plane owner in save/load logs (format strings can't
+/// hold field access, so the tag is built here, not at the log site).
+fn plane_owner_tag(owner: paint_state::PlaneOwner) -> String {
+    match owner {
+        paint_state::PlaneOwner::Base => "base".to_string(),
+        paint_state::PlaneOwner::Layer(id) => format!("layer {id}"),
+    }
 }
 
 /// The sidecar file holding the session's paint-target size
@@ -1507,7 +1593,8 @@ fn paint_manifest_path(project_dir: &Path) -> PathBuf {
 }
 
 /// Whether `name` is a file a paint commit may write under `paint/`: a
-/// flat or channel-qualified `tile-<N>.png` (see
+/// flat or channel-qualified `tile-<N>.png`, a layer plane
+/// `layers/<id>/<channel>/tile-<N>.png` (see
 /// [`parse_paint_sidecar_name`]), a layer-mask `mask-<layer>-tile-<N>.png`
 /// (see [`parse_paint_mask_name`]), or one of the two size files. Recovery
 /// refuses a manifest naming anything else (a hand-edited `../x` never
@@ -1720,32 +1807,105 @@ fn commit_paint_manifest(project_dir: &Path, entries: &[PaintCommitEntry]) -> st
     Ok(())
 }
 
-/// Every `tile-<N>.png`-shaped sidecar currently on disk under `dir`, as
-/// the SAME relative name the manifest uses: a flat `tile-<N>.png` at the
-/// top level, or `<channel>/tile-<N>.png` one level into a channel
-/// subdirectory — exactly as deep as the per-channel layout ever nests.
-/// Layer-mask `mask-<layer>-tile-<N>.png` files are listed too (flat, top
-/// level only): the prune step must drop a detached layer's mask just
-/// like a dropped tile, or re-saves resurrect dead masks.
-/// Used by the prune step so a dropped tile OR a dropped channel's tile
-/// is pruned regardless of which directory it lives in.
+/// Every paint artifact currently on disk under `dir`, as the SAME
+/// relative name the manifest uses: a flat `tile-<N>.png` at the top level
+/// (the reserved baseColor channel), `<channel>/tile-<N>.png` one level
+/// into a channel subdirectory, or `layers/<id>/<channel>/tile-<N>.png`
+/// two levels into the layer tree (design §6.1 — exactly as deep as the
+/// per-layer layout ever nests). Layer-mask `mask-<layer>-tile-<N>.png`
+/// files are listed too (flat, top level only): the prune step must drop a
+/// detached layer's mask just like a dropped tile, or re-saves resurrect
+/// dead masks.
+/// Used by the prune step so a dropped tile, a dropped channel's tile, or
+/// a dropped layer's planes are pruned regardless of which directory they
+/// live in. Anything the parse rule rejects (a 3-component `layers/…`
+/// path, foreign junk) is never listed and never pruned — the prune only
+/// removes what the manifest's trust boundary admits.
 fn list_paint_tile_names(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        if path.is_dir() {
-            for inner in std::fs::read_dir(&path)?.flatten() {
-                let inner_name = inner.file_name().to_string_lossy().into_owned();
-                if parse_paint_tile_name(&inner_name).is_some() {
-                    names.push(format!("{name}/{inner_name}"));
+        if !path.is_dir() {
+            if parse_paint_tile_name(&name).is_some() || parse_paint_mask_name(&name).is_some() {
+                names.push(name);
+            }
+            continue;
+        }
+        if name == "layers" {
+            for id_entry in std::fs::read_dir(&path)?.flatten() {
+                let id_name = id_entry.file_name().to_string_lossy().into_owned();
+                let id_path = id_entry.path();
+                if !id_path.is_dir() {
+                    continue;
+                }
+                for channel_entry in std::fs::read_dir(&id_path)?.flatten() {
+                    let channel_name = channel_entry.file_name().to_string_lossy().into_owned();
+                    let channel_path = channel_entry.path();
+                    if !channel_path.is_dir() {
+                        continue;
+                    }
+                    for inner in std::fs::read_dir(&channel_path)?.flatten() {
+                        let inner_name = inner.file_name().to_string_lossy().into_owned();
+                        if parse_paint_tile_name(&inner_name).is_some() {
+                            names.push(format!("layers/{id_name}/{channel_name}/{inner_name}"));
+                        }
+                    }
                 }
             }
-        } else if parse_paint_tile_name(&name).is_some() || parse_paint_mask_name(&name).is_some() {
-            names.push(name);
+            continue;
+        }
+        for inner in std::fs::read_dir(&path)?.flatten() {
+            let inner_name = inner.file_name().to_string_lossy().into_owned();
+            if parse_paint_tile_name(&inner_name).is_some() {
+                names.push(format!("{name}/{inner_name}"));
+            }
         }
     }
     Ok(names)
+}
+
+/// Removes the now-empty directories under `paint/layers/` bottom-up
+/// (`<channel>/`, then `<id>/` — design §6.1 [m10]), so a deleted layer
+/// leaves no empty tree behind. Only directories under `paint/layers/`
+/// are candidates; a directory that still holds any file (including
+/// parse-rejected junk the prune never lists) survives.
+fn prune_empty_layer_dirs(project_dir: &Path) {
+    let layers = paint_sidecar_dir(project_dir).join("layers");
+    let Ok(ids) = std::fs::read_dir(&layers) else {
+        return;
+    };
+    for id in ids.flatten() {
+        let id_path = id.path();
+        if !id_path.is_dir() {
+            continue;
+        }
+        if let Ok(channels) = std::fs::read_dir(&id_path) {
+            for channel in channels.flatten() {
+                let channel_path = channel.path();
+                let empty = channel_path.is_dir()
+                    && std::fs::read_dir(&channel_path)
+                        .is_ok_and(|mut entries| entries.next().is_none());
+                if empty {
+                    if let Err(e) = std::fs::remove_dir(&channel_path) {
+                        log::warn!(
+                            "paint save: empty layer dir {} not removed: {e}",
+                            channel_path.display()
+                        );
+                    }
+                }
+            }
+        }
+        let empty = std::fs::read_dir(&id_path).is_ok_and(|mut entries| entries.next().is_none());
+        if empty {
+            if let Err(e) = std::fs::remove_dir(&id_path) {
+                log::warn!(
+                    "paint save: empty layer dir {} not removed: {e}",
+                    id_path.display()
+                );
+            }
+        }
+    }
 }
 
 /// Applies a pending commit (idempotent — safe to re-run after a crash at
@@ -1813,6 +1973,9 @@ fn apply_paint_commit(project_dir: &Path, max_steps: Option<usize>) -> std::io::
             std::fs::remove_file(dir.join(&name))?;
         }
     }
+    // A deleted layer's planes prune as files above; their now-empty
+    // directories go here (bottom-up, `paint/layers/` only).
+    prune_empty_layer_dirs(project_dir);
     sync_dir(&dir)?;
     step()?;
     std::fs::rename(&pending, paint_manifest_path(project_dir))?;
@@ -1837,10 +2000,9 @@ fn recover_paint_sidecar(project_dir: &Path) {
     sweep_paint_temps(&paint_sidecar_dir(project_dir));
 }
 
-/// Removes every staged temp under `dir`, recursing one level into
-/// channel subdirectories (the per-channel layout's only nesting depth)
-/// so a crash mid-save on a non-baseColor channel leaves no orphan
-/// `paint/<channel>/*.tmp.<pid>` behind either.
+/// Removes every staged temp under `dir`, recursing fully (channel
+/// subdirectories AND the `layers/` tree) so a crash mid-save on any plane
+/// leaves no orphan `<name>.tmp.<pid>` behind either.
 fn sweep_paint_temps(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -1860,22 +2022,92 @@ fn sweep_paint_temps(dir: &Path) {
     }
 }
 
-/// Writes every present paint tile — and every materialized channel on
-/// it (docs/specs/per-channel-tile-pool-design.md) — into the project
-/// sidecar as a Linear-transfer PNG (byte-exact — the export dialog's
-/// `Srgb` would move the bytes through the IEC curve), crash-safely:
-/// every artifact is staged (temp + `AssetStore` blob) before ONE
-/// manifest rename commits the save (see the module docs). Reads
-/// through `PaintState::read_tile`/`read_channel_tile`, the REAL
-/// readback path: it drains the target's queue first so earlier strokes'
-/// dabs are in the bytes, then does the blocking
-/// `PaintTarget::read_back_rgba8` — the same call the stroke-undo
-/// capture uses. Prunes sidecar files for tiles/channels the session no
-/// longer holds, then returns how many paint artifacts were stored
-/// (0 when the save never committed — the previous paint stays intact).
-fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
-    match commit_paint_tiles(paint, project_dir) {
-        Ok(saved) => saved,
+/// What `commit_paint_tiles` staged: `staged` counts manifest-listed
+/// plane PNGs (a clean-skipped plane re-stages its on-disk bytes, so it
+/// counts); `read_back` counts GPU readbacks — the §8 T20 observable (an
+/// in-place save right after open reads back nothing).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PaintSaveReport {
+    /// Plane PNGs listed in the committed manifest.
+    staged: usize,
+    /// Planes read back from the GPU (`read_plane` calls).
+    read_back: usize,
+}
+
+/// §6.2 condition 1: the save's target project dir equals the plane's
+/// committed dir. Compared after `std::fs::canonicalize`; a canonicalize
+/// failure on either side counts as different.
+fn same_project_dir(target: &Path, committed: &Path) -> bool {
+    match (
+        std::fs::canonicalize(target),
+        std::fs::canonicalize(committed),
+    ) {
+        (Ok(current), Ok(recorded)) => current == recorded,
+        _ => false,
+    }
+}
+
+/// §6.3's minimal bump [M2]: the save writes version 2 iff it will stage
+/// at least one plane whose owner is a `Layer(id)` LIVE in the stack.
+/// Orphans and tombstones don't count (`live` is the stack's ids), and a
+/// layer-less or headless session stays version 1 (readable by old
+/// builds). Computable from the session before either file is written. A
+/// loaded model is never re-stamped: the save recomputes the version every
+/// time, so re-saving a version-2 project after deleting its only planed
+/// layer writes 1 again (§8 T24).
+fn paint_save_version(
+    paint: &paint_state::PaintState,
+    live: &std::collections::HashSet<u64>,
+) -> u32 {
+    let has_live_layer_plane = paint.planes_present().iter().any(
+        |(owner, _, _)| matches!(owner, paint_state::PlaneOwner::Layer(id) if live.contains(id)),
+    );
+    if has_live_layer_plane {
+        umber_core::project::LAYER_PLANES_PROJECT_VERSION
+    } else {
+        umber_core::project::CURRENT_PROJECT_VERSION
+    }
+}
+
+/// Writes every materialized plane — Base AND every live layer-owned one —
+/// into the project sidecar as a Linear-transfer PNG (byte-exact — the
+/// export dialog's `Srgb` would move the bytes through the IEC curve),
+/// crash-safely: every artifact is staged (temp + `AssetStore` blob)
+/// before ONE manifest rename commits the save (see the module docs).
+/// Reads through `PaintState::read_plane` for EVERY owner, Base included
+/// (design §1.1 [B3]): the save loop is a PLANE reader, never a composite
+/// reader — writing the cache into `paint/tile-<N>.png` would double-count
+/// every layer on the next reopen (§8 T21).
+///
+/// A clean plane may skip its readback ONLY under §6.2's two-part test
+/// [B1]: the target dir equals the plane's committed dir (canonicalized)
+/// AND the target dir's sidecar file for that plane hashes (blake3) to the
+/// recorded commit hash. The check re-reads and re-hashes the file — a
+/// file read plus blake3, far cheaper than a GPU readback plus PNG encode.
+/// Every other case reads back and encodes: `committed == None`, a
+/// different dir (save-as), a missing file, a hash mismatch.
+///
+/// A failed readback keeps the artifact's previous sidecar (if any) ONLY
+/// for an in-place save: re-staging reads the TARGET dir's file, and a
+/// save-as must never re-stage bytes from a dir the plane was not committed
+/// to (that was r1's silent-drop shape — every clean plane lost from a
+/// save-as, Base included). In a save-as a failed readback is a loud
+/// per-plane failure (warn log), never a silent omission.
+///
+/// `live` is the document stack's layer ids: orphan planes (an id no
+/// longer in the stack) are never staged — the next save's manifest prunes
+/// them (§6.4) — and never count toward the version decision (§6.3).
+/// Prunes sidecar files for planes the session no longer holds, then
+/// returns what was staged and what was read back (a zero-`staged` commit
+/// still commits the size files; an `Err` means the commit point was never
+/// reached — the previous paint stays intact).
+fn save_paint_tiles(
+    paint: &mut paint_state::PaintState,
+    project_dir: &Path,
+    live: &std::collections::HashSet<u64>,
+) -> usize {
+    match commit_paint_tiles(paint, project_dir, live) {
+        Ok(report) => report.staged,
         Err(e) => {
             log::warn!("paint save: not committed, the previous paint stays intact: {e:#}");
             0
@@ -1888,7 +2120,8 @@ fn save_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> 
 fn commit_paint_tiles(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
-) -> std::io::Result<usize> {
+    live: &std::collections::HashSet<u64>,
+) -> std::io::Result<PaintSaveReport> {
     std::fs::create_dir_all(paint_sidecar_dir(project_dir))?;
     // An earlier crash's pending commit lands (or its orphans go) before
     // this save stages anything.
@@ -1939,40 +2172,101 @@ fn commit_paint_tiles(
         "target_sizes.txt",
         format_paint_set_sizes(&mapping).as_bytes(),
     )?);
-    let mut saved = 0usize;
-    for tile in &tiles {
-        let mut channels = vec![paint_state::BASE_COLOR_CHANNEL.to_string()];
-        channels.extend(paint.channels_present(*tile));
-        for channel in &channels {
-            let name = paint_sidecar_name(channel, *tile);
-            let image = if channel == paint_state::BASE_COLOR_CHANNEL {
-                paint.read_tile(*tile)
-            } else {
-                paint.read_channel_tile(*tile, channel)
-            };
-            let Some(image) = image else {
-                // A failed readback keeps the artifact's previous sidecar
-                // (if any): it is re-staged as-is so the commit does not
-                // prune it.
+    let mut report = PaintSaveReport::default();
+    // The plane census (§1.1): every materialized `(owner, tile, channel)`
+    // stages its own file. Collected up front (owned) so no session borrow
+    // is held across the `&mut` readback/commit calls below.
+    for (owner, tile, channel) in paint.planes_present() {
+        if let paint_state::PlaneOwner::Layer(id) = owner {
+            if !live.contains(&id) {
+                continue;
+            }
+        }
+        let name = paint_plane_sidecar_name(owner, &channel, tile);
+        let tag = plane_owner_tag(owner);
+        let committed = paint.plane_committed(owner, tile, &channel);
+        // §6.2's clean-skip [B1]: same dir AND same bytes on disk.
+        if let Some((committed_dir, committed_hash)) = committed.as_ref() {
+            if same_project_dir(project_dir, committed_dir) {
+                let path = paint_sidecar_dir(project_dir).join(&name);
+                match std::fs::read(&path) {
+                    Ok(bytes) if blake3::hash(&bytes) == *committed_hash => {
+                        let entry = stage_paint_bytes(project_dir, &store, &name, &bytes)?;
+                        paint.mark_plane_committed(
+                            owner,
+                            tile,
+                            &channel,
+                            project_dir.to_path_buf(),
+                            *committed_hash,
+                        );
+                        entries.push(entry);
+                        report.staged += 1;
+                        continue;
+                    }
+                    Ok(_) => {
+                        log::warn!(
+                            "paint save: {tag}/{channel} tile {tile} changed on disk since commit; reading back"
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "paint save: {tag}/{channel} tile {tile} sidecar unreadable ({e:#}); reading back"
+                        );
+                    }
+                }
+            }
+        }
+        let Some(image) = paint.read_plane(owner, tile, &channel) else {
+            // A failed readback keeps the artifact's previous sidecar
+            // (if any): it is re-staged as-is so the commit does not
+            // prune it — but ONLY for an in-place save (condition 1
+            // above). In a save-as there is no committed source to keep
+            // from, so this is a loud per-plane failure instead.
+            log::warn!("paint save: {tag}/{channel} tile {tile} readback failed");
+            let in_place = committed
+                .as_ref()
+                .is_some_and(|(committed_dir, _)| same_project_dir(project_dir, committed_dir));
+            if !in_place {
                 log::warn!(
-                    "paint save: tile {tile}/{channel} readback failed; keeping its previous file"
+                    "paint save: {tag}/{channel} tile {tile} has no in-place sidecar to keep; skipping"
                 );
-                let path = paint_channel_tile_path(project_dir, channel, *tile);
-                if let Ok(bytes) = std::fs::read(&path) {
+                continue;
+            }
+            let path = paint_plane_path(project_dir, owner, &channel, tile);
+            match std::fs::read(&path) {
+                Ok(bytes) => {
                     entries.push(stage_paint_bytes(project_dir, &store, &name, &bytes)?);
                 }
-                continue;
-            };
-            entries.push(stage_paint_png(
-                project_dir,
-                &store,
-                &name,
-                image.width,
-                image.height,
-                &image.data,
-            )?);
-            saved += 1;
-        }
+                Err(e) => {
+                    log::warn!(
+                        "paint save: {tag}/{channel} tile {tile} previous file unreadable ({e:#}); skipping"
+                    );
+                }
+            }
+            continue;
+        };
+        let entry = stage_paint_png(
+            project_dir,
+            &store,
+            &name,
+            image.width,
+            image.height,
+            &image.data,
+        )?;
+        // The commit hash is over the STAGED png bytes (not the readback:
+        // the clean-skip compares against the file). Re-read the staged
+        // temp — one extra file read per read-back plane, no GPU cost.
+        let staged_bytes = std::fs::read(paint_sidecar_dir(project_dir).join(&entry.temp))?;
+        paint.mark_plane_committed(
+            owner,
+            tile,
+            &channel,
+            project_dir.to_path_buf(),
+            blake3::hash(&staged_bytes),
+        );
+        entries.push(entry);
+        report.staged += 1;
+        report.read_back += 1;
     }
     // Layer masks ride as their own flat sub-namespace (`mask-<layer>-
     // tile-<N>.png` — see `paint_mask_name`): one Linear-transfer PNG per
@@ -2006,24 +2300,38 @@ fn commit_paint_tiles(
             height,
             &mask_to_rgba(plane),
         )?);
-        saved += 1;
+        report.staged += 1;
     }
     commit_paint_manifest(project_dir, &entries)?;
     // Committed: from here an interruption rolls forward on the next open.
     if let Err(e) = apply_paint_commit(project_dir, None) {
         log::warn!("paint save: committed, apply stopped early ({e:#}); next open finishes it");
     }
-    Ok(saved)
+    Ok(report)
 }
 
-/// Restores the paint sidecar into `paint` through the EXISTING
-/// `WriteRegion` queue path (`PaintState::publish_fill` — the same call
-/// the fill-layer refresh uses, one full-tile write per tile, in FIFO
-/// order). Decodes each `tile-<N>.png`, flips it back out of the PNG
-/// reader's row order, applies the stored sizes first (each resize drops
-/// the old contents and the session-scoped stroke-undo history clears
-/// with the first one, so no stale rect can undo against the restored
-/// pixels), then drains so the pixels have landed before returning.
+/// Restores the paint sidecar into `paint` through the per-plane publish
+/// path (`PaintState::publish_plane` — one full-plane write per plane, in
+/// the sidecar's sorted order). Decodes each sidecar PNG, flips it back out
+/// of the PNG reader's row order, applies the stored sizes first (each
+/// resize drops the old contents and the session-scoped stroke-undo history
+/// clears with the first one, so no stale rect can undo against the
+/// restored pixels), then drains so the pixels have landed before
+/// returning.
+///
+/// Dual read, keyed on the sidecar's CONTENT (§6.3): legacy flat and
+/// channel-qualified paths always load into Base; `layers/…` paths load
+/// into layer planes. A v1 project therefore lands in Base verbatim, and
+/// the first frame is byte-identical (a Base-only `(tile, channel)` reads
+/// Base directly). Every loaded plane starts committed to the opened dir
+/// (`committed = (opened_dir, blake3(png_bytes))`), so an in-place save
+/// right after open re-stages without a readback (§6.2).
+///
+/// Orphan planes (a `Layer(id)` no longer in the stack — `live` is the
+/// loaded stack's ids) are ignored with a log: they never enter the
+/// session, never count toward the version decision, and the next save's
+/// manifest prunes them (§6.4). A budget refusal on any plane is a loud
+/// skip (warn log — §1.3's load rule), never a silent hole.
 ///
 /// Per-set sizes come from `target_sizes.txt` when present (authoritative:
 /// each tile must match ITS set's size); without it the v1 shape holds —
@@ -2034,8 +2342,12 @@ fn commit_paint_tiles(
 /// never a silent resample). A project with no sidecar tiles clears the
 /// session to transparent instead of keeping the previous document's
 /// pixels. Returns how many tiles were restored and what was refused.
-fn load_paint_tiles(paint: &mut paint_state::PaintState, project_dir: &Path) -> usize {
-    load_paint_tiles_reported(paint, project_dir).restored
+fn load_paint_tiles(
+    paint: &mut paint_state::PaintState,
+    project_dir: &Path,
+    live: &std::collections::HashSet<u64>,
+) -> usize {
+    load_paint_tiles_reported(paint, project_dir, live).restored
 }
 
 /// Decodes one sidecar PNG, flipped back out of the reader's row order.
@@ -2051,46 +2363,102 @@ fn decode_paint_png(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
         }
     }
 }
+/// One loaded plane sidecar's decoded payload, keyed by its plane
+/// identity (owner, channel, tile) — the open-path plane census.
+type LoadedPlaneSidecars =
+    std::collections::BTreeMap<(paint_state::PlaneOwner, String, u16), (u32, u32, Vec<u8>)>;
 
-/// Every `(channel, tile)` artifact currently on disk under `dir`: flat
-/// `tile-<N>.png` files first (the reserved baseColor channel — the v2
-/// shape), then one level into every subdirectory (an explicit channel
-/// name). A channel subdirectory inserts AFTER the flat pass, so a
-/// (forward-compatible, never written by this crate today) literal
-/// `paint/baseColor/` wins over a same-tile flat collision.
-fn collect_paint_tiles(
-    dir: &Path,
-) -> std::collections::BTreeMap<(String, u16), (u32, u32, Vec<u8>)> {
+/// Every `(owner, channel, tile)` artifact currently on disk under `dir`
+/// (design §6.1's dual read, keyed on the sidecar's CONTENT, not on
+/// `project.json`): flat `tile-<N>.png` files first (the reserved
+/// baseColor channel's Base plane), then one level into every channel
+/// subdirectory EXCEPT `layers/` (an explicit channel's Base plane), then
+/// the `layers/<id>/<channel>/` tree (layer-owned planes). The flat pass
+/// runs first so a (forward-compatible, never written by this crate today)
+/// literal `paint/baseColor/` wins over a same-tile flat collision. Every
+/// relative name goes through [`parse_paint_sidecar_name`] — the single
+/// parse rule for both passes.
+/// trust boundary — so a rejected shape never reaches the session.
+fn collect_paint_tiles(dir: &Path) -> LoadedPlaneSidecars {
     let mut found = std::collections::BTreeMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return found;
     };
     let mut channel_dirs = Vec::new();
+    let mut layers_dir = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
         if path.is_dir() {
-            channel_dirs.push((name, path));
+            if name == "layers" {
+                layers_dir = Some(path);
+            } else {
+                channel_dirs.push((name, path));
+            }
             continue;
         }
         let Some(tile) = parse_paint_tile_name(&name) else {
             continue;
         };
         if let Some(decoded) = decode_paint_png(&path) {
-            found.insert((paint_state::BASE_COLOR_CHANNEL.to_string(), tile), decoded);
+            found.insert(
+                (
+                    paint_state::PlaneOwner::Base,
+                    paint_state::BASE_COLOR_CHANNEL.to_string(),
+                    tile,
+                ),
+                decoded,
+            );
         }
     }
-    for (channel, path) in channel_dirs {
+    for (dir_name, path) in channel_dirs {
         let Ok(inner) = std::fs::read_dir(&path) else {
             continue;
         };
         for inner_entry in inner.flatten() {
             let inner_name = inner_entry.file_name().to_string_lossy().into_owned();
-            let Some(tile) = parse_paint_tile_name(&inner_name) else {
+            let key = parse_paint_sidecar_name(&format!("{dir_name}/{inner_name}"));
+            let Some((owner, channel, tile)) = key else {
                 continue;
             };
             if let Some(decoded) = decode_paint_png(&inner_entry.path()) {
-                found.insert((channel.clone(), tile), decoded);
+                found.insert((owner, channel, tile), decoded);
+            }
+        }
+    }
+    let Some(layers) = layers_dir else {
+        return found;
+    };
+    let Ok(ids) = std::fs::read_dir(&layers) else {
+        return found;
+    };
+    for id_entry in ids.flatten() {
+        let id_name = id_entry.file_name().to_string_lossy().into_owned();
+        let id_path = id_entry.path();
+        if !id_path.is_dir() {
+            continue;
+        }
+        let Ok(channels) = std::fs::read_dir(&id_path) else {
+            continue;
+        };
+        for channel_entry in channels.flatten() {
+            let channel_name = channel_entry.file_name().to_string_lossy().into_owned();
+            let channel_path = channel_entry.path();
+            if !channel_path.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&channel_path) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let file_name = file.file_name().to_string_lossy().into_owned();
+                let rel = format!("layers/{id_name}/{channel_name}/{file_name}");
+                let Some((owner, channel, tile)) = parse_paint_sidecar_name(&rel) else {
+                    continue;
+                };
+                if let Some(decoded) = decode_paint_png(&file.path()) {
+                    found.insert((owner, channel, tile), decoded);
+                }
             }
         }
     }
@@ -2125,6 +2493,7 @@ fn collect_paint_masks(dir: &Path) -> std::collections::BTreeMap<(u64, u16), (u3
 fn load_paint_tiles_reported(
     paint: &mut paint_state::PaintState,
     project_dir: &Path,
+    live: &std::collections::HashSet<u64>,
 ) -> PaintLoadReport {
     // An interrupted save resolves first (rolled forward when it had
     // committed, its orphans swept when not), so the sidecar read below
@@ -2249,11 +2618,11 @@ fn load_paint_tiles_reported(
             // contents and clears the session-scoped stroke-undo history
             // with them). No mapping means no `target_sizes.txt`, which
             // this crate always writes alongside any channel data — so
-            // `found` here holds ONLY baseColor entries, and `found`'s
-            // `(channel, tile)` key order reduces to tile order (every
-            // key shares the same channel string).
+            // `found` here holds ONLY Base baseColor entries, and `found`'s
+            // `(owner, channel, tile)` key order reduces to tile order
+            // (every key shares owner and channel).
             paint.clear_tile_assignments();
-            let mut tile_ids: Vec<u16> = found.keys().map(|(_, tile)| *tile).collect();
+            let mut tile_ids: Vec<u16> = found.keys().map(|(_, _, tile)| *tile).collect();
             tile_ids.dedup();
             for tile in &tile_ids {
                 paint.assign_tile_to_set(*tile, &active);
@@ -2271,7 +2640,18 @@ fn load_paint_tiles_reported(
         return PaintLoadReport::default();
     }
     let mut report = PaintLoadReport::default();
-    for ((channel, tile), (width, height, bytes)) in found {
+    for ((owner, channel, tile), (width, height, bytes)) in found {
+        // Orphans (a saved plane whose layer is not in the loaded stack)
+        // never enter the session (§6.4): ignored with a log, pruned by
+        // the next save's manifest.
+        if let paint_state::PlaneOwner::Layer(id) = owner {
+            if !live.contains(&id) {
+                log::warn!(
+                    "paint open: layer {id}/{channel} tile {tile} has no live layer; ignoring"
+                );
+                continue;
+            }
+        }
         // Tiles the mapping never assigned resolve to the active set;
         // recording the resolution keeps the next save's mapping exact.
         let set = paint.set_of_tile(tile).to_string();
@@ -2281,8 +2661,9 @@ fn load_paint_tiles_reported(
         let expected = paint.tile_channel_size(tile, &channel);
         if (width, height) != expected {
             let (ew, eh) = expected;
+            let tag = plane_owner_tag(owner);
             log::warn!(
-                "paint open: tile {tile}/{channel} is {width}x{height}, want {ew}x{eh}; skipping"
+                "paint open: {tag}/{channel} tile {tile} is {width}x{height}, want {ew}x{eh}; skipping"
             );
             report.skipped.push(PaintTileSkip {
                 tile,
@@ -2292,15 +2673,39 @@ fn load_paint_tiles_reported(
             });
             continue;
         }
-        let landed = if channel == paint_state::BASE_COLOR_CHANNEL {
-            paint.publish_fill(tile, width, height, bytes)
-        } else {
-            paint.publish_fill_channel(tile, &channel, width, height, bytes)
-        };
-        if landed {
-            report.restored += 1;
-        } else {
-            log::warn!("paint open: tile {tile}/{channel} upload failed; skipping");
+        // The commit hash is over the sidecar PNG's bytes: re-read the
+        // file (it decoded a moment ago, so this only fails under a
+        // concurrent delete — which then skips the commit mark loudly).
+        let sidecar =
+            paint_sidecar_dir(project_dir).join(paint_plane_sidecar_name(owner, &channel, tile));
+        let png_bytes = std::fs::read(&sidecar);
+        match paint.publish_plane(owner, tile, &channel, width, height, bytes) {
+            Ok(()) => {
+                report.restored += 1;
+                match png_bytes {
+                    Ok(png) => {
+                        paint.mark_plane_committed(
+                            owner,
+                            tile,
+                            &channel,
+                            project_dir.to_path_buf(),
+                            blake3::hash(&png),
+                        );
+                    }
+                    Err(e) => {
+                        let tag = plane_owner_tag(owner);
+                        log::warn!(
+                            "paint open: {tag}/{channel} tile {tile} sidecar vanished ({e:#}); commit mark skipped"
+                        );
+                    }
+                }
+            }
+            Err(refusal) => {
+                let tag = plane_owner_tag(owner);
+                log::warn!(
+                    "paint open: {tag}/{channel} tile {tile} publish refused ({refusal:?}); skipping"
+                );
+            }
         }
     }
     // Layer masks restore through the size-checked publish path (the
@@ -2410,13 +2815,26 @@ impl UmberApp {
         if let Some(paint) = self.state.paint.as_mut() {
             paint.set_active_set(&set_name);
         }
+        // The stack's live layer ids: the version decision's (§6.3) and
+        // the sidecar save's (§6.4) shared orphan filter.
+        let live: std::collections::HashSet<u64> = self
+            .state
+            .doc
+            .stack
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .collect();
+        // §6.3's minimal bump [M2]: version 2 iff this save stages a live
+        // layer plane, else the default 1 (`ProjectModel::new`'s stamp —
+        // headless/CLI sessions always write 1, §8 T24).
         let texture_set = self.state.mesh_import.session_set.clone();
         let graphs_mtlx = if self.state.graph.graph().nodes.is_empty() {
             Vec::new()
         } else {
             vec![self.state.graph.to_mtlx()]
         };
-        let model = umber_core::project::ProjectModel::new(
+        let mut model = umber_core::project::ProjectModel::new(
             vec![texture_set],
             vec![umber_core::project::TextureSetLayers {
                 texture_set: set_name.clone(),
@@ -2436,6 +2854,9 @@ impl UmberApp {
         // The journal high-water mark: every entry recorded so far is in
         // this saved state, so none may replay on top of it.
         .with_journal_seq(self.state.doc.journal_seq());
+        if let Some(paint) = self.state.paint.as_ref() {
+            model.version = paint_save_version(paint, &live);
+        }
         match umber_core::project::save_to_dir(&model, &dir) {
             Ok(()) => {
                 log::info!("project saved: {}", dir.display());
@@ -2448,17 +2869,11 @@ impl UmberApp {
                     // Layer-mask planes for deleted layers prune here, not
                     // in the sidecar walk: only live layers' masks commit
                     // (a re-save never resurrects a detached mask — the
-                    // apply step prunes whatever the manifest omits).
-                    let live: std::collections::HashSet<u64> = self
-                        .state
-                        .doc
-                        .stack
-                        .layers
-                        .iter()
-                        .map(|layer| layer.id)
-                        .collect();
+                    // apply step prunes whatever the manifest omits). The
+                    // same `live` set filters orphan pixel planes in the
+                    // sidecar walk itself (§6.4).
                     paint.prune_layer_masks(&live);
-                    let tiles = save_paint_tiles(paint, &dir);
+                    let tiles = save_paint_tiles(paint, &dir, &live);
                     log::info!("paint saved: {tiles} tile(s)");
                 }
                 // The import Apply path (and future drops) now have a
@@ -2544,21 +2959,25 @@ impl UmberApp {
                 self.state.postfx = postfx_panel::chain_from_carry(&model.settings.postfx);
                 // The painted pixels (or a clear to transparent when the
                 // project predates the sidecar — never the previous
-                // document's paint).
+                // document's paint). The session lifecycle (§6.3 [M10])
+                // clears every layer-owned plane BEFORE the sidecar load:
+                // layer ids restart at 0 in every LayerStack, so pixel
+                // state keyed by id must not outlive its document.
+                let live: std::collections::HashSet<u64> = self
+                    .state
+                    .doc
+                    .stack
+                    .layers
+                    .iter()
+                    .map(|layer| layer.id)
+                    .collect();
                 if let Some(paint) = self.state.paint.as_mut() {
-                    let tiles = load_paint_tiles(paint, &dir);
+                    paint.clear_layer_planes();
+                    let tiles = load_paint_tiles(paint, &dir, &live);
                     log::info!("paint restored: {tiles} tile(s)");
                     // Masks restore session-side keyed by layer id: drop
                     // whatever the loaded stack no longer holds, so a
                     // previous document's masks never gate the new one.
-                    let live: std::collections::HashSet<u64> = self
-                        .state
-                        .doc
-                        .stack
-                        .layers
-                        .iter()
-                        .map(|layer| layer.id)
-                        .collect();
                     paint.prune_layer_masks(&live);
                 }
                 if let Some(doc) = model.graphs_mtlx.first() {
@@ -3266,6 +3685,30 @@ mod new_project_tests {
         assert_eq!(state.postfx, umber_gpu::postfx::PostChain::new());
         assert!(state.project_dir.is_none(), "a new project is unsaved");
     }
+
+    /// Stage-2 §8 T30 (`reset_for_new` half): document B's Fill 3 must not
+    /// inherit document A's Fill 3 state — the fill states reset with the
+    /// document. (The paint half — `clear_layer_planes` — is pinned beside
+    /// the sidecar tests, where a GPU session exists.)
+    #[test]
+    fn reset_for_new_clears_fill_states() {
+        let mut state = AppState::default();
+        // Dirty the fill states away from default first, so the asserts
+        // below cannot pass vacuously.
+        state.fill_states.dirty.push(3);
+        assert!(!state.fill_states.dirty.is_empty());
+
+        state.reset_for_new();
+
+        assert!(
+            state.fill_states.map.is_empty(),
+            "no fill state survives a new document"
+        );
+        assert!(
+            state.fill_states.dirty.is_empty(),
+            "no fill dirty queued survives a new document"
+        );
+    }
 }
 
 /// Paint-sidecar persistence tests (CORE-LOOP CRITICAL 4): the filename
@@ -3307,6 +3750,12 @@ mod paint_persistence_tests {
             "umber-app-paint-{label}-{}-{n}",
             std::process::id()
         ))
+    }
+
+    /// The stage-2 orphan filter for Base-only sessions: no live layers,
+    /// so only Base planes stage and load (orphan planes never stage).
+    fn no_live_layers() -> std::collections::HashSet<u64> {
+        std::collections::HashSet::new()
     }
 
     #[test]
@@ -3404,7 +3853,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir);
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
         assert_eq!(saved, 1, "a single-tile session stores exactly tile 1001");
         assert!(paint_tile_path(&dir, umber_mesh::FIRST_TILE).exists());
         // Store-routed: the commit applied (no pending manifest, no temps)
@@ -3427,7 +3876,7 @@ mod paint_persistence_tests {
 
         let mut fresh =
             paint_state::PaintState::new(device, queue).expect("fresh paint state builds");
-        let restored = load_paint_tiles(&mut fresh, &dir);
+        let restored = load_paint_tiles(&mut fresh, &dir, &no_live_layers());
         assert_eq!(restored, 1);
         let after = fresh
             .read_tile(umber_mesh::FIRST_TILE)
@@ -3625,7 +4074,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("perset-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir);
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
         assert_eq!(saved, 2, "both sets' tiles persist");
         assert!(paint_tile_path(&dir, 1001).exists());
         assert!(paint_tile_path(&dir, 1002).exists());
@@ -3646,7 +4095,7 @@ mod paint_persistence_tests {
         // sizes and assignments from the mapping, not from the live state.
         let mut fresh = paint_state::PaintState::new(device.clone(), queue.clone())
             .expect("fresh paint state builds");
-        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
         assert_eq!(
             report,
             PaintLoadReport {
@@ -3687,7 +4136,7 @@ mod paint_persistence_tests {
         .expect("clobber writes");
         let mut mismatch =
             paint_state::PaintState::new(device, queue).expect("mismatch session builds");
-        let report = load_paint_tiles_reported(&mut mismatch, &dir);
+        let report = load_paint_tiles_reported(&mut mismatch, &dir, &no_live_layers());
         assert_eq!(report.restored, 1, "only the matching tile restores");
         assert_eq!(
             report.skipped,
@@ -3737,7 +4186,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("per-channel-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir);
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
         assert_eq!(saved, 2, "baseColor + height persist as two artifacts");
         // baseColor keeps the v2 FLAT layout byte-for-byte
         // (paint/tile-1001.png — paint_tile_path, deliberately
@@ -3775,7 +4224,7 @@ mod paint_persistence_tests {
         // restore byte-identical AT the saved size.
         let mut fresh =
             paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
-        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
         assert_eq!(
             report,
             PaintLoadReport {
@@ -3826,7 +4275,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("per-channel-size-roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
-        let saved = save_paint_tiles(&mut paint, &dir);
+        let saved = save_paint_tiles(&mut paint, &dir, &no_live_layers());
         assert_eq!(saved, 2, "baseColor + height persist as two artifacts");
         // The mapping pins the override line exactly (sorted between the
         // size and the assignment — the codec test pins the grammar; this
@@ -3845,7 +4294,7 @@ mod paint_persistence_tests {
         // restores at 512 — both byte-identical.
         let mut fresh =
             paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
-        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
         assert_eq!(
             report,
             PaintLoadReport {
@@ -3894,7 +4343,7 @@ mod paint_persistence_tests {
         .expect("clobber writes");
         let mut mismatch =
             paint_state::PaintState::new(device, queue).expect("mismatch session builds");
-        let report = load_paint_tiles_reported(&mut mismatch, &dir);
+        let report = load_paint_tiles_reported(&mut mismatch, &dir, &no_live_layers());
         assert_eq!(report.restored, 1, "only the matching channel restores");
         assert_eq!(
             report.skipped,
@@ -3942,11 +4391,15 @@ mod paint_persistence_tests {
         // baseColor, one level nests, anything else rejects.
         assert_eq!(
             parse_paint_sidecar_name("tile-1001.png"),
-            Some((paint_state::BASE_COLOR_CHANNEL.to_string(), 1001))
+            Some((
+                paint_state::PlaneOwner::Base,
+                paint_state::BASE_COLOR_CHANNEL.to_string(),
+                1001
+            ))
         );
         assert_eq!(
             parse_paint_sidecar_name("height/tile-1001.png"),
-            Some(("height".to_string(), 1001))
+            Some((paint_state::PlaneOwner::Base, "height".to_string(), 1001))
         );
         // A literal paint/baseColor/ subdirectory parses as the
         // reserved channel too — and wins over a same-tile flat file
@@ -3955,7 +4408,11 @@ mod paint_persistence_tests {
         // the reserved name fails loudly instead of forking the pool.
         assert_eq!(
             parse_paint_sidecar_name("baseColor/tile-1001.png"),
-            Some((paint_state::BASE_COLOR_CHANNEL.to_string(), 1001))
+            Some((
+                paint_state::PlaneOwner::Base,
+                paint_state::BASE_COLOR_CHANNEL.to_string(),
+                1001
+            ))
         );
         for bad in [
             "",
@@ -3988,7 +4445,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("channel-migration");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &no_live_layers()), 1);
         assert!(
             !paint_sidecar_dir(&dir).join("height").exists(),
             "no channel was routed, so no channel directory is written"
@@ -4001,13 +4458,17 @@ mod paint_persistence_tests {
             }
             assert_eq!(
                 parse_paint_sidecar_name(&entry.name),
-                Some((paint_state::BASE_COLOR_CHANNEL.to_string(), 1001)),
+                Some((
+                    paint_state::PlaneOwner::Base,
+                    paint_state::BASE_COLOR_CHANNEL.to_string(),
+                    1001
+                )),
                 "every tile entry in a channel-less save is flat baseColor"
             );
         }
 
         let mut fresh = paint_state::PaintState::new(device, queue).expect("fresh session builds");
-        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
         assert_eq!(
             report,
             PaintLoadReport {
@@ -4058,7 +4519,7 @@ mod paint_persistence_tests {
 
         let dir = unique_temp_dir("legacy-migration");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &no_live_layers()), 1);
         std::fs::remove_file(paint_set_sizes_path(&dir)).expect("a v1 project has no mapping");
         assert_eq!(
             std::fs::read_to_string(paint_target_size_path(&dir)).unwrap(),
@@ -4069,7 +4530,7 @@ mod paint_persistence_tests {
         // dims, exactly the v1 rule), and the pixels restore byte-identical.
         let mut fresh =
             paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
-        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
         assert_eq!(
             report,
             PaintLoadReport {
@@ -4096,7 +4557,7 @@ mod paint_persistence_tests {
         // trip) while the pool clears.
         std::fs::remove_file(paint_tile_path(&dir, 1001)).unwrap();
         let mut empty = paint_state::PaintState::new(device, queue).expect("empty session builds");
-        let report = load_paint_tiles_reported(&mut empty, &dir);
+        let report = load_paint_tiles_reported(&mut empty, &dir, &no_live_layers());
         assert_eq!(
             report,
             PaintLoadReport {
@@ -4112,6 +4573,597 @@ mod paint_persistence_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stage-2 orphan filter for sessions WITH live layers.
+    fn live_layers(ids: &[u64]) -> std::collections::HashSet<u64> {
+        ids.iter().copied().collect()
+    }
+
+    /// Stage-2 §8 T15: the §6.1 parse rule, exactly as the doc derives it
+    /// (no GPU needed — pure codec).
+    #[test]
+    fn layer_plane_sidecar_names_follow_the_parse_rule() {
+        let base = paint_state::PlaneOwner::Base;
+        let base_color = paint_state::BASE_COLOR_CHANNEL.to_string();
+        assert_eq!(
+            parse_paint_sidecar_name("layers/7/baseColor/tile-1001.png"),
+            Some((
+                paint_state::PlaneOwner::Layer(7),
+                "baseColor".to_string(),
+                1001
+            ))
+        );
+        // Depth disambiguates a channel literally named `layers`.
+        assert_eq!(
+            parse_paint_sidecar_name("layers/tile-1001.png"),
+            Some((base, "layers".to_string(), 1001))
+        );
+        for bad in [
+            "layers/7/tile-1001.png",
+            "layers/x/baseColor/tile-1001.png",
+            "layers/7/../tile-1001.png",
+            "layers/7/a\\b/tile-1001.png",
+            "layers//baseColor/tile-1001.png",
+            "layers/7//tile-1001.png",
+            "layers/7/baseColor/tile-1001.png/",
+            "layers/7/baseColor/tile-abc.png",
+        ] {
+            assert_eq!(parse_paint_sidecar_name(bad), None, "{bad:?} must reject");
+        }
+        // The name builder round-trips through the parser exactly (not a
+        // contains-check — a renamed nesting would fail).
+        for (owner, channel, tile) in [
+            (base, base_color.clone(), 1001),
+            (base, "height".to_string(), 1002),
+            (
+                paint_state::PlaneOwner::Layer(7),
+                "baseColor".to_string(),
+                1001,
+            ),
+            (
+                paint_state::PlaneOwner::Layer(12),
+                "normal".to_string(),
+                1002,
+            ),
+        ] {
+            let name = paint_plane_sidecar_name(owner, &channel, tile);
+            assert_eq!(
+                parse_paint_sidecar_name(&name),
+                Some((owner, channel, tile)),
+                "{name:?} must parse back to its plane"
+            );
+        }
+        assert_eq!(
+            paint_plane_sidecar_name(paint_state::PlaneOwner::Layer(7), "baseColor", 1001),
+            "layers/7/baseColor/tile-1001.png"
+        );
+        assert_eq!(
+            paint_plane_path(
+                Path::new("/p"),
+                paint_state::PlaneOwner::Layer(7),
+                "baseColor",
+                1001
+            ),
+            PathBuf::from("/p/paint/layers/7/baseColor/tile-1001.png")
+        );
+        assert_eq!(
+            paint_plane_path(Path::new("/p"), base, "baseColor", 1001),
+            paint_tile_path(Path::new("/p"), 1001),
+            "Base keeps the legacy flat path byte-for-byte"
+        );
+        // The manifest gate admits layer names (else the commit would
+        // refuse its own entries) and still refuses the 3-component shape.
+        assert!(is_paint_sidecar_name("layers/7/baseColor/tile-1001.png"));
+        assert!(!is_paint_sidecar_name("layers/7/tile-1001.png"));
+    }
+
+    /// Stage-2 §8 T16: a v2 save → load gives byte-identical planes per
+    /// owner; orphan planes (no live layer) are ignored with a log.
+    #[test]
+    fn layer_planes_round_trip_per_owner_with_orphans_ignored() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        let before_base = pattern_bytes(512, 512, 3);
+        let before_layer = pattern_bytes(512, 512, 77);
+        // Can-fail guards against a vacuous pass (the seeds pin (0,0) to
+        // [3, 74, 145, 216] and [77, 148, 219, 39]).
+        assert_eq!(&before_base[..4], &[3u8, 74, 145, 216]);
+        assert_eq!(&before_layer[..4], &[77u8, 148, 219, 39]);
+        assert_ne!(before_base, before_layer);
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Base,
+                1001,
+                "baseColor",
+                512,
+                512,
+                before_base.clone()
+            )
+            .is_ok());
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Layer(7),
+                1001,
+                "baseColor",
+                512,
+                512,
+                before_layer.clone()
+            )
+            .is_ok());
+        paint.process_pending().expect("uploads land");
+
+        let dir = unique_temp_dir("plane-roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = live_layers(&[7]);
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &live),
+            2,
+            "Base + one layer plane persist as two artifacts"
+        );
+        // The manifest header STAYS v1 (the v2 header is stage 4's — §6.1).
+        let manifest = std::fs::read_to_string(paint_manifest_path(&dir)).unwrap();
+        assert_eq!(
+            manifest.lines().next(),
+            Some("# Umber paint commit v1"),
+            "stage 2 never writes the v2 header"
+        );
+        let entries = parse_paint_commit(&manifest).expect("the applied manifest parses");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(
+            names.contains(&"tile-1001.png"),
+            "Base keeps its flat v2 name, got {names:?}"
+        );
+        assert!(
+            names.contains(&"layers/7/baseColor/tile-1001.png"),
+            "the layer plane nests under layers/<id>/, got {names:?}"
+        );
+        assert!(paint_sidecar_dir(&dir)
+            .join("layers/7/baseColor/tile-1001.png")
+            .exists());
+        assert!(
+            !dir.join("layers").exists(),
+            "planes never land under layers/<set>/ (the layer-JSON tree)"
+        );
+
+        // Open with the layer live: both planes restore byte-identical.
+        let mut fresh =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &live);
+        assert_eq!(
+            report,
+            PaintLoadReport {
+                restored: 2,
+                masks_restored: 0,
+                skipped: Vec::new(),
+            }
+        );
+        let after_base = fresh
+            .read_plane(paint_state::PlaneOwner::Base, 1001, "baseColor")
+            .expect("Base restores");
+        assert_eq!(after_base.data, before_base);
+        let after_layer = fresh
+            .read_plane(paint_state::PlaneOwner::Layer(7), 1001, "baseColor")
+            .expect("the layer plane restores");
+        assert_eq!(after_layer.data, before_layer);
+
+        // Open with NO live layer: the layer plane is an orphan — ignored
+        // (never enters the session), Base still restores.
+        let mut orphaned =
+            paint_state::PaintState::new(device, queue).expect("orphan session builds");
+        let report = load_paint_tiles_reported(&mut orphaned, &dir, &no_live_layers());
+        assert_eq!(report.restored, 1, "only Base restores for an orphan plane");
+        assert!(
+            orphaned
+                .read_plane(paint_state::PlaneOwner::Layer(7), 1001, "baseColor")
+                .is_none(),
+            "the orphan plane never enters the session"
+        );
+        let orphan_base = orphaned
+            .read_plane(paint_state::PlaneOwner::Base, 1001, "baseColor")
+            .expect("Base restores");
+        assert_eq!(orphan_base.data, before_base);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stage-2 §8 T20 [B1]: save-as into a new dir keeps every plane; an
+    /// in-place save right after open reads back NOTHING; a corrupted
+    /// on-disk sidecar reads back (hash mismatch) instead of re-staging.
+    #[test]
+    fn save_as_into_new_dir_keeps_every_plane() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        let base_bytes = pattern_bytes(512, 512, 3);
+        let l1_bytes = pattern_bytes(512, 512, 77);
+        let l2_bytes = pattern_bytes(512, 512, 11);
+        assert_ne!(l1_bytes, l2_bytes);
+        for (owner, bytes) in [
+            (paint_state::PlaneOwner::Base, base_bytes.clone()),
+            (paint_state::PlaneOwner::Layer(1), l1_bytes.clone()),
+            (paint_state::PlaneOwner::Layer(2), l2_bytes.clone()),
+        ] {
+            assert!(paint
+                .publish_plane(owner, 1001, "baseColor", 512, 512, bytes)
+                .is_ok());
+        }
+        paint.process_pending().expect("uploads land");
+        let live = live_layers(&[1, 2]);
+
+        let dir_a = unique_temp_dir("saveas-a");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        assert_eq!(save_paint_tiles(&mut paint, &dir_a, &live), 3);
+
+        // Corrupt L2's sidecar on disk, then save in place: L2 reads back
+        // (hash mismatch), Base + L1 skip (same dir, same bytes).
+        let l2_path =
+            paint_plane_path(&dir_a, paint_state::PlaneOwner::Layer(2), "baseColor", 1001);
+        umber_export::png::write_png(
+            &l2_path,
+            512,
+            512,
+            &pattern_bytes(512, 512, 5),
+            umber_export::png::Transfer::Linear,
+        )
+        .expect("clobber writes");
+        let report = commit_paint_tiles(&mut paint, &dir_a, &live).expect("in-place save commits");
+        assert_eq!(
+            report,
+            PaintSaveReport {
+                staged: 3,
+                read_back: 1
+            },
+            "only the corrupted plane reads back"
+        );
+        let (width, height, repaired) =
+            decode_paint_png(&l2_path).expect("the re-saved L2 decodes");
+        assert_eq!((width, height), (512, 512));
+        assert_eq!(
+            repaired, l2_bytes,
+            "a hash mismatch reads back; the corrupt file never re-stages"
+        );
+
+        // In-place save right after that commit reads back NOTHING.
+        let report = commit_paint_tiles(&mut paint, &dir_a, &live).expect("re-save commits");
+        assert_eq!(
+            report,
+            PaintSaveReport {
+                staged: 3,
+                read_back: 0
+            },
+            "an in-place save of clean planes stages without a readback"
+        );
+
+        // Change L1 only, then save-as into a NEW dir: every plane reads
+        // back (a save-as shares no committed dir), and B reopens with
+        // every plane byte-identical (the r1 sentinel dropped them).
+        let l1_new = pattern_bytes(512, 512, 99);
+        assert_ne!(l1_new, l1_bytes);
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Layer(1),
+                1001,
+                "baseColor",
+                512,
+                512,
+                l1_new.clone()
+            )
+            .is_ok());
+        paint.process_pending().expect("the L1 change lands");
+        let dir_b = unique_temp_dir("saveas-b");
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let report = commit_paint_tiles(&mut paint, &dir_b, &live).expect("save-as commits");
+        assert_eq!(
+            report,
+            PaintSaveReport {
+                staged: 3,
+                read_back: 3
+            },
+            "a save-as shares no committed dir, so every plane reads back"
+        );
+        let manifest = std::fs::read_to_string(paint_manifest_path(&dir_b)).unwrap();
+        let entries = parse_paint_commit(&manifest).expect("B's manifest parses");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        for want in [
+            "tile-1001.png",
+            "layers/1/baseColor/tile-1001.png",
+            "layers/2/baseColor/tile-1001.png",
+        ] {
+            assert!(
+                names.contains(&want),
+                "B's manifest lists {want}, got {names:?}"
+            );
+        }
+
+        let mut fresh = paint_state::PaintState::new(device, queue).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir_b, &live);
+        assert_eq!(report.restored, 3);
+        let reopened_base = fresh
+            .read_plane(paint_state::PlaneOwner::Base, 1001, "baseColor")
+            .expect("Base reopens");
+        assert_eq!(reopened_base.data, base_bytes);
+        let reopened_l1 = fresh
+            .read_plane(paint_state::PlaneOwner::Layer(1), 1001, "baseColor")
+            .expect("L1 reopens");
+        assert_eq!(reopened_l1.data, l1_new);
+        let reopened_l2 = fresh
+            .read_plane(paint_state::PlaneOwner::Layer(2), 1001, "baseColor")
+            .expect("L2 reopens");
+        assert_eq!(reopened_l2.data, l2_bytes);
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// Stage-2 §8 T21 [B3]: the save loop reads Base via `read_plane`,
+    /// never the composite — `paint/tile-1001.png` decodes to Base's plane
+    /// exactly, and a reopen shows no double-count.
+    #[test]
+    fn save_writes_base_not_the_cache() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        let base_bytes = pattern_bytes(512, 512, 3);
+        let layer_bytes = pattern_bytes(512, 512, 77);
+        assert_eq!(&base_bytes[..4], &[3u8, 74, 145, 216]);
+        assert_eq!(&layer_bytes[..4], &[77u8, 148, 219, 39]);
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Base,
+                1001,
+                "baseColor",
+                512,
+                512,
+                base_bytes.clone()
+            )
+            .is_ok());
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Layer(1),
+                1001,
+                "baseColor",
+                512,
+                512,
+                layer_bytes.clone()
+            )
+            .is_ok());
+        paint.process_pending().expect("uploads land");
+        let live = live_layers(&[1]);
+
+        let dir = unique_temp_dir("base-not-cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &live), 2);
+
+        let (width, height, file_bytes) =
+            decode_paint_png(&paint_tile_path(&dir, 1001)).expect("the flat tile decodes");
+        assert_eq!((width, height), (512, 512));
+        assert_eq!(
+            file_bytes, base_bytes,
+            "the flat path carries Base's plane, never the composite"
+        );
+        assert_ne!(
+            file_bytes, layer_bytes,
+            "the layer's bytes must not leak into the flat path"
+        );
+
+        // Reopen: Base is still exactly Base (no layer folded in) and the
+        // layer plane is intact — no per-cycle copy.
+        let mut fresh = paint_state::PaintState::new(device, queue).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &live);
+        assert_eq!(report.restored, 2);
+        let reopened_base = fresh
+            .read_plane(paint_state::PlaneOwner::Base, 1001, "baseColor")
+            .expect("Base reopens");
+        assert_eq!(
+            reopened_base.data, base_bytes,
+            "reopening must not composite the layer into Base"
+        );
+        let reopened_layer = fresh
+            .read_plane(paint_state::PlaneOwner::Layer(1), 1001, "baseColor")
+            .expect("the layer reopens");
+        assert_eq!(reopened_layer.data, layer_bytes);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stage-2 §8 T17 (+ [m10]): a save → save cycle keeps every
+    /// `paint/layers/…` file (the `prune_stale_layer_files` guard — planes
+    /// never live under `layers/<set>/`), and deleting a layer then saving
+    /// leaves no `paint/layers/<id>/` directory behind, empty or not.
+    #[test]
+    fn layer_plane_directories_prune_with_their_layer() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 512)
+                .expect("paint builds");
+        for (owner, seed) in [
+            (paint_state::PlaneOwner::Base, 3u8),
+            (paint_state::PlaneOwner::Layer(7), 77u8),
+            (paint_state::PlaneOwner::Layer(9), 11u8),
+        ] {
+            assert!(paint
+                .publish_plane(
+                    owner,
+                    1001,
+                    "baseColor",
+                    512,
+                    512,
+                    pattern_bytes(512, 512, seed)
+                )
+                .is_ok());
+        }
+        paint.process_pending().expect("uploads land");
+
+        let dir = unique_temp_dir("layer-dirs");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &live_layers(&[7, 9])), 3);
+        let l7 = paint_sidecar_dir(&dir).join("layers/7/baseColor/tile-1001.png");
+        let l9 = paint_sidecar_dir(&dir).join("layers/9/baseColor/tile-1001.png");
+        assert!(l7.exists());
+        assert!(l9.exists());
+        let l9_bytes = std::fs::read(&l9).unwrap();
+
+        // Save → save keeps every paint/layers file byte-identical.
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &live_layers(&[7, 9])), 3);
+        assert!(l7.exists());
+        assert_eq!(
+            std::fs::read(&l9).unwrap(),
+            l9_bytes,
+            "a re-save keeps the surviving layer's bytes"
+        );
+
+        // Delete layer 7 (its planes go orphan), then save: no
+        // paint/layers/7 directory survives, and layer 9's does.
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &live_layers(&[9])),
+            2,
+            "the orphan plane never stages"
+        );
+        assert!(
+            !paint_sidecar_dir(&dir).join("layers/7").exists(),
+            "no layers/7 directory survives, empty or not"
+        );
+        assert_eq!(
+            std::fs::read(&l9).unwrap(),
+            l9_bytes,
+            "every other layer's directory survives"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stage-2 §8 T24 (app half): the minimal bump — version 2 iff a LIVE
+    /// layer plane exists; orphans don't count. The other half (a loaded
+    /// version-2 project re-saved layer-less writes 1) follows from the
+    /// same helper `save_project` calls every save: a loaded model is
+    /// never re-stamped. `ProjectModel::new` (every headless/CLI session's
+    /// path) stays version 1.
+    #[test]
+    fn save_version_is_minimal_and_new_model_stamps_1() {
+        assert_eq!(umber_core::CURRENT_PROJECT_VERSION, 1);
+        assert_eq!(
+            umber_core::ProjectModel::new(vec![], vec![], umber_core::ProjectSettings::default())
+                .version,
+            1,
+            "the default write version never moves"
+        );
+
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device, queue, 512).expect("paint builds");
+        // No planes at all (beyond Base): version 1.
+        assert_eq!(paint_save_version(&paint, &no_live_layers()), 1);
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Base,
+                1001,
+                "baseColor",
+                512,
+                512,
+                pattern_bytes(512, 512, 3)
+            )
+            .is_ok());
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Layer(7),
+                1001,
+                "baseColor",
+                512,
+                512,
+                pattern_bytes(512, 512, 77)
+            )
+            .is_ok());
+        paint.process_pending().expect("uploads land");
+        // A layer plane with no live layer is an orphan: still 1.
+        assert_eq!(
+            paint_save_version(&paint, &no_live_layers()),
+            1,
+            "orphans don't count toward the version decision"
+        );
+        assert_eq!(
+            paint_save_version(&paint, &live_layers(&[9])),
+            1,
+            "a different live set leaves layer 7 an orphan"
+        );
+        assert_eq!(
+            paint_save_version(&paint, &live_layers(&[7])),
+            2,
+            "one live layer plane writes version 2"
+        );
+    }
+
+    /// Stage-2 §8 T30 (paint half): the session lifecycle clear drops
+    /// every layer-owned plane (and nothing else), so the next save
+    /// writes version 1. (The `fill_states` half lives beside
+    /// `reset_for_new`'s own tests.)
+    #[test]
+    fn clear_layer_planes_drops_layer_planes_not_base() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device, queue, 512).expect("paint builds");
+        let base_bytes = pattern_bytes(512, 512, 3);
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Base,
+                1001,
+                "baseColor",
+                512,
+                512,
+                base_bytes.clone()
+            )
+            .is_ok());
+        assert!(paint
+            .publish_plane(
+                paint_state::PlaneOwner::Layer(3),
+                1001,
+                "baseColor",
+                512,
+                512,
+                pattern_bytes(512, 512, 77)
+            )
+            .is_ok());
+        paint.process_pending().expect("uploads land");
+        assert!(
+            paint
+                .read_plane(paint_state::PlaneOwner::Layer(3), 1001, "baseColor")
+                .is_some(),
+            "the layer plane exists before the clear (else the test is vacuous)"
+        );
+
+        paint.clear_layer_planes();
+
+        assert!(
+            paint
+                .read_plane(paint_state::PlaneOwner::Layer(3), 1001, "baseColor")
+                .is_none(),
+            "no (Layer(3), …) plane survives the lifecycle clear"
+        );
+        let base = paint
+            .read_plane(paint_state::PlaneOwner::Base, 1001, "baseColor")
+            .expect("Base survives the layer clear");
+        assert_eq!(base.data, base_bytes);
+        assert_eq!(
+            paint_save_version(&paint, &no_live_layers()),
+            1,
+            "a cleared session saves version 1"
+        );
     }
 
     /// The paint-relevant files under `paint/` (sidecar names only — the
@@ -4342,7 +5394,7 @@ mod paint_persistence_tests {
         paint.process_pending().expect("upload lands");
         let dir = unique_temp_dir("post-commit-crash");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(save_paint_tiles(&mut paint, &dir), 1);
+        assert_eq!(save_paint_tiles(&mut paint, &dir, &no_live_layers()), 1);
 
         let store = umber_core::AssetStore::new(&dir);
         let entry = stage_paint_png(&dir, &store, "tile-1001.png", 512, 512, &new).unwrap();
@@ -4351,7 +5403,7 @@ mod paint_persistence_tests {
 
         let mut fresh = paint_state::PaintState::with_target_size(device, queue, 512)
             .expect("fresh paint state builds");
-        let report = load_paint_tiles_reported(&mut fresh, &dir);
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
         assert_eq!(report.restored, 1);
         assert_eq!(
             fresh.read_tile(1001).expect("readback succeeds").data,

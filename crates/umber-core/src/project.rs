@@ -39,6 +39,21 @@ use crate::TextureSet;
 /// The only `.umber` project format version this build understands.
 pub const CURRENT_PROJECT_VERSION: u32 = 1;
 
+/// The opt-in write version for projects whose save stages at least one
+/// live layer-owned pixel plane (per-layer-pool design §6.3 [M2]):
+/// `ProjectModel::new` keeps stamping [`CURRENT_PROJECT_VERSION`], and the
+/// app's `save_project` upgrades to this only when a `Layer(id)` live in
+/// the stack owns a plane. A loaded model is never re-stamped — every save
+/// recomputes the version, so deleting the only planed layer writes 1
+/// again. Dual-read makes the bump safe: old builds loud-fail on the
+/// version instead of showing a canvas missing every layer's paint.
+pub const LAYER_PLANES_PROJECT_VERSION: u32 = 2;
+
+/// The highest `project.json` version this build loads: versions
+/// `1..=MAX_SUPPORTED_PROJECT_VERSION` validate and load (the sidecar
+/// loader itself needs no version — legacy paths always land in Base).
+pub const MAX_SUPPORTED_PROJECT_VERSION: u32 = 2;
+
 /// Everything that can go wrong saving or loading a `.umber` project.
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -51,7 +66,7 @@ pub enum ProjectError {
     Json(#[from] serde_json::Error),
 
     /// `project.json`'s `version` isn't one this build understands.
-    #[error("unsupported project version {0} (this build understands version 1)")]
+    #[error("unsupported project version {0} (this build understands versions 1..=2)")]
     UnsupportedVersion(u32),
 
     /// A texture-set name is empty, reserved, or unsafe as a directory name.
@@ -365,7 +380,7 @@ fn validate_project_structure(
     texture_set_names: &[String],
     layer_sets: &[(String, Vec<u64>, u64)],
 ) -> Result<(), ProjectError> {
-    if version != CURRENT_PROJECT_VERSION {
+    if !(1..=MAX_SUPPORTED_PROJECT_VERSION).contains(&version) {
         return Err(ProjectError::UnsupportedVersion(version));
     }
 
@@ -567,7 +582,7 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
     // the rest, so a future-version project.json fails with
     // ProjectError::UnsupportedVersion rather than an opaque JSON error.
     let probe: VersionProbe = serde_json::from_slice(&bytes)?;
-    if probe.version != CURRENT_PROJECT_VERSION {
+    if !(1..=MAX_SUPPORTED_PROJECT_VERSION).contains(&probe.version) {
         return Err(ProjectError::UnsupportedVersion(probe.version));
     }
 
@@ -1189,16 +1204,51 @@ mod tests {
 
     #[test]
     fn load_rejects_unsupported_version() {
+        // Per-layer-pool stage 2 [M2]: version 2 is now in range, so the
+        // rejection pins version 3 — with the error naming the supported
+        // range `1..=2` (the stage-2 test plan's exact assertion).
         let dir = unique_temp_dir("version");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("project.json"),
+            br#"{"version":3,"texture_sets":[],"layer_sets":[],"settings":{"active_texture_set":null}}"#,
+        )
+        .unwrap();
+
+        let result = load_from_dir(&dir);
+        assert!(matches!(result, Err(ProjectError::UnsupportedVersion(3))));
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("1..=2"),
+            "the rejection must name the supported range, got {message}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_2_project_loads_with_its_version_preserved_and_new_stamps_1() {
+        // [M2]'s minimal bump: the DEFAULT write version stays 1
+        // (`ProjectModel::new` is what every headless/CLI session saves),
+        // while a version-2 file loads and keeps its stamp (no re-stamp —
+        // each save recomputes the version from its planes).
+        assert_eq!(CURRENT_PROJECT_VERSION, 1);
+        assert_eq!(
+            ProjectModel::new(vec![], vec![], ProjectSettings::default()).version,
+            1
+        );
+        assert_eq!(LAYER_PLANES_PROJECT_VERSION, 2);
+        assert_eq!(MAX_SUPPORTED_PROJECT_VERSION, 2);
+
+        let dir = unique_temp_dir("version-2");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("project.json"),
             br#"{"version":2,"texture_sets":[],"layer_sets":[],"settings":{"active_texture_set":null}}"#,
         )
         .unwrap();
-
-        let result = load_from_dir(&dir);
-        assert!(matches!(result, Err(ProjectError::UnsupportedVersion(2))));
+        let loaded = load_from_dir(&dir).expect("version 2 must load");
+        assert_eq!(loaded.version, 2);
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -301,8 +301,51 @@
 //! folded into the event pressure by the path itself (both are flow
 //! multipliers, so spacing interpolates them for free). Replays refuse
 //! while a live stroke runs, and restore the session tool afterwards.
+//!
+//! Per-layer pool storage, stage 1b (docs/specs/per-layer-pool-design.md
+//! §1): one GPU plane per `(owner, tile, channel)`, materialized lazily.
+//! [`PlaneOwner::Base`] is the session's ownerless bottom plane — today's
+//! `TileTargets` content, read directly while no layer-owned plane exists
+//! (the lazy cache rule, §4.2) — and [`PlaneOwner::Layer`] is a document
+//! layer's own pixels. The PLANE-reader API is [`PaintState::read_plane`];
+//! the composite accessors (`paint_target`, `tile_target`,
+//! `channel_target`, `read_tile`, `read_channel_tile`) resolve
+//! cache-else-Base once a cache exists, which in stage 1b means they read
+//! Base exactly as today: every existing test passes unchanged, and that
+//! IS the regression proof (§7 row 1b "Behavior after").
+//!
+//! Judgment calls (stage-1b boundaries — read before extending):
+//!
+//! * Base stays in `TileTargets` for this stage. §1.4's end state moves
+//!   those threads into `planes` as the `Base` owner's planes; stage 1b
+//!   only adds the `planes` map (layer-owned planes), the `cache` map and
+//!   `cache_dirty` beside them, so the live stroke path is byte-identical
+//!   by construction. The move lands with stage 4's routing (the same
+//!   kill that stages into non-Base planes).
+//! * `Plane.committed` is `[u8; 32]`, not `blake3::Hash`: `blake3` is a
+//!   dependency of `umber-core` only, and the workspace rule (E0432) plus
+//!   this stage's lock forbid adding it to `umber-app/Cargo.toml` here —
+//!   §6.2's own dependency note puts that dep in stage 2's surface, which
+//!   swaps the alias for the hash type (the bytes are identical either
+//!   way). Recorded as a reconciling deviation in the stage-1b report.
+//! * `materialize_plane` returns `Result<bool, PaintRefusal>` (created vs
+//!   already present), not the doc's `Result<&mut Plane, PaintRefusal>`:
+//!   Base planes live outside `planes` until the §1.4 move, so no single
+//!   reference type covers both owners yet. Stage 4 restores the doc
+//!   shape alongside the move.
+//! * The OOM error scope rides `umber_gpu::paint_thread::push_oom_scope`
+//!   / `await_oom_scope` (wgpu 30's guard + async-pop shape, verified in
+//!   the registry source). The pop driver is std-only (`std::task::Wake`
+//!   over an `Arc`): `pollster` is dev-only in this crate and cannot run
+//!   at runtime.
+//! * `flush_composite` takes no snapshot yet and is a no-op: the
+//!   `CompositeSnapshot`, drain-then-composite ordering and region
+//!   dispatches land in stage 4 (§4.1). The hook's fire condition (dirty
+//!   entries pending) is already its body.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui::Pos2;
 use umber_bake::id::{bake_id_mesh, IdBakeParams, IdFlavor};
@@ -315,7 +358,7 @@ use umber_brush::{
     RgbaBuffer, StrokeConditioner, StrokeEvent, SymTransform, SymmetrySettings, WashMode,
 };
 use umber_core::undo::UndoStack;
-use umber_gpu::paint::Dab;
+use umber_gpu::paint::{Dab, PaintCompositor};
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
 use umber_mesh::polygon_fill::rasterize_polygon_mask;
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
@@ -478,6 +521,185 @@ impl TileTargets {
     }
 }
 
+/// Who owns a plane (per-layer-pool design §1.1). Layer ids start at 0
+/// (`LayerStack::new`), so no id value can double as "no layer": the
+/// ownerless plane is its own variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PlaneOwner {
+    /// The session's ownerless bottom plane (§1.4). Selectable (§2).
+    Base,
+    /// A document layer's own pixels.
+    Layer(u64),
+}
+
+/// One GPU plane per `(owner, tile, channel)`, materialized lazily
+/// (per-layer-pool design §1.1–§1.2): the same [`PaintThread`] type every
+/// target is today, so strokes, `WriteRegion`, `WriteMask` and `Resize`
+/// are unchanged per plane.
+pub struct Plane {
+    thread: PaintThread,
+    /// `Some((dir, hash))` = this plane's bytes were last committed to
+    /// (saved into, or loaded from) the project at `dir`, whose sidecar
+    /// file hashed to `hash` (blake3 of the PNG bytes). EVERY write
+    /// (stage, `WriteRegion`, publish, `Resize`) sets it to `None`. The
+    /// save may skip this plane's readback only under §6.2's two-part
+    /// test (lands in stage 2 with the save loop that reads it).
+    ///
+    /// The hash is `[u8; 32]`, byte-identical to `blake3::Hash` (see the
+    /// module docs): stage 2 swaps the alias when the dependency lands.
+    committed: Option<(PathBuf, [u8; 32])>,
+}
+
+impl Plane {
+    /// What the save path's clean-skip test reads (§6.2, stage 2).
+    /// The PLANE-side accessor [`PaintState::plane_committed`] serves
+    /// the live save loop; this one stays for the §8 clean-skip test.
+    #[allow(
+        dead_code,
+        reason = "the §6.2 clean-skip test's reader; the live save loop uses PaintState::plane_committed"
+    )]
+    pub fn committed(&self) -> Option<&(PathBuf, [u8; 32])> {
+        self.committed.as_ref()
+    }
+}
+
+/// Every reason a stroke can be refused (per-layer-pool design §2.1,
+/// [M4]). One enum, so the status line has one surface. No field is named
+/// `source` (the thiserror trap). The `Layer` arm lands in stage 3 with
+/// the selection gate; stage 1b carries the budget arm only.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PaintRefusal {
+    /// Materializing a new plane would cross the hard cap, or wgpu
+    /// reported `OutOfMemory` creating it (§1.3). `bytes` is the total
+    /// `plane_bytes()` would have reached.
+    #[error("plane budget refused: materializing would reach {bytes} bytes")]
+    PlaneBudget {
+        /// The total `plane_bytes()` the refused materialization would
+        /// have reached (plane plus its cache texture, if new).
+        bytes: u64,
+    },
+}
+
+/// Advisory plane budget (§1.3): 32 planes at 4K or 128 at 2K. Crossing
+/// it logs once and sets a status-line flag (stage 4); it never refuses.
+#[allow(dead_code, reason = "advisory budget: stage 4's status-line consumer")]
+pub const PLANE_BUDGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Enforced plane budget (§1.3): 2× the advisory. The default
+/// [`PaintState`] hard cap (see its `plane_hard_cap_bytes` field, which
+/// tests lower). A materialization that would cross it is refused with
+/// [`PaintRefusal::PlaneBudget`].
+pub const PLANE_HARD_CAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// One `(tile, channel)`'s composite dirt (per-layer-pool design §4.2,
+/// [M8]): the multi-rect rule. `umber-app` has no `smallvec` dependency;
+/// a plain capped `Vec` needs none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "stage-1b primitive: stage 4's flush is the consumer; the §8 tests exercise it directly"
+)]
+pub enum DirtyRegion {
+    /// At most 8 rects (see [`DirtyRegion::MAX_RECTS`]).
+    Rects(Vec<DirtyRect>),
+    /// A metadata change (order, visibility, opacity, blend, mask
+    /// attach/detach, channel params): absorbs everything.
+    Full,
+}
+
+#[allow(
+    dead_code,
+    reason = "stage-1b primitive: stage 4's flush is the consumer; the §8 tests exercise it directly"
+)]
+impl DirtyRegion {
+    /// Rect cap: past it, the CLOSEST pair merges into its bounding rect,
+    /// so the cost degrades smoothly toward `Full`.
+    pub const MAX_RECTS: usize = 8;
+
+    /// Whether this entry needs a full-tile recomposite.
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Marks the entry `Full` (the metadata-change writer, §4.2).
+    pub fn mark_full(&mut self) {
+        *self = Self::Full;
+    }
+
+    /// Marks `rect` dirty (the plane-write writer, §4.2): a rect that
+    /// overlaps or touches an existing one unions into it; past
+    /// [`DirtyRegion::MAX_RECTS`] rects the closest pair (whose union adds
+    /// the fewest texels) merges into its bounding rect. A `Full` entry
+    /// absorbs the rect.
+    pub fn mark_rect(&mut self, rect: DirtyRect) {
+        let Self::Rects(rects) = self else {
+            return;
+        };
+        rects.push(rect);
+        merge_touching(rects);
+        while rects.len() > Self::MAX_RECTS {
+            merge_closest_pair(rects);
+        }
+    }
+}
+
+/// Unions every touching-or-overlapping pair in `rects` until none
+/// remains (the [`DirtyRegion::mark_rect`] writer rule).
+fn merge_touching(rects: &mut Vec<DirtyRect>) {
+    loop {
+        let mut pair = None;
+        for (i, a) in rects.iter().enumerate() {
+            if let Some(j) = rects
+                .iter()
+                .enumerate()
+                .skip(i + 1)
+                .find(|(_, b)| rects_touch(a, b))
+                .map(|(j, _)| j)
+            {
+                pair = Some((i, j));
+                break;
+            }
+        }
+        let Some((i, j)) = pair else {
+            return;
+        };
+        let united = rects[i].union(rects[j]);
+        rects.remove(j.max(i));
+        rects.remove(j.min(i));
+        rects.push(united);
+    }
+}
+
+/// Whether `a` and `b` overlap or touch (share an edge): half-open
+/// `[x0, x1) × [y0, y1)` rects whose extents meet on both axes union
+/// without a gap.
+fn rects_touch(a: &DirtyRect, b: &DirtyRect) -> bool {
+    a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1
+}
+
+/// Merges the pair of `rects` whose union adds the fewest texels
+/// (the over-cap writer rule). `rects` holds more than one entry.
+fn merge_closest_pair(rects: &mut Vec<DirtyRect>) {
+    let mut best: Option<(usize, usize, u64)> = None;
+    for (i, a) in rects.iter().enumerate() {
+        for (j, b) in rects.iter().enumerate().skip(i + 1) {
+            let united = a.union(*b);
+            let added = united.width() as u64 * united.height() as u64
+                - a.width() as u64 * a.height() as u64
+                - b.width() as u64 * b.height() as u64;
+            if best.is_none_or(|(_, _, least)| added < least) {
+                best = Some((i, j, added));
+            }
+        }
+    }
+    if let Some((i, j, _)) = best {
+        let united = rects[i].union(rects[j]);
+        rects.remove(j.max(i));
+        rects.remove(j.min(i));
+        rects.push(united);
+    }
+}
+
 /// One tile's slice of a live paint stroke's undo capture: the
 /// stroke-start snapshot plus the union of every staged dab footprint on
 /// that tile (see the module docs). The snapshot is taken lazily on the
@@ -528,7 +750,45 @@ pub struct PaintState {
     queue: umber_gpu::WgpuQueue,
     /// One [`TileTargets`] per UDIM tile. Tile [`FIRST_TILE`] is created in
     /// [`Self::new`] and never removed; other tiles appear on first route.
+    /// Stage-1b role: the Base owner's planes (§1.4's move into `planes`
+    /// lands with stage 4's routing) AND the composite cache (§4 — today
+    /// only the cache half is live, and only once a layer-owned plane
+    /// exists for that `(tile, channel)`).
     targets: BTreeMap<u16, TileTargets>,
+    /// One [`Plane`] per `(owner, tile, channel)`, materialized lazily
+    /// (§1.2). In stage 1b only layer-owned planes live here (via
+    /// [`Self::publish_plane`]); Base planes stay in `targets` until the
+    /// §1.4 move.
+    planes: BTreeMap<(PlaneOwner, u16, String), Plane>,
+    /// The committed registry (§6.2 [B1]): every plane's last-committed
+    /// `(dir, content hash)`, keyed like `planes` but covering Base's
+    /// targets-resident planes too (Base still lives in `targets` this
+    /// stage — the save loop's clean-skip reads THIS map, one seam for
+    /// both stores). Cleared by [`Self::clear_layer_planes`] and by any
+    /// write to the plane it names.
+    plane_committed: BTreeMap<(PlaneOwner, u16, String), (PathBuf, [u8; 32])>,
+    /// The composite cache (§4.2's lazy cache rule): one thread per
+    /// `(tile, channel)` that has at least one layer-owned plane, born
+    /// `Full`-dirty so it can never be read uncomposited. A `(tile,
+    /// channel)` whose only plane is Base has no cache entry: readers get
+    /// Base directly, today's exact path at zero extra VRAM.
+    cache: BTreeMap<(u16, String), PaintThread>,
+    /// One [`DirtyRegion`] per `(tile, channel)` with pending composite
+    /// work (§4.2). Plane writes mark their rects; metadata changes mark
+    /// `Full`. The per-frame flush consumes these in stage 4; in stage 1b
+    /// [`Self::flush_composite`] only records them.
+    cache_dirty: BTreeMap<(u16, String), DirtyRegion>,
+    /// The ONE paint compositor every plane and cache thread shares
+    /// (§1, [M4]): built at [`Self::new`], handed as an [`Arc`] to every
+    /// [`PaintThread::with_compositor`] call, so materializing a plane
+    /// never compiles a shader.
+    compositor: Arc<PaintCompositor>,
+    /// The enforced plane budget (§1.3): a materialization that would push
+    /// [`Self::plane_bytes`] past this is refused with
+    /// [`PaintRefusal::PlaneBudget`]. Defaults to
+    /// [`PLANE_HARD_CAP_BYTES`]; tests lower it through
+    /// [`Self::set_plane_hard_cap_bytes`].
+    plane_hard_cap_bytes: u64,
     /// The tile the last original (non-mirror) event routed to; always a
     /// key of `targets`.
     active_tile: u16,
@@ -722,7 +982,14 @@ impl PaintState {
         queue: umber_gpu::WgpuQueue,
         size: u32,
     ) -> Result<Self, PaintStateError> {
-        let first = PaintThread::new(device.clone(), queue.clone(), size, size)?;
+        let compositor = Arc::new(PaintCompositor::new(device.clone())?);
+        let first = PaintThread::with_compositor(
+            device.clone(),
+            queue.clone(),
+            size,
+            size,
+            compositor.clone(),
+        );
         let default_set = DEFAULT_TEXTURE_SET.to_string();
         Ok(Self {
             device,
@@ -734,6 +1001,12 @@ impl PaintState {
                     channels: BTreeMap::new(),
                 },
             )]),
+            planes: BTreeMap::new(),
+            plane_committed: BTreeMap::new(),
+            cache: BTreeMap::new(),
+            cache_dirty: BTreeMap::new(),
+            compositor,
+            plane_hard_cap_bytes: PLANE_HARD_CAP_BYTES,
             active_tile: FIRST_TILE,
             active_channel: BASE_COLOR_CHANNEL.to_string(),
             stroke_channel: BASE_COLOR_CHANNEL.to_string(),
@@ -1654,6 +1927,320 @@ impl PaintState {
         }
     }
 
+    /// Whether `(owner, tile, channel)` has a materialized plane: Base
+    /// planes live in `targets` until the §1.4 move, layer-owned planes in
+    /// `planes`.
+    fn plane_exists(&self, owner: PlaneOwner, tile: u16, channel: &str) -> bool {
+        match owner {
+            PlaneOwner::Base => {
+                if channel == BASE_COLOR_CHANNEL {
+                    self.targets.contains_key(&tile)
+                } else {
+                    self.targets
+                        .get(&tile)
+                        .is_some_and(|t| t.channels.contains_key(channel))
+                }
+            }
+            PlaneOwner::Layer(_) => self
+                .planes
+                .contains_key(&(owner, tile, channel.to_string())),
+        }
+    }
+
+    /// Materializes `(owner, tile, channel)`'s plane at
+    /// [`Self::tile_channel_size`] when it has none yet (§1.2): the one
+    /// budget checkpoint ([M4]). A first layer-owned plane for its `(tile,
+    /// channel)` also materializes that entry's cache thread, born
+    /// `Full`-dirty so it can never be read uncomposited (§4.2's lazy
+    /// cache rule). An existing plane is returned untouched: it never goes
+    /// through the check again, so it keeps painting.
+    ///
+    /// Returns `Ok(true)` when the plane was created, `Ok(false)` when it
+    /// already existed, or `Err(PaintRefusal::PlaneBudget)` when the new
+    /// plane (plus its cache texture, if new) would push
+    /// [`Self::plane_bytes`] past the hard cap, or when wgpu reported
+    /// `OutOfMemory` creating it (§1.3). Nothing is created on refusal.
+    pub fn materialize_plane(
+        &mut self,
+        owner: PlaneOwner,
+        tile: u16,
+        channel: &str,
+    ) -> Result<bool, PaintRefusal> {
+        if self.plane_exists(owner, tile, channel) {
+            return Ok(false);
+        }
+        let (width, height) = self.tile_channel_size(tile, channel);
+        let plane_len = width as u64 * height as u64 * 4;
+        let cache_new = matches!(owner, PlaneOwner::Layer(_))
+            && !self.cache.contains_key(&(tile, channel.to_string()));
+        let prospective = self.plane_bytes() + plane_len + u64::from(cache_new) * plane_len;
+        if prospective > self.plane_hard_cap_bytes {
+            return Err(PaintRefusal::PlaneBudget { bytes: prospective });
+        }
+        let scope = umber_gpu::paint_thread::push_oom_scope(&self.device);
+        match owner {
+            PlaneOwner::Base => {
+                self.ensure_channel(tile, channel);
+            }
+            PlaneOwner::Layer(_) => {
+                let thread = PaintThread::with_compositor(
+                    self.device.clone(),
+                    self.queue.clone(),
+                    width,
+                    height,
+                    self.compositor.clone(),
+                );
+                self.planes.insert(
+                    (owner, tile, channel.to_string()),
+                    Plane {
+                        thread,
+                        committed: None,
+                    },
+                );
+                if cache_new {
+                    self.cache.insert(
+                        (tile, channel.to_string()),
+                        PaintThread::with_compositor(
+                            self.device.clone(),
+                            self.queue.clone(),
+                            width,
+                            height,
+                            self.compositor.clone(),
+                        ),
+                    );
+                    self.cache_dirty
+                        .insert((tile, channel.to_string()), DirtyRegion::Full);
+                }
+            }
+        }
+        if umber_gpu::paint_thread::await_oom_scope(&self.device, scope) {
+            log::warn!(
+                "plane budget: wgpu reported OutOfMemory materializing {owner:?}/{tile}/{channel}"
+            );
+            return Err(PaintRefusal::PlaneBudget { bytes: prospective });
+        }
+        Ok(true)
+    }
+
+    /// The plane's committed record, if any (§6.2's [B1] seam): where its
+    /// bytes were last written and the content hash they carried. The
+    /// save loop asks, then decides the clean-skip.
+    pub fn plane_committed(
+        &self,
+        owner: PlaneOwner,
+        tile: u16,
+        channel: &str,
+    ) -> Option<(PathBuf, blake3::Hash)> {
+        self.plane_committed
+            .get(&(owner, tile, channel.to_string()))
+            .map(|(dir, hash)| (dir.clone(), blake3::Hash::from_bytes(*hash)))
+    }
+
+    /// Marks the plane's bytes committed at `dir` with `hash` (§6.2):
+    /// called after a sidecar write lands. Any later plane write
+    /// ([`Self::publish_plane`]) clears it.
+    pub fn mark_plane_committed(
+        &mut self,
+        owner: PlaneOwner,
+        tile: u16,
+        channel: &str,
+        dir: PathBuf,
+        hash: blake3::Hash,
+    ) {
+        self.plane_committed
+            .insert((owner, tile, channel.to_string()), (dir, hash.into()));
+    }
+
+    /// Every materialized plane key `(owner, tile, channel)`, Base
+    /// included (§1.1's save census — the save loop stages one sidecar
+    /// per materialized plane, and the version decision asks which
+    /// layer-owned planes exist). Base still lives in `targets` this
+    /// stage (the additive-diff judgment call — it moves in stage 4),
+    /// so the census walks BOTH stores: every tile's baseColor thread
+    /// as `(Base, tile, "baseColor")`, every explicit channel thread
+    /// as `(Base, tile, channel)`, then every layer-owned plane.
+    /// Owned: callers iterate without a session borrow.
+    pub fn planes_present(&self) -> Vec<(PlaneOwner, u16, String)> {
+        let mut keys: Vec<(PlaneOwner, u16, String)> = Vec::new();
+        for (tile, targets) in &self.targets {
+            // A Base-owned plane in `planes` supersedes the targets
+            // thread (stage 4 unifies the stores; until then the
+            // published plane is the truth — never both).
+            let explicit: Vec<String> = targets.channels.keys().cloned().collect();
+            for channel in std::iter::once("baseColor".to_string()).chain(explicit) {
+                if !self
+                    .planes
+                    .contains_key(&(PlaneOwner::Base, *tile, channel.clone()))
+                {
+                    keys.push((PlaneOwner::Base, *tile, channel));
+                }
+            }
+        }
+        keys.extend(self.planes.keys().cloned());
+        keys
+    }
+
+    /// Drops every layer-owned plane, cache texture and dirty rect, and
+    /// every plane's `committed` record (§1.5's session lifecycle — the
+    /// open-path and `reset_for_new` call before loading, so a document
+    /// never inherits another document's planes). Base's `targets` stay:
+    /// the open path re-materializes them from the sidecars it loads.
+    pub fn clear_layer_planes(&mut self) {
+        self.planes.clear();
+        self.plane_committed.clear();
+        self.cache.clear();
+        self.cache_dirty.clear();
+    }
+
+    /// Backing-store bytes (§1.3's accounting, exactly): Σ `w·h·4` over
+    /// materialized planes (Base threads in `targets`, layer-owned planes
+    /// in `planes`) and cache textures, plus Σ `w·h` over the threads
+    /// holding a GPU quick-mask copy. The Perf HUD reports this (stage 4).
+    pub fn plane_bytes(&self) -> u64 {
+        let mut bytes: u64 = 0;
+        for tile_targets in self.targets.values() {
+            bytes += thread_bytes(&tile_targets.base_color);
+            for thread in tile_targets.channels.values() {
+                bytes += thread_bytes(thread);
+            }
+        }
+        for plane in self.planes.values() {
+            bytes += thread_bytes(&plane.thread);
+        }
+        for thread in self.cache.values() {
+            bytes += thread_bytes(thread);
+        }
+        bytes
+    }
+
+    /// Lowers (or raises) the enforced plane budget (see the
+    /// `plane_hard_cap_bytes` field docs). Tests lower it to pin
+    /// [`PaintRefusal::PlaneBudget`]; the Texture Sets panel will edit it
+    /// beside the size combo (stage 4).
+    pub fn set_plane_hard_cap_bytes(&mut self, bytes: u64) {
+        self.plane_hard_cap_bytes = bytes;
+    }
+
+    /// The only PLANE accessor (§1.1, [B3]): `(owner, tile, channel)`'s
+    /// texels as a CPU image. Drains the plane's queue first (the
+    /// `read_target` precedent), then the blocking full-plane readback.
+    /// `None` (logged) when the plane was never materialized, or when the
+    /// drain or the readback fails. Reads never materialize: a layer that
+    /// was never written holds no planes, and reading it stays `None`.
+    pub fn read_plane(
+        &mut self,
+        owner: PlaneOwner,
+        tile: u16,
+        channel: &str,
+    ) -> Option<RgbaBuffer> {
+        if matches!(owner, PlaneOwner::Base) {
+            return self.read_target(tile, channel, false);
+        }
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let plane = self.planes.get_mut(&(owner, tile, channel.to_string()))?;
+        if let Err(err) = plane.thread.process_pending() {
+            log::warn!("plane: draining {owner:?}/{tile}/{channel} failed: {err:#}");
+            return None;
+        }
+        let target = plane.thread.paint_target();
+        let (width, height) = target.dimensions();
+        match target.read_back_rgba8(&device, &queue) {
+            Ok(bytes) => RgbaBuffer::new(width, height, bytes),
+            Err(err) => {
+                log::warn!("plane: reading {owner:?}/{tile}/{channel} back failed: {err:#}");
+                None
+            }
+        }
+    }
+
+    /// Publishes `rgba` (`width`x`height` RGBA8, row-major) whole-plane
+    /// into `(owner, tile, channel)`'s plane (§5.1's fill shape with an
+    /// owner, plus the materialization check): materializes through
+    /// [`Self::materialize_plane`] (refusals propagate — the layer stays
+    /// dirty and retries per §1.3), queues one full-plane `WriteRegion`,
+    /// clears the plane's `committed`, and marks the `(tile, channel)`
+    /// cache `Full` (the plane-write dirt writer, §4.2).
+    ///
+    /// A torn upload (byte count or dims not matching the plane's
+    /// [`Self::tile_channel_size`]) is dropped with a log — the fill
+    /// precedent ([`Self::publish_fill`]) — and still returns `Ok(())`:
+    /// there is no refusal variant for caller error, only for budget.
+    pub fn publish_plane(
+        &mut self,
+        owner: PlaneOwner,
+        tile: u16,
+        channel: &str,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), PaintRefusal> {
+        if rgba.len() != width as usize * height as usize * 4 {
+            log::warn!(
+                "plane: dropping {width}x{height} upload for {owner:?}/{tile}/{channel} ({} bytes)",
+                rgba.len()
+            );
+            return Ok(());
+        }
+        if (width, height) != self.tile_channel_size(tile, channel) {
+            log::warn!(
+                "plane: dropping {width}x{height} upload for {owner:?}/{tile}/{channel} (plane is {}x{})",
+                self.tile_channel_size(tile, channel).0,
+                self.tile_channel_size(tile, channel).1
+            );
+            return Ok(());
+        }
+        self.materialize_plane(owner, tile, channel)?;
+        match owner {
+            PlaneOwner::Base => {
+                if let Some(thread) = self.target_of_mut(tile, channel) {
+                    let _ = thread.publish(vec![PaintThreadCommand::WriteRegion {
+                        x: 0,
+                        y: 0,
+                        width,
+                        height,
+                        rgba,
+                    }]);
+                }
+            }
+            PlaneOwner::Layer(_) => {
+                if let Some(plane) = self.planes.get_mut(&(owner, tile, channel.to_string())) {
+                    let _ = plane.thread.publish(vec![PaintThreadCommand::WriteRegion {
+                        x: 0,
+                        y: 0,
+                        width,
+                        height,
+                        rgba,
+                    }]);
+                    plane.committed = None;
+                }
+            }
+        }
+        self.plane_committed
+            .remove(&(owner, tile, channel.to_string()));
+        self.cache_dirty
+            .insert((tile, channel.to_string()), DirtyRegion::Full);
+        Ok(())
+    }
+
+    /// Recomposites every pending-dirty `(tile, channel)` cache from its
+    /// planes (§4.1's flush). Stage 1b: a no-op — dirt is recorded (see
+    /// [`Self::publish_plane`]) but nothing composites: the end-of-update
+    /// placement (AFTER the fill AND material refresh blocks, drain-first
+    /// per composite set), the `CompositeSnapshot` argument and the
+    /// `composite_stack_region` dispatches all land in stage 4. The early
+    /// return names the stage-4 fire condition (no dirt, no work).
+    pub fn flush_composite(&mut self) {
+        if self.cache_dirty.is_empty() {
+            // Stage 4's early-out: no dirt, no work.
+            return;
+        }
+        // Stage 1b ends here: see the module docs. (The empty check is
+        // the stage-4 fire condition, kept so the call sites compile
+        // against the final signature.)
+        let _ = ();
+    }
+
     /// Extend the stroke to `uv`.
     pub fn extend_stroke(&mut self, uv: Pos2) {
         self.extend_stroke_styled(uv, 1.0, 1.0);
@@ -2115,32 +2702,31 @@ impl PaintState {
 
     /// Ensures `tile` has a paint thread, creating it at the TILE'S SET
     /// size on first use (and recording the active set when the tile has
-    /// no assignment yet). Returns `false` (event dropped, logged)
-    /// if creation fails — unreachable in practice, since tile 1001 was
-    /// built on the same device.
+    /// no assignment yet). Infallible since stage 1b: the thread shares
+    /// the session compositor ([`PaintThread::with_compositor`], [M4]), so
+    /// no shader compiles here — creation cannot fail. Always `true`.
     fn ensure_tile(&mut self, tile: u16) -> bool {
         if self.targets.contains_key(&tile) {
             return true;
         }
         let (width, height) = self.tile_size(tile);
-        match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
-            Ok(thread) => {
-                self.targets.insert(
-                    tile,
-                    TileTargets {
-                        base_color: thread,
-                        channels: BTreeMap::new(),
-                    },
-                );
-                let active = self.active_set.clone();
-                self.tile_sets.entry(tile).or_insert(active);
-                true
-            }
-            Err(err) => {
-                log::warn!("paint target for tile {tile} failed: {err:#}");
-                false
-            }
-        }
+        let thread = PaintThread::with_compositor(
+            self.device.clone(),
+            self.queue.clone(),
+            width,
+            height,
+            self.compositor.clone(),
+        );
+        self.targets.insert(
+            tile,
+            TileTargets {
+                base_color: thread,
+                channels: BTreeMap::new(),
+            },
+        );
+        let active = self.active_set.clone();
+        self.tile_sets.entry(tile).or_insert(active);
+        true
     }
 
     /// Ensures `tile` has a paint thread for `channel`, creating it at the
@@ -2149,8 +2735,8 @@ impl PaintState {
     /// the module docs): a channel's thread appears on first route (a
     /// stroke, a bake write, or this explicit pre-warm call).
     /// [`BASE_COLOR_CHANNEL`] defers to [`Self::ensure_tile`] and never
-    /// allocates a `channels` entry. Returns `false` (logged) on creation
-    /// failure, same as `ensure_tile`.
+    /// allocates a `channels` entry. Infallible since stage 1b (the shared
+    /// compositor — see [`Self::ensure_tile`]). Always `true`.
     pub fn ensure_channel(&mut self, tile: u16, channel: &str) -> bool {
         if channel == BASE_COLOR_CHANNEL {
             return self.ensure_tile(tile);
@@ -2166,20 +2752,19 @@ impl PaintState {
             return true;
         }
         let (width, height) = self.tile_channel_size(tile, channel);
-        match PaintThread::new(self.device.clone(), self.queue.clone(), width, height) {
-            Ok(thread) => {
-                self.targets
-                    .get_mut(&tile)
-                    .expect("ensure_tile just created or kept it")
-                    .channels
-                    .insert(channel.to_string(), thread);
-                true
-            }
-            Err(err) => {
-                log::warn!("paint channel target for tile {tile}/{channel} failed: {err:#}");
-                false
-            }
-        }
+        let thread = PaintThread::with_compositor(
+            self.device.clone(),
+            self.queue.clone(),
+            width,
+            height,
+            self.compositor.clone(),
+        );
+        self.targets
+            .get_mut(&tile)
+            .expect("ensure_tile just created or kept it")
+            .channels
+            .insert(channel.to_string(), thread);
+        true
     }
 
     /// Resolves `tile`'s thread for `channel`, mutably, WITHOUT
@@ -2700,6 +3285,19 @@ impl PaintState {
     }
 }
 
+/// One thread's backing-store bytes (§1.3's accounting): `w·h·4` for the
+/// RGBA8 plane, plus `w·h` when it holds a GPU quick-mask copy (a
+/// full-size `R8` texture — see `PaintTarget`'s mask docs).
+fn thread_bytes(thread: &PaintThread) -> u64 {
+    let (width, height) = thread.paint_target().dimensions();
+    let plane = width as u64 * height as u64 * 4;
+    if thread.paint_target().has_mask() {
+        plane + width as u64 * height as u64
+    } else {
+        plane
+    }
+}
+
 /// Tile-local texel coordinates of `uv` inside `tile` on a target with
 /// `texels_per_uv` texels per UV unit: the tile's integer UV offsets
 /// (`(tile - 1001) % 10`, `(tile - 1001) / 10`) are subtracted before the
@@ -2996,6 +3594,275 @@ mod tests {
             (buildup - 0.96875).abs() < 1e-6 && (buildup - folded).abs() > 0.4,
             "build-up must accumulate well past the wash ceiling"
         );
+    }
+
+    // --- Per-layer pool storage (stage 1b, §8 T14/T33) ---
+    //
+    // T14 pins lazy materialization + accounting; T33 pins the budget
+    // refusal. Both need a device, so they skip gracefully where no wgpu
+    // adapter exists (the `try_request_device` pattern). The `DirtyRegion`
+    // shape tests are CPU-only.
+
+    #[test]
+    fn plane_budget_constants_are_pinned() {
+        // §1.3: advisory 2 GiB (32 planes at 4K), enforced 4 GiB (2×).
+        assert_eq!(PLANE_BUDGET_BYTES, 2 * 1024 * 1024 * 1024);
+        assert_eq!(PLANE_HARD_CAP_BYTES, 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn dirty_region_unions_touching_rects() {
+        // Edge-adjacent on x unions into one rect …
+        let mut dirt = DirtyRegion::Rects(vec![DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        }]);
+        dirt.mark_rect(DirtyRect {
+            x0: 10,
+            y0: 0,
+            x1: 20,
+            y1: 10,
+        });
+        assert_eq!(
+            dirt,
+            DirtyRegion::Rects(vec![DirtyRect {
+                x0: 0,
+                y0: 0,
+                x1: 20,
+                y1: 10
+            }])
+        );
+        // … and so does overlap.
+        let mut dirt = DirtyRegion::Rects(vec![DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        }]);
+        dirt.mark_rect(DirtyRect {
+            x0: 5,
+            y0: 5,
+            x1: 15,
+            y1: 15,
+        });
+        assert_eq!(
+            dirt,
+            DirtyRegion::Rects(vec![DirtyRect {
+                x0: 0,
+                y0: 0,
+                x1: 15,
+                y1: 15
+            }])
+        );
+    }
+
+    #[test]
+    fn dirty_region_keeps_disjoint_rects() {
+        let mut dirt = DirtyRegion::Rects(vec![DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        }]);
+        dirt.mark_rect(DirtyRect {
+            x0: 100,
+            y0: 0,
+            x1: 110,
+            y1: 10,
+        });
+        assert!(!dirt.is_full());
+        let DirtyRegion::Rects(rects) = &dirt else {
+            panic!("disjoint rects must stay Rects");
+        };
+        assert_eq!(rects.len(), 2);
+    }
+
+    #[test]
+    fn dirty_region_merges_closest_pair_past_eight() {
+        // Eight 10×10 rects at a 10-texel pitch plus one far rect: the 9th
+        // disjoint mark must merge ONE adjacent pair (union adds 100
+        // texels: 30×10 − 100 − 100), never anything involving the far
+        // rect. Ties break to the first minimal pair (strict `<`), so the
+        // merged rect is exactly (0,0)-(30,10).
+        let mut dirt = DirtyRegion::Rects(Vec::new());
+        for i in 0..8u32 {
+            dirt.mark_rect(DirtyRect {
+                x0: i * 20,
+                y0: 0,
+                x1: i * 20 + 10,
+                y1: 10,
+            });
+        }
+        dirt.mark_rect(DirtyRect {
+            x0: 1000,
+            y0: 0,
+            x1: 1010,
+            y1: 10,
+        });
+        let DirtyRegion::Rects(rects) = &dirt else {
+            panic!("nine disjoint rects must stay Rects, merged to eight");
+        };
+        assert_eq!(rects.len(), 8);
+        assert!(rects.contains(&DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: 30,
+            y1: 10
+        }));
+        assert!(rects.contains(&DirtyRect {
+            x0: 1000,
+            y0: 0,
+            x1: 1010,
+            y1: 10
+        }));
+    }
+
+    #[test]
+    fn dirty_region_full_absorbs_rects() {
+        let mut dirt = DirtyRegion::Full;
+        dirt.mark_rect(DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        });
+        assert_eq!(dirt, DirtyRegion::Full);
+        let mut dirt = DirtyRegion::Rects(vec![DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: 10,
+            y1: 10,
+        }]);
+        dirt.mark_full();
+        assert_eq!(dirt, DirtyRegion::Full);
+    }
+
+    #[test]
+    fn lazy_planes_and_accounting() {
+        // §8 T14. A fresh 512² session holds exactly Base's 1001 baseColor
+        // plane: 512·512·4 = 1,048,576.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        assert_eq!(state.plane_bytes(), 1_048_576);
+        assert!(state.cache.is_empty());
+        // A layer never published holds 0 planes …
+        assert!(state
+            .read_plane(PlaneOwner::Layer(2), 1001, BASE_COLOR_CHANNEL)
+            .is_none());
+        // … while publishing one layer plane adds exactly that plane plus
+        // its (tile, channel) cache target: 3 · 1,048,576 = 3,145,728.
+        let bytes = vec![42u8; 512 * 512 * 4];
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL,
+                512,
+                512,
+                bytes.clone(),
+            )
+            .expect("first layer plane fits the default cap");
+        assert_eq!(state.plane_bytes(), 3_145_728);
+        assert_eq!(state.cache.len(), 1);
+        assert!(state
+            .cache
+            .contains_key(&(1001, BASE_COLOR_CHANNEL.to_string())));
+        // The cache is born Full-dirty, and the no-op flush leaves the dirt
+        // (and the bytes) untouched.
+        assert_eq!(
+            state
+                .cache_dirty
+                .get(&(1001, BASE_COLOR_CHANNEL.to_string())),
+            Some(&DirtyRegion::Full)
+        );
+        state.flush_composite();
+        assert_eq!(state.plane_bytes(), 3_145_728);
+        assert_eq!(
+            state
+                .cache_dirty
+                .get(&(1001, BASE_COLOR_CHANNEL.to_string())),
+            Some(&DirtyRegion::Full)
+        );
+        // The plane reads back exactly what was published (a direct upload
+        // round-trip — no composite, no tolerance), and Base is untouched:
+        // the plane reader and the composite reader agree byte-for-byte.
+        let plane = state
+            .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+            .expect("published plane reads");
+        assert_eq!(plane.data, bytes);
+        let base = state
+            .read_plane(PlaneOwner::Base, 1001, BASE_COLOR_CHANNEL)
+            .expect("Base plane reads");
+        let composite = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("composite reader reads");
+        assert_eq!(base.data, composite.data);
+        assert!(base.data.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn budget_refusal_names_bytes() {
+        // §8 T33. With the hard cap lowered to exactly
+        // plane_bytes() + 512·512·4 − 1, a new Base plane is refused with
+        // the total it would have reached — and nothing is created. The
+        // test uses a Base plane on purpose: a new LAYER plane would also
+        // materialize a cache texture, and both count toward the cap.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 512)
+            .expect("paint state builds");
+        let before = state.plane_bytes();
+        assert_eq!(before, 1_048_576);
+        state.set_plane_hard_cap_bytes(before + 1_048_576 - 1);
+        let err = state
+            .publish_plane(
+                PlaneOwner::Base,
+                1001,
+                "height",
+                512,
+                512,
+                vec![0u8; 512 * 512 * 4],
+            )
+            .expect_err("crossing the cap must refuse");
+        assert_eq!(
+            err,
+            PaintRefusal::PlaneBudget {
+                bytes: before + 1_048_576
+            }
+        );
+        assert!(state.channels_present(1001).is_empty());
+        assert_eq!(state.plane_bytes(), before);
+        // A publish into an EXISTING plane still succeeds under the same
+        // cap: the check gates materialization, never writes.
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        state
+            .publish_plane(
+                PlaneOwner::Base,
+                1001,
+                "height",
+                512,
+                512,
+                vec![1u8; 512 * 512 * 4],
+            )
+            .expect("first publish fits the default cap");
+        state.set_plane_hard_cap_bytes(state.plane_bytes() - 1);
+        state
+            .publish_plane(
+                PlaneOwner::Base,
+                1001,
+                "height",
+                512,
+                512,
+                vec![2u8; 512 * 512 * 4],
+            )
+            .expect("writes into an existing plane ignore the cap");
     }
 
     // --- Paint-what-you-see projection (§2's P1 row) ---

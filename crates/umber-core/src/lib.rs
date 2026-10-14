@@ -39,7 +39,7 @@ pub use layers::{BlendMode, InstanceError, Layer, LayerCommand, LayerKind, Layer
 pub use layers::{MaterialChannel, MaterialParamOverride, MaterialParamValue, MaterialParams};
 pub use project::{
     load_from_dir, save_to_dir, ProjectError, ProjectModel, ProjectSettings, TextureSetLayers,
-    CURRENT_PROJECT_VERSION,
+    CURRENT_PROJECT_VERSION, LAYER_PLANES_PROJECT_VERSION, MAX_SUPPORTED_PROJECT_VERSION,
 };
 pub use smart::{
     AnchorError, AnchorRef, GeneratorBinding, MaskOp, MaskOpKind, MaskOpParams, MaskSource,

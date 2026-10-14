@@ -851,6 +851,17 @@ mod tests {
         assert_eq!(size_of::<Dab>(), 48);
     }
 
+    /// The per-layer-pool share (stage 1b, [M4]): every plane and cache
+    /// thread holds one [`PaintCompositor`] behind an `Arc`, so this pins
+    /// `Send + Sync` — the bound that makes the share legal. The fields
+    /// are all wgpu handle types (`Device` is asserted `Send + Sync` in
+    /// the wgpu 30.0.1 source; the rest are the same Arc-backed family).
+    #[test]
+    fn paint_compositor_is_send_sync_for_pool_sharing() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PaintCompositor>();
+    }
+
     #[test]
     fn mask_gate_defaults_off_and_round_trips() {
         let dab = Dab::new([1.0, 2.0], 3.0, [1.0, 0.0, 0.0, 1.0], 0.5, 0.25);
