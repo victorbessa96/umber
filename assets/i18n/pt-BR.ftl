@@ -20,6 +20,16 @@ menu =
     .recent-empty = Nenhum projeto recente ainda.
     .recent-missing = Esta pasta não está acessível agora (movida, apagada ou em uma unidade desconectada).
     .recent-clear = Limpar recentes
+    .revert = Reverter para o salvo
+    .revert-unsaved = O projeto nunca foi salvo, então não há para onde reverter.
+    .revert-clean = Nenhuma edição não salva para descartar.
+    .revert-confirm-title = Reverter para o salvo?
+    .revert-confirm-body = Isto descarta todas as edições desde o último salvamento e recarrega o projeto do disco.
+    .window = Janela
+    .panels = Painéis
+    .reset-layout = Redefinir layout
+    .about-copy = Copiar para a área de transferência
+    .about-close = Fechar
     .save-project = Salvar projeto…
     .export-png = Exportar mapa pintado (PNG)…
     .load-environment = Carregar ambiente…
@@ -28,7 +38,6 @@ menu =
     .wireframe = Mostrar wireframe (W)
     .grid = Mostrar grade (G)
     .about = Sobre o Umber
-    .about-text = Umber v0.1.0 — Onda 2 em andamento
 
 ## Títulos dos painéis
 

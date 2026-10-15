@@ -138,6 +138,7 @@ mod palette;
 mod preferences;
 mod recent;
 mod rich_tooltip;
+mod shell_menu;
 use umber_paint::material_layer;
 mod mesh_map_import;
 use umber_paint::paint_state;
@@ -166,7 +167,7 @@ use bakes_panel::{BakesContext, BakesPanel};
 use brush_panel::BrushPanel;
 use egui::containers::menu::{MenuBar, MenuButton};
 use egui::{CentralPanel, Id, Ui, WidgetText};
-use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
+use egui_dock::{DockArea, DockState, Style, TabViewer};
 use export_dialog::{ExportContext, ExportDialog};
 use graph_panel::GraphPanel;
 use i18n::tr;
@@ -174,6 +175,24 @@ use std::path::{Path, PathBuf};
 use umber_gpu::GpuContext;
 use uv_view::UvView;
 use viewport::Viewport;
+
+/// A panel's localized title: the dock tab and Window ▸ Panels read it
+/// from here, so the two never name a panel differently.
+fn panel_title(panel: &Panel) -> String {
+    tr(match panel {
+        Panel::Viewport => "panel.viewport",
+        Panel::UvView => "panel.uv-view",
+        Panel::LayerStack => "panel.layers",
+        Panel::Properties => "panel.properties",
+        Panel::Assets => "panel.assets",
+        Panel::History => "panel.history",
+        Panel::TextureSets => "panel.texture-sets",
+        Panel::Bakes => "panel.bakes",
+        Panel::Export => "panel.export",
+        Panel::Graph => "panel.graph",
+        Panel::Display => "panel.display",
+    })
+}
 
 /// Every panel the shell can dock.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -274,19 +293,7 @@ impl TabViewer for PanelViewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
-        match tab {
-            Panel::Viewport => tr("panel.viewport").into(),
-            Panel::UvView => tr("panel.uv-view").into(),
-            Panel::LayerStack => tr("panel.layers").into(),
-            Panel::Properties => tr("panel.properties").into(),
-            Panel::Assets => tr("panel.assets").into(),
-            Panel::History => tr("panel.history").into(),
-            Panel::TextureSets => tr("panel.texture-sets").into(),
-            Panel::Bakes => tr("panel.bakes").into(),
-            Panel::Export => tr("panel.export").into(),
-            Panel::Graph => tr("panel.graph").into(),
-            Panel::Display => tr("panel.display").into(),
-        }
+        panel_title(tab).into()
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
@@ -1018,6 +1025,10 @@ pub struct UmberApp {
     /// discard was confirmed; `Some(false)` = the user asked to save
     /// first (the save dialog runs, then the reset).
     pending_new: Option<bool>,
+    /// File ▸ Revert is asking to discard the unsaved edits.
+    pending_revert: bool,
+    /// Help ▸ About is open.
+    about_open: bool,
     /// The device display LUT (created at startup on eframe's device;
     /// rewritten in place when `state.display_lut` is dirty). Handed to
     /// the viewport's mesh pass and the UV view's paint display.
@@ -1077,26 +1088,9 @@ impl UmberApp {
         // (`AppState::display_lut` starts dirty) uploads the chain.
         let display_lut = umber_gpu::DisplayLut::new(&gpu, &umber_gpu::identity_lut_bytes());
 
-        // Layout: [left column | center (3D + 2D UV tabs)] with history docked right.
-        let mut dock = DockState::new(vec![Panel::Viewport, Panel::UvView]);
-        {
-            let tree = dock.main_surface_mut();
-            let [left, _] = tree.split_left(
-                NodeIndex::root(),
-                0.25,
-                vec![
-                    Panel::LayerStack,
-                    Panel::TextureSets,
-                    Panel::Bakes,
-                    Panel::Export,
-                    Panel::Graph,
-                    Panel::Display,
-                ],
-            );
-            let [_top, _bottom] =
-                tree.split_below(left, 0.4, vec![Panel::Properties, Panel::Assets]);
-            tree.split_right(NodeIndex::root(), 0.2, vec![Panel::History]);
-        }
+        // Layout: the boot shape (`shell_menu::default_dock`, which Window ▸
+        // Reset Layout rebuilds).
+        let dock = shell_menu::default_dock();
 
         // Paint session on the eframe-owned device/queue (cloned for the
         // thread). Feature-missing devices degrade to view-only with a
@@ -1173,6 +1167,8 @@ impl UmberApp {
             icons,
             hdr_mode,
             pending_new: None,
+            pending_revert: false,
+            about_open: false,
         })
     }
 }
@@ -2308,6 +2304,59 @@ impl eframe::App for UmberApp {
                     });
                 });
         }
+        // File ▸ Revert: reopen the saved project, discarding the edits —
+        // through the same confirm-window shape File ▸ New uses.
+        if self.pending_revert {
+            let mut close = false;
+            egui::Window::new(tr("menu.revert-confirm-title"))
+                .collapsible(false)
+                .resizable(false)
+                .min_width(280.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label(tr("menu.revert-confirm-body"));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("menu.revert")).clicked() {
+                            if let Some(dir) = self.state.project_dir.clone() {
+                                self.open_project_at(dir);
+                            }
+                            close = true;
+                        }
+                        if ui.button(tr("shell.new-confirm-cancel")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.pending_revert = false;
+            }
+        }
+        if self.about_open {
+            let info = self.gpu.adapter.get_info();
+            let about = shell_menu::AboutInfo::new(info.name, format!("{:?}", info.backend));
+            let mut open = true;
+            let mut close = false;
+            egui::Window::new(tr("menu.about"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    for line in about.lines() {
+                        ui.monospace(line);
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("menu.about-copy")).clicked() {
+                            ui.ctx().copy_text(about.lines().join("\n"));
+                        }
+                        if ui.button(tr("menu.about-close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            self.about_open = open && !close;
+        }
         if self.state.bakes.poll_job() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
@@ -2405,6 +2454,20 @@ impl eframe::App for UmberApp {
                 ) {
                     actions.push(toolbar::ShellAction::SaveProject);
                 }
+                let revert = shell_menu::revert_availability(
+                    self.state.project_dir.is_some(),
+                    self.state.doc.is_dirty(),
+                );
+                let revert_row =
+                    ui.add_enabled(revert.is_ok(), egui::Button::new(tr("menu.revert")));
+                let revert_row = match revert {
+                    Err(reason) => revert_row.on_disabled_hover_text(tr(reason)),
+                    Ok(()) => revert_row,
+                };
+                if revert_row.clicked() {
+                    self.pending_revert = true;
+                    ui.close();
+                }
                 let export_enabled = self.state.paint.is_some();
                 if ui
                     .add_enabled(export_enabled, egui::Button::new(tr("menu.export-png")))
@@ -2438,9 +2501,25 @@ impl eframe::App for UmberApp {
                 ui.separator();
                 viewport::view_mode_menu(ui, &mut self.view.view_mode);
             });
+            MenuButton::new(tr("menu.window")).ui(ui, |ui| {
+                ui.menu_button(tr("menu.panels"), |ui| {
+                    for panel in &shell_menu::ALL_PANELS {
+                        let mut open = shell_menu::is_open(&self.dock, panel);
+                        if ui.checkbox(&mut open, panel_title(panel)).changed() {
+                            shell_menu::toggle_panel(&mut self.dock, panel);
+                        }
+                    }
+                });
+                ui.separator();
+                if ui.button(tr("menu.reset-layout")).clicked() {
+                    self.dock = shell_menu::default_dock();
+                    ui.close();
+                }
+            });
             MenuButton::new(tr("menu.help")).ui(ui, |ui| {
                 if ui.button(tr("menu.about")).clicked() {
-                    ui.label(tr("menu.about-text"));
+                    self.about_open = true;
+                    ui.close();
                 }
             });
         });

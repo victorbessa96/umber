@@ -19,6 +19,16 @@ menu =
     .recent-empty = No recent projects yet.
     .recent-missing = This folder is not reachable right now (moved, deleted, or on a disconnected drive).
     .recent-clear = Clear Recent
+    .revert = Revert to Saved
+    .revert-unsaved = The project has never been saved, so there is nothing to revert to.
+    .revert-clean = No unsaved edits to discard.
+    .revert-confirm-title = Revert to saved?
+    .revert-confirm-body = This discards every edit since the last save and reloads the project from disk.
+    .window = Window
+    .panels = Panels
+    .reset-layout = Reset Layout
+    .about-copy = Copy to Clipboard
+    .about-close = Close
     .save-project = Save Project…
     .export-png = Export Painted Map (PNG)…
     .load-environment = Load Environment…
@@ -27,7 +37,6 @@ menu =
     .wireframe = Show Wireframe (W)
     .grid = Show Grid (G)
     .about = About Umber
-    .about-text = Umber v0.1.0 — Wave 2 in progress
 
 ## Dock panel titles
 
