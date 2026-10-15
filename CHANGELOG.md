@@ -8,6 +8,9 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Painter's display keys: M back to the material, C / Shift+C through the
+  paint channels, B / Shift+B through the baked mesh maps, each naming what
+  is shown (g6-display-mode-keys)
 - Workspaces: Paint, Bake, Export and Graph tabs in the menu row
   (Ctrl+PgUp / Ctrl+PgDn), each remembering its own layout for the session
   (g5-workspaces)
