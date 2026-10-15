@@ -638,6 +638,7 @@ import =
     .reason-empty-set = nothing before the “_” — no texture-set name
     .reason-empty-suffix = nothing after the “_” — no map name
     .reason-tile-suffixed = tile-suffixed UDIM output (Set_map_tile) — import the per-tile files individually
+    .reason-unsafe-channel = the map name holds a character a channel folder cannot use on every OS (: \ / * ? < > | " or a control character)
     .size-mismatch = Size mismatch — layer left empty
     .budget-refused = Plane budget refused ({ $bytes } bytes) — layer left empty
     .decode-failed = File undecodable — layer left empty
