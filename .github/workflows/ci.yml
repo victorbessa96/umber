@@ -90,16 +90,19 @@ jobs:
       # Windows runs the GPU tests on WARP (software D3D12), ~30x slower than
       # Linux lavapipe: three tests alone took ~24 of 41 minutes (run
       # 38797679021: pool_drag_session 13.8 min, the two adjacent-margin
-      # CLI bakes 10.3 min). Linux runs all three on every push; Windows
-      # skips only those three, so every other GPU test still exercises
-      # the D3D12 path. `--skip` matches test names in every binary.
-      - name: Tests (Windows, minus the three WARP-slow GPU tests)
+      # CLI bakes 10.3 min). The panel's end-to-end Bake-from-high test
+      # timed out at 60 s there (run 38804748176); umber-bake's own transfer
+      # GPU tests still cover the transfer on D3D12. Linux runs all four on
+      # every push; every other GPU test still exercises Windows' D3D12 path.
+      # `--skip` matches test names in every binary.
+      - name: Tests (Windows, minus the four WARP-slow GPU tests)
         if: runner.os == 'Windows'
         run: >-
           cargo test --workspace --
           --skip pool_drag_session
           --skip adjacent_margin_bakes_every_map_and_differs_from_extend
           --skip agent_bake_margin_adjacent_differs_and_absent_is_extend
+          --skip bake_from_high_transfers_height_and_normal_from_the_high_mesh
         # The GPU golden family (`renderer::tests::gpu`, 173 tests incl.
         # the height→normal goldens) is feature-gated behind `gpu`
         # (pollster device bootstrap); without this leg the workspace

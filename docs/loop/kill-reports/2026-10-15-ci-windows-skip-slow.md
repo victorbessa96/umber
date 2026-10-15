@@ -40,3 +40,15 @@ the measured number.
 
 The release smoke (7.7 min) stays. It is the only per-push check that
 the release profile builds on Windows.
+
+## Follow-up: W-C2e's Windows run went red (38804748176)
+
+`bake_from_high_transfers_height_and_normal_from_the_high_mesh` (new in
+W-C2e) timed out at its 60 s job deadline on WARP; Linux passed. This
+was a test-deadline failure, not a product bug: the same bake passes on
+lavapipe and on the build host's GPU.
+
+- The test bakes with no dilation; the post-pass is not what it pins.
+- Its deadline is now 600 s.
+- Windows skips it, the fourth test on the skip list. `umber-bake`'s
+  transfer GPU tests still run the transfer on D3D12.

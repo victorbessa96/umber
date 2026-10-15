@@ -2468,10 +2468,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut p = BakesPanel::new(dir.clone());
         assert!(p.set_resolution(512));
+        // No dilation: the post-pass is not what this pins, and on Windows'
+        // WARP software adapter it doubled an already-slow bake.
+        p.set_dilation_iterations(0);
         p.high_poly_mut().mesh = Some((dir.join("high.obj"), quad(0.05)));
         p.bake_from_high(&device, &queue, &quad(0.0), Some(Path::new("Quad.obj")));
         assert!(p.is_baking());
-        await_job_within(&mut p, 60);
+        // WARP (Windows CI) runs the brute-force transfer ~30x slower than
+        // lavapipe: 60 s timed out there (run 38804748176).
+        await_job_within(&mut p, 600);
         assert_eq!(p.last_records().len(), 2, "{}", p.status());
         // The written PNGs, decoded (RGBA8, 512²; the transfer writes
         // Linear, so the bytes are the baker's).
