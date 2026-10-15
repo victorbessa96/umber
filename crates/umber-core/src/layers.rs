@@ -947,6 +947,16 @@ impl LayerStack {
         self.next_id
     }
 
+    /// Raises the id counter to at least `floor` (never lowers it): the
+    /// shared-id-space primitive of per-set stacks (C2-9 stage 1,
+    /// `docs/specs/per-set-stacks-design.md`). Paint planes are keyed by
+    /// layer id with no set, so every stack of one document allocates
+    /// from the document's max: before a set's stack adds, it is raised
+    /// to that max, and ids never collide across sets.
+    pub fn reserve_ids_from(&mut self, floor: u64) {
+        self.next_id = self.next_id.max(floor);
+    }
+
     /// The current stack position of the layer with `id`, if it exists.
     pub fn index_of(&self, id: u64) -> Option<usize> {
         self.layers.iter().position(|l| l.id == id)
@@ -1852,6 +1862,40 @@ impl Command for LayerCommand {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stacks_sharing_one_id_space_never_collide() {
+        // C2-9 stage 1: two sets' stacks, adds interleaved, each raised to
+        // the document max before it allocates.
+        let mut stacks = [LayerStack::new(), LayerStack::new()];
+        let mut doc_next = 0;
+        let mut ids = Vec::new();
+        for (i, which) in [0usize, 1, 0, 1, 1].into_iter().enumerate() {
+            let stack = &mut stacks[which];
+            stack.reserve_ids_from(doc_next);
+            ids.push(stack.add_layer(format!("L{i}"), LayerKind::Paint));
+            doc_next = doc_next.max(stack.next_layer_id());
+        }
+        let [mut a, _b] = stacks;
+        let unique: std::collections::BTreeSet<u64> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "no id is shared across sets: {ids:?}"
+        );
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+        // Never lowers: a stale floor leaves the counter alone.
+        // (A's own last add was id 2, so its counter is 3.)
+        a.reserve_ids_from(0);
+        assert_eq!(a.next_layer_id(), 3);
+        a.reserve_ids_from(doc_next);
+        assert_eq!(a.next_layer_id(), 5, "raised to the document max");
+        // A reloaded stack seeded with the max keeps the space unique.
+        let mut reloaded = LayerStack::from_parts(a.layers.clone(), 3);
+        reloaded.reserve_ids_from(doc_next);
+        assert!(!ids.contains(&reloaded.add_layer("new", LayerKind::Paint)));
+    }
+
     use super::*;
     use crate::undo::UndoStack;
 
