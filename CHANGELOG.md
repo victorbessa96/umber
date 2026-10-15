@@ -8,6 +8,10 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Hide UI (Tab) gives the whole window to the viewport, with a Show UI
+  button to come back; Maximize Area (Ctrl+Space) fills the window with
+  the focused panel. Leaving either restores the exact layout
+  (g5-focus-modes)
 - File ▸ Revert to Saved (asks first), Window ▸ Panels (show or hide any
   panel) and Reset Layout, and a real Help ▸ About: version, commit and
   the live GPU, copyable for bug reports (g5-menu-completion)
