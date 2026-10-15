@@ -365,6 +365,134 @@ pub fn apply_skew_edge_protection(map: &mut [u8], skew_map: &[u8], threshold_deg
     )
 }
 
+/// The painted data channels the export reads (C2-6,
+/// `docs/loop/audit-2026-10-15-c2.md`): paint channel name → export map,
+/// with the neutral value an unpainted texel exports as. Base Color keeps
+/// its own bridge above (painted / graph / flat).
+/// Emissive is included although `TextureSet::new_default` does not carry
+/// it: a user channel named `emissive` (an imported map, or a set that
+/// adds it) exports through the presets' Emissive slot like the rest.
+pub const PAINTED_DATA_CHANNELS: [(&str, umber_export::MapKind, [u8; 4]); 5] = [
+    // Mid roughness: the neutral "unauthored" surface.
+    (
+        "roughness",
+        umber_export::MapKind::Roughness,
+        [128, 128, 128, 255],
+    ),
+    // Dielectric.
+    ("metallic", umber_export::MapKind::Metallic, [0, 0, 0, 255]),
+    // Mid height: no displacement either way.
+    (
+        "height",
+        umber_export::MapKind::Height,
+        [128, 128, 128, 255],
+    ),
+    // Flat tangent-space normal (the baked flat normal's own value).
+    (
+        "normal",
+        umber_export::MapKind::Normal,
+        [128, 128, 255, 255],
+    ),
+    // No emission.
+    ("emissive", umber_export::MapKind::Emissive, [0, 0, 0, 255]),
+];
+
+/// Flattens a painted channel's PREMULTIPLIED RGBA8 bytes over the
+/// channel's opaque neutral `under`: `out = paint + under × (1 − α)`.
+/// Unpainted texels (α = 0) export the neutral exactly, fully painted
+/// ones the paint exactly, and the result is always opaque, because an
+/// exported data map has no "transparent" meaning. A wrong-length buffer
+/// returns `None` (never a partial map).
+pub fn flatten_over(premultiplied: &[u8], under: [u8; 4], size: u32) -> Option<Vec<u8>> {
+    let expected = (size as usize) * (size as usize) * 4;
+    if premultiplied.len() != expected {
+        return None;
+    }
+    let mut out = Vec::with_capacity(expected);
+    for texel in premultiplied.chunks_exact(4) {
+        let inv = 255 - u32::from(texel[3]);
+        for c in 0..3 {
+            // Rounded: paint + under·(255−α)/255.
+            let v = u32::from(texel[c]) + (u32::from(under[c]) * inv + 127) / 255;
+            out.push(v.min(255) as u8);
+        }
+        out.push(255);
+    }
+    Some(out)
+}
+
+/// Attaches every PAINTED data channel to `set`. `read(channel)` returns
+/// the channel's premultiplied composite bytes at `size`, or `None` when
+/// the channel never materialized on this tile. A channel that was
+/// painted replaces whatever `set` held for its map (the baked AO stays
+/// AO, while a painted normal replaces the flat placeholder). Returns
+/// the maps that came from paint, for the dialog's source line.
+pub fn apply_painted_channels(
+    set: &mut umber_export::MapSet,
+    size: u32,
+    mut read: impl FnMut(&str) -> Option<Vec<u8>>,
+) -> Vec<umber_export::MapKind> {
+    let mut painted = Vec::new();
+    for (channel, kind, neutral) in PAINTED_DATA_CHANNELS {
+        if let Some(bytes) = read(channel).and_then(|b| flatten_over(&b, neutral, size)) {
+            set.set(kind, bytes);
+            painted.push(kind);
+        }
+    }
+    painted
+}
+
+/// Completes the outputs paint has started (C2-6): for every preset
+/// output with at least one painted input, each of its OTHER data inputs
+/// that `set` still lacks is filled with that channel's neutral (an
+/// unpainted metallic is dielectric). Without this, painting roughness
+/// alone would drop glTF's packed metallicRoughness output entirely,
+/// because metallic was missing. Outputs with no painted input are left
+/// alone, so nothing is invented for a channel nobody touched. Returns
+/// the maps filled.
+pub fn fill_unpainted_partners(
+    set: &mut umber_export::MapSet,
+    size: u32,
+    preset: &umber_export::ExportPreset,
+    painted: &[umber_export::MapKind],
+) -> Vec<umber_export::MapKind> {
+    let mut filled = Vec::new();
+    for output in &preset.outputs {
+        let kinds: Vec<umber_export::MapKind> = output.maps.iter().map(|(k, _)| *k).collect();
+        if !kinds.iter().any(|k| painted.contains(k)) {
+            continue;
+        }
+        for kind in kinds {
+            if set.maps_iter().any(|k| k == kind) {
+                continue;
+            }
+            if let Some((_, _, neutral)) = PAINTED_DATA_CHANNELS.iter().find(|(_, k, _)| *k == kind)
+            {
+                set.set(kind, neutral.repeat((size as usize) * (size as usize)));
+                filled.push(kind);
+            }
+        }
+    }
+    filled
+}
+
+/// The GPU half: `channel`'s composite on `tile`, read back when it
+/// exists at exactly `size²` (reads never materialize a channel).
+pub fn painted_channel_tile(
+    paint: Option<&PaintState>,
+    tile: u16,
+    channel: &str,
+    size: u32,
+    device: &umber_gpu::WgpuDevice,
+    queue: &umber_gpu::WgpuQueue,
+) -> Option<Vec<u8>> {
+    let target = paint?.channel_target(tile, channel)?;
+    if target.dimensions() != (size, size) {
+        return None;
+    }
+    read_back(target, device, queue)
+}
+
 /// One tile's export-ready maps and which source fed its Base Color.
 #[derive(Debug)]
 pub struct TileMapSet {
@@ -374,6 +502,8 @@ pub struct TileMapSet {
     pub set: umber_export::MapSet,
     /// What fed this tile's Base Color.
     pub base_source: BaseColorSource,
+    /// The data maps that came from paint on this tile (C2-6).
+    pub painted_channels: Vec<umber_export::MapKind>,
 }
 
 /// The per-tile map-set assembly (UDIM slice 5), the painted bridge's
@@ -396,6 +526,7 @@ pub fn assemble_tile_map_sets(
     size: u32,
     mut baked: impl FnMut(u16) -> anyhow::Result<umber_export::MapSet>,
     mut painted: impl FnMut(u16) -> Option<Vec<u8>>,
+    mut painted_channel: impl FnMut(u16, &str) -> Option<Vec<u8>>,
     graph: Option<(u64, Vec<u8>)>,
 ) -> anyhow::Result<Vec<TileMapSet>> {
     let mut graph = graph;
@@ -408,10 +539,13 @@ pub fn assemble_tile_map_sets(
             None
         };
         let base_source = apply_base_color_with_graph(&mut set, size, painted(tile), tile_graph);
+        let painted_channels =
+            apply_painted_channels(&mut set, size, |channel| painted_channel(tile, channel));
         out.push(TileMapSet {
             tile,
             set,
             base_source,
+            painted_channels,
         });
     }
     Ok(out)
@@ -420,6 +554,118 @@ pub fn assemble_tile_map_sets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flatten_over_keeps_paint_and_fills_the_neutral() {
+        // Three texels: unpainted, fully painted 200, half-alpha 100
+        // premultiplied (= straight 200 at 50%).
+        let premul = [0, 0, 0, 0, 200, 200, 200, 255, 100, 100, 100, 128];
+        let under = [128, 128, 128, 255];
+        // size² must equal the texel count: a 3-texel buffer is no square,
+        // so pin through a 2x2 (fourth texel unpainted).
+        let mut buf = premul.to_vec();
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        let out = flatten_over(&buf, under, 2).expect("2x2");
+        assert_eq!(&out[0..4], &[128, 128, 128, 255], "unpainted = neutral");
+        assert_eq!(&out[4..8], &[200, 200, 200, 255], "opaque paint = paint");
+        // 100 + 128·127/255 = 100 + 63.75 → 164 (rounded): halfway
+        // between the neutral 128 and the straight paint 200.
+        assert_eq!(&out[8..12], &[164, 164, 164, 255]);
+        assert_eq!(&out[12..16], &[128, 128, 128, 255]);
+        assert_eq!(flatten_over(&buf, under, 3), None, "wrong length = no map");
+    }
+
+    #[test]
+    fn painted_channels_land_only_where_painted() {
+        let size = 1;
+        let mut set = map_set_from(vec![9, 9, 9, 255], size);
+        let painted = apply_painted_channels(&mut set, size, |channel| match channel {
+            "roughness" => Some(vec![51, 51, 51, 255]),
+            "normal" => Some(vec![0, 0, 0, 0]), // materialized, nothing painted
+            _ => None,
+        });
+        assert_eq!(
+            painted,
+            vec![
+                umber_export::MapKind::Roughness,
+                umber_export::MapKind::Normal
+            ]
+        );
+        let get = |kind| {
+            set.maps_with_bytes()
+                .find(|(k, _)| *k == kind)
+                .map(|(_, b)| b.to_vec())
+        };
+        assert_eq!(
+            get(umber_export::MapKind::Roughness),
+            Some(vec![51, 51, 51, 255])
+        );
+        // A materialized-but-empty normal exports the FLAT normal, not black.
+        assert_eq!(
+            get(umber_export::MapKind::Normal),
+            Some(vec![128, 128, 255, 255])
+        );
+        // Unpainted channels are not invented: no metallic map appears.
+        assert_eq!(get(umber_export::MapKind::Metallic), None);
+        // The baked AO is untouched.
+        assert_eq!(
+            get(umber_export::MapKind::AmbientOcclusion),
+            Some(vec![9, 9, 9, 255])
+        );
+    }
+
+    #[test]
+    fn partners_fill_only_outputs_paint_started() {
+        let size = 1;
+        let preset = umber_export::ExportPreset::gltf_metal_rough();
+        // Nothing painted: nothing filled, the packed output stays skipped.
+        let mut set = map_set_from(vec![9, 9, 9, 255], size);
+        assert!(fill_unpainted_partners(&mut set, size, &preset, &[]).is_empty());
+        assert!(!set
+            .maps_iter()
+            .any(|k| k == umber_export::MapKind::Metallic));
+        // Roughness painted: metallic is filled with the dielectric neutral.
+        set.set(umber_export::MapKind::Roughness, vec![51, 51, 51, 255]);
+        let filled =
+            fill_unpainted_partners(&mut set, size, &preset, &[umber_export::MapKind::Roughness]);
+        assert_eq!(filled, vec![umber_export::MapKind::Metallic]);
+        let metallic = set
+            .maps_with_bytes()
+            .find(|(k, _)| *k == umber_export::MapKind::Metallic)
+            .map(|(_, b)| b.to_vec());
+        assert_eq!(metallic, Some(vec![0, 0, 0, 255]));
+        // A painted map is never overwritten by a neutral.
+        let rough = set
+            .maps_with_bytes()
+            .find(|(k, _)| *k == umber_export::MapKind::Roughness)
+            .map(|(_, b)| b.to_vec());
+        assert_eq!(rough, Some(vec![51, 51, 51, 255]));
+    }
+
+    #[test]
+    fn painted_data_channels_are_the_standard_set_names() {
+        let standard: Vec<String> = umber_core::TextureSet::new_default("")
+            .channels
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        // Every default-set data channel is exported (baseColor rides its
+        // own bridge); `emissive` is the one deliberate extra (see the
+        // const's doc).
+        for name in standard.iter().filter(|c| *c != "baseColor") {
+            assert!(
+                PAINTED_DATA_CHANNELS.iter().any(|(c, _, _)| c == name),
+                "default channel {name} has no export path"
+            );
+        }
+        for (channel, _, neutral) in PAINTED_DATA_CHANNELS {
+            assert!(
+                standard.iter().any(|c| c == channel) || channel == "emissive",
+                "{channel} is neither a set channel nor the named extra"
+            );
+            assert_eq!(neutral[3], 255, "{channel}'s neutral is opaque");
+        }
+    }
 
     #[test]
     fn flat_normal_is_up_everywhere() {
@@ -629,6 +875,95 @@ mod tests {
     }
 
     #[test]
+    fn painted_roughness_reaches_the_exported_orm_png() {
+        // C2-6's can-fail core (GPU-gated): paint the ROUGHNESS channel
+        // white, export through the real glTF preset, decode the packed
+        // metallicRoughness PNG and find the painted value in its B slot
+        // (roughness gray) — where the unpainted neutral is 128. Before
+        // C2-6 the roughness output was filtered out entirely.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let size = 512;
+        let mut paint = PaintState::with_target_size(device.clone(), queue.clone(), size)
+            .expect("paint state builds");
+        paint.set_brush_color([1.0, 1.0, 1.0, 1.0]);
+        paint.set_active_channel("roughness");
+        paint.begin_stroke(egui::pos2(0.35, 0.5));
+        for i in 1..=60u32 {
+            paint.extend_stroke(egui::pos2(0.35 + 0.005 * i as f32, 0.5));
+        }
+        paint.end_stroke();
+        paint.process_pending().expect("drain succeeds");
+
+        let sets = assemble_tile_map_sets(
+            &[umber_mesh::FIRST_TILE],
+            size,
+            |_| Ok(map_set_from(vec![200u8; (size * size * 4) as usize], size)),
+            |tile| painted_base_color_tile(Some(&paint), tile, size, &device, &queue),
+            |tile, channel| {
+                painted_channel_tile(Some(&paint), tile, channel, size, &device, &queue)
+            },
+            None,
+        )
+        .expect("assembly succeeds");
+        assert_eq!(
+            sets[0].painted_channels,
+            vec![umber_export::MapKind::Roughness]
+        );
+
+        let preset = umber_export::ExportPreset::gltf_metal_rough();
+        let mut set = sets[0].set.clone();
+        // Metallic was never painted: the partner fill completes the packed
+        // output with the dielectric neutral (the dialog's own path).
+        let filled = fill_unpainted_partners(&mut set, size, &preset, &sets[0].painted_channels);
+        assert_eq!(filled, vec![umber_export::MapKind::Metallic]);
+        let available: Vec<umber_export::MapKind> = set.maps_iter().collect();
+        let (filtered_all, _) = crate::export_dialog::filter_satisfiable(&preset, &available);
+        assert!(
+            filtered_all
+                .outputs
+                .iter()
+                .any(|o| o.filename.contains("metallicRoughness")),
+            "the packed output is satisfiable once roughness is painted"
+        );
+        let out = std::env::temp_dir().join(format!(
+            "umber-bake-sources-painted-roughness-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&out);
+        let written = umber_export::run_preset(
+            &filtered_all,
+            &set,
+            &umber_export::TokenSources::new("Rough"),
+            &out,
+        )
+        .expect("the preset runs");
+        let orm = written
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains("metallicRoughness"))
+            })
+            .expect("the packed output was written");
+        let (_, _, decoded) = umber_export::png::read_png_rgba8(orm).expect("decodes");
+        // B = roughness gray: painted texels are white (255), unpainted
+        // texels carry the neutral 128. Both must appear.
+        let blues: std::collections::BTreeSet<u8> =
+            decoded.chunks_exact(4).map(|px| px[2]).collect();
+        assert!(
+            blues.contains(&255),
+            "painted roughness reached the file: {blues:?}"
+        );
+        assert!(
+            blues.contains(&128),
+            "unpainted texels export the neutral: {blues:?}"
+        );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
     fn painted_pixels_survive_into_the_exported_png() {
         // THE CAN-FAIL CORE (GPU-gated): stage real dabs through a
         // PaintState, read back via the new bridge path, export through
@@ -751,6 +1086,7 @@ mod tests {
                 1002 => Some(texel(22)),
                 _ => None,
             },
+            |_, _| None,
             Some((5, texel(77))),
         )
         .expect("assembly succeeds");
@@ -804,6 +1140,7 @@ mod tests {
             size,
             |_| Ok(map_set_from(texel(9), size)),
             |_| None,
+            |_, _| None,
             Some((5, texel(77))),
         )
         .expect("assembly succeeds");
@@ -824,6 +1161,7 @@ mod tests {
                 Ok(map_set_from(vec![9, 9, 9, 255], 1))
             },
             |_| None,
+            |_, _| None,
             None,
         )
         .unwrap_err();
@@ -877,6 +1215,9 @@ mod tests {
             size,
             |_| Ok(map_set_from(vec![200u8; (size * size * 4) as usize], size)),
             |tile| painted_base_color_tile(Some(&paint), tile, size, &device, &queue),
+            |tile, channel| {
+                painted_channel_tile(Some(&paint), tile, channel, size, &device, &queue)
+            },
             None,
         )
         .expect("assembly succeeds");

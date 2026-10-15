@@ -30,11 +30,12 @@
 //! to tile 1001 alone takes the lone-1001 path (whole-mesh AO, unsuffixed
 //! names — the driver's own single-tile rule in `umber-export`).
 //!
-//! V1 painted scope is Base Color ONLY (paint-per-channel compositing
-//! is a later slice): normal/AO keep their baked sources, and the
-//! dialog always shows which source feeds Base Color (the
-//! painted-source badge) so a flat-placeholder export never masquerades
-//! as painted.
+//! Painted scope (C2-6, 2026-10-15): Base Color from paint (or the graph,
+//! or the flat placeholder — the painted-source badge says which), AND
+//! every painted data channel (roughness, metallic, height, normal,
+//! emissive) flattened over its neutral (`bake_sources::flatten_over`).
+//! AO keeps its baked source. A channel nobody painted is not invented:
+//! outputs that need it are skipped and named, as before.
 //!
 //! Still synchronous: one AO bake + a handful of PNG writes at 512² is
 //! sub-second. The Bakes panel moved its bake onto a worker thread (wave 5,
@@ -293,6 +294,21 @@ pub fn tile_badge(tile_count: usize) -> Option<String> {
 /// The status line's Base Color note over every exported tile: one
 /// source named once when all tiles agree (plus the tile count when
 /// several), else each tile's source listed. Pure logic.
+/// The data maps painted on EVERY tile of the export, in
+/// `PAINTED_DATA_CHANNELS` order: the ones whose exported files are paint
+/// on all tiles, and therefore safe to name as painted in the status.
+pub fn painted_on_every_tile(tile_sets: &[bake_sources::TileMapSet]) -> Vec<umber_export::MapKind> {
+    let Some(first) = tile_sets.first() else {
+        return Vec::new();
+    };
+    first
+        .painted_channels
+        .iter()
+        .copied()
+        .filter(|kind| tile_sets.iter().all(|t| t.painted_channels.contains(kind)))
+        .collect()
+}
+
 pub fn base_note(sources: &[(u16, BaseColorSource)]) -> String {
     fn name(source: BaseColorSource) -> String {
         match source {
@@ -344,6 +360,8 @@ struct ExportOutcome {
     texture_set: String,
     /// Each exported tile's Base Color source, in export order.
     base_sources: Vec<(u16, BaseColorSource)>,
+    /// The data maps that came from paint on EVERY exported tile (C2-6).
+    painted_channels: Vec<umber_export::MapKind>,
     /// Present tiles skipped for owning no mesh geometry.
     skipped_tiles: Vec<u16>,
     bake_ms: u128,
@@ -635,6 +653,13 @@ impl ExportDialog {
                     ("files", FluentValue::from(names.join(", "))),
                 ];
                 let mut status = tr_args("export.done", args);
+                // The painted data maps, by their export tokens (the same
+                // `$srcMap` names the files carry, so untranslated by design).
+                if !outcome.painted_channels.is_empty() {
+                    let tokens: Vec<&str> =
+                        outcome.painted_channels.iter().map(|k| k.token()).collect();
+                    status.push_str(&format!(" [+ painted: {}]", tokens.join(", ")));
+                }
                 if !outcome.skipped.is_empty() {
                     let sources = skipped_display_sources(&outcome.texture_set);
                     let parts: Vec<String> = outcome
@@ -734,21 +759,45 @@ impl ExportDialog {
                 baked.context("building export map set")
             },
             |tile| bake_sources::painted_base_color_tile(paint, tile, size, device, queue),
+            |tile, channel| {
+                bake_sources::painted_channel_tile(paint, tile, channel, size, device, queue)
+            },
             graphed,
         )?;
         let bake_ms = bake_started.elapsed().as_millis();
+        // Outputs paint started get their unpainted data partners filled
+        // with neutrals (painted roughness keeps glTF's packed
+        // metallicRoughness, with a dielectric metallic).
+        let full_preset = self.build_preset();
+        let mut tile_sets = tile_sets;
+        for t in &mut tile_sets {
+            bake_sources::fill_unpainted_partners(
+                &mut t.set,
+                size,
+                &full_preset,
+                &t.painted_channels,
+            );
+        }
         let Some(first) = tile_sets.first() else {
             anyhow::bail!("no tile has mesh geometry to export");
         };
 
-        // Every tile's set carries the same kinds (AO + normal + Base
-        // Color), so one filter serves all tiles.
-        let available: Vec<umber_export::MapKind> = first.set.maps_iter().collect();
-        let full_preset = self.build_preset();
+        // The filter must hold for EVERY tile: a channel painted on one
+        // tile only is not available on the others, so an output needing
+        // it is skipped (named in the status) rather than half-written.
+        let available: Vec<umber_export::MapKind> = first
+            .set
+            .maps_iter()
+            .filter(|kind| {
+                tile_sets
+                    .iter()
+                    .all(|t| t.set.maps_iter().any(|k| k == *kind))
+            })
+            .collect();
         let (filtered, skipped) = filter_satisfiable(&full_preset, &available);
         if filtered.outputs.is_empty() {
             anyhow::bail!(
-                "preset '{}' has no outputs satisfiable from today's maps (AO + flat normal + Base Color)",
+                "preset '{}' has no outputs satisfiable from today's maps (AO + normal + Base Color + every painted channel)",
                 full_preset.name
             );
         }
@@ -806,6 +855,7 @@ impl ExportDialog {
             skipped,
             texture_set,
             base_sources: tile_sets.iter().map(|t| (t.tile, t.base_source)).collect(),
+            painted_channels: painted_on_every_tile(&tile_sets),
             skipped_tiles,
             bake_ms,
             write_ms,
