@@ -100,7 +100,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-9 | Per-texture-set layer stacks | 2 loop | todo |
 | C2-10 | Smart-material / smart-mask shelf | 2 loop | ◐ shelf + undoable apply landed; generator wiring + smart masks open |
 | C2-11 | Bitmap stamps → angle → jitter quartet | 2 loop | todo |
-| C2-12 | The colour picker (g4-color-picker) | 2 loop | todo |
+| C2-12 | The colour picker (g4-color-picker) | 2 loop | ◐ widget + 9 tests landed (unregistered: widgets/mod.rs lock); the 3 call sites follow registration |
 | C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 13 + 18 done (`c85a5a8`); 14 + 15 landed (the nightly runs + the leak-proof gate; the baseline reseed waits on its first run); 19 done (MSI dropped from the §10 row, cargo-dist 0.32.0); 17 done (generated UV'd FBX, Gate 0 asserts the unwrap); 16 (real-GPU budget row: Bessa's host) todo |
 | C2-20..22 | Security: panic-hunt the uncovered seams, plugin consent + size cap, Windows signing decision | 4 security | ◐ C2-20 ✓ (7 seams + the agent wire, no panic found), C2-21 ✓ (blake3 consent + 8 MiB cap); C2-22 (Windows signing) is Bessa's decision |
 | C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | todo |
