@@ -73,7 +73,7 @@ tobj = "4"
 ufbx = "0.11"
 # Pure-Rust USD: the `.usdc` crate reader (API facts verified against
 # docs/claw-artifacts/openusd/). Needs a let-chains toolchain (1.88+).
-openusd = "0.7.0"
+openusd = "0.8.0"
 
 # Internal crates
 umber-core = { path = "crates/umber-core" }

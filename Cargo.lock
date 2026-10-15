@@ -3358,9 +3358,9 @@ dependencies = [
 
 [[package]]
 name = "openusd"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d4f9438bafa6114b57ff495a22bca9ee51421d3c9c95b5609eafffad12c93e4"
+checksum = "54f38d869c64c96492e1a482fb621eda620d120d91dbe93072112ee315a8923c"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -3372,6 +3372,7 @@ dependencies = [
  "regex-lite",
  "strum",
  "thiserror 2.0.21",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

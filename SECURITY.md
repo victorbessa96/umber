@@ -23,7 +23,7 @@ surface is the **untrusted files it opens** and the **plugins it runs**:
 
 | Surface | Where | Current defences |
 |---|---|---|
-| Meshes (FBX, glTF, OBJ, USDA, USDC, USDZ) | `umber-mesh` | own parsers validate topology before indexing; USD nesting capped at 256; glTF accessors pre-validated; `load()` catches dependency panics as a typed error. In the mesh panic-hunt (`crates/umber-mesh/tests/panic_hunt_mesh.rs`, 5,400+ cases). **Known gap:** a corrupt `.usdc` count can make openusd 0.7.0 request a multi-TB allocation, which ABORTS the process (not catchable) — open upstream |
+| Meshes (FBX, glTF, OBJ, USDA, USDC, USDZ) | `umber-mesh` | own parsers validate topology before indexing; USD nesting capped at 256; glTF accessors pre-validated; `load()` catches dependency panics as a typed error. openusd 0.8.0 (since 2026-10-15) closes the crate-reader allocation ABORTS a panic boundary cannot catch — the 40 abort-class fuzz cases now return typed errors, pinned by the panic hunt on frozen 0.7.0 bytes. In the mesh panic-hunt (`crates/umber-mesh/tests/panic_hunt_mesh.rs`, 5,400+ cases) |
 | PSD import | `umber-app` | typed errors; in the panic-hunt |
 | Images (PNG/EXR/…) | `image` crate via `umber-export` | upstream decoder hardening |
 | `.spp` (Substance project) import | `crates/spp` | read-only, never-crash lint gate; in the panic-hunt |

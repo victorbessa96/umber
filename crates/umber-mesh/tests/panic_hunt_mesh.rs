@@ -193,54 +193,14 @@ const USDC_KNOWN: Known = &[
     ),
 ];
 
-/// usdc mutations that ABORT on a failed multi-TiB allocation: openusd
-/// sizes `vec![T::default(); count]` (`ReadExt::read_vec`) and its
-/// decompression buffers (`read_compressed`) from unchecked crate counts.
-/// Pinned by `bug_usdc_huge_count_allocation_aborts` (child process).
-const USDC_ABORTS: &[&str] = &[
-    "flip@104",
-    "flip@364",
-    "flip@390",
-    "flip@468",
-    "flip@546",
-    "flip@572",
-    "flip@611",
-    "flip@637",
-    "mutate seed=10",
-    "mutate seed=11",
-    "mutate seed=28",
-    "mutate seed=29",
-    "mutate seed=49",
-    "mutate seed=56",
-    "mutate seed=57",
-    "mutate seed=68",
-    "mutate seed=69",
-    "mutate seed=106",
-    "mutate seed=107",
-    "mutate seed=116",
-    "mutate seed=117",
-    "mutate seed=134",
-    "mutate seed=135",
-    "mutate seed=150",
-    "mutate seed=151",
-];
-const USDZ_ABORTS: &[&str] = &[
-    "crate-as-usdz flip@104",
-    "crate-as-usdz flip@364",
-    "crate-as-usdz flip@390",
-    "crate-as-usdz flip@468",
-    "crate-as-usdz flip@546",
-    "crate-as-usdz flip@572",
-    "crate-as-usdz flip@611",
-    "crate-as-usdz flip@637",
-    "crate-as-usdz mutate seed=10",
-    "crate-as-usdz mutate seed=11",
-    "crate-as-usdz mutate seed=28",
-    "crate-as-usdz mutate seed=29",
-    "crate-as-usdz mutate seed=49",
-    "crate-as-usdz mutate seed=56",
-    "crate-as-usdz mutate seed=57",
-];
+/// usdc mutations that ABORTED openusd 0.7.0 on a failed multi-TiB
+/// allocation (`ReadExt::read_vec` / `read_compressed` sized from
+/// unchecked crate counts) — 25 usdc cases, 15 usdz. EMPTY since openusd
+/// 0.8.0 (2026-10-15, mxpv/openusd#138): every one of them now runs, on
+/// the frozen 0.7.0 bytes, and must come back typed.
+/// `bug_usdc_huge_count_allocation_aborts` keeps the child-process pin.
+const USDC_ABORTS: &[&str] = &[];
+const USDZ_ABORTS: &[&str] = &[];
 
 /// A per-case wall-clock ceiling: a case over this is an allocation bomb
 /// or a hang and is reported as a finding.
@@ -785,7 +745,7 @@ fn usda_mutated_quad_never_panics() {
 fn usdc_mutated_crate_never_panics() {
     let dir = Dir::new("usdc");
     let mut hunt = Hunt::triaged("usdc", USDC_KNOWN, USDC_ABORTS);
-    let base = usdc_bytes(USDC_TRI_TEXT);
+    let base = usdc_frozen_0_7_0();
     let valid = dir.write("valid.usdc", &base);
     let mesh = umber_mesh::usdc::load_usdc(&valid).expect("valid fixture loads");
     assert_eq!(mesh.indices, vec![0, 1, 2]);
@@ -819,7 +779,7 @@ fn usdc_mutated_crate_never_panics() {
 fn usdz_garbage_and_mutated_packages_never_panic() {
     let dir = Dir::new("usdz");
     let mut hunt = Hunt::triaged("usdz", USDC_KNOWN, USDZ_ABORTS);
-    let layer = usdc_bytes(USDC_TRI_TEXT);
+    let layer = usdc_frozen_0_7_0();
     let package = usdz_package(&layer);
     for (i, (case, bytes)) in byte_mutations(&package, 100).into_iter().enumerate() {
         let p = dir.write(&format!("b{i}.usdz"), &bytes);
@@ -927,15 +887,28 @@ fn expect_typed_err_in_child(dir: &Dir, file: &str, bytes: &[u8]) {
 
 /// The usdc fixture with one byte inverted — the reduced shape of every
 /// openusd finding (the exhaustive single-flip map in the kill report).
-/// The length pin guards the offsets against a writer-output drift.
+///
+/// The bytes are FROZEN: `tests/assets/usdc_tri_openusd_0_7_0.usdc` is
+/// exactly what openusd 0.7.0's `CrateWriter` wrote for [`USDC_TRI_TEXT`]
+/// (869 bytes), committed as a file. The offsets below were mapped on those
+/// bytes, so they must not follow the writer: openusd 0.8.0 writes the same
+/// layer in 866 bytes, which would move every offset. Reading the frozen
+/// 0.7.0 bytes with the 0.8.0 reader is the regression test — the same
+/// corruptions that panicked or aborted 0.7.0 must now come back typed.
 fn usdc_flip(offset: usize) -> Vec<u8> {
-    let mut b = usdc_bytes(USDC_TRI_TEXT);
-    assert_eq!(
-        b.len(),
-        869,
-        "openusd writer output drifted; re-map the offsets"
-    );
+    let mut b = usdc_frozen_0_7_0();
     b[offset] ^= 0xff;
+    b
+}
+
+/// The frozen 0.7.0-written crate bytes (see [`usdc_flip`]). The mutation
+/// hunts seed from these too, so their case names (`flip@104`, `mutate
+/// seed=10`) keep naming the same bytes across openusd writer changes.
+fn usdc_frozen_0_7_0() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/assets/usdc_tri_openusd_0_7_0.usdc");
+    let b = std::fs::read(&path).expect("frozen 0.7.0 usdc fixture");
+    assert_eq!(b.len(), 869, "the frozen 0.7.0 fixture changed");
     b
 }
 
@@ -1145,7 +1118,8 @@ fn bug_gltf_position_dangling_accessor_panics() {
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 sizes Vec allocs from unchecked crate counts; multi-TiB alloc ABORTS (usdc/reader.rs read_vec, read_compressed)"]
+// FIXED 2026-10-15 (openusd 0.8.0, mxpv/openusd#138: read_vec checks the
+// count against the remaining bytes before allocating); was: BUG: openusd 0.7.0 sizes Vec allocs from unchecked crate counts; multi-TiB alloc ABORTS (usdc/reader.rs read_vec, read_compressed)
 fn bug_usdc_huge_count_allocation_aborts() {
     // 36: read_vec::<u32>; 104: read_vec::<Vec3f> (points);
     // 188: read_compressed::<u8>; 389: read_compressed::<u64>.
@@ -1156,7 +1130,7 @@ fn bug_usdc_huge_count_allocation_aborts() {
 }
 
 #[test]
-// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 read_vec count*size overflows: capacity overflow panic (usdc/reader.rs ReadExt::read_vec)
+// FIXED in openusd 0.8.0 (mxpv/openusd#138; was also caught by load()'s panic boundary); was: BUG: openusd 0.7.0 read_vec count*size overflows: capacity overflow panic (usdc/reader.rs ReadExt::read_vec)
 fn bug_openusd_read_vec_capacity_overflow() {
     let d = Dir::new("bug-usdc-readvec");
     for off in [39, 75, 107] {
@@ -1165,7 +1139,7 @@ fn bug_openusd_read_vec_capacity_overflow() {
 }
 
 #[test]
-// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 read_compressed estimated size overflows: capacity overflow panic (usdc/reader.rs read_compressed)
+// FIXED in openusd 0.8.0 (mxpv/openusd#138; was also caught by load()'s panic boundary); was: BUG: openusd 0.7.0 read_compressed estimated size overflows: capacity overflow panic (usdc/reader.rs read_compressed)
 fn bug_openusd_read_compressed_capacity_overflow() {
     let d = Dir::new("bug-usdc-readcomp");
     for off in [191, 392] {
@@ -1174,28 +1148,28 @@ fn bug_openusd_read_compressed_capacity_overflow() {
 }
 
 #[test]
-// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 integer decoding slices &data[offset..] unchecked (usdc/coding.rs:52)
+// FIXED in openusd 0.8.0 (mxpv/openusd#138; was also caught by load()'s panic boundary); was: BUG: openusd 0.7.0 integer decoding slices &data[offset..] unchecked (usdc/coding.rs:52)
 fn bug_openusd_decode_ints_slice_oob() {
     let d = Dir::new("bug-usdc-coding52");
     expect_typed_err(&d, "a.usdc", &usdc_flip(351));
 }
 
 #[test]
-// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 encoded_buffer_size `count * 2` overflows (usdc/coding.rs:22)
+// FIXED in openusd 0.8.0 (mxpv/openusd#138; was also caught by load()'s panic boundary); was: BUG: openusd 0.7.0 encoded_buffer_size `count * 2` overflows (usdc/coding.rs:22)
 fn bug_openusd_encoded_buffer_size_overflow() {
     let d = Dir::new("bug-usdc-coding22");
     expect_typed_err(&d, "a.usdc", &usdc_flip(358));
 }
 
 #[test]
-// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 lz4 chunk count != 0 hits todo!() (usdc/reader.rs:1562)
+// FIXED in openusd 0.8.0 (mxpv/openusd#138; was also caught by load()'s panic boundary); was: BUG: openusd 0.7.0 lz4 chunk count != 0 hits todo!() (usdc/reader.rs:1562)
 fn bug_openusd_lz4_chunked_todo() {
     let d = Dir::new("bug-usdc-lz4");
     expect_typed_err(&d, "a.usdc", &usdc_flip(200));
 }
 
 #[test]
-// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 compressed-flag value trips debug_assert!(!is_compressed) (usdc/reader.rs:656)
+// FIXED in openusd 0.8.0 (mxpv/openusd#138; was also caught by load()'s panic boundary); was: BUG: openusd 0.7.0 compressed-flag value trips debug_assert!(!is_compressed) (usdc/reader.rs:656)
 fn bug_openusd_compressed_value_debug_assert() {
     let d = Dir::new("bug-usdc-656");
     expect_typed_err(&d, "a.usdc", &usdc_flip(408));

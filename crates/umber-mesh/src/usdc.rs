@@ -1,5 +1,5 @@
 //! Binary crate (`.usdc`) and package (`.usdz`) mesh import via
-//! `openusd` 0.7.0 — the pure-Rust USD implementation.
+//! `openusd` 0.8.0 — the pure-Rust USD implementation.
 //!
 //! The 2026-10-09 audit's deferral ("usdc when a pure-Rust reader
 //! stabilizes") is void. This arm MIRRORS the `.usda` hand parser's
@@ -12,14 +12,13 @@
 //! shared attribute layer is the named follow-up when a third USD
 //! format forces it.
 //!
-//! Error contract: every failure Umber's own code can see maps to
-//! `ImportError::Usd`/`UsdBinary`; topology (counts, indices) is
-//! validated before any of it is used. NOT a never-panic guarantee:
-//! openusd 0.7.0's crate reader panics or aborts on some corrupt counts
-//! even in `safe` mode (allocation sized from unchecked counts, a
-//! `todo!()` on lz4 chunked data) — the 2026-10-14 panic hunt's findings
-//! #19-#24, pinned in `tests/panic_hunt_mesh.rs`. Those need an upstream
-//! fix or a process boundary; this module cannot catch an abort.
+//! Error contract: every failure maps to `ImportError::Usd`/`UsdBinary`;
+//! topology (counts, indices) is validated before any of it is used. The
+//! crate-reader panics and allocation aborts the 2026-10-14 panic hunt
+//! found in openusd 0.7.0 (findings #19-#24, including a multi-TB
+//! allocation that aborted the process) are fixed upstream in 0.8.0
+//! (mxpv/openusd#138); the hunt's `bug_usdc_*` reproducers are live tests
+//! of that. `umber_mesh::load`'s panic boundary stays as defence in depth.
 
 use std::path::Path;
 
@@ -34,8 +33,9 @@ pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
     if !bytes.starts_with(b"PXR-USDC") {
         return Err(ImportError::UsdBinary);
     }
-    let reader = std::io::Cursor::new(bytes);
-    let data = usdc::CrateData::open(reader, true)
+    // openusd 0.8: the crate reader takes owned bytes (`impl
+    // Into<AssetBuffer>`) instead of a `Read + Seek`.
+    let data = usdc::CrateData::open(bytes, true)
         .map_err(|e| ImportError::Usd(format!("usdc: open failed: {e}")))?;
     extract_first_mesh(&data)
 }
