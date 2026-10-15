@@ -20,9 +20,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Deserialize;
 
+use umber_bake::margin::MarginType;
+
 use crate::{
-    inspect_mesh, preset_by_name, print_skipped, run_bake, run_bake_transfer, run_export,
-    BakeFlags, BakeMap, TransferMapName, TransferSettings, UDIM_GRID,
+    inspect_mesh, parse_margin, preset_by_name, print_skipped, run_bake, run_bake_transfer,
+    run_export, BakeFlags, BakeMap, TransferMapName, TransferSettings, UDIM_GRID,
 };
 
 /// The recipe format version this build reads.
@@ -123,6 +125,27 @@ struct BakeStep {
     rays: u32,
     #[serde(default)]
     dilate: u32,
+    /// `"extend"` (absent = Extend, the pre-margin behavior) or
+    /// `"adjacent"` (Adjacent Faces, then Extend). Only meaningful with
+    /// `dilate > 0`, the margin width in texels.
+    #[serde(default = "default_margin", deserialize_with = "de_margin")]
+    margin: MarginType,
+}
+
+fn default_margin() -> MarginType {
+    MarginType::Extend
+}
+
+/// `margin`'s value through the CLI's own `--margin` parser, so the
+/// recipe and the flag accept exactly the same names. umber-bake's
+/// `MarginType` derives no serde.
+fn de_margin<'de, D: serde::Deserializer<'de>>(d: D) -> Result<MarginType, D::Error> {
+    let name = String::deserialize(d)?;
+    parse_margin(&name).map_err(|_| {
+        serde::de::Error::custom(format!(
+            "margin: unknown margin type '{name}' (expected 'extend' or 'adjacent')"
+        ))
+    })
 }
 
 /// `bake_transfer` — HIGH-to-LOW transfer (`maps` empty/absent = every
@@ -262,7 +285,7 @@ fn run_step(step: &BatchStep) -> Result<String> {
                 rays: s.rays,
                 dilate: s.dilate,
             };
-            let (set, written) = run_bake(&s.mesh, &s.out_dir, &flags, &maps)?;
+            let (set, written) = run_bake(&s.mesh, &s.out_dir, &flags, s.margin, &maps)?;
             Ok(format!(
                 "{} maps for '{set}' -> {}",
                 written.len(),
@@ -516,6 +539,48 @@ mod tests {
             parse_recipe(r#"{ "version": 1, "steps": [{ "inspect": { "mesh": "a.obj" } }] }"#)
                 .expect("validates");
         assert_eq!(recipe.on_error, OnError::Stop);
+    }
+
+    fn bake_step(fields: &str) -> Result<BakeStep> {
+        let text = format!(
+            r#"{{ "version": 1, "steps": [{{ "bake": {{ "mesh": "a.obj", "out_dir": "o"{fields} }} }}] }}"#
+        );
+        let recipe = parse_recipe(&text)?;
+        match recipe.steps.into_iter().next() {
+            Some(BatchStep::Bake(s)) => Ok(s),
+            _ => Err(anyhow::anyhow!("step 0 is not bake")),
+        }
+    }
+
+    #[test]
+    fn bake_margin_defaults_to_extend_and_parses_adjacent() {
+        // Absent (the design example and every pre-margin recipe): Extend.
+        assert_eq!(bake_step("").expect("no margin").margin, MarginType::Extend);
+        let BatchStep::Bake(design) = &parse_recipe(DESIGN_EXAMPLE).expect("validates").steps[0]
+        else {
+            panic!("step 0 is bake")
+        };
+        assert_eq!(design.margin, MarginType::Extend);
+        assert_eq!(
+            bake_step(r#", "margin": "extend""#).expect("extend").margin,
+            MarginType::Extend
+        );
+        let s = bake_step(r#", "margin": "adjacent", "dilate": 4"#).expect("adjacent");
+        assert_eq!((s.margin, s.dilate), (MarginType::AdjacentFaces, 4));
+    }
+
+    #[test]
+    fn bad_bake_margin_is_an_error_naming_the_field_and_path() {
+        let e = bake_step(r#", "margin": "bilinear""#)
+            .expect_err("unknown margin")
+            .to_string();
+        assert!(e.starts_with("steps[0].bake:"), "{e}");
+        assert!(e.contains("margin") && e.contains("bilinear"), "{e}");
+        // A non-string value is a type error, still under the step path.
+        let e = bake_step(r#", "margin": 1"#)
+            .expect_err("wrong type")
+            .to_string();
+        assert!(e.starts_with("steps[0].bake:"), "{e}");
     }
 
     #[test]
