@@ -231,6 +231,12 @@ pub fn bake_ao_tile(
 /// The AO params both entry points share: max_distance/bias per the
 /// bake tests' convention; the plane is unused by the mesh-fed path (the
 /// mesh's position map supplies ray origins).
+/// [`ao_params`] for the Bakes panel's bent-normal bake (C2-29), which
+/// needs the same rays, distance and bias as its AO.
+pub fn ao_params_for(rays: u32) -> umber_bake::AoBakeParams {
+    ao_params(rays)
+}
+
 fn ao_params(rays: u32) -> umber_bake::AoBakeParams {
     let mut params = umber_bake::AoBakeParams::new(
         10.0,

@@ -163,7 +163,7 @@ pub const MAX_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::MAX_SKEW_THRESHOLD_DEG
 
 /// Which mesh map the panel can bake (the four `umber-bake` entry points
 /// the panel drives; a subset of [`umber_mesh::MeshMapKind`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BakeSelection {
     /// Ambient occlusion (`umber_bake::ao::bake_ao_mesh`).
     Ao,
@@ -173,11 +173,49 @@ pub enum BakeSelection {
     Thickness,
     /// World-space position (`umber_bake::position`, re-encoded to RGBA8).
     Position,
+    /// Tangent-space normal (`umber_bake::normal_map`, OpenGL Y), the map
+    /// an export's normal slot needs (C2-29). Written LINEAR.
+    Normal,
+    /// World-space normal (`umber_bake::position`), each axis `[-1, 1]`
+    /// mapped to `[0, 255]`. Written LINEAR.
+    WorldNormal,
+    /// Per-triangle ID (`umber_bake::id`, the FNV-hashed triangle flavor):
+    /// a colour per mesh region for masking.
+    Id,
+    /// Bent normal (`umber_bake::ao::bake_ao_and_bent_mesh`): the average
+    /// unoccluded direction, at the panel's ray count. Written LINEAR.
+    BentNormal,
 }
 
 impl BakeSelection {
     /// Every selectable map, in bake order.
-    pub const ALL: [Self; 4] = [Self::Ao, Self::Curvature, Self::Thickness, Self::Position];
+    pub const ALL: [Self; 8] = [
+        Self::Ao,
+        Self::Curvature,
+        Self::Thickness,
+        Self::Position,
+        Self::Normal,
+        Self::WorldNormal,
+        Self::Id,
+        Self::BentNormal,
+    ];
+
+    /// What a fresh panel checks: the four original maps plus the normal
+    /// (an export's normal slot needs it). World normal, ID and bent
+    /// normal are opt-in: niche, and bent normal is a second AO bake.
+    pub const DEFAULT_ON: [Self; 5] = [
+        Self::Ao,
+        Self::Curvature,
+        Self::Thickness,
+        Self::Position,
+        Self::Normal,
+    ];
+
+    /// Whether this map holds vectors (written with the Linear transfer:
+    /// the sRGB curve would bend the directions).
+    pub fn is_vector(self) -> bool {
+        matches!(self, Self::Normal | Self::WorldNormal | Self::BentNormal)
+    }
 
     /// The checkbox / record label.
     pub fn label(self) -> String {
@@ -186,6 +224,13 @@ impl BakeSelection {
             Self::Curvature => tr("bakes.map-curvature"),
             Self::Thickness => tr("bakes.map-thickness"),
             Self::Position => tr("bakes.map-position"),
+            // `viewmode.normal` is the existing "Normal" key; the other
+            // three are untranslated until the catalogs (under a sibling
+            // lock) take `bakes.map-*` keys for them.
+            Self::Normal => tr("viewmode.normal"),
+            Self::WorldNormal => "World-space normal".to_owned(),
+            Self::Id => "ID".to_owned(),
+            Self::BentNormal => "Bent normal".to_owned(),
         }
     }
 
@@ -196,6 +241,10 @@ impl BakeSelection {
             Self::Curvature => umber_mesh::MeshMapKind::Curvature,
             Self::Thickness => umber_mesh::MeshMapKind::Thickness,
             Self::Position => umber_mesh::MeshMapKind::Position,
+            Self::Normal => umber_mesh::MeshMapKind::NormalBase,
+            Self::WorldNormal => umber_mesh::MeshMapKind::WorldSpaceNormal,
+            Self::Id => umber_mesh::MeshMapKind::Id,
+            Self::BentNormal => umber_mesh::MeshMapKind::BentNormal,
         }
     }
 }
@@ -402,7 +451,9 @@ impl BakeLogEntry {
             BakeSettingId::SkewThreshold
         } else if matches!(
             self.selection,
-            Some(BakeSelection::Ao) | Some(BakeSelection::Thickness)
+            Some(BakeSelection::Ao)
+                | Some(BakeSelection::Thickness)
+                | Some(BakeSelection::BentNormal)
         ) {
             BakeSettingId::Rays
         } else if matches!(self.selection, Some(BakeSelection::Position)) {
@@ -507,6 +558,10 @@ pub fn bake_map_of(selection: BakeSelection) -> umber_bake::BakeMap {
         BakeSelection::Curvature => umber_bake::BakeMap::Curvature,
         BakeSelection::Thickness => umber_bake::BakeMap::Thickness,
         BakeSelection::Position => umber_bake::BakeMap::Position,
+        BakeSelection::Normal => umber_bake::BakeMap::Normal,
+        BakeSelection::WorldNormal => umber_bake::BakeMap::WorldSpaceNormal,
+        BakeSelection::Id => umber_bake::BakeMap::Id,
+        BakeSelection::BentNormal => umber_bake::BakeMap::BentNormal,
     }
 }
 
@@ -634,10 +689,9 @@ impl BakeJobHandle {
 /// other method is pure logic with no GPU or UI dependency.
 pub struct BakesPanel {
     resolution: u32,
-    bake_ao: bool,
-    bake_curvature: bool,
-    bake_thickness: bool,
-    bake_position: bool,
+    /// The checked maps (C2-29: eight selectable, so a set, not one bool
+    /// per map).
+    maps: std::collections::BTreeSet<BakeSelection>,
     /// Whether the skew deviation channel bakes (default off, like the
     /// bent-normal toggle: a correction mask, opt-in per bake).
     bake_skew: bool,
@@ -691,10 +745,7 @@ impl BakesPanel {
     pub fn new(output_dir: PathBuf) -> Self {
         Self {
             resolution: DEFAULT_RESOLUTION,
-            bake_ao: true,
-            bake_curvature: true,
-            bake_thickness: true,
-            bake_position: true,
+            maps: BakeSelection::DEFAULT_ON.into_iter().collect(),
             bake_skew: false,
             rays: DEFAULT_RAYS,
             dilation_iterations: DEFAULT_DILATION_ITERATIONS,
@@ -813,22 +864,16 @@ impl BakesPanel {
 
     /// Enables or disables one map's checkbox.
     pub fn set_map_enabled(&mut self, selection: BakeSelection, enabled: bool) {
-        match selection {
-            BakeSelection::Ao => self.bake_ao = enabled,
-            BakeSelection::Curvature => self.bake_curvature = enabled,
-            BakeSelection::Thickness => self.bake_thickness = enabled,
-            BakeSelection::Position => self.bake_position = enabled,
+        if enabled {
+            self.maps.insert(selection);
+        } else {
+            self.maps.remove(&selection);
         }
     }
 
     /// Whether one map's checkbox is on.
     pub fn is_map_enabled(&self, selection: BakeSelection) -> bool {
-        match selection {
-            BakeSelection::Ao => self.bake_ao,
-            BakeSelection::Curvature => self.bake_curvature,
-            BakeSelection::Thickness => self.bake_thickness,
-            BakeSelection::Position => self.bake_position,
-        }
+        self.maps.contains(&selection)
     }
 
     /// The currently-checked maps, in bake order.
@@ -842,11 +887,7 @@ impl BakesPanel {
     /// Whether at least one map is checked (the skew channel counts: a
     /// skew-only bake writes just the correction mask).
     pub fn any_selected(&self) -> bool {
-        self.bake_ao
-            || self.bake_curvature
-            || self.bake_thickness
-            || self.bake_position
-            || self.bake_skew
+        !self.maps.is_empty() || self.bake_skew
     }
 
     /// Whether the skew deviation channel bakes.
@@ -1012,10 +1053,7 @@ impl BakesPanel {
         for row in &mut self.sets {
             row.enabled = true;
         }
-        self.bake_ao = true;
-        self.bake_curvature = true;
-        self.bake_thickness = true;
-        self.bake_position = true;
+        self.maps = BakeSelection::ALL.into_iter().collect();
         self.bake_skew = true;
     }
 
@@ -1280,18 +1318,12 @@ impl BakesPanel {
         // tiles, so the selector lives here rather than in its own group).
         let maps_title = tr("bakes.maps-group");
         ParamGroup::new("bakes-maps", maps_title.as_str()).show(ui, |group| {
-            group
-                .ui
-                .checkbox(&mut self.bake_ao, BakeSelection::Ao.label());
-            group
-                .ui
-                .checkbox(&mut self.bake_curvature, BakeSelection::Curvature.label());
-            group
-                .ui
-                .checkbox(&mut self.bake_thickness, BakeSelection::Thickness.label());
-            group
-                .ui
-                .checkbox(&mut self.bake_position, BakeSelection::Position.label());
+            for selection in BakeSelection::ALL {
+                let mut on = self.maps.contains(&selection);
+                if group.ui.checkbox(&mut on, selection.label()).changed() {
+                    self.set_map_enabled(selection, on);
+                }
+            }
             group.ui.checkbox(&mut self.bake_skew, tr("bakes.map-skew"));
 
             if let Some(mesh) = ctx.mesh {
@@ -1799,8 +1831,25 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                 umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                     .context("position dilation")?
             }
+            other => {
+                // C2-29: the four maps the panel did not bake before, the
+                // same bakers and encodings `umber-cli bake-all` uses.
+                let raw = bake_extra_map(device, queue, mesh, size, rays, other)?;
+                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                let filled = pad
+                    .fill(mesh, seams.as_ref(), raw)
+                    .with_context(|| format!("{other:?} margin"))?;
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                    .with_context(|| format!("{other:?} dilation"))?
+            }
         };
-        umber_export::png::write_png(&path, size, size, &bytes, umber_export::png::Transfer::Srgb)
+        // Vectors are data: the sRGB curve would bend the directions.
+        let transfer = if selection.is_vector() {
+            umber_export::png::Transfer::Linear
+        } else {
+            umber_export::png::Transfer::Srgb
+        };
+        umber_export::png::write_png(&path, size, size, &bytes, transfer)
             .with_context(|| format!("writing {}", path.display()))?;
         records.push(BakeRecord {
             selection: Some(selection),
@@ -1812,6 +1861,82 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         });
     }
     Ok(records)
+}
+
+/// One whole-mesh bake for the maps C2-29 added (raw RGBA8, before the
+/// margin + dilation post-pass). Normal, world normal, ID and bent normal
+/// go through the same `umber_bake` entry points and encodings as
+/// `umber-cli bake-all`, so a map baked here and one baked headless match.
+fn bake_extra_map(
+    device: &umber_gpu::WgpuDevice,
+    queue: &umber_gpu::WgpuQueue,
+    mesh: &umber_mesh::MeshData,
+    size: u32,
+    rays: u32,
+    selection: BakeSelection,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+    Ok(match selection {
+        BakeSelection::Normal => umber_bake::normal_map::bake_tangent_normal_mesh(
+            device,
+            queue,
+            mesh,
+            size,
+            size,
+            &umber_bake::normal_map::TangentNormalParams::default(),
+        )
+        .context("normal bake")?,
+        BakeSelection::WorldNormal => {
+            let params = umber_bake::position::PositionMapParams {
+                width: size,
+                height: size,
+            };
+            let f32map = umber_bake::position::bake_world_normal_map(device, queue, mesh, &params)
+                .context("world normal bake")?;
+            encode_unit_vectors_rgba8(&f32map)
+        }
+        BakeSelection::Id => umber_bake::id::bake_id_mesh(
+            device,
+            queue,
+            mesh,
+            &umber_bake::IdBakeParams {
+                flavor: umber_bake::IdFlavor::Triangle,
+                width: size,
+                height: size,
+            },
+        )
+        .context("id bake")?,
+        BakeSelection::BentNormal => {
+            umber_bake::ao::bake_ao_and_bent_mesh(
+                device,
+                queue,
+                mesh,
+                size,
+                size,
+                &crate::bake_sources::ao_params_for(rays).with_bent_normals(true),
+            )
+            .context("bent normal bake")?
+            .bent
+        }
+        other => anyhow::bail!("{other:?} is baked by its own arm"),
+    })
+}
+
+/// World-space unit normals (RGBA32F, `w` = coverage) as RGBA8: each axis
+/// `[-1, 1]` → `[0, 255]`, covered texels opaque, uncovered ones zero
+/// (the `umber-cli` encoding).
+pub fn encode_unit_vectors_rgba8(f32map: &[f32]) -> Vec<u8> {
+    let mut out = vec![0u8; f32map.len()];
+    for (texel, px) in f32map.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+        if texel[3] > 0.5 {
+            for axis in 0..3 {
+                let v = (texel[axis] + 1.0) * 0.5;
+                px[axis] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+            px[3] = 255;
+        }
+    }
+    out
 }
 
 /// The CPU half of the UV-padding post-pass: the margin strategy and its
@@ -1926,6 +2051,78 @@ fn encode_position_rgba8(position_f32: &[f32]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unit_vectors_encode_like_the_cli() {
+        let f = [0.0, 0.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0, 0.3, 0.3, 0.3, 0.0];
+        assert_eq!(
+            encode_unit_vectors_rgba8(&f),
+            vec![128, 128, 255, 255, 0, 255, 128, 255, 0, 0, 0, 0],
+            "+Z up, -X/+Y, and an uncovered texel stays clear"
+        );
+    }
+
+    #[test]
+    fn vector_maps_are_written_linear_and_the_rest_srgb() {
+        for selection in BakeSelection::ALL {
+            let vector = matches!(
+                selection,
+                BakeSelection::Normal | BakeSelection::WorldNormal | BakeSelection::BentNormal
+            );
+            assert_eq!(selection.is_vector(), vector, "{selection:?}");
+        }
+        // Every DEFAULT_ON entry is in ALL, and the normal is on by default.
+        assert!(BakeSelection::DEFAULT_ON
+            .iter()
+            .all(|s| BakeSelection::ALL.contains(s)));
+        assert!(BakeSelection::DEFAULT_ON.contains(&BakeSelection::Normal));
+    }
+
+    #[test]
+    fn the_four_new_maps_bake_on_the_gpu_and_cover_the_quad() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let quad = umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+        };
+        let size = 64;
+        for selection in [
+            BakeSelection::Normal,
+            BakeSelection::WorldNormal,
+            BakeSelection::Id,
+            BakeSelection::BentNormal,
+        ] {
+            let bytes = bake_extra_map(&device, &queue, &quad, size, 8, selection)
+                .unwrap_or_else(|e| panic!("{selection:?}: {e:#}"));
+            assert_eq!(bytes.len(), (size * size * 4) as usize, "{selection:?}");
+            let covered = bytes.chunks_exact(4).filter(|px| px[3] > 0).count();
+            assert!(
+                covered > (size * size / 2) as usize,
+                "{selection:?} covers the quad: {covered}"
+            );
+            // The centre texel of a flat +Z quad: the tangent normal is
+            // "up" (B high), and the world normal is +Z (B = 255).
+            let centre = ((size / 2) * size + size / 2) as usize * 4;
+            let px = &bytes[centre..centre + 4];
+            match selection {
+                BakeSelection::Normal => assert!(px[2] > 200, "tangent normal up: {px:?}"),
+                BakeSelection::WorldNormal => assert_eq!(px[2], 255, "world +Z: {px:?}"),
+                _ => {}
+            }
+        }
+        assert!(bake_extra_map(&device, &queue, &quad, size, 8, BakeSelection::Ao).is_err());
+    }
+
     use super::*;
 
     fn panel() -> BakesPanel {
@@ -1941,7 +2138,7 @@ mod tests {
         assert_eq!(p.rays(), 16);
         assert_eq!(p.dilation_iterations(), DEFAULT_DILATION_ITERATIONS);
         assert_eq!(p.dilation_iterations(), 16);
-        assert_eq!(p.selected_maps(), BakeSelection::ALL.to_vec());
+        assert_eq!(p.selected_maps(), BakeSelection::DEFAULT_ON.to_vec());
         assert!(p.any_selected());
         assert_eq!(p.status(), "No bake yet.");
         assert!(p.last_records().is_empty());
@@ -1969,7 +2166,11 @@ mod tests {
     fn selection_toggling_drives_any_selected() {
         let mut p = panel();
         for selection in BakeSelection::ALL {
-            assert!(p.is_map_enabled(selection));
+            assert_eq!(
+                p.is_map_enabled(selection),
+                BakeSelection::DEFAULT_ON.contains(&selection),
+                "{selection:?}"
+            );
         }
         for selection in BakeSelection::ALL {
             p.set_map_enabled(selection, false);
@@ -2019,6 +2220,10 @@ mod tests {
             (BakeSelection::Curvature, "curvature"),
             (BakeSelection::Thickness, "thickness"),
             (BakeSelection::Position, "position"),
+            (BakeSelection::Normal, "normal_base"),
+            (BakeSelection::WorldNormal, "world_space_normal"),
+            (BakeSelection::Id, "id"),
+            (BakeSelection::BentNormal, "bent_normal"),
         ] {
             let path = p.output_path_for("Sword", selection);
             assert_eq!(
@@ -2104,9 +2309,9 @@ mod tests {
         );
         let plan = p.bake_plan(&present);
         let tiles: Vec<u16> = plan.jobs.iter().map(|j| j.tile).collect();
-        // AO covers both tiles; curvature/thickness/position bake whole-
-        // mesh for 1001 and are skipped (named) for 1002.
-        assert_eq!(tiles, vec![1001, 1001, 1001, 1001, 1002]);
+        // AO covers both tiles; curvature/thickness/position/normal bake
+        // whole-mesh for 1001 and are skipped (named) for 1002.
+        assert_eq!(tiles, vec![1001, 1001, 1001, 1001, 1001, 1002]);
         assert!(plan.tiled);
     }
 
@@ -2117,7 +2322,7 @@ mod tests {
         p.tiles_mut().sync(&present);
         p.tiles_mut().set_selected(1001, false);
         let plan = p.bake_plan(&present);
-        // Only tile 1002 remains: AO per tile; the three whole-mesh maps
+        // Only tile 1002 remains: AO per tile; the four whole-mesh maps
         // have no 1002 baker in v1 and are reported, not mis-written.
         assert_eq!(
             plan.jobs,
@@ -2129,6 +2334,7 @@ mod tests {
                 (1002, BakeSelection::Curvature),
                 (1002, BakeSelection::Thickness),
                 (1002, BakeSelection::Position),
+                (1002, BakeSelection::Normal),
             ]
         );
         assert!(plan.tiled);
@@ -2183,7 +2389,7 @@ mod tests {
         assert!(!p.tiles_mut().nothing_selected());
         assert_eq!(p.tiles_mut().tiles(), vec![1001]);
         let plan = p.bake_plan(&present);
-        let expected: Vec<BakeJob> = BakeSelection::ALL
+        let expected: Vec<BakeJob> = BakeSelection::DEFAULT_ON
             .into_iter()
             .map(|s| job(s, 1001, BakeSource::WholeMesh))
             .collect();
@@ -2399,6 +2605,7 @@ mod tests {
             BakeSelection::Curvature,
             BakeSelection::Thickness,
             BakeSelection::Position,
+            BakeSelection::Normal,
         ] {
             p.set_map_enabled(selection, false);
         }
@@ -2516,6 +2723,13 @@ mod tests {
             (BakeSelection::Curvature, umber_bake::BakeMap::Curvature),
             (BakeSelection::Thickness, umber_bake::BakeMap::Thickness),
             (BakeSelection::Position, umber_bake::BakeMap::Position),
+            (BakeSelection::Normal, umber_bake::BakeMap::Normal),
+            (
+                BakeSelection::WorldNormal,
+                umber_bake::BakeMap::WorldSpaceNormal,
+            ),
+            (BakeSelection::Id, umber_bake::BakeMap::Id),
+            (BakeSelection::BentNormal, umber_bake::BakeMap::BentNormal),
         ] {
             assert_eq!(bake_map_of(selection), map, "{selection:?}");
         }
@@ -2673,7 +2887,7 @@ mod tests {
         let by_dilation = fire_after(&|p| p.set_dilation_iterations(8))
             .expect("a dilation change schedules a rebake");
         assert_eq!(by_margin.maps, by_dilation.maps);
-        assert_eq!(by_margin.maps, BakeSelection::ALL.to_vec());
+        assert_eq!(by_margin.maps, BakeSelection::DEFAULT_ON.to_vec());
         // An unchanged margin dirties nothing.
         assert!(fire_after(&|p| p.set_margin(MarginType::Extend)).is_none());
     }
