@@ -104,8 +104,9 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 }
 
 /// The shell's key table: most modifiers first (see the module docs).
-/// Seventeen bindings: seven chords (incl. Ctrl+Shift+P the palette,
-/// Ctrl+, Preferences, Ctrl+Space maximize) + six letter keys + the `[` /
+/// Nineteen bindings: nine chords (incl. Ctrl+Shift+P the palette,
+/// Ctrl+, Preferences, Ctrl+Space maximize, Ctrl+PgUp/PgDn workspaces) +
+/// six letter keys + the `[` /
 /// `]` brush size steps + F3 + Tab (Hide UI). Ctrl+N stays unbound in v1
 /// (the toolbar module's judgment call), so `NewProject` has no row.
 pub const BINDINGS: &[(Binding, ShellAction)] = &[
@@ -116,6 +117,8 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::O, Chord::Cmd), ShellAction::OpenProject),
     (bind(Key::Comma, Chord::Cmd), ShellAction::Preferences),
     (bind(Key::Space, Chord::Cmd), ShellAction::ToggleMaximize),
+    (bind(Key::PageDown, Chord::Cmd), ShellAction::NextWorkspace),
+    (bind(Key::PageUp, Chord::Cmd), ShellAction::PrevWorkspace),
     (bind(Key::W, Chord::Bare), ShellAction::ToggleWireframe),
     (bind(Key::G, Chord::Bare), ShellAction::ToggleGrid),
     (bind(Key::V, Chord::Bare), ShellAction::CycleViewMode),
@@ -396,6 +399,8 @@ mod tests {
                     | ShellAction::CommandPalette
                     | ShellAction::Preferences
                     | ShellAction::ToggleMaximize
+                    | ShellAction::NextWorkspace
+                    | ShellAction::PrevWorkspace
             );
             assert_eq!(through_text, expected, "{action:?} through a text field");
         }

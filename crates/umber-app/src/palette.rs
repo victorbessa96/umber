@@ -105,6 +105,8 @@ pub const CATALOG: &[Entry] = &[
     ),
     e(ShellAction::ToggleHideUi, "shell.hide-ui", "menu.window"),
     e(ShellAction::ToggleMaximize, "shell.maximize", "menu.window"),
+    e(ShellAction::NextWorkspace, "workspace.next", "menu.window"),
+    e(ShellAction::PrevWorkspace, "workspace.prev", "menu.window"),
 ];
 
 /// Most results shown at once.

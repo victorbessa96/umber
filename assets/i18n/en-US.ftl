@@ -771,3 +771,13 @@ tip =
     .invert-mask = Invert the quick mask.
     .palette-title = Command palette
     .palette = Find and run any command by name.
+
+## Workspaces (GUI plan g5-workspaces)
+
+workspace =
+    .paint = Paint
+    .bake = Bake
+    .export = Export
+    .graph = Graph
+    .next = Next Workspace
+    .prev = Previous Workspace

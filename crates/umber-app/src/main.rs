@@ -139,6 +139,7 @@ mod preferences;
 mod recent;
 mod rich_tooltip;
 mod shell_menu;
+mod workspaces;
 use umber_paint::material_layer;
 mod mesh_map_import;
 use umber_paint::paint_state;
@@ -1031,6 +1032,8 @@ pub struct UmberApp {
     about_open: bool,
     /// Hide UI / maximize (GUI plan g5-focus-modes).
     focus: shell_menu::FocusState,
+    /// Named layouts (GUI plan g5-workspaces).
+    workspaces: workspaces::Workspaces,
     /// A bare Tab arrived with nothing focused: `raw_input_hook` took it
     /// out of egui's input (where it would move keyboard focus) and the
     /// frame turns it into Hide UI.
@@ -1176,6 +1179,7 @@ impl UmberApp {
             pending_revert: false,
             about_open: false,
             focus: shell_menu::FocusState::default(),
+            workspaces: workspaces::Workspaces::default(),
             tab_hide_pending: false,
         })
     }
@@ -1373,6 +1377,13 @@ impl UmberApp {
                     &mut self.dock,
                     Panel::Viewport,
                 );
+            }
+            ShellAction::NextWorkspace | ShellAction::PrevWorkspace => {
+                let to = self
+                    .workspaces
+                    .active()
+                    .cycle(action == ShellAction::NextWorkspace);
+                self.switch_workspace(to);
             }
             ShellAction::ToggleMaximize => {
                 let keep = shell_menu::maximize_target(&mut self.dock);
@@ -1985,6 +1996,13 @@ impl UmberApp {
         open
     }
 
+    /// Switches the dock to workspace `to`, leaving any focus mode first so
+    /// the outgoing workspace stores its real layout.
+    fn switch_workspace(&mut self, to: workspaces::Workspace) {
+        self.focus.restore(&mut self.dock);
+        self.workspaces.switch(to, &mut self.dock);
+    }
+
     fn open_project(&mut self) {
         let Some(dir) = rfd::FileDialog::new().pick_folder() else {
             return;
@@ -2578,7 +2596,7 @@ impl eframe::App for UmberApp {
                 });
                 if ui.button(tr("menu.reset-layout")).clicked() {
                     self.focus.restore(&mut self.dock);
-                    self.dock = shell_menu::default_dock();
+                    self.dock = self.workspaces.reset_active();
                     ui.close();
                 }
             });
@@ -2588,6 +2606,18 @@ impl eframe::App for UmberApp {
                     ui.close();
                 }
             });
+            // The workspace tabs after the menus (Blender's top row).
+            ui.separator();
+            for workspace in workspaces::Workspace::ALL {
+                let active = self.workspaces.active() == workspace;
+                if ui
+                    .selectable_label(active, tr(workspace.label_key()))
+                    .clicked()
+                    && !active
+                {
+                    self.switch_workspace(workspace);
+                }
+            }
         });
 
         // Shell chrome (GUI Phase 0b): the toolbar under the menu bar, the

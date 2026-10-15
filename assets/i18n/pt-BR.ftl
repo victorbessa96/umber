@@ -760,3 +760,13 @@ tip =
     .invert-mask = Inverter a máscara rápida.
     .palette-title = Paleta de comandos
     .palette = Encontrar e executar qualquer comando pelo nome.
+
+## Espaços de trabalho (plano de GUI g5-workspaces)
+
+workspace =
+    .paint = Pintura
+    .bake = Bake
+    .export = Exportação
+    .graph = Grafo
+    .next = Próximo espaço de trabalho
+    .prev = Espaço de trabalho anterior
