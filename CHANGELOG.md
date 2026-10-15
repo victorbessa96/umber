@@ -8,6 +8,13 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Your work is safe: closing with unsaved edits asks first, Ctrl+S re-saves
+  in place (Ctrl+Shift+S is Save As), unsaved work (paint included, even a
+  never-saved document) is snapshotted every two minutes and offered back
+  after a crash, and a crash leaves a report the next launch shows
+  (C2-1, C2-2, C2-3, C2-4)
+- One undo timeline: Ctrl+Z steps back through strokes and layer edits
+  together, and History rows travel both (C2-7)
 - Bitmap stamps: brushes can paint a stamp image instead of a round dab,
   rotated by a fixed angle, the stroke direction or a random angle, with
   size / angle / position / flow jitter (engine + brush; the panel rows

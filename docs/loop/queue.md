@@ -91,7 +91,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 |---|---|---|---|
 | C2-1 | Quit guard (dirty close asks Save / Discard / Cancel) | 1 data | ✓ done (CancelClose + the confirm window; GUI smoke pending) |
 | C2-2 | Panic hook + crash report + next-launch offer | 1 data | ✓ done (hook first in main(), pending reports offered once as sticky notices) |
-| C2-3 | Pixel autosave + "Recover unsaved work?" | 1 data | todo |
+| C2-3 | Pixel autosave + "Recover unsaved work?" | 1 data | ✓ done (120 s full snapshots to the state dir; launch prompt; desktop kill-9 smoke pending) |
 | C2-4 | Ctrl+S silent re-save; Save As = Ctrl+Shift+S | 1 data | ✓ done |
 | C2-5 | Paint-channel targeting (Brush panel picker → `set_active_channel`) | 2 loop | ✓ done (the Channel picker; export of the painted channels = C2-6) |
 | C2-6 | Export every painted channel through the presets | 2 loop | ✓ done (neutrals + partner fill; GPU paint→glTF→ORM test) |
