@@ -1807,6 +1807,48 @@ impl PaintState {
         self.projection
     }
 
+    /// Adopts the active brush preset's dab parameters (color, alpha,
+    /// hardness, pressure gamma, falloff curve; wash mode rides its own
+    /// [`Self::sync_wash_mode`]) between strokes only: a mid-stroke change
+    /// would split one stroke's dabs across two brushes.
+    ///
+    /// Before 2026-10-15 nothing called anything like this: the session's
+    /// `brush` stayed `BrushParams::default()` for its whole life, so the
+    /// preset editor's alpha / hardness / gamma / falloff / color never
+    /// reached a stroke (only the eyedropper's `set_brush_color` did).
+    /// `preserve_color` keeps the session's current color when the caller
+    /// has an override (an eyedropper pick the preset does not know about).
+    pub fn sync_brush_params(&mut self, params: &BrushParams, preserve_color: bool) {
+        if self.stroking {
+            return;
+        }
+        let color = self.brush.color;
+        self.brush = BrushParams {
+            wash_mode: self.brush.wash_mode,
+            ..*params
+        };
+        if preserve_color {
+            self.brush.color = color;
+        }
+    }
+
+    /// The session's current dab parameters (what the next stroke paints
+    /// with).
+    pub fn brush_params(&self) -> &BrushParams {
+        &self.brush
+    }
+
+    /// Adopts the active preset's stroke method between strokes (Space,
+    /// Airbrush, Dash, Drag Dot). An invalid method is refused and the
+    /// current one kept (the conditioner validates); returns whether it
+    /// was adopted.
+    pub fn sync_stroke_method(&mut self, method: umber_brush::StrokeMethod) -> bool {
+        if self.stroking || self.conditioner.method() == method {
+            return false;
+        }
+        self.conditioner.set_method(method).is_ok()
+    }
+
     /// Adopts the panel's paint projection (between strokes only — a mode
     /// swap mid-stroke would split one stroke across two surfaces).
     pub fn sync_projection(&mut self, mode: PaintProjection) {
@@ -3706,6 +3748,16 @@ impl PaintState {
     /// per-frame drain turns commits into rows. A stroke that recorded
     /// nothing (identity, or mask-mode) queues nothing.
     pub fn end_stroke(&mut self) {
+        // The stroke method's tail (Drag Dot's single dab at the release
+        // point) lands BEFORE the stroke records, so it joins the same
+        // undo step. Space / Airbrush / Dash return nothing here.
+        if self.stroking {
+            let tail = self.conditioner.finish();
+            if !tail.is_empty() {
+                let radius = BRUSH_RADIUS_TEXELS * self.brush_size;
+                self.stage_stamps(self.active_tile, &tail, radius, true);
+            }
+        }
         self.stroking = false;
         // [m7] The owner-deleted-mid-stroke boundary: the verdict is one
         // frame old, and kinds never mutate, so a live stroke's owner can
@@ -4551,7 +4603,22 @@ impl PaintState {
             return;
         }
         let radius = BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale);
-        let dabs = DabAdapter::stamps_to_dabs(&stamps, radius, &self.brush);
+        self.stage_stamps(tile, &stamps, radius, expand_seams);
+    }
+
+    /// Stamps planned dabs onto `tile` through every stroke hook (layer
+    /// mask, quick mask, retouch, symmetry, the per-layer pool staging):
+    /// the tail of [`Self::push_event_styled`], shared with the stroke
+    /// method's end-of-stroke tail (Drag Dot) in [`Self::end_stroke`] so a
+    /// finishing dab takes exactly the path a live dab takes.
+    fn stage_stamps(
+        &mut self,
+        tile: u16,
+        stamps: &[umber_brush::DabPlan],
+        radius: f32,
+        expand_seams: bool,
+    ) {
+        let dabs = DabAdapter::stamps_to_dabs(stamps, radius, &self.brush);
         if dabs.is_empty() {
             return;
         }
@@ -5248,6 +5315,63 @@ mod tests {
         let b = local_texel(source, FIRST_TILE, 512.0);
         let off = clone_offset_texels(offset_uv, 512.0);
         assert_eq!([a[0] + off[0], a[1] + off[1]], b);
+    }
+
+    #[test]
+    fn preset_params_and_method_reach_the_session_between_strokes_only() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        let preset = BrushParams {
+            color: [0.1, 0.9, 0.2, 1.0],
+            alpha: 0.4,
+            hardness: 0.9,
+            pressure_gamma: 2.0,
+            wash_mode: WashMode::BuildUp,
+            falloff: umber_brush::FalloffCurve::Sharp,
+        };
+        s.sync_brush_params(&preset, false);
+        assert_eq!(s.brush_params().alpha, 0.4);
+        assert_eq!(s.brush_params().hardness, 0.9);
+        assert_eq!(s.brush_params().falloff, umber_brush::FalloffCurve::Sharp);
+        assert_eq!(s.brush_params().color, [0.1, 0.9, 0.2, 1.0]);
+        // An eyedropper override survives a sync that preserves color.
+        s.set_brush_color([1.0, 1.0, 0.0, 1.0]);
+        s.sync_brush_params(&preset, true);
+        assert_eq!(s.brush_params().color, [1.0, 1.0, 0.0, 1.0]);
+        // Mid-stroke, nothing changes.
+        s.begin_stroke(Pos2::new(0.5, 0.5));
+        let mut other = preset;
+        other.alpha = 0.1;
+        s.sync_brush_params(&other, false);
+        assert_eq!(s.brush_params().alpha, 0.4, "a stroke keeps its brush");
+        assert!(!s.sync_stroke_method(umber_brush::StrokeMethod::DragDot));
+        s.end_stroke();
+        // Between strokes the method is adopted; an invalid one is refused.
+        assert!(s.sync_stroke_method(umber_brush::StrokeMethod::DragDot));
+        assert!(!s.sync_stroke_method(umber_brush::StrokeMethod::Airbrush { rate_hz: -1.0 }));
+    }
+
+    #[test]
+    fn drag_dot_stamps_once_at_release_in_the_same_undo_step() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        assert!(s.sync_stroke_method(umber_brush::StrokeMethod::DragDot));
+        s.begin_stroke(Pos2::new(0.2, 0.2));
+        for i in 1..=20 {
+            s.extend_stroke(Pos2::new(0.2 + 0.02 * i as f32, 0.2));
+        }
+        let before = s.staged_dab_count();
+        assert_eq!(before, 0, "Drag Dot paints nothing while dragging");
+        s.end_stroke();
+        assert!(s.staged_dab_count() > before, "one dab lands at release");
+        assert!(
+            s.can_undo_stroke(),
+            "the release dab is in the stroke's undo step"
+        );
     }
 
     #[test]

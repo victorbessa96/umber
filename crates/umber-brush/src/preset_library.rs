@@ -280,6 +280,8 @@ mod tests {
             spacing: SpacingConfig::default(),
             alpha_curve: crate::preset::ControlCurve::identity(),
             radius_curve: crate::preset::ControlCurve::identity(),
+            stroke_method: Default::default(),
+            size: 1.0,
         }
     }
 

@@ -323,6 +323,15 @@ viewmode =
 
 brush =
     .no-preset = No preset selected
+    .size = Size
+    .method = Stroke method
+    .method-space = Space
+    .method-airbrush = Airbrush
+    .method-dash = Dash
+    .method-drag-dot = Drag dot
+    .method-rate = Rate
+    .method-dash-ratio = Dash ratio
+    .method-dash-length = Dash length
     .preset = Preset
     .preset-none = None
     .broken = { $count } broken

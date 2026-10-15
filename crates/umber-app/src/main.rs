@@ -445,6 +445,28 @@ impl TabViewer for PanelViewer<'_> {
                             preset.params.wash_mode
                         });
                     paint.sync_wash_mode(wash);
+                    // ... and the preset's dab params, stroke method and
+                    // size (brush-wiring, 2026-10-15). Before this, the
+                    // session painted BrushParams::default() forever: the
+                    // preset editor's alpha / hardness / gamma / falloff /
+                    // color never reached a stroke.
+                    // Live size / hardness edits from the viewport (`[` / `]`,
+                    // Ctrl+RMB) flow into the preset first, so the sync
+                    // below does not snap them back.
+                    if !paint.is_stroking() {
+                        self.brush
+                            .adopt_live_size(paint.brush_size(), paint.brush_hardness());
+                    }
+                    let preset_changed = self.brush.take_preset_changed();
+                    if let Some(preset) = self.brush.active_preset() {
+                        // An eyedropper pick overrides the preset's color
+                        // until the preset itself changes.
+                        paint.sync_brush_params(&preset.params, !preset_changed);
+                        paint.sync_stroke_method(preset.stroke_method);
+                        if preset_changed {
+                            paint.set_brush_size(preset.size);
+                        }
+                    }
                 }
                 // One collapsible row per fill layer (projection picker +
                 // v1 source editor) plus the polygon-fill tool rows; edits

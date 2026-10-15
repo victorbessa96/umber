@@ -333,6 +333,15 @@ viewmode =
 
 brush =
     .no-preset = Nenhuma predefinição selecionada
+    .size = Tamanho
+    .method = Método do traço
+    .method-space = Espaçado
+    .method-airbrush = Aerógrafo
+    .method-dash = Tracejado
+    .method-drag-dot = Ponto arrastado
+    .method-rate = Taxa
+    .method-dash-ratio = Proporção do traço
+    .method-dash-length = Comprimento do traço
     .preset = Predefinição
     .preset-none = Nenhuma
     .broken = { $count ->

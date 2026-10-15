@@ -253,6 +253,20 @@ pub struct BrushPreset {
     /// Pressure→radius mapping.
     #[serde(default)]
     pub radius_curve: ControlCurve,
+    /// How pointer motion becomes dabs (Space / Airbrush / Dash / Drag
+    /// Dot; [`crate::StrokeMethod`]). `#[serde(default)]` = Space, so every
+    /// pre-method `.umberbrush` loads with its historical spacing behavior.
+    #[serde(default)]
+    pub stroke_method: crate::StrokeMethod,
+    /// The brush size multiplier on the paint session's base radius
+    /// (`1.0` = the historical 24-texel brush; `[` / `]` and Ctrl+RMB
+    /// drag write it). `#[serde(default = ...)]` keeps older files at 1.
+    #[serde(default = "default_size")]
+    pub size: f32,
+}
+
+fn default_size() -> f32 {
+    1.0
 }
 
 impl BrushPreset {
@@ -353,6 +367,15 @@ impl BrushPreset {
                 return Err(PresetError::NonMonotonicX);
             }
         }
+        // The size multiplier is the path tool's domain (0.05..=8). The
+        // stroke method validates itself on deserialize; this keeps a
+        // struct built in code to the same rule.
+        if !self.size.is_finite() || !(0.05..=8.0).contains(&self.size) {
+            return Err(PresetError::InvalidParams);
+        }
+        if self.stroke_method.validate().is_err() {
+            return Err(PresetError::InvalidParams);
+        }
         Ok(())
     }
 }
@@ -407,7 +430,28 @@ mod tests {
                 .expect("valid test curve"),
             radius_curve: ControlCurve::try_new(&[(0.0, 0.5), (0.3, 0.6), (0.7, 0.9), (1.0, 1.0)])
                 .expect("valid test curve"),
+            stroke_method: crate::StrokeMethod::Dash {
+                ratio: 0.5,
+                length_px: 20.0,
+            },
+            size: 1.5,
         }
+    }
+
+    #[test]
+    fn a_preset_without_method_or_size_loads_as_space_at_unit_size() {
+        // A pre-2026-10-15 file has neither key: it must load unchanged.
+        let mut json: serde_json::Value =
+            serde_json::from_str(&non_default_preset().to_json().expect("ser")).expect("json");
+        let obj = json.as_object_mut().expect("object");
+        assert!(
+            obj.remove("stroke_method").is_some(),
+            "the fixture writes the key"
+        );
+        assert!(obj.remove("size").is_some(), "the fixture writes the key");
+        let back = BrushPreset::from_json(&json.to_string()).expect("loads");
+        assert_eq!(back.stroke_method, crate::StrokeMethod::Space);
+        assert_eq!(back.size, 1.0);
     }
 
     #[test]
@@ -612,6 +656,18 @@ mod tests {
         let mut bad_spacing = non_default_preset();
         bad_spacing.spacing.dabs_per_radius = -3.0;
         assert_eq!(bad_spacing.validate(), Err(PresetError::InvalidParams));
+        for size in [0.0, 9.0, f32::NAN] {
+            let mut bad = non_default_preset();
+            bad.size = size;
+            assert_eq!(
+                bad.validate(),
+                Err(PresetError::InvalidParams),
+                "size {size}"
+            );
+        }
+        let mut bad = non_default_preset();
+        bad.stroke_method = crate::StrokeMethod::Airbrush { rate_hz: -1.0 };
+        assert_eq!(bad.validate(), Err(PresetError::InvalidParams));
     }
 
     #[test]

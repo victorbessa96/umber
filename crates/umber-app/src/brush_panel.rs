@@ -202,6 +202,11 @@ pub struct BrushPanel {
     /// (`Viewport::set_front_face_falloff_deg`). Applies to viewport
     /// (Screen) strokes only — a UV-view stroke has no view angle.
     pub front_face_falloff: Option<f32>,
+    /// The active preset was picked or edited since the paint session last
+    /// adopted it (`take_preset_changed`): the session then takes the
+    /// preset's color and size too, not just its dab params (an
+    /// eyedropper pick survives until the preset itself changes).
+    preset_changed: bool,
 }
 
 impl BrushPanel {
@@ -241,6 +246,7 @@ impl BrushPanel {
             line_constraint: LineConstraintMode::default(),
             projection: PaintProjection::default(),
             front_face_falloff: None,
+            preset_changed: true,
         }
     }
 
@@ -336,6 +342,32 @@ impl BrushPanel {
 
     /// The preset being edited, if one is selected (the paint session
     /// reads its wash mode through this).
+    /// The live size and hardness flowing BACK from the paint session
+    /// (`[` / `]`, Ctrl+RMB drag): written into the active preset so a Save
+    /// keeps them, and marked dirty. A no-op when they already match, so
+    /// the per-frame call costs nothing at rest.
+    pub fn adopt_live_size(&mut self, size: f32, hardness: f32) {
+        let Some(idx) = self.active else {
+            return;
+        };
+        let Some(entry) = self.library.entries.get_mut(idx) else {
+            return;
+        };
+        let p = &mut entry.preset;
+        if (p.size - size).abs() > 1e-6 || (p.params.hardness - hardness).abs() > 1e-6 {
+            p.size = size;
+            p.params.hardness = hardness;
+            self.dirty = true;
+        }
+    }
+
+    /// Whether the active preset was picked or edited since the last call
+    /// (and clears the flag): the paint session's cue to adopt the
+    /// preset's color and size, not only its dab params.
+    pub fn take_preset_changed(&mut self) -> bool {
+        std::mem::take(&mut self.preset_changed)
+    }
+
     pub fn active_preset(&self) -> Option<&BrushPreset> {
         self.active
             .and_then(|i| self.library.entries.get(i))
@@ -396,6 +428,7 @@ impl BrushPanel {
                 });
             if picked != self.active {
                 self.active = picked;
+                self.preset_changed = true;
                 self.dirty = false;
                 self.save_error = None;
                 // Prefill Save-As with the selected name for "duplicate
@@ -513,6 +546,16 @@ impl BrushPanel {
                 });
         });
 
+        changed |= value_row(
+            ui,
+            &tr("brush.size"),
+            ValueField::new(&mut preset.size)
+                .range(0.05..=8.0)
+                .step(0.01),
+        )
+        .changed();
+        changed |= stroke_method_rows(ui, &mut preset.stroke_method);
+
         ui.add_space(4.0);
         ParamGroup::new("brush-stabilizer", "Stabilizer (one-euro)").show(ui, |group| {
             changed |= group
@@ -588,6 +631,7 @@ impl BrushPanel {
 
         if changed {
             self.dirty = true;
+            self.preset_changed = true;
         }
     }
 
@@ -790,6 +834,73 @@ fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
     ParamGroup::new("brush-quick-mask", title.as_str()).show(ui, |group| {
         quick_mask_body(group, paint);
     });
+}
+
+/// The stroke-method rows (Blender's Stroke Method, `stroke.html`): a
+/// combo, then only the chosen method's own parameters. Returns whether
+/// anything changed. Every value is kept inside the method's own valid
+/// domain, so the conditioner never refuses what the panel wrote.
+fn stroke_method_rows(ui: &mut egui::Ui, method: &mut umber_brush::StrokeMethod) -> bool {
+    use umber_brush::StrokeMethod as M;
+    let mut changed = false;
+    let kind_key = |m: &M| match m {
+        M::Space => "brush.method-space",
+        M::Airbrush { .. } => "brush.method-airbrush",
+        M::Dash { .. } => "brush.method-dash",
+        M::DragDot => "brush.method-drag-dot",
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(tr("brush.method"));
+        egui::ComboBox::from_id_salt("brush_method_combo")
+            .selected_text(tr(kind_key(method)))
+            .show_ui(ui, |ui| {
+                for candidate in [
+                    M::Space,
+                    M::Airbrush { rate_hz: 10.0 },
+                    M::Dash {
+                        ratio: 0.5,
+                        length_px: 20.0,
+                    },
+                    M::DragDot,
+                ] {
+                    let same = std::mem::discriminant(method) == std::mem::discriminant(&candidate);
+                    if ui
+                        .selectable_label(same, tr(kind_key(&candidate)))
+                        .clicked()
+                        && !same
+                    {
+                        *method = candidate;
+                        changed = true;
+                    }
+                }
+            });
+    });
+    match method {
+        M::Airbrush { rate_hz } => {
+            changed |= value_row(
+                ui,
+                &tr("brush.method-rate"),
+                ValueField::new(rate_hz).range(1.0..=60.0).unit("Hz"),
+            )
+            .changed();
+        }
+        M::Dash { ratio, length_px } => {
+            changed |= value_row(
+                ui,
+                &tr("brush.method-dash-ratio"),
+                ValueField::new(ratio).range(0.05..=1.0),
+            )
+            .changed();
+            changed |= value_row(
+                ui,
+                &tr("brush.method-dash-length"),
+                ValueField::new(length_px).range(1.0..=512.0).unit("px"),
+            )
+            .changed();
+        }
+        M::Space | M::DragDot => {}
+    }
+    changed
 }
 
 /// The quick-mask body: the group-level widgets (kept verbatim, only the
@@ -1527,6 +1638,8 @@ mod tests {
             spacing: SpacingConfig::default(),
             alpha_curve: ControlCurve::identity(),
             radius_curve: ControlCurve::identity(),
+            stroke_method: Default::default(),
+            size: 1.0,
         }
     }
 
