@@ -99,6 +99,15 @@ protocol had no number to freeze). After 0.1.0, any step change bumps it.
 
 ## The known-deferred (honest, in the tag's companion notes not the message)
 
+- **Windows code signing (C2-22, decided 2026-10-15 by Bessa):** the alpha
+  ships unsigned with the SHA-256 checksums and the SmartScreen
+  "More info → Run anyway" note (`docs/CODE_SIGNING.md`). Apply to
+  SignPath Foundation's free OSS signing now; it requires the code signing
+  policy page (written) and an already-released artifact, which is what the
+  alpha provides. Azure Artifact Signing is out (individuals: US/Canada
+  only). An OV certificate ($150–300/yr) is the fallback; EV no longer
+  bypasses SmartScreen since 2024.
+
 - PSD import (P3-designed), .usdz read beyond the first layer, the
   full-32 blend set, OCIO configs (the adoption probe's rule), the
   path tools, the post-effects stack — all tracked, none blocking

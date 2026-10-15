@@ -54,6 +54,12 @@ printf '%s\n' '"version"' '"quit"' | cargo run -p umber-cli -- agent
 
 GPU work needs a Vulkan (Linux) or DX12 (Windows) adapter; `mesa-vulkan-drivers` (lavapipe) works for headless use. If a driver crashes at startup, the next launch steps down to a safer backend automatically; `--safe-gpu` or `WGPU_BACKEND` force one.
 
+## Code signing policy
+
+Windows builds are not signed yet; Umber is applying for free open-source
+signing (SignPath Foundation). Until then every release ships SHA-256
+checksums. Roles, privacy and uninstall details: [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md).
+
 ## License
 
 GPL-3.0-or-later for the application. Standalone library crates extracted from Umber may be released under MIT where it helps the ecosystem.

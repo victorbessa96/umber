@@ -106,7 +106,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | 25: local `dist plan` ran — the tag needs a `0.1.0-alpha.1` version-bump commit first (checklist item 9); the push is Bessa's call. 23 + 24 Bessa |
 | C2-26..28 | User docs + a generated keyboard reference, plugin SDK guide, kittest breadth | 6 docs/tests | ◐ C2-27 ✓ (`docs/plugins/authoring-guide.md`, its example built + loaded); C2-26 ✓ (`docs/user/keyboard.md` generated + drift-tested; `docs/user/getting-started.md`, claims code-checked); C2-28 ✓ (kittests: Bakes checklist, Brush channel combo, Layers add/raise, Graph Trust & load; the Export path stays gate0_journey's) |
 | C2-29 | Bakes panel: all nine mesh-map kinds (normal + cage, world normal, ID, bent normal), not four | 2 loop | ✓ 9 of 9 (High poly group: pick, cage, Bake from high; `2026-10-15-c2-29-transfer.md`); Export writes the newest baked normal ✓ |
-| C2-30 | Windows Ink default-on for the Windows build (or documented as opt-in) | 5 release | todo (a release decision) |
+| C2-30 | Windows Ink default-on for the Windows build (or documented as opt-in) | 5 release | DECIDED 2026-10-15: default-on (Bessa); the Cargo change waits on the host |
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work
