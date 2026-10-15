@@ -196,6 +196,12 @@ pub struct BrushPanel {
     /// like `line_constraint`: not in the preset nor the project file in
     /// v1. The paint session adopts it via `PaintState::sync_projection`.
     pub projection: PaintProjection,
+    /// Front-face falloff start angle in degrees, or `None` = off (the
+    /// default — strokes unchanged). Panel state like `projection`; the
+    /// shell syncs it to the viewport each frame
+    /// (`Viewport::set_front_face_falloff_deg`). Applies to viewport
+    /// (Screen) strokes only — a UV-view stroke has no view angle.
+    pub front_face_falloff: Option<f32>,
 }
 
 impl BrushPanel {
@@ -234,6 +240,7 @@ impl BrushPanel {
             symmetry: SymmetrySettings::default(),
             line_constraint: LineConstraintMode::default(),
             projection: PaintProjection::default(),
+            front_face_falloff: None,
         }
     }
 
@@ -249,7 +256,7 @@ impl BrushPanel {
         self.tool_rows(ui);
         symmetry_rows(ui, &mut self.symmetry);
         line_constraint_rows(ui, &mut self.line_constraint);
-        projection_rows(ui, &mut self.projection);
+        projection_rows(ui, &mut self.projection, &mut self.front_face_falloff);
         if let Some(paint) = paint {
             quick_mask_rows(ui, paint);
         }
@@ -484,6 +491,26 @@ impl BrushPanel {
                     tr("brush.build-up"),
                 )
                 .changed();
+        });
+
+        // Falloff curve (absorbed from Blender's brush falloff presets):
+        // the dab's radial profile, applied past the hardness core.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr("brush.falloff"));
+            let current = preset.params.falloff;
+            egui::ComboBox::from_id_salt("brush_falloff_combo")
+                .selected_text(tr(falloff_key(current)))
+                .show_ui(ui, |ui| {
+                    for curve in umber_brush::FalloffCurve::ALL {
+                        changed |= ui
+                            .selectable_value(
+                                &mut preset.params.falloff,
+                                curve,
+                                tr(falloff_key(curve)),
+                            )
+                            .changed();
+                    }
+                });
         });
 
         ui.add_space(4.0);
@@ -919,7 +946,11 @@ fn line_constraint_rows(ui: &mut egui::Ui, mode: &mut LineConstraintMode) {
 /// The paint-what-you-see projection section (§2's P1 row): 3D
 /// (Screen — viewport strokes raycast to the mesh) or UV-only (the 3D
 /// viewport orbits). Applies to every tool (paint, smudge, clone, eraser).
-fn projection_rows(ui: &mut egui::Ui, mode: &mut PaintProjection) {
+fn projection_rows(
+    ui: &mut egui::Ui,
+    mode: &mut PaintProjection,
+    front_face_falloff: &mut Option<f32>,
+) {
     let title = tr("brush.projection");
     ParamGroup::new("brush-projection", title.as_str()).show(ui, |group| {
         group.ui.horizontal_wrapped(|ui| {
@@ -931,6 +962,23 @@ fn projection_rows(ui: &mut egui::Ui, mode: &mut PaintProjection) {
             ui.selectable_value(&mut *mode, PaintProjection::Uv, tr("brush.projection-uv"));
         });
         group.ui.weak(tr("brush.projection-hint"));
+        // Front-face falloff (absorbed from Blender's Normal Falloff):
+        // viewport strokes fade on faces seen at a grazing angle. Off by
+        // default; the angle is where the fade starts. 80 degrees is near
+        // Blender's default — on the first enable it seeds there.
+        group.ui.horizontal_wrapped(|ui| {
+            let mut on = front_face_falloff.is_some();
+            if ui
+                .checkbox(&mut on, tr("brush.front-face-falloff"))
+                .changed()
+            {
+                *front_face_falloff = on.then_some(80.0);
+            }
+            if let Some(deg) = front_face_falloff.as_mut() {
+                ui.add(ValueField::new(deg).range(0.0..=89.0).step(1.0));
+                ui.label("°");
+            }
+        });
     });
 }
 
@@ -1395,9 +1443,51 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     changed
 }
 
+/// The catalog key naming a falloff curve (`brush.falloff-<curve>`).
+/// Exhaustive on purpose: a new curve fails to compile here until it has
+/// a label in both catalogs.
+fn falloff_key(curve: umber_brush::FalloffCurve) -> &'static str {
+    use umber_brush::FalloffCurve as F;
+    match curve {
+        F::Smooth => "brush.falloff-smooth",
+        F::Smoother => "brush.falloff-smoother",
+        F::Sphere => "brush.falloff-sphere",
+        F::Root => "brush.falloff-root",
+        F::Sharp => "brush.falloff-sharp",
+        F::Sharper => "brush.falloff-sharper",
+        F::Linear => "brush.falloff-linear",
+        F::InverseSquare => "brush.falloff-inverse-square",
+        F::Constant => "brush.falloff-constant",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn front_face_falloff_defaults_off() {
+        // Off by default: the viewport receives None and every stroke keeps
+        // its pressure unchanged.
+        assert_eq!(BrushPanel::new().front_face_falloff, None);
+    }
+
+    #[test]
+    fn every_falloff_curve_has_a_distinct_catalog_key() {
+        let keys: std::collections::BTreeSet<&str> = umber_brush::FalloffCurve::ALL
+            .iter()
+            .map(|c| falloff_key(*c))
+            .collect();
+        assert_eq!(keys.len(), umber_brush::FalloffCurve::ALL.len());
+        crate::i18n::init();
+        for key in keys {
+            assert_ne!(
+                crate::i18n::tr(key).as_str(),
+                key,
+                "{key} has no en-US entry"
+            );
+        }
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
     use umber_brush::preset::{LazyMouseConfig, SpacingConfig};
     use umber_brush::preset_library::user_preset_dir_from;

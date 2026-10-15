@@ -1976,6 +1976,9 @@ impl eframe::App for UmberApp {
             .viewport
             .set_show_cage(self.state.bakes.show_cage());
         self.state.viewport.set_view_mode(self.view.view_mode);
+        self.state
+            .viewport
+            .set_front_face_falloff_deg(self.brush_panel.front_face_falloff);
         // The paint session adopts the panel's tool here too, not only in
         // the Properties tab (egui_dock skips hidden tabs — same pattern as
         // the bake poll), so a toolbar/E tool change reaches the session
