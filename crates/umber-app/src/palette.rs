@@ -43,6 +43,7 @@ pub const CATALOG: &[Entry] = &[
     e(ShellAction::OpenMesh, "menu.open-mesh", "menu.file"),
     e(ShellAction::OpenProject, "menu.open-project", "menu.file"),
     e(ShellAction::SaveProject, "menu.save-project", "menu.file"),
+    e(ShellAction::SaveProjectAs, "button.save-as", "menu.file"),
     e(ShellAction::Undo, "shell.undo", "menu.edit"),
     e(ShellAction::Redo, "shell.redo", "menu.edit"),
     e(ShellAction::Preferences, "prefs.title", "menu.edit"),

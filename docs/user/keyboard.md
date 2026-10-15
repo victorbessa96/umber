@@ -12,8 +12,9 @@ shell, and Ctrl+Z undoes the typing, not the document.
 |---|---|---|---|
 | `Ctrl+Shift+Z` | `⇧⌘Z` | Redo | not while typing in a field |
 | `Ctrl+Shift+P` | `⇧⌘P` | Command palette | everywhere, even while typing |
+| `Ctrl+Shift+S` | `⇧⌘S` | Save project as (always asks) | everywhere, even while typing |
 | `Ctrl+Z` | `⌘Z` | Undo | not while typing in a field |
-| `Ctrl+S` | `⌘S` | Save project | everywhere, even while typing |
+| `Ctrl+S` | `⌘S` | Save project (asks for a folder the first time) | everywhere, even while typing |
 | `Ctrl+O` | `⌘O` | Open project | everywhere, even while typing |
 | `Ctrl+,` | `⌘,` | Preferences | everywhere, even while typing |
 | `Ctrl+Space` | `⌘Space` | Maximize the hovered area | everywhere, even while typing |

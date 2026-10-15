@@ -96,6 +96,9 @@ pub enum ShellAction {
     OpenProject,
     /// Save the project (dialog). Ctrl+S.
     SaveProject,
+    /// Save to a NEW directory, always through the dialog (C2-4:
+    /// Ctrl+Shift+S; plain Save re-saves silently once a project has one).
+    SaveProjectAs,
     /// Undo one document edit. Ctrl+Z.
     Undo,
     /// Redo one document edit. Ctrl+Shift+Z.
@@ -551,8 +554,12 @@ mod tests {
             resolve_shortcut(Key::O, cmd()),
             Some(ShellAction::OpenProject)
         );
-        // Unbound shifted / alt variants.
-        assert_eq!(resolve_shortcut(Key::S, cmd_shift()), None);
+        // Ctrl+Shift+S is Save As (C2-4); other shifted / alt variants
+        // stay unbound.
+        assert_eq!(
+            resolve_shortcut(Key::S, cmd_shift()),
+            Some(ShellAction::SaveProjectAs)
+        );
         assert_eq!(resolve_shortcut(Key::O, cmd_shift()), None);
         let cmd_alt = Modifiers { alt: true, ..cmd() };
         assert_eq!(resolve_shortcut(Key::Z, cmd_alt), None);
@@ -575,8 +582,8 @@ mod tests {
         }
         // Twenty-four bindings. Thirteen keys resolve bare (the six
         // letters, [ ], F3, Tab, M, C, B; Shift+C / Shift+B are counted by
-        // the shift table test) + nine chords (Z, Shift+Z, Shift+P, S, O,
-        // Comma, Space, PgUp, PgDn).
+        // the shift table test) + ten chords (Z, Shift+Z, Shift+P, S,
+        // Shift+S, O, Comma, Space, PgUp, PgDn).
         let bare = SHORTCUT_KEYS
             .iter()
             .filter(|k| resolve_shortcut(**k, bare()).is_some())
@@ -589,7 +596,7 @@ mod tests {
                 .iter()
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
-        assert_eq!((bare, chords), (13, 9));
+        assert_eq!((bare, chords), (13, 10));
     }
 
     /// One headless frame: `keys` pressed (with `mods`), the poll first

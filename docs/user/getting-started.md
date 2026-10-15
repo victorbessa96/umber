@@ -93,8 +93,10 @@ projects, and **File ▸ Revert to Saved** discards unsaved edits.
 Layer edits are journaled as you work: after a crash, reopening the
 project replays them.
 
-*Gaps:* `Ctrl+S` always asks where to save (a silent re-save is C2-4).
-Paint pixels are not autosaved between saves (C2-3), so save often. There
+`Ctrl+S` asks for a folder the first time and then re-saves there
+silently; `Ctrl+Shift+S` (Save As) always asks.
+
+*Gaps:* paint pixels are not autosaved between saves (C2-3), so save often. There
 is no "save before quitting?" prompt yet (C2-1).
 
 ## 5. Export

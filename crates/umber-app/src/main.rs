@@ -1366,6 +1366,7 @@ impl UmberApp {
             ShellAction::OpenMesh => self.open_mesh(),
             ShellAction::OpenProject => self.open_project(),
             ShellAction::SaveProject => self.save_project(),
+            ShellAction::SaveProjectAs => self.save_project_as(),
             // One timeline (C2-7): Ctrl+Z steps whichever journal holds the
             // newest applied edit, a layer op or a stroke.
             ShellAction::Undo => {
@@ -1875,7 +1876,19 @@ impl UmberApp {
     /// retargeted to the mesh's set name, channels kept): user channels an
     /// earlier `<Set>_<suffix>` import created survive the save instead of
     /// being reset to the five defaults.
+    /// Save (C2-4, Ctrl+S): re-saves SILENTLY to the open project's
+    /// directory once it has one (the atomic manifest commit makes the
+    /// in-place overwrite crash-safe); a never-saved document asks for a
+    /// folder, which is Save As.
     fn save_project(&mut self) {
+        match save_target(self.state.project_dir.as_deref()) {
+            SaveTarget::InPlace(dir) => self.save_project_to(dir),
+            SaveTarget::Ask => self.save_project_as(),
+        }
+    }
+
+    /// Save As (Ctrl+Shift+S): always asks for a new directory.
+    fn save_project_as(&mut self) {
         let set_name = self.project_texture_set_name();
         let Some(dir) = rfd::FileDialog::new()
             .set_file_name(format!("{set_name}.umber"))
@@ -1883,6 +1896,12 @@ impl UmberApp {
         else {
             return;
         };
+        self.save_project_to(dir);
+    }
+
+    /// The save itself, to `dir`.
+    fn save_project_to(&mut self, dir: PathBuf) {
+        let set_name = self.project_texture_set_name();
         // Keep the import session set (and its user channels) as the saved
         // set: a rename keeps channels (see `retarget_set`). The paint
         // session's active set follows it (the saved set is the session
@@ -2561,6 +2580,13 @@ impl eframe::App for UmberApp {
                     toolbar::ShellAction::SaveProject,
                 ) {
                     actions.push(toolbar::ShellAction::SaveProject);
+                }
+                if action_item(
+                    ui,
+                    tr("button.save-as"),
+                    toolbar::ShellAction::SaveProjectAs,
+                ) {
+                    actions.push(toolbar::ShellAction::SaveProjectAs);
                 }
                 let revert = shell_menu::revert_availability(
                     self.state.project_dir.is_some(),
@@ -3282,6 +3308,22 @@ fn pending_crash_notices() -> umber_gui::Notices {
     notices
 }
 
+/// Where a plain Save writes (C2-4): in place when the document already
+/// lives in a directory, through the dialog when it never did.
+#[derive(Debug, PartialEq, Eq)]
+enum SaveTarget {
+    /// Overwrite the open project.
+    InPlace(PathBuf),
+    /// Never saved: Save As.
+    Ask,
+}
+
+fn save_target(project_dir: Option<&std::path::Path>) -> SaveTarget {
+    project_dir.map_or(SaveTarget::Ask, |dir| {
+        SaveTarget::InPlace(dir.to_path_buf())
+    })
+}
+
 fn main() -> eframe::Result<()> {
     // The crash reporter first (C2-2): every later panic, startup included,
     // leaves a report under `<state>/crashes/` for the next launch to offer.
@@ -3360,6 +3402,21 @@ fn main() -> eframe::Result<()> {
 /// report.
 #[cfg(test)]
 mod new_project_tests {
+    #[test]
+    fn save_is_silent_once_the_project_has_a_directory() {
+        use super::{save_target, SaveTarget};
+        assert_eq!(
+            save_target(None),
+            SaveTarget::Ask,
+            "never saved: the dialog"
+        );
+        let dir = std::path::Path::new("/projects/sword.umber");
+        assert_eq!(
+            save_target(Some(dir)),
+            SaveTarget::InPlace(dir.to_path_buf())
+        );
+    }
+
     use super::*;
 
     #[test]

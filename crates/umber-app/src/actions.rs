@@ -109,7 +109,7 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 }
 
 /// The shell's key table: most modifiers first (see the module docs).
-/// Nineteen bindings: nine chords (incl. Ctrl+Shift+P the palette,
+/// The bindings: nine chords (incl. Ctrl+Shift+P the palette,
 /// Ctrl+, Preferences, Ctrl+Space maximize, Ctrl+PgUp/PgDn workspaces) +
 /// six letter keys + the `[` /
 /// `]` brush size steps + F3 + Tab (Hide UI). Ctrl+N stays unbound in v1
@@ -117,6 +117,7 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::Z, Chord::CmdShift), ShellAction::Redo),
     (bind(Key::P, Chord::CmdShift), ShellAction::CommandPalette),
+    (bind(Key::S, Chord::CmdShift), ShellAction::SaveProjectAs),
     (bind(Key::Z, Chord::Cmd), ShellAction::Undo),
     (bind(Key::S, Chord::Cmd), ShellAction::SaveProject),
     (bind(Key::O, Chord::Cmd), ShellAction::OpenProject),
@@ -187,7 +188,8 @@ fn reference_text(action: ShellAction) -> &'static str {
     match action {
         ShellAction::Undo => "Undo",
         ShellAction::Redo => "Redo",
-        ShellAction::SaveProject => "Save project",
+        ShellAction::SaveProject => "Save project (asks for a folder the first time)",
+        ShellAction::SaveProjectAs => "Save project as (always asks)",
         ShellAction::OpenProject => "Open project",
         ShellAction::CommandPalette => "Command palette",
         ShellAction::Preferences => "Preferences",
@@ -545,6 +547,7 @@ mod tests {
             let expected = matches!(
                 action,
                 ShellAction::SaveProject
+                    | ShellAction::SaveProjectAs
                     | ShellAction::OpenProject
                     | ShellAction::CommandPalette
                     | ShellAction::Preferences
