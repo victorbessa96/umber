@@ -2671,12 +2671,16 @@ fn main() -> eframe::Result<()> {
     let result = eframe::run_native(
         "Umber",
         native,
-        Box::new(|cc| match UmberApp::new(cc) {
-            Ok(mut app) => {
-                app.load_default_env();
-                Ok(Box::new(app) as Box<dyn eframe::App>)
+        Box::new(|cc| {
+            // The device exists: a death from here is not a driver crash.
+            gpu_startup::note_device();
+            match UmberApp::new(cc) {
+                Ok(mut app) => {
+                    app.load_default_env();
+                    Ok(Box::new(app) as Box<dyn eframe::App>)
+                }
+                Err(err) => Err(format!("{err:#}").into()),
             }
-            Err(err) => Err(format!("{err:#}").into()),
         }),
     );
     // An Err (e.g. no device) keeps an unconfirmed marker so the next

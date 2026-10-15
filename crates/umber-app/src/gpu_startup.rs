@@ -16,9 +16,23 @@
 //!    cleared and, when this launch fell back, the backend that worked is
 //!    persisted to `gpu-backend`.
 //!
-//! A launch that finds a marker nobody holds the lock on knows the previous
-//! start died inside the driver and steps the backend down one rung
-//! ([`decide_backend`], the pure, table-tested core):
+//! The marker also records the STAGE the start reached ([`Stage`]):
+//! `planned` (written before the driver is touched), `adapter` (an adapter
+//! was chosen; `request_device` is next), `device` (the device exists and
+//! the app is constructing). Only a start that died at `planned` or
+//! `adapter` died inside the driver. A marker left at `device` means the
+//! process ended after the driver survived device creation — killed
+//! (SIGTERM, a closed terminal, a headless launch whose window never
+//! mapped so frames never came) or an app error — and stepping the
+//! backend down for that would punish a working driver. That exact false
+//! positive bricked a Wayland desktop on 2026-10-15: a `timeout`-killed
+//! headless launch forced GL, which cannot present to a Wayland surface,
+//! and the GL failure then kept the marker so every launch retried GL.
+//!
+//! A launch that finds a marker nobody holds the lock on, at a driver
+//! stage, knows the previous start died inside the driver and steps the
+//! backend down one rung ([`decide_backend`], the pure, table-tested
+//! core):
 //!
 //! - Linux / other Unix: auto (wgpu's pick, normally Vulkan) / Vulkan -> GL.
 //! - Windows: auto / Vulkan -> DX12 -> GL.
@@ -44,9 +58,14 @@
 //!   confirmation, so a second concurrent Umber launch sees `Live` and
 //!   skips marker handling instead of treating a healthy sibling as a crash.
 //! * Clean exit before confirmation (`run_native` returned Ok) clears the
-//!   marker without persisting; an `Err` return (e.g. a failed device
-//!   request) KEEPS it so the next launch tries a safer backend
-//!   ([`finish`]).
+//!   marker without persisting. An `Err` return ([`finish`],
+//!   [`exit_action`]) keeps it only when the error says the driver failed
+//!   this backend (a failed device request, stage `adapter`). An `Err` at
+//!   stage `device` is the app's own error and clears it. An `Err` at stage
+//!   `planned` on a FALLBACK rung means that rung found no adapter able to
+//!   present on this display (GL on Wayland): the fallback is undone
+//!   (marker cleared, persisted fallback removed) so the next launch
+//!   returns to auto instead of retrying a backend that cannot work.
 //! * A persisted fallback is never upgraded automatically; deleting
 //!   `gpu-backend` in the state dir resets it. No UI for that in v1.
 //! * State dir: the parent of the brushes dir (`$XDG_DATA_HOME/umber`,
@@ -196,10 +215,45 @@ pub enum Planned {
     Unknown,
 }
 
+/// How far a start got (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    /// The marker is written; the driver has not been touched.
+    Planned,
+    /// An adapter was chosen; `request_device` is next.
+    Adapter,
+    /// The device exists; the driver survived device creation.
+    Device,
+}
+
+impl Stage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Planned => "planned",
+            Stage::Adapter => "adapter",
+            Stage::Device => "device",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Stage::Planned, Stage::Adapter, Stage::Device]
+            .into_iter()
+            .find(|st| st.name() == s.trim())
+    }
+
+    /// Whether a start that ended at this stage can have died inside the
+    /// driver (the only case that steps the backend down).
+    pub fn is_driver_stage(self) -> bool {
+        self < Stage::Device
+    }
+}
+
 /// What a start records before touching the driver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Marker {
     pub planned: Planned,
+    /// How far the start got.
+    pub stage: Stage,
     /// The adapter about to be asked for a device (once known).
     pub adapter: Option<String>,
     pub adapter_backend: Option<Backend>,
@@ -217,6 +271,7 @@ impl Marker {
             .unwrap_or(0);
         Marker {
             planned,
+            stage: Stage::Planned,
             adapter: None,
             adapter_backend: None,
             driver: None,
@@ -229,6 +284,7 @@ impl Marker {
     pub fn unknown() -> Self {
         Marker {
             planned: Planned::Unknown,
+            stage: Stage::Planned,
             adapter: None,
             adapter_backend: None,
             driver: None,
@@ -243,7 +299,10 @@ impl Marker {
             Planned::Env => "env",
             Planned::Unknown => "unknown",
         };
-        let mut out = format!("{MARKER_HEADER}\nplanned={planned}\n");
+        let mut out = format!(
+            "{MARKER_HEADER}\nplanned={planned}\nstage={}\n",
+            self.stage.name()
+        );
         if let Some(a) = &self.adapter {
             out.push_str(&format!("adapter={}\n", clean_field(a)));
         }
@@ -270,6 +329,7 @@ impl Marker {
         }
         let mut marker = Marker::unknown();
         let mut planned = None;
+        let mut stage = None;
         for line in lines {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
@@ -285,6 +345,7 @@ impl Marker {
                         ),
                     })
                 }
+                "stage" => stage = Stage::parse(value),
                 "adapter" => marker.adapter = Some(clean_field(value)),
                 "adapter_backend" => marker.adapter_backend = Backend::parse(value),
                 "driver" => marker.driver = Some(clean_field(value)),
@@ -294,13 +355,32 @@ impl Marker {
             }
         }
         marker.planned = planned.ok_or_else(|| corrupt("no planned= line"))?;
+        // Pre-stage markers (no `stage=` line): infer it. A recorded
+        // adapter means the start reached `request_device`.
+        marker.stage = stage.unwrap_or(if marker.adapter.is_some() {
+            Stage::Adapter
+        } else {
+            Stage::Planned
+        });
         Ok(marker)
+    }
+
+    /// The rung this marker planned, if it named one.
+    pub fn planned_backend(&self) -> Option<Backend> {
+        match self.planned {
+            Planned::Backend(b) => Some(b),
+            _ => None,
+        }
     }
 
     /// The rung the crashed start was on: the adapter's when an `auto`
     /// start got as far as choosing one, else the plan's. `base` stands in
     /// for an unknown plan. `None` for an env-override start.
     fn tried(&self, base: Backend) -> Option<Backend> {
+        // Past device creation the driver survived: not a driver crash.
+        if !self.stage.is_driver_stage() {
+            return None;
+        }
         match &self.planned {
             Planned::Env => None,
             Planned::Unknown => Some(self.adapter_backend.unwrap_or(base)),
@@ -561,6 +641,9 @@ pub struct Session {
     marker: Marker,
     persist: Option<Backend>,
     frames: u32,
+    /// This launch runs on a fallback rung (stepped down or remembered),
+    /// not the platform's preferred backend.
+    fallback: bool,
 }
 
 impl Session {
@@ -571,6 +654,10 @@ impl Session {
             marker: Marker::new(decision.planned()),
             persist: decision.persist_on_success(),
             frames: 0,
+            fallback: matches!(
+                decision.reason,
+                Reason::FellBack { .. } | Reason::Persisted | Reason::Exhausted { .. }
+            ),
         }
     }
 
@@ -592,6 +679,18 @@ impl Session {
         self.marker.adapter = Some(clean_field(name));
         self.marker.adapter_backend = Backend::from_wgpu(backend);
         self.marker.driver = Some(clean_field(driver));
+        self.marker.stage = Stage::Adapter;
+        self.write_marker()
+    }
+
+    /// The device exists (the app is being constructed): the driver
+    /// survived device creation, so a death from here on is not a
+    /// driver crash (see the module docs).
+    pub fn note_device(&mut self) -> Result<(), MarkerError> {
+        if self.marker.stage >= Stage::Device {
+            return Ok(());
+        }
+        self.marker.stage = Stage::Device;
         self.write_marker()
     }
 
@@ -624,18 +723,73 @@ impl Session {
         }
     }
 
-    /// The process is exiting. A clean exit clears an unconfirmed marker
-    /// (no persist: too few frames to vouch for the backend); an error
-    /// exit keeps it, so the next launch steps down.
+    /// The process is exiting; see [`exit_action`] for the rule.
     pub fn finish(&mut self, clean: bool) -> Result<(), MarkerError> {
-        if !clean {
+        let action = exit_action(clean, self.marker.stage, self.fallback);
+        if action == ExitAction::KeepMarker {
             return Ok(());
         }
         self.persist = None;
+        if action == ExitAction::UndoFallback {
+            log::error!(
+                "gpu startup: the {} fallback found no adapter that can present here; \
+                 undoing it so the next launch uses auto again",
+                self.marker
+                    .planned_backend()
+                    .map(Backend::name)
+                    .unwrap_or("fallback")
+            );
+            remove_persisted(&self.dir)?;
+        }
         match self.guard.take() {
             Some(g) => g.clear(),
             None => Ok(()),
         }
+    }
+}
+
+/// What [`Session::finish`] does with an unconfirmed marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitAction {
+    /// Clear it: nothing about this exit blames the backend.
+    Clear,
+    /// Keep it: the driver failed this backend, so the next launch steps
+    /// down.
+    KeepMarker,
+    /// Clear it AND remove the persisted fallback: a fallback rung found
+    /// no adapter able to present here, so falling back made things
+    /// worse.
+    UndoFallback,
+}
+
+/// The exit rule (pure, table-tested).
+///
+/// - A clean exit clears.
+/// - An error at stage `device` is the app's own: clear.
+/// - An error at stage `adapter` is a failed device request: keep (step
+///   down next launch).
+/// - An error at stage `planned` means no adapter was found. On the
+///   preferred backend, keep it (a broken default stack: try the safer
+///   one). On a fallback rung, undo it (the fallback cannot present here,
+///   e.g. GL on Wayland): retrying the same dead end every launch is the
+///   failure mode this exists to prevent.
+pub fn exit_action(clean: bool, stage: Stage, fallback: bool) -> ExitAction {
+    match (clean, stage, fallback) {
+        (true, _, _) => ExitAction::Clear,
+        (false, Stage::Device, _) => ExitAction::Clear,
+        (false, Stage::Adapter, _) => ExitAction::KeepMarker,
+        (false, Stage::Planned, false) => ExitAction::KeepMarker,
+        (false, Stage::Planned, true) => ExitAction::UndoFallback,
+    }
+}
+
+/// Remove the persisted fallback (absent is fine).
+pub fn remove_persisted(dir: &Path) -> Result<(), MarkerError> {
+    let path = dir.join(PERSISTED_FILE);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(MarkerError::Io { path, err }),
     }
 }
 
@@ -738,6 +892,11 @@ pub fn note_adapter(info: &wgpu::AdapterInfo) {
     with_session(|s| s.note_adapter(&info.name, info.backend, &info.driver));
 }
 
+/// From the app constructor: the device exists (see [`Stage::Device`]).
+pub fn note_device() {
+    with_session(|s| s.note_device());
+}
+
 /// From `App::ui`, every frame (cheap after confirmation).
 pub fn note_frame() {
     with_session(|s| s.note_frame().map(|_| ()));
@@ -759,11 +918,112 @@ mod tests {
         Marker {
             adapter: adapter_backend.map(|_| "Test GPU".to_string()),
             adapter_backend,
+            stage: if adapter_backend.is_some() {
+                Stage::Adapter
+            } else {
+                Stage::Planned
+            },
             ..Marker {
                 planned,
                 ..Marker::unknown()
             }
         }
+    }
+
+    #[test]
+    fn a_start_killed_after_device_creation_never_steps_down() {
+        // The 2026-10-15 regression: a launch killed by `timeout` before
+        // its 3rd frame (headless: the window never mapped) left a marker.
+        // The driver had survived device creation, so the next launch must
+        // stay on auto, not force GL.
+        for p in PLATFORMS {
+            let mut m = crashed(Planned::Backend(Backend::Auto), Some(Backend::Vulkan));
+            m.stage = Stage::Device;
+            let d = decide_backend(Some(&m), None, None, false, p);
+            assert_eq!(
+                (d.backend, d.reason),
+                (Backend::Auto, Reason::Preferred),
+                "{p:?}"
+            );
+        }
+        // With a remembered fallback, it is kept (not stepped further).
+        let mut m = crashed(Planned::Backend(Backend::Dx12), Some(Backend::Dx12));
+        m.stage = Stage::Device;
+        let d = decide_backend(
+            Some(&m),
+            Some(Backend::Dx12),
+            None,
+            false,
+            Platform::Windows,
+        );
+        assert_eq!((d.backend, d.reason), (Backend::Dx12, Reason::Persisted));
+    }
+
+    #[test]
+    fn exit_rule_blames_the_backend_only_for_driver_failures() {
+        use ExitAction::*;
+        let rows = [
+            // (clean, stage, fallback) -> action
+            (true, Stage::Planned, false, Clear),
+            (true, Stage::Device, true, Clear),
+            (false, Stage::Device, false, Clear),
+            (false, Stage::Device, true, Clear),
+            (false, Stage::Adapter, false, KeepMarker),
+            (false, Stage::Adapter, true, KeepMarker),
+            (false, Stage::Planned, false, KeepMarker),
+            // GL on Wayland: the fallback found no presentable adapter.
+            (false, Stage::Planned, true, UndoFallback),
+        ];
+        for (clean, stage, fallback, want) in rows {
+            assert_eq!(
+                exit_action(clean, stage, fallback),
+                want,
+                "{clean} {stage:?} {fallback}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dead_fallback_is_undone_so_the_next_launch_is_auto() {
+        // The exact remote failure: previous launch "crashed" on Vulkan,
+        // this one fell back to GL, GL found no adapter that can present
+        // (Wayland): run_native returns Err at stage planned.
+        let dir = fresh_dir("undo-fallback");
+        write_persisted(&dir, Backend::Gl).expect("seed a remembered GL");
+        let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
+        let d = fell_back(Backend::Vulkan, Backend::Gl, None);
+        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        s.write_marker().expect("write");
+        s.finish(false).expect("finish");
+        drop(s);
+        assert!(!dir.join(MARKER_FILE).exists(), "marker cleared");
+        assert_eq!(read_persisted(&dir).expect("read"), None, "fallback undone");
+        let (guard, previous) = free(acquire_marker(&dir).expect("next launch"));
+        assert!(previous.is_none());
+        let next = decide_backend(None, None, None, false, Platform::Unix);
+        assert_eq!(
+            (next.backend, next.reason),
+            (Backend::Auto, Reason::Preferred)
+        );
+        guard.clear().expect("clear");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stage_round_trips_and_old_markers_infer_it() {
+        let mut m = Marker::new(Planned::Backend(Backend::Auto));
+        for stage in [Stage::Planned, Stage::Adapter, Stage::Device] {
+            m.stage = stage;
+            assert_eq!(Marker::parse(&m.serialize()).expect("parse").stage, stage);
+        }
+        // A v1 marker written before `stage=` existed.
+        let old = "umber-gpu-marker v1\nplanned=auto\ntimestamp=1\npid=2\n";
+        assert_eq!(Marker::parse(old).expect("old").stage, Stage::Planned);
+        let old_adapter = "umber-gpu-marker v1\nplanned=auto\nadapter=GPU\n";
+        assert_eq!(
+            Marker::parse(old_adapter).expect("old").stage,
+            Stage::Adapter
+        );
     }
 
     fn fell_back(from: Backend, to: Backend, adapter: Option<&str>) -> Decision {
@@ -1043,6 +1303,7 @@ mod tests {
     fn marker_text_round_trips_and_sanitizes_fields() {
         let m = Marker {
             planned: Planned::Backend(Backend::Vulkan),
+            stage: Stage::Adapter,
             adapter: Some("GPU\nplanned=gl".to_string()),
             adapter_backend: Some(Backend::Vulkan),
             driver: Some("drv 1.2".to_string()),
