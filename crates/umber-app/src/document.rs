@@ -1122,6 +1122,87 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
 
 #[cfg(test)]
 mod tests {
+
+    /// kittest (C2-28): the Layers panel's new buttons drive the
+    /// document through undoable commands. Add a folder by its button,
+    /// raise the bottom layer with its ▲, and both land in the stack and
+    /// in history.
+    #[test]
+    fn layers_panel_buttons_add_and_reorder_through_history() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        struct S {
+            doc: Document,
+            defs: std::collections::BTreeMap<String, String>,
+            badges: std::collections::HashMap<u64, String>,
+            states: crate::material_layer::MaterialLayerStates,
+        }
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("Bottom", LayerKind::Paint));
+        doc.run(LayerCommand::add("Top", LayerKind::Paint));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(600.0, 800.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let mats = crate::layers_panel::MaterialPanelContext {
+                        defs: &s.defs,
+                        badges: &s.badges,
+                        status: None,
+                        states: &mut s.states,
+                    };
+                    let _ = layers_ui(
+                        ui,
+                        &mut s.doc,
+                        mats,
+                        PlaneOwner::Base,
+                        true,
+                        &LayerRowBadges::default(),
+                        &std::collections::HashMap::new(),
+                    );
+                },
+                S {
+                    doc,
+                    defs: Default::default(),
+                    badges: Default::default(),
+                    states: Default::default(),
+                },
+            );
+        harness.run();
+        let before = harness.state().doc.history.len();
+        harness
+            .get_by_label(&format!("＋ {}", tr("history.op-add-folder")))
+            .click();
+        harness.run();
+        let names: Vec<String> = harness
+            .state()
+            .doc
+            .layers()
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(matches!(
+            harness.state().doc.layers()[2].kind,
+            LayerKind::Folder { .. }
+        ));
+        assert_eq!(harness.state().doc.history.len(), before + 1);
+        // The rows list top-first, so the LAST ▲ belongs to "Bottom".
+        let raises: Vec<_> = harness.query_all_by_label("▲").collect();
+        assert_eq!(raises.len(), 3, "one ▲ per row");
+        raises.last().unwrap().click();
+        harness.run();
+        let names: Vec<String> = harness
+            .state()
+            .doc
+            .layers()
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(names[0], "Top", "Bottom rose one place: {names:?}");
+        assert_eq!(names[1], "Bottom");
+        assert_eq!(harness.state().doc.history.len(), before + 2);
+    }
+
     #[test]
     fn the_shipped_smart_materials_list_and_apply_undoably() {
         let list = list_smart_materials(&smart_dirs());

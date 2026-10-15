@@ -32,8 +32,19 @@ Gate 1: umber-app 490. fmt and clippy clean.
   `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`. A default device fails with
   `MissingDeviceFeature`.
 
+## Round 2: the Layers panel (lock `c2-28-layers-kittest`, `document.rs`)
+
+`document::layers_panel_buttons_add_and_reorder_through_history`: the
+real `layers_ui` over a 2-layer `Document`, with every context struct
+Default-built. Clicking "＋ Add folder layer" adds a folder, which is one
+history entry. Clicking the BOTTOM row's ▲ (the last of three) raises
+"Bottom" one place, a second history entry.
+
+**Mutation check:** making ▲ move down fails it at "Bottom rose one
+place". The test pins the direction, which a top-first panel listing
+makes easy to get backwards. Gate 1: umber-app 491.
+
 ## Open (C2-28's remainder)
 
-The Layers panel (C2-8's row buttons, which need a `Document` +
-`MaterialPanelContext` fixture), the Export dialog, and the Graph panel's
-plugin Trust & load.
+The Export dialog (it needs a GPU + mesh fixture) and the Graph panel's
+plugin Trust & load row.
