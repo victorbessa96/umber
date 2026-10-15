@@ -86,3 +86,20 @@ marker was backed up to `~/umber-gpu-state-backup/` and removed. No
 - The smoke-test method itself is fixed in the umber-wave-ops skill: GUI
   smokes run with the real display env and wait for the confirm log line,
   never a bare `timeout` against a window that may not map.
+
+## Verified on hardware (post-commit, 2026-10-15 13:06 UTC)
+
+centralhost, release build of 51d9047 installed to `~/.local/bin/umber`.
+The KDE session had locked (`loginctl LockedHint=yes`), so a launched
+window never received frames and the start could not confirm. Exactly
+the incident's precondition. Observed:
+
+1. Launch, killed after 15 s: the marker was left at `stage=device`
+   (adapter "NVIDIA GeForce RTX 3070", backend vulkan). The marker is the
+   PROOF the start got past device creation.
+2. Relaunch with that marker present: `gpu startup: backend auto`. No
+   step-down to GL. Pre-fix, this same state forced GL and the app
+   exited on every launch thereafter.
+
+The stale `device` marker was then removed by hand so the next real
+launch starts from an empty state dir.

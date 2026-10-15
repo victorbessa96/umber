@@ -337,6 +337,14 @@ viewmode =
 
 brush =
     .no-preset = Nenhuma predefinição selecionada
+    .cavity = Máscara de cavidade
+    .cavity-enable = Pintar pela curvatura
+    .cavity-cavities = Cavidades
+    .cavity-ridges = Arestas
+    .cavity-threshold = Limiar
+    .cavity-width = Suavidade
+    .cavity-invert = Inverter
+    .cavity-no-map = Faça o bake do mapa de Curvatura para usar isto (painel Bakes).
     .size = Tamanho
     .method = Método do traço
     .method-space = Espaçado

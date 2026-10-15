@@ -265,6 +265,7 @@ impl BrushPanel {
         projection_rows(ui, &mut self.projection, &mut self.front_face_falloff);
         if let Some(paint) = paint {
             quick_mask_rows(ui, paint);
+            cavity_rows(ui, paint);
         }
         ui.separator();
         self.preset_selector(ui);
@@ -833,6 +834,65 @@ fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
     let title = tr("brush.quick-mask");
     ParamGroup::new("brush-quick-mask", title.as_str()).show(ui, |group| {
         quick_mask_body(group, paint);
+    });
+}
+
+/// The Cavity Mask section (Blender's texture-paint Cavity Mask panel,
+/// `tool_settings/index.html`): paint only where the baked curvature says
+/// crevice (or ridge). It edits the paint session directly, like the quick
+/// mask: it depends on the mesh's curvature bake, not on the brush preset.
+fn cavity_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
+    use umber_brush::{CavityMask, CavityTarget};
+    let title = tr("brush.cavity");
+    ParamGroup::new("brush-cavity", title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        let current = paint.cavity_mask();
+        let mut on = current.is_some();
+        let mut mask: CavityMask = current.unwrap_or_default();
+        let mut changed = ui.checkbox(&mut on, tr("brush.cavity-enable")).changed();
+        if on {
+            ui.horizontal_wrapped(|ui| {
+                changed |= ui
+                    .selectable_value(
+                        &mut mask.target,
+                        CavityTarget::Cavities,
+                        tr("brush.cavity-cavities"),
+                    )
+                    .changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut mask.target,
+                        CavityTarget::Ridges,
+                        tr("brush.cavity-ridges"),
+                    )
+                    .changed();
+            });
+            changed |= value_row(
+                ui,
+                &tr("brush.cavity-threshold"),
+                ValueField::new(&mut mask.threshold).range(0.0..=1.0),
+            )
+            .changed();
+            changed |= value_row(
+                ui,
+                &tr("brush.cavity-width"),
+                ValueField::new(&mut mask.width).range(0.01..=1.0),
+            )
+            .changed();
+            changed |= ui
+                .checkbox(&mut mask.invert, tr("brush.cavity-invert"))
+                .changed();
+            if !paint.has_curvature_map(paint.active_tile()) {
+                ui.label(
+                    egui::RichText::new(tr("brush.cavity-no-map"))
+                        .small()
+                        .color(umber_gui::muted()),
+                );
+            }
+        }
+        if changed {
+            paint.set_cavity_mask(on.then_some(mask));
+        }
     });
 }
 

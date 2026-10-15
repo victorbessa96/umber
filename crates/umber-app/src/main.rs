@@ -952,6 +952,9 @@ pub struct UmberApp {
     /// that used to reach only the log (mesh / environment / project /
     /// export) post here too, so a failed action is never silent.
     notices: umber_gui::Notices,
+    /// Which landed Curvature bakes the paint session already loaded (the
+    /// cavity mask's input).
+    curvature_feed: CurvatureFeed,
     /// The style was installed on both OS-theme branches (once, first
     /// frame: `umber_gui::theme::apply`).
     style_installed: bool,
@@ -1101,6 +1104,7 @@ impl UmberApp {
             #[cfg(feature = "perf")]
             show_perf_hud: false,
             notices: umber_gui::Notices::new(),
+            curvature_feed: CurvatureFeed::default(),
             style_installed: false,
             #[cfg(feature = "perf")]
             last_frame_time: None,
@@ -1934,6 +1938,34 @@ impl UmberApp {
     }
 }
 
+/// Turns the Bakes panel's record list into "newly landed Curvature maps"
+/// exactly once each. A record is new when its `(path, modified time)`
+/// was not seen before, so a re-bake to the same path (newer mtime) is
+/// loaded again, and an unchanged list loads nothing.
+#[derive(Debug, Default)]
+struct CurvatureFeed {
+    seen: std::collections::BTreeMap<std::path::PathBuf, std::time::SystemTime>,
+}
+
+impl CurvatureFeed {
+    fn take_new(&mut self, records: &[bakes_panel::BakeRecord]) -> Vec<(u16, std::path::PathBuf)> {
+        let mut out = Vec::new();
+        for r in records {
+            if r.selection != Some(bakes_panel::BakeSelection::Curvature) {
+                continue;
+            }
+            let Ok(mtime) = std::fs::metadata(&r.path).and_then(|m| m.modified()) else {
+                continue;
+            };
+            if self.seen.get(&r.path) != Some(&mtime) {
+                self.seen.insert(r.path.clone(), mtime);
+                out.push((r.tile, r.path.clone()));
+            }
+        }
+        out
+    }
+}
+
 impl eframe::App for UmberApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         profiling::scope!("frame");
@@ -1992,6 +2024,35 @@ impl eframe::App for UmberApp {
         if self.state.bakes.poll_job() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // The cavity mask's input (brush-wiring cavity half): each landed
+        // Curvature bake loads into the paint session for its tile, once
+        // per landing (`take_landed_curvature` drains). The PNG is sRGB-
+        // encoded on disk; `curvature_png_to_linear` restores the bake's
+        // linear `g`. A failed read or a size mismatch logs and leaves the
+        // mask inert on that tile (the panel shows the bake hint).
+        // `last_records()` is the panel's public record list (bakes_panel.rs
+        // is another session's lock right now); `curvature_feed` keeps the
+        // once-per-landing rule on this side, keyed by path + file mtime.
+        let landed = self
+            .curvature_feed
+            .take_new(self.state.bakes.last_records());
+        for (tile, path) in landed {
+            let Some(paint) = self.state.paint.as_mut() else {
+                break;
+            };
+            match umber_export::png::read_png_rgba8(&path) {
+                Ok((w, h, mut rgba)) => {
+                    umber_paint::paint_state::curvature_png_to_linear(&mut rgba);
+                    if !paint.set_curvature_map(tile, w, h, rgba) {
+                        log::warn!(
+                            "cavity: curvature map {} ({w}x{h}) does not match tile {tile}'s paint size",
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) => log::warn!("cavity: cannot read {}: {e}", path.display()),
+            }
         }
         // Mesh-map import drops (§7 P1 row): drain here, not only in the
         // Assets tab's `show` (egui_dock skips hidden tabs — same pattern

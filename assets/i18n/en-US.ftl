@@ -327,6 +327,14 @@ viewmode =
 
 brush =
     .no-preset = No preset selected
+    .cavity = Cavity mask
+    .cavity-enable = Paint by curvature
+    .cavity-cavities = Cavities
+    .cavity-ridges = Ridges
+    .cavity-threshold = Threshold
+    .cavity-width = Softness
+    .cavity-invert = Invert
+    .cavity-no-map = Bake the Curvature map to use this (Bakes panel).
     .size = Size
     .method = Stroke method
     .method-space = Space

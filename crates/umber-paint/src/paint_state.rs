@@ -1203,6 +1203,14 @@ pub struct PaintState {
     stroke_mask_edit: bool,
     /// The live stroke is gated by the mask (gating at `begin_stroke`).
     stroke_mask_gate: bool,
+    /// The cavity mask (GUI plan g2-brush-method-cavity-ui, cavity half):
+    /// its params plus the baked curvature map per tile (RGBA8, the bake's
+    /// own `g = (curv + 1) / 2` encoding) and the derived coverage plane.
+    /// `None` params = off. Without a curvature map for a tile, the mask
+    /// is inert there (the panel says so) rather than blocking all paint.
+    cavity: Option<umber_brush::CavityMask>,
+    cavity_maps: BTreeMap<u16, (u32, u32, Vec<u8>)>,
+    cavity_coverage: BTreeMap<u16, Vec<f32>>,
     /// The layer-mask planes: one grayscale `u8` plane per
     /// `(layer id, tile)` at the tile's set size, `255` = open (see the
     /// module docs). Lazy — a layer with no mask stroke costs nothing.
@@ -1404,6 +1412,9 @@ impl PaintState {
             mask_synced: BTreeSet::new(),
             stroke_mask_edit: false,
             stroke_mask_gate: false,
+            cavity: None,
+            cavity_maps: BTreeMap::new(),
+            cavity_coverage: BTreeMap::new(),
             layer_masks: BTreeMap::new(),
             mask_edit_layer: None,
             stroke_mask_layer: None,
@@ -1668,7 +1679,7 @@ impl PaintState {
         // Snapshot the quick-mask modes too: X / I mid-stroke never split
         // one stroke between the mask and the layer.
         self.stroke_mask_edit = self.quick_mask().is_editing();
-        self.stroke_mask_gate = self.quick_mask().gates();
+        self.stroke_mask_gate = self.quick_mask().gates() || self.cavity_gates();
         // Snapshot the layer-mask target too: a mid-stroke panel switch
         // never splits one stroke across two planes.
         self.stroke_mask_layer = self.mask_edit_layer;
@@ -1963,16 +1974,21 @@ impl PaintState {
     /// see `umber_brush::quick_mask`); returns the new state. A live
     /// stroke keeps the mode it began with.
     pub fn toggle_mask_mode(&mut self) -> bool {
+        // The uploaded gate depends on the mode (see `gate_plane`), so a
+        // mode change invalidates every synced GPU gate.
+        self.mask_synced.clear();
         self.active_mask_mut().toggle_editing()
     }
 
     /// Enters (`true`) or leaves mask mode — the panel's toggle.
     pub fn set_mask_mode(&mut self, editing: bool) {
+        self.mask_synced.clear();
         self.active_mask_mut().set_editing(editing);
     }
 
     /// Arms or disarms gating. Disarming keeps the mask for the session.
     pub fn set_mask_active(&mut self, active: bool) {
+        self.mask_synced.clear();
         self.active_mask_mut().set_active(active);
     }
 
@@ -4868,12 +4884,19 @@ impl PaintState {
         // The quick-mask gate: the retouch ops multiply their per-texel
         // coverage by the tile's set's CPU plane (allocated empty if
         // untouched).
-        let mask = if self.stroke_mask_gate {
+        // The gate: the quick mask's CPU plane, multiplied by the cavity
+        // coverage when the cavity mask gates this tile (one gate, the
+        // same product the GPU path uploads in `gate_bytes`).
+        let composed: Option<Vec<f32>> = if self.stroke_mask_gate {
             self.mask_of_tile_mut(tile).ensure_plane(tile);
-            self.quick_mask_for_tile(tile).view(tile)
+            Some(self.gate_plane(tile))
         } else {
             None
         };
+        let (mw, mh) = self.quick_mask_for_tile(tile).dimensions();
+        let mask = composed
+            .as_deref()
+            .and_then(|plane| umber_brush::quick_mask::MaskView::new(mw, mh, plane));
         if let Some(rect) = stroke.apply_masked(tile, dabs, mask) {
             let rgba = stroke.region(tile, rect);
             match self.plane_of_mut(owner, tile, &channel) {
@@ -4929,6 +4952,120 @@ impl PaintState {
         }
     }
 
+    /// Sets (`Some`) or clears (`None`) the cavity mask. Refused
+    /// mid-stroke (one stroke never changes its gate partway). Invalid
+    /// params are refused too. Returns whether it was adopted.
+    pub fn set_cavity_mask(&mut self, mask: Option<umber_brush::CavityMask>) -> bool {
+        if self.stroking || self.cavity == mask {
+            return false;
+        }
+        if let Some(m) = mask {
+            if m.validate().is_err() {
+                return false;
+            }
+        }
+        self.cavity = mask;
+        self.rebuild_cavity_coverage();
+        true
+    }
+
+    /// The cavity mask in force, if any.
+    pub fn cavity_mask(&self) -> Option<umber_brush::CavityMask> {
+        self.cavity
+    }
+
+    /// Hands the session `tile`'s baked curvature map as RGBA8 at the
+    /// paint target's size, in the bake's LINEAR encoding (`g = (curv + 1)
+    /// / 2`). The Bakes panel writes curvature PNGs through the sRGB
+    /// transfer, so a PNG read from disk must go through
+    /// [`curvature_png_to_linear`] first; otherwise flat (128) reads as
+    /// ~188 and the whole map looks concave. A map whose size is not the
+    /// tile's paint size is refused: the coverage plane must line up texel
+    /// for texel with the gate it multiplies.
+    pub fn set_curvature_map(&mut self, tile: u16, width: u32, height: u32, rgba: Vec<u8>) -> bool {
+        if self.stroking {
+            return false;
+        }
+        let (tw, th) = self.quick_mask_for_tile(tile).dimensions();
+        if (width, height) != (tw, th) || rgba.len() != width as usize * height as usize * 4 {
+            return false;
+        }
+        self.cavity_maps.insert(tile, (width, height, rgba));
+        self.rebuild_cavity_coverage();
+        true
+    }
+
+    /// Whether `tile` has a curvature map (the cavity panel row reads it:
+    /// no map = an inert mask and a hint to bake curvature).
+    pub fn has_curvature_map(&self, tile: u16) -> bool {
+        self.cavity_maps.contains_key(&tile)
+    }
+
+    /// Whether the cavity mask gates any tile right now.
+    fn cavity_gates(&self) -> bool {
+        self.cavity.is_some() && !self.cavity_coverage.is_empty()
+    }
+
+    /// Recomputes every tile's cavity coverage from its curvature map and
+    /// marks the GPU gates stale (the next gated dab re-uploads).
+    fn rebuild_cavity_coverage(&mut self) {
+        self.cavity_coverage.clear();
+        if let Some(mask) = self.cavity {
+            for (&tile, (w, h, rgba)) in &self.cavity_maps {
+                if let Ok(cov) = mask.coverage(rgba, *w, *h) {
+                    self.cavity_coverage.insert(tile, cov);
+                }
+            }
+        }
+        self.mask_synced.clear();
+    }
+
+    /// `tile`'s gate plane: the quick mask's coverage where the quick mask
+    /// gates (else all-pass `1.0`), times the cavity coverage where the
+    /// cavity mask gates the tile. Multiplication, so both masks apply.
+    fn gate_plane(&self, tile: u16) -> Vec<f32> {
+        let qm = self.quick_mask_for_tile(tile);
+        let (w, h) = qm.dimensions();
+        let len = w as usize * h as usize;
+        let quick_on = qm.gates();
+        let mut plane: Vec<f32> = if quick_on {
+            match qm.coverage(tile) {
+                Some(c) if c.len() == len => c.to_vec(),
+                _ => vec![qm.empty_value(); len],
+            }
+        } else {
+            vec![1.0; len]
+        };
+        if self.cavity.is_some() {
+            if let Some(cov) = self.cavity_coverage.get(&tile) {
+                if cov.len() == len {
+                    for (g, c) in plane.iter_mut().zip(cov) {
+                        *g *= c;
+                    }
+                }
+            }
+        }
+        plane
+    }
+
+    /// The 8-bit GPU gate for `rect` of `tile` ([`Self::gate_plane`]).
+    fn gate_bytes(&self, tile: u16, rect: DirtyRect) -> Vec<u8> {
+        let plane = self.gate_plane(tile);
+        let (w, _) = self.quick_mask_for_tile(tile).dimensions();
+        let mut out = Vec::with_capacity(rect.width() as usize * rect.height() as usize);
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let v = plane
+                    .get(y as usize * w as usize + x as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                out.push((v * 255.0).round() as u8);
+            }
+        }
+        out
+    }
+
     /// Brings `(owner, tile, channel)`'s GPU mask in line with the CPU
     /// plane before gated dabs read it: a plane never uploaded (or marked
     /// stale by a mask stroke, an invert/clear/resize) gets its whole
@@ -4959,7 +5096,7 @@ impl PaintState {
         if rect.width() == 0 || rect.height() == 0 {
             return;
         }
-        let values = self.quick_mask_for_tile(tile).gpu_bytes(tile, rect);
+        let values = self.gate_bytes(tile, rect);
         // The quick mask is per-SET, not per-channel: each plane holds its
         // OWN GPU copy of its set's plane (this closes the "non-baseColor
         // channel's OWN GPU mask copy" follow-up).
@@ -5170,6 +5307,28 @@ fn fill_runs(mask: &[bool], width: usize, height: usize) -> Vec<FillRun> {
 /// per UV unit: `BRUSH_RADIUS_TEXELS * SEAM_MIRROR_MARGIN / texels_per_uv`.
 /// Free function so the radius math is unit-testable without a GPU-backed
 /// [`PaintState`].
+/// Undoes the sRGB transfer the Bakes panel applies when it writes a
+/// curvature PNG (`umber_export::png::Transfer::Srgb`), returning the
+/// bake's linear `g` bytes for [`PaintState::set_curvature_map`]. Alpha
+/// (coverage) is untouched. The inverse of `linear_to_srgb_u8`, rounded to
+/// nearest; it is exact at the encoding's anchors (0, flat 128, 255).
+pub fn curvature_png_to_linear(rgba: &mut [u8]) {
+    fn srgb_to_linear_u8(s: u8) -> u8 {
+        let s = f32::from(s) / 255.0;
+        let l = if s <= 0.040_45 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        };
+        (l * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+    }
+    for px in rgba.chunks_exact_mut(4) {
+        for c in &mut px[..3] {
+            *c = srgb_to_linear_u8(*c);
+        }
+    }
+}
+
 fn mirror_radius_uv(texels_per_uv: f32) -> f32 {
     (BRUSH_RADIUS_TEXELS * SEAM_MIRROR_MARGIN) / texels_per_uv
 }
@@ -5315,6 +5474,99 @@ mod tests {
         let b = local_texel(source, FIRST_TILE, 512.0);
         let off = clone_offset_texels(offset_uv, 512.0);
         assert_eq!([a[0] + off[0], a[1] + off[1]], b);
+    }
+
+    #[test]
+    fn cavity_gate_composes_with_the_quick_mask_and_is_inert_without_a_map() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        let tile = FIRST_TILE;
+        // Off: the gate plane is all-pass (quick mask not gating either).
+        assert!(s.gate_plane(tile).iter().all(|v| *v == 1.0));
+        // A cavity mask with no curvature map is inert (no gate at all).
+        assert!(s.set_cavity_mask(Some(umber_brush::CavityMask::default())));
+        assert!(!s.cavity_gates(), "no map, no gate");
+        // A wrong-size map is refused.
+        assert!(!s.set_curvature_map(tile, 8, 8, vec![128; 8 * 8 * 4]));
+        // A 4x4 map: left half deep cavity (g = 255), right half flat (128).
+        let mut rgba = Vec::new();
+        for _y in 0..4 {
+            for x in 0..4 {
+                let g = if x < 2 { 255 } else { 128 };
+                rgba.extend_from_slice(&[g, g, g, 255]);
+            }
+        }
+        assert!(s.set_curvature_map(tile, 4, 4, rgba));
+        assert!(s.has_curvature_map(tile) && s.cavity_gates());
+        let plane = s.gate_plane(tile);
+        assert!(plane[0] > 0.99, "cavity texel paints: {}", plane[0]);
+        assert!(plane[3] < 0.01, "flat texel is gated out: {}", plane[3]);
+        // Multiplication with an armed quick mask: an empty (all-block)
+        // quick mask blocks the cavity texel too.
+        s.set_mask_active(true);
+        assert!(
+            s.gate_plane(tile).iter().all(|v| *v == 0.0),
+            "both masks apply"
+        );
+        s.set_mask_active(false);
+        // Clearing the mask lifts the gate.
+        assert!(s.set_cavity_mask(None));
+        assert!(!s.cavity_gates());
+        assert!(s.gate_plane(tile).iter().all(|v| *v == 1.0));
+    }
+
+    #[test]
+    fn curvature_png_decode_inverts_the_bake_writers_srgb_transfer() {
+        // The writer's curve (umber-export png.rs `linear_to_srgb_u8`),
+        // restated: the decode must round-trip every byte to within 1 and
+        // hit the encoding's anchors exactly (0, flat 128, 255).
+        fn to_srgb(l: u8) -> u8 {
+            let l = f32::from(l) / 255.0;
+            let s = if l <= 0.003_130_8 {
+                l * 12.92
+            } else {
+                1.055 * l.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+        }
+        for g in 0..=255u8 {
+            let mut px = [to_srgb(g), to_srgb(g), to_srgb(g), 200];
+            curvature_png_to_linear(&mut px);
+            assert!(
+                (i16::from(px[0]) - i16::from(g)).abs() <= 1,
+                "g={g} -> {}",
+                px[0]
+            );
+            assert_eq!(px[3], 200, "alpha untouched");
+        }
+        for anchor in [0u8, 128, 255] {
+            let mut px = [to_srgb(anchor); 4];
+            curvature_png_to_linear(&mut px);
+            assert_eq!(px[0], anchor, "anchor {anchor}");
+        }
+        // Without the decode, flat reads concave: the bug this guards.
+        assert!(to_srgb(128) > 180);
+    }
+
+    #[test]
+    fn mask_mode_changes_invalidate_the_synced_gpu_gate() {
+        // The uploaded gate bytes depend on the mode (editing uploads
+        // all-pass, gating uploads the coverage): a mode change must force
+        // a re-upload, or leaving edit mode would gate with stale bytes.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        s.mask_synced
+            .insert((PlaneOwner::Base, FIRST_TILE, BASE_COLOR_CHANNEL.to_string()));
+        s.set_mask_mode(true);
+        assert!(s.mask_synced.is_empty());
+        s.mask_synced
+            .insert((PlaneOwner::Base, FIRST_TILE, BASE_COLOR_CHANNEL.to_string()));
+        s.set_mask_active(true);
+        assert!(s.mask_synced.is_empty());
     }
 
     #[test]
