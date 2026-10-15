@@ -63,8 +63,9 @@ quartet; stamp textures in the dab shader first") and ROADMAP
   CI's lavapipe step (`ci.yml:95`), which this wave's CI run covers.
 - Clippy `--features gpu --all-targets` reports two pre-existing
   `manual_range_contains` errors in `compositor.rs:3245`, a test under
-  the gpu feature that the default battery never compiles. Not this
-  kill's surface; named for the CI leg.
+  the gpu feature that neither the default battery nor CI's clippy (no
+  `--features gpu`) ever compiles. Fixed in the next commit, so clippy
+  is now clean with and without the feature.
 
 ## Not done (the brush half, next kill)
 
