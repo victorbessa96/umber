@@ -130,6 +130,23 @@ input-to-photon re-measurement under composite-on-read (the stroke frame
 is now splat + region recomposite — re-run the i2p session before stage
 4 lands and record the row).
 
+## The real-GPU row (C2-16): `scripts/perf-3070.sh`
+
+The baselines below were all measured on llvmpipe or lavapipe (CPU
+rasterizers) apart from the 2026-10-10 stroke soak on the RTX 3070. That
+row predates the ref-scene bench, so **no real-GPU viewport number
+exists**. On the 3070 host:
+
+```bash
+bash scripts/perf-3070.sh      # ~10-20 min: release build + three benches
+```
+
+It runs the ref scene (1M tris + 4K set, 1000 frames), input-to-photon
+(5000 events) and the composite-on-read drag. It writes the three JSONs
+to `perf-3070-<commit>/` and prints the row template for the table
+below. The 3070 is above SPEC's 3060 class (amendment A9), so a pass
+there shows the budget is reachable; it does not prove the class floor.
+
 ## Baselines (fill as instrumentation lands)
 
 | Date | Commit | Input→photon P95 | Dab drop @200Hz | Viewport P95 (ref scene) | Undo RAM @100 steps | Notes |
