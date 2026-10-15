@@ -61,8 +61,9 @@ source (`egui_dock-0.21.1/src/widgets/dock_area/show/leaf.rs`, egui
      panels not open anywhere (pick = add here).
    - The button shows on every leaf, overflowing or not. That matches
      Painter, where every panel group has its menu.
-   - This also closes the plan's "restore a closed panel" gap: today
-     only Window ▸ restores one.
+   - Reopening a closed panel already works through Window ▸ Panels
+     (`shell_menu.rs`); the popup's second list only adds a closer
+     route, placing it in THIS group rather than the default dock spot.
 4. **Selected tab visible.** It falls out of (3): picking from » also
    sets `leaf.scroll` so the active tab's x lands inside the bar. Same
    for the keyboard path (`Ctrl+PgDn`). Width per tab is recomputed with
