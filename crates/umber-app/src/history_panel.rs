@@ -421,6 +421,84 @@ pub fn row_state(entry: &HistoryEntry, layer_len: usize, stroke_len: Option<usiz
     }
 }
 
+/// Which journal one unified undo/redo step drives (C2-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Journal {
+    /// The layer journal (`Document::undo` / `redo`).
+    Layer,
+    /// The paint session's stroke journal (`undo_stroke` / `redo_stroke`).
+    Stroke,
+}
+
+/// The journal ONE undo steps back on the unified timeline (C2-7): the
+/// one holding the NEWEST applied row, by `op_id` (the log's single
+/// interleaving record of both journals). `None` when nothing applied
+/// remains. Without a paint session, stroke rows are not candidates.
+/// Pure, so the rule is headless-testable.
+pub fn unified_undo_target(
+    entries: &[HistoryEntry],
+    layer_len: usize,
+    stroke_len: Option<usize>,
+) -> Option<Journal> {
+    entries
+        .iter()
+        .rev()
+        .find_map(|e| match (e.jump_target(), e.stroke_target()) {
+            (Some(d), None) if d >= 1 && d <= layer_len => Some(Journal::Layer),
+            (None, Some(d)) if stroke_len.is_some_and(|len| d >= 1 && d <= len) => {
+                Some(Journal::Stroke)
+            }
+            _ => None,
+        })
+}
+
+/// The journal ONE redo replays on the unified timeline: the one whose
+/// next undone step is the OLDEST, by `op_id`, so a run of unified undos
+/// replays in reverse exactly. A journal's next redo step is the first
+/// row past its live length (`depth == len + 1`).
+pub fn unified_redo_target(
+    entries: &[HistoryEntry],
+    layer_len: usize,
+    stroke_len: Option<usize>,
+) -> Option<Journal> {
+    entries
+        .iter()
+        .find_map(|e| match (e.jump_target(), e.stroke_target()) {
+            (Some(d), None) if d == layer_len + 1 => Some(Journal::Layer),
+            (None, Some(d)) if stroke_len.is_some_and(|len| d == len + 1) => Some(Journal::Stroke),
+            _ => None,
+        })
+}
+
+/// One unified undo (C2-7): Ctrl+Z on ONE timeline across layer ops and
+/// strokes. Drains pending stroke commits first, so a stroke painted this
+/// frame is on the timeline before the choice is made. `false` when
+/// nothing could be undone.
+pub fn unified_undo(doc: &mut Document, mut paint: Option<&mut PaintState>) -> bool {
+    if let Some(p) = paint.as_deref_mut() {
+        drain_stroke_commits(doc, p);
+    }
+    let stroke_len = paint.as_ref().map(|p| p.stroke_len());
+    match unified_undo_target(doc.session_history.entries(), doc.history.len(), stroke_len) {
+        Some(Journal::Layer) => doc.undo(),
+        Some(Journal::Stroke) => paint.is_some_and(|p| p.undo_stroke()),
+        None => false,
+    }
+}
+
+/// One unified redo, the inverse of [`unified_undo`].
+pub fn unified_redo(doc: &mut Document, mut paint: Option<&mut PaintState>) -> bool {
+    if let Some(p) = paint.as_deref_mut() {
+        drain_stroke_commits(doc, p);
+    }
+    let stroke_len = paint.as_ref().map(|p| p.stroke_len());
+    match unified_redo_target(doc.session_history.entries(), doc.history.len(), stroke_len) {
+        Some(Journal::Layer) => doc.redo(),
+        Some(Journal::Stroke) => paint.is_some_and(|p| p.redo_stroke()),
+        None => false,
+    }
+}
+
 /// The per-frame stroke-commit drain: called from the app's frame loop with
 /// the document AND the paint session — every frame, not only when the
 /// History tab is visible (egui_dock skips hidden tabs), so strokes painted
@@ -467,19 +545,23 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
     ParamGroup::new("history-controls", controls_title.as_str()).show(ui, |group| {
         let ui: &mut egui::Ui = &mut *group.ui;
         ui.horizontal(|ui| {
-            let can_undo = doc.history.can_undo();
-            let can_redo = doc.history.can_redo();
+            // ONE timeline (C2-7): the panel's Undo/Redo step whichever
+            // journal holds the newest applied / oldest undone row.
+            let stroke_len = paint.as_ref().map(|p| p.stroke_len());
+            let entries = doc.session_history.entries();
+            let can_undo = unified_undo_target(entries, doc.history.len(), stroke_len).is_some();
+            let can_redo = unified_redo_target(entries, doc.history.len(), stroke_len).is_some();
             if ui
                 .add_enabled(can_undo, egui::Button::new(tr("history.undo")))
                 .clicked()
             {
-                doc.undo();
+                unified_undo(doc, paint.as_deref_mut());
             }
             if ui
                 .add_enabled(can_redo, egui::Button::new(tr("history.redo")))
                 .clicked()
             {
-                doc.redo();
+                unified_redo(doc, paint.as_deref_mut());
             }
         });
         let n = doc.history.len();
@@ -587,6 +669,167 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
 
 #[cfg(test)]
 mod tests {
+
+    /// A paint-capable device (the `bake_sources` tests' pattern).
+    fn paint_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        if !adapter.features().contains(features) {
+            eprintln!("skipping: adapter lacks TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    #[test]
+    fn unified_undo_interleaves_a_real_stroke_and_layer_op() {
+        // GPU: layer op, then a stroke, then a layer op. Three unified
+        // undos must take the layer op, then the STROKE, then the first
+        // layer op: the order they happened, across both journals.
+        let Some((device, queue)) = paint_device() else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 64).expect("paint builds");
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("First", LayerKind::Paint));
+        paint.begin_stroke(egui::pos2(0.2, 0.2));
+        for i in 1..=24 {
+            let t = i as f32 * 0.02;
+            paint.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+        }
+        paint.end_stroke();
+        paint.process_pending().expect("drains");
+        drain_stroke_commits(&mut doc, &mut paint);
+        assert_eq!(paint.stroke_len(), 1, "the stroke committed");
+        doc.run(LayerCommand::add("Second", LayerKind::Paint));
+
+        assert!(unified_undo(&mut doc, Some(&mut paint)));
+        assert_eq!(
+            (doc.layers().len(), paint.stroke_len()),
+            (1, 1),
+            "the newest: Second"
+        );
+        assert!(unified_undo(&mut doc, Some(&mut paint)));
+        assert_eq!(
+            (doc.layers().len(), paint.stroke_len()),
+            (1, 0),
+            "then the stroke"
+        );
+        assert!(unified_undo(&mut doc, Some(&mut paint)));
+        assert_eq!(
+            (doc.layers().len(), paint.stroke_len()),
+            (0, 0),
+            "then First"
+        );
+        assert!(!unified_undo(&mut doc, Some(&mut paint)));
+        // Redo replays the same three in reverse.
+        assert!(unified_redo(&mut doc, Some(&mut paint)));
+        assert_eq!((doc.layers().len(), paint.stroke_len()), (1, 0));
+        assert!(unified_redo(&mut doc, Some(&mut paint)));
+        assert_eq!((doc.layers().len(), paint.stroke_len()), (1, 1));
+        assert!(unified_redo(&mut doc, Some(&mut paint)));
+        assert_eq!((doc.layers().len(), paint.stroke_len()), (2, 1));
+    }
+
+    /// A log interleaving layer and stroke rows in `op_id` order.
+    fn mixed_log(rows: &[(bool, usize)]) -> Vec<HistoryEntry> {
+        rows.iter()
+            .enumerate()
+            .map(|(i, (layer, depth))| HistoryEntry {
+                kind: if *layer {
+                    HistoryKind::AddPaint
+                } else {
+                    HistoryKind::BrushStroke
+                },
+                op_id: i as u64,
+                undo_depth: layer.then_some(*depth),
+                stroke_depth: (!layer).then_some(*depth),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unified_undo_walks_both_journals_newest_first_and_redo_replays() {
+        // L1, S1, L2, S2: two layer ops and two strokes, interleaved.
+        let log = mixed_log(&[(true, 1), (false, 1), (true, 2), (false, 2)]);
+        // Simulate four unified undos, applying each to the right length.
+        let (mut l, mut s) = (2usize, 2usize);
+        let mut order = Vec::new();
+        while let Some(j) = unified_undo_target(&log, l, Some(s)) {
+            order.push(j);
+            match j {
+                Journal::Layer => l -= 1,
+                Journal::Stroke => s -= 1,
+            }
+        }
+        use Journal::{Layer, Stroke};
+        assert_eq!(
+            order,
+            [Stroke, Layer, Stroke, Layer],
+            "newest first, across journals"
+        );
+        assert_eq!((l, s), (0, 0));
+        // Redo replays the exact reverse.
+        let mut replay = Vec::new();
+        while let Some(j) = unified_redo_target(&log, l, Some(s)) {
+            replay.push(j);
+            match j {
+                Journal::Layer => l += 1,
+                Journal::Stroke => s += 1,
+            }
+        }
+        assert_eq!(replay, [Layer, Stroke, Layer, Stroke]);
+        assert_eq!((l, s), (2, 2));
+    }
+
+    #[test]
+    fn unified_undo_without_paint_skips_stroke_rows_and_context_rows() {
+        let mut log = mixed_log(&[(true, 1), (false, 1)]);
+        log.push(HistoryEntry {
+            kind: HistoryKind::Bake,
+            op_id: 9,
+            undo_depth: None,
+            stroke_depth: None,
+        });
+        // No paint session: only the layer row is undoable.
+        assert_eq!(unified_undo_target(&log, 1, None), Some(Journal::Layer));
+        assert_eq!(unified_undo_target(&log, 0, None), None);
+        // A merged stroke shares its predecessor's depth: still one step.
+        let merged = mixed_log(&[(false, 1), (false, 1)]);
+        assert_eq!(
+            unified_undo_target(&merged, 0, Some(1)),
+            Some(Journal::Stroke)
+        );
+        assert_eq!(
+            unified_redo_target(&merged, 0, Some(0)),
+            Some(Journal::Stroke)
+        );
+        assert_eq!(unified_redo_target(&merged, 0, Some(1)), None);
+    }
+
+    #[test]
+    fn unified_undo_steps_a_real_document() {
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("A", umber_core::LayerKind::Paint));
+        doc.run(LayerCommand::add("B", umber_core::LayerKind::Paint));
+        assert!(unified_undo(&mut doc, None));
+        assert_eq!(doc.layers().len(), 1);
+        assert!(unified_undo(&mut doc, None));
+        assert!(!unified_undo(&mut doc, None), "nothing left");
+        assert!(unified_redo(&mut doc, None));
+        assert!(unified_redo(&mut doc, None));
+        assert_eq!(doc.layers().len(), 2);
+        assert!(!unified_redo(&mut doc, None));
+    }
+
     use super::*;
     use umber_core::layers::LayerKind;
 
