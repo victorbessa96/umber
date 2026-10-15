@@ -8,6 +8,9 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- File ▸ Revert to Saved (asks first), Window ▸ Panels (show or hide any
+  panel) and Reset Layout, and a real Help ▸ About: version, commit and
+  the live GPU, copyable for bug reports (g5-menu-completion)
 - File ▸ Open Recent: the last 10 projects, kept across sessions;
   unreachable folders grey out instead of failing (g5-recent-projects)
 - `umber-gui` gains a general curve editor (`Curve` / `CurveEdit`),
