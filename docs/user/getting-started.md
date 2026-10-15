@@ -33,7 +33,8 @@ shows the same paint flat, in UV space.
 ## 2. Bake the mesh maps
 
 Open the **Bakes** panel. Pick the maps (ambient occlusion, curvature,
-thickness, position), a **Resolution**, the **Rays** per
+thickness, position and the tangent normal are on by default; world-space
+normal, ID and bent normal are opt-in), a **Resolution**, the **Rays** per
 texel (more rays mean smoother AO and a slower bake) and **Dilation**,
 the number of texels each UV island bleeds past its edge so mip-mapping
 never samples the background.
@@ -45,9 +46,8 @@ never samples the background.
   across each UV seam, so a seam stays invisible when the texture is
   filtered.
 
-Then press **Bake**. (The panel bakes those four. Normal, world-space
-normal, ID, bent normals and high→low baking with a cage run through
-`umber-cli` today; see §6.) The baked maps feed the viewport's mesh-map view
+Then press **Bake**. (High→low baking with a cage, and the height map it
+produces, run through `umber-cli`'s batch recipes today.) The baked maps feed the viewport's mesh-map view
 modes (press `B`), the brush's cavity mask, and the export.
 
 ## 3. Paint
