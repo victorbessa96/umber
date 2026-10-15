@@ -120,6 +120,7 @@ use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fluent::FluentValue;
+use umber_bake::margin::MarginType;
 use umber_gui::{ParamGroup, ValueField};
 use umber_mesh::FIRST_TILE;
 
@@ -559,6 +560,9 @@ struct BakeRequest {
     size: u32,
     rays: u32,
     dilation_iterations: u32,
+    /// The margin fill strategy ahead of the dilation post-pass
+    /// ([`pad_map`]).
+    margin: MarginType,
     /// Skew edge-protection threshold in degrees (the AO guard).
     skew_threshold_deg: f32,
     /// The planned jobs, each with its output path (resolved on the main
@@ -639,6 +643,9 @@ pub struct BakesPanel {
     bake_skew: bool,
     rays: u32,
     dilation_iterations: u32,
+    /// Blender's Margin Type (Extend = the dilation alone, the pre-margin
+    /// default; Adjacent Faces = the cross-seam fill first).
+    margin: MarginType,
     /// Skew edge-protection threshold in degrees (the guard + the log's
     /// warnings column).
     skew_threshold_deg: f32,
@@ -655,6 +662,7 @@ pub struct BakesPanel {
     applied_resolution: u32,
     applied_rays: u32,
     applied_dilation: u32,
+    applied_margin: MarginType,
     applied_skew_threshold_deg: f32,
     /// The per-set checklist (§6:59), synced from the mesh each frame.
     sets: Vec<SetCheck>,
@@ -690,6 +698,7 @@ impl BakesPanel {
             bake_skew: false,
             rays: DEFAULT_RAYS,
             dilation_iterations: DEFAULT_DILATION_ITERATIONS,
+            margin: MarginType::Extend,
             skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
             auto_rebake: false,
             auto_state: umber_bake::skew::AutoRebake::new(),
@@ -697,6 +706,7 @@ impl BakesPanel {
             applied_resolution: DEFAULT_RESOLUTION,
             applied_rays: DEFAULT_RAYS,
             applied_dilation: DEFAULT_DILATION_ITERATIONS,
+            applied_margin: MarginType::Extend,
             applied_skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
             sets: Vec::new(),
             show_cage: false,
@@ -788,6 +798,17 @@ impl BakesPanel {
     /// Sets the dilation width, clamping to `0..=MAX_DILATION_ITERATIONS`.
     pub fn set_dilation_iterations(&mut self, iterations: u32) {
         self.dilation_iterations = iterations.min(MAX_DILATION_ITERATIONS);
+    }
+
+    /// The margin fill strategy (default [`MarginType::Extend`]).
+    pub fn margin(&self) -> MarginType {
+        self.margin
+    }
+
+    /// Sets the margin fill strategy. Its width is the dilation width:
+    /// with dilation `0` neither strategy pads anything.
+    pub fn set_margin(&mut self, margin: MarginType) {
+        self.margin = margin;
     }
 
     /// Enables or disables one map's checkbox.
@@ -1016,6 +1037,12 @@ impl BakesPanel {
             changed.push(umber_bake::skew::BakeParam::Dilation);
             self.applied_dilation = self.dilation_iterations;
         }
+        // The margin type changes the same post-pass every map shares, so
+        // it dirties exactly what a dilation change dirties.
+        if self.margin != self.applied_margin {
+            changed.push(umber_bake::skew::BakeParam::Dilation);
+            self.applied_margin = self.margin;
+        }
         if (self.skew_threshold_deg - self.applied_skew_threshold_deg).abs() > f32::EPSILON {
             changed.push(umber_bake::skew::BakeParam::SkewThreshold);
             self.applied_skew_threshold_deg = self.skew_threshold_deg;
@@ -1205,6 +1232,10 @@ impl BakesPanel {
                     ValueField::new(&mut self.dilation_iterations)
                         .range(0..=MAX_DILATION_ITERATIONS),
                 );
+            });
+            let margin_label = tr("bakes.margin");
+            group.row(margin_label.as_str(), |ui| {
+                margin_combo(ui, &mut self.margin);
             });
             let skew_label =
                 self.row_label(BakeSettingId::SkewThreshold, tr("bakes.skew-threshold"));
@@ -1486,6 +1517,7 @@ impl BakesPanel {
             size: self.resolution,
             rays: self.rays,
             dilation_iterations: self.dilation_iterations,
+            margin: self.margin,
             skew_threshold_deg: self.skew_threshold_deg,
             jobs,
             skew_jobs,
@@ -1610,12 +1642,25 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         size,
         rays,
         dilation_iterations,
+        margin,
         skew_threshold_deg,
         jobs,
         skew_jobs,
     } = request;
     let (device, queue, mesh) = (&device, &queue, &mesh);
     let dilate = umber_bake::DilateParams::new(dilation_iterations);
+    let pad = Padding {
+        margin,
+        iterations: dilation_iterations,
+        size,
+    };
+    // Adjacent Faces' seam graphs, built at most once per bake: the
+    // whole mesh's for whole-mesh jobs, and per tile for the AO tile
+    // jobs (those bake a filtered, UV-rebased mesh, and the margin reads
+    // the mesh the map was rasterized from).
+    let mut whole_seams: Option<Option<umber_mesh::seam::SeamGraph>> = None;
+    let mut tile_seams: HashMap<u16, (umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>)> =
+        HashMap::new();
     let mut records = Vec::new();
     let mut skew_by_tile: HashMap<u16, Vec<u8>> = HashMap::new();
 
@@ -1668,8 +1713,23 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                         device, queue, mesh, size, rays, job.tile,
                     )?,
                 };
+                let filled = match job.source {
+                    BakeSource::WholeMesh => {
+                        let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                        pad.fill(mesh, seams.as_ref(), raw)
+                    }
+                    BakeSource::Tile => {
+                        let (tile_mesh, seams) = tile_seams.entry(job.tile).or_insert_with(|| {
+                            let tile_mesh = umber_bake::ao::filter_mesh_for_tile(mesh, job.tile);
+                            let seams = pad.seams(&tile_mesh);
+                            (tile_mesh, seams)
+                        });
+                        pad.fill(tile_mesh, seams.as_ref(), raw)
+                    }
+                }
+                .context("ao margin")?;
                 let mut dilated =
-                    umber_bake::dilation::dilate_map(device, queue, &raw, size, size, &dilate)
+                    umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                         .context("ao dilation")?;
                 // Edge protection (§6:57): the guard in the bake pass,
                 // over the DILATED bytes (the guard sees what ships).
@@ -1692,7 +1752,11 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                     &umber_bake::CurvatureParams::default(),
                 )
                 .context("curvature bake")?;
-                umber_bake::dilation::dilate_map(device, queue, &raw, size, size, &dilate)
+                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                let filled = pad
+                    .fill(mesh, seams.as_ref(), raw)
+                    .context("curvature margin")?;
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                     .context("curvature dilation")?
             }
             BakeSelection::Thickness => {
@@ -1704,7 +1768,11 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                     device, queue, mesh, size, size, &params,
                 )
                 .context("thickness bake")?;
-                umber_bake::dilation::dilate_map(device, queue, &raw, size, size, &dilate)
+                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                let filled = pad
+                    .fill(mesh, seams.as_ref(), raw)
+                    .context("thickness margin")?;
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                     .context("thickness dilation")?
             }
             BakeSelection::Position => {
@@ -1715,7 +1783,11 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                 let f32map = umber_bake::position::bake_position_map(device, queue, mesh, &params)
                     .context("position bake")?;
                 let raw = encode_position_rgba8(&f32map);
-                umber_bake::dilation::dilate_map(device, queue, &raw, size, size, &dilate)
+                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                let filled = pad
+                    .fill(mesh, seams.as_ref(), raw)
+                    .context("position margin")?;
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                     .context("position dilation")?
             }
         };
@@ -1731,6 +1803,72 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         });
     }
     Ok(records)
+}
+
+/// The CPU half of the UV-padding post-pass: the margin strategy and its
+/// width. [`run_bake`] runs [`Padding::fill`] and then the GPU dilation
+/// (Extend) over the result — the same order as `umber-cli`'s `pad_map`:
+/// adjacency FIRST, or Extend covers the seam strip and leaves Adjacent
+/// Faces nothing to fill.
+struct Padding {
+    margin: MarginType,
+    /// The margin width in texels (the dilation width).
+    iterations: u32,
+    /// Square map size in texels.
+    size: u32,
+}
+
+impl Padding {
+    /// The seam graph Adjacent Faces needs; `None` when it will not be
+    /// used (Extend, or a zero-width margin), so Extend never builds it.
+    fn seams(&self, mesh: &umber_mesh::MeshData) -> Option<umber_mesh::seam::SeamGraph> {
+        (self.margin == MarginType::AdjacentFaces && self.iterations > 0)
+            .then(|| umber_mesh::seam::build_seam_graph(mesh))
+    }
+
+    /// Fills the margin texels within `iterations` texels of a UV seam
+    /// from the face across it ([`umber_bake::margin::adjacent_faces_margin`]).
+    /// Without `seams` the map returns untouched, byte-identical — the
+    /// pre-margin Extend path.
+    fn fill(
+        &self,
+        mesh: &umber_mesh::MeshData,
+        seams: Option<&umber_mesh::seam::SeamGraph>,
+        raw: Vec<u8>,
+    ) -> Result<Vec<u8>, umber_bake::margin::MarginError> {
+        match seams {
+            Some(graph) => umber_bake::margin::adjacent_faces_margin(
+                &raw,
+                self.size,
+                self.size,
+                mesh,
+                graph,
+                self.iterations,
+            ),
+            None => Ok(raw),
+        }
+    }
+}
+
+/// The catalog key naming a margin type in the combo.
+fn margin_key(margin: MarginType) -> &'static str {
+    match margin {
+        MarginType::Extend => "bakes.margin-extend",
+        MarginType::AdjacentFaces => "bakes.margin-adjacent",
+    }
+}
+
+/// The Margin Type combo (Blender's two strategies).
+fn margin_combo(ui: &mut egui::Ui, margin: &mut MarginType) {
+    egui::ComboBox::from_id_salt("bakes_margin_combo")
+        .selected_text(tr(margin_key(*margin)))
+        .show_ui(ui, |ui| {
+            for candidate in [MarginType::Extend, MarginType::AdjacentFaces] {
+                ui.selectable_value(margin, candidate, tr(margin_key(candidate)));
+            }
+        })
+        .response
+        .on_hover_text(tr("bakes.margin-hint"));
 }
 
 impl Default for BakesPanel {
@@ -2486,6 +2624,144 @@ mod tests {
             "▶ Dilation"
         );
         assert_eq!(p.row_label(BakeSettingId::Rays, "Rays".to_string()), "Rays");
+    }
+
+    // --- Margin type (Blender's Extend / Adjacent Faces) ----------------
+
+    #[test]
+    fn margin_defaults_to_extend_and_round_trips() {
+        let mut p = panel();
+        assert_eq!(p.margin(), MarginType::Extend);
+        p.set_margin(MarginType::AdjacentFaces);
+        assert_eq!(p.margin(), MarginType::AdjacentFaces);
+        p.set_margin(MarginType::Extend);
+        assert_eq!(p.margin(), MarginType::Extend);
+        assert_eq!(margin_key(MarginType::Extend), "bakes.margin-extend");
+        assert_eq!(
+            margin_key(MarginType::AdjacentFaces),
+            "bakes.margin-adjacent"
+        );
+    }
+
+    #[test]
+    fn margin_change_dirties_what_a_dilation_change_dirties() {
+        use std::time::Duration;
+
+        let present = [1001];
+        let fire_after = |edit: &dyn Fn(&mut BakesPanel)| {
+            let mut p = panel();
+            p.set_auto_rebake(true);
+            p.tiles_mut().sync(&present);
+            p.sync_sets(&["A".to_string()]);
+            let start = Instant::now();
+            let selected = p.tiles.resolve(&present);
+            edit(&mut p);
+            p.sync_param_tracking(start, &selected);
+            p.poll_autorebake(start + Duration::from_millis(500), &selected)
+        };
+        let by_margin = fire_after(&|p| p.set_margin(MarginType::AdjacentFaces))
+            .expect("a margin change must schedule a rebake");
+        let by_dilation = fire_after(&|p| p.set_dilation_iterations(8))
+            .expect("a dilation change schedules a rebake");
+        assert_eq!(by_margin.maps, by_dilation.maps);
+        assert_eq!(by_margin.maps, BakeSelection::ALL.to_vec());
+        // An unchanged margin dirties nothing.
+        assert!(fire_after(&|p| p.set_margin(MarginType::Extend)).is_none());
+    }
+
+    /// `umber-cli`'s `tests/margin_cli.rs` seamed quad at 64 px: island A's
+    /// seam on column 24 (body left), island B's on column 40 (body
+    /// right), the gap 24..40 uncovered. Both islands share 3D edge A-C.
+    fn seamed_quad_64() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 6],
+            uvs: vec![
+                [0.375, 0.875],
+                [0.0, 0.125],
+                [0.375, 0.125],
+                [0.625, 0.875],
+                [0.625, 0.125],
+                [1.0, 0.875],
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            material_names: vec![],
+        }
+    }
+
+    /// Columns 0..24 and 40..64 covered (rows 8..56), each texel a distinct
+    /// colour so a copy pins exactly which texel was sampled.
+    fn seamed_map_64() -> Vec<u8> {
+        let mut m = vec![0u8; 64 * 64 * 4];
+        for y in 8..56u32 {
+            for x in (0..24u32).chain(40..64) {
+                let i = ((y * 64 + x) * 4) as usize;
+                m[i..i + 4].copy_from_slice(&[(x * 3) as u8, (y * 3) as u8, 7, 255]);
+            }
+        }
+        m
+    }
+
+    fn texel_64(m: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * 64 + x) * 4) as usize;
+        [m[i], m[i + 1], m[i + 2], m[i + 3]]
+    }
+
+    #[test]
+    fn extend_padding_is_byte_identical_and_builds_no_seams() {
+        let mesh = seamed_quad_64();
+        let pad = Padding {
+            margin: MarginType::Extend,
+            iterations: 4,
+            size: 64,
+        };
+        let seams = pad.seams(&mesh);
+        assert!(seams.is_none());
+        let map = seamed_map_64();
+        assert_eq!(pad.fill(&mesh, seams.as_ref(), map.clone()).unwrap(), map);
+        // A zero-width Adjacent Faces margin builds nothing either.
+        let zero = Padding {
+            margin: MarginType::AdjacentFaces,
+            iterations: 0,
+            size: 64,
+        };
+        assert!(zero.seams(&mesh).is_none());
+    }
+
+    #[test]
+    fn adjacent_padding_copies_the_partner_island_across_the_seam() {
+        let mesh = seamed_quad_64();
+        let pad = Padding {
+            margin: MarginType::AdjacentFaces,
+            iterations: 4,
+            size: 64,
+        };
+        let seams = pad.seams(&mesh);
+        assert!(seams.is_some());
+        let map = seamed_map_64();
+        let out = pad.fill(&mesh, seams.as_ref(), map.clone()).unwrap();
+        // Column 24 (centre 24.5, 0.5 px beyond A's seam) samples island
+        // B 0.5 px inside ITS seam: column 40, same row. Column 39 (0.5 px
+        // beyond B's seam) samples island A at column 23. Extend would
+        // leave both uncovered here (this pass), then repeat each island's
+        // own border — never the partner's colour.
+        for y in [12u32, 30, 50] {
+            assert_eq!(texel_64(&out, 24, y), texel_64(&map, 40, y), "row {y}");
+            assert_eq!(texel_64(&out, 39, y), texel_64(&map, 23, y), "row {y}");
+        }
+        // Beyond the 4 px width (column 28 and 35) stays uncovered for
+        // the Extend pass that follows.
+        assert_eq!(texel_64(&out, 28, 30)[3], 0);
+        assert_eq!(texel_64(&out, 35, 30)[3], 0);
+        // Covered texels are untouched.
+        assert_eq!(texel_64(&out, 10, 30), texel_64(&map, 10, 30));
     }
 
     #[test]

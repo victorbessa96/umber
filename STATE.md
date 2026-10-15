@@ -18,7 +18,7 @@ paints through it (`paint_stroke` / `paint_read` / `paint_snapshot` /
 undo, a `version` step, exact wire strokes); the photocraft + Blender
 absorption pass (`docs/research/absorption-2026-10-14-photocraft-blender.md`)
 landed falloff curves + front-face falloff (with brush-panel controls),
-the Adjacent Faces bake margin, crash-safe GPU startup, save-format
+the Adjacent Faces bake margin (CLI + the Bakes panel combo), crash-safe GPU startup, save-format
 completeness, the crate layering gate and the docs-only CI path filter;
 the mesh-importer panic hunt found 24 crash bugs and hardening closed
 23 (`.usdz` loads for the first time; the open one is an openusd

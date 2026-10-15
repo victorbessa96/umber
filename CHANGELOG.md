@@ -24,8 +24,9 @@ the source of truth.
 - Brush falloff curves (Blender's presets; CPU + GPU, old brushes load as
   Smooth, bit-identical) and front-face falloff for 3D strokes, both with
   brush-panel controls (`d0309e1`, `cabe283`, `9a47fa0`)
-- Adjacent Faces bake margin — cross-seam fill (`3818da0`; not yet in
-  the bake UI)
+- Adjacent Faces bake margin — cross-seam fill (`3818da0`), on the CLI
+  (`--margin`, the agent `bake` step) and in the Bakes panel's Margin
+  type combo (g2-bakes-margin-ui)
 - Crash-safe GPU startup: a driver crash at device creation makes the
   next launch step down the backend chain; `--safe-gpu` / `WGPU_BACKEND`
   override (`a221a85`)
