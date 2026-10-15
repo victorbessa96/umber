@@ -20,6 +20,9 @@ png = "0.17"
 # Feature-gated `gpu` smoke test only (the renderer::tests::gpu pattern).
 pollster = { workspace = true }
 wgpu = { workspace = true }
+# Headless widget interaction tests (the AccessKit query + click flow).
+# Already in the lock through umber-app; no snapshot/wgpu features here.
+egui_kittest = { version = "0.36" }
 
 [features]
 # Bake Inter + JetBrains Mono into the binary via include_bytes!. Off by

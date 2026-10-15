@@ -4954,6 +4954,7 @@ name = "umber-gui"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "egui_kittest",
  "png 0.17.16",
  "pollster 1.0.1",
  "serde",

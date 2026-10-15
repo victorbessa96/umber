@@ -39,6 +39,13 @@
 //! - Hover + Backspace resets to [`ValueField::default_value`], when one is
 //!   set. A double-click reset is NOT offered: the first click of a
 //!   double-click already opens typing.
+//! - [`ValueField::context_menu`] (kill `g4-property-context-menu`,
+//!   B:D10): right-click opens Reset to Default / Copy / Paste. umber-gui
+//!   has no i18n, so the caller passes the labels ([`MenuLabels`]) already
+//!   translated. Without labels, right-click keeps copying the value.
+//!   Paste reads the field's own clipboard (the last value a field
+//!   copied), because egui exposes no clipboard READ outside its paste
+//!   event; a value copied from another app arrives by hover + Ctrl+V.
 //!
 //! The math is in free functions so it is testable without an
 //! `egui::Context`.
@@ -248,6 +255,30 @@ impl ExprParser<'_> {
     }
 }
 
+/// The right-click menu's labels, already translated by the caller.
+#[derive(Debug, Clone, Copy)]
+pub struct MenuLabels<'a> {
+    /// "Reset to Default".
+    pub reset: &'a str,
+    /// "Copy".
+    pub copy: &'a str,
+    /// "Paste".
+    pub paste: &'a str,
+}
+
+/// The clipboard every field shares within one egui context (temp data
+/// under one id): what Copy wrote last, as the bare number.
+fn shared_clip_id() -> Id {
+    Id::new("umber-gui-value-field-clip")
+}
+
+/// What a context-menu Paste of `clip` gives, clamped to the hard range:
+/// `None` when nothing was copied yet or the text does not evaluate.
+pub fn menu_paste(clip: Option<&str>, unit: &str, min: f64, max: f64) -> Option<f64> {
+    clip.and_then(|text| eval_expr(text, unit))
+        .map(|v| clamp(v, min, max))
+}
+
 /// The drag clamp: the soft range intersected with the hard one (an
 /// inverted intersection falls back to the hard range).
 pub fn soft_bounds(hard: (f64, f64), soft: Option<(f64, f64)>) -> (f64, f64) {
@@ -316,6 +347,7 @@ pub struct ValueField<'a, N: Numeric> {
     logarithmic: bool,
     soft: Option<(f64, f64)>,
     default: Option<f64>,
+    menu: Option<MenuLabels<'a>>,
 }
 
 impl<'a, N: Numeric> ValueField<'a, N> {
@@ -337,7 +369,16 @@ impl<'a, N: Numeric> ValueField<'a, N> {
             logarithmic: false,
             soft: None,
             default: None,
+            menu: None,
         }
+    }
+
+    /// Right-click opens Reset to Default / Copy / Paste with these labels
+    /// (see the module docs). Reset is offered only with a
+    /// [`Self::default_value`].
+    pub fn context_menu(mut self, labels: MenuLabels<'a>) -> Self {
+        self.menu = Some(labels);
+        self
     }
 
     /// The drag range (see the module docs). Typing still reaches the
@@ -558,7 +599,10 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 (copy, paste, reset)
             });
             if copy {
-                ui.ctx().copy_text(format_value(new, self.decimals, ""));
+                let text = format_value(new, self.decimals, "");
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
+                ui.ctx().copy_text(text);
             }
             if let Some(value) = paste.and_then(|text| eval_expr(&text, self.unit)) {
                 new = clamp(value, hard.0, hard.1);
@@ -568,9 +612,56 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
             }
         }
 
-        // Copy the bare number (no unit) so it pastes into other fields.
-        if response.secondary_clicked() {
-            ui.ctx().copy_text(format_value(new, self.decimals, ""));
+        match self.menu {
+            // Right-click opens the property menu.
+            Some(labels) => {
+                let decimals = self.decimals;
+                let unit = self.unit;
+                let default = self.default;
+                let current = new;
+                let mut picked = None;
+                response.context_menu(|ui| {
+                    if let Some(d) = default {
+                        let at_default = (current - d).abs() < f64::EPSILON;
+                        if ui
+                            .add_enabled(!at_default, egui::Button::new(labels.reset))
+                            .clicked()
+                        {
+                            picked = Some(clamp(d, hard.0, hard.1));
+                            ui.close();
+                        }
+                    }
+                    if ui.button(labels.copy).clicked() {
+                        let text = format_value(current, decimals, "");
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
+                        ui.ctx().copy_text(text);
+                        ui.close();
+                    }
+                    let clip: Option<String> = ui.ctx().data(|d| d.get_temp(shared_clip_id()));
+                    let pasted = menu_paste(clip.as_deref(), unit, hard.0, hard.1);
+                    if ui
+                        .add_enabled(pasted.is_some(), egui::Button::new(labels.paste))
+                        .clicked()
+                    {
+                        picked = pasted;
+                        ui.close();
+                    }
+                });
+                if let Some(v) = picked {
+                    new = v;
+                }
+            }
+            // No menu: right-click copies the bare number (no unit) so it
+            // pastes into other fields.
+            None => {
+                if response.secondary_clicked() {
+                    let text = format_value(new, self.decimals, "");
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
+                    ui.ctx().copy_text(text);
+                }
+            }
         }
 
         if new != old {
@@ -872,6 +963,88 @@ mod tests {
         };
         run(&ctx, &mut v, vec![backspace]);
         assert_eq!(v, 5.0);
+    }
+
+    #[test]
+    fn menu_paste_evaluates_and_clamps() {
+        assert_eq!(menu_paste(None, "", 0.0, 1.0), None);
+        assert_eq!(menu_paste(Some("0.25"), "", 0.0, 1.0), Some(0.25));
+        assert_eq!(menu_paste(Some("5"), "", 0.0, 1.0), Some(1.0), "clamped");
+        assert_eq!(menu_paste(Some("2*8 px"), "px", 0.0, 100.0), Some(16.0));
+        assert_eq!(menu_paste(Some("junk"), "", 0.0, 1.0), None);
+    }
+
+    /// The harness state: field A's value, field B's value, and field A's
+    /// rect as last drawn (the test right-clicks it).
+    struct Fields {
+        a: f32,
+        b: f32,
+        a_rect: egui::Rect,
+    }
+
+    /// Field A (0..=10, default 5) with the property menu, beside field B.
+    fn menu_harness(a: f32) -> egui_kittest::Harness<'static, Fields> {
+        egui_kittest::Harness::new_ui_state(
+            |ui, f: &mut Fields| {
+                let labels = MenuLabels {
+                    reset: "Reset",
+                    copy: "Copy",
+                    paste: "Paste",
+                };
+                f.a_rect = ui
+                    .add(
+                        ValueField::new(&mut f.a)
+                            .range(0.0..=10.0)
+                            .default_value(5.0)
+                            .context_menu(labels),
+                    )
+                    .rect;
+                ui.add(
+                    ValueField::new(&mut f.b)
+                        .range(0.0..=10.0)
+                        .context_menu(labels),
+                );
+            },
+            Fields {
+                a,
+                b: 0.0,
+                a_rect: egui::Rect::NOTHING,
+            },
+        )
+    }
+
+    /// Right-clicks field A, then clicks menu row `row` (found by label).
+    fn pick(harness: &mut egui_kittest::Harness<'_, Fields>, row: &str) {
+        use egui_kittest::kittest::Queryable;
+        let field = harness.state().a_rect.center();
+        for pressed in [true, false] {
+            harness.hover_at(field);
+            harness.event(egui::Event::PointerButton {
+                pos: field,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.step();
+        }
+        harness.run();
+        harness.get_by_label(row).click();
+        harness.run();
+    }
+
+    #[test]
+    fn right_click_menu_resets_copies_and_pastes() {
+        let mut harness = menu_harness(2.0);
+        harness.run();
+        pick(&mut harness, "Reset");
+        assert_eq!(harness.state().a, 5.0, "Reset to Default wrote the default");
+        // Copy A (5), change A, Paste restores the copied 5.
+        pick(&mut harness, "Copy");
+        harness.state_mut().a = 9.0;
+        harness.run();
+        pick(&mut harness, "Paste");
+        assert_eq!(harness.state().a, 5.0, "Paste wrote the copied value");
+        assert_eq!(harness.state().b, 0.0, "field B untouched");
     }
 
     #[test]
