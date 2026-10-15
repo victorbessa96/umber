@@ -20,8 +20,28 @@
 //!   Requires a finite range with `min > 0`; otherwise it falls back to
 //!   linear (logged nowhere: the field still works).
 //!
-//! Typed entry (double-click → text edit) is a v2 follow-up. The math is
-//! in free functions so it is testable without an `egui::Context`.
+//! # The field grammar (kill `g4-valuefield-grammar`, B:D1-D9, P:D2, PC:#8)
+//!
+//! - Click without dragging, or Tab into the field, to TYPE a value: the
+//!   field turns into a text edit with everything selected. Enter or
+//!   leaving the field (Tab to the next one, a click elsewhere) commits;
+//!   Escape cancels. The text is parsed by [`eval_expr`]: numbers,
+//!   `+ - * /`, parentheses and unary minus (`2*512`, `-(1/3)`), with an
+//!   optional trailing unit that matches the field's. Anything else is
+//!   rejected and the old value stays.
+//! - Ctrl/Cmd + wheel over the field steps it (one step per notch). Alt +
+//!   wheel still works. A plain wheel scrolls the panel.
+//! - [`ValueField::soft_range`]: dragging clamps to the soft range, while
+//!   typing, pasting and the wheel reach the hard [`ValueField::range`]
+//!   (Blender's soft/hard limits). The fill bar shows the soft range.
+//! - Hover + Ctrl/Cmd+C copies the value, hover + Ctrl/Cmd+V pastes one
+//!   (through [`eval_expr`]). Right-click still copies.
+//! - Hover + Backspace resets to [`ValueField::default_value`], when one is
+//!   set. A double-click reset is NOT offered: the first click of a
+//!   double-click already opens typing.
+//!
+//! The math is in free functions so it is testable without an
+//! `egui::Context`.
 
 use std::ops::RangeInclusive;
 
@@ -105,6 +125,145 @@ pub fn format_value(value: f64, decimals: usize, unit: &str) -> String {
     }
 }
 
+/// Evaluates a typed value: decimal numbers, `+ - * /`, parentheses and
+/// unary signs, with whitespace anywhere. A trailing `unit` (the field's
+/// own, e.g. `px`) is accepted and ignored. Returns `None` for any other
+/// input, for division by zero, and for non-finite results, so a typo
+/// never writes NaN or infinity into engine state. Recursion depth is
+/// capped, so a pathological `((((…` cannot overflow the stack.
+pub fn eval_expr(text: &str, unit: &str) -> Option<f64> {
+    let mut body = text.trim();
+    if !unit.is_empty() {
+        if let Some(stripped) = body.strip_suffix(unit) {
+            body = stripped.trim_end();
+        }
+    }
+    let mut parser = ExprParser {
+        bytes: body.as_bytes(),
+        pos: 0,
+        depth: 0,
+    };
+    let value = parser.expr()?;
+    parser.skip_ws();
+    (parser.pos == parser.bytes.len() && value.is_finite()).then_some(value)
+}
+
+/// Nesting cap for [`eval_expr`].
+const MAX_EXPR_DEPTH: u32 = 32;
+
+struct ExprParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    depth: u32,
+}
+
+impl ExprParser<'_> {
+    fn skip_ws(&mut self) {
+        while self
+            .bytes
+            .get(self.pos)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        self.skip_ws();
+        self.bytes.get(self.pos).copied()
+    }
+
+    /// expr := term (('+' | '-') term)*
+    fn expr(&mut self) -> Option<f64> {
+        let mut value = self.term()?;
+        while let Some(op @ (b'+' | b'-')) = self.peek() {
+            self.pos += 1;
+            let rhs = self.term()?;
+            value = if op == b'+' { value + rhs } else { value - rhs };
+        }
+        Some(value)
+    }
+
+    /// term := unary (('*' | '/') unary)*
+    fn term(&mut self) -> Option<f64> {
+        let mut value = self.unary()?;
+        while let Some(op @ (b'*' | b'/')) = self.peek() {
+            self.pos += 1;
+            let rhs = self.unary()?;
+            value = if op == b'*' {
+                value * rhs
+            } else if rhs == 0.0 {
+                return None;
+            } else {
+                value / rhs
+            };
+        }
+        Some(value)
+    }
+
+    /// unary := ('-' | '+') unary | atom
+    fn unary(&mut self) -> Option<f64> {
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            return None;
+        }
+        let value = match self.peek()? {
+            b'-' => {
+                self.pos += 1;
+                self.unary().map(|v| -v)
+            }
+            b'+' => {
+                self.pos += 1;
+                self.unary()
+            }
+            _ => self.atom(),
+        };
+        self.depth -= 1;
+        value
+    }
+
+    /// atom := number | '(' expr ')'
+    fn atom(&mut self) -> Option<f64> {
+        if self.peek()? == b'(' {
+            self.pos += 1;
+            let value = self.expr()?;
+            if self.peek()? != b')' {
+                return None;
+            }
+            self.pos += 1;
+            return Some(value);
+        }
+        let start = self.pos;
+        while self
+            .bytes
+            .get(self.pos)
+            .is_some_and(|b| b.is_ascii_digit() || *b == b'.')
+        {
+            self.pos += 1;
+        }
+        std::str::from_utf8(&self.bytes[start..self.pos])
+            .ok()?
+            .parse::<f64>()
+            .ok()
+    }
+}
+
+/// The drag clamp: the soft range intersected with the hard one (an
+/// inverted intersection falls back to the hard range).
+pub fn soft_bounds(hard: (f64, f64), soft: Option<(f64, f64)>) -> (f64, f64) {
+    match soft {
+        Some((lo, hi)) => {
+            let (lo, hi) = (lo.max(hard.0), hi.min(hard.1));
+            if lo <= hi {
+                (lo, hi)
+            } else {
+                hard
+            }
+        }
+        None => hard,
+    }
+}
+
 /// Whether a log scrub is possible on `[min, max]`: both finite, `min > 0`,
 /// `max > min`.
 pub fn log_capable(min: f64, max: f64) -> bool {
@@ -155,6 +314,8 @@ pub struct ValueField<'a, N: Numeric> {
     unit: &'a str,
     width: Option<f32>,
     logarithmic: bool,
+    soft: Option<(f64, f64)>,
+    default: Option<f64>,
 }
 
 impl<'a, N: Numeric> ValueField<'a, N> {
@@ -174,7 +335,22 @@ impl<'a, N: Numeric> ValueField<'a, N> {
             unit: "",
             width: None,
             logarithmic: false,
+            soft: None,
+            default: None,
         }
+    }
+
+    /// The drag range (see the module docs). Typing still reaches the
+    /// hard [`Self::range`].
+    pub fn soft_range(mut self, range: RangeInclusive<N>) -> Self {
+        self.soft = Some((range.start().to_f64(), range.end().to_f64()));
+        self
+    }
+
+    /// The value hover + Backspace resets to.
+    pub fn default_value(mut self, value: N) -> Self {
+        self.default = Some(value.to_f64());
+        self
     }
 
     /// Log-space scrubbing + fill (see the module docs). Needs a finite
@@ -236,50 +412,159 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         let size = Vec2::new(width, ui.spacing().interact_size.y);
         let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let id: Id = response.id.with("scrub-raw");
+        let edit_id: Id = response.id.with("edit-buf");
+        let text_id: Id = response.id.with("edit-text");
+        let hard = (self.min, self.max);
+        let (drag_min, drag_max) = soft_bounds(hard, self.soft);
 
         let old = self.value.to_f64();
         let mut new = old;
 
-        // Drag-scrub over the persistent unsnapped accumulator.
+        // Typed entry: a click (no drag) or keyboard focus opens it.
+        let mut editing: Option<String> = ui.ctx().data(|d| d.get_temp(edit_id));
+        if editing.is_none() && (response.clicked() || response.gained_focus()) {
+            editing = Some(format_value(old, self.decimals, ""));
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(text_id.with("fresh"), true));
+        }
+        if let Some(mut buffer) = editing {
+            // Focus the text edit on its first frame WITHOUT a click: in the
+            // opening click's own frame the edit is new, so egui's hit test
+            // (last frame's rects) sees the click as elsewhere and would
+            // surrender the focus straight away.
+            let fresh_id = text_id.with("fresh");
+            let fresh: bool = ui.ctx().data(|d| d.get_temp(fresh_id)).unwrap_or(false);
+            let focus_now = fresh && !ui.input(|i| i.pointer.any_click());
+            if focus_now {
+                ui.ctx().memory_mut(|m| m.request_focus(text_id));
+            }
+            let output = egui::TextEdit::singleline(&mut buffer)
+                .id(text_id)
+                .font(numeric_font(
+                    ui.style().text_styles[&egui::TextStyle::Monospace].size,
+                ))
+                .horizontal_align(egui::Align::Center)
+                .desired_width(rect.width())
+                .show(&mut ui.new_child(egui::UiBuilder::new().max_rect(rect)));
+            // Select everything on the focusing frame, so typing replaces.
+            if focus_now {
+                ui.ctx().data_mut(|d| d.remove::<bool>(fresh_id));
+                let mut state = output.state.clone();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::select_all(&output.galley)));
+                state.store(ui.ctx(), text_id);
+            }
+            let text_response = output.response.response;
+            if text_response.lost_focus() {
+                let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if !cancelled {
+                    if let Some(typed) = eval_expr(&buffer, self.unit) {
+                        new = clamp(typed, hard.0, hard.1);
+                    }
+                }
+                ui.ctx().data_mut(|d| d.remove::<String>(edit_id));
+            } else {
+                ui.ctx().data_mut(|d| d.insert_temp(edit_id, buffer));
+            }
+            if new != old {
+                write_back(self.value, new, &mut response);
+            }
+            return response;
+        }
+
+        // Drag-scrub over the persistent unsnapped accumulator, clamped to
+        // the soft range.
         if response.drag_started() {
-            ui.data_mut(|d| d.insert_temp(id, old));
+            ui.ctx().data_mut(|d| d.insert_temp(id, old));
         }
         if response.dragged() {
             let (shift, command) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
-            let raw: f64 = ui.data(|d| d.get_temp(id)).unwrap_or(old);
+            let raw: f64 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(old);
             let factor = modifier_factor(shift, command);
-            let raw = if self.logarithmic && log_capable(self.min, self.max) {
+            let raw = if self.logarithmic && log_capable(drag_min, drag_max) {
                 log_scrub(
                     raw,
                     response.drag_delta().x,
                     rect.width(),
-                    self.min,
-                    self.max,
+                    drag_min,
+                    drag_max,
                     factor,
                 )
             } else {
                 scrub(raw, response.drag_delta().x, self.speed, factor)
             };
-            ui.data_mut(|d| d.insert_temp(id, raw));
-            new = snap_clamp(raw, self.step, self.min, self.max);
+            ui.ctx().data_mut(|d| d.insert_temp(id, raw));
+            new = snap_clamp(raw, self.step, drag_min, drag_max);
         }
         if response.drag_stopped() {
-            ui.data_mut(|d| d.remove::<f64>(id));
+            ui.ctx().data_mut(|d| d.remove::<f64>(id));
         }
 
-        // Alt+wheel steps while hovered. A plain wheel must keep scrolling
-        // the panel's ScrollArea; otherwise panels full of fields stop
-        // scrolling under the cursor and trackpads run the value away. The
-        // scroll is consumed only when it steps.
-        let alt = ui.input(|i| i.modifiers.alt);
-        if alt && response.hovered() && !response.dragged() {
-            let steps = wheel_steps(ui.input(|i| i.smooth_scroll_delta.y));
+        let hovered = response.hovered() && !response.dragged();
+        // Hover gestures: wheel steps, clipboard, reset. None of them fires
+        // while a text field elsewhere owns the keyboard.
+        if hovered && !ui.ctx().text_edit_focused() {
+            // Ctrl/Cmd + wheel (egui turns it into zoom, so read the raw
+            // wheel events) or Alt + wheel (the smoothed scroll) steps.
+            // A plain wheel keeps scrolling the panel's ScrollArea.
+            let cmd_steps: i32 = ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::MouseWheel {
+                            delta, modifiers, ..
+                        } if modifiers.command => Some(wheel_steps(delta.y)),
+                        _ => None,
+                    })
+                    .sum()
+            });
+            let alt = ui.input(|i| i.modifiers.alt);
+            let alt_steps = if alt {
+                wheel_steps(ui.input(|i| i.smooth_scroll_delta.y))
+            } else {
+                0
+            };
+            let steps = cmd_steps + alt_steps;
             if steps != 0 {
-                new = step_value(new, steps, self.step, self.min, self.max);
-                ui.input_mut(|i| {
-                    i.smooth_scroll_delta = Vec2::ZERO;
-                    i.smooth_scroll_delta = Vec2::ZERO;
+                new = step_value(new, steps, self.step, hard.0, hard.1);
+                ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+            }
+
+            let (copy, paste, reset) = ui.input_mut(|i| {
+                let mut copy = false;
+                let mut paste = None;
+                let mut reset = false;
+                let has_default = self.default.is_some();
+                i.events.retain(|e| match e {
+                    egui::Event::Copy => {
+                        copy = true;
+                        false
+                    }
+                    egui::Event::Paste(text) => {
+                        paste = Some(text.clone());
+                        false
+                    }
+                    egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        pressed: true,
+                        ..
+                    } if has_default => {
+                        reset = true;
+                        false
+                    }
+                    _ => true,
                 });
+                (copy, paste, reset)
+            });
+            if copy {
+                ui.ctx().copy_text(format_value(new, self.decimals, ""));
+            }
+            if let Some(value) = paste.and_then(|text| eval_expr(&text, self.unit)) {
+                new = clamp(value, hard.0, hard.1);
+            }
+            if let (true, Some(default)) = (reset, self.default) {
+                new = clamp(default, hard.0, hard.1);
             }
         }
 
@@ -289,9 +574,8 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         }
 
         if new != old {
-            new = clamp(new, N::MIN.to_f64(), N::MAX.to_f64());
-            *self.value = N::from_f64(new);
-            response.mark_changed();
+            write_back(self.value, new, &mut response);
+            new = self.value.to_f64();
         }
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
@@ -306,10 +590,10 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
             };
             painter.rect_filled(rect, 3.0, bg);
             let fill = if self.logarithmic {
-                log_fill_fraction(new, self.min, self.max)
-                    .or_else(|| fill_fraction(new, self.min, self.max))
+                log_fill_fraction(new, drag_min, drag_max)
+                    .or_else(|| fill_fraction(new, drag_min, drag_max))
             } else {
-                fill_fraction(new, self.min, self.max)
+                fill_fraction(new, drag_min, drag_max)
             };
             if let Some(f) = fill {
                 let mut fill = rect;
@@ -339,6 +623,14 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         }
         response
     }
+}
+
+/// Writes `new` into the field's value (clamped to `N`'s own range) and
+/// marks the response changed.
+fn write_back<N: Numeric>(value: &mut N, new: f64, response: &mut Response) {
+    let new = clamp(new, N::MIN.to_f64(), N::MAX.to_f64());
+    *value = N::from_f64(new);
+    response.mark_changed();
 }
 
 #[cfg(test)]
@@ -443,6 +735,143 @@ mod tests {
         assert_eq!(log_fill_fraction(1.0, 0.0, 100.0), None);
         assert_eq!(log_fill_fraction(1.0, 0.01, f64::INFINITY), None);
         assert!(!log_capable(-1.0, 1.0) && !log_capable(2.0, 1.0) && log_capable(0.5, 1.0));
+    }
+
+    #[test]
+    fn expressions_evaluate_and_reject_junk() {
+        assert_eq!(eval_expr("2*512", ""), Some(1024.0));
+        assert_eq!(eval_expr(" 1 + 2 * 3 ", ""), Some(7.0));
+        assert_eq!(eval_expr("(1 + 2) * 3", ""), Some(9.0));
+        assert_eq!(eval_expr("-(1/4)", ""), Some(-0.25));
+        assert_eq!(eval_expr("--3", ""), Some(3.0));
+        assert_eq!(eval_expr("10 - 2 - 3", ""), Some(5.0), "left-assoc");
+        assert_eq!(eval_expr("12 / 3 / 2", ""), Some(2.0), "left-assoc");
+        assert_eq!(eval_expr(".5", ""), Some(0.5));
+        // The field's own unit is accepted; another unit is not.
+        assert_eq!(eval_expr("64 px", "px"), Some(64.0));
+        assert_eq!(eval_expr("64px", "px"), Some(64.0));
+        assert_eq!(eval_expr("64 cm", "px"), None);
+        for junk in [
+            "", "abc", "1/0", "2*", "(1", "1)", "1..2", "1e999", "nan", "inf", "3 4",
+        ] {
+            assert_eq!(eval_expr(junk, ""), None, "{junk:?}");
+        }
+        // Deep nesting is rejected, not a stack overflow.
+        let deep = format!("{}1{}", "(".repeat(200), ")".repeat(200));
+        assert_eq!(eval_expr(&deep, ""), None);
+        let fine = format!("{}1{}", "(".repeat(8), ")".repeat(8));
+        assert_eq!(eval_expr(&fine, ""), Some(1.0));
+    }
+
+    #[test]
+    fn soft_bounds_intersect_the_hard_range() {
+        assert_eq!(soft_bounds((0.0, 100.0), None), (0.0, 100.0));
+        assert_eq!(soft_bounds((0.0, 100.0), Some((0.0, 10.0))), (0.0, 10.0));
+        // A soft range wider than the hard one is cut down to it.
+        assert_eq!(soft_bounds((0.0, 100.0), Some((-5.0, 500.0))), (0.0, 100.0));
+        // Disjoint ranges fall back to the hard range.
+        assert_eq!(soft_bounds((0.0, 1.0), Some((5.0, 9.0))), (0.0, 1.0));
+    }
+
+    /// Headless frames over one field (`f32` at 0..=1000, soft 0..=10).
+    fn run(ctx: &egui::Context, value: &mut f32, events: Vec<egui::Event>) -> Response {
+        let input = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(400.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let mut response = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            response = Some(
+                ui.add(
+                    ValueField::new(value)
+                        .range(0.0..=1000.0)
+                        .soft_range(0.0..=10.0)
+                        .default_value(5.0)
+                        .unit("px"),
+                ),
+            );
+        });
+        out.textures_delta.clear();
+        response.expect("drawn")
+    }
+
+    fn click(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn click_types_an_expression_past_the_soft_range() {
+        let ctx = egui::Context::default();
+        let mut v = 1.0f32;
+        let at = run(&ctx, &mut v, Vec::new()).rect.center();
+        run(
+            &ctx,
+            &mut v,
+            vec![egui::Event::PointerMoved(at), click(at, true)],
+        );
+        run(&ctx, &mut v, vec![click(at, false)]);
+        // The text edit opens with everything selected: typing replaces.
+        run(&ctx, &mut v, Vec::new());
+        assert!(ctx.text_edit_focused());
+        run(&ctx, &mut v, vec![egui::Event::Text("2*256 px".into())]);
+        let key = |key, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&ctx, &mut v, vec![key(egui::Key::Enter, true)]);
+        run(&ctx, &mut v, vec![key(egui::Key::Enter, false)]);
+        // 512 is past the soft max (10): typing reaches the hard range.
+        assert_eq!(v, 512.0);
+        assert!(!ctx.text_edit_focused());
+    }
+
+    #[test]
+    fn hover_paste_ctrl_wheel_and_backspace_reset() {
+        let ctx = egui::Context::default();
+        let mut v = 1.0f32;
+        let at = run(&ctx, &mut v, Vec::new()).rect.center();
+        run(&ctx, &mut v, vec![egui::Event::PointerMoved(at)]);
+        run(&ctx, &mut v, vec![egui::Event::Paste("100/4".into())]);
+        assert_eq!(v, 25.0);
+        // Junk pastes change nothing.
+        run(&ctx, &mut v, vec![egui::Event::Paste("hello".into())]);
+        assert_eq!(v, 25.0);
+        let wheel = |dy, command| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: Vec2::new(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers {
+                command,
+                ctrl: command,
+                ..Default::default()
+            },
+        };
+        run(&ctx, &mut v, vec![wheel(1.0, true)]);
+        assert_eq!(v, 25.01, "one step (0.01) per notch");
+        // A plain wheel does not step: it belongs to the scroll area.
+        run(&ctx, &mut v, vec![wheel(1.0, false)]);
+        assert_eq!(v, 25.01);
+        let backspace = egui::Event::Key {
+            key: egui::Key::Backspace,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&ctx, &mut v, vec![backspace]);
+        assert_eq!(v, 5.0);
     }
 
     #[test]
