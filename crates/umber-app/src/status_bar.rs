@@ -60,6 +60,9 @@ pub struct StatusSnapshot {
     pub frame_dt: f32,
     /// Which mouse/key hints the left of the bar shows.
     pub hints: HintContext,
+    /// The navigation preset: its orbit / pan / zoom chords follow the
+    /// paint hint in the [`HintContext::Paint`] context.
+    pub nav: crate::navigation::NavPreset,
 }
 
 /// The viewport's mouse/key hint set for the left of the bar (GUI plan G1
@@ -67,10 +70,10 @@ pub struct StatusSnapshot {
 /// helper). It changes with the held modifier, so holding Ctrl shows what
 /// Ctrl does: the bar teaches the bindings without a cheat sheet.
 ///
-/// Every hint states a binding the viewport ACTUALLY has
-/// (`viewport.rs::ui` / `handle_input`): Ctrl/Cmd+LMB paints, LMB-drag
-/// orbits, Shift+LMB or MMB pans, the wheel zooms, P toggles the
-/// projection. A hint for a binding that does not exist is a bug.
+/// Every hint states a binding the viewport ACTUALLY has: Ctrl/Cmd+LMB
+/// paints (`viewport.rs::ui`), and the navigation chords come from the
+/// active [`crate::navigation::NavPreset`] (`handle_input` routes through
+/// the same preset). A hint for a binding that does not exist is a bug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HintContext {
     /// No mesh: the only action is loading one.
@@ -108,25 +111,18 @@ impl HintContext {
     pub fn hints(self) -> &'static [(&'static str, &'static str)] {
         match self {
             HintContext::NoMesh => &[("hint.drop", "hint.load-mesh")],
-            HintContext::Paint => &[
-                ("hint.ctrl-lmb", "hint.paint"),
-                ("hint.lmb-drag", "hint.orbit"),
-                ("hint.shift-lmb", "hint.pan"),
-                ("hint.wheel", "hint.zoom"),
-            ],
+            // The navigation chords follow from the preset (`show`).
+            HintContext::Paint => &[("hint.ctrl-lmb", "hint.paint")],
             HintContext::PaintModifier => &[
                 ("hint.lmb-drag", "hint.paint-stroke"),
                 ("hint.ctrl-z", "hint.undo"),
             ],
-            HintContext::PanModifier => &[("hint.lmb-drag", "hint.pan")],
-            HintContext::Pick => &[
-                ("hint.lmb", "hint.sample-color"),
-                ("hint.lmb-drag", "hint.orbit"),
-            ],
-            HintContext::IdMask => &[
-                ("hint.lmb", "hint.select-region"),
-                ("hint.lmb-drag", "hint.orbit"),
-            ],
+            // Shift alone binds nothing the bar should claim under the
+            // Painter / Blender presets; the preset's own chords (which
+            // include Shift+LMB pan under the classic preset) follow.
+            HintContext::PanModifier => &[("hint.ctrl-lmb", "hint.paint")],
+            HintContext::Pick => &[("hint.lmb", "hint.sample-color")],
+            HintContext::IdMask => &[("hint.lmb", "hint.select-region")],
         }
     }
 }
@@ -203,7 +199,11 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
             .color(theme::text())
     };
     ui.horizontal(|ui| {
-        for (input, action) in status.hints.hints() {
+        let nav = match status.hints {
+            HintContext::NoMesh | HintContext::PaintModifier => &[][..],
+            _ => status.nav.hints(),
+        };
+        for (input, action) in status.hints.hints().iter().chain(nav) {
             ui.label(key(tr(input)));
             ui.label(label(tr(action)));
             ui.add_space(6.0);

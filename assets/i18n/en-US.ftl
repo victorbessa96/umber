@@ -655,6 +655,11 @@ action =
 
 hint =
     .drop = Drop
+    .alt-lmb = Alt+LMB
+    .alt-mmb = Alt+MMB
+    .alt-rmb = Alt+RMB
+    .mmb = MMB
+    .shift-mmb = Shift+MMB
     .load-mesh = a mesh to start
     .ctrl-lmb = Ctrl+LMB
     .lmb-drag = LMB drag

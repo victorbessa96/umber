@@ -644,6 +644,11 @@ action =
 
 hint =
     .drop = Solte
+    .alt-lmb = Alt+Esq
+    .alt-mmb = Alt+Meio
+    .alt-rmb = Alt+Dir
+    .mmb = Meio
+    .shift-mmb = Shift+Meio
     .load-mesh = uma malha para começar
     .ctrl-lmb = Ctrl+Esq
     .lmb-drag = Arrastar Esq

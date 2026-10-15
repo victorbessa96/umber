@@ -86,6 +86,9 @@ const ORBIT_SENSITIVITY: f32 = 0.01;
 const PAN_SENSITIVITY: f32 = 0.0015;
 /// Zoom step per wheel notch (multiplicative, see `OrbitCamera::zoom`).
 const ZOOM_SENSITIVITY: f32 = 0.08;
+/// Dolly per pixel of a zoom DRAG (Painter's Alt+RMB), as a fraction of
+/// the distance: 200 px of drag ≈ the wheel's 8 % notch, twenty times over.
+const ZOOM_DRAG_SENSITIVITY: f32 = 0.004;
 
 /// An eyedropper sample (C1 worklist #10): the sRGBA bytes the viewport
 /// read from the paint target at the clicked UV, one per Pick click.
@@ -172,6 +175,9 @@ pub struct Viewport {
     /// are byte-identical to before until the shell enables it
     /// ([`Self::set_front_face_falloff_deg`]).
     front_face_falloff_deg: Option<f32>,
+    /// The navigation scheme (`crate::navigation`): Painter's Alt+mouse by
+    /// default, `UMBER_NAV` to choose until the preferences window lands.
+    nav: crate::navigation::NavPreset,
 }
 
 impl Viewport {
@@ -332,7 +338,7 @@ impl Viewport {
 
         let painting = !self.pick_armed
             && !self.idmask_armed
-            && ui.input(|i| i.modifiers.ctrl || i.modifiers.command)
+            && ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
             && response.dragged_by(PointerButton::Primary)
             && self.mesh_data.is_some()
             && paint
@@ -526,9 +532,16 @@ impl Viewport {
         let Some(pos) = response.hover_pos() else {
             return;
         };
-        let painting_mod = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
-        if response.dragged() && !painting_mod {
-            return; // orbit / pan: the arrow, not a brush
+        let mods = ui.input(|i| i.modifiers);
+        let navigating = [
+            PointerButton::Primary,
+            PointerButton::Middle,
+            PointerButton::Secondary,
+        ]
+        .into_iter()
+        .any(|b| response.dragged_by(b) && self.nav.camera_op(b, mods).is_some());
+        if navigating || mods.alt {
+            return; // a navigation chord: the arrow, not a brush
         }
         let Some(uv) = self.pick_uv(rect, mesh, pos) else {
             return; // off the mesh
@@ -544,6 +557,16 @@ impl Viewport {
         let shape = brush_cursor::shape(radius_px, paint.brush_hardness());
         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         brush_cursor::paint(&ui.painter().with_clip_rect(rect), pos, shape);
+    }
+
+    /// Sets the navigation preset.
+    pub fn set_nav_preset(&mut self, nav: crate::navigation::NavPreset) {
+        self.nav = nav;
+    }
+
+    /// The navigation preset (the status bar's hints read it).
+    pub fn nav_preset(&self) -> crate::navigation::NavPreset {
+        self.nav
     }
 
     /// Sets the front-face falloff start angle in degrees, or `None` to
@@ -624,19 +647,32 @@ impl Viewport {
     }
 
     fn handle_input(&mut self, ui: &Ui, response: &Response) {
-        if response.dragged_by(PointerButton::Primary) {
+        // Navigation goes through the preset (`crate::navigation`): the
+        // first held button whose (button, modifiers) chord the preset
+        // binds drives the camera this frame.
+        let mods = ui.input(|i| i.modifiers);
+        let op = [
+            PointerButton::Primary,
+            PointerButton::Middle,
+            PointerButton::Secondary,
+        ]
+        .into_iter()
+        .filter(|b| response.dragged_by(*b))
+        .find_map(|b| self.nav.camera_op(b, mods));
+        if let Some(op) = op {
             let delta = response.drag_delta();
-            if ui.input(|i| i.modifiers.shift) {
-                self.camera
-                    .pan(-delta.x * PAN_SENSITIVITY, delta.y * PAN_SENSITIVITY);
-            } else {
-                self.camera
-                    .orbit(delta.x * ORBIT_SENSITIVITY, -delta.y * ORBIT_SENSITIVITY);
+            match op {
+                crate::navigation::CameraOp::Orbit => self
+                    .camera
+                    .orbit(delta.x * ORBIT_SENSITIVITY, -delta.y * ORBIT_SENSITIVITY),
+                crate::navigation::CameraOp::Pan => self
+                    .camera
+                    .pan(-delta.x * PAN_SENSITIVITY, delta.y * PAN_SENSITIVITY),
+                // Drag right / down dollies in (Painter's Alt+RMB feel).
+                crate::navigation::CameraOp::Zoom => self
+                    .camera
+                    .zoom((delta.x + delta.y) * ZOOM_DRAG_SENSITIVITY),
             }
-        } else if response.dragged_by(PointerButton::Middle) {
-            let delta = response.drag_delta();
-            self.camera
-                .pan(-delta.x * PAN_SENSITIVITY, delta.y * PAN_SENSITIVITY);
         }
 
         if response.hovered() {

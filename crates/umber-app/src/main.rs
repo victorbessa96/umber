@@ -132,6 +132,7 @@ mod i18n;
 #[cfg(test)]
 mod input_photon;
 mod layers_panel;
+mod navigation;
 use umber_paint::material_layer;
 mod mesh_map_import;
 use umber_paint::paint_state;
@@ -1190,6 +1191,11 @@ impl UmberApp {
         if let Some(env) = env::load_default_environment(&self.gpu) {
             self.state.viewport.set_environment(&self.gpu, Some(env));
         }
+        // Startup is also where the navigation preset is read
+        // (`UMBER_NAV`, until the G3 preferences window owns it).
+        self.state
+            .viewport
+            .set_nav_preset(navigation::NavPreset::from_env());
     }
 
     /// File > Load Environment…: file dialog → decode → convolve →
@@ -2066,6 +2072,7 @@ impl eframe::App for UmberApp {
                 self.brush_panel.strip,
                 ui.input(|i| i.modifiers),
             ),
+            nav: self.state.viewport.nav_preset(),
         };
         egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
             status_bar::show(ui, &status);
