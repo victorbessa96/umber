@@ -4014,6 +4014,19 @@ impl PaintState {
         self.brush.color = color;
     }
 
+    /// The live-stroke brush radius in target texels (the radius every
+    /// viewport dab is stamped with, before per-event pressure scaling).
+    /// Read by the viewport's brush cursor (GUI plan G1 g1-brush-cursor).
+    pub fn brush_radius_texels(&self) -> f32 {
+        BRUSH_RADIUS_TEXELS
+    }
+
+    /// The brush's hardness (`0..=1`): the fraction of the radius painted
+    /// at full coverage. Read by the brush cursor's inner ring.
+    pub fn brush_hardness(&self) -> f32 {
+        self.brush.hardness
+    }
+
     /// The tile the last original pointer event routed to (v1: the tile
     /// the UV view displays, and whose quick mask it overlays).
     pub fn active_tile(&self) -> u16 {

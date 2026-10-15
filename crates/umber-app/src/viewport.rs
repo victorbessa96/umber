@@ -496,9 +496,54 @@ impl Viewport {
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
             }
         }
+        // The brush cursor (GUI plan G1): the ring at the brush's on-screen
+        // radius, over everything above. Drawn last so no overlay hides it.
+        self.paint_brush_cursor(ui, &response, rect, paint.as_deref());
         // No strip-tool click this frame: the signature is Option so the
         // shell reads one click per primary press, `None` every other frame.
         None
+    }
+
+    /// The brush cursor (`crate::brush_cursor`): when the pointer is over
+    /// the mesh with a paint tool, measure the brush's on-screen radius
+    /// with a two-ray probe and draw the ring; the OS cursor hides while
+    /// the ring shows. Off the mesh, with the eyedropper / ID-mask armed,
+    /// or while orbiting (a drag without the paint modifier), nothing.
+    fn paint_brush_cursor(
+        &self,
+        ui: &Ui,
+        response: &Response,
+        rect: egui::Rect,
+        paint: Option<&crate::paint_state::PaintState>,
+    ) {
+        use crate::brush_cursor;
+        let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint) else {
+            return;
+        };
+        if self.pick_armed || self.idmask_armed || !paint.projection().viewport_paints() {
+            return;
+        }
+        let Some(pos) = response.hover_pos() else {
+            return;
+        };
+        let painting_mod = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        if response.dragged() && !painting_mod {
+            return; // orbit / pan: the arrow, not a brush
+        }
+        let Some(uv) = self.pick_uv(rect, mesh, pos) else {
+            return; // off the mesh
+        };
+        let texels_per_uv = paint.texels_per_uv_for(tile_of_uv(uv));
+        let probe = |dir: f32| {
+            let at = pos + egui::vec2(dir * brush_cursor::PROBE_PX, 0.0);
+            let uv_b = self.pick_uv(rect, mesh, at)?;
+            brush_cursor::texels_spanned(uv, uv_b, texels_per_uv)
+        };
+        let span = brush_cursor::combine_spans(probe(1.0), probe(-1.0));
+        let radius_px = span.map(|t| brush_cursor::screen_radius(paint.brush_radius_texels(), t));
+        let shape = brush_cursor::shape(radius_px, paint.brush_hardness());
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        brush_cursor::paint(&ui.painter().with_clip_rect(rect), pos, shape);
     }
 
     /// Sets the front-face falloff start angle in degrees, or `None` to
@@ -781,6 +826,34 @@ mod tests {
         assert!(
             (uv[0] - 0.5).abs() < 1e-4 && (uv[1] - 0.5).abs() < 1e-4,
             "center must map to center UV, got {uv:?}"
+        );
+    }
+
+    #[test]
+    fn brush_cursor_probe_measures_the_quad() {
+        // The cursor's probe on the head-on quad: an 8 px step
+        // spans a measurable, non-seam UV distance, and the resulting ring
+        // radius grows when the camera moves closer (the same brush covers
+        // more pixels).
+        use crate::brush_cursor::{screen_radius, texels_spanned, PROBE_PX};
+        let radius_at = |viewport: &Viewport| {
+            let a = viewport
+                .pick_uv(rect200(), &quad(), egui::pos2(100.0, 100.0))
+                .expect("centre hits");
+            let b = viewport
+                .pick_uv(rect200(), &quad(), egui::pos2(100.0 + PROBE_PX, 100.0))
+                .expect("probe hits");
+            let t = texels_spanned(a, b, 512.0).expect("measurable span");
+            screen_radius(24.0, t)
+        };
+        let far = radius_at(&head_on_viewport());
+        let mut near_vp = head_on_viewport();
+        near_vp.camera.distance *= 0.5;
+        let near = radius_at(&near_vp);
+        assert!(far.is_finite() && far > 0.0, "{far}");
+        assert!(
+            near > far * 1.5,
+            "closer camera, bigger ring: {near} vs {far}"
         );
     }
 
