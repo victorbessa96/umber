@@ -24,6 +24,7 @@ surface is the **untrusted files it opens** and the **plugins it runs**:
 | Surface | Where | Current defences |
 |---|---|---|
 | Meshes (FBX, glTF, OBJ, USDA, USDC, USDZ) | `umber-mesh` | own parsers validate topology before indexing; USD nesting capped at 256; glTF accessors pre-validated; `load()` catches dependency panics as a typed error. openusd 0.8.0 (since 2026-10-15) closes the crate-reader allocation ABORTS a panic boundary cannot catch — the 40 abort-class fuzz cases now return typed errors, pinned by the panic hunt on frozen 0.7.0 bytes. In the mesh panic-hunt (`crates/umber-mesh/tests/panic_hunt_mesh.rs`, 5,400+ cases) |
+| Mesh-supplied NAMES in output paths | `umber-mesh::format_mesh_map`, `umber-export::expand_template` | material and layer names from a mesh are file-name-safe before they reach a path: separators, drive colon, reserved and control characters → `_`, dot-only names → underscores (`file_safe` / `path_safe_value`). Project set names are rejected outright by `project::validate_set_name` before any join (2026-10-15) |
 | PSD import | `umber-app` | typed errors; in the panic-hunt |
 | Images (PNG/EXR/…) | `image` crate via `umber-export` | upstream decoder hardening |
 | `.spp` (Substance project) import | `crates/spp` | read-only, never-crash lint gate; in the panic-hunt |
