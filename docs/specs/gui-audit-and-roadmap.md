@@ -1,5 +1,10 @@
 # The Umber GUI Audit + Long-Horizon Plan
 
+> **Superseded 2026-10-15 (Phases 1-3).** Phase 0 here is built. The plan of
+> record for everything after it is `docs/specs/gui-plan-2026-10-15.md`, which
+> folds this file's Phase 1-3 rows into waves G0-G7. Part 1 (the audit) stays
+> valid history.
+
 **The date**: 2026-10-10, late session. **The auditor**: the dragon, adversarial, fresh-context.
 **The constraint honored**: code-only (no cargo) until Bessa lifts it — this plan's Phase 0 is code-only; the rest gates on the machine.
 
