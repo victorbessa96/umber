@@ -8,6 +8,13 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Shortcuts respect keyboard focus: typing in a text field never fires the
+  letter keys or the document undo; Ctrl/Cmd chords and F-keys still pass.
+  Dispatched key presses are consumed, and egui's Ctrl+Plus/Minus UI zoom
+  is off (g0-focus-dispatch)
+- `umber-gui` gains the colour ramp widget (`Ramp` / `RampEdit`): stops,
+  Linear / Ease / Constant in linear light, Ctrl+click to add, flip,
+  distribute (g4-gradient-ramp)
 - `umber-paint`: the paint engine, paint persistence and the
   composite-snapshot builder moved out of `umber-app` into a crate with
   no egui/eframe (PR #8). The JSONL agent session paints through it:
