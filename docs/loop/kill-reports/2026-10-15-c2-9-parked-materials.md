@@ -38,3 +38,12 @@ single-set session's tiles are all of them, unchanged.
 are assigned to Body and Hilt (1002 materialized by a stroke). The Body
 IO lists [1001] and the Hilt IO lists [1002]. **Mutation check:** every
 present tile fails the test (`[1001, 1002]`). Gate 1: umber-app 532.
+
+## Same bug, fill layers (lock `c2-9-fill-scope`)
+
+The fill drain passed `paint.tiles_present()` to `refresh_fill_layer`, so
+with two sets every fill evaluated onto the other set's tiles too. It now
+passes `tiles_of_set(active_set)`: the doc's live stack belongs to the
+active set. This is a one-line twin of the material fix. Its guard is the
+material test's rule plus the stage-2 composite test, because the fill
+drain itself runs in `App::ui` with no harness. Gate 1: umber-app 532.

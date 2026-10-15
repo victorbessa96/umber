@@ -3355,7 +3355,11 @@ impl eframe::App for UmberApp {
             if !self.state.fill_states.dirty.is_empty() {
                 if let Some(mesh) = self.state.mesh.clone() {
                     let dirty: Vec<u64> = self.state.fill_states.dirty.drain(..).collect();
-                    let (tiles, symmetry) = (paint.tiles_present(), *paint.symmetry());
+                    // The ACTIVE set's tiles only (C2-9): the doc's live
+                    // stack is that set's, and another set's tiles never
+                    // composite these fills (the material drain's rule).
+                    let active_set = paint.active_set().to_string();
+                    let (tiles, symmetry) = (paint.tiles_of_set(&active_set), *paint.symmetry());
                     for layer in dirty {
                         // A layer deleted between queueing and the mesh's
                         // arrival must not ghost-publish.
