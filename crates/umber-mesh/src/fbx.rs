@@ -127,5 +127,11 @@ mod tests {
         // Blender 2.72 cube exports carry no material; material presence is
         // not asserted for this fixture. A material-carrying fixture lands
         // with the Wave-2 texture-set work.
+        // This fixture carries NO UV layer (no `LayerElementUV` in the
+        // file), so every UV loads as the zero-fill [0, 0] — pinned, so a
+        // test that needs UV coverage cannot silently pick this cube
+        // (2026-10-15: a bake test on it baked all-empty maps). A UV'd FBX
+        // fixture is the follow-up.
+        assert!(data.uvs.iter().all(|uv| *uv == [0.0, 0.0]));
     }
 }
