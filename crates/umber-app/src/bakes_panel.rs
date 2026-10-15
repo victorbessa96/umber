@@ -185,6 +185,10 @@ pub enum BakeSelection {
     /// Bent normal (`umber_bake::ao::bake_ao_and_bent_mesh`): the average
     /// unoccluded direction, at the panel's ray count. Written LINEAR.
     BentNormal,
+    /// Height transferred from a HIGH-poly mesh (`umber_bake::transfer`,
+    /// C2-29). Only the High-poly group bakes it, so it is NOT in
+    /// [`Self::ALL`] (a low-only mesh has no height to bake).
+    Height,
 }
 
 impl BakeSelection {
@@ -214,7 +218,10 @@ impl BakeSelection {
     /// Whether this map holds vectors (written with the Linear transfer:
     /// the sRGB curve would bend the directions).
     pub fn is_vector(self) -> bool {
-        matches!(self, Self::Normal | Self::WorldNormal | Self::BentNormal)
+        matches!(
+            self,
+            Self::Normal | Self::WorldNormal | Self::BentNormal | Self::Height
+        )
     }
 
     /// The checkbox / record label.
@@ -231,6 +238,7 @@ impl BakeSelection {
             Self::WorldNormal => "World-space normal".to_owned(),
             Self::Id => "ID".to_owned(),
             Self::BentNormal => "Bent normal".to_owned(),
+            Self::Height => tr("viewmode.height"),
         }
     }
 
@@ -245,6 +253,7 @@ impl BakeSelection {
             Self::WorldNormal => umber_mesh::MeshMapKind::WorldSpaceNormal,
             Self::Id => umber_mesh::MeshMapKind::Id,
             Self::BentNormal => umber_mesh::MeshMapKind::BentNormal,
+            Self::Height => umber_mesh::MeshMapKind::Height,
         }
     }
 }
@@ -562,6 +571,7 @@ pub fn bake_map_of(selection: BakeSelection) -> umber_bake::BakeMap {
         BakeSelection::WorldNormal => umber_bake::BakeMap::WorldSpaceNormal,
         BakeSelection::Id => umber_bake::BakeMap::Id,
         BakeSelection::BentNormal => umber_bake::BakeMap::BentNormal,
+        BakeSelection::Height => umber_bake::BakeMap::Height,
     }
 }
 
@@ -602,6 +612,9 @@ struct BakeDispatch<'a> {
     skew_tiles: Vec<u16>,
     skew_skipped: Vec<u16>,
     sets: Vec<String>,
+    /// The HIGH mesh + cage for a Bake-from-high (C2-29); `None` = a
+    /// low-only bake.
+    transfer: Option<(&'a umber_mesh::MeshData, f32, f32)>,
 }
 
 /// Everything one Bake reads, owned so it can move onto the worker thread
@@ -629,6 +642,16 @@ struct BakeRequest {
     /// curvature — bakes for tile 1001 only; see
     /// [`BakesPanel::skew_tiles`]).
     skew_jobs: Vec<(u16, PathBuf, String)>,
+    /// A high-to-low transfer (C2-29): when set, the Normal and Height jobs
+    /// bake from this HIGH mesh onto `mesh`'s UVs instead of from `mesh`.
+    transfer: Option<TransferSource>,
+}
+
+/// The HIGH side of a transfer bake (owned, for the worker thread).
+struct TransferSource {
+    high: umber_mesh::MeshData,
+    front: f32,
+    back: f32,
 }
 
 /// One in-flight bake on a worker thread: the receiving end of its
@@ -736,7 +759,75 @@ pub struct BakesPanel {
     mesh_tiles: MeshTilesCache,
     /// The in-flight bake, if any (at most one at a time).
     job: Option<BakeJobHandle>,
+    /// The high-to-low transfer source (C2-29): the picked HIGH mesh and
+    /// its cage + map choices.
+    high: HighPoly,
 }
+
+/// The High-poly group's state (C2-29): the HIGH mesh a transfer bakes
+/// from, the cage distances, and which transfer maps run.
+#[derive(Debug, Clone)]
+pub struct HighPoly {
+    /// The picked HIGH mesh's path and its loaded data.
+    pub mesh: Option<(PathBuf, umber_mesh::MeshData)>,
+    /// Max hit distance in front of the LOW surface (world units).
+    pub front: f32,
+    /// Max hit distance behind the LOW surface (world units).
+    pub back: f32,
+    /// Bake the transferred tangent normal (the export's normal slot).
+    pub normal: bool,
+    /// Bake the transferred height.
+    pub height: bool,
+    /// The last pick's load error, shown under the picker.
+    pub error: Option<String>,
+}
+
+impl Default for HighPoly {
+    /// `umber-cli bake-transfer`'s defaults: a symmetric 0.1-unit cage,
+    /// both maps on.
+    fn default() -> Self {
+        Self {
+            mesh: None,
+            front: DEFAULT_CAGE_DISTANCE,
+            back: DEFAULT_CAGE_DISTANCE,
+            normal: true,
+            height: true,
+            error: None,
+        }
+    }
+}
+
+impl HighPoly {
+    /// The transfer maps a Bake-from-high runs, in order.
+    pub fn maps(&self) -> Vec<BakeSelection> {
+        let mut out = Vec::new();
+        if self.normal {
+            out.push(BakeSelection::Normal);
+        }
+        if self.height {
+            out.push(BakeSelection::Height);
+        }
+        out
+    }
+
+    /// Loads `path` as the HIGH mesh. A failure keeps the previous mesh and
+    /// records the error for the panel.
+    pub fn load(&mut self, path: &Path) {
+        match umber_mesh::load(path) {
+            Ok(mesh) => {
+                self.mesh = Some((path.to_path_buf(), mesh));
+                self.error = None;
+            }
+            Err(err) => self.error = Some(format!("{err}")),
+        }
+    }
+}
+
+/// The default cage half-width (world units): `umber-cli`'s 0.1, a tight
+/// fit for meter-scale props.
+pub const DEFAULT_CAGE_DISTANCE: f32 = 0.1;
+/// The cage distance ceiling (world units).
+pub const MAX_CAGE_DISTANCE: f32 = 10.0;
 
 impl BakesPanel {
     /// Creates the panel writing to `output_dir` with default settings
@@ -769,6 +860,7 @@ impl BakesPanel {
             tiles: TileSelection::new(),
             mesh_tiles: MeshTilesCache::default(),
             job: None,
+            high: HighPoly::default(),
         }
     }
 
@@ -1355,6 +1447,75 @@ impl BakesPanel {
         if !sets_ok {
             ui.label(tr("bakes.select-set"));
         }
+        // High-poly group (C2-29): the transfer source, cage and maps, with
+        // its own Bake button (a transfer bakes normal + height FROM the
+        // high mesh; the checklist above bakes from the low one).
+        let high_title = tr("bakes.high-group");
+        let mut bake_high = false;
+        ParamGroup::new("bakes-high", high_title.as_str()).show(ui, |group| {
+            group.ui.horizontal(|ui| {
+                let name = self
+                    .high
+                    .mesh
+                    .as_ref()
+                    .and_then(|(p, _)| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| tr("bakes.high-none"));
+                ui.label(name);
+                if ui.button(tr("button.choose")).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(
+                            tr("shell.filter-meshes"),
+                            &crate::empty_state::MESH_EXTENSIONS,
+                        )
+                        .pick_file()
+                    {
+                        self.high.load(&path);
+                    }
+                }
+            });
+            if let Some(err) = &self.high.error {
+                group
+                    .ui
+                    .colored_label(group.ui.visuals().error_fg_color, err.clone());
+            }
+            for (label, value) in [
+                (tr("bakes.cage-front"), &mut self.high.front),
+                (tr("bakes.cage-back"), &mut self.high.back),
+            ] {
+                group.row(label.as_str(), |ui| {
+                    ui.add(
+                        ValueField::new(value)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .default_value(DEFAULT_CAGE_DISTANCE)
+                            .range(0.0..=MAX_CAGE_DISTANCE)
+                            .step(0.01)
+                            .decimals(3),
+                    );
+                });
+            }
+            group
+                .ui
+                .checkbox(&mut self.high.normal, tr("bakes.transfer-normal"));
+            group
+                .ui
+                .checkbox(&mut self.high.height, tr("bakes.transfer-height"));
+            let ready = mesh_loaded
+                && gpu_ready
+                && !self.is_baking()
+                && self.high.mesh.is_some()
+                && !self.high.maps().is_empty();
+            bake_high = group
+                .ui
+                .add_enabled(ready, egui::Button::new(tr("bakes.bake-from-high")))
+                .clicked();
+        });
+        if bake_high {
+            if let (Some(gpu), Some(mesh)) = (ctx.gpu, ctx.mesh) {
+                self.bake_from_high(&gpu.device, &gpu.queue, mesh, ctx.mesh_path);
+            }
+        }
+
         let enabled =
             self.can_bake(mesh_loaded, gpu_ready) && !self.tiles.nothing_selected() && sets_ok;
         ui.horizontal(|ui| {
@@ -1455,8 +1616,58 @@ impl BakesPanel {
                 skew_tiles,
                 skew_skipped,
                 sets,
+                transfer: None,
             },
         );
+    }
+
+    /// Bakes the High-poly group's maps (normal and/or height) from the
+    /// picked HIGH mesh onto `mesh`'s UVs (C2-29), through the same worker,
+    /// naming, margin and log as a low-only bake. Whole mesh only (tile
+    /// 1001 naming), like every non-AO map. A no-op without a HIGH mesh or
+    /// with no transfer map checked.
+    fn bake_from_high(
+        &mut self,
+        device: &umber_gpu::WgpuDevice,
+        queue: &umber_gpu::WgpuQueue,
+        mesh: &umber_mesh::MeshData,
+        mesh_path: Option<&Path>,
+    ) {
+        if self.is_baking() {
+            return;
+        }
+        let maps = self.high.maps();
+        let Some((_, high)) = self.high.mesh.clone() else {
+            return;
+        };
+        if maps.is_empty() {
+            return;
+        }
+        let plan = plan_bake(&maps, &[], &[FIRST_TILE]);
+        let sets = self.sets_for_bake(mesh, mesh_path);
+        let (front, back) = (self.high.front, self.high.back);
+        self.bake_jobs(
+            device,
+            queue,
+            &BakeDispatch {
+                mesh,
+                plan,
+                skew_tiles: Vec::new(),
+                skew_skipped: Vec::new(),
+                sets,
+                transfer: Some((&high, front, back)),
+            },
+        );
+    }
+
+    /// The High-poly group's state (tests and the shell read it).
+    pub fn high_poly(&self) -> &HighPoly {
+        &self.high
+    }
+
+    /// Mutable High-poly state (tests drive the pick without a dialog).
+    pub fn high_poly_mut(&mut self) -> &mut HighPoly {
+        &mut self.high
     }
 
     /// The sets one bake writes: the enabled checklist sets, or the
@@ -1512,6 +1723,7 @@ impl BakesPanel {
                 skew_tiles,
                 skew_skipped,
                 sets,
+                transfer: None,
             },
         );
     }
@@ -1562,6 +1774,11 @@ impl BakesPanel {
             skew_threshold_deg: self.skew_threshold_deg,
             jobs,
             skew_jobs,
+            transfer: dispatch.transfer.map(|(high, front, back)| TransferSource {
+                high: high.clone(),
+                front,
+                back,
+            }),
         };
         self.start_job(count, skipped, dispatch.skew_skipped.clone(), move || {
             run_bake(request)
@@ -1687,6 +1904,7 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         skew_threshold_deg,
         jobs,
         skew_jobs,
+        transfer,
     } = request;
     let (device, queue, mesh) = (&device, &queue, &mesh);
     let dilate = umber_bake::DilateParams::new(dilation_iterations);
@@ -1741,107 +1959,141 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         // `plan_bake` routes only AO to `BakeSource::Tile`; every
         // other map's job is a whole-mesh bake.
         let mut skew_clamped = 0usize;
-        let bytes: Vec<u8> = match selection {
-            BakeSelection::Ao => {
-                // Shared with the Export dialog (`bake_sources::bake_ao`)
-                // — this panel dilates afterward; the export path uses
-                // the raw bake directly (see `bake_sources` docs).
-                let raw = match job.source {
-                    BakeSource::WholeMesh => {
-                        crate::bake_sources::bake_ao(device, queue, mesh, size, rays)?
-                    }
-                    BakeSource::Tile => crate::bake_sources::bake_ao_tile(
-                        device, queue, mesh, size, rays, job.tile,
-                    )?,
+        let bytes: Vec<u8> = match (selection, transfer.as_ref()) {
+            // C2-29: a transfer bake's maps come from the HIGH mesh, the
+            // same entry point and params as `umber-cli bake-transfer`.
+            (BakeSelection::Normal | BakeSelection::Height, Some(src)) => {
+                let map = if selection == BakeSelection::Height {
+                    umber_bake::TransferMap::Height
+                } else {
+                    umber_bake::TransferMap::TangentNormal
                 };
-                let filled = match job.source {
-                    BakeSource::WholeMesh => {
-                        let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                        pad.fill(mesh, seams.as_ref(), raw)
+                // Rays start AT the cage (`front_offset = front`): the ray
+                // runs inward from `surface + n * offset`, so with offset 0
+                // HIGH detail outside the LOW surface sits behind the
+                // origin and is never hit (the cage-front distance would do
+                // nothing).
+                let params =
+                    umber_bake::TransferParams::new(src.front, src.back, src.front, size, size)
+                        .with_map(map);
+                let raw = umber_bake::bake_transfer_mesh(device, queue, mesh, &src.high, &params)
+                    .with_context(|| format!("{selection:?} transfer"))?;
+                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                let filled = pad
+                    .fill(mesh, seams.as_ref(), raw)
+                    .with_context(|| format!("{selection:?} transfer margin"))?;
+                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                    .with_context(|| format!("{selection:?} transfer dilation"))?
+            }
+            (BakeSelection::Height, None) => {
+                anyhow::bail!("height bakes only from a high-poly mesh")
+            }
+            (selection, _) => match selection {
+                BakeSelection::Ao => {
+                    // Shared with the Export dialog (`bake_sources::bake_ao`)
+                    // — this panel dilates afterward; the export path uses
+                    // the raw bake directly (see `bake_sources` docs).
+                    let raw = match job.source {
+                        BakeSource::WholeMesh => {
+                            crate::bake_sources::bake_ao(device, queue, mesh, size, rays)?
+                        }
+                        BakeSource::Tile => crate::bake_sources::bake_ao_tile(
+                            device, queue, mesh, size, rays, job.tile,
+                        )?,
+                    };
+                    let filled = match job.source {
+                        BakeSource::WholeMesh => {
+                            let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                            pad.fill(mesh, seams.as_ref(), raw)
+                        }
+                        BakeSource::Tile => {
+                            let (tile_mesh, seams) =
+                                tile_seams.entry(job.tile).or_insert_with(|| {
+                                    let tile_mesh =
+                                        umber_bake::ao::filter_mesh_for_tile(mesh, job.tile);
+                                    let seams = pad.seams(&tile_mesh);
+                                    (tile_mesh, seams)
+                                });
+                            pad.fill(tile_mesh, seams.as_ref(), raw)
+                        }
                     }
-                    BakeSource::Tile => {
-                        let (tile_mesh, seams) = tile_seams.entry(job.tile).or_insert_with(|| {
-                            let tile_mesh = umber_bake::ao::filter_mesh_for_tile(mesh, job.tile);
-                            let seams = pad.seams(&tile_mesh);
-                            (tile_mesh, seams)
-                        });
-                        pad.fill(tile_mesh, seams.as_ref(), raw)
+                    .context("ao margin")?;
+                    let mut dilated = umber_bake::dilation::dilate_map(
+                        device, queue, &filled, size, size, &dilate,
+                    )
+                    .context("ao dilation")?;
+                    // Edge protection (§6:57): the guard in the bake pass,
+                    // over the DILATED bytes (the guard sees what ships).
+                    if let Some(skew) = skew_by_tile.get(&job.tile) {
+                        skew_clamped = crate::bake_sources::apply_skew_edge_protection(
+                            &mut dilated,
+                            skew,
+                            skew_threshold_deg,
+                        );
                     }
+                    dilated
                 }
-                .context("ao margin")?;
-                let mut dilated =
+                BakeSelection::Curvature => {
+                    let raw = umber_bake::curvature::bake_curvature_mesh(
+                        device,
+                        queue,
+                        mesh,
+                        size,
+                        size,
+                        &umber_bake::CurvatureParams::default(),
+                    )
+                    .context("curvature bake")?;
+                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                    let filled = pad
+                        .fill(mesh, seams.as_ref(), raw)
+                        .context("curvature margin")?;
                     umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
-                        .context("ao dilation")?;
-                // Edge protection (§6:57): the guard in the bake pass,
-                // over the DILATED bytes (the guard sees what ships).
-                if let Some(skew) = skew_by_tile.get(&job.tile) {
-                    skew_clamped = crate::bake_sources::apply_skew_edge_protection(
-                        &mut dilated,
-                        skew,
-                        skew_threshold_deg,
-                    );
+                        .context("curvature dilation")?
                 }
-                dilated
-            }
-            BakeSelection::Curvature => {
-                let raw = umber_bake::curvature::bake_curvature_mesh(
-                    device,
-                    queue,
-                    mesh,
-                    size,
-                    size,
-                    &umber_bake::CurvatureParams::default(),
-                )
-                .context("curvature bake")?;
-                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                let filled = pad
-                    .fill(mesh, seams.as_ref(), raw)
-                    .context("curvature margin")?;
-                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
-                    .context("curvature dilation")?
-            }
-            BakeSelection::Thickness => {
-                let params = umber_bake::ThicknessParams {
-                    rays,
-                    ..umber_bake::ThicknessParams::default()
-                };
-                let raw = umber_bake::thickness::bake_thickness_mesh(
-                    device, queue, mesh, size, size, &params,
-                )
-                .context("thickness bake")?;
-                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                let filled = pad
-                    .fill(mesh, seams.as_ref(), raw)
-                    .context("thickness margin")?;
-                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
-                    .context("thickness dilation")?
-            }
-            BakeSelection::Position => {
-                let params = umber_bake::position::PositionMapParams {
-                    width: size,
-                    height: size,
-                };
-                let f32map = umber_bake::position::bake_position_map(device, queue, mesh, &params)
-                    .context("position bake")?;
-                let raw = encode_position_rgba8(&f32map);
-                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                let filled = pad
-                    .fill(mesh, seams.as_ref(), raw)
-                    .context("position margin")?;
-                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
-                    .context("position dilation")?
-            }
-            other => {
-                // C2-29: the four maps the panel did not bake before, the
-                // same bakers and encodings `umber-cli bake-all` uses.
-                let raw = bake_extra_map(device, queue, mesh, size, rays, other)?;
-                let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                let filled = pad
-                    .fill(mesh, seams.as_ref(), raw)
-                    .with_context(|| format!("{other:?} margin"))?;
-                umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
-                    .with_context(|| format!("{other:?} dilation"))?
-            }
+                BakeSelection::Thickness => {
+                    let params = umber_bake::ThicknessParams {
+                        rays,
+                        ..umber_bake::ThicknessParams::default()
+                    };
+                    let raw = umber_bake::thickness::bake_thickness_mesh(
+                        device, queue, mesh, size, size, &params,
+                    )
+                    .context("thickness bake")?;
+                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                    let filled = pad
+                        .fill(mesh, seams.as_ref(), raw)
+                        .context("thickness margin")?;
+                    umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                        .context("thickness dilation")?
+                }
+                BakeSelection::Position => {
+                    let params = umber_bake::position::PositionMapParams {
+                        width: size,
+                        height: size,
+                    };
+                    let f32map =
+                        umber_bake::position::bake_position_map(device, queue, mesh, &params)
+                            .context("position bake")?;
+                    let raw = encode_position_rgba8(&f32map);
+                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                    let filled = pad
+                        .fill(mesh, seams.as_ref(), raw)
+                        .context("position margin")?;
+                    umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                        .context("position dilation")?
+                }
+                other => {
+                    // C2-29: the four maps the panel did not bake before, the
+                    // same bakers and encodings `umber-cli bake-all` uses.
+                    let raw = bake_extra_map(device, queue, mesh, size, rays, other)?;
+                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                    let filled = pad
+                        .fill(mesh, seams.as_ref(), raw)
+                        .with_context(|| format!("{other:?} margin"))?;
+                    umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
+                        .with_context(|| format!("{other:?} dilation"))?
+                }
+            },
         };
         // Vectors are data: the sRGB curve would bend the directions.
         let transfer = if selection.is_vector() {
@@ -2119,6 +2371,82 @@ mod tests {
             .iter()
             .all(|s| BakeSelection::ALL.contains(s)));
         assert!(BakeSelection::DEFAULT_ON.contains(&BakeSelection::Normal));
+    }
+
+    #[test]
+    fn high_poly_maps_and_a_bad_pick_keep_the_previous_mesh() {
+        let mut high = HighPoly::default();
+        assert_eq!(
+            high.maps(),
+            vec![BakeSelection::Normal, BakeSelection::Height]
+        );
+        high.height = false;
+        assert_eq!(high.maps(), vec![BakeSelection::Normal]);
+        high.normal = false;
+        assert!(high.maps().is_empty());
+        high.load(Path::new("/nonexistent/high.obj"));
+        assert!(high.mesh.is_none());
+        assert!(high.error.is_some(), "a failed pick reports");
+        // Height is a vector-free data map but written Linear (data), named
+        // `<set>_height.png`, and is not in the low-only checklist.
+        assert!(BakeSelection::Height.is_vector());
+        assert!(!BakeSelection::ALL.contains(&BakeSelection::Height));
+        assert_eq!(BakeSelection::Height.mesh_map_kind().suffix(), "height");
+    }
+
+    #[test]
+    fn bake_from_high_transfers_height_and_normal_from_the_high_mesh() {
+        // GPU end to end: LOW = the flat +Z quad, HIGH = the same quad lifted
+        // 0.05 OUTSIDE it (inside the 0.1 cage front). The transfer's height
+        // is the hit distance along the inward ray over the cage span, so
+        // outward detail reads BELOW the surface value (0.5 → 128 for a
+        // symmetric cage): t = 0.05 of 0.2 → 64. The transferred normal is
+        // "up" like the high plane's.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let quad = |z: f32| umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, z],
+                [1.0, -1.0, z],
+                [1.0, 1.0, z],
+                [-1.0, 1.0, z],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+        };
+        let dir = std::env::temp_dir().join(format!("umber-high-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = BakesPanel::new(dir.clone());
+        assert!(p.set_resolution(512));
+        p.high_poly_mut().mesh = Some((dir.join("high.obj"), quad(0.05)));
+        p.bake_from_high(&device, &queue, &quad(0.0), Some(Path::new("Quad.obj")));
+        assert!(p.is_baking());
+        await_job_within(&mut p, 60);
+        assert_eq!(p.last_records().len(), 2, "{}", p.status());
+        // The written PNGs, decoded (RGBA8, 512²; the transfer writes
+        // Linear, so the bytes are the baker's).
+        let read = |name: &str| -> Vec<u8> {
+            umber_export::png::read_png_rgba8(&dir.join(name))
+                .unwrap_or_else(|e| panic!("{name}: {e} ({})", p.status()))
+                .2
+        };
+        let centre = ((256 * 512) + 256) * 4;
+        let height = read("Quad_height.png");
+        let normal = read("Quad_normal_base.png");
+        let h = &height[centre..centre + 4];
+        assert_eq!(h[3], 255, "the outward high plane is hit: {h:?}");
+        assert!(
+            (60..=68).contains(&h[0]),
+            "t 0.05 of a 0.2 span ≈ 64: {h:?}"
+        );
+        let n = &normal[centre..centre + 4];
+        assert!(n[2] > 200, "transferred normal up: {n:?}");
+        assert_eq!(p.bake_log().entries().len(), 2, "two log rows");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

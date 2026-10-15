@@ -141,6 +141,13 @@ texturesets =
 ## Bakes panel
 
 bakes =
+    .high-group = High poly
+    .high-none = No high-poly mesh
+    .cage-front = Cage front
+    .cage-back = Cage back
+    .bake-from-high = Bake from high
+    .transfer-normal = Transfer normal
+    .transfer-height = Transfer height
     .map-ao = Ambient occlusion
     .map-curvature = Curvature
     .map-thickness = Thickness

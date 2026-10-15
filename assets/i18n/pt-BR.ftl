@@ -142,6 +142,13 @@ texturesets =
 ## Painel de bakes
 
 bakes =
+    .high-group = Alta resolução
+    .high-none = Nenhuma malha de alta resolução
+    .cage-front = Gaiola à frente
+    .cage-back = Gaiola atrás
+    .bake-from-high = Bake da alta
+    .transfer-normal = Transferir normal
+    .transfer-height = Transferir altura
     .map-ao = Oclusão de ambiente
     .map-curvature = Curvatura
     .map-thickness = Espessura

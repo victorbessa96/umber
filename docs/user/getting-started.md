@@ -46,8 +46,15 @@ never samples the background.
   across each UV seam, so a seam stays invisible when the texture is
   filtered.
 
-Then press **Bake**. (High→low baking with a cage, and the height map it
-produces, run through `umber-cli`'s batch recipes today.) The baked maps feed the viewport's mesh-map view
+Then press **Bake**.
+
+To bake detail from a sculpt, use the **High poly** group: choose the
+high-poly mesh, set **Cage front** and **Cage back** (how far outside and
+inside the low surface a ray looks for the high one, in world units), tick
+**Transfer normal** and/or **Transfer height** and press **Bake from high**. The maps land
+beside the others as `<set>_normal_base.png` and `<set>_height.png`. The
+transferred normal replaces a self-baked one, which is near-flat on a low
+poly. The baked maps feed the viewport's mesh-map view
 modes (press `B`), the brush's cavity mask, and the export.
 
 ## 3. Paint
