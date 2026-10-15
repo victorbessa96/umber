@@ -146,16 +146,29 @@ is the session to-do; each row here names its blocker or its file surface.
 | wave-openusd-0.8 | the last importer crash: openusd 0.7.0's multi-TB allocation ABORT (#19) | bump `openusd` 0.7.0 → 0.8.0 (fixes all six openusd findings upstream, PR mxpv/openusd#138; `docs/upstream/openusd-0.7.0.md`); adapt `umber-mesh/src/usdc.rs` to the `CrateData::open(impl Into<AssetBuffer>)` change; un-ignore `bug_usdc_huge_count_allocation_aborts` |
 | wave-stroke-methods-wiring | stroke methods reach the brush | `PaintState` sets the method, calls `finish()` at stroke end; brush-panel method picker + rate / dash rows; `.umberbrush` field |
 | wave-cavity-wiring | the cavity mask paints | compose `CavityMask::coverage` into the per-tile gate the shader samples; re-upload on curvature-map / param change; panel row |
-| wave-margin-ui | Adjacent Faces from the app | Bakes panel Margin Type control; agent `bake` step `margin`; fold `MarginType` into `BakeFlags` |
+| wave-margin-ui | Adjacent Faces from the app | ◐ agent `bake` step `margin` + `MarginType` folded into `BakeFlags` LANDED 2026-10-15; **open: Bakes panel Margin Type control** (`bakes_panel.rs`, `BakeRequest`) |
 | wave-fbx-uv-fixture | a UV'd FBX test asset | see its row below |
 | wave-valuefield-log | the last raw sliders | `ValueField` log mode; migrate DoF focus + fill_layer (6), path_tool (4), bakes (3), display (2), layers (1) |
 
 ### Wave 6b — the GUI plan
 
-`docs/specs/gui-plan-2026-10-15.md` (research: `docs/research/gui-research-2026-10-15.md`,
-brief: `docs/research/gui-plan-prompt-2026-10-15.md`) — supersedes phases
-1-3 of `docs/specs/gui-audit-and-roadmap.md`, whose Phase 0 is built. Its
-waves land here as they are scheduled.
+`docs/specs/gui-plan-2026-10-15.md` (research index
+`docs/research/gui-research-2026-10-15.md` over three slices: Painter,
+Blender, photocraft; brief `docs/research/gui-plan-prompt-2026-10-15.md`).
+It supersedes phases 1-3 of `docs/specs/gui-audit-and-roadmap.md`, whose
+Phase 0 is built. Eight waves, ~45 kills, each with its file surface and
+its test:
+
+| Wave | Theme | Kills |
+|---|---|---|
+| G0 | foundations | action registry, focus-aware dispatch, kittest harness, toasts, both-branch style |
+| G1 | the first five minutes | brush cursor, Ctrl+RMB size/hardness drag, status-bar tool hints, straight-line preview, Painter/Blender navigation presets, axis gizmo |
+| G2 | panels | layer thumbnails + gestures, history panel, texture-set list, context Properties + search, raw-slider sweep, bakes margin UI, stroke-method/cavity UI |
+| G3 | find anything | command palette, preferences, keymap editor, rich tooltips |
+| G4 | flagship widgets | colour picker, curve, gradient ramp, field grammar, property context menu |
+| G5 | shell | menu completion, workspaces, Hide UI, home screen, first-run setup, tab overflow |
+| G6 | viewport depth | overlays popover, contextual toolbar, display-mode keys, UV-view parity, stencil overlay |
+| G7 | accessibility + polish | AccessKit sweep, keyboard-only, UI scale/density, polish batch |
 
 ### Wave 6c — new capability
 

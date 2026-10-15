@@ -102,29 +102,31 @@ fn mesh_summary(path: &Path, mesh: &umber_mesh::MeshData) -> MeshSummary {
     }
 }
 
-/// Size/ray/dilate flag parsing shared by the bake commands.
-///
-/// The bake margin type ([`MarginType`]) travels BESIDE this struct
-/// (`parse_bake_args`, [`run_bake`], [`bake_mesh_maps_with_margin`]),
-/// not inside it: the agent session (agent.rs) builds full
-/// `BakeFlags { size, rays, dilate }` literals, and a new field would
-/// break them. The agent therefore always bakes with Extend.
+/// Size/ray/dilate/margin flag parsing shared by the bake commands (and
+/// the settings the batch `bake` step and the agent `bake` step bake
+/// with).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BakeFlags {
     size: u32,
     rays: u32,
-    /// Dilation iterations for the UV-padding post-pass (0 = off).
+    /// Dilation iterations for the UV-padding post-pass (0 = off); also
+    /// the Adjacent Faces strip width in texels.
     dilate: u32,
+    /// The margin type the UV-padding post-pass uses (see [`pad_map`]):
+    /// Extend alone, or Adjacent Faces then Extend. Only meaningful with
+    /// `dilate > 0`.
+    margin: MarginType,
 }
 
 impl Default for BakeFlags {
-    /// The CLI defaults (`--size 512 --rays 16`, no dilation) — also the
-    /// batch recipe's defaults for omitted fields.
+    /// The CLI defaults (`--size 512 --rays 16`, no dilation, Extend
+    /// margin) — also the batch recipe's defaults for omitted fields.
     fn default() -> Self {
         Self {
             size: 512,
             rays: 16,
             dilate: 0,
+            margin: MarginType::Extend,
         }
     }
 }
@@ -142,18 +144,12 @@ fn parse_margin(value: &str) -> Result<MarginType> {
     }
 }
 
-/// [`parse_bake_args`] without the margin: `export` bakes undilated, so
-/// the margin type never applies there (export_cmd's own flag loop
-/// rejects `--margin` before this runs).
+/// The bake commands' flags as [`BakeFlags`]; `--margin` absent =
+/// [`MarginType::Extend`], today's behavior. `export` shares this parser
+/// but bakes undilated, so the margin type never applies there
+/// (export_cmd's own flag loop rejects `--margin` before this runs).
 fn parse_bake_flags(args: &[String], start: usize) -> Result<BakeFlags> {
-    parse_bake_args(args, start).map(|(flags, _)| flags)
-}
-
-/// The bake commands' flags: [`BakeFlags`] plus `--margin` (absent =
-/// [`MarginType::Extend`], today's behavior).
-fn parse_bake_args(args: &[String], start: usize) -> Result<(BakeFlags, MarginType)> {
     let mut flags = BakeFlags::default();
-    let mut margin = MarginType::Extend;
     let mut i = start;
     while i < args.len() {
         match args[i].as_str() {
@@ -179,7 +175,7 @@ fn parse_bake_args(args: &[String], start: usize) -> Result<(BakeFlags, MarginTy
                 i += 2;
             }
             "--margin" => {
-                margin = parse_margin(
+                flags.margin = parse_margin(
                     args.get(i + 1)
                         .ok_or_else(|| anyhow::anyhow!("--margin needs a value"))?,
                 )?;
@@ -192,7 +188,7 @@ fn parse_bake_args(args: &[String], start: usize) -> Result<(BakeFlags, MarginTy
             other => return Err(anyhow::anyhow!("unknown flag: {other}")),
         }
     }
-    Ok((flags, margin))
+    Ok(flags)
 }
 
 /// A headless bake context: adapter + device + queue, created once and
@@ -220,13 +216,13 @@ fn bake_ao_cmd(args: &[String]) -> Result<()> {
     let usage = "usage: umber-cli bake-ao <mesh-file> <out.png> [--size N] [--rays N] [--dilate N] [--margin extend|adjacent]";
     let mesh_path = args.first().ok_or_else(|| anyhow::anyhow!("{usage}"))?;
     let out_path = args.get(1).ok_or_else(|| anyhow::anyhow!("{usage}"))?;
-    let (flags, margin) = parse_bake_args(args, 2)?;
+    let flags = parse_bake_flags(args, 2)?;
 
     let mesh = umber_mesh::load(std::path::Path::new(mesh_path))?;
     let ctx = bake_context()?;
     let map = bake_ao(&ctx, &mesh, &flags)?;
     // Optional UV-padding post-pass (--dilate N, N > 0): see pad_map.
-    let seams = margin_seams(&mesh, &flags, margin);
+    let seams = margin_seams(&mesh, &flags);
     let map = pad_map(&ctx, &mesh, seams.as_ref(), map, &flags)?;
     umber_export::png::write_png(
         std::path::Path::new(out_path),
@@ -241,7 +237,11 @@ fn bake_ao_cmd(args: &[String]) -> Result<()> {
         flags.size,
         flags.rays,
         if flags.dilate > 0 {
-            format!(", {} dilate steps{}", flags.dilate, margin_note(margin))
+            format!(
+                ", {} dilate steps{}",
+                flags.dilate,
+                margin_note(flags.margin)
+            )
         } else {
             String::new()
         }
@@ -255,13 +255,12 @@ fn bake_all_cmd(args: &[String]) -> Result<()> {
     let usage = "usage: umber-cli bake-all <mesh-file> <out-dir> [--size N] [--rays N] [--dilate N] [--margin extend|adjacent]";
     let mesh_path = args.first().ok_or_else(|| anyhow::anyhow!("{usage}"))?;
     let out_dir = args.get(1).ok_or_else(|| anyhow::anyhow!("{usage}"))?;
-    let (flags, margin) = parse_bake_args(args, 2)?;
+    let flags = parse_bake_flags(args, 2)?;
 
     let (set, written) = run_bake(
         Path::new(mesh_path),
         Path::new(out_dir),
         &flags,
-        margin,
         &BakeMap::ALL,
     )?;
     for path in &written {
@@ -270,7 +269,7 @@ fn bake_all_cmd(args: &[String]) -> Result<()> {
                 "wrote {} (dilated {} steps{})",
                 path.display(),
                 flags.dilate,
-                margin_note(margin)
+                margin_note(flags.margin)
             );
         } else {
             println!("wrote {}", path.display());
@@ -336,33 +335,20 @@ impl BakeMap {
 /// Bakes `maps` for the mesh at `mesh_path` into `out_dir` (created if
 /// absent) with the `TextureSetName_map` convention — the shared body of
 /// `bake-all` and the batch `bake` step. With `flags.dilate > 0` every
-/// map is margin-padded before its write (see [`pad_map`]; `margin`
+/// map is margin-padded before its write (see [`pad_map`]; `flags.margin`
 /// picks Extend or Adjacent Faces + Extend). Returns the texture-set
 /// name and the written paths, in `maps` order.
 fn run_bake(
     mesh_path: &Path,
     out_dir: &Path,
     flags: &BakeFlags,
-    margin: MarginType,
     maps: &[BakeMap],
 ) -> Result<(String, Vec<PathBuf>)> {
     let mesh = umber_mesh::load(mesh_path)?;
     let ctx = bake_context()?;
     let set = umber_mesh::texture_set_name(mesh_path, &mesh);
-    let job = BakeJob {
-        flags: *flags,
-        margin,
-    };
-    let written = bake_mesh_maps_with_margin(&ctx, &mesh, &set, out_dir, &job, maps, None)?;
+    let written = bake_mesh_maps(&ctx, &mesh, &set, out_dir, flags, maps, None)?;
     Ok((set, written))
-}
-
-/// [`BakeFlags`] plus the margin type: the settings
-/// [`bake_mesh_maps_with_margin`] bakes with (bundled to stay under
-/// clippy's argument limit).
-struct BakeJob {
-    flags: BakeFlags,
-    margin: MarginType,
 }
 
 /// `", adjacent-faces margin"` for Adjacent Faces, empty for Extend —
@@ -379,9 +365,8 @@ fn margin_note(margin: MarginType) -> &'static str {
 fn margin_seams(
     mesh: &umber_mesh::MeshData,
     flags: &BakeFlags,
-    margin: MarginType,
 ) -> Option<umber_mesh::seam::SeamGraph> {
-    (margin == MarginType::AdjacentFaces && flags.dilate > 0)
+    (flags.margin == MarginType::AdjacentFaces && flags.dilate > 0)
         .then(|| umber_mesh::seam::build_seam_graph(mesh))
 }
 
@@ -434,8 +419,13 @@ fn pad_map(
     )?)
 }
 
-/// [`bake_mesh_maps_with_margin`] with the Extend margin — the agent
-/// session's entry point (its `BakeFlags` carry no margin type).
+/// [`run_bake`]'s body over an already-loaded mesh (the agent session
+/// bakes the mesh it holds, via [`bake_mesh_maps`]). Writes `maps` into
+/// `out_dir`, creating it if absent. Without `tile` the files are named
+/// `<set>_<map>.png`. With `tile` they are named `<set>_<map>_<tile>.png`,
+/// the same tiled naming export uses, so per-tile bakes never overwrite
+/// each other. Every map goes through [`pad_map`]; under Adjacent Faces
+/// the seam graph is built once for the whole call, not per map.
 fn bake_mesh_maps(
     ctx: &BakeContext,
     mesh: &umber_mesh::MeshData,
@@ -445,32 +435,8 @@ fn bake_mesh_maps(
     maps: &[BakeMap],
     tile: Option<u16>,
 ) -> Result<Vec<PathBuf>> {
-    let job = BakeJob {
-        flags: *flags,
-        margin: MarginType::Extend,
-    };
-    bake_mesh_maps_with_margin(ctx, mesh, set, out_dir, &job, maps, tile)
-}
-
-/// [`run_bake`]'s body over an already-loaded mesh (the agent session
-/// bakes the mesh it holds, via [`bake_mesh_maps`]). Writes `maps` into
-/// `out_dir`, creating it if absent. Without `tile` the files are named
-/// `<set>_<map>.png`. With `tile` they are named `<set>_<map>_<tile>.png`,
-/// the same tiled naming export uses, so per-tile bakes never overwrite
-/// each other. Every map goes through [`pad_map`]; under Adjacent Faces
-/// the seam graph is built once for the whole call, not per map.
-fn bake_mesh_maps_with_margin(
-    ctx: &BakeContext,
-    mesh: &umber_mesh::MeshData,
-    set: &str,
-    out_dir: &Path,
-    job: &BakeJob,
-    maps: &[BakeMap],
-    tile: Option<u16>,
-) -> Result<Vec<PathBuf>> {
-    let flags = &job.flags;
     std::fs::create_dir_all(out_dir)?;
-    let seams = margin_seams(mesh, flags, job.margin);
+    let seams = margin_seams(mesh, flags);
     let mut written = Vec::with_capacity(maps.len());
     for &map in maps {
         let data = bake_map(ctx, mesh, map, flags)?;
@@ -1145,37 +1111,37 @@ mod tests {
 
     #[test]
     fn absent_margin_flag_is_extend_with_default_flags() {
-        let (flags, margin) = parse_bake_args(&args(&["m.obj", "out"]), 2).expect("no flags");
-        assert_eq!(margin, MarginType::Extend);
+        let flags = parse_bake_flags(&args(&["m.obj", "out"]), 2).expect("no flags");
+        assert_eq!(flags.margin, MarginType::Extend);
         assert_eq!(flags, BakeFlags::default());
     }
 
     #[test]
     fn margin_flag_parses_both_types_alongside_the_others() {
-        let (flags, margin) = parse_bake_args(
+        let flags = parse_bake_flags(
             &args(&[
                 "m.obj", "out", "--margin", "adjacent", "--dilate", "4", "--size", "64",
             ]),
             2,
         )
         .expect("valid flags");
-        assert_eq!(margin, MarginType::AdjacentFaces);
         assert_eq!(
             flags,
             BakeFlags {
                 size: 64,
                 rays: 16,
-                dilate: 4
+                dilate: 4,
+                margin: MarginType::AdjacentFaces,
             }
         );
-        let (_, margin) =
-            parse_bake_args(&args(&["m.obj", "out", "--margin", "extend"]), 2).expect("extend");
-        assert_eq!(margin, MarginType::Extend);
+        let flags =
+            parse_bake_flags(&args(&["m.obj", "out", "--margin", "extend"]), 2).expect("extend");
+        assert_eq!(flags.margin, MarginType::Extend);
     }
 
     #[test]
     fn bad_margin_values_are_errors_naming_the_flag() {
-        let err = parse_bake_args(&args(&["m.obj", "out", "--margin", "bilinear"]), 2)
+        let err = parse_bake_flags(&args(&["m.obj", "out", "--margin", "bilinear"]), 2)
             .expect_err("unknown margin type");
         let msg = err.to_string();
         assert!(
@@ -1185,18 +1151,23 @@ mod tests {
         // Case-sensitive, like every other CLI value.
         assert!(parse_margin("Adjacent").is_err());
         let err =
-            parse_bake_args(&args(&["m.obj", "out", "--margin"]), 2).expect_err("missing value");
+            parse_bake_flags(&args(&["m.obj", "out", "--margin"]), 2).expect_err("missing value");
         assert_eq!(err.to_string(), "--margin needs a value");
     }
 
     #[test]
     fn margin_seams_built_only_for_adjacent_with_nonzero_dilate() {
         let mesh = two_tile_strip();
-        let mut flags = BakeFlags::default();
-        assert!(margin_seams(&mesh, &flags, MarginType::AdjacentFaces).is_none());
+        let mut flags = BakeFlags {
+            margin: MarginType::AdjacentFaces,
+            ..BakeFlags::default()
+        };
+        assert!(margin_seams(&mesh, &flags).is_none());
         flags.dilate = 4;
-        assert!(margin_seams(&mesh, &flags, MarginType::Extend).is_none());
-        let graph = margin_seams(&mesh, &flags, MarginType::AdjacentFaces).expect("built");
+        flags.margin = MarginType::Extend;
+        assert!(margin_seams(&mesh, &flags).is_none());
+        flags.margin = MarginType::AdjacentFaces;
+        let graph = margin_seams(&mesh, &flags).expect("built");
         // Built from THIS mesh: one flag per triangle.
         assert_eq!(graph.tri_touches_seam.len(), 4);
     }

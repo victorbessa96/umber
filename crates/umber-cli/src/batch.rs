@@ -132,14 +132,14 @@ struct BakeStep {
     margin: MarginType,
 }
 
-fn default_margin() -> MarginType {
+pub(crate) fn default_margin() -> MarginType {
     MarginType::Extend
 }
 
 /// `margin`'s value through the CLI's own `--margin` parser, so the
 /// recipe and the flag accept exactly the same names. umber-bake's
 /// `MarginType` derives no serde.
-fn de_margin<'de, D: serde::Deserializer<'de>>(d: D) -> Result<MarginType, D::Error> {
+pub(crate) fn de_margin<'de, D: serde::Deserializer<'de>>(d: D) -> Result<MarginType, D::Error> {
     let name = String::deserialize(d)?;
     parse_margin(&name).map_err(|_| {
         serde::de::Error::custom(format!(
@@ -284,8 +284,9 @@ fn run_step(step: &BatchStep) -> Result<String> {
                 size: s.size,
                 rays: s.rays,
                 dilate: s.dilate,
+                margin: s.margin,
             };
-            let (set, written) = run_bake(&s.mesh, &s.out_dir, &flags, s.margin, &maps)?;
+            let (set, written) = run_bake(&s.mesh, &s.out_dir, &flags, &maps)?;
             Ok(format!(
                 "{} maps for '{set}' -> {}",
                 written.len(),
@@ -305,6 +306,7 @@ fn run_step(step: &BatchStep) -> Result<String> {
                 size: s.size,
                 rays: s.rays,
                 dilate: 0,
+                margin: MarginType::Extend,
             };
             let (written, tiles) = run_export(
                 &s.mesh,

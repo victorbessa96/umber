@@ -97,7 +97,9 @@ use umber_paint::persistence::{
 };
 use umber_paint::snapshot::build_composite_snapshot;
 
-use crate::batch::{default_rays, default_size, BakeTransferStep, InspectStep};
+use crate::batch::{
+    de_margin, default_margin, default_rays, default_size, BakeTransferStep, InspectStep,
+};
 use crate::{
     bake_context, bake_mesh_maps, export_mesh, mesh_summary, select_tiles, BakeFlags, BakeMap,
     MeshSummary, UDIM_GRID,
@@ -176,6 +178,12 @@ struct AgentBakeStep {
     rays: u32,
     #[serde(default)]
     dilate: u32,
+    /// `"extend"` (absent = Extend, the pre-margin behavior) or
+    /// `"adjacent"` (Adjacent Faces, then Extend) — the batch recipe's
+    /// `margin` field and the CLI's `--margin`, same names, same parser.
+    /// Only meaningful with `dilate > 0`, the margin width in texels.
+    #[serde(default = "default_margin", deserialize_with = "de_margin")]
+    margin: umber_bake::margin::MarginType,
     #[serde(default)]
     tiles: Vec<u16>,
 }
@@ -937,6 +945,7 @@ impl Session {
                     size: s.size,
                     rays: s.rays,
                     dilate: 0,
+                    margin: umber_bake::margin::MarginType::Extend,
                 };
                 let mut skipped = Vec::new();
                 let ask = crate::ExportAsk {
@@ -1741,6 +1750,7 @@ impl Session {
             size: s.size,
             rays: s.rays,
             dilate: s.dilate,
+            margin: s.margin,
         };
         // v0 (`set_active`'s contract): an open project's working set
         // names the bake; otherwise the mesh's own set, as before.
@@ -2017,6 +2027,31 @@ mod tests {
                 "{r}"
             );
         }
+    }
+
+    #[test]
+    fn bake_margin_defaults_to_extend_and_parses_adjacent() {
+        use umber_bake::margin::MarginType;
+        let step = |json: &str| -> Result<AgentStep> {
+            serde_json::from_str::<AgentStep>(json).map_err(anyhow::Error::from)
+        };
+        let margin = |json: &str| match step(json).expect("valid bake step") {
+            AgentStep::Bake(s) => s.margin,
+            other => panic!("not a bake step: {other:?}"),
+        };
+        assert_eq!(margin(r#"{"bake": {"out_dir": "o"}}"#), MarginType::Extend);
+        assert_eq!(
+            margin(r#"{"bake": {"out_dir": "o", "margin": "extend"}}"#),
+            MarginType::Extend
+        );
+        assert_eq!(
+            margin(r#"{"bake": {"out_dir": "o", "dilate": 4, "margin": "adjacent"}}"#),
+            MarginType::AdjacentFaces
+        );
+        let err = step(r#"{"bake": {"out_dir": "o", "margin": "bilinear"}}"#)
+            .expect_err("unknown margin type");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("margin") && msg.contains("bilinear"), "{msg}");
     }
 
     #[test]

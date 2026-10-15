@@ -43,7 +43,7 @@ function. Sockets add auth/lifecycle surface with zero v1 gain.
 | load | mesh | once per session; the mesh summary returns |
 | state | — | the loaded mesh, present tiles, texture sets |
 | inspect | mesh | the batch step, stateless variant |
-| bake | maps, out_dir, size, rays, dilate, tiles | the async bake STARTS; `bake_status` polls |
+| bake | maps, out_dir, size, rays, dilate, margin, tiles | the async bake STARTS; `bake_status` polls. `margin`: `"extend"` (absent = Extend, byte-identical to the pre-margin bake) or `"adjacent"` (Adjacent Faces, then Extend; `dilate` is the strip width), the CLI `--margin` / recipe `margin` names; any other value is a step error naming the field |
 | bake_status | — | pending/running/done(records)/failed(err) |
 | bake_transfer | low, high, maps, out_dir | sync (the transfer is one-shot) |
 | export | preset, out_dir, tiles | sync |

@@ -1,6 +1,6 @@
-//! `bake-all --margin` end to end through the built binary: the Adjacent
-//! Faces bake margin (umber-bake's `margin` module) wired into the
-//! headless bake path.
+//! `bake-all --margin` and the agent `bake` step's `margin` field end to
+//! end through the built binary: the Adjacent Faces bake margin
+//! (umber-bake's `margin` module) wired into the headless bake paths.
 //!
 //! GPU-gated: a run that fails because this host has no usable wgpu
 //! adapter prints `skipping:` and returns (the CLI tests' house rule,
@@ -8,8 +8,10 @@
 //! between runs on the same adapter, never golden bytes (GPU output is
 //! adapter-flaky across lavapipe/WARP/hardware).
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Writes the seamed fixture into `dir`: margin.rs's `seamed_quad` as an
 /// OBJ. 3D quad A(0,0,0) B(1,0,0) C(1,1,0) D(0,1,0), triangles (A,B,C)
@@ -187,4 +189,109 @@ fn bad_margin_value_fails_before_any_bake() {
     // Parsing fails before run_bake creates the out dir's contents.
     assert_eq!(pngs(&out).len(), 0);
     let _ = std::fs::remove_dir_all(out);
+}
+
+/// Runs one `umber-cli agent` session: `load` the mesh, `bake` with
+/// `bake` (the step's fields; `out_dir` is added here), then poll
+/// `bake_status` to a final state and `quit`. `None` = GPU skip (the
+/// bake failed on a missing adapter); panics on any other failure.
+fn agent_bake(mesh: &Path, out: &Path, mut bake: serde_json::Value) -> Option<()> {
+    bake["out_dir"] = serde_json::json!(out);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_umber-cli"))
+        .arg("agent")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn umber-cli agent");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+    let mut call = |step: serde_json::Value| -> serde_json::Value {
+        writeln!(stdin, "{step}").expect("write step");
+        stdin.flush().expect("flush step");
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("read reply");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("reply is not JSON ({e}): {line}"))
+    };
+    let load = call(serde_json::json!({ "load": { "mesh": mesh } }));
+    assert_eq!(load["ok"], true, "{load}");
+    let started = call(serde_json::json!({ "bake": bake }));
+    assert_eq!(started["ok"], true, "{started}");
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let last = loop {
+        let status = call(serde_json::json!("bake_status"));
+        assert_eq!(status["ok"], true, "{status}");
+        if status["status"] == "done" || status["status"] == "failed" {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "bake never finished: {status}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let quit = call(serde_json::json!("quit"));
+    assert_eq!(quit["ok"], true, "{quit}");
+    assert!(child.wait().expect("agent exits").success());
+    if last["status"] == "failed" {
+        let error = last["error"].as_str().unwrap_or_default();
+        if is_gpu_skip(error) {
+            eprintln!("skipping: {error}");
+            return None;
+        }
+        panic!("agent bake failed: {last}");
+    }
+    Some(())
+}
+
+#[test]
+fn agent_bake_margin_adjacent_differs_and_absent_is_extend() {
+    let base = serde_json::json!({ "dilate": 4, "size": 64, "rays": 4 });
+    let with = |margin: &str| {
+        let mut step = base.clone();
+        step["margin"] = serde_json::json!(margin);
+        step
+    };
+    let mesh_dir = scratch("agent-mesh");
+    let mesh = seamed_quad(&mesh_dir);
+    let adj_dir = scratch("agent-adjacent");
+    if agent_bake(&mesh, &adj_dir, with("adjacent")).is_none() {
+        return;
+    }
+    let adjacent = pngs(&adj_dir);
+    assert_eq!(adjacent.len(), 6, "{adjacent:?}");
+
+    let ext_dir = scratch("agent-extend");
+    agent_bake(&mesh, &ext_dir, with("extend")).expect("the adapter was there a moment ago");
+    let extend = pngs(&ext_dir);
+    let def_dir = scratch("agent-default");
+    agent_bake(&mesh, &def_dir, base.clone()).expect("the adapter was there a moment ago");
+    // Absent `margin` is Extend, byte for byte (same adapter, same path).
+    assert_eq!(pngs(&def_dir), extend, "absent margin must equal extend");
+
+    let differing: Vec<&str> = adjacent
+        .iter()
+        .zip(&extend)
+        .filter(|((_, a), (_, e))| a != e)
+        .map(|((n, _), _)| n.as_str())
+        .collect();
+    eprintln!("agent maps differing adjacent vs extend: {differing:?}");
+    assert!(
+        differing.iter().any(|n| n.ends_with("_position.png")),
+        "adjacent and extend must differ on the position map: {differing:?}"
+    );
+
+    // The agent writes the same files `bake-all` does for the same
+    // settings: one bake path, two front ends.
+    let cli_dir = scratch("agent-cli-adjacent");
+    bake_all(
+        &mesh,
+        &cli_dir,
+        &[
+            "--dilate", "4", "--size", "64", "--rays", "4", "--margin", "adjacent",
+        ],
+    )
+    .expect("the adapter was there a moment ago");
+    assert_eq!(pngs(&cli_dir), adjacent, "agent and bake-all must agree");
+
+    for dir in [mesh_dir, adj_dir, ext_dir, def_dir, cli_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
