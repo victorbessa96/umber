@@ -11,6 +11,7 @@
 
 menu =
     .file = Arquivo
+    .edit = Editar
     .view = Exibir
     .help = Ajuda
     .open-mesh = Abrir malha…
@@ -630,3 +631,11 @@ display-hdr =
     .toggle = Saída HDR
     .reason-not-exposed = Ainda não disponível: a camada de janelas desta versão (eframe) não expõe o espaço de cor da superfície, então o umber não pode perguntar ao display se ele suporta HDR.
     .reason-sdr-only = Este adaptador ou superfície só ofereceu o espaço de cor SDR.
+
+## Por que uma ação está indisponível (a verificação única do registro, plano G0)
+
+action =
+    .unavailable-nothing-to-undo = Nada para desfazer
+    .unavailable-nothing-to-redo = Nada para refazer
+    .unavailable-no-mesh = Carregue uma malha primeiro
+    .unavailable-not-editing-mask = Só ao editar a máscara rápida (X)

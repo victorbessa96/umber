@@ -113,6 +113,7 @@
 //!   sets (an override on an unwritten set is dropped from the file, the
 //!   set-size rule applied to channels).
 
+mod actions;
 mod bake_sources;
 mod bakes_panel;
 mod brush_panel;
@@ -1906,18 +1907,53 @@ impl eframe::App for UmberApp {
         let mut actions = toolbar::poll_shortcuts(ui.ctx());
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
+            // Every action row prints its registry shortcut (GUI plan G0:
+            // the key shown is the key that fires) and greys out from the
+            // registry's one enabled-check.
+            let shell_state = actions::ShellState {
+                can_undo: self.state.doc.history.can_undo(),
+                can_redo: self.state.doc.history.can_redo(),
+                paint_available: self.state.paint.is_some(),
+                mask_editing: self
+                    .state
+                    .paint
+                    .as_ref()
+                    .is_some_and(|p| p.quick_mask().is_editing()),
+            };
+            let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+            let action_item = |ui: &mut Ui, label: String, action: toolbar::ShellAction| {
+                let mut button = egui::Button::new(label);
+                if let Some(shortcut) = actions::shortcut_label(action, is_mac) {
+                    button = button.shortcut_text(shortcut);
+                }
+                let state = actions::availability(action, shell_state);
+                let response = ui.add_enabled(state.is_ok(), button);
+                let response = match state {
+                    Err(reason) => response.on_disabled_hover_text(tr(reason)),
+                    Ok(()) => response,
+                };
+                response.clicked()
+            };
             MenuButton::new(tr("menu.file")).ui(ui, |ui| {
-                if ui.button(tr("shell.new")).clicked() {
+                if action_item(ui, tr("shell.new"), toolbar::ShellAction::NewProject) {
                     actions.push(toolbar::ShellAction::NewProject);
                 }
-                if ui.button(tr("menu.open-mesh")).clicked() {
+                if action_item(ui, tr("menu.open-mesh"), toolbar::ShellAction::OpenMesh) {
                     actions.push(toolbar::ShellAction::OpenMesh);
                 }
-                if ui.button(tr("menu.open-project")).clicked() {
-                    self.open_project();
+                if action_item(
+                    ui,
+                    tr("menu.open-project"),
+                    toolbar::ShellAction::OpenProject,
+                ) {
+                    actions.push(toolbar::ShellAction::OpenProject);
                 }
-                if ui.button(tr("menu.save-project")).clicked() {
-                    self.save_project();
+                if action_item(
+                    ui,
+                    tr("menu.save-project"),
+                    toolbar::ShellAction::SaveProject,
+                ) {
+                    actions.push(toolbar::ShellAction::SaveProject);
                 }
                 let export_enabled = self.state.paint.is_some();
                 if ui
@@ -1928,6 +1964,14 @@ impl eframe::App for UmberApp {
                 }
                 if ui.button(tr("menu.load-environment")).clicked() {
                     self.load_environment();
+                }
+            });
+            MenuButton::new(tr("menu.edit")).ui(ui, |ui| {
+                if action_item(ui, tr("shell.undo"), toolbar::ShellAction::Undo) {
+                    actions.push(toolbar::ShellAction::Undo);
+                }
+                if action_item(ui, tr("shell.redo"), toolbar::ShellAction::Redo) {
+                    actions.push(toolbar::ShellAction::Redo);
                 }
             });
             MenuButton::new(tr("menu.view")).ui(ui, |ui| {

@@ -186,6 +186,8 @@ impl ToolKind {
 }
 
 /// The keys the shell polls each frame (the letter keys + the chord keys).
+/// Pinned against [`crate::actions::BINDINGS`] by
+/// `shortcut_keys_are_exactly_the_bound_keys`.
 pub const SHORTCUT_KEYS: [Key; 9] = [
     Key::W,
     Key::G,
@@ -199,35 +201,11 @@ pub const SHORTCUT_KEYS: [Key; 9] = [
 ];
 
 /// The shell's key table (see the module docs). `None` for any key or
-/// modifier combination that isn't bound.
+/// modifier combination that isn't bound. The table itself is
+/// [`crate::actions::BINDINGS`] (GUI plan G0): one registry that the
+/// menus print from too.
 pub fn resolve_shortcut(key: Key, mods: Modifiers) -> Option<ShellAction> {
-    if mods.command {
-        // Chords. Alt+chord is reserved (unbound) rather than aliased.
-        if mods.alt {
-            return None;
-        }
-        return match key {
-            Key::Z if mods.shift => Some(ShellAction::Redo),
-            Key::Z => Some(ShellAction::Undo),
-            Key::S if !mods.shift => Some(ShellAction::SaveProject),
-            Key::O if !mods.shift => Some(ShellAction::OpenProject),
-            _ => None,
-        };
-    }
-    // On macOS `command` is Cmd and `ctrl` is the separate Control key;
-    // a held Control is still not a bare press.
-    if mods.ctrl {
-        return None;
-    }
-    match key {
-        Key::W => Some(ShellAction::ToggleWireframe),
-        Key::G => Some(ShellAction::ToggleGrid),
-        Key::V => Some(ShellAction::CycleViewMode),
-        Key::X => Some(ShellAction::ToggleMaskMode),
-        Key::I => Some(ShellAction::InvertMask),
-        Key::E => Some(ShellAction::SelectTool(ToolKind::Erase)),
-        _ => None,
-    }
+    crate::actions::resolve(key, mods)
 }
 
 /// Every bound action pressed this frame, in [`SHORTCUT_KEYS`] order.
@@ -518,6 +496,21 @@ mod tests {
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
         assert_eq!((bare, chords), (6, 4));
+    }
+
+    #[test]
+    fn shortcut_keys_are_exactly_the_bound_keys() {
+        // A bound key missing from the poll list would never fire; a polled
+        // key with no row is polled for nothing.
+        let mut bound: Vec<Key> = crate::actions::BINDINGS
+            .iter()
+            .map(|(b, _)| b.key)
+            .collect();
+        bound.sort_by_key(|k| k.name());
+        bound.dedup();
+        let mut polled = SHORTCUT_KEYS.to_vec();
+        polled.sort_by_key(|k| k.name());
+        assert_eq!(polled, bound);
     }
 
     #[test]

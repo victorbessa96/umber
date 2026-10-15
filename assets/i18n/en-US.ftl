@@ -10,6 +10,7 @@
 
 menu =
     .file = File
+    .edit = Edit
     .view = View
     .help = Help
     .open-mesh = Open Mesh…
@@ -641,3 +642,11 @@ display-hdr =
     .toggle = HDR output
     .reason-not-exposed = Not available yet: this build's windowing layer (eframe) doesn't expose the surface's color space, so umber can't ask the display whether it supports HDR.
     .reason-sdr-only = This adapter or surface only offered the SDR color space.
+
+## Why an action is unavailable (the registry's enabled-check, GUI plan G0)
+
+action =
+    .unavailable-nothing-to-undo = Nothing to undo
+    .unavailable-nothing-to-redo = Nothing to redo
+    .unavailable-no-mesh = Load a mesh first
+    .unavailable-not-editing-mask = Only while editing the quick mask (X)
