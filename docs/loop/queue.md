@@ -98,7 +98,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-7 | One undo timeline (strokes + masks + layer ops on Ctrl+Z) | 2 loop | todo |
 | C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | ◐ done in buttons + a properties row (drag reorder, content-duplicate deferred) |
 | C2-9 | Per-texture-set layer stacks | 2 loop | todo |
-| C2-10 | Smart-material / smart-mask shelf | 2 loop | todo |
+| C2-10 | Smart-material / smart-mask shelf | 2 loop | ◐ shelf + undoable apply landed; generator wiring + smart masks open |
 | C2-11 | Bitmap stamps → angle → jitter quartet | 2 loop | todo |
 | C2-12 | The colour picker (g4-color-picker) | 2 loop | todo |
 | C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 13 + 18 done (`c85a5a8`); 14 + 15 landed (the nightly runs + the leak-proof gate; the baseline reseed waits on its first run); 16, 17, 19 todo |

@@ -8,6 +8,8 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- A smart-material shelf in the Layers panel: the shipped materials apply as
+  undoable layers (generator wiring follows) (C2-10)
 - The Layers panel can reorder, rename, duplicate and add folders, and the
   selected layer shows its opacity and blend mode, all undoable (C2-8)
 - Paint any channel, export every channel: a Channel picker in the Brush
