@@ -8,6 +8,13 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Paint any channel, export every channel: a Channel picker in the Brush
+  panel (roughness, metallic, height, normal, ...), and the export presets
+  now write each painted channel (unpainted texels and partners fill with
+  documented neutrals) instead of Base Color only (C2-5, C2-6)
+- A crash reporter module (panic hook, report files; wiring pending a
+  sibling lock), the perf nightly running on hosted lavapipe with a
+  leak-proof gate, and the C2 gap audit with its 28-item worklist
 - `ValueField` property menu: right-click Reset to Default, Copy and Paste
   on every numeric field in the app; Reset where the panel names a default
   (Bakes, Display) (g4-property-context-menu + the sweep)

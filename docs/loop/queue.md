@@ -94,7 +94,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-3 | Pixel autosave + "Recover unsaved work?" | 1 data | todo |
 | C2-4 | Ctrl+S silent re-save; Save As = Ctrl+Shift+S | 1 data | todo |
 | C2-5 | Paint-channel targeting (Brush panel picker → `set_active_channel`) | 2 loop | ✓ done (the Channel picker; export of the painted channels = C2-6) |
-| C2-6 | Export every painted channel through the presets | 2 loop | todo |
+| C2-6 | Export every painted channel through the presets | 2 loop | ✓ done (neutrals + partner fill; GPU paint→glTF→ORM test) |
 | C2-7 | One undo timeline (strokes + masks + layer ops on Ctrl+Z) | 2 loop | todo |
 | C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | todo |
 | C2-9 | Per-texture-set layer stacks | 2 loop | todo |
