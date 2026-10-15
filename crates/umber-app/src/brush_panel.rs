@@ -264,6 +264,7 @@ impl BrushPanel {
         line_constraint_rows(ui, &mut self.line_constraint);
         projection_rows(ui, &mut self.projection, &mut self.front_face_falloff);
         if let Some(paint) = paint {
+            channel_rows(ui, paint);
             quick_mask_rows(ui, paint);
             cavity_rows(ui, paint);
         }
@@ -864,6 +865,70 @@ fn quick_mask_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
 /// `tool_settings/index.html`): paint only where the baked curvature says
 /// crevice (or ridge). It edits the paint session directly, like the quick
 /// mask: it depends on the mesh's curvature bake, not on the brush preset.
+/// The channels the picker offers, in order: the default texture set's
+/// OpenPBR channels (`TextureSet::new_default`, the set every new project
+/// starts from), then any extra channel the paint session already holds
+/// on tile 1001 (an imported user channel), deduplicated.
+pub(crate) fn pickable_channels(present: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = umber_core::TextureSet::new_default("")
+        .channels
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    for name in present {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// The catalog key of a channel's display name; `None` for a user channel
+/// (shown by its own name).
+pub(crate) fn channel_label_key(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "baseColor" => "viewmode.basecolor",
+        "roughness" => "viewmode.roughness",
+        "metallic" => "viewmode.metallic",
+        "normal" => "viewmode.normal",
+        "height" => "viewmode.height",
+        "emissive" => "viewmode.emissive",
+        "ambientOcclusion" | "ao" => "viewmode.ao",
+        _ => return None,
+    })
+}
+
+fn channel_label(name: &str) -> String {
+    channel_label_key(name).map_or_else(|| name.to_owned(), tr)
+}
+
+/// The paint-channel picker (C2-5, `docs/loop/audit-2026-10-15-c2.md`):
+/// which channel the next stroke paints. The paint session snapshots it
+/// at stroke begin, so a change mid-stroke takes effect on the next one.
+fn channel_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
+    // The View menu's existing "Channel" key: both catalogs sit under a
+    // sibling session's lock right now, so this kill adds no new strings.
+    let title = tr("viewmode.channel");
+    ParamGroup::new("brush-channel", title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        let active = paint.active_channel().to_owned();
+        let options = pickable_channels(&paint.channels_present(umber_mesh::FIRST_TILE));
+        egui::ComboBox::from_id_salt("brush_channel_combo")
+            .selected_text(channel_label(&active))
+            .show_ui(ui, |ui| {
+                for name in &options {
+                    if ui
+                        .selectable_label(*name == active, channel_label(name))
+                        .clicked()
+                        && *name != active
+                    {
+                        paint.set_active_channel(name);
+                    }
+                }
+            });
+    });
+}
+
 fn cavity_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
     use umber_brush::{CavityMask, CavityTarget};
     let title = tr("brush.cavity");
@@ -1680,6 +1745,35 @@ fn falloff_key(curve: umber_brush::FalloffCurve) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_picker_lists_the_default_set_then_session_extras() {
+        let options = pickable_channels(&[]);
+        assert_eq!(options[0], crate::paint_state::BASE_COLOR_CHANNEL);
+        for want in ["roughness", "metallic", "normal", "height"] {
+            assert!(options.iter().any(|c| c == want), "{want} offered");
+        }
+        // A user channel the session already holds joins at the end, once.
+        let with_user = pickable_channels(&["wear".into(), "height".into()]);
+        assert_eq!(with_user.last().map(String::as_str), Some("wear"));
+        assert_eq!(with_user.iter().filter(|c| *c == "height").count(), 1);
+        // Labels: known channels translate, user channels show as named.
+        assert_eq!(channel_label_key("roughness"), Some("viewmode.roughness"));
+        assert_eq!(channel_label_key("wear"), None);
+        let i18n = crate::i18n::I18n::builtin();
+        for name in pickable_channels(&[]) {
+            if let Some(key) = channel_label_key(&name) {
+                for locale in ["en-US", "pt-BR"] {
+                    assert!(i18n.has_key(locale, key), "{locale} {key}");
+                }
+            }
+        }
+        for key in ["viewmode.channel"] {
+            for locale in ["en-US", "pt-BR"] {
+                assert!(i18n.has_key(locale, key), "{locale} {key}");
+            }
+        }
+    }
 
     #[test]
     fn front_face_falloff_defaults_off() {
