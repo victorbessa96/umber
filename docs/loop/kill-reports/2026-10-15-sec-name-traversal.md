@@ -63,3 +63,34 @@ into other folders.
 Remove `file_safe` from `format_mesh_map` (the bake test must fail), and
 remove `path_safe_value` from `expand_template` (the export test must
 fail).
+
+## Third site: the paint sidecar manifest's channel segment (lock `sec-sidecar-channel`, UNRUN)
+
+`parse_paint_sidecar_name` is the manifest's trust boundary (the
+manifest is file content). It rejected an empty channel, `..` and `\\`,
+but NOT:
+
+- `C:`. On Windows, `PathBuf::join("C:")` drops the base and yields a
+  drive-relative path, so a crafted `paint/manifest.txt` line
+  `C:/tile-1001.png …` aims the roll-forward's rename at the current
+  directory of drive C.
+- `.` and `...`: Windows strips trailing dots, so `...` names the
+  sidecar dir itself.
+- `a:b`: an NTFS alternate data stream.
+- `* ? < > | "`: invalid on Windows, so the roll-forward's rename fails
+  loudly instead of being rejected cleanly.
+
+`is_safe_channel_component` now rejects all of them, and the parse
+rule's doc points at it. Both existing reject lists (flat and
+layer-nested) gain those cases. Real channel names (`baseColor`,
+`height`, user channels) are untouched: they are identifiers.
+
+## Owed (with the battery, not speculatively now)
+
+The mesh-map import's user-channel route (`<set>_<suffix>.png` →
+channel `suffix`) can carry a `:` from a Linux file name into the
+document. The save then writes `paint/<suffix>/…`, which fails on a
+Windows checkout of that project, and the load now rejects it. The
+import should refuse it at the source with a new
+`UnmatchedReason::UnsafeChannel`, which needs both catalogs (a new
+`import.reason-unsafe-channel` key). Do it in the same battery run.
