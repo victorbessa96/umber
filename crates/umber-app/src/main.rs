@@ -114,6 +114,7 @@
 //!   set-size rule applied to channels).
 
 mod actions;
+mod axis_gizmo;
 mod bake_sources;
 mod bakes_panel;
 mod brush_cursor;
