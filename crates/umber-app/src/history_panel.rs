@@ -388,6 +388,39 @@ pub fn entry_is_current(entry: &HistoryEntry, layer_len: usize, stroke_len: Opti
     }
 }
 
+/// How a history row reads (GUI plan G2 `g2-history-panel`; Blender
+/// A10.1: "newest on top, a dot on the current state, greyed future").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    /// The journal position this row names is the live state.
+    Current,
+    /// Applied, behind the live state.
+    Past,
+    /// Undone: ahead of the live state on its journal. A new edit
+    /// truncates it (the stack drops the redo branch).
+    Future,
+    /// Context (a bake, an export): no journal position.
+    Context,
+}
+
+/// The row state from the entry's own journal depth and that journal's
+/// live length. A layer row `d` is Future once the journal is shorter
+/// than `d` (its edit undone), Current at exactly `d`, else Past. The
+/// same for stroke rows against the stroke journal; with no paint session,
+/// stroke rows read as context (nothing to drive).
+pub fn row_state(entry: &HistoryEntry, layer_len: usize, stroke_len: Option<usize>) -> RowState {
+    let classify = |depth: usize, len: usize| match depth.cmp(&len) {
+        std::cmp::Ordering::Equal => RowState::Current,
+        std::cmp::Ordering::Less => RowState::Past,
+        std::cmp::Ordering::Greater => RowState::Future,
+    };
+    match (entry.jump_target(), entry.stroke_target()) {
+        (Some(d), None) => classify(d, layer_len),
+        (None, Some(d)) => stroke_len.map_or(RowState::Context, |len| classify(d, len)),
+        _ => RowState::Context,
+    }
+}
+
 /// The per-frame stroke-commit drain: called from the app's frame loop with
 /// the document AND the paint session — every frame, not only when the
 /// History tab is visible (egui_dock skips hidden tabs), so strokes painted
@@ -473,19 +506,25 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                 layer_target: Option<usize>,
                 stroke_target: Option<usize>,
                 current: bool,
+                state: RowState,
             }
+            // Newest on top (Blender A10.1): the log reads like a stack,
+            // with the most recent edit nearest the toolbar.
             let rows: Vec<Row> = doc
                 .session_history
                 .entries()
                 .iter()
+                .rev()
                 .map(|entry| {
                     let current = entry_is_current(entry, depth, stroke_len);
+                    let state = row_state(entry, depth, stroke_len);
                     match (entry.jump_target(), entry.stroke_target()) {
                         (Some(target), None) => Row {
                             text: format!("{target} · {}", entry.kind.label()),
                             layer_target: Some(target),
                             stroke_target: None,
                             current,
+                            state,
                         },
                         // A stroke row without a paint session has no
                         // journal to drive: display-only, like context.
@@ -494,12 +533,14 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                             layer_target: None,
                             stroke_target: Some(target),
                             current,
+                            state,
                         },
                         _ => Row {
                             text: format!("· {}", entry.kind.label()),
                             layer_target: None,
                             stroke_target: None,
                             current: false,
+                            state: RowState::Context,
                         },
                     }
                 })
@@ -507,12 +548,24 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
             let mut layer_jump_to = None;
             let mut stroke_jump_to = None;
             for row in &rows {
+                // The current row carries a dot; undone (future) rows are
+                // greyed: a new edit would discard them.
+                let label = |row: &Row| {
+                    let text = match row.state {
+                        RowState::Current => format!("● {}", row.text),
+                        _ => format!("   {}", row.text),
+                    };
+                    match row.state {
+                        RowState::Future => egui::RichText::new(text).weak().italics(),
+                        _ => egui::RichText::new(text),
+                    }
+                };
                 if let Some(target) = row.layer_target {
-                    if ui.selectable_label(row.current, &row.text).clicked() {
+                    if ui.selectable_label(row.current, label(row)).clicked() {
                         layer_jump_to = Some(target);
                     }
                 } else if let Some(target) = row.stroke_target {
-                    if ui.selectable_label(row.current, &row.text).clicked() {
+                    if ui.selectable_label(row.current, label(row)).clicked() {
                         stroke_jump_to = Some(target);
                     }
                 } else {
@@ -739,6 +792,28 @@ mod tests {
         // New strokes record against the new epoch at depth 1 again.
         log.record_stroke(1);
         assert_eq!(log.entries()[2].stroke_target(), Some(1));
+    }
+
+    #[test]
+    fn row_state_marks_current_past_future_and_context() {
+        let mut log = SessionHistory::new();
+        log.record_undoable(HistoryKind::AddPaint, 1);
+        log.record_undoable(HistoryKind::SetOpacity, 2);
+        log.record_stroke(1);
+        log.record_context(HistoryKind::Bake);
+        let e = log.entries();
+        // Live: layers at 2, strokes at 1.
+        assert_eq!(row_state(&e[0], 2, Some(1)), RowState::Past);
+        assert_eq!(row_state(&e[1], 2, Some(1)), RowState::Current);
+        assert_eq!(row_state(&e[2], 2, Some(1)), RowState::Current);
+        assert_eq!(row_state(&e[3], 2, Some(1)), RowState::Context);
+        // Undo one layer edit: row 2 becomes Future (greyed), row 1 Current.
+        assert_eq!(row_state(&e[1], 1, Some(1)), RowState::Future);
+        assert_eq!(row_state(&e[0], 1, Some(1)), RowState::Current);
+        // Undo the stroke: its row is Future.
+        assert_eq!(row_state(&e[2], 2, Some(0)), RowState::Future);
+        // No paint session: stroke rows read as context.
+        assert_eq!(row_state(&e[2], 2, None), RowState::Context);
     }
 
     #[test]
