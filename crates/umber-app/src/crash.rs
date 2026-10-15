@@ -47,7 +47,12 @@ pub fn format_report(
          location: {}\n\
          message: {message}\n\
          \n\
-         backtrace:\n{backtrace}\n",
+         backtrace:\n{backtrace}\n\
+         \n\
+         The session's log is logs/umber.log in the same state folder (renamed\n\
+         logs/umber.prev.log at the next launch). It is not copied here: log\n\
+         lines can name your files, so attach it to a bug report only if you\n\
+         are happy to share them.\n",
         env!("CARGO_PKG_VERSION"),
         location.unwrap_or("unknown"),
     )
@@ -144,6 +149,8 @@ mod tests {
     #[test]
     fn report_carries_the_facts() {
         let body = format_report("boom", Some("src/x.rs:1:2"), "main", 42, "frame 0");
+        // The log is pointed at, never inlined (it can hold user paths).
+        assert!(body.contains("logs/umber.prev.log"));
         assert!(body.starts_with("Umber crash report\n"));
         assert!(body.contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))));
         assert!(body.contains("commit: "));
@@ -151,7 +158,7 @@ mod tests {
         assert!(body.contains("thread: main"));
         assert!(body.contains("location: src/x.rs:1:2"));
         assert!(body.contains("message: boom"));
-        assert!(body.ends_with("backtrace:\nframe 0\n"));
+        assert!(body.contains("backtrace:\nframe 0\n"));
         let no_loc = format_report("boom", None, "main", 0, "");
         assert!(no_loc.contains("location: unknown"));
     }
