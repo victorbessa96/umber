@@ -22,6 +22,11 @@ KILLS=(
   "sec-sidecar-channel|umber-paint umber-app|crates/umber-paint/src/persistence.rs"
   "sec-smart-caps|umber-core umber-app|crates/umber-core/src/smart.rs"
 )
+# NOT in the table: win-version-resource. It needs the workspace dep
+# `winresource` in the root Cargo.toml + umber-app's build-dep, both
+# under g5-workspace-persist's lock, and a Cargo.lock resolved on the host
+# (`cargo metadata`). Do it by hand after g5-workspace-persist commits:
+# docs/loop/kill-reports/2026-10-15-win-version-resource.md.
 
 ssh -o BatchMode=yes -n "$HOST" "rm -rf ~/$REMOTE && mkdir -p ~/$REMOTE"
 git bundle create - HEAD 2>/dev/null | ssh -o BatchMode=yes "$HOST" \
