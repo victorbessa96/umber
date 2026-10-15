@@ -90,17 +90,17 @@ painter cannot yet finish a real PBR asset in the GUI.
 | # | item | tier | state |
 |---|---|---|---|
 | C2-1 | Quit guard (dirty close asks Save / Discard / Cancel) | 1 data | todo |
-| C2-2 | Panic hook + crash report + next-launch offer | 1 data | ◐ module + 5 tests landed (`crash.rs`, unregistered); main() wiring waits on the sibling's main.rs lock |
+| C2-2 | Panic hook + crash report + next-launch offer | 1 data | ✓ done (hook first in main(), pending reports offered once as sticky notices) |
 | C2-3 | Pixel autosave + "Recover unsaved work?" | 1 data | todo |
 | C2-4 | Ctrl+S silent re-save; Save As = Ctrl+Shift+S | 1 data | todo |
 | C2-5 | Paint-channel targeting (Brush panel picker → `set_active_channel`) | 2 loop | ✓ done (the Channel picker; export of the painted channels = C2-6) |
 | C2-6 | Export every painted channel through the presets | 2 loop | ✓ done (neutrals + partner fill; GPU paint→glTF→ORM test) |
-| C2-7 | One undo timeline (strokes + masks + layer ops on Ctrl+Z) | 2 loop | ◐ unified_undo/redo + the History buttons landed (GPU-tested); coordinated row travel landed (a click moves both journals); only the Ctrl+Z swap (2 main.rs lines, lock-blocked) remains |
-| C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | ◐ done in buttons + a properties row (drag reorder deferred; content-duplicate engine + outcome landed, the main.rs block waits on the sibling lock) |
+| C2-7 | One undo timeline (strokes + masks + layer ops on Ctrl+Z) | 2 loop | ◐ unified_undo/redo + the History buttons landed (GPU-tested); coordinated row travel landed (a click moves both journals); Ctrl+Z dispatch wired ✓ — C2-7 done |
+| C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | ◐ done in buttons + a properties row (drag reorder deferred; duplicate copies pixels ✓) |
 | C2-9 | Per-texture-set layer stacks | 2 loop | todo |
 | C2-10 | Smart-material / smart-mask shelf | 2 loop | ◐ shelf + undoable apply landed; generator wiring + smart masks open |
 | C2-11 | Bitmap stamps → angle → jitter quartet | 2 loop | ◐ engine + brush halves landed (stamp dabs, per-dab angle, StampAngle fixed/follow/random, PaintState::set_stamp); the jitter quartet landed (deterministic, flow-thins-only); the panel rows (stamp picker + angle mode + 4 jitter amounts) wait on main.rs + the catalogs |
-| C2-12 | The colour picker (g4-color-picker) | 2 loop | ◐ widget + 9 tests landed (unregistered: widgets/mod.rs lock); the 3 call sites follow registration |
+| C2-12 | The colour picker (g4-color-picker) | 2 loop | ◐ widget registered + suite-run (gui 91); the 3 call sites (popup wrapper) next |
 | C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 13 + 18 done (`c85a5a8`); 14 + 15 landed (the nightly runs + the leak-proof gate; the baseline reseed waits on its first run); 19 done (MSI dropped from the §10 row, cargo-dist 0.32.0); 17 done (generated UV'd FBX, Gate 0 asserts the unwrap); 16 (real-GPU budget row: Bessa's host) todo |
 | C2-20..22 | Security: panic-hunt the uncovered seams, plugin consent + size cap, Windows signing decision | 4 security | ◐ C2-20 ✓ (7 seams + the agent wire, no panic found), C2-21 ✓ (blake3 consent + 8 MiB cap); C2-22 (Windows signing) is Bessa's decision |
 | C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | todo |
