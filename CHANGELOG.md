@@ -8,6 +8,18 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Bitmap stamps: brushes can paint a stamp image instead of a round dab,
+  rotated by a fixed angle, the stroke direction or a random angle, with
+  size / angle / position / flow jitter (engine + brush; the panel rows
+  follow) (C2-11)
+- The Bakes panel bakes the normal map (on by default), world-space normal,
+  ID and bent normal, written Linear (C2-29)
+- A user guide (`docs/user/getting-started.md`), a keyboard reference
+  generated from the key table, and a plugin authoring guide with the v1
+  ABI contract (C2-26, C2-27)
+- A colour picker widget that keeps the hue through greys (C2-12; wiring
+  follows), duplicate-with-pixels in the paint engine, and four more
+  behavior kittests (C2-28)
 - Plugins ask first: a `.wasm` in the user plugins dir loads only after
   Trust & load in the Graph panel (bound to its exact bytes), and modules
   over 8 MiB are refused before compile (C2-21)
