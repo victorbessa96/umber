@@ -165,6 +165,7 @@ pub fn build_composite_snapshot(
         layers,
         base_visible,
         displayed,
+        set_layers: Default::default(),
     }
 }
 

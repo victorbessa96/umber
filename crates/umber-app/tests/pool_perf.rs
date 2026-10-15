@@ -109,6 +109,7 @@ fn harness_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnaps
         ],
         base_visible: true,
         displayed: displayed.to_vec(),
+        set_layers: Default::default(),
     }
 }
 
@@ -161,6 +162,7 @@ fn drag_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnapshot
         ],
         base_visible: true,
         displayed: displayed.to_vec(),
+        set_layers: Default::default(),
     }
 }
 

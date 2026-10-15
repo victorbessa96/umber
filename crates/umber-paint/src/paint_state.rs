@@ -908,18 +908,34 @@ pub struct CompositeSnapshot {
     /// Displayed `(tile, channel)`s: the only `Full` entries the frame
     /// flush composites ([M8]'s coalescing).
     pub displayed: Vec<(u16, String)>,
+    /// Per-texture-set rows (C2-9 stage 2, `per-set-stacks-design.md`): a
+    /// tile whose set has an entry composites THOSE rows; a set without
+    /// one uses [`Self::layers`]. Empty (the default, and every
+    /// single-stack caller) is exactly the pre-per-set behavior.
+    pub set_layers: BTreeMap<String, Vec<SnapshotLayer>>,
 }
 
 impl CompositeSnapshot {
+    /// The rows a tile of `set` composites (see [`Self::set_layers`]).
+    pub fn rows_for(&self, set: &str) -> &[SnapshotLayer] {
+        self.set_layers.get(set).map_or(&self.layers, Vec::as_slice)
+    }
+
+    /// Every row across every set (the base rows, then each set's): the
+    /// retire census and revival read this union, so switching sets never
+    /// retires the inactive set's planes.
+    pub fn all_rows(&self) -> impl Iterator<Item = &SnapshotLayer> {
+        self.layers.iter().chain(self.set_layers.values().flatten())
+    }
+
     /// The ids with planes in `prev` that `next` no longer lists, with
     /// their kind (`true` = Paint, tombstoned; `false` = eval-owned,
     /// dropped): the shell's per-frame retire census (§5.4). Order-only
     /// edits (reorder, opacity, blend, visibility, channel params) are NOT
     /// removals — they surface through [`Self::full_owners`] instead.
     pub fn removed(prev: &Self, next: &Self) -> Vec<(u64, bool)> {
-        let live: BTreeSet<u64> = next.layers.iter().filter_map(|l| l.layer_id).collect();
-        prev.layers
-            .iter()
+        let live: BTreeSet<u64> = next.all_rows().filter_map(|l| l.layer_id).collect();
+        prev.all_rows()
             .filter_map(|l| {
                 let id = l.layer_id?;
                 (!live.contains(&id)).then_some((id, matches!(l.kind, SnapshotLayerKind::Paint)))
@@ -936,6 +952,15 @@ impl CompositeSnapshot {
     /// position-independent identity (its `layer_id`), so a pure reorder
     /// still resolves through the order arm.
     pub fn full_owners(prev: &Self, next: &Self) -> Vec<PlaneOwner> {
+        // Per-set rows (C2-9 stage 2): any change to them recomposites every
+        // owner of the union, the order arm's same conservative rule.
+        if prev.set_layers != next.set_layers {
+            let mut owners: Vec<PlaneOwner> = next.all_rows().map(|l| l.owner).collect();
+            owners.push(PlaneOwner::Base);
+            owners.sort();
+            owners.dedup();
+            return owners;
+        }
         let prev_order: Vec<Option<u64>> = prev.layers.iter().map(|l| l.layer_id).collect();
         let next_order: Vec<Option<u64>> = next.layers.iter().map(|l| l.layer_id).collect();
         if prev_order != next_order {
@@ -3032,8 +3057,7 @@ impl PaintState {
     /// is a loud revive-empty naming the layer).
     fn revive_check(&mut self, snapshot: &CompositeSnapshot) {
         let live: BTreeSet<u64> = snapshot
-            .layers
-            .iter()
+            .all_rows()
             .filter_map(|layer| layer.layer_id)
             .collect();
         self.retire_pending.retain(|entry| !live.contains(&entry.0));
@@ -3435,7 +3459,8 @@ impl PaintState {
         let (set_w, set_h) = self.tile_size(tile);
         let mut owned_masks: Vec<Vec<u8>> = Vec::new();
         let mut resolved: Vec<ResolvedEntry> = Vec::new();
-        for layer in &snapshot.layers {
+        // The tile's OWN set's rows (C2-9 stage 2).
+        for layer in snapshot.rows_for(self.set_of_tile(tile)) {
             if let Some(entry) = self.resolve_row(
                 layer,
                 tile,
@@ -3666,6 +3691,7 @@ impl PaintState {
             layers,
             base_visible: true,
             displayed: Vec::new(),
+            set_layers: Default::default(),
         }
     }
 
@@ -3767,7 +3793,11 @@ impl PaintState {
         anchor: PlaneOwner,
     ) -> Option<RgbaBuffer> {
         use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
-        if !snapshot.layers.iter().any(|row| row_is(row, anchor)) {
+        if !snapshot
+            .rows_for(self.set_of_tile(tile))
+            .iter()
+            .any(|row| row_is(row, anchor))
+        {
             return None;
         }
         let (width, height) = self.tile_channel_size(tile, channel);
@@ -6485,6 +6515,7 @@ mod tests {
             layers: vec![base_row()],
             base_visible: true,
             displayed: vec![(tile, channel.to_string())],
+            set_layers: Default::default(),
         }
     }
 
@@ -6550,7 +6581,102 @@ mod tests {
             ],
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
         }
+    }
+
+    #[test]
+    fn each_tile_composites_its_own_sets_rows() {
+        // C2-9 stage 2 (GPU): tile 1001 in set "A" with layer 20, tile 1002
+        // in set "B" with layer 21. A per-set snapshot composites each
+        // tile from its own rows only; layer 21's planes on tile 1001 do
+        // not leak in.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        state.set_mesh(&two_tile_strip());
+        state.assign_tile_to_set(1001, "A");
+        state.assign_tile_to_set(1002, "B");
+        // New sets default to the 4K size: rebuild both at the fixture's
+        // 64² (a wrong-size upload is dropped, which would read as 0).
+        for set in ["A", "B"] {
+            state.resize_set(set, 64, 64);
+        }
+        assert_eq!(state.tile_channel_size(1001, BASE_COLOR_CHANNEL), (64, 64));
+        let flat = |v: u8| -> Vec<u8> { (0..64 * 64).flat_map(|_| [v, v, v, 255]).collect() };
+        for tile in [1001u16, 1002] {
+            state
+                .publish_plane(
+                    PlaneOwner::Layer(20),
+                    tile,
+                    BASE_COLOR_CHANNEL,
+                    64,
+                    64,
+                    flat(200),
+                )
+                .expect("fits");
+            state
+                .publish_plane(
+                    PlaneOwner::Layer(21),
+                    tile,
+                    BASE_COLOR_CHANNEL,
+                    64,
+                    64,
+                    flat(60),
+                )
+                .expect("fits");
+        }
+        let row = |id: u64| SnapshotLayer {
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        let snapshot = CompositeSnapshot {
+            layers: vec![base_row()],
+            base_visible: true,
+            displayed: vec![
+                (1001, BASE_COLOR_CHANNEL.to_string()),
+                (1002, BASE_COLOR_CHANNEL.to_string()),
+            ],
+            set_layers: BTreeMap::from([
+                ("A".to_string(), vec![base_row(), row(20)]),
+                ("B".to_string(), vec![base_row(), row(21)]),
+            ]),
+        };
+        state.flush_composite(&snapshot);
+        let centre = |state: &mut PaintState, tile: u16| {
+            let b = state
+                .read_composite(tile, BASE_COLOR_CHANNEL)
+                .expect("composite reads");
+            let i = ((32 * 64) + 32) * 4;
+            b.data[i]
+        };
+        assert_eq!(
+            centre(&mut state, 1001),
+            200,
+            "tile 1001 composites set A's layer 20"
+        );
+        assert_eq!(
+            centre(&mut state, 1002),
+            60,
+            "tile 1002 composites set B's layer 21"
+        );
+        // The union census: dropping a set's rows retires its layer.
+        let mut fewer = snapshot.clone();
+        fewer.set_layers.remove("B");
+        assert_eq!(
+            CompositeSnapshot::removed(&snapshot, &fewer),
+            vec![(21, true)]
+        );
+        assert!(CompositeSnapshot::removed(&snapshot, &snapshot).is_empty());
+        assert!(CompositeSnapshot::full_owners(&snapshot, &fewer).contains(&PlaneOwner::Layer(20)));
     }
 
     /// Publishes the T5–T7 planes (premultiplied writer bytes): L0 opaque
@@ -6733,6 +6859,7 @@ mod tests {
             ],
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
         };
         state.flush_composite(&snapshot);
         let cache = state
@@ -7069,6 +7196,7 @@ mod tests {
             ],
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
         };
         let l0 = state
             .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(20))
@@ -7145,6 +7273,7 @@ mod tests {
             layers: vec![row(30), row(31), row(32)],
             base_visible: true,
             displayed: Vec::new(),
+            set_layers: Default::default(),
         };
         let prefix = state
             .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(31))
@@ -7206,6 +7335,7 @@ mod tests {
             layers: vec![row(40, 40, 1.0), row(41, 41, 0.5)],
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
         };
         let mut with = without.clone();
         with.layers.push(row(41, 42, 0.5));
@@ -7617,6 +7747,7 @@ mod tests {
             layers: vec![base_row(), paint_row(id)],
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
         };
         // Three planes on L1 (amortization needs 3 frames).
         let pat_a: Vec<u8> = (0..512 * 512).flat_map(|_| [10, 20, 30, 255]).collect();
@@ -7777,6 +7908,7 @@ mod tests {
                 (1001, "roughness".to_string()),
                 (1001, "metallic".to_string()),
             ],
+            set_layers: Default::default(),
         };
         // Publish dirt flushes away first (the mask stroke must leave
         // `Rects`, not ride a stale `Full`).
