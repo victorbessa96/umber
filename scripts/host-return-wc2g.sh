@@ -21,6 +21,7 @@ KILLS=(
   "sec-name-traversal|umber-mesh umber-export umber-app umber-cli|crates/umber-mesh/src/mesh_maps.rs crates/umber-export/src/lib.rs"
   "sec-sidecar-channel|umber-paint umber-app|crates/umber-paint/src/persistence.rs"
   "sec-smart-caps|umber-core umber-app|crates/umber-core/src/smart.rs"
+  "spp-inflate-bound|spp|crates/spp/src/hdf5.rs"
 )
 # NOT in the table: win-version-resource. It needs the workspace dep
 # `winresource` in the root Cargo.toml + umber-app's build-dep, both
