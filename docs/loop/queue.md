@@ -90,7 +90,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | # | item | tier | state |
 |---|---|---|---|
 | C2-1 | Quit guard (dirty close asks Save / Discard / Cancel) | 1 data | todo |
-| C2-2 | Panic hook + crash report + next-launch offer | 1 data | todo |
+| C2-2 | Panic hook + crash report + next-launch offer | 1 data | ◐ module + 5 tests landed (`crash.rs`, unregistered); main() wiring waits on the sibling's main.rs lock |
 | C2-3 | Pixel autosave + "Recover unsaved work?" | 1 data | todo |
 | C2-4 | Ctrl+S silent re-save; Save As = Ctrl+Shift+S | 1 data | todo |
 | C2-5 | Paint-channel targeting (Brush panel picker → `set_active_channel`) | 2 loop | todo |
@@ -101,7 +101,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-10 | Smart-material / smart-mask shelf | 2 loop | todo |
 | C2-11 | Bitmap stamps → angle → jitter quartet | 2 loop | todo |
 | C2-12 | The colour picker (g4-color-picker) | 2 loop | todo |
-| C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 18 in flight |
+| C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 13 + 18 done (`c85a5a8`); 14-17, 19 todo |
 | C2-20..22 | Security: panic-hunt the uncovered seams, plugin consent + size cap, Windows signing decision | 4 security | todo |
 | C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | todo |
 | C2-26..28 | User docs + a generated keyboard reference, plugin SDK guide, kittest breadth | 6 docs/tests | todo |
