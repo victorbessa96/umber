@@ -44,7 +44,24 @@ history entry. Clicking the BOTTOM row's ▲ (the last of three) raises
 place". The test pins the direction, which a top-first panel listing
 makes easy to get backwards. Gate 1: umber-app 491.
 
+## Round 3: Graph panel Trust & load (lock `c2-28-graph-kittest`, `graph_panel.rs`)
+
+- `GraphPanel::load_plugins_with_trust(dirs, store)`: the scan against
+  an explicit consent store. `load_plugins` delegates to it with the
+  user's store, so its behavior is unchanged. It exists so that no test
+  can read or write the real `plugins-trusted.txt`.
+- `trust_and_load_button_registers_the_pending_plugin`: the vignette
+  example is copied into a temp plugins dir and scanned against a
+  temp-file store, so it starts pending and unregistered. Clicking
+  "Trust & load" in the real `GraphPanel::show` registers it, empties
+  the pending list and writes its hash line to the temp trust file. The
+  row is gone afterwards.
+- **Mutation check:** a button that does nothing fails it.
+
+Gate 1: umber-app 492.
+
 ## Open (C2-28's remainder)
 
-The Export dialog (it needs a GPU + mesh fixture) and the Graph panel's
-plugin Trust & load row.
+The Export dialog: it needs a GPU + mesh fixture, so it is
+`gate0_journey`'s ground, which already drives the export path
+headless.

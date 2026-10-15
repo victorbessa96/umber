@@ -215,7 +215,18 @@ impl GraphPanel {
     /// warnings on the plugin status line, never fatal. Returns the
     /// scan's report.
     pub fn load_plugins(&mut self, dirs: &[PathBuf]) -> PluginLoadReport {
-        self.plugin_trust = plugins::TrustStore::open(plugins::trust_path());
+        self.load_plugins_with_trust(dirs, plugins::TrustStore::open(plugins::trust_path()))
+    }
+
+    /// [`Self::load_plugins`] against an explicit consent store: tests
+    /// pass a temp-file store, so no test ever reads or writes the
+    /// user's real `plugins-trusted.txt`.
+    pub fn load_plugins_with_trust(
+        &mut self,
+        dirs: &[PathBuf],
+        trust: plugins::TrustStore,
+    ) -> PluginLoadReport {
+        self.plugin_trust = trust;
         let report = plugins::load_plugins(&mut self.registry, dirs, &self.plugin_trust);
         self.plugin_pending = report.pending.clone();
         self.plugin_decls.extend(
@@ -1305,6 +1316,50 @@ fn content_hash(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// kittest (C2-28 + C2-21): an untrusted plugin shows its Trust & load
+    /// row; clicking it registers the node, persists the hash to the
+    /// (temp) trust file, and removes the row.
+    #[test]
+    fn trust_and_load_button_registers_the_pending_plugin() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let dir = std::env::temp_dir().join(format!("umber-graph-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("plugins")).unwrap();
+        std::fs::copy(
+            crate::plugins::dev_plugin_dir().join("plugin_vignette.wasm"),
+            dir.join("plugins").join("vignette.wasm"),
+        )
+        .unwrap();
+        let trust_file = dir.join("plugins-trusted.txt");
+        let mut panel = GraphPanel::new();
+        let report = panel.load_plugins_with_trust(
+            &[dir.join("plugins")],
+            plugins::TrustStore::open(Some(trust_file.clone())),
+        );
+        assert_eq!(report.pending.len(), 1, "untrusted: listed, not loaded");
+        assert!(panel.registry().get("vignette").is_none());
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 900.0))
+            .build_ui_state(|ui, panel: &mut GraphPanel| panel.show(ui), panel);
+        harness.run();
+        harness.get_by_label("Trust & load").click();
+        harness.run();
+        let panel = harness.state();
+        assert!(
+            panel.registry().get("vignette").is_some(),
+            "registered: {}",
+            panel.status()
+        );
+        assert!(panel.plugin_pending().is_empty(), "the row is gone");
+        let saved = std::fs::read_to_string(&trust_file).unwrap();
+        assert!(saved.contains("vignette.wasm"), "trust persisted: {saved}");
+        assert!(harness.query_by_label("Trust & load").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::collections::HashMap;
 
