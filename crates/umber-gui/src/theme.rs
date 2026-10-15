@@ -57,6 +57,15 @@ pub mod palette {
 /// `animate_value_with_time` / `animate_bool_with_time`.
 pub const MOTION_SECS: f32 = 0.12;
 
+/// Seconds the pointer rests before a tooltip shows (GUI plan G0,
+/// photocraft `theme.rs`: 0.35 s). egui's default is 0, so tooltips flash
+/// while the pointer merely crosses a toolbar.
+pub const TOOLTIP_DELAY_SECS: f32 = 0.35;
+
+/// Maximum tooltip width, px: long `tr()` strings wrap instead of spanning
+/// the screen.
+pub const TOOLTIP_WIDTH: f32 = 280.0;
+
 /// How much the accent darkens on hover (RGB multiply, hue-preserving).
 pub const ACCENT_HOVER_FACTOR: f32 = 0.85;
 
@@ -225,6 +234,16 @@ pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
         animation_time: MOTION_SECS,
         ..Default::default()
     };
+    style.interaction.tooltip_delay = TOOLTIP_DELAY_SECS;
+    style.spacing.tooltip_width = TOOLTIP_WIDTH;
+    // Thin overlay scroll bars, but with an opaque handle: egui's thin
+    // preset fades the handle to near-invisible while idle (photocraft
+    // `theme.rs` sets the same 1.0), and a scroll bar you cannot see is a
+    // panel you do not know scrolls.
+    style.spacing.scroll = egui::style::ScrollStyle {
+        interact_handle_opacity: 1.0,
+        ..egui::style::ScrollStyle::thin()
+    };
 
     let tokens = SpacingTokens::for_density(density);
     style.spacing.item_spacing = tokens.item;
@@ -251,6 +270,22 @@ pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
     ]
     .into();
     style
+}
+
+/// Installs the Umber style on the whole context (GUI plan G0,
+/// `g0-style-both-branches`).
+///
+/// egui keeps one style per OS theme (`Theme::Dark` / `Theme::Light`)
+/// and switches between them when the OS appearance flips. Setting only
+/// one branch (or calling `set_style`, which writes only the current
+/// branch) lets an OS light-mode flip swap egui's stock light palette in
+/// over the Umber chrome mid-session. This writes the SAME style to both
+/// branches, and keeps `ThemePreference::System` so appearance events
+/// still arrive (photocraft `theme.rs`, PC:#9).
+pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
+    let style = std::sync::Arc::new(umber_style_scaled(density, text_scale));
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }
 
 /// The Umber visuals: stock dark as the base, every color re-authored.
@@ -391,6 +426,29 @@ mod tests {
         assert_eq!(s.visuals.panel_fill, palette::PANEL);
         assert_eq!(s.visuals.selection.stroke.color, palette::ACCENT);
         assert_eq!(s.animation_time, MOTION_SECS);
+    }
+
+    #[test]
+    fn apply_writes_both_theme_branches() {
+        let ctx = egui::Context::default();
+        apply(&ctx, Density::Comfortable, 1.0);
+        let dark = ctx.style_of(egui::Theme::Dark);
+        let light = ctx.style_of(egui::Theme::Light);
+        // An OS appearance flip must not change the chrome.
+        assert_eq!(dark.visuals.panel_fill, palette::PANEL);
+        assert_eq!(light.visuals.panel_fill, palette::PANEL);
+        assert_eq!(*dark, *light);
+        ctx.set_theme(egui::Theme::Light);
+        assert_eq!(ctx.global_style().visuals.panel_fill, palette::PANEL);
+    }
+
+    #[test]
+    fn style_sets_tooltip_and_scroll_tokens() {
+        let s = umber_style(Density::Comfortable);
+        assert_eq!(s.interaction.tooltip_delay, TOOLTIP_DELAY_SECS);
+        assert_eq!(s.spacing.tooltip_width, TOOLTIP_WIDTH);
+        assert!(s.spacing.scroll.floating, "thin = floating bars");
+        assert_eq!(s.spacing.scroll.interact_handle_opacity, 1.0);
     }
 
     #[test]
