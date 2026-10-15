@@ -103,6 +103,9 @@ shell =
     .new-confirm-save = Save…
     .new-confirm-discard = Discard
     .new-confirm-cancel = Cancel
+    .hide-ui = Hide UI
+    .maximize = Maximize Area
+    .show-ui = Show UI
 
     .open = Open…
     .tip-open-mesh = Load a mesh to paint (or drop one on the viewport)
@@ -754,6 +757,8 @@ prefs =
 ## Rich tooltips (GUI plan G3): descriptions only, the registry prints the key
 
 tip =
+    .hide-ui = Hide the panels, toolbar and status bar: the viewport fills the window. Tab again (or the Show UI button) brings them back.
+    .maximize = Fill the window with the focused area, keeping the menu, toolbar and status bar.
     .open-project = Open a saved .umber project.
     .save-project = Save the project.
     .undo = Undo the last layer edit.

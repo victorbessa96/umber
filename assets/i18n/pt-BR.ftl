@@ -106,6 +106,9 @@ shell =
     .new-confirm-save = Salvar…
     .new-confirm-discard = Descartar
     .new-confirm-cancel = Cancelar
+    .hide-ui = Ocultar interface
+    .maximize = Maximizar área
+    .show-ui = Mostrar interface
 
     .tip-new = Começar um novo projeto vazio (não salvo; o atual permanece no disco se foi salvo)
     .open = Abrir…
@@ -743,6 +746,8 @@ prefs =
 ## Dicas ricas (plano G3): só descrições, o registro imprime a tecla
 
 tip =
+    .hide-ui = Oculta os painéis, a barra de ferramentas e a barra de status: o viewport ocupa a janela. Tab de novo (ou o botão Mostrar interface) os traz de volta.
+    .maximize = A área em foco ocupa a janela, mantendo o menu, a barra de ferramentas e a barra de status.
     .open-project = Abrir um projeto .umber salvo.
     .save-project = Salvar o projeto.
     .undo = Desfazer a última edição de camada.

@@ -104,8 +104,9 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 }
 
 /// The shell's key table: most modifiers first (see the module docs).
-/// Fifteen bindings: six chords (incl. Ctrl+Shift+P the palette, Ctrl+,
-/// Preferences) + six letter keys + the `[` / `]` brush size steps + F3. Ctrl+N stays unbound in v1
+/// Seventeen bindings: seven chords (incl. Ctrl+Shift+P the palette,
+/// Ctrl+, Preferences, Ctrl+Space maximize) + six letter keys + the `[` /
+/// `]` brush size steps + F3 + Tab (Hide UI). Ctrl+N stays unbound in v1
 /// (the toolbar module's judgment call), so `NewProject` has no row.
 pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::Z, Chord::CmdShift), ShellAction::Redo),
@@ -114,6 +115,7 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::S, Chord::Cmd), ShellAction::SaveProject),
     (bind(Key::O, Chord::Cmd), ShellAction::OpenProject),
     (bind(Key::Comma, Chord::Cmd), ShellAction::Preferences),
+    (bind(Key::Space, Chord::Cmd), ShellAction::ToggleMaximize),
     (bind(Key::W, Chord::Bare), ShellAction::ToggleWireframe),
     (bind(Key::G, Chord::Bare), ShellAction::ToggleGrid),
     (bind(Key::V, Chord::Bare), ShellAction::CycleViewMode),
@@ -132,6 +134,7 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
         ShellAction::BrushLarger,
     ),
     (bind(Key::F3, Chord::Bare), ShellAction::CommandPalette),
+    (bind(Key::Tab, Chord::Bare), ShellAction::ToggleHideUi),
 ];
 
 /// The action `key` + `mods` fire, if any: the first matching row.
@@ -192,6 +195,12 @@ impl Focus {
 
     /// Whether `binding` may fire while this focus holds the keyboard.
     pub fn allows(self, binding: Binding) -> bool {
+        // Bare Tab is egui's focus traversal whenever anything is focused:
+        // it only means Hide UI with nothing focused (and `main.rs` takes
+        // it out of the input before egui sees it, see `shell_menu`).
+        if binding.key == Key::Tab && binding.chord == Chord::Bare && self != Focus::None {
+            return false;
+        }
         match self {
             Focus::None | Focus::Widget => true,
             Focus::Text => {
@@ -373,7 +382,9 @@ mod tests {
     fn text_focus_keeps_letters_and_undo_but_passes_other_chords() {
         for (binding, action) in BINDINGS {
             assert!(Focus::None.allows(*binding), "{action:?}");
-            assert!(Focus::Widget.allows(*binding), "{action:?}");
+            // A focused widget keeps bare Tab (focus traversal) only.
+            let hide_ui = *action == ShellAction::ToggleHideUi;
+            assert_eq!(Focus::Widget.allows(*binding), !hide_ui, "{action:?}");
             let through_text = Focus::Text.allows(*binding);
             // Ctrl+S / Ctrl+O, and the palette (Ctrl+Shift+P and F3) pass a
             // text field: global commands, never text input. Everything
@@ -384,6 +395,7 @@ mod tests {
                     | ShellAction::OpenProject
                     | ShellAction::CommandPalette
                     | ShellAction::Preferences
+                    | ShellAction::ToggleMaximize
             );
             assert_eq!(through_text, expected, "{action:?} through a text field");
         }

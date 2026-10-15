@@ -103,6 +103,8 @@ pub const CATALOG: &[Entry] = &[
         "palette.brush-larger",
         "palette.path-brush",
     ),
+    e(ShellAction::ToggleHideUi, "shell.hide-ui", "menu.window"),
+    e(ShellAction::ToggleMaximize, "shell.maximize", "menu.window"),
 ];
 
 /// Most results shown at once.

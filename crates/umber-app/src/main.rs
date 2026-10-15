@@ -1029,6 +1029,12 @@ pub struct UmberApp {
     pending_revert: bool,
     /// Help ▸ About is open.
     about_open: bool,
+    /// Hide UI / maximize (GUI plan g5-focus-modes).
+    focus: shell_menu::FocusState,
+    /// A bare Tab arrived with nothing focused: `raw_input_hook` took it
+    /// out of egui's input (where it would move keyboard focus) and the
+    /// frame turns it into Hide UI.
+    tab_hide_pending: bool,
     /// The device display LUT (created at startup on eframe's device;
     /// rewritten in place when `state.display_lut` is dirty). Handed to
     /// the viewport's mesh pass and the UV view's paint display.
@@ -1169,6 +1175,8 @@ impl UmberApp {
             pending_new: None,
             pending_revert: false,
             about_open: false,
+            focus: shell_menu::FocusState::default(),
+            tab_hide_pending: false,
         })
     }
 }
@@ -1359,6 +1367,18 @@ impl UmberApp {
             // multiplicative step, so ten presses span ~2.6x.
             ShellAction::CommandPalette => self.palette.open(),
             ShellAction::Preferences => self.prefs_open = true,
+            ShellAction::ToggleHideUi => {
+                self.focus.toggle(
+                    shell_menu::FocusMode::HideUi,
+                    &mut self.dock,
+                    Panel::Viewport,
+                );
+            }
+            ShellAction::ToggleMaximize => {
+                let keep = shell_menu::maximize_target(&mut self.dock);
+                self.focus
+                    .toggle(shell_menu::FocusMode::Maximized, &mut self.dock, keep);
+            }
             ShellAction::BrushSmaller | ShellAction::BrushLarger => {
                 if let Some(paint) = self.state.paint.as_mut() {
                     let grow = action == ShellAction::BrushLarger;
@@ -2250,6 +2270,31 @@ impl CurvatureFeed {
 }
 
 impl eframe::App for UmberApp {
+    /// Bare Tab with nothing focused is Hide UI (Painter's Tab), not
+    /// egui's "focus the first widget". Taken out of the input here, before
+    /// egui's focus logic runs on it; Tab inside a focused widget still
+    /// moves focus as usual.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let before = raw_input.events.len();
+        raw_input.events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.is_none()
+            )
+        });
+        if raw_input.events.len() != before {
+            self.tab_hide_pending = true;
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         profiling::scope!("frame");
         // Crash-safe GPU startup: the 3rd frame confirms the backend.
@@ -2409,6 +2454,10 @@ impl eframe::App for UmberApp {
         // flips the viewport, the mask, or the tool. Dispatched with the
         // toolbar's clicks below, through the same `dispatch`.
         let mut actions = toolbar::poll_shortcuts(ui.ctx());
+        if std::mem::take(&mut self.tab_hide_pending) {
+            actions.push(toolbar::ShellAction::ToggleHideUi);
+        }
+        let hide_ui = self.focus.mode() == shell_menu::FocusMode::HideUi;
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
             // Every action row prints its registry shortcut (GUI plan G0:
@@ -2502,16 +2551,33 @@ impl eframe::App for UmberApp {
                 viewport::view_mode_menu(ui, &mut self.view.view_mode);
             });
             MenuButton::new(tr("menu.window")).ui(ui, |ui| {
+                if action_item(ui, tr("shell.hide-ui"), toolbar::ShellAction::ToggleHideUi) {
+                    actions.push(toolbar::ShellAction::ToggleHideUi);
+                }
+                if action_item(
+                    ui,
+                    tr("shell.maximize"),
+                    toolbar::ShellAction::ToggleMaximize,
+                ) {
+                    actions.push(toolbar::ShellAction::ToggleMaximize);
+                }
+                ui.separator();
+                // Layout edits act on the real layout: leave a focus mode
+                // first, or the edit would land on the one-tab stand-in.
                 ui.menu_button(tr("menu.panels"), |ui| {
                     for panel in &shell_menu::ALL_PANELS {
-                        let mut open = shell_menu::is_open(&self.dock, panel);
+                        let mut open = shell_menu::is_open(&self.dock, panel)
+                            && self.focus.mode() == shell_menu::FocusMode::Normal;
                         if ui.checkbox(&mut open, panel_title(panel)).changed() {
-                            shell_menu::toggle_panel(&mut self.dock, panel);
+                            self.focus.restore(&mut self.dock);
+                            if shell_menu::is_open(&self.dock, panel) != open {
+                                shell_menu::toggle_panel(&mut self.dock, panel);
+                            }
                         }
                     }
                 });
-                ui.separator();
                 if ui.button(tr("menu.reset-layout")).clicked() {
+                    self.focus.restore(&mut self.dock);
                     self.dock = shell_menu::default_dock();
                     ui.close();
                 }
@@ -2541,9 +2607,11 @@ impl eframe::App for UmberApp {
                 .is_some_and(|p| p.quick_mask().is_editing()),
         };
         let icons = &self.icons;
-        egui::Panel::top("umber-toolbar").show(ui, |ui| {
-            actions.extend(toolbar::show(ui, &toolbar_view, icons));
-        });
+        if !hide_ui {
+            egui::Panel::top("umber-toolbar").show(ui, |ui| {
+                actions.extend(toolbar::show(ui, &toolbar_view, icons));
+            });
+        }
         for action in actions {
             self.dispatch(action);
         }
@@ -2604,9 +2672,28 @@ impl eframe::App for UmberApp {
             },
             nav: self.state.viewport.nav_preset(),
         };
-        egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
-            status_bar::show(ui, &status);
-        });
+        if hide_ui {
+            // The visible way back (P:A4): a corner button over the
+            // viewport, beside the menu bar that also stays.
+            egui::Area::new(Id::new("umber-show-ui"))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 28.0))
+                .show(ui.ctx(), |ui| {
+                    let label = match actions::shortcut_label(
+                        toolbar::ShellAction::ToggleHideUi,
+                        ui.ctx().os() == egui::os::OperatingSystem::Mac,
+                    ) {
+                        Some(key) => format!("{} ({key})", tr("shell.show-ui")),
+                        None => tr("shell.show-ui"),
+                    };
+                    if ui.button(label).clicked() {
+                        self.dispatch(toolbar::ShellAction::ToggleHideUi);
+                    }
+                });
+        } else {
+            egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
+                status_bar::show(ui, &status);
+            });
+        }
 
         // The import Apply path needs the project's content-hash store;
         // it exists from the first Save/Open on (see `project_dir`).

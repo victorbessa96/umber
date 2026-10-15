@@ -59,6 +59,8 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::BrushLarger => ("palette.brush-larger", None),
         ShellAction::CommandPalette => ("tip.palette-title", Some("tip.palette")),
         ShellAction::Preferences => ("prefs.title", None),
+        ShellAction::ToggleHideUi => ("shell.hide-ui", Some("tip.hide-ui")),
+        ShellAction::ToggleMaximize => ("shell.maximize", Some("tip.maximize")),
     }
 }
 
@@ -173,6 +175,8 @@ mod tests {
             ShellAction::BrushLarger,
             ShellAction::CommandPalette,
             ShellAction::Preferences,
+            ShellAction::ToggleHideUi,
+            ShellAction::ToggleMaximize,
         ];
         // The real Fluent bundles, not a hand-split of the .ftl text
         // (CRLF on a Windows checkout broke that, 979a523).

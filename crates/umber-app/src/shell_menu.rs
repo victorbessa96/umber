@@ -71,6 +71,76 @@ pub fn is_open(dock: &DockState<Panel>, panel: &Panel) -> bool {
     dock.find_tab(panel).is_some()
 }
 
+/// A focus mode (GUI plan g5-focus-modes, P:A4, B:A1.4, B:A1.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusMode {
+    /// The normal docked layout.
+    Normal,
+    /// Hide UI (Tab): the viewport alone, no toolbar or status bar. The
+    /// menu bar and a corner button stay as the visible way back.
+    HideUi,
+    /// One dock area fills the window (Ctrl+Space); the menu, toolbar and
+    /// status bar stay.
+    Maximized,
+}
+
+/// The focus-mode state: which mode is on, and the layout it replaced.
+/// Entering a mode swaps the live dock for a one-tab dock and keeps the
+/// real layout aside, so leaving the mode restores it exactly (sizes,
+/// tab order, the focused tab), whatever the user did in between.
+#[derive(Debug)]
+pub struct FocusState {
+    mode: FocusMode,
+    saved: Option<DockState<Panel>>,
+}
+
+impl Default for FocusState {
+    fn default() -> Self {
+        FocusState {
+            mode: FocusMode::Normal,
+            saved: None,
+        }
+    }
+}
+
+impl FocusState {
+    /// The current mode.
+    pub fn mode(&self) -> FocusMode {
+        self.mode
+    }
+
+    /// Toggles `target`: entering it shows `keep` alone; toggling the mode
+    /// that is already on returns to the saved layout. Switching straight
+    /// from one mode to the other restores first, so the saved layout is
+    /// always the user's real one.
+    pub fn toggle(&mut self, target: FocusMode, dock: &mut DockState<Panel>, keep: Panel) {
+        if self.mode == target || target == FocusMode::Normal {
+            self.restore(dock);
+            return;
+        }
+        self.restore(dock);
+        self.saved = Some(std::mem::replace(dock, DockState::new(vec![keep])));
+        self.mode = target;
+    }
+
+    /// Leaves any focus mode, restoring the saved layout (a no-op in
+    /// Normal). The Window menu calls this before it edits the layout.
+    pub fn restore(&mut self, dock: &mut DockState<Panel>) {
+        if let Some(saved) = self.saved.take() {
+            *dock = saved;
+        }
+        self.mode = FocusMode::Normal;
+    }
+}
+
+/// The tab Ctrl+Space maximizes: the focused dock area's active tab, or
+/// the viewport when nothing is focused.
+pub fn maximize_target(dock: &mut DockState<Panel>) -> Panel {
+    dock.find_active_focused()
+        .map(|(_, tab)| tab.clone())
+        .unwrap_or(Panel::Viewport)
+}
+
 /// File ▸ Revert needs a saved project with unsaved edits: `Err(reason
 /// key)` otherwise, the same shape as `actions::availability`.
 pub fn revert_availability(has_project_dir: bool, dirty: bool) -> Result<(), &'static str> {
@@ -167,6 +237,34 @@ mod tests {
     }
 
     #[test]
+    fn focus_modes_swap_and_restore_the_exact_layout() {
+        let mut dock = default_dock();
+        toggle_panel(&mut dock, &Panel::Graph); // a user edit before entering
+        let before = docked(&dock);
+        let mut focus = FocusState::default();
+        focus.toggle(FocusMode::HideUi, &mut dock, Panel::Viewport);
+        assert_eq!(focus.mode(), FocusMode::HideUi);
+        assert_eq!(docked(&dock), vec![Panel::Viewport]);
+        // Switching straight to Maximized restores first, then maximizes.
+        focus.toggle(FocusMode::Maximized, &mut dock, Panel::Bakes);
+        assert_eq!(focus.mode(), FocusMode::Maximized);
+        assert_eq!(docked(&dock), vec![Panel::Bakes]);
+        // Toggling the active mode returns to the user's real layout.
+        focus.toggle(FocusMode::Maximized, &mut dock, Panel::Bakes);
+        assert_eq!(focus.mode(), FocusMode::Normal);
+        assert_eq!(docked(&dock), before);
+        // Restore in Normal is a no-op.
+        focus.restore(&mut dock);
+        assert_eq!(docked(&dock), before);
+    }
+
+    #[test]
+    fn maximize_targets_the_viewport_without_focus() {
+        let mut dock = default_dock();
+        assert_eq!(maximize_target(&mut dock), Panel::Viewport);
+    }
+
+    #[test]
     fn revert_needs_a_saved_dirty_project() {
         assert_eq!(revert_availability(false, true), Err("menu.revert-unsaved"));
         assert_eq!(revert_availability(true, false), Err("menu.revert-clean"));
@@ -209,6 +307,9 @@ mod tests {
             "menu.reset-layout",
             "menu.about-copy",
             "menu.about-close",
+            "shell.hide-ui",
+            "shell.maximize",
+            "shell.show-ui",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");
