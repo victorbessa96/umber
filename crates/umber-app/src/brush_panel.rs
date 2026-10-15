@@ -1879,6 +1879,7 @@ mod tests {
                 falloff: Default::default(),
                 stamped: false,
                 stamp_angle: Default::default(),
+                jitter: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

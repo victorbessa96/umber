@@ -272,6 +272,7 @@ mod tests {
                 falloff: crate::FalloffCurve::Smooth,
                 stamped: false,
                 stamp_angle: Default::default(),
+                jitter: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

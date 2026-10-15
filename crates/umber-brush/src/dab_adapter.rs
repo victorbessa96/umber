@@ -94,6 +94,72 @@ impl StampAngle {
     }
 }
 
+/// Per-dab randomness (C2-11's jitter quartet): each dab's size, angle,
+/// position and flow vary by up to these amounts. All zero (the
+/// default) is no jitter, so every pre-jitter preset paints exactly as
+/// before. Deterministic: the variation hashes the dab's planned
+/// position, so a replayed stroke jitters identically (the same rule as
+/// [`StampAngle::Random`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Jitter {
+    /// Radius varies by up to ± this fraction (0..=1).
+    #[serde(default)]
+    pub size: f32,
+    /// Stamp angle varies by up to ± this many degrees (0..=180).
+    #[serde(default)]
+    pub angle_degrees: f32,
+    /// The dab centre moves up to this many RADII in a random direction
+    /// (0..=2).
+    #[serde(default)]
+    pub position: f32,
+    /// Flow (the dab alpha) is reduced by up to this fraction (0..=1):
+    /// jitter only ever thins a dab, never pushes it past its alpha.
+    #[serde(default)]
+    pub flow: f32,
+}
+
+impl Jitter {
+    /// Whether every amount is zero (the fast path: no hashing).
+    pub fn is_none(&self) -> bool {
+        self.size == 0.0 && self.angle_degrees == 0.0 && self.position == 0.0 && self.flow == 0.0
+    }
+
+    /// The clamped amounts (out-of-range and non-finite input is pulled
+    /// into each field's documented range).
+    fn clamped(&self) -> Self {
+        let c = |v: f32, hi: f32| finite_or_zero(v).clamp(0.0, hi);
+        Self {
+            size: c(self.size, 1.0),
+            angle_degrees: c(self.angle_degrees, 180.0),
+            position: c(self.position, 2.0),
+            flow: c(self.flow, 1.0),
+        }
+    }
+}
+
+/// Four independent uniform samples in `[-1, 1]` for the dab at `pos`
+/// (FNV-1a over the position bits, salted per sample, then avalanched).
+fn jitter_samples(pos: [f32; 2]) -> [f32; 4] {
+    let mut out = [0.0; 4];
+    for (salt, slot) in out.iter_mut().enumerate() {
+        let mut h: u32 = 0x811c_9dc5 ^ (salt as u32).wrapping_mul(0x9e37_79b9);
+        for b in pos[0]
+            .to_bits()
+            .to_le_bytes()
+            .into_iter()
+            .chain(pos[1].to_bits().to_le_bytes())
+        {
+            h ^= u32::from(b);
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2c1b_3c6d);
+        h ^= h >> 12;
+        *slot = (h as f32 / u32::MAX as f32) * 2.0 - 1.0;
+    }
+    out
+}
+
 fn finite_or_zero(v: f32) -> f32 {
     if v.is_finite() {
         v
@@ -138,6 +204,10 @@ pub struct BrushParams {
     /// How stamped dabs rotate. `#[serde(default)]` = unrotated.
     #[serde(default)]
     pub stamp_angle: StampAngle,
+    /// Per-dab jitter (size / angle / position / flow). `#[serde(default)]`
+    /// = none.
+    #[serde(default)]
+    pub jitter: Jitter,
 }
 
 impl Default for BrushParams {
@@ -151,6 +221,7 @@ impl Default for BrushParams {
             falloff: FalloffCurve::Smooth,
             stamped: false,
             stamp_angle: StampAngle::None,
+            jitter: Jitter::default(),
         }
     }
 }
@@ -166,11 +237,37 @@ fn dab_for(
     params: &BrushParams,
     alpha: f32,
 ) -> Dab {
-    let dab = Dab::new(stamp.pos, radius_px, params.color, alpha, params.hardness);
+    let travel = prev.map(|p| [stamp.pos[0] - p[0], stamp.pos[1] - p[1]]);
+    let mut angle = if params.stamped {
+        params.stamp_angle.radians(stamp.pos, travel)
+    } else {
+        0.0
+    };
+    let (mut pos, mut radius, mut alpha) = (stamp.pos, radius_px, alpha);
+    if !params.jitter.is_none() {
+        let j = params.jitter.clamped();
+        // Hash the PLANNED position, before any offset: one dab's jitter
+        // never depends on another's.
+        let [s_size, s_angle, s_dir, s_flow] = jitter_samples(stamp.pos);
+        radius = (radius * (1.0 + j.size * s_size)).max(0.0);
+        angle += (j.angle_degrees * s_angle).to_radians();
+        let theta = (s_dir * 0.5 + 0.5) * std::f32::consts::TAU;
+        // The distance reuses the size sample's magnitude (a fifth salt
+        // would buy no visible difference).
+        let dist = j.position * radius_px * s_size.abs();
+        pos = [pos[0] + dist * theta.cos(), pos[1] + dist * theta.sin()];
+        alpha *= 1.0 - j.flow * (s_flow * 0.5 + 0.5);
+    }
+    let dab = Dab::new(
+        pos,
+        radius,
+        params.color,
+        alpha.clamp(0.0, 1.0),
+        params.hardness,
+    );
     if params.stamped {
-        let travel = prev.map(|p| [stamp.pos[0] - p[0], stamp.pos[1] - p[1]]);
         dab.with_falloff(umber_gpu::paint::FALLOFF_STAMP)
-            .with_angle(params.stamp_angle.radians(stamp.pos, travel))
+            .with_angle(angle)
     } else {
         dab.with_falloff(params.falloff.as_u32())
     }
@@ -328,6 +425,67 @@ mod tests {
         assert_eq!(dabs[0].angle(), 0.0, "the first dab has no travel yet");
         assert!(dabs[1].angle().abs() < 1e-6);
         assert!((dabs[2].angle() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_jitter_is_unchanged_and_jitter_stays_in_range() {
+        let stamps = plans(&[[5.0, 5.0], [9.0, 5.0], [13.0, 5.0], [17.0, 5.0]]);
+        let base = BrushParams::default();
+        let plain = DabAdapter::stamps_to_dabs(&stamps, 8.0, &base);
+        for (d, s) in plain.iter().zip(&stamps) {
+            assert_eq!(d.pos, s.pos, "zero jitter: the old dab");
+            assert_eq!(d.radius, 8.0);
+        }
+        let jittered = BrushParams {
+            jitter: Jitter {
+                size: 0.5,
+                angle_degrees: 30.0,
+                position: 1.0,
+                flow: 0.5,
+            },
+            stamped: true,
+            ..base
+        };
+        let a = DabAdapter::stamps_to_dabs(&stamps, 8.0, &jittered);
+        let b = DabAdapter::stamps_to_dabs(&stamps, 8.0, &jittered);
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(
+                (x.pos, x.radius, x.alpha, x.angle()),
+                (y.pos, y.radius, y.alpha, y.angle()),
+                "deterministic"
+            );
+        }
+        let mut varied = 0;
+        for ((d, s), p) in a.iter().zip(&stamps).zip(&plain) {
+            assert!(
+                (4.0..=12.0).contains(&d.radius),
+                "size within ±50%: {}",
+                d.radius
+            );
+            let off = ((d.pos[0] - s.pos[0]).powi(2) + (d.pos[1] - s.pos[1]).powi(2)).sqrt();
+            assert!(off <= 8.0 + 1e-4, "position within one radius: {off}");
+            assert!(d.alpha <= p.alpha + 1e-6, "flow jitter only thins");
+            assert!(d.alpha >= p.alpha * 0.5 - 1e-6, "by at most half");
+            assert!(
+                d.angle().abs() <= 30f32.to_radians() + 1e-5,
+                "angle within ±30°"
+            );
+            if off > 0.01 || (d.radius - 8.0).abs() > 0.01 {
+                varied += 1;
+            }
+        }
+        assert!(varied >= 3, "jitter actually varies the dabs ({varied}/4)");
+        let wild = Jitter {
+            size: 9.0,
+            angle_degrees: f32::NAN,
+            position: -3.0,
+            flow: 2.0,
+        }
+        .clamped();
+        assert_eq!(
+            (wild.size, wild.angle_degrees, wild.position, wild.flow),
+            (1.0, 0.0, 0.0, 1.0)
+        );
     }
 
     #[test]

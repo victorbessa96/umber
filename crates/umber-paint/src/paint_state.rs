@@ -5710,6 +5710,7 @@ mod tests {
             falloff: umber_brush::FalloffCurve::Sharp,
             stamped: false,
             stamp_angle: Default::default(),
+            jitter: Default::default(),
         };
         s.sync_brush_params(&preset, false);
         assert_eq!(s.brush_params().alpha, 0.4);

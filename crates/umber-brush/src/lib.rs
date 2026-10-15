@@ -47,7 +47,7 @@ pub mod wiring;
 
 pub use cavity::{CavityMask, CavityMaskError, CavityTarget};
 pub use dab_adapter::{
-    opaque_linearize, wash_scale, BrushParams, DabAdapter, StampAngle, WashMode,
+    opaque_linearize, wash_scale, BrushParams, DabAdapter, Jitter, StampAngle, WashMode,
 };
 pub use falloff::FalloffCurve;
 pub use id_mask::{select_id, SelectIdError};
