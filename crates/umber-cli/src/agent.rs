@@ -10,7 +10,9 @@
 //! `{"ok": true, "step": "<name>", "index": i, ...result fields}` or
 //! `{"ok": false, "step": "<name>", "index": i, "error": "..."}`, where
 //! `i` counts the non-blank lines and `step` is `null` when the line
-//! names no step. A failing step never ends the session. `quit` replies
+//! names no step. A failing step never ends the session. `version`
+//! answers `protocol_version` ([`PROTOCOL_VERSION`]) + `umber_version` —
+//! the number a client checks first. `quit` replies
 //! and then exits 0; stdin EOF also exits 0, so a crashed harness never
 //! leaves an orphaned process. Stdout carries only these JSON lines.
 //! Logs and diagnostics go to stderr.
@@ -133,8 +135,16 @@ enum AgentStep {
     PaintRead(PaintReadStep),
     PaintUndo(NoFields),
     PaintRedo(NoFields),
+    Version(NoFields),
     Quit(NoFields),
 }
+
+/// The agent protocol's version, answered by the `version` step. Bump on
+/// ANY change to a step's name, fields or reply shape once 0.1.0 is
+/// tagged (the release checklist's Beta freeze points at this number). A
+/// client asks once at session start and refuses a version it does not
+/// know. 1 = the protocol as of the paint ops (2026-10-14).
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The body of a step that takes no fields (`{}`; `null` and the bare
 /// name are normalized to it by [`normalize_step`]).
@@ -861,6 +871,13 @@ impl Session {
                 Ok(reply)
             }
             AgentStep::State(NoFields {}) => summary_fields(&self.loaded()?.summary),
+            // An explicit step, not a greeting line: the protocol promises
+            // exactly one reply per input line, so an unsolicited banner
+            // would desynchronise every existing client.
+            AgentStep::Version(NoFields {}) => fields(serde_json::json!({
+                "protocol_version": PROTOCOL_VERSION,
+                "umber_version": env!("CARGO_PKG_VERSION"),
+            })),
             AgentStep::Inspect(s) => {
                 let mesh = umber_mesh::load(&s.mesh)?;
                 summary_fields(&mesh_summary(&s.mesh, &mesh))
@@ -1837,6 +1854,24 @@ mod tests {
                 "{r}"
             );
         }
+    }
+
+    #[test]
+    fn version_reports_the_protocol_and_needs_no_mesh_or_project() {
+        let replies = session("\"version\"\n{\"version\": {\"x\": 1}}\n");
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0]["step"], "version");
+        assert_eq!(replies[0]["ok"], true, "{}", replies[0]);
+        // The pinned number: changing it is a deliberate protocol event.
+        assert_eq!(replies[0]["protocol_version"], 1);
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(replies[0]["umber_version"], env!("CARGO_PKG_VERSION"));
+        // A no-field step: a field is refused like every other.
+        assert_eq!(replies[1]["ok"], false);
+        assert!(replies[1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown field"));
     }
 
     #[test]

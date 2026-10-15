@@ -47,7 +47,13 @@ function. Sockets add auth/lifecycle surface with zero v1 gain.
 | bake_status | — | pending/running/done(records)/failed(err) |
 | bake_transfer | low, high, maps, out_dir | sync (the transfer is one-shot) |
 | export | preset, out_dir, tiles | sync |
+| version | — | `protocol_version` + `umber_version`; ask first, refuse an unknown protocol (added 2026-10-14, the release checklist's Beta-freeze anchor) |
 | quit | — | clean exit |
+
+The project, edit and paint steps (`project_*`, `set_active`,
+`layer_*`, `undo`/`redo`, `paint_*`) landed later; their reference is
+`crates/umber-cli/src/agent.rs`'s module docs and
+`docs/specs/agent-paint-ops-design.md`.
 
 The async-bake integration reuses the merged worker (7bf6140) —
 the agent polls instead of the panel polling; the SAME job

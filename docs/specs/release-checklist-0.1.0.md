@@ -54,6 +54,26 @@ as the shell-only remainder). [IN FLIGHT]
   ratify before the tag, the dogfood cohort (Bessa first) paints a
   real asset end to end and files what breaks.
 
+## Release phases (added 2026-10-14, absorbed from Blender's release cycle)
+
+Blender cuts each release through Alpha → Beta → RC, and freezes its
+Python API at Beta so add-on authors get a stable target before the
+release (developer.blender.org/docs/handbook/release_process/release_cycle).
+Umber has two surfaces outside users build against — the JSONL agent
+protocol and the `.umber` file format — so the same freeze applies.
+
+| Phase | Entry | What may land | Exit |
+|---|---|---|---|
+| **Alpha** (now) | — | anything; risky changes go here, early | the gate list above all green except Gate 0's shell-frame remainder |
+| **Beta** | Bessa calls it | bug fixes, docs, perf; **no** agent-protocol step changes, **no** `.umber` / paint-sidecar schema changes, **no** new user-visible strings (the pt-BR pass needs a frozen catalog) | one dogfood asset painted end to end (gate 8) with no open P0 |
+| **RC** | Beta exit | critical fixes only, each reviewed | 1 week with no new critical, then the tag |
+
+**What the freeze points at.** `.umber` carries `CURRENT_PROJECT_VERSION`
+/ `LAYER_PLANES_PROJECT_VERSION`, the paint sidecar `paint_save_version`,
+and the agent protocol `PROTOCOL_VERSION` (umber-cli `agent.rs`, answered
+by the `version` step, pinned by a test; added 2026-10-14 because the
+protocol had no number to freeze). After 0.1.0, any step change bumps it.
+
 ## The known-deferred (honest, in the tag's companion notes not the message)
 
 - PSD import (P3-designed), .usdz read beyond the first layer, the
