@@ -355,6 +355,29 @@ pub fn layer_token(doc: Option<&Document>) -> &str {
         .unwrap_or("")
 }
 
+/// Groups the exported tiles by texture set (C2-9). `set_of(tile)` names a
+/// tile's set (`None` = no paint session). With fewer than two distinct
+/// sets the result is ONE group named `None`, so the caller keeps the
+/// mesh-derived name and the output is byte-identical to before. With
+/// several, each group is `(Some(set), tiles)` in first-seen order.
+pub fn tile_set_groups(
+    tiles: &[u16],
+    mut set_of: impl FnMut(u16) -> Option<String>,
+) -> Vec<(Option<String>, Vec<u16>)> {
+    let mut groups: Vec<(Option<String>, Vec<u16>)> = Vec::new();
+    for &tile in tiles {
+        let set = set_of(tile);
+        match groups.iter_mut().find(|(s, _)| *s == set) {
+            Some((_, list)) => list.push(tile),
+            None => groups.push((set, vec![tile])),
+        }
+    }
+    if groups.len() < 2 {
+        return vec![(None, tiles.to_vec())];
+    }
+    groups
+}
+
 /// One finished export's outcome: what was written, what was skipped,
 /// and phase timings for the status line.
 struct ExportOutcome {
@@ -836,11 +859,29 @@ impl ExportDialog {
         };
 
         let write_started = Instant::now();
-        let pairs: Vec<(u16, &umber_export::MapSet)> =
-            tile_sets.iter().map(|t| (t.tile, &t.set)).collect();
-        let mut written =
-            umber_export::run_preset_tiled(&filtered, &pairs, &sources, &self.output_dir)
-                .context("run_preset_tiled")?;
+        // Per texture set (C2-9): with several sets, each set's tiles write
+        // under THAT set's name (`$textureSet`), one tiled run per set. A
+        // single-set session is one group under the mesh's name, exactly
+        // the pre-per-set output.
+        let groups = tile_set_groups(&tiles, |tile| {
+            paint.map(|p| p.set_of_tile(tile).to_string())
+        });
+        let mut written = Vec::new();
+        for (set_name, group_tiles) in &groups {
+            let pairs: Vec<(u16, &umber_export::MapSet)> = tile_sets
+                .iter()
+                .filter(|t| group_tiles.contains(&t.tile))
+                .map(|t| (t.tile, &t.set))
+                .collect();
+            let group_sources = umber_export::TokenSources {
+                texture_set: set_name.as_deref().unwrap_or(&texture_set),
+                ..sources
+            };
+            written.extend(
+                umber_export::run_preset_tiled(&filtered, &pairs, &group_sources, &self.output_dir)
+                    .with_context(|| format!("run_preset_tiled ({})", group_sources.texture_set))?,
+            );
+        }
         if filtered.usda {
             // The `.usda` carries the whole mesh (per-tile splits stay a
             // bake-window concern); only its texture references are
@@ -1285,6 +1326,25 @@ mod tests {
                 (1002, BaseColorSource::FlatPlaceholder)
             ]),
             "Base Color: 1001 painted, 1002 flat placeholder"
+        );
+    }
+
+    #[test]
+    fn tiles_group_by_texture_set_only_when_there_are_several() {
+        // One set (or no session): one unnamed group, the old output.
+        assert_eq!(
+            tile_set_groups(&[1001, 1002], |_| Some("Body".into())),
+            vec![(None, vec![1001, 1002])]
+        );
+        assert_eq!(tile_set_groups(&[1001], |_| None), vec![(None, vec![1001])]);
+        // Two sets: each set's tiles write under its own name.
+        let set_of = |t: u16| Some(if t == 1002 { "Hilt" } else { "Body" }.to_string());
+        assert_eq!(
+            tile_set_groups(&[1001, 1002, 1003], set_of),
+            vec![
+                (Some("Body".to_string()), vec![1001, 1003]),
+                (Some("Hilt".to_string()), vec![1002]),
+            ]
         );
     }
 
