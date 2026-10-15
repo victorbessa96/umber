@@ -4,7 +4,8 @@ The tag fires on Bessa's word (the standing rule from the packaging
 commit). This is the readiness state, so the word is the only
 remaining input.
 
-Updated 2026-10-12 per the strategy review's checklist audit: every
+Updated 2026-10-15 against the C2 gap audit (`docs/loop/audit-2026-10-15-c2.md`):
+gates 6-9 are NOT MET. Earlier, 2026-10-12, per the strategy review: every
 gate below checked process; none checked FUNCTION. Gate 0 (the
 journey test) is now the first gate — the process gates follow it.
 
@@ -13,9 +14,11 @@ journey test) is now the first gate — the process gates follow it.
 FBX → 4K pressure paint → see lit → undo/redo → save/reopen → ORM
 export decode-verified. One continuous session exercising the six
 core-loop criticals JOINED — not each in isolation. The harness:
-`crates/umber-app/tests/gate0_journey.rs` (in flight; the compositor
+`crates/umber-app/tests/gate0_journey.rs` (`15c072e`; the compositor
 assertion is the headless 'see lit' equivalent, the shell frame named
-as the shell-only remainder). [IN FLIGHT]
+as the shell-only remainder). [PASSED — CI run 38255484123 at `70dc67a`,
+lavapipe + WARP. Caveat (C2-17): the FBX fixture carries no UV layer, so
+the FBX leg proves the import, not a UV paint on it.]
 
 ## The gate (what must be true when the tag fires)
 
@@ -27,15 +30,26 @@ as the shell-only remainder). [IN FLIGHT]
    fill layer, view modes, and eraser kills all landed and CI-green
    in the 2026-10-11/12 era; the blend census carried the math]
 3. **The compile debt cleared** — every code-only commit gates on CI
-   per commit (the de facto gate): the full workspace suite green on
-   both platforms. [CI GREEN per commit through f867215]
+   per WAVE (Bessa 2026-10-15: one push per large wave): the full
+   workspace suite green on both platforms. [Green through the W-G5 wave
+   on Linux; the latest per-wave verdicts live in `docs/loop/queue.md`'s
+   push log]
 4. **The changelog current** — ✓ done (`4b234a1`).
 5. **The requirements marked** — ✓ the census current through the
    core-loop phase: all six criticals' rows marked ✓ code with the
    code-vs-reachable split (the last marks: `472b774`).
-6. **The perf baselines** — the first row measured (d369886); the
-   re-baseline at the 4K default = the named follow-up (the 512²
-   baselines are invalidated by `133dd12`).
+6. **The perf baselines** — seeded at the 4K default (`fd49627`), but
+   from a local Intel HD 530 over GL, not the nightly's lavapipe. NOT MET
+   until: the nightly actually runs (C2-14: `runs-on: [self-hosted]` has
+   no hosted fallback), the gate stops passing missing metrics (C2-15),
+   and the 60 fps / 1M-tri / 4K budget is measured as specified (C2-16).
+7. **SPEC ratified** (Bessa) — NOT MET: SPEC.md v1.0 is DRAFT, and the
+   v1.1 amendment draft waits.
+8. **One dogfood asset painted end to end** (Bessa first) — NOT MET, and
+   blocked on the C2 Tier 1-2 rows: painting reaches Base Color only, and
+   export writes Base Color only from paint.
+9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — NOT MET: no tag has
+   ever run `release.yml` (C2-25).
 
 ## The tag shape (drafted, not fired)
 
@@ -49,10 +63,8 @@ as the shell-only remainder). [IN FLIGHT]
 - The dist workflow (release.yml) builds on the tag push: the two
   targets, shell + PowerShell installers, checksums — measured at
   11 MB against the 150 MB budget.
-- SPEC ratification + a dogfood cohort ride the release path as
-  gates 7-8 (the review's IMPROVEMENTS §4.4): the SPEC docs
-  ratify before the tag, the dogfood cohort (Bessa first) paints a
-  real asset end to end and files what breaks.
+- SPEC ratification + a dogfood cohort are gates 7-8 above (the
+  review's IMPROVEMENTS §4.4).
 
 ## Release phases (added 2026-10-14, absorbed from Blender's release cycle)
 

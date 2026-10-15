@@ -54,7 +54,7 @@ Pass 4), highest first:
 | # | item | state | evidence |
 |---|---|---|---|
 | 1 | Re-mark the drifted requirements rows | **done** | 967ec7b: §5 PBR viewport REACHABLE, §5 postfx wiring-landed, §10 distribution split-mark, §5 perf re-phrased; perf-design doc's dead const fixed |
-| 2 | Re-baseline perf/baseline.json on the 4K path | **in flight** | the scheduled nightly (run 38234644651) is cooking the lavapipe harness numbers RIGHT NOW — on completion its artifact seeds the first baseline.json; the compare step's first-baseline handling rides the same kill |
+| 2 | Re-baseline perf/baseline.json on the 4K path | **done (seeded `fd49627`) — but from a local Intel HD 530 over GL, not the lavapipe the nightly runs; the CI reseed = C2-14** | the nightly's first artifact was to seed it; the runner label never resolved (C2-14) |
 | 3 | AssetStore routing + atomic commit for paint save | **done (e4ad8b7)** | atomic manifest commit + store-backed recovery; 7 tests incl. interrupted-save + byte-identity; reopen = old-or-new, never torn |
 | 4 | Per-texture-set (then per-channel) sizing | **done (2564c17)** | the set model + per-tile routing at the set's size + per-set panel + target_sizes.txt with v1 back-compat; the two-sets/two-sizes round-trip test pins it; per-channel sizing = named follow-up |
 | 5 | Cumulative merge for stroke undo | **done (37025d5)** | merge-at-push for intersecting rects; the 8-stroke soak pins 5632B vs 16384B unmerged; envelope unchanged (64/256MiB) |
@@ -79,6 +79,32 @@ Pass 4), highest first:
 | 22 | Per-layer pool — the design arc (the stroke gate's real fix; closes the four dynmat v1 warts) | **done — all five stages landed 2026-10-14** | 1a+1b+2 (`b1ceb2c`, `f2aff9f`), 3 selection + stroke gate (`ed64a58`), 4 per-layer pixels (`dd6e1cd`), 5 anchors + instances (`ec6d552`); the arc closed in `cfb205c`. Review artifact: docs/loop/artifacts/2026-10-14-perlayer-pool-review.json |
 | 23 | The GUI plan G0-G7 (docs/specs/gui-plan-2026-10-15.md) | **in flight — the active worklist** | Each kill carries its ✓ + SHA in the plan's own tables (the single source for per-kill state). Two sessions work it in parallel under kill locks. 2026-10-15 dragon kills: g2-bakes-margin-ui `741ec47`, g0-focus-dispatch `cfc8158`, g4-gradient-ramp `9fb1066`, g4-valuefield-grammar `22be3a8`, g4-curve-widget `ca1b0d0` (UNREGISTERED: widgets/mod.rs is under the g1-axis-gizmo lock), g5 Recent `ede999b`, g5 Revert/Window/About `8a53645` + build.rs commit hash `8920890`, g5-focus-modes `64a9754`, g5-workspaces `5f7bdd2`, g0-kittest-harness `ef4d5fd`, g6-display-mode-keys `a420e07`, g4-property-context-menu `ce21db8` + 48-site sweep `b0478b2`. Wave W-G5 is ONE push (Bessa 2026-10-15: larger waves, complete before pushing) |
 
+
+## The C2 refreshed worklist (2026-10-15, the ACTIVE queue)
+
+Source: `docs/loop/audit-2026-10-15-c2.md` (Pass 4, 28 items, evidence
+per row). The C1 list above is complete. The GUI plan (item 23) continues
+in parallel, but C2's Tier 1-2 outranks the remaining GUI polish: a
+painter cannot yet finish a real PBR asset in the GUI.
+
+| # | item | tier | state |
+|---|---|---|---|
+| C2-1 | Quit guard (dirty close asks Save / Discard / Cancel) | 1 data | todo |
+| C2-2 | Panic hook + crash report + next-launch offer | 1 data | todo |
+| C2-3 | Pixel autosave + "Recover unsaved work?" | 1 data | todo |
+| C2-4 | Ctrl+S silent re-save; Save As = Ctrl+Shift+S | 1 data | todo |
+| C2-5 | Paint-channel targeting (Brush panel picker → `set_active_channel`) | 2 loop | todo |
+| C2-6 | Export every painted channel through the presets | 2 loop | todo |
+| C2-7 | One undo timeline (strokes + masks + layer ops on Ctrl+Z) | 2 loop | todo |
+| C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | todo |
+| C2-9 | Per-texture-set layer stacks | 2 loop | todo |
+| C2-10 | Smart-material / smart-mask shelf | 2 loop | todo |
+| C2-11 | Bitmap stamps → angle → jitter quartet | 2 loop | todo |
+| C2-12 | The colour picker (g4-color-picker) | 2 loop | todo |
+| C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 18 in flight |
+| C2-20..22 | Security: panic-hunt the uncovered seams, plugin consent + size cap, Windows signing decision | 4 security | todo |
+| C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | todo |
+| C2-26..28 | User docs + a generated keyboard reference, plugin SDK guide, kittest breadth | 6 docs/tests | todo |
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work

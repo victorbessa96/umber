@@ -21,8 +21,8 @@ landed falloff curves + front-face falloff (with brush-panel controls),
 the Adjacent Faces bake margin (CLI + the Bakes panel combo), crash-safe GPU startup, save-format
 completeness, the crate layering gate and the docs-only CI path filter;
 the mesh-importer panic hunt found 24 crash bugs and hardening closed
-23 (`.usdz` loads for the first time; the open one is an openusd
-allocation abort, upstream). Stroke methods and the cavity mask now
+all 24 (`.usdz` loads for the first time; the last, an openusd
+allocation abort, closed by the 0.8.0 bump `5b5b0ba`). Stroke methods and the cavity mask now
 reach the brush (51d9047, 4bebc72). The GUI plan
 (`docs/specs/gui-plan-2026-10-15.md`) is the active worklist (queue item
 23): G0 foundations, most of G1-G3, the G4 ramp / ValueField grammar /
@@ -36,6 +36,12 @@ color picker, G5 home screen / first run / tab overflow, G6 overlays /
 contextual toolbar / UV parity, G7), ROADMAP 8b's
 remaining rows (stencil, bitmap stamps → angle/jitter), the Win32 tablet
 path, and the 0.1.0 gates.
+**The C2 gap audit (2026-10-15, `docs/loop/audit-2026-10-15-c2.md`) is
+the active worklist.** A painter cannot yet finish a real PBR asset in the
+GUI: painting reaches Base Color only, export writes Base Color only from
+paint, there is no quit guard and no pixel autosave, Ctrl+Z misses paint
+strokes, the Layers panel cannot reorder or rename, and a document holds one
+layer stack. Those Tier 1-2 rows come first.
 State: POST-POOL-MARCH
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate (v1.1 amendment drafted: docs/specs/spec-v1.1-amendment-draft.md).

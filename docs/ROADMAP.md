@@ -13,6 +13,8 @@ inventory), exceeded where [04] (next-gen bar) points.
 
 ---
 
+
+> **2026-10-15: the C2 gap audit** (`docs/loop/audit-2026-10-15-c2.md`) is the active worklist. Its headline: a painter cannot yet finish a real PBR asset in the GUI (painting reaches Base Color only, export writes Base Color only from paint, no quit guard or pixel autosave, two undo timelines, one layer stack per document). Its Tier 1-2 rows outrank the remaining GUI polish.
 ## Where we stand (2026-10-15)
 
 The core loop is Gate-0-proven end to end: mesh → 4K pressured paint →
@@ -49,7 +51,7 @@ model (local battery per kill, one CI run per wave) runs the march.
 | wave-spp-import | ✓ landed | 30b966e + 0a5c20d; the corpus harness arms on real files |
 | wave-psd-import | ✓ landed | a4bf81a (flatten-on-import, every deviation reported) |
 | wave-dynamic-materials | ✓ LANDED END TO END | 83aa242 → review → 7ecea60 → Kill A f85cb0a → Kill B 2c6497e |
-| wave-camera-ortho | OPEN | the named camera gap — moves to the post-pool list |
+| wave-camera-ortho | ✓ LANDED (`40f3e5d`) | see the post-pool row below |
 | wave-stylus-win32 | OPEN (wave 5 now) | Wintab32 dual-path |
 | wave-8k-export | ✓ built earlier (`cd668a3`, 2026-10-10) | the 8K presets + bake→export→decode proof at 8192²; roadmap row was stale |
 
@@ -82,7 +84,7 @@ Arc threading; un-premultiply exactness on GPU vendors.
 | wave-stylus-win32 | §10 the Windows dual-path | Wintab32 polling beside Windows Ink |
 | wave-8k-export | §2/§6 the 8K export path | ✓ already built (`cd668a3`); requirements row 99 carries it. Open remainder: none named |
 | wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
-| wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
+| wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm — ✓ LANDED (`77118f0` + `216018e`; `paint_snapshot` `3e003ec`, exact wire strokes `1ff0921`) |
 | wave-harness-script | the snapshot harness's --script arm | ✓ landed 2026-10-14: `paint_snapshot` (whole plane → PNG + blake3) — a script is a JSONL file piped into `umber-cli agent`. **Found:** a 2-point wire stroke can paint nothing (the live conditioner swallows it) — follow-up row `wave-agent-stroke-conditioning` |
 | wave-fbx-uv-fixture | the FBX test asset has no UVs | `cube_b7400.fbx` (ufbx's Blender 2.72 cube) carries NO UV layer — every UV loads as [0,0] (pinned in `fbx.rs` 2026-10-15). Gate 0's FBX leg paints by UV directly so it never noticed; any bake/paint-by-mesh test on it is vacuous. Add a UV-unwrapped FBX fixture (e.g. ufbx's corpus has UV'd cubes) and point Gate 0 + the margin CLI test at it |
 | wave-agent-stroke-conditioning | agent strokes that paint exactly what was sent | ✓ landed 2026-10-15: wire strokes run the conditioner in EXACT mode (no one-euro / lazy-mouse; spacing kept). Root cause: 1 Hz one-euro at synthetic 8 ms steps moves the cursor ~10%/event, so a 2-point stroke never travelled one dab spacing. Open: path replays still smoothed (UX call) |
@@ -121,13 +123,13 @@ the already-have list and the declines is
 
 | Kill | Closes | Notes |
 |---|---|---|
-| wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | Blender's Margin Type "Adjacent Faces": fill the margin from the faces across each seam, not by extending border pixels (today's `dilate_map`). The seam graph the brush uses is the input. Per-bake + per-export enum beside the pixel size — ✓ engine `3818da0`; CLI `--margin` (wave 5 commit) — **open: Bakes panel control, agent step field** |
+| wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | ✓ LANDED end to end (engine `3818da0`; CLI `bca634f` + agent step `c237e4f`; Bakes panel `741ec47`) |
 | wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading — ✓ landed `d0309e1` + panel combo `9a47fa0` |
 | wave-brush-dynamics-angle-jitter | per-dab jitter (+ angle once stamps exist) | size, opacity and position jitter per dab (`BrushParams` has none; surface = `dab_adapter.rs`, seeded per stroke so replays are deterministic). **Angle / rake / random rotation is blocked:** the paint shader stamps a radially symmetric disc (no stamp texture binding in `PAINT_COMPUTE_SHADER`), so rotation is invisible until bitmap alpha stamps land — verified 2026-10-14 |
 | wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) — ✓ landed `cabe283` + panel control `9a47fa0` |
-| wave-stroke-methods | the missing stroke idioms | airbrush (deposit at a rate while held), anchored + drag-dot (decal placement), dash ratio/length (stitches, seams) — ◐ engine landed (Airbrush, Dash, Drag Dot in `StrokeConditioner`; Space bit-identical) — **open: paint_state wiring, panel picker, `.umberbrush` persistence**; Anchored still unbuilt |
+| wave-stroke-methods | the missing stroke idioms | ✓ LANDED end to end (engine `ee2dce5`; wiring, picker and `.umberbrush` persistence `51d9047`) |
 | wave-stencil | paint-through screen stencil | an image overlay you move/scale/rotate and paint through — the logo/decal workflow |
-| wave-brush-cavity-mask | edge-wear without building a mask layer | per-brush "mask by cavity / ridge" reusing the baked curvature map — ◐ pure module landed (`CavityMask::coverage` over the baked curvature map) — **open: paint_state gate composition, panel row, persistence** |
+| wave-brush-cavity-mask | edge-wear without building a mask layer | ✓ LANDED end to end (module `405e0e2`; gate composition + Brush-panel Cavity section `4bebc72`) |
 | wave-gpu-safe-start | a driver crash at device creation repeating every launch | photocraft's startup marker: write before device creation, clear after the first frames; an uncleared marker steps the backend down next launch; `--safe-gpu` override — ✓ landed `a221a85` |
 | wave-save-completeness | a new document field silently not saved | destructure every doc struct in the save converters with no `..`: a new field fails to compile until the save path handles it — ✓ landed `17900df` (project save/load) |
 | wave-scorecard | handwritten headline numbers drifting | generate README/STATE counts (crates, tests, rows) from the tree; `--check` in the battery + CI (this pass found 4 drifted docs) |
@@ -143,12 +145,12 @@ is the session to-do; each row here names its blocker or its file surface.
 
 | Kill | Closes | Surface |
 |---|---|---|
-| wave-openusd-0.8 | the last importer crash: openusd 0.7.0's multi-TB allocation ABORT (#19) | bump `openusd` 0.7.0 → 0.8.0 (fixes all six openusd findings upstream, PR mxpv/openusd#138; `docs/upstream/openusd-0.7.0.md`); adapt `umber-mesh/src/usdc.rs` to the `CrateData::open(impl Into<AssetBuffer>)` change; un-ignore `bug_usdc_huge_count_allocation_aborts` |
+| wave-openusd-0.8 | the last importer crash: openusd 0.7.0's multi-TB allocation ABORT (#19) | bump `openusd` 0.7.0 → 0.8.0 (fixes all six openusd findings upstream, PR mxpv/openusd#138; `docs/upstream/openusd-0.7.0.md`); adapt `umber-mesh/src/usdc.rs` to the `CrateData::open(impl Into<AssetBuffer>)` change; un-ignore `bug_usdc_huge_count_allocation_aborts` — ✓ LANDED (`5b5b0ba`) |
 | wave-stroke-methods-wiring | stroke methods reach the brush | ✓ LANDED 2026-10-15 (`51d9047`): the preset's brush finally reaches the stroke; method picker + size in presets; Drag Dot's release dab flushes into the same undo step |
 | wave-cavity-wiring | the cavity mask paints | ✓ LANDED 2026-10-15 (`4bebc72`): one composed gate over quick mask × curvature; Brush-panel Cavity section |
 | wave-margin-ui | Adjacent Faces from the app | ✓ agent `bake` step `margin` + `MarginType` folded into `BakeFlags` LANDED 2026-10-15; the Bakes panel Margin type combo LANDED 2026-10-15 (g2-bakes-margin-ui; whole-mesh + per-tile AO seam graphs) |
 | wave-fbx-uv-fixture | a UV'd FBX test asset | see its row below |
-| wave-valuefield-log | the last raw sliders | `ValueField` log mode; migrate DoF focus + fill_layer (6), path_tool (4), bakes (3), display (2), layers (1) |
+| wave-valuefield-log | the last raw sliders | `ValueField` log mode; migrate DoF focus + fill_layer (6), path_tool (4), bakes (3), display (2), layers (1) — ✓ LANDED (`7c21424` log mode + DoF; `66b805d` the last 11 raw sliders) |
 
 ### Wave 6b — the GUI plan
 
@@ -238,20 +240,20 @@ the owner's go-ahead to file.
 | Layers: types, instancing, anchors, smart materials | ✓ complete |
 | Blend modes | ✓ 32-mode census landed (d861482) |
 | Masks (paintable per-layer) | ✓ landed (770162f); per-plane masks ride the pool |
-| Dynamic materials | ✓ LANDED end to end (Kill A + Kill B, 2026-10-14); per-layer pixels = the pool arc, stage 4 in flight |
+| Dynamic materials | ✓ LANDED end to end (Kill A + Kill B, 2026-10-14); per-layer pixels ✓ (the pool arc, stages 4 `dd6e1cd` + 5 `ec6d552`) |
 | Agent/automation | ✓ JSONL protocol (`PROTOCOL_VERSION` 1): projects, layers, undo, paint strokes/reads/undo, `paint_snapshot` (whole plane → PNG + blake3); wire strokes paint exactly (no pointer smoothing) |
 | Headless testing | ✓ offscreen panel snapshots; the never-crash fuzz over mtlx/PSD/.spp/projects AND the mesh importers (5,400+ cases, 2026-10-14/15); scripted sessions via `paint_snapshot` |
 | Importers (.spp/PSD) | ✓ both landed; the corpus harness arms on real .spp files |
-| Baking (all 8 maps, cage, skew, auto-rebake) | ✓ complete; + Adjacent Faces margin (cross-seam fill, `3818da0`) — not yet wired into the bake UI |
+| Baking (all 8 maps, cage, skew, auto-rebake) | ✓ complete; + Adjacent Faces margin (cross-seam fill, `3818da0`) on the CLI, the agent and the Bakes panel (`741ec47`) |
 | Node graph + MaterialX | ✓ complete (original engine) |
 | Viewport (OpenPBR, IBL, view modes, postfx) | ✓ + height→normal live (2026-10-12); postfx persistence = wave 2 |
 | Color management (OCIO, ACES, LUT) | ✓ bundled build + LUT; panel selection = wave 2 |
 | Export (templates, packing, presets, EXR, PSD, USD, MaterialX) | ✓ PSD-out complete; PSD-in = wave 3 |
-| Import (FBX, USD, images, mesh maps) | ✓ FBX/glTF/OBJ/USDA/USDC/**USDZ** (usdz never loaded until `6c68ce7`); importers hardened against the panic hunt's 24 findings (23 closed — the open one is an openusd allocation abort, upstream) |
+| Import (FBX, USD, images, mesh maps) | ✓ FBX/glTF/OBJ/USDA/USDC/**USDZ** (usdz never loaded until `6c68ce7`); importers hardened against the panic hunt's 24 findings (all 24 closed: the last, an openusd allocation abort, by the 0.8.0 bump `5b5b0ba`) |
 | Stylus (pressure/tilt/proximity) | ✓ Linux XI2 + raw pressure; win32 dual-path = wave 3 |
 | History panel | ✓ panel; time-travel = wave 1 |
 | Distribution | ✓ shell+PS proven + CI; Flatpak/AppImage = wave 1 |
-| Performance floor | pending baseline (nightly starved) |
+| Performance floor | seeded (`fd49627`) on a local Intel HD 530 / GL, NOT the nightly's lavapipe; the nightly has never run (no self-hosted runner, no fallback) — C2-14..16 |
 | Paint-what-you-see buffer | live-raycast ✓; the pwys stroke buffer stays a design-first wave-5 candidate |
 | Ortho camera | ✓ landed (40f3e5d) |
 | 8K export | ✓ built (`cd668a3`) |
