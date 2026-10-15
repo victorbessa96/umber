@@ -58,6 +58,77 @@ pub struct StatusSnapshot {
     pub pen: Option<stylus::InputSource>,
     /// `egui::InputState::stable_dt`, seconds.
     pub frame_dt: f32,
+    /// Which mouse/key hints the left of the bar shows.
+    pub hints: HintContext,
+}
+
+/// The viewport's mouse/key hint set for the left of the bar (GUI plan G1
+/// `g1-status-hints`; Blender's status-bar tool hints, Painter's keyboard
+/// helper). It changes with the held modifier, so holding Ctrl shows what
+/// Ctrl does: the bar teaches the bindings without a cheat sheet.
+///
+/// Every hint states a binding the viewport ACTUALLY has
+/// (`viewport.rs::ui` / `handle_input`): Ctrl/Cmd+LMB paints, LMB-drag
+/// orbits, Shift+LMB or MMB pans, the wheel zooms, P toggles the
+/// projection. A hint for a binding that does not exist is a bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HintContext {
+    /// No mesh: the only action is loading one.
+    #[default]
+    NoMesh,
+    /// A mesh is loaded and a paint tool is active; no modifier held.
+    Paint,
+    /// Ctrl / Cmd held over the viewport: the paint chord.
+    PaintModifier,
+    /// Shift held: the pan chord.
+    PanModifier,
+    /// The eyedropper is armed.
+    Pick,
+    /// The ID-mask select is armed.
+    IdMask,
+}
+
+impl HintContext {
+    /// The hint context for the shell's state this frame.
+    pub fn of(has_mesh: bool, tool: crate::toolbar::ToolKind, mods: egui::Modifiers) -> Self {
+        use crate::toolbar::ToolKind;
+        if !has_mesh {
+            return HintContext::NoMesh;
+        }
+        match tool {
+            ToolKind::Pick => HintContext::Pick,
+            ToolKind::IdMask => HintContext::IdMask,
+            _ if mods.ctrl || mods.command => HintContext::PaintModifier,
+            _ if mods.shift => HintContext::PanModifier,
+            _ => HintContext::Paint,
+        }
+    }
+
+    /// The hints as `(input key, action key)` i18n pairs, in display order.
+    pub fn hints(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            HintContext::NoMesh => &[("hint.drop", "hint.load-mesh")],
+            HintContext::Paint => &[
+                ("hint.ctrl-lmb", "hint.paint"),
+                ("hint.lmb-drag", "hint.orbit"),
+                ("hint.shift-lmb", "hint.pan"),
+                ("hint.wheel", "hint.zoom"),
+            ],
+            HintContext::PaintModifier => &[
+                ("hint.lmb-drag", "hint.paint-stroke"),
+                ("hint.ctrl-z", "hint.undo"),
+            ],
+            HintContext::PanModifier => &[("hint.lmb-drag", "hint.pan")],
+            HintContext::Pick => &[
+                ("hint.lmb", "hint.sample-color"),
+                ("hint.lmb-drag", "hint.orbit"),
+            ],
+            HintContext::IdMask => &[
+                ("hint.lmb", "hint.select-region"),
+                ("hint.lmb-drag", "hint.orbit"),
+            ],
+        }
+    }
 }
 
 /// The placeholder for a value that has no reading.
@@ -125,7 +196,19 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
             .monospace()
             .color(theme::text())
     };
+    let key = |text: String| {
+        RichText::new(text)
+            .size(theme::TEXT_STATUS)
+            .strong()
+            .color(theme::text())
+    };
     ui.horizontal(|ui| {
+        for (input, action) in status.hints.hints() {
+            ui.label(key(tr(input)));
+            ui.label(label(tr(action)));
+            ui.add_space(6.0);
+        }
+        ui.separator();
         ui.label(label(tr("status.uv")));
         ui.label(value(format_uv(status.cursor_uv)));
         ui.separator();
@@ -207,6 +290,69 @@ mod tests {
         assert_eq!(fps_from_dt(-0.016), None);
         assert_eq!(fps_from_dt(f32::NAN), None);
         assert_eq!(fps_from_dt(f32::INFINITY), None);
+    }
+
+    #[test]
+    fn hint_context_follows_tool_and_modifier() {
+        use crate::toolbar::ToolKind;
+        let none = egui::Modifiers::NONE;
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..none
+        };
+        let shift = egui::Modifiers {
+            shift: true,
+            ..none
+        };
+        assert_eq!(
+            HintContext::of(false, ToolKind::Paint, ctrl),
+            HintContext::NoMesh
+        );
+        assert_eq!(
+            HintContext::of(true, ToolKind::Paint, none),
+            HintContext::Paint
+        );
+        assert_eq!(
+            HintContext::of(true, ToolKind::Smudge, ctrl),
+            HintContext::PaintModifier
+        );
+        assert_eq!(
+            HintContext::of(true, ToolKind::Paint, shift),
+            HintContext::PanModifier
+        );
+        // The strip tools win over modifiers: they never paint.
+        assert_eq!(
+            HintContext::of(true, ToolKind::Pick, ctrl),
+            HintContext::Pick
+        );
+        assert_eq!(
+            HintContext::of(true, ToolKind::IdMask, none),
+            HintContext::IdMask
+        );
+    }
+
+    #[test]
+    fn every_hint_key_is_in_both_catalogs() {
+        let en = include_str!("../../../assets/i18n/en-US.ftl");
+        let pt = include_str!("../../../assets/i18n/pt-BR.ftl");
+        for ctx in [
+            HintContext::NoMesh,
+            HintContext::Paint,
+            HintContext::PaintModifier,
+            HintContext::PanModifier,
+            HintContext::Pick,
+            HintContext::IdMask,
+        ] {
+            assert!(!ctx.hints().is_empty(), "{ctx:?}");
+            for (input, action) in ctx.hints() {
+                for k in [input, action] {
+                    let attr = format!(".{} =", k.trim_start_matches("hint."));
+                    assert!(en.contains(&attr), "en-US missing {k}");
+                    assert!(pt.contains(&attr), "pt-BR missing {k}");
+                }
+            }
+        }
     }
 
     #[test]

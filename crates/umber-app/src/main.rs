@@ -116,6 +116,7 @@
 mod actions;
 mod bake_sources;
 mod bakes_panel;
+mod brush_cursor;
 mod brush_panel;
 mod display_panel;
 mod document;
@@ -2060,6 +2061,11 @@ impl eframe::App for UmberApp {
             tile,
             frame_dt: ui.input(|i| i.stable_dt),
             pen: pen_source,
+            hints: status_bar::HintContext::of(
+                self.state.paint.is_some(),
+                self.brush_panel.strip,
+                ui.input(|i| i.modifiers),
+            ),
         };
         egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
             status_bar::show(ui, &status);

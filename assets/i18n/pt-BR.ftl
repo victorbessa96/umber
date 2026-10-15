@@ -639,3 +639,23 @@ action =
     .unavailable-nothing-to-redo = Nada para refazer
     .unavailable-no-mesh = Carregue uma malha primeiro
     .unavailable-not-editing-mask = Só ao editar a máscara rápida (X)
+
+## Dicas de mouse/teclado da barra de status (plano G1 g1-status-hints)
+
+hint =
+    .drop = Solte
+    .load-mesh = uma malha para começar
+    .ctrl-lmb = Ctrl+Esq
+    .lmb-drag = Arrastar Esq
+    .lmb = Esq
+    .shift-lmb = Shift+Esq
+    .wheel = Roda
+    .ctrl-z = Ctrl+Z
+    .paint = pintar
+    .paint-stroke = pintar o traço
+    .orbit = orbitar
+    .pan = mover a vista
+    .zoom = zoom
+    .undo = desfazer
+    .sample-color = amostrar a cor
+    .select-region = selecionar a região

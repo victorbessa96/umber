@@ -650,3 +650,23 @@ action =
     .unavailable-nothing-to-redo = Nothing to redo
     .unavailable-no-mesh = Load a mesh first
     .unavailable-not-editing-mask = Only while editing the quick mask (X)
+
+## Status-bar mouse/key hints (GUI plan G1 g1-status-hints)
+
+hint =
+    .drop = Drop
+    .load-mesh = a mesh to start
+    .ctrl-lmb = Ctrl+LMB
+    .lmb-drag = LMB drag
+    .lmb = LMB
+    .shift-lmb = Shift+LMB
+    .wheel = Wheel
+    .ctrl-z = Ctrl+Z
+    .paint = paint
+    .paint-stroke = paint the stroke
+    .orbit = orbit
+    .pan = pan
+    .zoom = zoom
+    .undo = undo
+    .sample-color = sample the color
+    .select-region = select the region
