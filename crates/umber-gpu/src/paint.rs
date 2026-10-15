@@ -77,7 +77,10 @@ pub struct Dab {
     /// (it occupies what was the second padding slot, byte 40, so the
     /// layout is unchanged). `0` = [`FALLOFF_SMOOTH`], the historical curve.
     falloff: u32,
-    _pad: f32,
+    /// Stamp rotation in radians (C2-11), read only by [`FALLOFF_STAMP`]
+    /// dabs. It occupies the last padding slot (byte 44), so the layout is
+    /// unchanged and a default dab's bytes are byte-identical to before.
+    angle: f32,
 }
 
 /// Falloff-curve ids carried in [`Dab`] and switched on by
@@ -101,6 +104,11 @@ pub const FALLOFF_LINEAR: u32 = 6;
 pub const FALLOFF_INVERSE_SQUARE: u32 = 7;
 /// Flat disc out to the radius.
 pub const FALLOFF_CONSTANT: u32 = 8;
+/// Bitmap stamp (C2-11): the dab's coverage is the compositor's stamp
+/// texture ([`PaintCompositor::set_stamp`]), sampled over the dab's
+/// square and rotated by the dab's angle ([`Dab::with_angle`]).
+/// `hardness` is ignored.
+pub const FALLOFF_STAMP: u32 = 9;
 
 const _: () = assert!(size_of::<Dab>() == 48, "Dab must match the WGSL Dab layout");
 
@@ -116,8 +124,21 @@ impl Dab {
             hardness,
             mask_gate: 0.0,
             falloff: FALLOFF_SMOOTH,
-            _pad: 0.0,
+            angle: 0.0,
         }
+    }
+
+    /// This dab rotated by `radians` (read by [`FALLOFF_STAMP`] dabs only;
+    /// a radial dab is rotation-symmetric). Non-finite input is `0.0`.
+    #[must_use]
+    pub fn with_angle(mut self, radians: f32) -> Self {
+        self.angle = if radians.is_finite() { radians } else { 0.0 };
+        self
+    }
+
+    /// The stamp rotation this dab carries, in radians.
+    pub fn angle(&self) -> f32 {
+        self.angle
     }
 
     /// This dab with falloff-curve id `id` (a `FALLOFF_*` constant). An
@@ -649,6 +670,13 @@ pub struct PaintCompositor {
     /// the caller uploads a mask before staging those).
     _fallback_mask: wgpu::Texture,
     fallback_mask_view: wgpu::TextureView,
+    /// The bitmap stamp [`FALLOFF_STAMP`] dabs sample (binding 4): a 1x1
+    /// white texture until [`Self::set_stamp`] uploads one, so a stamp
+    /// dab with no stamp paints the full square.
+    stamp: (wgpu::Texture, wgpu::TextureView),
+    /// Whether the white fallback's single texel still needs its upload
+    /// (recorded on the next splat's encoder: construction has no queue).
+    stamp_needs_white: std::sync::atomic::AtomicBool,
     max_dabs_per_batch: usize,
 }
 
@@ -721,6 +749,16 @@ impl PaintCompositor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -756,6 +794,7 @@ impl PaintCompositor {
         });
 
         let max_dabs_per_batch = device.limits().max_compute_workgroups_per_dimension as usize;
+        let stamp = Self::stamp_texture(&device, None, 1, 1, &[255]);
 
         Ok(Self {
             device,
@@ -763,8 +802,112 @@ impl PaintCompositor {
             bind_group_layout,
             _fallback_mask: fallback_mask,
             fallback_mask_view,
+            stamp,
+            stamp_needs_white: std::sync::atomic::AtomicBool::new(true),
             max_dabs_per_batch,
         })
+    }
+
+    /// Uploads `values` (`width * height` R8 coverage, row-major, top row
+    /// first) as the stamp every [`FALLOFF_STAMP`] dab samples from now
+    /// on. Uploaded through `queue` at once, so call it between strokes,
+    /// not mid-batch: a splat recorded before the call but submitted after
+    /// it would sample the new stamp.
+    ///
+    /// # Errors
+    ///
+    /// [`PaintError::InvalidRegion`] for a zero dimension, a byte count
+    /// that does not match, or a side beyond the device's 2D texture limit.
+    pub fn set_stamp(
+        &mut self,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        values: &[u8],
+    ) -> Result<(), PaintError> {
+        let max = self.device.limits().max_texture_dimension_2d;
+        if width == 0
+            || height == 0
+            || width > max
+            || height > max
+            || values.len() != width as usize * height as usize
+        {
+            return Err(PaintError::InvalidRegion {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            });
+        }
+        self.stamp = Self::stamp_texture(&self.device, Some(queue), width, height, values);
+        self.stamp_needs_white
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Back to the white fallback (stamp dabs paint the full square).
+    pub fn clear_stamp(&mut self) {
+        self.stamp = Self::stamp_texture(&self.device, None, 1, 1, &[255]);
+        self.stamp_needs_white
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The current stamp's dimensions (`(1, 1)` = the white fallback).
+    pub fn stamp_size(&self) -> (u32, u32) {
+        let size = self.stamp.0.size();
+        (size.width, size.height)
+    }
+
+    /// An R8 stamp texture holding `values`. With a `queue` the bytes go
+    /// through `write_texture`; without one (construction and
+    /// `clear_stamp`, the 1x1 white fallback) the texture is created empty
+    /// and `splat_dabs` records its single white texel on the next
+    /// encoder (`stamp_needs_white`).
+    fn stamp_texture(
+        device: &wgpu::Device,
+        queue: Option<&wgpu::Queue>,
+        width: u32,
+        height: u32,
+        values: &[u8],
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let desc = wgpu::TextureDescriptor {
+            label: Some("umber_paint_stamp"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        };
+        let texture = match queue {
+            Some(queue) => {
+                let texture = device.create_texture(&desc);
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    values,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(width),
+                        rows_per_image: Some(height),
+                    },
+                    desc.size,
+                );
+                texture
+            }
+            None => device.create_texture(&desc),
+        };
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
     }
 
     /// The maximum dabs accepted in one [`PaintCompositor::splat_dabs`]
@@ -794,6 +937,43 @@ impl PaintCompositor {
         let mut staging = DabBuffer::new(self.max_dabs_per_batch);
         staging.stage(dabs)?;
         let dab_buffer = staging.upload(&self.device)?;
+        if self
+            .stamp_needs_white
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            // The fallback's one white texel, recorded ahead of the pass
+            // (256-byte row pitch, the copy minimum).
+            let mut row = vec![0u8; 256];
+            row[0] = 255;
+            let white = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("umber_paint_stamp_white"),
+                    contents: &row,
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                });
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &white,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.stamp.0,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("umber_paint_bind_group"),
@@ -827,6 +1007,10 @@ impl PaintCompositor {
                             .as_ref()
                             .map_or(&self.fallback_mask_view, |(_, view)| view),
                     ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.stamp.1),
                 },
             ],
         });
@@ -922,8 +1106,11 @@ mod tests {
         let dab = Dab::new([1.0, 2.0], 3.0, [1.0, 0.0, 0.0, 1.0], 0.5, 0.25);
         assert_eq!(dab.falloff(), FALLOFF_SMOOTH);
         // A default dab's former padding bytes stay zero: the pre-curve
-        // upload is byte-identical.
+        // upload is byte-identical (the angle slot included).
         assert_eq!(bytemuck::bytes_of(&dab)[40..48], [0u8; 8]);
+        let turned = dab.with_angle(1.25);
+        assert_eq!(bytemuck::bytes_of(&turned)[44..48], 1.25f32.to_ne_bytes());
+        assert_eq!(dab.with_angle(f32::NAN).angle(), 0.0);
         let sharp = dab.with_falloff(FALLOFF_SHARP).with_mask_gate(true);
         assert_eq!(sharp.falloff(), FALLOFF_SHARP);
         assert_eq!(
@@ -937,7 +1124,10 @@ mod tests {
     /// The WGSL `Dab` must declare the id as `u32` at the same slot.
     #[test]
     fn shader_dab_struct_carries_the_falloff_slot() {
-        assert!(PAINT_COMPUTE_SHADER.contains("mask_gate: f32,\n    falloff: u32,\n    _pad: f32,"));
+        assert!(
+            PAINT_COMPUTE_SHADER.contains("mask_gate: f32,\n    falloff: u32,\n    angle: f32,")
+        );
+        assert!(PAINT_COMPUTE_SHADER.contains(&format!("FALLOFF_STAMP: u32 = {FALLOFF_STAMP}u")));
         for id in 0..=FALLOFF_CONSTANT {
             assert!(
                 PAINT_COMPUTE_SHADER.contains(&format!("case {id}u")),
@@ -1059,6 +1249,92 @@ mod tests {
         fn pixel(bytes: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
             let i = (y * width + x) as usize * 4;
             [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
+        }
+
+        /// Splats one dab with `compositor` into a fresh 64² target and
+        /// reads it back.
+        fn splat_one(
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            compositor: &PaintCompositor,
+            dab: Dab,
+        ) -> Vec<u8> {
+            let target = PaintTarget::new(device, 64, 64);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("umber_paint_stamp_test"),
+            });
+            compositor
+                .splat_dabs(&mut encoder, &target, &[dab])
+                .expect("splats");
+            queue.submit(Some(encoder.finish()));
+            read_back_rgba8(device, queue, &target)
+        }
+
+        #[test]
+        fn a_stamp_dab_without_a_stamp_paints_its_full_square() {
+            // C2-11: the 1x1 white fallback = full coverage over the dab's
+            // square, corners included (a radial dab leaves them empty).
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let compositor = PaintCompositor::new(device.clone()).expect("compositor");
+            assert_eq!(compositor.stamp_size(), (1, 1));
+            let dab = Dab::new([32.0, 32.0], 16.0, [1.0, 0.0, 0.0, 1.0], 1.0, 0.0)
+                .with_falloff(FALLOFF_STAMP);
+            let out = splat_one(&device, &queue, &compositor, dab);
+            // Inside the square's corner (17, 17): outside the r=16 disc.
+            assert_eq!(pixel(&out, 64, 17, 17)[3], 255, "the corner is painted");
+            assert_eq!(pixel(&out, 64, 32, 32)[3], 255);
+            assert_eq!(
+                pixel(&out, 64, 14, 32)[3],
+                0,
+                "outside the square stays clear"
+            );
+            // The same dab radial leaves that corner clear.
+            let radial = Dab::new([32.0, 32.0], 16.0, [1.0, 0.0, 0.0, 1.0], 1.0, 1.0);
+            let out = splat_one(&device, &queue, &compositor, radial);
+            assert_eq!(pixel(&out, 64, 17, 17)[3], 0);
+        }
+
+        #[test]
+        fn a_stamp_shapes_the_dab_and_the_angle_rotates_it() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mut compositor = PaintCompositor::new(device.clone()).expect("compositor");
+            // An 8x8 stamp: left half opaque, right half empty.
+            let stamp: Vec<u8> = (0..64).map(|i| if i % 8 < 4 { 255 } else { 0 }).collect();
+            compositor
+                .set_stamp(&queue, 8, 8, &stamp)
+                .expect("stamp uploads");
+            assert_eq!(compositor.stamp_size(), (8, 8));
+            let dab = Dab::new([32.0, 32.0], 16.0, [0.0, 1.0, 0.0, 1.0], 1.0, 0.0)
+                .with_falloff(FALLOFF_STAMP);
+            let out = splat_one(&device, &queue, &compositor, dab);
+            assert_eq!(pixel(&out, 64, 22, 32)[3], 255, "left half painted");
+            assert_eq!(pixel(&out, 64, 42, 32)[3], 0, "right half empty");
+
+            // Rotated a quarter turn, the opaque half moves to the top or
+            // bottom: the left and right probes now read the same, and a
+            // vertical pair differs.
+            let turned = dab.with_angle(std::f32::consts::FRAC_PI_2);
+            let out = splat_one(&device, &queue, &compositor, turned);
+            let (left, right) = (pixel(&out, 64, 22, 32)[3], pixel(&out, 64, 42, 32)[3]);
+            let (top, bottom) = (pixel(&out, 64, 32, 22)[3], pixel(&out, 64, 32, 42)[3]);
+            assert_eq!(left, right, "rotated: left/right are no longer split");
+            assert_ne!(top, bottom, "rotated: the split is vertical now");
+            assert!(top == 255 || bottom == 255);
+
+            // Bad uploads are refused and leave the stamp in place.
+            assert!(compositor.set_stamp(&queue, 0, 8, &[]).is_err());
+            assert!(compositor.set_stamp(&queue, 8, 8, &stamp[..10]).is_err());
+            assert_eq!(compositor.stamp_size(), (8, 8));
+            compositor.clear_stamp();
+            assert_eq!(compositor.stamp_size(), (1, 1));
+            // The fallback after a clear is white again (the deferred
+            // upload re-arms).
+            let out = splat_one(&device, &queue, &compositor, dab);
+            assert_eq!(pixel(&out, 64, 42, 32)[3], 255, "cleared: full square");
         }
 
         #[test]

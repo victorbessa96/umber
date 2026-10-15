@@ -526,13 +526,36 @@ struct Dab {
     hardness: f32,
     mask_gate: f32,
     falloff: u32,
-    _pad: f32,
+    angle: f32,
 };
 
 @group(0) @binding(0) var<storage, read> dabs: array<Dab>;
 @group(0) @binding(1) var paint_tex: texture_storage_2d<rgba8unorm, read_write>;
 @group(0) @binding(2) var<uniform> dims: vec2<u32>;
 @group(0) @binding(3) var mask_tex: texture_2d<f32>;
+/// The bitmap stamp (C2-11): R8, any size, read by falloff id 9 only.
+/// A 1x1 white fallback is bound when no stamp is set.
+@group(0) @binding(4) var stamp_tex: texture_2d<f32>;
+
+/// `paint::FALLOFF_STAMP`: coverage comes from the stamp, not a curve.
+const FALLOFF_STAMP: u32 = 9u;
+
+/// Bilinear sample of the stamp at `uv` in [0, 1]^2 (texel centres at
+/// (i + 0.5) / size), clamped to the edge. Manual: the stamp is bound
+/// as a non-filterable texture so this pass needs no sampler.
+fn stamp_sample(uv: vec2<f32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(stamp_tex));
+    let p = uv * vec2<f32>(size) - vec2<f32>(0.5, 0.5);
+    let base = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let lo = vec2<i32>(0, 0);
+    let hi = size - vec2<i32>(1, 1);
+    let t00 = textureLoad(stamp_tex, clamp(base, lo, hi), 0).r;
+    let t10 = textureLoad(stamp_tex, clamp(base + vec2<i32>(1, 0), lo, hi), 0).r;
+    let t01 = textureLoad(stamp_tex, clamp(base + vec2<i32>(0, 1), lo, hi), 0).r;
+    let t11 = textureLoad(stamp_tex, clamp(base + vec2<i32>(1, 1), lo, hi), 0).r;
+    return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+}
 
 const WORKGROUP_SIZE: u32 = 64u;
 
@@ -568,9 +591,15 @@ fn cs_main(
 ) {
     let dab = dabs[workgroup_id.x];
     let safe_radius = max(dab.radius, 1e-5);
+    let stamped = dab.falloff == FALLOFF_STAMP;
+    // A stamp fills the dab's square (side = 2 * radius), so a rotated
+    // stamp's corners reach radius * sqrt(2): grow the box to match.
+    let reach = select(safe_radius, safe_radius * 1.4142136, stamped);
+    let cos_a = cos(dab.angle);
+    let sin_a = sin(dab.angle);
 
-    let min_xy = vec2<i32>(floor(dab.pos - safe_radius));
-    let max_xy = vec2<i32>(ceil(dab.pos + safe_radius));
+    let min_xy = vec2<i32>(floor(dab.pos - reach));
+    let max_xy = vec2<i32>(ceil(dab.pos + reach));
     let clamped_min = max(min_xy, vec2<i32>(0, 0));
     let clamped_max = min(max_xy, vec2<i32>(dims) - vec2<i32>(1, 1));
     if (clamped_max.x < clamped_min.x || clamped_max.y < clamped_min.y) {
@@ -587,12 +616,26 @@ fn cs_main(
         let texel = clamped_min + vec2<i32>(local_x, local_y);
 
         let center = vec2<f32>(texel) + vec2<f32>(0.5, 0.5);
-        let dist = distance(center, dab.pos);
-        if (dist > safe_radius) {
-            continue;
+        var shape: f32;
+        if (stamped) {
+            // Into the stamp's frame: rotate the offset by -angle, scale
+            // the dab square to [0, 1]^2.
+            let d = center - dab.pos;
+            let local = vec2<f32>(cos_a * d.x + sin_a * d.y, -sin_a * d.x + cos_a * d.y);
+            let uv = local / (2.0 * safe_radius) + vec2<f32>(0.5, 0.5);
+            if (any(uv < vec2<f32>(0.0, 0.0)) || any(uv > vec2<f32>(1.0, 1.0))) {
+                continue;
+            }
+            shape = stamp_sample(uv);
+        } else {
+            let dist = distance(center, dab.pos);
+            if (dist > safe_radius) {
+                continue;
+            }
+            shape = radial_falloff(dist / safe_radius, dab.hardness, dab.falloff);
         }
 
-        var coverage = dab.alpha * radial_falloff(dist / safe_radius, dab.hardness, dab.falloff);
+        var coverage = dab.alpha * shape;
         if (dab.mask_gate > 0.5) {
             coverage = coverage * textureLoad(mask_tex, texel, 0).r;
         }
