@@ -583,6 +583,17 @@ impl TabViewer for PanelViewer<'_> {
                     &channels,
                     self.pending_resize,
                 );
+                // The document follows the paint session's active set
+                // (C2-9): the Layers panel, undo and History then act on
+                // that set's own stack.
+                if let Some(paint) = self.paint.as_deref() {
+                    let active = paint.active_set().to_string();
+                    // (The first activation adopts the current stack: see
+                    // `Document::activate_set`.)
+                    if !active.is_empty() && self.doc.active_set() != active {
+                        self.doc.activate_set(&active);
+                    }
+                }
             }
             Panel::Bakes => {
                 let ctx = BakesContext {
@@ -2052,13 +2063,15 @@ impl UmberApp {
         }
         // The stack's live layer ids: the version decision's (§6.3) and
         // the sidecar save's (§6.4) shared orphan filter.
+        // Every set's ids (C2-9): the sidecar's orphan filter must keep the
+        // parked sets' planes, or a multi-set save would prune them.
         let live: std::collections::HashSet<u64> = self
             .state
             .doc
-            .stack
-            .layers
+            .all_sets()
             .iter()
-            .map(|layer| layer.id)
+            .flat_map(|(_, stack)| stack.layers.iter().map(|layer| layer.id))
+            .chain(self.state.doc.stack.layers.iter().map(|layer| layer.id))
             .collect();
         // §6.3's minimal bump [M2]: version 2 iff this save stages a live
         // layer plane, else the default 1 (`ProjectModel::new`'s stamp —
@@ -2069,12 +2082,28 @@ impl UmberApp {
         } else {
             vec![self.state.graph.to_mtlx()]
         };
+        // Every set (C2-9): the active one is the import session's set
+        // (its user channels kept); parked sets carry the default channels
+        // until per-set channel lists land. A single-set document writes
+        // exactly what it did before.
+        let mut texture_sets = vec![texture_set];
+        let mut layer_sets = vec![umber_core::project::TextureSetLayers {
+            texture_set: set_name.clone(),
+            stack: self.state.doc.stack.clone(),
+        }];
+        for (name, stack) in self.state.doc.all_sets() {
+            if name == set_name || name == self.state.doc.active_set() {
+                continue;
+            }
+            texture_sets.push(umber_core::TextureSet::new_default(name));
+            layer_sets.push(umber_core::project::TextureSetLayers {
+                texture_set: name.to_string(),
+                stack: stack.clone(),
+            });
+        }
         let mut model = umber_core::project::ProjectModel::new(
-            vec![texture_set],
-            vec![umber_core::project::TextureSetLayers {
-                texture_set: set_name.clone(),
-                stack: self.state.doc.stack.clone(),
-            }],
+            texture_sets,
+            layer_sets,
             umber_core::project::ProjectSettings {
                 active_texture_set: Some(set_name.clone()),
                 display: self.state.display.clone(),
@@ -2253,7 +2282,17 @@ impl UmberApp {
                     log::error!("texture set {name:?} has no layers entry");
                     return;
                 };
-                self.state.doc.load_stack(entry.stack.clone());
+                // Every set's stack (C2-9): `name` live, the rest parked.
+                let sets: Vec<(String, umber_core::LayerStack)> = model
+                    .layers
+                    .iter()
+                    .map(|l| (l.texture_set.clone(), l.stack.clone()))
+                    .collect();
+                if sets.len() > 1 {
+                    self.state.doc.load_sets(sets, &name);
+                } else {
+                    self.state.doc.load_stack(entry.stack.clone());
+                }
                 // The import session set restores the saved set wholesale
                 // (channels included — user channels from earlier imports
                 // survive the open); unknown-name fallback is the default.
@@ -2295,13 +2334,14 @@ impl UmberApp {
                 // clears every layer-owned plane BEFORE the sidecar load:
                 // layer ids restart at 0 in every LayerStack, so pixel
                 // state keyed by id must not outlive its document.
+                // Every loaded set's ids (C2-9): planes of parked sets load too.
                 let live: std::collections::HashSet<u64> = self
                     .state
                     .doc
-                    .stack
-                    .layers
+                    .all_sets()
                     .iter()
-                    .map(|layer| layer.id)
+                    .flat_map(|(_, stack)| stack.layers.iter().map(|layer| layer.id))
+                    .chain(self.state.doc.stack.layers.iter().map(|layer| layer.id))
                     .collect();
                 // The paint commit's provenance header (§6.1 [B2, M11]):
                 // v2 + `# dormant` lines, or legacy (absent/unreadable
@@ -3398,12 +3438,28 @@ impl eframe::App for UmberApp {
                 (active, paint_state::BASE_COLOR_CHANNEL.to_string()),
                 (active, paint_state::HEIGHT_CHANNEL.to_string()),
             ];
-            let snapshot = build_composite_snapshot(
+            let mut snapshot = build_composite_snapshot(
                 &self.state.doc.stack,
                 &self.state.material_states,
                 self.state.base_visible,
                 displayed,
             );
+            // Per-set rows (C2-9): with more than one set, each tile
+            // composites its own set's stack, and the inactive sets keep
+            // their planes (the retire census reads the union).
+            let sets = self.state.doc.all_sets();
+            if sets.len() > 1 {
+                for (name, stack) in sets {
+                    let rows = build_composite_snapshot(
+                        stack,
+                        &self.state.material_states,
+                        self.state.base_visible,
+                        Vec::new(),
+                    )
+                    .layers;
+                    snapshot.set_layers.insert(name.to_string(), rows);
+                }
+            }
             // Metadata edits surface through the snapshot diff (order,
             // visibility, opacity, blend, mask attach/detach/enable,
             // channel params, Base visibility): changed owners mark
@@ -3639,6 +3695,68 @@ fn main() -> eframe::Result<()> {
 /// report.
 #[cfg(test)]
 mod new_project_tests {
+    #[test]
+    fn two_sets_round_trip_through_the_project_model() {
+        // C2-9 stage 3b's file contract: the save writes one TextureSetLayers
+        // per set (what `write_project_files` assembles from `all_sets`),
+        // and the open's `load_sets` restores both, ids intact and unique.
+        use crate::document::Document;
+        use umber_core::layers::{LayerCommand, LayerKind};
+        let mut doc = Document::default();
+        doc.activate_set("Body");
+        doc.run(LayerCommand::add("body", LayerKind::Paint));
+        doc.activate_set("Hilt");
+        doc.run(LayerCommand::add("hilt", LayerKind::Paint));
+        let sets: Vec<(String, umber_core::LayerStack)> = doc
+            .all_sets()
+            .into_iter()
+            .map(|(n, st)| (n.to_string(), st.clone()))
+            .collect();
+        let model = umber_core::project::ProjectModel::new(
+            sets.iter()
+                .map(|(n, _)| umber_core::TextureSet::new_default(n))
+                .collect(),
+            sets.iter()
+                .map(|(n, st)| umber_core::project::TextureSetLayers {
+                    texture_set: n.clone(),
+                    stack: st.clone(),
+                })
+                .collect(),
+            umber_core::project::ProjectSettings {
+                active_texture_set: Some("Hilt".into()),
+                ..Default::default()
+            },
+        );
+        let dir = std::env::temp_dir().join(format!("umber-two-sets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        umber_core::project::save_to_dir(&model, &dir).expect("saves");
+        let back = umber_core::project::load_from_dir(&dir).expect("opens");
+        let mut reopened = Document::default();
+        reopened.load_sets(
+            back.layers
+                .iter()
+                .map(|l| (l.texture_set.clone(), l.stack.clone()))
+                .collect(),
+            back.settings.active_texture_set.as_deref().unwrap_or(""),
+        );
+        assert_eq!(reopened.active_set(), "Hilt");
+        assert_eq!(reopened.layers()[0].name, "hilt");
+        reopened.activate_set("Body");
+        assert_eq!(reopened.layers()[0].name, "body");
+        let ids: Vec<u64> = reopened
+            .all_sets()
+            .iter()
+            .flat_map(|(_, st)| st.layers.iter().map(|l| l.id))
+            .collect();
+        let unique: std::collections::BTreeSet<u64> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "ids unique across reopened sets: {ids:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_quit_guard_asks_only_for_unsaved_unconfirmed_closes() {
         use super::{quit_decision, QuitDecision::*};
