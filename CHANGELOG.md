@@ -8,6 +8,10 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- File ▸ Open Recent: the last 10 projects, kept across sessions;
+  unreachable folders grey out instead of failing (g5-recent-projects)
+- `umber-gui` gains a general curve editor (`Curve` / `CurveEdit`),
+  committed ahead of its registration (g4-curve-widget)
 - Every numeric field takes typed input: click (or Tab) to type, safe
   arithmetic (`2*512`, `-(1/3)`, the unit suffix), Esc to cancel;
   Ctrl+wheel steps, hover Ctrl+C / Ctrl+V copy and paste a value, and
