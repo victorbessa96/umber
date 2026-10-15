@@ -36,6 +36,6 @@ pub use theme::{
     MOTION_SECS,
 };
 pub use widgets::{
-    Notice, NoticeLevel, Notices, ParamGroup, Ramp, RampEdit, RecentColors, SwatchGrid, Tool,
-    ToolRow, ValueField,
+    ColorPicker, ColorState, Curve, CurveEdit, CurveError, Notice, NoticeLevel, Notices,
+    ParamGroup, Ramp, RampEdit, RecentColors, SwatchGrid, Tool, ToolRow, ValueField,
 };

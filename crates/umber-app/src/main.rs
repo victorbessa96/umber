@@ -119,6 +119,7 @@ mod bake_sources;
 mod bakes_panel;
 mod brush_cursor;
 mod brush_panel;
+mod crash;
 mod display_keys;
 mod display_panel;
 mod document;
@@ -419,6 +420,18 @@ impl TabViewer for PanelViewer<'_> {
                     &badges,
                     &thumbs,
                 );
+                // Duplicate with content (C2-8): the document made the copy's
+                // settings; its pixels come from the source's planes.
+                if let Some((source, copy)) = outcome.duplicated {
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        if let Err(refusal) = paint.copy_owner_planes(
+                            paint_state::PlaneOwner::Layer(source),
+                            paint_state::PlaneOwner::Layer(copy),
+                        ) {
+                            log::warn!("duplicate: plane copy refused: {refusal:?}");
+                        }
+                    }
+                }
                 if let Some(target) = outcome.select {
                     if let Some(paint) = self.paint.as_deref_mut() {
                         paint.set_active_target(target);
@@ -1164,7 +1177,7 @@ impl UmberApp {
             show_gizmo: true,
             #[cfg(feature = "perf")]
             show_perf_hud: false,
-            notices: umber_gui::Notices::new(),
+            notices: pending_crash_notices(),
             palette: palette::Palette::default(),
             prefs: preferences::Preferences::load(preferences::prefs_path().as_deref()),
             recent: recent::recent_path()
@@ -1353,11 +1366,13 @@ impl UmberApp {
             ShellAction::OpenMesh => self.open_mesh(),
             ShellAction::OpenProject => self.open_project(),
             ShellAction::SaveProject => self.save_project(),
+            // One timeline (C2-7): Ctrl+Z steps whichever journal holds the
+            // newest applied edit, a layer op or a stroke.
             ShellAction::Undo => {
-                let _ = self.state.doc.undo();
+                let _ = history_panel::unified_undo(&mut self.state.doc, self.state.paint.as_mut());
             }
             ShellAction::Redo => {
-                let _ = self.state.doc.redo();
+                let _ = history_panel::unified_redo(&mut self.state.doc, self.state.paint.as_mut());
             }
             // Quick mask (§2's P1 row): needs a paint session; I inverts
             // only while the mask is being edited (outside it, nothing).
@@ -3245,7 +3260,32 @@ fn rfd_pick_mesh() -> Option<PathBuf> {
         .pick_file()
 }
 
+/// The notice stack a launch starts with: one sticky notice per crash
+/// report the previous runs left (C2-2), each acknowledged once offered
+/// (renamed `.seen`, kept on disk), so a report is shown exactly once.
+fn pending_crash_notices() -> umber_gui::Notices {
+    let mut notices = umber_gui::Notices::new();
+    let state = gpu_startup::state_dir();
+    for report in crash::pending(&state) {
+        // Untranslated until the catalogs take a crash key.
+        notices.post_sticky(
+            umber_gui::NoticeLevel::Error,
+            format!(
+                "Umber crashed last time. The report is at\n{}\n(it holds no document data; attach it to an issue).",
+                report.display()
+            ),
+        );
+        if let Err(e) = crash::acknowledge(&report) {
+            log::warn!("crash report {} not acknowledged: {e}", report.display());
+        }
+    }
+    notices
+}
+
 fn main() -> eframe::Result<()> {
+    // The crash reporter first (C2-2): every later panic, startup included,
+    // leaves a report under `<state>/crashes/` for the next launch to offer.
+    crash::install(gpu_startup::state_dir());
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("umber — starting (wave-2: paint core)");
     // UI strings: catalogs + locale on this (the UI) thread, before any
