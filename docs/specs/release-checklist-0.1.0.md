@@ -61,6 +61,25 @@ the FBX leg proves the import, not a UV paint on it.]
      shell + PowerShell installers and the sha256 sums.
    - Afterwards, set the version back to `0.1.0` for the real tag.
    - Pushing either tag is Bessa's call. It publishes a GitHub pre-release.
+   - **APPROVED by Bessa 2026-10-15.** It fires after W-C2g's CI is green.
+     The exact steps:
+     1. One commit: `version = "0.1.0-alpha.1"` in the root
+        `[workspace.package]` (all 17 crates inherit it), plus a
+        `<release version="0.1.0-alpha.1" type="development"
+        date="<day>">` entry in BOTH metainfo files
+        (`flatpak/` and `appimage/`: `packaging.yml` diffs them, so they
+        must stay identical). Regenerate `Cargo.lock` on the build host
+        (17 `version = ` lines change). The `examples/` workspace is
+        separate and unpublished, so it stays 0.1.0.
+     2. The wave gate on a clean clone, then push. CI green.
+     3. `dist plan --tag v0.1.0-alpha.1` on the host must announce both
+        packages, as in the dry run.
+     4. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`, then
+        watch `release.yml` + `packaging.yml` (the tag triggers both).
+     5. Record the artifact sizes in the §12 table (installer budget
+        < 150 MB) and download the Windows zip to check its `.sha256`.
+     6. A follow-up commit returns the version to `0.1.0`, whose metainfo
+        entry keeps the alpha's release line as history.
 
 ## The tag shape (drafted, not fired)
 
