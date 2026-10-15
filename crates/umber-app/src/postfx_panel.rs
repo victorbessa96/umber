@@ -188,9 +188,30 @@ pub fn chain_from_carry(carry: &PostFxCarry) -> PostChain {
     chain
 }
 
-/// One effect's param sliders; true when a value changed. Ranges mirror
+/// One labelled numeric row in the house grammar (muted label + a
+/// [`umber_gui::ValueField`]), the same shape the brush panel uses.
+fn field_row<N: egui::emath::Numeric>(
+    ui: &mut Ui,
+    label: &str,
+    field: umber_gui::ValueField<'_, N>,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(umber_gui::muted()));
+        ui.add(field).changed()
+    })
+    .inner
+}
+
+/// One effect's param rows; true when a value changed. Ranges mirror
 /// [`PostEffect::clamped`].
+///
+/// JUDGMENT CALL — DoF focus stays an `egui::Slider` (logarithmic): its
+/// 0.01..=100 range spans four decades and a linear drag-scrub field would
+/// make the near range (where focus lives on a small mesh) unreachable.
+/// `ValueField` has no log mode; adding one is the widget crate's change,
+/// not this panel's. Every other param is linear and migrates.
 fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
+    use umber_gui::ValueField;
     let mut changed = false;
     match effect {
         PostEffect::Dof { focus, aperture } => {
@@ -201,40 +222,56 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
                         .text(i18n::tr("postfx.focus")),
                 )
                 .changed();
-            changed |= ui
-                .add(egui::Slider::new(aperture, 0.0..=1.0).text(i18n::tr("postfx.aperture")))
-                .changed();
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.aperture"),
+                ValueField::new(aperture).range(0.0..=1.0),
+            );
         }
         PostEffect::Bloom {
             threshold,
             intensity,
             radius,
         } => {
-            changed |= ui
-                .add(egui::Slider::new(threshold, 0.0..=4.0).text(i18n::tr("postfx.threshold")))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(intensity, 0.0..=4.0).text(i18n::tr("postfx.intensity")))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(radius, 1..=64).text(i18n::tr("postfx.radius")))
-                .changed();
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.threshold"),
+                ValueField::new(threshold).range(0.0..=4.0).step(0.05),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.intensity"),
+                ValueField::new(intensity).range(0.0..=4.0).step(0.05),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.radius"),
+                ValueField::new(radius).range(1..=64).unit("px"),
+            );
         }
         PostEffect::Vignette { strength, softness } => {
-            changed |= ui
-                .add(egui::Slider::new(strength, 0.0..=1.0).text(i18n::tr("postfx.strength")))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(softness, 0.0..=1.0).text(i18n::tr("postfx.softness")))
-                .changed();
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.strength"),
+                ValueField::new(strength).range(0.0..=1.0),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.softness"),
+                ValueField::new(softness).range(0.0..=1.0),
+            );
         }
         PostEffect::Sharpen { amount, radius } => {
-            changed |= ui
-                .add(egui::Slider::new(amount, 0.0..=4.0).text(i18n::tr("postfx.amount")))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(radius, 1..=8).text(i18n::tr("postfx.radius")))
-                .changed();
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.amount"),
+                ValueField::new(amount).range(0.0..=4.0).step(0.05),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.radius"),
+                ValueField::new(radius).range(1..=8).unit("px"),
+            );
         }
         PostEffect::ToneMap { mode, exposure } => {
             // `from_label` ids are scoped by the row's `push_id`, so two
@@ -248,9 +285,14 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
                             .changed();
                     }
                 });
-            changed |= ui
-                .add(egui::Slider::new(exposure, -4.0..=4.0).text(i18n::tr("postfx.exposure")))
-                .changed();
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.exposure"),
+                ValueField::new(exposure)
+                    .range(-4.0..=4.0)
+                    .step(0.1)
+                    .unit("EV"),
+            );
         }
     }
     changed
