@@ -84,7 +84,22 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
+        if: runner.os != 'Windows'
         run: cargo test --workspace
+
+      # Windows runs the GPU tests on WARP (software D3D12), ~30x slower than
+      # Linux lavapipe: three tests alone took ~24 of 41 minutes (run
+      # 38797679021: pool_drag_session 13.8 min, the two adjacent-margin
+      # CLI bakes 10.3 min). Linux runs all three on every push; Windows
+      # skips only those three, so every other GPU test still exercises
+      # the D3D12 path. `--skip` matches test names in every binary.
+      - name: Tests (Windows, minus the three WARP-slow GPU tests)
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --workspace --
+          --skip pool_drag_session
+          --skip adjacent_margin_bakes_every_map_and_differs_from_extend
+          --skip agent_bake_margin_adjacent_differs_and_absent_is_extend
         # The GPU golden family (`renderer::tests::gpu`, 173 tests incl.
         # the height→normal goldens) is feature-gated behind `gpu`
         # (pollster device bootstrap); without this leg the workspace
