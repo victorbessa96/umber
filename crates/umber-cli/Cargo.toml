@@ -29,6 +29,9 @@ pollster = { workspace = true }
 emath = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# paint_snapshot's content hash (the same hash the paint sidecar's
+# clean-skip uses).
+blake3 = { workspace = true }
 
 [features]
 default = ["gpu"]

@@ -111,6 +111,27 @@ exactly as in the shell.
 7. a session that never paints: `project_save` still reports `painted: 0`
    and creates no `paint/` (no GPU device requested).
 
+## The snapshot arm (2026-10-14, ROADMAP `wave-harness-script`)
+
+`paint_snapshot { out, layer?, composite?, tile?, channel? }` writes the
+WHOLE selected plane to a PNG at `out` and replies with its `blake3` (plus
+`exists`, `composite`, `tile`, `channel`, `width`, `height`, `out`). Plane
+selection is `paint_read`'s exactly, so the two share one implementation
+(`Session::read_selected_plane`). A never-written plane writes no file and
+replies `exists: false` — that is a never-painted LAYER: Base is allocated
+when the paint half initializes, so it always exists (all zero before a
+stroke). The PNG is raw (linear transfer, premultiplied as
+stored), so the file decodes to exactly the hashed bytes.
+
+This is the harness's `--script` arm in protocol form: a script is just a
+JSONL file of steps piped into `umber-cli agent`, with a
+`paint_snapshot` after each step it wants to pin. **Pins are relational,
+not golden hex** — dab-edge coverage differs across lavapipe, WARP and
+hardware, so a hard-coded hash is platform-flaky. The test pins: file ==
+hashed bytes, same state → same hash, a stroke changes it, undo restores
+it byte-for-byte. A per-platform golden set (one hash file per adapter
+class) is the follow-up if cross-machine pins are needed.
+
 ## As written — deltas from the draft
 
 - `paint_read` gained `composite` (absent → composite iff `layer` is

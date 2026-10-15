@@ -133,6 +133,7 @@ enum AgentStep {
     Redo(NoFields),
     PaintStroke(PaintStrokeStep),
     PaintRead(PaintReadStep),
+    PaintSnapshot(PaintSnapshotStep),
     PaintUndo(NoFields),
     PaintRedo(NoFields),
     Version(NoFields),
@@ -260,6 +261,35 @@ struct PaintReadStep {
     #[serde(default = "default_paint_channel")]
     channel: String,
     texels: Vec<[u32; 2]>,
+}
+
+/// `paint_snapshot` — the WHOLE plane (or the stack composite) to a PNG
+/// at `out`, plus its blake3 content hash: the snapshot arm of a scripted
+/// session (ROADMAP `wave-harness-script`). A script paints through the
+/// wire steps, then snapshots after each step and compares the hash to a
+/// golden — visual regression over driven state, without 64 MiB of texels
+/// on a JSONL line. The plane selection is `paint_read`'s exactly
+/// (`layer` / `composite`, same defaults, same typed refusals). The PNG is
+/// written raw (linear transfer): the hash covers the plane's own bytes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaintSnapshotStep {
+    out: PathBuf,
+    #[serde(default)]
+    layer: Option<u64>,
+    #[serde(default)]
+    composite: Option<bool>,
+    #[serde(default = "default_paint_tile")]
+    tile: u16,
+    #[serde(default = "default_paint_channel")]
+    channel: String,
+}
+
+/// One plane's readback: `width`×`height` RGBA8, row-major.
+struct PlaneImage {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
 }
 
 /// The `paint_read` tile when absent: the first UDIM tile.
@@ -942,6 +972,7 @@ impl Session {
             AgentStep::Redo(NoFields {}) => self.project_redo(),
             AgentStep::PaintStroke(s) => self.paint_stroke(s),
             AgentStep::PaintRead(s) => self.paint_read(s),
+            AgentStep::PaintSnapshot(s) => self.paint_snapshot(s),
             AgentStep::PaintUndo(NoFields {}) => self.paint_history(true),
             AgentStep::PaintRedo(NoFields {}) => self.paint_history(false),
             AgentStep::Quit(NoFields {}) => unreachable!("quit is answered by Session::reply"),
@@ -1461,25 +1492,28 @@ impl Session {
         }))
     }
 
-    /// `paint_read`: samples texels from one plane or from the composite
-    /// (see [`PaintReadStep`]). Out-of-range texels are a typed error
-    /// naming the plane's size; a plane nothing ever wrote reads as
-    /// absent (`exists: false`, no texels) — never invented zeros.
-    fn paint_read(&mut self, s: PaintReadStep) -> Result<Fields> {
-        if s.texels.is_empty() || s.texels.len() > PAINT_READ_MAX_TEXELS {
-            let n = s.texels.len();
+    /// The plane selection `paint_read` and `paint_snapshot` share: one
+    /// layer's plane (`layer`), Base (`layer` absent, `composite: false`),
+    /// or the stack composite (`composite: true`, the default when `layer`
+    /// is absent) — flushed first so a wire edit since the last step
+    /// re-composites, never a stale cache. Returns whether it composited,
+    /// and the readback (`None` = a plane nothing ever wrote).
+    fn read_selected_plane(
+        &mut self,
+        step: &str,
+        layer: Option<u64>,
+        composite: Option<bool>,
+        tile: u16,
+        channel: &str,
+    ) -> Result<(bool, Option<PlaneImage>)> {
+        let composite = composite.unwrap_or(layer.is_none());
+        if composite && layer.is_some() {
             return Err(anyhow::anyhow!(
-                "paint_read: texels must hold 1..={PAINT_READ_MAX_TEXELS} [x, y] pairs (got {n})"
-            ));
-        }
-        let composite = s.composite.unwrap_or(s.layer.is_none());
-        if composite && s.layer.is_some() {
-            return Err(anyhow::anyhow!(
-                "paint_read: `composite: true` reads the whole stack — drop `layer`"
+                "{step}: `composite: true` reads the whole stack — drop `layer`"
             ));
         }
         let held = self.project_mut()?;
-        if let Some(id) = s.layer {
+        if let Some(id) = layer {
             if active_stack(held)?.layer(id).is_none() {
                 return Err(anyhow::anyhow!("no layer {id} in the active set"));
             }
@@ -1493,11 +1527,69 @@ impl Session {
         }
         let paint = held.paint_mut()?;
         let image = if composite {
-            paint.read_composite(s.tile, &s.channel)
+            paint.read_composite(tile, channel)
         } else {
-            let owner = s.layer.map_or(PlaneOwner::Base, PlaneOwner::Layer);
-            paint.read_plane(owner, s.tile, &s.channel)
+            let owner = layer.map_or(PlaneOwner::Base, PlaneOwner::Layer);
+            paint.read_plane(owner, tile, channel)
         };
+        // Moved into a CLI-local shape: the engine's buffer type lives in
+        // umber-brush, which this crate does not depend on directly.
+        Ok((
+            composite,
+            image.map(|b| PlaneImage {
+                width: b.width,
+                height: b.height,
+                data: b.data,
+            }),
+        ))
+    }
+
+    /// `paint_snapshot`: the selected plane, whole, to a PNG at `out` +
+    /// its blake3 hash (see [`PaintSnapshotStep`]). A never-written plane
+    /// writes nothing and reports `exists: false`.
+    fn paint_snapshot(&mut self, s: PaintSnapshotStep) -> Result<Fields> {
+        let (composite, image) =
+            self.read_selected_plane("paint_snapshot", s.layer, s.composite, s.tile, &s.channel)?;
+        let Some(image) = image else {
+            return fields(serde_json::json!({
+                "exists": false,
+                "tile": s.tile,
+                "channel": s.channel,
+            }));
+        };
+        umber_export::png::write_png(
+            &s.out,
+            image.width,
+            image.height,
+            &image.data,
+            umber_export::png::Transfer::Linear,
+        )
+        .map_err(|e| anyhow::anyhow!("paint_snapshot: writing {}: {e}", s.out.display()))?;
+        fields(serde_json::json!({
+            "exists": true,
+            "composite": composite,
+            "tile": s.tile,
+            "channel": s.channel,
+            "width": image.width,
+            "height": image.height,
+            "out": s.out,
+            "blake3": blake3::hash(&image.data).to_hex().to_string(),
+        }))
+    }
+
+    /// `paint_read`: samples texels from one plane or from the composite
+    /// (see [`PaintReadStep`]). Out-of-range texels are a typed error
+    /// naming the plane's size; a plane nothing ever wrote reads as
+    /// absent (`exists: false`, no texels) — never invented zeros.
+    fn paint_read(&mut self, s: PaintReadStep) -> Result<Fields> {
+        if s.texels.is_empty() || s.texels.len() > PAINT_READ_MAX_TEXELS {
+            let n = s.texels.len();
+            return Err(anyhow::anyhow!(
+                "paint_read: texels must hold 1..={PAINT_READ_MAX_TEXELS} [x, y] pairs (got {n})"
+            ));
+        }
+        let (composite, image) =
+            self.read_selected_plane("paint_read", s.layer, s.composite, s.tile, &s.channel)?;
         let Some(image) = image else {
             return fields(serde_json::json!({
                 "exists": false,

@@ -447,3 +447,128 @@ fn a_session_that_never_paints_writes_no_sidecar() {
     assert_ok(&agent.call(&json!("quit")), "quit");
     assert!(agent.wait_exit().success());
 }
+
+/// The snapshot arm (ROADMAP `wave-harness-script`): `paint_snapshot`
+/// writes the WHOLE plane to a PNG and returns its blake3, so a script can
+/// pin a driven state without carrying texels on the wire. The pins here
+/// are RELATIONAL, not golden hex: dab-edge coverage is implementation-
+/// defined (lavapipe / WARP / hardware differ — the module's exactness
+/// rule), so a hard-coded hash would be platform-flaky. What must hold on
+/// every platform: the file decodes to exactly the hashed bytes, the hash
+/// is deterministic (same state → same hash), it CHANGES with a stroke, and
+/// undo returns it to the pre-stroke hash byte-for-byte.
+#[test]
+fn snapshot_hash_tracks_strokes_and_undo_exactly() {
+    let dir = write_fixture_project("snap");
+    let out = scratch("snap-out");
+    let mut agent = Agent::spawn();
+    assert_ok(
+        &agent.call(&json!({ "project_open": { "dir": dir } })),
+        "project_open",
+    );
+
+    // A layer plane nothing ever wrote: nothing to snapshot, no file.
+    // (Base is allocated when paint initializes, so it always exists — the
+    // absent case is a never-painted LAYER.)
+    let png = |name: &str| out.join(name);
+    let none = agent.call(&json!({ "paint_snapshot": { "out": png("none.png"), "layer": 0 } }));
+    if is_gpu_skip(&none) {
+        eprintln!("skipping: {none}");
+        return;
+    }
+    assert_ok(&none, "paint_snapshot");
+    assert_eq!(none["exists"], false, "{none}");
+    assert!(
+        !png("none.png").exists(),
+        "a never-written plane writes no file"
+    );
+
+    let snap = |agent: &mut Agent, name: &str| -> String {
+        let r = agent.call(&json!({ "paint_snapshot": { "out": png(name), "composite": false } }));
+        assert_ok(&r, "paint_snapshot");
+        assert_eq!(r["exists"], true, "{r}");
+        assert_eq!(
+            (r["width"].clone(), r["height"].clone()),
+            (json!(512), json!(512))
+        );
+        let hash = r["blake3"].as_str().expect("blake3 hex").to_string();
+        assert_eq!(hash.len(), 64, "{r}");
+        // The written PNG decodes to exactly the hashed bytes. Through the
+        // paint sidecar's own decoder: `read_png_rgba8` flips rows into GPU
+        // order (the env-map contract), `decode_paint_png` flips them back.
+        let (w, h, bytes) =
+            umber_paint::persistence::decode_paint_png(&png(name)).expect("snapshot decodes");
+        assert_eq!((w, h), (512, 512));
+        assert_eq!(
+            blake3::hash(&bytes).to_hex().to_string(),
+            hash,
+            "file == hashed bytes"
+        );
+        hash
+    };
+
+    // Base before any stroke: allocated, all zero — the undo target.
+    let blank = snap(&mut agent, "blank.png");
+
+    let stroke = agent.call(&green_stroke(None));
+    if is_gpu_skip(&stroke) {
+        eprintln!("skipping: {stroke}");
+        return;
+    }
+    assert_ok(&stroke, "paint_stroke");
+
+    let painted = snap(&mut agent, "painted.png");
+    // Deterministic: the same state hashes the same.
+    assert_eq!(snap(&mut agent, "painted-again.png"), painted);
+
+    // A second stroke changes the plane, so it changes the hash.
+    // The same 9-point shape as `green_stroke`, moved to a disjoint region
+    // (UV ~0.2), so it cannot land on texels the first stroke already set.
+    let mut second = green_stroke(None);
+    let points: Vec<[f32; 2]> = (0..=8)
+        .map(|i| {
+            let t = i as f32 * 0.005;
+            [0.18 + t, 0.18 + t]
+        })
+        .collect();
+    second["paint_stroke"]["points"] = json!(points);
+    let r2 = agent.call(&second);
+    assert_ok(&r2, "paint_stroke");
+    assert_eq!(r2["tiles"], json!([1001]), "the second stroke wrote: {r2}");
+    let two = snap(&mut agent, "two.png");
+    assert_ne!(two, painted, "a stroke must change the snapshot");
+
+    // Undo returns to the one-stroke state byte-for-byte.
+    assert_ok(&agent.call(&json!("paint_undo")), "paint_undo");
+    assert_eq!(
+        snap(&mut agent, "undone.png"),
+        painted,
+        "undo is byte-exact"
+    );
+    assert_ok(&agent.call(&json!("paint_undo")), "paint_undo");
+    assert_eq!(
+        snap(&mut agent, "blank-again.png"),
+        blank,
+        "undoing every stroke restores the blank plane byte-for-byte"
+    );
+    assert_ne!(blank, painted, "the first stroke changed the plane");
+
+    // The composite snapshot exists too, and `composite: true` + `layer`
+    // is paint_read's typed refusal, shared.
+    let comp = agent.call(&json!({ "paint_snapshot": { "out": png("comp.png") } }));
+    assert_ok(&comp, "paint_snapshot");
+    assert_eq!(comp["composite"], true, "{comp}");
+    let both = agent
+        .call(&json!({ "paint_snapshot": { "out": png("x.png"), "composite": true, "layer": 0 } }));
+    assert_eq!(both["ok"], false, "{both}");
+    assert!(
+        both["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("drop `layer`"),
+        "{both}"
+    );
+
+    assert_ok(&agent.call(&json!("quit")), "quit");
+    assert!(agent.wait_exit().success());
+}
