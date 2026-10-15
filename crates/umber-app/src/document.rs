@@ -998,11 +998,13 @@ pub fn list_smart_masks(
 /// Composes a smart mask into a `width × height` grayscale plane (C2-10),
 /// texel by texel through [`umber_core::smart::SmartMask::compose_scalar`].
 /// `map(map_name)` supplies each generator's baked map as `(w, h, rgba8)`
-/// with LINEAR values; its red channel is the stage value. Anchors (layer
-/// channels) are not wired: they read as fully open (1.0). Returns the
-/// plane plus the generator map names that were missing or the wrong size
-/// (those stages read 0.5, a neutral mid value, rather than failing the
-/// whole mask).
+/// with LINEAR values; its red channel is the stage value. `anchor(layer,
+/// channel)` supplies an Anchor stage's layer-channel composite the same
+/// way (layer = the template-local layer NAME); a missing anchor reads
+/// fully open (1.0), the mask slot's no-op. Returns the plane plus the
+/// sources that were missing or the wrong size: generator map names, and
+/// anchors as `layer/channel` (generator stages read 0.5, a neutral mid
+/// value, rather than failing the whole mask).
 ///
 /// # Errors
 ///
@@ -1012,23 +1014,36 @@ pub fn compose_smart_mask(
     width: u32,
     height: u32,
     mut map: impl FnMut(&str) -> Option<(u32, u32, Vec<u8>)>,
+    mut anchor: impl FnMut(&str, &str) -> Option<(u32, u32, Vec<u8>)>,
 ) -> Result<(Vec<u8>, Vec<String>), umber_core::smart::SmartError> {
     use umber_core::smart::MaskSource;
     let texels = width as usize * height as usize;
+    let fits = |(w, h, b): (u32, u32, Vec<u8>)| -> Option<Vec<u8>> {
+        (w == width && h == height && b.len() == texels * 4).then_some(b)
+    };
     let mut maps: std::collections::BTreeMap<String, Option<Vec<u8>>> = Default::default();
+    let mut anchors: std::collections::BTreeMap<(String, String), Option<Vec<u8>>> =
+        Default::default();
     let mut missing = Vec::new();
     for stage in &mask.ops {
-        if let MaskSource::Generator { map_name, .. } = &stage.source {
-            if maps.contains_key(map_name) {
-                continue;
+        match &stage.source {
+            MaskSource::Generator { map_name, .. } if !maps.contains_key(map_name) => {
+                let bytes = map(map_name).and_then(fits);
+                if bytes.is_none() {
+                    missing.push(map_name.clone());
+                }
+                maps.insert(map_name.clone(), bytes);
             }
-            let bytes = map(map_name)
-                .filter(|(w, h, b)| *w == width && *h == height && b.len() == texels * 4)
-                .map(|(_, _, b)| b);
-            if bytes.is_none() {
-                missing.push(map_name.clone());
+            MaskSource::Anchor { layer, channel }
+                if !anchors.contains_key(&(layer.clone(), channel.clone())) =>
+            {
+                let bytes = anchor(layer, channel).and_then(fits);
+                if bytes.is_none() {
+                    missing.push(format!("{layer}/{channel}"));
+                }
+                anchors.insert((layer.clone(), channel.clone()), bytes);
             }
-            maps.insert(map_name.clone(), bytes);
+            _ => {}
         }
     }
     let mut plane = vec![0u8; texels];
@@ -1036,7 +1051,12 @@ pub fn compose_smart_mask(
         let lookup = |source: &MaskSource| -> f32 {
             match source {
                 MaskSource::Constant { value } => *value,
-                MaskSource::Anchor { .. } => 1.0,
+                MaskSource::Anchor { layer, channel } => {
+                    match anchors.get(&(layer.clone(), channel.clone())) {
+                        Some(Some(bytes)) => f32::from(bytes[texel * 4]) / 255.0,
+                        _ => 1.0,
+                    }
+                }
                 MaskSource::Generator { map_name, .. } => match maps.get(map_name) {
                     Some(Some(bytes)) => f32::from(bytes[texel * 4]) / 255.0,
                     _ => 0.5,
@@ -1085,13 +1105,21 @@ pub fn apply_smart_material(
     ids
 }
 
+/// The `noise_perlin` smart generator's pattern frequency (fill-UV units):
+/// a grunge-scale breakup, a few blotches per UV tile.
+pub const SMART_NOISE_SCALE: f32 = 8.0;
+/// The `noise_perlin` smart generator's fBm octaves.
+pub const SMART_NOISE_OCTAVES: u32 = 4;
+
 /// Binds a just-applied smart material's mesh-map generators (C2-10):
 /// each fill template whose generator is `mesh_map_generator` gets a
 /// `GraphImage` fill of `map(map_name)` (`(w, h, rgba8)`), recorded as an
 /// undoable `set_fill`. The image is a SNAPSHOT of the bake at apply time;
 /// re-applying after a rebake picks up the new one. Returns the map names
 /// that could not be resolved (never baked), for the status line; those
-/// fills keep their default solid source.
+/// fills keep their default solid source. A `noise_perlin` generator needs
+/// no bake: it becomes the fill's value-noise source
+/// ([`SMART_NOISE_SCALE`], [`SMART_NOISE_OCTAVES`]).
 pub fn bind_smart_generators(
     doc: &mut Document,
     material: &umber_core::smart::SmartMaterial,
@@ -1106,6 +1134,21 @@ pub fn bind_smart_generators(
         let Some(generator) = &template.generator else {
             continue;
         };
+        // Self-contained noise (no bake input) is the fill's own value-noise
+        // fBm. The seed comes from the layer id, so two applications differ
+        // while one layer is stable across reloads.
+        if generator.node_def == "noise_perlin" {
+            let params = umber_mesh::FillParams {
+                source: umber_mesh::FillSource::Noise {
+                    seed: (*id as u32).wrapping_mul(0x9E37_79B9),
+                    scale: SMART_NOISE_SCALE,
+                    octaves: SMART_NOISE_OCTAVES,
+                },
+                ..Default::default()
+            };
+            doc.run(LayerCommand::set_fill(*id, params));
+            continue;
+        }
         if generator.node_def != "mesh_map_generator" || generator.map_name.is_empty() {
             continue;
         }
@@ -1574,6 +1617,36 @@ mod tests {
     }
 
     #[test]
+    fn an_anchor_stage_reads_the_named_layer_channel() {
+        // A one-stage mask over a layer's height: texel 0 low, texel 1 high.
+        let mask = umber_core::smart::SmartMask::from_json(
+            r#"{ "name": "Anchored", "ops": [ { "source": { "type": "anchor",
+                 "layer": "Dirt", "channel": "height" }, "op": "multiply" } ] }"#,
+        )
+        .expect("parses");
+        let mut asked = Vec::new();
+        let (plane, missing) = compose_smart_mask(
+            &mask,
+            2,
+            1,
+            |_| None,
+            |layer, channel| {
+                asked.push(format!("{layer}/{channel}"));
+                Some((2, 1, vec![51, 0, 0, 255, 204, 0, 0, 255]))
+            },
+        )
+        .expect("composes");
+        assert_eq!(asked, ["Dirt/height"], "asked once, by name");
+        assert!(missing.is_empty());
+        assert_eq!(plane, vec![51, 204]);
+        // A missing anchor reads fully open and is reported.
+        let (plane, missing) =
+            compose_smart_mask(&mask, 2, 1, |_| None, |_, _| None).expect("composes");
+        assert_eq!(plane, vec![255, 255]);
+        assert_eq!(missing, ["Dirt/height"]);
+    }
+
+    #[test]
     fn the_shipped_edge_wear_mask_composes_from_curvature() {
         let masks = list_smart_masks(&smart_dirs());
         let (_, wear) = masks
@@ -1583,21 +1656,61 @@ mod tests {
         // Edge wear = levels(0.4..0.9) of (curvature + 0.35): a flat texel
         // (curvature 0) is closed, a sharp one (curvature 1) fully open.
         let curvature: Vec<u8> = [0u8, 0, 0, 255, 255, 255, 255, 255].to_vec();
-        let (plane, missing) = compose_smart_mask(wear, 2, 1, |name| {
-            (name == "curvature").then(|| (2, 1, curvature.clone()))
-        })
+        let (plane, missing) = compose_smart_mask(
+            wear,
+            2,
+            1,
+            |name| (name == "curvature").then(|| (2, 1, curvature.clone())),
+            |_, _| None,
+        )
         .expect("composes");
         assert!(missing.is_empty());
         assert_eq!(plane, vec![0, 255]);
         // A missing map reads neutral and is reported, never a failure.
-        let (plane, missing) = compose_smart_mask(wear, 2, 1, |_| None).expect("composes");
+        let (plane, missing) =
+            compose_smart_mask(wear, 2, 1, |_| None, |_, _| None).expect("composes");
         assert_eq!(missing, vec!["curvature".to_string()]);
         // (0.5 + 0.35 = 0.85 → levels 0.4..0.9 → 0.9 → 229.5, f32-rounded)
         assert!(plane.iter().all(|v| (229..=230).contains(v)), "{plane:?}");
         // A wrong-size map counts as missing too.
         let (_, missing) =
-            compose_smart_mask(wear, 2, 1, |_| Some((4, 4, vec![0; 64]))).expect("composes");
+            compose_smart_mask(wear, 2, 1, |_| Some((4, 4, vec![0; 64])), |_, _| None)
+                .expect("composes");
         assert_eq!(missing, vec!["curvature".to_string()]);
+    }
+
+    #[test]
+    fn a_noise_generator_binds_without_any_bake() {
+        let list = list_smart_materials(&smart_dirs());
+        let (_, metal) = list
+            .iter()
+            .find(|(n, _)| n == "Worn metal")
+            .expect("shipped");
+        let noisy: Vec<&str> = metal
+            .layers
+            .iter()
+            .filter(|l| {
+                l.generator
+                    .as_ref()
+                    .is_some_and(|g| g.node_def == "noise_perlin")
+            })
+            .map(|l| l.name.as_str())
+            .collect();
+        assert!(!noisy.is_empty(), "Worn metal ships a noise_perlin layer");
+        let mut doc = Document::default();
+        let ids = apply_smart_material(&mut doc, metal);
+        // No bake at all: the noise layer still binds.
+        bind_smart_generators(&mut doc, metal, &ids, |_| None);
+        for name in noisy {
+            let layer = doc.stack.layers.iter().find(|l| l.name == name).unwrap();
+            match layer.fill.as_ref().map(|f| &f.source) {
+                Some(umber_mesh::FillSource::Noise { scale, octaves, .. }) => {
+                    assert_eq!(*scale, SMART_NOISE_SCALE);
+                    assert_eq!(*octaves, SMART_NOISE_OCTAVES);
+                }
+                other => panic!("{name} binds to noise: {other:?}"),
+            }
+        }
     }
 
     #[test]

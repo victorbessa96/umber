@@ -93,7 +93,10 @@ it); bake it and apply again.
 press ＋ on a mask: it attaches a mask to that layer and fills it from the
 preset, e.g. **Edge wear** opens the mask where the baked curvature is
 sharp. It is ordinary mask paint afterwards, so brush over it to touch it
-up.
+up. A mask stage can also read another layer's channel by that layer's
+name (e.g. a "Dirt" layer's height). If no layer has that name, the stage
+leaves the mask open. Smart materials whose fills use **noise** need no
+bake: the fill gets its own noise pattern.
 
 **Several materials on one mesh** become texture sets, each with its own
 layer stack. The **Texture Sets** panel picks the active one, and the

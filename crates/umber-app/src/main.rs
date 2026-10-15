@@ -457,31 +457,74 @@ impl TabViewer for PanelViewer<'_> {
                             .into_iter()
                             .filter(|t| paint.set_of_tile(*t) == active_set)
                             .collect();
+                        // Anchor stages resolve by layer NAME in the active
+                        // set's stack (the preset's template-local names).
+                        let by_name: std::collections::HashMap<String, u64> = self
+                            .doc
+                            .layers()
+                            .iter()
+                            .map(|l| (l.name.clone(), l.id))
+                            .collect();
                         for tile in tiles {
                             let (w, h) = paint.tile_size(tile);
-                            let composed = document::compose_smart_mask(mask, w, h, |name| {
-                                let path = self.bakes.latest_map(name)?;
-                                let (mw, mh, mut rgba) =
-                                    umber_export::png::read_png_rgba8(path).ok()?;
-                                let linear = matches!(
-                                    name.to_ascii_lowercase().as_str(),
-                                    "normal"
-                                        | "normal_base"
-                                        | "world_normal"
-                                        | "world_space_normal"
-                                        | "bent_normal"
-                                        | "height"
-                                );
-                                if !linear {
-                                    paint_state::curvature_png_to_linear(&mut rgba);
+                            // Anchors read the named layer's OWN plane
+                            // (premultiplied linear bytes); read up front so
+                            // the compose closures borrow nothing mutably.
+                            let mut anchor_reads: AnchorReads = std::collections::HashMap::new();
+                            for stage in &mask.ops {
+                                if let umber_core::smart::MaskSource::Anchor { layer, channel } =
+                                    &stage.source
+                                {
+                                    let key = (layer.clone(), channel.clone());
+                                    if anchor_reads.contains_key(&key) {
+                                        continue;
+                                    }
+                                    let read = by_name.get(layer).and_then(|id| {
+                                        paint
+                                            .read_plane(
+                                                paint_state::PlaneOwner::Layer(*id),
+                                                tile,
+                                                channel,
+                                            )
+                                            .map(|b| (b.width, b.height, b.data))
+                                    });
+                                    anchor_reads.insert(key, read);
                                 }
-                                Some((mw, mh, rgba))
-                            });
+                            }
+                            let composed = document::compose_smart_mask(
+                                mask,
+                                w,
+                                h,
+                                |name| {
+                                    let path = self.bakes.latest_map(name)?;
+                                    let (mw, mh, mut rgba) =
+                                        umber_export::png::read_png_rgba8(path).ok()?;
+                                    let linear = matches!(
+                                        name.to_ascii_lowercase().as_str(),
+                                        "normal"
+                                            | "normal_base"
+                                            | "world_normal"
+                                            | "world_space_normal"
+                                            | "bent_normal"
+                                            | "height"
+                                    );
+                                    if !linear {
+                                        paint_state::curvature_png_to_linear(&mut rgba);
+                                    }
+                                    Some((mw, mh, rgba))
+                                },
+                                |layer, channel| {
+                                    anchor_reads
+                                        .get(&(layer.to_string(), channel.to_string()))
+                                        .cloned()
+                                        .flatten()
+                                },
+                            );
                             match composed {
                                 Ok((plane, missing)) => {
                                     if !missing.is_empty() {
                                         log::info!(
-                                            "smart mask '{}': {} not baked at {w}x{h}; those stages read mid-grey",
+                                            "smart mask '{}': {} missing at {w}x{h} (unbaked maps read mid-grey, missing layers open)",
                                             mask.name,
                                             missing.join(", ")
                                         );
@@ -1102,6 +1145,10 @@ impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
         }
     }
 }
+
+/// A smart mask's anchor stages, read once per tile: `(layer name,
+/// channel)` → the layer plane's `(w, h, rgba8)`, `None` when absent.
+type AnchorReads = std::collections::HashMap<(String, String), Option<(u32, u32, Vec<u8>)>>;
 
 /// The eframe app.
 pub struct UmberApp {
