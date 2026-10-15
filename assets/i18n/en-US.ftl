@@ -794,3 +794,10 @@ viewkeys =
     .toast-unlit = Viewing unlit
     .toast-channel = Channel:
     .toast-map = Mesh map:
+
+## Property menu (GUI plan g4-property-context-menu)
+
+propmenu =
+    .reset = Reset to Default
+    .copy = Copy Value
+    .paste = Paste Value

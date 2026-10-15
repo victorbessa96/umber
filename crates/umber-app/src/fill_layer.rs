@@ -1016,14 +1016,18 @@ fn projection_rows(
             if field_row(
                 ui,
                 &tr("fill.sharpness"),
-                umber_gui::ValueField::new(sharpness).range(1.0..=8.0),
+                umber_gui::ValueField::new(sharpness)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1.0..=8.0),
             ) {
                 *changed = true;
             }
             if field_row(
                 ui,
                 &tr("fill.scale"),
-                umber_gui::ValueField::new(scale).range(0.1..=8.0),
+                umber_gui::ValueField::new(scale)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.1..=8.0),
             ) {
                 *changed = true;
             }
@@ -1127,7 +1131,9 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
             if field_row(
                 ui,
                 &tr("fill.alpha"),
-                umber_gui::ValueField::new(&mut color[3]).range(0.0..=1.0),
+                umber_gui::ValueField::new(&mut color[3])
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             ) {
                 *changed = true;
             }
@@ -1148,7 +1154,9 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
             if field_row(
                 ui,
                 &tr("fill.angle"),
-                umber_gui::ValueField::new(angle).range(0.0..=std::f32::consts::TAU),
+                umber_gui::ValueField::new(angle)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=std::f32::consts::TAU),
             ) {
                 *changed = true;
             }
@@ -1167,14 +1175,18 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
             if field_row(
                 ui,
                 &tr("fill.scale"),
-                umber_gui::ValueField::new(scale).range(0.1..=16.0),
+                umber_gui::ValueField::new(scale)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.1..=16.0),
             ) {
                 *changed = true;
             }
             if field_row(
                 ui,
                 &tr("fill.octaves"),
-                umber_gui::ValueField::new(octaves).range(1..=8),
+                umber_gui::ValueField::new(octaves)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1..=8),
             ) {
                 *changed = true;
             }

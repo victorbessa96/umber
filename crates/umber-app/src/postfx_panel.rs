@@ -217,6 +217,7 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
                 ui,
                 &i18n::tr("postfx.focus"),
                 ValueField::new(focus)
+                    .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.01..=100.0)
                     .logarithmic(true)
                     .step(0.0)
@@ -225,7 +226,9 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.aperture"),
-                ValueField::new(aperture).range(0.0..=1.0),
+                ValueField::new(aperture)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             );
         }
         PostEffect::Bloom {
@@ -236,41 +239,60 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.threshold"),
-                ValueField::new(threshold).range(0.0..=4.0).step(0.05),
+                ValueField::new(threshold)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=4.0)
+                    .step(0.05),
             );
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.intensity"),
-                ValueField::new(intensity).range(0.0..=4.0).step(0.05),
+                ValueField::new(intensity)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=4.0)
+                    .step(0.05),
             );
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.radius"),
-                ValueField::new(radius).range(1..=64).unit("px"),
+                ValueField::new(radius)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1..=64)
+                    .unit("px"),
             );
         }
         PostEffect::Vignette { strength, softness } => {
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.strength"),
-                ValueField::new(strength).range(0.0..=1.0),
+                ValueField::new(strength)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             );
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.softness"),
-                ValueField::new(softness).range(0.0..=1.0),
+                ValueField::new(softness)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             );
         }
         PostEffect::Sharpen { amount, radius } => {
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.amount"),
-                ValueField::new(amount).range(0.0..=4.0).step(0.05),
+                ValueField::new(amount)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=4.0)
+                    .step(0.05),
             );
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.radius"),
-                ValueField::new(radius).range(1..=8).unit("px"),
+                ValueField::new(radius)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1..=8)
+                    .unit("px"),
             );
         }
         PostEffect::ToneMap { mode, exposure } => {
@@ -289,6 +311,7 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
                 ui,
                 &i18n::tr("postfx.exposure"),
                 ValueField::new(exposure)
+                    .context_menu(crate::i18n::prop_menu_labels())
                     .range(-4.0..=4.0)
                     .step(0.1)
                     .unit("EV"),

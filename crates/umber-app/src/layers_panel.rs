@@ -402,7 +402,11 @@ fn channel_rows(
                 egui::RichText::new(tr("layers.material-channel-opacity"))
                     .color(umber_gui::muted()),
             );
-            ui.add(umber_gui::ValueField::new(&mut next_opacity).range(0.0..=1.0));
+            ui.add(
+                umber_gui::ValueField::new(&mut next_opacity)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
         });
         if next_enabled != enabled || next_blend != blend || next_opacity != opacity {
             let mut next = params.clone();

@@ -414,14 +414,18 @@ pub fn path_tool_rows(
             if field_row(
                 ui,
                 &tr("brush.smudge-strength"),
-                umber_gui::ValueField::new(&mut params.strength).range(0.0..=1.0),
+                umber_gui::ValueField::new(&mut params.strength)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             ) {
                 tool.smudge = params;
             }
             if field_row(
                 ui,
                 &tr("brush.smudge-smear"),
-                umber_gui::ValueField::new(&mut params.smear).range(0.0..=1.0),
+                umber_gui::ValueField::new(&mut params.smear)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             ) {
                 tool.smudge = params;
             }
@@ -457,6 +461,7 @@ pub fn path_tool_rows(
                 ui,
                 &tr("path.size"),
                 umber_gui::ValueField::new(&mut size)
+                    .context_menu(crate::i18n::prop_menu_labels())
                     .range(umber_brush::path::PATH_MIN_SIZE..=umber_brush::path::PATH_MAX_SIZE),
             ) {
                 tool.set_selected_size(size);
@@ -465,7 +470,9 @@ pub fn path_tool_rows(
             if field_row(
                 ui,
                 &tr("path.opacity"),
-                umber_gui::ValueField::new(&mut opacity).range(0.0..=1.0),
+                umber_gui::ValueField::new(&mut opacity)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             ) {
                 tool.set_selected_opacity(opacity);
             }

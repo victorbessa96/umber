@@ -1224,12 +1224,19 @@ impl BakesPanel {
 
             let rays_label = self.row_label(BakeSettingId::Rays, tr("bakes.rays"));
             group.row(rays_label.as_str(), |ui| {
-                ui.add(ValueField::new(&mut self.rays).range(MIN_RAYS..=MAX_RAYS));
+                ui.add(
+                    ValueField::new(&mut self.rays)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .default_value(DEFAULT_RAYS)
+                        .range(MIN_RAYS..=MAX_RAYS),
+                );
             });
             let dilation_label = self.row_label(BakeSettingId::Dilation, tr("bakes.dilation"));
             group.row(dilation_label.as_str(), |ui| {
                 ui.add(
                     ValueField::new(&mut self.dilation_iterations)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .default_value(DEFAULT_DILATION_ITERATIONS)
                         .range(0..=MAX_DILATION_ITERATIONS),
                 );
             });
@@ -1242,6 +1249,8 @@ impl BakesPanel {
             group.row(skew_label.as_str(), |ui| {
                 ui.add(
                     ValueField::new(&mut self.skew_threshold_deg)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .default_value(DEFAULT_SKEW_THRESHOLD_DEG)
                         .range(MIN_SKEW_THRESHOLD_DEG..=MAX_SKEW_THRESHOLD_DEG)
                         .step(0.5)
                         .decimals(1)

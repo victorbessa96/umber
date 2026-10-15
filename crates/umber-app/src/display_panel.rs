@@ -478,6 +478,8 @@ fn transform_section(
             .row(&i18n::tr("display.exposure"), |ui| {
                 ui.add(
                     ValueField::new(&mut settings.exposure)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .default_value(DisplaySettings::default().exposure)
                         .range(DisplaySettings::EXPOSURE_RANGE)
                         .step(0.1),
                 )
@@ -485,7 +487,12 @@ fn transform_section(
             .changed();
         changed |= group
             .row(&i18n::tr("display.gamma"), |ui| {
-                ui.add(ValueField::new(&mut settings.gamma).range(DisplaySettings::GAMMA_RANGE))
+                ui.add(
+                    ValueField::new(&mut settings.gamma)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .default_value(DisplaySettings::default().gamma)
+                        .range(DisplaySettings::GAMMA_RANGE),
+                )
             })
             .changed();
         if group

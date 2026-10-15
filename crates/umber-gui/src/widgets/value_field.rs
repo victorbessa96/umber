@@ -256,14 +256,16 @@ impl ExprParser<'_> {
 }
 
 /// The right-click menu's labels, already translated by the caller.
-#[derive(Debug, Clone, Copy)]
+/// `Cow` so a caller can hand over freshly translated `String`s (the app's
+/// `tr()` output) without keeping them alive past the builder.
+#[derive(Debug, Clone)]
 pub struct MenuLabels<'a> {
     /// "Reset to Default".
-    pub reset: &'a str,
+    pub reset: std::borrow::Cow<'a, str>,
     /// "Copy".
-    pub copy: &'a str,
+    pub copy: std::borrow::Cow<'a, str>,
     /// "Paste".
-    pub paste: &'a str,
+    pub paste: std::borrow::Cow<'a, str>,
 }
 
 /// The clipboard every field shares within one egui context (temp data
@@ -624,14 +626,14 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                     if let Some(d) = default {
                         let at_default = (current - d).abs() < f64::EPSILON;
                         if ui
-                            .add_enabled(!at_default, egui::Button::new(labels.reset))
+                            .add_enabled(!at_default, egui::Button::new(labels.reset.as_ref()))
                             .clicked()
                         {
                             picked = Some(clamp(d, hard.0, hard.1));
                             ui.close();
                         }
                     }
-                    if ui.button(labels.copy).clicked() {
+                    if ui.button(labels.copy.as_ref()).clicked() {
                         let text = format_value(current, decimals, "");
                         ui.ctx()
                             .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
@@ -641,7 +643,7 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                     let clip: Option<String> = ui.ctx().data(|d| d.get_temp(shared_clip_id()));
                     let pasted = menu_paste(clip.as_deref(), unit, hard.0, hard.1);
                     if ui
-                        .add_enabled(pasted.is_some(), egui::Button::new(labels.paste))
+                        .add_enabled(pasted.is_some(), egui::Button::new(labels.paste.as_ref()))
                         .clicked()
                     {
                         picked = pasted;
@@ -987,16 +989,16 @@ mod tests {
         egui_kittest::Harness::new_ui_state(
             |ui, f: &mut Fields| {
                 let labels = MenuLabels {
-                    reset: "Reset",
-                    copy: "Copy",
-                    paste: "Paste",
+                    reset: "Reset".into(),
+                    copy: "Copy".into(),
+                    paste: "Paste".into(),
                 };
                 f.a_rect = ui
                     .add(
                         ValueField::new(&mut f.a)
                             .range(0.0..=10.0)
                             .default_value(5.0)
-                            .context_menu(labels),
+                            .context_menu(labels.clone()),
                     )
                     .rect;
                 ui.add(

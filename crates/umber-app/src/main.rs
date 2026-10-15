@@ -1230,6 +1230,7 @@ impl UmberApp {
                                 ui.label(&scale);
                                 ui.add(
                                     umber_gui::ValueField::new(&mut p.ui_scale)
+                                        .context_menu(crate::i18n::prop_menu_labels())
                                         .range(preferences::SCALE_MIN..=preferences::SCALE_MAX)
                                         .step(0.05),
                                 );

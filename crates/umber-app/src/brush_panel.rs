@@ -310,10 +310,18 @@ impl BrushPanel {
                 BrushTool::Paint => {}
                 BrushTool::Smudge(params) => {
                     group.row(&tr("brush.smudge-strength"), |ui| {
-                        ui.add(ValueField::new(&mut params.strength).range(0.0..=1.0))
+                        ui.add(
+                            ValueField::new(&mut params.strength)
+                                .context_menu(crate::i18n::prop_menu_labels())
+                                .range(0.0..=1.0),
+                        )
                     });
                     group.row(&tr("brush.smudge-smear"), |ui| {
-                        ui.add(ValueField::new(&mut params.smear).range(0.0..=1.0))
+                        ui.add(
+                            ValueField::new(&mut params.smear)
+                                .context_menu(crate::i18n::prop_menu_labels())
+                                .range(0.0..=1.0),
+                        )
                     });
                 }
                 BrushTool::Clone(params) => {
@@ -486,13 +494,17 @@ impl BrushPanel {
         changed |= value_row(
             ui,
             "Alpha",
-            ValueField::new(&mut preset.params.alpha).range(0.0..=1.0),
+            ValueField::new(&mut preset.params.alpha)
+                .context_menu(crate::i18n::prop_menu_labels())
+                .range(0.0..=1.0),
         )
         .changed();
         changed |= value_row(
             ui,
             "Hardness",
-            ValueField::new(&mut preset.params.hardness).range(0.0..=1.0),
+            ValueField::new(&mut preset.params.hardness)
+                .context_menu(crate::i18n::prop_menu_labels())
+                .range(0.0..=1.0),
         )
         .changed();
         // Gamma > 1 favors light pressure; the 0.05 floor avoids
@@ -501,6 +513,7 @@ impl BrushPanel {
             ui,
             "Pressure gamma",
             ValueField::new(&mut preset.params.pressure_gamma)
+                .context_menu(crate::i18n::prop_menu_labels())
                 .range(0.05..=4.0)
                 .step(0.05),
         )
@@ -551,6 +564,7 @@ impl BrushPanel {
             ui,
             &tr("brush.size"),
             ValueField::new(&mut preset.size)
+                .context_menu(crate::i18n::prop_menu_labels())
                 .range(0.05..=8.0)
                 .step(0.01),
         )
@@ -563,6 +577,7 @@ impl BrushPanel {
                 .row("Min cutoff", |ui| {
                     ui.add(
                         ValueField::new(&mut preset.one_euro.min_cutoff)
+                            .context_menu(crate::i18n::prop_menu_labels())
                             .range(0.1..=10.0)
                             .step(0.1),
                     )
@@ -572,6 +587,7 @@ impl BrushPanel {
                 .row("Beta", |ui| {
                     ui.add(
                         ValueField::new(&mut preset.one_euro.beta)
+                            .context_menu(crate::i18n::prop_menu_labels())
                             .range(0.0..=0.1)
                             .step(0.005)
                             .decimals(3),
@@ -582,6 +598,7 @@ impl BrushPanel {
                 .row("d cutoff", |ui| {
                     ui.add(
                         ValueField::new(&mut preset.one_euro.d_cutoff)
+                            .context_menu(crate::i18n::prop_menu_labels())
                             .range(0.1..=10.0)
                             .step(0.1),
                     )
@@ -595,6 +612,7 @@ impl BrushPanel {
                 .row("Radius px", |ui| {
                     ui.add(
                         ValueField::new(&mut preset.lazy_mouse.radius_px)
+                            .context_menu(crate::i18n::prop_menu_labels())
                             .range(0.0..=64.0)
                             .step(0.5)
                             .decimals(1)
@@ -604,7 +622,11 @@ impl BrushPanel {
                 .changed();
             changed |= group
                 .row("Strength", |ui| {
-                    ui.add(ValueField::new(&mut preset.lazy_mouse.strength).range(0.0..=1.0))
+                    ui.add(
+                        ValueField::new(&mut preset.lazy_mouse.strength)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .range(0.0..=1.0),
+                    )
                 })
                 .changed();
         });
@@ -615,6 +637,7 @@ impl BrushPanel {
                 .row("Dabs per radius", |ui| {
                     ui.add(
                         ValueField::new(&mut preset.spacing.dabs_per_radius)
+                            .context_menu(crate::i18n::prop_menu_labels())
                             .range(1.0..=64.0)
                             .step(0.5)
                             .decimals(1),
@@ -870,13 +893,17 @@ fn cavity_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
             changed |= value_row(
                 ui,
                 &tr("brush.cavity-threshold"),
-                ValueField::new(&mut mask.threshold).range(0.0..=1.0),
+                ValueField::new(&mut mask.threshold)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             )
             .changed();
             changed |= value_row(
                 ui,
                 &tr("brush.cavity-width"),
-                ValueField::new(&mut mask.width).range(0.01..=1.0),
+                ValueField::new(&mut mask.width)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.01..=1.0),
             )
             .changed();
             changed |= ui
@@ -940,7 +967,10 @@ fn stroke_method_rows(ui: &mut egui::Ui, method: &mut umber_brush::StrokeMethod)
             changed |= value_row(
                 ui,
                 &tr("brush.method-rate"),
-                ValueField::new(rate_hz).range(1.0..=60.0).unit("Hz"),
+                ValueField::new(rate_hz)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1.0..=60.0)
+                    .unit("Hz"),
             )
             .changed();
         }
@@ -948,13 +978,18 @@ fn stroke_method_rows(ui: &mut egui::Ui, method: &mut umber_brush::StrokeMethod)
             changed |= value_row(
                 ui,
                 &tr("brush.method-dash-ratio"),
-                ValueField::new(ratio).range(0.05..=1.0),
+                ValueField::new(ratio)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.05..=1.0),
             )
             .changed();
             changed |= value_row(
                 ui,
                 &tr("brush.method-dash-length"),
-                ValueField::new(length_px).range(1.0..=512.0).unit("px"),
+                ValueField::new(length_px)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1.0..=512.0)
+                    .unit("px"),
             )
             .changed();
         }
@@ -1047,7 +1082,9 @@ fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
             value_row(
                 ui,
                 &tr("brush.symmetry-offset"),
-                ValueField::new(&mut symmetry.mirror.offset).range(0.0..=1.0),
+                ValueField::new(&mut symmetry.mirror.offset)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
             );
             ui.weak(tr("brush.symmetry-hint"));
         });
@@ -1057,7 +1094,9 @@ fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
             value_row(
                 ui,
                 &tr("brush.symmetry-count"),
-                ValueField::new(&mut radial.count).range(RADIAL_COUNT_MIN..=RADIAL_COUNT_MAX),
+                ValueField::new(&mut radial.count)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(RADIAL_COUNT_MIN..=RADIAL_COUNT_MAX),
             );
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut radial.flip_u, tr("brush.symmetry-flip-u"));
@@ -1103,6 +1142,7 @@ fn line_constraint_rows(ui: &mut egui::Ui, mode: &mut LineConstraintMode) {
             group.row(&tr("brush.line-constraint-angle"), |ui| {
                 ui.add(
                     ValueField::new(snap_deg)
+                        .context_menu(crate::i18n::prop_menu_labels())
                         .range(ANGLE_SNAP_MIN_DEG..=ANGLE_SNAP_MAX_DEG)
                         .step(0.5)
                         .decimals(1)
@@ -1146,7 +1186,12 @@ fn projection_rows(
                 *front_face_falloff = on.then_some(80.0);
             }
             if let Some(deg) = front_face_falloff.as_mut() {
-                ui.add(ValueField::new(deg).range(0.0..=89.0).step(1.0));
+                ui.add(
+                    ValueField::new(deg)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .range(0.0..=89.0)
+                        .step(1.0),
+                );
                 ui.label("°");
             }
         });

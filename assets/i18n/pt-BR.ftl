@@ -783,3 +783,10 @@ viewkeys =
     .toast-unlit = Vendo sem iluminação
     .toast-channel = Canal:
     .toast-map = Mapa da malha:
+
+## Menu de propriedade (plano de GUI g4-property-context-menu)
+
+propmenu =
+    .reset = Restaurar o padrão
+    .copy = Copiar valor
+    .paste = Colar valor

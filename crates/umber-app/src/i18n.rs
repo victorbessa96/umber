@@ -359,6 +359,16 @@ pub fn catalog_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The property menu labels (`ValueField::context_menu`, GUI plan
+/// g4-property-context-menu), translated now.
+pub fn prop_menu_labels() -> umber_gui::widgets::value_field::MenuLabels<'static> {
+    umber_gui::widgets::value_field::MenuLabels {
+        reset: tr("propmenu.reset").into(),
+        copy: tr("propmenu.copy").into(),
+        paste: tr("propmenu.paste").into(),
+    }
+}
+
 /// The locale preference file: a sibling of the per-user brushes dir
 /// (as the plugins dir is). `None` when no home is discoverable.
 pub fn locale_pref_path() -> Option<PathBuf> {
