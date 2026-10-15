@@ -116,3 +116,26 @@ come from the fluent bundle itself (message value + attributes), with
 message ids read from the column-0 `id =` lines. That rule picks exactly
 39 clean identifiers in each catalog, checked by a model run against the
 real files.
+
+## Resource caps on smart presets (lock `sec-smart-caps`, UNRUN)
+
+Same sweep, resource-exhaustion side. `.umbersmart` and `.umbermask`
+loaded with an unbounded `read_to_string` and no structural limits. A
+mask's ops run once per TEXEL per tile, so a hostile preset with 10⁶
+ops would pin the UI thread for hours on one apply; a 2 GB "preset"
+would be read into memory whole.
+
+- `read_capped`: `metadata().len() > 1 MiB` refuses before reading, and
+  the read itself is `take(1 MiB + 1)` in case the file grows in
+  between. `SmartError::TooLarge`.
+- `MAX_MASK_OPS = 64` and `MAX_PRESET_LAYERS = 256`, checked in
+  `from_json` (so the agent wire and tests get them too).
+  `SmartError::TooMany`.
+- The shipped presets: 3 ops and 4–5 layers, far inside the caps.
+- Test `oversized_presets_are_refused_before_they_cost_anything`: 65
+  ops refused, 64 accepted, 257 layers refused, a 1 MiB + 1 file refused
+  from metadata. Its JSON shapes match the structs' required fields
+  (`name`, `kind`; the rest defaults).
+
+The shelf lists presets through `load_file`, so an oversized file
+becomes a skipped row with a log line, never a hang.
