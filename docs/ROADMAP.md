@@ -108,7 +108,7 @@ between "feature-complete" and "a tool a studio trusts".
 | Kill | Closes | Notes |
 |---|---|---|
 | wave-perf-protocol | the perf discipline as a standing gate | docs/perf/protocol.md gains the regression-triage flow: every nightly red names its owning wave; the baseline becomes a release artifact, not a CI afterthought |
-| wave-plugin-sdk-docs | the WASM plugin SDK's author docs | umber-wasm's runtime is built; the marketplace (wave 7) needs the author guide + the API stability contract first |
+| wave-plugin-sdk-docs | the WASM plugin SDK's author docs | ✓ LANDED 2026-10-15 (`b0c1aa0`): `docs/plugins/authoring-guide.md` — build, contract, limits, consent install, testing, and the v1 ABI stability contract (frozen: exports, MBER/MDEF, TLV kinds, error codes, no imports) |
 | wave-fuzz-corpus | the panic-hunt's structured corpus | today: 850 synthetic garbage cases over mtlx / PSD / .spp / project dirs; next: (a) the **mesh importers** (FBX, glTF, USD/USDC — untrusted files with no garbage coverage yet; found writing SECURITY.md's threat table, 2026-10-14), (b) byte-replays of the corpus harness's real files' structure (headers valid, bodies broken — the middle ground that finds real parser bugs) |
 | wave-a11y-first-pass | keyboard navigation + focus states | the icon toolbar + panels need tab order, focus rings, shortcut discoverability — Substance's UI is dense but fully keyboard-driven; ours isn't yet |
 | wave-i18n-audit | the pt-BR completeness beyond the test | the completeness test pins key parity; a native-speaker review pass (Bessa's call who) for the strings' actual quality |
