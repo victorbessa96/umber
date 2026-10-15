@@ -2,7 +2,9 @@ name: perf-nightly
 
 # The §12 protocol's regression gate (docs/perf/protocol.md): the nightly
 # job runs the perf harnesses headless and compares against
-# perf/baseline.json — a >10% regression on any budget fails the job.
+# perf/baseline.json — a >10% regression on any budget fails the job, and
+# so does a tracked metric the run did not produce (perf_compare.py), and
+# so does a failing harness (the stroke soak's zero-drop assert).
 # NOT per-commit (the load directive): failures here don't block merges;
 # they surface the drift the protocol tracks.
 
@@ -16,7 +18,11 @@ env:
 
 jobs:
   perf:
-    runs-on: [self-hosted] # the 3070 runner when Bessa adds it; falls back to hosted with lavapipe
+    # Hosted + lavapipe by default. `runs-on: [self-hosted]` alone queued
+    # forever (zero runners registered: every nightly 10-13..15 sat queued
+    # then cancelled). The 3070 runner opts in through the repo variable
+    # PERF_RUNNER=self-hosted once it is online; until then the gate runs.
+    runs-on: ${{ vars.PERF_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +36,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          # The ICD path differs by Ubuntu release: find it, never assume.
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json /usr/share/vulkan/icd.d/*lavapipe*.json 2>/dev/null | head -1)
+          test -n "$icd" || { echo "lavapipe ICD not found"; exit 1; }
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
 
       - name: Build the perf harnesses
         run: cargo build --release -p umber-app -p umber-gpu --features perf
@@ -40,17 +50,24 @@ jobs:
           UMBER_REF_SCENE_JSON: /tmp/ref-scene.json
           UMBER_I2P_EVENTS: "5000"
           UMBER_I2P_JSON: /tmp/i2p.json
-          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lxd/lavapipe.icd.json # CI's headless adapter; the 3070 runner overrides
+        # No `|| true`: a harness that fails (the stroke soak's zero-drop
+        # assert, a panicking bench) fails the job. Every step still runs
+        # (`set +e` + the exit tally) so one failure does not hide the
+        # others' numbers.
         run: |
           # The harness tests are NOT #[ignore] (the 2026-10-12 seed run
           # proved: --ignored filtered EVERYTHING and the job compared an
           # empty report). One filter per invocation — cargo test takes
           # exactly one TESTNAME.
-          cargo test -p umber-gpu --features perf --release ref_scene_bench -- --nocapture || true
-          cargo test -p umber-app --features perf --release input_photon_session -- --nocapture || true
-          cargo test -p umber-app --features perf --release stroke_soak -- --nocapture || true
+          set +e
+          fail=0
+          cargo test -p umber-gpu --features perf --release ref_scene_bench -- --nocapture || fail=1
+          cargo test -p umber-app --features perf --release input_photon_session -- --nocapture || fail=1
+          cargo test -p umber-app --features perf --release stroke_soak -- --nocapture || fail=1
+          exit $fail
 
       - name: Compare against perf/baseline.json (>10% fails)
+        if: always()
         run: python3 scripts/perf_compare.py /tmp/ref-scene.json /tmp/i2p.json perf/baseline.json
 
       - name: Upload the fresh numbers as the artifact

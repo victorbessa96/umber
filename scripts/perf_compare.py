@@ -2,9 +2,11 @@
 """perf_compare.py — the §12 nightly regression gate.
 
 Compares the fresh harness JSONs against perf/baseline.json:
-a >10% regression on any tracked metric fails (exit 1). Missing
-metrics report as U (unmeasured) and don't fail — the protocol's
-own honest-gap rule. A missing baseline file = first-run mode:
+a >10% regression on any tracked metric fails (exit 1), and so does a
+metric the baseline tracks but the fresh run did not produce (a harness
+that silently stopped reporting is a failure, not a pass). A fresh
+metric the baseline does not track yet reports as U and does not fail
+(new instrumentation). A missing baseline file = first-run mode:
 the fresh numbers BECOME the baseline candidate (printed, exit 0
 — the commit of baseline.json is the human's call).
 
@@ -16,6 +18,14 @@ import sys
 from pathlib import Path
 
 REGRESSION = 1.10  # >10% over baseline = fail
+# The metrics `metrics()` can produce. A baseline key outside this set
+# (the seeded/adapter/note annotations) is inert.
+TRACKED = (
+    "viewport_p95_ms",
+    "viewport_mean_ms",
+    "input_photon_p95_ms",
+    "input_photon_p50_ms",
+)
 
 
 def load(path: str) -> dict:
@@ -70,6 +80,10 @@ def main() -> int:
         return 1
 
     failures = []
+    tracked = {k for k in TRACKED if k in baseline}
+    for key in sorted(tracked - fresh.keys()):
+        print(f"MISSING      {key}: in the baseline, absent from this run")
+        failures.append(key)
     for key, value in sorted(fresh.items()):
         base = baseline.get(key)
         if base is None:
@@ -82,7 +96,7 @@ def main() -> int:
             failures.append(key)
 
     if failures:
-        print(f"FAIL: {len(failures)} metric(s) regressed >10%: {', '.join(failures)}")
+        print(f"FAIL: {len(failures)} metric(s) regressed >10% or went missing: {', '.join(failures)}")
         return 1
     print("PASS: no metric regressed >10% against the baseline")
     return 0
