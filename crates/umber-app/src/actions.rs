@@ -179,6 +179,103 @@ pub fn shortcut_label(action: ShellAction, is_mac: bool) -> Option<String> {
     Some(KeyboardShortcut::new(binding.chord.modifiers(), binding.key).format(&names, is_mac))
 }
 
+/// What a binding does, in the words of the keyboard reference
+/// (`docs/user/keyboard.md`). English on purpose: the reference is a
+/// repository document, and the UI's own labels are the catalogs' job.
+#[cfg_attr(not(test), allow(dead_code))] // generator + its test only
+fn reference_text(action: ShellAction) -> &'static str {
+    match action {
+        ShellAction::Undo => "Undo",
+        ShellAction::Redo => "Redo",
+        ShellAction::SaveProject => "Save project",
+        ShellAction::OpenProject => "Open project",
+        ShellAction::CommandPalette => "Command palette",
+        ShellAction::Preferences => "Preferences",
+        ShellAction::ToggleMaximize => "Maximize the hovered area",
+        ShellAction::NextWorkspace => "Next workspace",
+        ShellAction::PrevWorkspace => "Previous workspace",
+        ShellAction::ToggleWireframe => "Toggle wireframe",
+        ShellAction::ToggleGrid => "Toggle grid",
+        ShellAction::CycleViewMode => "Cycle lit / unlit view",
+        ShellAction::ToggleMaskMode => "Toggle mask painting",
+        ShellAction::InvertMask => "Invert the mask",
+        ShellAction::SelectTool(ToolKind::Erase) => "Eraser tool",
+        ShellAction::BrushSmaller => "Brush smaller",
+        ShellAction::BrushLarger => "Brush larger",
+        ShellAction::ToggleHideUi => "Hide / show the UI",
+        ShellAction::ViewMaterial => "Material view",
+        ShellAction::NextChannel => "Next channel view",
+        ShellAction::PrevChannel => "Previous channel view",
+        ShellAction::NextMeshMap => "Next mesh-map view",
+        ShellAction::PrevMeshMap => "Previous mesh-map view",
+        _ => "",
+    }
+}
+
+/// Where a binding fires from (the [`Focus::allows`] rule, in words).
+#[cfg_attr(not(test), allow(dead_code))]
+fn reference_scope(binding: Binding) -> &'static str {
+    if binding.key == Key::Tab && binding.chord == Chord::Bare {
+        "nothing focused"
+    } else if Focus::Text.allows(binding) {
+        "everywhere, even while typing"
+    } else {
+        "not while typing in a field"
+    }
+}
+
+/// The keyboard reference (`docs/user/keyboard.md`), generated from
+/// [`BINDINGS`] so the document cannot drift from the keys that fire:
+/// `keyboard_reference_is_current` regenerates it and compares. Both
+/// platform spellings are printed (egui's own formatter, the one the
+/// menus use).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn keyboard_reference() -> String {
+    let mut out = String::from(
+        "# Keyboard reference\n\n\
+         Generated from `crates/umber-app/src/actions.rs` (`BINDINGS`): do not edit by\n\
+         hand. Regenerate with\n\
+         `UMBER_REGEN_KEYBOARD_DOC=1 cargo test -p umber-app --bin umber keyboard_reference`.\n\n\
+         Letter keys need no Ctrl/Cmd, so Ctrl+X and Ctrl+V are never these actions. While a\n\
+         text field has focus it keeps its own keys: only Ctrl/Cmd chords and F-keys reach the\n\
+         shell, and Ctrl+Z undoes the typing, not the document.\n\n\
+         | Windows / Linux | macOS | Action | Fires |\n\
+         |---|---|---|---|\n",
+    );
+    for (binding, action) in BINDINGS {
+        let label = |mac: bool| {
+            let names = if mac {
+                ModifierNames::SYMBOLS
+            } else {
+                ModifierNames::NAMES
+            };
+            let text =
+                KeyboardShortcut::new(binding.chord.modifiers(), binding.key).format(&names, mac);
+            // egui spells punctuation by name off macOS ("OpenBracket");
+            // a reader wants the key cap.
+            text.replace("OpenBracket", "[")
+                .replace("CloseBracket", "]")
+                .replace("Comma", ",")
+        };
+        let text = reference_text(*action);
+        let text = if text.is_empty() {
+            "(undocumented)"
+        } else {
+            text
+        };
+        // `|` would end a markdown cell; none of today's keys print one.
+        let cell = |s: String| s.replace('|', "\\|");
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | {} |\n",
+            cell(label(false)),
+            cell(label(true)),
+            text,
+            reference_scope(*binding)
+        ));
+    }
+    out
+}
+
 /// Who owns the keyboard this frame (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -276,6 +373,43 @@ pub fn availability(action: ShellAction, state: ShellState) -> Result<(), &'stat
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_binding_has_reference_text() {
+        for (binding, action) in BINDINGS {
+            assert!(
+                !reference_text(*action).is_empty(),
+                "{binding:?} -> {action:?} needs a line in the keyboard reference"
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_reference_is_current() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/user/keyboard.md");
+        let fresh = keyboard_reference();
+        if std::env::var_os("UMBER_REGEN_KEYBOARD_DOC").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &fresh).unwrap();
+        }
+        let committed = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert!(
+            committed == fresh,
+            "docs/user/keyboard.md is stale; regenerate with UMBER_REGEN_KEYBOARD_DOC=1"
+        );
+        // One row per binding, and both spellings of the redo chord.
+        assert_eq!(
+            fresh.lines().filter(|l| l.starts_with("| `")).count(),
+            BINDINGS.len()
+        );
+        assert!(fresh.contains("`Ctrl+Shift+Z`"), "{fresh}");
+        assert!(fresh.contains("not while typing in a field"));
+        assert!(fresh.contains("everywhere, even while typing"));
+    }
+
     use super::*;
 
     /// How many modifiers a chord names: the table's sort key.
