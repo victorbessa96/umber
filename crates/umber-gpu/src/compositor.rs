@@ -3242,7 +3242,7 @@ mod tests {
             assert_bytes_near_lenient(&got_inside, &want);
             for y in 0..size {
                 for x in 0..size {
-                    if x >= 4 && x < 12 && y >= 4 && y < 12 {
+                    if (4..12).contains(&x) && (4..12).contains(&y) {
                         continue;
                     }
                     let base = (y * size + x) as usize * 4;
