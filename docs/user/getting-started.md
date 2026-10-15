@@ -144,7 +144,19 @@ maps came from paint.
 The dialog writes PNG (8/16-bit), EXR (32-bit float), TIFF or JPEG files, and can add a MaterialX
 (`.mtlx`) or USD (`.usda`) material that references them.
 
-## 6. Without the window
+## 6. The menus
+
+- **File ▸ Save** asks for a folder the first time; **Save As** always
+  asks. **Close Project** clears the session, after the same unsaved-work
+  confirm as New.
+- **Help ▸ Keyboard Shortcuts** lists every binding, and
+  **Help ▸ Show Log** opens this session's log (kept from the previous
+  session as `umber.prev.log` — the file to attach to a bug report).
+- The menu row's workspace tabs (**Paint / Bake / Export / Graph**) swap
+  the whole dock layout; Ctrl+PgDn cycles them. Your edits to each layout
+  are remembered between launches.
+
+## 7. Without the window
 
 The same engine runs headless:
 
