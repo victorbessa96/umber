@@ -9,6 +9,7 @@ pub mod ao;
 pub mod curvature;
 pub mod dilation;
 pub mod id;
+pub mod margin;
 pub mod normal_map;
 pub mod position;
 pub mod skew;
