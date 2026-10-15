@@ -96,7 +96,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-5 | Paint-channel targeting (Brush panel picker → `set_active_channel`) | 2 loop | ✓ done (the Channel picker; export of the painted channels = C2-6) |
 | C2-6 | Export every painted channel through the presets | 2 loop | ✓ done (neutrals + partner fill; GPU paint→glTF→ORM test) |
 | C2-7 | One undo timeline (strokes + masks + layer ops on Ctrl+Z) | 2 loop | todo |
-| C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | ◐ done in buttons + a properties row (drag reorder, content-duplicate deferred) |
+| C2-8 | Layers panel parity (reorder, rename, opacity, blend, duplicate, folders) | 2 loop | ◐ done in buttons + a properties row (drag reorder deferred; content-duplicate engine + outcome landed, the main.rs block waits on the sibling lock) |
 | C2-9 | Per-texture-set layer stacks | 2 loop | todo |
 | C2-10 | Smart-material / smart-mask shelf | 2 loop | ◐ shelf + undoable apply landed; generator wiring + smart masks open |
 | C2-11 | Bitmap stamps → angle → jitter quartet | 2 loop | todo |
