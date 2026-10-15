@@ -50,6 +50,17 @@ the FBX leg proves the import, not a UV paint on it.]
    export writes Base Color only from paint.
 9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — NOT MET: no tag has
    ever run `release.yml` (C2-25).
+   - The local half ran 2026-10-15. `dist plan` (cargo-dist 0.32.0) shows
+     that a `v0.1.0-alpha.1` tag on today's tree releases NOTHING ("doesn't
+     have anything for dist to Release"): dist matches the tag against the
+     workspace `version = "0.1.0"`.
+   - The dry run needs a version-bump commit first:
+     `version = "0.1.0-alpha.1"` in `[workspace.package]`, then the tag.
+     With the bump, `dist plan` announces both packages (`umber-app`,
+     `umber-cli`), each with the Linux `.tar.xz`, the Windows `.zip`, the
+     shell + PowerShell installers and the sha256 sums.
+   - Afterwards, set the version back to `0.1.0` for the real tag.
+   - Pushing either tag is Bessa's call. It publishes a GitHub pre-release.
 
 ## The tag shape (drafted, not fired)
 
