@@ -8,3 +8,8 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 installers = ["shell", "powershell"]
 targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Shipped beside the binary in every archive. The README, LICENSE and
+# CHANGELOG are auto-included; the notices are not, and the embedded
+# egui fonts' licences (OFL-1.1, Ubuntu Font Licence, MIT) require them
+# to accompany every copy.
+include = ["LICENSES/THIRD_PARTY_FONTS.txt", "THIRD_PARTY.md"]

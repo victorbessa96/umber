@@ -75,7 +75,9 @@ the FBX leg proves the import, not a UV paint on it.]
         separate and unpublished, so it stays 0.1.0.
      2. The wave gate on a clean clone, then push. CI green.
      3. `dist plan --tag v0.1.0-alpha.1` on the host must announce both
-        packages, as in the dry run.
+        packages, as in the dry run, each archive's `[misc]` now listing
+        `THIRD_PARTY_FONTS.txt` + `THIRD_PARTY.md` (the embedded fonts'
+        licences require it: `2026-10-15-release-font-notices.md`).
      4. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`, then
         watch `release.yml` + `packaging.yml` (the tag triggers both).
      5. Record the artifact sizes in the §12 table (installer budget

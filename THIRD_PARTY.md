@@ -10,6 +10,35 @@
 Umber is GPL-3.0-or-later (LICENSE). Standalone library crates may be MIT
 where upstream licenses permit relicensing.
 
+## Fonts embedded in every binary
+
+egui's default fonts are compiled in (`epaint_default_fonts` 0.36.2, via
+eframe's `default_fonts`): Ubuntu Light (Ubuntu Font Licence 1.0), Hack
+(MIT + Bitstream Vera + DejaVu public domain), Noto Emoji (OFL-1.1) and
+emoji-icon-font (MIT). These licences require their texts to accompany
+every copy: `LICENSES/THIRD_PARTY_FONTS.txt` carries them verbatim, and
+every release archive includes it (`dist-workspace.toml` `include`).
+
+## The whole tree, by licence (2026-10-15)
+
+`Cargo.lock` holds 636 packages, 620 from crates.io, read from each
+crate's own manifest in the local registry (enumn 0.1.14 was not
+downloaded locally; MIT OR Apache-2.0 per crates.io). All are
+permissive or offer a permissive choice. The ones worth naming:
+
+| Crate | Licence | Why it is fine |
+|---|---|---|
+| colored 2.2.0 | MPL-2.0 | test-only: reached via `dify` ← egui_kittest's `snapshot` feature, a dev-dependency, so it is never in a shipped binary (MPL-2.0 is GPL-3.0 compatible regardless) |
+| self_cell 1.3.0 | Apache-2.0 OR GPL-2.0-only | Umber takes Apache-2.0 |
+| ittapi / ittapi-sys 0.4.0 | GPL-2.0-only OR BSD-3-Clause | Umber takes BSD-3-Clause |
+| r-efi 5.3.0 / 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | Umber takes MIT |
+| epaint_default_fonts 0.36.2 | (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 | notices shipped (section above) |
+
+`cargo-audit` (advisory DB 2026-10-14): 0 vulnerabilities; 2
+unmaintained warnings, both transitive (`paste` via egui_dock + pulp,
+`ttf-parser` via owned_ttf_parser), with no action on our side short of
+upstream.
+
 ## Direct dependencies (Wave 1)
 
 | Crate | Version | License | GPL-3.0 compatible | Notes |
