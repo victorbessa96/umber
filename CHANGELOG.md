@@ -8,6 +8,14 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Release packaging: every archive, the Flatpak and the AppImage now ship
+  the licences of the fonts compiled into the app (OFL, Ubuntu Font
+  Licence, MIT), which require them; THIRD_PARTY.md gains a licence and
+  advisory summary of the whole dependency tree
+- README's crate and test counts come from the tree (`scripts/scorecard.py`)
+  and CI fails when they drift; the test count was 300 low
+- Help: Close Project, Keyboard Shortcuts and Show Log (the session log
+  and the previous one), and a crash report points at the log
 - Bakes: a High poly group bakes normal + height from a high-poly mesh with
   a cage; Export writes the newest baked normal instead of a flat one (C2-29)
 - Smart materials bind their mesh-map generators to the newest bakes, and
