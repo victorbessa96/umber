@@ -429,24 +429,14 @@ mod tests {
 
     #[test]
     fn every_catalog_key_is_in_both_catalogs_and_every_action_is_listed_once() {
-        let en = include_str!("../../../assets/i18n/en-US.ftl");
-        let pt = include_str!("../../../assets/i18n/pt-BR.ftl");
+        // Through the real Fluent bundles (`I18n::has_key`), never a
+        // hand-rolled .ftl split: a Windows checkout's CRLF line endings
+        // broke the string-split version on CI (979a523).
+        let i18n = crate::i18n::I18n::builtin();
         for e in CATALOG {
             for key in [e.label, e.path] {
-                let (group, attr) = key.split_once('.').expect("group.attr");
-                for (name, cat) in [("en-US", en), ("pt-BR", pt)] {
-                    let block = cat
-                        .split(&format!("\n{group} =\n"))
-                        .nth(1)
-                        .unwrap_or_else(|| panic!("{name}: no `{group}` block"));
-                    // A message block may hold blank lines: it ends at the
-                    // first top-level line (unindented, non-blank).
-                    let attr_line = format!(".{attr} =");
-                    let found = block
-                        .lines()
-                        .take_while(|l| l.is_empty() || l.starts_with(' '))
-                        .any(|l| l.trim_start().starts_with(&attr_line));
-                    assert!(found, "{name} missing {key}");
+                for locale in ["en-US", "pt-BR"] {
+                    assert!(i18n.has_key(locale, key), "{locale} missing {key}");
                 }
             }
         }

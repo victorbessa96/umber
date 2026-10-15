@@ -1,0 +1,12 @@
+# Text assets the code embeds with include_str! (and parses) keep LF on
+# every platform. A Windows checkout's default autocrlf turned the .ftl
+# catalogs into CRLF, which broke a test that split them on "\n" (979a523,
+# windows-latest). Source is normalised too, so a byte-level check
+# (sha256 of a file) means the same thing on every machine.
+*.rs   text eol=lf
+*.ftl  text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.wgsl text eol=lf
+*.json text eol=lf
+*.sh   text eol=lf

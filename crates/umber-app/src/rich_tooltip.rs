@@ -174,24 +174,14 @@ mod tests {
             ShellAction::CommandPalette,
             ShellAction::Preferences,
         ];
-        let en = include_str!("../../../assets/i18n/en-US.ftl");
-        let pt = include_str!("../../../assets/i18n/pt-BR.ftl");
-        let has = |cat: &str, key: &str| {
-            let (group, attr) = key.split_once('.').expect("group.attr");
-            let Some(block) = cat.split(&format!("\n{group} =\n")).nth(1) else {
-                return false;
-            };
-            let line = format!(".{attr} =");
-            block
-                .lines()
-                .take_while(|l| l.is_empty() || l.starts_with(' '))
-                .any(|l| l.trim_start().starts_with(&line))
-        };
+        // The real Fluent bundles, not a hand-split of the .ftl text
+        // (CRLF on a Windows checkout broke that, 979a523).
+        let i18n = crate::i18n::I18n::builtin();
         for a in all {
             let (t, d) = tooltip_keys(a);
             for key in std::iter::once(t).chain(d) {
-                assert!(has(en, key), "en-US missing {key}");
-                assert!(has(pt, key), "pt-BR missing {key}");
+                assert!(i18n.has_key("en-US", key), "en-US missing {key}");
+                assert!(i18n.has_key("pt-BR", key), "pt-BR missing {key}");
             }
         }
     }
@@ -200,7 +190,8 @@ mod tests {
     fn no_new_description_hard_codes_a_shortcut() {
         // The tip.* strings are this kill's: none may carry a key in
         // parentheses (the registry prints it).
-        let en = include_str!("../../../assets/i18n/en-US.ftl");
+        // Normalised: a Windows checkout embeds CRLF.
+        let en = include_str!("../../../assets/i18n/en-US.ftl").replace("\r\n", "\n");
         let block = en.split("\ntip =\n").nth(1).expect("tip block");
         for line in block
             .lines()
