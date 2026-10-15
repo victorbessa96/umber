@@ -86,7 +86,8 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 }
 
 /// The shell's key table: most modifiers first (see the module docs).
-/// Ten bindings: four chords + six letter keys. Ctrl+N stays unbound in v1
+/// Twelve bindings: four chords + six letter keys + the `[` / `]` brush
+/// size steps. Ctrl+N stays unbound in v1
 /// (the toolbar module's judgment call), so `NewProject` has no row.
 pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::Z, Chord::CmdShift), ShellAction::Redo),
@@ -101,6 +102,14 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (
         bind(Key::E, Chord::Bare),
         ShellAction::SelectTool(ToolKind::Erase),
+    ),
+    (
+        bind(Key::OpenBracket, Chord::Bare),
+        ShellAction::BrushSmaller,
+    ),
+    (
+        bind(Key::CloseBracket, Chord::Bare),
+        ShellAction::BrushLarger,
     ),
 ];
 
@@ -155,6 +164,9 @@ pub fn availability(action: ShellAction, state: ShellState) -> Result<(), &'stat
         ShellAction::ToggleMaskMode if !state.paint_available => Err("action.unavailable-no-mesh"),
         ShellAction::InvertMask if !state.mask_editing => {
             Err("action.unavailable-not-editing-mask")
+        }
+        ShellAction::BrushSmaller | ShellAction::BrushLarger if !state.paint_available => {
+            Err("action.unavailable-no-mesh")
         }
         _ => Ok(()),
     }

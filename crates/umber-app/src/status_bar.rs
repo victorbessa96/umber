@@ -112,9 +112,13 @@ impl HintContext {
         match self {
             HintContext::NoMesh => &[("hint.drop", "hint.load-mesh")],
             // The navigation chords follow from the preset (`show`).
-            HintContext::Paint => &[("hint.ctrl-lmb", "hint.paint")],
+            HintContext::Paint => &[
+                ("hint.ctrl-lmb", "hint.paint"),
+                ("hint.brackets", "hint.size"),
+            ],
             HintContext::PaintModifier => &[
                 ("hint.lmb-drag", "hint.paint-stroke"),
+                ("hint.rmb-drag", "hint.resize"),
                 ("hint.ctrl-z", "hint.undo"),
             ],
             // Shift alone binds nothing the bar should claim under the

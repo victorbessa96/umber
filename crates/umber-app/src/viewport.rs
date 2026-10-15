@@ -121,6 +121,14 @@ fn linear_to_srgb_byte(linear: u8) -> u8 {
     (s.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// An in-flight Ctrl+RMB brush-resize drag (see `Viewport::resize`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResizeDrag {
+    size: f32,
+    hardness: f32,
+    origin: egui::Pos2,
+}
+
 /// Owns the camera and the currently-loaded mesh's GPU buffers.
 #[derive(Default)]
 pub struct Viewport {
@@ -178,6 +186,10 @@ pub struct Viewport {
     /// The navigation scheme (`crate::navigation`): Painter's Alt+mouse by
     /// default, `UMBER_NAV` to choose until the preferences window lands.
     nav: crate::navigation::NavPreset,
+    /// A Ctrl+RMB brush-resize drag in flight: the brush size and
+    /// hardness at its start and the pointer origin (GUI plan G1
+    /// g1-brush-resize). The ring stays at the origin while it runs.
+    resize: Option<ResizeDrag>,
 }
 
 impl Viewport {
@@ -334,6 +346,30 @@ impl Viewport {
                     }
                 }
             }
+        }
+
+        // Ctrl+RMB drag resizes the brush (Painter's chord): horizontal =
+        // size, vertical = hardness, relative to the drag origin. It is
+        // never navigation under any preset (`navigation.rs` binds RMB
+        // only with Alt), so it is handled before the camera.
+        let resize_chord = ui
+            .input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
+            && response.dragged_by(PointerButton::Secondary);
+        match (resize_chord, paint.as_mut()) {
+            (true, Some(p)) => {
+                let origin = response.interact_pointer_pos().unwrap_or(rect.center());
+                let drag = *self.resize.get_or_insert(ResizeDrag {
+                    size: p.brush_size(),
+                    hardness: p.brush_hardness(),
+                    origin,
+                });
+                let now = response.interact_pointer_pos().unwrap_or(drag.origin);
+                let (size, hardness) =
+                    crate::brush_cursor::resize_drag((drag.size, drag.hardness), now - drag.origin);
+                p.set_brush_size(size);
+                p.set_brush_hardness(hardness);
+            }
+            _ => self.resize = None,
         }
 
         let painting = !self.pick_armed
@@ -529,6 +565,31 @@ impl Viewport {
         if self.pick_armed || self.idmask_armed || !paint.projection().viewport_paints() {
             return;
         }
+        let painter = ui.painter().with_clip_rect(rect);
+        // A resize drag in flight: the ring stays at the drag origin and
+        // reads the live size/hardness, with a numeric HUD beside it.
+        if let Some(drag) = self.resize {
+            let radius = self.cursor_radius_px(rect, mesh, paint, drag.origin);
+            let shape = brush_cursor::shape(radius, paint.brush_hardness());
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            brush_cursor::paint(&painter, drag.origin, shape);
+            let hud = format!(
+                "{} ×{:.2}   {} {:.2}",
+                tr("hint.hud-size"),
+                paint.brush_size(),
+                tr("hint.hud-hardness"),
+                paint.brush_hardness()
+            );
+            let r = radius.unwrap_or(0.0);
+            painter.text(
+                drag.origin + egui::vec2(r + 10.0, -r.min(40.0)),
+                egui::Align2::LEFT_BOTTOM,
+                hud,
+                egui::FontId::proportional(13.0),
+                Color32::WHITE,
+            );
+            return;
+        }
         let Some(pos) = response.hover_pos() else {
             return;
         };
@@ -543,20 +604,35 @@ impl Viewport {
         if navigating || mods.alt {
             return; // a navigation chord: the arrow, not a brush
         }
-        let Some(uv) = self.pick_uv(rect, mesh, pos) else {
+        if self.pick_uv(rect, mesh, pos).is_none() {
             return; // off the mesh
-        };
+        }
+        let radius = self.cursor_radius_px(rect, mesh, paint, pos);
+        let shape = brush_cursor::shape(radius, paint.brush_hardness());
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        brush_cursor::paint(&painter, pos, shape);
+    }
+
+    /// The brush's on-screen radius at `pos` (`crate::brush_cursor`):
+    /// probes 8 px right and left through `pick_uv`, `None` when the
+    /// pointer is off the mesh or no probe measures.
+    fn cursor_radius_px(
+        &self,
+        rect: egui::Rect,
+        mesh: &umber_mesh::MeshData,
+        paint: &crate::paint_state::PaintState,
+        pos: egui::Pos2,
+    ) -> Option<f32> {
+        use crate::brush_cursor;
+        let uv = self.pick_uv(rect, mesh, pos)?;
         let texels_per_uv = paint.texels_per_uv_for(tile_of_uv(uv));
         let probe = |dir: f32| {
             let at = pos + egui::vec2(dir * brush_cursor::PROBE_PX, 0.0);
             let uv_b = self.pick_uv(rect, mesh, at)?;
             brush_cursor::texels_spanned(uv, uv_b, texels_per_uv)
         };
-        let span = brush_cursor::combine_spans(probe(1.0), probe(-1.0));
-        let radius_px = span.map(|t| brush_cursor::screen_radius(paint.brush_radius_texels(), t));
-        let shape = brush_cursor::shape(radius_px, paint.brush_hardness());
-        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-        brush_cursor::paint(&ui.painter().with_clip_rect(rect), pos, shape);
+        brush_cursor::combine_spans(probe(1.0), probe(-1.0))
+            .map(|t| brush_cursor::screen_radius(paint.brush_radius_texels(), t))
     }
 
     /// Sets the navigation preset.

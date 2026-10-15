@@ -57,6 +57,38 @@ pub const MAX_RING_PX: f32 = 4096.0;
 /// Crosshair arm length, px.
 pub const CROSSHAIR_PX: f32 = 6.0;
 
+/// One `[` / `]` press scales the brush size by this factor (Painter
+/// steps the size multiplicatively, so small brushes step finely).
+pub const SIZE_STEP: f32 = 1.1;
+/// Ctrl+RMB drag: pixels of horizontal drag that double the size.
+pub const RESIZE_PX_PER_DOUBLING: f32 = 150.0;
+/// Ctrl+RMB drag: pixels of vertical drag that sweep the full hardness
+/// range (up = harder).
+pub const HARDNESS_PX_PER_FULL: f32 = 200.0;
+
+/// One `[` (`grow = false`) or `]` (`grow = true`) step from `size`.
+/// Callers clamp through `PaintState::set_brush_size`.
+pub fn step_size(size: f32, grow: bool) -> f32 {
+    if grow {
+        size * SIZE_STEP
+    } else {
+        size / SIZE_STEP
+    }
+}
+
+/// The size and hardness after a Ctrl+RMB drag of `(dx, dy)` pixels from
+/// the drag's `start` values. Horizontal is exponential in size (right =
+/// bigger, 150 px doubles it). Vertical is linear in hardness (up =
+/// harder; screen y grows downward, so `-dy`). The result is relative to
+/// the drag origin, not accumulated per frame, so a drag returned to its
+/// origin restores the exact start values.
+pub fn resize_drag(start: (f32, f32), total_delta: egui::Vec2) -> (f32, f32) {
+    let (size0, hard0) = start;
+    let size = size0 * 2f32.powf(total_delta.x / RESIZE_PX_PER_DOUBLING);
+    let hardness = (hard0 - total_delta.y / HARDNESS_PX_PER_FULL).clamp(0.0, 1.0);
+    (size, hardness)
+}
+
 /// What the viewport draws at the pointer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CursorShape {
@@ -164,6 +196,33 @@ pub fn paint(painter: &egui::Painter, at: Pos2, shape: CursorShape) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_steps_are_multiplicative_and_reversible() {
+        let up = step_size(1.0, true);
+        assert!((up - SIZE_STEP).abs() < 1e-6);
+        assert!((step_size(up, false) - 1.0).abs() < 1e-6);
+        // Ten presses: ~2.59x.
+        let ten = (0..10).fold(1.0, |s, _| step_size(s, true));
+        assert!((ten - SIZE_STEP.powi(10)).abs() < 1e-4, "{ten}");
+    }
+
+    #[test]
+    fn resize_drag_maps_axes_and_returns_home() {
+        let start = (1.0, 0.5);
+        // 150 px right doubles; 150 px left halves.
+        let (s, h) = resize_drag(start, egui::vec2(RESIZE_PX_PER_DOUBLING, 0.0));
+        assert!((s - 2.0).abs() < 1e-5 && (h - 0.5).abs() < 1e-6);
+        let (s, _) = resize_drag(start, egui::vec2(-RESIZE_PX_PER_DOUBLING, 0.0));
+        assert!((s - 0.5).abs() < 1e-5);
+        // Up = harder, down = softer, clamped.
+        let (_, h) = resize_drag(start, egui::vec2(0.0, -HARDNESS_PX_PER_FULL / 4.0));
+        assert!((h - 0.75).abs() < 1e-6, "{h}");
+        let (_, h) = resize_drag(start, egui::vec2(0.0, 10_000.0));
+        assert_eq!(h, 0.0);
+        // Back at the origin: exactly the start values.
+        assert_eq!(resize_drag(start, egui::Vec2::ZERO), start);
+    }
 
     #[test]
     fn span_measures_texels_and_rejects_degenerate_probes() {

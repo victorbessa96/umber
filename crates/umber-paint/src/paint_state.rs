@@ -1111,6 +1111,11 @@ pub struct PaintState {
     /// Dab parameters every staged stroke uses (v1: the default brush;
     /// tests override the color to tell tiles' paint apart).
     brush: BrushParams,
+    /// The live brush SIZE as a multiplier on [`BRUSH_RADIUS_TEXELS`]
+    /// (`[` / `]`, Ctrl+RMB drag — GUI plan G1 g1-brush-resize). Applies to
+    /// live strokes only: path replays carry their own per-point scale.
+    /// Clamped to the path tool's `PATH_MIN_SIZE..=PATH_MAX_SIZE`.
+    brush_size: f32,
     /// How the live stroke's overlapping dabs accumulate, adopted from
     /// the active preset between strokes ([`Self::sync_wash_mode`]).
     /// `BuildUp` (the default) stages adapter dabs unchanged;
@@ -1365,6 +1370,7 @@ impl PaintState {
             active_set: default_set.clone(),
             multi_tile: false,
             brush: BrushParams::default(),
+            brush_size: 1.0,
             wash_mode: WashMode::BuildUp,
             conditioner: StrokeConditioner::new(
                 umber_brush::OneEuroParams::default(),
@@ -1821,7 +1827,7 @@ impl PaintState {
 
     pub fn begin_screen_point_pressured(&mut self, hit: Option<Pos2>, pressure: f32) {
         if let Some(uv) = hit {
-            self.begin_stroke_styled(uv, pressure, 1.0);
+            self.begin_stroke_styled(uv, pressure, self.brush_size);
         }
     }
 
@@ -1845,9 +1851,9 @@ impl PaintState {
     pub fn extend_screen_point_pressured(&mut self, hit: Option<Pos2>, pressure: f32) {
         if let Some(uv) = hit {
             if self.stroking {
-                self.extend_stroke_styled(uv, pressure, 1.0);
+                self.extend_stroke_styled(uv, pressure, self.brush_size);
             } else {
-                self.begin_stroke_styled(uv, pressure, 1.0);
+                self.begin_stroke_styled(uv, pressure, self.brush_size);
             }
         }
     }
@@ -4015,10 +4021,32 @@ impl PaintState {
     }
 
     /// The live-stroke brush radius in target texels (the radius every
-    /// viewport dab is stamped with, before per-event pressure scaling).
-    /// Read by the viewport's brush cursor (GUI plan G1 g1-brush-cursor).
+    /// viewport dab is stamped with, before per-event pressure scaling):
+    /// `BRUSH_RADIUS_TEXELS × brush_size`. Read by the viewport's brush
+    /// cursor (GUI plan G1).
     pub fn brush_radius_texels(&self) -> f32 {
-        BRUSH_RADIUS_TEXELS
+        BRUSH_RADIUS_TEXELS * self.brush_size
+    }
+
+    /// The live brush size multiplier (`1.0` = the historical 24-texel
+    /// brush).
+    pub fn brush_size(&self) -> f32 {
+        self.brush_size
+    }
+
+    /// Sets the live brush size multiplier, clamped through the path
+    /// tool's `sanitize_size` (`0.05..=8.0`; non-finite resets to `1.0`).
+    /// A stroke in flight keeps the size it began with: the change applies
+    /// from the next stroke, so a resize gesture never kinks a stroke.
+    pub fn set_brush_size(&mut self, size: f32) {
+        self.brush_size = sanitize_size(size);
+    }
+
+    /// Sets the brush hardness, clamped to `0..=1` (non-finite ignored).
+    pub fn set_brush_hardness(&mut self, hardness: f32) {
+        if hardness.is_finite() {
+            self.brush.hardness = hardness.clamp(0.0, 1.0);
+        }
     }
 
     /// The brush's hardness (`0..=1`): the fraction of the radius painted
@@ -5220,6 +5248,31 @@ mod tests {
         let b = local_texel(source, FIRST_TILE, 512.0);
         let off = clone_offset_texels(offset_uv, 512.0);
         assert_eq!([a[0] + off[0], a[1] + off[1]], b);
+    }
+
+    #[test]
+    fn brush_size_scales_the_live_radius_and_clamps() {
+        // PaintState needs a device; GPU-less hosts skip (the house rule).
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        assert_eq!(s.brush_size(), 1.0);
+        assert_eq!(s.brush_radius_texels(), BRUSH_RADIUS_TEXELS);
+        s.set_brush_size(2.0);
+        assert_eq!(s.brush_radius_texels(), BRUSH_RADIUS_TEXELS * 2.0);
+        s.set_brush_size(1000.0);
+        assert_eq!(s.brush_size(), umber_brush::path::PATH_MAX_SIZE);
+        s.set_brush_size(0.0);
+        assert_eq!(s.brush_size(), umber_brush::path::PATH_MIN_SIZE);
+        s.set_brush_size(f32::NAN);
+        assert_eq!(s.brush_size(), 1.0);
+        s.set_brush_hardness(2.0);
+        assert_eq!(s.brush_hardness(), 1.0);
+        s.set_brush_hardness(f32::NAN);
+        assert_eq!(s.brush_hardness(), 1.0);
+        s.set_brush_hardness(0.25);
+        assert_eq!(s.brush_hardness(), 0.25);
     }
 
     #[test]

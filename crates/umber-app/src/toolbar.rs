@@ -112,6 +112,10 @@ pub enum ShellAction {
     InvertMask,
     /// Select a brush tool. E selects the eraser.
     SelectTool(ToolKind),
+    /// Shrink the brush one step. `[` (GUI plan G1 g1-brush-resize).
+    BrushSmaller,
+    /// Grow the brush one step. `]`.
+    BrushLarger,
 }
 
 /// The brush tool without its params: the tool strip's slot id.
@@ -188,7 +192,7 @@ impl ToolKind {
 /// The keys the shell polls each frame (the letter keys + the chord keys).
 /// Pinned against [`crate::actions::BINDINGS`] by
 /// `shortcut_keys_are_exactly_the_bound_keys`.
-pub const SHORTCUT_KEYS: [Key; 9] = [
+pub const SHORTCUT_KEYS: [Key; 11] = [
     Key::W,
     Key::G,
     Key::V,
@@ -198,6 +202,8 @@ pub const SHORTCUT_KEYS: [Key; 9] = [
     Key::Z,
     Key::S,
     Key::O,
+    Key::OpenBracket,
+    Key::CloseBracket,
 ];
 
 /// The shell's key table (see the module docs). `None` for any key or
@@ -482,7 +488,8 @@ mod tests {
                 resolve_shortcut(key, bare()).is_some() || resolve_shortcut(key, cmd()).is_some();
             assert!(bound, "{key:?} is polled but unbound");
         }
-        // Ten bindings: six bare + four chords (Z, Shift+Z, S, O).
+        // Twelve bindings: eight bare (incl. [ ]) + four chords (Z,
+        // Shift+Z, S, O).
         let bare = SHORTCUT_KEYS
             .iter()
             .filter(|k| resolve_shortcut(**k, bare()).is_some())
@@ -495,7 +502,7 @@ mod tests {
                 .iter()
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
-        assert_eq!((bare, chords), (6, 4));
+        assert_eq!((bare, chords), (8, 4));
     }
 
     #[test]
@@ -566,6 +573,8 @@ mod tests {
             ShellAction::ToggleMaskMode,
             ShellAction::InvertMask,
             ShellAction::SelectTool(ToolKind::Smudge),
+            ShellAction::BrushSmaller,
+            ShellAction::BrushLarger,
         ] {
             assert!(!v.apply(action), "{action:?}");
         }

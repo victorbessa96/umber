@@ -644,6 +644,12 @@ action =
 
 hint =
     .drop = Solte
+    .rmb-drag = Arrastar Dir
+    .resize = tamanho / dureza
+    .brackets = [ ]
+    .size = tamanho do pincel
+    .hud-size = Tamanho
+    .hud-hardness = Dureza
     .alt-lmb = Alt+Esq
     .alt-mmb = Alt+Meio
     .alt-rmb = Alt+Dir

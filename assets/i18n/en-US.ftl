@@ -655,6 +655,12 @@ action =
 
 hint =
     .drop = Drop
+    .rmb-drag = RMB drag
+    .resize = size / hardness
+    .brackets = [ ]
+    .size = brush size
+    .hud-size = Size
+    .hud-hardness = Hardness
     .alt-lmb = Alt+LMB
     .alt-mmb = Alt+MMB
     .alt-rmb = Alt+RMB

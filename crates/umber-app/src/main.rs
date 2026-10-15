@@ -1119,6 +1119,15 @@ impl UmberApp {
                 }
             }
             ShellAction::SelectTool(kind) => self.brush_panel.select_tool(kind),
+            // `[` / `]` (Painter's size steps): one notch of the shared
+            // multiplicative step, so ten presses span ~2.6x.
+            ShellAction::BrushSmaller | ShellAction::BrushLarger => {
+                if let Some(paint) = self.state.paint.as_mut() {
+                    let grow = action == ShellAction::BrushLarger;
+                    let next = brush_cursor::step_size(paint.brush_size(), grow);
+                    paint.set_brush_size(next);
+                }
+            }
             // Applied by `ViewToggles::apply` above.
             ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {
             }
