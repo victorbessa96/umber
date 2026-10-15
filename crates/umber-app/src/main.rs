@@ -445,6 +445,56 @@ impl TabViewer for PanelViewer<'_> {
                         );
                     }
                 }
+                // Smart mask (C2-10): the attached mask's pixels are the
+                // preset composed over the newest bakes, on every tile of
+                // the active set at the set's size. The bakes' sRGB PNGs
+                // are linearized first (vector maps are already linear).
+                if let Some((layer, mask)) = &outcome.smart_mask_applied {
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        let active_set = paint.active_set().to_string();
+                        let tiles: Vec<u16> = paint
+                            .tiles_present()
+                            .into_iter()
+                            .filter(|t| paint.set_of_tile(*t) == active_set)
+                            .collect();
+                        for tile in tiles {
+                            let (w, h) = paint.tile_size(tile);
+                            let composed = document::compose_smart_mask(mask, w, h, |name| {
+                                let path = self.bakes.latest_map(name)?;
+                                let (mw, mh, mut rgba) =
+                                    umber_export::png::read_png_rgba8(path).ok()?;
+                                let linear = matches!(
+                                    name.to_ascii_lowercase().as_str(),
+                                    "normal"
+                                        | "normal_base"
+                                        | "world_normal"
+                                        | "world_space_normal"
+                                        | "bent_normal"
+                                        | "height"
+                                );
+                                if !linear {
+                                    paint_state::curvature_png_to_linear(&mut rgba);
+                                }
+                                Some((mw, mh, rgba))
+                            });
+                            match composed {
+                                Ok((plane, missing)) => {
+                                    if !missing.is_empty() {
+                                        log::info!(
+                                            "smart mask '{}': {} not baked at {w}x{h}; those stages read mid-grey",
+                                            mask.name,
+                                            missing.join(", ")
+                                        );
+                                    }
+                                    if !paint.publish_layer_mask(*layer, tile, plane) {
+                                        log::warn!("smart mask: tile {tile} refused the plane");
+                                    }
+                                }
+                                Err(e) => log::warn!("smart mask '{}': {e}", mask.name),
+                            }
+                        }
+                    }
+                }
                 // Duplicate with content (C2-8): the document made the copy's
                 // settings; its pixels come from the source's planes.
                 if let Some((source, copy)) = outcome.duplicated {

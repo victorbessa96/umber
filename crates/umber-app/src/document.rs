@@ -412,6 +412,10 @@ pub struct LayersUiOutcome {
     /// its new layer ids, so the shell can bind each fill's mesh-map
     /// generator ([`bind_smart_generators`]) from the panel's bakes.
     pub smart_applied: Option<(umber_core::smart::SmartMaterial, Vec<u64>)>,
+    /// A smart mask the shelf just applied to a layer (C2-10): the shell
+    /// composes its pixels ([`compose_smart_mask`]) into that layer's mask
+    /// plane.
+    pub smart_mask_applied: Option<(u64, umber_core::smart::SmartMask)>,
 }
 
 /// Per-row badge state for [`layers_ui`] (stage 4): the shell owns these
@@ -651,6 +655,19 @@ pub fn layers_ui(
                     outcome.select = Some(PlaneOwner::Layer(*top));
                 }
                 outcome.smart_applied = Some((material, ids));
+            }
+            // Smart masks (`.umbermask`) apply to the selected layer.
+            if let PlaneOwner::Layer(target) = active {
+                ui.separator();
+                for (name, mask) in list_smart_masks(&smart_dirs()) {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{name} ▸ .umbermask"));
+                        if ui.button("＋").clicked() {
+                            doc.run(LayerCommand::attach_mask(target, name.clone()));
+                            outcome.smart_mask_applied = Some((target, mask));
+                        }
+                    });
+                }
             }
         });
     let mut remove_id = None;
@@ -942,6 +959,94 @@ pub fn list_smart_materials(
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// Every loadable `.umbermask` in `dirs`, sorted by name (the
+/// [`list_smart_materials`] rules: first directory wins, a bad file is
+/// skipped with a log line).
+pub fn list_smart_masks(
+    dirs: &[std::path::PathBuf],
+) -> Vec<(String, umber_core::smart::SmartMask)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "umbermask"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !seen.insert(file) {
+                continue;
+            }
+            match umber_core::smart::SmartMask::load_file(&path) {
+                Ok(mask) => out.push((mask.name.clone(), mask)),
+                Err(e) => log::warn!("smart mask {} skipped: {e}", path.display()),
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Composes a smart mask into a `width × height` grayscale plane (C2-10),
+/// texel by texel through [`umber_core::smart::SmartMask::compose_scalar`].
+/// `map(map_name)` supplies each generator's baked map as `(w, h, rgba8)`
+/// with LINEAR values; its red channel is the stage value. Anchors (layer
+/// channels) are not wired: they read as fully open (1.0). Returns the
+/// plane plus the generator map names that were missing or the wrong size
+/// (those stages read 0.5, a neutral mid value, rather than failing the
+/// whole mask).
+///
+/// # Errors
+///
+/// An empty mask (no ops).
+pub fn compose_smart_mask(
+    mask: &umber_core::smart::SmartMask,
+    width: u32,
+    height: u32,
+    mut map: impl FnMut(&str) -> Option<(u32, u32, Vec<u8>)>,
+) -> Result<(Vec<u8>, Vec<String>), umber_core::smart::SmartError> {
+    use umber_core::smart::MaskSource;
+    let texels = width as usize * height as usize;
+    let mut maps: std::collections::BTreeMap<String, Option<Vec<u8>>> = Default::default();
+    let mut missing = Vec::new();
+    for stage in &mask.ops {
+        if let MaskSource::Generator { map_name, .. } = &stage.source {
+            if maps.contains_key(map_name) {
+                continue;
+            }
+            let bytes = map(map_name)
+                .filter(|(w, h, b)| *w == width && *h == height && b.len() == texels * 4)
+                .map(|(_, _, b)| b);
+            if bytes.is_none() {
+                missing.push(map_name.clone());
+            }
+            maps.insert(map_name.clone(), bytes);
+        }
+    }
+    let mut plane = vec![0u8; texels];
+    for (texel, out) in plane.iter_mut().enumerate() {
+        let lookup = |source: &MaskSource| -> f32 {
+            match source {
+                MaskSource::Constant { value } => *value,
+                MaskSource::Anchor { .. } => 1.0,
+                MaskSource::Generator { map_name, .. } => match maps.get(map_name) {
+                    Some(Some(bytes)) => f32::from(bytes[texel * 4]) / 255.0,
+                    _ => 0.5,
+                },
+            }
+        };
+        let v = mask.compose_scalar(&lookup)?;
+        *out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    Ok((plane, missing))
 }
 
 /// Applies a smart material to the document as ordinary undoable
@@ -1466,6 +1571,33 @@ mod tests {
         assert_eq!(names[0], "Top", "Bottom rose one place: {names:?}");
         assert_eq!(names[1], "Bottom");
         assert_eq!(harness.state().doc.history.len(), before + 2);
+    }
+
+    #[test]
+    fn the_shipped_edge_wear_mask_composes_from_curvature() {
+        let masks = list_smart_masks(&smart_dirs());
+        let (_, wear) = masks
+            .iter()
+            .find(|(n, _)| n == "Edge wear")
+            .expect("shipped");
+        // Edge wear = levels(0.4..0.9) of (curvature + 0.35): a flat texel
+        // (curvature 0) is closed, a sharp one (curvature 1) fully open.
+        let curvature: Vec<u8> = [0u8, 0, 0, 255, 255, 255, 255, 255].to_vec();
+        let (plane, missing) = compose_smart_mask(wear, 2, 1, |name| {
+            (name == "curvature").then(|| (2, 1, curvature.clone()))
+        })
+        .expect("composes");
+        assert!(missing.is_empty());
+        assert_eq!(plane, vec![0, 255]);
+        // A missing map reads neutral and is reported, never a failure.
+        let (plane, missing) = compose_smart_mask(wear, 2, 1, |_| None).expect("composes");
+        assert_eq!(missing, vec!["curvature".to_string()]);
+        // (0.5 + 0.35 = 0.85 → levels 0.4..0.9 → 0.9 → 229.5, f32-rounded)
+        assert!(plane.iter().all(|v| (229..=230).contains(v)), "{plane:?}");
+        // A wrong-size map counts as missing too.
+        let (_, missing) =
+            compose_smart_mask(wear, 2, 1, |_| Some((4, 4, vec![0; 64]))).expect("composes");
+        assert_eq!(missing, vec!["curvature".to_string()]);
     }
 
     #[test]

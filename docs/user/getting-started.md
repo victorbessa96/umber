@@ -89,6 +89,12 @@ position, ...) takes the newest bake of that map from the Bakes panel, so
 bake first. A map that was never baked leaves its fill plain (the log names
 it); bake it and apply again.
 
+**Smart masks** (`.umbermask`) sit in the same shelf. Select a layer, then
+press ＋ on a mask: it attaches a mask to that layer and fills it from the
+preset, e.g. **Edge wear** opens the mask where the baked curvature is
+sharp. It is ordinary mask paint afterwards, so brush over it to touch it
+up.
+
 **Several materials on one mesh** become texture sets, each with its own
 layer stack. The **Texture Sets** panel picks the active one, and the
 Layers panel (headed with the set's name), undo and History follow it.
