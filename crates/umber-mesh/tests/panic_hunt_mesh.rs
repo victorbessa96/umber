@@ -154,12 +154,31 @@ const USDC_KNOWN: Known = &[
         "umber-mesh/src/usdc.rs:239",
         "bug_usdc_negative_count_panics",
     ),
+    // The alloc-site needles name the openusd frame that drove the failing
+    // allocation. Symbol syntax differs by platform: Linux backtraces print
+    // `<R as openusd::usdc::reader::ReadExt>::read_vec` and
+    // `read_compressed::<..>`; MSVC prints `openusd::usdc::reader::impl$2::
+    // read_vec<..>` and `...::read_compressed<..>` (no turbofish), and on a
+    // Vec3f read the innermost named frame is `RawVec<openusd::gf::vec::
+    // Vec3f>::with_capacity_in` (CI 38674793562). Each pair matches both.
     (
         "ReadExt>::read_vec",
         "bug_openusd_read_vec_capacity_overflow",
     ),
     (
+        "openusd::usdc::reader::impl$",
+        "bug_openusd_read_vec_capacity_overflow",
+    ),
+    (
+        "RawVec<openusd::gf::vec::",
+        "bug_openusd_read_vec_capacity_overflow",
+    ),
+    (
         "read_compressed::<",
+        "bug_openusd_read_compressed_capacity_overflow",
+    ),
+    (
+        ">::read_compressed<",
         "bug_openusd_read_compressed_capacity_overflow",
     ),
     ("usdc/coding.rs:52", "bug_openusd_decode_ints_slice_oob"),
