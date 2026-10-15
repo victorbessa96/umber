@@ -8,6 +8,9 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Plugins ask first: a `.wasm` in the user plugins dir loads only after
+  Trust & load in the Graph panel (bound to its exact bytes), and modules
+  over 8 MiB are refused before compile (C2-21)
 - A smart-material shelf in the Layers panel: the shipped materials apply as
   undoable layers (generator wiring follows) (C2-10)
 - The Layers panel can reorder, rename, duplicate and add folders, and the
