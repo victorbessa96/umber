@@ -318,8 +318,16 @@ pub struct ToolbarView {
 /// Draws the toolbar into `ui` and returns the actions clicked this frame
 /// (dispatched by the caller after the panel closes).
 pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellAction> {
+    use crate::rich_tooltip::RichTooltip;
     ui.set_style(theme::umber_style(theme::Density::Comfortable));
     let mut actions = Vec::new();
+    // The registry's view, for the rich tooltips' unavailable reasons.
+    let state = crate::actions::ShellState {
+        can_undo: view.can_undo,
+        can_redo: view.can_redo,
+        paint_available: view.paint_available,
+        mask_editing: view.mask_editing,
+    };
     ui.horizontal(|ui| {
         // File ops. The baked Panel family (icon-raster §11) draws the
         // glyphs; the localized labels moved to tooltips (Photoshop's own
@@ -327,26 +335,26 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         // has no glyph in the family.
         if ui
             .button(tr("shell.new"))
-            .on_hover_text(tr("shell.tip-new"))
+            .action_tip(ShellAction::NewProject, state)
             .clicked()
         {
             actions.push(ShellAction::NewProject);
         }
         let icon_size = 16.0;
         if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
-            .on_hover_text(tr("menu.open-mesh"))
+            .action_tip(ShellAction::OpenMesh, state)
             .clicked()
         {
             actions.push(ShellAction::OpenMesh);
         }
         if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
-            .on_hover_text(tr("shell.tip-open-project"))
+            .action_tip(ShellAction::OpenProject, state)
             .clicked()
         {
             actions.push(ShellAction::OpenProject);
         }
         if icons::icon_button(ui, atlas, "save", icon_size, false)
-            .on_hover_text(tr("shell.tip-save-project"))
+            .action_tip(ShellAction::SaveProject, state)
             .clicked()
         {
             actions.push(ShellAction::SaveProject);
@@ -355,12 +363,12 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
 
         // History.
         let undo = icons::icon_button_enabled(ui, atlas, "undo-2", icon_size, false, view.can_undo)
-            .on_hover_text(tr("shell.tip-undo"));
+            .action_tip(ShellAction::Undo, state);
         if undo.clicked() && view.can_undo {
             actions.push(ShellAction::Undo);
         }
         let redo = icons::icon_button_enabled(ui, atlas, "redo-2", icon_size, false, view.can_redo)
-            .on_hover_text(tr("shell.tip-redo"));
+            .action_tip(ShellAction::Redo, state);
         if redo.clicked() && view.can_redo {
             actions.push(ShellAction::Redo);
         }
@@ -390,12 +398,12 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         // glyph carries all three — active-tinted for the toggles, the
         // cycle button keeps the mode's name as its tooltip.
         let wireframe = icons::icon_button(ui, atlas, "eye", icon_size, view.view.wireframe)
-            .on_hover_text(tr("shell.tip-wireframe"));
+            .action_tip(ShellAction::ToggleWireframe, state);
         if wireframe.clicked() {
             actions.push(ShellAction::ToggleWireframe);
         }
         let grid = icons::icon_button(ui, atlas, "eye", icon_size, view.view.grid)
-            .on_hover_text(tr("shell.tip-grid"));
+            .action_tip(ShellAction::ToggleGrid, state);
         if grid.clicked() {
             actions.push(ShellAction::ToggleGrid);
         }
@@ -405,7 +413,16 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         } else {
             tr("shell.view-other")
         };
-        let cycle = icons::icon_button(ui, atlas, "eye", icon_size, lit).on_hover_text(mode);
+        // The cycle button's tooltip leads with the CURRENT mode (it is
+        // the button's state), then what V does, from the registry.
+        let cycle = icons::icon_button(ui, atlas, "eye", icon_size, lit).on_hover_ui(|ui| {
+            ui.label(egui::RichText::new(&mode).color(theme::accent()));
+            let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+            crate::rich_tooltip::draw(
+                ui,
+                &crate::rich_tooltip::tooltip_parts(ShellAction::CycleViewMode, state, is_mac, tr),
+            );
+        });
         if cycle.clicked() {
             actions.push(ShellAction::CycleViewMode);
         }
@@ -421,13 +438,13 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
             view.mask_editing,
             view.paint_available,
         )
-        .on_hover_text(tr("shell.tip-mask"));
+        .action_tip(ShellAction::ToggleMaskMode, state);
         if mask.clicked() && view.paint_available {
             actions.push(ShellAction::ToggleMaskMode);
         }
         let invert =
             icons::icon_button_enabled(ui, atlas, "pencil", icon_size, false, view.mask_editing)
-                .on_hover_text(tr("shell.tip-invert-mask"));
+                .action_tip(ShellAction::InvertMask, state);
         if invert.clicked() && view.mask_editing {
             actions.push(ShellAction::InvertMask);
         }

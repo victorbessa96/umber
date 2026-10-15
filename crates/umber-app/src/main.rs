@@ -136,6 +136,7 @@ mod layers_panel;
 mod navigation;
 mod palette;
 mod preferences;
+mod rich_tooltip;
 use umber_paint::material_layer;
 mod mesh_map_import;
 use umber_paint::paint_state;
