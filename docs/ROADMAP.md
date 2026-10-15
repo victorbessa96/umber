@@ -177,7 +177,7 @@ its test:
 | Kill | Closes | Notes |
 |---|---|---|
 | wave-stencil | paint-through screen stencil | 8b row |
-| wave-bitmap-stamps | stamp textures | ◐ engine landed 2026-10-15 (`47d8fed`: stamp texture + per-dab angle in the dab shader); the brush side (preset stamp, angle modes, jitter quartet) is next — prerequisite of `wave-brush-dynamics-angle-jitter` |
+| wave-bitmap-stamps | stamp textures | ✓ LANDED 2026-10-15: engine (`47d8fed`), brush angle modes (`487fd49`), jitter quartet (`90ec048`), panel + stamp picker. Open: stamp images persisted with presets |
 | wave-scorecard | generated headline counts | 8b row |
 | wave-stylus-win32 | the Windows tablet dual-path | wave 5 row |
 | wave-replay-exact | path replays paint exactly | a UX call (replays may want smoothing); default-off until decided |
