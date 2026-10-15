@@ -61,12 +61,30 @@ ShellAction::Redo => {
 Until it lands, the panel buttons are unified and the shortcuts still
 step layers only.
 
-## Deferred
+## Round 2: coordinated row travel (lock `c2-7-row-travel`)
 
-- Click-to-time-travel on a row still drives one journal. Coordinated
-  travel to a row means unified steps until both journals sit at the
-  row's moment. That is now a loop over `unified_undo`/`redo`, and the
-  next kill.
+- `travel_target(entries, op_id)` gives the journal lengths that put the
+  timeline AT a row: each journal's last depth at or before it, 0 if
+  none. Context rows and unknown ids return `None`.
+- `travel_to(doc, paint, op_id)` drives both journals through their
+  normal jump paths, so every intermediate edit is still journaled.
+- **A row click now travels the whole timeline.** Clicking a layer row
+  rewinds the strokes painted after it. The old per-journal click left
+  them painted, which is what `history.travel-note` warned about.
+- The module docs' "mixed-journal boundary" paragraph is rewritten for
+  the one timeline, and the panel no longer renders `travel-note`. The
+  key stays in the catalogs until their lock frees.
+- Tests:
+  - `travel_target` pins every row of an L S L S + bake log;
+  - **GPU:** First, a stroke, Second. Travelling to First leaves (1
+    layer, 0 strokes), and travelling to the newest restores (2, 1).
+
+  **Mutation check:** travel that ignores the stroke journal fails it.
+- Gate 1: umber-app 505. fmt and clippy clean: the battery caught a
+  `double_ended_iterator_last` and a `needless_option_as_deref`, both
+  fixed.
+
+## Deferred
 - Mask strokes and retouch tools ride the stroke journal already, so they
   are on the timeline. Smudge/clone reuse the same commit path; verified
   by reading, not by a dedicated test.

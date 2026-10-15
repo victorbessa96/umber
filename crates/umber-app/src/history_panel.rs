@@ -43,14 +43,14 @@
 //! (one undo step, one shared target — the merged-entry semantics); an
 //! identity stroke queues nothing and leaves no row.
 //!
-//! The mixed-journal boundary (v1): layer rows drive ONLY the layer journal
-//! and stroke rows ONLY the stroke journal — each click travels on its own.
-//! The row ORDER is the interleaving record (one `op_id` sequence across
-//! both journals), but clicking a layer row does not rewind contemporaneous
-//! strokes, nor vice versa. Coordinated travel — driving BOTH journals to
-//! the clicked row's wall-clock moment — is the named follow-up, not v1.
-//! The panel says so in the open (`history.travel-note`), so the boundary
-//! is visible, not silent.
+//! One timeline (C2-7, 2026-10-15): the row ORDER (one `op_id` sequence
+//! across both journals) IS the timeline. Clicking any row travels BOTH
+//! journals to that moment ([`travel_to`]): every row up to it applied,
+//! every row after it undone. A layer row rewinds the strokes painted
+//! after it, and a stroke row the layer ops after it. The Undo/Redo
+//! buttons step the same timeline one row at a time ([`unified_undo`] /
+//! [`unified_redo`]). The `history.travel-note` key, which described the
+//! old per-journal boundary, is no longer rendered.
 //!
 //! Capacity note: the log itself is unbounded (rows are a kind + small
 //! integers), while the layer journal is capped at 256 entries and the
@@ -499,6 +499,44 @@ pub fn unified_redo(doc: &mut Document, mut paint: Option<&mut PaintState>) -> b
     }
 }
 
+/// Coordinated travel (C2-7): the journal lengths that put the timeline AT
+/// the row with `op_id`: every row up to and including it applied, every
+/// row after it undone. For each journal that is the depth of its last
+/// row at or before `op_id` (0 when it has none there). `None` for an
+/// unknown id or a context row (not a position).
+pub fn travel_target(entries: &[HistoryEntry], op_id: u64) -> Option<(usize, usize)> {
+    let row = entries.iter().find(|e| e.op_id == op_id)?;
+    if row.jump_target().is_none() && row.stroke_target().is_none() {
+        return None;
+    }
+    // Newest-first over the rows at or before the target: the first depth
+    // found per journal is that journal's last one there.
+    let mut upto = entries.iter().rev().filter(|e| e.op_id <= op_id);
+    let layer = upto
+        .clone()
+        .find_map(HistoryEntry::jump_target)
+        .unwrap_or(0);
+    let stroke = upto.find_map(HistoryEntry::stroke_target).unwrap_or(0);
+    Some((layer, stroke))
+}
+
+/// Travels the whole timeline to row `op_id`: drives BOTH journals to
+/// [`travel_target`]'s lengths through their normal single-step paths
+/// (the layer journal's `jump_to_depth`, the session's
+/// `jump_to_stroke_depth`), so every intermediate edit is journaled.
+/// Without a paint session only the layer journal moves. `false` for a
+/// non-position row.
+pub fn travel_to(doc: &mut Document, paint: Option<&mut PaintState>, op_id: u64) -> bool {
+    let Some((layer, stroke)) = travel_target(doc.session_history.entries(), op_id) else {
+        return false;
+    };
+    doc.jump_to_depth(layer);
+    if let Some(session) = paint {
+        session.jump_to_stroke_depth(stroke);
+    }
+    true
+}
+
 /// The per-frame stroke-commit drain: called from the app's frame loop with
 /// the document AND the paint session — every frame, not only when the
 /// History tab is visible (egui_dock skips hidden tabs), so strokes painted
@@ -585,6 +623,7 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
             // pattern): collect-then-act.
             struct Row {
                 text: String,
+                op_id: u64,
                 layer_target: Option<usize>,
                 stroke_target: Option<usize>,
                 current: bool,
@@ -603,6 +642,7 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                     match (entry.jump_target(), entry.stroke_target()) {
                         (Some(target), None) => Row {
                             text: format!("{target} · {}", entry.kind.label()),
+                            op_id: entry.op_id,
                             layer_target: Some(target),
                             stroke_target: None,
                             current,
@@ -612,6 +652,7 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                         // journal to drive: display-only, like context.
                         (None, Some(target)) if paint.is_some() => Row {
                             text: format!("{target} · {}", entry.kind.label()),
+                            op_id: entry.op_id,
                             layer_target: None,
                             stroke_target: Some(target),
                             current,
@@ -619,6 +660,7 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                         },
                         _ => Row {
                             text: format!("· {}", entry.kind.label()),
+                            op_id: entry.op_id,
                             layer_target: None,
                             stroke_target: None,
                             current: false,
@@ -627,8 +669,7 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                     }
                 })
                 .collect();
-            let mut layer_jump_to = None;
-            let mut stroke_jump_to = None;
+            let mut travel: Option<u64> = None;
             for row in &rows {
                 // The current row carries a dot; undone (future) rows are
                 // greyed: a new edit would discard them.
@@ -642,33 +683,86 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
                         _ => egui::RichText::new(text),
                     }
                 };
-                if let Some(target) = row.layer_target {
+                // Coordinated travel (C2-7): a click puts the WHOLE
+                // timeline at this row, both journals at once.
+                if row.layer_target.is_some() || row.stroke_target.is_some() {
                     if ui.selectable_label(row.current, label(row)).clicked() {
-                        layer_jump_to = Some(target);
-                    }
-                } else if let Some(target) = row.stroke_target {
-                    if ui.selectable_label(row.current, label(row)).clicked() {
-                        stroke_jump_to = Some(target);
+                        travel = Some(row.op_id);
                     }
                 } else {
                     ui.label(egui::RichText::new(&row.text).weak());
                 }
             }
-            if let Some(target) = layer_jump_to {
-                doc.jump_to_depth(target);
-            }
-            if let Some(target) = stroke_jump_to {
-                if let Some(session) = paint.as_mut() {
-                    session.jump_to_stroke_depth(target);
-                }
+            if let Some(op_id) = travel {
+                travel_to(doc, paint, op_id);
             }
         });
-        ui.weak(tr("history.travel-note"));
+        // `history.travel-note` described the two-journal boundary that
+        // coordinated travel retired; it stays unused until the catalogs
+        // (under a sibling lock) can drop or reword it.
     });
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn travel_target_puts_both_journals_at_the_row() {
+        // op 0 L1, op 1 S1, op 2 L2, op 3 S2, op 4 a bake.
+        let mut log = mixed_log(&[(true, 1), (false, 1), (true, 2), (false, 2)]);
+        log.push(HistoryEntry {
+            kind: HistoryKind::Bake,
+            op_id: 4,
+            undo_depth: None,
+            stroke_depth: None,
+        });
+        assert_eq!(travel_target(&log, 0), Some((1, 0)), "L1: no stroke yet");
+        assert_eq!(travel_target(&log, 1), Some((1, 1)));
+        assert_eq!(travel_target(&log, 2), Some((2, 1)), "L2 keeps S1");
+        assert_eq!(travel_target(&log, 3), Some((2, 2)));
+        assert_eq!(
+            travel_target(&log, 4),
+            None,
+            "a context row is not a position"
+        );
+        assert_eq!(travel_target(&log, 99), None);
+    }
+
+    #[test]
+    fn clicking_a_layer_row_rewinds_the_stroke_painted_after_it() {
+        // GPU: First, a stroke, Second. Travelling to First must undo the
+        // stroke too (the old per-journal click left it painted).
+        let Some((device, queue)) = paint_device() else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 64).expect("paint builds");
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("First", LayerKind::Paint));
+        paint.begin_stroke(egui::pos2(0.2, 0.2));
+        for i in 1..=24 {
+            let t = i as f32 * 0.02;
+            paint.extend_stroke(egui::pos2(0.2 + t, 0.2 + t * 0.5));
+        }
+        paint.end_stroke();
+        paint.process_pending().expect("drains");
+        drain_stroke_commits(&mut doc, &mut paint);
+        doc.run(LayerCommand::add("Second", LayerKind::Paint));
+        let first = doc.session_history.entries()[0].op_id;
+        assert!(travel_to(&mut doc, Some(&mut paint), first));
+        assert_eq!(
+            (doc.layers().len(), paint.stroke_len()),
+            (1, 0),
+            "at First: no stroke"
+        );
+        let last = doc.session_history.entries().last().unwrap().op_id;
+        assert!(travel_to(&mut doc, Some(&mut paint), last));
+        assert_eq!(
+            (doc.layers().len(), paint.stroke_len()),
+            (2, 1),
+            "back to the newest"
+        );
+    }
 
     /// A paint-capable device (the `bake_sources` tests' pattern).
     fn paint_device() -> Option<(wgpu::Device, wgpu::Queue)> {
