@@ -8,6 +8,11 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Texture sets: a mesh with several materials gets a layer stack, undo,
+  History and channel list per set; the Texture Sets panel switches them and
+  a save writes every set (C2-9)
+- Brush panel: bitmap stamp, angle mode and jitter controls, and a stamp
+  image picker (C2-11)
 - Your work is safe: closing with unsaved edits asks first, Ctrl+S re-saves
   in place (Ctrl+Shift+S is Save As), unsaved work (paint included, even a
   never-saved document) is snapshotted every two minutes and offered back
