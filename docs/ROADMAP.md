@@ -123,7 +123,6 @@ the already-have list and the declines is
 | wave-stroke-methods | the missing stroke idioms | airbrush (deposit at a rate while held), anchored + drag-dot (decal placement), dash ratio/length (stitches, seams) |
 | wave-stencil | paint-through screen stencil | an image overlay you move/scale/rotate and paint through — the logo/decal workflow |
 | wave-brush-cavity-mask | edge-wear without building a mask layer | per-brush "mask by cavity / ridge" reusing the baked curvature map |
-| wave-normal-object-space | object-space normal bakes | Normal Space: Object beside today's tangent-only bake |
 | wave-gpu-safe-start | a driver crash at device creation repeating every launch | photocraft's startup marker: write before device creation, clear after the first frames; an uncleared marker steps the backend down next launch; `--safe-gpu` override |
 | wave-save-completeness | a new document field silently not saved | destructure every doc struct in the save converters with no `..`: a new field fails to compile until the save path handles it |
 | wave-scorecard | handwritten headline numbers drifting | generate README/STATE counts (crates, tests, rows) from the tree; `--check` in the battery + CI (this pass found 4 drifted docs) |

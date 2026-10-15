@@ -35,7 +35,6 @@ Verdicts: **landed** (in this pass) · **row** (became a ROADMAP row) ·
 | **Stroke methods: airbrush, anchored, drag-dot, dash** | Blender stroke manual | spacing, line constraint, path/polygon exist; no airbrush (rate while held), no anchored/drag-dot (the decal-placement idioms), no dash ratio/length (stitches) | M |
 | **Stamp angle (fixed / rake / random) + size/opacity/position jitter; stencil overlay** | Blender brush texture manual | `BrushParams` is color/alpha/hardness/pressure-gamma/wash-mode only: no per-dab rotation and **no jitter** (`brush_panel.rs` module docs confirm a kill brief named jitter/angle and found neither — an earlier summary claiming jitter was wrong); no screen-space stencil to paint through | M |
 | **Brush-level cavity mask** | Blender texture-paint mask settings | curvature bakes (`umber-bake`) and layer masks exist; no per-brush "mask by cavity" toggle reusing the baked curvature | S |
-| **Object-space normal bake** | Blender baking (Normal Space: Object/Tangent) | tangent-space only (`umber-bake/src/normal_map.rs`); DX/GL Y-flip at export already **have** (`NormalConvention`, `a1490ad`) | S |
 | **GPU-startup crash marker + backend fallback** | photocraft `apps/photocraft/src/gpu_startup.rs` | nothing — a driver segfault at device creation repeats every launch; the marker (written before device creation, cleared after first frames) steps Vulkan→GL/DX12 next launch; `--safe-gpu` override | M |
 | **Mesh importers in the panic-hunt** | photocraft codec limits + this pass's threat table | FBX / glTF / USD/USDC parsers have no garbage coverage (`umber-app/tests/panic_hunt.rs` covers mtlx/PSD/.spp/projects) | S |
 | **Save-format completeness by exhaustive destructuring** | photocraft `crates/format/src/convert.rs` | to verify per-converter; the pattern (no `..` in the doc→disk destructure) makes a new field a compile error until saved | S |
@@ -49,6 +48,7 @@ Verdicts: **landed** (in this pass) · **row** (became a ROADMAP row) ·
 |---|---|---|
 | Autosave + crash recovery | photocraft Autosaver | the journal (`umber_core::journal`, requirements §5 `015fbf0`) |
 | DX/GL normal Y-flip | Blender swizzle | `NormalConvention` per export preset |
+| Object-space (world) normal bake | Blender Normal Space: Object | `BakeMap::WorldSpaceNormal` (`umber-bake/src/lib.rs`), `position::bake_world_normal_map`; also a transfer (high→low) output. **Ledger correction 2026-10-14:** first listed as a gap — the check grepped `normal_map.rs` only; the world-normal path lives in `position.rs`. |
 | Nightly perf with a baseline | photocraft perf-nightly; Blender benchmark framework | `docs/perf/protocol.md` + the i2p/pool harnesses; budget breach blocks, slowdown records |
 | i18n key coverage | photocraft `i18n_coverage.rs` | `i18n::missing_keys` + the en-US/pt-BR parity test |
 | Test data in-repo, filtered runs | Blender test setup | fixtures under `crates/*/tests/fixtures`; `cargo test -p` |
