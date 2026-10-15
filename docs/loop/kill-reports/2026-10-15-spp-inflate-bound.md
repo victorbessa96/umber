@@ -32,6 +32,34 @@ path whose cost was not set by the declared shape.
   length equals the footprint for every legal pipeline.
 - Removed the old 256 MiB `Unsupported` branch; the limit subsumes it.
 
+## A second bug found in review: payloads over one window
+
+The original loop called `decompress(.., FlushDecompress::Finish)` once
+per 64 KiB window. The backend is miniz_oxide or zlib-rs, depending on
+which flate2 feature wins: `zip` 8.6 enables `flate2/zlib-rs`, so the
+workspace build is zlib-rs, while `umber-spp`'s own test build may be
+miniz_oxide. Both refuse that pattern, read from the registry source:
+- **miniz_oxide 0.9.1** `inflate/stream.rs:227`: `Finish` on the first
+  call decodes in one shot into a non-wrapping buffer. Too small →
+  `Failed` → `MZError::Buf`. flate2 maps that to `Status::BufError`, which
+  the loop called "stalled".
+- **zlib-rs 0.6.8** `inflate.rs:2450`: with `Finish`, a call that does
+  not end the stream returns `BufError`. Same result.
+
+So every deflated dataset or chunk over 64 KiB failed to open. The
+synthetic tests only use 2×2 f32 chunks (64 bytes), and the real-file
+corpus is empty (queue #16, BLOCKED on samples), so nothing covered it.
+A real Painter 4K texture chunk is far larger. The rewrite:
+- streams with `FlushDecompress::None`, which resumes across windows on
+  both backends, until `StreamEnd`;
+- continues on `Ok` or `BufError` while input or output moved;
+- refuses "ends early (truncated chunk)" when neither moved.
+
+**This is inferred from the backends' source, not observed.** No real
+`.spp` has been opened, and the host must confirm it. The new test
+(300 KB patterned payload, more than four windows) fails on the old loop
+if the reading is right.
+
 ## Test
 
 `inflate_tests::a_deflate_bomb_stops_at_its_footprint`:
@@ -39,7 +67,8 @@ path whose cost was not set by the declared shape.
   refused with the footprint message;
 - an honest 4 KiB stream decodes exactly;
 - a short stream decodes, and the caller's check owns that refusal;
-- a 300 KB stream decodes across several 64 KiB windows.
+- a 300 KB patterned stream decodes byte-exact across five windows;
+- the same stream cut in half is refused as truncated, not looped on.
 
 Mutation check due on the host: with `limit` ignored (`room = 65536`),
 the bomb case must fail.
