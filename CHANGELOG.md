@@ -8,6 +8,12 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Bakes: a High poly group bakes normal + height from a high-poly mesh with
+  a cage; Export writes the newest baked normal instead of a flat one (C2-29)
+- Smart materials bind their mesh-map generators to the newest bakes, and
+  `.umbermask` presets compose onto a layer's mask (C2-10)
+- CLI: `bake_transfer` rays start at the cage by default, so detail outside
+  the low surface is no longer missed
 - Texture sets: a mesh with several materials gets a layer stack, undo,
   History and channel list per set; the Texture Sets panel switches them and
   a save writes every set (C2-9)

@@ -236,8 +236,8 @@ the owner's go-ahead to file.
 | MyPaint-style input curves + stabilizer | ✓ complete |
 | Smudge/clone/symmetry/path/polygon/quick mask | ✓ complete |
 | Seam-aware stamping + 3D-space strokes | ✓ complete |
-| Texture sets + channel stacks + UDIM | ✓ + per-channel pool (2026-10-12) |
-| Layers: types, instancing, anchors, smart materials | ✓ complete |
+| Texture sets + channel stacks + UDIM | ✓ + per-channel pool (2026-10-12) + a layer stack, undo, History and channel list per texture set (C2-9, 2026-10-15) |
+| Layers: types, instancing, anchors, smart materials | ✓ complete; smart materials bind their mesh-map generators to the newest bakes and `.umbermask` presets compose onto masks (C2-10, 2026-10-15) |
 | Blend modes | ✓ 32-mode census landed (d861482) |
 | Masks (paintable per-layer) | ✓ landed (770162f); per-plane masks ride the pool |
 | Dynamic materials | ✓ LANDED end to end (Kill A + Kill B, 2026-10-14); per-layer pixels ✓ (the pool arc, stages 4 `dd6e1cd` + 5 `ec6d552`) |
