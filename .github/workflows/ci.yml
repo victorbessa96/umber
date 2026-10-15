@@ -22,8 +22,32 @@ jobs:
       - name: Crate layering
         run: python3 scripts/check-layers.py
 
+  # Docs-only PRs skip the build matrix (absorbed 2026-10-14 from
+  # photocraft's ci.yml `platforms` job, made conservative): the matrix
+  # runs on EVERY push to master, on a PR touching anything outside the
+  # docs allowlist, and on any PR labelled `full-ci`. Diff computed with
+  # plain git against the PR base — no third-party action. An error in
+  # this job (e.g. the base is unreachable) fails OPEN: code=true.
+  changes:
+    name: change classifier
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: python3 scripts/ci-classify.py >> "$GITHUB_OUTPUT"
+
   check:
     name: fmt + clippy + test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
