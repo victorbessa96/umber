@@ -64,6 +64,14 @@ pub const FUEL: u64 = 2_000_000_000;
 /// must fit — about 2896² for a square image.
 pub const MEMORY_CAP: usize = 64 << 20;
 
+/// Cap on a plugin module's SIZE, checked before wasmtime compiles a
+/// byte (C2-21). Compilation is the one host-side cost a module controls
+/// before any fuel is metered: an oversized file would burn compile time
+/// and memory on every launch. The three reference plugins are under
+/// 4 KiB; 8 MiB is generous headroom for real filters with embedded
+/// tables.
+pub const MODULE_SIZE_CAP: usize = 8 << 20;
+
 /// wasm page size (the core spec's fixed 64 KiB).
 const PAGE: usize = 65_536;
 
@@ -124,13 +132,20 @@ impl PluginRuntime {
     ///
     /// # Errors
     ///
-    /// [`PluginError::BadModule`] — not wasm, fails validation, or
-    /// declares imports (v1 plugins get none); [`PluginError::MissingExport`]
+    /// [`PluginError::BadModule`] — over [`MODULE_SIZE_CAP`], not wasm,
+    /// fails validation, or declares imports (v1 plugins get none); [`PluginError::MissingExport`]
     /// — an export is absent or has the wrong type;
     /// [`PluginError::BadWire`] — the node-def record is malformed or
     /// outside v1 limits; [`PluginError::FuelExhausted`] /
     /// [`PluginError::GuestPanic`] — `umber_node_def` ran away / trapped.
     pub fn load(&self, bytes: &[u8]) -> Result<PluginModule, PluginError> {
+        if bytes.len() > MODULE_SIZE_CAP {
+            return Err(PluginError::BadModule(format!(
+                "module is {} bytes, over the {} MiB cap",
+                bytes.len(),
+                MODULE_SIZE_CAP >> 20
+            )));
+        }
         let module = Module::new(&self.engine, bytes)
             .map_err(|e| PluginError::BadModule(format!("{e:#}")))?;
         if let Some(import) = module.imports().next() {

@@ -155,6 +155,10 @@ pub struct GraphPanel {
     /// The last plugin scan's summary line (kept apart from `status`,
     /// which every evaluate overwrites).
     plugin_status: Option<String>,
+    /// Untrusted plugins awaiting consent, `(path, blake3 hex)` (C2-21).
+    plugin_pending: Vec<(PathBuf, String)>,
+    /// The consent store the scan and the Trust button share.
+    plugin_trust: plugins::TrustStore,
     /// The active texture set's layers, for the anchor picker (the app
     /// refreshes this each frame — the picker filters graph inputs to
     /// the set by construction).
@@ -199,6 +203,8 @@ impl GraphPanel {
             canvas: CanvasState::default(),
             plugin_decls: Vec::new(),
             plugin_status: None,
+            plugin_pending: Vec::new(),
+            plugin_trust: plugins::TrustStore::default(),
             anchor_layers: Vec::new(),
             anchor_externals: HashMap::new(),
         }
@@ -209,7 +215,9 @@ impl GraphPanel {
     /// warnings on the plugin status line, never fatal. Returns the
     /// scan's report.
     pub fn load_plugins(&mut self, dirs: &[PathBuf]) -> PluginLoadReport {
-        let report = plugins::load_plugins(&mut self.registry, dirs);
+        self.plugin_trust = plugins::TrustStore::open(plugins::trust_path());
+        let report = plugins::load_plugins(&mut self.registry, dirs, &self.plugin_trust);
+        self.plugin_pending = report.pending.clone();
         self.plugin_decls.extend(
             report
                 .loaded
@@ -219,6 +227,66 @@ impl GraphPanel {
         self.plugin_decls.sort_by(|a, b| a.name.cmp(&b.name));
         self.plugin_status = report.status_line();
         report
+    }
+
+    /// Trusts pending plugin `index` (persisting its hash) and loads it.
+    /// The file must still hash to what was listed: a swapped file is
+    /// refused and stays out. Returns the registered name, or the reason.
+    ///
+    /// # Errors
+    ///
+    /// The trust file failing to save, or the load failing.
+    pub fn trust_pending_plugin(&mut self, index: usize) -> Result<String, String> {
+        let (path, hash) = self
+            .plugin_pending
+            .get(index)
+            .cloned()
+            .ok_or_else(|| "no such pending plugin".to_owned())?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.plugin_trust
+            .trust(&hash, &name)
+            .map_err(|e| format!("cannot save trust: {e}"))?;
+        let result = plugins::load_trusted_file(&mut self.registry, &path, &hash);
+        self.plugin_pending.remove(index);
+        if let Ok(node) = &result {
+            self.plugin_decls.push(plugins::plugin_nodedef(node));
+            self.plugin_decls.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        result
+    }
+
+    /// The untrusted plugins awaiting consent.
+    pub fn plugin_pending(&self) -> &[(PathBuf, String)] {
+        &self.plugin_pending
+    }
+
+    /// One row per untrusted plugin: its file, the first 12 hex digits of
+    /// its hash (to compare against what the author published), and the
+    /// one-click Trust & load. Plugins run sandboxed (no imports, fuel,
+    /// a memory cap), so the consent guards against unexpected code
+    /// rather than host access; the row says where the file is.
+    fn pending_plugins_ui(&mut self, ui: &mut egui::Ui) {
+        let mut trust = None;
+        for (i, (path, hash)) in self.plugin_pending.iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("⚠");
+                ui.monospace(path.display().to_string());
+                ui.weak(format!("blake3 {}…", &hash[..12]));
+                // Untranslated until the catalogs take the consent keys.
+                if ui.button("Trust & load").clicked() {
+                    trust = Some(i);
+                }
+            });
+        }
+        if let Some(i) = trust {
+            self.status = match self.trust_pending_plugin(i) {
+                Ok(name) => format!("plugin {name} trusted and loaded"),
+                Err(reason) => format!("plugin not loaded: {reason}"),
+            };
+        }
     }
 
     /// The last plugin scan's summary (`None` when no `.wasm` was found).
@@ -809,6 +877,7 @@ impl GraphPanel {
         if let Some(line) = self.plugin_status() {
             ui.weak(line);
         }
+        self.pending_plugins_ui(ui);
         self.editor_section(ui);
 
         ui.add_space(4.0);

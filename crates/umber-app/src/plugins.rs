@@ -15,6 +15,19 @@
 //! WARNING in the [`PluginLoadReport`] — a broken plugin never takes the
 //! graph panel down.
 //!
+//! # Consent (C2-21)
+//!
+//! A `.wasm` in the user plugins dir is code someone else wrote, dropped
+//! where the app scans on every launch. It does NOT load until the user
+//! trusts it: the loader hashes the file (blake3) and loads it only when
+//! that hash is in the trust file ([`TrustStore`], `plugins-trusted.txt`
+//! beside the plugins dir). Otherwise it is reported as PENDING, and the
+//! Graph panel offers a per-file "Trust & load". Trust binds the exact
+//! bytes. The hash is taken from the same buffer that is compiled (one
+//! read, no swap window), so a replaced or modified file is pending
+//! again. The dev `examples/` dir (debug builds only) is implicitly
+//! trusted: it is the repo's own checked-in reference plugins.
+//!
 //! # The collision rule
 //!
 //! [`umber_graph::NodeRegistry::register`] is a plain map insert: a later
@@ -43,6 +56,9 @@ pub struct PluginLoadReport {
     pub loaded: Vec<String>,
     /// Files that did not register: `(path, reason)`, in scan order.
     pub failed: Vec<(PathBuf, String)>,
+    /// Untrusted files awaiting consent: `(path, blake3 hex)`, in scan
+    /// order. Never compiled.
+    pub pending: Vec<(PathBuf, String)>,
 }
 
 impl PluginLoadReport {
@@ -50,7 +66,7 @@ impl PluginLoadReport {
     /// files at all (nothing worth saying), else
     /// `N plugin(s) loaded, M failed[: a.wasm, b.wasm]`.
     pub fn status_line(&self) -> Option<String> {
-        if self.loaded.is_empty() && self.failed.is_empty() {
+        if self.loaded.is_empty() && self.failed.is_empty() && self.pending.is_empty() {
             return None;
         }
         let mut line = tr_args(
@@ -72,6 +88,10 @@ impl PluginLoadReport {
                 .collect();
             line.push_str(": ");
             line.push_str(&names.join(", "));
+        }
+        if !self.pending.is_empty() {
+            // Untranslated until the catalogs take a `.plugins-pending` key.
+            line.push_str(&format!(" · {} awaiting trust", self.pending.len()));
         }
         Some(line)
     }
@@ -105,14 +125,130 @@ pub fn plugin_paths() -> Vec<PathBuf> {
     plugin_paths_from(user.as_deref(), dev.as_deref())
 }
 
-/// Scans `dirs` in order and registers every loadable plugin into
-/// `registry` (see the module docs for the tolerance + collision rules).
-/// The registry is untouched by a failed file.
-pub fn load_plugins(registry: &mut NodeRegistry, dirs: &[PathBuf]) -> PluginLoadReport {
+/// The trust file's path: `plugins-trusted.txt` beside the plugins dir
+/// (`None` without a discoverable home: then nothing user-side loads).
+pub fn trust_path() -> Option<PathBuf> {
+    umber_brush::preset_library::user_preset_dir()
+        .and_then(|b| b.parent().map(|p| p.join("plugins-trusted.txt")))
+}
+
+/// The set of plugin hashes the user has consented to (C2-21). One line
+/// per trust, `<blake3 hex> <file name>`. The name is for the human
+/// reading the file; only the hash is matched.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TrustStore {
+    path: Option<PathBuf>,
+    hashes: std::collections::BTreeSet<String>,
+}
+
+impl TrustStore {
+    /// Reads the trust file at `path`. A missing or unreadable file is an
+    /// empty store (nothing trusted), and malformed lines are skipped.
+    /// `None` gives an in-memory store that never persists.
+    pub fn open(path: Option<PathBuf>) -> Self {
+        let mut hashes = std::collections::BTreeSet::new();
+        if let Some(text) = path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+        {
+            for line in text.lines() {
+                if let Some(hash) = line.split_whitespace().next() {
+                    if is_blake3_hex(hash) {
+                        hashes.insert(hash.to_owned());
+                    }
+                }
+            }
+        }
+        Self { path, hashes }
+    }
+
+    /// Whether `hash` (blake3 hex) is trusted.
+    pub fn is_trusted(&self, hash: &str) -> bool {
+        self.hashes.contains(hash)
+    }
+
+    /// Trusts `hash`, recording `name` beside it, and rewrites the file
+    /// (write-then-rename, so a crash never leaves a torn trust list).
+    ///
+    /// # Errors
+    ///
+    /// A non-hash `hash` (`InvalidInput`), or the write failing. The
+    /// in-memory trust is only added once the file is written, so a
+    /// failed save never trusts silently for this session.
+    pub fn trust(&mut self, hash: &str, name: &str) -> std::io::Result<()> {
+        if !is_blake3_hex(hash) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a blake3 hex digest",
+            ));
+        }
+        if self.hashes.contains(hash) {
+            return Ok(());
+        }
+        if let Some(path) = &self.path {
+            let mut text = path
+                .exists()
+                .then(|| std::fs::read_to_string(path))
+                .transpose()?
+                .unwrap_or_default();
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            // The name is display-only: keep it one line.
+            let name: String = name.chars().filter(|c| !c.is_control()).collect();
+            text.push_str(&format!("{hash} {name}\n"));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp = path.with_extension(format!("txt.tmp.{}", std::process::id()));
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, path)?;
+        }
+        self.hashes.insert(hash.to_owned());
+        Ok(())
+    }
+}
+
+fn is_blake3_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// Whether `dir` is implicitly trusted: the repo's checked-in `examples/`
+/// in a debug build, and nothing else.
+pub fn implicitly_trusted(dir: &Path) -> bool {
+    cfg!(debug_assertions) && dir == dev_plugin_dir()
+}
+
+/// Scans `dirs` in order and registers every loadable, TRUSTED plugin
+/// into `registry` (see the module docs for the consent, tolerance and
+/// collision rules). Untrusted files are reported pending and never
+/// compiled. The registry is untouched by a failed file.
+pub fn load_plugins(
+    registry: &mut NodeRegistry,
+    dirs: &[PathBuf],
+    trust: &TrustStore,
+) -> PluginLoadReport {
     let mut report = PluginLoadReport::default();
     for dir in dirs {
+        let implicit = implicitly_trusted(dir);
         for path in sorted_wasm_files(dir) {
-            match load_one(registry, &path) {
+            let bytes = match read_capped(&path) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    log::warn!("plugin {} not loaded: {reason}", path.display());
+                    report.failed.push((path, reason));
+                    continue;
+                }
+            };
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            if !implicit && !trust.is_trusted(&hash) {
+                log::info!("plugin {} awaits trust ({hash})", path.display());
+                report.pending.push((path, hash));
+                continue;
+            }
+            match load_bytes(registry, &bytes) {
                 Ok(name) => report.loaded.push(name),
                 Err(reason) => {
                     log::warn!("plugin {} not loaded: {reason}", path.display());
@@ -122,6 +258,25 @@ pub fn load_plugins(registry: &mut NodeRegistry, dirs: &[PathBuf]) -> PluginLoad
         }
     }
     report
+}
+
+/// Loads one file the user just trusted: re-reads it and loads it only
+/// if its bytes STILL hash to `hash` (the file may have changed since it
+/// was listed as pending). Returns the registered node name.
+///
+/// # Errors
+///
+/// The reason, as in the scan's `failed` entries.
+pub fn load_trusted_file(
+    registry: &mut NodeRegistry,
+    path: &Path,
+    hash: &str,
+) -> Result<String, String> {
+    let bytes = read_capped(path)?;
+    if blake3::hash(&bytes).to_hex().as_str() != hash {
+        return Err("file changed since it was listed; rescan".to_owned());
+    }
+    load_bytes(registry, &bytes)
 }
 
 /// The `.mtlx` declaration for a loaded plugin node. The v1 wire's
@@ -140,11 +295,26 @@ pub fn plugin_nodedef(name: &str) -> NodedefDecl {
     }
 }
 
-/// Read -> compile + contract-check -> collision check -> register.
-fn load_one(registry: &mut NodeRegistry, path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read: {e}"))?;
+/// Reads `path`, refusing a file over [`umber_wasm::MODULE_SIZE_CAP`] by
+/// its metadata BEFORE reading it (a multi-gigabyte `.wasm` never lands
+/// in memory). The runtime re-checks the buffer's length.
+fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read: {e}"))?
+        .len();
+    if len > umber_wasm::MODULE_SIZE_CAP as u64 {
+        return Err(format!(
+            "module is {len} bytes, over the {} MiB cap",
+            umber_wasm::MODULE_SIZE_CAP >> 20
+        ));
+    }
+    std::fs::read(path).map_err(|e| format!("cannot read: {e}"))
+}
+
+/// Compile + contract-check -> collision check -> register.
+fn load_bytes(registry: &mut NodeRegistry, bytes: &[u8]) -> Result<String, String> {
     let module = PluginRuntime::new()
-        .load(&bytes)
+        .load(bytes)
         .map_err(|e| e.to_string())?;
     let name = module.def().name.clone();
     if registry.get(&name).is_some() {
@@ -238,7 +408,7 @@ mod tests {
         let missing = dir.join("does-not-exist");
 
         let mut registry = NodeRegistry::seeded();
-        let report = load_plugins(&mut registry, &[missing, dir.clone()]);
+        let report = load_plugins(&mut registry, &[missing, dir.clone()], &trust_all_in(&dir));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(report.loaded, vec!["blur5".to_string()]);
@@ -266,7 +436,11 @@ mod tests {
         registry.register("blur5", passthrough);
         let dir = fresh_tmpdir("shadow");
         std::fs::write(dir.join("blur5.wasm"), blur5_bytes()).unwrap();
-        let report = load_plugins(&mut registry, std::slice::from_ref(&dir));
+        let report = load_plugins(
+            &mut registry,
+            std::slice::from_ref(&dir),
+            &trust_all_in(&dir),
+        );
         let _ = std::fs::remove_dir_all(&dir);
         assert!(report.loaded.is_empty());
         assert_eq!(report.failed.len(), 1);
@@ -274,7 +448,138 @@ mod tests {
 
     #[test]
     fn empty_scan_says_nothing() {
-        let report = load_plugins(&mut NodeRegistry::new(), &[]);
+        let report = load_plugins(&mut NodeRegistry::new(), &[], &TrustStore::default());
         assert_eq!(report.status_line(), None);
+    }
+
+    /// An in-memory store trusting every `.wasm` currently in `dir`.
+    fn trust_all_in(dir: &Path) -> TrustStore {
+        let mut store = TrustStore::open(None);
+        for path in sorted_wasm_files(dir) {
+            let hash = blake3::hash(&std::fs::read(&path).unwrap())
+                .to_hex()
+                .to_string();
+            store.trust(&hash, "test").unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn an_untrusted_user_plugin_is_pending_and_never_registers() {
+        let dir = fresh_tmpdir("consent");
+        std::fs::write(dir.join("blur5.wasm"), blur5_bytes()).unwrap();
+        let mut registry = NodeRegistry::seeded();
+        let report = load_plugins(
+            &mut registry,
+            std::slice::from_ref(&dir),
+            &TrustStore::default(),
+        );
+        assert!(report.loaded.is_empty(), "consent first: {report:?}");
+        assert_eq!(report.pending.len(), 1);
+        let expected = blake3::hash(&blur5_bytes()).to_hex().to_string();
+        assert_eq!(report.pending[0].1, expected, "the hash of the exact bytes");
+        assert!(
+            registry.get("blur5").is_none(),
+            "never compiled, never registered"
+        );
+        assert_eq!(
+            report.status_line().as_deref(),
+            Some("0 plugin(s) loaded, 0 failed · 1 awaiting trust")
+        );
+
+        // Trusting through a real file, then loading the pending entry.
+        let trust_file = dir.join("trust").join("plugins-trusted.txt");
+        let mut trust = TrustStore::open(Some(trust_file.clone()));
+        trust.trust(&expected, "blur5.wasm").unwrap();
+        let name = load_trusted_file(&mut registry, &report.pending[0].0, &expected).unwrap();
+        assert_eq!(name, "blur5");
+        // The trust persists: a fresh scan with a reopened store loads it
+        // (into a fresh registry: the old one already holds blur5).
+        let reopened = TrustStore::open(Some(trust_file.clone()));
+        assert!(reopened.is_trusted(&expected));
+        let again = load_plugins(
+            &mut NodeRegistry::seeded(),
+            std::slice::from_ref(&dir),
+            &reopened,
+        );
+        assert_eq!(again.loaded, vec!["blur5".to_string()]);
+        assert!(again.pending.is_empty());
+
+        // Changing ONE byte revokes the trust: the file is pending again.
+        let mut bytes = blur5_bytes();
+        bytes.push(0);
+        std::fs::write(dir.join("blur5.wasm"), &bytes).unwrap();
+        let changed = load_plugins(
+            &mut NodeRegistry::seeded(),
+            std::slice::from_ref(&dir),
+            &reopened,
+        );
+        assert!(changed.loaded.is_empty());
+        assert_eq!(changed.pending.len(), 1);
+        // ...and the stale "trust & load" refuses the swapped file.
+        assert!(load_trusted_file(
+            &mut NodeRegistry::seeded(),
+            &dir.join("blur5.wasm"),
+            &expected
+        )
+        .unwrap_err()
+        .contains("changed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_trust_file_rejects_junk_and_keeps_one_line_per_entry() {
+        let dir = fresh_tmpdir("trust-file");
+        let path = dir.join("plugins-trusted.txt");
+        let good = "a".repeat(64);
+        std::fs::write(
+            &path,
+            format!(
+                "{good} ok.wasm\nnot-a-hash x\n{} upper.wasm\n\n",
+                "A".repeat(64)
+            ),
+        )
+        .unwrap();
+        let mut store = TrustStore::open(Some(path.clone()));
+        assert!(store.is_trusted(&good));
+        assert!(
+            !store.is_trusted(&"A".repeat(64)),
+            "uppercase is not a blake3 hex digest"
+        );
+        assert!(store.trust("nope", "x").is_err());
+        let second = "b".repeat(64);
+        store.trust(&second, "evil\nname.wasm").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.ends_with(&format!("{second} evilname.wasm\n")),
+            "{text:?}"
+        );
+        // Idempotent: trusting again writes nothing new.
+        store.trust(&second, "again").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(TrustStore::open(None).hashes.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_oversized_module_is_refused_before_it_is_read() {
+        let dir = fresh_tmpdir("size-cap");
+        let path = dir.join("huge.wasm");
+        let file = std::fs::File::create(&path).unwrap();
+        // Sparse: the length is over the cap without writing 8 MiB.
+        file.set_len(umber_wasm::MODULE_SIZE_CAP as u64 + 1)
+            .unwrap();
+        let report = load_plugins(
+            &mut NodeRegistry::seeded(),
+            std::slice::from_ref(&dir),
+            &TrustStore::default(),
+        );
+        assert!(
+            report.pending.is_empty(),
+            "never hashed, so never offered for trust"
+        );
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].1.contains("cap"), "{:?}", report.failed);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

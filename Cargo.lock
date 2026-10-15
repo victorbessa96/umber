@@ -4808,6 +4808,7 @@ version = "0.1.0"
 dependencies = [
  "ag-psd",
  "anyhow",
+ "blake3",
  "eframe",
  "egui",
  "egui_dock",

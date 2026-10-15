@@ -22,6 +22,10 @@ umber-color = { workspace = true }
 umber-wasm = { workspace = true }
 umber-gui = { workspace = true }
 umber-paint = { workspace = true }
+# Plugin consent (C2-21): trust binds a module's exact bytes by blake3,
+# already in the workspace (umber-core, umber-paint) — no new lock entry
+# beyond umber-app's own dependency list.
+blake3 = { workspace = true }
 stylus = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }

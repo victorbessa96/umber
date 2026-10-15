@@ -29,7 +29,7 @@ surface is the **untrusted files it opens** and the **plugins it runs**:
 | `.spp` (Substance project) import | `crates/spp` | read-only, never-crash lint gate; in the panic-hunt |
 | MaterialX documents | `umber-graph` | element-depth cap (256); in the panic-hunt |
 | `.umber` project files | `umber-app` | corrupt-file arms covered by the panic-hunt |
-| WASM plugins | `umber-wasm` | wasmtime sandbox: fuel budget per call, 64 MiB guest-memory cap, fresh store per call |
+| WASM plugins | `umber-wasm`, `umber-app/src/plugins.rs` | consent first: a user-dir `.wasm` loads only once its blake3 is in `plugins-trusted.txt` (Graph panel ▸ Trust & load; a changed byte is untrusted again); 8 MiB module-size cap before compile; wasmtime sandbox: no host imports, fuel budget per call, 64 MiB guest-memory cap, fresh store per call |
 | Agent protocol (`umber agent`) | `umber-cli` | stdin/stdout only — no socket; `deny_unknown_fields` on wire structs |
 
 `crates/umber-app/tests/panic_hunt.rs` feeds deterministic garbage and

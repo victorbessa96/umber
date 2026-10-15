@@ -18,7 +18,7 @@ pub mod runtime;
 pub mod wire;
 pub mod wire_consts;
 
-pub use runtime::{PluginModule, PluginRuntime, WasmNodeImpl, FUEL, MEMORY_CAP};
+pub use runtime::{PluginModule, PluginRuntime, WasmNodeImpl, FUEL, MEMORY_CAP, MODULE_SIZE_CAP};
 pub use wire::{NodeDef, WireError};
 
 use std::sync::Arc;
