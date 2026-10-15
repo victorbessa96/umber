@@ -576,13 +576,15 @@ struct TransferSettings {
 
 impl Default for TransferSettings {
     /// v1 defaults (no CLI precedent): a symmetric 0.1-unit cage — a
-    /// tight fit for meter-scale props; recipes override per asset.
+    /// tight fit for meter-scale props; recipes override per asset. The
+    /// origin starts AT the cage (`offset = front`): the ray runs inward,
+    /// so an on-surface origin would never hit detail outside the LOW.
     fn default() -> Self {
         Self {
             size: BakeFlags::default().size,
             front: 0.1,
             back: 0.1,
-            offset: 0.0,
+            offset: 0.1,
         }
     }
 }

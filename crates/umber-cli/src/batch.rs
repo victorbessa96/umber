@@ -100,10 +100,6 @@ fn default_back() -> f32 {
     TransferSettings::default().back
 }
 
-fn default_offset() -> f32 {
-    TransferSettings::default().offset
-}
-
 /// `inspect` — the `inspect` command.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,8 +160,13 @@ pub(crate) struct BakeTransferStep {
     front: f32,
     #[serde(default = "default_back")]
     back: f32,
-    #[serde(default = "default_offset")]
-    offset: f32,
+    /// The ray origin's push off the LOW surface. Absent = `front`: rays
+    /// start AT the cage, the only origin from which detail outside the
+    /// LOW surface is hittable (the ray runs inward; an origin on the
+    /// surface leaves every outward hit behind it, so `front` would do
+    /// nothing). The Bakes panel's High poly group uses the same rule.
+    #[serde(default)]
+    offset: Option<f32>,
 }
 
 impl BakeTransferStep {
@@ -182,7 +183,7 @@ impl BakeTransferStep {
             size: self.size,
             front: self.front,
             back: self.back,
-            offset: self.offset,
+            offset: self.offset.unwrap_or(self.front),
         };
         run_bake_transfer(&self.low, &self.high, &self.out_dir, &maps, &settings)
     }
@@ -526,6 +527,8 @@ mod tests {
             [TransferMapName::Height, TransferMapName::WorldNormal]
         );
         assert_eq!(transfer.size, 512);
+        // Absent offset = the cage front (rays start at the cage).
+        assert_eq!(transfer.offset, None);
         let BatchStep::Export(export) = &recipe.steps[2] else {
             panic!("step 2 is export")
         };
