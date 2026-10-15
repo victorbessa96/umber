@@ -45,11 +45,18 @@ catalogs. Gate 1 (umber-app): fmt, clippy, 455 tests.
   kill), and F1 is Help everywhere else. Remapping F3 is a keymap
   decision, so it waits for the keymap editor (g3-keymap-editor), where
   a preset can carry it. Named in Deferred.
-- **No persistence across launches.** `DockState` serialization needs
-  egui_dock's `serde` feature and a `Panel: Serialize` derive, which is
-  a dependency-feature change in the workspace manifest, outside this
-  surface. In-session memory is the honest v1, and the unit round-trip
-  the plan asks for comes with the persistence kill.
+- **No persistence across launches, and the probe says why.** Checked
+  on the build host after the kill: turning on egui_dock's `serde`
+  feature turns on `egui/serde`, which turns on `accesskit/serde`.
+  `cargo tree --offline` then fails with `no matching package named
+  enumn`, because accesskit's serde arm needs a crate that is in neither
+  Cargo.lock nor the host registry. Persisting layouts therefore means a
+  NEW third-party dependency fetched from crates.io, which is a
+  dependency-policy decision and not something to slip into a GUI kill.
+  The alternative that adds nothing is a small hand-written layout
+  format (panel lists per leaf plus split fractions, as serde_json the
+  crate already has), rebuilt through egui_dock's public split API. It
+  is filed as the persistence kill's design choice.
 - **Tabs, not a combo.** The plan says "tabs in the menu row", which is
   Blender's top bar.
 
