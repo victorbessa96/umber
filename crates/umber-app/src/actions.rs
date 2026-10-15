@@ -30,6 +30,24 @@
 //!   exactly as written. Alt+chord is reserved: it never matches.
 //!
 //! Every pre-existing toolbar test passes unchanged through this table.
+//!
+//! # Focus-aware dispatch (kill `g0-focus-dispatch`)
+//!
+//! [`Focus`] says who owns the keyboard this frame and [`Focus::allows`]
+//! decides whether a binding may fire through it (photocraft PC:#3):
+//!
+//! - [`Focus::None`] / [`Focus::Widget`]: every binding fires. A focused
+//!   button or slider owns arrows, Space, Enter and Tab, none of which the
+//!   table binds.
+//! - [`Focus::Text`]: a text field keeps its keys. Only Ctrl/Cmd chords and
+//!   the F-keys get through, so typing "wedge" into a layer name never
+//!   flips the wireframe or picks the eraser. Ctrl+Z / Ctrl+Shift+Z stay
+//!   with the field too: every text field undoes its own typing (egui's
+//!   `TextEdit` binds both), and a document undo there would throw away
+//!   paint while the user meant to fix a typo.
+//!
+//! `toolbar::poll_shortcuts` consumes every key event it dispatches, so a
+//! panel drawn later in the frame never sees the same press twice.
 
 use egui::{Key, KeyboardShortcut, ModifierNames, Modifiers};
 
@@ -114,11 +132,9 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
 ];
 
 /// The action `key` + `mods` fire, if any: the first matching row.
+#[cfg_attr(not(test), allow(dead_code))] // the poll uses `resolve_binding`
 pub fn resolve(key: Key, mods: Modifiers) -> Option<ShellAction> {
-    BINDINGS
-        .iter()
-        .find(|(binding, _)| binding.key == key && binding.chord.matches(mods))
-        .map(|(_, action)| *action)
+    resolve_binding(key, mods).map(|(_, action)| action)
 }
 
 /// The first binding for `action`, if it has one.
@@ -139,6 +155,62 @@ pub fn shortcut_label(action: ShellAction, is_mac: bool) -> Option<String> {
         ModifierNames::NAMES
     };
     Some(KeyboardShortcut::new(binding.chord.modifiers(), binding.key).format(&names, is_mac))
+}
+
+/// Who owns the keyboard this frame (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// Nothing is focused: the shell owns the keyboard.
+    None,
+    /// A non-text widget (a button, a slider) has keyboard focus.
+    Widget,
+    /// A text field is being edited.
+    Text,
+}
+
+impl Focus {
+    /// The focus state from egui's memory (last frame's focus, which is
+    /// what this frame's key events were typed into).
+    pub fn current(ctx: &egui::Context) -> Self {
+        Self::from_flags(ctx.egui_wants_keyboard_input(), ctx.text_edit_focused())
+    }
+
+    /// [`Focus::current`]'s mapping, separated so it is testable without a
+    /// context: a focused text edit is [`Focus::Text`] whatever else holds.
+    pub fn from_flags(widget_focused: bool, text_focused: bool) -> Self {
+        if text_focused {
+            Focus::Text
+        } else if widget_focused {
+            Focus::Widget
+        } else {
+            Focus::None
+        }
+    }
+
+    /// Whether `binding` may fire while this focus holds the keyboard.
+    pub fn allows(self, binding: Binding) -> bool {
+        match self {
+            Focus::None | Focus::Widget => true,
+            Focus::Text => {
+                is_function_key(binding.key)
+                    || (binding.chord != Chord::Bare && binding.key != Key::Z)
+            }
+        }
+    }
+}
+
+/// F1..F35: the keys a text field never types, so they pass through it.
+pub fn is_function_key(key: Key) -> bool {
+    let name = key.name();
+    name.len() > 1 && name.starts_with('F') && name[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The first row matching `key` + `mods`, with its binding.
+pub fn resolve_binding(key: Key, mods: Modifiers) -> Option<(Binding, ShellAction)> {
+    BINDINGS
+        .iter()
+        .find(|(binding, _)| binding.key == key && binding.chord.matches(mods))
+        .copied()
 }
 
 /// What [`availability`] needs to know about the app. A snapshot taken
@@ -282,6 +354,39 @@ mod tests {
             ShellAction::InvertMask,
         ] {
             assert_eq!(availability(action, all), Ok(()), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn focus_maps_from_the_flags() {
+        assert_eq!(Focus::from_flags(false, false), Focus::None);
+        assert_eq!(Focus::from_flags(true, false), Focus::Widget);
+        assert_eq!(Focus::from_flags(true, true), Focus::Text);
+        // A text edit is text focus even if the widget flag lags.
+        assert_eq!(Focus::from_flags(false, true), Focus::Text);
+    }
+
+    #[test]
+    fn text_focus_keeps_letters_and_undo_but_passes_other_chords() {
+        for (binding, action) in BINDINGS {
+            assert!(Focus::None.allows(*binding), "{action:?}");
+            assert!(Focus::Widget.allows(*binding), "{action:?}");
+            let through_text = Focus::Text.allows(*binding);
+            let expected = matches!(action, ShellAction::SaveProject | ShellAction::OpenProject);
+            assert_eq!(through_text, expected, "{action:?} through a text field");
+        }
+        // The F-keys pass a text field even bare (none bound yet).
+        assert!(Focus::Text.allows(bind(Key::F2, Chord::Bare)));
+        assert!(!Focus::Text.allows(bind(Key::A, Chord::Bare)));
+    }
+
+    #[test]
+    fn function_keys_are_exactly_f1_to_f35() {
+        assert!(is_function_key(Key::F1));
+        assert!(is_function_key(Key::F12));
+        assert!(is_function_key(Key::F35));
+        for key in [Key::F, Key::A, Key::Escape, Key::OpenBracket, Key::Num1] {
+            assert!(!is_function_key(key), "{key:?}");
         }
     }
 

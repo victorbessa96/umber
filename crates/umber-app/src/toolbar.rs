@@ -210,24 +210,58 @@ pub const SHORTCUT_KEYS: [Key; 11] = [
 /// modifier combination that isn't bound. The table itself is
 /// [`crate::actions::BINDINGS`] (GUI plan G0): one registry that the
 /// menus print from too.
+///
+/// The frame poll goes through [`crate::actions::resolve_binding`] (it
+/// needs the binding for the focus check), so outside tests this is the
+/// table's plain query, kept as the module's documented entry point.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn resolve_shortcut(key: Key, mods: Modifiers) -> Option<ShellAction> {
     crate::actions::resolve(key, mods)
 }
 
-/// Every bound action pressed this frame, in [`SHORTCUT_KEYS`] order.
-/// Empty while a text edit has focus, so typing a preset name never flips
-/// the viewport.
+/// Every bound action pressed this frame, in event order, that the
+/// keyboard's current owner lets through ([`crate::actions::Focus`]): a
+/// text field keeps its letters and its undo, so typing a preset name
+/// never flips the viewport. Each dispatched key event is CONSUMED, so a
+/// panel drawn later this frame does not act on the same press again.
+///
+/// Also turns off egui's built-in Ctrl+Plus / Ctrl+Minus / Ctrl+0 UI zoom
+/// (`zoom_with_keyboard`): those chords belong to the app's keymap, and a
+/// stray Ctrl+Minus silently rescaling the whole UI reads as a bug. The
+/// UI scale becomes a preference (GUI plan g7-density-scale). Done here,
+/// the one per-frame keyboard entry point, and only when still on.
 pub fn poll_shortcuts(ctx: &egui::Context) -> Vec<ShellAction> {
-    if ctx.text_edit_focused() {
-        return Vec::new();
+    if ctx.options(|o| o.zoom_with_keyboard) {
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
     }
-    ctx.input(|i| {
-        SHORTCUT_KEYS
-            .iter()
-            .filter(|key| i.key_pressed(**key))
-            .filter_map(|key| resolve_shortcut(*key, i.modifiers))
-            .collect()
-    })
+    let focus = crate::actions::Focus::current(ctx);
+    let mut fired = Vec::new();
+    ctx.input_mut(|i| {
+        i.events.retain(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            // The poll list (pinned equal to the bound keys) pre-filters,
+            // so no unbound key is ever matched against the table.
+            if !SHORTCUT_KEYS.contains(key) {
+                return true;
+            }
+            match crate::actions::resolve_binding(*key, *modifiers) {
+                Some((binding, action)) if focus.allows(binding) => {
+                    fired.push(action);
+                    false
+                }
+                _ => true,
+            }
+        });
+    });
+    fired
 }
 
 /// The view state the toolbar toggles and the viewport reads each frame
@@ -503,6 +537,80 @@ mod tests {
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
         assert_eq!((bare, chords), (8, 4));
+    }
+
+    /// One headless frame: `keys` pressed (with `mods`), the poll first
+    /// (as `main.rs` does), then `draw`. Returns what fired and whether a
+    /// W press was still visible to the panel code after the poll.
+    fn frame(
+        ctx: &egui::Context,
+        keys: &[Key],
+        mods: Modifiers,
+        mut draw: impl FnMut(&mut egui::Ui),
+    ) -> (Vec<ShellAction>, bool) {
+        let mut input = egui::RawInput::default();
+        for key in keys {
+            input.events.push(egui::Event::Key {
+                key: *key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            });
+        }
+        let mut fired = Vec::new();
+        let mut w_left = false;
+        let mut out = ctx.run_ui(input, |ui| {
+            fired = poll_shortcuts(ui.ctx());
+            w_left = ui.input(|i| i.key_pressed(Key::W));
+            draw(ui);
+        });
+        out.textures_delta.clear();
+        (fired, w_left)
+    }
+
+    #[test]
+    fn poll_fires_and_consumes_with_nothing_focused() {
+        let ctx = egui::Context::default();
+        let (fired, w_left) = frame(&ctx, &[Key::W, Key::E], bare(), |_| {});
+        assert_eq!(
+            fired,
+            vec![
+                ShellAction::ToggleWireframe,
+                ShellAction::SelectTool(ToolKind::Erase)
+            ]
+        );
+        assert!(!w_left, "a dispatched press must be consumed");
+        // egui's own keyboard UI zoom is off after the first poll.
+        assert!(!ctx.options(|o| o.zoom_with_keyboard));
+    }
+
+    #[test]
+    fn typing_in_a_text_field_does_not_switch_tools() {
+        let ctx = egui::Context::default();
+        let mut name = String::from("layer");
+        let id = egui::Id::new("layer-name");
+        let mut field = |ui: &mut egui::Ui| {
+            ui.add(egui::TextEdit::singleline(&mut name).id(id));
+        };
+        // Frame 1 focuses the field (the user clicked into it).
+        let _ = frame(&ctx, &[], bare(), |ui| {
+            field(ui);
+            ui.memory_mut(|m| m.request_focus(id));
+        });
+        let _ = frame(&ctx, &[], bare(), &mut field);
+        assert!(ctx.text_edit_focused());
+        // Typing E and W: the field keeps them, nothing fires, and the W
+        // press is still there for the field to read.
+        let (fired, w_left) = frame(&ctx, &[Key::E, Key::W], bare(), &mut field);
+        assert!(fired.is_empty(), "{fired:?}");
+        assert!(w_left);
+        // Ctrl+Z stays with the field (its own text undo) ...
+        let (fired, _) = frame(&ctx, &[Key::Z], cmd(), &mut field);
+        assert!(fired.is_empty(), "{fired:?}");
+        // ... but Ctrl+S still saves.
+        let (fired, _) = frame(&ctx, &[Key::S], cmd(), &mut field);
+        assert_eq!(fired, vec![ShellAction::SaveProject]);
     }
 
     #[test]
