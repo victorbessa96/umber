@@ -8,6 +8,8 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- `ValueField` property menu: right-click Reset to Default, Copy and Paste
+  (opt-in per field; app sites follow) (g4-property-context-menu)
 - Painter's display keys: M back to the material, C / Shift+C through the
   paint channels, B / Shift+B through the baked mesh maps, each naming what
   is shown (g6-display-mode-keys)
