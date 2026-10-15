@@ -1040,6 +1040,13 @@ pub struct UmberApp {
     /// discard was confirmed; `Some(false)` = the user asked to save
     /// first (the save dialog runs, then the reset).
     pending_new: Option<bool>,
+    /// The quit guard (C2-1): the window's close was requested with
+    /// unsaved edits. While set, the close is cancelled each frame and the
+    /// Save / Discard / Cancel window shows.
+    pending_quit: bool,
+    /// The user chose to quit (Discard, or a successful Save): the next
+    /// close request goes through.
+    quit_confirmed: bool,
     /// File ▸ Revert is asking to discard the unsaved edits.
     pending_revert: bool,
     /// Help ▸ About is open.
@@ -1195,6 +1202,8 @@ impl UmberApp {
             icons,
             hdr_mode,
             pending_new: None,
+            pending_quit: false,
+            quit_confirmed: false,
             pending_revert: false,
             about_open: false,
             focus: shell_menu::FocusState::default(),
@@ -1837,6 +1846,15 @@ impl UmberApp {
         self.confirm_new_project();
     }
 
+    /// Closes the window for real: marks the quit confirmed (so the next
+    /// close request is not intercepted again) and asks the viewport to
+    /// close.
+    fn quit_now(&mut self, ctx: &egui::Context) {
+        self.pending_quit = false;
+        self.quit_confirmed = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
     /// The File > New reset itself, post-confirmation (or when clean).
     fn confirm_new_project(&mut self) {
         self.pending_new = None;
@@ -2397,6 +2415,59 @@ impl eframe::App for UmberApp {
         // half-modal that blocks input would fight the dock — the
         // dialog is the honest v1 shape (the Perf HUD's Window
         // precedent).
+        // The quit guard (C2-1): a close with unsaved edits is cancelled and
+        // asks first, the File ▸ New confirm shape. Every close path
+        // (the window's ✕, Alt+F4, the OS) arrives as `close_requested`.
+        let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
+        match quit_decision(
+            close_requested,
+            self.state.doc.is_dirty(),
+            self.quit_confirmed,
+        ) {
+            QuitDecision::Allow => {}
+            QuitDecision::AskFirst => {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending_quit = true;
+            }
+        }
+        if self.pending_quit {
+            let mut choice = None;
+            egui::Window::new(tr("shell.new-confirm-title"))
+                .id(egui::Id::new("quit-guard"))
+                .collapsible(false)
+                .resizable(false)
+                .min_width(280.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.label(tr("shell.new-confirm-body"));
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(tr("shell.new-confirm-save")).clicked() {
+                            choice = Some(QuitChoice::Save);
+                        }
+                        if ui.button(tr("shell.new-confirm-discard")).clicked() {
+                            choice = Some(QuitChoice::Discard);
+                        }
+                        if ui.button(tr("shell.new-confirm-cancel")).clicked() {
+                            choice = Some(QuitChoice::Cancel);
+                        }
+                    });
+                });
+            match choice {
+                Some(QuitChoice::Save) => {
+                    // Ctrl+S semantics: in place if the project has a
+                    // directory, else the dialog. Quit only if it saved.
+                    self.save_project();
+                    if !self.state.doc.is_dirty() {
+                        self.quit_now(ui.ctx());
+                    }
+                }
+                Some(QuitChoice::Discard) => self.quit_now(ui.ctx()),
+                Some(QuitChoice::Cancel) => self.pending_quit = false,
+                None => {}
+            }
+        }
         if self.pending_new.is_some() {
             use egui::Window;
             Window::new(tr("shell.new-confirm-title"))
@@ -3308,6 +3379,33 @@ fn pending_crash_notices() -> umber_gui::Notices {
     notices
 }
 
+/// What the quit guard does with this frame's close request (C2-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitDecision {
+    /// Let it close (nothing pending, nothing unsaved, or already confirmed).
+    Allow,
+    /// Cancel the close and ask Save / Discard / Cancel.
+    AskFirst,
+}
+
+/// The guard's rule: only a close request over unsaved edits that the user
+/// has not already confirmed asks first. Pure, so it is unit-tested.
+fn quit_decision(close_requested: bool, dirty: bool, confirmed: bool) -> QuitDecision {
+    if close_requested && dirty && !confirmed {
+        QuitDecision::AskFirst
+    } else {
+        QuitDecision::Allow
+    }
+}
+
+/// The quit window's three answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
 /// Where a plain Save writes (C2-4): in place when the document already
 /// lives in a directory, through the dialog when it never did.
 #[derive(Debug, PartialEq, Eq)]
@@ -3402,6 +3500,31 @@ fn main() -> eframe::Result<()> {
 /// report.
 #[cfg(test)]
 mod new_project_tests {
+    #[test]
+    fn the_quit_guard_asks_only_for_unsaved_unconfirmed_closes() {
+        use super::{quit_decision, QuitDecision::*};
+        assert_eq!(
+            quit_decision(true, true, false),
+            AskFirst,
+            "dirty close asks"
+        );
+        assert_eq!(
+            quit_decision(true, false, false),
+            Allow,
+            "a clean close just closes"
+        );
+        assert_eq!(
+            quit_decision(true, true, true),
+            Allow,
+            "Discard / Save confirmed it"
+        );
+        assert_eq!(
+            quit_decision(false, true, false),
+            Allow,
+            "no close, nothing to guard"
+        );
+    }
+
     #[test]
     fn save_is_silent_once_the_project_has_a_directory() {
         use super::{save_target, SaveTarget};

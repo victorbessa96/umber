@@ -96,8 +96,8 @@ project replays them.
 `Ctrl+S` asks for a folder the first time and then re-saves there
 silently; `Ctrl+Shift+S` (Save As) always asks.
 
-*Gaps:* paint pixels are not autosaved between saves (C2-3), so save often. There
-is no "save before quitting?" prompt yet (C2-1).
+*Gaps:* paint pixels are not autosaved between saves (C2-3), so save often. Closing
+the window with unsaved edits asks Save / Discard / Cancel first.
 
 ## 5. Export
 
