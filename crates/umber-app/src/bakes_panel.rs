@@ -2052,6 +2052,49 @@ fn encode_position_rgba8(position_f32: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
 
+    /// kittest (C2-28): the panel's map checkboxes are wired to the state
+    /// the bake plan reads. Clicking "ID" (default off) adds it to the
+    /// selection; clicking the normal's box (default on) removes it.
+    #[test]
+    fn clicking_a_map_checkbox_changes_what_bakes() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, p: &mut BakesPanel| {
+                p.show(
+                    ui,
+                    BakesContext {
+                        gpu: None,
+                        mesh: None,
+                        mesh_path: None,
+                    },
+                );
+            },
+            panel(),
+        );
+        harness.run();
+        assert!(!harness.state().is_map_enabled(BakeSelection::Id));
+        harness.get_by_label(&BakeSelection::Id.label()).click();
+        harness.run();
+        assert!(
+            harness.state().is_map_enabled(BakeSelection::Id),
+            "ID now bakes"
+        );
+        let normal = BakeSelection::Normal.label();
+        assert!(harness.state().is_map_enabled(BakeSelection::Normal));
+        harness.get_by_label(&normal).click();
+        harness.run();
+        assert!(
+            !harness.state().is_map_enabled(BakeSelection::Normal),
+            "normal now skipped"
+        );
+        let maps = harness.state().selected_maps();
+        assert!(
+            maps.contains(&BakeSelection::Id) && !maps.contains(&BakeSelection::Normal),
+            "{maps:?}"
+        );
+    }
+
     #[test]
     fn unit_vectors_encode_like_the_cli() {
         let f = [0.0, 0.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0, 0.3, 0.3, 0.3, 0.0];

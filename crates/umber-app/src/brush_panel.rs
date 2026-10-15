@@ -1744,6 +1744,56 @@ fn falloff_key(curve: umber_brush::FalloffCurve) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// kittest (C2-28): the Channel combo drives the paint session's
+    /// active channel. Open the combo, pick "Roughness", and the session
+    /// strokes into roughness (GPU-gated: `PaintState` needs a device).
+    #[test]
+    fn the_channel_combo_retargets_the_paint_session() {
+        use egui_kittest::kittest::Queryable;
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        // PaintState needs the adapter-specific format features (the
+        // `paint_state` GPU tests' device).
+        let features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        if !adapter.features().contains(features) {
+            eprintln!("skipping: adapter lacks TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+            return;
+        }
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: features,
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let paint = PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        assert_eq!(
+            paint.active_channel(),
+            crate::paint_state::BASE_COLOR_CHANNEL
+        );
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, paint: &mut PaintState| channel_rows(ui, paint),
+            paint,
+        );
+        harness.run();
+        // The combo shows the active channel; clicking it opens the list.
+        // egui exposes the selected text as the combo's VALUE, not its
+        // label: find it by role.
+        harness.get_by_role(egui::accesskit::Role::ComboBox).click();
+        harness.run();
+        harness.get_by_label(&channel_label("roughness")).click();
+        harness.run();
+        assert_eq!(harness.state().active_channel(), "roughness");
+    }
+
     use super::*;
 
     #[test]
