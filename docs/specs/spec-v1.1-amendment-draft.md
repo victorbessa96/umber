@@ -56,8 +56,59 @@ All 15 boxes are unchecked in v1.0. The RC walkthrough
 
 Everything else is verified at the walkthrough, not asserted here.
 
+## A6. W1 stylus premise: winit reads Windows pen pressure
+
+v1.0 W1: "winit 0.30 has no pen events — we bypass it". winit 0.30.13
+handles `WM_POINTER` and reads `GetPointerPenInfo` pressure into
+`WindowEvent::Touch { force }` (`platform_impl/windows/event_loop.rs`
+:1985, :2087, :994); egui-winit forwards it and Umber's viewport uses it
+(`docs/loop/kill-reports/2026-10-15-c2-30-winink.md`). Proposed W1 text:
+
+> Windows pen pressure rides winit's `WM_POINTER` path. The owned
+> `stylus` crate adds what winit lacks: tilt, eraser and barrel button
+> through a WndProc subclass, and Wintab for tablets that only speak it.
+
+## A7. Release artifacts: no MSI
+
+v1.0 acceptance + W6: "Windows MSI + Flatpak manifest + AppImage". The
+installers design dropped MSI; cargo-dist 0.32.0 produces a Windows
+`.zip` + PowerShell installer and a Linux `.tar.xz` + shell installer;
+`packaging.yml` builds the AppImage and validates the Flatpak manifest.
+Proposed criterion:
+
+> [CI] Release: tag → CI produces the Windows zip + PowerShell
+> installer, the Linux tar.xz + shell installer and AppImage, and a
+> validated Flatpak manifest, with SHA-256 sums for each.
+
+## A8. Constraints: release provenance and signing
+
+New constraint line:
+
+> Release binaries are built only by CI from a tagged commit of the
+> public repository, never on a personal machine. Windows binaries are
+> code-signed through SignPath Foundation once granted
+> (`docs/CODE_SIGNING.md`); until then releases ship SHA-256 sums.
+
+## A9. The reference GPU, honestly
+
+The [HW] criteria name "RTX 3060 / RX 6600 class". The only real-GPU rig
+available is Bessa's RTX 3070, ABOVE the class. Proposed note under the
+oracle legend:
+
+> The recorded reference rig is an RTX 3070. A pass there shows the
+> budget is reachable; it does not prove the class floor. A 3060-class
+> run is owed before the criterion is called met for the class.
+
+## A10. Dogfood gate, split by release
+
+W5: "≥2 external artists each complete a full asset". Proposed:
+
+> The alpha needs one complete asset by the maintainer (release
+> checklist gate 8). 0.1.0 final keeps ≥2 external artists.
+
 ## A5. Unchanged (confirm only)
 
 One-sentence goal, the rest of the non-goals, deliverables 1–7,
-constraints, risks, sustainability. The sustainability section's "human
+constraints (plus A8), risks, sustainability. The ~32 blend modes (W4)
+are confirmed: `BlendMode` has 32 variants. The sustainability section's "human
 bus factor of one" is still true.
