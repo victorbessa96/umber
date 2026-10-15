@@ -1,6 +1,6 @@
 # Agent paint ops — design (wave 7 row `wave-agent-paint-ops`)
 
-Status: WRITTEN (uncompiled) 2026-10-14, dragon-authored — `crates/umber-cli/src/agent.rs` paint steps + `tests/agent_paint_ops.rs` (7 tests). Built on the umber-paint
+Status: BUILT 2026-10-14 (CI 38653177537 green both platforms; Gate 1 battery green), dragon-authored — `crates/umber-cli/src/agent.rs` paint steps + `tests/agent_paint_ops.rs` (6 test functions covering the 7 cases below: case 3 rides the stroke/read test, case 6 the validation test). Built on the umber-paint
 extraction (`dbc3d1f` engine, `989ba7f` persistence — both uncompiled
 until Bessa lifts the cargo hold).
 
