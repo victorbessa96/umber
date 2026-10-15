@@ -487,6 +487,18 @@ pub fn layers_ui(
             }
         }
     });
+    // The smart-material shelf (C2-10), collapsed by default so the layer
+    // list keeps the space. Its header reuses the material-layer add key.
+    egui::CollapsingHeader::new(format!("{} ▸ .umbersmart", tr("layers.add-material")))
+        .id_salt("smart-shelf")
+        .default_open(false)
+        .show(ui, |ui| {
+            if let Some(ids) = smart_shelf_ui(ui, doc) {
+                if let Some(top) = ids.last() {
+                    outcome.select = Some(PlaneOwner::Layer(*top));
+                }
+            }
+        });
     let mut remove_id = None;
     let mut instance_source_id = None;
     let mut duplicate_id: Option<u64> = None;
@@ -726,6 +738,127 @@ pub fn layers_ui(
         ui.weak(status);
     }
     outcome
+}
+
+/// The shipped smart-material directory: the repo's `assets/smart`
+/// (dev builds and the source tree), or `smart/` beside the binary in an
+/// installed build: the same two-place rule as the i18n catalogs.
+pub fn smart_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs =
+        vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/smart")];
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
+    {
+        dirs.push(exe_dir.join("smart"));
+    }
+    dirs
+}
+
+/// Every loadable `.umbersmart` in `dirs`, sorted by name, deduplicated
+/// by file name (the first directory wins). A file that fails to parse is
+/// skipped with a log line, never a panic and never a broken row.
+pub fn list_smart_materials(
+    dirs: &[std::path::PathBuf],
+) -> Vec<(String, umber_core::smart::SmartMaterial)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "umbersmart"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !seen.insert(file) {
+                continue;
+            }
+            match umber_core::smart::SmartMaterial::load_file(&path) {
+                Ok(material) => out.push((material.name.clone(), material)),
+                Err(e) => log::warn!("smart material {} skipped: {e}", path.display()),
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Applies a smart material to the document as ordinary undoable
+/// commands (C2-10), one per template field: add, then opacity, blend
+/// and mask when they differ from a fresh layer's. Unlike
+/// `SmartMaterial::apply` (which writes the stack directly, bypassing
+/// history and the autosave journal), every layer this creates is undoable
+/// and journaled. Returns the new layer ids, bottom to top.
+pub fn apply_smart_material(
+    doc: &mut Document,
+    material: &umber_core::smart::SmartMaterial,
+) -> Vec<u64> {
+    use umber_core::smart::SmartLayerKind;
+    let mut ids = Vec::with_capacity(material.layers.len());
+    for template in &material.layers {
+        let kind = match template.kind {
+            SmartLayerKind::Paint => LayerKind::Paint,
+            SmartLayerKind::Fill => LayerKind::Fill,
+            SmartLayerKind::Folder => LayerKind::Folder { passthrough: true },
+        };
+        doc.run(LayerCommand::add(template.name.clone(), kind));
+        let Some(id) = doc.layers().last().map(|l| l.id) else {
+            continue;
+        };
+        if template.opacity.is_finite() && (template.opacity - 1.0).abs() > f32::EPSILON {
+            doc.run(LayerCommand::set_opacity(id, template.opacity));
+        }
+        if template.blend_mode != umber_core::BlendMode::Normal {
+            doc.run(LayerCommand::set_blend_mode(id, template.blend_mode));
+        }
+        if let Some(mask) = &template.mask {
+            doc.run(LayerCommand::attach_mask(id, mask.clone()));
+        }
+        ids.push(id);
+    }
+    ids
+}
+
+/// The smart-material shelf (C2-10): one row per shipped `.umbersmart`
+/// with an Apply button that stacks its layers on the active set.
+/// Generator bindings are not wired yet: the template's layers arrive
+/// with their names, kinds, opacity, blend and masks, and the graph-side
+/// wiring of each fill's mesh-map generator is the named follow-up.
+pub fn smart_shelf_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<Vec<u64>> {
+    // The directory scan is cheap, but it is still disk I/O: cache the
+    // list in egui memory per frame-group, refreshed by the user.
+    let cache_id = egui::Id::new("smart-shelf-cache");
+    let mut names: Option<Vec<String>> = ui.ctx().data(|d| d.get_temp(cache_id));
+    let refresh = ui.small_button("⟳").clicked();
+    if names.is_none() || refresh {
+        let list: Vec<String> = list_smart_materials(&smart_dirs())
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        ui.ctx().data_mut(|d| d.insert_temp(cache_id, list.clone()));
+        names = Some(list);
+    }
+    let mut applied = None;
+    for name in names.unwrap_or_default() {
+        ui.horizontal(|ui| {
+            ui.label(&name);
+            if ui.button("＋").clicked() {
+                if let Some((_, material)) = list_smart_materials(&smart_dirs())
+                    .into_iter()
+                    .find(|(n, _)| *n == name)
+                {
+                    applied = Some(apply_smart_material(doc, &material));
+                }
+            }
+        });
+    }
+    applied
 }
 
 /// The reorder a one-step move asks for: `Some((from, to))`, or `None` at
@@ -983,6 +1116,62 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_shipped_smart_materials_list_and_apply_undoably() {
+        let list = list_smart_materials(&smart_dirs());
+        let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"Painted wood"), "{names:?}");
+        assert!(names.len() >= 2, "both shipped materials: {names:?}");
+        let (_, wood) = list.iter().find(|(n, _)| n == "Painted wood").unwrap();
+
+        let mut doc = Document::default();
+        let before = doc.history.len();
+        let ids = apply_smart_material(&mut doc, wood);
+        assert_eq!(ids.len(), wood.layers.len());
+        // Every template field arrived on its layer.
+        for (id, template) in ids.iter().zip(&wood.layers) {
+            let layer = doc.stack.layer(*id).unwrap();
+            assert_eq!(layer.name, template.name);
+            assert!(
+                (layer.opacity - template.opacity).abs() < 1e-6,
+                "{}",
+                template.name
+            );
+            assert_eq!(layer.blend_mode, template.blend_mode);
+            assert_eq!(
+                layer.mask.as_ref().map(|m| m.name.as_str()),
+                template.mask.as_deref()
+            );
+        }
+        // ...through history: unwinding every entry restores the empty stack.
+        let added = doc.history.len() - before;
+        assert!(added >= ids.len());
+        for _ in 0..added {
+            assert!(doc.undo());
+        }
+        assert!(doc.layers().is_empty(), "fully undoable");
+    }
+
+    #[test]
+    fn a_broken_smart_file_is_skipped_not_fatal() {
+        let dir = std::env::temp_dir().join(format!("umber-smart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.umbersmart"), "{ not json").unwrap();
+        std::fs::write(
+            dir.join("ok.umbersmart"),
+            r#"{"name":"Ok","version":1,"layers":[{"name":"L","kind":"paint"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        let list = list_smart_materials(std::slice::from_ref(&dir));
+        let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Ok"]);
+        // A second dir with the same file name does not duplicate it.
+        assert_eq!(list_smart_materials(&[dir.clone(), dir.clone()]).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn move_target_steps_within_the_stack() {
         assert_eq!(move_target(3, Some(0), 1), Some((0, 1)));
