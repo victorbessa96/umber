@@ -205,23 +205,23 @@ fn field_row<N: egui::emath::Numeric>(
 /// One effect's param rows; true when a value changed. Ranges mirror
 /// [`PostEffect::clamped`].
 ///
-/// JUDGMENT CALL — DoF focus stays an `egui::Slider` (logarithmic): its
-/// 0.01..=100 range spans four decades and a linear drag-scrub field would
-/// make the near range (where focus lives on a small mesh) unreachable.
-/// `ValueField` has no log mode; adding one is the widget crate's change,
-/// not this panel's. Every other param is linear and migrates.
+/// DoF focus uses the field's log mode (2026-10-15): its 0.01..=100 range
+/// spans four decades, and a linear drag-scrub would make the near range
+/// — where focus lives on a small mesh — unreachable.
 fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
     use umber_gui::ValueField;
     let mut changed = false;
     match effect {
         PostEffect::Dof { focus, aperture } => {
-            changed |= ui
-                .add(
-                    egui::Slider::new(focus, 0.01..=100.0)
-                        .logarithmic(true)
-                        .text(i18n::tr("postfx.focus")),
-                )
-                .changed();
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.focus"),
+                ValueField::new(focus)
+                    .range(0.01..=100.0)
+                    .logarithmic(true)
+                    .step(0.0)
+                    .decimals(3),
+            );
             changed |= field_row(
                 ui,
                 &i18n::tr("postfx.aperture"),

@@ -12,6 +12,14 @@
 //!   [`crate::fonts::numeric_font`]). The unit renders muted. A finite
 //!   range draws an accent fill bar under the value.
 //!
+//! - [`ValueField::logarithmic`] (2026-10-15): for a range spanning
+//!   decades (DoF focus 0.01..=100), the scrub moves through LOG space —
+//!   each point of drag multiplies the value by a constant factor — and the
+//!   fill bar shows the log fraction, so every decade gets the same drag
+//!   distance. A linear scrub there makes the bottom decades unreachable.
+//!   Requires a finite range with `min > 0`; otherwise it falls back to
+//!   linear (logged nowhere: the field still works).
+//!
 //! Typed entry (double-click → text edit) is a v2 follow-up. The math is
 //! in free functions so it is testable without an `egui::Context`.
 
@@ -97,6 +105,36 @@ pub fn format_value(value: f64, decimals: usize, unit: &str) -> String {
     }
 }
 
+/// Whether a log scrub is possible on `[min, max]`: both finite, `min > 0`,
+/// `max > min`.
+pub fn log_capable(min: f64, max: f64) -> bool {
+    min.is_finite() && max.is_finite() && min > 0.0 && max > min
+}
+
+/// The log-mode scrub: `dx` points of drag over a `[min, max]` field
+/// `width_pts` wide move `raw` by `dx / width_pts` of the full log span, so
+/// dragging the field's own width traverses the whole range. `factor` is
+/// the modifier multiplier (fine / coarse). A non-positive `raw` restarts
+/// from `min`.
+pub fn log_scrub(raw: f64, dx: f32, width_pts: f32, min: f64, max: f64, factor: f64) -> f64 {
+    let start = if raw > 0.0 { raw } else { min };
+    if !log_capable(min, max) || width_pts.is_nan() || width_pts <= 0.0 {
+        return start;
+    }
+    let span = (max / min).ln();
+    (start.ln() + f64::from(dx) / f64::from(width_pts) * span * factor).exp()
+}
+
+/// The log-space fill fraction (`ln(v/min) / ln(max/min)`), `None` when the
+/// range cannot be log-scaled.
+pub fn log_fill_fraction(value: f64, min: f64, max: f64) -> Option<f32> {
+    if !log_capable(min, max) {
+        return None;
+    }
+    let v = value.max(min);
+    Some(((v / min).ln() / (max / min).ln()).clamp(0.0, 1.0) as f32)
+}
+
 /// The 0..1 fill fraction for a finite range, `None` otherwise.
 pub fn fill_fraction(value: f64, min: f64, max: f64) -> Option<f32> {
     if !(min.is_finite() && max.is_finite()) || max <= min {
@@ -116,6 +154,7 @@ pub struct ValueField<'a, N: Numeric> {
     decimals: usize,
     unit: &'a str,
     width: Option<f32>,
+    logarithmic: bool,
 }
 
 impl<'a, N: Numeric> ValueField<'a, N> {
@@ -134,7 +173,17 @@ impl<'a, N: Numeric> ValueField<'a, N> {
             decimals: if integral { 0 } else { 2 },
             unit: "",
             width: None,
+            logarithmic: false,
         }
+    }
+
+    /// Log-space scrubbing + fill (see the module docs). Needs a finite
+    /// range with `min > 0`; otherwise the field stays linear. Snapping
+    /// still applies after the scrub (use a small `step`, or `0.0` to
+    /// disable, for a range spanning decades).
+    pub fn logarithmic(mut self, logarithmic: bool) -> Self {
+        self.logarithmic = logarithmic;
+        self
     }
 
     /// Clamp range.
@@ -198,12 +247,19 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         if response.dragged() {
             let (shift, command) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
             let raw: f64 = ui.data(|d| d.get_temp(id)).unwrap_or(old);
-            let raw = scrub(
-                raw,
-                response.drag_delta().x,
-                self.speed,
-                modifier_factor(shift, command),
-            );
+            let factor = modifier_factor(shift, command);
+            let raw = if self.logarithmic && log_capable(self.min, self.max) {
+                log_scrub(
+                    raw,
+                    response.drag_delta().x,
+                    rect.width(),
+                    self.min,
+                    self.max,
+                    factor,
+                )
+            } else {
+                scrub(raw, response.drag_delta().x, self.speed, factor)
+            };
             ui.data_mut(|d| d.insert_temp(id, raw));
             new = snap_clamp(raw, self.step, self.min, self.max);
         }
@@ -249,7 +305,13 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 theme::raised()
             };
             painter.rect_filled(rect, 3.0, bg);
-            if let Some(f) = fill_fraction(new, self.min, self.max) {
+            let fill = if self.logarithmic {
+                log_fill_fraction(new, self.min, self.max)
+                    .or_else(|| fill_fraction(new, self.min, self.max))
+            } else {
+                fill_fraction(new, self.min, self.max)
+            };
+            if let Some(f) = fill {
                 let mut fill = rect;
                 fill.set_width(rect.width() * f);
                 painter.rect_filled(fill, 3.0, theme::accent().gamma_multiply(0.25));
@@ -344,6 +406,43 @@ mod tests {
         assert_eq!(modifier_factor(true, false), FINE_FACTOR);
         assert_eq!(modifier_factor(false, true), COARSE_FACTOR);
         assert_eq!(modifier_factor(true, true), FINE_FACTOR);
+    }
+
+    #[test]
+    fn log_scrub_spends_equal_drag_per_decade() {
+        // 0.01..=100 is four decades over a 200-point field: 50 points of
+        // drag = one decade, from anywhere.
+        let (min, max, w) = (0.01, 100.0, 200.0);
+        let one = log_scrub(0.01, 50.0, w, min, max, 1.0);
+        assert!((one - 0.1).abs() < 1e-9, "{one}");
+        let two = log_scrub(1.0, 50.0, w, min, max, 1.0);
+        assert!((two - 10.0).abs() < 1e-9, "{two}");
+        // The full width traverses the full range; negative drag comes back.
+        let full = log_scrub(0.01, 200.0, w, min, max, 1.0);
+        assert!((full - 100.0).abs() < 1e-9, "{full}");
+        let back = log_scrub(10.0, -50.0, w, min, max, 1.0);
+        assert!((back - 1.0).abs() < 1e-9, "{back}");
+        // Fine modifier = a tenth of a decade.
+        let fine = log_scrub(1.0, 50.0, w, min, max, FINE_FACTOR);
+        assert!((fine - 10f64.powf(0.1)).abs() < 1e-9, "{fine}");
+        // A non-positive accumulator restarts from min; an unusable range
+        // (min <= 0, or zero width) is a no-op, never NaN.
+        assert!((log_scrub(0.0, 50.0, w, min, max, 1.0) - 0.1).abs() < 1e-9);
+        assert_eq!(log_scrub(5.0, 50.0, w, 0.0, 100.0, 1.0), 5.0);
+        assert_eq!(log_scrub(5.0, 50.0, 0.0, min, max, 1.0), 5.0);
+    }
+
+    #[test]
+    fn log_fill_is_the_log_fraction() {
+        assert_eq!(log_fill_fraction(0.01, 0.01, 100.0), Some(0.0));
+        assert_eq!(log_fill_fraction(100.0, 0.01, 100.0), Some(1.0));
+        let mid = log_fill_fraction(1.0, 0.01, 100.0).expect("capable");
+        assert!((mid - 0.5).abs() < 1e-6, "{mid}");
+        // Below min clamps to empty; an incapable range has no log fill.
+        assert_eq!(log_fill_fraction(0.0001, 0.01, 100.0), Some(0.0));
+        assert_eq!(log_fill_fraction(1.0, 0.0, 100.0), None);
+        assert_eq!(log_fill_fraction(1.0, 0.01, f64::INFINITY), None);
+        assert!(!log_capable(-1.0, 1.0) && !log_capable(2.0, 1.0) && log_capable(0.5, 1.0));
     }
 
     #[test]
