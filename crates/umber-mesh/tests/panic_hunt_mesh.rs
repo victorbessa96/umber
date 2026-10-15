@@ -104,12 +104,21 @@ fn install_hook() {
                 default(info);
                 return;
             }
+            // Normalized to '/' separators: on Windows `Location::file()`
+            // is `crates\umber-mesh\src\...` and the registry path is
+            // `C:\Users\...\gltf-json-1.4.1\src\mesh.rs`, so the '/'-
+            // written needles in the KNOWN tables matched nothing and every
+            // known bug read as a NEW panic (CI 38672191735, windows leg).
             let mut site = info
                 .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .map(|l| format!("{}:{}", l.file().replace('\\', "/"), l.line()))
                 .unwrap_or_default();
             if site.contains("/alloc/") {
-                site.push_str(&std::backtrace::Backtrace::force_capture().to_string());
+                site.push_str(
+                    &std::backtrace::Backtrace::force_capture()
+                        .to_string()
+                        .replace('\\', "/"),
+                );
             }
             LAST_PANIC.with(|p| *p.borrow_mut() = site);
         }));
