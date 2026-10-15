@@ -269,6 +269,7 @@ mod tests {
                 hardness: 0.25,
                 pressure_gamma: 1.0,
                 wash_mode: crate::WashMode::BuildUp,
+                falloff: crate::FalloffCurve::Smooth,
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

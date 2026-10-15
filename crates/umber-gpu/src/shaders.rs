@@ -525,8 +525,8 @@ struct Dab {
     color: vec4<f32>,
     hardness: f32,
     mask_gate: f32,
-    _pad1: f32,
-    _pad2: f32,
+    falloff: u32,
+    _pad: f32,
 };
 
 @group(0) @binding(0) var<storage, read> dabs: array<Dab>;
@@ -536,14 +536,29 @@ struct Dab {
 
 const WORKGROUP_SIZE: u32 = 64u;
 
-/// Radial falloff: 1.0 inside `hardness * radius`, smoothly down to 0.0 at
-/// `radius`. `t` is the normalized distance from center (0 at center, 1 at
-/// the edge). Written without WGSL's built-in `smoothstep` so the
-/// `hardness == 1.0` (hard disc) case can't divide by zero.
-fn radial_falloff(t: f32, hardness: f32) -> f32 {
+/// Radial falloff: 1.0 inside `hardness * radius`, then the dab's curve
+/// down to the rim. `t` is the normalized distance from center (0 at
+/// center, 1 at the edge); `e` is the remapped ring parameter (0 at the
+/// core edge, 1 at the rim), `u = 1 - e`. Written without WGSL's built-in
+/// `smoothstep` so the `hardness == 1.0` (hard disc) case can't divide by
+/// zero. Ids are `paint::FALLOFF_*`; the CPU reference is
+/// `umber_brush::falloff::FalloffCurve::eval` (same operations, same
+/// order). Id 0 / unknown ids = the historical smoothstep.
+fn radial_falloff(t: f32, hardness: f32, curve: u32) -> f32 {
     let denom = max(1.0 - hardness, 1e-4);
-    let edge_t = clamp((t - hardness) / denom, 0.0, 1.0);
-    return 1.0 - edge_t * edge_t * (3.0 - 2.0 * edge_t);
+    let e = clamp((t - hardness) / denom, 0.0, 1.0);
+    let u = 1.0 - e;
+    switch curve {
+        case 1u: { return u * u * u * (u * (u * 6.0 - 15.0) + 10.0); }
+        case 2u: { return sqrt(max(2.0 * u - u * u, 0.0)); }
+        case 3u: { return sqrt(u); }
+        case 4u: { return u * u; }
+        case 5u: { return u * u * u * u; }
+        case 6u: { return u; }
+        case 7u: { return u * (2.0 - u); }
+        case 8u: { return 1.0; }
+        case 0u, default: { return 1.0 - e * e * (3.0 - 2.0 * e); }
+    }
 }
 
 @compute @workgroup_size(WORKGROUP_SIZE)
@@ -577,7 +592,7 @@ fn cs_main(
             continue;
         }
 
-        var coverage = dab.alpha * radial_falloff(dist / safe_radius, dab.hardness);
+        var coverage = dab.alpha * radial_falloff(dist / safe_radius, dab.hardness, dab.falloff);
         if (dab.mask_gate > 0.5) {
             coverage = coverage * textureLoad(mask_tex, texel, 0).r;
         }

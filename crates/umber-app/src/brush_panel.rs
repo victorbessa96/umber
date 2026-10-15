@@ -1426,6 +1426,7 @@ mod tests {
                 hardness: 0.25,
                 pressure_gamma: 1.0,
                 wash_mode: umber_brush::WashMode::BuildUp,
+                falloff: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

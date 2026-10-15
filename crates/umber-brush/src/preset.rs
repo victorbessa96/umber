@@ -376,7 +376,7 @@ pub struct PresetFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WashMode;
+    use crate::{FalloffCurve, WashMode};
 
     const EPS: f32 = 1e-6;
 
@@ -389,6 +389,7 @@ mod tests {
                 hardness: 0.77,
                 pressure_gamma: 2.2,
                 wash_mode: WashMode::Wash,
+                falloff: FalloffCurve::Sphere,
             },
             one_euro: OneEuroParams {
                 min_cutoff: 2.5,
@@ -555,6 +556,37 @@ mod tests {
         non_default_preset()
             .validate()
             .expect("wash preset must validate");
+    }
+
+    #[test]
+    fn falloff_round_trips_and_old_files_default_to_smooth() {
+        // The fixture carries Sphere: the byte-identical round trip proves
+        // the curve survives save/load; the name is lowercase on disk.
+        let valid = non_default_preset().to_json().expect("serialize");
+        assert!(valid.contains(r#""falloff": "sphere""#), "{valid}");
+        assert_eq!(
+            BrushPreset::from_json(&valid)
+                .expect("round trip")
+                .params
+                .falloff,
+            FalloffCurve::Sphere
+        );
+
+        // A pre-curve file (no `falloff` key under `params`) loads with the
+        // historical smoothstep instead of failing, and validates.
+        let mut value: serde_json::Value = serde_json::from_str(&valid).expect("valid JSON");
+        value
+            .as_object_mut()
+            .expect("top-level object")
+            .get_mut("params")
+            .expect("params object")
+            .as_object_mut()
+            .expect("params is an object")
+            .remove("falloff");
+        let legacy = serde_json::to_string_pretty(&value).expect("re-serialize");
+        let back = BrushPreset::from_json(&legacy).expect("missing falloff must default");
+        assert_eq!(back.params.falloff, FalloffCurve::Smooth);
+        back.validate().expect("legacy preset must validate");
     }
 
     #[test]

@@ -72,8 +72,35 @@ pub struct Dab {
     /// [`Dab::with_mask_gate`] (it occupies what was the first padding
     /// slot, so the layout is unchanged).
     mask_gate: f32,
-    _pad: [f32; 2],
+    /// Falloff-curve id (one of the `FALLOFF_*` constants) read by the
+    /// shader's `radial_falloff` switch. Set through [`Dab::with_falloff`]
+    /// (it occupies what was the second padding slot, byte 40, so the
+    /// layout is unchanged). `0` = [`FALLOFF_SMOOTH`], the historical curve.
+    falloff: u32,
+    _pad: f32,
 }
+
+/// Falloff-curve ids carried in [`Dab`] and switched on by
+/// `shaders::PAINT_COMPUTE_SHADER`'s `radial_falloff`. The brush-side enum
+/// (`umber_brush::falloff::FalloffCurve`) maps onto these; never renumber.
+/// Smoothstep from the hardness core to the rim (the default).
+pub const FALLOFF_SMOOTH: u32 = 0;
+/// Quintic smootherstep.
+pub const FALLOFF_SMOOTHER: u32 = 1;
+/// Quarter-circle `sqrt(2u - u²)`.
+pub const FALLOFF_SPHERE: u32 = 2;
+/// `sqrt(u)`.
+pub const FALLOFF_ROOT: u32 = 3;
+/// `u²`.
+pub const FALLOFF_SHARP: u32 = 4;
+/// `u⁴`.
+pub const FALLOFF_SHARPER: u32 = 5;
+/// `u`.
+pub const FALLOFF_LINEAR: u32 = 6;
+/// `u(2 - u)`.
+pub const FALLOFF_INVERSE_SQUARE: u32 = 7;
+/// Flat disc out to the radius.
+pub const FALLOFF_CONSTANT: u32 = 8;
 
 const _: () = assert!(size_of::<Dab>() == 48, "Dab must match the WGSL Dab layout");
 
@@ -88,8 +115,22 @@ impl Dab {
             color,
             hardness,
             mask_gate: 0.0,
-            _pad: [0.0; 2],
+            falloff: FALLOFF_SMOOTH,
+            _pad: 0.0,
         }
+    }
+
+    /// This dab with falloff-curve id `id` (a `FALLOFF_*` constant). An
+    /// unknown id renders as [`FALLOFF_SMOOTH`] in the shader.
+    #[must_use]
+    pub fn with_falloff(mut self, id: u32) -> Self {
+        self.falloff = id;
+        self
+    }
+
+    /// The falloff-curve id this dab carries.
+    pub fn falloff(&self) -> u32 {
+        self.falloff
     }
 
     /// This dab with the quick-mask gate set (`true`) or cleared. A gated
@@ -876,6 +917,35 @@ mod tests {
         assert!(!gated.with_mask_gate(false).mask_gated());
     }
 
+    #[test]
+    fn falloff_defaults_smooth_and_rides_in_byte_40() {
+        let dab = Dab::new([1.0, 2.0], 3.0, [1.0, 0.0, 0.0, 1.0], 0.5, 0.25);
+        assert_eq!(dab.falloff(), FALLOFF_SMOOTH);
+        // A default dab's former padding bytes stay zero: the pre-curve
+        // upload is byte-identical.
+        assert_eq!(bytemuck::bytes_of(&dab)[40..48], [0u8; 8]);
+        let sharp = dab.with_falloff(FALLOFF_SHARP).with_mask_gate(true);
+        assert_eq!(sharp.falloff(), FALLOFF_SHARP);
+        assert_eq!(
+            bytemuck::bytes_of(&sharp)[40..44],
+            FALLOFF_SHARP.to_ne_bytes()
+        );
+        assert_eq!(bytemuck::bytes_of(&sharp)[36..40], 1.0f32.to_ne_bytes());
+        assert_eq!(sharp.hardness, dab.hardness);
+    }
+
+    /// The WGSL `Dab` must declare the id as `u32` at the same slot.
+    #[test]
+    fn shader_dab_struct_carries_the_falloff_slot() {
+        assert!(PAINT_COMPUTE_SHADER.contains("mask_gate: f32,\n    falloff: u32,\n    _pad: f32,"));
+        for id in 0..=FALLOFF_CONSTANT {
+            assert!(
+                PAINT_COMPUTE_SHADER.contains(&format!("case {id}u")),
+                "shader lacks a case for falloff id {id}"
+            );
+        }
+    }
+
     #[cfg(feature = "gpu")]
     mod gpu {
         use super::super::*;
@@ -1076,6 +1146,56 @@ mod tests {
             let bytes = read_back_rgba8(&device, &queue, &plain);
             assert!(pixel(&bytes, 64, 24, 32)[0] > 200);
             assert!(pixel(&bytes, 64, 40, 32)[0] > 200);
+        }
+
+        /// A non-default falloff reaches the shader: the same soft dab
+        /// (hardness 0, r 16) with `FALLOFF_SHARP` paints a visibly
+        /// dimmer centre texel than `FALLOFF_SMOOTH`, and each texel's
+        /// alpha matches the CPU formula (byte-rounded, ±1 for the unorm
+        /// conversion — implementation-defined rounding).
+        #[test]
+        fn sharp_falloff_dims_the_centre_texel_versus_smooth() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let compositor =
+                PaintCompositor::new(device.clone()).expect("device has the required feature");
+            let paint = |id: u32| {
+                let target = PaintTarget::new(&device, 64, 64);
+                let dab =
+                    Dab::new([32.0, 32.0], 16.0, [1.0, 0.0, 0.0, 1.0], 1.0, 0.0).with_falloff(id);
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("umber_paint_test_falloff_encoder"),
+                });
+                compositor
+                    .splat_dabs(&mut encoder, &target, &[dab])
+                    .expect("falloff dab splats");
+                queue.submit(Some(encoder.finish()));
+                read_back_rgba8(&device, &queue, &target)
+            };
+            let smooth = paint(FALLOFF_SMOOTH);
+            let sharp = paint(FALLOFF_SHARP);
+            // Texel (32,32)'s centre is (32.5,32.5): t = sqrt(0.5)/16.
+            let t = 0.5f32.sqrt() / 16.0;
+            let want_smooth = 1.0 - t * t * (3.0 - 2.0 * t); // ~0.9943
+            let want_sharp = (1.0 - t) * (1.0 - t); // ~0.9135
+            let byte = |v: f32| (v * 255.0).round() as i32;
+            let got_smooth = pixel(&smooth, 64, 32, 32)[3] as i32;
+            let got_sharp = pixel(&sharp, 64, 32, 32)[3] as i32;
+            assert!(
+                (got_smooth - byte(want_smooth)).abs() <= 1,
+                "smooth centre {got_smooth} vs {}",
+                byte(want_smooth)
+            );
+            assert!(
+                (got_sharp - byte(want_sharp)).abs() <= 1,
+                "sharp centre {got_sharp} vs {}",
+                byte(want_sharp)
+            );
+            assert!(
+                got_smooth - got_sharp >= 15,
+                "sharp must dim the centre: smooth {got_smooth}, sharp {got_sharp}"
+            );
         }
 
         #[test]

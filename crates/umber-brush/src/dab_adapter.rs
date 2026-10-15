@@ -11,7 +11,7 @@
 //! paint-target texel grid (the app maps UV → texel before spacing);
 //! the adapter neither knows nor scales by texture size.
 
-use crate::DabPlan;
+use crate::{DabPlan, FalloffCurve};
 use serde::{Deserialize, Serialize};
 use umber_gpu::paint::Dab;
 
@@ -58,6 +58,12 @@ pub struct BrushParams {
     /// `.umberbrush` files loading with historical behavior).
     #[serde(default)]
     pub wash_mode: WashMode,
+    /// Radial profile of each dab beyond the `hardness` core (see
+    /// [`crate::falloff`]). Defaults to [`FalloffCurve::Smooth`], the
+    /// historical curve; the `#[serde(default)]` keeps pre-curve
+    /// `.umberbrush` files loading unchanged.
+    #[serde(default)]
+    pub falloff: FalloffCurve,
 }
 
 impl Default for BrushParams {
@@ -68,6 +74,7 @@ impl Default for BrushParams {
             hardness: 0.5,
             pressure_gamma: 1.0,
             wash_mode: WashMode::BuildUp,
+            falloff: FalloffCurve::Smooth,
         }
     }
 }
@@ -140,13 +147,10 @@ impl DabAdapter {
         for stamp in stamps {
             let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
             let alpha = (params.alpha * shaped).clamp(0.0, 1.0);
-            out.push(Dab::new(
-                stamp.pos,
-                radius_px,
-                params.color,
-                alpha,
-                params.hardness,
-            ));
+            out.push(
+                Dab::new(stamp.pos, radius_px, params.color, alpha, params.hardness)
+                    .with_falloff(params.falloff.as_u32()),
+            );
         }
         out
     }
@@ -175,13 +179,10 @@ impl DabAdapter {
         for stamp in stamps {
             let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
             let alpha = (base * shaped).clamp(0.0, 1.0);
-            out.push(Dab::new(
-                stamp.pos,
-                radius_px,
-                params.color,
-                alpha,
-                params.hardness,
-            ));
+            out.push(
+                Dab::new(stamp.pos, radius_px, params.color, alpha, params.hardness)
+                    .with_falloff(params.falloff.as_u32()),
+            );
         }
         out
     }
@@ -254,6 +255,38 @@ mod tests {
         let dabs = DabAdapter::stamps_to_dabs(&[stamp([1.0, 1.0], 1.0)], 4.0, &params);
         assert_eq!(dabs[0].color, [0.1, 0.2, 0.3, 1.0]);
         assert!((dabs[0].hardness - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn falloff_passes_through_both_paths() {
+        let params = BrushParams {
+            falloff: FalloffCurve::Sphere,
+            ..BrushParams::default()
+        };
+        let stamps = [stamp([1.0, 1.0], 1.0)];
+        let build_up = DabAdapter::stamps_to_dabs(&stamps, 4.0, &params);
+        let wash = DabAdapter::stamps_to_dabs_wash(&stamps, 4.0, &params, 4.0);
+        assert_eq!(build_up[0].falloff(), umber_gpu::paint::FALLOFF_SPHERE);
+        assert_eq!(wash[0].falloff(), umber_gpu::paint::FALLOFF_SPHERE);
+        // Default params stay on the historical curve (id 0).
+        let plain = DabAdapter::stamps_to_dabs(&stamps, 4.0, &BrushParams::default());
+        assert_eq!(plain[0].falloff(), umber_gpu::paint::FALLOFF_SMOOTH);
+    }
+
+    #[test]
+    fn brush_params_without_falloff_load_as_smooth() {
+        let json = r#"{"color":[1.0,0.0,0.0,1.0],"alpha":0.5,"hardness":0.3,"pressure_gamma":1.0}"#;
+        let params: BrushParams = serde_json::from_str(json).expect("pre-curve params load");
+        assert_eq!(params.falloff, FalloffCurve::Smooth);
+        assert_eq!(params.wash_mode, WashMode::BuildUp);
+        let sharp = BrushParams {
+            falloff: FalloffCurve::Sharp,
+            ..params
+        };
+        let text = serde_json::to_string(&sharp).expect("serialize");
+        assert!(text.contains(r#""falloff":"sharp""#), "{text}");
+        let back: BrushParams = serde_json::from_str(&text).expect("round trip");
+        assert_eq!(back, sharp);
     }
 
     #[test]
