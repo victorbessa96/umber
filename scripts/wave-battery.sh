@@ -16,7 +16,15 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-CRATES=("${@:-umber-core umber-color umber-graph umber-spp umber-cli umber-gpu umber-app}")
+# The default scope is a real array (one element per crate). The old
+# "${@:-a b c}" form made ONE element holding every name, so a bare
+# `wave-battery.sh` handed cargo the package "umber-core umber-color ..."
+# and failed at clippy before a single crate ran.
+if [ "$#" -gt 0 ]; then
+    CRATES=("$@")
+else
+    CRATES=(umber-core umber-color umber-graph umber-spp umber-cli umber-gpu umber-app)
+fi
 LOGDIR=$(mktemp -d /tmp/wave-battery.XXXXXX)
 # Logs survive a RED battery (the FAIL lines point into them); a GREEN
 # battery cleans up after itself.
