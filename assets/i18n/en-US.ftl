@@ -718,3 +718,13 @@ notice =
     .export-failed = Export failed
     .save-failed = Project save failed
     .open-failed = Project open failed
+
+## Command palette (GUI plan G3)
+
+palette =
+    .placeholder = Type a command…
+    .path-mask = Quick mask
+    .path-tools = Tools
+    .path-brush = Brush
+    .brush-smaller = Smaller brush
+    .brush-larger = Larger brush

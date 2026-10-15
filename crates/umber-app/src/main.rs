@@ -134,6 +134,7 @@ mod i18n;
 mod input_photon;
 mod layers_panel;
 mod navigation;
+mod palette;
 use umber_paint::material_layer;
 mod mesh_map_import;
 use umber_paint::paint_state;
@@ -990,6 +991,8 @@ pub struct UmberApp {
     /// that used to reach only the log (mesh / environment / project /
     /// export) post here too, so a failed action is never silent.
     notices: umber_gui::Notices,
+    /// The command palette (GUI plan G3).
+    palette: palette::Palette,
     /// Which landed Curvature bakes the paint session already loaded (the
     /// cavity mask's input).
     curvature_feed: CurvatureFeed,
@@ -1142,6 +1145,7 @@ impl UmberApp {
             #[cfg(feature = "perf")]
             show_perf_hud: false,
             notices: umber_gui::Notices::new(),
+            palette: palette::Palette::default(),
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
             #[cfg(feature = "perf")]
@@ -1226,6 +1230,7 @@ impl UmberApp {
             ShellAction::SelectTool(kind) => self.brush_panel.select_tool(kind),
             // `[` / `]` (Painter's size steps): one notch of the shared
             // multiplicative step, so ten presses span ~2.6x.
+            ShellAction::CommandPalette => self.palette.open(),
             ShellAction::BrushSmaller | ShellAction::BrushLarger => {
                 if let Some(paint) = self.state.paint.as_mut() {
                     let grow = action == ShellAction::BrushLarger;
@@ -2401,6 +2406,20 @@ impl eframe::App for UmberApp {
         // The toast stack, drawn after the dock (GUI plan G0): everything
         // under it has laid out, and `show` schedules its own repaints.
         self.notices.show(ui.ctx());
+        // The command palette overlay (Ctrl+Shift+P / F3), drawn last so it
+        // sits over everything; a chosen action runs through the same
+        // dispatch as every key and menu row.
+        let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+        let picked = self.palette.show(
+            ui.ctx(),
+            tr,
+            i18n::tr_en,
+            |a| actions::shortcut_label(a, is_mac),
+            &tr("palette.placeholder"),
+        );
+        if let Some(action) = picked {
+            self.dispatch(action);
+        }
 
         // Display LUT rebuild, after the panels (the Display panel's
         // edits this frame included): the upload is staged on the queue,

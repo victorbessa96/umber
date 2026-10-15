@@ -104,11 +104,12 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 }
 
 /// The shell's key table: most modifiers first (see the module docs).
-/// Twelve bindings: four chords + six letter keys + the `[` / `]` brush
-/// size steps. Ctrl+N stays unbound in v1
+/// Fourteen bindings: five chords (incl. Ctrl+Shift+P, the palette) + six
+/// letter keys + the `[` / `]` brush size steps + F3 (the palette). Ctrl+N stays unbound in v1
 /// (the toolbar module's judgment call), so `NewProject` has no row.
 pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::Z, Chord::CmdShift), ShellAction::Redo),
+    (bind(Key::P, Chord::CmdShift), ShellAction::CommandPalette),
     (bind(Key::Z, Chord::Cmd), ShellAction::Undo),
     (bind(Key::S, Chord::Cmd), ShellAction::SaveProject),
     (bind(Key::O, Chord::Cmd), ShellAction::OpenProject),
@@ -129,6 +130,7 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
         bind(Key::CloseBracket, Chord::Bare),
         ShellAction::BrushLarger,
     ),
+    (bind(Key::F3, Chord::Bare), ShellAction::CommandPalette),
 ];
 
 /// The action `key` + `mods` fire, if any: the first matching row.
@@ -372,10 +374,16 @@ mod tests {
             assert!(Focus::None.allows(*binding), "{action:?}");
             assert!(Focus::Widget.allows(*binding), "{action:?}");
             let through_text = Focus::Text.allows(*binding);
-            let expected = matches!(action, ShellAction::SaveProject | ShellAction::OpenProject);
+            // Ctrl+S / Ctrl+O, and the palette (Ctrl+Shift+P and F3) pass a
+            // text field: global commands, never text input. Everything
+            // else (letters, Ctrl+Z undo) stays with the field.
+            let expected = matches!(
+                action,
+                ShellAction::SaveProject | ShellAction::OpenProject | ShellAction::CommandPalette
+            );
             assert_eq!(through_text, expected, "{action:?} through a text field");
         }
-        // The F-keys pass a text field even bare (none bound yet).
+        // The F-keys pass a text field even bare (F3 opens the palette).
         assert!(Focus::Text.allows(bind(Key::F2, Chord::Bare)));
         assert!(!Focus::Text.allows(bind(Key::A, Chord::Bare)));
     }

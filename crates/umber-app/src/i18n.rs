@@ -272,6 +272,20 @@ pub fn tr(key: &str) -> String {
     CURRENT.with(|c| c.borrow().lookup(key, None))
 }
 
+/// `key` in the en-US source catalog, whatever the current locale (the
+/// command palette matches the English label too, so a pt-BR user who
+/// knows the English name still finds the command; photocraft PC:#2).
+/// Falls back to the key itself like [`tr`].
+pub fn tr_en(key: &str) -> String {
+    CURRENT.with(|c| {
+        let i18n = c.borrow();
+        i18n.bundles
+            .get(FALLBACK_LOCALE)
+            .and_then(|bundle| format_in(bundle, key, None))
+            .unwrap_or_else(|| key.to_owned())
+    })
+}
+
 /// [`tr`] with Fluent arguments (`$name` placeables, plural selectors —
 /// pass counts as numbers so plural rules apply).
 pub fn tr_args<'a>(

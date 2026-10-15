@@ -116,6 +116,8 @@ pub enum ShellAction {
     BrushSmaller,
     /// Grow the brush one step. `]`.
     BrushLarger,
+    /// Open the command palette. Ctrl+Shift+P / F3 (GUI plan G3).
+    CommandPalette,
 }
 
 /// The brush tool without its params: the tool strip's slot id.
@@ -192,7 +194,7 @@ impl ToolKind {
 /// The keys the shell polls each frame (the letter keys + the chord keys).
 /// Pinned against [`crate::actions::BINDINGS`] by
 /// `shortcut_keys_are_exactly_the_bound_keys`.
-pub const SHORTCUT_KEYS: [Key; 11] = [
+pub const SHORTCUT_KEYS: [Key; 13] = [
     Key::W,
     Key::G,
     Key::V,
@@ -204,6 +206,8 @@ pub const SHORTCUT_KEYS: [Key; 11] = [
     Key::O,
     Key::OpenBracket,
     Key::CloseBracket,
+    Key::P,
+    Key::F3,
 ];
 
 /// The shell's key table (see the module docs). `None` for any key or
@@ -516,14 +520,16 @@ mod tests {
     #[test]
     fn every_polled_key_is_bound_to_something() {
         // A key in SHORTCUT_KEYS with no binding would be polled for
-        // nothing; each one resolves bare or under Cmd.
+        // nothing; each one resolves bare, under Cmd, or under Cmd+Shift
+        // (P is bound only as Ctrl+Shift+P, the palette).
         for key in SHORTCUT_KEYS {
-            let bound =
-                resolve_shortcut(key, bare()).is_some() || resolve_shortcut(key, cmd()).is_some();
+            let bound = resolve_shortcut(key, bare()).is_some()
+                || resolve_shortcut(key, cmd()).is_some()
+                || resolve_shortcut(key, cmd_shift()).is_some();
             assert!(bound, "{key:?} is polled but unbound");
         }
-        // Twelve bindings: eight bare (incl. [ ]) + four chords (Z,
-        // Shift+Z, S, O).
+        // Fourteen bindings: nine bare (incl. [ ] and F3) + five chords
+        // (Z, Shift+Z, Shift+P, S, O).
         let bare = SHORTCUT_KEYS
             .iter()
             .filter(|k| resolve_shortcut(**k, bare()).is_some())
@@ -536,7 +542,7 @@ mod tests {
                 .iter()
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
-        assert_eq!((bare, chords), (8, 4));
+        assert_eq!((bare, chords), (9, 5));
     }
 
     /// One headless frame: `keys` pressed (with `mods`), the poll first
@@ -683,6 +689,7 @@ mod tests {
             ShellAction::SelectTool(ToolKind::Smudge),
             ShellAction::BrushSmaller,
             ShellAction::BrushLarger,
+            ShellAction::CommandPalette,
         ] {
             assert!(!v.apply(action), "{action:?}");
         }

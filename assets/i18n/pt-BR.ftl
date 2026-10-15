@@ -707,3 +707,13 @@ notice =
     .export-failed = Falha na exportação
     .save-failed = Falha ao salvar o projeto
     .open-failed = Falha ao abrir o projeto
+
+## Paleta de comandos (plano G3)
+
+palette =
+    .placeholder = Digite um comando…
+    .path-mask = Máscara rápida
+    .path-tools = Ferramentas
+    .path-brush = Pincel
+    .brush-smaller = Pincel menor
+    .brush-larger = Pincel maior
