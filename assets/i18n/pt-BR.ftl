@@ -717,6 +717,13 @@ notice =
     .save-failed = Falha ao salvar o projeto
     .open-failed = Falha ao abrir o projeto
 
+## Pixel autosave recovery (C2-3)
+
+recovery =
+    .title = Recuperar trabalho não salvo?
+    .body = O Umber fechou sem salvar da última vez. Há uma cópia salva automaticamente desse trabalho (camadas e pintura).
+    .recover = Recuperar
+
 ## Paleta de comandos (plano G3)
 
 palette =

@@ -139,6 +139,7 @@ mod navigation;
 mod palette;
 mod preferences;
 mod recent;
+mod recovery;
 mod rich_tooltip;
 mod shell_menu;
 mod workspaces;
@@ -1047,6 +1048,10 @@ pub struct UmberApp {
     /// The user chose to quit (Discard, or a successful Save): the next
     /// close request goes through.
     quit_confirmed: bool,
+    /// The pixel autosave's timer (C2-3).
+    autosave: recovery::AutosaveClock,
+    /// A snapshot the previous run left, offered once at launch (C2-3).
+    pending_recovery: Option<recovery::RecoveryMeta>,
     /// File ▸ Revert is asking to discard the unsaved edits.
     pending_revert: bool,
     /// Help ▸ About is open.
@@ -1204,6 +1209,8 @@ impl UmberApp {
             pending_new: None,
             pending_quit: false,
             quit_confirmed: false,
+            autosave: recovery::AutosaveClock::default(),
+            pending_recovery: recovery::pending(&gpu_startup::state_dir()),
             pending_revert: false,
             about_open: false,
             focus: shell_menu::FocusState::default(),
@@ -1846,12 +1853,124 @@ impl UmberApp {
         self.confirm_new_project();
     }
 
+    /// The pixel autosave (C2-3): while the document has unsaved edits,
+    /// every `recovery::AUTOSAVE_SECS` (never mid-stroke, never twice for
+    /// the same edits) write a full snapshot into the state dir's
+    /// recovery folder. The user's project dir, recents and journal are
+    /// untouched (`write_project_files`).
+    fn autosave_tick(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        // Every edit adds a history row (layer op or stroke), so the row
+        // count is the edit generation.
+        let generation = self.state.doc.session_history.len() as u64;
+        let stroking = self.state.paint.as_ref().is_some_and(|p| p.is_stroking());
+        if !self
+            .autosave
+            .due(now, generation, self.state.doc.is_dirty(), stroking)
+        {
+            return;
+        }
+        self.autosave.snapshotted(now, generation);
+        let state = gpu_startup::state_dir();
+        let dir = recovery::snapshot_dir(&state);
+        match self.write_project_files(&dir) {
+            Ok(_) => {
+                let meta = recovery::RecoveryMeta {
+                    source_project: self.state.project_dir.clone(),
+                    mesh: self.state.mesh_path.clone(),
+                    written_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs()),
+                };
+                if let Err(e) = recovery::write_meta(&state, &meta) {
+                    log::warn!("autosave meta not written: {e}");
+                }
+                log::info!("autosave snapshot: {}", dir.display());
+            }
+            Err(e) => log::warn!("autosave snapshot failed: {e}"),
+        }
+    }
+
+    /// The launch-time offer (C2-3): a snapshot a previous run left (a
+    /// crash, a kill) asks Recover / Discard once.
+    fn recovery_prompt(&mut self, ctx: &egui::Context) {
+        let Some(meta) = self.pending_recovery.clone() else {
+            return;
+        };
+        let mut choice = None;
+        egui::Window::new(tr("recovery.title"))
+            .id(egui::Id::new("recovery-prompt"))
+            .collapsible(false)
+            .resizable(false)
+            .min_width(320.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(tr("recovery.body"));
+                if let Some(p) = &meta.source_project {
+                    ui.weak(p.display().to_string());
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(tr("recovery.recover")).clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button(tr("shell.new-confirm-discard")).clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                self.pending_recovery = None;
+                self.recover(&meta);
+            }
+            Some(false) => {
+                self.pending_recovery = None;
+                recovery::discard(&gpu_startup::state_dir());
+            }
+            None => {}
+        }
+    }
+
+    /// Opens the snapshot as the document: the mesh first (so the paint
+    /// lands on it), then the snapshot project. The session then forgets
+    /// the snapshot's directory: the project dir becomes the ORIGINAL
+    /// project (when there was one) or none, so Ctrl+S never writes into
+    /// the state dir, and the recovered work stays dirty until saved.
+    fn recover(&mut self, meta: &recovery::RecoveryMeta) {
+        if let Some(mesh) = meta.mesh.clone().filter(|p| p.is_file()) {
+            self.load_mesh_path(mesh);
+        }
+        let snapshot = recovery::snapshot_dir(&gpu_startup::state_dir());
+        self.open_project_at(snapshot.clone());
+        if self.state.project_dir.as_deref() != Some(snapshot.as_path()) {
+            // The open failed (logged by open_project_at): keep the
+            // snapshot on disk for another try.
+            return;
+        }
+        self.state.doc.detach_journal();
+        self.state.project_dir = meta.source_project.clone().filter(|p| p.is_dir());
+        if let Some(dir) = self.state.project_dir.clone() {
+            let set = self.project_texture_set_name();
+            let seq = self.state.doc.journal_seq();
+            if let Err(e) = self.state.doc.attach_journal(&dir, &set, seq) {
+                log::warn!("autosave journal unavailable: {e}");
+            }
+        }
+        // The recovered state is not on disk anywhere the user chose.
+        self.state.doc.dirty = true;
+        self.recent.remove(&snapshot);
+        self.save_recent();
+    }
+
     /// Closes the window for real: marks the quit confirmed (so the next
     /// close request is not intercepted again) and asks the viewport to
     /// close.
     fn quit_now(&mut self, ctx: &egui::Context) {
         self.pending_quit = false;
         self.quit_confirmed = true;
+        // A deliberate quit (Discard, or after a save): no crash to recover.
+        recovery::discard(&gpu_startup::state_dir());
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -1917,8 +2036,11 @@ impl UmberApp {
         self.save_project_to(dir);
     }
 
-    /// The save itself, to `dir`.
-    fn save_project_to(&mut self, dir: PathBuf) {
+    /// Writes the project (metadata + the paint sidecar) to `dir` and
+    /// returns the stamped journal mark, WITHOUT touching the session's
+    /// project dir, recents or journal: the shared core of a user save and
+    /// an autosave snapshot (C2-3).
+    fn write_project_files(&mut self, dir: &std::path::Path) -> Result<u64, String> {
         let set_name = self.project_texture_set_name();
         // Keep the import session set (and its user channels) as the saved
         // set: a rename keeps channels (see `retarget_set`). The paint
@@ -1970,7 +2092,7 @@ impl UmberApp {
         if let Some(paint) = self.state.paint.as_ref() {
             model.version = paint_save_version(paint, &live);
         }
-        match umber_core::project::save_to_dir(&model, &dir) {
+        match umber_core::project::save_to_dir(&model, dir) {
             Ok(()) => {
                 log::info!("project saved: {}", dir.display());
                 // The painted pixels ride along as the `paint/` sidecar,
@@ -2005,9 +2127,21 @@ impl UmberApp {
                         })
                         .copied()
                         .collect();
-                    let tiles = save_paint_tiles(paint, &dir, &live, &dormant);
+                    let tiles = save_paint_tiles(paint, dir, &live, &dormant);
                     log::info!("paint saved: {tiles} tile(s)");
                 }
+                Ok(model.journal_seq)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The save itself, to `dir`: write, then make `dir` the session's
+    /// project (recents, journal) and drop any recovery snapshot (C2-3).
+    fn save_project_to(&mut self, dir: PathBuf) {
+        let set_name = self.project_texture_set_name();
+        match self.write_project_files(&dir) {
+            Ok(journal_seq) => {
                 // The import Apply path (and future drops) now have a
                 // content-hash store to write into.
                 self.state.project_dir = Some(dir.clone());
@@ -2015,13 +2149,11 @@ impl UmberApp {
                 // From here on the document journals into `dir`, its seq
                 // continuing past the stamped mark (a Save As clears the
                 // old directory's journal — `dir` now holds those edits).
-                if let Err(e) = self
-                    .state
-                    .doc
-                    .attach_journal(&dir, &set_name, model.journal_seq)
-                {
+                if let Err(e) = self.state.doc.attach_journal(&dir, &set_name, journal_seq) {
                     log::warn!("autosave journal unavailable: {e}");
                 }
+                // On disk now: the crash snapshot is redundant.
+                recovery::discard(&gpu_startup::state_dir());
             }
             Err(e) => {
                 log::error!("project save failed: {e}");
@@ -2418,13 +2550,20 @@ impl eframe::App for UmberApp {
         // The quit guard (C2-1): a close with unsaved edits is cancelled and
         // asks first, the File ▸ New confirm shape. Every close path
         // (the window's ✕, Alt+F4, the OS) arrives as `close_requested`.
+        self.autosave_tick(ui.ctx());
+        self.recovery_prompt(ui.ctx());
         let close_requested = ui.ctx().input(|i| i.viewport().close_requested());
         match quit_decision(
             close_requested,
             self.state.doc.is_dirty(),
             self.quit_confirmed,
         ) {
-            QuitDecision::Allow => {}
+            QuitDecision::Allow => {
+                if close_requested && !self.state.doc.is_dirty() {
+                    // A clean close: nothing unsaved, nothing to recover.
+                    recovery::discard(&gpu_startup::state_dir());
+                }
+            }
             QuitDecision::AskFirst => {
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::CancelClose);

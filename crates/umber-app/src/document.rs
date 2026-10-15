@@ -217,6 +217,16 @@ impl Document {
     /// The high-water mark a save of this document stamps into
     /// `project.json`: the attached journal's last seq, never below the
     /// mark of the project last attached (0 for a never-saved document).
+    /// Drops the attached autosave journal WITHOUT truncating its file
+    /// (C2-3: a recovered snapshot's journal belongs to the snapshot, which
+    /// the next autosave or a discard replaces). The high-water mark stays,
+    /// so a later attach never re-arms an already-applied seq.
+    pub fn detach_journal(&mut self) {
+        if let Some(old) = self.journal.take() {
+            self.journal_high_water = self.journal_high_water.max(old.journal.last_seq());
+        }
+    }
+
     pub fn journal_seq(&self) -> u64 {
         self.journal
             .as_ref()

@@ -96,7 +96,8 @@ project replays them.
 `Ctrl+S` asks for a folder the first time and then re-saves there
 silently; `Ctrl+Shift+S` (Save As) always asks.
 
-*Gaps:* paint pixels are not autosaved between saves (C2-3), so save often. Closing
+Unsaved work is snapshotted every two minutes; after a crash, the next
+launch asks *Recover unsaved work?*. Closing
 the window with unsaved edits asks Save / Discard / Cancel first.
 
 ## 5. Export

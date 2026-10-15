@@ -728,6 +728,13 @@ notice =
     .save-failed = Project save failed
     .open-failed = Project open failed
 
+## Pixel autosave recovery (C2-3)
+
+recovery =
+    .title = Recover unsaved work?
+    .body = Umber closed without saving last time. An autosaved copy of that work (layers and paint) is available.
+    .recover = Recover
+
 ## Command palette (GUI plan G3)
 
 palette =
