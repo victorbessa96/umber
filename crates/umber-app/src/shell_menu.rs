@@ -99,7 +99,8 @@ pub struct AboutInfo {
 }
 
 impl AboutInfo {
-    /// The facts for this build on `adapter` / `backend`.
+    /// The facts for this build on `adapter` / `backend`. The commit comes
+    /// from `build.rs` (`GITHUB_SHA`, else `git rev-parse`).
     pub fn new(adapter: String, backend: String) -> Self {
         AboutInfo {
             version: env!("CARGO_PKG_VERSION"),
@@ -183,6 +184,12 @@ mod tests {
         assert_eq!(lines[0], format!("Umber {}", env!("CARGO_PKG_VERSION")));
         assert!(lines[1].starts_with("commit: "));
         assert_eq!(lines[2], "GPU: TestGPU (Vulkan)");
+        // build.rs records a hex commit whenever git or GITHUB_SHA is
+        // there (always true in this repo's builds and in CI).
+        if let Some(commit) = info.commit {
+            assert!(commit.len() >= 7 && commit.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(lines[1], format!("commit: {commit}"));
+        }
         let none = AboutInfo {
             commit: None,
             ..info

@@ -44,12 +44,19 @@ the GPU line. All 10 keys exist in both catalogs through
 
 ## Judgment calls
 
-- **The commit hash reads `UMBER_GIT_HASH` at build time, and nothing
-  sets it yet.** `release.yml` is cargo-dist generated, and a `build.rs`
-  shelling out to git changes the build surface (and breaks tarball
-  builds without `.git`). About says "commit: unknown" rather than guess.
-  Follow-up: a `build.rs` that reads `GITHUB_SHA` or `git rev-parse` and
-  falls back silently.
+- **The commit hash is set by `crates/umber-app/build.rs`** (added later
+  in the same wave). It prefers `GITHUB_SHA`, falls back to
+  `git rev-parse --short=12 HEAD`, and records nothing on failure, in
+  which case About says "commit: unknown". It is verified on the build
+  host in four shapes:
+  - a source tarball with no `.git`: nothing recorded, tests pass;
+  - `GITHUB_SHA` set: the first 12 hex digits recorded;
+  - a junk `GITHUB_SHA`: rejected;
+  - a real git clone at HEAD: `45fa138ffc5b` recorded, equal to
+    `git rev-parse`, with the umber-app battery green.
+
+  The script reruns when HEAD moves, so each new commit recompiles the
+  `umber` bin crate once. That is the accepted cost.
 - **Revert is a reopen, not an in-memory rollback.** It reloads from
   disk through the exact Open path, so a revert can never disagree with
   what an Open would show.
