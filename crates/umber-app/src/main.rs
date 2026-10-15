@@ -136,6 +136,7 @@ mod layers_panel;
 mod navigation;
 mod palette;
 mod preferences;
+mod recent;
 mod rich_tooltip;
 use umber_paint::material_layer;
 mod mesh_map_import;
@@ -998,6 +999,9 @@ pub struct UmberApp {
     /// Preferences (GUI plan G3): the values, whether the window is open,
     /// and its search query.
     prefs: preferences::Preferences,
+    /// File ▸ Recent (GUI plan g5-menu-completion), persisted beside the
+    /// locale preference.
+    recent: recent::RecentProjects,
     prefs_open: bool,
     prefs_query: String,
     /// Which landed Curvature bakes the paint session already loaded (the
@@ -1154,6 +1158,9 @@ impl UmberApp {
             notices: umber_gui::Notices::new(),
             palette: palette::Palette::default(),
             prefs: preferences::Preferences::load(preferences::prefs_path().as_deref()),
+            recent: recent::recent_path()
+                .map(|p| recent::RecentProjects::load(&p))
+                .unwrap_or_default(),
             prefs_open: false,
             prefs_query: String::new(),
             curvature_feed: CurvatureFeed::default(),
@@ -1899,6 +1906,7 @@ impl UmberApp {
                 // The import Apply path (and future drops) now have a
                 // content-hash store to write into.
                 self.state.project_dir = Some(dir.clone());
+                self.note_recent(&dir);
                 // From here on the document journals into `dir`, its seq
                 // continuing past the stamped mark (a Save As clears the
                 // old directory's journal — `dir` now holds those edits).
@@ -1927,10 +1935,66 @@ impl UmberApp {
     /// Display panel's postfx section, and the first carried
     /// `.mtlx` graph into the graph panel (a parse failure keeps the
     /// current panel graph and logs — the panel's status line says so).
+    /// File ▸ Recent: the submenu of recent project dirs, most recent
+    /// first (missing ones greyed with the reason), plus Clear. Returns
+    /// the dir to open. With an empty list the entry draws disabled.
+    fn recent_menu(&mut self, ui: &mut Ui) -> Option<PathBuf> {
+        if self.recent.paths().is_empty() {
+            ui.add_enabled(false, egui::Button::new(tr("menu.recent")))
+                .on_disabled_hover_text(tr("menu.recent-empty"));
+            return None;
+        }
+        let mut open = None;
+        let mut clear = false;
+        ui.menu_button(tr("menu.recent"), |ui| {
+            for (path, exists) in self.recent.existing(std::path::Path::exists) {
+                let row = ui
+                    .add_enabled(exists, egui::Button::new(recent::display_name(path)))
+                    .on_hover_text(path.display().to_string())
+                    .on_disabled_hover_text(tr("menu.recent-missing"));
+                if row.clicked() {
+                    open = Some(path.to_path_buf());
+                }
+            }
+            ui.separator();
+            if ui.button(tr("menu.recent-clear")).clicked() {
+                clear = true;
+            }
+        });
+        if clear {
+            self.recent.clear();
+            self.save_recent();
+            ui.close();
+        }
+        open
+    }
+
     fn open_project(&mut self) {
         let Some(dir) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
+        self.open_project_at(dir);
+    }
+
+    /// Records `dir` as the most recent project and persists the list (a
+    /// write failure only logs: the list is a convenience).
+    fn note_recent(&mut self, dir: &std::path::Path) {
+        if self.recent.note(dir) {
+            self.save_recent();
+        }
+    }
+
+    fn save_recent(&self) {
+        if let Some(path) = recent::recent_path() {
+            if let Err(e) = self.recent.save(&path) {
+                log::warn!("recent projects not saved: {e}");
+            }
+        }
+    }
+
+    /// [`Self::open_project`]'s body for a known dir (the dialog, or a
+    /// File ▸ Recent row).
+    fn open_project_at(&mut self, dir: PathBuf) {
         match umber_core::project::load_from_dir(&dir) {
             Ok(model) => {
                 let active = model
@@ -1962,6 +2026,7 @@ impl UmberApp {
                     paint.set_active_set(&name);
                 }
                 self.state.project_dir = Some(dir.clone());
+                self.note_recent(&dir);
                 // `load_from_dir` already replayed + truncated any journal
                 // a crash left behind; resume journaling from its mark.
                 if let Err(e) = self
@@ -2150,6 +2215,11 @@ impl UmberApp {
             Err(e) => {
                 log::error!("project load failed: {e}");
                 self.notify_error("notice.open-failed", &e.to_string());
+                // A dir that exists but no longer loads (not a project any
+                // more, corrupt) leaves File ▸ Recent: it would fail again.
+                if self.recent.remove(&dir) {
+                    self.save_recent();
+                }
             }
         }
     }
@@ -2323,6 +2393,10 @@ impl eframe::App for UmberApp {
                     toolbar::ShellAction::OpenProject,
                 ) {
                     actions.push(toolbar::ShellAction::OpenProject);
+                }
+                if let Some(dir) = self.recent_menu(ui) {
+                    ui.close();
+                    self.open_project_at(dir);
                 }
                 if action_item(
                     ui,
