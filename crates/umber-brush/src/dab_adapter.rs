@@ -37,6 +37,71 @@ pub enum WashMode {
     Wash,
 }
 
+/// How a stamped dab is rotated (C2-11). Read only when the session has a
+/// bitmap stamp ([`BrushParams::stamped`]); a radial dab is
+/// rotation-symmetric.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum StampAngle {
+    /// Every dab at `degrees`.
+    Fixed {
+        /// The fixed rotation, degrees counter-clockwise.
+        degrees: f32,
+    },
+    /// Each dab turned to the stroke's direction of travel, plus
+    /// `offset_degrees` (a flat brush dragged sideways).
+    FollowStroke {
+        /// Added to the travel direction, degrees.
+        offset_degrees: f32,
+    },
+    /// Each dab at a deterministic pseudo-random angle (hashed from its
+    /// position, so a replayed stroke paints identically).
+    Random,
+    /// Unrotated: the default, and the meaning of every pre-stamp preset.
+    #[default]
+    None,
+}
+
+impl StampAngle {
+    /// The dab's angle in radians, given its position and the direction
+    /// the stroke travelled to reach it (`None` for a stroke's first dab).
+    pub fn radians(self, pos: [f32; 2], travel: Option<[f32; 2]>) -> f32 {
+        match self {
+            StampAngle::None => 0.0,
+            StampAngle::Fixed { degrees } => finite_or_zero(degrees).to_radians(),
+            StampAngle::FollowStroke { offset_degrees } => {
+                let base = travel
+                    .filter(|d| d[0] != 0.0 || d[1] != 0.0)
+                    .map_or(0.0, |d| d[1].atan2(d[0]));
+                base + finite_or_zero(offset_degrees).to_radians()
+            }
+            StampAngle::Random => {
+                // FNV-1a over the position's bits: deterministic, so the
+                // same stroke always rotates the same way.
+                let mut h: u32 = 0x811c_9dc5;
+                for b in pos[0]
+                    .to_bits()
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain(pos[1].to_bits().to_le_bytes())
+                {
+                    h ^= u32::from(b);
+                    h = h.wrapping_mul(0x0100_0193);
+                }
+                (h as f32 / u32::MAX as f32) * std::f32::consts::TAU
+            }
+        }
+    }
+}
+
+fn finite_or_zero(v: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
+}
+
 /// Static brush parameters for one stroke segment.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrushParams {
@@ -64,6 +129,15 @@ pub struct BrushParams {
     /// `.umberbrush` files loading unchanged.
     #[serde(default)]
     pub falloff: FalloffCurve,
+    /// Whether dabs use the session's bitmap stamp (C2-11) instead of the
+    /// radial falloff. The stamp's pixels live in the paint session
+    /// (`PaintState::set_stamp`), so the params stay `Copy`.
+    /// `#[serde(default)]`: pre-stamp presets load radial.
+    #[serde(default)]
+    pub stamped: bool,
+    /// How stamped dabs rotate. `#[serde(default)]` = unrotated.
+    #[serde(default)]
+    pub stamp_angle: StampAngle,
 }
 
 impl Default for BrushParams {
@@ -75,7 +149,30 @@ impl Default for BrushParams {
             pressure_gamma: 1.0,
             wash_mode: WashMode::BuildUp,
             falloff: FalloffCurve::Smooth,
+            stamped: false,
+            stamp_angle: StampAngle::None,
         }
+    }
+}
+
+/// One dab from one stamp: the radial or the stamped shape, per `params`.
+/// Stamped dabs carry their angle; `prev` is the previous stamp's position
+/// in the same segment (the travel direction for
+/// [`StampAngle::FollowStroke`]).
+fn dab_for(
+    stamp: &DabPlan,
+    prev: Option<[f32; 2]>,
+    radius_px: f32,
+    params: &BrushParams,
+    alpha: f32,
+) -> Dab {
+    let dab = Dab::new(stamp.pos, radius_px, params.color, alpha, params.hardness);
+    if params.stamped {
+        let travel = prev.map(|p| [stamp.pos[0] - p[0], stamp.pos[1] - p[1]]);
+        dab.with_falloff(umber_gpu::paint::FALLOFF_STAMP)
+            .with_angle(params.stamp_angle.radians(stamp.pos, travel))
+    } else {
+        dab.with_falloff(params.falloff.as_u32())
     }
 }
 
@@ -144,13 +241,12 @@ impl DabAdapter {
     /// and call [`Self::stamps_to_dabs_wash`] for [`WashMode::Wash`].
     pub fn stamps_to_dabs(stamps: &[DabPlan], radius_px: f32, params: &BrushParams) -> Vec<Dab> {
         let mut out = Vec::with_capacity(stamps.len());
+        let mut prev = None;
         for stamp in stamps {
             let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
             let alpha = (params.alpha * shaped).clamp(0.0, 1.0);
-            out.push(
-                Dab::new(stamp.pos, radius_px, params.color, alpha, params.hardness)
-                    .with_falloff(params.falloff.as_u32()),
-            );
+            out.push(dab_for(stamp, prev, radius_px, params, alpha));
+            prev = Some(stamp.pos);
         }
         out
     }
@@ -176,13 +272,12 @@ impl DabAdapter {
     ) -> Vec<Dab> {
         let base = opaque_linearize(params.alpha, dabs_per_radius);
         let mut out = Vec::with_capacity(stamps.len());
+        let mut prev = None;
         for stamp in stamps {
             let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
             let alpha = (base * shaped).clamp(0.0, 1.0);
-            out.push(
-                Dab::new(stamp.pos, radius_px, params.color, alpha, params.hardness)
-                    .with_falloff(params.falloff.as_u32()),
-            );
+            out.push(dab_for(stamp, prev, radius_px, params, alpha));
+            prev = Some(stamp.pos);
         }
         out
     }
@@ -191,6 +286,86 @@ impl DabAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plans(points: &[[f32; 2]]) -> Vec<DabPlan> {
+        points
+            .iter()
+            .map(|p| DabPlan {
+                pos: *p,
+                alpha_multiplier: 1.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stamped_params_emit_stamp_dabs_with_the_angle_mode() {
+        use umber_gpu::paint::FALLOFF_STAMP;
+        let stamps = plans(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]]);
+        // Radial by default: no stamp id, no angle.
+        let radial = DabAdapter::stamps_to_dabs(&stamps, 4.0, &BrushParams::default());
+        assert!(radial
+            .iter()
+            .all(|d| d.falloff() != FALLOFF_STAMP && d.angle() == 0.0));
+        // Fixed 90 degrees.
+        let fixed = BrushParams {
+            stamped: true,
+            stamp_angle: StampAngle::Fixed { degrees: 90.0 },
+            ..BrushParams::default()
+        };
+        for d in DabAdapter::stamps_to_dabs(&stamps, 4.0, &fixed) {
+            assert_eq!(d.falloff(), FALLOFF_STAMP);
+            assert!((d.angle() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        }
+        // Follow the stroke: dab 2 travelled +x (0 rad), dab 3 travelled +y.
+        let follow = BrushParams {
+            stamped: true,
+            stamp_angle: StampAngle::FollowStroke {
+                offset_degrees: 0.0,
+            },
+            ..BrushParams::default()
+        };
+        let dabs = DabAdapter::stamps_to_dabs_wash(&stamps, 4.0, &follow, 2.0);
+        assert_eq!(dabs[0].angle(), 0.0, "the first dab has no travel yet");
+        assert!(dabs[1].angle().abs() < 1e-6);
+        assert!((dabs[2].angle() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn random_angles_are_deterministic_and_spread() {
+        let a = StampAngle::Random.radians([3.0, 7.0], None);
+        assert_eq!(
+            a,
+            StampAngle::Random.radians([3.0, 7.0], None),
+            "same dab, same angle"
+        );
+        assert!((0.0..=std::f32::consts::TAU).contains(&a));
+        let spread: std::collections::BTreeSet<u32> = (0..64)
+            .map(|i| (StampAngle::Random.radians([i as f32, 0.0], None) * 4.0) as u32)
+            .collect();
+        assert!(spread.len() >= 6, "angles spread over the turn: {spread:?}");
+        assert_eq!(
+            StampAngle::Fixed { degrees: f32::NAN }.radians([0.0; 2], None),
+            0.0
+        );
+    }
+
+    #[test]
+    fn pre_stamp_params_json_loads_radial_and_unrotated() {
+        let json = r#"{"color":[1,0,0,1],"alpha":0.5,"hardness":0.5,"pressure_gamma":1.0}"#;
+        let params: BrushParams = serde_json::from_str(json).expect("old shape loads");
+        assert!(!params.stamped);
+        assert_eq!(params.stamp_angle, StampAngle::None);
+        let turned = BrushParams {
+            stamped: true,
+            stamp_angle: StampAngle::FollowStroke {
+                offset_degrees: 15.0,
+            },
+            ..BrushParams::default()
+        };
+        let back: BrushParams =
+            serde_json::from_str(&serde_json::to_string(&turned).unwrap()).unwrap();
+        assert_eq!(back, turned, "round-trips");
+    }
 
     fn stamp(pos: [f32; 2], alpha_multiplier: f32) -> DabPlan {
         DabPlan {

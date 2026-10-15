@@ -673,7 +673,9 @@ pub struct PaintCompositor {
     /// The bitmap stamp [`FALLOFF_STAMP`] dabs sample (binding 4): a 1x1
     /// white texture until [`Self::set_stamp`] uploads one, so a stamp
     /// dab with no stamp paints the full square.
-    stamp: (wgpu::Texture, wgpu::TextureView),
+    /// Behind a lock: the compositor is shared (`Arc`) by every paint
+    /// thread of a session, so a stamp change goes through `&self`.
+    stamp: std::sync::RwLock<(wgpu::Texture, wgpu::TextureView)>,
     /// Whether the white fallback's single texel still needs its upload
     /// (recorded on the next splat's encoder: construction has no queue).
     stamp_needs_white: std::sync::atomic::AtomicBool,
@@ -802,7 +804,7 @@ impl PaintCompositor {
             bind_group_layout,
             _fallback_mask: fallback_mask,
             fallback_mask_view,
-            stamp,
+            stamp: std::sync::RwLock::new(stamp),
             stamp_needs_white: std::sync::atomic::AtomicBool::new(true),
             max_dabs_per_batch,
         })
@@ -819,7 +821,7 @@ impl PaintCompositor {
     /// [`PaintError::InvalidRegion`] for a zero dimension, a byte count
     /// that does not match, or a side beyond the device's 2D texture limit.
     pub fn set_stamp(
-        &mut self,
+        &self,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
@@ -839,22 +841,35 @@ impl PaintCompositor {
                 height,
             });
         }
-        self.stamp = Self::stamp_texture(&self.device, Some(queue), width, height, values);
+        let fresh = Self::stamp_texture(&self.device, Some(queue), width, height, values);
+        *self
+            .stamp
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
         self.stamp_needs_white
             .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     /// Back to the white fallback (stamp dabs paint the full square).
-    pub fn clear_stamp(&mut self) {
-        self.stamp = Self::stamp_texture(&self.device, None, 1, 1, &[255]);
+    pub fn clear_stamp(&self) {
+        let fresh = Self::stamp_texture(&self.device, None, 1, 1, &[255]);
+        *self
+            .stamp
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
         self.stamp_needs_white
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The current stamp's dimensions (`(1, 1)` = the white fallback).
     pub fn stamp_size(&self) -> (u32, u32) {
-        let size = self.stamp.0.size();
+        let size = self
+            .stamp
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .size();
         (size.width, size.height)
     }
 
@@ -937,6 +952,12 @@ impl PaintCompositor {
         let mut staging = DabBuffer::new(self.max_dabs_per_batch);
         staging.stage(dabs)?;
         let dab_buffer = staging.upload(&self.device)?;
+        // One read guard for the whole recording: the texture this splat
+        // samples cannot be swapped out from under it.
+        let stamp = self
+            .stamp
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self
             .stamp_needs_white
             .swap(false, std::sync::atomic::Ordering::Relaxed)
@@ -962,7 +983,7 @@ impl PaintCompositor {
                     },
                 },
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.stamp.0,
+                    texture: &stamp.0,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -1010,7 +1031,7 @@ impl PaintCompositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&self.stamp.1),
+                    resource: wgpu::BindingResource::TextureView(&stamp.1),
                 },
             ],
         });
@@ -1301,7 +1322,7 @@ mod tests {
             let Some((device, queue)) = try_request_device() else {
                 return;
             };
-            let mut compositor = PaintCompositor::new(device.clone()).expect("compositor");
+            let compositor = PaintCompositor::new(device.clone()).expect("compositor");
             // An 8x8 stamp: left half opaque, right half empty.
             let stamp: Vec<u8> = (0..64).map(|i| if i % 8 < 4 { 255 } else { 0 }).collect();
             compositor

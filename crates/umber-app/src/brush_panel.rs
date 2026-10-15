@@ -1877,6 +1877,8 @@ mod tests {
                 pressure_gamma: 1.0,
                 wash_mode: umber_brush::WashMode::BuildUp,
                 falloff: Default::default(),
+                stamped: false,
+                stamp_angle: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

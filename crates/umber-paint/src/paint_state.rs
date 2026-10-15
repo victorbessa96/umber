@@ -1850,6 +1850,35 @@ impl PaintState {
         }
     }
 
+    /// Sets the session's bitmap stamp (C2-11): `width * height` R8
+    /// coverage, top row first. Strokes whose params say `stamped` sample
+    /// it from the next stroke on. Every paint target of the session
+    /// shares one compositor, so this is session-wide.
+    ///
+    /// # Errors
+    ///
+    /// The compositor's refusal for a zero side, a side over the device
+    /// limit or a mismatched byte count (the stamp is left unchanged).
+    pub fn set_stamp(
+        &mut self,
+        width: u32,
+        height: u32,
+        values: &[u8],
+    ) -> Result<(), umber_gpu::PaintError> {
+        self.compositor
+            .set_stamp(&self.queue, width, height, values)
+    }
+
+    /// Back to no stamp: stamped strokes paint their full square.
+    pub fn clear_stamp(&mut self) {
+        self.compositor.clear_stamp();
+    }
+
+    /// The stamp's dimensions (`(1, 1)` = none set).
+    pub fn stamp_size(&self) -> (u32, u32) {
+        self.compositor.stamp_size()
+    }
+
     /// The session's current dab parameters (what the next stroke paints
     /// with).
     pub fn brush_params(&self) -> &BrushParams {
@@ -5679,6 +5708,8 @@ mod tests {
             pressure_gamma: 2.0,
             wash_mode: WashMode::BuildUp,
             falloff: umber_brush::FalloffCurve::Sharp,
+            stamped: false,
+            stamp_angle: Default::default(),
         };
         s.sync_brush_params(&preset, false);
         assert_eq!(s.brush_params().alpha, 0.4);
@@ -6004,6 +6035,62 @@ mod tests {
         assert!(state
             .read_plane(PlaneOwner::Layer(10), 1001, BASE_COLOR_CHANNEL)
             .is_none());
+    }
+
+    #[test]
+    fn a_stamped_brush_paints_the_stamp_shape() {
+        // C2-11 end to end: the session's stamp reaches every target's
+        // splat. A left-half stamp + one stamped dab paints the dab's
+        // left half; the same stroke radial paints both sides.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let paint_once = |stamped: bool| {
+            let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 128)
+                .expect("paint state builds");
+            let stamp: Vec<u8> = (0..64).map(|i| if i % 8 < 4 { 255 } else { 0 }).collect();
+            state.set_stamp(8, 8, &stamp).expect("stamp uploads");
+            assert_eq!(state.stamp_size(), (8, 8));
+            let mut params = *state.brush_params();
+            params.stamped = stamped;
+            params.alpha = 1.0;
+            params.hardness = 1.0;
+            state.sync_brush_params(&params, false);
+            state.set_brush_color([1.0, 1.0, 1.0, 1.0]);
+            // A short vertical stroke through the centre: every dab's
+            // left half is left of x = 64, its right half right of it.
+            state.begin_stroke(Pos2::new(0.5, 0.45));
+            for i in 1..=10u8 {
+                state.extend_stroke(Pos2::new(0.5, 0.45 + 0.01 * f32::from(i)));
+            }
+            state.end_stroke();
+            state.process_pending().expect("drains");
+            state
+                .read_target(umber_mesh::FIRST_TILE, BASE_COLOR_CHANNEL)
+                .expect("reads")
+                .data
+        };
+        let alpha_at = |bytes: &[u8], x: usize, y: usize| bytes[(y * 128 + x) * 4 + 3];
+        let radial = paint_once(false);
+        let stamped = paint_once(true);
+        // Probe half the dab radius either side of the stroke point (uv
+        // 0.5 -> texel 64), whatever the session's default size is.
+        let r = PaintState::with_target_size(device.clone(), queue.clone(), 128)
+            .expect("paint state builds")
+            .brush_radius_texels();
+        let off = (r * 0.5).round().max(1.0) as usize;
+        let (cx, cy) = (64, 64);
+        assert!(
+            alpha_at(&radial, cx + off, cy) > 0,
+            "radial paints both sides (r={r})"
+        );
+        assert!(alpha_at(&radial, cx - off, cy) > 0);
+        assert!(alpha_at(&stamped, cx - off, cy) > 0, "left half painted");
+        assert_eq!(
+            alpha_at(&stamped, cx + off, cy),
+            0,
+            "right half empty under the stamp"
+        );
     }
 
     #[test]

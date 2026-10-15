@@ -413,6 +413,8 @@ mod tests {
                 pressure_gamma: 2.2,
                 wash_mode: WashMode::Wash,
                 falloff: FalloffCurve::Sphere,
+                stamped: false,
+                stamp_angle: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 2.5,

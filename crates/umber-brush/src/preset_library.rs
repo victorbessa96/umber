@@ -270,6 +270,8 @@ mod tests {
                 pressure_gamma: 1.0,
                 wash_mode: crate::WashMode::BuildUp,
                 falloff: crate::FalloffCurve::Smooth,
+                stamped: false,
+                stamp_angle: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,
