@@ -105,7 +105,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-20..22 | Security: panic-hunt the uncovered seams, plugin consent + size cap, Windows signing decision | 4 security | ◐ C2-20 ✓ (7 seams + the agent wire, no panic found), C2-21 ✓ (blake3 consent + 8 MiB cap); C2-22 (Windows signing) is Bessa's decision |
 | C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | todo |
 | C2-26..28 | User docs + a generated keyboard reference, plugin SDK guide, kittest breadth | 6 docs/tests | ◐ C2-27 ✓ (`docs/plugins/authoring-guide.md`, its example built + loaded); C2-26 ✓ (`docs/user/keyboard.md` generated + drift-tested; `docs/user/getting-started.md`, claims code-checked); 28 open |
-| C2-29 | Bakes panel: all nine mesh-map kinds (normal + cage, world normal, ID, bent normal), not four | 2 loop | ◐ 8 of 9 landed (normal default-on, vectors written Linear); height/cage transfer needs a high-poly picker; baked normal → export slot open |
+| C2-29 | Bakes panel: all nine mesh-map kinds (normal + cage, world normal, ID, bent normal), not four | 2 loop | ◐ 8 of 9 landed (normal default-on, vectors written Linear); height/cage transfer needs a high-poly picker, and routing a baked normal into the export belongs with it (self-baked low-poly normals are near-flat) |
 | C2-30 | Windows Ink default-on for the Windows build (or documented as opt-in) | 5 release | todo (a release decision) |
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's

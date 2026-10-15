@@ -55,6 +55,9 @@ take `bakes.map-*` keys.
   mesh picker. `umber-cli`'s batch `bake_transfer` step does it today.
 - Per-tile baking of the new maps on multi-tile meshes (v1 has a
   per-tile entry point for AO only).
-- The export still uses its own flat normal unless a baked normal is
-  imported. Routing the panel's baked normal into the export's normal
-  slot is the follow-up.
+- The export keeps its flat normal (or the PAINTED normal, C2-6). Routing
+  this panel's baked normal into the export is NOT worth doing alone:
+  a tangent normal baked from the low-poly mesh against itself is
+  near-flat by construction, since the mesh's normals are its tangent
+  frame. The value arrives with high→low (the transfer bake), and the
+  routing belongs to that kill.
