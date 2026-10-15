@@ -43,14 +43,26 @@ source (`egui_dock-0.21.1/src/widgets/dock_area/show/leaf.rs`, egui
    (21). A cap of about 140 px at the Button size keeps every en-US
    title whole and elides only that one pt-BR title ("Conjuntos de
    tex…"), so the elision is the exception, not the norm.
-3. **The » menu without forking.** egui_dock exposes no overflow hook.
-   It is drawn by us: a `TabViewer::add_popup` is the only built-in
-   popup in the bar, and it is for adding tabs. The honest path is our
-   own button at the bar's right edge, enabled only when the leaf
-   overflows (sum of tab widths > `leaf.rect.width()`). It lists the
-   leaf's tabs and sets `leaf.active` on pick. It is drawn after
-   `DockArea::show` into the leaf's tab-bar rect, which is known from
-   `LeafNode.rect` and `TabBarStyle::height`.
+3. **The » menu through the add-button hook, no forking.** egui_dock
+   reserves space at the bar's end for an add button
+   (`DockArea::show_add_buttons`, `TAB_ADD_BUTTON_SIZE` taken from the
+   available width before the tabs lay out) and shows our popup under it
+   (`show_add_popup` → `TabViewer::add_popup(ui, path)`, leaf.rs:660).
+   The popup gets the leaf's `NodePath`, so it lists that leaf's tabs.
+   Picking one is recorded as `(path, index)` and applied after
+   `DockArea::show` returns: `dock_state[path]` → `set_active_tab`, plus
+   the scroll from (4).
+   - The button is a "+" glyph by default; `Style::add_tab_*` sets its
+     colours only, so the glyph stays "+". Either live with "+"
+     reading as "panels in this group" (it also lists closed panels,
+     which IS adding), or paint a » over its rect via `on_add`'s
+     neighbour hook. The first is honest and zero-risk: the popup lists
+     this leaf's tabs (pick = activate) and, under a separator, the
+     panels not open anywhere (pick = add here).
+   - The button shows on every leaf, overflowing or not. That matches
+     Painter, where every panel group has its menu.
+   - This also closes the plan's "restore a closed panel" gap: today
+     only Window ▸ restores one.
 4. **Selected tab visible.** It falls out of (3): picking from » also
    sets `leaf.scroll` so the active tab's x lands inside the bar. Same
    for the keyboard path (`Ctrl+PgDn`). Width per tab is recomputed with
@@ -67,7 +79,8 @@ source (`egui_dock-0.21.1/src/widgets/dock_area/show/leaf.rs`, egui
 
 ## Risk
 
-(3) and (4) depend on the leaf scroll field (`pub scroll: f32`) and
+(3) uses only public hooks (`show_add_buttons`, `show_add_popup`,
+`add_popup`). (4) depends on the leaf scroll field (`pub scroll: f32`) and
 on egui_dock's tab-width arithmetic staying the same. Pin the
 arithmetic in one helper with a test, so an egui_dock bump that
 changes it fails loudly.
