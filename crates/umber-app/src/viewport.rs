@@ -164,6 +164,14 @@ pub struct Viewport {
     /// returns to the shell (as [`ViewportClick::IdMask`]), which bakes
     /// the region IDs and selects through the paint session.
     idmask_armed: bool,
+    /// Front-face falloff start angle, degrees (absorbed from Blender's
+    /// brush Normal Falloff): viewport strokes on faces seen more than this
+    /// far from head-on paint weaker, down to nothing edge-on. `None` = off
+    /// — an `Option` so the derived `Default` is OFF (a bare `f32` would
+    /// default to 0.0 = fully ON and silently weaken every stroke). Strokes
+    /// are byte-identical to before until the shell enables it
+    /// ([`Self::set_front_face_falloff_deg`]).
+    front_face_falloff_deg: Option<f32>,
 }
 
 impl Viewport {
@@ -334,9 +342,9 @@ impl Viewport {
             self.handle_input(ui, &response);
         } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
             if let Some(pos) = response.interact_pointer_pos() {
-                let hit = self
-                    .pick_uv(rect, mesh, pos)
-                    .map(|uv| egui::Pos2::new(uv[0], uv[1]));
+                let picked = self.pick(rect, mesh, pos);
+                let hit = picked.map(|(uv, _)| egui::Pos2::new(uv[0], uv[1]));
+                let facing_weight = picked.map_or(1.0, |(_, w)| w);
                 // CORE-LOOP CRITICAL 5 — real pressure: the digitizer's
                 // per-event force feeds the stroke. The source is the RAW
                 // `Event::Touch` stream, NOT `multi_touch()`: the gesture
@@ -383,7 +391,13 @@ impl Viewport {
                     }
                     force
                 });
-                let pressure = crate::stylus_input::resolve_pressure(stylus_pressure, touch_force);
+                // Front-face falloff rides the pressure channel: it scales
+                // the dab's strength exactly as a lighter pen would, so it
+                // inherits every downstream rule (pressure curve, wash,
+                // symmetry) with no new paint-engine surface. Off (the
+                // default) the weight is exactly 1.0 — pressure unchanged.
+                let pressure = crate::stylus_input::resolve_pressure(stylus_pressure, touch_force)
+                    * facing_weight;
                 if !paint.is_stroking() {
                     paint.begin_screen_point_pressured(hit, pressure);
                 } else {
@@ -487,6 +501,13 @@ impl Viewport {
         None
     }
 
+    /// Sets the front-face falloff start angle in degrees, or `None` to
+    /// turn it off. Clamped to `0..=90` (`90` is also off); a non-finite
+    /// angle turns it off.
+    pub fn set_front_face_falloff_deg(&mut self, deg: Option<f32>) {
+        self.front_face_falloff_deg = deg.filter(|d| d.is_finite()).map(|d| d.clamp(0.0, 90.0));
+    }
+
     /// Arms or disarms the eyedropper (the shell syncs this from
     /// ToolKind::Pick each frame; painting is suppressed while armed).
     pub fn set_pick_armed(&mut self, armed: bool) {
@@ -510,6 +531,20 @@ impl Viewport {
         mesh: &umber_mesh::MeshData,
         pos: egui::Pos2,
     ) -> Option<[f32; 2]> {
+        self.pick(rect, mesh, pos).map(|(uv, _)| uv)
+    }
+
+    /// [`Self::pick_uv`] plus the front-face weight at the hit:
+    /// `|cos|` between the view ray and the hit face's normal, through
+    /// [`umber_mesh::front_facing_weight`] at the current start angle.
+    /// A degenerate face (no normal) weighs `1.0` — the falloff only ever
+    /// weakens a stroke it can measure.
+    fn pick(
+        &self,
+        rect: egui::Rect,
+        mesh: &umber_mesh::MeshData,
+        pos: egui::Pos2,
+    ) -> Option<([f32; 2], f32)> {
         let aspect = rect.width() / rect.height();
         let ndc_x = (pos.x - rect.left()) / rect.width() * 2.0 - 1.0;
         let ndc_y = 1.0 - (pos.y - rect.top()) / rect.height() * 2.0;
@@ -529,7 +564,18 @@ impl Viewport {
             umber_gpu::camera::Projection::Orthographic => near,
         };
         let hit = umber_mesh::ray_intersect(mesh, origin, dir)?;
-        umber_mesh::uv_at(mesh, hit)
+        let uv = umber_mesh::uv_at(mesh, hit)?;
+        let weight = match (
+            self.front_face_falloff_deg,
+            umber_mesh::face_normal(mesh, hit),
+        ) {
+            (Some(start), Some(n)) => {
+                umber_mesh::front_facing_weight(n.dot(dir.normalize_or_zero()), start)
+            }
+            // Off, or a degenerate face it cannot measure: full strength.
+            _ => 1.0,
+        };
+        Some((uv, weight))
     }
 
     fn handle_input(&mut self, ui: &Ui, response: &Response) {
@@ -752,6 +798,58 @@ mod tests {
             viewport.pick_uv(rect200(), &quad(), egui::pos2(200.0, 200.0)),
             None
         );
+    }
+
+    #[test]
+    fn front_face_falloff_is_off_by_default_and_weighs_one() {
+        // The derived Default must be OFF: a fresh viewport's pick carries
+        // weight exactly 1.0 even on the quad's head-on centre, so every
+        // existing stroke keeps its pressure byte-for-byte.
+        let viewport = head_on_viewport();
+        let (uv, w) = viewport
+            .pick(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("centre hits");
+        assert_eq!(w, 1.0);
+        assert_eq!(
+            Some(uv),
+            viewport.pick_uv(rect200(), &quad(), egui::pos2(100.0, 100.0))
+        );
+    }
+
+    #[test]
+    fn front_face_falloff_weakens_a_grazing_face_and_spares_head_on() {
+        // The quad faces +z; the head-on camera looks down -z, so the
+        // centre ray is perpendicular (facing = 1): weight 1 at any start.
+        let mut viewport = head_on_viewport();
+        viewport.set_front_face_falloff_deg(Some(0.0));
+        let (_, w) = viewport
+            .pick(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("centre hits");
+        assert!((w - 1.0).abs() < 1e-4, "head-on must be full strength: {w}");
+        // Tilt the camera 60 degrees: the ray now meets the face at 60 deg
+        // off its normal. With start 0, the weight is (90-60)/90 = 1/3.
+        viewport.camera.pitch = 60f32.to_radians();
+        let (_, w) = viewport
+            .pick(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("centre still hits");
+        assert!(
+            (w - 1.0 / 3.0).abs() < 2e-3,
+            "60 deg off normal, start 0: {w}"
+        );
+        // Start 70 covers 60 deg: full strength again.
+        viewport.set_front_face_falloff_deg(Some(70.0));
+        let (_, w) = viewport
+            .pick(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("centre still hits");
+        assert_eq!(w, 1.0);
+        // Turned back off, and garbage turns it off.
+        viewport.set_front_face_falloff_deg(Some(f32::NAN));
+        viewport.set_front_face_falloff_deg(Some(0.0));
+        viewport.set_front_face_falloff_deg(None);
+        let (_, w) = viewport
+            .pick(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("centre still hits");
+        assert_eq!(w, 1.0);
     }
 
     #[test]

@@ -37,7 +37,9 @@ pub use polygon_fill::{
     flood_connected_triangles, flood_uv_island, pick_from_ray, point_in_polygon,
     rasterize_polygon_mask, uv_triangle_at, FillMask, LASSO_MAX_POINTS,
 };
-pub use raycast::{ray_intersect, uv_at, walk_surface_path, RayHit};
+pub use raycast::{
+    face_normal, front_facing_weight, ray_intersect, uv_at, walk_surface_path, RayHit,
+};
 pub use udim::{present_tiles, tile_of_triangle, tile_of_uv, triangles_for_tile, FIRST_TILE};
 pub use usd::load_usda;
 

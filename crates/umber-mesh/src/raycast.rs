@@ -88,6 +88,52 @@ pub fn ray_intersect(mesh: &MeshData, origin: Vec3, dir: Vec3) -> Option<RayHit>
     best
 }
 
+/// The hit triangle's geometric (face) normal, normalized, from the
+/// winding `p0 -> p1 -> p2` (counter-clockwise = front, the renderer's
+/// convention). `None` for a degenerate triangle or an index past the
+/// mesh — never a NaN.
+pub fn face_normal(mesh: &MeshData, hit: RayHit) -> Option<Vec3> {
+    let tri = mesh.indices.chunks_exact(3).nth(hit.triangle)?;
+    let p = |k: usize| {
+        mesh.positions
+            .get(tri[k] as usize)
+            .map(|v| Vec3::from_array(*v))
+    };
+    let (p0, p1, p2) = (p(0)?, p(1)?, p(2)?);
+    let n = (p1 - p0).cross(p2 - p0);
+    let len = n.length();
+    (len > 1e-12 && len.is_finite()).then(|| n / len)
+}
+
+/// Front-face falloff (absorbed 2026-10-14 from Blender's brush "Normal
+/// Falloff"): the dab-strength weight for a surface seen at an angle.
+///
+/// `facing` is `|cos θ|` between the view ray and the face normal (1 =
+/// head-on, 0 = edge-on). Faces within `start_deg` of head-on paint at
+/// full strength; past it the weight falls linearly in ANGLE to 0 at 90°,
+/// so grazing faces stop taking stretched, smeared dabs. `start_deg` is
+/// clamped to `0..=90`; `90` disables the falloff (weight 1 everywhere);
+/// a non-finite `facing` gives `1.0` (never silently kill a stroke).
+pub fn front_facing_weight(facing: f32, start_deg: f32) -> f32 {
+    if !facing.is_finite() {
+        return 1.0;
+    }
+    let start = if start_deg.is_finite() {
+        start_deg.clamp(0.0, 90.0)
+    } else {
+        90.0
+    };
+    if start >= 90.0 {
+        return 1.0;
+    }
+    let angle = facing.abs().clamp(0.0, 1.0).acos().to_degrees();
+    if angle <= start {
+        1.0
+    } else {
+        ((90.0 - angle) / (90.0 - start)).clamp(0.0, 1.0)
+    }
+}
+
 /// The UV at a hit, barycentrically interpolated.
 pub fn uv_at(mesh: &MeshData, hit: RayHit) -> Option<[f32; 2]> {
     let tri = mesh.indices.chunks_exact(3).nth(hit.triangle)?;
@@ -121,6 +167,58 @@ pub fn walk_surface_path(mesh: &MeshData, rays: &[([f32; 3], [f32; 3])]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn front_facing_weight_is_one_head_on_and_zero_edge_on() {
+        // Head-on and within the start angle: full strength.
+        assert_eq!(front_facing_weight(1.0, 60.0), 1.0);
+        // Inside the start angle (50 deg < 60). Not AT 60: cos -> acos does
+        // not round-trip exactly in f32 (60 comes back 60.000004), so the
+        // boundary itself is not a stable pin.
+        assert_eq!(front_facing_weight(50f32.to_radians().cos(), 60.0), 1.0);
+        // Edge-on: nothing.
+        assert_eq!(front_facing_weight(0.0, 60.0), 0.0);
+        // Halfway through the falloff band (75 deg with start 60): 0.5.
+        let w = front_facing_weight(75f32.to_radians().cos(), 60.0);
+        assert!((w - 0.5).abs() < 1e-4, "{w}");
+        // The sign of cos is ignored (back-facing hit through an open mesh).
+        assert_eq!(
+            front_facing_weight(-0.5, 30.0),
+            front_facing_weight(0.5, 30.0)
+        );
+        // 90 = disabled; garbage never kills a stroke.
+        assert_eq!(front_facing_weight(0.0, 90.0), 1.0);
+        assert_eq!(front_facing_weight(f32::NAN, 60.0), 1.0);
+        assert_eq!(front_facing_weight(0.0, f32::NAN), 1.0);
+        // start 0: linear in angle over the whole quarter turn.
+        let w = front_facing_weight(45f32.to_radians().cos(), 0.0);
+        assert!((w - 0.5).abs() < 1e-4, "{w}");
+    }
+
+    #[test]
+    fn face_normal_follows_winding_and_refuses_degenerates() {
+        let mesh = MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0]; 4],
+            // tri 0: CCW in xy -> +z; tri 1: collinear (degenerate).
+            indices: vec![0, 1, 2, 0, 1, 3],
+            material_names: vec![],
+        };
+        let hit = |triangle| RayHit {
+            triangle,
+            t: 1.0,
+            bary: (0.3, 0.3),
+        };
+        assert_eq!(face_normal(&mesh, hit(0)), Some(Vec3::Z));
+        assert_eq!(face_normal(&mesh, hit(1)), None);
+        assert_eq!(face_normal(&mesh, hit(7)), None);
+    }
 
     fn quad() -> MeshData {
         // Two-triangle quad on the z=0 plane, unit UVs.
