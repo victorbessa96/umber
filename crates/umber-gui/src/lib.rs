@@ -36,5 +36,6 @@ pub use theme::{
     MOTION_SECS,
 };
 pub use widgets::{
-    Notice, NoticeLevel, Notices, ParamGroup, RecentColors, SwatchGrid, Tool, ToolRow, ValueField,
+    Notice, NoticeLevel, Notices, ParamGroup, Ramp, RampEdit, RecentColors, SwatchGrid, Tool,
+    ToolRow, ValueField,
 };
