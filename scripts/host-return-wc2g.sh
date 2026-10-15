@@ -22,6 +22,7 @@ KILLS=(
   "sec-sidecar-channel|umber-paint umber-app|crates/umber-paint/src/persistence.rs"
   "sec-smart-caps|umber-core umber-app|crates/umber-core/src/smart.rs"
   "spp-inflate-bound|spp|crates/spp/src/hdf5.rs"
+  "g5-tab-overflow-core|umber-gui|crates/umber-gui/src/widgets/mod.rs crates/umber-gui/src/widgets/tab_overflow.rs"
 )
 # NOT in the table: win-version-resource. It needs the workspace dep
 # `winresource` in the root Cargo.toml + umber-app's build-dep, both
