@@ -45,6 +45,19 @@ pub struct Document {
     /// pass through `run`, and a stroke-only session used to read clean).
     /// A successful save/open reset clears it.
     pub dirty: bool,
+    /// The texture set `stack` / `history` / `session_history` belong to
+    /// (C2-9 stage 3). Empty = the single-set document of before.
+    active_set: String,
+    /// Every OTHER set's stack + histories, parked while another set is
+    /// active. `activate_set` swaps one in; the active set is never here.
+    parked: std::collections::BTreeMap<String, ParkedSet>,
+}
+
+/// An inactive texture set's state (C2-9 stage 3).
+struct ParkedSet {
+    stack: LayerStack,
+    history: UndoStack<LayerCommand>,
+    session_history: SessionHistory,
 }
 
 /// An attached journal plus the texture set this document's stack is.
@@ -67,6 +80,8 @@ impl Default for Document {
             journal: None,
             journal_high_water: 0,
             dirty: false,
+            active_set: String::new(),
+            parked: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -77,6 +92,10 @@ impl Document {
     /// the History window's row from the same command.
     pub fn run(&mut self, command: LayerCommand) {
         self.dirty = true;
+        // One id space across every set's stack (C2-9 stage 1): paint
+        // planes are keyed by layer id alone.
+        let floor = self.next_layer_id_floor();
+        self.stack.reserve_ids_from(floor);
         // The cursor before the push: a push clears the redo stack, so any
         // history rows past this depth describe a future that no longer
         // exists and must go (context rows survive — see `truncate_future`).
@@ -173,7 +192,13 @@ impl Document {
         let (Some(attached), Some(op)) = (self.journal.as_mut(), op) else {
             return;
         };
-        if let Err(err) = attached.journal.record(&attached.texture_set, op) {
+        // Each entry names the set it edited: the active one.
+        let set = if self.active_set.is_empty() {
+            attached.texture_set.as_str()
+        } else {
+            self.active_set.as_str()
+        };
+        if let Err(err) = attached.journal.record(set, op) {
             log::warn!("autosave journal append failed: {err}");
         }
     }
@@ -247,6 +272,103 @@ impl Document {
         self.journal = None;
         self.journal_high_water = 0;
         self.stack = stack;
+        self.active_set.clear();
+        self.parked.clear();
+    }
+
+    /// Loads every texture set's stack (C2-9 stage 3, the Open path):
+    /// `active` becomes the live set, the rest are parked with fresh
+    /// histories. Each stack is raised to the document-wide id floor so
+    /// ids stay unique across sets. An unknown `active` activates the
+    /// first set.
+    pub fn load_sets(&mut self, sets: Vec<(String, LayerStack)>, active: &str) {
+        self.load_stack(LayerStack::default());
+        let floor = sets
+            .iter()
+            .map(|(_, st)| st.next_layer_id())
+            .max()
+            .unwrap_or(0);
+        let active = if sets.iter().any(|(n, _)| n == active) {
+            active.to_string()
+        } else {
+            sets.first().map(|(n, _)| n.clone()).unwrap_or_default()
+        };
+        for (name, mut stack) in sets {
+            stack.reserve_ids_from(floor);
+            if name == active {
+                self.stack = stack;
+            } else {
+                self.parked.insert(
+                    name,
+                    ParkedSet {
+                        stack,
+                        history: UndoStack::new(HISTORY_MAX_ENTRIES),
+                        session_history: SessionHistory::new(),
+                    },
+                );
+            }
+        }
+        self.active_set = active;
+    }
+
+    /// Makes `name` the live texture set: parks the current set's stack
+    /// and histories, then swaps `name`'s in (a new set starts empty).
+    /// Undo, History and the Layers panel then act on `name` only, which
+    /// is Painter's per-set undo. A no-op when `name` is already active.
+    pub fn activate_set(&mut self, name: &str) {
+        if name == self.active_set {
+            return;
+        }
+        let incoming = self.parked.remove(name).unwrap_or_else(|| ParkedSet {
+            stack: LayerStack::default(),
+            history: UndoStack::new(HISTORY_MAX_ENTRIES),
+            session_history: SessionHistory::new(),
+        });
+        let outgoing = ParkedSet {
+            stack: std::mem::replace(&mut self.stack, incoming.stack),
+            history: std::mem::replace(&mut self.history, incoming.history),
+            session_history: std::mem::replace(&mut self.session_history, incoming.session_history),
+        };
+        let previous = std::mem::replace(&mut self.active_set, name.to_string());
+        // The pre-set document (empty name) is adopted as `name`'s own
+        // state on first activation, not parked under "".
+        if !previous.is_empty() {
+            self.parked.insert(previous, outgoing);
+        } else {
+            self.stack = outgoing.stack;
+            self.history = outgoing.history;
+            self.session_history = outgoing.session_history;
+        }
+    }
+
+    /// The active texture set's name (empty for a single-set document).
+    pub fn active_set(&self) -> &str {
+        &self.active_set
+    }
+
+    /// Every set's `(name, stack)`, the active one included, sorted by
+    /// name: what a save writes and what the composite snapshot reads.
+    pub fn all_sets(&self) -> Vec<(&str, &LayerStack)> {
+        let mut out: Vec<(&str, &LayerStack)> = self
+            .parked
+            .iter()
+            .map(|(n, p)| (n.as_str(), &p.stack))
+            .collect();
+        if !self.active_set.is_empty() {
+            out.push((self.active_set.as_str(), &self.stack));
+        }
+        out.sort_by(|a, b| a.0.cmp(b.0));
+        out
+    }
+
+    /// The document-wide id floor: the max next id over every stack.
+    fn next_layer_id_floor(&self) -> u64 {
+        self.parked
+            .values()
+            .map(|p| p.stack.next_layer_id())
+            .chain(std::iter::once(self.stack.next_layer_id()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Layers bottom-to-top (stack order == draw order).
@@ -1130,6 +1252,73 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn switching_sets_keeps_each_stack_and_its_own_undo() {
+        let mut doc = Document::default();
+        doc.activate_set("Body");
+        doc.run(LayerCommand::add("body paint", LayerKind::Paint));
+        doc.activate_set("Hilt");
+        assert!(doc.layers().is_empty(), "a new set starts empty");
+        doc.run(LayerCommand::add("hilt paint", LayerKind::Paint));
+        doc.run(LayerCommand::add("hilt fill", LayerKind::Fill));
+        // Ids are unique across sets (planes are keyed by id alone).
+        let hilt_ids: Vec<u64> = doc.layers().iter().map(|l| l.id).collect();
+        doc.activate_set("Body");
+        let body_ids: Vec<u64> = doc.layers().iter().map(|l| l.id).collect();
+        assert_eq!(doc.layers()[0].name, "body paint");
+        assert!(
+            hilt_ids.iter().all(|id| !body_ids.contains(id)),
+            "{hilt_ids:?} vs {body_ids:?}"
+        );
+        // Undo acts on the active set only.
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        doc.activate_set("Hilt");
+        assert_eq!(doc.layers().len(), 2, "Hilt untouched by Body's undo");
+        assert!(doc.undo());
+        assert_eq!(doc.layers().len(), 1);
+        // all_sets lists both, sorted.
+        let names: Vec<&str> = doc.all_sets().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["Body", "Hilt"]);
+        doc.activate_set("Hilt"); // no-op
+        assert_eq!(doc.active_set(), "Hilt");
+    }
+
+    #[test]
+    fn the_first_activation_adopts_the_single_set_document() {
+        // A pre-set document (layers made before any set was named) becomes
+        // the first set's content, not a phantom "" set.
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("early", LayerKind::Paint));
+        doc.activate_set("Main");
+        assert_eq!(doc.layers()[0].name, "early");
+        assert_eq!(doc.all_sets().len(), 1);
+    }
+
+    #[test]
+    fn load_sets_activates_one_and_parks_the_rest_without_id_overlap() {
+        let mut a = LayerStack::default();
+        a.add_layer("a0", LayerKind::Paint);
+        let mut b = LayerStack::default();
+        b.add_layer("b0", LayerKind::Paint); // also id 0 on disk
+        let mut doc = Document::default();
+        doc.load_sets(vec![("A".into(), a), ("B".into(), b)], "B");
+        assert_eq!(doc.active_set(), "B");
+        assert_eq!(doc.layers()[0].name, "b0");
+        // A new layer in B gets an id neither saved stack holds.
+        doc.run(LayerCommand::add("b1", LayerKind::Paint));
+        let new_id = doc.layers().last().unwrap().id;
+        assert!(new_id >= 1);
+        doc.activate_set("A");
+        doc.run(LayerCommand::add("a1", LayerKind::Paint));
+        let a1 = doc.layers().last().unwrap().id;
+        assert_ne!(a1, new_id, "ids never collide across sets");
+        // Unknown active name: the first set.
+        let mut doc2 = Document::default();
+        doc2.load_sets(vec![("X".into(), LayerStack::default())], "nope");
+        assert_eq!(doc2.active_set(), "X");
+    }
 
     /// kittest (C2-28): the Layers panel's new buttons drive the
     /// document through undoable commands. Add a folder by its button,
