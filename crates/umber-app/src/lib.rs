@@ -38,6 +38,10 @@
 /// stable for the shell and the integration harnesses (tests/).
 pub use umber_paint::{paint_state, retouch};
 
+/// The viewport's axis gizmo — on the library surface for the kittest
+/// snapshot harness (the pure projection / hit / snap functions and
+/// `paint`; the shell keeps driving them through `crate::axis_gizmo`).
+pub mod axis_gizmo;
 /// The Display panel + the PSD import section — on the library surface
 /// for the kittest snapshot harness (tests/panel_snapshot.rs renders both
 /// headless; i18n::init() must run first — the tests call it).

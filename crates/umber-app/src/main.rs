@@ -1044,6 +1044,10 @@ pub struct UmberApp {
     /// the viewport's mesh pass and the UV view's paint display.
     display_lut: umber_gpu::DisplayLut,
     brush_panel: BrushPanel,
+    /// Whether the axis gizmo draws (View menu; GUI plan G1
+    /// `g1-axis-gizmo`). Shell state synced into the viewport each
+    /// frame, like the view toggles. On by default.
+    show_gizmo: bool,
     /// Perf HUD toggle (View menu). `perf` feature only.
     #[cfg(feature = "perf")]
     show_perf_hud: bool,
@@ -1157,6 +1161,7 @@ impl UmberApp {
             gpu,
             display_lut,
             brush_panel: BrushPanel::new(),
+            show_gizmo: true,
             #[cfg(feature = "perf")]
             show_perf_hud: false,
             notices: umber_gui::Notices::new(),
@@ -2586,6 +2591,7 @@ impl eframe::App for UmberApp {
                 ui.label(tr("menu.perf-hud-unavailable"));
                 ui.checkbox(&mut self.view.wireframe, tr("menu.wireframe"));
                 ui.checkbox(&mut self.view.grid, tr("menu.grid"));
+                ui.checkbox(&mut self.show_gizmo, tr("menu.gizmo"));
                 ui.separator();
                 viewport::view_mode_menu(ui, &mut self.view.view_mode);
             });
@@ -2668,6 +2674,7 @@ impl eframe::App for UmberApp {
         }
         self.state.viewport.set_show_wireframe(self.view.wireframe);
         self.state.viewport.set_show_grid(self.view.grid);
+        self.state.viewport.set_show_gizmo(self.show_gizmo);
         self.state
             .viewport
             .set_show_cage(self.state.bakes.show_cage());

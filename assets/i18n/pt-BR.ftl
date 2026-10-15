@@ -37,6 +37,7 @@ menu =
     .perf-hud-unavailable = O HUD de desempenho requer --features perf
     .wireframe = Mostrar wireframe (W)
     .grid = Mostrar grade (G)
+    .gizmo = Mostrar gizmo de eixos
     .about = Sobre o Umber
 
 ## Títulos dos painéis

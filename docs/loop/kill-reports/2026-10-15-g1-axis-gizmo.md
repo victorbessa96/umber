@@ -51,3 +51,82 @@ opposite side").
 
 - The live look and the click on hardware: manual (needs the GPU
   viewport).
+
+---
+
+# Supplement — the plan-row gaps this wave closed (same day)
+
+Author: dragon (the second wake session; see the process note). This
+section lands the two plan-row clauses the kill above left open, against
+its landed implementation — no code of that kill was changed beyond the
+gates below.
+
+## Built (supplement)
+
+- **"Hideable"** (plan row's clause): `Viewport::show_gizmo` (default
+  `false` from the derived `Default`; the SHELL holds the user-facing
+  default) + `set_show_gizmo` / `show_gizmo` accessors; `UmberApp`
+  shell state `show_gizmo: true` synced into the viewport each frame
+  like wireframe/grid; View menu row `menu.gizmo` (both catalogs:
+  "Show Axis Gizmo" / "Mostrar gizmo de eixos"). The gate covers all
+  three gizmo touchpoints: click (no snap while hidden), hover (no
+  highlight), draw (nothing painted) — a hidden gizmo consumes no
+  clicks and leaves the viewport input surface untouched.
+- **The snapshot** (plan row's Test column): `axis_gizmo` is now on the
+  umber-app library surface (`pub mod axis_gizmo` in lib.rs — the
+  `display_panel` precedent) so the kittest harness can render it;
+  `axis_gizmo_snapshot` (tests/panel_snapshot.rs) draws the landed
+  gizmo under the default camera through the exact call `viewport.rs`
+  makes and pins the PNG. `axis_gizmo_click_chain_snap_the_view`
+  drives the landed click chain headless (hit on the +X tip →
+  `click_target` → `snap_angles` → eye-on-+X; aligned click flips to
+  the opposite side).
+
+## Judgment calls (supplement)
+
+1. **The derived-Default flip.** `Viewport::default()` now hides the
+   gizmo (`show_gizmo: bool` → `false`); the user-facing default ON
+   lives in the shell's constructor (`show_gizmo: true`), where every
+   other user-facing default lives. Existing tests that construct
+   `Viewport::default()` keep clean-slate expectations.
+2. **No parallel widget in umber-gui.** The first session's draft
+   widget (engine-pure `AxisPose` + per-handle interact rects) was
+   fully dismantled once the landed kill was discovered mid-flight —
+   see the process note. The landed `umber-app::axis_gizmo` is the one
+   implementation; the plan row's `crates/umber-gui/src/widgets/
+   axis_gizmo.rs` surface line was a dispatch-time path guess, and the
+   skill's resolve-paths-at-dispatch rule fired too late (the parallel
+   session's brief already said `umber-app`).
+
+## Process note (the double-strike)
+
+Two dragon-loop wake sessions picked the same queue item (`6b69de3d`,
+g1-axis-gizmo) within the same window. The other session landed first
+(commit `379ddb9`, CI-green via the W-G5 wave run 38760269560). This
+session discovered the landed kill only when its write to the kill
+report path was refused for staleness. Response: the duplicate core
+(umber-gui widget, its re-exports, viewport wiring, UV arrows, camera
+pub, navigation snap) was reverted wholesale; only the two genuinely
+unshipped plan clauses (hideable + snapshot) were kept, re-targeted
+against the landed implementation. LESSON (for the dispatch layer, not
+just this session): a queue item claimed by a live session should
+transition state (active → running) so a second wake cannot pick it
+up; the queue's `next_step` field is the cheaper guard and was not set
+by either session before striking.
+
+## Unverified (supplement)
+
+- ~~The `axis_gizmo.png` snapshot itself~~ — RESOLVED during the kill:
+  generated on the build host via `UPDATE_SNAPSHOTS=1` (the initial-run
+  red the report predicted), pulled back, and pixel-verified against the
+  derived geometry (six tips at the `camera_basis(0.6, 0.4)` positions,
+  red/green/blue on ±X/±Y/±Z, positive solid + lettered, negative
+  hollow, front tips over back) before committing.
+- The live-shell rendering of the hidden-gizmo input neutrality beyond
+  the three gated paths: nothing else in `viewport.rs` reads gizmo
+  state, but the full interaction matrix (hidden gizmo + eyedropper +
+  ID-mask + straight-line in one frame) is not separately pinned; the
+  unit tests cover each path alone. The kittest snapshot harness
+  renders the gizmo through `paint` only — a kittest frame of the whole
+  `Viewport::ui` would need the GPU context, which is the standing
+  exclusion for the viewport in this harness.

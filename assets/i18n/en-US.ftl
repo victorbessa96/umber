@@ -36,6 +36,7 @@ menu =
     .perf-hud-unavailable = Perf HUD needs --features perf
     .wireframe = Show Wireframe (W)
     .grid = Show Grid (G)
+    .gizmo = Show Axis Gizmo
     .about = About Umber
 
 ## Dock panel titles

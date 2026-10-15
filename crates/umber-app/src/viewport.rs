@@ -190,6 +190,9 @@ pub struct Viewport {
     /// hardness at its start and the pointer origin (GUI plan G1
     /// g1-brush-resize). The ring stays at the origin while it runs.
     resize: Option<ResizeDrag>,
+    /// Whether the axis gizmo draws (View menu; GUI plan G1
+    /// `g1-axis-gizmo`). Shown by default.
+    show_gizmo: bool,
     /// The in-flight paint stroke was begun by THIS viewport (so the
     /// viewport ends it on release, and never ends a UV-view stroke).
     stroke_from_viewport: bool,
@@ -316,10 +319,12 @@ impl Viewport {
             crate::axis_gizmo::RADIUS,
         );
         let gizmo_centre = crate::axis_gizmo::centre(rect);
-        let gizmo_hover = response
-            .hover_pos()
-            .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre));
-        if self.mesh.is_some() && response.clicked_by(PointerButton::Primary) {
+        let gizmo_hover = self.show_gizmo.then(|| {
+            response
+                .hover_pos()
+                .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre))
+        });
+        if self.mesh.is_some() && self.show_gizmo && response.clicked_by(PointerButton::Primary) {
             if let Some(axis) = response
                 .interact_pointer_pos()
                 .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre))
@@ -627,12 +632,12 @@ impl Viewport {
         // The brush cursor (GUI plan G1): the ring at the brush's on-screen
         // radius, over everything above. Drawn last so no overlay hides it.
         self.paint_line_preview(ui, &response, rect);
-        if self.mesh.is_some() {
+        if self.mesh.is_some() && self.show_gizmo {
             crate::axis_gizmo::paint(
                 &ui.painter().with_clip_rect(rect),
                 gizmo_centre,
                 &gizmo_tips,
-                gizmo_hover,
+                gizmo_hover.flatten(),
             );
         }
         self.paint_brush_cursor(ui, &response, rect, paint.as_deref());
@@ -786,6 +791,19 @@ impl Viewport {
     /// Sets the navigation preset.
     pub fn set_nav_preset(&mut self, nav: crate::navigation::NavPreset) {
         self.nav = nav;
+    }
+
+    /// Whether the axis gizmo draws (GUI plan G1 `g1-axis-gizmo`): the
+    /// View menu's toggle, synced by the shell each frame like the
+    /// overlay toggles. The gizmo itself (`crate::axis_gizmo`) is
+    /// always computed; this only gates drawing + clicking.
+    pub fn show_gizmo(&self) -> bool {
+        self.show_gizmo
+    }
+
+    /// Shows or hides the axis gizmo.
+    pub fn set_show_gizmo(&mut self, on: bool) {
+        self.show_gizmo = on;
     }
 
     /// The navigation preset (the status bar's hints read it).
