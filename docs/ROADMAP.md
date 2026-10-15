@@ -80,7 +80,8 @@ Arc threading; un-premultiply exactness on GPU vendors.
 | wave-8k-export | §2/§6 the 8K export path | ✓ already built (`cd668a3`); requirements row 99 carries it. Open remainder: none named |
 | wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
 | wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
-| wave-harness-script | the snapshot harness's --script arm | drive the agent session, snapshot after each step — visual regression over driven state |
+| wave-harness-script | the snapshot harness's --script arm | ✓ landed 2026-10-14: `paint_snapshot` (whole plane → PNG + blake3) — a script is a JSONL file piped into `umber-cli agent`. **Found:** a 2-point wire stroke can paint nothing (the live conditioner swallows it) — follow-up row `wave-agent-stroke-conditioning` |
+| wave-agent-stroke-conditioning | agent strokes that paint exactly what was sent | `paint_stroke` runs points through the live one-euro + lazy-mouse conditioner (tuned for dense pointer streams); a short wire stroke can vanish. Decide: bypass for wire strokes, or a `smoothing` field. Find which stage swallows it first |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
 
 ## Wave 6 — the differentiators (P1s that Substance lacks or does worse)
@@ -118,7 +119,7 @@ the already-have list and the declines is
 |---|---|---|
 | wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | Blender's Margin Type "Adjacent Faces": fill the margin from the faces across each seam, not by extending border pixels (today's `dilate_map`). The seam graph the brush uses is the input. Per-bake + per-export enum beside the pixel size |
 | wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading |
-| wave-brush-dynamics-angle-jitter | per-dab rotation + jitter | fixed / rake (follows stroke direction) / random angle; size, opacity and position jitter. `BrushParams` has none today |
+| wave-brush-dynamics-angle-jitter | per-dab jitter (+ angle once stamps exist) | size, opacity and position jitter per dab (`BrushParams` has none; surface = `dab_adapter.rs`, seeded per stroke so replays are deterministic). **Angle / rake / random rotation is blocked:** the paint shader stamps a radially symmetric disc (no stamp texture binding in `PAINT_COMPUTE_SHADER`), so rotation is invisible until bitmap alpha stamps land — verified 2026-10-14 |
 | wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) |
 | wave-stroke-methods | the missing stroke idioms | airbrush (deposit at a rate while held), anchored + drag-dot (decal placement), dash ratio/length (stitches, seams) |
 | wave-stencil | paint-through screen stencil | an image overlay you move/scale/rotate and paint through — the logo/decal workflow |
