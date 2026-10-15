@@ -461,6 +461,20 @@ pub fn layers_ui(
                 outcome.select = Some(PlaneOwner::Layer(top.id));
             }
         }
+        if ui
+            .button(format!("＋ {}", tr("history.op-add-folder")))
+            .clicked()
+        {
+            let n = doc.layers().len() + 1;
+            let name = format!("{} {n}", tr("layers.kind-folder"));
+            doc.run(LayerCommand::add(
+                name,
+                LayerKind::Folder { passthrough: false },
+            ));
+            if let Some(top) = doc.layers().last() {
+                outcome.select = Some(PlaneOwner::Layer(top.id));
+            }
+        }
         if ui.button(tr("layers.add-material")).clicked() {
             let n = doc.layers().len() + 1;
             let name = tr_args(
@@ -475,6 +489,8 @@ pub fn layers_ui(
     });
     let mut remove_id = None;
     let mut instance_source_id = None;
+    let mut duplicate_id: Option<u64> = None;
+    let mut move_by: Option<(u64, i64)> = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
         // Snapshot the display rows first so command runs below can't
         // borrow-conflict with the iteration (E0502).
@@ -598,8 +614,37 @@ pub fn layers_ui(
                     if ui.small_button("✕").clicked() {
                         remove_id = Some(layer.id);
                     }
+                    // Duplicate (C2-8): a same-kind copy with the row's
+                    // properties, added through the undoable commands.
+                    // No catalog key yet for "Duplicate" (the catalogs sit
+                    // under a sibling lock): the glyph alone, no tooltip
+                    // rather than a wrong one.
+                    if ui.small_button("⧉").clicked() {
+                        duplicate_id = Some(layer.id);
+                    }
+                    // Move: the panel lists top-first, so "up" raises the
+                    // stack index.
+                    if ui
+                        .small_button("▼")
+                        .on_hover_text(tr("history.op-reorder"))
+                        .clicked()
+                    {
+                        move_by = Some((layer.id, -1));
+                    }
+                    if ui
+                        .small_button("▲")
+                        .on_hover_text(tr("history.op-reorder"))
+                        .clicked()
+                    {
+                        move_by = Some((layer.id, 1));
+                    }
                 });
             });
+            // The properties row of the SELECTED layer (C2-8): opacity,
+            // blend mode and the name, each an undoable command.
+            if active == PlaneOwner::Layer(layer.id) {
+                layer_properties_row(ui, doc, layer.id);
+            }
             // Dynamic-material expandable rows (Kill B): under their own row,
             // never replacing it — the badge line above stays visible while
             // collapsed. Re-fetched by id (the snapshot rows above carry no
@@ -652,6 +697,16 @@ pub fn layers_ui(
     if let Some(id) = remove_id {
         doc.run(LayerCommand::remove(id));
     }
+    if let Some((id, delta)) = move_by {
+        if let Some((from, to)) = move_target(doc.layers().len(), doc.stack.index_of(id), delta) {
+            doc.run(LayerCommand::reorder(from, to));
+        }
+    }
+    if let Some(id) = duplicate_id {
+        if let Some(new_id) = duplicate_layer(doc, id) {
+            outcome.select = Some(PlaneOwner::Layer(new_id));
+        }
+    }
     if let Some(source) = instance_source_id {
         if let Some(src) = doc.stack.layer(source) {
             let name = tr_args(
@@ -671,6 +726,138 @@ pub fn layers_ui(
         ui.weak(status);
     }
     outcome
+}
+
+/// The reorder a one-step move asks for: `Some((from, to))`, or `None` at
+/// either end of the stack (or for an unknown layer). `delta` +1 raises
+/// the layer one index (toward the top of the panel, which lists
+/// top-first), −1 lowers it.
+pub fn move_target(len: usize, index: Option<usize>, delta: i64) -> Option<(usize, usize)> {
+    let from = index?;
+    let to = from as i64 + delta;
+    (to >= 0 && (to as usize) < len && to as usize != from).then_some((from, to as usize))
+}
+
+/// The copy's name: the source name plus " copy" (the history keys own
+/// no "copy" word yet, so this is the one untranslated suffix, as in
+/// Painter's own English default).
+pub fn duplicate_name(source: &str) -> String {
+    format!("{source} copy")
+}
+
+/// Duplicates layer `id` (C2-8): a new layer of the same kind directly
+/// above it, carrying its opacity, visibility and blend mode. Each step
+/// is an ordinary undoable command (add, reorder, the setters), so undo
+/// unwinds a duplicate step by step. v1 copies the layer's SETTINGS
+/// (kind, opacity, visibility, blend), not its content: paint pixels live
+/// in the paint session, and fill / material / mask parameters ride
+/// their own commands, which this does not replay yet. The kill report
+/// names both. Returns the new id.
+pub fn duplicate_layer(doc: &mut Document, id: u64) -> Option<u64> {
+    let source = doc.stack.layer(id)?.clone();
+    let from_index = doc.stack.index_of(id)?;
+    doc.run(LayerCommand::add(
+        duplicate_name(&source.name),
+        source.kind.clone(),
+    ));
+    let new_id = doc.layers().last()?.id;
+    // The add lands on top; move it to just above the source.
+    let top = doc.layers().len() - 1;
+    let target = from_index + 1;
+    if top != target {
+        doc.run(LayerCommand::reorder(top, target));
+    }
+    if source.opacity != 1.0 {
+        doc.run(LayerCommand::set_opacity(new_id, source.opacity));
+    }
+    if !source.visible {
+        doc.run(LayerCommand::set_visible(new_id, false));
+    }
+    if source.blend_mode != umber_core::BlendMode::Normal {
+        doc.run(LayerCommand::set_blend_mode(new_id, source.blend_mode));
+    }
+    Some(new_id)
+}
+
+/// The selected layer's properties row: opacity, blend mode, name. Each
+/// edit is one undoable command, issued only when the value changes.
+fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u64) {
+    let Some(layer) = doc.stack.layer(id).cloned() else {
+        return;
+    };
+    ui.indent(("layer-props", id), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(tr("history.op-set-opacity"));
+            let mut opacity = layer.opacity;
+            let response = ui.add(
+                umber_gui::ValueField::new(&mut opacity)
+                    .range(0.0..=1.0)
+                    .default_value(1.0)
+                    .context_menu(crate::i18n::prop_menu_labels()),
+            );
+            // One command per change. A drag is many changes, and each
+            // runs as its own command, the History panel's existing
+            // behavior for slider edits: the command captures the true
+            // previous value, so every step undoes exactly. Coalescing a
+            // drag into one entry is the C2-7 timeline's job.
+            if response.changed() && (opacity - layer.opacity).abs() > f32::EPSILON {
+                doc.run(LayerCommand::set_opacity(id, opacity));
+            }
+        });
+        // Folders composite through their children; materials keep their
+        // own per-channel blends (the layer's mode is inert there).
+        if !matches!(layer.kind, LayerKind::Material) {
+            ui.horizontal(|ui| {
+                ui.label(tr("history.op-set-blend"));
+                let mut mode = layer.blend_mode;
+                egui::ComboBox::from_id_salt(("layer-blend", id))
+                    .selected_text(format!("{mode:?}"))
+                    .show_ui(ui, |ui| {
+                        for candidate in layer_blend_options(&layer.kind) {
+                            ui.selectable_value(&mut mode, candidate, format!("{candidate:?}"));
+                        }
+                    });
+                if mode != layer.blend_mode {
+                    doc.run(LayerCommand::set_blend_mode(id, mode));
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label(tr("history.op-rename"));
+            let edit_id = egui::Id::new(("layer-rename", id));
+            let mut text: String = ui
+                .ctx()
+                .data(|d| d.get_temp(edit_id))
+                .unwrap_or_else(|| layer.name.clone());
+            let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(140.0));
+            if response.changed() {
+                ui.ctx().data_mut(|d| d.insert_temp(edit_id, text.clone()));
+            }
+            if response.lost_focus() {
+                ui.ctx().data_mut(|d| d.remove::<String>(edit_id));
+                if let Some(name) = rename_commit(&layer.name, &text) {
+                    doc.run(LayerCommand::rename(id, name));
+                }
+            }
+        });
+    });
+}
+
+/// The blend modes a layer row offers: the material panel's list (every
+/// mode but Passthrough, the normal-map trio only for normal), plus
+/// Passthrough for folders, the one kind it means something for.
+pub fn layer_blend_options(kind: &LayerKind) -> Vec<umber_core::BlendMode> {
+    let mut modes = crate::layers_panel::channel_blend_options("");
+    if matches!(kind, LayerKind::Folder { .. }) {
+        modes.insert(1, umber_core::BlendMode::Passthrough);
+    }
+    modes
+}
+
+/// The name a rename commits: trimmed, `None` when empty or unchanged.
+pub fn rename_commit(old: &str, typed: &str) -> Option<String> {
+    let name = typed.trim();
+    (!name.is_empty() && name != old).then(|| name.to_owned())
 }
 
 /// Draws the layer-mask section under the Layers panel: per-layer mask
@@ -796,6 +983,67 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn move_target_steps_within_the_stack() {
+        assert_eq!(move_target(3, Some(0), 1), Some((0, 1)));
+        assert_eq!(move_target(3, Some(2), -1), Some((2, 1)));
+        // At the ends, no move.
+        assert_eq!(move_target(3, Some(2), 1), None);
+        assert_eq!(move_target(3, Some(0), -1), None);
+        assert_eq!(move_target(3, None, 1), None);
+        assert_eq!(move_target(1, Some(0), 1), None);
+    }
+
+    #[test]
+    fn rename_commit_trims_and_skips_noops() {
+        assert_eq!(rename_commit("Paint 1", "  Rust  "), Some("Rust".into()));
+        assert_eq!(rename_commit("Paint 1", "Paint 1"), None);
+        assert_eq!(rename_commit("Paint 1", "   "), None);
+        assert_eq!(duplicate_name("Rust"), "Rust copy");
+    }
+
+    #[test]
+    fn layer_blend_options_offer_passthrough_to_folders_only() {
+        use umber_core::BlendMode;
+        let paint = layer_blend_options(&LayerKind::Paint);
+        assert!(!paint.contains(&BlendMode::Passthrough));
+        assert!(paint.contains(&BlendMode::Multiply));
+        let folder = layer_blend_options(&LayerKind::Folder { passthrough: false });
+        assert!(folder.contains(&BlendMode::Passthrough));
+        assert_eq!(folder.len(), paint.len() + 1);
+    }
+
+    #[test]
+    fn duplicate_copies_settings_above_the_source_and_undoes_cleanly() {
+        use umber_core::BlendMode;
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("Bottom", LayerKind::Paint));
+        doc.run(LayerCommand::add("Source", LayerKind::Paint));
+        doc.run(LayerCommand::add("Top", LayerKind::Paint));
+        let source = doc.layers()[1].id;
+        doc.run(LayerCommand::set_opacity(source, 0.4));
+        doc.run(LayerCommand::set_blend_mode(source, BlendMode::Multiply));
+        let before = doc.history.len();
+        let copy = duplicate_layer(&mut doc, source).expect("duplicates");
+        let names: Vec<&str> = doc.layers().iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Bottom", "Source", "Source copy", "Top"],
+            "directly above"
+        );
+        let layer = doc.stack.layer(copy).unwrap();
+        assert_eq!(layer.opacity, 0.4);
+        assert_eq!(layer.blend_mode, BlendMode::Multiply);
+        // add + reorder + opacity + blend: four commands, all undoable.
+        assert_eq!(doc.history.len(), before + 4);
+        for _ in 0..4 {
+            assert!(doc.undo());
+        }
+        let names: Vec<&str> = doc.layers().iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Bottom", "Source", "Top"], "fully unwound");
+        assert_eq!(duplicate_layer(&mut doc, 999), None, "unknown id");
+    }
+
     use super::*;
 
     #[test]
