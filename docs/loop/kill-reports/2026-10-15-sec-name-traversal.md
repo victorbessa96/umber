@@ -105,3 +105,14 @@ pt-BR user saw that panel in English. The catalog's own header said so
 ("as demais caem no en-US"). All 21 are translated now; the parse says
 651 = 651, with nothing missing and nothing extra.
 
+
+## The guard that would have caught it (lock `i18n-coverage-test`, UNRUN)
+
+`every_shipped_locale_covers_every_en_us_key` (i18n.rs tests) enumerates
+en-US's keys and fails on any locale that misses one or carries an extra
+one. The existing completeness test only checked that every key the
+SOURCE calls exists in en-US, which is why pt-BR's gap went unseen. Keys
+come from the fluent bundle itself (message value + attributes), with
+message ids read from the column-0 `id =` lines. That rule picks exactly
+39 clean identifiers in each catalog, checked by a model run against the
+real files.

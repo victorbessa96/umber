@@ -141,6 +141,9 @@ texturesets =
     .resize-cancel = Cancelar
     .size = Tamanho do alvo de pintura
     .resize-clears = Mudar o tamanho do conjunto selecionado limpa a tela dele e o histórico de traços, e redefine sua máscara rápida. Isso é intencional.
+    .inherit = Herdar a resolução do documento
+    .per-channel = Tamanhos por canal
+    .channel-resize-clears = Redimensionar um canal limpa os tiles dele
     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
 
 ## Painel de bakes
@@ -534,9 +537,37 @@ layers =
     .tombstone-lost = Camada { $layer } recriada vazia ao desfazer (pixels aposentados liberados)
     .dormant-badge = Resultado pré-v2 vive na pintura base
 
-## Importação de mapas (§5.6 — chaves novas; as demais caem no en-US)
+## Importação de mapas da malha
 
 import =
+    .title = Importar mapas da malha
+    .hint = Solte uma pasta de arquivos NomeDoConjunto_mapa.png (o que o baker gera) ou escolha uma abaixo. Mapas conhecidos vão para os canais do conjunto de texturas; sufixos desconhecidos viram canais do usuário. Cada importação cria uma camada nova — nada é sobrescrito.
+    .choose = Escolher pasta…
+    .apply = Importar como camadas
+    .need-project = Salve ou abra um projeto primeiro — as importações ficam guardadas no projeto, endereçadas por hash, antes de virar camadas.
+    .no-files = Nenhum arquivo verificado ainda.
+    .scan-failed = Falha ao ler a pasta: { $error }
+    .scanned = { $matched } arquivo(s) encaminhado(s), { $unmatched } ignorado(s).
+    .applied = { $count ->
+        [one] { $count } arquivo importado como camada nova.
+       *[other] { $count } arquivos importados como camadas novas.
+    }
+    .matched-title = { $count ->
+        [one] { $count } arquivo encaminhado
+       *[other] { $count } arquivos encaminhados
+    }
+    .unmatched-title = { $count ->
+        [one] { $count } arquivo ignorado
+       *[other] { $count } arquivos ignorados
+    }
+    .row-matched = { $file } → { $set } / { $channel } como “{ $layer }”
+    .row-unmatched = { $file } — { $reason }
+    .reason-not-png = não é um PNG (o baker gera PNG)
+    .reason-no-separator = sem o separador “_” — não é um nome NomeDoConjunto_mapa
+    .reason-empty-set = nada antes do “_” — sem nome de conjunto de texturas
+    .reason-empty-suffix = nada depois do “_” — sem nome de mapa
+    .reason-tile-suffixed = saída UDIM com sufixo de tile (Conjunto_mapa_tile) — importe os arquivos de cada tile separadamente
+    .reason-unsafe-channel = o nome do mapa tem um caractere que uma pasta de canal não pode usar em todos os sistemas (: \ / * ? < > | " ou um caractere de controle)
     .size-mismatch = Tamanho incompatível — camada vazia
     .budget-refused = Orçamento estourado na importação ({ $bytes } bytes) — camada vazia
     .decode-failed = Arquivo ilegível — camada vazia
