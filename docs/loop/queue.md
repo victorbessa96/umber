@@ -88,6 +88,7 @@ for the NEXT audit cycle, not walls.
 
 ## Push log
 
+- 2026-10-15 **W-G5, one push** (Bessa: larger waves, complete before pushing): 17 commits 45fa138..c5372f3, ten kills + docs. Wave gate on the build host in a clean clone of the exact tip: 8 crates, 1,037 tests, fmt + clippy -D warnings, 0 `skipping:` lines. The gate found and fixed a battery bug on the way (c5372f3: the default crate scope was one string). CI run 38760269560 watching.
 - 2026-10-15 the GUI-plan wave: 396bcf9 (margin + focus + ramp) **CI GREEN both platforms** (run 38744092732). 979a523 / 32804d7 / ef492f0 went red on Windows only (the sibling's catalog tests split .ftl text on `\n` under a CRLF checkout); fixed forward in 121afdd (`I18n::has_key` + `.gitattributes` pins LF). Later pushes 0434e80, ca1b0d0, 9a69bb1 in flight at this write.
 - 2026-10-12 bed9e0a pushed — smudge-test stacking-contract fix, forward-fix
   of the 5-red streak (f78e6c1 introduced, 9e4fb9e mis-fixed, bed9e0a
