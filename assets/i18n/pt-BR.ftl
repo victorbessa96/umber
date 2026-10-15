@@ -481,6 +481,7 @@ brush =
 ## Painel de camadas
 
 layers =
+    .set-header = Conjunto de texturas: { $set }
     .add-paint = ＋ Adicionar camada de pintura
     .add-fill = ＋ Adicionar camada de preenchimento
     .masks-section = Máscaras

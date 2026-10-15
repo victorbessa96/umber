@@ -577,6 +577,20 @@ pub fn layers_ui(
     thumbs: &std::collections::HashMap<u64, egui::TextureHandle>,
 ) -> LayersUiOutcome {
     let mut outcome = LayersUiOutcome::default();
+    // Which set this stack is (C2-9 stage 4): with several sets, the panel
+    // shows only the active one's layers.
+    if !doc.active_set().is_empty() {
+        ui.label(
+            egui::RichText::new(crate::i18n::tr_args(
+                "layers.set-header",
+                [(
+                    "set",
+                    fluent::FluentValue::from(doc.active_set().to_string()),
+                )],
+            ))
+            .strong(),
+        );
+    }
     ui.horizontal_wrapped(|ui| {
         if ui.button(tr("layers.add-paint")).clicked() {
             let n = doc.layers().len() + 1;

@@ -75,12 +75,17 @@ colour, gradient or noise. Material layers are live node-graph materials,
 edited in the **Graph** panel. The collapsed **Material ▸ .umbersmart**
 section adds a whole smart-material stack in one click.
 
+**Several materials on one mesh** become texture sets, each with its own
+layer stack. The **Texture Sets** panel picks the active one, and the
+Layers panel (headed with the set's name), undo and History follow it.
+Saving writes every set.
+
 **Undo** is `Ctrl+Z` and **redo** `Ctrl+Shift+Z`. The **History** panel
 lists every layer step, and clicking an entry travels back to it.
 Strokes have their own undo in the same panel.
 
-*Gap:* stroke undo and layer undo are two timelines today (one Ctrl+Z
-for both is roadmap item C2-7).
+Strokes and layer edits share one timeline: `Ctrl+Z` steps back through
+both, newest first, and clicking a History row moves both to that point.
 
 ## 4. Save
 

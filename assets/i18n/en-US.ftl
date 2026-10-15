@@ -465,6 +465,7 @@ brush =
 ## Layers panel
 
 layers =
+    .set-header = Texture set: { $set }
     .add-paint = ＋ Add paint layer
     .add-fill = ＋ Add fill layer
     .masks-section = Masks

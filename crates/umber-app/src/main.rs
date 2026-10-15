@@ -231,6 +231,8 @@ struct PanelViewer<'a> {
     doc: &'a mut document::Document,
     brush: &'a mut BrushPanel,
     mesh_import: &'a mut mesh_map_import::MeshMapImportState,
+    /// Inactive sets' channel lists (C2-9 stage 4).
+    parked_texture_sets: &'a mut std::collections::BTreeMap<String, umber_core::TextureSet>,
     /// The PSD import state (the Assets tab's PSD section).
     psd_import: &'a mut psd_import::PsdImportState,
     spp_import: &'a mut spp_import::SppImportState,
@@ -592,6 +594,9 @@ impl TabViewer for PanelViewer<'_> {
                     // `Document::activate_set`.)
                     if !active.is_empty() && self.doc.active_set() != active {
                         self.doc.activate_set(&active);
+                        // Its channel list follows (C2-9 stage 4).
+                        self.mesh_import
+                            .switch_set(&active, self.parked_texture_sets);
                     }
                 }
             }
@@ -758,6 +763,9 @@ pub struct AppState {
     /// on apply). Owns the session set so imported user channels survive
     /// until the next save (see `mesh_map_import`).
     pub mesh_import: mesh_map_import::MeshMapImportState,
+    /// Every inactive texture set's channel list (C2-9 stage 4): the
+    /// import session holds the active set; these wait for their switch.
+    pub parked_texture_sets: std::collections::BTreeMap<String, umber_core::TextureSet>,
     /// PSD flatten-import (requirements §7 row 101, the designed-deferred
     /// clause now built): drop-scan + import state mirroring the mesh-map
     /// shape (composite-first; the honest rasterizer fallback reports
@@ -806,6 +814,7 @@ impl AppState {
         // A resize armed against the old document must not fire on the new.
         self.pending_resize = None;
         self.mesh_import = mesh_map_import::MeshMapImportState::default();
+        self.parked_texture_sets.clear();
         self.psd_import = psd_import::PsdImportState::default();
         self.spp_import = spp_import::SppImportState::default();
         self.display = umber_color::DisplaySettings::default();
@@ -2082,10 +2091,9 @@ impl UmberApp {
         } else {
             vec![self.state.graph.to_mtlx()]
         };
-        // Every set (C2-9): the active one is the import session's set
-        // (its user channels kept); parked sets carry the default channels
-        // until per-set channel lists land. A single-set document writes
-        // exactly what it did before.
+        // Every set (C2-9): the active one is the import session's set, the
+        // parked ones their own saved channel lists (stage 4). A single-set
+        // document writes exactly what it did before.
         let mut texture_sets = vec![texture_set];
         let mut layer_sets = vec![umber_core::project::TextureSetLayers {
             texture_set: set_name.clone(),
@@ -2095,7 +2103,13 @@ impl UmberApp {
             if name == set_name || name == self.state.doc.active_set() {
                 continue;
             }
-            texture_sets.push(umber_core::TextureSet::new_default(name));
+            texture_sets.push(
+                self.state
+                    .parked_texture_sets
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| umber_core::TextureSet::new_default(name)),
+            );
             layer_sets.push(umber_core::project::TextureSetLayers {
                 texture_set: name.to_string(),
                 stack: stack.clone(),
@@ -2287,6 +2301,13 @@ impl UmberApp {
                     .layers
                     .iter()
                     .map(|l| (l.texture_set.clone(), l.stack.clone()))
+                    .collect();
+                // Each parked set's channel list (C2-9 stage 4).
+                self.state.parked_texture_sets = model
+                    .texture_sets
+                    .iter()
+                    .filter(|ts| ts.name != name)
+                    .map(|ts| (ts.name.clone(), ts.clone()))
                     .collect();
                 if sets.len() > 1 {
                     self.state.doc.load_sets(sets, &name);
@@ -3103,6 +3124,7 @@ impl eframe::App for UmberApp {
                 postfx: &mut self.state.postfx,
                 postfx_panel: &mut self.state.postfx_panel,
                 mesh_import: &mut self.state.mesh_import,
+                parked_texture_sets: &mut self.state.parked_texture_sets,
                 psd_import: &mut self.state.psd_import,
                 spp_import: &mut self.state.spp_import,
                 base_visible: &mut self.state.base_visible,

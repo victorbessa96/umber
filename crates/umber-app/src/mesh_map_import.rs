@@ -460,6 +460,24 @@ impl MeshMapImportState {
         self.session_set = set;
     }
 
+    /// Makes `name` the session set (C2-9 stage 4): parks the current set
+    /// (its user channels kept) in `parked` and restores `name`'s, or a
+    /// default set when `name` was never seen. A no-op when already active.
+    pub fn switch_set(
+        &mut self,
+        name: &str,
+        parked: &mut std::collections::BTreeMap<String, TextureSet>,
+    ) {
+        if self.session_set.name == name {
+            return;
+        }
+        let incoming = parked
+            .remove(name)
+            .unwrap_or_else(|| TextureSet::new_default(name));
+        let outgoing = std::mem::replace(&mut self.session_set, incoming);
+        parked.insert(outgoing.name.clone(), outgoing);
+    }
+
     /// Records one file name's route (shared by the dir scan, the drop
     /// handler and the name-only fixtures).
     pub fn ingest_name(&mut self, file_name: &str, path: Option<PathBuf>) {
@@ -795,6 +813,29 @@ pub fn read_pending_from_disk(item: &PendingImport) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn switching_sets_keeps_each_sets_channels() {
+        let mut state = MeshMapImportState::default();
+        state.retarget_set("Body");
+        assert!(ensure_channel(&mut state.session_set, "dirt"));
+        let mut parked = std::collections::BTreeMap::new();
+        state.switch_set("Hilt", &mut parked);
+        assert_eq!(state.session_set.name, "Hilt");
+        assert!(
+            state.session_set.channels.iter().all(|c| c.name != "dirt"),
+            "Hilt starts default"
+        );
+        state.switch_set("Body", &mut parked);
+        assert!(
+            state.session_set.channels.iter().any(|c| c.name == "dirt"),
+            "Body keeps its channel"
+        );
+        assert_eq!(parked.keys().collect::<Vec<_>>(), ["Hilt"]);
+        state.switch_set("Body", &mut parked); // no-op
+        assert_eq!(parked.len(), 1);
+    }
+
     use super::*;
 
     fn tmp_store(tag: &str) -> (AssetStore, PathBuf) {
