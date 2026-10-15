@@ -107,6 +107,19 @@ pub const CATALOG: &[Entry] = &[
     e(ShellAction::ToggleMaximize, "shell.maximize", "menu.window"),
     e(ShellAction::NextWorkspace, "workspace.next", "menu.window"),
     e(ShellAction::PrevWorkspace, "workspace.prev", "menu.window"),
+    e(ShellAction::ViewMaterial, "viewkeys.material", "menu.view"),
+    e(
+        ShellAction::NextChannel,
+        "viewkeys.next-channel",
+        "menu.view",
+    ),
+    e(
+        ShellAction::PrevChannel,
+        "viewkeys.prev-channel",
+        "menu.view",
+    ),
+    e(ShellAction::NextMeshMap, "viewkeys.next-map", "menu.view"),
+    e(ShellAction::PrevMeshMap, "viewkeys.prev-map", "menu.view"),
 ];
 
 /// Most results shown at once.

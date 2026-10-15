@@ -58,6 +58,9 @@ use crate::toolbar::{ShellAction, ToolKind};
 pub enum Chord {
     /// No Ctrl/Cmd; Shift and Alt ignored.
     Bare,
+    /// Shift, no Ctrl/Cmd, no Alt (Shift+C / Shift+B, the display-mode
+    /// keys). Sorted before [`Chord::Bare`], which ignores Shift.
+    Shift,
     /// Ctrl/Cmd, no Shift, no Alt.
     Cmd,
     /// Ctrl/Cmd + Shift, no Alt.
@@ -71,6 +74,7 @@ impl Chord {
             // On macOS `command` is Cmd and `ctrl` is the separate Control
             // key; a held Control is still not a bare press.
             Chord::Bare => !mods.command && !mods.ctrl,
+            Chord::Shift => mods.shift && !mods.command && !mods.ctrl && !mods.alt,
             Chord::Cmd => mods.command && !mods.alt && !mods.shift,
             Chord::CmdShift => mods.command && !mods.alt && mods.shift,
         }
@@ -80,6 +84,7 @@ impl Chord {
     fn modifiers(self) -> Modifiers {
         match self {
             Chord::Bare => Modifiers::NONE,
+            Chord::Shift => Modifiers::SHIFT,
             Chord::Cmd => Modifiers::COMMAND,
             Chord::CmdShift => Modifiers {
                 command: true,
@@ -119,6 +124,11 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::Space, Chord::Cmd), ShellAction::ToggleMaximize),
     (bind(Key::PageDown, Chord::Cmd), ShellAction::NextWorkspace),
     (bind(Key::PageUp, Chord::Cmd), ShellAction::PrevWorkspace),
+    // The display-mode Shift rows (GUI plan g6-display-mode-keys) sit
+    // above every bare row: Chord::Bare ignores Shift, so a bare C row
+    // first would swallow Shift+C.
+    (bind(Key::C, Chord::Shift), ShellAction::PrevChannel),
+    (bind(Key::B, Chord::Shift), ShellAction::PrevMeshMap),
     (bind(Key::W, Chord::Bare), ShellAction::ToggleWireframe),
     (bind(Key::G, Chord::Bare), ShellAction::ToggleGrid),
     (bind(Key::V, Chord::Bare), ShellAction::CycleViewMode),
@@ -138,6 +148,9 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
     ),
     (bind(Key::F3, Chord::Bare), ShellAction::CommandPalette),
     (bind(Key::Tab, Chord::Bare), ShellAction::ToggleHideUi),
+    (bind(Key::M, Chord::Bare), ShellAction::ViewMaterial),
+    (bind(Key::C, Chord::Bare), ShellAction::NextChannel),
+    (bind(Key::B, Chord::Bare), ShellAction::NextMeshMap),
 ];
 
 /// The action `key` + `mods` fire, if any: the first matching row.
@@ -207,8 +220,10 @@ impl Focus {
         match self {
             Focus::None | Focus::Widget => true,
             Focus::Text => {
-                is_function_key(binding.key)
-                    || (binding.chord != Chord::Bare && binding.key != Key::Z)
+                // Only Ctrl/Cmd chords are commands inside a text field:
+                // Shift+C is a capital C being typed.
+                let command_chord = matches!(binding.chord, Chord::Cmd | Chord::CmdShift);
+                is_function_key(binding.key) || (command_chord && binding.key != Key::Z)
             }
         }
     }
@@ -267,6 +282,7 @@ mod tests {
     fn weight(chord: Chord) -> u8 {
         match chord {
             Chord::Bare => 0,
+            Chord::Shift => 1,
             Chord::Cmd => 1,
             Chord::CmdShift => 2,
         }
@@ -407,6 +423,29 @@ mod tests {
         // The F-keys pass a text field even bare (F3 opens the palette).
         assert!(Focus::Text.allows(bind(Key::F2, Chord::Bare)));
         assert!(!Focus::Text.allows(bind(Key::A, Chord::Bare)));
+    }
+
+    #[test]
+    fn shift_rows_resolve_and_stay_out_of_text_fields() {
+        let shift = Modifiers::SHIFT;
+        assert_eq!(resolve(Key::C, shift), Some(ShellAction::PrevChannel));
+        assert_eq!(resolve(Key::B, shift), Some(ShellAction::PrevMeshMap));
+        assert_eq!(
+            resolve(Key::C, Modifiers::NONE),
+            Some(ShellAction::NextChannel)
+        );
+        // Shift+Alt is not the Shift chord: it falls through to the bare
+        // row, which ignores Shift and Alt by contract (module docs).
+        assert_eq!(
+            resolve(Key::C, Modifiers::SHIFT | Modifiers::ALT),
+            Some(ShellAction::NextChannel)
+        );
+        // Ctrl+Shift+C is neither (no Cmd row for C).
+        assert_eq!(resolve(Key::C, Modifiers::SHIFT | Modifiers::COMMAND), None);
+        // Typing a capital C into a text field is text, not a command.
+        let shift_c = binding_of(ShellAction::PrevChannel).expect("bound");
+        assert!(!Focus::Text.allows(shift_c));
+        assert!(Focus::None.allows(shift_c));
     }
 
     #[test]

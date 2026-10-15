@@ -770,3 +770,16 @@ workspace =
     .graph = Grafo
     .next = Próximo espaço de trabalho
     .prev = Espaço de trabalho anterior
+
+## Teclas do modo de exibição (plano de GUI g6-display-mode-keys)
+
+viewkeys =
+    .material = Ver material
+    .next-channel = Próximo canal
+    .prev-channel = Canal anterior
+    .next-map = Próximo mapa da malha
+    .prev-map = Mapa da malha anterior
+    .toast-material = Vendo o material
+    .toast-unlit = Vendo sem iluminação
+    .toast-channel = Canal:
+    .toast-map = Mapa da malha:

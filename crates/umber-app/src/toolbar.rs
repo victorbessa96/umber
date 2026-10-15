@@ -130,6 +130,14 @@ pub enum ShellAction {
     NextWorkspace,
     /// The previous workspace. Ctrl+PgUp.
     PrevWorkspace,
+    /// Back to the material (Lit). M (GUI plan g6-display-mode-keys).
+    ViewMaterial,
+    /// Solo the next / previous paint channel. C / Shift+C.
+    NextChannel,
+    PrevChannel,
+    /// Preview the next / previous baked mesh map. B / Shift+B.
+    NextMeshMap,
+    PrevMeshMap,
 }
 
 /// The brush tool without its params: the tool strip's slot id.
@@ -206,7 +214,7 @@ impl ToolKind {
 /// The keys the shell polls each frame (the letter keys + the chord keys).
 /// Pinned against [`crate::actions::BINDINGS`] by
 /// `shortcut_keys_are_exactly_the_bound_keys`.
-pub const SHORTCUT_KEYS: [Key; 18] = [
+pub const SHORTCUT_KEYS: [Key; 21] = [
     Key::W,
     Key::G,
     Key::V,
@@ -225,6 +233,9 @@ pub const SHORTCUT_KEYS: [Key; 18] = [
     Key::Space,
     Key::PageUp,
     Key::PageDown,
+    Key::M,
+    Key::C,
+    Key::B,
 ];
 
 /// The shell's key table (see the module docs). `None` for any key or
@@ -562,8 +573,10 @@ mod tests {
                 || resolve_shortcut(key, cmd_shift()).is_some();
             assert!(bound, "{key:?} is polled but unbound");
         }
-        // Nineteen bindings: ten bare (incl. [ ], F3 and Tab) + nine
-        // chords (Z, Shift+Z, Shift+P, S, O, Comma, Space, PgUp, PgDn).
+        // Twenty-four bindings. Thirteen keys resolve bare (the six
+        // letters, [ ], F3, Tab, M, C, B; Shift+C / Shift+B are counted by
+        // the shift table test) + nine chords (Z, Shift+Z, Shift+P, S, O,
+        // Comma, Space, PgUp, PgDn).
         let bare = SHORTCUT_KEYS
             .iter()
             .filter(|k| resolve_shortcut(**k, bare()).is_some())
@@ -576,7 +589,7 @@ mod tests {
                 .iter()
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
-        assert_eq!((bare, chords), (10, 9));
+        assert_eq!((bare, chords), (13, 9));
     }
 
     /// One headless frame: `keys` pressed (with `mods`), the poll first

@@ -781,3 +781,16 @@ workspace =
     .graph = Graph
     .next = Next Workspace
     .prev = Previous Workspace
+
+## Display-mode keys (GUI plan g6-display-mode-keys)
+
+viewkeys =
+    .material = View Material
+    .next-channel = Next Channel
+    .prev-channel = Previous Channel
+    .next-map = Next Mesh Map
+    .prev-map = Previous Mesh Map
+    .toast-material = Viewing the material
+    .toast-unlit = Viewing unlit
+    .toast-channel = Channel:
+    .toast-map = Mesh map:

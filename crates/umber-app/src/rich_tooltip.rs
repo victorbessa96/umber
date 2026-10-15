@@ -63,6 +63,11 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::ToggleMaximize => ("shell.maximize", Some("tip.maximize")),
         ShellAction::NextWorkspace => ("workspace.next", None),
         ShellAction::PrevWorkspace => ("workspace.prev", None),
+        ShellAction::ViewMaterial => ("viewkeys.material", None),
+        ShellAction::NextChannel => ("viewkeys.next-channel", None),
+        ShellAction::PrevChannel => ("viewkeys.prev-channel", None),
+        ShellAction::NextMeshMap => ("viewkeys.next-map", None),
+        ShellAction::PrevMeshMap => ("viewkeys.prev-map", None),
     }
 }
 
@@ -181,6 +186,11 @@ mod tests {
             ShellAction::ToggleMaximize,
             ShellAction::NextWorkspace,
             ShellAction::PrevWorkspace,
+            ShellAction::ViewMaterial,
+            ShellAction::NextChannel,
+            ShellAction::PrevChannel,
+            ShellAction::NextMeshMap,
+            ShellAction::PrevMeshMap,
         ];
         // The real Fluent bundles, not a hand-split of the .ftl text
         // (CRLF on a Windows checkout broke that, 979a523).

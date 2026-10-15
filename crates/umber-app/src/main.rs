@@ -119,6 +119,7 @@ mod bake_sources;
 mod bakes_panel;
 mod brush_cursor;
 mod brush_panel;
+mod display_keys;
 mod display_panel;
 mod document;
 mod empty_state;
@@ -1376,6 +1377,25 @@ impl UmberApp {
                     shell_menu::FocusMode::HideUi,
                     &mut self.dock,
                     Panel::Viewport,
+                );
+            }
+            ShellAction::ViewMaterial
+            | ShellAction::NextChannel
+            | ShellAction::PrevChannel
+            | ShellAction::NextMeshMap
+            | ShellAction::PrevMeshMap => {
+                let mode = self.view.view_mode;
+                self.view.view_mode = match action {
+                    ShellAction::NextChannel => display_keys::cycle_channel(mode, true),
+                    ShellAction::PrevChannel => display_keys::cycle_channel(mode, false),
+                    ShellAction::NextMeshMap => display_keys::cycle_mesh_map(mode, true),
+                    ShellAction::PrevMeshMap => display_keys::cycle_mesh_map(mode, false),
+                    _ => umber_gpu::ViewMode::Lit,
+                };
+                // The soloed name, so the user sees what the viewport shows.
+                self.notices.post(
+                    umber_gui::NoticeLevel::Info,
+                    display_keys::mode_name(self.view.view_mode, tr),
                 );
             }
             ShellAction::NextWorkspace | ShellAction::PrevWorkspace => {
