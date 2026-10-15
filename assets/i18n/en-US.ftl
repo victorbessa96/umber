@@ -40,6 +40,8 @@ menu =
     .about = About Umber
     .shortcuts = Keyboard Shortcuts
     .close-project = Close Project
+    .show-log = Show Log
+    .show-log-failed = Could not open the log { $path }: { $error }
 
 ## Dock panel titles
 

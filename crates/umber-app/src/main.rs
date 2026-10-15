@@ -135,6 +135,7 @@ mod i18n;
 #[cfg(test)]
 mod input_photon;
 mod layers_panel;
+mod logfile;
 mod navigation;
 mod palette;
 mod preferences;
@@ -3105,6 +3106,25 @@ impl eframe::App for UmberApp {
                     self.shortcuts_open = true;
                     ui.close();
                 }
+                if ui.button(tr("menu.show-log")).clicked() {
+                    ui.close();
+                    let path = logfile::log_path(&gpu_startup::state_dir());
+                    if let Err(e) = logfile::open_in_system(&path) {
+                        self.notices.post(
+                            umber_gui::NoticeLevel::Error,
+                            crate::i18n::tr_args(
+                                "menu.show-log-failed",
+                                [
+                                    (
+                                        "path",
+                                        fluent::FluentValue::from(path.display().to_string()),
+                                    ),
+                                    ("error", fluent::FluentValue::from(e.to_string())),
+                                ],
+                            ),
+                        );
+                    }
+                }
                 if ui.button(tr("menu.about")).clicked() {
                     self.about_open = true;
                     ui.close();
@@ -3812,7 +3832,15 @@ fn main() -> eframe::Result<()> {
     // The crash reporter first (C2-2): every later panic, startup included,
     // leaves a report under `<state>/crashes/` for the next launch to offer.
     crash::install(gpu_startup::state_dir());
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Logs tee to `<state>/logs/umber.log` (Help ▸ Show log); stderr stays
+    // the sink of record when the file cannot open.
+    let log_tee = logfile::Tee {
+        primary: std::io::stderr(),
+        secondary: logfile::open_session_log(&gpu_startup::state_dir()),
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .target(env_logger::Target::Pipe(Box::new(log_tee)))
+        .init();
     log::info!("umber — starting (wave-2: paint core)");
     // UI strings: catalogs + locale on this (the UI) thread, before any
     // panel renders (docs/specs/i18n-design.md).

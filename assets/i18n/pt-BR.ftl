@@ -41,6 +41,8 @@ menu =
     .about = Sobre o Umber
     .shortcuts = Atalhos de Teclado
     .close-project = Fechar Projeto
+    .show-log = Mostrar Log
+    .show-log-failed = Não foi possível abrir o log { $path }: { $error }
 
 ## Títulos dos painéis
 
