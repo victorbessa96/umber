@@ -65,8 +65,9 @@ the viewport (in 3D, on the mesh) or in the 2D UV view.
 
 - **The Brush panel** sets size (`[` and `]`), alpha, spacing, hardness,
   the falloff curve, pressure response and the stabilizer. Pen pressure
-  works through the tablet's standard input (Windows Ink is a
-  `stylus --features winink` build option, not in the default build).
+  works out of the box: on Windows through Windows Ink (`WM_POINTER`
+  pen events), on Linux through XInput2 when an X display is available.
+  Pen tilt and the eraser end are not read yet.
 - **Channel** (top of the Brush panel's paint section) picks what you
   paint into: base color, roughness, metallic, height, normal. Painting
   roughness changes how shiny the surface is, not its colour. Press `C`
