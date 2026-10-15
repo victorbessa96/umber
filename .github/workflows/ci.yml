@@ -21,6 +21,10 @@ jobs:
           python-version: "3.12"
       - name: Crate layering
         run: python3 scripts/check-layers.py
+      # README headline counts (crates, tests) generated from the tree;
+      # fails when a commit changes the counts without regenerating.
+      - name: Scorecard current
+        run: python3 scripts/scorecard.py --check
 
   # Docs-only PRs skip the build matrix (absorbed 2026-10-14 from
   # photocraft's ci.yml `platforms` job, made conservative): the matrix
