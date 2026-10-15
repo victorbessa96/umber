@@ -3171,6 +3171,42 @@ impl PaintState {
         }
     }
 
+    /// Copies every pixel plane `from` holds onto `to` (layer duplicate
+    /// with content, C2-8's follow-up): each `(tile, channel)` plane of
+    /// `from` is read back (draining its queue first) and published whole
+    /// into `to`'s plane, through the ordinary [`Self::publish_plane`]
+    /// path, so budget accounting, the cache dirt and the revision bump
+    /// all apply. Mask planes are not copied (they belong to the mask, a
+    /// separate owner key). Returns the `(tile, channel)`s copied.
+    ///
+    /// # Errors
+    ///
+    /// A budget refusal from `publish_plane`. Planes copied before it
+    /// stay copied: `to` is a fresh layer, so a partial copy is honest
+    /// (each copied plane is exactly `from`'s) and the caller reports the
+    /// refusal.
+    pub fn copy_owner_planes(
+        &mut self,
+        from: PlaneOwner,
+        to: PlaneOwner,
+    ) -> Result<Vec<(u16, String)>, PaintRefusal> {
+        let keys: Vec<(u16, String)> = self
+            .planes
+            .keys()
+            .filter(|(owner, _, _)| *owner == from)
+            .map(|(_, tile, channel)| (*tile, channel.clone()))
+            .collect();
+        let mut copied = Vec::with_capacity(keys.len());
+        for (tile, channel) in keys {
+            let Some(buffer) = self.read_plane(from, tile, &channel) else {
+                continue;
+            };
+            self.publish_plane(to, tile, &channel, buffer.width, buffer.height, buffer.data)?;
+            copied.push((tile, channel));
+        }
+        Ok(copied)
+    }
+
     /// Publishes `rgba` (`width`x`height` RGBA8, row-major) whole-plane
     /// into `(owner, tile, channel)`'s plane (§5.1's fill shape with an
     /// owner, plus the materialization check): materializes through
@@ -5898,6 +5934,76 @@ mod tests {
         }]);
         dirt.mark_full();
         assert_eq!(dirt, DirtyRegion::Full);
+    }
+
+    #[test]
+    fn copy_owner_planes_duplicates_every_plane_exactly() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        let color: Vec<u8> = (0..64 * 64 * 4).map(|i| (i % 251) as u8).collect();
+        let rough = vec![77u8; 64 * 64 * 4];
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                color.clone(),
+            )
+            .expect("fits");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(1),
+                1001,
+                "roughness",
+                64,
+                64,
+                rough.clone(),
+            )
+            .expect("fits");
+        let before = state.owner_revision(PlaneOwner::Layer(2));
+        let mut copied = state
+            .copy_owner_planes(PlaneOwner::Layer(1), PlaneOwner::Layer(2))
+            .expect("copy fits");
+        copied.sort();
+        assert_eq!(
+            copied,
+            vec![
+                (1001, BASE_COLOR_CHANNEL.to_string()),
+                (1001, "roughness".to_string())
+            ]
+        );
+        let got = |s: &mut PaintState, ch: &str| {
+            s.read_plane(PlaneOwner::Layer(2), 1001, ch).map(|b| b.data)
+        };
+        assert_eq!(
+            got(&mut state, BASE_COLOR_CHANNEL),
+            Some(color.clone()),
+            "byte-exact"
+        );
+        assert_eq!(got(&mut state, "roughness"), Some(rough));
+        assert!(
+            state.owner_revision(PlaneOwner::Layer(2)) > before,
+            "the copy bumps the revision"
+        );
+        // The source is untouched, and an owner with no planes copies nothing.
+        assert_eq!(
+            state
+                .read_plane(PlaneOwner::Layer(1), 1001, BASE_COLOR_CHANNEL)
+                .map(|b| b.data),
+            Some(color)
+        );
+        assert!(state
+            .copy_owner_planes(PlaneOwner::Layer(9), PlaneOwner::Layer(10))
+            .expect("nothing to copy")
+            .is_empty());
+        assert!(state
+            .read_plane(PlaneOwner::Layer(10), 1001, BASE_COLOR_CHANNEL)
+            .is_none());
     }
 
     #[test]

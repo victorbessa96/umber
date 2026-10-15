@@ -273,6 +273,11 @@ pub struct LayersUiOutcome {
     /// the shell applies it to its `base_visible` session state, which
     /// rides the next composite snapshot).
     pub base_visible: Option<bool>,
+    /// `Some((source, copy))` = a row was duplicated: the document holds
+    /// the copy's settings, and the shell copies the pixel planes with
+    /// `PaintState::copy_owner_planes(Layer(source), Layer(copy))` (the
+    /// panel owns no paint session).
+    pub duplicated: Option<(u64, u64)>,
 }
 
 /// Per-row badge state for [`layers_ui`] (stage 4): the shell owns these
@@ -717,6 +722,7 @@ pub fn layers_ui(
     if let Some(id) = duplicate_id {
         if let Some(new_id) = duplicate_layer(doc, id) {
             outcome.select = Some(PlaneOwner::Layer(new_id));
+            outcome.duplicated = Some((id, new_id));
         }
     }
     if let Some(source) = instance_source_id {
