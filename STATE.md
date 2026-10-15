@@ -26,9 +26,14 @@ allocation abort, upstream). Stroke methods and the cavity mask now
 reach the brush (51d9047, 4bebc72). The GUI plan
 (`docs/specs/gui-plan-2026-10-15.md`) is the active worklist (queue item
 23): G0 foundations, most of G1-G3, the G4 ramp / ValueField grammar /
-curve widget, and the G5 menus landed 2026-10-15, two sessions in parallel
-under kill locks, with per-kill state in the plan's tables. Next: the rest
-of the GUI plan (G5 focus modes + workspaces, G6, G7), ROADMAP 8b's
+curve widget, the G4 property menu on every value field, the G5 menus
+(Recent, Revert, Window, a real About), Hide UI / Maximize and the
+workspaces, the G6 display-mode keys, and the shared kittest support
+module landed 2026-10-15, two sessions in parallel under kill locks, with
+per-kill state in the plan's tables. Waves are large and push once
+(Bessa 2026-10-15). Next: the rest of the GUI plan (G3 keymap editor, G4
+color picker, G5 home screen / first run / tab overflow, G6 overlays /
+contextual toolbar / UV parity, G7), ROADMAP 8b's
 remaining rows (stencil, bitmap stamps → angle/jitter), the Win32 tablet
 path, and the 0.1.0 gates.
 State: POST-POOL-MARCH
