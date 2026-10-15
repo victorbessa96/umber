@@ -4,7 +4,7 @@
 
 Umber is a ground-up reimagining of the 3D texture-painting DCC: paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps, and export engine-ready texture sets — fast, local-first, and free forever. Built completely in Rust for **Windows and Linux**.
 
-> Status: **Core loop complete (Gate 0, 2026-10-12) — now building the per-layer pool.** The journey is whole end to end: FBX in → 4K painting with real pen pressure → paint visible in the lit 3D viewport → undo/redo byte-exact → save/reopen loses nothing → engine-ready export, decode-verified. The active arc (2026-10-14): per-layer pixel planes — every layer owns its pixels, the flat targets become a composite cache, strokes/fills/materials write their own planes, the save round-trips them (three of five stages landed; the design is hostile-reviewed and lives in docs/specs/per-layer-pool-design.md). Around it: an agent protocol drives the app over JSONL (projects, layers, undo), panels render headless in snapshot tests, importer corpora arm on real files, and the never-crash lint + fuzz gates hold. ~1000 workspace tests; CI green per wave push. No release tag yet (SPEC ratification and the perf baseline lead the pre-release checklist).
+> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. 16 crates, 1,600+ tests. No release tag yet: SPEC ratification and the perf baseline lead the 0.1.0 checklist (`docs/specs/release-checklist-0.1.0.md`).
 
 ## Why
 
@@ -19,32 +19,40 @@ Substance Painter is the industry standard for game/film texturing — and it is
 - **Git-friendly project format.** Diffable, mergeable projects — the anti-.spp.
 - **Windows + Linux first-class.** One codebase, no second-class platform.
 
-## Scope (v0.1 horizon)
+## What works today
 
-| Capability | Wave |
+| Area | |
 |---|---|
-| glTF / OBJ / FBX mesh import, PBR viewport | 1 |
-| Pressure-sensitive painting, layer stack, undo/redo, project save/load | 2 |
-| Engine-correct export (Unity / Unreal / glTF), AO/normal/curvature bake | 3 |
-| Procedural node graph: generators, filters, smart materials | 4 |
-| Tablet-pressure pipeline end-to-end, dockable UI maturity, theming | 5 |
-| Sandboxed plugins (WASM/WASI), headless CLI, v0.1 release | 6 |
+| **Import** | FBX, glTF/GLB, OBJ, USDA, USDC, USDZ; `.spp` (read-only, clean-room) and PSD import |
+| **Painting** | MyPaint-style dynamics + stabilizer, 9 falloff curves, smudge / clone / erase, mirror + radial symmetry, path and polygon tools, quick mask, seam-aware strokes, front-face falloff for 3D strokes, UDIM |
+| **Layers** | per-layer pixel planes, paint / fill / material / folder / instance layers, masks, anchors, 32 blend modes, click-to-time-travel history |
+| **Materials** | an original node-graph engine (generators, filters, smart materials); MaterialX export + import |
+| **Baking** | AO, normal (mesh + high→low with cage), curvature, position, world-space normal, thickness, ID, bent normals; dilation and an Adjacent Faces seam margin |
+| **Viewport** | OpenPBR shading, IBL, view modes, post-effects, orthographic camera, OCIO / ACES color management |
+| **Export** | engine presets (Unreal, Unity, glTF, Blender) with DX/GL normal conventions, EXR / PNG / TIFF / PSD / USD / MaterialX, up to 8K |
+| **Automation** | headless CLI (bake, export, batch recipes) and a versioned JSONL agent protocol: projects, layers, undo, paint strokes, plane snapshots |
+| **Extensibility** | sandboxed WASM plugins (wasmtime, fuel-metered, memory-capped) |
+| **Platform** | Linux + Windows; crash-safe GPU startup with backend fallback; i18n (en-US, pt-BR) |
 
+Still open is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) — brush angle / jitter, bitmap stamps, the Win32 tablet path, and the 0.1.0 release gates among them.
 
 ## Try it
 
 ```bash
+# the app: viewport, layer stack, Bakes panel, Export dialog
+cargo run -p umber-app
+
 # headless: bake every P0 mesh map from a mesh, seam-padded
 cargo run -p umber-cli -- bake-all sword.obj out/ --size 1024 --rays 16 --dilate 16
-# -> sword_ambient_occlusion.png, sword_curvature.png, sword_position.png,
-#    sword_world_space_normal.png, sword_normal_base.png, sword_thickness.png
 
 # headless: pack through an engine preset (DirectX normals for Unreal)
 cargo run -p umber-cli -- export sword.obj out/ --preset unreal
 
-# the app: viewport, layer stack, Bakes panel, Export dialog
-cargo run -p umber-app
+# drive the app's paint engine over JSONL (one step per line, one reply per step)
+printf '%s\n' '"version"' '"quit"' | cargo run -p umber-cli -- agent
 ```
+
+GPU work needs a Vulkan (Linux) or DX12 (Windows) adapter; `mesa-vulkan-drivers` (lavapipe) works for headless use. If a driver crashes at startup, the next launch steps down to a safer backend automatically; `--safe-gpu` or `WGPU_BACKEND` force one.
 
 ## License
 
@@ -55,17 +63,20 @@ GPL-3.0-or-later for the application. Standalone library crates extracted from U
 ```
 umber/
 ├── SPEC.md            # the contract — what Umber is and is not
+├── STATE.md           # current state (read first)
 ├── DECISIONS.md       # append-only architecture decision log
-├── STATE.md           # wave state (read this first on any new session)
+├── CHANGELOG.md       # what landed, by wave
 ├── docs/
-│   ├── research/      # claw research reports (Painter inventory, competitors, ecosystem)
-│   └── specs/         # design specs per subsystem
-└── crates/            # Rust workspace — 15 crates, ~1500 tests, CI on Linux + Windows
+│   ├── ROADMAP.md     # the plan of record
+│   ├── specs/         # design docs per subsystem
+│   └── research/      # cited research (Painter inventory, competitors, absorption ledgers)
+├── scripts/           # the local battery, CI helpers, the crate layering gate
+└── crates/            # Rust workspace — 16 crates in a layered dependency graph
 ```
 
 ## Contributing
 
-The core loop is real and Gate-0-verified — the app paints, undoes, saves, and exports end to end (see `STATE.md` for the current worklist). Read `SPEC.md` and `docs/specs/requirements.md`, pick from the roadmap surfaces, and open issues for anything missing. Code contributions welcome; the workspace map lives in `CLAUDE.md`/`AGENTS.md`.
+Code contributions are open. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) (setup, the exact CI gates, commit format), then [`STATE.md`](STATE.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md) for what to pick up. Security reports go through [`SECURITY.md`](SECURITY.md).
 
 ## Credit
 

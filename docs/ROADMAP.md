@@ -13,22 +13,25 @@ inventory), exceeded where [04] (next-gen bar) points.
 
 ---
 
-## Where we stand (2026-10-14, the per-layer pool era)
+## Where we stand (2026-10-15)
 
 The core loop is Gate-0-proven end to end: mesh → 4K pressured paint →
-compositor → undo/redo → save/reopen → export, both CI platforms.
-2026-10-13/14 closed the importers wave (the .spp reader crate, PSD
-flatten-on-import), the dynamic-materials arc end to end (design → hostile
-review → r2 → headless Kill A → UI Kill B — per-channel material layers
-live), the never-crash lint gate + panic-hunt fuzz (850 garbage cases, the
-four public seams), the File > New dirty-check, the agent protocol v0 +
-its five wire edit steps (projects, layers, undo over JSONL), the
-offscreen snapshot harness (egui_kittest), the importer corpus harness
-(arms on real .spp files), LayerCommand::Rename, and the per-layer pool's
-first three stages (the compositor's premultiplied mode; the plane
-storage + save v2 round-trip; the selection + stroke gate). Stage 4
-(per-layer pixels) is in flight. The two-gate wave model (local battery
-per kill, one CI run per wave) runs the march now.
+compositor → undo/redo → save/reopen → export, both CI platforms. The
+per-layer pool arc is complete (every layer owns its pixel planes;
+stages 1a-5, 2026-10-14). The paint engine is a headless crate
+(`umber-paint`, PR #8), so the JSONL agent session paints through the
+same engine and persistence the GUI uses — `paint_stroke`, `paint_read`,
+`paint_snapshot`, undo/redo, and a `version` step for protocol pinning.
+
+2026-10-14/15 also landed: MaterialX import Kill A + the stdlib
+verification (Kill S); the photocraft + Blender absorption pass (the
+ledger is `docs/research/absorption-2026-10-14-photocraft-blender.md`):
+falloff curves, front-face falloff, the Adjacent Faces bake margin, a
+crash-safe GPU startup with backend fallback, save-format completeness by
+exhaustive destructuring, the crate layering gate and the docs-only CI
+path filter; and the mesh-importer panic hunt + hardening (24 findings,
+23 closed; `.usdz` import works for the first time). The two-gate wave
+model (local battery per kill, one CI run per wave) runs the march.
 
 ## Waves 1-3 of the march — LANDED (2026-10-13/14)
 
@@ -173,7 +176,7 @@ the already-have list and the declines is
 
 | Substance capability | Umber state |
 |---|---|
-| Painting core (stamps, flow, spacing, jitter, alignment) | ✓ complete |
+| Painting core (stamps, flow, spacing, falloff curves) | ✓ complete — **angle / alignment / jitter NOT built** (the old "✓ complete" covered them falsely; corrected 2026-10-15, row `wave-brush-dynamics-angle-jitter`) |
 | MyPaint-style input curves + stabilizer | ✓ complete |
 | Smudge/clone/symmetry/path/polygon/quick mask | ✓ complete |
 | Seam-aware stamping + 3D-space strokes | ✓ complete |
@@ -182,15 +185,15 @@ the already-have list and the declines is
 | Blend modes | ✓ 32-mode census landed (d861482) |
 | Masks (paintable per-layer) | ✓ landed (770162f); per-plane masks ride the pool |
 | Dynamic materials | ✓ LANDED end to end (Kill A + Kill B, 2026-10-14); per-layer pixels = the pool arc, stage 4 in flight |
-| Agent/automation | ✓ protocol v0 + wire edit steps (projects, layers, undo over JSONL) |
-| Headless testing | ✓ the offscreen snapshot harness + the never-crash fuzz (2026-10-14) |
+| Agent/automation | ✓ JSONL protocol (`PROTOCOL_VERSION` 1): projects, layers, undo, paint strokes/reads/undo, `paint_snapshot` (whole plane → PNG + blake3); wire strokes paint exactly (no pointer smoothing) |
+| Headless testing | ✓ offscreen panel snapshots; the never-crash fuzz over mtlx/PSD/.spp/projects AND the mesh importers (5,400+ cases, 2026-10-14/15); scripted sessions via `paint_snapshot` |
 | Importers (.spp/PSD) | ✓ both landed; the corpus harness arms on real .spp files |
-| Baking (all 8 maps, cage, skew, auto-rebake) | ✓ complete |
+| Baking (all 8 maps, cage, skew, auto-rebake) | ✓ complete; + Adjacent Faces margin (cross-seam fill, `3818da0`) — not yet wired into the bake UI |
 | Node graph + MaterialX | ✓ complete (original engine) |
 | Viewport (OpenPBR, IBL, view modes, postfx) | ✓ + height→normal live (2026-10-12); postfx persistence = wave 2 |
 | Color management (OCIO, ACES, LUT) | ✓ bundled build + LUT; panel selection = wave 2 |
 | Export (templates, packing, presets, EXR, PSD, USD, MaterialX) | ✓ PSD-out complete; PSD-in = wave 3 |
-| Import (FBX, USD, images, mesh maps) | ✓ complete |
+| Import (FBX, USD, images, mesh maps) | ✓ FBX/glTF/OBJ/USDA/USDC/**USDZ** (usdz never loaded until `6c68ce7`); importers hardened against the panic hunt's 24 findings (23 closed — the open one is an openusd allocation abort, upstream) |
 | Stylus (pressure/tilt/proximity) | ✓ Linux XI2 + raw pressure; win32 dual-path = wave 3 |
 | History panel | ✓ panel; time-travel = wave 1 |
 | Distribution | ✓ shell+PS proven + CI; Flatpak/AppImage = wave 1 |

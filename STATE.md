@@ -11,20 +11,25 @@
 
 ## Status line
 
-Current phase: **THE PER-LAYER POOL ARC IS COMPLETE (2026-10-14).** All
-five stages landed: 1a premultiplied compositor (`b1ceb2c`), 1b plane
-storage + 2 save v2 (`f2aff9f`), 3 selection + stroke gate (`ed64a58`), 4
-per-layer pixels (`dd6e1cd`), 5 anchors + instances (`ec6d552`). The four
-v1 boundary warts are closed. Wave 5 also landed the ortho camera
-(`40f3e5d`) and MaterialX import Kill A (`bb287cd`). Next: the stage-4/5
-perf gate re-measure against the stage-3 baseline (p95 10.19 ms; only a
-16.7 ms budget breach blocks), then the user-facing wave 5 (8K export,
-Win32 stylus, agent paint ops). SPEC v1.1 amendment drafted for RC
-ratification (docs/specs/spec-v1.1-amendment-draft.md).
-State: POOL-ARC-COMPLETE
+Current phase: **POST-POOL MARCH (2026-10-15).** The per-layer pool arc
+is complete (stages 1a-5, 2026-10-14). Since then: the paint engine is a
+headless crate (`umber-paint`, PR #8), and the JSONL agent session
+paints through it (`paint_stroke` / `paint_read` / `paint_snapshot` /
+undo, a `version` step, exact wire strokes); the photocraft + Blender
+absorption pass (`docs/research/absorption-2026-10-14-photocraft-blender.md`)
+landed falloff curves + front-face falloff (with brush-panel controls),
+the Adjacent Faces bake margin, crash-safe GPU startup, save-format
+completeness, the crate layering gate and the docs-only CI path filter;
+the mesh-importer panic hunt found 24 crash bugs and hardening closed
+23 (`.usdz` loads for the first time; the open one is an openusd
+allocation abort, upstream). Next: ROADMAP wave 8b's remaining rows
+(stroke methods, stencil, cavity mask, bitmap stamps → angle/jitter),
+the Win32 tablet path, and the 0.1.0 gates.
+State: POST-POOL-MARCH
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
-SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate.
-No tag, no release, no v0.1 claim until Gate 0 passes.
+SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate (v1.1 amendment drafted: docs/specs/spec-v1.1-amendment-draft.md).
+No tag, no release, no v0.1 claim until the 0.1.0 checklist's gates pass.
+Workspace: 16 crates, 1,600+ tests (the `#[test]` census), CI on Linux + Windows.
 
 ## The core-loop queue (the ONLY active hunt)
 
@@ -110,10 +115,15 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
    cross-cutting invariant (every stroke = one history entry), grep the
    test suite for every consumer of the OLD invariant before marking done.
 5. Kill-locks before dispatch (scripts/kill-locks.sh add|check|remove|list)
-   — no live locks; zero claws running as of this write.
-6. Test counts: 599+ green on both platforms through the core-loop
-   close; the C1 audit's Pass 2 verified zero stale-premise tests
-   (the smudge class is fully repaired).
+   — no live locks; zero claws running as of this write. Dragon-loop wake
+   and leisure sessions write into the shared main tree too: a hold set
+   in a live session (e.g. "no cargo") must be written into any queued
+   hunt's goal, or a wake session will not see it.
+6. Test counts: 1,600+ `#[test]`s across 16 crates (2026-10-15 census;
+   599+ at the core-loop close). The C1 audit's Pass 2 verified zero
+   stale-premise tests then; the 2026-10-15 truth pass found two stale
+   requirements MARKS instead (brush angle / alignment / jitter were
+   marked built and are not — rows 15 and 154 corrected).
 
 ## History pointers (audit trail, preserved deliberately)
 

@@ -1,6 +1,6 @@
 # Umber — agent contract
 
-Rust 3D texture-painting DCC. 15-crate workspace, wgpu 30 + egui/eframe 0.36, toolchain pinned 1.97.0.
+Rust 3D texture-painting DCC. 16-crate workspace (layering enforced by `scripts/check-layers.py`), wgpu 30 + egui/eframe 0.36, toolchain pinned 1.97.0.
 Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, then traps, tooling, pointers.
 
 ## Hard rules
@@ -84,18 +84,18 @@ Other scripts (`brief-template.sh`, `ci-consume.sh`, `loop-status.sh`, `perf_com
 | `umber-brush` | stroke pipeline: conditioning, spacing, smoothing, adapters, retouch |
 | `umber-gpu` | wgpu: renderer, paint passes, bakers, `graph_eval` (WGSL arm), postfx, display LUT |
 | `umber-graph` | node graph: topo, CPU reference eval, nodes, MaterialX I/O |
-| `umber-mesh` | loaders (glTF/FBX/OBJ/usda/usdc), raycast, fill, polygon fill |
+| `umber-mesh` | loaders (glTF/FBX/OBJ/usda/usdc/usdz — `load()` catches importer panics), raycast + face normal, fill, polygon fill |
 | `umber-bake` / `umber-export` / `umber-color` | mesh-map bakers + cage + dilation / naming tokens, packing, engine presets, writers / OCIO, display LUT, per-channel CM flags |
 | `stylus` | owned tablet-input crate (Windows Ink behind the `winink` feature) |
 | `umber-gui` | design-language widgets (Phase 0a). Has no `tr()` calls today; translate in umber-app and pass strings in. |
-| `umber-paint` | the headless paint engine: per-layer planes, strokes, retouch, material refresh, the composite-on-read flush. No egui/eframe (points are `emath::Pos2`; GPU via `umber_gpu` re-exports). Cross-crate test hooks sit behind its `test-hooks` feature. |
+| `umber-paint` | the headless paint engine: per-layer planes, strokes, retouch, material refresh, the composite-on-read flush, paint persistence, the composite-snapshot builder. No egui/eframe (points are `emath::Pos2`; GPU via `umber_gpu` re-exports). Cross-crate test hooks sit behind its `test-hooks` feature. |
 | `umber-app` | the eframe app: panels, viewport, i18n, fills' panel rows; re-exports `umber_paint::{paint_state, retouch, material_layer}` for path stability |
 | `umber-cli` | headless CLI, batch recipes, agent JSONL session |
 | `umber-wasm` / `umber-plugin-sdk` | wasmtime plugin host / guest SDK. Example plugins live in `examples/` (a separate workspace, excluded). |
 
 **Tests:**
 - Inline `#[cfg(test)] mod tests` in the source file is the norm.
-- Integration tests live in `crates/umber-cli/tests/`, `crates/umber-wasm/tests/` and `crates/umber-app/tests/` (fixtures under `tests/fixtures/`).
+- Integration tests live in `crates/umber-cli/tests/`, `crates/umber-wasm/tests/`, `crates/umber-app/tests/` and `crates/umber-mesh/tests/` (the mesh panic hunt; fixtures under `tests/fixtures/`).
 - Mesh test assets are in `crates/umber-mesh/tests/assets/`.
 
 ## Pointers (read the one for your surface before writing code)

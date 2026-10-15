@@ -6,6 +6,42 @@ the source of truth.
 
 ## [Unreleased]
 
+### The headless paint engine + the post-pool march (2026-10-14/15)
+
+- `umber-paint`: the paint engine, paint persistence and the
+  composite-snapshot builder moved out of `umber-app` into a crate with
+  no egui/eframe (PR #8). The JSONL agent session paints through it:
+  `paint_stroke` / `paint_read` / `paint_undo` / `paint_redo`,
+  `project_save` / `project_open` carry the paint sidecar
+- `paint_snapshot`: the whole selected plane to a PNG + its blake3 —
+  the snapshot arm of a scripted session (`3e003ec`)
+- The agent protocol is versioned: a `version` step answers
+  `PROTOCOL_VERSION` (1); the 0.1.0 checklist gains Alpha / Beta (protocol,
+  formats and strings frozen) / RC phases (`2c19dcd`)
+- Wire strokes paint exactly what was sent: a 2-point stroke used to paint
+  nothing (the pointer one-euro at the synthetic 8 ms clock swallowed it);
+  the conditioner gains an exact mode (`1ff0921`)
+- Brush falloff curves (Blender's presets; CPU + GPU, old brushes load as
+  Smooth, bit-identical) and front-face falloff for 3D strokes, both with
+  brush-panel controls (`d0309e1`, `cabe283`, `9a47fa0`)
+- Adjacent Faces bake margin — cross-seam fill (`3818da0`; not yet in
+  the bake UI)
+- Crash-safe GPU startup: a driver crash at device creation makes the
+  next launch step down the backend chain; `--safe-gpu` / `WGPU_BACKEND`
+  override (`a221a85`)
+- Save-format completeness: project save/load destructure every field,
+  so a new one cannot be silently dropped (`17900df`)
+- CI skips the build matrix for docs-only PRs, fail-open (`908135e`)
+- The mesh-importer panic hunt (5,400+ cases) found 24 crash bugs; 23
+  closed (`31d8c47`, `6c68ce7`): usdc topology validated before use, USD
+  nesting capped, glTF accessors pre-validated, dependency panics caught
+  at `umber_mesh::load`, and **`.usdz` import works for the first time**
+  (it called the bare-crate reader on the zip). Open: openusd 0.7.0's
+  multi-TB allocation abort on a corrupt `.usdc` count (upstream)
+- MaterialX Kill S: the stdlib ground truth + 10 exact pins (`a825798`)
+- Docs truth pass: the requirements census marked brush angle /
+  alignment / jitter as built — they are not; rows corrected
+
 ### Absorbed from photocraft + Blender (2026-10-14)
 
 - EXR read refuses decompression bombs: a header preflight rejects a
