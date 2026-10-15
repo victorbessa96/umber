@@ -9,7 +9,7 @@
 //!
 //! - **Cursor UV comes from the 2D UV view's hover, not the 3D viewport.**
 //!   The UV view maps the pointer to UV with one division
-//!   (`paint_state::uv_from_pointer`). A 3D hover readout would need a
+//!   (`uv_view::uv_from_pointer`). A 3D hover readout would need a
 //!   per-move ray cast, and `umber_mesh::ray_intersect` is a brute-force
 //!   loop over every triangle (no BVH). Per-hover cost on a production
 //!   mesh is not v1 material. The 3D readout lands with the

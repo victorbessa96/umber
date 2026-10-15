@@ -12,12 +12,14 @@
 //!
 //! Judgment calls (v1 boundaries):
 //!
-//! * This surface is additive: `main.rs` keeps its own `mod paint_state;`
-//!   / `mod retouch;` declarations (same files, compiled once per crate —
-//!   legal, and zero risk to the shell). Nothing is moved or re-wired.
-//! * Only what the journey test needs is reachable: `paint_state`'s
-//!   remaining `pub(crate)` test hooks (`set_brush_params`, `read_tile`,
-//!   …) stay crate-private to each crate. The widened seams are
+//! * The engine modules are re-exports of `umber-paint` (2026-10-14):
+//!   one compile, shared by the shell (`main.rs` `use`s the same crate)
+//!   and every headless front end. The old dual-declaration (the same
+//!   files compiled into both the lib and the bin target) is gone.
+//! * `paint_state`'s remaining `pub(crate)` test hooks stay private to
+//!   `umber-paint`; the two cross-crate test hooks (`staged_dab_count`,
+//!   `two_tile_strip`) sit behind its `test-hooks` feature, enabled only
+//!   from this crate's dev-dependencies. The widened seams are
 //!   [`paint_state::PaintState::publish_fill`] and
 //!   [`paint_state::PaintState::set_brush_color`] (`pub(crate)` → `pub`):
 //!   the project open path restores sidecar PNGs through the former, and
@@ -30,12 +32,11 @@
 //!   (`umber_export::png::{write_png, read_png_rgba8}`) and the same
 //!   session calls, and names that boundary in its own module docs.
 
-/// Dual-declared with the shell (main.rs keeps its own `mod
-/// paint_state;`): retouch + material_layer's lib-target compiles need
-/// its types (PlaneOwner, PaintRefusal, SnapshotMaterialChannel), and
-/// the integration harnesses (tests/) drive it directly.
-pub mod paint_state;
-pub mod retouch;
+/// The paint engine lives in `umber-paint` (extracted 2026-10-14 so the
+/// CLI agent and other headless front ends drive the same engine). The
+/// re-exports keep every `umber_app::paint_state::…` / `crate::…` path
+/// stable for the shell and the integration harnesses (tests/).
+pub use umber_paint::{paint_state, retouch};
 
 /// The Display panel + the PSD import section — on the library surface
 /// for the kittest snapshot harness (tests/panel_snapshot.rs renders both
@@ -45,10 +46,6 @@ pub mod display_panel;
 pub mod i18n;
 pub mod psd_import;
 
-/// Dynamic material layers: the headless eval driver (Kill A). Declared
-/// here — not only behind the binary's `mod` list — so the driver and its
-/// goldens are reachable and testable without the shell (the
-/// `paint_state`/`retouch` library-surface precedent). Kill B adds the
-/// `main.rs` `mod` line and the frame wiring; until then nothing in the
-/// binary names this module.
-pub mod material_layer;
+/// Dynamic material layers: the headless eval driver, now in
+/// `umber-paint` (re-exported for path stability).
+pub use umber_paint::material_layer;

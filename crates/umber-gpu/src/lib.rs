@@ -78,6 +78,11 @@ pub use renderer::{
 // directly (architecture rule — GPU objects stay behind umber-gpu), but it
 // needs to hand the eframe-owned device/queue to `PaintThread::new`.
 pub use wgpu::{Device as WgpuDevice, Queue as WgpuQueue};
+// The composite flush records onto one caller-owned encoder
+// (`umber-paint`'s `flush_composite`): same rule, the two types it names.
+pub use wgpu::{
+    CommandEncoder as WgpuCommandEncoder, CommandEncoderDescriptor as WgpuCommandEncoderDescriptor,
+};
 
 /// Identifies a backend device at runtime (for diagnostics + the future
 /// lavapipe/WARP test path).

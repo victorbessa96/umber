@@ -21,6 +21,7 @@ umber-graph = { workspace = true }
 umber-color = { workspace = true }
 umber-wasm = { workspace = true }
 umber-gui = { workspace = true }
+umber-paint = { workspace = true }
 stylus = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
@@ -31,11 +32,6 @@ thiserror = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
 rfd = "0.15"
-# blake3 for the per-layer-pool §6.2 clean-skip (the sidecar file's hash is
-# compared against the plane's recorded commit hash): umber-app's own entry
-# (the E0432 trap — paint_state.rs's `Plane.committed` hash is this crate's
-# use, not umber-core's), same workspace pin umber-core uses.
-blake3 = { workspace = true }
 # PSD import (flatten-on-import): the same ag-psd reader the export path
 # uses (umber-export's `psd.rs`). Version already locked in Cargo.lock —
 # no lock churn. The `mod psd_import;` + menu wiring lands at the
@@ -50,7 +46,7 @@ profiling = { workspace = true }
 [features]
 # Perf instrumentation backend (tracy). Off by default: with the feature
 # off, every profiling::span! in the workspace compiles to nothing.
-perf = ["profiling/profile-with-tracy"]
+perf = ["profiling/profile-with-tracy", "umber-paint/perf"]
 
 # §9 OCIO adoption: the Display panel's config selector + the OCIO view
 # stage in the viewer chain (stub mode when ocio-bundled is absent: the
@@ -66,6 +62,9 @@ ocio = ["umber-color/ocio"]
 stylus = { workspace = true, features = ["xi2"] }
 
 [dev-dependencies]
+# The paint engine's cross-crate test hooks (staged_dab_count,
+# two_tile_strip) for the soak + per-tile export tests.
+umber-paint = { workspace = true, features = ["test-hooks"] }
 pollster = { workspace = true }
 wgpu = { workspace = true }
 serde_json = { workspace = true }

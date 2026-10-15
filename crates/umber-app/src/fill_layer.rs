@@ -246,7 +246,7 @@ impl FillLayerState {
 /// Applies the session quick mask to an evaluated tile: the post-symmetry
 /// coverage is multiplied by the mask at each texel — AFTER symmetry
 /// expansion, at the sibling's own texels, exactly like the retouch
-/// consumers ([`RetouchStroke::apply_masked`](crate::retouch::RetouchStroke::apply_masked)).
+/// consumers (`umber_paint::retouch::RetouchStroke::apply_masked`).
 ///
 /// Ungated (`!mask.gates()`) or size-mismatched tiles pass through
 /// untouched: both planes track the paint target's size and resize resets

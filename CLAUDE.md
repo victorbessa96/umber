@@ -88,13 +88,14 @@ Other scripts (`brief-template.sh`, `ci-consume.sh`, `loop-status.sh`, `perf_com
 | `umber-bake` / `umber-export` / `umber-color` | mesh-map bakers + cage + dilation / naming tokens, packing, engine presets, writers / OCIO, display LUT, per-channel CM flags |
 | `stylus` | owned tablet-input crate (Windows Ink behind the `winink` feature) |
 | `umber-gui` | design-language widgets (Phase 0a). Has no `tr()` calls today; translate in umber-app and pass strings in. |
-| `umber-app` | the eframe app: panels, viewport, i18n |
+| `umber-paint` | the headless paint engine: per-layer planes, strokes, retouch, material refresh, the composite-on-read flush. No egui/eframe (points are `emath::Pos2`; GPU via `umber_gpu` re-exports). Cross-crate test hooks sit behind its `test-hooks` feature. |
+| `umber-app` | the eframe app: panels, viewport, i18n, fills' panel rows; re-exports `umber_paint::{paint_state, retouch, material_layer}` for path stability |
 | `umber-cli` | headless CLI, batch recipes, agent JSONL session |
 | `umber-wasm` / `umber-plugin-sdk` | wasmtime plugin host / guest SDK. Example plugins live in `examples/` (a separate workspace, excluded). |
 
 **Tests:**
 - Inline `#[cfg(test)] mod tests` in the source file is the norm.
-- Integration tests exist only in `crates/umber-cli/tests/` and `crates/umber-wasm/tests/` (fixtures under `tests/fixtures/`).
+- Integration tests live in `crates/umber-cli/tests/`, `crates/umber-wasm/tests/` and `crates/umber-app/tests/` (fixtures under `tests/fixtures/`).
 - Mesh test assets are in `crates/umber-mesh/tests/assets/`.
 
 ## Pointers (read the one for your surface before writing code)

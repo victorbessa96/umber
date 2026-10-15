@@ -19,12 +19,11 @@
 //! work on that mesh. `inspect` and `bake_transfer` are the batch steps
 //! unchanged and stay stateless.
 //!
-//! Control protocol v0 (project + paint READS + the save seam — no
-//! interactive paint driving): `project_open` holds a `.umber` project
+//! Control protocol v0 (project + the save seam): `project_open` holds a `.umber` project
 //! beside the mesh (the mesh stays whatever `load` set — projects carry
 //! no geometry), `project_state` censuses it (`null` when none is open),
-//! `project_save` writes it back (`painted: 0`: the CLI holds no paint
-//! tiles, so the save is `project.json` + layers only), `set_active`
+//! `project_save` writes it back (with the paint sidecar when the session
+//! painted or opened paint — `painted` counts the staged planes), `set_active`
 //! chooses the working set, and `undo`/`redo` drive the model's per-set
 //! undo journals. When a project is open, `bake` names its outputs after
 //! the active set; `export` still names from the mesh (its naming lives
@@ -40,6 +39,18 @@
 //! each — see `Session::apply_edit`), so every edit is undoable and every
 //! save stamps it. Unknown layer ids and a missing project are typed
 //! errors; a failed step never ends the session.
+//!
+//! Paint steps (docs/specs/agent-paint-ops-design.md): `paint_stroke`,
+//! `paint_read`, `paint_undo` and `paint_redo` drive the SAME headless
+//! engine the GUI paints through (`umber_paint`), and `project_save` /
+//! `project_open` write and read the paint sidecar through the SAME
+//! persistence (`umber_paint::persistence`) — no second implementation.
+//! The paint half (a GPU device + a `PaintState`) is created lazily on
+//! the first paint step, or at open when the project has a `paint/`
+//! sidecar; a session that never paints requests no device. Stroke undo
+//! is the engine's own history, separate from the model's `undo` (the
+//! app's two-stack shape). v1 boundaries: no fill/material evaluation
+//! (their rows composite nothing here), no mask strokes, no pressure.
 //!
 //! Judgment calls (v1 boundaries): there is no `layer_rename` —
 //! [`LayerCommand`] carries no rename op and the journal has no name-only
@@ -77,6 +88,13 @@ use umber_core::{
     MaterialChannel, MaterialParams, ProjectModel, TextureSet, TileSet, UndoStack,
 };
 
+use umber_paint::paint_state::{CompositeSnapshot, PaintState, PlaneOwner};
+use umber_paint::persistence::{
+    list_paint_tile_names, load_paint_tiles_reported, paint_save_version, paint_set_sizes_path,
+    paint_sidecar_dir, parse_paint_set_sizes, save_paint_tiles, PaintSetSizes,
+};
+use umber_paint::snapshot::build_composite_snapshot;
+
 use crate::batch::{default_rays, default_size, BakeTransferStep, InspectStep};
 use crate::{
     bake_context, bake_mesh_maps, export_mesh, mesh_summary, select_tiles, BakeFlags, BakeMap,
@@ -111,6 +129,10 @@ enum AgentStep {
     LayerSetMaterial(LayerSetMaterialStep),
     Undo(NoFields),
     Redo(NoFields),
+    PaintStroke(PaintStrokeStep),
+    PaintRead(PaintReadStep),
+    PaintUndo(NoFields),
+    PaintRedo(NoFields),
     Quit(NoFields),
 }
 
@@ -188,6 +210,60 @@ struct ProjectSaveStep {
 struct SetActiveStep {
     set: String,
 }
+
+/// `paint_stroke` — one stroke through the shared paint engine
+/// (docs/specs/agent-paint-ops-design.md). `layer` absent paints Base.
+/// `points` are UV (≥ 1; a point's integer part routes it to its UDIM
+/// tile). `color` is straight RGBA in `0..=1`; `radius_scale` multiplies
+/// the session brush's radius (the engine's per-stroke scale — v1 has no
+/// absolute-radius seam).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaintStrokeStep {
+    #[serde(default)]
+    layer: Option<u64>,
+    points: Vec<[f32; 2]>,
+    color: [f32; 4],
+    #[serde(default = "default_radius_scale")]
+    radius_scale: f32,
+}
+
+/// The `paint_stroke` radius scale when absent: the session brush as-is.
+fn default_radius_scale() -> f32 {
+    1.0
+}
+
+/// `paint_read` — sample texels from one plane (`layer` present; Base is
+/// `layer` absent with `composite: false`) or the stack composite
+/// (`composite: true`, the default when `layer` is absent). Sampled texels
+/// only (1..=[`PAINT_READ_MAX_TEXELS`]): a 4K plane is 64 MiB, which no
+/// JSONL line should carry.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaintReadStep {
+    #[serde(default)]
+    layer: Option<u64>,
+    #[serde(default)]
+    composite: Option<bool>,
+    #[serde(default = "default_paint_tile")]
+    tile: u16,
+    #[serde(default = "default_paint_channel")]
+    channel: String,
+    texels: Vec<[u32; 2]>,
+}
+
+/// The `paint_read` tile when absent: the first UDIM tile.
+fn default_paint_tile() -> u16 {
+    umber_mesh::udim::FIRST_TILE
+}
+
+/// The `paint_read` channel when absent: Base Color.
+fn default_paint_channel() -> String {
+    umber_paint::paint_state::BASE_COLOR_CHANNEL.to_string()
+}
+
+/// The `paint_read` sample cap (see [`PaintReadStep`]).
+const PAINT_READ_MAX_TEXELS: usize = 64;
 
 /// The layer kinds a wire `layer_add` may create: paint, fill or material.
 /// Folders and instances exist in [`LayerKind`] but have no wire
@@ -373,6 +449,16 @@ struct ProjectSession {
     active: String,
     histories: BTreeMap<String, UndoStack<LayerCommand>>,
     journal: Option<Journal>,
+    /// The paint half (agent paint ops): created on the first paint step,
+    /// or at `project_open` when the project has a `paint/` sidecar. A
+    /// session that never paints requests no GPU device.
+    paint: Option<PaintState>,
+    /// The last snapshot the paint half flushed against: the shell's
+    /// `prev_snapshot`. The flush does NOT diff snapshots itself — the
+    /// caller marks changed owners `Full` (`CompositeSnapshot::full_owners`)
+    /// and retires removed layers, exactly as the app's frame does, or a
+    /// wire `layer_set_opacity` would leave a stale composite cache.
+    prev_snapshot: Option<CompositeSnapshot>,
 }
 
 /// A session's state between steps.
@@ -462,95 +548,40 @@ fn active_stack(held: &ProjectSession) -> Result<&LayerStack> {
         })
 }
 
-/// The paint sidecar's size model as the census reads it: a structural
-/// mirror of the app's `target_sizes.txt` size/channel arms (main.rs's
-/// `parse_paint_set_sizes` + `parse_paint_target_size`). It lives here
-/// because umber-cli must not depend on the app crate (that would pull
-/// egui into the headless binary). Tile assignments are intentionally
-/// not carried (the census needs sizes only — carrying them would be
-/// dead state). Drift guard: the `#`-comment skip, the `=` split, the
-/// `WxH` body and the reserved `tile-`/`channel/` prefixes must match
-/// the app's parser line for line.
-#[derive(Debug, Default)]
-struct SidecarSizes {
-    sizes: BTreeMap<String, (u32, u32)>,
-    channels: BTreeMap<(String, String), (u32, u32)>,
+/// Reads the opened project's `paint/target_sizes.txt` through the
+/// shared persistence codec (`umber_paint::persistence` — the parser the
+/// app's open path uses, so the census can never drift from what the GUI
+/// restores). A missing, unreadable or empty sidecar is an empty mapping
+/// (sizes fall back to the model), never an error.
+fn read_sidecar_sizes(dir: &Path) -> PaintSetSizes {
+    std::fs::read_to_string(paint_set_sizes_path(dir))
+        .ok()
+        .and_then(|text| parse_paint_set_sizes(&text))
+        .unwrap_or_default()
 }
 
-/// The `target_size.txt` body shape (`"{width}x{height}"`): only
-/// positive dims parse (a hand-edited file degrades to the model size —
-/// never a panic, never a zero-size target).
-fn parse_sidecar_size(text: &str) -> Option<(u32, u32)> {
-    let (width, height) = text.trim().split_once('x')?;
-    let width: u32 = width.trim().parse().ok()?;
-    let height: u32 = height.trim().parse().ok()?;
-    (width > 0 && height > 0).then_some((width, height))
-}
-
-/// One `channel/<set>/<channel>=<WxH>` override line into `into`.
-/// The reserved-separator rule is the app's: a set or channel name
-/// holding `/` cannot round-trip (the first `/` splits set from
-/// channel), and the sidecar PNG layout already nests channels as
-/// `<channel>/tile-<N>.png`, so `/` in a channel name never arrives.
-fn parse_channel_override(
-    into: &mut BTreeMap<(String, String), (u32, u32)>,
-    rest: &str,
-    right: &str,
-) {
-    let Some((set, channel)) = rest.split_once('/') else {
-        return;
-    };
-    if set.is_empty() || channel.is_empty() {
-        return;
+/// A paint-capable headless device: the paint compositor's read-write
+/// storage textures need `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`, which
+/// the bake device does not request (the app injects the same feature
+/// into eframe's device descriptor). An adapter without it is a typed
+/// error, never a panic at first splat.
+fn paint_context() -> Result<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::default();
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .map_err(|e| anyhow::anyhow!("no suitable GPU adapter: {e}"))?;
+    let needed = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    if !adapter.features().contains(needed) {
+        let name = adapter.get_info().name;
+        return Err(anyhow::anyhow!(
+            "adapter {name:?} lacks read-write storage textures (paint needs them)"
+        ));
     }
-    if let Some(size) = parse_sidecar_size(right) {
-        into.insert((set.to_string(), channel.to_string()), size);
-    }
-}
-
-/// Parses a `target_sizes.txt` body the way the app's loader does:
-/// `#` comments and malformed lines are skipped (never a panic), the
-/// `tile-<N>` prefix is reserved for assignments (skipped here — sizes
-/// only), and later lines win (BTreeMap insert order).
-fn parse_sidecar_sizes(text: &str) -> SidecarSizes {
-    let mut out = SidecarSizes::default();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((left, right)) = line.split_once('=') else {
-            continue;
-        };
-        let (left, right) = (left.trim(), right.trim());
-        if left
-            .strip_prefix("tile-")
-            .is_some_and(|n| n.parse::<u16>().is_ok())
-        {
-            continue;
-        }
-        if let Some(rest) = left.strip_prefix("channel/") {
-            parse_channel_override(&mut out.channels, rest, right);
-            continue;
-        }
-        if left.is_empty() || right.is_empty() {
-            continue;
-        }
-        if let Some(size) = parse_sidecar_size(right) {
-            out.sizes.insert(left.to_string(), size);
-        }
-    }
-    out
-}
-
-/// Reads the opened project's `paint/target_sizes.txt` when present.
-/// A missing or unreadable sidecar is an empty mapping (no per-set
-/// information — sizes fall back to the model), never an error.
-fn read_sidecar_sizes(dir: &Path) -> SidecarSizes {
-    match std::fs::read_to_string(dir.join("paint").join("target_sizes.txt")) {
-        Ok(text) => parse_sidecar_sizes(&text),
-        Err(_) => SidecarSizes::default(),
-    }
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: needed,
+        ..Default::default()
+    }))?;
+    Ok((device, queue))
 }
 
 /// The working set a freshly opened project starts on: the saved
@@ -602,7 +633,7 @@ fn layer_census_row(layer: &Layer) -> LayerCensus {
 fn texture_set_census(
     set: &TextureSet,
     stack: Option<&LayerStack>,
-    sizes: &SidecarSizes,
+    sizes: &PaintSetSizes,
 ) -> TextureSetCensus {
     let mut channels = Vec::with_capacity(set.channels.len());
     for channel in &set.channels {
@@ -637,6 +668,81 @@ fn texture_set_census(
 }
 
 impl ProjectSession {
+    /// The active set's live layer ids (the persistence `live` filter:
+    /// orphan planes never stage, masks prune against it).
+    fn live_ids(&self) -> std::collections::HashSet<u64> {
+        self.model
+            .layers
+            .iter()
+            .find(|e| e.texture_set == self.active)
+            .map(|e| e.stack.layers.iter().map(|layer| layer.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// The paint half, created on first use: a paint-capable device (see
+    /// [`paint_context`]) and a session on the active set, sized to the
+    /// set's `resolution` (the sidecar's own sizes win on a later load —
+    /// `load_paint_tiles_reported` resizes from `target_sizes.txt`).
+    fn paint_mut(&mut self) -> Result<&mut PaintState> {
+        if self.paint.is_none() {
+            let size = self
+                .model
+                .texture_sets
+                .iter()
+                .find(|ts| ts.name == self.active)
+                .map(|ts| ts.resolution)
+                .unwrap_or(umber_paint::paint_state::DEFAULT_TARGET_SIZE);
+            let (device, queue) = paint_context()?;
+            let mut paint = PaintState::with_target_size(device, queue, size)
+                .map_err(|e| anyhow::anyhow!("paint session: {e}"))?;
+            paint.set_active_set(&self.active);
+            self.paint = Some(paint);
+        }
+        self.paint
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("internal: paint session missing after creation"))
+    }
+
+    /// The composite rows for the active set (the shell's builder,
+    /// `umber_paint::snapshot`): no material states (the CLI evaluates no
+    /// materials, so their rows contribute nothing), Base visible, nothing
+    /// displayed (every composite happens on read, flush-first).
+    fn snapshot(&self) -> Result<CompositeSnapshot> {
+        let stack = self
+            .model
+            .layers
+            .iter()
+            .find(|e| e.texture_set == self.active)
+            .map(|e| &e.stack)
+            .ok_or_else(|| {
+                let active = &self.active;
+                anyhow::anyhow!("texture set {active:?} has no layers entry")
+            })?;
+        let states = umber_paint::material_layer::MaterialLayerStates::default();
+        Ok(build_composite_snapshot(stack, &states, true, Vec::new()))
+    }
+
+    /// The end-of-step composite (the app's end-of-update flush, one
+    /// step = one frame): builds the current snapshot, marks every owner
+    /// whose row changed since the last flush `Full` and retires removed
+    /// layers (the app's diff — `full_owners` / `removed`), then flushes.
+    /// No-op when the session never painted (nothing to composite).
+    fn flush_paint(&mut self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let Some(paint) = self.paint.as_mut() else {
+            return Ok(());
+        };
+        if let Some(prev) = self.prev_snapshot.as_ref() {
+            for owner in CompositeSnapshot::full_owners(prev, &snapshot) {
+                paint.mark_owner_full(owner);
+            }
+            paint.note_removed_layers(&CompositeSnapshot::removed(prev, &snapshot));
+        }
+        paint.flush_composite(&snapshot);
+        self.prev_snapshot = Some(snapshot);
+        Ok(())
+    }
+
     /// The census sequence number: the saved mark advanced by any
     /// journaled edits since (mirrors `Document::journal_seq` — the
     /// attached journal's last seq, never below the stamped mark).
@@ -817,6 +923,10 @@ impl Session {
             AgentStep::LayerSetMaterial(s) => self.layer_set_material(s),
             AgentStep::Undo(NoFields {}) => self.project_undo(),
             AgentStep::Redo(NoFields {}) => self.project_redo(),
+            AgentStep::PaintStroke(s) => self.paint_stroke(s),
+            AgentStep::PaintRead(s) => self.paint_read(s),
+            AgentStep::PaintUndo(NoFields {}) => self.paint_history(true),
+            AgentStep::PaintRedo(NoFields {}) => self.paint_history(false),
             AgentStep::Quit(NoFields {}) => unreachable!("quit is answered by Session::reply"),
         }
     }
@@ -840,16 +950,42 @@ impl Session {
                 None
             }
         };
-        let session = ProjectSession {
+        let mut session = ProjectSession {
             model,
             dir: s.dir,
             active,
             histories: BTreeMap::new(),
             journal,
+            paint: None,
+            prev_snapshot: None,
         };
+        // A project with a `paint/` sidecar restores its pixels now (the
+        // app's `open_project` sequence), so `paint_read` after open sees
+        // what was saved. No sidecar -> no GPU device is requested.
+        let mut painted = 0usize;
+        // Trigger on real pixels, not on the directory: a sizes-only
+        // `paint/` (target_sizes.txt, no PNGs) restores nothing, so it
+        // must not cost a GPU device (the census reads the sizes itself).
+        let has_paint = list_paint_tile_names(&paint_sidecar_dir(&session.dir))
+            .map(|names| !names.is_empty())
+            .unwrap_or(false);
+        if has_paint {
+            let live = session.live_ids();
+            let dir = session.dir.clone();
+            let paint = session.paint_mut()?;
+            paint.clear_layer_planes();
+            let report = load_paint_tiles_reported(paint, &dir, &live);
+            paint.prune_layer_masks(&live);
+            painted = report.restored;
+            // Seed the diff baseline with the opened stack (the app's
+            // first frame after open).
+            session.flush_paint()?;
+        }
         let census = session.census();
         self.project = Some(session);
-        fields(census)
+        let mut reply = fields(census)?;
+        reply.insert("painted".to_string(), Value::from(painted));
+        Ok(reply)
     }
 
     /// `project_state`: the session's project census. An empty session
@@ -886,7 +1022,24 @@ impl Session {
         let live = held.journal.as_ref().map(Journal::last_seq).unwrap_or(0);
         held.model.journal_seq = held.model.journal_seq.max(live);
         held.model.settings.active_texture_set = Some(held.active.clone());
+        // Paint first decides the format version (§6.3: v2 iff a live
+        // layer owns a plane) — the app's `save_project` order.
+        let live_ids = held.live_ids();
+        if let Some(paint) = held.paint.as_ref() {
+            held.model.version = paint_save_version(paint, &live_ids);
+        }
         umber_core::save_to_dir(&held.model, &s.dir).map_err(|e| anyhow::anyhow!("{e}"))?;
+        // The sidecar rides after the metadata commit (the directory now
+        // exists); the paint commit is atomic on its own. Dormancy is the
+        // GUI's (the CLI evaluates no fills/materials), so no layer is
+        // listed dormant: a reopen in the app re-derives from the header.
+        let painted = match held.paint.as_mut() {
+            Some(paint) => {
+                paint.prune_layer_masks(&live_ids);
+                save_paint_tiles(paint, &s.dir, &live_ids, &[])
+            }
+            None => 0,
+        };
         let journal_seq = held.model.journal_seq;
         let old_dir = held.dir.clone();
         if s.dir != old_dir {
@@ -904,7 +1057,7 @@ impl Session {
         held.dir = s.dir.clone();
         fields(serde_json::json!({
             "dir": s.dir,
-            "painted": 0,
+            "painted": painted,
             "journal_seq": journal_seq,
         }))
     }
@@ -1201,6 +1354,195 @@ impl Session {
             "journal_seq": journal_seq,
             "can_undo": can_undo,
             "can_redo": can_redo,
+        }))
+    }
+
+    /// `paint_stroke`: one stroke through the shared engine on the active
+    /// set (docs/specs/agent-paint-ops-design.md). The target is set
+    /// EXPLICITLY with the stack's verdict, so a Fill/Material/Folder/
+    /// Instance layer refuses typed (never silently paints Base); the
+    /// stroke runs, the queue drains, and the end-of-step flush
+    /// composites against the session's snapshot.
+    fn paint_stroke(&mut self, s: PaintStrokeStep) -> Result<Fields> {
+        if s.points.is_empty() {
+            return Err(anyhow::anyhow!(
+                "paint_stroke: points must hold at least one [u, v]"
+            ));
+        }
+        for (j, p) in s.points.iter().enumerate() {
+            if !p[0].is_finite() || !p[1].is_finite() {
+                return Err(anyhow::anyhow!("points[{j}]: {p:?} is not finite"));
+            }
+        }
+        if s.color
+            .iter()
+            .any(|c| !c.is_finite() || !(0.0..=1.0).contains(c))
+        {
+            let color = s.color;
+            return Err(anyhow::anyhow!(
+                "color {color:?}: each channel must be in 0..=1"
+            ));
+        }
+        if !s.radius_scale.is_finite() || s.radius_scale <= 0.0 {
+            let scale = s.radius_scale;
+            return Err(anyhow::anyhow!(
+                "radius_scale {scale} must be finite and > 0"
+            ));
+        }
+        let held = self.project_mut()?;
+        let (target, verdict, index) = {
+            let stack = active_stack(held)?;
+            match s.layer {
+                None => (PlaneOwner::Base, Ok(()), 0),
+                Some(id) => {
+                    if stack.layer(id).is_none() {
+                        return Err(anyhow::anyhow!("no layer {id} in the active set"));
+                    }
+                    let index = stack.index_of(id).unwrap_or(0);
+                    (PlaneOwner::Layer(id), stack.check_paintable(id), index)
+                }
+            }
+        };
+        // The first flush seeds the diff baseline before the stroke (so
+        // this stroke's dirt is the only thing the end-of-step flush
+        // composites on a fresh session).
+        if held.paint.is_none() {
+            held.paint_mut()?;
+            held.flush_paint()?;
+        }
+        let paint = held.paint_mut()?;
+        paint.sync_active_target(target, verdict, index);
+        paint.set_active_target(target);
+        // Straight color in, premultiplied brush color out (the brush
+        // param is premultiplied — `BrushParams::color`).
+        let [r, g, b, a] = s.color;
+        paint.set_brush_color([r * a, g * a, b * a, a]);
+        let first = s.points[0];
+        paint.begin_stroke_styled(emath::pos2(first[0], first[1]), 1.0, s.radius_scale);
+        if let Some(refusal) = paint.stroke_refusal() {
+            return Err(anyhow::anyhow!("{refusal}"));
+        }
+        for p in &s.points[1..] {
+            paint.extend_stroke_styled(emath::pos2(p[0], p[1]), 1.0, s.radius_scale);
+        }
+        paint.end_stroke();
+        paint
+            .process_pending()
+            .map_err(|e| anyhow::anyhow!("paint drain failed: {e:#}"))?;
+        let (can_undo, can_redo) = (paint.can_undo_stroke(), paint.can_redo_stroke());
+        held.flush_paint()?;
+        let tiles: std::collections::BTreeSet<u16> = s
+            .points
+            .iter()
+            .map(|p| umber_mesh::tile_of_uv(*p))
+            .collect();
+        fields(serde_json::json!({
+            "layer": s.layer,
+            "tiles": tiles,
+            "can_undo_stroke": can_undo,
+            "can_redo_stroke": can_redo,
+        }))
+    }
+
+    /// `paint_read`: samples texels from one plane or from the composite
+    /// (see [`PaintReadStep`]). Out-of-range texels are a typed error
+    /// naming the plane's size; a plane nothing ever wrote reads as
+    /// absent (`exists: false`, no texels) — never invented zeros.
+    fn paint_read(&mut self, s: PaintReadStep) -> Result<Fields> {
+        if s.texels.is_empty() || s.texels.len() > PAINT_READ_MAX_TEXELS {
+            let n = s.texels.len();
+            return Err(anyhow::anyhow!(
+                "paint_read: texels must hold 1..={PAINT_READ_MAX_TEXELS} [x, y] pairs (got {n})"
+            ));
+        }
+        let composite = s.composite.unwrap_or(s.layer.is_none());
+        if composite && s.layer.is_some() {
+            return Err(anyhow::anyhow!(
+                "paint_read: `composite: true` reads the whole stack — drop `layer`"
+            ));
+        }
+        let held = self.project_mut()?;
+        if let Some(id) = s.layer {
+            if active_stack(held)?.layer(id).is_none() {
+                return Err(anyhow::anyhow!("no layer {id} in the active set"));
+            }
+        }
+        held.paint_mut()?;
+        if composite {
+            // The read composites the stack as it stands NOW: a wire
+            // layer edit since the last step (opacity, order, removal)
+            // diffs into `Full` dirt here, never a stale cache.
+            held.flush_paint()?;
+        }
+        let paint = held.paint_mut()?;
+        let image = if composite {
+            paint.read_composite(s.tile, &s.channel)
+        } else {
+            let owner = s.layer.map_or(PlaneOwner::Base, PlaneOwner::Layer);
+            paint.read_plane(owner, s.tile, &s.channel)
+        };
+        let Some(image) = image else {
+            return fields(serde_json::json!({
+                "exists": false,
+                "tile": s.tile,
+                "channel": s.channel,
+            }));
+        };
+        let mut texels = Vec::with_capacity(s.texels.len());
+        for (j, [x, y]) in s.texels.iter().copied().enumerate() {
+            if x >= image.width || y >= image.height {
+                let (w, h) = (image.width, image.height);
+                return Err(anyhow::anyhow!(
+                    "texels[{j}]: ({x}, {y}) is outside the {w}x{h} plane"
+                ));
+            }
+            let i = (y as usize * image.width as usize + x as usize) * 4;
+            let px = image
+                .data
+                .get(i..i + 4)
+                .ok_or_else(|| anyhow::anyhow!("internal: short plane readback"))?;
+            texels.push([px[0], px[1], px[2], px[3]]);
+        }
+        fields(serde_json::json!({
+            "exists": true,
+            "composite": composite,
+            "tile": s.tile,
+            "channel": s.channel,
+            "width": image.width,
+            "height": image.height,
+            "texels": texels,
+        }))
+    }
+
+    /// `paint_undo` / `paint_redo` (`undo = true` / `false`): the paint
+    /// session's stroke history — separate from the model's `undo`/`redo`
+    /// (layer edits), exactly as in the app (two stacks; see the design
+    /// doc). A session that never painted has nothing to undo: `false`,
+    /// and no GPU device is requested.
+    fn paint_history(&mut self, undo: bool) -> Result<Fields> {
+        let key = if undo { "undone" } else { "redone" };
+        let held = self.project_mut()?;
+        let Some(paint) = held.paint.as_mut() else {
+            return fields(serde_json::json!({
+                (key): false,
+                "can_undo_stroke": false,
+                "can_redo_stroke": false,
+            }));
+        };
+        let moved = if undo {
+            paint.undo_stroke()
+        } else {
+            paint.redo_stroke()
+        };
+        paint
+            .process_pending()
+            .map_err(|e| anyhow::anyhow!("paint drain failed: {e:#}"))?;
+        let (can_undo, can_redo) = (paint.can_undo_stroke(), paint.can_redo_stroke());
+        held.flush_paint()?;
+        fields(serde_json::json!({
+            (key): moved,
+            "can_undo_stroke": can_undo,
+            "can_redo_stroke": can_redo,
         }))
     }
 
@@ -1846,6 +2188,8 @@ mod tests {
             active: "Body".to_string(),
             histories: BTreeMap::new(),
             journal: None,
+            paint: None,
+            prev_snapshot: None,
         });
         // A journaled edit, the way a future edit step records one:
         // through the undo journal, against the active set's stack.
