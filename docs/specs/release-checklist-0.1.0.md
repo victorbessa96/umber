@@ -72,7 +72,12 @@ the FBX leg proves the import, not a UV paint on it.]
         (`flatpak/` and `appimage/`: `packaging.yml` diffs them, so they
         must stay identical). Regenerate `Cargo.lock` on the build host
         (17 `version = ` lines change). The `examples/` workspace is
-        separate and unpublished, so it stays 0.1.0.
+        separate and unpublished, so it stays 0.1.0. In the Flatpak
+        manifest's git source, replace `"branch": "master"` with
+        `"tag": "v0.1.0-alpha.1"` + `"commit": "<the tagged sha>"`, as
+        flatpak/README.md says ("at ship time this pins to the release
+        tag"). The sha is known only after step 4, so this goes in the
+        step-6 follow-up commit.
      2. The wave gate on a clean clone, then push. CI green.
      3. `dist plan --tag v0.1.0-alpha.1` on the host must announce both
         packages, as in the dry run, each archive's `[misc]` now listing
