@@ -119,6 +119,9 @@ shell =
 
 texturesets =
     .set = Texture set
+    .resize-confirm = Resize { $set } from { $from } to { $to }? This clears the set's canvas and the stroke undo history.
+    .resize-apply = Resize
+    .resize-cancel = Cancel
     .size = Paint target size
     .resize-clears = Changing the selected set's size clears that set's canvas and the stroke undo history, and resets its quick mask. This is intentional.
     .inherit = Inherit document resolution

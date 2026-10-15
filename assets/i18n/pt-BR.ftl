@@ -123,6 +123,9 @@ shell =
 
 texturesets =
     .set = Conjunto de texturas
+    .resize-confirm = Redimensionar { $set } de { $from } para { $to }? Isso apaga a tela do conjunto e o histórico de desfazer dos traços.
+    .resize-apply = Redimensionar
+    .resize-cancel = Cancelar
     .size = Tamanho do alvo de pintura
     .resize-clears = Mudar o tamanho do conjunto selecionado limpa a tela dele e o histórico de traços, e redefine sua máscara rápida. Isso é intencional.
     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.

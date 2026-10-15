@@ -252,6 +252,8 @@ struct PanelViewer<'a> {
     base_visible: &'a mut bool,
     /// The layer thumbnails (g2-layer-thumbnails).
     thumbnails: &'a mut thumbnails::Thumbnails,
+    /// A texture-set resize waiting for its confirm.
+    pending_resize: &'a mut Option<PendingResize>,
     /// Fill layers blocked by the plane budget: layer id → badge line.
     fill_badges: &'a std::collections::HashMap<u64, String>,
     /// Import-created layers with refused publishes: layer id → line.
@@ -552,6 +554,7 @@ impl TabViewer for PanelViewer<'_> {
                     self.paint.as_deref_mut(),
                     self.mesh_import.session_set.name.as_str(),
                     &channels,
+                    self.pending_resize,
                 );
             }
             Panel::Bakes => {
@@ -665,6 +668,8 @@ pub struct AppState {
     pub base_visible: bool,
     /// Layer thumbnails, content-keyed (g2-layer-thumbnails).
     pub thumbnails: thumbnails::Thumbnails,
+    /// A texture-set resize armed by the size combo (confirm first).
+    pub pending_resize: Option<PendingResize>,
     /// Dormant fill/material layers (§6.3 [B2, M11]): their pre-v2 result
     /// lives in the Base paint, so they seed CLEAN and never re-evaluate
     /// until an explicit edit. Survives save/reopen via `# dormant <id>`
@@ -760,6 +765,8 @@ impl AppState {
     /// half-modal would be worse than none.
     pub fn reset_for_new(&mut self) {
         self.doc = document::Document::default();
+        // A resize armed against the old document must not fire on the new.
+        self.pending_resize = None;
         self.mesh_import = mesh_map_import::MeshMapImportState::default();
         self.psd_import = psd_import::PsdImportState::default();
         self.spp_import = spp_import::SppImportState::default();
@@ -1456,11 +1463,21 @@ impl ChannelSizeChoice {
 /// override and rebuilds at the set's size. The same intentional-clear
 /// contract as the set resize (that channel's canvas plus the session
 /// stroke-undo history) — the hint string below names it.
+/// A texture-set resize armed by the size combo, waiting for its confirm
+/// (the resize clears the set's canvas and stroke history).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingResize {
+    set: String,
+    from: (u32, u32),
+    to: u32,
+}
+
 fn texture_sets_panel_ui(
     ui: &mut Ui,
     paint: Option<&mut paint_state::PaintState>,
     session_set: &str,
     channels: &[String],
+    pending: &mut Option<PendingResize>,
 ) {
     let Some(paint) = paint else {
         ui.label(tr("texturesets.no-paint"));
@@ -1492,8 +1509,46 @@ fn texture_sets_panel_ui(
         ui.label(tr("texturesets.size"));
         size_presets::size_combo(ui, "", &mut size);
     });
+    // A resize clears the set's canvas and the stroke undo history (Painter
+    // B4 warns that a resolution change triggers long recomputation). The
+    // combo pick only ARMS it; the change runs on an explicit confirm, so
+    // one stray click never wipes a painted set (GUI plan rule 8:
+    // destructive = confirm). The confirm also arms when the set has no
+    // paint yet: the rule is the same everywhere, and the click is cheap.
     if (size, size) != (width, height) {
-        paint.resize_set(&active, size, size);
+        *pending = Some(PendingResize {
+            set: active.clone(),
+            from: (width, height),
+            to: size,
+        });
+    }
+    if let Some(p) = pending.clone() {
+        if p.set != active {
+            *pending = None;
+        } else {
+            ui.group(|ui| {
+                ui.label(
+                    egui::RichText::new(crate::i18n::tr_args(
+                        "texturesets.resize-confirm",
+                        [
+                            ("set", fluent::FluentValue::from(p.set.as_str())),
+                            ("from", fluent::FluentValue::from(p.from.0.to_string())),
+                            ("to", fluent::FluentValue::from(p.to.to_string())),
+                        ],
+                    ))
+                    .color(umber_gui::theme::palette::WARN),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button(tr("texturesets.resize-apply")).clicked() {
+                        paint.resize_set(&p.set, p.to, p.to);
+                        *pending = None;
+                    }
+                    if ui.button(tr("texturesets.resize-cancel")).clicked() {
+                        *pending = None;
+                    }
+                });
+            });
+        }
     }
     ui.label(tr("texturesets.resize-clears"));
     // Per-channel rows for the SELECTED set: the document's channels plus
@@ -2324,6 +2379,7 @@ impl eframe::App for UmberApp {
                 spp_import: &mut self.state.spp_import,
                 base_visible: &mut self.state.base_visible,
                 thumbnails: &mut self.state.thumbnails,
+                pending_resize: &mut self.state.pending_resize,
                 fill_badges: &self.state.fill_badges,
                 import_badges: &self.state.import_badges,
                 dormant: &self.state.dormant,
@@ -2851,8 +2907,18 @@ mod new_project_tests {
         state.dormant.insert(3);
         state.fill_badges.insert(3, "blocked".to_string());
         state.import_badges.insert(5, "refused".to_string());
+        state.pending_resize = Some(PendingResize {
+            set: "Old".to_string(),
+            from: (512, 512),
+            to: 4096,
+        });
 
         state.reset_for_new();
+
+        assert_eq!(
+            state.pending_resize, None,
+            "an armed resize must not fire on the new document"
+        );
 
         assert!(
             state.doc.stack.layers.is_empty(),
