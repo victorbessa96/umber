@@ -39,13 +39,11 @@ pub struct Document {
     /// the journal so a failed attach can't make the next save stamp a
     /// *lower* `journal_seq` (which would re-arm already-saved entries).
     journal_high_water: u64,
-    /// Whether the document has unsaved edits (the File > New / Open
-    /// confirm gate). Any `run` sets it; a successful save/open reset
-    /// clears it. Layer edits through `run` cover every document change
-    /// — paint strokes ride the autosave journal, not the stack, so
-    /// stroke-painted work is covered by the journal's existence check
-    /// (a journaled document is never clean by construction here; the
-    /// journal re-arms after each save).
+    /// Whether the document has unsaved edits (the quit / File > New /
+    /// Open confirm gates). Any `run` sets it, and so does every committed
+    /// paint stroke (`history_panel::apply_stroke_commits`: strokes never
+    /// pass through `run`, and a stroke-only session used to read clean).
+    /// A successful save/open reset clears it.
     pub dirty: bool,
 }
 

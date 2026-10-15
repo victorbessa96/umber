@@ -558,6 +558,12 @@ pub fn drain_stroke_commits(doc: &mut Document, paint: &mut PaintState) {
 /// commit pairs are pinned in `paint_state`'s.
 pub fn apply_stroke_commits(doc: &mut Document, epoch: u64, commits: Vec<StrokeCommit>) {
     doc.session_history.adopt_stroke_epoch(epoch);
+    // A committed stroke is an unsaved edit: the quit / New / Open confirm
+    // gates read `is_dirty`, and before this a stroke-only session read
+    // clean, so closing the window dropped the paint with no prompt.
+    if !commits.is_empty() {
+        doc.dirty = true;
+    }
     for commit in commits {
         doc.session_history.truncate_stroke_future(commit.cursor);
         doc.session_history.record_stroke(commit.depth);
@@ -705,6 +711,24 @@ pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, mut paint: Option<&mut 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_committed_stroke_makes_the_document_dirty() {
+        // The quit guard's input: a stroke-only session must not read clean.
+        let mut doc = Document::default();
+        assert!(!doc.is_dirty());
+        apply_stroke_commits(&mut doc, 0, Vec::new());
+        assert!(!doc.is_dirty(), "no commits, still clean");
+        apply_stroke_commits(
+            &mut doc,
+            0,
+            vec![StrokeCommit {
+                cursor: 0,
+                depth: 1,
+            }],
+        );
+        assert!(doc.is_dirty(), "a stroke is an unsaved edit");
+    }
 
     #[test]
     fn travel_target_puts_both_journals_at_the_row() {
