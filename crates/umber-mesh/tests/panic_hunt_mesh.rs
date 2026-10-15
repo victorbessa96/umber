@@ -912,28 +912,28 @@ fn usdc_flip(offset: usize) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "BUG: usdc faceVertexIndices out of range index points unchecked (usdc.rs:220, Newell closure)"]
+// FIXED 2026-10-15 (usdc topology pre-validation); was: BUG: usdc faceVertexIndices out of range index points unchecked (usdc.rs:220, Newell closure)
 fn bug_usdc_index_out_of_range_panics() {
     let d = Dir::new("bug-usdc-oob");
     expect_typed_err(&d, "a.usdc", &usdc_mesh("3", "0, 1, 99"));
 }
 
 #[test]
-#[ignore = "BUG: usdc negative faceVertexIndices overflow `as usize * 3` (usdc.rs:219, Newell closure)"]
+// FIXED 2026-10-15 (usdc topology pre-validation); was: BUG: usdc negative faceVertexIndices overflow `as usize * 3` (usdc.rs:219, Newell closure)
 fn bug_usdc_negative_index_panics() {
     let d = Dir::new("bug-usdc-neg");
     expect_typed_err(&d, "a.usdc", &usdc_mesh("3", "0, 1, -1"));
 }
 
 #[test]
-#[ignore = "BUG: usdc negative faceVertexCounts entry passes the sum check, then slices OOB (usdc.rs:239)"]
+// FIXED 2026-10-15 (usdc topology pre-validation); was: BUG: usdc negative faceVertexCounts entry passes the sum check, then slices OOB (usdc.rs:239)
 fn bug_usdc_negative_count_panics() {
     let d = Dir::new("bug-usdc-negcount");
     expect_typed_err(&d, "a.usdc", &usdc_mesh("5, -2", "0, 1, 2"));
 }
 
 #[test]
-#[ignore = "BUG: usda value recursion unbounded; 20k nested '[' aborts on stack overflow (usd.rs parse_value/parse_sequence)"]
+// FIXED 2026-10-15 (usd.rs MAX_NESTING); was: BUG: usda value recursion unbounded; 20k nested '[' aborts on stack overflow (usd.rs parse_value/parse_sequence)
 fn bug_usda_deep_nesting_overflows_stack() {
     let d = Dir::new("bug-usda-deep");
     let s = format!(
@@ -944,7 +944,7 @@ fn bug_usda_deep_nesting_overflows_stack() {
 }
 
 #[test]
-#[ignore = "BUG: usda prim recursion unbounded; 5k well-formed nested prims abort on stack overflow (usd.rs parse_prim)"]
+// FIXED 2026-10-15 (usd.rs MAX_NESTING); was: BUG: usda prim recursion unbounded; 5k well-formed nested prims abort on stack overflow (usd.rs parse_prim)
 fn bug_usda_deep_prims_overflow_stack() {
     let d = Dir::new("bug-usda-prims");
     // Well-formed nesting (no Mesh): depth alone is the trigger.
@@ -957,7 +957,7 @@ fn bug_usda_deep_prims_overflow_stack() {
 }
 
 #[test]
-#[ignore = "BUG: glTF accessor count 0 underflows `count - 1` (gltf 1.4.1 accessor/util.rs:384)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF accessor count 0 underflows `count - 1` (gltf 1.4.1 accessor/util.rs:384)
 fn bug_gltf_accessor_count_zero_panics() {
     let d = Dir::new("bug-gltf-c0");
     let json = GltfTri {
@@ -969,7 +969,7 @@ fn bug_gltf_accessor_count_zero_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF accessor count 2^62 overflows `stride * (count - 1)` (gltf 1.4.1 accessor/util.rs:384)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF accessor count 2^62 overflows `stride * (count - 1)` (gltf 1.4.1 accessor/util.rs:384)
 fn bug_gltf_accessor_huge_count_panics() {
     let d = Dir::new("bug-gltf-huge");
     let json = GltfTri {
@@ -981,7 +981,7 @@ fn bug_gltf_accessor_huge_count_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF byteStride below element size trips a debug_assert (gltf 1.4.1 accessor/util.rs:376)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF byteStride below element size trips a debug_assert (gltf 1.4.1 accessor/util.rs:376)
 fn bug_gltf_short_stride_panics() {
     let d = Dir::new("bug-gltf-stride");
     let json = GltfTri {
@@ -993,7 +993,7 @@ fn bug_gltf_short_stride_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF POSITION accessor not f32 VEC3 trips debug_assert_eq (gltf 1.4.1 accessor/util.rs:371)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF POSITION accessor not f32 VEC3 trips debug_assert_eq (gltf 1.4.1 accessor/util.rs:371)
 fn bug_gltf_position_wrong_type_panics() {
     let d = Dir::new("bug-gltf-postype");
     for (i, (pc, pt)) in [("5121", "SCALAR"), ("5126", "VEC2")]
@@ -1011,7 +1011,7 @@ fn bug_gltf_position_wrong_type_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF index componentType FLOAT/BYTE hits unreachable!() (gltf 1.4.1 mesh/mod.rs:396)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF index componentType FLOAT/BYTE hits unreachable!() (gltf 1.4.1 mesh/mod.rs:396)
 fn bug_gltf_index_float_component_panics() {
     let d = Dir::new("bug-gltf-idxtype");
     for (i, ic) in ["5126", "5120"].into_iter().enumerate() {
@@ -1025,7 +1025,7 @@ fn bug_gltf_index_float_component_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF TEXCOORD_0 on a u32 accessor hits unreachable!() (gltf 1.4.1 mesh/mod.rs:430)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF TEXCOORD_0 on a u32 accessor hits unreachable!() (gltf 1.4.1 mesh/mod.rs:430)
 fn bug_gltf_texcoord_u32_panics() {
     let d = Dir::new("bug-gltf-uvtype");
     let json = GltfTri {
@@ -1037,7 +1037,7 @@ fn bug_gltf_texcoord_u32_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF NORMAL on a u32 SCALAR accessor trips debug_assert_eq (gltf 1.4.1 accessor/util.rs:371)"]
+// FIXED 2026-10-15 (gltf validate_accessors); was: BUG: glTF NORMAL on a u32 SCALAR accessor trips debug_assert_eq (gltf 1.4.1 accessor/util.rs:371)
 fn bug_gltf_normal_wrong_type_panics() {
     let d = Dir::new("bug-gltf-nrmtype");
     let json = GltfTri {
@@ -1049,7 +1049,7 @@ fn bug_gltf_normal_wrong_type_panics() {
 }
 
 #[test]
-#[ignore = "BUG: glTF index u32::MAX plus a primitive base overflows `i + base` (gltf.rs:70)"]
+// FIXED 2026-10-15 (gltf checked index offset); was: BUG: glTF index u32::MAX plus a primitive base overflows `i + base` (gltf.rs:70)
 fn bug_gltf_index_plus_base_overflows() {
     let d = Dir::new("bug-gltf-base");
     let json = GltfTri {
@@ -1062,7 +1062,7 @@ fn bug_gltf_index_plus_base_overflows() {
 }
 
 #[test]
-#[ignore = "BUG: glTF indices never range-checked; index 7777 on 3 verts returns Ok (gltf.rs:70)"]
+// FIXED 2026-10-15 (gltf index range check); was: BUG: glTF indices never range-checked; index 7777 on 3 verts returns Ok (gltf.rs:70)
 fn bug_gltf_index_out_of_range_is_accepted() {
     // Not a panic in the importer: a dishonest Ok that defers the crash
     // to the first consumer indexing `positions[7777]`.
@@ -1076,7 +1076,7 @@ fn bug_gltf_index_out_of_range_is_accepted() {
 }
 
 #[test]
-#[ignore = "BUG: OBJ relative vt index past the start underflows, `vt * 2` overflows (tobj 4.0.5 lib.rs:852)"]
+// FIXED 2026-10-15 (load() panic boundary); was: BUG: OBJ relative vt index past the start underflows, `vt * 2` overflows (tobj 4.0.5 lib.rs:852)
 fn bug_obj_relative_texcoord_underflow_panics() {
     let d = Dir::new("bug-obj-vt");
     expect_typed_err(
@@ -1087,7 +1087,7 @@ fn bug_obj_relative_texcoord_underflow_panics() {
 }
 
 #[test]
-#[ignore = "BUG: OBJ relative vn index past the start underflows, `vn * 3` overflows (tobj 4.0.5 lib.rs:860)"]
+// FIXED 2026-10-15 (load() panic boundary); was: BUG: OBJ relative vn index past the start underflows, `vn * 3` overflows (tobj 4.0.5 lib.rs:860)
 fn bug_obj_relative_normal_underflow_panics() {
     let d = Dir::new("bug-obj-vn");
     expect_typed_err(
@@ -1098,7 +1098,7 @@ fn bug_obj_relative_normal_underflow_panics() {
 }
 
 #[test]
-#[ignore = "BUG: load_usdz opens the zip as a raw crate (usdc::read_file), so a VALID .usdz never loads (usdc.rs:41)"]
+// FIXED 2026-10-15 (load_usdz via usdz::Archive); was: BUG: load_usdz opens the zip as a raw crate (usdc::read_file), so a VALID .usdz never loads (usdc.rs:41)
 fn bug_usdz_valid_package_does_not_load() {
     let d = Dir::new("bug-usdz-valid");
     let p = d.write("a.usdz", &usdz_package(&usdc_bytes(USDC_TRI_TEXT)));
@@ -1107,7 +1107,7 @@ fn bug_usdz_valid_package_does_not_load() {
 }
 
 #[test]
-#[ignore = "BUG: glTF POSITION naming a missing accessor indexes root.accessors unchecked (gltf-json 1.4.1 mesh.rs:151)"]
+// FIXED 2026-10-15 (load() panic boundary); was: BUG: glTF POSITION naming a missing accessor indexes root.accessors unchecked (gltf-json 1.4.1 mesh.rs:151)
 fn bug_gltf_position_dangling_accessor_panics() {
     let d = Dir::new("bug-gltf-dangling");
     let json = GltfTri::default()
@@ -1128,7 +1128,7 @@ fn bug_usdc_huge_count_allocation_aborts() {
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 read_vec count*size overflows: capacity overflow panic (usdc/reader.rs ReadExt::read_vec)"]
+// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 read_vec count*size overflows: capacity overflow panic (usdc/reader.rs ReadExt::read_vec)
 fn bug_openusd_read_vec_capacity_overflow() {
     let d = Dir::new("bug-usdc-readvec");
     for off in [39, 75, 107] {
@@ -1137,7 +1137,7 @@ fn bug_openusd_read_vec_capacity_overflow() {
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 read_compressed estimated size overflows: capacity overflow panic (usdc/reader.rs read_compressed)"]
+// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 read_compressed estimated size overflows: capacity overflow panic (usdc/reader.rs read_compressed)
 fn bug_openusd_read_compressed_capacity_overflow() {
     let d = Dir::new("bug-usdc-readcomp");
     for off in [191, 392] {
@@ -1146,28 +1146,28 @@ fn bug_openusd_read_compressed_capacity_overflow() {
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 integer decoding slices &data[offset..] unchecked (usdc/coding.rs:52)"]
+// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 integer decoding slices &data[offset..] unchecked (usdc/coding.rs:52)
 fn bug_openusd_decode_ints_slice_oob() {
     let d = Dir::new("bug-usdc-coding52");
     expect_typed_err(&d, "a.usdc", &usdc_flip(351));
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 encoded_buffer_size `count * 2` overflows (usdc/coding.rs:22)"]
+// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 encoded_buffer_size `count * 2` overflows (usdc/coding.rs:22)
 fn bug_openusd_encoded_buffer_size_overflow() {
     let d = Dir::new("bug-usdc-coding22");
     expect_typed_err(&d, "a.usdc", &usdc_flip(358));
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 lz4 chunk count != 0 hits todo!() (usdc/reader.rs:1562)"]
+// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 lz4 chunk count != 0 hits todo!() (usdc/reader.rs:1562)
 fn bug_openusd_lz4_chunked_todo() {
     let d = Dir::new("bug-usdc-lz4");
     expect_typed_err(&d, "a.usdc", &usdc_flip(200));
 }
 
 #[test]
-#[ignore = "BUG: openusd 0.7.0 compressed-flag value trips debug_assert!(!is_compressed) (usdc/reader.rs:656)"]
+// CAUGHT 2026-10-15 by umber_mesh::load()'s panic boundary (the dependency bug itself is open upstream); was: BUG: openusd 0.7.0 compressed-flag value trips debug_assert!(!is_compressed) (usdc/reader.rs:656)
 fn bug_openusd_compressed_value_debug_assert() {
     let d = Dir::new("bug-usdc-656");
     expect_typed_err(&d, "a.usdc", &usdc_flip(408));

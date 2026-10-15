@@ -100,6 +100,10 @@ pub enum ImportError {
     /// Binary crate files (`.usdc`, or a `.usd` holding crate bytes).
     #[error("usd: usdc (binary) arrives when the pure-Rust reader stabilizes")]
     UsdBinary,
+    /// An importer panicked on this file and [`load`]'s boundary caught
+    /// it: the file is malformed in a way a dependency does not handle.
+    #[error("import failed on a malformed file ({0})")]
+    Panicked(String),
 }
 
 /// Detect the import format from a file extension.
@@ -141,15 +145,40 @@ pub enum Format {
 /// ([`load_fbx`]), `.usda`/`.usd` ([`load_usda`]), `.usdc`
 /// ([`usdc::load_usdc`]) and `.usdz` ([`usdc::load_usdz`]);
 /// anything else [`ImportError::Unsupported`].
+///
+/// # The panic boundary
+///
+/// The dispatch runs inside [`std::panic::catch_unwind`]: a panic in an
+/// importer DEPENDENCY on a crafted file (the 2026-10-14 panic hunt pinned
+/// gltf 1.4.1, tobj 4.0.5 and openusd 0.7.0 panics that umber-mesh cannot
+/// pre-validate away) becomes [`ImportError::Panicked`] instead of taking
+/// the app down on File → Open. It catches unwinding panics only: a stack
+/// overflow or an allocation-failure ABORT still kills the process, which
+/// is why the recursive parsers carry depth caps. Umber's OWN parse code
+/// validates before it indexes; this boundary is for code it does not own.
 pub fn load(path: &std::path::Path) -> Result<MeshData, ImportError> {
-    match detect_format(path)? {
+    let format = detect_format(path)?;
+    let dispatch = || match format {
         Format::Obj => load_obj(path),
         Format::Gltf => load_gltf(path),
         Format::Fbx => load_fbx(path),
         Format::Usd => load_usda(path),
         Format::Usdc => crate::usdc::load_usdc(path),
         Format::Usdz => crate::usdc::load_usdz(path),
-    }
+    };
+    // AssertUnwindSafe: the closure borrows only `path` and `format`
+    // (read-only), and a caught panic returns an error — no partially
+    // built state escapes.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(dispatch)).unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        Err(ImportError::Panicked(format!(
+            "{format:?} importer: {detail}"
+        )))
+    })
 }
 
 /// OBJ import via tobj (Wave 1 baseline; claw hardening in flight).

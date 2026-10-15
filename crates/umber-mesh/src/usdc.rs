@@ -12,9 +12,14 @@
 //! shared attribute layer is the named follow-up when a third USD
 //! format forces it.
 //!
-//! Error contract: `safe` mode (structural validation before decode)
-//! and every failure maps to `ImportError::Usd`/`UsdBinary`; a corrupt
-//! file never panics.
+//! Error contract: every failure Umber's own code can see maps to
+//! `ImportError::Usd`/`UsdBinary`; topology (counts, indices) is
+//! validated before any of it is used. NOT a never-panic guarantee:
+//! openusd 0.7.0's crate reader panics or aborts on some corrupt counts
+//! even in `safe` mode (allocation sized from unchecked counts, a
+//! `todo!()` on lz4 chunked data) — the 2026-10-14 panic hunt's findings
+//! #19-#24, pinned in `tests/panic_hunt_mesh.rs`. Those need an upstream
+//! fix or a process boundary; this module cannot catch an abort.
 
 use std::path::Path;
 
@@ -36,9 +41,18 @@ pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
 }
 
 /// Loads a `.usdz` (package) file: its first layer's first Mesh prim.
+///
+/// The package is a zip; its root layer is the first `.usdc`/`.usda`/
+/// `.usd` entry (the USDZ spec's rule), opened through
+/// `openusd::usdz::Archive`. This used to call `usdc::read_file` on the
+/// zip itself — which reads a bare crate — so no valid `.usdz` had ever
+/// loaded (panic-hunt finding #8, `bug_usdz_valid_package_does_not_load`).
 pub fn load_usdz(path: &Path) -> Result<MeshData, ImportError> {
-    let layer =
-        usdc::read_file(path).map_err(|e| ImportError::Usd(format!("usdz: open failed: {e}")))?;
+    let mut archive = openusd::usdz::Archive::open(path)
+        .map_err(|e| ImportError::Usd(format!("usdz: open failed: {e}")))?;
+    let layer = archive
+        .read_first_layer()
+        .map_err(|e| ImportError::Usd(format!("usdz: no readable root layer: {e}")))?;
     extract_first_mesh(layer.as_ref())
 }
 
@@ -158,6 +172,27 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
             )))
         }
     };
+    // Validate the topology ONCE, up front, before any closure indexes
+    // `points`: every count >= 3 (a negative count once passed the sum
+    // check and sliced out of bounds), every index in `0..point_count` (a
+    // negative or past-the-end index once crashed the Newell closure,
+    // which ran before the per-corner range check). After this block every
+    // index below is a valid point index — the panic-hunt findings #1-#3.
+    let point_count = points.len() / 3;
+    for (fi, &count) in counts.iter().enumerate() {
+        if count < 3 {
+            return Err(ImportError::Usd(format!(
+                "usd: {path}: face {fi} has {count} corners (< 3)"
+            )));
+        }
+    }
+    for (k, &vi) in indices.iter().enumerate() {
+        if vi < 0 || vi as usize >= point_count {
+            return Err(ImportError::Usd(format!(
+                "usd: {path}: faceVertexIndices[{k}] = {vi} out of range ({point_count} points)"
+            )));
+        }
+    }
     let total: i64 = counts.iter().map(|&c| c as i64).sum();
     if indices.len() as i64 != total {
         return Err(ImportError::Usd(format!(
@@ -230,12 +265,9 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
     };
 
     let mut corner: usize = 0;
-    for (fi, &count) in counts.iter().enumerate() {
-        if count < 3 {
-            return Err(ImportError::Usd(format!(
-                "usd: {path}: face {fi} has {count} corners (< 3)"
-            )));
-        }
+    for &count in &counts {
+        // Counts are >= 3 and sum to indices.len() (validated above), so
+        // this slice is in bounds.
         let face: Vec<i32> = indices[corner..corner + count as usize].to_vec();
         corner += count as usize;
         let flat = newell(&face);

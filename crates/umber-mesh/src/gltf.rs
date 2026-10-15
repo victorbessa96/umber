@@ -18,6 +18,7 @@ use super::{ImportError, MeshData};
 pub fn load_gltf(path: &Path) -> Result<MeshData, ImportError> {
     let (document, buffers, _) =
         gltf::import(path).map_err(|e| ImportError::Gltf(e.to_string()))?;
+    validate_accessors(&document)?;
     let mut data = MeshData::default();
     for mesh in document.meshes() {
         for primitive in mesh.primitives() {
@@ -28,6 +29,91 @@ pub fn load_gltf(path: &Path) -> Result<MeshData, ImportError> {
         return Err(ImportError::Gltf("no mesh geometry found".into()));
     }
     Ok(data)
+}
+
+/// Pre-validates every accessor a primitive will read, BEFORE the `gltf`
+/// crate's reader touches it. gltf 1.4.1 panics (or `debug_assert`s) on
+/// shapes a crafted file can declare — the panic hunt's findings #9-#15:
+/// `count: 0` underflows `count - 1`, a huge count overflows
+/// `stride * (count - 1)`, a short `byteStride` or a wrong component type
+/// / dimensions trips an assert, a float/signed index type or a u32
+/// TEXCOORD hits `unreachable!()`. Each shape is refused here with a
+/// typed error naming the accessor.
+fn validate_accessors(document: &gltf::Document) -> Result<(), ImportError> {
+    use gltf::accessor::{DataType, Dimensions};
+    use gltf::mesh::Semantic;
+    // A cap far past any real mesh (2^28 elements ≈ 268M) and far below
+    // where `stride * count` could overflow a usize.
+    const MAX_COUNT: usize = 1 << 28;
+    let check = |accessor: &gltf::Accessor<'_>, role: &str| -> Result<(), ImportError> {
+        let idx = accessor.index();
+        let count = accessor.count();
+        if count == 0 || count > MAX_COUNT {
+            return Err(ImportError::Gltf(format!(
+                "accessor {idx} ({role}): count {count} outside 1..={MAX_COUNT}"
+            )));
+        }
+        let elem = accessor.size();
+        if let Some(view) = accessor.view() {
+            if let Some(stride) = view.stride() {
+                if stride < elem {
+                    return Err(ImportError::Gltf(format!(
+                        "accessor {idx} ({role}): byteStride {stride} < element size {elem}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    };
+    let want = |accessor: &gltf::Accessor<'_>,
+                role: &str,
+                dims: &[Dimensions],
+                types: &[DataType]|
+     -> Result<(), ImportError> {
+        check(accessor, role)?;
+        if !dims.contains(&accessor.dimensions()) || !types.contains(&accessor.data_type()) {
+            return Err(ImportError::Gltf(format!(
+                "accessor {} ({role}): {:?} {:?} is not a valid {role} layout",
+                accessor.index(),
+                accessor.data_type(),
+                accessor.dimensions()
+            )));
+        }
+        Ok(())
+    };
+    for mesh in document.meshes() {
+        for primitive in mesh.primitives() {
+            for (semantic, accessor) in primitive.attributes() {
+                match semantic {
+                    Semantic::Positions => {
+                        want(&accessor, "POSITION", &[Dimensions::Vec3], &[DataType::F32])?
+                    }
+                    Semantic::Normals => {
+                        want(&accessor, "NORMAL", &[Dimensions::Vec3], &[DataType::F32])?
+                    }
+                    Semantic::TexCoords(_) => want(
+                        &accessor,
+                        "TEXCOORD",
+                        &[Dimensions::Vec2],
+                        &[DataType::F32, DataType::U8, DataType::U16],
+                    )?,
+                    // Attributes Umber never reads are still count/stride
+                    // checked: the reader is not called on them, but the
+                    // shape is cheap to refuse.
+                    _ => check(&accessor, "attribute")?,
+                }
+            }
+            if let Some(indices) = primitive.indices() {
+                want(
+                    &indices,
+                    "indices",
+                    &[Dimensions::Scalar],
+                    &[DataType::U8, DataType::U16, DataType::U32],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Append one glTF primitive to the accumulated [`MeshData`], offsetting its
@@ -48,8 +134,10 @@ fn append_primitive(
     if positions.is_empty() {
         return Ok(());
     }
-    let base = data.positions.len() as u32;
-    let vertex_count = positions.len() as u32;
+    let base = u32::try_from(data.positions.len())
+        .map_err(|_| ImportError::Gltf("more than u32::MAX vertices".into()))?;
+    let vertex_count = u32::try_from(positions.len())
+        .map_err(|_| ImportError::Gltf("primitive has more than u32::MAX vertices".into()))?;
     data.positions.extend(positions.iter().copied());
 
     match reader.read_normals() {
@@ -67,8 +155,29 @@ fn append_primitive(
     }
 
     match reader.read_indices() {
-        Some(indices) => data.indices.extend(indices.into_u32().map(|i| i + base)),
-        None => data.indices.extend(base..base + vertex_count),
+        Some(indices) => {
+            // Range-check against THIS primitive's vertex count, and offset
+            // with checked arithmetic: an index past the primitive was
+            // accepted and crashed the first consumer (finding #7), and
+            // `i + base` overflowed on a u32::MAX index (finding #6).
+            for i in indices.into_u32() {
+                if i >= vertex_count {
+                    return Err(ImportError::Gltf(format!(
+                        "index {i} out of range ({vertex_count} vertices in the primitive)"
+                    )));
+                }
+                let global = i.checked_add(base).ok_or_else(|| {
+                    ImportError::Gltf("vertex index overflows u32 across primitives".into())
+                })?;
+                data.indices.push(global);
+            }
+        }
+        None => {
+            let end = base.checked_add(vertex_count).ok_or_else(|| {
+                ImportError::Gltf("vertex count overflows u32 across primitives".into())
+            })?;
+            data.indices.extend(base..end);
+        }
     }
 
     if let Some(name) = primitive.material().name() {

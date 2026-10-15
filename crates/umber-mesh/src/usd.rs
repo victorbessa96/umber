@@ -79,6 +79,7 @@ fn parse_usda_bytes(bytes: &[u8]) -> Result<MeshData, ImportError> {
     let mut parser = Parser {
         tokens: lex(text)?.into_iter().peekable(),
         last_line: 1,
+        depth: 0,
     };
     let raw = parser
         .parse_layer()?
@@ -336,7 +337,18 @@ struct Parser {
     tokens: Peekable<std::vec::IntoIter<Token>>,
     /// Line of the most recently consumed token (the EOF error hint).
     last_line: usize,
+    /// Current nesting depth across the two recursive descents (nested
+    /// prims and nested value lists/tuples), bounded by [`MAX_NESTING`].
+    depth: usize,
 }
+
+/// The deepest prim / value nesting the parser descends into. Without a
+/// bound, a crafted file recursed until the stack overflowed — an ABORT,
+/// not a catchable panic (panic-hunt findings #4/#5: 20 000 nested `[`,
+/// 5 000 nested `def`; the overflow measured between 1k and 5k frames on
+/// an 8 MiB stack). 256 is far past any real scene's hierarchy depth and
+/// far below the overflow — MaterialX's `MAX_ELEM_DEPTH` is the same cap.
+const MAX_NESTING: usize = 256;
 
 impl Parser {
     fn peek_punct(&mut self, c: char) -> bool {
@@ -392,6 +404,24 @@ impl Parser {
                 ),
             )),
         }
+    }
+
+    /// Enters one nesting level, or refuses past [`MAX_NESTING`]. Paired
+    /// with [`Self::leave`]; an early `?` return skips the leave, which is
+    /// fine — the whole parse aborts with that error.
+    fn enter(&mut self, what: &str) -> Result<(), ImportError> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(usd_error(
+                self.last_line,
+                format!("{what} nested deeper than {MAX_NESTING} levels"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     /// Skip tokens up to the bracket closing one already consumed on
@@ -481,7 +511,9 @@ impl Parser {
         self.expect_punct('{', "to open the prim body")?;
         let capture = specifier == "def" && type_name.as_deref() == Some("Mesh") && found.is_none();
         let mut props = capture.then(Vec::new);
+        self.enter("prims")?;
         self.parse_body(&mut props, found)?;
+        self.leave();
         if let Some(props) = props {
             *found = Some(RawMesh { name, line, props });
         }
@@ -611,17 +643,20 @@ impl Parser {
     /// Comma-separated values up to `close` (the opener is already consumed);
     /// a trailing comma is allowed.
     fn parse_sequence(&mut self, close: char) -> Result<Vec<Value>, ImportError> {
+        self.enter("values")?;
         let mut items = Vec::new();
         loop {
             if self.eat_punct(close) {
-                return Ok(items);
+                break;
             }
             items.push(self.parse_value()?);
             if !self.eat_punct(',') {
                 self.expect_punct(close, "to close the list (or ',' between elements)")?;
-                return Ok(items);
+                break;
             }
         }
+        self.leave();
+        Ok(items)
     }
 
     /// Attribute metadata after its `(`: reads `interpolation` and
