@@ -28,6 +28,7 @@ pub struct StrokeEvent {
     pub contact: bool,
 }
 
+pub mod cavity;
 pub mod dab_adapter;
 pub mod falloff;
 pub mod id_mask;
@@ -40,9 +41,11 @@ pub mod preset_library;
 pub mod quick_mask;
 pub mod retouch;
 pub mod spacing;
+pub mod stroke_method;
 pub mod symmetry;
 pub mod wiring;
 
+pub use cavity::{CavityMask, CavityMaskError, CavityTarget};
 pub use dab_adapter::{opaque_linearize, wash_scale, BrushParams, DabAdapter, WashMode};
 pub use falloff::FalloffCurve;
 pub use id_mask::{select_id, SelectIdError};
@@ -60,6 +63,7 @@ pub use preset_library::{Library, LibraryEntry};
 pub use quick_mask::{MaskPaint, MaskView, QuickMask};
 pub use retouch::{BrushTool, CloneParams, EraseChannels, EraseParams, RgbaBuffer, SmudgeParams};
 pub use spacing::{DabPlan, SpacingAccumulator, SpacingError};
+pub use stroke_method::{MethodState, StrokeMethod, StrokeMethodError, AIRBRUSH_MAX_DABS_PER_PUSH};
 pub use symmetry::{MirrorAxis, MirrorSettings, RadialSettings, SymTransform, SymmetrySettings};
 pub use wiring::{ConditionerError, StrokeConditioner};
 
