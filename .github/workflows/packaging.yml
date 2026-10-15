@@ -83,9 +83,11 @@ jobs:
       - name: Stage the AppDir tree (see appimage/README.md)
         run: |
           set -eu
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/metainfo
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/metainfo AppDir/usr/share/licenses/umber
           cp target/release/umber AppDir/usr/bin/umber
-          cp LICENSE AppDir/usr/bin/LICENSE
+          # The licence + the embedded fonts' notices (OFL/UFL/MIT require them
+          # with every copy), in the standard licences dir.
+          cp LICENSE LICENSES/THIRD_PARTY_FONTS.txt THIRD_PARTY.md AppDir/usr/share/licenses/umber/
           cp appimage/org.umber.Umber.desktop AppDir/org.umber.Umber.desktop
           cp appimage/org.umber.Umber.desktop AppDir/usr/share/applications/org.umber.Umber.desktop
           cp appimage/umber.svg AppDir/umber.svg

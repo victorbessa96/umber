@@ -42,3 +42,18 @@ and not compiled in; when they land, their OFL texts join this file.)
 `dist plan` must list `THIRD_PARTY_FONTS.txt` and `THIRD_PARTY.md` under
 each archive's `[misc]`, as the dry run listed CHANGELOG, LICENSE and
 README.
+
+## The Linux packages too (locks `pkg-license-files`, `pkg-license-readme`)
+
+- **Flatpak** (`org.umber.Umber.json`) installed no licence file at all.
+  It now installs LICENSE + THIRD_PARTY_FONTS.txt + THIRD_PARTY.md to
+  `/app/share/licenses/org.umber.Umber/`. They come from the git source,
+  which is the repo root; the JSON is valid.
+- **AppImage** (`packaging.yml`) copied LICENSE to `AppDir/usr/bin/`, a
+  binaries dir. All three files now go to `usr/share/licenses/umber/`;
+  the YAML is valid.
+- Both READMEs describe the new layout.
+
+Verify: `packaging.yml` runs on the alpha tag. Its lint job
+(desktop-file + AppStream validation) does not check this; the real
+check is listing the built AppImage and the Flatpak build dir.

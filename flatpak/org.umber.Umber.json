@@ -53,7 +53,10 @@
                 "install -Dm755 target/release/umber /app/bin/umber",
                 "install -Dm644 org.umber.Umber.desktop /app/share/applications/org.umber.Umber.desktop",
                 "install -Dm644 org.umber.Umber.metainfo.xml /app/share/metainfo/org.umber.Umber.metainfo.xml",
-                "install -Dm644 org.umber.Umber.svg /app/share/icons/hicolor/scalable/apps/org.umber.Umber.svg"
+                "install -Dm644 org.umber.Umber.svg /app/share/icons/hicolor/scalable/apps/org.umber.Umber.svg",
+                "install -Dm644 LICENSE /app/share/licenses/org.umber.Umber/LICENSE",
+                "install -Dm644 LICENSES/THIRD_PARTY_FONTS.txt /app/share/licenses/org.umber.Umber/THIRD_PARTY_FONTS.txt",
+                "install -Dm644 THIRD_PARTY.md /app/share/licenses/org.umber.Umber/THIRD_PARTY.md"
             ]
         }
     ]

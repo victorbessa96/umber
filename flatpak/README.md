@@ -14,6 +14,7 @@ see below), not by this kill (no cargo / no downloads in the claw).
 | `org.umber.Umber.json` | flatpak-builder manifest (schema: app-id, runtime, sdk, command, finish-args, modules) |
 | `org.umber.Umber.desktop` | desktop entry, installed to `/app/share/applications/` |
 | `org.umber.Umber.metainfo.xml` | AppStream metadata, installed to `/app/share/metainfo/` |
+| `LICENSE`, `LICENSES/THIRD_PARTY_FONTS.txt`, `THIRD_PARTY.md` (repo root, from the git source) | installed to `/app/share/licenses/org.umber.Umber/`: the GPL text plus the embedded egui fonts' OFL/UFL/MIT notices, which must accompany every copy |
 | `org.umber.Umber.svg` | v1 icon composition (NOT a final logo — see below) |
 
 ## Judgment calls (v1 boundaries)
