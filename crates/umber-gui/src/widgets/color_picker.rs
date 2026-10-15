@@ -388,6 +388,68 @@ fn swatches(ui: &mut Ui, state: &mut ColorState) -> Response {
     .inner
 }
 
+/// The swatch-button form every colour field uses (C2-12): a swatch of
+/// `linear`; clicking it opens a [`ColorPicker`] popup below. The popup's
+/// [`ColorState`] lives in egui memory under the button's id while it is
+/// open, so the hue survives greys across frames and the "previous"
+/// swatch is the colour the popup OPENED with. Writes `linear` and
+/// reports `changed()` when the colour moved. The drop-in for
+/// `Ui::color_edit_button_rgb` (same linear-RGB contract).
+pub fn color_button(ui: &mut Ui, linear: &mut [f32; 3]) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(40.0, 18.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, 3.0, color32(linear.map(linear_to_srgb)));
+        ui.painter().rect_stroke(
+            rect,
+            3.0,
+            ui.visuals().widgets.inactive.bg_stroke,
+            StrokeKind::Inside,
+        );
+    }
+    let popup_id = response.id.with("color-popup");
+    let state_id = response.id.with("color-state");
+    let mut open: bool = ui.ctx().data(|d| d.get_temp(popup_id)).unwrap_or(false);
+    if response.clicked() {
+        open = !open;
+        if open {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(state_id, ColorState::new(*linear)));
+        }
+    }
+    if open {
+        let mut state: ColorState = ui
+            .ctx()
+            .data(|d| d.get_temp(state_id))
+            .unwrap_or_else(|| ColorState::new(*linear));
+        let area = egui::Area::new(popup_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + Vec2::new(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| ColorPicker::new(&mut state).size(150.0).show(ui))
+            });
+        let picked = area.inner.inner;
+        if picked.changed() {
+            *linear = state.linear();
+            response.mark_changed();
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
+        // A click outside both the swatch and the popup closes it.
+        let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
+            && !response.clicked()
+            && !area
+                .response
+                .rect
+                .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()));
+        if clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(popup_id, open));
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +566,61 @@ mod tests {
         state.set_sv(f32::NAN, f32::INFINITY);
         state.set_linear([f32::NAN; 3]);
         assert!(state.linear().iter().all(|c| c.is_finite()));
+    }
+
+    #[test]
+    fn the_color_button_opens_a_picker_and_writes_the_colour_back() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            color: [f32; 3],
+            changed: bool,
+            swatch: Rect,
+        }
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(400.0, 400.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let r = color_button(ui, &mut s.color);
+                    s.changed |= r.changed();
+                    s.swatch = r.rect;
+                },
+                S {
+                    color: [1.0, 0.0, 0.0],
+                    changed: false,
+                    swatch: Rect::NOTHING,
+                },
+            );
+        harness.run();
+        let swatch = harness.state().swatch;
+        let click = |h: &mut egui_kittest::Harness<'_, S>, pos: egui::Pos2| {
+            h.event(egui::Event::PointerMoved(pos));
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.run();
+            }
+        };
+        click(&mut harness, swatch.center());
+        // The popup is open: its hex field shows the opening colour.
+        assert!(
+            // A TextEdit exposes its value on more than one AccessKit node.
+            harness.query_all_by_value("#ff0000").next().is_some(),
+            "the picker opened on red"
+        );
+        // A click in the popup's SV square, low s / low v, writes back.
+        let sv = egui::Pos2::new(swatch.left() + 20.0, swatch.bottom() + 4.0 + 8.0 + 130.0);
+        click(&mut harness, sv);
+        let s = harness.state();
+        assert!(s.changed, "the button reports the change");
+        assert!(
+            s.color[0] < 0.5,
+            "the colour moved off full red: {:?}",
+            s.color
+        );
     }
 
     #[test]

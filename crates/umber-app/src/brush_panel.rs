@@ -484,7 +484,7 @@ impl BrushPanel {
                 preset.params.color[1],
                 preset.params.color[2],
             ];
-            if ui.color_edit_button_rgb(&mut rgb).changed() {
+            if umber_gui::widgets::color_picker::color_button(ui, &mut rgb).changed() {
                 preset.params.color[0] = rgb[0];
                 preset.params.color[1] = rgb[1];
                 preset.params.color[2] = rgb[2];
