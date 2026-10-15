@@ -765,6 +765,9 @@ pub struct BakesPanel {
     /// The newest tangent normal this panel wrote (a low or high bake):
     /// the Export dialog's normal source (C2-29), until a newer one lands.
     baked_normal: Option<PathBuf>,
+    /// The newest tile-1001 file per map (C2-10: a smart material's
+    /// mesh-map generators bind to these when applied).
+    latest: std::collections::BTreeMap<BakeSelection, PathBuf>,
 }
 
 /// The High-poly group's state (C2-29): the HIGH mesh a transfer bakes
@@ -865,6 +868,7 @@ impl BakesPanel {
             job: None,
             high: HighPoly::default(),
             baked_normal: None,
+            latest: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1670,6 +1674,26 @@ impl BakesPanel {
         self.baked_normal.as_deref()
     }
 
+    /// The newest tile-1001 file for a generator's `map_name` (C2-10):
+    /// `AO`, `curvature`, `thickness`, `position`, `normal`, `world_normal`,
+    /// `id`, `bent_normal`, `height` (case-insensitive). `None` = never
+    /// baked this session, or an unknown name.
+    pub fn latest_map(&self, map_name: &str) -> Option<&Path> {
+        let selection = match map_name.to_ascii_lowercase().as_str() {
+            "ao" | "ambient_occlusion" => BakeSelection::Ao,
+            "curvature" => BakeSelection::Curvature,
+            "thickness" => BakeSelection::Thickness,
+            "position" => BakeSelection::Position,
+            "normal" | "normal_base" => BakeSelection::Normal,
+            "world_normal" | "world_space_normal" => BakeSelection::WorldNormal,
+            "id" => BakeSelection::Id,
+            "bent_normal" => BakeSelection::BentNormal,
+            "height" => BakeSelection::Height,
+            _ => return None,
+        };
+        self.latest.get(&selection).map(PathBuf::as_path)
+    }
+
     /// The High-poly group's state (tests and the shell read it).
     pub fn high_poly(&self) -> &HighPoly {
         &self.high
@@ -1880,6 +1904,11 @@ impl BakesPanel {
                     .find(|r| r.selection == Some(BakeSelection::Normal) && r.tile == FIRST_TILE)
                 {
                     self.baked_normal = Some(normal.path.clone());
+                }
+                for r in records.iter().filter(|r| r.tile == FIRST_TILE) {
+                    if let Some(selection) = r.selection {
+                        self.latest.insert(selection, r.path.clone());
+                    }
                 }
                 self.last_records = records;
             }
@@ -2468,6 +2497,14 @@ mod tests {
             p.baked_normal(),
             Some(dir.join("Quad_normal_base.png").as_path())
         );
+        // ...and the generator lookup finds both by name (C2-10).
+        assert_eq!(
+            p.latest_map("height"),
+            Some(dir.join("Quad_height.png").as_path())
+        );
+        assert_eq!(p.latest_map("Normal"), p.baked_normal());
+        assert!(p.latest_map("AO").is_none(), "AO was not baked");
+        assert!(p.latest_map("nonsense").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

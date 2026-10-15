@@ -423,6 +423,28 @@ impl TabViewer for PanelViewer<'_> {
                     &badges,
                     &thumbs,
                 );
+                // Smart material generators (C2-10): each fill's mesh map is
+                // the Bakes panel's newest bake of it, snapshotted now.
+                if let Some((material, ids)) = &outcome.smart_applied {
+                    let missing =
+                        document::bind_smart_generators(self.doc, material, ids, |name| {
+                            let path = self.bakes.latest_map(name)?;
+                            match umber_export::png::read_png_rgba8(path) {
+                                Ok(image) => Some(image),
+                                Err(e) => {
+                                    log::warn!("smart material: {}: {e}", path.display());
+                                    None
+                                }
+                            }
+                        });
+                    if !missing.is_empty() {
+                        log::info!(
+                            "smart material '{}': bake {} in the Bakes panel, then apply again to bind them",
+                            material.name,
+                            missing.join(", ")
+                        );
+                    }
+                }
                 // Duplicate with content (C2-8): the document made the copy's
                 // settings; its pixels come from the source's planes.
                 if let Some((source, copy)) = outcome.duplicated {

@@ -83,6 +83,12 @@ colour, gradient or noise. Material layers are live node-graph materials,
 edited in the **Graph** panel. The collapsed **Material ▸ .umbersmart**
 section adds a whole smart-material stack in one click.
 
+**Smart materials** live in the Layers panel's `.umbersmart` shelf. Applying
+one stacks its layers; each fill driven by a mesh map (AO, curvature,
+position, ...) takes the newest bake of that map from the Bakes panel, so
+bake first. A map that was never baked leaves its fill plain (the log names
+it); bake it and apply again.
+
 **Several materials on one mesh** become texture sets, each with its own
 layer stack. The **Texture Sets** panel picks the active one, and the
 Layers panel (headed with the set's name), undo and History follow it.

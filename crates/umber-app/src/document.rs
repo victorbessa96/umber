@@ -408,6 +408,10 @@ pub struct LayersUiOutcome {
     /// `PaintState::copy_owner_planes(Layer(source), Layer(copy))` (the
     /// panel owns no paint session).
     pub duplicated: Option<(u64, u64)>,
+    /// A smart material the shelf just applied (C2-10): the template and
+    /// its new layer ids, so the shell can bind each fill's mesh-map
+    /// generator ([`bind_smart_generators`]) from the panel's bakes.
+    pub smart_applied: Option<(umber_core::smart::SmartMaterial, Vec<u64>)>,
 }
 
 /// Per-row badge state for [`layers_ui`] (stage 4): the shell owns these
@@ -642,10 +646,11 @@ pub fn layers_ui(
         .id_salt("smart-shelf")
         .default_open(false)
         .show(ui, |ui| {
-            if let Some(ids) = smart_shelf_ui(ui, doc) {
+            if let Some((material, ids)) = smart_shelf_ui(ui, doc) {
                 if let Some(top) = ids.last() {
                     outcome.select = Some(PlaneOwner::Layer(*top));
                 }
+                outcome.smart_applied = Some((material, ids));
             }
         });
     let mut remove_id = None;
@@ -975,12 +980,60 @@ pub fn apply_smart_material(
     ids
 }
 
+/// Binds a just-applied smart material's mesh-map generators (C2-10):
+/// each fill template whose generator is `mesh_map_generator` gets a
+/// `GraphImage` fill of `map(map_name)` (`(w, h, rgba8)`), recorded as an
+/// undoable `set_fill`. The image is a SNAPSHOT of the bake at apply time;
+/// re-applying after a rebake picks up the new one. Returns the map names
+/// that could not be resolved (never baked), for the status line; those
+/// fills keep their default solid source.
+pub fn bind_smart_generators(
+    doc: &mut Document,
+    material: &umber_core::smart::SmartMaterial,
+    ids: &[u64],
+    mut map: impl FnMut(&str) -> Option<(u32, u32, Vec<u8>)>,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if ids.len() != material.layers.len() {
+        return missing;
+    }
+    for (template, id) in material.layers.iter().zip(ids) {
+        let Some(generator) = &template.generator else {
+            continue;
+        };
+        if generator.node_def != "mesh_map_generator" || generator.map_name.is_empty() {
+            continue;
+        }
+        match map(&generator.map_name) {
+            Some((width, height, rgba)) => {
+                let params = umber_mesh::FillParams {
+                    source: umber_mesh::FillSource::GraphImage {
+                        width,
+                        height,
+                        rgba,
+                    },
+                    ..Default::default()
+                };
+                doc.run(LayerCommand::set_fill(*id, params));
+            }
+            None => {
+                if !missing.contains(&generator.map_name) {
+                    missing.push(generator.map_name.clone());
+                }
+            }
+        }
+    }
+    missing
+}
+
 /// The smart-material shelf (C2-10): one row per shipped `.umbersmart`
-/// with an Apply button that stacks its layers on the active set.
-/// Generator bindings are not wired yet: the template's layers arrive
-/// with their names, kinds, opacity, blend and masks, and the graph-side
-/// wiring of each fill's mesh-map generator is the named follow-up.
-pub fn smart_shelf_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<Vec<u64>> {
+/// with an Apply button that stacks its layers on the active set. The
+/// shell then binds each fill's mesh-map generator
+/// ([`bind_smart_generators`]) from the Bakes panel's newest maps.
+pub fn smart_shelf_ui(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+) -> Option<(umber_core::smart::SmartMaterial, Vec<u64>)> {
     // The directory scan is cheap, but it is still disk I/O: cache the
     // list in egui memory per frame-group, refreshed by the user.
     let cache_id = egui::Id::new("smart-shelf-cache");
@@ -1003,7 +1056,8 @@ pub fn smart_shelf_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<Vec<u64>>
                     .into_iter()
                     .find(|(n, _)| *n == name)
                 {
-                    applied = Some(apply_smart_material(doc, &material));
+                    let ids = apply_smart_material(doc, &material);
+                    applied = Some((material, ids));
                 }
             }
         });
@@ -1412,6 +1466,49 @@ mod tests {
         assert_eq!(names[0], "Top", "Bottom rose one place: {names:?}");
         assert_eq!(names[1], "Bottom");
         assert_eq!(harness.state().doc.history.len(), before + 2);
+    }
+
+    #[test]
+    fn smart_generators_bind_baked_maps_as_undoable_fill_snapshots() {
+        let list = list_smart_materials(&smart_dirs());
+        let (_, wood) = list.iter().find(|(n, _)| n == "Painted wood").unwrap();
+        let mut doc = Document::default();
+        let ids = apply_smart_material(&mut doc, wood);
+        let before = doc.history.len();
+        // Only AO is baked: "Wood grain" (AO) binds, "Paint coat"
+        // (position) is reported missing.
+        let missing = bind_smart_generators(&mut doc, wood, &ids, |name| {
+            (name == "AO").then(|| (2, 2, vec![77u8; 16]))
+        });
+        assert_eq!(missing, vec!["position".to_string()]);
+        let fill_of = |doc: &Document| {
+            doc.stack
+                .layers
+                .iter()
+                .find(|l| l.name == "Wood grain")
+                .and_then(|l| l.fill.clone())
+        };
+        match fill_of(&doc).map(|f| f.source) {
+            Some(umber_mesh::FillSource::GraphImage {
+                width: 2,
+                height: 2,
+                rgba,
+            }) => {
+                assert_eq!(rgba, vec![77u8; 16]);
+            }
+            other => panic!("grain fill is the AO snapshot: {other:?}"),
+        }
+        assert_eq!(doc.history.len(), before + 1, "one undoable set_fill");
+        assert!(doc.undo());
+        assert!(
+            !matches!(
+                fill_of(&doc).map(|f| f.source),
+                Some(umber_mesh::FillSource::GraphImage { .. })
+            ),
+            "undo restores the unbound fill"
+        );
+        // Mismatched ids bind nothing.
+        assert!(bind_smart_generators(&mut doc, wood, &ids[1..], |_| None).is_empty());
     }
 
     #[test]
