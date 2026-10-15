@@ -439,6 +439,7 @@ pub fn layers_ui(
     active: PlaneOwner,
     base_visible: bool,
     badges: &LayerRowBadges,
+    thumbs: &std::collections::HashMap<u64, egui::TextureHandle>,
 ) -> LayersUiOutcome {
     let mut outcome = LayersUiOutcome::default();
     ui.horizontal_wrapped(|ui| {
@@ -538,6 +539,24 @@ pub fn layers_ui(
                     .clicked()
                 {
                     doc.run(LayerCommand::set_visible(layer.id, !layer.visible));
+                }
+                // The content thumbnail (g2-layer-thumbnails; Painter B1):
+                // a fixed-size slot so rows align whether or not a layer
+                // has pixels yet.
+                let slot = egui::vec2(28.0, 28.0);
+                match thumbs.get(&layer.id) {
+                    Some(tex) => {
+                        ui.add(egui::Image::new((tex.id(), slot)).corner_radius(3));
+                    }
+                    None => {
+                        let (rect, _) = ui.allocate_exact_size(slot, egui::Sense::hover());
+                        ui.painter().rect_stroke(
+                            rect,
+                            3.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                 }
                 if layer.instance_of.is_some() {
                     if ui

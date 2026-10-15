@@ -1172,6 +1172,12 @@ pub struct PaintState {
     /// drop rows that describe evicted commands. Starts at 0, matching a
     /// fresh session-history log.
     stroke_epoch: u64,
+    /// Per-owner content revision (GUI plan g2-layer-thumbnails): bumped
+    /// on every write to any of an owner's planes, staged dabs or written
+    /// regions alike. A thumbnail cache keyed on it rebuilds a layer's
+    /// thumbnail only when that layer's pixels changed (photocraft's
+    /// content-keyed thumbnails, PC:#6).
+    owner_revision: BTreeMap<PlaneOwner, u64>,
     /// The symmetry settings (synced from the brush panel between
     /// strokes; the UV view's mirror manipulator edits the offset here).
     symmetry: SymmetrySettings,
@@ -1403,6 +1409,7 @@ impl PaintState {
             retouch_writes: PaintWrites::default(),
             pending_commits: Vec::new(),
             stroke_epoch: 0,
+            owner_revision: BTreeMap::new(),
             symmetry: SymmetrySettings::default(),
             line_constraint: LineConstraintMode::Off,
             projection: PaintProjection::default(),
@@ -2746,6 +2753,11 @@ impl PaintState {
     /// the stroke, undo and resize writes — a stroke followed by an
     /// in-place save round-trips the stroke, never the old file.)
     fn clear_committed(&mut self, owner: PlaneOwner, tile: u16, channel: &str) {
+        // Every pixel write to a plane (stroke stage, retouch region,
+        // undo/redo, fill / plane publish, resize) clears its committed
+        // record here, so this is the one choke point for the content
+        // revision too (g2-layer-thumbnails).
+        self.bump_revision(owner);
         self.plane_committed
             .remove(&(owner, tile, channel.to_string()));
         if let Some(plane) = self.planes.get_mut(&(owner, tile, channel.to_string())) {
@@ -3100,6 +3112,17 @@ impl PaintState {
         self.plane_hard_cap_bytes = bytes;
     }
 
+    /// `owner`'s content revision: changes whenever any of its planes was
+    /// written. Equal revisions mean equal pixels, so a thumbnail cache can
+    /// skip the readback. `0` = never written this session.
+    pub fn owner_revision(&self, owner: PlaneOwner) -> u64 {
+        self.owner_revision.get(&owner).copied().unwrap_or(0)
+    }
+
+    fn bump_revision(&mut self, owner: PlaneOwner) {
+        *self.owner_revision.entry(owner).or_default() += 1;
+    }
+
     /// The only PLANE accessor (§1.1, [B3]): `(owner, tile, channel)`'s
     /// texels as a CPU image. Drains the plane's queue first (the
     /// `read_target` precedent), then the blocking full-plane readback.
@@ -3214,6 +3237,8 @@ impl PaintState {
             .remove(&(owner, tile, channel.to_string()));
         self.cache_dirty
             .insert((tile, channel.to_string()), DirtyRegion::Full);
+        // Inlines `clear_committed`'s work, so it bumps the revision too.
+        self.bump_revision(owner);
         Ok(())
     }
 
@@ -5474,6 +5499,42 @@ mod tests {
         let b = local_texel(source, FIRST_TILE, 512.0);
         let off = clone_offset_texels(offset_uv, 512.0);
         assert_eq!([a[0] + off[0], a[1] + off[1]], b);
+    }
+
+    #[test]
+    fn owner_revision_moves_only_with_that_owners_pixels() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 16).expect("paint state builds");
+        let layer = PlaneOwner::Layer(7);
+        let base0 = s.owner_revision(PlaneOwner::Base);
+        assert_eq!(s.owner_revision(layer), 0, "never written");
+        // A plane publish to the layer moves the layer, not Base.
+        s.publish_plane(
+            layer,
+            FIRST_TILE,
+            BASE_COLOR_CHANNEL,
+            16,
+            16,
+            vec![255; 16 * 16 * 4],
+        )
+        .expect("publish");
+        let l1 = s.owner_revision(layer);
+        assert!(l1 > 0);
+        assert_eq!(s.owner_revision(PlaneOwner::Base), base0);
+        // A fill publish to Base moves Base, not the layer.
+        assert!(s.publish_fill(FIRST_TILE, 16, 16, vec![9; 16 * 16 * 4]));
+        assert!(s.owner_revision(PlaneOwner::Base) > base0);
+        assert_eq!(s.owner_revision(layer), l1);
+        // Reads move nothing.
+        let (b, l) = (s.owner_revision(PlaneOwner::Base), s.owner_revision(layer));
+        let _ = s.read_plane(layer, FIRST_TILE, BASE_COLOR_CHANNEL);
+        let _ = s.read_plane(PlaneOwner::Base, FIRST_TILE, BASE_COLOR_CHANNEL);
+        assert_eq!(
+            (s.owner_revision(PlaneOwner::Base), s.owner_revision(layer)),
+            (b, l)
+        );
     }
 
     #[test]

@@ -152,6 +152,7 @@ mod size_presets;
 mod spp_import;
 mod status_bar;
 mod stylus_input;
+mod thumbnails;
 mod tile_selection;
 mod toolbar;
 mod uv_view;
@@ -249,6 +250,8 @@ struct PanelViewer<'a> {
     /// The Base pseudo-row's composite visibility (stage 4's toggle):
     /// the Layers panel edits this; the end-of-update flush reads it.
     base_visible: &'a mut bool,
+    /// The layer thumbnails (g2-layer-thumbnails).
+    thumbnails: &'a mut thumbnails::Thumbnails,
     /// Fill layers blocked by the plane budget: layer id → badge line.
     fill_badges: &'a std::collections::HashMap<u64, String>,
     /// Import-created layers with refused publishes: layer id → line.
@@ -373,8 +376,34 @@ impl TabViewer for PanelViewer<'_> {
                     import_refusals: (*self.import_badges).clone(),
                     dormant: (*self.dormant).clone(),
                 };
-                let outcome =
-                    document::layers_ui(ui, self.doc, mats, active, *self.base_visible, &badges);
+                // Thumbnails first (they read the paint session), then the
+                // rows draw from the finished map. Rebuild-budgeted.
+                let mut thumbs = std::collections::HashMap::new();
+                if let Some(paint) = self.paint.as_deref_mut() {
+                    let live: Vec<u64> = self.doc.layers().iter().map(|l| l.id).collect();
+                    self.thumbnails.prune(&live);
+                    let mut budget = thumbnails::MAX_REBUILDS_PER_FRAME;
+                    for &id in &live {
+                        if let Some(t) = self.thumbnails.get(ui.ctx(), paint, id, &mut budget) {
+                            thumbs.insert(id, t);
+                        }
+                    }
+                    // Budget spent = possibly more stale thumbnails: come
+                    // back next frame. A budget left over means everything
+                    // is current, so an idle panel never spins frames.
+                    if budget == 0 {
+                        ui.ctx().request_repaint();
+                    }
+                }
+                let outcome = document::layers_ui(
+                    ui,
+                    self.doc,
+                    mats,
+                    active,
+                    *self.base_visible,
+                    &badges,
+                    &thumbs,
+                );
                 if let Some(target) = outcome.select {
                     if let Some(paint) = self.paint.as_deref_mut() {
                         paint.set_active_target(target);
@@ -634,6 +663,8 @@ pub struct AppState {
     /// every composite snapshot; shown whenever the stack is non-empty
     /// or Base holds planes.
     pub base_visible: bool,
+    /// Layer thumbnails, content-keyed (g2-layer-thumbnails).
+    pub thumbnails: thumbnails::Thumbnails,
     /// Dormant fill/material layers (§6.3 [B2, M11]): their pre-v2 result
     /// lives in the Base paint, so they seed CLEAN and never re-evaluate
     /// until an explicit edit. Survives save/reopen via `# dormant <id>`
@@ -2292,6 +2323,7 @@ impl eframe::App for UmberApp {
                 psd_import: &mut self.state.psd_import,
                 spp_import: &mut self.state.spp_import,
                 base_visible: &mut self.state.base_visible,
+                thumbnails: &mut self.state.thumbnails,
                 fill_badges: &self.state.fill_badges,
                 import_badges: &self.state.import_badges,
                 dormant: &self.state.dormant,
