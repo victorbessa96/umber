@@ -267,6 +267,7 @@ impl BrushPanel {
             channel_rows(ui, paint);
             quick_mask_rows(ui, paint);
             cavity_rows(ui, paint);
+            stamp_image_rows(ui, paint);
         }
         ui.separator();
         self.preset_selector(ui);
@@ -540,6 +541,11 @@ impl BrushPanel {
                 )
                 .changed();
         });
+
+        // Bitmap stamp + angle + jitter (C2-11): the preset says THAT it
+        // is stamped and how stamps turn and vary; the stamp image itself
+        // is session state (the Stamp image row).
+        changed |= stamp_rows(ui, &mut preset.params);
 
         // Falloff curve (absorbed from Blender's brush falloff presets):
         // the dab's radial profile, applied past the hardness core.
@@ -927,6 +933,136 @@ fn channel_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
                 }
             });
     });
+}
+
+/// The preset's stamp switch, angle mode and the jitter quartet (C2-11).
+/// Returns whether anything changed.
+fn stamp_rows(ui: &mut egui::Ui, params: &mut umber_brush::BrushParams) -> bool {
+    use umber_brush::StampAngle as A;
+    let mut changed = ui
+        .checkbox(&mut params.stamped, tr("brush.stamped"))
+        .changed();
+    if params.stamped {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(tr("brush.stamp-angle"));
+            let key = |a: &A| match a {
+                A::None => "brush.angle-none",
+                A::Fixed { .. } => "brush.angle-fixed",
+                A::FollowStroke { .. } => "brush.angle-follow",
+                A::Random => "brush.angle-random",
+            };
+            egui::ComboBox::from_id_salt("brush_stamp_angle")
+                .selected_text(tr(key(&params.stamp_angle)))
+                .show_ui(ui, |ui| {
+                    for mode in [
+                        A::None,
+                        A::Fixed { degrees: 0.0 },
+                        A::FollowStroke {
+                            offset_degrees: 0.0,
+                        },
+                        A::Random,
+                    ] {
+                        let same = std::mem::discriminant(&mode)
+                            == std::mem::discriminant(&params.stamp_angle);
+                        if ui.selectable_label(same, tr(key(&mode))).clicked() && !same {
+                            params.stamp_angle = mode;
+                            changed = true;
+                        }
+                    }
+                });
+        });
+        match &mut params.stamp_angle {
+            A::Fixed { degrees } => {
+                changed |= value_row(
+                    ui,
+                    &tr("brush.angle-degrees"),
+                    ValueField::new(degrees)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .range(-180.0..=180.0)
+                        .unit("°"),
+                )
+                .changed();
+            }
+            A::FollowStroke { offset_degrees } => {
+                changed |= value_row(
+                    ui,
+                    &tr("brush.angle-offset"),
+                    ValueField::new(offset_degrees)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .range(-180.0..=180.0)
+                        .unit("°"),
+                )
+                .changed();
+            }
+            A::None | A::Random => {}
+        }
+    }
+    let j = &mut params.jitter;
+    for (key, value, max, suffix) in [
+        ("brush.jitter-size", &mut j.size, 1.0, ""),
+        ("brush.jitter-angle", &mut j.angle_degrees, 180.0, "°"),
+        ("brush.jitter-position", &mut j.position, 2.0, ""),
+        ("brush.jitter-flow", &mut j.flow, 1.0, ""),
+    ] {
+        changed |= value_row(
+            ui,
+            &tr(key),
+            ValueField::new(value)
+                .context_menu(crate::i18n::prop_menu_labels())
+                .range(0.0..=max)
+                .default_value(0.0)
+                .unit(suffix),
+        )
+        .changed();
+    }
+    changed
+}
+
+/// The session's stamp image (C2-11): load a PNG (its luminance becomes
+/// the R8 coverage, alpha-weighted) or clear back to the full square.
+fn stamp_image_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
+    let title = tr("brush.stamp-image");
+    ParamGroup::new("brush-stamp", title.as_str()).show(ui, |group| {
+        let ui: &mut egui::Ui = &mut *group.ui;
+        let (w, h) = paint.stamp_size();
+        ui.horizontal_wrapped(|ui| {
+            if (w, h) == (1, 1) {
+                ui.weak(tr("brush.stamp-none"));
+            } else {
+                ui.weak(format!("{w} × {h}"));
+            }
+            if ui.button(tr("button.choose")).clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG", &["png"])
+                    .pick_file()
+                {
+                    match umber_export::png::read_png_rgba8(&path) {
+                        Ok((w, h, rgba)) => {
+                            if let Err(e) = paint.set_stamp(w, h, &stamp_coverage(&rgba)) {
+                                log::warn!("stamp {} refused: {e}", path.display());
+                            }
+                        }
+                        Err(e) => log::warn!("stamp {} unreadable: {e}", path.display()),
+                    }
+                }
+            }
+            if (w, h) != (1, 1) && ui.button(tr("button.reset")).clicked() {
+                paint.clear_stamp();
+            }
+        });
+    });
+}
+
+/// An RGBA8 image as stamp coverage: Rec. 709 luma times alpha, so a white
+/// shape on transparency and a white shape on black both stamp the shape.
+pub(crate) fn stamp_coverage(rgba: &[u8]) -> Vec<u8> {
+    rgba.chunks_exact(4)
+        .map(|px| {
+            let luma =
+                0.2126 * f32::from(px[0]) + 0.7152 * f32::from(px[1]) + 0.0722 * f32::from(px[2]);
+            (luma * f32::from(px[3]) / 255.0).round().clamp(0.0, 255.0) as u8
+        })
+        .collect()
 }
 
 fn cavity_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
@@ -1744,6 +1880,38 @@ fn falloff_key(curve: umber_brush::FalloffCurve) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stamp_coverage_is_luma_times_alpha() {
+        let rgba = [
+            255, 255, 255, 255, // white opaque -> 255
+            255, 255, 255, 0, // white transparent -> 0
+            0, 0, 0, 255, // black opaque -> 0
+            255, 255, 255, 128, // white half -> 128
+        ];
+        assert_eq!(stamp_coverage(&rgba), vec![255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn the_stamp_rows_write_the_preset_params() {
+        // kittest: the Stamped checkbox, then a jitter field, reach the
+        // params the session syncs from.
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, p: &mut umber_brush::BrushParams| {
+                stamp_rows(ui, p);
+            },
+            umber_brush::BrushParams::default(),
+        );
+        harness.run();
+        assert!(!harness.state().stamped);
+        harness.get_by_label(&tr("brush.stamped")).click();
+        harness.run();
+        assert!(harness.state().stamped, "the checkbox stamps the preset");
+        // Once stamped, the angle combo shows (it was hidden before).
+        assert!(harness.query_by_label(&tr("brush.stamp-angle")).is_some());
+    }
 
     /// kittest (C2-28): the Channel combo drives the paint session's
     /// active channel. Open the combo, pick "Roughness", and the session
