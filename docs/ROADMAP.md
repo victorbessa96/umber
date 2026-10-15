@@ -14,7 +14,7 @@ inventory), exceeded where [04] (next-gen bar) points.
 ---
 
 
-> **2026-10-15: the C2 gap audit** (`docs/loop/audit-2026-10-15-c2.md`) is the active worklist. Its headline: a painter cannot yet finish a real PBR asset in the GUI (painting reaches Base Color only, export writes Base Color only from paint, no quit guard or pixel autosave, two undo timelines, one layer stack per document). Its Tier 1-2 rows outrank the remaining GUI polish.
+> **2026-10-15: the C2 gap audit** (`docs/loop/audit-2026-10-15-c2.md`) is the active worklist. Its headline at audit time was that a painter could not finish a real PBR asset in the GUI (paint reached Base Color only, export wrote Base Color only from paint, no quit guard or pixel autosave, two undo timelines, one layer stack per document). **All five closed the same day** (waves W-C2a..f, every CI green): every channel paints and exports (C2-5/6), a quit guard and silent Ctrl+S (C2-1/4), pixel autosave + recovery (C2-3), one undo timeline with row travel (C2-7), a stack + undo + channel list per texture set (C2-9). Open from the audit: the release decisions (C2-16, 22, 23-25, 30) and per-set masked bakes (`docs/specs/per-set-masked-bakes.md`).
 ## Where we stand (2026-10-15)
 
 The core loop is Gate-0-proven end to end: mesh → 4K pressured paint →
@@ -125,7 +125,7 @@ the already-have list and the declines is
 |---|---|---|
 | wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | ✓ LANDED end to end (engine `3818da0`; CLI `bca634f` + agent step `c237e4f`; Bakes panel `741ec47`) |
 | wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading — ✓ landed `d0309e1` + panel combo `9a47fa0` |
-| wave-brush-dynamics-angle-jitter | per-dab jitter (+ angle once stamps exist) | size, opacity and position jitter per dab (`BrushParams` has none; surface = `dab_adapter.rs`, seeded per stroke so replays are deterministic). **Angle / rake / random rotation is blocked:** the paint shader stamps a radially symmetric disc (no stamp texture binding in `PAINT_COMPUTE_SHADER`), so rotation is invisible until bitmap alpha stamps land — verified 2026-10-14 |
+| wave-brush-dynamics-angle-jitter | per-dab jitter + angle | ✓ LANDED with bitmap stamps (C2-11): stamp texture in the dab shader `47d8fed`, stamped brushes + `StampAngle` (fixed / follow-stroke / random) `487fd49`, size/opacity/position jitter `90ec048`, the Brush panel rows + stamp picker. The earlier "angle is blocked" note (no stamp binding in `PAINT_COMPUTE_SHADER`) was what C2-11 removed |
 | wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) — ✓ landed `cabe283` + panel control `9a47fa0` |
 | wave-stroke-methods | the missing stroke idioms | ✓ LANDED end to end (engine `ee2dce5`; wiring, picker and `.umberbrush` persistence `51d9047`) |
 | wave-stencil | paint-through screen stencil | an image overlay you move/scale/rotate and paint through — the logo/decal workflow |
