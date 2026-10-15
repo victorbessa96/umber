@@ -190,6 +190,16 @@ pub struct Viewport {
     /// hardness at its start and the pointer origin (GUI plan G1
     /// g1-brush-resize). The ring stays at the origin while it runs.
     resize: Option<ResizeDrag>,
+    /// The in-flight paint stroke was begun by THIS viewport (so the
+    /// viewport ends it on release, and never ends a UV-view stroke).
+    stroke_from_viewport: bool,
+    /// A gizmo tip took this frame's click (the straight line, the
+    /// eyedropper and the ID-mask must not also act on it).
+    gizmo_clicked: bool,
+    /// Where the last viewport stroke ended, in SCREEN space (Painter's
+    /// straight line is screen-space too, with the same caveat: move the
+    /// camera and the anchor no longer sits on the old stroke end).
+    last_stroke_end: Option<egui::Pos2>,
 }
 
 impl Viewport {
@@ -295,13 +305,40 @@ impl Viewport {
             return None;
         }
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        self.gizmo_clicked = false;
+
+        // The axis gizmo (GUI plan G1): a primary click on a tip snaps the
+        // view down that axis (again: the opposite side). It takes the
+        // click before painting, the straight line or the strip tools.
+        let gizmo_tips = crate::axis_gizmo::project_axes(
+            self.camera.yaw,
+            self.camera.pitch,
+            crate::axis_gizmo::RADIUS,
+        );
+        let gizmo_centre = crate::axis_gizmo::centre(rect);
+        let gizmo_hover = response
+            .hover_pos()
+            .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre));
+        if self.mesh.is_some() && response.clicked_by(PointerButton::Primary) {
+            if let Some(axis) = response
+                .interact_pointer_pos()
+                .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre))
+            {
+                let target =
+                    crate::axis_gizmo::click_target(axis, self.camera.yaw, self.camera.pitch);
+                let (yaw, pitch) = crate::axis_gizmo::snap_angles(target, self.camera.yaw);
+                self.camera.yaw = yaw;
+                self.camera.pitch = pitch;
+                self.gizmo_clicked = true;
+            }
+        }
 
         // The eyedropper (C1 worklist #10): when armed, a PRIMARY CLICK (not
         // a drag — a stray orbit still works) samples the paint target's
         // texel at the picked UV. Returns the sRGBA sample for the shell to
         // feed the brush; painting is disabled while the eyedropper is the
         // active tool (it never strokes).
-        if self.pick_armed && response.clicked_by(PointerButton::Primary) {
+        if self.pick_armed && !self.gizmo_clicked && response.clicked_by(PointerButton::Primary) {
             if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
@@ -338,7 +375,7 @@ impl Viewport {
         // mesh UV. The shell bakes the region IDs and selects through the
         // paint session; painting is disabled while armed (it never
         // strokes). A miss falls through to orbit, like the eyedropper.
-        if self.idmask_armed && response.clicked_by(PointerButton::Primary) {
+        if self.idmask_armed && !self.gizmo_clicked && response.clicked_by(PointerButton::Primary) {
             if let (Some(mesh), Some(_)) = (self.mesh_data.as_ref(), paint.as_ref()) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
@@ -372,6 +409,34 @@ impl Viewport {
             _ => self.resize = None,
         }
 
+        // Straight line (Painter C1): Shift held previews a dotted line from
+        // the last stroke's end to the pointer (drawn in `paint_line_preview`);
+        // Shift+click paints it as one stroke, Ctrl+Shift snaps the angle to
+        // 5° steps. Clicks only: a Shift+drag stays a pan under the classic
+        // preset.
+        if let (Some(from), Some(mesh), Some(p)) = (
+            self.last_stroke_end,
+            self.mesh_data.as_ref(),
+            paint.as_mut(),
+        ) {
+            let mods = ui.input(|i| i.modifiers);
+            if mods.shift
+                && !mods.alt
+                && !self.pick_armed
+                && !self.idmask_armed
+                && !p.is_stroking()
+                && !self.gizmo_clicked
+                && p.projection().viewport_paints()
+                && response.clicked_by(PointerButton::Primary)
+            {
+                if let Some(to) = response.interact_pointer_pos() {
+                    let to = straight_line_end(from, to, mods.ctrl || mods.command);
+                    self.paint_screen_line(rect, mesh, p, from, to);
+                    self.last_stroke_end = Some(to);
+                }
+            }
+        }
+
         let painting = !self.pick_armed
             && !self.idmask_armed
             && ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
@@ -380,6 +445,21 @@ impl Viewport {
             && paint
                 .as_ref()
                 .is_some_and(|p| p.projection().viewport_paints());
+        // A viewport stroke ENDS when the paint drag does (button up, the
+        // modifier released, or a tool arm). Before 2026-10-15 nothing here
+        // ended it: `is_stroking()` stayed true after release, so every
+        // later Ctrl+drag EXTENDED the previous stroke (one session-long
+        // stroke, one undo step, and History never got a row — recording
+        // happens in `end_stroke`). The UV view always ended its strokes;
+        // the viewport now matches it.
+        if let Some(p) = paint.as_mut() {
+            if ends_viewport_stroke(painting, p.is_stroking(), self.stroke_from_viewport) {
+                p.end_stroke();
+            }
+        }
+        if !painting {
+            self.stroke_from_viewport = false;
+        }
         if !painting {
             self.handle_input(ui, &response);
         } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
@@ -444,6 +524,12 @@ impl Viewport {
                     paint.begin_screen_point_pressured(hit, pressure);
                 } else {
                     paint.extend_screen_point_pressured(hit, pressure);
+                }
+                // Mark ownership only once a stroke actually began (a drag
+                // that opened on a miss starts nothing until it hits).
+                self.stroke_from_viewport = paint.is_stroking();
+                if hit.is_some() {
+                    self.last_stroke_end = Some(pos);
                 }
             }
         }
@@ -540,6 +626,15 @@ impl Viewport {
         }
         // The brush cursor (GUI plan G1): the ring at the brush's on-screen
         // radius, over everything above. Drawn last so no overlay hides it.
+        self.paint_line_preview(ui, &response, rect);
+        if self.mesh.is_some() {
+            crate::axis_gizmo::paint(
+                &ui.painter().with_clip_rect(rect),
+                gizmo_centre,
+                &gizmo_tips,
+                gizmo_hover,
+            );
+        }
         self.paint_brush_cursor(ui, &response, rect, paint.as_deref());
         // No strip-tool click this frame: the signature is Option so the
         // shell reads one click per primary press, `None` every other frame.
@@ -551,6 +646,59 @@ impl Viewport {
     /// with a two-ray probe and draw the ring; the OS cursor hides while
     /// the ring shows. Off the mesh, with the eyedropper / ID-mask armed,
     /// or while orbiting (a drag without the paint modifier), nothing.
+    /// Paints a screen-space segment as ONE stroke: samples every
+    /// `LINE_STEP_PX` along `from -> to`, each through the real pick. Samples
+    /// that miss the mesh are skipped, but the stroke keeps going, the same
+    /// rule a drag across a silhouette follows.
+    fn paint_screen_line(
+        &self,
+        rect: egui::Rect,
+        mesh: &umber_mesh::MeshData,
+        paint: &mut crate::paint_state::PaintState,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) {
+        let samples = line_samples(from, to, LINE_STEP_PX);
+        for at in samples {
+            let hit = self
+                .pick(rect, mesh, at)
+                .map(|(uv, w)| (egui::Pos2::new(uv[0], uv[1]), w));
+            let Some((uv, weight)) = hit else {
+                continue;
+            };
+            if paint.is_stroking() {
+                paint.extend_screen_point_pressured(Some(uv), weight);
+            } else {
+                paint.begin_screen_point_pressured(Some(uv), weight);
+            }
+        }
+        if paint.is_stroking() {
+            paint.end_stroke();
+        }
+    }
+
+    /// The dotted straight-line preview while Shift is held between strokes.
+    fn paint_line_preview(&self, ui: &Ui, response: &Response, rect: egui::Rect) {
+        let Some(from) = self.last_stroke_end else {
+            return;
+        };
+        let mods = ui.input(|i| i.modifiers);
+        if !mods.shift || mods.alt || self.pick_armed || self.idmask_armed {
+            return;
+        }
+        let Some(pos) = response.hover_pos() else {
+            return;
+        };
+        let to = straight_line_end(from, pos, mods.ctrl || mods.command);
+        let painter = ui.painter().with_clip_rect(rect);
+        for (stroke, dash) in [
+            (egui::Stroke::new(3.0, Color32::from_black_alpha(150)), 6.0),
+            (egui::Stroke::new(1.0, Color32::from_white_alpha(230)), 6.0),
+        ] {
+            painter.extend(egui::Shape::dashed_line(&[from, to], stroke, dash, 4.0));
+        }
+    }
+
     fn paint_brush_cursor(
         &self,
         ui: &Ui,
@@ -769,6 +917,47 @@ impl Viewport {
     }
 }
 
+/// Screen distance between straight-line samples, px. Below the smallest
+/// brush the cursor draws (`MIN_RING_PX`), so the conditioner's own spacing
+/// decides the dab density, not this.
+const LINE_STEP_PX: f32 = 2.0;
+
+/// The straight line's end: the pointer, or (with `snap`) the pointer
+/// projected onto the nearest 5° direction from `from` (Painter's
+/// Ctrl+Shift).
+fn straight_line_end(from: egui::Pos2, to: egui::Pos2, snap: bool) -> egui::Pos2 {
+    if !snap {
+        return to;
+    }
+    let d = to - from;
+    let len = d.length();
+    if len <= f32::EPSILON {
+        return to;
+    }
+    let step = 5f32.to_radians();
+    let angle = (d.y.atan2(d.x) / step).round() * step;
+    // Project onto the snapped ray (keeps the pointer's distance along it).
+    let dir = egui::vec2(angle.cos(), angle.sin());
+    from + dir * d.dot(dir)
+}
+
+/// Sample points from `from` to `to` inclusive, at most `step` px apart.
+fn line_samples(from: egui::Pos2, to: egui::Pos2, step: f32) -> Vec<egui::Pos2> {
+    let len = (to - from).length();
+    let n = ((len / step.max(0.5)).ceil() as usize).max(1);
+    (0..=n)
+        .map(|i| from + (to - from) * (i as f32 / n as f32))
+        .collect()
+}
+
+/// Whether this frame ends the viewport's paint stroke: the paint drag
+/// stopped (`painting` false) while a stroke THIS viewport began is still
+/// open. A stroke the UV view owns is never ended here (both views share
+/// one paint session).
+fn ends_viewport_stroke(painting: bool, stroking: bool, from_viewport: bool) -> bool {
+    !painting && stroking && from_viewport
+}
+
 /// Binds the paint session's active tile as `mesh`'s base-color texture
 /// (the CORE-LOOP follow-up — see the module docs). `None` (view-only
 /// device, or a tile with no target yet) clears to the constant arm, which
@@ -967,6 +1156,54 @@ mod tests {
             near > far * 1.5,
             "closer camera, bigger ring: {near} vs {far}"
         );
+    }
+
+    #[test]
+    fn straight_line_snaps_to_five_degree_rays() {
+        let from = egui::pos2(0.0, 0.0);
+        // No snap: the pointer itself.
+        assert_eq!(
+            straight_line_end(from, egui::pos2(10.0, 3.0), false),
+            egui::pos2(10.0, 3.0)
+        );
+        // 2° off horizontal snaps to horizontal (the nearest 5° ray),
+        // keeping the distance along it; 3° is nearer 5° and snaps there.
+        let to = egui::pos2(100.0, 100.0 * 2f32.to_radians().tan());
+        let s = straight_line_end(from, to, true);
+        assert!(s.y.abs() < 1e-3 && (s.x - 100.0).abs() < 1e-3, "{s:?}");
+        let to = egui::pos2(100.0, 100.0 * 3f32.to_radians().tan());
+        let s = straight_line_end(from, to, true);
+        assert!((s.y.atan2(s.x).to_degrees() - 5.0).abs() < 1e-3, "{s:?}");
+        // 44° snaps to 45°.
+        let a = 44f32.to_radians();
+        let s = straight_line_end(from, egui::pos2(a.cos() * 50.0, a.sin() * 50.0), true);
+        assert!((s.y.atan2(s.x).to_degrees() - 45.0).abs() < 1e-3, "{s:?}");
+        // Degenerate (no length): unchanged.
+        assert_eq!(straight_line_end(from, from, true), from);
+    }
+
+    #[test]
+    fn line_samples_cover_both_ends_densely() {
+        let pts = line_samples(egui::pos2(0.0, 0.0), egui::pos2(10.0, 0.0), 2.0);
+        assert_eq!(pts.first(), Some(&egui::pos2(0.0, 0.0)));
+        assert_eq!(pts.last(), Some(&egui::pos2(10.0, 0.0)));
+        assert!(pts.windows(2).all(|w| (w[1] - w[0]).length() <= 2.0 + 1e-4));
+        // A zero-length line still yields its point (a click paints a dab).
+        assert_eq!(
+            line_samples(egui::pos2(3.0, 3.0), egui::pos2(3.0, 3.0), 2.0).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_viewport_stroke_ends_when_the_paint_drag_stops() {
+        // The 2026-10-15 bug: release never ended the stroke, so every
+        // later Ctrl+drag extended it (one undo step per session).
+        assert!(ends_viewport_stroke(false, true, true), "release ends it");
+        assert!(!ends_viewport_stroke(true, true, true), "mid-drag keeps it");
+        assert!(!ends_viewport_stroke(false, false, true), "nothing open");
+        // A UV-view stroke in flight is not the viewport's to end.
+        assert!(!ends_viewport_stroke(false, true, false));
     }
 
     #[test]

@@ -655,6 +655,9 @@ action =
 
 hint =
     .drop = Drop
+    .straight-line = straight line from the last stroke
+    .ctrl-shift = +Ctrl
+    .snap-angle = snap to 5°
     .rmb-drag = RMB drag
     .resize = size / hardness
     .brackets = [ ]

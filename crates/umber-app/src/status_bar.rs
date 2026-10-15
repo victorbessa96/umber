@@ -124,7 +124,10 @@ impl HintContext {
             // Shift alone binds nothing the bar should claim under the
             // Painter / Blender presets; the preset's own chords (which
             // include Shift+LMB pan under the classic preset) follow.
-            HintContext::PanModifier => &[("hint.ctrl-lmb", "hint.paint")],
+            HintContext::PanModifier => &[
+                ("hint.lmb", "hint.straight-line"),
+                ("hint.ctrl-shift", "hint.snap-angle"),
+            ],
             HintContext::Pick => &[("hint.lmb", "hint.sample-color")],
             HintContext::IdMask => &[("hint.lmb", "hint.select-region")],
         }

@@ -644,6 +644,9 @@ action =
 
 hint =
     .drop = Solte
+    .straight-line = linha reta a partir do último traço
+    .ctrl-shift = +Ctrl
+    .snap-angle = ajustar a 5°
     .rmb-drag = Arrastar Dir
     .resize = tamanho / dureza
     .brackets = [ ]
