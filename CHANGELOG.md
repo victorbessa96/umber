@@ -8,6 +8,10 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Every numeric field takes typed input: click (or Tab) to type, safe
+  arithmetic (`2*512`, `-(1/3)`, the unit suffix), Esc to cancel;
+  Ctrl+wheel steps, hover Ctrl+C / Ctrl+V copy and paste a value, and
+  Backspace resets fields that carry a default (g4-valuefield-grammar)
 - Shortcuts respect keyboard focus: typing in a text field never fires the
   letter keys or the document undo; Ctrl/Cmd chords and F-keys still pass.
   Dispatched key presses are consumed, and egui's Ctrl+Plus/Minus UI zoom
