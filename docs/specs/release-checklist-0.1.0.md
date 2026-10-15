@@ -63,6 +63,8 @@ the FBX leg proves the import, not a UV paint on it.]
    - Pushing either tag is Bessa's call. It publishes a GitHub pre-release.
    - **APPROVED by Bessa 2026-10-15.** It fires after W-C2g's CI is green.
      The exact steps:
+     0. Land kill `win-version-resource` first (Windows ProductName/Version
+        metadata, which SignPath requires; `2026-10-15-c2-22-signing.md`).
      1. One commit: `version = "0.1.0-alpha.1"` in the root
         `[workspace.package]` (all 17 crates inherit it), plus a
         `<release version="0.1.0-alpha.1" type="development"
