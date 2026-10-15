@@ -8,6 +8,9 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- Workspaces: Paint, Bake, Export and Graph tabs in the menu row
+  (Ctrl+PgUp / Ctrl+PgDn), each remembering its own layout for the session
+  (g5-workspaces)
 - Hide UI (Tab) gives the whole window to the viewport, with a Show UI
   button to come back; Maximize Area (Ctrl+Space) fills the window with
   the focused panel. Leaving either restores the exact layout
