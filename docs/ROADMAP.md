@@ -84,6 +84,7 @@ Arc threading; un-premultiply exactness on GPU vendors.
 | wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
 | wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
 | wave-harness-script | the snapshot harness's --script arm | ✓ landed 2026-10-14: `paint_snapshot` (whole plane → PNG + blake3) — a script is a JSONL file piped into `umber-cli agent`. **Found:** a 2-point wire stroke can paint nothing (the live conditioner swallows it) — follow-up row `wave-agent-stroke-conditioning` |
+| wave-fbx-uv-fixture | the FBX test asset has no UVs | `cube_b7400.fbx` (ufbx's Blender 2.72 cube) carries NO UV layer — every UV loads as [0,0] (pinned in `fbx.rs` 2026-10-15). Gate 0's FBX leg paints by UV directly so it never noticed; any bake/paint-by-mesh test on it is vacuous. Add a UV-unwrapped FBX fixture (e.g. ufbx's corpus has UV'd cubes) and point Gate 0 + the margin CLI test at it |
 | wave-agent-stroke-conditioning | agent strokes that paint exactly what was sent | ✓ landed 2026-10-15: wire strokes run the conditioner in EXACT mode (no one-euro / lazy-mouse; spacing kept). Root cause: 1 Hz one-euro at synthetic 8 ms steps moves the cursor ~10%/event, so a 2-point stroke never travelled one dab spacing. Open: path replays still smoothed (UX call) |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
 
@@ -120,18 +121,58 @@ the already-have list and the declines is
 
 | Kill | Closes | Notes |
 |---|---|---|
-| wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | Blender's Margin Type "Adjacent Faces": fill the margin from the faces across each seam, not by extending border pixels (today's `dilate_map`). The seam graph the brush uses is the input. Per-bake + per-export enum beside the pixel size |
-| wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading |
+| wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | Blender's Margin Type "Adjacent Faces": fill the margin from the faces across each seam, not by extending border pixels (today's `dilate_map`). The seam graph the brush uses is the input. Per-bake + per-export enum beside the pixel size — ✓ engine `3818da0`; CLI `--margin` (wave 5 commit) — **open: Bakes panel control, agent step field** |
+| wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading — ✓ landed `d0309e1` + panel combo `9a47fa0` |
 | wave-brush-dynamics-angle-jitter | per-dab jitter (+ angle once stamps exist) | size, opacity and position jitter per dab (`BrushParams` has none; surface = `dab_adapter.rs`, seeded per stroke so replays are deterministic). **Angle / rake / random rotation is blocked:** the paint shader stamps a radially symmetric disc (no stamp texture binding in `PAINT_COMPUTE_SHADER`), so rotation is invisible until bitmap alpha stamps land — verified 2026-10-14 |
-| wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) |
-| wave-stroke-methods | the missing stroke idioms | airbrush (deposit at a rate while held), anchored + drag-dot (decal placement), dash ratio/length (stitches, seams) |
+| wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) — ✓ landed `cabe283` + panel control `9a47fa0` |
+| wave-stroke-methods | the missing stroke idioms | airbrush (deposit at a rate while held), anchored + drag-dot (decal placement), dash ratio/length (stitches, seams) — ◐ engine landed (Airbrush, Dash, Drag Dot in `StrokeConditioner`; Space bit-identical) — **open: paint_state wiring, panel picker, `.umberbrush` persistence**; Anchored still unbuilt |
 | wave-stencil | paint-through screen stencil | an image overlay you move/scale/rotate and paint through — the logo/decal workflow |
-| wave-brush-cavity-mask | edge-wear without building a mask layer | per-brush "mask by cavity / ridge" reusing the baked curvature map |
-| wave-gpu-safe-start | a driver crash at device creation repeating every launch | photocraft's startup marker: write before device creation, clear after the first frames; an uncleared marker steps the backend down next launch; `--safe-gpu` override |
-| wave-save-completeness | a new document field silently not saved | destructure every doc struct in the save converters with no `..`: a new field fails to compile until the save path handles it |
+| wave-brush-cavity-mask | edge-wear without building a mask layer | per-brush "mask by cavity / ridge" reusing the baked curvature map — ◐ pure module landed (`CavityMask::coverage` over the baked curvature map) — **open: paint_state gate composition, panel row, persistence** |
+| wave-gpu-safe-start | a driver crash at device creation repeating every launch | photocraft's startup marker: write before device creation, clear after the first frames; an uncleared marker steps the backend down next launch; `--safe-gpu` override — ✓ landed `a221a85` |
+| wave-save-completeness | a new document field silently not saved | destructure every doc struct in the save converters with no `..`: a new field fails to compile until the save path handles it — ✓ landed `17900df` (project save/load) |
 | wave-scorecard | handwritten headline numbers drifting | generate README/STATE counts (crates, tests, rows) from the tree; `--check` in the battery + CI (this pass found 4 drifted docs) |
-| wave-ci-path-filter | Windows CI time on docs-only PRs | a `platforms` job: the Windows leg runs when platform-sensitive paths change or a `full-ci` label is set; master always runs both |
-| wave-release-phases | integrators broken by late protocol changes | alpha → beta (agent protocol + file format frozen) → RC, written into the 0.1.0 release checklist |
+| wave-ci-path-filter | Windows CI time on docs-only PRs | a `platforms` job: the Windows leg runs when platform-sensitive paths change or a `full-ci` label is set; master always runs both — ✓ landed `908135e` |
+| wave-release-phases | integrators broken by late protocol changes | alpha → beta (agent protocol + file format frozen) → RC, written into the 0.1.0 release checklist — ✓ landed `2c19dcd` (+ the agent `version` step) |
+
+## Next waves (2026-10-15 — the plan of record for the next stretch)
+
+Every open item from the 2026-10-14/15 kills, ordered. The live checklist
+is the session to-do; each row here names its blocker or its file surface.
+
+### Wave 6a — finish what is half-built (engine landed, wiring owed)
+
+| Kill | Closes | Surface |
+|---|---|---|
+| wave-openusd-0.8 | the last importer crash: openusd 0.7.0's multi-TB allocation ABORT (#19) | bump `openusd` 0.7.0 → 0.8.0 (fixes all six openusd findings upstream, PR mxpv/openusd#138; `docs/upstream/openusd-0.7.0.md`); adapt `umber-mesh/src/usdc.rs` to the `CrateData::open(impl Into<AssetBuffer>)` change; un-ignore `bug_usdc_huge_count_allocation_aborts` |
+| wave-stroke-methods-wiring | stroke methods reach the brush | `PaintState` sets the method, calls `finish()` at stroke end; brush-panel method picker + rate / dash rows; `.umberbrush` field |
+| wave-cavity-wiring | the cavity mask paints | compose `CavityMask::coverage` into the per-tile gate the shader samples; re-upload on curvature-map / param change; panel row |
+| wave-margin-ui | Adjacent Faces from the app | Bakes panel Margin Type control; agent `bake` step `margin`; fold `MarginType` into `BakeFlags` |
+| wave-fbx-uv-fixture | a UV'd FBX test asset | see its row below |
+| wave-valuefield-log | the last raw sliders | `ValueField` log mode; migrate DoF focus + fill_layer (6), path_tool (4), bakes (3), display (2), layers (1) |
+
+### Wave 6b — the GUI plan
+
+`docs/specs/gui-plan-2026-10-15.md` (research: `docs/research/gui-research-2026-10-15.md`,
+brief: `docs/research/gui-plan-prompt-2026-10-15.md`) — supersedes phases
+1-3 of `docs/specs/gui-audit-and-roadmap.md`, whose Phase 0 is built. Its
+waves land here as they are scheduled.
+
+### Wave 6c — new capability
+
+| Kill | Closes | Notes |
+|---|---|---|
+| wave-stencil | paint-through screen stencil | 8b row |
+| wave-bitmap-stamps | stamp textures | prerequisite of angle / rake / random rotation and the jitter quartet (`wave-brush-dynamics-angle-jitter`) |
+| wave-scorecard | generated headline counts | 8b row |
+| wave-stylus-win32 | the Windows tablet dual-path | wave 5 row |
+| wave-replay-exact | path replays paint exactly | a UX call (replays may want smoothing); default-off until decided |
+
+### Release track
+
+The 0.1.0 gates (`docs/specs/release-checklist-0.1.0.md`): perf
+re-baseline at the stage-5 frame path, the SPEC v1.1 ratification packet,
+the checklist walkthrough. Upstream bug drafts (`docs/upstream/`) wait on
+the owner's go-ahead to file.
 
 ## Wave 9 — the far horizon (suggested 2026-10-14 — the differentiators beyond parity)
 
