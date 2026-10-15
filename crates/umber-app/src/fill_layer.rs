@@ -1013,16 +1013,18 @@ fn projection_rows(
     }
     match proj {
         FillProjection::Triplanar { sharpness, scale } => {
-            if ui
-                .add(egui::Slider::new(sharpness, 1.0..=8.0).text(tr("fill.sharpness")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("fill.sharpness"),
+                umber_gui::ValueField::new(sharpness).range(1.0..=8.0),
+            ) {
                 *changed = true;
             }
-            if ui
-                .add(egui::Slider::new(scale, 0.1..=8.0).text(tr("fill.scale")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("fill.scale"),
+                umber_gui::ValueField::new(scale).range(0.1..=8.0),
+            ) {
                 *changed = true;
             }
         }
@@ -1031,6 +1033,21 @@ fn projection_rows(
         }
         FillProjection::Uv | FillProjection::Spherical => {}
     }
+}
+
+/// One labelled numeric row in the house grammar (muted label + a
+/// [`umber_gui::ValueField`]); true when the value changed. Same shape as
+/// the postfx panel's `field_row`.
+fn field_row<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    field: umber_gui::ValueField<'_, N>,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(umber_gui::muted()));
+        ui.add(field).changed()
+    })
+    .inner
 }
 
 /// The axis picker shared by planar + cylindrical projections.
@@ -1107,10 +1124,11 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
                 color[2] = rgb[2];
                 *changed = true;
             }
-            if ui
-                .add(egui::Slider::new(&mut color[3], 0.0..=1.0).text(tr("fill.alpha")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("fill.alpha"),
+                umber_gui::ValueField::new(&mut color[3]).range(0.0..=1.0),
+            ) {
                 *changed = true;
             }
         }
@@ -1127,10 +1145,11 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
                     }
                 });
             }
-            if ui
-                .add(egui::Slider::new(angle, 0.0..=std::f32::consts::TAU).text(tr("fill.angle")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("fill.angle"),
+                umber_gui::ValueField::new(angle).range(0.0..=std::f32::consts::TAU),
+            ) {
                 *changed = true;
             }
         }
@@ -1145,16 +1164,18 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
                     *changed = true;
                 }
             });
-            if ui
-                .add(egui::Slider::new(scale, 0.1..=16.0).text(tr("fill.scale")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("fill.scale"),
+                umber_gui::ValueField::new(scale).range(0.1..=16.0),
+            ) {
                 *changed = true;
             }
-            if ui
-                .add(egui::Slider::new(octaves, 1..=8).text(tr("fill.octaves")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("fill.octaves"),
+                umber_gui::ValueField::new(octaves).range(1..=8),
+            ) {
                 *changed = true;
             }
         }

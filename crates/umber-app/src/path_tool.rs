@@ -411,19 +411,18 @@ pub fn path_tool_rows(
         PathOpKind::Paint => {}
         PathOpKind::Smudge => {
             let mut params = tool.smudge();
-            if ui
-                .add(
-                    egui::Slider::new(&mut params.strength, 0.0..=1.0)
-                        .text(tr("brush.smudge-strength")),
-                )
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("brush.smudge-strength"),
+                umber_gui::ValueField::new(&mut params.strength).range(0.0..=1.0),
+            ) {
                 tool.smudge = params;
             }
-            if ui
-                .add(egui::Slider::new(&mut params.smear, 0.0..=1.0).text(tr("brush.smudge-smear")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("brush.smudge-smear"),
+                umber_gui::ValueField::new(&mut params.smear).range(0.0..=1.0),
+            ) {
                 tool.smudge = params;
             }
         }
@@ -454,23 +453,20 @@ pub fn path_tool_rows(
                 umber_brush::path::PATH_MIN_SIZE,
                 umber_brush::path::PATH_MAX_SIZE,
             );
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut size,
-                        umber_brush::path::PATH_MIN_SIZE..=umber_brush::path::PATH_MAX_SIZE,
-                    )
-                    .text(tr("path.size")),
-                )
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("path.size"),
+                umber_gui::ValueField::new(&mut size)
+                    .range(umber_brush::path::PATH_MIN_SIZE..=umber_brush::path::PATH_MAX_SIZE),
+            ) {
                 tool.set_selected_size(size);
             }
             let mut opacity = point.opacity.clamp(0.0, 1.0);
-            if ui
-                .add(egui::Slider::new(&mut opacity, 0.0..=1.0).text(tr("path.opacity")))
-                .changed()
-            {
+            if field_row(
+                ui,
+                &tr("path.opacity"),
+                umber_gui::ValueField::new(&mut opacity).range(0.0..=1.0),
+            ) {
                 tool.set_selected_opacity(opacity);
             }
         }
@@ -506,6 +502,21 @@ pub fn path_tool_rows(
     } else if !tool.can_replay() {
         ui.label(tr("path.need-points"));
     }
+}
+
+/// One labelled numeric row in the house grammar (muted label + a
+/// [`umber_gui::ValueField`]); true when the value changed. Same shape as
+/// the postfx panel's `field_row`.
+fn field_row<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    field: umber_gui::ValueField<'_, N>,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(umber_gui::muted()));
+        ui.add(field).changed()
+    })
+    .inner
 }
 
 #[cfg(test)]

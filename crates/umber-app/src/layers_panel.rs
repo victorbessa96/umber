@@ -398,10 +398,11 @@ fn channel_rows(
                         ui.selectable_value(&mut next_blend, option, format!("{option:?}"));
                     }
                 });
-            ui.add(
-                egui::Slider::new(&mut next_opacity, 0.0..=1.0)
-                    .text(tr("layers.material-channel-opacity")),
+            ui.label(
+                egui::RichText::new(tr("layers.material-channel-opacity"))
+                    .color(umber_gui::muted()),
             );
+            ui.add(umber_gui::ValueField::new(&mut next_opacity).range(0.0..=1.0));
         });
         if next_enabled != enabled || next_blend != blend || next_opacity != opacity {
             let mut next = params.clone();
