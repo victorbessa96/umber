@@ -925,6 +925,13 @@ impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
 /// The eframe app.
 pub struct UmberApp {
     pub state: AppState,
+    /// The toast stack (GUI plan G0 integration): user-facing failures
+    /// that used to reach only the log (mesh / environment / project /
+    /// export) post here too, so a failed action is never silent.
+    notices: umber_gui::Notices,
+    /// The style was installed on both OS-theme branches (once, first
+    /// frame: `umber_gui::theme::apply`).
+    style_installed: bool,
     dock: DockState<Panel>,
     gpu: GpuContext,
     /// File > New with unsaved work arms this; the confirm window
@@ -1070,6 +1077,8 @@ impl UmberApp {
             brush_panel: BrushPanel::new(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
+            notices: umber_gui::Notices::new(),
+            style_installed: false,
             #[cfg(feature = "perf")]
             last_frame_time: None,
             #[cfg(feature = "perf")]
@@ -1088,8 +1097,39 @@ impl UmberApp {
     /// buttons and the shell shortcuts both land here, so a button and its
     /// key cannot drift (see `toolbar`'s module docs for the key table and
     /// the routing calls).
+    /// Posts a sticky error toast: the translated `key` headline and the
+    /// underlying error's text (errors stay until dismissed — a failed
+    /// save must not vanish while the user looks away).
+    fn notify_error(&mut self, key: &str, detail: &str) {
+        let text = format!("{}\n{detail}", tr(key));
+        self.notices
+            .post_sticky(umber_gui::NoticeLevel::Error, text);
+    }
+
+    /// The registry's view of the shell this frame (`actions::availability`).
+    fn shell_state(&self) -> actions::ShellState {
+        actions::ShellState {
+            can_undo: self.state.doc.history.can_undo(),
+            can_redo: self.state.doc.history.can_redo(),
+            paint_available: self.state.paint.is_some(),
+            mask_editing: self
+                .state
+                .paint
+                .as_ref()
+                .is_some_and(|p| p.quick_mask().is_editing()),
+        }
+    }
+
     fn dispatch(&mut self, action: toolbar::ShellAction) {
         use toolbar::ShellAction;
+        // The registry's one enabled-check (GUI plan G0): a shortcut on an
+        // action that cannot run says why instead of doing nothing
+        // (photocraft's disabled-reason rule). Menu rows and toolbar
+        // buttons are already greyed, so only keys reach this arm.
+        if let Err(reason) = actions::availability(action, self.shell_state()) {
+            self.notices.post(umber_gui::NoticeLevel::Info, tr(reason));
+            return;
+        }
         if self.view.apply(action) {
             return;
         }
@@ -1162,10 +1202,16 @@ impl UmberApp {
                         self.state.mesh_path = Some(path);
                         log::info!("loaded mesh: {n} vertices");
                     }
-                    Err(e) => log::error!("mesh upload failed: {e:#}"),
+                    Err(e) => {
+                        log::error!("mesh upload failed: {e:#}");
+                        self.notify_error("notice.mesh-upload-failed", &format!("{e:#}"));
+                    }
                 }
             }
-            Err(e) => log::error!("mesh load failed: {e}"),
+            Err(e) => {
+                log::error!("mesh load failed: {e}");
+                self.notify_error("notice.mesh-load-failed", &e.to_string());
+            }
         }
     }
 
@@ -1221,7 +1267,10 @@ impl UmberApp {
                 self.state.viewport.set_environment(&self.gpu, Some(ibl));
                 log::info!("loaded environment: {}", path.display());
             }
-            Err(err) => log::error!("environment load failed: {err:#}"),
+            Err(err) => {
+                log::error!("environment load failed: {err:#}");
+                self.notify_error("notice.environment-failed", &format!("{err:#}"));
+            }
         }
     }
     /// Exports the current paint target as an sRGB PNG via a save dialog.
@@ -1259,10 +1308,16 @@ impl UmberApp {
                     umber_export::png::Transfer::Srgb,
                 ) {
                     Ok(()) => log::info!("exported painted map: {}", path.display()),
-                    Err(e) => log::error!("png write failed: {e:#}"),
+                    Err(e) => {
+                        log::error!("png write failed: {e:#}");
+                        self.notify_error("notice.export-failed", &format!("{e:#}"));
+                    }
                 }
             }
-            Err(e) => log::error!("readback failed: {e:#}"),
+            Err(e) => {
+                log::error!("readback failed: {e:#}");
+                self.notify_error("notice.export-failed", &format!("{e:#}"));
+            }
         }
     }
 
@@ -1611,7 +1666,10 @@ impl UmberApp {
                     log::warn!("autosave journal unavailable: {e}");
                 }
             }
-            Err(e) => log::error!("project save failed: {e}"),
+            Err(e) => {
+                log::error!("project save failed: {e}");
+                self.notify_error("notice.save-failed", &e.to_string());
+            }
         }
     }
 
@@ -1845,7 +1903,10 @@ impl UmberApp {
                     self.state.doc.stack.layers.len()
                 );
             }
-            Err(e) => log::error!("project load failed: {e}"),
+            Err(e) => {
+                log::error!("project load failed: {e}");
+                self.notify_error("notice.open-failed", &e.to_string());
+            }
         }
     }
 }
@@ -1855,6 +1916,13 @@ impl eframe::App for UmberApp {
         profiling::scope!("frame");
         // Crash-safe GPU startup: the 3rd frame confirms the backend.
         gpu_startup::note_frame();
+        // The Umber style on BOTH OS-theme branches, once (GUI plan G0
+        // g0-style: an OS light/dark flip can no longer swap egui's stock
+        // palette in). Chrome panels still apply their own density.
+        if !self.style_installed {
+            umber_gui::theme::apply(ui.ctx(), umber_gui::Density::Comfortable, 1.0);
+            self.style_installed = true;
+        }
         // Async bake (wave 5): drain a finished bake job here, not only in
         // the Bakes tab's `show` (egui_dock skips hidden tabs), and keep
         // frames coming while one runs — egui otherwise repaints only on
@@ -1926,16 +1994,7 @@ impl eframe::App for UmberApp {
             // Every action row prints its registry shortcut (GUI plan G0:
             // the key shown is the key that fires) and greys out from the
             // registry's one enabled-check.
-            let shell_state = actions::ShellState {
-                can_undo: self.state.doc.history.can_undo(),
-                can_redo: self.state.doc.history.can_redo(),
-                paint_available: self.state.paint.is_some(),
-                mask_editing: self
-                    .state
-                    .paint
-                    .as_ref()
-                    .is_some_and(|p| p.quick_mask().is_editing()),
-            };
+            let shell_state = self.shell_state();
             let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
             let action_item = |ui: &mut Ui, label: String, action: toolbar::ShellAction| {
                 let mut button = egui::Button::new(label);
@@ -2166,6 +2225,10 @@ impl eframe::App for UmberApp {
         if self.state.uv_view.hover_uv() != hover_before {
             ui.ctx().request_repaint();
         }
+
+        // The toast stack, drawn after the dock (GUI plan G0): everything
+        // under it has laid out, and `show` schedules its own repaints.
+        self.notices.show(ui.ctx());
 
         // Display LUT rebuild, after the panels (the Display panel's
         // edits this frame included): the upload is staged on the queue,

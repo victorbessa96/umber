@@ -30,6 +30,7 @@ pub use icons::{
     BakedManifest, IconAtlas, IconFamily, ATLAS_DIR_ENV, ATLAS_DIR_PATH, ATLAS_VERSION,
     LUCIDE_VERSION, MANIFEST_FILE,
 };
+pub use theme::apply;
 pub use theme::{
     accent, accent_hover, hover, muted, panel_bg, umber_style, umber_style_scaled, Density,
     MOTION_SECS,

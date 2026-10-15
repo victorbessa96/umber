@@ -681,3 +681,13 @@ hint =
     .undo = undo
     .sample-color = sample the color
     .select-region = select the region
+
+## Toast notices (GUI plan G0 integration)
+
+notice =
+    .mesh-load-failed = Mesh load failed
+    .mesh-upload-failed = Mesh upload failed
+    .environment-failed = Environment load failed
+    .export-failed = Export failed
+    .save-failed = Project save failed
+    .open-failed = Project open failed

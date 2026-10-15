@@ -670,3 +670,13 @@ hint =
     .undo = desfazer
     .sample-color = amostrar a cor
     .select-region = selecionar a região
+
+## Avisos toast (integração G0)
+
+notice =
+    .mesh-load-failed = Falha ao carregar a malha
+    .mesh-upload-failed = Falha ao enviar a malha
+    .environment-failed = Falha ao carregar o ambiente
+    .export-failed = Falha na exportação
+    .save-failed = Falha ao salvar o projeto
+    .open-failed = Falha ao abrir o projeto
