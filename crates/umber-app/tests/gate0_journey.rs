@@ -4,9 +4,12 @@
 //!
 //! One test drives the six core-loop criticals JOINED, in user order:
 //!
-//! 1. **FBX**: `umber_mesh::load_fbx` loads the real binary cube fixture
-//!    (`umber-mesh/tests/assets/cube_b7400.fbx`, the same file the
-//!    `loads_fbx_cube_fixture` test pins).
+//! 1. **FBX**: `umber_mesh::load_fbx` loads the UV-unwrapped cube
+//!    (`umber-mesh/tests/assets/cube_uv_ascii7400.fbx`, C2-17: a 3x2 atlas
+//!    from `scripts/gen-fbx-uv-cube.py`). The earlier binary cube carried
+//!    NO UV layer, so every UV was [0, 0] and the seam/UDIM routing below
+//!    saw a degenerate mesh: the FBX leg was vacuous. The leg now asserts
+//!    the loaded UVs are a real unwrap before painting on them.
 //! 2. **4K pressure paint**: `PaintState::with_target_size(4096)` plus the
 //!    CRITICAL-5 pair
 //!    (`begin_screen_point_pressured`/`extend_screen_point_pressured`) at
@@ -136,9 +139,21 @@ fn flip_rows_vertical(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 #[test]
 fn gate0_journey_fbx_to_decode_verified_orm() {
     // ---- Leg 1: FBX (CPU; always runs, even where the GPU legs skip). ----
-    let fixture =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../umber-mesh/tests/assets/cube_b7400.fbx");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../umber-mesh/tests/assets/cube_uv_ascii7400.fbx");
     let mesh = load_fbx(&fixture).expect("cube fbx fixture must load");
+    // Not vacuous: the UVs span the atlas (six distinct cells), so the
+    // paint below lands on a mesh with real islands and seams.
+    let cells: std::collections::BTreeSet<(u32, u32)> = mesh
+        .uvs
+        .iter()
+        .map(|uv| (((uv[0] * 3.0) as u32).min(2), ((uv[1] * 2.0) as u32).min(1)))
+        .collect();
+    assert_eq!(
+        cells.len(),
+        6,
+        "a real UV unwrap, not the zero-fill: {cells:?}"
+    );
     assert!(
         mesh.vertex_count() >= 8,
         "cube needs >= 8 verts, got {}",
