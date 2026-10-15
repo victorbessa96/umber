@@ -60,6 +60,10 @@ than by a cap:
   the input, so a bomb needs a file of proportional size. The 4 GiB
   ceiling is upstream's; a tighter cap would be a fork, so it is not
   worth it for a mesh importer.
+- **USDZ** (openusd `usdz/reader.rs:94-108`): refuses any entry that
+  is not `Stored` (uncompressed, as the USDZ spec requires) and any
+  entry whose compressed size differs from its size. A zip bomb cannot
+  get through.
 - **PSD** (`psd_import`): `MAX_PSD_SIDE` 8192 and `MAX_PSD_BYTES`
   256 MiB, checked before decode. Bounded.
 - **ICC `embed_iccp`**: an unbounded `png::Decoder::new`, but it only
