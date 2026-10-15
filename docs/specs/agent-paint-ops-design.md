@@ -111,6 +111,15 @@ exactly as in the shell.
 7. a session that never paints: `project_save` still reports `painted: 0`
    and creates no `paint/` (no GPU device requested).
 
+## Exact stroke input (2026-10-15)
+
+`paint_stroke` points are painted exactly as sent: the session switches the
+conditioner to exact mode (`StrokeConditioner::set_exact`), which skips the
+one-euro and lazy-mouse smoothing the GUI's pointer input needs. Dab
+spacing still follows the brush. Before this, a short wire stroke could
+paint nothing (a 2-point stroke never travelled one dab spacing under the
+1 Hz filter at the synthetic 8 ms event clock).
+
 ## The snapshot arm (2026-10-14, ROADMAP `wave-harness-script`)
 
 `paint_snapshot { out, layer?, composite?, tile?, channel? }` writes the

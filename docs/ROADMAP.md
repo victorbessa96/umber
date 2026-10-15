@@ -81,7 +81,7 @@ Arc threading; un-premultiply exactness on GPU vendors.
 | wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
 | wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm |
 | wave-harness-script | the snapshot harness's --script arm | ✓ landed 2026-10-14: `paint_snapshot` (whole plane → PNG + blake3) — a script is a JSONL file piped into `umber-cli agent`. **Found:** a 2-point wire stroke can paint nothing (the live conditioner swallows it) — follow-up row `wave-agent-stroke-conditioning` |
-| wave-agent-stroke-conditioning | agent strokes that paint exactly what was sent | `paint_stroke` runs points through the live one-euro + lazy-mouse conditioner (tuned for dense pointer streams); a short wire stroke can vanish. Decide: bypass for wire strokes, or a `smoothing` field. Find which stage swallows it first |
+| wave-agent-stroke-conditioning | agent strokes that paint exactly what was sent | ✓ landed 2026-10-15: wire strokes run the conditioner in EXACT mode (no one-euro / lazy-mouse; spacing kept). Root cause: 1 Hz one-euro at synthetic 8 ms steps moves the cursor ~10%/event, so a 2-point stroke never travelled one dab spacing. Open: path replays still smoothed (UX call) |
 | wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
 
 ## Wave 6 — the differentiators (P1s that Substance lacks or does worse)

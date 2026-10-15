@@ -448,6 +448,49 @@ fn a_session_that_never_paints_writes_no_sidecar() {
     assert!(agent.wait_exit().success());
 }
 
+/// A 2-point wire stroke paints (wave-agent-stroke-conditioning): wire
+/// strokes bypass pointer smoothing, so the stroke lands where it was sent.
+/// Under the live one-euro this exact stroke painted NOTHING.
+#[test]
+fn a_two_point_stroke_paints_where_it_was_sent() {
+    let dir = write_fixture_project("two-point");
+    let mut agent = Agent::spawn();
+    assert_ok(
+        &agent.call(&json!({ "project_open": { "dir": dir } })),
+        "project_open",
+    );
+    // UV (0.20, 0.50) -> (0.30, 0.50): a horizontal line through row 255.5
+    // on a 512^2 plane, from texel x 102.4 to 153.6.
+    let stroke = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.20, 0.50], [0.30, 0.50]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+    } }));
+    if is_gpu_skip(&stroke) {
+        eprintln!("skipping: {stroke}");
+        return;
+    }
+    assert_ok(&stroke, "paint_stroke");
+    // The midpoint (x 128) and both ends lie under the line; a texel
+    // far above it does not.
+    let read = agent.call(&json!({ "paint_read": {
+        "texels": [[128, 255], [106, 255], [150, 255], [128, 200]],
+        "composite": false,
+    } }));
+    assert_ok(&read, "paint_read");
+    for k in 0..3 {
+        let t = &read["texels"][k];
+        assert_eq!(t[0], 0, "R stays 0 under green: {read}");
+        assert!(t[1].as_u64().unwrap_or(0) > 0, "texel {k} painted: {read}");
+    }
+    assert_eq!(
+        read["texels"][3],
+        json!([0, 0, 0, 0]),
+        "far texel untouched: {read}"
+    );
+    assert_ok(&agent.call(&json!("quit")), "quit");
+    assert!(agent.wait_exit().success());
+}
+
 /// The snapshot arm (ROADMAP `wave-harness-script`): `paint_snapshot`
 /// writes the WHOLE plane to a PNG and returns its blake3, so a script can
 /// pin a driven state without carrying texels on the wire. The pins here

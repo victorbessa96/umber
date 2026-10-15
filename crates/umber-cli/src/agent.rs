@@ -1465,6 +1465,11 @@ impl Session {
         // param is premultiplied — `BrushParams::color`).
         let [r, g, b, a] = s.color;
         paint.set_brush_color([r * a, g * a, b * a, a]);
+        // Wire strokes are intended geometry: no pointer smoothing. Under
+        // the live 1 Hz one-euro at synthetic 8 ms steps a short stroke
+        // never travelled one dab spacing and painted nothing (found by the
+        // paint_snapshot test). Set once per session; idempotent.
+        paint.set_exact_input(true);
         let first = s.points[0];
         paint.begin_stroke_styled(emath::pos2(first[0], first[1]), 1.0, s.radius_scale);
         if let Some(refusal) = paint.stroke_refusal() {

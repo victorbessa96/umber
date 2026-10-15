@@ -51,6 +51,14 @@ pub struct StrokeConditioner {
     anchor: [f32; 2],
     anchor_pressure: f32,
     live: bool,
+    /// Exact mode: the one-euro filters and the lazy-mouse leash are
+    /// bypassed, so the cursor IS the event position. For input that is
+    /// already intended geometry (agent / scripted strokes, path replays):
+    /// a 1 Hz one-euro over synthetic 8 ms events moves the cursor ~10% of
+    /// the way per event, so a 2-point stroke never travels one dab
+    /// spacing and paints NOTHING. Spacing and the line constraint still
+    /// run — dab density is the brush's, not the input's.
+    exact: bool,
 }
 
 impl StrokeConditioner {
@@ -78,6 +86,7 @@ impl StrokeConditioner {
             cursor: [0.0, 0.0],
             anchor: [0.0, 0.0],
             anchor_pressure: 0.0,
+            exact: false,
             live: false,
         })
     }
@@ -112,11 +121,22 @@ impl StrokeConditioner {
     /// event positions; degenerate values emit no dabs but still advance
     /// the smoother state. Pressure outside `0..=1` is clamped.
     pub fn push(&mut self, event: &StrokeEvent, radius_px: f32) -> Vec<DabPlan> {
+        if self.exact {
+            self.cursor = event.pos;
+            let pressure = saturate01(event.pressure);
+            return self.advance(pressure, radius_px);
+        }
         let pos = self.pos_filter.filter(event.pos, event.time_ns);
         let pressure = self
             .pressure_filter
             .filter(saturate01(event.pressure), event.time_ns);
         self.cursor = self.lazy.apply(pos, self.cursor);
+        self.advance(pressure, radius_px)
+    }
+
+    /// The shared tail of [`Self::push`]: line constraint, seeding, then
+    /// spacing from the anchor to the (filtered or exact) cursor.
+    fn advance(&mut self, pressure: f32, radius_px: f32) -> Vec<DabPlan> {
         // Straight-line constraint / angle snap (§2 line 23): the smoothed
         // cursor projects onto the anchored line before spacing sees it.
         // Off (the default) is the identity, so spacing input is unchanged.
@@ -144,6 +164,22 @@ impl StrokeConditioner {
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.live
+    }
+
+    /// Exact mode on/off (see the `exact` field): bypasses smoothing for
+    /// already-intended geometry. Call between strokes; resets the
+    /// pipeline so no filter state carries across the switch.
+    pub fn set_exact(&mut self, exact: bool) {
+        if self.exact != exact {
+            self.exact = exact;
+            self.reset();
+        }
+    }
+
+    /// Whether exact mode is on.
+    #[must_use]
+    pub fn is_exact(&self) -> bool {
+        self.exact
     }
 
     /// Switch the straight-line / angle-snap mode. Takes effect on the
@@ -195,6 +231,60 @@ mod tests {
     fn conditioner() -> StrokeConditioner {
         StrokeConditioner::new(OneEuroParams::default(), OneEuroParams::default(), 0.0, 2.0)
             .expect("valid params")
+    }
+
+    /// The finding this mode exists for: a 2-event stroke 50 px long under
+    /// the default 1 Hz one-euro at 8 ms steps barely moves the filtered
+    /// cursor, so it emits NO dabs at a 10 px radius / 2 dabs-per-radius
+    /// (5 px spacing). Exact mode emits the full 10.
+    #[test]
+    fn exact_mode_paints_a_short_stroke_the_filter_swallows() {
+        let mut smoothed = conditioner();
+        smoothed.push(&event(0.0, 1.0, 0), 10.0);
+        let swallowed = smoothed.push(&event(50.0, 1.0, 8_000_000), 10.0);
+        assert!(
+            swallowed.len() < 2,
+            "the filter should swallow most of a 2-event stroke (got {})",
+            swallowed.len()
+        );
+
+        let mut exact = conditioner();
+        exact.set_exact(true);
+        assert!(exact.is_exact());
+        assert!(exact.push(&event(0.0, 1.0, 0), 10.0).is_empty(), "seeding");
+        let dabs = exact.push(&event(50.0, 1.0, 8_000_000), 10.0);
+        // 50 px / (10 px / 2 dabs-per-radius) = 10 dabs, the last ON the end.
+        assert_eq!(dabs.len(), 10);
+        let last = dabs.last().expect("dabs");
+        assert!((last.pos[0] - 50.0).abs() < EPS && last.pos[1].abs() < EPS);
+        assert!((dabs[0].pos[0] - 5.0).abs() < EPS);
+    }
+
+    /// Exact mode passes pressure through unfiltered (clamped only), and
+    /// the switch resets so no filter state leaks across it.
+    #[test]
+    fn exact_mode_is_unfiltered_and_the_switch_resets() {
+        let mut c = conditioner();
+        c.set_exact(true);
+        c.push(&event(0.0, 0.2, 0), 10.0);
+        let dabs = c.push(&event(10.0, 0.8, 8_000_000), 10.0);
+        let last = dabs.last().expect("dabs");
+        // Pressure interpolates linearly 0.2 -> 0.8 along the segment;
+        // the last dab sits on the end point.
+        assert!(
+            (last.alpha_multiplier - 0.8).abs() < EPS,
+            "{}",
+            last.alpha_multiplier
+        );
+        // Out-of-range pressure is clamped, never passed through raw.
+        let more = c.push(&event(20.0, 7.0, 16_000_000), 10.0);
+        assert!(more.iter().all(|d| d.alpha_multiplier <= 1.0));
+
+        assert!(c.is_live());
+        c.set_exact(false);
+        assert!(!c.is_live(), "switching modes resets the pipeline");
+        c.set_exact(false);
+        assert!(!c.is_exact());
     }
 
     #[test]

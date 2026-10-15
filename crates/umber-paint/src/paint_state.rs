@@ -1784,6 +1784,18 @@ impl PaintState {
         self.line_constraint
     }
 
+    /// Exact stroke input on/off (between strokes only): `true` bypasses
+    /// the one-euro + lazy-mouse smoothing so each point lands where it
+    /// was sent — for strokes that are already intended geometry (the
+    /// agent session's `paint_stroke`). Spacing, seams, symmetry and the
+    /// mask/retouch hooks are unchanged. The GUI never sets it (pointer
+    /// input wants the smoothing).
+    pub fn set_exact_input(&mut self, exact: bool) {
+        if !self.stroking {
+            self.conditioner.set_exact(exact);
+        }
+    }
+
     /// The current paint projection (which surfaces may start strokes).
     pub fn projection(&self) -> PaintProjection {
         self.projection
