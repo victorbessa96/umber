@@ -717,3 +717,20 @@ palette =
     .path-brush = Pincel
     .brush-smaller = Pincel menor
     .brush-larger = Pincel maior
+
+## Preferências (plano G3)
+
+prefs =
+    .title = Preferências
+    .search = Buscar configurações…
+    .section-interface = Interface
+    .ui-scale = Escala da interface
+    .tooltips = Mostrar dicas
+    .reduce-motion = Reduzir movimento
+    .key-hints = Dicas de teclas na barra de status
+    .section-navigation = Navegação
+    .nav-preset = Navegação com o mouse
+    .nav-painter = Painter (Alt + mouse)
+    .nav-umber = Umber clássico
+    .nav-blender = Blender (botão do meio)
+    .nav-env-override = UMBER_NAV está definido: ele substitui esta escolha nesta execução.

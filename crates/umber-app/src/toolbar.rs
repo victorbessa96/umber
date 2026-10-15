@@ -118,6 +118,8 @@ pub enum ShellAction {
     BrushLarger,
     /// Open the command palette. Ctrl+Shift+P / F3 (GUI plan G3).
     CommandPalette,
+    /// Open Preferences. Ctrl+, (GUI plan G3).
+    Preferences,
 }
 
 /// The brush tool without its params: the tool strip's slot id.
@@ -194,7 +196,7 @@ impl ToolKind {
 /// The keys the shell polls each frame (the letter keys + the chord keys).
 /// Pinned against [`crate::actions::BINDINGS`] by
 /// `shortcut_keys_are_exactly_the_bound_keys`.
-pub const SHORTCUT_KEYS: [Key; 13] = [
+pub const SHORTCUT_KEYS: [Key; 14] = [
     Key::W,
     Key::G,
     Key::V,
@@ -208,6 +210,7 @@ pub const SHORTCUT_KEYS: [Key; 13] = [
     Key::CloseBracket,
     Key::P,
     Key::F3,
+    Key::Comma,
 ];
 
 /// The shell's key table (see the module docs). `None` for any key or
@@ -528,8 +531,8 @@ mod tests {
                 || resolve_shortcut(key, cmd_shift()).is_some();
             assert!(bound, "{key:?} is polled but unbound");
         }
-        // Fourteen bindings: nine bare (incl. [ ] and F3) + five chords
-        // (Z, Shift+Z, Shift+P, S, O).
+        // Fifteen bindings: nine bare (incl. [ ] and F3) + six chords
+        // (Z, Shift+Z, Shift+P, S, O, Comma).
         let bare = SHORTCUT_KEYS
             .iter()
             .filter(|k| resolve_shortcut(**k, bare()).is_some())
@@ -542,7 +545,7 @@ mod tests {
                 .iter()
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
-        assert_eq!((bare, chords), (9, 5));
+        assert_eq!((bare, chords), (9, 6));
     }
 
     /// One headless frame: `keys` pressed (with `mods`), the poll first
@@ -690,6 +693,7 @@ mod tests {
             ShellAction::BrushSmaller,
             ShellAction::BrushLarger,
             ShellAction::CommandPalette,
+            ShellAction::Preferences,
         ] {
             assert!(!v.apply(action), "{action:?}");
         }

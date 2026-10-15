@@ -135,6 +135,7 @@ mod input_photon;
 mod layers_panel;
 mod navigation;
 mod palette;
+mod preferences;
 use umber_paint::material_layer;
 mod mesh_map_import;
 use umber_paint::paint_state;
@@ -993,6 +994,11 @@ pub struct UmberApp {
     notices: umber_gui::Notices,
     /// The command palette (GUI plan G3).
     palette: palette::Palette,
+    /// Preferences (GUI plan G3): the values, whether the window is open,
+    /// and its search query.
+    prefs: preferences::Preferences,
+    prefs_open: bool,
+    prefs_query: String,
     /// Which landed Curvature bakes the paint session already loaded (the
     /// cavity mask's input).
     curvature_feed: CurvatureFeed,
@@ -1146,6 +1152,9 @@ impl UmberApp {
             show_perf_hud: false,
             notices: umber_gui::Notices::new(),
             palette: palette::Palette::default(),
+            prefs: preferences::Preferences::load(preferences::prefs_path().as_deref()),
+            prefs_open: false,
+            prefs_query: String::new(),
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
             #[cfg(feature = "perf")]
@@ -1166,6 +1175,120 @@ impl UmberApp {
     /// buttons and the shell shortcuts both land here, so a button and its
     /// key cannot drift (see `toolbar`'s module docs for the key table and
     /// the routing calls).
+    /// The Preferences window (when open) and the per-frame style sync.
+    /// The sync writes egui only when a value differs (`style_delta`), so
+    /// an unchanged preference set costs nothing per frame.
+    fn show_preferences(&mut self, ctx: &egui::Context) {
+        let before = self.prefs;
+        if self.prefs_open {
+            let mut open = true;
+            egui::Window::new(tr("prefs.title"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.prefs_query)
+                            .hint_text(tr("prefs.search")),
+                    );
+                    ui.separator();
+                    let q = self.prefs_query.clone();
+                    let p = &mut self.prefs;
+                    let interface = tr("prefs.section-interface");
+                    let scale = tr("prefs.ui-scale");
+                    let tips = tr("prefs.tooltips");
+                    let motion = tr("prefs.reduce-motion");
+                    let hints = tr("prefs.key-hints");
+                    let navigation = tr("prefs.section-navigation");
+                    let nav = tr("prefs.nav-preset");
+                    let any =
+                        |labels: &[&str]| labels.iter().any(|l| preferences::row_matches(&q, l));
+                    if any(&[&interface, &scale, &tips, &motion, &hints]) {
+                        ui.strong(&interface);
+                        if preferences::row_matches(&q, &scale)
+                            || preferences::row_matches(&q, &interface)
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(&scale);
+                                ui.add(
+                                    umber_gui::ValueField::new(&mut p.ui_scale)
+                                        .range(preferences::SCALE_MIN..=preferences::SCALE_MAX)
+                                        .step(0.05),
+                                );
+                            });
+                        }
+                        for (label, value) in [
+                            (&tips, &mut p.tooltips),
+                            (&motion, &mut p.reduce_motion),
+                            (&hints, &mut p.key_hints),
+                        ] {
+                            if preferences::row_matches(&q, label)
+                                || preferences::row_matches(&q, &interface)
+                            {
+                                ui.checkbox(value, label.as_str());
+                            }
+                        }
+                        ui.add_space(6.0);
+                    }
+                    if any(&[&navigation, &nav]) {
+                        ui.strong(&navigation);
+                        ui.horizontal(|ui| {
+                            ui.label(&nav);
+                            for (preset, key) in [
+                                (navigation::NavPreset::Painter, "prefs.nav-painter"),
+                                (navigation::NavPreset::Umber, "prefs.nav-umber"),
+                                (navigation::NavPreset::Blender, "prefs.nav-blender"),
+                            ] {
+                                ui.selectable_value(&mut p.nav, preset, tr(key));
+                            }
+                        });
+                        if std::env::var("UMBER_NAV").is_ok() {
+                            ui.label(
+                                egui::RichText::new(tr("prefs.nav-env-override"))
+                                    .small()
+                                    .color(umber_gui::muted()),
+                            );
+                        }
+                    }
+                });
+            self.prefs_open = open;
+        }
+        if self.prefs != before {
+            self.prefs.save(preferences::prefs_path().as_deref());
+            let env = std::env::var("UMBER_NAV").ok();
+            self.state
+                .viewport
+                .set_nav_preset(self.prefs.effective_nav(env.as_deref()));
+        }
+        // The style sync: only what differs is written (photocraft #10).
+        let style = ctx.global_style();
+        let delta = preferences::style_delta(
+            &self.prefs,
+            ctx.zoom_factor(),
+            style.interaction.tooltip_delay,
+            style.animation_time,
+            umber_gui::theme::TOOLTIP_DELAY_SECS,
+            umber_gui::MOTION_SECS,
+        );
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(zoom) = delta.zoom {
+            ctx.set_zoom_factor(zoom);
+        }
+        if delta.tooltip_delay.is_some() || delta.animation_time.is_some() {
+            ctx.all_styles_mut(|s| {
+                if let Some(t) = delta.tooltip_delay {
+                    s.interaction.tooltip_delay = t;
+                }
+                if let Some(a) = delta.animation_time {
+                    s.animation_time = a;
+                }
+            });
+        }
+    }
+
     /// Posts a sticky error toast: the translated `key` headline and the
     /// underlying error's text (errors stay until dismissed — a failed
     /// save must not vanish while the user looks away).
@@ -1231,6 +1354,7 @@ impl UmberApp {
             // `[` / `]` (Painter's size steps): one notch of the shared
             // multiplicative step, so ten presses span ~2.6x.
             ShellAction::CommandPalette => self.palette.open(),
+            ShellAction::Preferences => self.prefs_open = true,
             ShellAction::BrushSmaller | ShellAction::BrushLarger => {
                 if let Some(paint) = self.state.paint.as_mut() {
                     let grow = action == ShellAction::BrushLarger;
@@ -1318,9 +1442,10 @@ impl UmberApp {
         }
         // Startup is also where the navigation preset is read
         // (`UMBER_NAV`, until the G3 preferences window owns it).
+        let env = std::env::var("UMBER_NAV").ok();
         self.state
             .viewport
-            .set_nav_preset(navigation::NavPreset::from_env());
+            .set_nav_preset(self.prefs.effective_nav(env.as_deref()));
     }
 
     /// File > Load Environment…: file dialog → decode → convolve →
@@ -2223,6 +2348,10 @@ impl eframe::App for UmberApp {
                 if action_item(ui, tr("shell.redo"), toolbar::ShellAction::Redo) {
                     actions.push(toolbar::ShellAction::Redo);
                 }
+                ui.separator();
+                if action_item(ui, tr("prefs.title"), toolbar::ShellAction::Preferences) {
+                    actions.push(toolbar::ShellAction::Preferences);
+                }
             });
             MenuButton::new(tr("menu.view")).ui(ui, |ui| {
                 #[cfg(feature = "perf")]
@@ -2310,11 +2439,15 @@ impl eframe::App for UmberApp {
             tile,
             frame_dt: ui.input(|i| i.stable_dt),
             pen: pen_source,
-            hints: status_bar::HintContext::of(
-                self.state.paint.is_some(),
-                self.brush_panel.strip,
-                ui.input(|i| i.modifiers),
-            ),
+            hints: if self.prefs.key_hints {
+                status_bar::HintContext::of(
+                    self.state.paint.is_some(),
+                    self.brush_panel.strip,
+                    ui.input(|i| i.modifiers),
+                )
+            } else {
+                status_bar::HintContext::Hidden
+            },
             nav: self.state.viewport.nav_preset(),
         };
         egui::Panel::bottom("umber-status-bar").show(ui, |ui| {
@@ -2406,6 +2539,7 @@ impl eframe::App for UmberApp {
         // The toast stack, drawn after the dock (GUI plan G0): everything
         // under it has laid out, and `show` schedules its own repaints.
         self.notices.show(ui.ctx());
+        self.show_preferences(ui.ctx());
         // The command palette overlay (Ctrl+Shift+P / F3), drawn last so it
         // sits over everything; a chosen action runs through the same
         // dispatch as every key and menu row.

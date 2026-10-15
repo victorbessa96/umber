@@ -89,6 +89,8 @@ pub enum HintContext {
     Pick,
     /// The ID-mask select is armed.
     IdMask,
+    /// The user turned the hints off (Preferences ▸ key hints).
+    Hidden,
 }
 
 impl HintContext {
@@ -110,6 +112,7 @@ impl HintContext {
     /// The hints as `(input key, action key)` i18n pairs, in display order.
     pub fn hints(self) -> &'static [(&'static str, &'static str)] {
         match self {
+            HintContext::Hidden => &[],
             HintContext::NoMesh => &[("hint.drop", "hint.load-mesh")],
             // The navigation chords follow from the preset (`show`).
             HintContext::Paint => &[
@@ -207,7 +210,7 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
     };
     ui.horizontal(|ui| {
         let nav = match status.hints {
-            HintContext::NoMesh | HintContext::PaintModifier => &[][..],
+            HintContext::NoMesh | HintContext::PaintModifier | HintContext::Hidden => &[][..],
             _ => status.nav.hints(),
         };
         for (input, action) in status.hints.hints().iter().chain(nav) {
@@ -337,6 +340,13 @@ mod tests {
             HintContext::of(true, ToolKind::IdMask, none),
             HintContext::IdMask
         );
+    }
+
+    #[test]
+    fn hidden_hints_show_nothing() {
+        // Preferences ▸ key hints off: no hints, and `show` skips the nav
+        // chords for it too.
+        assert!(HintContext::Hidden.hints().is_empty());
     }
 
     #[test]

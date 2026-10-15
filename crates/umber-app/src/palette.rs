@@ -45,6 +45,7 @@ pub const CATALOG: &[Entry] = &[
     e(ShellAction::SaveProject, "menu.save-project", "menu.file"),
     e(ShellAction::Undo, "shell.undo", "menu.edit"),
     e(ShellAction::Redo, "shell.redo", "menu.edit"),
+    e(ShellAction::Preferences, "prefs.title", "menu.edit"),
     e(ShellAction::ToggleWireframe, "shell.wireframe", "menu.view"),
     e(ShellAction::ToggleGrid, "shell.grid", "menu.view"),
     e(

@@ -728,3 +728,20 @@ palette =
     .path-brush = Brush
     .brush-smaller = Smaller brush
     .brush-larger = Larger brush
+
+## Preferences (GUI plan G3)
+
+prefs =
+    .title = Preferences
+    .search = Search settings…
+    .section-interface = Interface
+    .ui-scale = UI scale
+    .tooltips = Show tooltips
+    .reduce-motion = Reduce motion
+    .key-hints = Status-bar key hints
+    .section-navigation = Navigation
+    .nav-preset = Mouse navigation
+    .nav-painter = Painter (Alt + mouse)
+    .nav-umber = Umber classic
+    .nav-blender = Blender (middle mouse)
+    .nav-env-override = UMBER_NAV is set: it overrides this choice for this launch.
