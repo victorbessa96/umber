@@ -12,6 +12,16 @@
 //!
 //! Deterministic: the same event sequence through equally constructed
 //! conditioners yields identical dab plans.
+//!
+//! Stroke methods ([`StrokeMethod`], `stroke_method.rs`) are a field here,
+//! not a wrapper type: Airbrush needs the conditioned cursor + pressure and
+//! the event clock, Drag Dot needs the last conditioned cursor, and Dash
+//! needs the spaced dabs — all of which only exist inside the private
+//! `advance` step. A wrapper would have to re-expose that internal state
+//! or re-derive it. Spacing always runs and the anchor always follows the
+//! *spaced* dabs, so the method only post-filters; [`StrokeMethod::Space`]
+//! returns the spacing output untouched (bit-identical to the pre-method
+//! pipeline).
 
 use thiserror::Error;
 
@@ -19,6 +29,7 @@ use crate::{
     line_constraint::{LineConstraint, LineConstraintMode},
     one_euro::OneEuroError,
     spacing::DabPlan,
+    stroke_method::{MethodState, StrokeMethod, StrokeMethodError},
     LazyMouse, OneEuroFilter, OneEuroParams, OneEuroScalar, SpacingAccumulator, SpacingError,
     StrokeEvent,
 };
@@ -32,6 +43,9 @@ pub enum ConditionerError {
     /// The dab density was invalid.
     #[error(transparent)]
     Spacing(#[from] SpacingError),
+    /// The stroke-method parameters were invalid.
+    #[error(transparent)]
+    Method(#[from] StrokeMethodError),
 }
 
 /// One stroke's conditioning pipeline.
@@ -59,6 +73,10 @@ pub struct StrokeConditioner {
     /// spacing and paints NOTHING. Spacing and the line constraint still
     /// run — dab density is the brush's, not the input's.
     exact: bool,
+    /// How spaced dabs become emitted dabs (default: Space = pass-through).
+    method: StrokeMethod,
+    /// Per-stroke state of `method`.
+    method_state: MethodState,
 }
 
 impl StrokeConditioner {
@@ -88,6 +106,8 @@ impl StrokeConditioner {
             anchor_pressure: 0.0,
             exact: false,
             live: false,
+            method: StrokeMethod::Space,
+            method_state: MethodState::default(),
         })
     }
 
@@ -112,6 +132,7 @@ impl StrokeConditioner {
         self.anchor = [0.0, 0.0];
         self.anchor_pressure = 0.0;
         self.live = false;
+        self.method_state.reset();
     }
 
     /// Feed one stylus event; returns the dabs for the smoothed segment
@@ -124,19 +145,27 @@ impl StrokeConditioner {
         if self.exact {
             self.cursor = event.pos;
             let pressure = saturate01(event.pressure);
-            return self.advance(pressure, radius_px);
+            return self.advance(pressure, radius_px, event.time_ns);
         }
         let pos = self.pos_filter.filter(event.pos, event.time_ns);
         let pressure = self
             .pressure_filter
             .filter(saturate01(event.pressure), event.time_ns);
         self.cursor = self.lazy.apply(pos, self.cursor);
-        self.advance(pressure, radius_px)
+        self.advance(pressure, radius_px, event.time_ns)
+    }
+
+    /// End the stroke's method: Drag Dot's single dab at the last
+    /// conditioned cursor (emitted once); empty for every other method.
+    /// Does not reset — call [`Self::reset`] after, as at any stroke end.
+    pub fn finish(&mut self) -> Vec<DabPlan> {
+        self.method_state.finish(&self.method)
     }
 
     /// The shared tail of [`Self::push`]: line constraint, seeding, then
-    /// spacing from the anchor to the (filtered or exact) cursor.
-    fn advance(&mut self, pressure: f32, radius_px: f32) -> Vec<DabPlan> {
+    /// spacing from the anchor to the (filtered or exact) cursor, then the
+    /// stroke method over the spaced dabs.
+    fn advance(&mut self, pressure: f32, radius_px: f32, time_ns: u64) -> Vec<DabPlan> {
         // Straight-line constraint / angle snap (§2 line 23): the smoothed
         // cursor projects onto the anchored line before spacing sees it.
         // Off (the default) is the identity, so spacing input is unchanged.
@@ -145,6 +174,8 @@ impl StrokeConditioner {
             self.anchor = self.cursor;
             self.anchor_pressure = pressure;
             self.live = true;
+            self.method_state
+                .seed(&self.method, self.cursor, pressure, time_ns);
             return Vec::new();
         }
         let dabs = self.spacing.plan_dabs(
@@ -157,7 +188,28 @@ impl StrokeConditioner {
             self.anchor = last.pos;
             self.anchor_pressure = last.alpha_multiplier;
         }
-        dabs
+        self.method_state
+            .apply(&self.method, dabs, self.cursor, pressure, time_ns)
+    }
+
+    /// Switch the stroke method. Call between strokes; the method's
+    /// per-stroke state is dropped (filters and spacing are untouched).
+    ///
+    /// # Errors
+    ///
+    /// [`ConditionerError::Method`] when the parameters are invalid; the
+    /// current method is kept.
+    pub fn set_method(&mut self, method: StrokeMethod) -> Result<(), ConditionerError> {
+        method.validate()?;
+        self.method = method;
+        self.method_state.reset();
+        Ok(())
+    }
+
+    /// The current stroke method.
+    #[must_use]
+    pub fn method(&self) -> StrokeMethod {
+        self.method
     }
 
     /// Whether the pipeline has been seeded by at least one event.
@@ -423,6 +475,249 @@ mod tests {
             "the snap must correct the drift, got y {}",
             last.pos[1]
         );
+    }
+
+    fn exact_conditioner(method: StrokeMethod) -> StrokeConditioner {
+        let mut c = conditioner();
+        c.set_exact(true);
+        c.set_method(method).expect("valid method");
+        c
+    }
+
+    fn event_at(pos: [f32; 2], pressure: f32, time_ns: u64) -> StrokeEvent {
+        StrokeEvent {
+            pos,
+            pressure,
+            tilt: None,
+            time_ns,
+            in_proximity: true,
+            contact: true,
+        }
+    }
+
+    /// The pre-stroke-method pipeline, composed by hand from the stages
+    /// exactly as `push`/`advance` did before methods existed.
+    struct Reference {
+        pos_filter: OneEuroFilter,
+        pressure_filter: OneEuroScalar,
+        lazy: LazyMouse,
+        line: LineConstraint,
+        spacing: SpacingAccumulator,
+        cursor: [f32; 2],
+        anchor: [f32; 2],
+        anchor_pressure: f32,
+        live: bool,
+    }
+
+    impl Reference {
+        fn new(lazy_radius_px: f32) -> Self {
+            Self {
+                pos_filter: OneEuroFilter::try_new(OneEuroParams::default()).expect("valid"),
+                pressure_filter: OneEuroScalar::try_new(OneEuroParams::default()).expect("valid"),
+                lazy: LazyMouse::new(lazy_radius_px),
+                line: LineConstraint::default(),
+                spacing: SpacingAccumulator::new(2.0).expect("valid"),
+                cursor: [0.0, 0.0],
+                anchor: [0.0, 0.0],
+                anchor_pressure: 0.0,
+                live: false,
+            }
+        }
+
+        fn push(&mut self, event: &StrokeEvent, radius_px: f32) -> Vec<DabPlan> {
+            let pos = self.pos_filter.filter(event.pos, event.time_ns);
+            let pressure = self
+                .pressure_filter
+                .filter(saturate01(event.pressure), event.time_ns);
+            self.cursor = self.lazy.apply(pos, self.cursor);
+            self.cursor = self.line.apply(self.cursor);
+            if !self.live {
+                self.anchor = self.cursor;
+                self.anchor_pressure = pressure;
+                self.live = true;
+                return Vec::new();
+            }
+            let dabs = self.spacing.plan_dabs(
+                self.anchor,
+                self.cursor,
+                radius_px,
+                [self.anchor_pressure, pressure],
+            );
+            if let Some(last) = dabs.last() {
+                self.anchor = last.pos;
+                self.anchor_pressure = last.alpha_multiplier;
+            }
+            dabs
+        }
+    }
+
+    /// Space (default AND explicitly set) is bit-identical to the
+    /// pre-method pipeline over a wiggly 2D stroke with varying pressure,
+    /// a lazy leash, and a dwell.
+    #[test]
+    fn space_method_is_bit_identical_to_the_old_pipeline() {
+        let seq: Vec<StrokeEvent> = (0..60)
+            .map(|i| {
+                let x = if (20..30).contains(&i) {
+                    60.0
+                } else {
+                    i as f32 * 3.0
+                };
+                event_at(
+                    [x + (i % 2) as f32, (i % 5) as f32 * 1.7],
+                    0.3 + (i % 7) as f32 * 0.1,
+                    i as u64 * 4_000_000,
+                )
+            })
+            .collect();
+        let mut reference = Reference::new(2.0);
+        let mut default_space =
+            StrokeConditioner::new(OneEuroParams::default(), OneEuroParams::default(), 2.0, 2.0)
+                .expect("valid");
+        let mut set_space = default_space.clone();
+        set_space.set_method(StrokeMethod::Space).expect("valid");
+        assert_eq!(default_space.method(), StrokeMethod::Space);
+        let mut total = 0;
+        for ev in &seq {
+            let want = reference.push(ev, 6.0);
+            let got_a = default_space.push(ev, 6.0);
+            let got_b = set_space.push(ev, 6.0);
+            total += want.len();
+            // Bitwise: compare raw f32 bits, not approximate values.
+            let bits = |d: &[DabPlan]| -> Vec<[u32; 3]> {
+                d.iter()
+                    .map(|p| {
+                        [
+                            p.pos[0].to_bits(),
+                            p.pos[1].to_bits(),
+                            p.alpha_multiplier.to_bits(),
+                        ]
+                    })
+                    .collect()
+            };
+            assert_eq!(bits(&got_a), bits(&want));
+            assert_eq!(bits(&got_b), bits(&want));
+        }
+        assert!(
+            total > 10,
+            "fixture must emit dabs to compare (got {total})"
+        );
+        assert!(
+            default_space.finish().is_empty(),
+            "Space emits nothing on finish"
+        );
+    }
+
+    /// 10 Hz held still for 0.35 s (7 events, 50 ms apart, after the seed)
+    /// banks 0.5 per event: dabs fire on events 2, 4, 6 — 3 in total, all
+    /// at the dwell point with the event's pressure.
+    #[test]
+    fn airbrush_held_still_sprays_at_rate() {
+        let mut c = exact_conditioner(StrokeMethod::Airbrush { rate_hz: 10.0 });
+        assert!(c.push(&event_at([5.0, 7.0], 0.6, 0), 10.0).is_empty());
+        let mut per_event = Vec::new();
+        let mut all = Vec::new();
+        for i in 1..=7u64 {
+            let d = c.push(&event_at([5.0, 7.0], 0.6, i * 50_000_000), 10.0);
+            per_event.push(d.len());
+            all.extend(d);
+        }
+        assert_eq!(per_event, vec![0, 1, 0, 1, 0, 1, 0]);
+        assert_eq!(all.len(), 3);
+        for d in &all {
+            assert_eq!(d.pos, [5.0, 7.0]);
+            assert_eq!(d.alpha_multiplier, 0.6);
+        }
+        assert!(c.finish().is_empty());
+    }
+
+    /// While moving, Airbrush is spaced exactly like Space (a spacing dab
+    /// drains the spray bank), so motion is never double-density.
+    #[test]
+    fn airbrush_moving_matches_space() {
+        let mut air = exact_conditioner(StrokeMethod::Airbrush { rate_hz: 10.0 });
+        let mut space = exact_conditioner(StrokeMethod::Space);
+        for i in 0..=10u64 {
+            let ev = event_at([i as f32 * 10.0, 0.0], 1.0, i * 50_000_000);
+            assert_eq!(air.push(&ev, 10.0), space.push(&ev, 10.0));
+        }
+    }
+
+    /// Dash ratio 0.5 length 20 over a straight 100 px stroke at a 5 px
+    /// step: spaced dabs at 5, 10, …, 100; phase = x; kept iff
+    /// x mod 20 < 10. Pinned the same whether the stroke arrives as one
+    /// segment or ten (phase carries across events).
+    #[test]
+    fn dash_keeps_only_the_on_intervals() {
+        let want: Vec<f32> = vec![5.0, 20.0, 25.0, 40.0, 45.0, 60.0, 65.0, 80.0, 85.0, 100.0];
+        let method = StrokeMethod::Dash {
+            ratio: 0.5,
+            length_px: 20.0,
+        };
+        for events in [1u64, 10] {
+            let mut c = exact_conditioner(method);
+            assert!(c.push(&event_at([0.0, 0.0], 1.0, 0), 10.0).is_empty());
+            let mut got = Vec::new();
+            for i in 1..=events {
+                let x = 100.0 * i as f32 / events as f32;
+                got.extend(c.push(&event_at([x, 0.0], 1.0, i * 8_000_000), 10.0));
+            }
+            // Positions are spacing's own `from + segment * t` floats (one
+            // segment gives 60.000004), so compare within EPS; the selection
+            // itself (which dabs survive) is exact via the count.
+            let xs: Vec<f32> = got.iter().map(|d| d.pos[0]).collect();
+            assert_eq!(xs.len(), want.len(), "{events} event(s): {xs:?}");
+            for (g, w) in xs.iter().zip(want.iter()) {
+                assert!((g - w).abs() <= EPS, "{events} event(s): {xs:?}");
+            }
+            assert!(got.iter().all(|d| d.pos[1] == 0.0));
+        }
+    }
+
+    /// Drag Dot: nothing during the stroke; `finish` emits exactly one dab
+    /// at the last conditioned position with its pressure, once.
+    #[test]
+    fn drag_dot_emits_one_dab_at_the_end() {
+        let mut c = exact_conditioner(StrokeMethod::DragDot);
+        for i in 0..=10u64 {
+            let ev = event_at(
+                [i as f32 * 9.0, i as f32 * 2.0],
+                0.1 * i as f32,
+                i * 8_000_000,
+            );
+            assert!(c.push(&ev, 10.0).is_empty(), "event {i}");
+        }
+        let dot = c.finish();
+        assert_eq!(dot.len(), 1);
+        assert_eq!(dot[0].pos, [90.0, 20.0]);
+        assert_eq!(dot[0].alpha_multiplier, 1.0);
+        assert!(c.finish().is_empty(), "the dot is emitted once");
+        // A click with no motion still leaves its dot.
+        c.reset();
+        c.push(&event_at([3.0, 4.0], 0.5, 0), 10.0);
+        assert_eq!(
+            c.finish(),
+            vec![DabPlan {
+                pos: [3.0, 4.0],
+                alpha_multiplier: 0.5
+            }]
+        );
+        // Reset before finish drops the pending dot.
+        c.push(&event_at([3.0, 4.0], 0.5, 0), 10.0);
+        c.reset();
+        assert!(c.finish().is_empty());
+    }
+
+    #[test]
+    fn set_method_rejects_invalid_and_keeps_the_current() {
+        let mut c = conditioner();
+        c.set_method(StrokeMethod::DragDot).expect("valid");
+        let err = c.set_method(StrokeMethod::Airbrush { rate_hz: 0.0 });
+        assert!(matches!(
+            err,
+            Err(ConditionerError::Method(StrokeMethodError::InvalidRate(_)))
+        ));
+        assert_eq!(c.method(), StrokeMethod::DragDot);
     }
 
     #[test]
