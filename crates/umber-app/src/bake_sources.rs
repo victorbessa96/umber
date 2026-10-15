@@ -427,6 +427,27 @@ pub fn flatten_over(premultiplied: &[u8], under: [u8; 4], size: u32) -> Option<V
     Some(out)
 }
 
+/// Replaces `set`'s flat normal placeholder with a BAKED tangent normal
+/// (C2-29: the Bakes panel's newest, often a high-poly transfer). `baked`
+/// is `(width, height, rgba8)`; a size other than `size` is declined (the
+/// placeholder stays, never a resampled normal). A painted normal applied
+/// afterwards still wins. Returns whether the baked normal was used.
+pub fn apply_baked_normal(
+    set: &mut umber_export::MapSet,
+    size: u32,
+    baked: Option<(u32, u32, Vec<u8>)>,
+) -> bool {
+    match baked {
+        Some((w, h, bytes))
+            if w == size && h == size && bytes.len() == (size * size * 4) as usize =>
+        {
+            set.set(umber_export::MapKind::Normal, bytes);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Attaches every PAINTED data channel to `set`. `read(channel)` returns
 /// the channel's premultiplied composite bytes at `size`, or `None` when
 /// the channel never materialized on this tile. A channel that was
@@ -559,6 +580,37 @@ pub fn assemble_tile_map_sets(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_baked_normal_replaces_the_flat_one_only_at_the_export_size() {
+        let normal_of = |set: &umber_export::MapSet| -> Vec<u8> {
+            set.maps_with_bytes()
+                .find(|(k, _)| *k == umber_export::MapKind::Normal)
+                .map(|(_, b)| b.to_vec())
+                .expect("normal present")
+        };
+        let mut set = map_set_from(vec![255; 16], 2);
+        let tilted = [200u8, 60, 230, 255].repeat(4);
+        assert!(
+            !apply_baked_normal(&mut set, 2, Some((4, 4, vec![0; 64]))),
+            "wrong size declined"
+        );
+        assert!(!apply_baked_normal(&mut set, 2, None));
+        assert_eq!(normal_of(&set), flat_normal_rgba8(2));
+        assert!(apply_baked_normal(
+            &mut set,
+            2,
+            Some((2, 2, tilted.clone()))
+        ));
+        assert_eq!(normal_of(&set), tilted);
+        // A painted normal still overrides the baked one.
+        let painted = apply_painted_channels(&mut set, 2, |c| {
+            (c == "normal").then(|| [10u8, 20, 250, 255].repeat(4))
+        });
+        assert_eq!(painted, vec![umber_export::MapKind::Normal]);
+        assert_eq!(normal_of(&set)[..3], [10, 20, 250]);
+    }
+
     use super::*;
 
     #[test]

@@ -619,6 +619,7 @@ impl TabViewer for PanelViewer<'_> {
                     paint: self.paint.as_deref(),
                     doc: Some(&*self.doc),
                     graph: Some(&*self.graph),
+                    baked_normal: self.bakes.baked_normal(),
                 };
                 self.export.show(ui, ctx);
             }

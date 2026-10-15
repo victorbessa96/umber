@@ -762,6 +762,9 @@ pub struct BakesPanel {
     /// The high-to-low transfer source (C2-29): the picked HIGH mesh and
     /// its cage + map choices.
     high: HighPoly,
+    /// The newest tangent normal this panel wrote (a low or high bake):
+    /// the Export dialog's normal source (C2-29), until a newer one lands.
+    baked_normal: Option<PathBuf>,
 }
 
 /// The High-poly group's state (C2-29): the HIGH mesh a transfer bakes
@@ -861,6 +864,7 @@ impl BakesPanel {
             mesh_tiles: MeshTilesCache::default(),
             job: None,
             high: HighPoly::default(),
+            baked_normal: None,
         }
     }
 
@@ -1660,6 +1664,12 @@ impl BakesPanel {
         );
     }
 
+    /// The newest baked tangent normal's path (the Export dialog's normal
+    /// source, C2-29). Tile 1001 only: the whole-mesh bake.
+    pub fn baked_normal(&self) -> Option<&Path> {
+        self.baked_normal.as_deref()
+    }
+
     /// The High-poly group's state (tests and the shell read it).
     pub fn high_poly(&self) -> &HighPoly {
         &self.high
@@ -1863,6 +1873,13 @@ impl BakesPanel {
                         record.elapsed_ms,
                         record.skew_clamped,
                     );
+                }
+                if let Some(normal) = records
+                    .iter()
+                    .rev()
+                    .find(|r| r.selection == Some(BakeSelection::Normal) && r.tile == FIRST_TILE)
+                {
+                    self.baked_normal = Some(normal.path.clone());
                 }
                 self.last_records = records;
             }
@@ -2446,6 +2463,11 @@ mod tests {
         let n = &normal[centre..centre + 4];
         assert!(n[2] > 200, "transferred normal up: {n:?}");
         assert_eq!(p.bake_log().entries().len(), 2, "two log rows");
+        // The export's normal source is now this transfer's normal.
+        assert_eq!(
+            p.baked_normal(),
+            Some(dir.join("Quad_normal_base.png").as_path())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

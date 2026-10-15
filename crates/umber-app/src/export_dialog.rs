@@ -215,6 +215,9 @@ pub struct ExportContext<'a> {
     /// The graph panel (for the procedural Base Color bridge; `None`
     /// or no evaluated output behaves like no graph — see the badge).
     pub graph: Option<&'a GraphPanel>,
+    /// The Bakes panel's newest tangent normal (C2-29): replaces the flat
+    /// placeholder on tile 1001 when its size matches the export.
+    pub baked_normal: Option<&'a Path>,
 }
 
 /// What the badge shows before an export: the shared pick-fn priority
@@ -756,7 +759,21 @@ impl ExportDialog {
                         bakes_panel::DEFAULT_RAYS,
                     )
                 };
-                baked.context("building export map set")
+                let mut baked = baked.context("building export map set")?;
+                if tile == umber_mesh::FIRST_TILE {
+                    if let Some(path) = ctx.baked_normal {
+                        let read = umber_export::png::read_png_rgba8(path)
+                            .map_err(|e| log::warn!("export: baked normal {}: {e}", path.display()))
+                            .ok();
+                        if !bake_sources::apply_baked_normal(&mut baked, size, read) {
+                            log::info!(
+                                "export: baked normal {} is not {size}², using the flat normal",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+                Ok(baked)
             },
             |tile| bake_sources::painted_base_color_tile(paint, tile, size, device, queue),
             |tile, channel| {

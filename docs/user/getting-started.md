@@ -52,9 +52,10 @@ To bake detail from a sculpt, use the **High poly** group: choose the
 high-poly mesh, set **Cage front** and **Cage back** (how far outside and
 inside the low surface a ray looks for the high one, in world units), tick
 **Transfer normal** and/or **Transfer height** and press **Bake from high**. The maps land
-beside the others as `<set>_normal_base.png` and `<set>_height.png`. The
-transferred normal replaces a self-baked one, which is near-flat on a low
-poly. The baked maps feed the viewport's mesh-map view
+beside the others as `<set>_normal_base.png` and `<set>_height.png`. The newest
+baked normal (from either button) is what **Export** writes in the normal
+slot, when its size matches the export; a painted normal still wins. The
+baked maps feed the viewport's mesh-map view
 modes (press `B`), the brush's cavity mask, and the export.
 
 ## 3. Paint
