@@ -38,6 +38,8 @@ menu =
     .grid = Show Grid (G)
     .gizmo = Show Axis Gizmo
     .about = About Umber
+    .shortcuts = Keyboard Shortcuts
+    .close-project = Close Project
 
 ## Dock panel titles
 

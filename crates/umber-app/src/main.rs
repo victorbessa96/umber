@@ -1200,6 +1200,8 @@ pub struct UmberApp {
     pending_revert: bool,
     /// Help ▸ About is open.
     about_open: bool,
+    /// Help ▸ Keyboard shortcuts is open (G5 menu completion).
+    shortcuts_open: bool,
     /// Hide UI / maximize (GUI plan g5-focus-modes).
     focus: shell_menu::FocusState,
     /// Named layouts (GUI plan g5-workspaces).
@@ -1357,6 +1359,7 @@ impl UmberApp {
             pending_recovery: recovery::pending(&gpu_startup::state_dir()),
             pending_revert: false,
             about_open: false,
+            shortcuts_open: false,
             focus: shell_menu::FocusState::default(),
             workspaces: workspaces::Workspaces::default(),
             tab_hide_pending: false,
@@ -2850,6 +2853,34 @@ impl eframe::App for UmberApp {
                 self.pending_revert = false;
             }
         }
+        if self.shortcuts_open {
+            // The same rows `docs/user/keyboard.md` is generated from
+            // (`actions::shortcut_rows`), in this platform's spelling.
+            let is_mac = cfg!(target_os = "macos");
+            let mut open = true;
+            egui::Window::new(tr("menu.shortcuts"))
+                .open(&mut open)
+                .collapsible(false)
+                .default_width(520.0)
+                .show(ui.ctx(), |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("shortcuts-grid")
+                                .striped(true)
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    for (key, text, scope) in actions::shortcut_rows(is_mac) {
+                                        ui.monospace(key);
+                                        ui.label(text);
+                                        ui.weak(scope);
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+            self.shortcuts_open = open;
+        }
         if self.about_open {
             let info = self.gpu.adapter.get_info();
             let about = shell_menu::AboutInfo::new(info.name, format!("{:?}", info.backend));
@@ -2997,6 +3028,12 @@ impl eframe::App for UmberApp {
                     self.pending_revert = true;
                     ui.close();
                 }
+                // Close = New: an empty session, through the same unsaved-
+                // work confirm (never a silent discard).
+                if ui.button(tr("menu.close-project")).clicked() {
+                    ui.close();
+                    actions.push(toolbar::ShellAction::NewProject);
+                }
                 let export_enabled = self.state.paint.is_some();
                 if ui
                     .add_enabled(export_enabled, egui::Button::new(tr("menu.export-png")))
@@ -3064,6 +3101,10 @@ impl eframe::App for UmberApp {
                 }
             });
             MenuButton::new(tr("menu.help")).ui(ui, |ui| {
+                if ui.button(tr("menu.shortcuts")).clicked() {
+                    self.shortcuts_open = true;
+                    ui.close();
+                }
                 if ui.button(tr("menu.about")).clicked() {
                     self.about_open = true;
                     ui.close();

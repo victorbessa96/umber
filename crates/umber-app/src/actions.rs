@@ -181,9 +181,9 @@ pub fn shortcut_label(action: ShellAction, is_mac: bool) -> Option<String> {
 }
 
 /// What a binding does, in the words of the keyboard reference
-/// (`docs/user/keyboard.md`). English on purpose: the reference is a
-/// repository document, and the UI's own labels are the catalogs' job.
-#[cfg_attr(not(test), allow(dead_code))] // generator + its test only
+/// (`docs/user/keyboard.md`, and the Help ▸ Keyboard shortcuts window,
+/// which renders the same rows). English: the catalogs translate the
+/// window's chrome, not this table.
 fn reference_text(action: ShellAction) -> &'static str {
     match action {
         ShellAction::Undo => "Undo",
@@ -215,7 +215,6 @@ fn reference_text(action: ShellAction) -> &'static str {
 }
 
 /// Where a binding fires from (the [`Focus::allows`] rule, in words).
-#[cfg_attr(not(test), allow(dead_code))]
 fn reference_scope(binding: Binding) -> &'static str {
     if binding.key == Key::Tab && binding.chord == Chord::Bare {
         "nothing focused"
@@ -224,6 +223,33 @@ fn reference_scope(binding: Binding) -> &'static str {
     } else {
         "not while typing in a field"
     }
+}
+
+/// One row of the shortcut table: the key on this platform, what it does,
+/// and where it fires. The Help ▸ Keyboard shortcuts window and
+/// [`keyboard_reference`] both read [`BINDINGS`] through this, so the
+/// window, the doc and the live keys cannot disagree.
+pub fn shortcut_rows(is_mac: bool) -> Vec<(String, &'static str, &'static str)> {
+    let names = if is_mac {
+        ModifierNames::SYMBOLS
+    } else {
+        ModifierNames::NAMES
+    };
+    BINDINGS
+        .iter()
+        .map(|(binding, action)| {
+            let key = KeyboardShortcut::new(binding.chord.modifiers(), binding.key)
+                .format(&names, is_mac)
+                .replace("OpenBracket", "[")
+                .replace("CloseBracket", "]")
+                .replace("Comma", ",");
+            let text = match reference_text(*action) {
+                "" => "(undocumented)",
+                text => text,
+            };
+            (key, text, reference_scope(*binding))
+        })
+        .collect()
 }
 
 /// The keyboard reference (`docs/user/keyboard.md`), generated from
@@ -383,6 +409,22 @@ mod tests {
                 !reference_text(*action).is_empty(),
                 "{binding:?} -> {action:?} needs a line in the keyboard reference"
             );
+        }
+    }
+
+    #[test]
+    fn the_shortcuts_window_rows_match_every_binding() {
+        let doc = keyboard_reference();
+        for mac in [false, true] {
+            let rows = shortcut_rows(mac);
+            assert_eq!(rows.len(), BINDINGS.len());
+            for (key, text, scope) in &rows {
+                assert!(!key.is_empty() && !scope.is_empty());
+                assert_ne!(*text, "(undocumented)", "{key}");
+                // The window shows exactly what the generated doc says.
+                assert!(doc.contains(&format!("`{key}`")), "{key} in the doc");
+                assert!(doc.contains(text), "{text} in the doc");
+            }
         }
     }
 

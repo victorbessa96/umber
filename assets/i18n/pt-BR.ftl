@@ -39,6 +39,8 @@ menu =
     .grid = Mostrar grade (G)
     .gizmo = Mostrar gizmo de eixos
     .about = Sobre o Umber
+    .shortcuts = Atalhos de Teclado
+    .close-project = Fechar Projeto
 
 ## Títulos dos painéis
 
