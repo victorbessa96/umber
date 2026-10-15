@@ -1085,8 +1085,12 @@ impl material_layer::MaterialTileIo for PaintMaterialIo<'_> {
         self.paint.size_of_channel(&self.set, channel)
     }
 
+    /// The IO's OWN set's tiles (C2-9): with several sets, a material
+    /// layer evaluates only onto its set's tiles, never another set's
+    /// (there its planes would be invisible and still cost the budget).
+    /// A single-set session's tiles are all of them, as before.
     fn tiles(&self) -> Vec<u16> {
-        self.paint.tiles_present()
+        self.paint.tiles_of_set(&self.set)
     }
 
     fn publish_channel(
@@ -4073,6 +4077,48 @@ mod pool_stage4_tests {
     use super::*;
     use umber_paint::persistence::{format_paint_commit, parse_paint_commit};
     use umber_paint::snapshot::resolve_instance_source;
+
+    #[test]
+    fn a_material_evaluates_onto_its_own_sets_tiles_only() {
+        // C2-9: the material IO lists the IO's set's tiles, so a parked
+        // set's tiles are never written by the active set's materials.
+        use material_layer::MaterialTileIo as _;
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+        let mut paint = paint_state::PaintState::with_target_size(device, queue, 64)
+            .expect("paint state builds");
+        paint.assign_tile_to_set(1001, "Body");
+        paint.assign_tile_to_set(1002, "Hilt");
+        paint.set_mesh(&paint_state::two_tile_strip());
+        // Tile 1002 materializes on its first stroke (the paint_state
+        // routing tests' shape).
+        paint.begin_stroke(egui::pos2(1.2, 0.5));
+        paint.end_stroke();
+        assert_eq!(paint.tiles_present(), vec![1001, 1002]);
+        let io = |paint: &mut paint_state::PaintState, set: &str| -> Vec<u16> {
+            PaintMaterialIo {
+                paint,
+                set: set.to_string(),
+                live_layers: Vec::new(),
+                snapshot: paint_state::CompositeSnapshot::default(),
+            }
+            .tiles()
+        };
+        assert_eq!(io(&mut paint, "Body"), vec![1001]);
+        assert_eq!(io(&mut paint, "Hilt"), vec![1002]);
+    }
 
     #[test]
     fn dormancy_keys_on_provenance_not_absence() {
