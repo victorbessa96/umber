@@ -8,6 +8,8 @@ the source of truth.
 
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
+- The Layers panel can reorder, rename, duplicate and add folders, and the
+  selected layer shows its opacity and blend mode, all undoable (C2-8)
 - Paint any channel, export every channel: a Channel picker in the Brush
   panel (roughness, metallic, height, normal, ...), and the export presets
   now write each painted channel (unpainted texels and partners fill with
