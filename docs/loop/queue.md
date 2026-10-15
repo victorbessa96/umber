@@ -104,7 +104,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 | C2-13..19 | Honest claims: checklist, perf nightly runner + leak-proof gate + real budget, UV'd FBX fixture, the doc-drift sweep, the §10 MSI row | 3 claims | 13 + 18 done (`c85a5a8`); 14 + 15 landed (the nightly runs + the leak-proof gate; the baseline reseed waits on its first run); 19 done (MSI dropped from the §10 row, cargo-dist 0.32.0); 17 done (generated UV'd FBX, Gate 0 asserts the unwrap); 16 (real-GPU budget row: Bessa's host) todo |
 | C2-20..22 | Security: panic-hunt the uncovered seams, plugin consent + size cap, Windows signing decision | 4 security | ◐ C2-20 ✓ (7 seams + the agent wire, no panic found), C2-21 ✓ (blake3 consent + 8 MiB cap); C2-22 (Windows signing) is Bessa's decision |
 | C2-23..25 | Release path: SPEC ratification and the dogfood asset (Bessa), a `v0.1.0-alpha.1` dry-run tag | 5 release | todo |
-| C2-26..28 | User docs + a generated keyboard reference, plugin SDK guide, kittest breadth | 6 docs/tests | ◐ C2-27 ✓ (`docs/plugins/authoring-guide.md`, its example built + loaded); C2-26 ◐ (`docs/user/keyboard.md` generated + drift-tested; the user guide open); 28 open |
+| C2-26..28 | User docs + a generated keyboard reference, plugin SDK guide, kittest breadth | 6 docs/tests | ◐ C2-27 ✓ (`docs/plugins/authoring-guide.md`, its example built + loaded); C2-26 ✓ (`docs/user/keyboard.md` generated + drift-tested; `docs/user/getting-started.md`, claims code-checked); 28 open |
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work
