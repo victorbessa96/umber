@@ -122,6 +122,7 @@ mod empty_state;
 mod env;
 mod export_dialog;
 mod fill_layer;
+mod gpu_startup;
 mod graph_canvas;
 mod graph_panel;
 mod history_panel;
@@ -1835,6 +1836,8 @@ impl UmberApp {
 impl eframe::App for UmberApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         profiling::scope!("frame");
+        // Crash-safe GPU startup: the 3rd frame confirms the backend.
+        gpu_startup::note_frame();
         // Async bake (wave 5): drain a finished bake job here, not only in
         // the Bakes tab's `show` (egui_dock skips hidden tabs), and keep
         // frames coming while one runs — egui otherwise repaints only on
@@ -2498,14 +2501,27 @@ fn main() -> eframe::Result<()> {
     // features requested on the device, or the compute splat pass panics at
     // first real stroke. eframe owns the device, so the requirement must be
     // injected here — through the device descriptor closure.
+    //
+    // Crash-safe GPU startup (gpu_startup.rs): decide the backend from the
+    // previous launch's marker (or WGPU_BACKEND / --safe-gpu), and write the
+    // marker before eframe touches the driver.
+    let safe_gpu = std::env::args().skip(1).any(|a| a == "--safe-gpu");
+    let gpu_decision = gpu_startup::prepare(safe_gpu);
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(ref mut create_new) = wgpu_options.wgpu_setup {
-        create_new.device_descriptor =
-            std::sync::Arc::new(|_adapter| eframe::egui_wgpu::wgpu::DeviceDescriptor {
+        if let Some(backends) = gpu_decision.wgpu_backends() {
+            create_new.instance_descriptor.backends = backends;
+        }
+        create_new.device_descriptor = std::sync::Arc::new(|adapter| {
+            // egui-wgpu calls this right before request_device: the marker
+            // names the adapter a driver crash would have died on.
+            gpu_startup::note_adapter(&adapter.get_info());
+            eframe::egui_wgpu::wgpu::DeviceDescriptor {
                 required_features:
                     eframe::egui_wgpu::wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                 ..Default::default()
-            });
+            }
+        });
     }
 
     let native = eframe::NativeOptions {
@@ -2520,7 +2536,7 @@ fn main() -> eframe::Result<()> {
         depth_buffer: umber_gpu::DEPTH_FORMAT_BITS,
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Umber",
         native,
         Box::new(|cc| match UmberApp::new(cc) {
@@ -2530,7 +2546,11 @@ fn main() -> eframe::Result<()> {
             }
             Err(err) => Err(format!("{err:#}").into()),
         }),
-    )
+    );
+    // An Err (e.g. no device) keeps an unconfirmed marker so the next
+    // launch steps the backend down; a clean exit clears it.
+    gpu_startup::finish(result.is_ok());
+    result
 }
 
 /// File > New tests: the headless reset half (`AppState::reset_for_new` —
