@@ -43,3 +43,25 @@ path whose cost was not set by the declared shape.
 
 Mutation check due on the host: with `limit` ignored (`room = 65536`),
 the bomb case must fail.
+
+## The sweep's other decoders (no change needed)
+
+Each untrusted reader was checked for output sized by the file rather
+than by a cap:
+
+- **PNG** (`umber_export::png::read_png_rgba8`, used for paint tiles,
+  mesh-map imports and environments): `png::Decoder::new_with_limits`
+  with `DECODE_LIMIT_BYTES`. Bounded.
+- **EXR** (`read_exr_rgba_f32`): a `MetaData` header preflight runs
+  `check_exr_size` on every layer before the prelude allocates. Bounded.
+- **USDC** (openusd 0.8.0, read from the registry): the LZ4 output is
+  `min(estimated, compressed × 255 + 64, 4 GiB)`, which is LZ4's own
+  maximum expansion, and path tables use `try_reserve_exact`. Bounded by
+  the input, so a bomb needs a file of proportional size. The 4 GiB
+  ceiling is upstream's; a tighter cap would be a fork, so it is not
+  worth it for a mesh importer.
+- **PSD** (`psd_import`): `MAX_PSD_SIDE` 8192 and `MAX_PSD_BYTES`
+  256 MiB, checked before decode. Bounded.
+- **ICC `embed_iccp`**: an unbounded `png::Decoder::new`, but it only
+  ever reads back the file Umber itself just wrote. Not an input
+  surface.
