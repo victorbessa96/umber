@@ -144,8 +144,8 @@ is the session to-do; each row here names its blocker or its file surface.
 | Kill | Closes | Surface |
 |---|---|---|
 | wave-openusd-0.8 | the last importer crash: openusd 0.7.0's multi-TB allocation ABORT (#19) | bump `openusd` 0.7.0 → 0.8.0 (fixes all six openusd findings upstream, PR mxpv/openusd#138; `docs/upstream/openusd-0.7.0.md`); adapt `umber-mesh/src/usdc.rs` to the `CrateData::open(impl Into<AssetBuffer>)` change; un-ignore `bug_usdc_huge_count_allocation_aborts` |
-| wave-stroke-methods-wiring | stroke methods reach the brush | `PaintState` sets the method, calls `finish()` at stroke end; brush-panel method picker + rate / dash rows; `.umberbrush` field |
-| wave-cavity-wiring | the cavity mask paints | compose `CavityMask::coverage` into the per-tile gate the shader samples; re-upload on curvature-map / param change; panel row |
+| wave-stroke-methods-wiring | stroke methods reach the brush | ✓ LANDED 2026-10-15 (`51d9047`): the preset's brush finally reaches the stroke; method picker + size in presets; Drag Dot's release dab flushes into the same undo step |
+| wave-cavity-wiring | the cavity mask paints | ✓ LANDED 2026-10-15 (`4bebc72`): one composed gate over quick mask × curvature; Brush-panel Cavity section |
 | wave-margin-ui | Adjacent Faces from the app | ✓ agent `bake` step `margin` + `MarginType` folded into `BakeFlags` LANDED 2026-10-15; the Bakes panel Margin type combo LANDED 2026-10-15 (g2-bakes-margin-ui; whole-mesh + per-tile AO seam graphs) |
 | wave-fbx-uv-fixture | a UV'd FBX test asset | see its row below |
 | wave-valuefield-log | the last raw sliders | `ValueField` log mode; migrate DoF focus + fill_layer (6), path_tool (4), bakes (3), display (2), layers (1) |

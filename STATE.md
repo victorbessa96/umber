@@ -22,9 +22,15 @@ the Adjacent Faces bake margin (CLI + the Bakes panel combo), crash-safe GPU sta
 completeness, the crate layering gate and the docs-only CI path filter;
 the mesh-importer panic hunt found 24 crash bugs and hardening closed
 23 (`.usdz` loads for the first time; the open one is an openusd
-allocation abort, upstream). Next: ROADMAP wave 8b's remaining rows
-(stroke methods, stencil, cavity mask, bitmap stamps → angle/jitter),
-the Win32 tablet path, and the 0.1.0 gates.
+allocation abort, upstream). Stroke methods and the cavity mask now
+reach the brush (51d9047, 4bebc72). The GUI plan
+(`docs/specs/gui-plan-2026-10-15.md`) is the active worklist (queue item
+23): G0 foundations, most of G1-G3, the G4 ramp / ValueField grammar /
+curve widget, and the G5 menus landed 2026-10-15, two sessions in parallel
+under kill locks, with per-kill state in the plan's tables. Next: the rest
+of the GUI plan (G5 focus modes + workspaces, G6, G7), ROADMAP 8b's
+remaining rows (stencil, bitmap stamps → angle/jitter), the Win32 tablet
+path, and the 0.1.0 gates.
 State: POST-POOL-MARCH
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate (v1.1 amendment drafted: docs/specs/spec-v1.1-amendment-draft.md).
