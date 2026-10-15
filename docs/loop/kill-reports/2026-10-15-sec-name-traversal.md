@@ -85,12 +85,23 @@ rule's doc points at it. Both existing reject lists (flat and
 layer-nested) gain those cases. Real channel names (`baseColor`,
 `height`, user channels) are untouched: they are identifiers.
 
-## Owed (with the battery, not speculatively now)
+## Fourth site: the import refuses an unsafe channel at the source (lock `sec-import-channel`, UNRUN)
 
 The mesh-map import's user-channel route (`<set>_<suffix>.png` →
-channel `suffix`) can carry a `:` from a Linux file name into the
-document. The save then writes `paint/<suffix>/…`, which fails on a
-Windows checkout of that project, and the load now rejects it. The
-import should refuse it at the source with a new
-`UnmatchedReason::UnsafeChannel`, which needs both catalogs (a new
-`import.reason-unsafe-channel` key). Do it in the same battery run.
+channel `suffix`) could carry a `:` or `*` from a Linux file name into
+the document; the save then writes `paint/<suffix>/…`, which fails on a
+Windows checkout, and the load now rejects it. `classify_file_name` now
+refuses such a suffix with `UnmatchedReason::UnsafeChannel`, by the same
+rule as the sidecar parser. The import report row says why; both
+catalogs have the new key. Test: four hostile names classify as
+`UnsafeChannel`; the reason-key list includes it.
+
+## Found on the way: 21 pt-BR strings were missing
+
+A static parse of both `.ftl` catalogs found pt-BR missing 21 of
+en-US's 650 keys, all of `import.*` (the whole mesh-map import panel)
+plus `texturesets.{inherit, per-channel, channel-resize-clears}`. A
+pt-BR user saw that panel in English. The catalog's own header said so
+("as demais caem no en-US"). All 21 are translated now; the parse says
+651 = 651, with nothing missing and nothing extra.
+
