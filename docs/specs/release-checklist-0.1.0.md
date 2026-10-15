@@ -72,12 +72,7 @@ the FBX leg proves the import, not a UV paint on it.]
         (`flatpak/` and `appimage/`: `packaging.yml` diffs them, so they
         must stay identical). Regenerate `Cargo.lock` on the build host
         (17 `version = ` lines change). The `examples/` workspace is
-        separate and unpublished, so it stays 0.1.0. In the Flatpak
-        manifest's git source, replace `"branch": "master"` with
-        `"tag": "v0.1.0-alpha.1"` + `"commit": "<the tagged sha>"`, as
-        flatpak/README.md says ("at ship time this pins to the release
-        tag"). The sha is known only after step 4, so this goes in the
-        step-6 follow-up commit.
+        separate and unpublished, so it stays 0.1.0.
      2. The wave gate on a clean clone, then push. CI green.
      3. `dist plan --tag v0.1.0-alpha.1` on the host must announce both
         packages, as in the dry run, each archive's `[misc]` now listing
@@ -88,7 +83,11 @@ the FBX leg proves the import, not a UV paint on it.]
      5. Record the artifact sizes in the §12 table (installer budget
         < 150 MB) and download the Windows zip to check its `.sha256`.
      6. A follow-up commit returns the version to `0.1.0`, whose metainfo
-        entry keeps the alpha's release line as history.
+        entry keeps the alpha's release line as history. The same commit
+        pins the Flatpak manifest's git source to the tag: replace
+        `"branch": "master"` with `"tag": "v0.1.0-alpha.1"` +
+        `"commit": "<the tagged sha>"` (flatpak/README.md: "at ship time
+        this pins to the release tag"). The sha only exists after step 4.
 
 ## The tag shape (drafted, not fired)
 
