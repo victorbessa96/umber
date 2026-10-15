@@ -513,13 +513,25 @@ fn prune_stale_layer_files(layers_root: &Path, model: &ProjectModel) -> Result<(
 /// already holding its newer body under the old `project.json` — the
 /// journal's absolute-state ops converge that on the next recovery.
 pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError> {
-    let texture_set_names: Vec<String> = model
-        .texture_sets
-        .iter()
-        .map(|ts| ts.name.clone())
-        .collect();
-    let layer_sets_for_validation: Vec<(String, Vec<u64>, u64)> = model
-        .layers
+    // Exhaustive destructure, NO `..` (absorbed 2026-10-14 from
+    // photocraft's crates/format/src/convert.rs): a new ProjectModel
+    // field fails to compile HERE until the save path decides what to do
+    // with it. Without this, a field added to the model but not to
+    // ProjectFile would be silently dropped on every save — the load side
+    // builds ProjectModel with a struct literal, so it is already
+    // compile-checked. Layer bodies serialize whole (serde), so a new
+    // Layer field is safe by construction.
+    let ProjectModel {
+        version,
+        texture_sets,
+        layers,
+        settings,
+        graphs_mtlx,
+        material_defs_mtlx,
+        journal_seq,
+    } = model;
+    let texture_set_names: Vec<String> = texture_sets.iter().map(|ts| ts.name.clone()).collect();
+    let layer_sets_for_validation: Vec<(String, Vec<u64>, u64)> = layers
         .iter()
         .map(|entry| {
             (
@@ -529,17 +541,13 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
             )
         })
         .collect();
-    validate_project_structure(
-        model.version,
-        &texture_set_names,
-        &layer_sets_for_validation,
-    )?;
+    validate_project_structure(*version, &texture_set_names, &layer_sets_for_validation)?;
 
     fs::create_dir_all(dir)?;
     let layers_root = dir.join("layers");
 
-    let mut layer_sets = Vec::with_capacity(model.layers.len());
-    for entry in &model.layers {
+    let mut layer_sets = Vec::with_capacity(layers.len());
+    for entry in layers {
         let set_dir = layers_root.join(&entry.texture_set);
         fs::create_dir_all(&set_dir)?;
 
@@ -558,13 +566,13 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
     }
 
     let file = ProjectFile {
-        version: model.version,
-        texture_sets: model.texture_sets.clone(),
+        version: *version,
+        texture_sets: texture_sets.clone(),
         layer_sets,
-        settings: model.settings.clone(),
-        graphs_mtlx: model.graphs_mtlx.clone(),
-        material_defs_mtlx: model.material_defs_mtlx.clone(),
-        journal_seq: model.journal_seq,
+        settings: settings.clone(),
+        graphs_mtlx: graphs_mtlx.clone(),
+        material_defs_mtlx: material_defs_mtlx.clone(),
+        journal_seq: *journal_seq,
     };
     write_atomic(&dir.join("project.json"), &to_pretty_json_bytes(&file)?)?;
     if layers_root.exists() {
@@ -587,11 +595,22 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
     }
 
     let file: ProjectFile = serde_json::from_slice(&bytes)?;
+    // The load-side twin of save_to_dir's destructure: every on-disk
+    // field must be consumed (no `..`), so a field added to ProjectFile
+    // but never carried into the model fails to compile here.
+    let ProjectFile {
+        version: file_version,
+        texture_sets: file_texture_sets,
+        layer_sets: file_layer_sets,
+        settings: file_settings,
+        graphs_mtlx: file_graphs_mtlx,
+        material_defs_mtlx: file_material_defs_mtlx,
+        journal_seq: file_journal_seq,
+    } = file;
 
     let texture_set_names: Vec<String> =
-        file.texture_sets.iter().map(|ts| ts.name.clone()).collect();
-    let layer_sets_for_validation: Vec<(String, Vec<u64>, u64)> = file
-        .layer_sets
+        file_texture_sets.iter().map(|ts| ts.name.clone()).collect();
+    let layer_sets_for_validation: Vec<(String, Vec<u64>, u64)> = file_layer_sets
         .iter()
         .map(|ls| {
             (
@@ -601,10 +620,10 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
             )
         })
         .collect();
-    validate_project_structure(file.version, &texture_set_names, &layer_sets_for_validation)?;
+    validate_project_structure(file_version, &texture_set_names, &layer_sets_for_validation)?;
 
-    let mut layers = Vec::with_capacity(file.layer_sets.len());
-    for layer_set in &file.layer_sets {
+    let mut layers = Vec::with_capacity(file_layer_sets.len());
+    for layer_set in &file_layer_sets {
         let set_dir = dir.join("layers").join(&layer_set.texture_set);
         let mut stack_layers = Vec::with_capacity(layer_set.layer_ids.len());
         for &id in &layer_set.layer_ids {
@@ -632,13 +651,13 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
     }
 
     let mut model = ProjectModel {
-        version: file.version,
-        texture_sets: file.texture_sets,
+        version: file_version,
+        texture_sets: file_texture_sets,
         layers,
-        settings: file.settings,
-        graphs_mtlx: file.graphs_mtlx,
-        material_defs_mtlx: file.material_defs_mtlx,
-        journal_seq: file.journal_seq,
+        settings: file_settings,
+        graphs_mtlx: file_graphs_mtlx,
+        material_defs_mtlx: file_material_defs_mtlx,
+        journal_seq: file_journal_seq,
     };
     recover_from_journal(&mut model, dir);
     Ok(model)
