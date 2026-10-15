@@ -54,6 +54,43 @@ Option<usize>`, and `gltf` `Material::index() -> Option<usize>`.
    material triangles), so the composite's per-set rows line up without
    manual assignment.
 
+## The occluder scope (researched 2026-10-15)
+
+The reference tools agree on the default, and every one of them also
+exposes a scope:
+
+- **Substance 3D Painter** (Mesh map settings, AO/thickness/bent
+  normals): "Self occlusion — select which meshes should affect ambient
+  occlusion for the current mesh", with *Always* and *Only Same Mesh
+  Name*. The default is Always, i.e. the whole mesh, which is Umber's
+  rule above.
+- **Marmoset Toolbag** bake groups: "Ignore Groups" isolates each
+  group's AO/thickness/lighting rays, and a per-mesh "Exclude When
+  Ignoring Groups" opts single meshes back in.
+- **The user case, a real request** (Adobe community, 2023): "AO for the
+  gauges, but the glass texture set will darken the result". Adobe's PM
+  answered that no per-set exclude exists: rename the mesh and use *Only
+  Same Mesh Name*, which the asker rejected with more than two sets.
+
+So Umber's design takes the default plus the scope Painter lacks:
+
+```
+enum OccluderScope { WholeMesh /* default */, OwnSet, Sets(BTreeSet<u32>) }
+```
+
+- `OwnSet` is Marmoset's Ignore Groups.
+- `Sets` names the occluding materials: the glass case is "everything
+  but Glass", which Painter cannot express.
+- It lives in the per-set bake settings and changes only the occluder
+  argument from §3. The raster submesh is untouched.
+- The parameter applies to AO, thickness and bent normal. Transfer takes
+  rays from the HIGH mesh, so its scope is the high-poly group, not
+  this.
+
+Ship order: `WholeMesh` lands in step 3 (no UI, matching today's
+output byte for byte); the enum and the panel row are step 4's. This
+keeps step 3's acceptance a pure no-regression check.
+
 ## Order (each a kill, all host-gated)
 
 1. **Core:** the field, `..Default::default()` at the 138 struct-literal
