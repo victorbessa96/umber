@@ -9,6 +9,7 @@ pub mod notices;
 pub mod param_group;
 pub mod ramp;
 pub mod swatch_grid;
+pub mod tab_overflow;
 pub mod tool_row;
 pub mod value_field;
 
