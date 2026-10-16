@@ -1714,7 +1714,9 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
                 if elem > 64 {
                     return Err(SppError::Corrupt(format!("chunk element size {elem}")));
                 }
-                elem as usize
+                // 0 is the padding of an absent field (v3 with a v1
+                // B-tree index): one element per cell.
+                usize::from(elem.max(1))
             } else {
                 1
             };
