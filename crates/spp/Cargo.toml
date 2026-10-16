@@ -10,6 +10,12 @@ rust-version.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 flate2 = { workspace = true }
+# texture-cache channels are one raw LZ4 block each (research §7a).
+# Already locked through openusd: 0.14.0, MIT, safe-decode (no unsafe).
+# Pinned here, not in [workspace.dependencies]: the exact version the lock
+# already resolves, so Cargo.lock gains one dependency edge and no
+# package.
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-decode", "checked-decode"] }
 
 [dev-dependencies]
 # The corpus manifest (tests/corpus.rs): sha256-pinned oracle rows.

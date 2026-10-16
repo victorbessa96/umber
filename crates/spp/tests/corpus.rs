@@ -182,7 +182,62 @@ mod tests {
                 "corpus drift: {} no longer matches its manifest pin",
                 entry.file
             );
-            let _ = umber_spp::open(&path);
+            // Real Painter files hold their channels in texture-cache/
+            // (research §7a): every pinned file must yield at least one
+            // set with a baseColor, and every channel must be RGBA of
+            // its declared size.
+            let project = umber_spp::open(&path)
+                .unwrap_or_else(|err| panic!("corpus file {} did not open: {err}", entry.file));
+            assert!(
+                !project.texture_sets.is_empty(),
+                "{}: no texture sets imported",
+                entry.file
+            );
+            let mut base_colours = 0;
+            for set in &project.texture_sets {
+                for ch in &set.channels {
+                    assert_eq!(
+                        ch.pixels.len(),
+                        ch.width as usize * ch.height as usize * usize::from(ch.channels),
+                        "{}: {} / {} has a short pixel buffer",
+                        entry.file,
+                        set.name,
+                        ch.name
+                    );
+                    base_colours += usize::from(ch.name == "baseColor");
+                    if ch.name == "height" {
+                        // Signed height, ±1 → 0..255 around Umber's flat
+                        // 128. The median depends on the sculpt (one corpus
+                        // set sits at 185), so the check is on clipping:
+                        // under 1% of texels may land at 0 or 255 (the
+                        // corpus maximum is 0.02%).
+                        let total = (ch.pixels.len() / 4).max(1);
+                        let clipped = ch
+                            .pixels
+                            .chunks_exact(4)
+                            .filter(|t| t[0] == 0 || t[0] == 255)
+                            .count();
+                        assert!(
+                            clipped * 100 < total,
+                            "{}: {} height clips {clipped} of {total} texels",
+                            entry.file,
+                            set.name
+                        );
+                    }
+                }
+            }
+            assert!(base_colours > 0, "{}: no baseColor channel", entry.file);
+            eprintln!(
+                "corpus: {} -> {} set(s): {}",
+                entry.file,
+                project.texture_sets.len(),
+                project
+                    .texture_sets
+                    .iter()
+                    .map(|s| format!("{} ({} ch)", s.name, s.channels.len()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
 }
