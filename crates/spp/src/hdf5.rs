@@ -1905,7 +1905,11 @@ impl BTreeNode {
         let level = head[5];
         let used = u16::from_le_bytes([head[6], head[7]]) as u64;
         let key_size: u64 = match kind {
-            BTreeKind::Group => 4,
+            // The key is the largest link-name size, stored off-wide
+            // (the first corpus file: key at 0xA0 is 8 zero bytes,
+            // child 0x648 at 0xA8 — a 4-byte key misreads the child as
+            // 0x648_00000000).
+            BTreeKind::Group => off as u64,
             // u32 byte-size + u32 filter-mask + (D+1) u64 offsets (§6.4).
             BTreeKind::Chunk(rank) => 8 + 8 * (rank as u64 + 1),
         };
@@ -1920,8 +1924,8 @@ impl BTreeNode {
             let at = base + i * stride;
             match kind {
                 BTreeKind::Group => {
-                    let key = uint_at(ctx.data, at, 4)? as u32;
-                    let child_stored = uint_at(ctx.data, at + 4, off)?;
+                    let key = uint_at(ctx.data, at, off)? as u32;
+                    let child_stored = uint_at(ctx.data, at + off, off)?;
                     let child = resolve(ctx, child_stored, "b-tree child")?
                         .ok_or_else(|| SppError::Corrupt("b-tree entry without child".into()))?;
                     entries.push(BTreeEntry::Group { key, child });
