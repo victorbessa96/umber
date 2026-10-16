@@ -1084,7 +1084,10 @@ impl<'a> Walker<'a> {
         pipeline: &[FilterKind],
         total_bytes: u64,
     ) -> Result<Vec<u8>, SppError> {
-        if chunked.rank != space.rank {
+        // h5py pads the chunk grid with trailing 1s (a 1-D dataset's
+        // grid is {65536, 1}): the first `space.rank` dims are the
+        // grid, any extra dims must be 1.
+        if chunked.rank < space.rank || chunked.chunk_dims[space.rank..].iter().any(|&d| d != 1) {
             let bad = path.to_string();
             return Err(SppError::Unsupported(format!(
                 "{bad}: chunked rank {} != dataspace rank {}",
