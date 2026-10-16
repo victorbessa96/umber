@@ -269,7 +269,28 @@ source, and it is recorded as such:
   (`model.rs`, "recomputed on open"). It is nonetheless the only place
   in the file where the flattened channels exist as plain pixels.
 
-### What this changes (Bessa decides)
+### Live channels, set names, stacks (corpus-observed, 2026-10-15)
+
+- **The `list` dataset names the live channels.** The cache's own
+  stamp (`texture-cache/header`, `version.minor`) selects the layout:
+  - v3.2: 20-byte entries, u64 BE flag at offset 12, datasets named by
+    flag;
+  - v3.3: 16-byte entries, u32 BE bit index at offset 12, datasets named
+    by index.
+
+  v3.3 stacks keep unlisted leftovers of the old naming (20 in
+  HydrageaBessa; some byte-identical, some stale). Only listed entries
+  are live.
+- **Set names.** `paint/scene.assbin` is an Assimp binary dump. Each
+  material's `$mat.uid` (u64) IS its `texture-cache/<id>` group, and its
+  `?mat.name` is the set name Painter shows. 10/10 sets resolve.
+- **Stacks.** `3864292196` is the main stack in every set. Bessa Synth's
+  set also has two 2048² stacks (material layering); they import as
+  their own sets.
+- **Names.** Flag 1 = base colour, 2²² = normal. Others stay
+  `flag_<n>` (see the kill report for the statistics).
+
+### What this changes (Bessa decided: build it, 2026-10-15)
 
 The skip rule throws away the only importable pixels a real file
 holds. A texture-cache reader would make `.spp` import real for

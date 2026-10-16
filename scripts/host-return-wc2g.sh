@@ -24,6 +24,10 @@ KILLS=(
   "spp-inflate-bound|spp|crates/spp/src/hdf5.rs"
   "g5-tab-overflow-core|umber-gui|crates/umber-gui/src/widgets/mod.rs crates/umber-gui/src/widgets/tab_overflow.rs"
 )
+# NOT in the table (needs Cargo.lock regenerated on the host first):
+# spp-texture-cache-reader + spp-extract-cli (spp, umber-cli, umber-app;
+# shares umber-cli/Cargo.toml with win-version-resource). See
+# docs/loop/kill-reports/2026-10-15-spp-texture-cache-reader.md.
 # NOT in the table: win-version-resource. It needs the workspace dep
 # `winresource` in the root Cargo.toml + umber-app's build-dep, both
 # under g5-workspace-persist's lock, and a Cargo.lock resolved on the host
