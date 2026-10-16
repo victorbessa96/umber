@@ -1163,14 +1163,16 @@ impl<'a> Walker<'a> {
                         .collect();
                     let full = chunk_bytes as usize;
                     let bytes = self.run_pipeline(path, stored, &kept, full, chunked.elem)?;
-                    if bytes.len() != expected {
+                    if bytes.len() < expected {
                         let bad = path.to_string();
                         return Err(SppError::Corrupt(format!(
-                            "{bad}: chunk at {coords:?} decoded {} != footprint {expected}",
+                            "{bad}: chunk at {coords:?} decoded {} < footprint {expected}",
                             bytes.len()
                         )));
                     }
-                    bytes
+                    // The edge chunk is stored full-size (padded); the
+                    // footprint crops it to the dataset extent.
+                    bytes[..expected].to_vec()
                 }
             };
             self.place_chunk(
