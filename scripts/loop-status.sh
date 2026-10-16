@@ -30,3 +30,14 @@ echo "claude procs:   $(pgrep -c claude 2>/dev/null || echo 0)"
 
 echo "--- movement (files touched in the last 4 min) ---"
 find crates assets -newermt "4 minutes ago" \( -name '*.rs' -o -name '*.ftl' -o -name '*.toml' \) 2>/dev/null | head -6
+
+echo "--- build host (192.168.15.64) ---"
+if timeout 4 bash -c '</dev/tcp/192.168.15.64/22' 2>/dev/null; then
+    echo "host: UP"
+    ssh -o BatchMode=yes -o ConnectTimeout=5 -n bessa@192.168.15.64 \
+        'pgrep -af "wave-battery|cargo" | grep -v pgrep | head -3; \
+         ls -t /tmp/*battery*.log 2>/dev/null | head -2' \
+        2>/dev/null | sed 's/^/  /'
+else
+    echo "host: DOWN (cargo parked — loop-prompt: host-free work only)"
+fi
