@@ -682,13 +682,13 @@ impl<'a> Walker<'a> {
                 head[0]
             )));
         }
-        let count = u16::from_le_bytes([head[2], head[3]]) as usize;
+        let _count = u16::from_le_bytes([head[2], head[3]]);
         let area = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as u64;
-        self.read_ohdr_v1_messages(addr + 16, area, out)?;
-        // The prefix's message count is the prefix block's own; the
-        // message list ends at the block boundary regardless.
-        debug_assert!(count <= out.len() || true);
-        Ok(())
+        // The prefix's message count covers only the first block; the
+        // list itself ends at the block boundary, and continuations
+        // carry the rest (each closed by a NIL message).
+        self.read_ohdr_v1_messages(addr + 16, area, out)
+    }
     }
 
     /// The message list both v1 header shapes share: 8-byte headers,
