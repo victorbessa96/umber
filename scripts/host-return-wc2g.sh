@@ -21,17 +21,18 @@ KILLS=(
   "sec-name-traversal|umber-mesh umber-export umber-app umber-cli|crates/umber-mesh/src/mesh_maps.rs crates/umber-export/src/lib.rs"
   "sec-sidecar-channel|umber-paint umber-app|crates/umber-paint/src/persistence.rs"
   "sec-smart-caps|umber-core umber-app|crates/umber-core/src/smart.rs"
-  "spp-inflate-bound|spp|crates/spp/src/hdf5.rs"
+  "spp-inflate-bound|umber-spp|crates/spp/src/hdf5.rs"
   "g5-tab-overflow-core|umber-gui|crates/umber-gui/src/widgets/mod.rs crates/umber-gui/src/widgets/tab_overflow.rs"
   "wave-abr|umber-app|crates/umber-app/src/brush_panel.rs crates/umber-app/src/brush_panel/abr_import.rs"
   "psd-read-caps|umber-app|crates/umber-app/src/psd_import.rs"
   "crash-recent-ops|umber-app|crates/umber-app/src/crash.rs crates/umber-app/src/history_panel.rs"
 )
-# NOT in the table (needs Cargo.lock regenerated on the host first):
 # spp-texture-cache-reader + spp-extract-cli + wave-benchmark-public
-# (spp, umber-cli, umber-app; bench rides spp-extract-cli's main.rs;
-# shares umber-cli/Cargo.toml with win-version-resource). See
-# docs/loop/kill-reports/2026-10-15-spp-texture-cache-reader.md.
+# (umber-spp, umber-cli, umber-app; bench rides spp-extract-cli's
+# main.rs; shares umber-cli/Cargo.toml with win-version-resource). See
+# docs/loop/kill-reports/2026-10-15-spp-texture-cache-reader.md. The
+# Cargo.lock regeneration they wait on happened at host-return
+# (2026-10-15 23:5x, commits 337efab..016fca6): the lock is done.
 # NOT in the table: win-version-resource. It needs the workspace dep
 # `winresource` in the root Cargo.toml + umber-app's build-dep, both
 # under g5-workspace-persist's lock, and a Cargo.lock resolved on the host
