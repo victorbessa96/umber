@@ -6,6 +6,33 @@ the source of truth.
 
 ## [Unreleased]
 
+### The host-return wave: the corpus gate lights up (2026-10-16)
+
+- .spp import reads REAL Substance Painter projects: the corpus gate
+  (3 projects, 1.3 GB) opens all three files and imports their texture
+  sets; 17 HDF5-format fixes measured on the real bytes — the v0/v1
+  root symbol-table entry (scratch-pad b-tree/heap), SNOD stride and
+  off-wide name offsets, off-wide group keys, v1 continuation blocks
+  as bare message lists, size-1 big-endian fixed-point (H5T_STD_U8BE),
+  unlimited max-dims as the current extent, layout v1→v3 field-order
+  normalize, one-offset-per-dimension chunk keys, padded edge chunks
+  cropped to the footprint, never-written contiguous datasets as
+  empty, and truncated LZ4 cache blocks (Painter's offset-0 end
+  marker: the valid prefix decodes, the tail zero-fills, reported)
+- The synthetic test builder now writes the same shapes the corpus
+  pins, so both pin one format
+- Workspaces: layout files keep finite rect corners — serde_json
+  spells an un-laid-out dock's ±∞ as null, which nothing could read
+  back; the repair is scoped to x/y corners so real Option nulls
+  (focused_surface) survive
+- Crash reports list the last 10 operations (fixed English labels,
+  recorded at session events; never translated text in a panic path)
+- ABR import surfaces per-brush "not carried over" lines in the panel
+  report
+- Windows version resources: winresource wired through both build.rs
+- umber-app's serde/serde_json are real dependencies (the workspace
+  layouts use them outside tests)
+
 ### The headless paint engine + the post-pool march (2026-10-14/15)
 
 - Release packaging: every archive, the Flatpak and the AppImage now ship
