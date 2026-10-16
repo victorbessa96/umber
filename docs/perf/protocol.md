@@ -184,21 +184,42 @@ the session composited nothing. `pool_mirror` gained the same kind of pin
 - "Feels fine" is not a measurement. Neither is a single run — every
   budget number is P95 over ≥ 1000 frames or ≥ 1000 dabs.
 
-## Nightly verdict 2026-10-16 (run 38869909446, head `06c1711`)
+## Nightly verdict 2026-10-16 (run 38869909446, head `06c1711`) — RESOLVED by the triage below
 
 The first COMPLETED perf-nightly in a week (all prior runs cancelled)
-is RED on a PRE-wave head:
+was RED on a PRE-wave head:
 
-- `viewport_mean_ms` 84.07 vs baseline 5.49 (**x15.3**)
-- `viewport_p95_ms` 91.87 vs baseline 6.24 (**x14.7**)
+- `viewport_mean_ms` 84.07 vs the then-baseline 5.49 (**x15.3**)
+- `viewport_p95_ms` 91.87 vs 6.24 (**x14.7**)
 - input-photon both OK (p50 x0.33, p95 x0.97)
 
-`06c1711` predates the 2026-10-15/16 host-return wave entirely, so the
-regression is NOT this wave's. The owning wave is whatever touched the
-viewport path between the last green nightly and `06c1711` — no green
-run exists to bisect against (every run since 2026-10-11 was cancelled),
-so the triage is a fresh hunt: profile `viewport_mean` on master, find
-the stall (the two suspects: the per-frame HUD added with the perf
-instrumentation itself, or a recompiled-shader hot path), and either
-fix it or re-baseline with a written justification. Until then the
-nightly stays red and the red is recorded here, per this protocol.
+## Triage verdict 2026-10-16 (run 38957356307, head `5e0d89e`) — a baseline-class mismatch, closed by reseed
+
+A fresh nightly dispatched against CURRENT master (`5e0d89e`, the
+W-GUI-1 wave) to decide whether the x15 lived past the pre-wave head:
+
+- `viewport_mean_ms` 45.54 vs the then-baseline 5.49 (**x8.3**)
+- `viewport_p95_ms` 57.24 vs 6.24 (**x9.2**)
+- input-photon both OK (p50 x0.15, p95 x0.96)
+- stroke soak green: 2914/2914 dabs composited, zero drops, @200Hz on
+  the 4K target
+
+Diagnosis: the regression is NOT a master regression — it is the
+hardware-class mismatch the 2026-10-13 seed's own note prescribed
+reseeding away. That seed was measured on the dev machine's Intel HD
+530 over GL; the nightly measures on lavapipe, GitHub's SOFTWARE
+Vulkan rasterizer, which is ~8x slower on this bench by nature. The
+note read: "reseed from a CI run once the nightly produces authentic
+runner numbers" — the first completed nightly produced them, and the
+reseed landed 2026-10-16 (`perf/baseline.json`, seeded from run
+38957356307's own metrics).
+
+What the two completed runs ALSO measure, against the same yardstick:
+the pre-wave head `06c1711` at x15.3 → the W-GUI-1 head `5e0d89e` at
+x8.3 — the host-return wave HALVED the absolute viewport frame time
+on lavapipe (84.07ms → 45.54ms mean). The protocol keeps the red
+recorded here: the seed change is a re-baseline with written
+justification (this section), exactly the remedy the original triage
+row named. The nightly's compare gate is now apples-to-apples
+(lavapipe baseline vs lavapipe runs); the next nightly is the first
+clean read of the gate.

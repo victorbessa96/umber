@@ -281,7 +281,7 @@ rows live in the census doc until their wave is cut.
 | Stylus (pressure/tilt/proximity) | ✓ Linux XI2 + raw pressure; win32 dual-path = wave 3 |
 | History panel | ✓ panel; time-travel = wave 1 |
 | Distribution | ✓ shell+PS proven + CI; Flatpak/AppImage = wave 1 |
-| Performance floor | seeded (`fd49627`) on a local Intel HD 530 / GL, NOT the nightly's lavapipe; the nightly has never run (no self-hosted runner, no fallback) — C2-14..16 |
+| Performance floor | ✓ reseeded 2026-10-16 from authentic CI numbers (run 38957356307, head `5e0d89e`): the x15 nightly red was the iGPU/GL-seed vs lavapipe hardware-class mismatch the seed's own note prescribed reseeding away; the nightly's compare is now apples-to-apples, and the two completed runs also show the host-return wave HALVED lavapipe viewport mean (84.07 → 45.54ms) — triage record in docs/perf/protocol.md |
 | Paint-what-you-see buffer | live-raycast ✓; the pwys stroke buffer stays a design-first wave-5 candidate |
 | Ortho camera | ✓ landed (40f3e5d) |
 | 8K export | ✓ built (`cd668a3`) |

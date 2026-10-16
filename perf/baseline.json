@@ -1,9 +1,9 @@
 {
-  "seeded": "2026-10-13",
-  "adapter": "Mesa Intel(R) HD Graphics 530 (SKL GT2), IntegratedGpu, GL backend",
-  "note": "Seeded per Bessa's ruling (local seed, CI compares thereafter). Seeded on the machine's iGPU via GL, NOT lavapipe as CI runs — CI's first compare against this baseline will read high on the iGPU numbers; reseed from a CI run once the nightly produces authentic runner numbers (the nightly's --ignored invocation bug, fixed separately, starved it to date). Extra keys (seeded/adapter/note) are inert to perf_compare.py, which reads the flat metric keys.",
-  "viewport_p95_ms": 6.2434,
-  "viewport_mean_ms": 5.4898,
-  "input_photon_p95_ms": 10.5263,
-  "input_photon_p50_ms": 0.6263
+  "seeded": "2026-10-16",
+  "adapter": "lavapipe (CI software Vulkan) — reseeded from the first completed CI nightly per the protocol's own remedy: the 2026-10-13 seed was measured on the local Intel HD 530 over GL while the nightly compares against it on lavapipe, and both completed nightlies ran x8-x15 red on that hardware-class mismatch, which the seed's own note prescribed reseeding away once authentic runner numbers existed",
+  "note": "Authentic runner numbers from CI run 38957356307 (head 5e0d89e, the W-GUI-1 wave): viewport_mean 45.5359 / viewport_p95 57.2448 on lavapipe; input-photon p50 0.0942 / p95 10.09 from the same run. The pre-wave head 06c1711 measured x15.3 against the same yardstick — the host-return wave HALVED the absolute frame time; this baseline preserves the W-GUI-1 state as the floor going forward. Baselines are per-hardware-class (protocol: 'Baselines are per-hardware-class'); this file is the CI lavapipe class. Extra keys (seeded/adapter/note) are inert to perf_compare.py, which reads the flat metric keys.",
+  "viewport_p95_ms": 57.2448,
+  "viewport_mean_ms": 45.5359,
+  "input_photon_p95_ms": 10.09,
+  "input_photon_p50_ms": 0.0942
 }
