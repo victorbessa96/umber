@@ -911,7 +911,11 @@ impl<'a> Walker<'a> {
             )));
         }
         let count = u16::from_le_bytes([head[6], head[7]]) as u64;
-        let stride = 28 + ctx.off_size as u64;
+        // Symbol-table entry v1 (§6.3): link name offset (off), object
+        // header address (off), cache type (4), reserved (4), scratch
+        // pad (16) = 2·off + 24. The first corpus file caught the old
+        // 28+off stride misreading every entry past the first.
+        let stride = 2 * ctx.off_size as u64 + 24;
         let area = count
             .checked_mul(stride)
             .ok_or_else(|| SppError::Corrupt("SNOD entry count overflows".into()))?;
@@ -919,8 +923,8 @@ impl<'a> Walker<'a> {
         bytes_at(ctx.data, base, area)?;
         for i in 0..count {
             let at = base + i * stride;
-            let name_off = uint_at(ctx.data, at, 4)? as usize;
-            let header_stored = uint_at(ctx.data, at + 4, ctx.off_size)?;
+            let name_off = uint_at(ctx.data, at, ctx.off_size)? as usize;
+            let header_stored = uint_at(ctx.data, at + ctx.off_size as u64, ctx.off_size)?;
             let target = resolve(ctx, header_stored, "symbol entry")?
                 .ok_or_else(|| SppError::Corrupt("symbol entry without object header".into()))?;
             let name = heap_c_string(heap, name_off)?;
