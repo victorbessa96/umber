@@ -832,6 +832,25 @@ pub fn read_pending_from_disk(item: &PendingImport) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
 
+    /// C2-32's decision pin: a Color-kind import linearizes its RGB
+    /// (an ordinary sRGB colour PNG must not land in the linear plane
+    /// curved twice), a Data-kind import passes bytes through. The
+    /// 188 anchor: sRGB 188 decodes to linear 128 (mid-grey), the
+    /// exact value the export re-curve inverts.
+    #[test]
+    fn colour_imports_linearize_and_data_imports_pass_through() {
+        let mut px = [188, 188, 188, 200];
+        if channel_kind_for("baseColor") == ChannelKind::Color {
+            umber_paint::paint_state::curvature_png_to_linear(&mut px);
+        }
+        assert_eq!(px, [128, 128, 128, 200], "sRGB 188 grey -> linear 128");
+        let mut px = [188, 188, 188, 200];
+        if channel_kind_for("roughness") == ChannelKind::Color {
+            umber_paint::paint_state::curvature_png_to_linear(&mut px);
+        }
+        assert_eq!(px, [188, 188, 188, 200], "data channels untouched");
+    }
+
     #[test]
     fn switching_sets_keeps_each_sets_channels() {
         let mut state = MeshMapImportState::default();

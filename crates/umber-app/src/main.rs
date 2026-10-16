@@ -1026,6 +1026,20 @@ fn publish_import_plane(
         badges.insert(id, crate::i18n::tr("import.size-mismatch"));
         return;
     }
+    // C2-32: an ordinary colour PNG (e.g. `Body_baseColor.png`) stores
+    // sRGB-encoded bytes; the planes are LINEAR (the picker and the
+    // eyedropper linearize on the way in, export re-curves baseColor and
+    // emissive), so publishing the bytes as-is curves them twice on
+    // export (washed out) and renders too light in the viewport. Color
+    // channels linearize BEFORE the premultiply — data channels (AO,
+    // roughness, ...) are unit-range values, not encoded colour, and
+    // pass through unchanged. `curvature_png_to_linear` is the shared
+    // sRGB→linear curve (RGB only, alpha/coverage untouched).
+    let mut rgba = rgba;
+    if crate::mesh_map_import::channel_kind_for(&applied.channel) == umber_core::ChannelKind::Color
+    {
+        umber_paint::paint_state::curvature_png_to_linear(&mut rgba);
+    }
     let plane = material_layer::straight_to_premultiplied(&rgba);
     match paint.publish_plane(
         PlaneOwner::Layer(id),
