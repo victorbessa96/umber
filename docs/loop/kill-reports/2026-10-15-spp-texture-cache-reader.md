@@ -140,6 +140,23 @@ If it is flipped, the fix is one line in `texture_cache::decode` (reverse
 the row order before returning), plus a test pinning it. Until checked,
 the user docs must not promise correct orientation; they don't.
 
+## Memory
+
+Peak on HydrageaBessa (742 MiB), from measured sizes:
+
+| Held | Size |
+|---|---|
+| the file buffer | 741 MiB, now dropped after parsing, before decoding |
+| the copied datasets | 729 MiB |
+| 24 decoded 4K RGBA8 channels | 1.5 GiB |
+| one raw decode buffer | 128 MiB |
+
+So the peak is about 2.3 GiB, down from 3.1 GiB. `open` also refuses
+files over `MAX_SPP_FILE_BYTES` (4 GiB) from metadata, before reading.
+Streaming channels one at a time (decode → PNG → drop) would bring the
+CLI/extract path under 1 GiB. That needs `open` to stop returning every
+channel at once: a follow-up, not this kill.
+
 ## Not done, and why
 
 1. **The one-line hand-off in `main.rs`** waits for
