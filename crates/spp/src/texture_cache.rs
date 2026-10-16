@@ -516,12 +516,10 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
         if off == 0 {
             return block[i..].iter().all(|&b| b == 0);
         }
-        let mut ml = (tok & 15) as usize;
-        if ml == 15 {
+        if tok & 15 == 15 {
             loop {
                 let Some(&b) = block.get(i) else { return true };
                 i += 1;
-                ml += b as usize;
                 if b != 255 {
                     break;
                 }

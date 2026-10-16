@@ -1692,11 +1692,9 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
                     addr: u64::MAX,
                     size: 0,
                 }),
-                None => {
-                    return Err(SppError::Corrupt(
-                        "contiguous layout without address".into(),
-                    ))
-                }
+                None => Err(SppError::Corrupt(
+                    "contiguous layout without address".into(),
+                )),
                 Some(addr) => {
                     bytes_at(ctx.data, addr, size)?;
                     Ok(Layout::Contiguous { addr, size })
