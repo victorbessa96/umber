@@ -235,7 +235,14 @@ fn is_showable(dock: &DockState<Panel>) -> bool {
 /// Writes the layouts to `path` as JSON. A failure is the caller's log
 /// line: layouts are a convenience, never worth an error dialog.
 pub fn save_layouts(path: &std::path::Path, saved: &SavedLayouts) -> std::io::Result<()> {
-    let json = serde_json::to_string(saved).map_err(std::io::Error::other)?;
+    // A dock that was never laid out holds `Rect::NOTHING` (±∞ corners)
+    // and serde_json writes ±∞/NaN as `null`, which nothing can read
+    // back. Rects are re-laid-out on the next frame anyway, so the file
+    // keeps them finite: every null becomes 0 (both save and load fix
+    // the same shape, so an old file a previous version wrote loads too).
+    let mut value = serde_json::to_value(saved).map_err(std::io::Error::other)?;
+    de_null_infinities(&mut value);
+    let json = serde_json::to_string(&value).map_err(std::io::Error::other)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -249,8 +256,30 @@ pub fn save_layouts(path: &std::path::Path, saved: &SavedLayouts) -> std::io::Re
 /// malformed or other-version file (the presets load instead).
 pub fn load_layouts(path: &std::path::Path) -> Option<SavedLayouts> {
     let text = std::fs::read_to_string(path).ok()?;
-    let saved: SavedLayouts = serde_json::from_str(&text).ok()?;
+    let mut value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    de_null_infinities(&mut value);
+    let saved: SavedLayouts = serde_json::from_value(value).ok()?;
     (saved.version == LAYOUTS_VERSION).then_some(saved)
+}
+
+/// Replaces every JSON `null` inside `value` with `0.0`: serde_json's
+/// spelling of a non-finite f32. Only `rect`/`viewport` corners contain
+/// those, and a 0×0 rect is inert (overwritten by the next layout pass).
+fn de_null_infinities(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Null => *value = serde_json::json!(0.0),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                de_null_infinities(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, item) in map.iter_mut() {
+                de_null_infinities(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +310,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the exact edited layout"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_never_laid_out_dock_round_trips_because_rects_go_finite() {
+        // The battery red: a fresh preset's nodes are Rect::NOTHING (±∞),
+        // which serde_json writes as null and cannot read back. The file
+        // must keep finite corners (0), whatever the in-memory rects are.
+        let mut ws = Workspaces::default();
+        let dock = preset(Workspace::Paint);
+        ws.switch(Workspace::Bake, &mut &mut dock.clone());
+        let path =
+            std::env::temp_dir().join(format!("umber-layouts-finite-{}.json", std::process::id()));
+        save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
+        let text = std::fs::read_to_string(&path).expect("file");
+        assert!(!text.contains("null"), "no non-finite corners in the file");
+        let (back, _) = Workspaces::restore(load_layouts(&path).expect("loads"));
+        assert_eq!(back.active(), Workspace::Bake);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A file with null corners (a previous version's save) still loads.
+    #[test]
+    fn a_torn_null_layouts_file_loads_through_the_same_repair() {
+        let text = r#"{"version":1,"active":"Paint","layouts":[["Paint",{"surfaces":{"Main":{"nodes":[{"Leaf":{"rect":{"min":{"x":null,"y":null},"max":{"x":null,"y":null}},"viewport":{"min":{"x":null,"y":null},"max":{"x":null,"y":null}},"tabs":["Viewport"],"active":0,"scroll":0.0,"collapsed":false,"tab_bar_hidden":false}}],"focused_surface":0,"surface_borders":{}}}}]]}"#;
+        let path =
+            std::env::temp_dir().join(format!("umber-layouts-null-{}.json", std::process::id()));
+        std::fs::write(&path, text).expect("write");
+        let saved = load_layouts(&path).expect("the null-repair loads it");
+        assert_eq!(saved.active, Workspace::Paint);
         let _ = std::fs::remove_file(&path);
     }
 
