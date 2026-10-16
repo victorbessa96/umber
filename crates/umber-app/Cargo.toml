@@ -47,6 +47,10 @@ umber-spp = { workspace = true }
 fluent = "0.17"
 profiling = { workspace = true }
 
+# Panel/Workspace derive Serialize/Deserialize (the persisted dock
+# layouts, g5-workspace-persist).
+serde = { workspace = true }
+
 [features]
 # Perf instrumentation backend (tracy). Off by default: with the feature
 # off, every profiling::span! in the workspace compiles to nothing.
@@ -72,9 +76,6 @@ umber-paint = { workspace = true, features = ["test-hooks"] }
 pollster = { workspace = true }
 wgpu = { workspace = true }
 serde_json = { workspace = true }
-# Panel/Workspace derive Serialize/Deserialize (the persisted dock
-# layouts, g5-workspace-persist).
-serde = { workspace = true }
 # The offscreen UI test harness (queue row 15, absorbed from photocraft):
 # kittest drives panels headless (widget-tree queries) and, with the
 # snapshot + wgpu features, renders PNGs compared against committed
