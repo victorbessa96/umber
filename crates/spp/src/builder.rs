@@ -116,6 +116,15 @@ impl B {
         self.u64(u64::MAX); // extension (undefined)
         self.u64(0); // end of file (patched by finish)
         self.u64(u64::MAX); // driver info (undefined)
+                            // The root symbol-table entry (spec): link name offset (0),
+                            // object header address, cache type 1, reserved, and the
+                            // 16-byte scratch pad carrying b-tree + local heap (the
+                            // synthetic root has no separate object header; the walker
+                            // reads cache type 1 and uses the scratch pad).
+        self.u64(0); // link name offset
+        self.u64(0); // root object header (unused by cache type 1)
+        self.u32(1); // cache type: symbol table
+        self.u32(0); // reserved
         let btree_at = self.pos();
         self.u64(0);
         let heap_at = self.pos();
