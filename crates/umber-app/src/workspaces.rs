@@ -238,8 +238,8 @@ pub fn save_layouts(path: &std::path::Path, saved: &SavedLayouts) -> std::io::Re
     // A dock that was never laid out holds `Rect::NOTHING` (±∞ corners)
     // and serde_json writes ±∞/NaN as `null`, which nothing can read
     // back. Rects are re-laid-out on the next frame anyway, so the file
-    // keeps them finite: every null becomes 0 (both save and load fix
-    // the same shape, so an old file a previous version wrote loads too).
+    // keeps them finite (the x/y corner nulls become 0; real
+    // `Option::None` nulls, like `focused_surface`, are left alone).
     let mut value = serde_json::to_value(saved).map_err(std::io::Error::other)?;
     de_null_infinities(&mut value);
     let json = serde_json::to_string(&value).map_err(std::io::Error::other)?;
@@ -262,23 +262,29 @@ pub fn load_layouts(path: &std::path::Path) -> Option<SavedLayouts> {
     (saved.version == LAYOUTS_VERSION).then_some(saved)
 }
 
-/// Replaces every JSON `null` inside `value` with `0.0`: serde_json's
-/// spelling of a non-finite f32. Only `rect`/`viewport` corners contain
-/// those, and a 0×0 rect is inert (overwritten by the next layout pass).
+/// Replaces the `x`/`y` `null` corners of every `rect`/`viewport`
+/// object with `0.0`: serde_json's spelling of a non-finite f32 (an
+/// un-laid-out dock is `Rect::NOTHING`, ±∞). Scoped to those keys —
+/// other nulls are real `Option::None`s (`focused_surface`) and must
+/// survive. A 0×0 rect is inert (overwritten by the next layout pass).
 fn de_null_infinities(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Null => *value = serde_json::json!(0.0),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                de_null_infinities(item);
+    if let serde_json::Value::Object(map) = value {
+        let is_corner = map.keys().all(|k| k == "x" || k == "y");
+        if is_corner && map.values().any(|v| v.is_null()) {
+            for (_, v) in map.iter_mut() {
+                if v.is_null() {
+                    *v = serde_json::json!(0.0);
+                }
             }
+            return;
         }
-        serde_json::Value::Object(map) => {
-            for (_, item) in map.iter_mut() {
-                de_null_infinities(item);
-            }
+        for (_, item) in map.iter_mut() {
+            de_null_infinities(item);
         }
-        _ => {}
+    } else if let serde_json::Value::Array(items) = value {
+        for item in items {
+            de_null_infinities(item);
+        }
     }
 }
 
