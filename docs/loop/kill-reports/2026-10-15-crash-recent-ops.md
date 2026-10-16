@@ -21,17 +21,18 @@ adds the operations.
 - The existing child-process hook test now records an op and asserts it
   is in the written report.
 
+## Also built (`history_panel.rs`, added to the lock)
+
+`HistoryKind::crash_label(self) -> &'static str`: fixed English names for
+all 20 kinds (an exhaustive `match`, so a new kind is a compile error
+there). A test requires them distinct and plain lowercase ASCII.
+
 ## Not done: the callers
 
 Nothing calls `note_op` yet, so a report lists "(none recorded)" until
 it is wired. The call sites are:
 - `Document::run` / `record_session_event` (document.rs, locked by
-  `mask-compose-perf`): one `note_op(kind.crash_label())`. That is a new
-  `HistoryKind::crash_label(self) -> &'static str` in history_panel.rs,
-  with fixed English names (`"add paint layer"`, …). Do NOT reuse
-  `HistoryKind::label()`: it returns a translated `String`, and a
-  report must be readable in any bug tracker and must not run the i18n
-  machinery inside a panic hook;
+  `mask-compose-perf`): one `crate::crash::note_op(kind.crash_label())`;
 - the paint-stroke commit, `PaintState` via main.rs (locked by
   `g5-workspace-persist`).
 
