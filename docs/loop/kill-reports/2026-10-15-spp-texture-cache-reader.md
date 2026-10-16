@@ -73,9 +73,9 @@ All 61 channels decode, with no name collisions. Every set has a
    +                }
    ```
 
-   Until it lands, `show_section`'s new return value is unused, which
-   is a warning (`unused_must_use` does not apply to `Option`, so it is
-   silent), and the button still writes the folder. Until then the button
+   Until it lands, `show_section`'s new return value is discarded. That
+   compiles warning-free (`Option` is not `#[must_use]`), and the
+   button still writes the folder. Until then the button
    writes the folder and the status line points at it; dropping that
    folder on the window imports it.
 2. **The button labels are English.** The catalogs are under
