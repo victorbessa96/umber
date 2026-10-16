@@ -23,7 +23,7 @@ Substance Painter is the industry standard for game/film texturing — and it is
 
 | Area | |
 |---|---|
-| **Import** | FBX, glTF/GLB, OBJ, USDA, USDC, USDZ; `.spp` (read-only, clean-room) and PSD import |
+| **Import** | FBX, glTF/GLB, OBJ, USDA, USDC, USDZ; PSD import; `.spp` opens read-only and reports every dataset, but real Painter projects keep their paint inside an undocumented graph format, so no channels import from them yet |
 | **Painting** | MyPaint-style dynamics + stabilizer, 9 falloff curves, smudge / clone / erase, mirror + radial symmetry, path and polygon tools, quick mask, seam-aware strokes, front-face falloff for 3D strokes, UDIM |
 | **Layers** | per-layer pixel planes, paint / fill / material / folder / instance layers, masks, anchors, 32 blend modes, click-to-time-travel history |
 | **Materials** | an original node-graph engine (generators, filters, smart materials); MaterialX export + import |
