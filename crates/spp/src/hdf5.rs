@@ -1688,7 +1688,7 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
                 rank,
                 btree,
                 chunk_dims,
-                elem: elem as usize,
+                elem,
             }))
         }
         other => Err(SppError::Unsupported(match other {
