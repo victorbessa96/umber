@@ -281,10 +281,11 @@ impl B {
             debug_assert_eq!(coords.len(), rank);
             self.u32(*size as u32);
             self.u32(*mask);
+            // One offset per dimension (the corpus node at 272159007
+            // pins the shape); the child follows the last offset.
             for coord in coords {
                 self.u64(*coord);
             }
-            self.u64(0); // the (D+1)th offset
             self.u64(*child);
         }
         at
