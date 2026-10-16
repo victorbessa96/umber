@@ -26,8 +26,12 @@ adds the operations.
 Nothing calls `note_op` yet, so a report lists "(none recorded)" until
 it is wired. The call sites are:
 - `Document::run` / `record_session_event` (document.rs, locked by
-  `mask-compose-perf`), one `note_op(kind_label(kind))` with a static
-  label per `HistoryKind`;
+  `mask-compose-perf`): one `note_op(kind.crash_label())`. That is a new
+  `HistoryKind::crash_label(self) -> &'static str` in history_panel.rs,
+  with fixed English names (`"add paint layer"`, …). Do NOT reuse
+  `HistoryKind::label()`: it returns a translated `String`, and a
+  report must be readable in any bug tracker and must not run the i18n
+  machinery inside a panic hook;
 - the paint-stroke commit, `PaintState` via main.rs (locked by
   `g5-workspace-persist`).
 
