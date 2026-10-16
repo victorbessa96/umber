@@ -258,10 +258,7 @@ impl Palette {
     }
 
     /// Whether the overlay is on screen.
-    #[expect(
-        dead_code,
-        reason = "kittest seam (tests/panel_kittest.rs drives these through the lib target)"
-    )]
+    #[allow(dead_code)] // kittest seam (tests/panel_kittest.rs)
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -269,20 +266,14 @@ impl Palette {
     /// Replaces the query (tests drive the filter without a focused text
     /// field; a live user's typing resets the selection the same way
     /// through `edit.changed()`).
-    #[expect(
-        dead_code,
-        reason = "kittest seam (tests/panel_kittest.rs drives these through the lib target)"
-    )]
+    #[allow(dead_code)] // kittest seam (tests/panel_kittest.rs)
     pub fn set_query(&mut self, query: &str) {
         self.query = query.to_string();
         self.selected = 0;
     }
 
     /// The recent picks, newest first (what an empty query lists first).
-    #[expect(
-        dead_code,
-        reason = "kittest seam (tests/panel_kittest.rs drives these through the lib target)"
-    )]
+    #[allow(dead_code)] // kittest seam (tests/panel_kittest.rs)
     pub fn recents(&self) -> &[ShellAction] {
         self.recents.items()
     }
