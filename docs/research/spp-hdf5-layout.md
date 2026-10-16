@@ -267,8 +267,15 @@ flattened channels:
 - one texture set per `<set-id>`;
 - channels named by flag until the name table is found.
 
-It needs an `lz4` decoder: `lz4_flex` is pure Rust and MIT. It stays
-inside ruling 1, as read-only import. Its scope (flattened channels
+It needs an `lz4` decoder. `lz4_flex` 0.14.0 (pure Rust, MIT, no
+unsafe by default) is ALREADY in `Cargo.lock` through openusd. Taking it
+directly adds a manifest line, no new third-party code.
+`block::decompress_into(input, &mut [u8; bufferSize])` decodes into a
+caller-sized buffer, so the output is capped by the declared size, the
+same bound `spp-inflate-bound` puts on deflate. Cap `bufferSize` at
+`width × height × bytes-per-texel` for the GL format AND at the 256 MiB
+dataset cap before allocating. It stays inside ruling 1, as read-only
+import. Its scope (flattened channels
 only, no layers) and the name-table question are a ruling, not a kill.
 
 
