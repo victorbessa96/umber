@@ -11,7 +11,19 @@
 
 ## Status line
 
-Current phase: **HOST-RETURN WAVE LANDED (2026-10-16).** The build host
+Current phase: **W-GUI-1 LANDED (2026-10-16, `5e0d89e`; CI 38954115915 in
+flight).** The four-kill GUI wave: the keymap editor (capture/conflict/
+presets/keymap=-persistence, one funnel), the home card (recents +
+recover, post-dock drain), UV-view parity (UDIM grid, shader-side
+channel isolation with a byte-exact golden, the shift-hold inspector),
+and the contextual strip (Size/Flow/Spacing/Lazy/Symmetry over the
+viewport, no second state copy). Battery GREEN: 687 app + 145 gpu
+tests, clippy -D warnings clean. Before it (same day): the .spp
+import-audit fix `ee1a078` — chunk b-tree keys are ELEMENT OFFSETS,
+the odometer counted indices, so every chunked Painter dataset
+imported only chunk 0 (94-98% zero-fill); fixed + the corpus gate now
+pins CONTENT (nonzero floors, material names, no truncation notes),
+extract-spp writes Body/Eyes/Fur. The prior phase follows. The build host
 returned 2026-10-15 23:41 after a ~5 h outage; the ENTIRE parked kill set
 (g5-workspace-persist, the kittest breadth + lib surface, c2-28, the four
 sec-* kills, spp-extract-cli, wave-benchmark-public, wave-abr, the texture
@@ -60,7 +72,7 @@ GUI: painting reaches Base Color only, export writes Base Color only from
 paint, there is no quit guard and no pixel autosave, Ctrl+Z misses paint
 strokes, the Layers panel cannot reorder or rename, and a document holds one
 layer stack. Those Tier 1-2 rows come first.
-State: HOST-RETURN-WAVE-LANDED
+State: W-GUI-1-LANDED
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate (v1.1 amendment drafted: docs/specs/spec-v1.1-amendment-draft.md).
 No tag, no release, no v0.1 claim until the 0.1.0 checklist's gates pass.

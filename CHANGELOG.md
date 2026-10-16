@@ -6,6 +6,34 @@ the source of truth.
 
 ## [Unreleased]
 
+### W-GUI-1: four GUI-plan kills land in one wave (2026-10-16, `5e0d89e`)
+
+- The keymap editor (g3): Preferences ▸ Keymap — searchable 3-column
+  grid, click-to-capture (Esc cancels, Backspace clears/restores),
+  conflict refusal naming the owning action, Umber / Blender-like
+  presets, and `keymap=` override persistence with copy/paste of the
+  changed-binding delta. One `with_table` funnel feeds every
+  consumer (poll, menu labels, tooltips, the keyboard reference).
+- The home screen (g5): the empty viewport becomes a home card —
+  New/Open with live shortcuts, six recent projects (hover ×, Remove /
+  Clear all, missing paths gray out), Recover-last-session from the
+  autosave journal, double-click-empty = Open. The card's actions run
+  through the same dispatch as the File menu.
+- UV-view parity (g6): the 2D view gets the UDIM grid with tile
+  numbers and the accent on the active cell, per-channel display
+  (R/G/B/A/Gray) applied in the display shader (byte-exact golden per
+  arm), and a shift-hold pixel inspector (XY, RGBA, HSV — linear-space
+  readout, one readback per gesture).
+- The contextual strip (g6): Size, Flow, Spacing, Lazy mouse and
+  Symmetry over the viewport — editing the panel's own state, so the
+  strip and Properties cannot drift; size rides the same setter the
+  `[` / `]` keys use.
+- The same day, the .spp import-audit fix (`ee1a078`): chunk b-tree
+  keys are element offsets, the odometer counted indices — every
+  chunked Painter dataset imported only its first chunk. Fixed, with
+  the corpus gate now pinning content (nonzero floors, material
+  names, zero truncation notes); extract-spp writes Body/Eyes/Fur.
+
 ### The loop protocol repaired at its own audit (2026-10-16)
 
 - loop-prompt v1.2: the push policy now matches the two-gate ruling (one
