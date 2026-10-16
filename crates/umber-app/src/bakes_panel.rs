@@ -231,14 +231,13 @@ impl BakeSelection {
             Self::Curvature => tr("bakes.map-curvature"),
             Self::Thickness => tr("bakes.map-thickness"),
             Self::Position => tr("bakes.map-position"),
-            // `viewmode.normal` is the existing "Normal" key; the other
-            // three are untranslated until the catalogs (under a sibling
-            // lock) take `bakes.map-*` keys for them.
             Self::Normal => tr("viewmode.normal"),
-            Self::WorldNormal => "World-space normal".to_owned(),
-            Self::Id => "ID".to_owned(),
-            Self::BentNormal => "Bent normal".to_owned(),
-            Self::Height => tr("viewmode.height"),
+            Self::WorldNormal => tr("bakes.map-world-normal"),
+            Self::Id => tr("bakes.map-id"),
+            Self::BentNormal => tr("bakes.map-bent-normal"),
+            // The High-poly group's height is the TRANSFER output, so it
+            // names the transfer, not the paintable height channel.
+            Self::Height => tr("bakes.map-height-transfer"),
         }
     }
 
