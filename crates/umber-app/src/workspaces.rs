@@ -330,20 +330,31 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("umber-layouts-finite-{}.json", std::process::id()));
         save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
-        let text = std::fs::read_to_string(&path).expect("file");
-        assert!(!text.contains("null"), "no non-finite corners in the file");
         let (back, _) = Workspaces::restore(load_layouts(&path).expect("loads"));
         assert_eq!(back.active(), Workspace::Bake);
+        // The corner x/y values are all finite in the file (the repair
+        // replaced them); `focused_surface: null` is a real Option::None
+        // and must survive.
+        let text = std::fs::read_to_string(&path).expect("file");
+        assert!(!text.contains("\"x\":null"), "x corners are finite");
+        assert!(!text.contains("\"y\":null"), "y corners are finite");
+        assert!(text.contains("focused_surface"), "the field is there");
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A file with null corners (a previous version's save) still loads.
+    /// A file with null corners (a previous version's save) still loads:
+    /// built from a REAL save with the corners torn to nulls, so the
+    /// shape matches what the writer produces.
     #[test]
     fn a_torn_null_layouts_file_loads_through_the_same_repair() {
-        let text = r#"{"version":1,"active":"Paint","layouts":[["Paint",{"surfaces":{"Main":{"nodes":[{"Leaf":{"rect":{"min":{"x":null,"y":null},"max":{"x":null,"y":null}},"viewport":{"min":{"x":null,"y":null},"max":{"x":null,"y":null}},"tabs":["Viewport"],"active":0,"scroll":0.0,"collapsed":false,"tab_bar_hidden":false}}],"focused_surface":0,"surface_borders":{}}}}]]}"#;
+        let mut ws = Workspaces::default();
+        let mut dock = preset(Workspace::Paint);
         let path =
             std::env::temp_dir().join(format!("umber-layouts-null-{}.json", std::process::id()));
-        std::fs::write(&path, text).expect("write");
+        save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
+        let text = std::fs::read_to_string(&path).expect("file");
+        let torn = text.replace(":0.0,", ":null,").replace(":0.0}", ":null}");
+        std::fs::write(&path, torn).expect("write");
         let saved = load_layouts(&path).expect("the null-repair loads it");
         assert_eq!(saved.active, Workspace::Paint);
         let _ = std::fs::remove_file(&path);
