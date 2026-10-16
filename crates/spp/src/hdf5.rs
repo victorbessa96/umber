@@ -1633,6 +1633,8 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
         if payload.len() < 8 {
             return Err(SppError::Corrupt("v1 layout header truncated".into()));
         }
+        // The rebuilt message marks itself: no element-size field
+        // follows the dims (the trailing bytes are message padding).
         let mut norm = vec![3u8, payload[2], payload[1]];
         norm.extend_from_slice(&payload[8..]);
         norm
@@ -1644,6 +1646,7 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
             payload[0]
         )));
     };
+    let v1_shape = payload_owned[0] == 3 && payload[0] != 3;
     let payload = payload_owned.as_slice();
     match payload[1] {
         LAYOUT_COMPACT => {
@@ -1698,7 +1701,7 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
             // v3+ carries the chunk element size after the dims; v1/2
             // do not (elements are the datatype's size - one element
             // per cell for the corpus's u8 datasets).
-            let elem: usize = if payload.len() >= dims_end + 4 {
+            let elem: usize = if !v1_shape && payload.len() >= dims_end + 4 {
                 let elem = uint_le(payload, dims_end, 4)?;
                 if elem == 0 || elem > 64 {
                     return Err(SppError::Corrupt(format!("chunk element size {elem}")));
