@@ -112,8 +112,8 @@ between "feature-complete" and "a tool a studio trusts".
 | wave-fuzz-corpus | the panic-hunt's structured corpus | ◐ (a) mesh importers ✓ (`crates/umber-mesh/tests/panic_hunt_mesh.rs`: noise + mutated FBX / glTF / USDA / USDC / USDZ / OBJ; it surfaced the openusd aborts closed in `5b5b0ba`); (b) mutated-valid replays ✓ for mtlx (3 real fixtures), presets, smart templates, PNG and the agent wire (C2-20, `1468f66`). Open: coverage-guided fuzzing (cargo-fuzz, nightly + a corpus budget) |
 | wave-a11y-first-pass | keyboard navigation + focus states | the icon toolbar + panels need tab order, focus rings, shortcut discoverability — Substance's UI is dense but fully keyboard-driven; ours isn't yet |
 | wave-i18n-audit | the pt-BR completeness beyond the test | the completeness test pins key parity; a native-speaker review pass (Bessa's call who) for the strings' actual quality |
-| wave-crash-reporter | the never-crash doctrine's last mile | a structured crash handler that writes the last 10 journal ops + the frame state to a user-readable file — the bug report a user can attach without a debugger |
-| wave-benchmark-public | the public benchmark story | a `umber-cli bench` subcommand: the bake/export/paint paths timed on a reference mesh, so community perf reports are comparable |
+| wave-crash-reporter | the never-crash doctrine's last mile | ✓ CORE DONE 2026-10-16 (battery-verified): the panic hook + report file + next-launch sticky notice (C2-2) and the last-10-operations ring (`crash::note_op`, fixed English labels at every session event; battery GREEN `ddb59e0`). Frame state = the named remainder (per-frame tool/panel state, `main.rs` wiring) |
+| wave-benchmark-public | the public benchmark story | ✓ LANDED 2026-10-16 (battery-verified): `umber-cli bench` — a 49k-tri generated cube, six bakers + encodes timed, one JSON line (static-verified + GREEN in the wave battery; GPU + lavapipe timing lines still owed to `docs/perf/protocol.md`, recorded in its kill report) |
 
 ## Wave 8b — absorbed from photocraft + Blender (2026-10-14)
 
