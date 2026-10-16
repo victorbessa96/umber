@@ -78,6 +78,31 @@ corpus channels pass (1/16 → SRGB8_ALPHA8, 2 → RG16F,
 8/128/8192 → RG8, 2²² → RGBA16F), so no real name reverts. The model
 test pins the revert with a hand-made mismatch.
 
+## Pixel values: linear colour, signed height (corpus-measured)
+
+- **Base colour and emissive are linearized on import.** Umber's planes
+  are linear: the picker and eyedropper linearize, and export applies
+  the sRGB curve to baseColor and emissive (`driver::output_transfer`).
+  Kept sRGB-encoded, an imported base colour would be curved twice and
+  export washed out. Alpha is never curved. The test pins the anchors
+  (sRGB 128 → 55, 188 → 128, 0 and 255 exact).
+- **Height is signed, mapped ±1 → 0..255 with 0.0 on 128**, Umber's
+  "no displacement" neutral (the C2-6 export neutral). Measured over the
+  10 corpus height stacks:
+
+  | | Value |
+  |---|---|
+  | Lowest | −1.116 (Bessa Synth main stack) |
+  | Highest | +0.463 (HydrageaBessa) |
+  | Clipped by ±0.5 | 5.5% of two stacks |
+  | Clipped by ±1 | 0.02% of one |
+
+  Painter does not store a height scale this reader can find, so ±1 is
+  a measured choice, not a recovered one. The report line says so.
+- **The corpus test** checks that height clips under 1%. It does not
+  check that the median sits at 128: two corpus stacks are offset
+  (−0.474, +0.453), so a median check would fail on Bessa's own files.
+
 ## Not done, and why
 
 1. **The one-line hand-off in `main.rs`** waits for
