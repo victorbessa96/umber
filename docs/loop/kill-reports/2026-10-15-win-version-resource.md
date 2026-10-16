@@ -35,13 +35,12 @@ API checked against docs.rs winresource 0.1.34: `new()`,
    `g5-workspace-persist` (the egui_dock serde lines): the two kills
    commit together, never alone.
 
-1. The workspace dependency `winresource = "0.1.34"` in the root
-   `[workspace.dependencies]`, plus
-   `[build-dependencies] winresource = { workspace = true }` in
-   `crates/umber-app/Cargo.toml`. Both files are under
-   `g5-workspace-persist`'s lock (its egui_dock serde edit); add them
-   when that kill commits, NOT before. umber-cli's Cargo.toml already
-   carries the build-dep line.
+1. **DONE at host-return (2026-10-15):** the root `winresource = "0.1"`
+   and umber-app's `[build-dependencies]` line are in the tree — the
+   tree does not compile without them (the first battery run failed on
+   exactly that). Cargo.lock resolved `winresource 0.1.34` on the host.
+   Both files stay shared-file with `g5-workspace-persist`: the two
+   kills commit together.
 2. `cargo metadata` on the host resolves it into Cargo.lock: winresource
    (MIT) + `version_check` 0.9.5 (already locked) and `toml` (optional,
    off by default). Add winresource to THIRD_PARTY.md.

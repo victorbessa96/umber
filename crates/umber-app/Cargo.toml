@@ -72,8 +72,15 @@ umber-paint = { workspace = true, features = ["test-hooks"] }
 pollster = { workspace = true }
 wgpu = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 # The offscreen UI test harness (queue row 15, absorbed from photocraft):
 # kittest drives panels headless (widget-tree queries) and, with the
 # snapshot + wgpu features, renders PNGs compared against committed
 # baselines (UPDATE_SNAPSHOTS=true regenerates).
 egui_kittest = { version = "0.36", features = ["snapshot", "wgpu"] }
+
+# The Windows version resource on the app binary (build.rs): SignPath
+# requires product metadata on every signed binary. Target-gated in
+# build.rs; only the windows-msvc job runs its resource compiler.
+[build-dependencies]
+winresource = { workspace = true }
