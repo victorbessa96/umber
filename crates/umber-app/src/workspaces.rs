@@ -319,8 +319,8 @@ mod tests {
         // which serde_json writes as null and cannot read back. The file
         // must keep finite corners (0), whatever the in-memory rects are.
         let mut ws = Workspaces::default();
-        let dock = preset(Workspace::Paint);
-        ws.switch(Workspace::Bake, &mut &mut dock.clone());
+        let mut dock = preset(Workspace::Paint);
+        ws.switch(Workspace::Bake, &mut dock);
         let path =
             std::env::temp_dir().join(format!("umber-layouts-finite-{}.json", std::process::id()));
         save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
