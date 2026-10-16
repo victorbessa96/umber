@@ -194,12 +194,16 @@ const MAIN_STACK: &str = "3864292196";
 /// `list` datasets and the `texture-cache/header` stamp's minor
 /// ([`texture_cache::live_channels`]). A stack whose list does not parse
 /// is absent, so none of its datasets import.
-fn cache_index(tree: &Tree) -> HashMap<String, Vec<(String, u64)>> {
+fn cache_index(tree: &Tree, ini_minor: Option<u8>) -> HashMap<String, Vec<(String, u64)>> {
+    // The header stamp dataset names the minor in v3.3 files; the v3.2
+    // corpus files have no header dataset - their minor comes from
+    // projectsettings.ini's versionAtLastSave (parsed by the caller).
     let minor = tree
         .datasets
         .iter()
         .find(|d| d.path.trim_start_matches('/') == "texture-cache/header")
-        .and_then(|d| texture_cache::stamp_minor(&d.bytes));
+        .and_then(|d| texture_cache::stamp_minor(&d.bytes))
+        .or_else(|| ini_minor.map(i64::from));
     let mut index = HashMap::new();
     let Some(minor) = minor else {
         return index;
