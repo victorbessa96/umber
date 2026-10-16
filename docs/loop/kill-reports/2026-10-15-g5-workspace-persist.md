@@ -5,6 +5,15 @@ Date: 2026-10-15. Author: dragon. Locks: `g5-workspace-persist`
 src/workspaces.rs}`, the GUI plan, this report) and
 `g5-workspace-persist-sm` (`shell_menu.rs`).
 
+## Shared-file note (2026-10-15)
+
+The root `Cargo.toml` now also carries `winresource = "0.1"` (added by
+`win-version-resource`, recorded in its report as a lock slip): both
+build.rs kills reference it and the tree does not compile without it.
+This kill's `Cargo.toml` hunks (egui_dock serde) and that line share one
+file, so `g5-workspace-persist` and `win-version-resource` commit
+TOGETHER.
+
 ## State
 
 The edits are in the working tree, NOT committed. The build host

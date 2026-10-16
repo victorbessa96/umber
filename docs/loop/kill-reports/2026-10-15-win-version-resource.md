@@ -26,6 +26,15 @@ API checked against docs.rs winresource 0.1.34: `new()`,
 
 ## Still to do, with the host
 
+0. **Lock note (2026-10-15):** the root `Cargo.toml` line was added
+   while the file was under `g5-workspace-persist`'s lock (a process
+   slip, recorded here). The line is required for the tree to compile at
+   all — both build.rs kills reference `winresource = { workspace =
+   true }`. `Cargo.toml` is therefore a SHARED file between
+   `win-version-resource` (this winresource line) and
+   `g5-workspace-persist` (the egui_dock serde lines): the two kills
+   commit together, never alone.
+
 1. The workspace dependency `winresource = "0.1.34"` in the root
    `[workspace.dependencies]`, plus
    `[build-dependencies] winresource = { workspace = true }` in

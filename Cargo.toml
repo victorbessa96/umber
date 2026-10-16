@@ -39,7 +39,8 @@ naga_oil = "0.23"
 # UI
 eframe = "0.36"
 egui = "0.36"
-egui_dock = "0.21"
+# `serde`: the workspace layouts persist (GUI plan g5-workspaces).
+egui_dock = { version = "0.21", features = ["serde"] }
 egui-wgpu = "0.36"
 epaint = "0.36"
 emath = "0.36"
@@ -51,6 +52,10 @@ glam = "0.34"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# The Windows version resource on both binaries (SignPath requires
+# product metadata on every signed binary; see crates/*/build.rs).
+winresource = "0.1"
+
 flate2 = "1"
 umber-spp = { path = "crates/spp" }
 anyhow = "1"
