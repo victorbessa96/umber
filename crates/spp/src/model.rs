@@ -780,7 +780,27 @@ mod tests {
         assert_eq!(set.name, "Body", "the scene's material uid names the set");
         let names: Vec<&str> = set.channels.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["baseColor", "roughness"]);
-        assert_eq!(set.channels[0].pixels, rgba, "sRGB bytes land as stored");
+        // sRGB colour bytes land LINEARIZED (the importer's note says
+        // so), alpha as stored: expected = table(rgba.rgb) + rgba.a.
+        let linearized: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|t| {
+                let f = |s: u8| {
+                    let s = f32::from(s) / 255.0;
+                    let l = if s <= 0.040_45 {
+                        s / 12.92
+                    } else {
+                        ((s + 0.055) / 1.055).powf(2.4)
+                    };
+                    (l * 255.0 + 0.5) as u8
+                };
+                [f(t[0]), f(t[1]), f(t[2]), t[3]]
+            })
+            .collect();
+        assert_eq!(
+            set.channels[0].pixels, linearized,
+            "sRGB bytes land linearized"
+        );
         assert_eq!(set.channels[1].pixels, vec![50, 50, 50, 255]);
         // Established names carry no naming note.
         assert!(set.channels[1].notes.iter().all(|n| !n.contains("name ")));
