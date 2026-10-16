@@ -482,6 +482,9 @@ pub fn decode_with(bytes: &[u8], remap: Remap) -> Result<CacheChannel, CacheErro
 /// when it appears with only zero bytes (padding) after it, which is
 /// how the corpus's truncated blocks all end (mid-stream nowhere).
 fn lz4_tail_zero_offset(block: &[u8]) -> bool {
+    // Only the explicit marker counts: a match offset of 0 followed
+    // by nothing but zero bytes (Painter's end-of-block padding). A
+    // block that merely ends early, without the marker, is refused.
     let mut i = 0usize;
     let n = block.len();
     while i < n {
@@ -490,7 +493,7 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
         let mut lit = (tok >> 4) as usize;
         if lit == 15 {
             loop {
-                let Some(&b) = block.get(i) else { return true };
+                let Some(&b) = block.get(i) else { return false };
                 i += 1;
                 lit += b as usize;
                 if b != 255 {
@@ -502,14 +505,14 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
             return false;
         };
         if lit_end > n {
-            return true;
+            return false;
         }
         i = lit_end;
         if i >= n {
-            return true; // stream ends after literals: full block, no marker
+            return false; // ends after literals: no marker
         }
         let Some(off) = block.get(i..i + 2).map(|s| [s[0], s[1]]) else {
-            return true;
+            return false;
         };
         i += 2;
         let off = u16::from_le_bytes(off);
@@ -518,7 +521,7 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
         }
         if tok & 15 == 15 {
             loop {
-                let Some(&b) = block.get(i) else { return true };
+                let Some(&b) = block.get(i) else { return false };
                 i += 1;
                 if b != 255 {
                     break;
@@ -526,7 +529,7 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
             }
         }
         if i > n {
-            return true;
+            return false;
         }
     }
     false
