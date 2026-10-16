@@ -1047,7 +1047,12 @@ impl<'a> Walker<'a> {
                         "{bad}: contiguous size {size} != dataspace {total_bytes}"
                     )));
                 }
-                let stored = bytes_at(self.ctx.data, *addr, *size)?.to_vec();
+                // Never-written (late allocation): the empty buffer.
+                let stored = if *size == 0 {
+                    Vec::new()
+                } else {
+                    bytes_at(self.ctx.data, *addr, *size)?.to_vec()
+                };
                 self.run_pipeline(path, stored, &pipeline, total_bytes as usize, elem as usize)?
             }
             Layout::Chunked(chunked) => {
@@ -1672,10 +1677,23 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
             }
             let addr_stored = uint_le(payload, 2, off)?;
             let size = uint_le(payload, 2 + off, len)?;
-            let addr = resolve(ctx, addr_stored, "contiguous data")?
-                .ok_or_else(|| SppError::Corrupt("contiguous layout without address".into()))?;
-            bytes_at(ctx.data, addr, size)?;
-            Ok(Layout::Contiguous { addr, size })
+            match resolve(ctx, addr_stored, "contiguous data")? {
+                // An undefined address is a dataset never written
+                // (late allocation): empty, not corrupt.
+                None if size == 0 => Ok(Layout::Contiguous {
+                    addr: u64::MAX,
+                    size: 0,
+                }),
+                None => {
+                    return Err(SppError::Corrupt(
+                        "contiguous layout without address".into(),
+                    ))
+                }
+                Some(addr) => {
+                    bytes_at(ctx.data, addr, size)?;
+                    Ok(Layout::Contiguous { addr, size })
+                }
+            }
         }
         LAYOUT_CHUNKED => {
             let off = ctx.off_size;
