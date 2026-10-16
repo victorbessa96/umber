@@ -39,15 +39,41 @@ pub use umber_graph::mtlx_doc::SurfaceParams;
 ///
 /// Unknown tokens pass through verbatim so user templates never break
 /// silently when a token's data is missing (documented, tested behavior).
+///
+/// Token VALUES are file-name-safe ([`path_safe_value`]): a `/` in the
+/// TEMPLATE is the user's subfolder (Painter's convention), but a value
+/// comes from the mesh file (material and layer names), and a crafted
+/// `../../x` material must never write outside the output directory.
 pub fn expand_template(template: &str, tokens: &[(&str, &str)]) -> String {
     let mut out = template.to_string();
     for (name, value) in tokens {
         let key = format!("${}", name);
         if out.contains(&key) && !value.is_empty() {
-            out = out.replace(&key, value);
+            out = out.replace(&key, &path_safe_value(value));
         }
     }
     out
+}
+
+/// A token value made safe as ONE path component: path separators (`/`,
+/// `\\`), the drive/stream colon, the other Windows-reserved characters
+/// and control characters each become `_`. A value of only dots (`.`,
+/// `..`) becomes underscores too, so it can never name a parent directory.
+/// Ordinary names (`Body`, `Sword_Hilt`, `Metal 01`) pass unchanged.
+pub fn path_safe_value(value: &str) -> String {
+    let mapped: String = value
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    if !mapped.is_empty() && mapped.chars().all(|c| c == '.') {
+        "_".repeat(mapped.len())
+    } else {
+        mapped
+    }
 }
 
 /// Convert `/` separators in a template into subfolders (Painter
@@ -58,6 +84,32 @@ pub fn template_to_path(template: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn token_values_cannot_climb_out_of_the_output_dir() {
+        // A crafted mesh material name is a token VALUE: no separator,
+        // drive colon or dot-only name survives into the path.
+        for (value, expected) in [
+            ("../../evil", ".._.._evil"),
+            ("/etc/passwd", "_etc_passwd"),
+            ("C:\\Windows\\x", "C__Windows_x"),
+            ("..", "__"),
+            (".", "_"),
+            ("a\nb", "a_b"),
+            ("Body", "Body"),
+            ("Metal 01", "Metal 01"),
+            ("Sword_Hilt.v2", "Sword_Hilt.v2"),
+        ] {
+            assert_eq!(path_safe_value(value), expected, "{value:?}");
+        }
+        // The template's own '/' still makes subfolders; a value's does not.
+        let out = expand_template(
+            "$mesh/$textureSet_color",
+            &[("mesh", "sword"), ("textureSet", "../up")],
+        );
+        assert_eq!(out, "sword/.._up_color");
+    }
+
     use super::*;
 
     #[test]

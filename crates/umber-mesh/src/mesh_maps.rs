@@ -120,7 +120,35 @@ pub fn format_mesh_map(
     kind: MeshMapKind,
     ext: &str,
 ) -> std::path::PathBuf {
-    dir.join(format!("{}_{}.{}", texture_set, kind.suffix(), ext))
+    dir.join(format!(
+        "{}_{}.{}",
+        file_safe(texture_set),
+        kind.suffix(),
+        ext
+    ))
+}
+
+/// `name` made safe as ONE file-name component: a set name comes from the
+/// mesh file (its material names), so a crafted `../../x` material must
+/// never place a bake outside `dir`. Separators, the drive/stream colon,
+/// the other Windows-reserved characters and control characters become
+/// `_`; a dot-only name becomes underscores. Ordinary names pass
+/// unchanged. (umber-export's `path_safe_value` is the same rule for
+/// export tokens; the crate layering keeps umber-mesh below umber-export.)
+pub fn file_safe(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    if !mapped.is_empty() && mapped.chars().all(|c| c == '.') {
+        "_".repeat(mapped.len())
+    } else {
+        mapped
+    }
 }
 
 /// The texture-set name derived from a mesh: the file stem, or the
@@ -139,6 +167,26 @@ pub fn texture_set_name(mesh_path: &std::path::Path, mesh: &MeshData) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_crafted_material_name_cannot_place_a_bake_outside_the_dir() {
+        let dir = std::path::Path::new("/out");
+        for name in ["../../evil", "/etc/x", "..", "C:\\x", "a/b"] {
+            let path = format_mesh_map(dir, name, MeshMapKind::AmbientOcclusion, "png");
+            assert_eq!(path.parent(), Some(dir), "{name:?} -> {path:?}");
+            assert!(
+                path.components()
+                    .all(|c| !matches!(c, std::path::Component::ParentDir)),
+                "{name:?} -> {path:?}"
+            );
+        }
+        // Ordinary names are untouched (the shipped naming convention).
+        assert_eq!(
+            format_mesh_map(dir, "Sword_Hilt", MeshMapKind::Curvature, "png"),
+            dir.join("Sword_Hilt_curvature.png")
+        );
+    }
+
     use super::*;
 
     #[test]
