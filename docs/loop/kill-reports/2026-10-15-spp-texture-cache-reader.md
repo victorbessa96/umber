@@ -60,6 +60,24 @@ All 61 channels decode, with no name collisions. Every set has a
   tests: the names route through the mesh-map import as user channels,
   and the folder is placed beside the file.
 
+## User docs (uncommitted, ships with the code)
+
+`docs/user/getting-started.md` §6b ("Bring in a Substance Painter
+project") and the `extract-spp` line in §7 are written but held under
+lock `spp-user-docs`. They commit WITH this kill, never before:
+committing them now would document a feature HEAD lacks. One corpus set
+(BessaCreatureV2 `652259…`, Bessa Synth `562550…`) has an empty cache
+list, so the "imports nothing for that set" line is observed, not
+assumed.
+
+## Name check (corpus, 2026-10-15)
+
+`expected_format` pins the texel format behind each named flag. A file
+that pairs a known flag with another format keeps `flag_<n>`. All 61
+corpus channels pass (1/16 → SRGB8_ALPHA8, 2 → RG16F,
+8/128/8192 → RG8, 2²² → RGBA16F), so no real name reverts. The model
+test pins the revert with a hand-made mismatch.
+
 ## Not done, and why
 
 1. **The one-line hand-off in `main.rs`** waits for
