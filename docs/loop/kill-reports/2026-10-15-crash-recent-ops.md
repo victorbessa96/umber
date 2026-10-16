@@ -44,3 +44,10 @@ It is deferred with the callers.
 
 No compiler. Static: `Mutex::new` is `const` (stable since 1.63), so the
 static compiles; the ring logic is pinned by the local-ring test.
+
+## VERIFIED (2026-10-16, host battery GREEN)
+
+`note_op` is wired: `document.rs`'s `record_session_event` calls
+`crate::crash::note_op(kind.crash_label())` (fixed English labels in
+`history_panel.rs`), and `crash.rs` is on the lib surface
+(`lib.rs`) so the lib target reaches it. Gate 1: battery GREEN.

@@ -209,3 +209,37 @@ Display`) was checked against the 0.14.0 registry source;
 clippy's `or_fun_call` was fixed (`map_or_else`), and so was a
 `matches!(…, Err(_))` → `is_err()`. The `tree.notes` move was ordered
 after `cache_index(&tree)`.
+
+## VERIFIED (2026-10-16, host battery GREEN)
+
+The corpus gate now OPENS all three real Painter files and imports
+texture sets (2 corpus tests, 208s against 1.3 GB). The corpus hunt
+forced 17 spec fixes in `hdf5.rs`/`texture_cache.rs`/`model.rs`/
+`builder.rs`, each measured on the real bytes (commit trail
+`5166b27..25799c6`):
+
+- v0/v1 superblock: the root is a symbol-table ENTRY (link name
+  offset + object header + cache type + scratch pad), not two loose
+  pointers; cache type 1 carries b-tree + heap in the scratch pad.
+- SNOD entries are 2*off+24 bytes with off-wide name offsets.
+- Group b-tree keys are off-wide (the largest heap-object size).
+- v1 header continuation blocks are bare message lists closed by a
+  NIL message.
+- Datatype: a size-1 fixed-point ignores the BE flag (the corpus's
+  datasets are H5T_STD_U8BE).
+- Dataspace: unlimited max-dims read as the current extent.
+- Layout v1/2 rebuilt in the v3 field order; the chunk element size
+  is v3-only (padding reads as 0 = absent).
+- h5py pads chunk grids with trailing 1s; index keys trim to the
+  dataspace rank.
+- Chunk b-tree keys hold ONE offset per dimension (measured on the
+  node at 272159007).
+- Edge chunks are stored padded and crop to the footprint.
+- Never-written contiguous datasets decode as empty.
+- Truncated lz4 cache blocks end in an explicit offset-0 marker
+  followed by zero padding (three 4096² stacks): the prefix decodes,
+  the tail zero-fills, a report note says so. A short block WITHOUT
+  the marker is still refused.
+- The builder (`builder.rs`) writes the spec shapes for the root
+  entry, SNOD entries, group keys and chunk entries, so the synthetic
+  tests pin the same format the corpus pins.

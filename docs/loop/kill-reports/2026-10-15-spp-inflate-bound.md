@@ -108,3 +108,7 @@ than by a cap:
 - **ICC `embed_iccp`**: an unbounded `png::Decoder::new`, but it only
   ever reads back the file Umber itself just wrote. Not an input
   surface.
+
+## VERIFIED (2026-10-16)
+
+The deflate bound rides the corpus-green battery (umber-spp 36 tests).
