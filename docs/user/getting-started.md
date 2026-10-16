@@ -157,6 +157,31 @@ The dialog writes PNG (8/16-bit), EXR (32-bit float), TIFF or JPEG files, and ca
   the whole dock layout; Ctrl+PgDn cycles them. Your edits to each layout
   are remembered between launches.
 
+## 6b. Bring in a Substance Painter project
+
+Umber reads `.spp` files; it never writes them.
+
+1. Drop the `.spp` on the window, then open **Assets** and press
+   **Import .spp**. The report lists every texture set by its Painter
+   name (Body, Fur, …) and every channel it found.
+2. Press **Extract N channel(s) as layers**. Umber writes each channel as
+   `<set>_<channel>.png` into a `<project>-channels` folder beside the
+   `.spp`.
+3. Drop that folder on the window. Each PNG becomes a new layer in its
+   set's channel, the same way baked maps import. Nothing existing is
+   overwritten.
+
+What comes across is each texture set's **flattened** result:
+`baseColor`, `height`, `roughness`, `metallic` and `normal`, plus
+`emissive` and `opacity` when the project uses them. The Painter layer
+stack itself (layers, masks, fill settings) is not readable yet, so each
+channel arrives as one flat layer. A channel Umber cannot name arrives as
+`flag_<number>` and is listed in the report.
+
+The channels come from the flattened cache Painter saves inside the
+project. A project whose cache is empty for a set imports nothing for
+that set, and the report says so.
+
 ## 7. Without the window
 
 The same engine runs headless:
@@ -166,6 +191,8 @@ The same engine runs headless:
 cargo run -p umber-cli -- bake-all model.fbx out/ --size 2048 --rays 16 --dilate 16
 # pack through an engine preset
 cargo run -p umber-cli -- export model.fbx out/ --preset unreal
+# write a Painter project's channels as <set>_<channel>.png
+cargo run -p umber-cli -- extract-spp project.spp out/
 # drive the paint engine over JSONL, one step per line
 printf '%s\n' '"version"' '"quit"' | cargo run -p umber-cli -- agent
 ```
