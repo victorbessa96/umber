@@ -60,9 +60,22 @@ All 61 channels decode, with no name collisions. Every set has a
 
 ## Not done, and why
 
-1. **The one-line hand-off in `main.rs`** (`if let Some(dir) =
-   spp_import::show_section(..) { mesh_import.ingest_paths(&[dir]) }`)
-   waits for `g5-workspace-persist`'s lock. Until then the button
+1. **The one-line hand-off in `main.rs`** waits for
+   `g5-workspace-persist`'s lock. The exact patch, at the Assets panel
+   (`Panel::Assets` in `PanelViewer::ui`):
+
+   ```rust
+   -                spp_import::show_section(ui, self.spp_import);
+   +                if let Some(dir) = spp_import::show_section(ui, self.spp_import) {
+   +                    // The extracted <set>_<channel>.png folder routes
+   +                    // through the mesh-map import as new layers.
+   +                    self.mesh_import.ingest_paths(&[dir]);
+   +                }
+   ```
+
+   Until it lands, `show_section`'s new return value is unused, which
+   is a warning (`unused_must_use` does not apply to `Option`, so it is
+   silent), and the button still writes the folder. Until then the button
    writes the folder and the status line points at it; dropping that
    folder on the window imports it.
 2. **The button labels are English.** The catalogs are under
@@ -79,3 +92,11 @@ corpus copied to the host (`docs/loop/build-host.md`); `umber-cli
 extract-spp` on each file, opening a PNG to look at it. Mutation:
 ignore the `list` (import every leaf), and the HydrageaBessa run must
 show duplicate or stale channels.
+
+Static review done here (no compiler): every lz4_flex call
+(`block::compress`, `block::decompress_into`, `DecompressError:
+Display`) was checked against the 0.14.0 registry source;
+`Option::is_none_or` needs Rust 1.82 (the workspace MSRV is 1.85);
+clippy's `or_fun_call` was fixed (`map_or_else`), and so was a
+`matches!(…, Err(_))` → `is_err()`. The `tree.notes` move was ordered
+after `cache_index(&tree)`.
