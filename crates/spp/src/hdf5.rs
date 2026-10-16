@@ -1716,7 +1716,7 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
                 }
                 // 0 is the padding of an absent field (v3 with a v1
                 // B-tree index): one element per cell.
-                usize::from(elem.max(1))
+                elem.max(1) as usize
             } else {
                 1
             };
