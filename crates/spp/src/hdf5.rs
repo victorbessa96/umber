@@ -1544,8 +1544,11 @@ fn parse_datatype(payload: &[u8]) -> Result<Dtype, SppError> {
     let size = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
     match class {
         0 => {
-            // Fixed-point: LE only, offset 0, full precision.
-            if payload[1] & 0x01 != 0 {
+            // Fixed-point. Byte order only matters for multi-byte values:
+            // a 1-byte fixed-point type flagged big-endian is identical to
+            // little-endian (the corpus's datasets are H5T_STD_U8BE — the
+            // m3 pipeline writes BE flags on single bytes).
+            if payload[1] & 0x01 != 0 && size != 1 {
                 return Err(SppError::Unsupported("big-endian fixed-point".into()));
             }
             if payload.len() < 12 {
