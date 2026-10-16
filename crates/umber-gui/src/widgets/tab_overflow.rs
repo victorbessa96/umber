@@ -89,7 +89,12 @@ mod tests {
     /// first frame, so layout needs one `run_ui` first.
     fn ctx() -> Context {
         let ctx = Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        // `run_ui` queues a font-texture delta on the first pass; the
+        // FullOutput is dropped here, and dropping a TexturesDelta with
+        // an unapplied delta panics (epaint's Drop bomb). Clear it.
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
         ctx
     }
 
@@ -98,22 +103,11 @@ mod tests {
     /// unapplied panics on drop (epaint 0.36 `textures.rs:337`). The
     /// battery caught both tab-overflow tests tripping it on the host.
     fn disarm_drop_bomb(ctx: &Context) {
-        ctx.tex_manager().write().clear();
-    }
-
-    /// Drops the context's texture deltas, so epaint's Drop bomb (a
-    /// `TexturesDelta` with unapplied deltas panics on drop) does not
-    /// fire when the test ends (it panics in ANY test that builds a
-    /// galley, i.e. all of them).
-    fn drop_ok(ctx: &Context) {
-        let deltas = ctx.fonts(|_| ()) // force the font texture into existence
-            ;
-        let _ = deltas;
-        // egui 0.36's public API: `Context::tex_manager` returns a mutex
-        // guard; taking and clearing it disarms the bomb.
-        if let Ok(mut tex) = ctx.tex_manager() {
-            tex.clear();
-        }
+        // Take the pending font-texture delta out of the manager and
+        // clear IT before it drops: an unapplied `TexturesDelta` panics
+        // in its own Drop (epaint 0.36 `textures.rs:337`). `run_ui` is
+        // not used here, so the delta is never handed to a renderer.
+        ctx.tex_manager().write().take_delta().clear();
     }
 
     #[test]
