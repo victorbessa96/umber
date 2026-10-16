@@ -480,6 +480,153 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
     actions
 }
 
+/// The contextual strip's inputs (GUI plan G6 `g6-contextual-toolbar`,
+/// P:A7/B:A5.7): the strip over the viewport showing the ACTIVE tool's
+/// key parameters — Size, Flow, Opacity, Spacing, Lazy mouse, Symmetry
+/// — with the SAME values the Brush panel edits.
+///
+/// The strip edits the panel's own state directly (the active preset +
+/// the mirror settings), so the two surfaces cannot drift by
+/// construction: there is no second copy of any value. Size/hardness
+/// arrive by value (the paint session owns the LIVE brush) and ride
+/// [`StripEdit::BrushParams`] back to the caller, who applies them
+/// through `set_brush_size`/`set_brush_hardness` (the same setters the
+/// `[`/`]` keys and the Ctrl+RMB drag use).
+pub struct ContextualView<'a> {
+    /// The live brush size (paint session).
+    pub size: f32,
+    /// The active preset being edited (`None` = no preset selected: the
+    /// strip shows its fields disabled — the panel's own empty state).
+    pub preset: Option<&'a mut umber_brush::preset::BrushPreset>,
+    /// The mirror-symmetry settings (panel session state).
+    pub mirror: &'a mut umber_brush::MirrorSettings,
+    /// The paint session exists (without it size/hardness edits go
+    /// nowhere; the strip says so).
+    pub paint_available: bool,
+}
+
+/// An edit the strip made this frame. Size/hardness changes report the
+/// NEW values (the caller pushes them into the paint session); preset
+/// and mirror edits have already landed in the shared state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StripEdit {
+    /// Size changed; the new size.
+    Size(f32),
+    /// The preset was edited (flow/opacity/spacing/lazy radius): the
+    /// caller marks the panel dirty so a Save keeps them.
+    Preset,
+    /// Lazy mouse toggled (already applied to the preset).
+    LazyToggle,
+    /// Mirror symmetry toggled (already applied to the settings).
+    SymmetryToggle,
+}
+
+/// The max brush size the strip's field offers (the Brush panel's own
+/// size range, 0.05..=8.0, is a MULTIPLIER; the strip's Size is the
+/// session radius in texels like the cursor ring shows).
+const STRIP_SIZE_MAX: f32 = 512.0;
+
+/// Draws the contextual strip for the active brush tool: the compact
+/// parameter row over the viewport. Returns the edits that need the
+/// caller's help (size/hardness → the paint session; the rest has
+/// already landed in the shared state the view borrowed).
+pub fn contextual_strip(ui: &mut Ui, view: &mut ContextualView<'_>) -> Vec<StripEdit> {
+    use umber_gui::widgets::ValueField;
+    let mut edits = Vec::new();
+    ui.set_style(theme::umber_style(theme::Density::Compact));
+    ui.horizontal(|ui| {
+        ui.label(tr("strip.size"));
+        let mut size = view.size;
+        if ui
+            .add_enabled(
+                view.paint_available,
+                ValueField::new(&mut size).range(1.0..=STRIP_SIZE_MAX),
+            )
+            .changed()
+        {
+            edits.push(StripEdit::Size(size));
+        }
+        ui.separator();
+        if let Some(preset) = view.preset.as_deref_mut() {
+            ui.label(tr("strip.flow"));
+            if ui
+                .add(ValueField::new(&mut preset.params.alpha).range(0.0..=1.0))
+                .changed()
+            {
+                // Flow and stroke opacity are the same field (BuildUp's
+                // per-dab alpha / Wash's ceiling): the strip exposes it
+                // once, exactly as the panel documents it.
+                edits.push(StripEdit::Preset);
+            }
+            ui.separator();
+            ui.label(tr("strip.spacing"));
+            if ui
+                .add(ValueField::new(&mut preset.spacing.dabs_per_radius).range(0.5..=64.0))
+                .changed()
+            {
+                edits.push(StripEdit::Preset);
+            }
+            ui.separator();
+            let lazy_on = preset.lazy_mouse.radius_px > 0.0;
+            if ui.selectable_label(lazy_on, tr("strip.lazy")).clicked() {
+                preset.lazy_mouse.radius_px = if lazy_on { 0.0 } else { 12.0 };
+                edits.push(StripEdit::LazyToggle);
+            }
+            if preset.lazy_mouse.radius_px > 0.0
+                && ui
+                    .add(ValueField::new(&mut preset.lazy_mouse.radius_px).range(4.0..=128.0))
+                    .changed()
+            {
+                edits.push(StripEdit::Preset);
+            }
+        } else {
+            ui.weak(tr("strip.no-preset"));
+        }
+        ui.separator();
+        if ui
+            .selectable_label(view.mirror.enabled, tr("strip.symmetry"))
+            .clicked()
+        {
+            view.mirror.enabled = !view.mirror.enabled;
+            edits.push(StripEdit::SymmetryToggle);
+        }
+        if view.mirror.enabled
+            && ui
+                .add(ValueField::new(&mut view.mirror.offset).range(0.0..=1.0))
+                .changed()
+        {
+            edits.push(StripEdit::SymmetryToggle);
+        }
+        if !view.paint_available {
+            ui.weak(tr("strip.no-paint"));
+        }
+    });
+    edits
+}
+
+#[cfg(test)]
+mod contextual_tests {
+    use super::*;
+
+    #[test]
+    fn strip_edits_report_only_cross_owner_changes() {
+        // The contract: preset/mirror edits land in the SHARED state the
+        // view borrowed (nothing to report but which KIND happened, so
+        // the caller can mark dirty / re-sync); size/hardness report
+        // their new values because the paint session (a different owner)
+        // must apply them. A variant that smuggles a preset value would
+        // break this pin.
+        use StripEdit::*;
+        for edit in [Size(1.0), Preset, LazyToggle, SymmetryToggle] {
+            let debug = format!("{edit:?}");
+            match edit {
+                Size(_) => assert!(debug.contains('(')),
+                _ => assert!(!debug.contains('('), "{debug} carries a value"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

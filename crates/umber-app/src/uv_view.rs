@@ -6,6 +6,7 @@
 use egui::{Color32, Sense, Stroke, Ui};
 use umber_brush::symmetry::{RADIAL_CENTER, RADIAL_COUNT_MAX, RADIAL_COUNT_MIN};
 use umber_brush::{MirrorAxis, MirrorSettings, QuickMask, SymmetrySettings};
+use umber_gpu::texture_display::{ChannelIsolate, UvPresent};
 use umber_mesh::MeshData;
 
 use crate::fill_layer::{PolygonFillMode, PolygonFillTool};
@@ -32,6 +33,19 @@ const PATH_CLICK_TOL_PX: f32 = 10.0;
 const PATH_SIZE_PX_PER_UNIT: f32 = 28.0;
 /// The opacity handle's travel above the point, in logical pixels.
 const PATH_OPACITY_TRAVEL_PX: f32 = 36.0;
+/// The footer strip's height, points (the isolate combo + inspector).
+const FOOTER_H: f32 = 24.0;
+/// The UDIM grid is 10×10 tiles (`1001..=1100`).
+const TILE_GRID_N: usize = 10;
+/// A present-but-inactive UDIM tile's background (dimmer than the
+/// active cell the paint canvas covers).
+const TILE_BG_DIM: Color32 = Color32::from_rgb(32, 32, 36);
+/// The tile-number label color.
+const TILE_LABEL_COLOR: Color32 = Color32::from_rgb(110, 118, 130);
+/// The UDIM grid line stroke (a fn: egui's `Stroke::new` is not const).
+fn tile_grid_stroke() -> Stroke {
+    Stroke::new(0.5, Color32::from_rgb(55, 58, 64))
+}
 
 /// The 2D UV view panel state: the cached quick-mask overlay texture.
 /// Zoom/pan for this view lands with the paint-engine sync work.
@@ -44,6 +58,23 @@ pub struct UvView {
     /// clears it each frame before the dock runs, so a hidden tab reads
     /// `None` rather than a stale position (see `status_bar`).
     hover_uv: Option<[f32; 2]>,
+    /// The per-channel presentation choice (G6 `g6-uv-view-parity`),
+    /// applied in the display shader.
+    isolate: ChannelIsolate,
+    /// The shift-hold pixel inspector's readback cache: one full-tile
+    /// composite read per gesture (a 4K readback is too heavy per
+    /// frame), CPU-sampled at the pointer while held. `None` when idle.
+    inspect: Option<InspectBuf>,
+    /// The footer's inspector line, rendered right-aligned.
+    inspect_readout: Option<String>,
+}
+
+/// The inspector's cached tile readback (see [`UvView::inspect`]).
+struct InspectBuf {
+    /// Which tile `buf` holds (the gesture's active tile).
+    tile: u16,
+    /// The tile's baseColor composite, one full readback per gesture.
+    buf: umber_brush::retouch::RgbaBuffer,
 }
 
 /// The uploaded quick-mask overlay and what it was built from.
@@ -84,14 +115,58 @@ impl UvView {
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return;
         }
+        // The footer (the isolate combo + the inspector readout) reserves
+        // the strip below the canvas; the canvas keeps its square shape.
+        let footer = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - FOOTER_H),
+            egui::pos2(rect.right(), rect.bottom()),
+        );
+        let canvas = egui::Rect::from_min_max(rect.min, footer.min);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
 
-        // The UV square occupies the largest centered square that fits.
-        let side = rect.width().min(rect.height());
-        let origin = egui::Pos2::new(
-            rect.left() + (rect.width() - side) / 2.0,
-            rect.top() + (rect.height() - side) / 2.0,
-        );
+        // The tiles the mesh actually has (UDIM G6): single-tile meshes
+        // keep the one-square layout byte-identical (the grid never
+        // draws, the active cell IS the old square).
+        let present_tiles = mesh.map(umber_mesh::udim::present_tiles);
+        let active_tile = paint
+            .as_deref()
+            .map(|p| p.active_tile())
+            .or(present_tiles.as_deref().and_then(|t| t.first().copied()))
+            .unwrap_or(umber_mesh::udim::FIRST_TILE);
+        let multi = present_tiles.as_deref().is_some_and(|t| t.len() > 1);
+        // The active tile's cell origin in the 10×10 UDIM grid.
+        let cell = tile_cell(active_tile);
+        let origin_uv = [cell.0 as f32, cell.1 as f32];
+
+        // The UV square occupies the largest centered square that fits
+        // the canvas strip. In UDIM mode it is the ACTIVE tile's cell —
+        // every draw + interaction below works in tile-local UV, exactly
+        // the single-tile contract, so paint, lasso, path and mirror all
+        // route through unchanged.
+        let side = canvas.width().min(canvas.height()).min(if multi {
+            canvas.width().min(canvas.height())
+        } else {
+            f32::INFINITY
+        });
+        let origin = if multi {
+            // The full 10×10 grid occupies the canvas; the active cell
+            // is one tenth of it, centered on its grid position.
+            let grid_side = canvas.width().min(canvas.height());
+            let grid_origin = egui::Pos2::new(
+                canvas.left() + (canvas.width() - grid_side) / 2.0,
+                canvas.top() + (canvas.height() - grid_side) / 2.0,
+            );
+            egui::Pos2::new(
+                grid_origin.x + cell.0 as f32 * grid_side / TILE_GRID_N as f32,
+                grid_origin.y
+                    + (TILE_GRID_N as f32 - 1.0 - cell.1 as f32) * grid_side / TILE_GRID_N as f32,
+            )
+        } else {
+            egui::Pos2::new(
+                canvas.left() + (canvas.width() - side) / 2.0,
+                canvas.top() + (canvas.height() - side) / 2.0,
+            )
+        };
         let square = egui::Rect::from_min_size(origin, egui::vec2(side, side));
         // The status bar's cursor readout. Read off the raw pointer, not
         // a response: the paint surface and handles registered below sit
@@ -328,6 +403,65 @@ impl UvView {
             }
         }
 
+        // The footer (G6): the isolate combo on the left, the
+        // shift-hold pixel inspector on the right. Drawn as widgets over
+        // the reserved strip, so it consumes no canvas space.
+        {
+            let mut footer_ui = ui.new_child(egui::UiBuilder::new().max_rect(footer));
+            footer_ui.horizontal(|f| {
+                f.label(tr("uv.isolate"));
+                let selected = self.isolate.name();
+                egui::ComboBox::from_id_salt("uv-isolate")
+                    .selected_text(selected)
+                    .width(90.0)
+                    .show_ui(f, |ui| {
+                        for kind in ChannelIsolate::ALL {
+                            ui.selectable_value(&mut self.isolate, kind, kind.name());
+                        }
+                    });
+                if let Some(read) = self.inspect_readout.clone() {
+                    f.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
+                        r.monospace(read);
+                    });
+                }
+            });
+        }
+        // The shift-hold pixel inspector (G6): while Shift is held and
+        // the pointer is inside the active tile, ONE full-tile composite
+        // readback per gesture (cached by tile), CPU-sampled at the
+        // pointer every frame; the footer's right side renders the
+        // readout. Releasing Shift drops the cache.
+        let inspect_shift = ui.input(|i| i.modifiers.shift);
+        if inspect_shift {
+            let pos = ui.input(|i| i.pointer.hover_pos());
+            let uv = pos.and_then(|pos| uv_from_pointer(square, pos));
+            if let Some(uv) = uv {
+                let tile = active_tile;
+                if self.inspect.as_ref().is_none_or(|c| c.tile != tile) {
+                    let read = paint.as_deref_mut().and_then(|p| p.read_tile(tile));
+                    if let Some(buf) = read {
+                        self.inspect = Some(InspectBuf { tile, buf });
+                    }
+                }
+                if let Some(cache) = &self.inspect {
+                    let x = (uv.x.clamp(0.0, 1.0) * cache.buf.width as f32) as u32;
+                    let y = (uv.y.clamp(0.0, 1.0) * cache.buf.height as f32) as u32;
+                    let x = x.min(cache.buf.width.saturating_sub(1));
+                    let y = y.min(cache.buf.height.saturating_sub(1));
+                    // The buffer's row 0 is the texture's TOP row (it
+                    // reads back in storage order); UV y grows upward,
+                    // so sample the mirrored row.
+                    let t = cache.buf.texel(x, cache.buf.height - 1 - y);
+                    self.inspect_readout = Some(inspector_line(x, y, t));
+                }
+            } else {
+                self.inspect_readout = None;
+            }
+        } else {
+            self.inspect = None;
+            self.inspect_readout = None;
+        }
+
         // Read before `paint` is consumed by the canvas callback below.
         let symmetry = paint.as_deref().map(|p| *p.symmetry());
         let mask_texture = paint
@@ -351,6 +485,9 @@ impl UvView {
                 paint.paint_target(),
                 square,
                 display_lut,
+                UvPresent {
+                    isolate: self.isolate,
+                },
             );
             let shape = umber_gpu::texture_display::texture_display_shape(square, callback);
             painter.add(shape);
@@ -378,10 +515,23 @@ impl UvView {
                 // Draw each triangle as a 3-segment line loop. Per-triangle
                 // iteration is fine for Wave 2 viewport counts; batching
                 // into a single mesh arrives with paint-engine sync.
+                // UDIM (G6): a triangle whose UVs live in another tile
+                // draws offset into its own cell — tile-local UV minus
+                // the ACTIVE tile's origin, clamped to the cell (a
+                // cross-tile triangle previews at the cell edge).
                 let stroke = Stroke::new(1.0, UV_EDGE_COLOR);
                 for tri in mesh.indices.chunks_exact(3) {
                     let pts: Option<Vec<egui::Pos2>> = (0..3)
-                        .map(|i| mesh.uvs.get(tri[i] as usize).map(|uv| to_screen(*uv)))
+                        .map(|i| {
+                            mesh.uvs.get(tri[i] as usize).map(|uv| {
+                                let local = if multi {
+                                    [uv[0] - origin_uv[0], uv[1] - origin_uv[1]]
+                                } else {
+                                    *uv
+                                };
+                                to_screen(local)
+                            })
+                        })
                         .collect();
                     if let Some([a, b, c]) = pts
                         .as_deref()
@@ -398,7 +548,7 @@ impl UvView {
                 painter.text(
                     square.center(),
                     egui::Align2::CENTER_CENTER,
-                    "no mesh loaded",
+                    tr("uv.no-mesh"),
                     egui::FontId::proportional(13.0),
                     egui::Color32::from_gray(120),
                 );
@@ -406,6 +556,17 @@ impl UvView {
         }
         if let Some(symmetry) = symmetry {
             draw_symmetry_guides(&painter, square, &symmetry);
+        }
+        // The UDIM grid (G6): in multi-tile mode, every present tile
+        // gets a cell, its number, and a click target (a click switches
+        // the active tile). The active cell's border is the accent.
+        if multi {
+            draw_udim_grid(
+                &painter,
+                canvas,
+                present_tiles.as_deref().unwrap_or(&[]),
+                active_tile,
+            );
         }
         // The polygon-fill capture overlay: the pending lasso path (plus
         // its closing edge once it is a polygon) or the single pick, so
@@ -612,6 +773,97 @@ fn draw_symmetry_guides(painter: &egui::Painter, square: egui::Rect, symmetry: &
     }
 }
 
+/// The UDIM tile's (u, v) grid cell: `1001 + u + 10v` over the 10×10
+/// grid, so 1001 = (0,0) … 1100 = (9,9).
+fn tile_cell(tile: u16) -> (usize, usize) {
+    let t = tile as i64 - umber_mesh::udim::FIRST_TILE as i64;
+    let t = t.clamp(0, (TILE_GRID_N * TILE_GRID_N - 1) as i64) as usize;
+    (t % TILE_GRID_N, t / TILE_GRID_N)
+}
+
+/// The grid cell's rect on the canvas: cell (0,0) bottom-left (UV
+/// convention; the canvas's v grows upward like UV space).
+fn cell_rect(canvas: egui::Rect, cell: (usize, usize)) -> egui::Rect {
+    let s = canvas.width().min(canvas.height()) / TILE_GRID_N as f32;
+    let origin_x = canvas.left() + (canvas.width() - s * TILE_GRID_N as f32) / 2.0;
+    let origin_y = canvas.top() + (canvas.height() - s * TILE_GRID_N as f32) / 2.0;
+    egui::Rect::from_min_size(
+        egui::pos2(
+            origin_x + cell.0 as f32 * s,
+            origin_y + (TILE_GRID_N as f32 - 1.0 - cell.1 as f32) * s,
+        ),
+        egui::vec2(s, s),
+    )
+}
+
+/// The UDIM overlay: one cell per present tile, its number label, the
+/// grid lines, and the active cell's accent border. A click on a cell
+/// is the tile-switch follow-up's surface (it needs a PaintState
+/// `set_active_tile` API); v1 presents, it does not switch.
+fn draw_udim_grid(painter: &egui::Painter, canvas: egui::Rect, present: &[u16], active: u16) {
+    for &tile in present {
+        let r = cell_rect(canvas, tile_cell(tile));
+        if tile != active {
+            painter.rect_filled(r, 1.0, TILE_BG_DIM);
+        }
+        painter.text(
+            r.left_top() + egui::vec2(3.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            tile.to_string(),
+            egui::FontId::monospace(10.0),
+            TILE_LABEL_COLOR,
+        );
+    }
+    // Per-cell borders for present tiles (cleaner than full grid lines:
+    // absent tiles stay undrawn, so the eye finds the geometry fast).
+    for &tile in present {
+        let r = cell_rect(canvas, tile_cell(tile));
+        painter.rect_stroke(r, 1.0, tile_grid_stroke(), egui::StrokeKind::Inside);
+        if tile == active {
+            painter.rect_stroke(
+                r,
+                1.0,
+                Stroke::new(1.5, umber_gui::theme::accent()),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
+/// The inspector line: texel coordinates, RGBA, and HSV (the hue from
+/// linear rgb via the standard atan2 formula — a display-space readout
+/// would double-encode; the panel works in linear planes).
+fn inspector_line(x: u32, y: u32, texel: [u8; 4]) -> String {
+    let (r, g, b) = (
+        texel[0] as f32 / 255.0,
+        texel[1] as f32 / 255.0,
+        texel[2] as f32 / 255.0,
+    );
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d <= f32::EPSILON {
+        0.0
+    } else if (max - r).abs() <= f32::EPSILON {
+        60.0 * (((g - b) / d) % 6.0)
+    } else if (max - g).abs() <= f32::EPSILON {
+        60.0 * (((b - r) / d) + 2.0)
+    } else {
+        60.0 * (((r - g) / d) + 4.0)
+    };
+    let h = (h + 360.0) % 360.0;
+    let s = if max <= f32::EPSILON { 0.0 } else { d / max };
+    format!(
+        "{x}, {y}  R{} G{} B{} A{}  H{h:.0}° S{:.0} V{:.0}",
+        texel[0],
+        texel[1],
+        texel[2],
+        texel[3],
+        s * 100.0,
+        max * 100.0
+    )
+}
+
 /// Extracts a UV-space position from a pointer interaction on a UV-square
 /// `rect` (the UV view's square layout), or `None` outside. Lives
 /// here, not in the headless paint engine: it is screen geometry.
@@ -643,13 +895,56 @@ mod tests {
     }
 
     #[test]
-    fn uv_view_default_holds_only_the_mask_overlay_cache() {
-        // The panel's only state is the quick-mask overlay cache (empty
-        // until a mask shows); the default exists so AppState can derive
-        // Default. If UV view gains more state (zoom/pan), update this
-        // test deliberately.
+    fn uv_view_default_holds_only_the_overlay_cache_and_present_defaults() {
+        // The panel's state: the quick-mask overlay cache (empty until a
+        // mask shows), the G6 isolate combo (default All = the identity
+        // presentation), and the shift-hold inspector (idle). The default
+        // exists so AppState can derive Default; if UV view gains more
+        // state (zoom/pan), update this test deliberately.
         let view = UvView::default();
         assert!(view.mask_overlay.is_none());
+        assert_eq!(view.isolate, ChannelIsolate::All);
+        assert!(view.inspect.is_none());
+        assert!(view.inspect_readout.is_none());
+    }
+
+    #[test]
+    fn tile_cells_map_the_udim_grid() {
+        // 1001 = (0,0) … 1100 = (9,9); the clamp holds for junk values.
+        assert_eq!(tile_cell(1001), (0, 0));
+        assert_eq!(tile_cell(1002), (1, 0));
+        assert_eq!(tile_cell(1011), (0, 1));
+        assert_eq!(tile_cell(1100), (9, 9));
+        assert_eq!(tile_cell(0), (0, 0));
+        assert_eq!(tile_cell(u16::MAX), (99 % 10, 99 / 10));
+    }
+
+    #[test]
+    fn cell_rects_tile_the_canvas_u_up_v_up() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let full = cell_rect(canvas, (0, 0));
+        assert_eq!(full.min, egui::pos2(0.0, 90.0));
+        let top_right = cell_rect(canvas, (9, 9));
+        assert_eq!(top_right.min, egui::pos2(90.0, 0.0));
+        // Non-square canvas: the grid centers horizontally.
+        let wide = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let first = cell_rect(wide, (0, 0));
+        assert_eq!(first.min, egui::pos2(50.0, 90.0));
+    }
+
+    #[test]
+    fn the_inspector_line_carries_position_rgba_and_hsv() {
+        // Pure red, opaque: hue 0, sat 100, value 100.
+        let line = inspector_line(12, 34, [255, 0, 0, 255]);
+        assert!(line.contains("12, 34"), "{line}");
+        assert!(line.contains("R255 G0 B0 A255"), "{line}");
+        assert!(line.contains("H0° S100 V100"), "{line}");
+        // Mid grey: saturation 0, hue reads 0 by convention.
+        let grey = inspector_line(0, 0, [128, 128, 128, 255]);
+        assert!(grey.contains("S0 V50"), "{grey}");
+        // Green hue: 120°.
+        let green = inspector_line(1, 2, [0, 255, 0, 255]);
+        assert!(green.contains("H120°"), "{green}");
     }
 
     #[test]

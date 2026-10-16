@@ -17,6 +17,10 @@
 //!   kill); the shell offers it once. [`discard`] removes it, which the
 //!   shell also does after a clean save, Discard, or a normal exit.
 //!
+//! The home card (docs/specs/gui-plan-2026-10-15.md `g5-home-screen`)
+//! reads [`pending`]'s meta too: its "Recover last session" row shows
+//! only while a snapshot is pending, named by [`RecoveryMeta::source_name`].
+//!
 //! Recovering opens the snapshot as the project, then forgets the
 //! snapshot's own directory: the user's next Ctrl+S asks where to save
 //! (or saves to the original project, when the meta names one), so a
@@ -88,6 +92,15 @@ impl RecoveryMeta {
             }
         }
         Some(meta)
+    }
+
+    /// The source project's display name (its last path component), for
+    /// the home card's Recover row (GUI plan `g5-home-screen`); `None`
+    /// for a never-saved session.
+    pub fn source_name(&self) -> Option<String> {
+        self.source_project
+            .as_deref()
+            .map(crate::recent::display_name)
     }
 }
 
@@ -191,6 +204,16 @@ mod tests {
             "no version line"
         );
         assert_eq!(RecoveryMeta::from_text(""), None);
+    }
+
+    #[test]
+    fn source_name_is_the_project_leaf_or_none() {
+        let meta = RecoveryMeta {
+            source_project: Some(PathBuf::from("/work/sword.umber")),
+            ..RecoveryMeta::default()
+        };
+        assert_eq!(meta.source_name().as_deref(), Some("sword.umber"));
+        assert_eq!(RecoveryMeta::default().source_name(), None, "never saved");
     }
 
     #[test]

@@ -48,6 +48,37 @@
 //!
 //! `toolbar::poll_shortcuts` consumes every key event it dispatches, so a
 //! panel drawn later in the frame never sees the same press twice.
+//!
+//! # User overrides (kill `g3-keymap-editor`, `docs/specs/gui-plan-2026-10-15.md`)
+//!
+//! [`BINDINGS`] stays the DEFAULT table (the keyboard doc and the
+//! toolbar's poll-list guard pin it). The user's changes are an
+//! [`Overrides`] delta: per action, the full list of its bindings (at most
+//! [`MAX_BINDINGS`]: primary + alternate; empty = unbound). An override
+//! for action X replaces EVERY default row of X; actions without one keep
+//! their defaults. The delta holds only what differs from the defaults
+//! ([`Overrides::set`] drops an entry equal to them), so exporting it is
+//! exporting "the changed bindings".
+//!
+//! The effective table ([`table_for`]: defaults minus overridden actions,
+//! plus the override rows, stable-sorted most-modifiers-first so a Shift
+//! row still precedes the Bare row it would otherwise lose to) is cached
+//! per UI thread ([`set_overrides`], like `i18n`'s current catalog). Every
+//! consumer funnels through that one cache: [`binding_of`],
+//! [`resolve_binding`] (the poll), [`shortcut_label`] (menus, tooltips,
+//! status hints), [`shortcut_rows`] (the Help ▸ Keyboard window). Tests
+//! run on their own threads, so they see the defaults unless they install
+//! overrides themselves.
+//!
+//! Persistence (`preferences.rs`) is one line,
+//! `keymap=<action>:<spec>[,<spec>];...`: the action is the `ShellAction`
+//! Debug name (`Undo`, `SelectTool(Erase)`), a spec is
+//! [`binding_spec`]'s platform-neutral spelling (`ctrl+shift+z`, `tab`).
+//! The editor refuses an assignment that would give two actions the same
+//! binding ([`conflict_in`]); a pasted / hand-edited line is checked with
+//! [`first_conflict`].
+
+use std::cell::RefCell;
 
 use egui::{Key, KeyboardShortcut, ModifierNames, Modifiers};
 
@@ -155,29 +186,476 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
 ];
 
 /// The action `key` + `mods` fire, if any: the first matching row.
-#[cfg_attr(not(test), allow(dead_code))] // the poll uses `resolve_binding`
 pub fn resolve(key: Key, mods: Modifiers) -> Option<ShellAction> {
     resolve_binding(key, mods).map(|(_, action)| action)
 }
 
-/// The first binding for `action`, if it has one.
+/// The first binding for `action` in the effective table (overrides
+/// applied, see the module docs), if it has one.
 pub fn binding_of(action: ShellAction) -> Option<Binding> {
-    BINDINGS
-        .iter()
-        .find(|(_, bound)| *bound == action)
-        .map(|(binding, _)| *binding)
+    with_table(|table| {
+        table
+            .iter()
+            .find(|(_, bound)| *bound == action)
+            .map(|(binding, _)| *binding)
+    })
 }
 
 /// `action`'s shortcut as a menu / tooltip label ("Ctrl+Shift+Z" off
 /// macOS, "⇧⌘Z" on it), or `None` when the action is unbound.
 pub fn shortcut_label(action: ShellAction, is_mac: bool) -> Option<String> {
-    let binding = binding_of(action)?;
+    binding_of(action).map(|binding| binding_label(binding, is_mac))
+}
+
+/// `binding` in this platform's spelling (egui's own formatter).
+pub fn binding_label(binding: Binding, is_mac: bool) -> String {
     let names = if is_mac {
         ModifierNames::SYMBOLS
     } else {
         ModifierNames::NAMES
     };
-    Some(KeyboardShortcut::new(binding.chord.modifiers(), binding.key).format(&names, is_mac))
+    KeyboardShortcut::new(binding.chord.modifiers(), binding.key).format(&names, is_mac)
+}
+
+/// [`binding_label`] with the punctuation keys printed as their caps
+/// ("[" not "OpenBracket"): the Help window's and the keymap editor's
+/// spelling.
+pub fn key_cap_label(binding: Binding, is_mac: bool) -> String {
+    binding_label(binding, is_mac)
+        .replace("OpenBracket", "[")
+        .replace("CloseBracket", "]")
+        .replace("Comma", ",")
+}
+
+// ---------------------------------------------------------------------
+// User overrides (kill g3-keymap-editor; see the module docs).
+// ---------------------------------------------------------------------
+
+/// Most bindings per action: a primary and an alternate (the editor's
+/// two binding columns).
+pub const MAX_BINDINGS: usize = 2;
+
+/// Every shell action, in the keymap editor's row order and the persisted
+/// line's order. `every_action_is_listed` pins it exhaustive.
+pub const ALL_ACTIONS: &[ShellAction] = &[
+    ShellAction::NewProject,
+    ShellAction::OpenMesh,
+    ShellAction::OpenProject,
+    ShellAction::SaveProject,
+    ShellAction::SaveProjectAs,
+    ShellAction::Undo,
+    ShellAction::Redo,
+    ShellAction::CommandPalette,
+    ShellAction::Preferences,
+    ShellAction::ToggleWireframe,
+    ShellAction::ToggleGrid,
+    ShellAction::CycleViewMode,
+    ShellAction::ViewMaterial,
+    ShellAction::NextChannel,
+    ShellAction::PrevChannel,
+    ShellAction::NextMeshMap,
+    ShellAction::PrevMeshMap,
+    ShellAction::ToggleMaskMode,
+    ShellAction::InvertMask,
+    ShellAction::SelectTool(ToolKind::Paint),
+    ShellAction::SelectTool(ToolKind::Smudge),
+    ShellAction::SelectTool(ToolKind::Clone),
+    ShellAction::SelectTool(ToolKind::Erase),
+    ShellAction::SelectTool(ToolKind::Pick),
+    ShellAction::SelectTool(ToolKind::IdMask),
+    ShellAction::BrushSmaller,
+    ShellAction::BrushLarger,
+    ShellAction::ToggleHideUi,
+    ShellAction::ToggleMaximize,
+    ShellAction::NextWorkspace,
+    ShellAction::PrevWorkspace,
+];
+
+/// The persisted name of `action`: the variant's Debug spelling
+/// (`Undo`, `SelectTool(Erase)`).
+pub fn action_name(action: ShellAction) -> String {
+    format!("{action:?}")
+}
+
+/// The action [`action_name`] printed as `name`.
+pub fn action_from_name(name: &str) -> Option<ShellAction> {
+    let name = name.trim();
+    ALL_ACTIONS
+        .iter()
+        .copied()
+        .find(|action| action_name(*action) == name)
+}
+
+/// What a binding does in the keyboard reference's English words (a pub
+/// accessor over the reference table; empty for undocumented actions).
+pub fn reference_label(action: ShellAction) -> &'static str {
+    reference_text(action)
+}
+
+/// `binding` in the persisted, platform-neutral spelling: what
+/// `KeyboardShortcut::format` prints off macOS, lowercased
+/// (`ctrl+shift+z`, `shift+c`, `tab`, `openbracket`).
+pub fn binding_spec(binding: Binding) -> String {
+    let mods = match binding.chord {
+        Chord::Bare => "",
+        Chord::Shift => "shift+",
+        Chord::Cmd => "ctrl+",
+        Chord::CmdShift => "ctrl+shift+",
+    };
+    format!("{mods}{}", binding.key.name().to_lowercase())
+}
+
+/// Parses a [`binding_spec`] (case-insensitive; `cmd` / `command` are
+/// accepted for `ctrl`). `None` for an unknown key or a modifier no
+/// [`Chord`] expresses (Alt).
+pub fn parse_binding_spec(spec: &str) -> Option<Binding> {
+    let spec = spec.trim();
+    let (mods, key) = spec.rsplit_once('+').unwrap_or(("", spec));
+    let key = Key::ALL
+        .iter()
+        .copied()
+        .find(|k| k.name().eq_ignore_ascii_case(key.trim()))?;
+    let (mut cmd, mut shift) = (false, false);
+    for part in mods.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "cmd" | "command" => cmd = true,
+            "shift" => shift = true,
+            _ => return None,
+        }
+    }
+    let chord = match (cmd, shift) {
+        (false, false) => Chord::Bare,
+        (false, true) => Chord::Shift,
+        (true, false) => Chord::Cmd,
+        (true, true) => Chord::CmdShift,
+    };
+    Some(bind(key, chord))
+}
+
+/// `action`'s rows in the default [`BINDINGS`] table, in table order.
+pub fn default_bindings(action: ShellAction) -> Vec<Binding> {
+    BINDINGS
+        .iter()
+        .filter(|(_, bound)| *bound == action)
+        .map(|(binding, _)| *binding)
+        .collect()
+}
+
+/// The user's keymap delta (see the module docs): per overridden action,
+/// its full binding list. Kept in [`ALL_ACTIONS`] order and holding only
+/// entries that differ from the defaults, so equal deltas compare equal
+/// and serialize identically.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Overrides {
+    entries: Vec<(ShellAction, Vec<Binding>)>,
+}
+
+fn action_rank(action: ShellAction) -> usize {
+    ALL_ACTIONS
+        .iter()
+        .position(|a| *a == action)
+        .unwrap_or(usize::MAX)
+}
+
+impl Overrides {
+    /// No action is overridden.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// `action`'s override, if it has one (an empty slice = unbound).
+    pub fn get(&self, action: ShellAction) -> Option<&[Binding]> {
+        self.entries
+            .iter()
+            .find(|(a, _)| *a == action)
+            .map(|(_, b)| b.as_slice())
+    }
+
+    /// `action`'s bindings with this delta applied (override or defaults).
+    pub fn bindings(&self, action: ShellAction) -> Vec<Binding> {
+        self.get(action)
+            .map_or_else(|| default_bindings(action), <[Binding]>::to_vec)
+    }
+
+    /// Gives `action` exactly `bindings` (duplicates dropped, capped at
+    /// [`MAX_BINDINGS`]). Equal to the defaults = the override is removed.
+    pub fn set(&mut self, action: ShellAction, bindings: Vec<Binding>) {
+        let mut list: Vec<Binding> = Vec::with_capacity(MAX_BINDINGS);
+        for b in bindings {
+            if !list.contains(&b) && list.len() < MAX_BINDINGS {
+                list.push(b);
+            }
+        }
+        self.reset(action);
+        if list == default_bindings(action) {
+            return;
+        }
+        let rank = action_rank(action);
+        let at = self
+            .entries
+            .iter()
+            .position(|(a, _)| action_rank(*a) > rank)
+            .unwrap_or(self.entries.len());
+        self.entries.insert(at, (action, list));
+    }
+
+    /// Back to `action`'s default bindings.
+    pub fn reset(&mut self, action: ShellAction) {
+        self.entries.retain(|(a, _)| *a != action);
+    }
+
+    /// The overridden actions, in [`ALL_ACTIONS`] order.
+    pub fn iter(&self) -> impl Iterator<Item = (ShellAction, &[Binding])> {
+        self.entries.iter().map(|(a, b)| (*a, b.as_slice()))
+    }
+
+    /// The value of the persisted `keymap=` line:
+    /// `Action:spec,spec;Action:spec` (`Action:` alone = unbound).
+    pub fn serialize(&self) -> String {
+        self.entries
+            .iter()
+            .map(|(action, bindings)| {
+                let specs: Vec<String> = bindings.iter().map(|b| binding_spec(*b)).collect();
+                format!("{}:{}", action_name(*action), specs.join(","))
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// Parses [`Overrides::serialize`]'s text leniently: an entry naming
+    /// an unknown action is skipped, an unknown spec is dropped from its
+    /// entry (an entry left with no valid spec out of some is skipped, so
+    /// a typo never unbinds an action).
+    pub fn parse(text: &str) -> Self {
+        let mut out = Self::default();
+        for entry in text.split(';') {
+            let Some((name, specs)) = entry.split_once(':') else {
+                continue;
+            };
+            let Some(action) = action_from_name(name) else {
+                continue;
+            };
+            let raw: Vec<&str> = specs
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            let bindings: Vec<Binding> =
+                raw.iter().copied().filter_map(parse_binding_spec).collect();
+            if bindings.is_empty() && !raw.is_empty() {
+                continue;
+            }
+            out.set(action, bindings);
+        }
+        out
+    }
+}
+
+/// How many modifiers a chord names: the table's sort key (most first).
+fn chord_weight(chord: Chord) -> u8 {
+    match chord {
+        Chord::Bare => 0,
+        Chord::Shift | Chord::Cmd => 1,
+        Chord::CmdShift => 2,
+    }
+}
+
+/// The effective table for `overrides`: the default rows of every
+/// non-overridden action plus the override rows, stable-sorted most
+/// modifiers first (so a Shift row still wins over a Bare row).
+pub fn table_for(overrides: &Overrides) -> Vec<(Binding, ShellAction)> {
+    let mut table: Vec<(Binding, ShellAction)> = BINDINGS
+        .iter()
+        .filter(|(_, action)| overrides.get(*action).is_none())
+        .copied()
+        .collect();
+    for (action, bindings) in overrides.iter() {
+        table.extend(bindings.iter().map(|b| (*b, action)));
+    }
+    table.sort_by_key(|(b, _)| std::cmp::Reverse(chord_weight(b.chord)));
+    table
+}
+
+thread_local! {
+    /// The effective table on this (the UI) thread; `None` = [`BINDINGS`].
+    static EFFECTIVE: RefCell<Option<Vec<(Binding, ShellAction)>>> = const { RefCell::new(None) };
+}
+
+/// Installs `overrides` as this thread's effective table: every
+/// consumer ([`binding_of`], [`resolve_binding`], [`shortcut_label`],
+/// [`shortcut_rows`]) reads it from here on.
+pub fn set_overrides(overrides: &Overrides) {
+    let table = (!overrides.is_empty()).then(|| table_for(overrides));
+    EFFECTIVE.with(|t| *t.borrow_mut() = table);
+}
+
+/// Runs `f` over the effective table (the one funnel; module docs).
+fn with_table<R>(f: impl FnOnce(&[(Binding, ShellAction)]) -> R) -> R {
+    EFFECTIVE.with(|t| match t.borrow().as_deref() {
+        Some(table) => f(table),
+        None => f(BINDINGS),
+    })
+}
+
+/// The action other than `action` that already owns `binding` in
+/// `table`, if any: the editor refuses such an assignment.
+pub fn conflict_in(
+    table: &[(Binding, ShellAction)],
+    action: ShellAction,
+    binding: Binding,
+) -> Option<ShellAction> {
+    table
+        .iter()
+        .find(|(b, a)| *b == binding && *a != action)
+        .map(|(_, a)| *a)
+}
+
+/// The first binding two actions share once `overrides` apply, as
+/// `(binding, first action, second action)`.
+pub fn first_conflict(overrides: &Overrides) -> Option<(Binding, ShellAction, ShellAction)> {
+    let table = table_for(overrides);
+    table
+        .iter()
+        .enumerate()
+        .find_map(|(i, (b, a))| conflict_in(&table[i + 1..], *a, *b).map(|other| (*b, *a, other)))
+}
+
+/// What one key press means while the editor captures a binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+    /// Assign this binding.
+    Assign(Binding),
+    /// Esc: stop capturing, change nothing.
+    Cancel,
+    /// Backspace: clear the slot (or restore the defaults of an
+    /// overridden action).
+    Clear,
+    /// A shape no [`Chord`] expresses (Alt held; macOS Control without
+    /// Cmd): keep capturing.
+    Ignore,
+}
+
+/// The [`Capture`] for `key` pressed with `mods`: the shape → [`Chord`]
+/// mapping (the inverse of [`Chord::matches`] for the four chords).
+pub fn capture_shape(key: Key, mods: Modifiers) -> Capture {
+    match key {
+        Key::Escape => return Capture::Cancel,
+        Key::Backspace => return Capture::Clear,
+        _ => {}
+    }
+    if mods.alt {
+        return Capture::Ignore;
+    }
+    let chord = if mods.command {
+        if mods.shift {
+            Chord::CmdShift
+        } else {
+            Chord::Cmd
+        }
+    } else if mods.ctrl {
+        // macOS Control without Cmd: Bare refuses it and no chord takes it.
+        return Capture::Ignore;
+    } else if mods.shift {
+        Chord::Shift
+    } else {
+        Chord::Bare
+    };
+    Capture::Assign(bind(key, chord))
+}
+
+/// The keymap presets (the editor's combo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeymapPreset {
+    /// The default table: no overrides.
+    Umber,
+    /// [`blender_overrides`].
+    Blender,
+    /// Anything else the user built.
+    Custom,
+}
+
+/// The Blender-like preset: only the rows [`BINDINGS`] owns that Blender
+/// spells differently (viewport navigation is `NavPreset`'s job).
+/// Blender's Shift+Z toggles wireframe, Z switches the shading mode
+/// (here: lit / unlit), Ctrl+I inverts the mask. Undo / redo / save /
+/// open / F3 / Ctrl+Space / `[` `]` / E already match Blender.
+pub fn blender_overrides() -> Overrides {
+    let mut o = Overrides::default();
+    o.set(
+        ShellAction::ToggleWireframe,
+        vec![bind(Key::Z, Chord::Shift)],
+    );
+    o.set(ShellAction::CycleViewMode, vec![bind(Key::Z, Chord::Bare)]);
+    o.set(ShellAction::InvertMask, vec![bind(Key::I, Chord::Cmd)]);
+    o
+}
+
+impl KeymapPreset {
+    /// The preset `overrides` equal, or [`KeymapPreset::Custom`].
+    pub fn of(overrides: &Overrides) -> Self {
+        if overrides.is_empty() {
+            KeymapPreset::Umber
+        } else if *overrides == blender_overrides() {
+            KeymapPreset::Blender
+        } else {
+            KeymapPreset::Custom
+        }
+    }
+
+    /// The overrides this preset installs (`None` for Custom).
+    pub fn overrides(self) -> Option<Overrides> {
+        match self {
+            KeymapPreset::Umber => Some(Overrides::default()),
+            KeymapPreset::Blender => Some(blender_overrides()),
+            KeymapPreset::Custom => None,
+        }
+    }
+}
+
+/// Every bound action pressed this frame on a key `polled` does not hold
+/// (`toolbar::SHORTCUT_KEYS` pre-filters the main poll to the DEFAULT
+/// keys, so a key only an override binds is polled here), through the
+/// same [`resolve_binding`] + [`Focus::allows`], consuming what fires.
+/// No-op while no override is installed.
+pub fn poll_override_keys(ctx: &egui::Context, polled: &[Key]) -> Vec<ShellAction> {
+    let extra: Vec<Key> = EFFECTIVE.with(|t| {
+        t.borrow().as_deref().map_or_else(Vec::new, |table| {
+            table
+                .iter()
+                .map(|(b, _)| b.key)
+                .filter(|k| !polled.contains(k))
+                .collect()
+        })
+    });
+    if extra.is_empty() {
+        return Vec::new();
+    }
+    let focus = Focus::current(ctx);
+    let mut fired = Vec::new();
+    ctx.input_mut(|i| {
+        i.events.retain(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            if !extra.contains(key) {
+                return true;
+            }
+            match resolve_binding(*key, *modifiers) {
+                Some((binding, action)) if focus.allows(binding) => {
+                    fired.push(action);
+                    false
+                }
+                _ => true,
+            }
+        });
+    });
+    fired
 }
 
 /// What a binding does, in the words of the keyboard reference
@@ -226,30 +704,26 @@ fn reference_scope(binding: Binding) -> &'static str {
 }
 
 /// One row of the shortcut table: the key on this platform, what it does,
-/// and where it fires. The Help ▸ Keyboard shortcuts window and
-/// [`keyboard_reference`] both read [`BINDINGS`] through this, so the
-/// window, the doc and the live keys cannot disagree.
+/// and where it fires. The Help ▸ Keyboard shortcuts window reads the
+/// effective table (user overrides applied) through this, so the window
+/// and the live keys cannot disagree; [`keyboard_reference`] prints the
+/// defaults with the same cells.
 pub fn shortcut_rows(is_mac: bool) -> Vec<(String, &'static str, &'static str)> {
-    let names = if is_mac {
-        ModifierNames::SYMBOLS
-    } else {
-        ModifierNames::NAMES
-    };
-    BINDINGS
-        .iter()
-        .map(|(binding, action)| {
-            let key = KeyboardShortcut::new(binding.chord.modifiers(), binding.key)
-                .format(&names, is_mac)
-                .replace("OpenBracket", "[")
-                .replace("CloseBracket", "]")
-                .replace("Comma", ",");
-            let text = match reference_text(*action) {
-                "" => "(undocumented)",
-                text => text,
-            };
-            (key, text, reference_scope(*binding))
-        })
-        .collect()
+    // The effective table: the window shows the keys that fire now, user
+    // overrides included (the generated doc stays the defaults).
+    with_table(|table| {
+        table
+            .iter()
+            .map(|(binding, action)| {
+                let key = key_cap_label(*binding, is_mac);
+                let text = match reference_text(*action) {
+                    "" => "(undocumented)",
+                    text => text,
+                };
+                (key, text, reference_scope(*binding))
+            })
+            .collect()
+    })
 }
 
 /// The keyboard reference (`docs/user/keyboard.md`), generated from
@@ -360,12 +834,15 @@ pub fn is_function_key(key: Key) -> bool {
     name.len() > 1 && name.starts_with('F') && name[1..].bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The first row matching `key` + `mods`, with its binding.
+/// The first row of the effective table matching `key` + `mods`, with
+/// its binding.
 pub fn resolve_binding(key: Key, mods: Modifiers) -> Option<(Binding, ShellAction)> {
-    BINDINGS
-        .iter()
-        .find(|(binding, _)| binding.key == key && binding.chord.matches(mods))
-        .copied()
+    with_table(|table| {
+        table
+            .iter()
+            .find(|(binding, _)| binding.key == key && binding.chord.matches(mods))
+            .copied()
+    })
 }
 
 /// What [`availability`] needs to know about the app. A snapshot taken
@@ -648,5 +1125,313 @@ mod tests {
         ] {
             assert!(catalog.contains(&format!(".{key} =")), "{key}");
         }
+    }
+
+    // --- User overrides (g3-keymap-editor) ---
+
+    #[test]
+    fn every_action_is_listed() {
+        // A new ShellAction variant fails to compile here until it is
+        // added to this match and to ALL_ACTIONS.
+        let guard = |a: ShellAction| match a {
+            ShellAction::NewProject
+            | ShellAction::OpenMesh
+            | ShellAction::OpenProject
+            | ShellAction::SaveProject
+            | ShellAction::SaveProjectAs
+            | ShellAction::Undo
+            | ShellAction::Redo
+            | ShellAction::ToggleWireframe
+            | ShellAction::ToggleGrid
+            | ShellAction::CycleViewMode
+            | ShellAction::ToggleMaskMode
+            | ShellAction::InvertMask
+            | ShellAction::SelectTool(_)
+            | ShellAction::BrushSmaller
+            | ShellAction::BrushLarger
+            | ShellAction::ToggleHideUi
+            | ShellAction::ToggleMaximize
+            | ShellAction::CommandPalette
+            | ShellAction::Preferences
+            | ShellAction::NextWorkspace
+            | ShellAction::PrevWorkspace
+            | ShellAction::ViewMaterial
+            | ShellAction::NextChannel
+            | ShellAction::PrevChannel
+            | ShellAction::NextMeshMap
+            | ShellAction::PrevMeshMap => {}
+        };
+        ALL_ACTIONS.iter().copied().for_each(guard);
+        assert_eq!(ALL_ACTIONS.len(), 25 + ToolKind::ALL.len());
+        for kind in ToolKind::ALL {
+            assert!(
+                ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),
+                "{kind:?}"
+            );
+        }
+        for (_, action) in BINDINGS {
+            assert!(ALL_ACTIONS.contains(action), "{action:?}");
+        }
+        for (i, a) in ALL_ACTIONS.iter().enumerate() {
+            assert!(!ALL_ACTIONS[i + 1..].contains(a), "{a:?} listed twice");
+            assert_eq!(action_from_name(&action_name(*a)), Some(*a));
+        }
+        assert_eq!(
+            action_name(ShellAction::SelectTool(ToolKind::Erase)),
+            "SelectTool(Erase)"
+        );
+    }
+
+    #[test]
+    fn binding_specs_round_trip_for_every_default_row() {
+        for (binding, action) in BINDINGS {
+            let spec = binding_spec(*binding);
+            assert_eq!(
+                parse_binding_spec(&spec),
+                Some(*binding),
+                "{action:?} {spec}"
+            );
+        }
+        assert_eq!(binding_spec(bind(Key::Z, Chord::CmdShift)), "ctrl+shift+z");
+        assert_eq!(binding_spec(bind(Key::Tab, Chord::Bare)), "tab");
+        assert_eq!(binding_spec(bind(Key::C, Chord::Shift)), "shift+c");
+        assert_eq!(parse_binding_spec("Cmd+S"), Some(bind(Key::S, Chord::Cmd)));
+        assert_eq!(
+            parse_binding_spec("SHIFT+ctrl+p"),
+            Some(bind(Key::P, Chord::CmdShift))
+        );
+        assert_eq!(parse_binding_spec("alt+z"), None, "no chord expresses Alt");
+        assert_eq!(parse_binding_spec("ctrl+nosuchkey"), None);
+        assert_eq!(parse_binding_spec(""), None);
+    }
+
+    #[test]
+    fn overrides_round_trip_through_the_line() {
+        let mut o = Overrides::default();
+        assert_eq!(o.serialize(), "");
+        assert_eq!(Overrides::parse(""), o);
+        o.set(
+            ShellAction::ToggleGrid,
+            vec![bind(Key::G, Chord::Shift), bind(Key::F5, Chord::Bare)],
+        );
+        o.set(ShellAction::Undo, vec![bind(Key::U, Chord::Cmd)]);
+        // Unbound is an override too.
+        o.set(ShellAction::InvertMask, Vec::new());
+        let line = o.serialize();
+        // ALL_ACTIONS order, whatever the insertion order.
+        assert_eq!(line, "Undo:ctrl+u;ToggleGrid:shift+g,f5;InvertMask:");
+        assert_eq!(Overrides::parse(&line), o);
+        assert_eq!(
+            Overrides::parse(&line).serialize(),
+            line,
+            "exact round trip"
+        );
+        // Setting the defaults back removes the entry: the delta stays minimal.
+        o.set(ShellAction::Undo, default_bindings(ShellAction::Undo));
+        assert_eq!(o.get(ShellAction::Undo), None);
+        // Lenient: unknown actions and junk entries are skipped, a typo'd
+        // spec never unbinds an action.
+        let junk = Overrides::parse("Bogus:ctrl+q;Undo:ctrl+nope;;garbage;ToggleGrid:shift+g");
+        assert_eq!(junk.get(ShellAction::Undo), None);
+        assert_eq!(
+            junk.get(ShellAction::ToggleGrid),
+            Some(&[bind(Key::G, Chord::Shift)][..])
+        );
+        // More than MAX_BINDINGS: capped; duplicates dropped.
+        let mut capped = Overrides::default();
+        capped.set(
+            ShellAction::ToggleGrid,
+            vec![
+                bind(Key::F5, Chord::Bare),
+                bind(Key::F5, Chord::Bare),
+                bind(Key::F6, Chord::Bare),
+                bind(Key::F7, Chord::Bare),
+            ],
+        );
+        assert_eq!(
+            capped.get(ShellAction::ToggleGrid),
+            Some(&[bind(Key::F5, Chord::Bare), bind(Key::F6, Chord::Bare)][..])
+        );
+    }
+
+    #[test]
+    fn an_override_changes_every_consumer() {
+        let mut o = Overrides::default();
+        o.set(ShellAction::Undo, vec![bind(Key::U, Chord::Cmd)]);
+        o.set(
+            ShellAction::ToggleWireframe,
+            vec![bind(Key::W, Chord::Shift)],
+        );
+        o.set(ShellAction::ToggleGrid, Vec::new());
+        set_overrides(&o);
+        assert_eq!(
+            binding_of(ShellAction::Undo),
+            Some(bind(Key::U, Chord::Cmd))
+        );
+        assert_eq!(
+            shortcut_label(ShellAction::Undo, false).as_deref(),
+            Some("Ctrl+U")
+        );
+        assert_eq!(resolve(Key::U, Modifiers::COMMAND), Some(ShellAction::Undo));
+        // The default row is gone, not merely shadowed.
+        assert_eq!(resolve(Key::Z, Modifiers::COMMAND), None);
+        assert_eq!(
+            resolve(Key::W, Modifiers::SHIFT),
+            Some(ShellAction::ToggleWireframe)
+        );
+        assert_eq!(resolve(Key::W, Modifiers::NONE), None);
+        assert_eq!(binding_of(ShellAction::ToggleGrid), None);
+        assert_eq!(resolve(Key::G, Modifiers::NONE), None);
+        // Untouched actions keep their defaults; the Help window follows.
+        assert_eq!(
+            binding_of(ShellAction::Redo),
+            Some(bind(Key::Z, Chord::CmdShift))
+        );
+        let rows = shortcut_rows(false);
+        assert!(rows.iter().any(|(k, t, _)| k == "Ctrl+U" && *t == "Undo"));
+        assert!(!rows.iter().any(|(_, t, _)| *t == "Toggle grid"));
+        // The effective table keeps the most-modifiers-first order.
+        let table = table_for(&o);
+        for pair in table.windows(2) {
+            assert!(chord_weight(pair[0].0.chord) >= chord_weight(pair[1].0.chord));
+        }
+        // Back to the defaults.
+        set_overrides(&Overrides::default());
+        assert_eq!(
+            binding_of(ShellAction::Undo),
+            Some(bind(Key::Z, Chord::Cmd))
+        );
+        assert_eq!(
+            resolve(Key::G, Modifiers::NONE),
+            Some(ShellAction::ToggleGrid)
+        );
+    }
+
+    #[test]
+    fn conflicts_name_the_owning_action() {
+        let none = Overrides::default();
+        let table = table_for(&none);
+        assert_eq!(
+            conflict_in(&table, ShellAction::ToggleGrid, bind(Key::Z, Chord::Cmd)),
+            Some(ShellAction::Undo)
+        );
+        // An action never conflicts with itself, and a free key is free.
+        assert_eq!(
+            conflict_in(&table, ShellAction::Undo, bind(Key::Z, Chord::Cmd)),
+            None
+        );
+        assert_eq!(
+            conflict_in(&table, ShellAction::Undo, bind(Key::F9, Chord::Bare)),
+            None
+        );
+        // Overrides count: a key moved away is free, its new owner is not.
+        let mut o = Overrides::default();
+        o.set(ShellAction::Undo, vec![bind(Key::U, Chord::Cmd)]);
+        let table = table_for(&o);
+        assert_eq!(
+            conflict_in(&table, ShellAction::ToggleGrid, bind(Key::Z, Chord::Cmd)),
+            None
+        );
+        assert_eq!(
+            conflict_in(&table, ShellAction::ToggleGrid, bind(Key::U, Chord::Cmd)),
+            Some(ShellAction::Undo)
+        );
+        assert_eq!(first_conflict(&o), None);
+        // A hand-made duplicate is caught.
+        o.set(ShellAction::ToggleGrid, vec![bind(Key::W, Chord::Bare)]);
+        assert_eq!(
+            first_conflict(&o),
+            Some((
+                bind(Key::W, Chord::Bare),
+                ShellAction::ToggleWireframe,
+                ShellAction::ToggleGrid
+            ))
+        );
+        assert_eq!(first_conflict(&none), None);
+    }
+
+    #[test]
+    fn capture_maps_the_pressed_shape_to_a_chord() {
+        let ctrl = Modifiers::CTRL | Modifiers::COMMAND; // egui off macOS
+        assert_eq!(
+            capture_shape(Key::S, ctrl),
+            Capture::Assign(bind(Key::S, Chord::Cmd))
+        );
+        assert_eq!(
+            capture_shape(Key::S, ctrl | Modifiers::SHIFT),
+            Capture::Assign(bind(Key::S, Chord::CmdShift))
+        );
+        assert_eq!(
+            capture_shape(Key::C, Modifiers::SHIFT),
+            Capture::Assign(bind(Key::C, Chord::Shift))
+        );
+        assert_eq!(
+            capture_shape(Key::W, Modifiers::NONE),
+            Capture::Assign(bind(Key::W, Chord::Bare))
+        );
+        assert_eq!(capture_shape(Key::Escape, Modifiers::NONE), Capture::Cancel);
+        assert_eq!(
+            capture_shape(Key::Backspace, Modifiers::NONE),
+            Capture::Clear
+        );
+        // Shapes no chord expresses keep the capture waiting.
+        assert_eq!(capture_shape(Key::W, Modifiers::ALT), Capture::Ignore);
+        assert_eq!(
+            capture_shape(Key::W, Modifiers::CTRL | Modifiers::ALT),
+            Capture::Ignore
+        );
+        assert_eq!(
+            capture_shape(Key::W, Modifiers::MAC_CMD | Modifiers::COMMAND),
+            Capture::Assign(bind(Key::W, Chord::Cmd))
+        );
+        assert_eq!(
+            capture_shape(Key::W, Modifiers::CTRL),
+            Capture::Ignore,
+            "macOS Control alone"
+        );
+        // Every default row's own modifiers capture back to that row, and
+        // the captured binding resolves under those modifiers.
+        for (binding, action) in BINDINGS {
+            let mods = binding.chord.modifiers();
+            assert_eq!(
+                capture_shape(binding.key, mods),
+                Capture::Assign(*binding),
+                "{action:?}"
+            );
+            assert!(binding.chord.matches(mods));
+        }
+    }
+
+    #[test]
+    fn presets_are_conflict_free_and_recognised() {
+        let blender = blender_overrides();
+        assert_eq!(first_conflict(&blender), None);
+        assert_eq!(KeymapPreset::of(&Overrides::default()), KeymapPreset::Umber);
+        assert_eq!(KeymapPreset::of(&blender), KeymapPreset::Blender);
+        let mut custom = blender.clone();
+        custom.set(ShellAction::ToggleGrid, vec![bind(Key::F5, Chord::Bare)]);
+        assert_eq!(KeymapPreset::of(&custom), KeymapPreset::Custom);
+        assert_eq!(KeymapPreset::Custom.overrides(), None);
+        assert_eq!(KeymapPreset::Umber.overrides(), Some(Overrides::default()));
+        // Blender's spellings resolve once installed.
+        set_overrides(&blender);
+        assert_eq!(
+            resolve(Key::Z, Modifiers::SHIFT),
+            Some(ShellAction::ToggleWireframe)
+        );
+        assert_eq!(
+            resolve(Key::Z, Modifiers::NONE),
+            Some(ShellAction::CycleViewMode)
+        );
+        assert_eq!(resolve(Key::Z, Modifiers::COMMAND), Some(ShellAction::Undo));
+        assert_eq!(
+            resolve(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT),
+            Some(ShellAction::Redo)
+        );
+        assert_eq!(
+            resolve(Key::I, Modifiers::COMMAND),
+            Some(ShellAction::InvertMask)
+        );
+        set_overrides(&Overrides::default());
     }
 }

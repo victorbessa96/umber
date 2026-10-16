@@ -223,6 +223,15 @@ pub enum Panel {
 struct PanelViewer<'a> {
     viewport: &'a mut Viewport,
     uv_view: &'a mut UvView,
+    /// The home card's recent-projects source (the empty-viewport card,
+    /// g5-home-screen). None keeps the card at its no-input shape.
+    home_recent: Option<&'a mut recent::RecentProjects>,
+    /// The autosave snapshot a previous run left (the card's Recover row;
+    /// None hides the row).
+    home_recovery: Option<&'a recovery::RecoveryMeta>,
+    /// The home card's actions this frame (drained by the app after the
+    /// dock: the viewer cannot dispatch on the app itself).
+    home_actions: Vec<crate::empty_state::HomeCardAction>,
     bakes: &'a mut BakesPanel,
     export: &'a mut ExportDialog,
     graph: &'a mut GraphPanel,
@@ -307,6 +316,46 @@ impl TabViewer for PanelViewer<'_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
             Panel::Viewport => {
+                // The contextual strip (GUI plan g6-contextual-toolbar):
+                // the active tool's key params over the viewport, same
+                // values the Brush panel edits. The strip edits the
+                // panel's own state (no second copy); size/hardness ride
+                // StripEdit back into the paint session through the same
+                // setters the [` / `] keys use.
+                {
+                    let size = self.paint.as_deref().map_or(1.0, |p| p.brush_size());
+                    let preset = self
+                        .brush
+                        .active
+                        .and_then(|i| self.brush.library.entries.get_mut(i))
+                        .map(|e| &mut e.preset);
+                    let mut view = toolbar::ContextualView {
+                        size,
+                        preset,
+                        mirror: &mut self.brush.symmetry.mirror,
+                        paint_available: self.paint.is_some(),
+                    };
+                    for edit in toolbar::contextual_strip(ui, &mut view) {
+                        match edit {
+                            toolbar::StripEdit::Size(v) => {
+                                if let Some(paint) = self.paint.as_deref_mut() {
+                                    paint.set_brush_size(v);
+                                }
+                            }
+                            toolbar::StripEdit::Preset => {
+                                self.brush.dirty = true;
+                            }
+                            toolbar::StripEdit::LazyToggle => {
+                                self.brush.dirty = true;
+                            }
+                            toolbar::StripEdit::SymmetryToggle => {
+                                // sync_symmetry hands the panel's settings
+                                // to the session at the next begin_stroke
+                                // (the end-of-frame flush does the sync).
+                            }
+                        }
+                    }
+                }
                 // The eyedropper arm syncs from the strip's tool state each
                 // frame (Pick highlights; the brush keeps its last real
                 // tool — Pick never strokes, the viewport suppresses paint
@@ -321,14 +370,28 @@ impl TabViewer for PanelViewer<'_> {
                 // and leave the mask alone.
                 let idmask_armed = self.brush.strip == toolbar::ToolKind::IdMask;
                 self.viewport.set_idmask_armed(idmask_armed);
-                if let Some(click) = self.viewport.ui(
+                let home = self.home_recent.as_deref_mut().zip(self.home_recovery).map(
+                    |(recent, recovery)| crate::empty_state::HomeCardInput {
+                        recent,
+                        recovery: Some(recovery),
+                    },
+                );
+                let click = self.viewport.ui_with_home(
                     ui,
                     self.gpu,
                     self.paint.as_deref_mut(),
                     self.stylus_pressure,
                     self.display_lut,
                     self.postfx,
-                ) {
+                    home,
+                );
+                // The card's click (or the double-click) is collected and
+                // the app drains it after the dock: the viewer cannot
+                // reach the app's dispatch/open methods from here.
+                if let Some(action) = self.viewport.take_home_action() {
+                    self.home_actions.push(action);
+                }
+                if let Some(click) = click {
                     match click {
                         viewport::ViewportClick::Pick(sample) => {
                             // The sample is sRGBA bytes; the brush wants LINEAR
@@ -1187,6 +1250,9 @@ pub struct UmberApp {
     recent: recent::RecentProjects,
     prefs_open: bool,
     prefs_query: String,
+    /// The Preferences ▸ Keymap page's capture / search / paste state
+    /// (GUI plan g3-keymap-editor).
+    keymap_editor: preferences::KeymapEditor,
     /// Which landed Curvature bakes the paint session already loaded (the
     /// cavity mask's input).
     curvature_feed: CurvatureFeed,
@@ -1361,12 +1427,19 @@ impl UmberApp {
             show_perf_hud: false,
             notices: pending_crash_notices(),
             palette: palette::Palette::default(),
-            prefs: preferences::Preferences::load(preferences::prefs_path().as_deref()),
+            prefs: {
+                // The saved keymap overrides become the effective table
+                // before the first frame polls a key (g3-keymap-editor).
+                let prefs = preferences::Preferences::load(preferences::prefs_path().as_deref());
+                actions::set_overrides(&prefs.keymap_overrides);
+                prefs
+            },
             recent: recent::recent_path()
                 .map(|p| recent::RecentProjects::load(&p))
                 .unwrap_or_default(),
             prefs_open: false,
             prefs_query: String::new(),
+            keymap_editor: preferences::KeymapEditor::default(),
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
             #[cfg(feature = "perf")]
@@ -1401,7 +1474,7 @@ impl UmberApp {
     /// The sync writes egui only when a value differs (`style_delta`), so
     /// an unchanged preference set costs nothing per frame.
     fn show_preferences(&mut self, ctx: &egui::Context) {
-        let before = self.prefs;
+        let before = self.prefs.clone();
         if self.prefs_open {
             let mut open = true;
             egui::Window::new(tr("prefs.title"))
@@ -1473,9 +1546,26 @@ impl UmberApp {
                                     .color(umber_gui::muted()),
                             );
                         }
+                        ui.add_space(6.0);
                     }
+                    // Keymap (g3-keymap-editor): the page lives in
+                    // `preferences::keymap_section`.
+                    let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+                    preferences::keymap_section(
+                        ui,
+                        &mut self.keymap_editor,
+                        &mut p.keymap_overrides,
+                        &q,
+                        is_mac,
+                    );
                 });
             self.prefs_open = open;
+            if !open {
+                self.keymap_editor.cancel_capture();
+            }
+        }
+        if self.prefs.keymap_overrides != before.keymap_overrides {
+            actions::set_overrides(&self.prefs.keymap_overrides);
         }
         if self.prefs != before {
             self.prefs.save(preferences::prefs_path().as_deref());
@@ -2737,7 +2827,20 @@ impl eframe::App for UmberApp {
     /// egui's focus logic runs on it; Tab inside a focused widget still
     /// moves focus as usual.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Preferences ▸ Keymap capturing a binding owns the keyboard: the
+        // press is taken before egui and the shortcut poll see it, so it
+        // never fires the action it is about to be bound away from.
+        if self.prefs_open && self.keymap_editor.intercept(&mut raw_input.events) {
+            ctx.request_repaint();
+            return;
+        }
         if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        // Only while bare Tab is still Hide UI (a keymap override may have
+        // moved it).
+        let tab = actions::resolve(egui::Key::Tab, egui::Modifiers::NONE);
+        if tab != Some(toolbar::ShellAction::ToggleHideUi) {
             return;
         }
         let before = raw_input.events.len();
@@ -3004,6 +3107,12 @@ impl eframe::App for UmberApp {
         // flips the viewport, the mask, or the tool. Dispatched with the
         // toolbar's clicks below, through the same `dispatch`.
         let mut actions = toolbar::poll_shortcuts(ui.ctx());
+        // Keys only a keymap override binds (the main poll pre-filters to
+        // the default keys).
+        actions.extend(crate::actions::poll_override_keys(
+            ui.ctx(),
+            &toolbar::SHORTCUT_KEYS,
+        ));
         if std::mem::take(&mut self.tab_hide_pending) {
             actions.push(toolbar::ShellAction::ToggleHideUi);
         }
@@ -3327,53 +3436,101 @@ impl eframe::App for UmberApp {
             );
             paint.sync_active_target(sync.target, sync.verdict, sync.index);
         }
-        CentralPanel::default().show(ui, |ui| {
-            let mut viewer = PanelViewer {
-                viewport: &mut self.state.viewport,
-                uv_view: &mut self.state.uv_view,
-                bakes: &mut self.state.bakes,
-                export: &mut self.state.export,
-                graph: &mut self.state.graph,
-                mesh: self.state.mesh.as_ref(),
-                mesh_path: self.state.mesh_path.as_deref(),
-                gpu: &self.gpu,
-                paint: self.state.paint.as_mut(),
-                doc: &mut self.state.doc,
-                brush: &mut self.brush_panel,
-                polygon_fill: &mut self.state.polygon_fill,
-                path_tool: &mut self.state.path_tool,
-                material_defs: &mut self.state.material_defs,
-                material_badges: &self.state.material_badges,
-                material_status: self.state.material_status.as_deref(),
-                material_states: &mut self.state.material_states,
-                display: &mut self.state.display,
-                display_lut_state: &mut self.state.display_lut,
-                #[cfg(feature = "ocio")]
-                ocio_state: &mut self.state.ocio_state,
-                display_lut: effective_lut,
-                postfx: &mut self.state.postfx,
-                postfx_panel: &mut self.state.postfx_panel,
-                mesh_import: &mut self.state.mesh_import,
-                parked_texture_sets: &mut self.state.parked_texture_sets,
-                psd_import: &mut self.state.psd_import,
-                spp_import: &mut self.state.spp_import,
-                base_visible: &mut self.state.base_visible,
-                thumbnails: &mut self.state.thumbnails,
-                pending_resize: &mut self.state.pending_resize,
-                fill_badges: &self.state.fill_badges,
-                import_badges: &self.state.import_badges,
-                dormant: &self.state.dormant,
-                store: store.as_ref(),
-                hdr_mode: &mut self.hdr_mode,
-                stylus_pressure,
-            };
-            DockArea::new(&mut self.dock)
-                .style(Style::from_egui(ui.style()))
-                .show_inside(ui, &mut viewer);
-        });
+        // The home card's inputs (g5-home-screen), split out of the
+        // closure: `self.recent` mutably here (the card's Remove/Clear),
+        // `pending_recovery` immutably — computed against `state.mesh`
+        // so a mesh loaded this frame already skips the card.
+        let home_recent: Option<&mut recent::RecentProjects> = if self.state.mesh.is_none() {
+            Some(&mut self.recent)
+        } else {
+            None
+        };
+        let home_recovery = if self.state.mesh.is_none() {
+            self.pending_recovery.as_ref()
+        } else {
+            None
+        };
+        let home_actions: Vec<crate::empty_state::HomeCardAction> = CentralPanel::default()
+            .show(ui, |ui| {
+                let mut viewer = PanelViewer {
+                    viewport: &mut self.state.viewport,
+                    uv_view: &mut self.state.uv_view,
+                    home_recent,
+                    home_recovery,
+                    home_actions: Vec::new(),
+                    bakes: &mut self.state.bakes,
+                    export: &mut self.state.export,
+                    graph: &mut self.state.graph,
+                    mesh: self.state.mesh.as_ref(),
+                    mesh_path: self.state.mesh_path.as_deref(),
+                    gpu: &self.gpu,
+                    paint: self.state.paint.as_mut(),
+                    doc: &mut self.state.doc,
+                    brush: &mut self.brush_panel,
+                    polygon_fill: &mut self.state.polygon_fill,
+                    path_tool: &mut self.state.path_tool,
+                    material_defs: &mut self.state.material_defs,
+                    material_badges: &self.state.material_badges,
+                    material_status: self.state.material_status.as_deref(),
+                    material_states: &mut self.state.material_states,
+                    display: &mut self.state.display,
+                    display_lut_state: &mut self.state.display_lut,
+                    #[cfg(feature = "ocio")]
+                    ocio_state: &mut self.state.ocio_state,
+                    display_lut: effective_lut,
+                    postfx: &mut self.state.postfx,
+                    postfx_panel: &mut self.state.postfx_panel,
+                    mesh_import: &mut self.state.mesh_import,
+                    parked_texture_sets: &mut self.state.parked_texture_sets,
+                    psd_import: &mut self.state.psd_import,
+                    spp_import: &mut self.state.spp_import,
+                    base_visible: &mut self.state.base_visible,
+                    thumbnails: &mut self.state.thumbnails,
+                    pending_resize: &mut self.state.pending_resize,
+                    fill_badges: &self.state.fill_badges,
+                    import_badges: &self.state.import_badges,
+                    dormant: &self.state.dormant,
+                    store: store.as_ref(),
+                    hdr_mode: &mut self.hdr_mode,
+                    stylus_pressure,
+                };
+                DockArea::new(&mut self.dock)
+                    .style(Style::from_egui(ui.style()))
+                    .show_inside(ui, &mut viewer);
+
+                let actions: Vec<crate::empty_state::HomeCardAction> =
+                    viewer.home_actions.drain(..).collect();
+                actions
+            })
+            .inner;
         // The status bar drew before the dock: one more frame when the
         // hover moved, so its readout catches up (converges — the next
         // frame records the same hover).
+        // The home card's actions (g5-home-screen), drained AFTER the
+        // dock closure: the same dispatch the File menu rows use, so the
+        // card and the menu cannot drift. Recents open through the menu's
+        // own opener + note; Recover clears the pending meta first (the
+        // launch prompt's own order, else the offer re-fires).
+        for action in home_actions {
+            match action {
+                crate::empty_state::HomeCardAction::NewProject => {
+                    self.dispatch(toolbar::ShellAction::NewProject)
+                }
+                crate::empty_state::HomeCardAction::OpenProject => {
+                    self.dispatch(toolbar::ShellAction::OpenProject)
+                }
+                crate::empty_state::HomeCardAction::OpenRecent(path) => {
+                    self.open_project_at(path.clone());
+                    self.note_recent(&path);
+                }
+                crate::empty_state::HomeCardAction::RecoverSession => {
+                    if let Some(meta) = self.pending_recovery.take() {
+                        self.recover(&meta);
+                    }
+                }
+            }
+        }
+
         if self.state.uv_view.hover_uv() != hover_before {
             ui.ctx().request_repaint();
         }

@@ -70,6 +70,7 @@ struct ScreenUniform {
     resolution: vec2<f32>,  // target surface size (pixels)
     quad_origin: vec2<f32>, // surface-space top-left of the quad
     quad_size: vec2<f32>,   // surface-space quad extent
+    isolate: u32,           // G6 uv-view parity: 0=All 1=R 2=G 3=B 4=A 5=luma
 }
 
 @group(0) @binding(0) var<uniform> screen: ScreenUniform;
@@ -99,23 +100,109 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv_in: vec2<f32>) -> Vertex
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(tex, samp, in.uv);
+    // G6 `g6-uv-view-parity`: channel isolation applied in the shader,
+    // before the display LUT (the LUT transforms the PRESENTED grey, so
+    // isolate stays in the same colour pipeline as All). `0` = All
+    // (the pre-existing identity path); 1..4 = R/G/B/A as grey;
+    // 5 = Rec.709 luma.
+    var rgb = color.rgb;
+    if (screen.isolate != u32(0)) {
+        var grey = dot(color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        if (screen.isolate == u32(1)) { grey = color.r; }
+        else if (screen.isolate == u32(2)) { grey = color.g; }
+        else if (screen.isolate == u32(3)) { grey = color.b; }
+        else if (screen.isolate == u32(4)) { grey = color.a; }
+        rgb = vec3<f32>(grey);
+    }
     // The paint buffer is linear rgba8unorm; the pipeline's fragment
     // target format matches the egui surface (non-sRGB). The display
     // LUT is the last step before the target: nearest sampling hands it
     // one of the 256 stored levels, which addresses its entry exactly
     // (the identity LUT returns the texel unchanged). Alpha forced to 1
     // (opaque presentation).
-    return vec4<f32>(apply_display_lut(color.rgb), 1.0);
+    return vec4<f32>(apply_display_lut(rgb), 1.0);
 }
 "#;
 
-/// CPU-side mirror of the WGSL `ScreenUniform` (repr(C), Pod).
+/// CPU-side mirror of the WGSL `ScreenUniform` (repr(C), Pod). The
+/// trailing `_pad` matches WGSL uniform layout: the shader struct's
+/// size rounds to 16 (2×vec2 align 8 + u32 align 4 = 20 → stride 32),
+/// so the CPU mirror carries the same trailing padding and the
+/// binding size always satisfies the reflected minimum.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ScreenUniformData {
     resolution: [f32; 2],
     quad_origin: [f32; 2],
     quad_size: [f32; 2],
+    isolate: u32,
+    _pad: [u8; 4],
+}
+
+/// Which channel(s) of the paint texture the UV view presents
+/// (GUI plan G6 `g6-uv-view-parity` — Painter's per-channel 2D view).
+/// Applied in the shader: `All` is the identity (byte-identical
+/// presentation, the pre-existing path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelIsolate {
+    /// RGBA as stored.
+    #[default]
+    All,
+    /// Red only, as grey.
+    Red,
+    /// Green only, as grey.
+    Green,
+    /// Blue only, as grey.
+    Blue,
+    /// Alpha only, as grey.
+    Alpha,
+    /// Luminance (Rec.709 luma of linear rgb), as grey.
+    Gray,
+}
+
+impl ChannelIsolate {
+    /// The WGSL uniform value ([`UvPresent::isolate`]): 0 = All.
+    pub fn uniform_value(self) -> u32 {
+        match self {
+            Self::All => 0,
+            Self::Red => 1,
+            Self::Green => 2,
+            Self::Blue => 3,
+            Self::Alpha => 4,
+            Self::Gray => 5,
+        }
+    }
+
+    /// The combo label (English; the panel's combo carries its own
+    /// translated header — this is the stable ordering key, not shown).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Red => "Red",
+            Self::Green => "Green",
+            Self::Blue => "Blue",
+            Self::Alpha => "Alpha",
+            Self::Gray => "Gray",
+        }
+    }
+
+    /// Every variant in combo order.
+    pub const ALL: [Self; 6] = [
+        Self::All,
+        Self::Red,
+        Self::Green,
+        Self::Blue,
+        Self::Alpha,
+        Self::Gray,
+    ];
+}
+
+/// Per-frame presentation options for the UV view's paint canvas
+/// (GUI plan G6 `g6-uv-view-parity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UvPresent {
+    /// Which channel(s) to present.
+    pub isolate: ChannelIsolate,
 }
 
 /// Static display resources: quad pipeline, bind-group layout, sampler,
@@ -251,15 +338,18 @@ impl TextureDisplay {
     /// `rect` (egui points; converted to pixels per-frame in `prepare`
     /// using the frame's actual scale factor), through `lut` — the app's
     /// display LUT, or `None` for the identity table (renders exactly
-    /// the pre-LUT bytes).
+    /// the pre-LUT bytes). `present.isolate` selects the UV view's
+    /// channel isolation ([`UvPresent::default`] = All, the identity
+    /// presentation).
     pub fn callback(
         &self,
         device: &wgpu::Device,
         target: &crate::paint::PaintTarget,
         rect: epaint::emath::Rect,
         lut: Option<&crate::display_lut::DisplayLut>,
+        present: UvPresent,
     ) -> TextureDisplayCallback {
-        self.callback_for_view(device, target.view(), rect, lut)
+        self.callback_for_view(device, target.view(), rect, lut, present)
     }
 
     /// [`Self::callback`] over any filterable 2D view — the golden test
@@ -271,6 +361,7 @@ impl TextureDisplay {
         source: &wgpu::TextureView,
         rect: epaint::emath::Rect,
         lut: Option<&crate::display_lut::DisplayLut>,
+        present: UvPresent,
     ) -> TextureDisplayCallback {
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("umber_texture_display_uniform"),
@@ -281,6 +372,8 @@ impl TextureDisplay {
                 resolution: [0.0, 0.0],
                 quad_origin: [0.0, 0.0],
                 quad_size: [0.0, 0.0],
+                isolate: present.isolate.uniform_value(),
+                _pad: [0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -319,6 +412,7 @@ impl TextureDisplay {
             vertex_buffer,
             uniform_buffer,
             rect_points: rect,
+            isolate: present.isolate.uniform_value(),
         }
     }
 }
@@ -340,6 +434,9 @@ pub struct TextureDisplayCallback {
     /// (from `ScreenDescriptor`), so the uniform and the surface size
     /// are always in one coordinate system.
     rect_points: epaint::emath::Rect,
+    /// The channel-isolation uniform value (G6 uv-view parity), carried
+    /// so `write_uniform` re-applies it every frame alongside the rect.
+    isolate: u32,
 }
 
 impl egui_wgpu::CallbackTrait for TextureDisplayCallback {
@@ -378,7 +475,8 @@ impl TextureDisplayCallback {
         queue: &wgpu::Queue,
         screen_descriptor: &egui_wgpu::ScreenDescriptor,
     ) {
-        let uniform = screen_uniform(&self.rect_points, screen_descriptor);
+        let mut uniform = screen_uniform(&self.rect_points, screen_descriptor);
+        uniform.isolate = self.isolate;
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
@@ -418,6 +516,10 @@ fn screen_uniform(
         ],
         quad_origin: [rect.left() * ppp, rect.top() * ppp],
         quad_size: [rect.width() * ppp, rect.height() * ppp],
+        // The callback's isolate overwrites this in `write_uniform`;
+        // the helper builds the geometry arm only.
+        isolate: 0,
+        _pad: [0; 4],
     }
 }
 
@@ -451,10 +553,13 @@ mod tests {
 
     #[test]
     fn uniform_layout_is_pod() {
-        // ScreenUniformData must stay exactly 24 bytes (2+2+2 f32s) for
-        // the WGSL struct alignment; repr(C) + Pod is checked at the
-        // derive, this pins the size.
-        assert_eq!(std::mem::size_of::<ScreenUniformData>(), 24);
+        // ScreenUniformData must stay exactly 32 bytes: 2+2+2 f32s +
+        // the u32 isolate + the 12-byte pad that matches WGSL's
+        // 16-byte uniform-struct stride (the shader's reflected
+        // minimum; a smaller binding fails validation at pipeline
+        // creation). repr(C) + Pod is checked at the derive, this
+        // pins the size.
+        assert_eq!(std::mem::size_of::<ScreenUniformData>(), 32);
     }
 
     #[test]
@@ -505,6 +610,7 @@ mod tests {
         use crate::display_lut::{identity_lut_bytes, DisplayLut, DISPLAY_LUT_BYTES};
         use crate::golden::{compare_rgba8, RenderTarget};
         use crate::renderer::GpuContext;
+        use crate::texture_display::{ChannelIsolate, UvPresent};
 
         /// 16×16 = 256 texels: the source holds every byte level per
         /// channel, so every LUT entry is exercised.
@@ -595,15 +701,25 @@ mod tests {
             source: &wgpu::TextureView,
             lut: Option<&DisplayLut>,
         ) -> Vec<u8> {
+            present_isolate(gpu, source, lut, UvPresent::default())
+        }
+
+        /// [`present`] with an explicit isolate (the new G6 arm's probe).
+        fn present_isolate(
+            gpu: &GpuContext,
+            source: &wgpu::TextureView,
+            lut: Option<&DisplayLut>,
+            present: UvPresent,
+        ) -> Vec<u8> {
             let target =
                 RenderTarget::with_format(&gpu.device, SIDE, SIDE, wgpu::TextureFormat::Rgba8Unorm);
             let rect = epaint::emath::Rect::from_min_size(
                 epaint::emath::Pos2::ZERO,
                 epaint::emath::vec2(SIDE as f32, SIDE as f32),
             );
-            let callback = gpu
-                .texture_display()
-                .callback_for_view(&gpu.device, source, rect, lut);
+            let callback =
+                gpu.texture_display()
+                    .callback_for_view(&gpu.device, source, rect, lut, present);
             callback.write_uniform(
                 &gpu.queue,
                 &egui_wgpu::ScreenDescriptor {
@@ -693,6 +809,68 @@ mod tests {
                 .collect();
             compare_rgba8(&out, &expected, 0).expect("inverted LUT");
             assert_ne!(out, pre_lut_expected(&source));
+        }
+
+        /// G6 `g6-uv-view-parity`: the isolate uniform reaches the
+        /// shader. Each isolate picks its own source channel as the
+        /// presented grey (through the identity LUT = byte-exact), and
+        /// `All` stays the pre-existing identity render — the regression
+        /// arm: a uniform the shader ignores makes every isolate equal
+        /// `All` and this test red.
+        #[test]
+        fn isolate_picks_its_channel() {
+            let Some(gpu) = context() else {
+                eprintln!("skipping isolate_picks_its_channel: no wgpu adapter");
+                return;
+            };
+            let source = source_bytes();
+            let view = source_view(&gpu, &source);
+
+            // All: the identity render (regression).
+            let all = present_isolate(&gpu, &view, None, UvPresent::default());
+            compare_rgba8(&all, &pre_lut_expected(&source), 0).expect("All is identity");
+
+            let isolate = |kind| {
+                let out = present_isolate(&gpu, &view, None, UvPresent { isolate: kind });
+                compare_rgba8(&out, &grey_expected(&source, kind), 0)
+                    .expect("isolated grey render");
+            };
+            // R: texel k presents k (its red).
+            isolate(ChannelIsolate::Red);
+            // G: 255 − k.
+            isolate(ChannelIsolate::Green);
+            // B: 97k mod 256.
+            isolate(ChannelIsolate::Blue);
+            // A: k again (alpha rides the same walk as red).
+            isolate(ChannelIsolate::Alpha);
+            // Gray: Rec.709 luma of the rgb triple, rounded.
+            isolate(ChannelIsolate::Gray);
+        }
+
+        /// The expected byte for an isolate render: every texel the
+        /// chosen component's value in all three channels, alpha 255.
+        fn grey_expected(source: &[u8], kind: ChannelIsolate) -> Vec<u8> {
+            source
+                .chunks_exact(4)
+                .flat_map(|t| {
+                    let v = match kind {
+                        ChannelIsolate::Red => t[0],
+                        ChannelIsolate::Green => t[1],
+                        ChannelIsolate::Blue => t[2],
+                        ChannelIsolate::Alpha => t[3],
+                        // The shader dots the RAW normalized samples
+                        // (Rgba8Unorm, no sRGB decode): luma of b/255.
+                        ChannelIsolate::Gray => {
+                            (0.2126 * t[0] as f32
+                                + 0.7152 * t[1] as f32
+                                + 0.0722 * t[2] as f32
+                                + 0.5) as u8
+                        }
+                        ChannelIsolate::All => unreachable!("All handled above"),
+                    };
+                    [v, v, v, 255]
+                })
+                .collect()
         }
     }
 }

@@ -203,6 +203,12 @@ pub struct Viewport {
     /// straight line is screen-space too, with the same caveat: move the
     /// camera and the anchor no longer sits on the old stroke end).
     last_stroke_end: Option<egui::Pos2>,
+    /// The home card's click this frame (GUI plan `g5-home-screen`): set
+    /// by [`Self::ui_with_home`] while no mesh is loaded, drained by the
+    /// shell through [`Self::take_home_action`].
+    // `dead_code`: read only by `take_home_action` until main.rs wires it.
+    #[allow(dead_code)]
+    home_action: Option<crate::empty_state::HomeCardAction>,
 }
 
 impl Viewport {
@@ -298,10 +304,31 @@ impl Viewport {
         &mut self,
         ui: &mut Ui,
         gpu: &GpuContext,
+        paint: Option<&mut crate::paint_state::PaintState>,
+        stylus_pressure: Option<f32>,
+        display_lut: Option<&DisplayLut>,
+        postfx: &PostChain,
+    ) -> Option<ViewportClick> {
+        self.ui_with_home(ui, gpu, paint, stylus_pressure, display_lut, postfx, None)
+    }
+
+    /// [`Self::ui`] with the home card's shell state (GUI plan
+    /// `g5-home-screen`): while no mesh is loaded the empty state is the
+    /// home card ([`crate::empty_state::home_card`]), fed the recent list
+    /// and the pending autosave snapshot from `home`. `None` draws the
+    /// card with New / Open only. The card's click (or a double-click on
+    /// the empty viewport = Open) is kept for [`Self::take_home_action`],
+    /// so the strip-tool return value stays one `ViewportClick` per frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ui_with_home(
+        &mut self,
+        ui: &mut Ui,
+        gpu: &GpuContext,
         mut paint: Option<&mut crate::paint_state::PaintState>,
         stylus_pressure: Option<f32>,
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
+        home: Option<crate::empty_state::HomeCardInput<'_>>,
     ) -> Option<ViewportClick> {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -540,11 +567,18 @@ impl Viewport {
         }
 
         ui.painter().rect_filled(rect, 0.0, EMPTY_VIEWPORT_COLOR);
-        // The empty state (Phase 0b): the drop-zone hero until a mesh
-        // loads, lit while a file drag hovers the window.
+        // The empty state (Phase 0b, GUI plan g5-home-screen): the home
+        // card until a mesh loads, lit while a file drag hovers the
+        // window. Its widgets are added after the viewport's own response,
+        // so they take their clicks first; a double-click that reaches the
+        // viewport (empty space) is Open.
         if self.mesh.is_none() {
             let hovering = ui.input(|i| !i.raw.hovered_files.is_empty());
-            crate::empty_state::paint_hero(ui, rect, hovering);
+            let card = crate::empty_state::home_card(ui, rect, hovering, home);
+            let action = crate::empty_state::resolve_action(card, response.double_clicked());
+            if action.is_some() {
+                self.home_action = action;
+            }
         }
 
         let route = match self.mesh {
@@ -786,6 +820,18 @@ impl Viewport {
         };
         brush_cursor::combine_spans(probe(1.0), probe(-1.0))
             .map(|t| brush_cursor::screen_radius(paint.brush_radius_texels(), t))
+    }
+
+    /// The home card's last click, taken (GUI plan `g5-home-screen`): the
+    /// shell reads this after [`Self::ui_with_home`] and dispatches it
+    /// (New / Open / the recent dir / Recover). `None` when nothing was
+    /// clicked since the last take.
+    //
+    // `dead_code`: the binary calls this once main.rs wires the home card
+    // (the integration step of g5-home-screen).
+    #[allow(dead_code)]
+    pub fn take_home_action(&mut self) -> Option<crate::empty_state::HomeCardAction> {
+        self.home_action.take()
     }
 
     /// Sets the navigation preset.

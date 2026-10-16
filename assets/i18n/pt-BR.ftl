@@ -132,6 +132,18 @@ shell =
     .hero-hint = ou use Abrir malha… na barra de ferramentas ou no menu Arquivo
     .hero-formats = Suportados:
 
+## Cartão inicial (plano de GUI g5-home-screen)
+
+home =
+    .new-project = Novo projeto
+    .open-project = Abrir…
+    .open-tip = Abrir um projeto .umber salvo (ou clique duas vezes no espaço vazio)
+    .recent = Projetos recentes
+    .recent-remove = Remover dos recentes
+    .recent-clear = Limpar todos os recentes
+    .recover = Recuperar a última sessão
+    .recover-tip = O Umber fechou sem salvar da última vez. Abra a cópia salva automaticamente desse trabalho.
+
 ## Painel de conjuntos de texturas
 
 texturesets =
@@ -697,6 +709,7 @@ spp-import =
 uv =
     .no-mesh = nenhuma malha carregada
     .mask-mode = MODO MÁSCARA (X para sair)
+    .isolate = Canal
 
 ## Ferramentas de caminho de pintura (§2 P1)
 
@@ -811,6 +824,24 @@ prefs =
     .nav-umber = Umber clássico
     .nav-blender = Blender (botão do meio)
     .nav-env-override = UMBER_NAV está definido: ele substitui esta escolha nesta execução.
+    .section-keymap = Atalhos de teclado
+    .keymap-preset = Predefinição
+    .keymap-preset-umber = Umber (padrão)
+    .keymap-preset-blender = Estilo Blender
+    .keymap-preset-custom = Personalizado
+    .keymap-search = Buscar ações ou teclas (ex.: ctrl s)…
+    .keymap-col-action = Ação
+    .keymap-col-binding = Atalho
+    .keymap-col-alt = Alternativo
+    .keymap-unbound = —
+    .keymap-press-keys = Pressione as teclas…
+    .keymap-button-tip = Clique e pressione o novo atalho. Esc cancela; Backspace limpa (ou restaura o padrão).
+    .keymap-conflict = Conflita com { $action }: não atribuído.
+    .keymap-copy = Copiar atalhos alterados
+    .keymap-paste = Colar atalhos
+    .keymap-paste-hint = keymap=…
+    .keymap-paste-invalid = Não é uma linha de atalhos: nada mudou.
+    .keymap-paste-conflict = { $key } seria { $first } e { $second } ao mesmo tempo: nada mudou.
 
 ## Dicas ricas (plano G3): só descrições, o registro imprime a tecla
 
@@ -859,3 +890,14 @@ propmenu =
     .reset = Restaurar o padrão
     .copy = Copiar valor
     .paste = Colar valor
+
+## Faixa de contexto sobre o viewport (plano de GUI g6-contextual-toolbar)
+
+strip =
+    .size = Tamanho
+    .flow = Fluxo
+    .spacing = Espaçamento
+    .lazy = Lazy mouse (D)
+    .symmetry = Simetria (L)
+    .no-paint = sem sessão de pintura
+    .no-preset = nenhum preset selecionado

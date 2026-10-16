@@ -128,6 +128,18 @@ shell =
     .hero-hint = or use Open Mesh… in the toolbar or the File menu
     .hero-formats = Supported:
 
+## Home card (GUI plan g5-home-screen)
+
+home =
+    .new-project = New project
+    .open-project = Open…
+    .open-tip = Open a saved .umber project (or double-click empty space)
+    .recent = Recent projects
+    .recent-remove = Remove from recents
+    .recent-clear = Clear all recents
+    .recover = Recover last session
+    .recover-tip = Umber closed without saving last time. Open the autosaved copy of that work.
+
 ## Texture Sets panel
 
 texturesets =
@@ -678,6 +690,7 @@ spp-import =
 uv =
     .no-mesh = no mesh loaded
     .mask-mode = MASK MODE (X to exit)
+    .isolate = Channel
 
 ## Paint path tools (§2 P1 row)
 
@@ -792,6 +805,24 @@ prefs =
     .nav-umber = Umber classic
     .nav-blender = Blender (middle mouse)
     .nav-env-override = UMBER_NAV is set: it overrides this choice for this launch.
+    .section-keymap = Keymap
+    .keymap-preset = Preset
+    .keymap-preset-umber = Umber (default)
+    .keymap-preset-blender = Blender-like
+    .keymap-preset-custom = Custom
+    .keymap-search = Search actions or keys (e.g. ctrl s)…
+    .keymap-col-action = Action
+    .keymap-col-binding = Shortcut
+    .keymap-col-alt = Alternate
+    .keymap-unbound = —
+    .keymap-press-keys = Press keys…
+    .keymap-button-tip = Click, then press the new shortcut. Esc cancels; Backspace clears (or restores the default).
+    .keymap-conflict = Conflicts with { $action }: not assigned.
+    .keymap-copy = Copy changed bindings
+    .keymap-paste = Paste bindings
+    .keymap-paste-hint = keymap=…
+    .keymap-paste-invalid = Not a keymap line: nothing changed.
+    .keymap-paste-conflict = { $key } would be both { $first } and { $second }: nothing changed.
 
 ## Rich tooltips (GUI plan G3): descriptions only, the registry prints the key
 
@@ -840,3 +871,14 @@ propmenu =
     .reset = Reset to Default
     .copy = Copy Value
     .paste = Paste Value
+
+## Contextual toolbar strip (GUI plan g6-contextual-toolbar)
+
+strip =
+    .size = Size
+    .flow = Flow
+    .spacing = Spacing
+    .lazy = Lazy mouse (D)
+    .symmetry = Symmetry (L)
+    .no-paint = no paint session
+    .no-preset = no preset selected
