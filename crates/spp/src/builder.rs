@@ -243,7 +243,7 @@ impl B {
         self.u8(0); // reserved
         self.u16(entries.len() as u16);
         for (name_off, header) in entries {
-            self.u32(*name_off);
+            self.u64(u64::from(*name_off)); // link name offset, off-wide
             self.u64(*header);
             self.u32(0); // cache type
             self.u32(0); // reserved
