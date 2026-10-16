@@ -125,6 +125,50 @@ pub enum SmartError {
     /// A mask stack with no ops cannot compose.
     #[error("smart mask {0:?} has no ops")]
     EmptyMask(String),
+    /// A preset file larger than [`MAX_PRESET_BYTES`] (read refused).
+    #[error("smart preset file is {0} bytes; the cap is {MAX_PRESET_BYTES}")]
+    TooLarge(u64),
+    /// More layers or ops than the caps ([`MAX_PRESET_LAYERS`],
+    /// [`MAX_MASK_OPS`]).
+    #[error("smart preset {name:?} has {count} {what}; the cap is {cap}")]
+    TooMany {
+        /// The preset's display name.
+        name: String,
+        /// `"layers"` or `"ops"`.
+        what: &'static str,
+        /// How many it has.
+        count: usize,
+        /// The cap.
+        cap: usize,
+    },
+}
+
+/// Largest `.umbersmart` / `.umbermask` file read (1 MiB). The shipped
+/// presets are ~1 KB; a preset is JSON metadata, never pixels.
+pub const MAX_PRESET_BYTES: u64 = 1 << 20;
+/// Most layers a smart material may instantiate in one apply.
+pub const MAX_PRESET_LAYERS: usize = 256;
+/// Most stages a smart mask may compose. Every op runs once per texel
+/// (16.8M at 4K), so this bounds the apply's cost, not just its size.
+pub const MAX_MASK_OPS: usize = 64;
+
+/// Reads a preset file, refusing anything over [`MAX_PRESET_BYTES`]
+/// BEFORE allocating it (the size comes from metadata, and the read is
+/// capped too in case the file grows between the two).
+fn read_capped(path: &std::path::Path) -> Result<String, SmartError> {
+    use std::io::Read as _;
+    let len = std::fs::metadata(path)?.len();
+    if len > MAX_PRESET_BYTES {
+        return Err(SmartError::TooLarge(len));
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)?
+        .take(MAX_PRESET_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_PRESET_BYTES {
+        return Err(SmartError::TooLarge(text.len() as u64));
+    }
+    Ok(text)
 }
 
 fn default_preset_version() -> u32 {
@@ -241,7 +285,16 @@ impl SmartMaterial {
     ///
     /// [`SmartError::Json`] on malformed input.
     pub fn from_json(json: &str) -> Result<Self, SmartError> {
-        Ok(serde_json::from_str(json)?)
+        let material: Self = serde_json::from_str(json)?;
+        if material.layers.len() > MAX_PRESET_LAYERS {
+            return Err(SmartError::TooMany {
+                name: material.name,
+                what: "layers",
+                count: material.layers.len(),
+                cap: MAX_PRESET_LAYERS,
+            });
+        }
+        Ok(material)
     }
 
     /// Reads a `.umbersmart` file.
@@ -250,7 +303,7 @@ impl SmartMaterial {
     ///
     /// [`SmartError::Io`] / [`SmartError::Json`] on unreadable input.
     pub fn load_file(path: &std::path::Path) -> Result<Self, SmartError> {
-        let text = std::fs::read_to_string(path)?;
+        let text = read_capped(path)?;
         Self::from_json(&text)
     }
 
@@ -418,7 +471,16 @@ impl SmartMask {
     ///
     /// [`SmartError::Json`] on malformed input.
     pub fn from_json(json: &str) -> Result<Self, SmartError> {
-        Ok(serde_json::from_str(json)?)
+        let mask: Self = serde_json::from_str(json)?;
+        if mask.ops.len() > MAX_MASK_OPS {
+            return Err(SmartError::TooMany {
+                name: mask.name,
+                what: "ops",
+                count: mask.ops.len(),
+                cap: MAX_MASK_OPS,
+            });
+        }
+        Ok(mask)
     }
 
     /// Reads an `.umbermask` file.
@@ -427,7 +489,7 @@ impl SmartMask {
     ///
     /// [`SmartError::Io`] / [`SmartError::Json`] on unreadable input.
     pub fn load_file(path: &std::path::Path) -> Result<Self, SmartError> {
-        let text = std::fs::read_to_string(path)?;
+        let text = read_capped(path)?;
         Self::from_json(&text)
     }
 
@@ -511,6 +573,37 @@ impl SmartMask {
 mod tests {
     use super::*;
     use crate::layers::LayerKind;
+
+    #[test]
+    fn oversized_presets_are_refused_before_they_cost_anything() {
+        // Ops over the cap: a mask is composed once per texel, so the cap
+        // bounds the apply's cost.
+        let op = r#"{ "source": { "type": "constant", "value": 0.5 }, "op": "multiply" }"#;
+        let ops = vec![op; MAX_MASK_OPS + 1].join(",");
+        let json = format!(r#"{{ "name": "Big", "ops": [{ops}] }}"#);
+        assert!(matches!(
+            SmartMask::from_json(&json),
+            Err(SmartError::TooMany { what: "ops", .. })
+        ));
+        let ok = vec![op; MAX_MASK_OPS].join(",");
+        assert!(SmartMask::from_json(&format!(r#"{{ "name": "Ok", "ops": [{ok}] }}"#)).is_ok());
+        // Layers over the cap.
+        let layer = r#"{ "name": "l", "kind": "paint" }"#;
+        let layers = vec![layer; MAX_PRESET_LAYERS + 1].join(",");
+        let json = format!(r#"{{ "name": "Big", "layers": [{layers}] }}"#);
+        assert!(matches!(
+            SmartMaterial::from_json(&json),
+            Err(SmartError::TooMany { what: "layers", .. })
+        ));
+        // A file over the byte cap is refused from metadata, unread.
+        let path = std::env::temp_dir().join(format!("umber-big-{}.umbermask", std::process::id()));
+        std::fs::write(&path, vec![b' '; (MAX_PRESET_BYTES + 1) as usize]).unwrap();
+        assert!(matches!(
+            SmartMask::load_file(&path),
+            Err(SmartError::TooLarge(_))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn paint_stack(names: &[&str]) -> LayerStack {
         let mut stack = LayerStack::new();
