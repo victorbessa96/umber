@@ -140,6 +140,16 @@ If it is flipped, the fix is one line in `texture_cache::decode` (reverse
 the row order before returning), plus a test pinning it. Until checked,
 the user docs must not promise correct orientation; they don't.
 
+## PNG transfer: two writers, on purpose
+
+- `umber-cli extract-spp` (files that leave Umber): colour channels are
+  written sRGB and data linear, the convention every texture tool reads
+  (`transfer_for`, tested).
+- `spp_import::write_channels` (the app's hand-off folder): all LINEAR,
+  because the mesh-map import loads PNG bytes into the linear plane
+  without converting (audit C2-32). When C2-32 lands, this writer
+  switches to `transfer_for`'s rule in the same commit.
+
 ## Memory
 
 Peak on HydrageaBessa (742 MiB), from measured sizes:
