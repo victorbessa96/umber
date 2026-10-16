@@ -12,6 +12,8 @@
 
 mod agent;
 mod batch;
+mod bench;
+mod spp_extract;
 
 use std::path::{Path, PathBuf};
 
@@ -29,8 +31,10 @@ fn main() -> Result<()> {
         Some("export") => export_cmd(&args[1..]),
         Some("batch") => batch::batch_cmd(&args[1..]),
         Some("agent") => agent::agent_cmd(&args[1..]),
+        Some("extract-spp") => spp_extract::extract_spp_cmd(&args[1..]),
+        Some("bench") => bench::bench_cmd(&args[1..]),
         Some(other) => Err(anyhow::anyhow!(
-            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent> ..."
+            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|extract-spp|bench> ..."
         )),
         None => {
             println!("umber-cli v{} (wave-6)", env!("CARGO_PKG_VERSION"));
@@ -40,6 +44,8 @@ fn main() -> Result<()> {
             println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda]");
             println!("          batch <recipe.json>");
             println!("          agent   (JSONL steps on stdin, one JSON result line each on stdout)");
+            println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
+            println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
             Ok(())
         }
     }
@@ -199,14 +205,22 @@ struct BakeContext {
 }
 
 fn bake_context() -> Result<BakeContext> {
+    Ok(bake_context_with_info()?.0)
+}
+
+/// [`bake_context`] plus the adapter's `"name (device type, backend)"`,
+/// which `bench` reports so two machines' numbers are comparable.
+fn bake_context_with_info() -> Result<(BakeContext, String)> {
     let instance = wgpu::Instance::default();
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .map_err(|e| anyhow::anyhow!("no suitable GPU adapter: {e}"))?;
     let (device, queue) =
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
-    log::info!("adapter: {}", adapter.get_info().name);
-    Ok(BakeContext { device, queue })
+    let info = adapter.get_info();
+    log::info!("adapter: {}", info.name);
+    let label = format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend);
+    Ok((BakeContext { device, queue }, label))
 }
 
 /// `bake-ao <mesh> <out.png> [--size N] [--rays N] [--dilate N]
