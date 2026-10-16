@@ -222,6 +222,56 @@ manifest.json`. Facts, all three files:
 - The filter path (§6.4) is exercised only by synthetic and non-Painter
   files. `spp-inflate-bound` is defence, not a real-file fix.
 
+### texture-cache/ holds the flattened channel textures (corpus-observed)
+
+Observed on `BessaCreatureV2.spp` with h5py + python-lz4 in a scratch
+venv, against the §8 rule ("the first corpus file decides the true
+channel-raster paths"). This is a corpus observation, not a third-party
+source, and it is recorded as such:
+
+- **Shape.** `texture-cache/<set-id>/<n>/<flag>`, one dataset per
+  channel, plus a `list` dataset (big-endian u64 pairs that enumerate
+  the flags). 3 non-empty sets in this file, 5–7 channels each; one
+  set's `list` is empty.
+- **Payload.** A big-endian `QDataStream` map, read as `u32 count`,
+  then count × (UTF-16BE `QString` key, `QVariant`: u32 type + u8
+  null, then the value). Keys: `bufferSize`, `compression` = "lz4",
+  `width`, `height`, `internalFormat`, `version` = "v1". Then a u32
+  length, then ONE raw LZ4 block that decodes to exactly `bufferSize`
+  bytes.
+- **Pixels.** `internalFormat` is an OpenGL enum:
+  - `0x8C43` (35907, `GL_SRGB8_ALPHA8`): 4096² × 4 B, sRGB RGBA;
+  - two-byte formats: 4096² × 2 B;
+  - `0x881A` (34842, `GL_RGBA16F`): 4096² × 8 B.
+
+  The 4096² RGBA decode of flag `1` is a coherent painted map (right
+  neighbours differ by 11.6/765 on average vs 113.3 for random pairs,
+  ratio 0.10; noise would be about 1.0), opaque, mean colour
+  (82, 29, 41). It is a base colour.
+- **Flags** are powers of two (1, 2, 8, 16, 128, 8192, 4194304,
+  2^46): a channel bitmask. Their mapping to channel names (base colour,
+  roughness, …) is NOT established. A name table would come from the
+  HBO `document.bin` or the export presets; inferring names from pixel
+  statistics is a guess, so none is recorded.
+- **Semantics.** "texture-cache" suggests a derived cache that Painter
+  recomputes on open, which is why the importer skips it today
+  (`model.rs`, "recomputed on open"). It is nonetheless the only place
+  in the file where the flattened channels exist as plain pixels.
+
+### What this changes (Bessa decides)
+
+The skip rule throws away the only importable pixels a real file
+holds. A texture-cache reader would make `.spp` import real for
+flattened channels:
+- QDataStream header + LZ4 block + GL-format → RGBA8 or f16;
+- one texture set per `<set-id>`;
+- channels named by flag until the name table is found.
+
+It needs an `lz4` decoder: `lz4_flex` is pure Rust and MIT. It stays
+inside ruling 1, as read-only import. Its scope (flattened channels
+only, no layers) and the name-table question are a ruling, not a kill.
+
+
 ## 7. Known-unknowns (v1 boundaries)
 
 - U1. Painted-channel raster dataset paths/shapes: NOT published. The
