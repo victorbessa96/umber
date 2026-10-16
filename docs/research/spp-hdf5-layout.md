@@ -183,6 +183,45 @@ storage, committed/named datatypes, shared messages, compound/enum/
 variable-length/array datatypes, big-endian data, object references,
 superblock extensions, group info / B-tree-K / driver-info messages.
 
+## 7a. Corpus findings (2026-10-15, three real Painter projects)
+
+Measured with h5py 3.16.0 (scratch venv, a reference reader, not
+Umber's) on Bessa's own `BessaCreatureV2.spp` (85 MB), `Bessa Synth.spp`
+(437 MB) and `HydrageaBessa.spp` (777 MB); pins in `~/corpora/umber/spp/
+manifest.json`. Facts, all three files:
+
+- **Every dataset is rank 1, uint8** (330/330). Painter stores opaque
+  byte blobs, never shaped rasters.
+- **No filters anywhere**: no deflate, shuffle or fletcher32.
+  - 196 datasets are chunked, every one at 65,536 elements;
+  - the rest are contiguous or compact.
+- **Superblock v0.**
+- Root groups: `baking`, `editor`, `paint`, `plugins`, `resources`,
+  `texture-cache`, plus `projectsettings.ini` and `resources.toc`
+  datasets.
+- Kinds by leaf suffix: `.sbsar` (embedded Substance graphs), `.ini`
+  (settings), `.bin` (`paint/document.bin` = HBO, `dd2f7c1b` + check 1 =
+  `Registry1112` era), `.assbin` (scene), `.image`, `.shader`, `.json`,
+  `.toc`. 9–10 HBO streams per file.
+- `resources/*.image` and `resources.toc` begin with big-endian length +
+  UTF-16BE strings (`"Alg::ResourceImage"`, `"ICCd…"`): a Qt
+  `QDataStream`-style serialization, not a raster.
+
+### What this settles
+
+- **U1, painted-channel rasters: there are none as HDF5 datasets.** H1
+  (rank-2/rank-3 → channel) never fires on a real file: every candidate
+  is rank 1 and `channel_from` skips it ("rank-1 dataset (not a raster
+  channel)"). The painted pixels live inside the HBO `document.bin`
+  and the serialized `.image` resources. **v1 imports zero channels
+  from a real Painter project.** The importer reports this honestly, per
+  dataset, but the user-facing claim "`.spp` import" must say "project
+  report" until the HBO/QDataStream decode exists (U2).
+- **U6, dense links**: all three open in h5py, and the tree walks fully;
+  whether Umber's reader follows them is the host-side corpus run.
+- The filter path (§6.4) is exercised only by synthetic and non-Painter
+  files. `spp-inflate-bound` is defence, not a real-file fix.
+
 ## 7. Known-unknowns (v1 boundaries)
 
 - U1. Painted-channel raster dataset paths/shapes: NOT published. The
