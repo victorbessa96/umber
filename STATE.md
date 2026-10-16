@@ -11,7 +11,20 @@
 
 ## Status line
 
-Current phase: **POST-POOL MARCH (2026-10-15).** The per-layer pool arc
+Current phase: **HOST-RETURN WAVE LANDED (2026-10-16).** The build host
+returned 2026-10-15 23:41 after a ~5 h outage; the ENTIRE parked kill set
+(g5-workspace-persist, the kittest breadth + lib surface, c2-28, the four
+sec-* kills, spp-extract-cli, wave-benchmark-public, wave-abr, the texture
+cache reader, win-version-resource, crash-recent-ops) ran GREEN in one
+battery at `ddb59e0` (651+97+74+109+36 tests) and the wave pushed through
+Gate 2: CI green on both platforms at the tip `1031b27` (runs 38872572891,
+38885801883). **The .spp corpus gate is LIVE**: umber-spp opens all 3 real
+Painter projects (1.3 GB) and imports texture sets — the corpus hunt
+forced 17 HDF5-format fixes measured on the real bytes (root
+symbol-table entry, SNOD stride, off-wide keys, v1 continuation blocks,
+H5T_STD_U8BE, unlimited max-dims, layout v1→v3 normalize, chunk-key
+shape, padded edge chunks, the LZ4 off0 end marker + prefix decode).
+Post-wave state: The per-layer pool arc
 is complete (stages 1a-5, 2026-10-14). Since then: the paint engine is a
 headless crate (`umber-paint`, PR #8), and the JSONL agent session
 paints through it (`paint_stroke` / `paint_read` / `paint_snapshot` /
@@ -31,22 +44,28 @@ curve widget, the G4 property menu on every value field, the G5 menus
 workspaces, the G6 display-mode keys, and the shared kittest support
 module landed 2026-10-15, two sessions in parallel under kill locks, with
 per-kill state in the plan's tables. Waves are large and push once
-(Bessa 2026-10-15). Next: the rest of the GUI plan (G3 keymap editor, G4
-color picker, G5 home screen / first run / tab overflow, G6 overlays /
-contextual toolbar / UV parity, G7), ROADMAP 8b's
-remaining rows (stencil, bitmap stamps → angle/jitter), the Win32 tablet
-path, and the 0.1.0 gates.
+(Bessa 2026-10-15). Next (post-wave): the C2 audit's remaining Tier 1-2 rows first (painting
+beyond Base Color, export beyond Base Color, quit guard, pixel autosave,
+Ctrl+Z paint strokes, Layers reorder/rename — the real-PBR-asset gaps),
+then the rest of the GUI plan (G3 keymap editor, G4 color picker, G5 home
+screen / first run, G6 overlays / contextual toolbar / UV parity, G7),
+ROADMAP 8b's remaining rows (stencil, bitmap stamps → angle/jitter), the
+Flatpak offline-deps kill (the packaging job's cargo cannot fetch crates
+in the sandbox — vendor the registry), the perf-nightly viewport x15
+triage (`docs/perf/protocol.md`), the Win32 tablet path, and the 0.1.0
+gates.
 **The C2 gap audit (2026-10-15, `docs/loop/audit-2026-10-15-c2.md`) is
 the active worklist.** A painter cannot yet finish a real PBR asset in the
 GUI: painting reaches Base Color only, export writes Base Color only from
 paint, there is no quit guard and no pixel autosave, Ctrl+Z misses paint
 strokes, the Layers panel cannot reorder or rename, and a document holds one
 layer stack. Those Tier 1-2 rows come first.
-State: POST-POOL-MARCH
+State: HOST-RETURN-WAVE-LANDED
 GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
 SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate (v1.1 amendment drafted: docs/specs/spec-v1.1-amendment-draft.md).
 No tag, no release, no v0.1 claim until the 0.1.0 checklist's gates pass.
-Workspace: 16 crates, 1,600+ tests (the `#[test]` census), CI on Linux + Windows.
+Workspace: 16 crates, 1,700+ tests (the `#[test]` census), CI on Linux + Windows,
+both green at `1031b27`.
 
 ## The core-loop queue (the ONLY active hunt)
 
@@ -108,10 +127,14 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
 
 - B5's Windows Ink path: Windows-first CI gate applies; Linux path is
   the queue item.
-- Remote build gate (centralhost) unreachable as of 2026-10-12 ~02:50
-  (ping + ssh dead). CI is the runtime gate until it returns.
+- Flatpak bundle build: the sandbox has no network at the cargo step, so
+  `--locked` cannot fetch crates — vendored registry is the named kill.
+- Perf-nightly: viewport_mean x15.3 on head `06c1711` (a PRE-wave head;
+  first completed nightly after a week of cancelled runs) — triage owed,
+  recorded in docs/perf/protocol.md.
 - Pushes are autonomous: push-gate.json is STANDING approval (Bessa's
-  directive: keep it true, push when needed).
+  directive: keep it true, push when needed) — for WAVE pushes (Gate 2,
+  loop-prompt v1.2 §5).
 
 ## Handoff note (what the next session must know)
 
@@ -132,11 +155,13 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
    cross-cutting invariant (every stroke = one history entry), grep the
    test suite for every consumer of the OLD invariant before marking done.
 5. Kill-locks before dispatch (scripts/kill-locks.sh add|check|remove|list)
-   — no live locks; zero claws running as of this write. Dragon-loop wake
+   — no live locks (all released at the 2026-10-16 wave close); zero claws
+   running as of this write. Dragon-loop wake
    and leisure sessions write into the shared main tree too: a hold set
    in a live session (e.g. "no cargo") must be written into any queued
    hunt's goal, or a wake session will not see it.
-6. Test counts: 1,600+ `#[test]`s across 16 crates (2026-10-15 census;
+6. Test counts: 1,700+ `#[test]`s across 16 crates (2026-10-16: the wave
+   battery ran 967 suite tests green across the five app/engine crates;
    599+ at the core-loop close). The C1 audit's Pass 2 verified zero
    stale-premise tests then; the 2026-10-15 truth pass found two stale
    requirements MARKS instead (brush angle / alignment / jitter were
