@@ -239,10 +239,21 @@ source, and it is recorded as such:
   `width`, `height`, `internalFormat`, `version` = "v1". Then a u32
   length, then ONE raw LZ4 block that decodes to exactly `bufferSize`
   bytes.
-- **Pixels.** `internalFormat` is an OpenGL enum:
-  - `0x8C43` (35907, `GL_SRGB8_ALPHA8`): 4096² × 4 B, sRGB RGBA;
-  - two-byte formats: 4096² × 2 B;
-  - `0x881A` (34842, `GL_RGBA16F`): 4096² × 8 B.
+- **Pixels.** `internalFormat` is an OpenGL enum. Values were checked
+  against glow 0.17.0's constants in the local registry:
+
+  | Enum | Value | Format | Bytes/texel |
+  |---|---|---|---|
+  | `0x8C43` | 35907 | `GL_SRGB8_ALPHA8` | 4 |
+  | `0x822B` | 33323 | `GL_RG8` | 2 |
+  | `0x822F` | 33327 | `GL_RG16F` | 4 |
+  | `0x881A` | 34842 | `GL_RGBA16F` | 8 |
+
+  **All 81 channel headers in the three corpus files satisfy
+  `bufferSize == width × height × bytes-per-texel`** for their
+  format. Sizes are 2048² and 4096²; the largest is 128 MiB (RGBA16F
+  4K), under the 256 MiB cap. One `header` dataset per file carries
+  only `version` 3 and `version.minor` 2–3 (the cache's own stamp).
 
   The 4096² RGBA decode of flag `1` is a coherent painted map (right
   neighbours differ by 11.6/765 on average vs 113.3 for random pairs,
