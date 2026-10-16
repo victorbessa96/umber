@@ -26,7 +26,10 @@
 //! - MurmurHash3 (§7-U7) rides the report as presence-only (`m3: yes/no`);
 //!   no verification is attempted.
 
+use std::collections::HashMap;
+
 use crate::hdf5::{Dtype, RawDataset, Tree, HBO_MAGIC, HBO_MARKER_V11};
+use crate::texture_cache;
 use crate::{
     ChannelImage, DatasetReport, GroupKind, GroupReport, ImportStatus, SppProject, SppVersion,
     TextureSet,
@@ -182,6 +185,128 @@ fn describe(dataset: &RawDataset) -> String {
     let count = dataset.attr_count;
     let m3 = if dataset.has_m3 { "yes" } else { "no" };
     format!("{dtype} {shape} {layout}{chunks} filters={filters} attrs={count} m3={m3}")
+}
+
+/// The texture-cache stack id present in every corpus set (research §7a).
+const MAIN_STACK: &str = "3864292196";
+
+/// Every stack's live channels, keyed `"<set-id>/<stack>"`, from the
+/// `list` datasets and the `texture-cache/header` stamp's minor
+/// ([`texture_cache::live_channels`]). A stack whose list does not parse
+/// is absent, so none of its datasets import.
+fn cache_index(tree: &Tree) -> HashMap<String, Vec<(String, u64)>> {
+    let minor = tree
+        .datasets
+        .iter()
+        .find(|d| d.path.trim_start_matches('/') == "texture-cache/header")
+        .and_then(|d| texture_cache::stamp_minor(&d.bytes));
+    let mut index = HashMap::new();
+    let Some(minor) = minor else {
+        return index;
+    };
+    for d in &tree.datasets {
+        let parts: Vec<&str> = d.path.trim_start_matches('/').split('/').collect();
+        if parts.len() == 4 && parts[0] == "texture-cache" && parts[3] == "list" {
+            if let Some(entries) = texture_cache::live_channels(&d.bytes, minor) {
+                index.insert(format!("{}/{}", parts[1], parts[2]), entries);
+            }
+        }
+    }
+    index
+}
+
+/// One `texture-cache/<set-id>/<stack>/<n>` dataset as `(set, channel)`.
+///
+/// `Ok(None)`: not a channel (the `list` index, the `header` stamp, an
+/// empty dataset). `Err`: a channel-shaped dataset that is not live or
+/// did not decode, with the reason. The set is `cache-<set-id>` here;
+/// `build` swaps in the material name.
+fn cache_channel(
+    dataset: &RawDataset,
+    live: &HashMap<String, Vec<(String, u64)>>,
+) -> Result<Option<(String, ChannelImage)>, String> {
+    let trimmed = dataset.path.strip_prefix('/').unwrap_or(&dataset.path);
+    let parts: Vec<&str> = trimmed.split('/').collect();
+    let leaf = parts.last().copied().unwrap_or("");
+    if parts.len() != 4 || leaf == "list" || dataset.bytes.is_empty() {
+        return Ok(None);
+    }
+    // Only datasets the stack's `list` names are live; the flag comes
+    // from the list (a v3.3 leaf is a bit index, not a flag).
+    let stack = format!("{}/{}", parts[1], parts[2]);
+    let Some(entries) = live.get(&stack) else {
+        return Err("stack index unreadable (no channels taken from it)".into());
+    };
+    let Some(&(_, flag)) = entries.iter().find(|(name, _)| name == leaf) else {
+        return Err("not in the stack's index (stale cache copy)".into());
+    };
+    if dataset.dtype != Dtype::U8 {
+        let at = dataset.path.clone();
+        return Err(format!("{at}: not a u8 blob"));
+    }
+    // Height is signed around Umber's flat 128; every other channel is
+    // unit-range.
+    let remap = if flag == texture_cache::HEIGHT_FLAG {
+        texture_cache::Remap::Signed
+    } else {
+        texture_cache::Remap::Unit
+    };
+    let decoded = match texture_cache::decode_with(&dataset.bytes, remap) {
+        Ok(decoded) => decoded,
+        Err(texture_cache::CacheError::NotAChannel) => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    let (mut name, mut named) = texture_cache::channel_name_for_flag(flag);
+    // A name is only as good as the format behind it: if a file pairs a
+    // known flag with the wrong texel format (another Painter version,
+    // a different stack), the channel keeps its number instead of
+    // landing under a wrong name.
+    if let Some(expected) = texture_cache::expected_format(flag) {
+        if decoded.header.format != expected {
+            name = format!("flag_{flag}");
+            named = false;
+        }
+    }
+    let mut notes = decoded.notes;
+    notes.insert(
+        0,
+        format!(
+            "{} {}x{}",
+            decoded.header.format.name(),
+            decoded.header.width,
+            decoded.header.height
+        ),
+    );
+    if !named {
+        notes.push(if name.starts_with("flag_") {
+            format!("channel flag {flag}: name unknown (research §7a), imported as {name}")
+        } else {
+            format!("channel flag {flag}: name inferred as {name} (research §7a)")
+        });
+    }
+    // `texture-cache/<set-id>/<stack>/<flag>`. Stack 3864292196 is in
+    // every set of every corpus file at the set's full resolution, so it
+    // is the main stack and keeps the set's name. Any other stack (Bessa
+    // Synth's two 2048² siblings: material-layering stacks) becomes its
+    // own set, `<set>-stack-<id>`, so no channel name collides and none
+    // is dropped (research §7a).
+    let set = if parts[2] == MAIN_STACK {
+        format!("cache-{}", parts[1])
+    } else {
+        format!("cache-{}-stack-{}", parts[1], parts[2])
+    };
+    Ok(Some((
+        set,
+        ChannelImage {
+            name,
+            path: dataset.path.clone(),
+            width: decoded.header.width,
+            height: decoded.header.height,
+            channels: 4,
+            pixels: decoded.rgba,
+            notes,
+        },
+    )))
 }
 
 /// Map one dataset to an 8-bit channel image (heuristic H1, §7-U1).
@@ -340,6 +465,8 @@ fn convert_samples(
 
 /// Build the [`SppProject`] from the parsed tree (H1/H2 + report).
 pub fn build(tree: Tree, file_stem: &str) -> SppProject {
+    // Before `tree.notes` moves into the project below.
+    let live = cache_index(&tree);
     let mut project = SppProject {
         version: SppVersion::default(),
         texture_sets: Vec::new(),
@@ -374,6 +501,7 @@ pub fn build(tree: Tree, file_stem: &str) -> SppProject {
     }
     // Datasets: stamp, cache, HBO, then H1.
     let mut imported: Vec<(String, ChannelImage)> = Vec::new();
+    let mut cache_imported: Vec<(String, ChannelImage)> = Vec::new();
     for dataset in &tree.datasets {
         let detail = describe(dataset);
         let path = dataset.path.clone();
@@ -386,11 +514,29 @@ pub fn build(tree: Tree, file_stem: &str) -> SppProject {
             continue;
         }
         if top_level(&dataset.path) == Some("texture-cache") {
-            project.datasets.push(DatasetReport {
-                path,
-                status: ImportStatus::Skipped("texture-cache (recomputed on open)".into()),
-                detail,
-            });
+            // The flattened channels (research §7a): decoded, never
+            // trusted. A failure is a report line, not an error.
+            match cache_channel(dataset, &live) {
+                Ok(Some((set, channel))) => {
+                    let detail = format!("{detail}; {}", channel.notes.join("; "));
+                    project.datasets.push(DatasetReport {
+                        path: path.clone(),
+                        status: ImportStatus::Imported,
+                        detail: detail.trim_end_matches("; ").to_string(),
+                    });
+                    cache_imported.push((set, channel));
+                }
+                Ok(None) => project.datasets.push(DatasetReport {
+                    path,
+                    status: ImportStatus::Skipped("texture-cache index/stamp".into()),
+                    detail,
+                }),
+                Err(reason) => project.datasets.push(DatasetReport {
+                    path,
+                    status: ImportStatus::Skipped(format!("texture-cache: {reason}")),
+                    detail,
+                }),
+            }
             continue;
         }
         if let Some(era) = classify_hbo(dataset.dtype, &dataset.bytes) {
@@ -438,6 +584,41 @@ pub fn build(tree: Tree, file_stem: &str) -> SppProject {
         };
         sets[index].channels.push(channel);
     }
+    // The cache's sets, after H1's: one set per `texture-cache/<set-id>`,
+    // channels in traversal order. A real Painter file fills only these.
+    // Names come from the scene's material uids (`material_names`); a set
+    // the scene does not name keeps `cache-<id>`.
+    let names: Vec<(u64, String)> = tree
+        .datasets
+        .iter()
+        .find(|d| d.path.trim_start_matches('/') == "paint/scene.assbin")
+        .map(|d| texture_cache::material_names(&d.bytes))
+        .unwrap_or_default();
+    for (set_id, channel) in cache_imported {
+        // `cache-<id>` or `cache-<id>-stack-<stack>`: the id's material
+        // name replaces `cache-<id>`, the stack suffix stays.
+        let rest = set_id.strip_prefix("cache-").unwrap_or(&set_id);
+        let (id, stack) = match rest.split_once("-stack-") {
+            Some((id, stack)) => (id, Some(stack)),
+            None => (rest, None),
+        };
+        let base = id
+            .parse::<u64>()
+            .ok()
+            .and_then(|id| names.iter().find(|(uid, _)| *uid == id))
+            .map_or_else(|| format!("cache-{id}"), |(_, name)| name.clone());
+        let set_name = match stack {
+            Some(stack) => format!("{base}-stack-{stack}"),
+            None => base,
+        };
+        match sets.iter_mut().find(|s| s.name == set_name) {
+            Some(set) => set.channels.push(channel),
+            None => sets.push(TextureSet {
+                name: set_name,
+                channels: vec![channel],
+            }),
+        }
+    }
     project.texture_sets = sets;
     // Group lines, root first (traversal order already is).
     for group in &tree.groups {
@@ -458,6 +639,177 @@ pub fn build(tree: Tree, file_stem: &str) -> SppProject {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A texture-cache dataset in the corpus layout (see
+    /// `texture_cache`'s tests for the byte format).
+    fn cache_blob(w: i32, h: i32, gl: i32, pixels: &[u8]) -> Vec<u8> {
+        fn qs(s: &str) -> Vec<u8> {
+            let u: Vec<u8> = s.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            let mut o = (u.len() as u32).to_be_bytes().to_vec();
+            o.extend(u);
+            o
+        }
+        let int = |k: &str, v: i32| {
+            let mut o = qs(k);
+            o.extend(2u32.to_be_bytes());
+            o.push(0);
+            o.extend(v.to_be_bytes());
+            o
+        };
+        let mut o = 5u32.to_be_bytes().to_vec();
+        o.extend(int("bufferSize", pixels.len() as i32));
+        let mut c = qs("compression");
+        c.extend(10u32.to_be_bytes());
+        c.push(0);
+        c.extend(qs("lz4"));
+        o.extend(c);
+        o.extend(int("height", h));
+        o.extend(int("internalFormat", gl));
+        o.extend(int("width", w));
+        let block = lz4_flex::block::compress(pixels);
+        o.extend((block.len() as u32).to_be_bytes());
+        o.extend(block);
+        o
+    }
+
+    fn blob(path: &str, bytes: Vec<u8>) -> RawDataset {
+        RawDataset {
+            path: path.to_string(),
+            shape: vec![bytes.len() as u64],
+            dtype: Dtype::U8,
+            layout_name: "chunked",
+            chunk_dims: Some(vec![65536]),
+            filters: Vec::new(),
+            attr_count: 0,
+            has_m3: false,
+            bytes,
+        }
+    }
+
+    #[test]
+    fn the_texture_cache_imports_as_one_set_per_cache_group() {
+        // The real-file shape: rank-1 u8 blobs only, which H1 never
+        // imports, plus the cache.
+        let rgba: Vec<u8> = (0..2 * 2 * 4).map(|i| i as u8 * 9).collect();
+        // `paint/scene.assbin` names set 777 (texture_cache's Assimp layout).
+        let mut scene = b"ASSIMP.binary-dump.".to_vec();
+        for (key, kind, data) in [
+            ("?mat.name", 3u32, {
+                let mut d = 4u32.to_le_bytes().to_vec();
+                d.extend(b"Body\0");
+                d
+            }),
+            ("$mat.uid", 5u32, 777u64.to_le_bytes().to_vec()),
+        ] {
+            scene.extend((key.len() as u32).to_le_bytes());
+            scene.extend(key.as_bytes());
+            scene.extend([0u8; 8]);
+            scene.extend(kind.to_le_bytes());
+            scene.extend((data.len() as u32).to_le_bytes());
+            scene.extend(data);
+        }
+        // The v3.3 layout (HydrageaBessa's): the stamp says minor 3, each
+        // stack's `list` holds 16-byte entries with a u32 BE bit index at
+        // offset 12, and datasets are named by that index.
+        let list = |bits: &[u32]| -> Vec<u8> {
+            bits.iter()
+                .flat_map(|b| {
+                    let mut e = vec![0u8; 12];
+                    e.extend(b.to_be_bytes());
+                    e
+                })
+                .collect()
+        };
+        let mut stamp = 2u32.to_be_bytes().to_vec();
+        for (k, v) in [("version", 3i32), ("version.minor", 3)] {
+            let u: Vec<u8> = k.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            stamp.extend((u.len() as u32).to_be_bytes());
+            stamp.extend(u);
+            stamp.extend(2u32.to_be_bytes());
+            stamp.push(0);
+            stamp.extend(v.to_be_bytes());
+        }
+        let tree = Tree {
+            datasets: vec![
+                blob("/paint/document.bin", vec![1, 2, 3]),
+                blob("/paint/scene.assbin", scene),
+                blob("/texture-cache/header", stamp),
+                // bit 0 = flag 1 (baseColor), bit 7 = flag 128.
+                blob(
+                    "/texture-cache/777/3864292196/0",
+                    cache_blob(2, 2, 0x8C43, &rgba),
+                ),
+                blob(
+                    "/texture-cache/777/3864292196/7",
+                    cache_blob(1, 1, 0x822B, &[50, 255]),
+                ),
+                // A v3.2-named leftover the list does not name: stale.
+                blob(
+                    "/texture-cache/777/3864292196/128",
+                    cache_blob(1, 1, 0x822B, &[9, 9]),
+                ),
+                blob("/texture-cache/777/3864292196/list", list(&[0, 7])),
+                // Listed, but the payload is garbage: a skip with its reason.
+                blob("/texture-cache/888/3864292196/0", vec![0, 0, 0, 1, 9]),
+                blob("/texture-cache/888/3864292196/list", list(&[0])),
+                blob(
+                    "/texture-cache/777/42/0",
+                    cache_blob(1, 1, 0x8C43, &[1, 2, 3, 4]),
+                ),
+                // Bit 1 (flag 2, `height`) stored as SRGB8_ALPHA8 instead of
+                // RG16F: the format check keeps its number.
+                blob(
+                    "/texture-cache/777/42/1",
+                    cache_blob(1, 1, 0x8C43, &[5, 6, 7, 8]),
+                ),
+                blob("/texture-cache/777/42/list", list(&[0, 1])),
+            ],
+            groups: Vec::new(),
+            notes: Vec::new(),
+        };
+        let project = build(tree, "demo");
+        assert_eq!(project.texture_sets.len(), 2, "{:?}", project.texture_sets);
+        // A non-main stack is its own set: no collision with Body's
+        // baseColor, nothing dropped.
+        assert_eq!(project.texture_sets[1].name, "Body-stack-42");
+        // sRGB bytes land LINEARIZED (the note says so), alpha as stored:
+        // 1..4/255 all linearize to 0, and alpha 4 stays 4.
+        assert_eq!(project.texture_sets[1].channels[0].pixels, vec![0, 0, 0, 4]);
+        assert_eq!(project.texture_sets[1].channels[1].name, "flag_2");
+        let set = &project.texture_sets[0];
+        assert_eq!(set.name, "Body", "the scene's material uid names the set");
+        let names: Vec<&str> = set.channels.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["baseColor", "roughness"]);
+        assert_eq!(set.channels[0].pixels, rgba, "sRGB bytes land as stored");
+        assert_eq!(set.channels[1].pixels, vec![50, 50, 50, 255]);
+        // Established names carry no naming note.
+        assert!(set.channels[1].notes.iter().all(|n| !n.contains("name ")));
+        // Every dataset reports; the list is an index, the broken 888 blob
+        // a skip with its reason, never an error.
+        let status = |p: &str| {
+            project
+                .datasets
+                .iter()
+                .find(|d| d.path == p)
+                .map(|d| d.status.clone())
+        };
+        assert_eq!(
+            status("/texture-cache/777/3864292196/0"),
+            Some(ImportStatus::Imported)
+        );
+        assert!(matches!(
+            status("/texture-cache/777/3864292196/128"),
+            Some(ImportStatus::Skipped(r)) if r.contains("stale")
+        ));
+        assert!(matches!(
+            status("/texture-cache/777/3864292196/list"),
+            Some(ImportStatus::Skipped(r)) if r.contains("index")
+        ));
+        assert!(matches!(
+            status("/texture-cache/888/3864292196/0"),
+            Some(ImportStatus::Skipped(r)) if r.starts_with("texture-cache: ")
+        ));
+    }
     use crate::builder as sb;
 
     /// The value byte rides exactly at field + utf16_len + 2 + 5 (§2.1).

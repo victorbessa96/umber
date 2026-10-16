@@ -58,6 +58,7 @@
 mod builder;
 mod hdf5;
 mod model;
+pub mod texture_cache;
 
 use std::path::Path;
 
@@ -67,6 +68,16 @@ use std::path::Path;
 /// per-channel images (heuristic H1), and the full import report. HBO
 /// datasets are classified detection-only and reported, never parsed.
 pub fn open(path: &Path) -> Result<SppProject, SppError> {
+    // Size from metadata before reading: the reader holds the whole file,
+    // so a hostile multi-GB path must be refused before `fs::read`.
+    let len = std::fs::metadata(path)
+        .map_err(|e| SppError::Io(e.to_string()))?
+        .len();
+    if len > MAX_SPP_FILE_BYTES {
+        return Err(SppError::Unsupported(format!(
+            "{len}-byte .spp is over the {MAX_SPP_FILE_BYTES}-byte cap"
+        )));
+    }
     let bytes = std::fs::read(path).map_err(|e| SppError::Io(e.to_string()))?;
     let stem = path
         .file_stem()
@@ -74,8 +85,18 @@ pub fn open(path: &Path) -> Result<SppProject, SppError> {
         .unwrap_or("project")
         .to_string();
     let tree = hdf5::parse(&bytes)?;
+    // The datasets are copies; the file buffer is dead from here on.
+    // Dropped before `build` decodes the channels, so peak memory is the
+    // datasets plus the channels, not the file on top (741 MiB less on
+    // the largest corpus file).
+    drop(bytes);
     Ok(model::build(tree, &stem))
 }
+
+/// Largest `.spp` opened: 4 GiB. The corpus's largest is 742 MiB, and
+/// the reader holds every dataset in memory, so a file several times
+/// the RAM of a working machine is refused rather than half-read.
+pub const MAX_SPP_FILE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Reader errors. `umber` never sees an HDF5 type through this API.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -624,7 +645,7 @@ mod tests {
         assert_eq!(project.datasets.len(), 1);
         assert_eq!(
             project.datasets[0].status,
-            ImportStatus::Skipped("texture-cache (recomputed on open)".into())
+            ImportStatus::Skipped("texture-cache index/stamp".into())
         );
         assert!(project.texture_sets.is_empty());
     }
