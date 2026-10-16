@@ -770,7 +770,23 @@ impl BrushPanel {
                 return;
             }
         };
-        self.abr_report = import.report.clone();
+        // Per-brush "not carried over" lines surface in the panel's report
+        // too (the report on the pack, the field per brush).
+        let per_brush: Vec<String> = import
+            .brushes
+            .iter()
+            .filter(|b| !b.dropped.is_empty())
+            .map(|b| {
+                format!(
+                    "{}: not carried over: {}",
+                    b.preset.name,
+                    b.dropped.join(", ")
+                )
+            })
+            .collect();
+        let mut report = import.report.clone();
+        report.extend(per_brush);
+        self.abr_report = report;
         self.abr_report.insert(
             0,
             format!(
