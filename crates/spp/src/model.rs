@@ -194,25 +194,48 @@ const MAIN_STACK: &str = "3864292196";
 /// `list` datasets and the `texture-cache/header` stamp's minor
 /// ([`texture_cache::live_channels`]). A stack whose list does not parse
 /// is absent, so none of its datasets import.
-fn cache_index(tree: &Tree, ini_minor: Option<u8>) -> HashMap<String, Vec<(String, u64)>> {
+fn cache_index(tree: &Tree) -> HashMap<String, Vec<(String, u64)>> {
     // The header stamp dataset names the minor in v3.3 files; the v3.2
-    // corpus files have no header dataset - their minor comes from
-    // projectsettings.ini's versionAtLastSave (parsed by the caller).
-    let minor = tree
+    // corpus files have no header dataset. Their list self-identifies
+    // by shape: 20-byte entries hold u64 flags, 16-byte entries hold
+    // u32 bit indexes - and every entry name must be a dataset leaf
+    // the stack actually carries.
+    let stamped = tree
         .datasets
         .iter()
         .find(|d| d.path.trim_start_matches('/') == "texture-cache/header")
-        .and_then(|d| texture_cache::stamp_minor(&d.bytes))
-        .or_else(|| ini_minor.map(i64::from));
-    let mut index = HashMap::new();
-    let Some(minor) = minor else {
-        return index;
+        .and_then(|d| texture_cache::stamp_minor(&d.bytes));
+    let candidates: Vec<i64> = match stamped {
+        Some(minor) => vec![minor],
+        None => vec![2, 3],
     };
+    let mut leaves: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     for d in &tree.datasets {
         let parts: Vec<&str> = d.path.trim_start_matches('/').split('/').collect();
-        if parts.len() == 4 && parts[0] == "texture-cache" && parts[3] == "list" {
-            if let Some(entries) = texture_cache::live_channels(&d.bytes, minor) {
-                index.insert(format!("{}/{}", parts[1], parts[2]), entries);
+        if parts.len() == 4 && parts[0] == "texture-cache" && parts[3] != "list" {
+            leaves
+                .entry(format!("{}/{}", parts[1], parts[2]))
+                .or_default()
+                .insert(parts[3].to_string());
+        }
+    }
+    let mut index = HashMap::new();
+    for d in &tree.datasets {
+        let parts: Vec<&str> = d.path.trim_start_matches('/').split('/').collect();
+        if parts.len() != 4 || parts[0] != "texture-cache" || parts[3] != "list" {
+            continue;
+        }
+        let stack = format!("{}/{}", parts[1], parts[2]);
+        let Some(names) = leaves.get(&stack) else {
+            continue;
+        };
+        for minor in &candidates {
+            let Some(entries) = texture_cache::live_channels(&d.bytes, *minor) else {
+                continue;
+            };
+            if entries.iter().all(|(name, _)| names.contains(name)) {
+                index.insert(stack.clone(), entries);
+                break;
             }
         }
     }
@@ -469,17 +492,8 @@ fn convert_samples(
 
 /// Build the [`SppProject`] from the parsed tree (H1/H2 + report).
 pub fn build(tree: Tree, file_stem: &str) -> SppProject {
-    // The ini stamp's minor feeds the cache index when no header
-    // dataset exists (the v3.2 corpus files); parsed before the tree
-    // moves its notes into the project.
-    let ini_stamp = tree
-        .datasets
-        .iter()
-        .find(|d| leaf(&d.path) == "projectsettings.ini")
-        .map(|d| parse_stamp(&d.bytes));
-    let ini_minor = ini_stamp.and_then(|(_, last_save)| last_save.1);
     // Before `tree.notes` moves into the project below.
-    let live = cache_index(&tree, ini_minor);
+    let live = cache_index(&tree);
     let mut project = SppProject {
         version: SppVersion::default(),
         texture_sets: Vec::new(),
