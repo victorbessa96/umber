@@ -603,7 +603,7 @@ mod tests {
         sample.extend([0u8, 8, 0]); // depth 8, raw
         let mut samp = (sample.len() as u32).to_be_bytes().to_vec();
         samp.extend(&sample);
-        while samp.len() % 4 != 0 {
+        while !samp.len().is_multiple_of(4) {
             samp.push(0);
         }
         abr.extend(b"8BIMsamp");
@@ -627,7 +627,7 @@ mod tests {
         }
         let mut rec = (patt.len() as u32).to_be_bytes().to_vec();
         rec.extend(&patt);
-        while rec.len() % 4 != 0 {
+        while !rec.len().is_multiple_of(4) {
             rec.push(0);
         }
         let mut abr = vec![0, 6, 0, 2];
