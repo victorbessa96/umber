@@ -47,6 +47,11 @@ pub mod actions;
 /// snapshot harness (the pure projection / hit / snap functions and
 /// `paint`; the shell keeps driving them through `crate::axis_gizmo`).
 pub mod axis_gizmo;
+/// The crash-reporter hook and the recent-operations ring: on the
+/// library surface so `document`'s session-event recording reaches
+/// `crash::note_op` from the lib target too (the shell keeps its own
+/// `mod crash;` in main.rs).
+pub mod crash;
 /// The Display panel + the PSD import section — on the library surface
 /// for the kittest snapshot harness (tests/panel_snapshot.rs renders both
 /// headless; i18n::init() must run first — the tests call it).

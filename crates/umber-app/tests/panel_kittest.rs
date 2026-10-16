@@ -58,6 +58,79 @@ fn display_reset_is_disabled_at_the_default() {
 }
 
 #[test]
+fn the_command_palette_picks_and_notes_a_recent() {
+    // The overlay: typing filters the catalog, Enter picks the selected
+    // row, and the picked action lands in the recents list.
+    use umber_app::palette::Palette;
+    use umber_app::toolbar::ShellAction;
+    struct S {
+        palette: Palette,
+        picked: Option<ShellAction>,
+    }
+    let mut harness = support::harness_state(
+        |ui, s: &mut S| {
+            ui.allocate_space(egui::vec2(480.0, 640.0));
+            if let Some(action) = s.palette.show(
+                ui.ctx(),
+                umber_app::i18n::tr,
+                umber_app::i18n::tr,
+                |a| umber_app::actions::shortcut_label(a, false),
+                "search",
+            ) {
+                s.picked = Some(action);
+            }
+        },
+        {
+            let mut palette = Palette::default();
+            palette.open();
+            S {
+                palette,
+                picked: None,
+            }
+        },
+    );
+    support::settle(&mut harness);
+    // Type a query that matches few actions, then Enter.
+    harness.state_mut().palette.set_query("wireframe");
+    support::settle(&mut harness);
+    let before = harness.state().palette.recents().to_vec();
+    support::press_enter(&mut harness);
+    support::settle(&mut harness);
+    let picked = harness.state().picked.expect("Enter picked an action");
+    let after = harness.state().palette.recents().to_vec();
+    assert!(
+        !harness.state().palette.is_open(),
+        "the overlay closed after picking {picked:?}"
+    );
+    assert_ne!(before, after, "the pick was noted as a recent");
+}
+
+#[test]
+fn the_history_buttons_undo_and_redo_layer_edits() {
+    // One document, two adds: the panel's Undo button empties the stack's
+    // redo side, Redo fills it again.
+    use umber_app::document::Document;
+    use umber_core::layers::{LayerCommand, LayerKind};
+    let mut harness = support::harness_state(
+        |ui, doc: &mut Document| {
+            umber_app::history_panel::history_ui(ui, doc, None);
+        },
+        {
+            let mut doc = Document::default();
+            doc.run(LayerCommand::add("one", LayerKind::Paint));
+            doc.run(LayerCommand::add("two", LayerKind::Paint));
+            doc
+        },
+    );
+    support::settle(&mut harness);
+    assert_eq!(harness.state().layers().len(), 2);
+    support::click_label(&mut harness, &umber_app::i18n::tr("history.undo"));
+    assert_eq!(harness.state().layers().len(), 1, "one undo");
+    support::click_label(&mut harness, &umber_app::i18n::tr("history.redo"));
+    assert_eq!(harness.state().layers().len(), 2, "redo restores it");
+}
+
+#[test]
 fn the_harness_installs_i18n_before_the_first_frame() {
     // Labels render translated, never as raw `display.*` keys.
     let mut harness = display_harness(DisplaySettings::default());

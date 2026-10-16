@@ -71,6 +71,12 @@ pub fn settle<S>(harness: &mut Harness<'_, S>) {
 }
 
 /// Clicks the widget labelled `label` (exact match), then settles.
+pub fn press_enter<S>(harness: &mut Harness<'_, S>) {
+    harness.key_press(egui::Key::Enter);
+    harness.step();
+}
+
+/// Clicks the first widget whose AccessKit label matches exactly.
 pub fn click_label<S>(harness: &mut Harness<'_, S>, label: &str) {
     harness.get_by_label(label).click();
     settle(harness);
