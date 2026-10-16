@@ -1129,7 +1129,7 @@ impl<'a> Walker<'a> {
         let chunk_bytes = chunk_elems * chunked.elem as u64;
         // Collect the index: coordinates -> (filter mask, address, size).
         let mut index: HashMap<Vec<u64>, (u32, u64, u64)> = HashMap::new();
-        self.walk_chunk_btree(chunked.btree, chunked.rank, &mut index)?;
+        self.walk_chunk_btree(chunked.btree, chunked.rank, space.rank, &mut index)?;
         // Output strides (row-major, last axis fastest).
         let mut strides = vec![1u64; space.rank.max(1)];
         for i in (0..space.rank.saturating_sub(1)).rev() {
@@ -1301,6 +1301,7 @@ impl<'a> Walker<'a> {
         &mut self,
         addr: u64,
         rank: usize,
+        space_rank: usize,
         out: &mut HashMap<Vec<u64>, (u32, u64, u64)>,
     ) -> Result<(), SppError> {
         let ctx = self.ctx;
@@ -1318,9 +1319,14 @@ impl<'a> Walker<'a> {
                             SppError::Corrupt("chunk without data address".into())
                         })?;
                         bytes_at(ctx.data, target, size)?;
+                        // h5py's padded grid dims (trailing 1s) put a
+                        // constant 0 in the key's tail offsets; the
+                        // decode loop keys on the dataspace's rank, so
+                        // trim the padding here.
+                        let coords = coords[..space_rank].to_vec();
                         out.insert(coords, (mask, target, size));
                     } else {
-                        self.walk_chunk_btree(child, rank, out)?;
+                        self.walk_chunk_btree(child, rank, space_rank, out)?;
                     }
                 }
                 BTreeEntry::Group { .. } => {
