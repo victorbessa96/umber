@@ -1925,7 +1925,7 @@ impl BTreeNode {
             match kind {
                 BTreeKind::Group => {
                     let key = uint_at(ctx.data, at, off)? as u32;
-                    let child_stored = uint_at(ctx.data, at + off, off)?;
+                    let child_stored = uint_at(ctx.data, at + off as u64, off)?;
                     let child = resolve(ctx, child_stored, "b-tree child")?
                         .ok_or_else(|| SppError::Corrupt("b-tree entry without child".into()))?;
                     entries.push(BTreeEntry::Group { key, child });
