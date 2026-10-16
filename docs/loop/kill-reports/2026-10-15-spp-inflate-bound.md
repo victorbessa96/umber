@@ -46,19 +46,29 @@ miniz_oxide. Both refuse that pattern, read from the registry source:
 - **zlib-rs 0.6.8** `inflate.rs:2450`: with `Finish`, a call that does
   not end the stream returns `BufError`. Same result.
 
-So every deflated dataset or chunk over 64 KiB failed to open. The
-synthetic tests only use 2×2 f32 chunks (64 bytes), and the real-file
-corpus is empty (queue #16, BLOCKED on samples), so nothing covered it.
-A real Painter 4K texture chunk is far larger. The rewrite:
+So every DEFLATED dataset or chunk over 64 KiB failed to open. The
+synthetic tests only use 2×2 f32 chunks (64 bytes), so nothing covered
+it. The rewrite:
 - streams with `FlushDecompress::None`, which resumes across windows on
   both backends, until `StreamEnd`;
 - continues on `Ok` or `BufError` while input or output moved;
 - refuses "ends early (truncated chunk)" when neither moved.
 
-**This is inferred from the backends' source, not observed.** No real
-`.spp` has been opened, and the host must confirm it. The new test
-(300 KB patterned payload, more than four windows) fails on the old loop
-if the reading is right.
+**This is inferred from the backends' source, not observed.** The new
+test (300 KB patterned payload, five windows) fails on the old loop if
+the reading is right; the host confirms it.
+
+**Real-file reach: none, measured.** The corpus is NOT empty: three of
+Bessa's own Painter projects sit in `~/corpora/umber/spp/` (85 MB,
+437 MB, 777 MB; queue #16's "blocked" is stale, only `manifest.json` is
+missing). h5py 3.16.0, from a scratch venv, opens all three:
+- 330 datasets, 196 chunked, every chunk 65,536 elements;
+- **zero use any filter** (no deflate, shuffle or fletcher32).
+
+Painter stores raw bytes in 64 KiB chunks. Neither this bug nor the bomb
+can touch a real Painter file. Both live only on hand-made or other
+writers' `.spp`/HDF5. The bound still matters for a hostile file; the
+window fix keeps the deflate path correct for whatever does use it.
 
 ## Test
 
