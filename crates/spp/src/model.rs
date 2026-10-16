@@ -465,8 +465,17 @@ fn convert_samples(
 
 /// Build the [`SppProject`] from the parsed tree (H1/H2 + report).
 pub fn build(tree: Tree, file_stem: &str) -> SppProject {
+    // The ini stamp's minor feeds the cache index when no header
+    // dataset exists (the v3.2 corpus files); parsed before the tree
+    // moves its notes into the project.
+    let ini_stamp = tree
+        .datasets
+        .iter()
+        .find(|d| leaf(&d.path) == "projectsettings.ini")
+        .map(|d| parse_stamp(&d.bytes));
+    let ini_minor = ini_stamp.and_then(|(_, last_save)| last_save.1);
     // Before `tree.notes` moves into the project below.
-    let live = cache_index(&tree);
+    let live = cache_index(&tree, ini_minor);
     let mut project = SppProject {
         version: SppVersion::default(),
         texture_sets: Vec::new(),
