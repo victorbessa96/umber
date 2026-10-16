@@ -262,7 +262,7 @@ impl B {
         self.u64(u64::MAX); // left sibling (undefined)
         self.u64(u64::MAX); // right sibling (undefined)
         for (key, child) in entries {
-            self.u32(*key);
+            self.u64(u64::from(*key)); // off-wide key: the largest heap object size
             self.u64(*child);
         }
         at
