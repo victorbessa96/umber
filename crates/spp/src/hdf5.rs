@@ -1701,9 +1701,14 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
             // v3+ carries the chunk element size after the dims; v1/2
             // do not (elements are the datatype's size - one element
             // per cell for the corpus's u8 datasets).
+            // v3 chunked messages with a v1 B-tree index (h5py's
+            // old-style files) end at the dims: no element-size field,
+            // and the padding bytes read as 0. A real element size is
+            // never 0, so 0 means "absent" - one element per cell (the
+            // corpus's u8 datasets; the chunk index carries the sizes).
             let elem: usize = if !v1_shape && payload.len() >= dims_end + 4 {
                 let elem = uint_le(payload, dims_end, 4)?;
-                if elem == 0 || elem > 64 {
+                if elem > 64 {
                     return Err(SppError::Corrupt(format!("chunk element size {elem}")));
                 }
                 elem as usize
