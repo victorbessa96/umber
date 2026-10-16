@@ -6,6 +6,30 @@ the source of truth.
 
 ## [Unreleased]
 
+### The loop protocol repaired at its own audit (2026-10-16)
+
+- loop-prompt v1.2: the push policy now matches the two-gate ruling (one
+  push per WAVE — v1.1 §3/§5 still said "push on every landed kill",
+  which a wake session would have obeyed against Bessa's standing
+  policy); Gate 1 moved to the build host with the lock-exclusion sync;
+  the active-worklist pointer is audit-cycle-generic (names C2 as live);
+  crate count corrected to 16
+- STATE.md re-derived at the wave boundary (the one thing the wave
+  itself skipped): host-return status, corpus-gate-live, CI verdicts,
+  the Flatpak offline-deps and perf-triage items, the 1,700+ census
+- The queue's W-C2g staging mega-cell closed as done and restructured
+  into the dated wave log (the protocol's own restructure rule applied
+  to itself); the wave log carries the full battery + CI verdicts
+- The constraint file: .spp reading is a landmark feature (the blanket
+  ban superseded by Bessa's ask), cargo locality updated, closed exit
+  criteria recorded as closed
+- loop-status.sh prints the build-host state (up/down, running battery,
+  last log) — a wake session's first call now sees what cargo can run
+- The umber-wave-ops skill: the corpus-debug loop (real-tools ground
+  truth, builder+reader fixed together, host-only probe patches), the
+  stale-lock footgun, the too-wide-sanitizer lesson, and the
+  skill-patch bullet-head trap (which this very patch hit and repaired)
+
 ### The host-return wave: the corpus gate lights up (2026-10-16)
 
 - .spp import reads REAL Substance Painter projects: the corpus gate
