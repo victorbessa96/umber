@@ -183,3 +183,22 @@ the session composited nothing. `pool_mirror` gained the same kind of pin
   mid-range reference GPU (dev machine), recorded separately.
 - "Feels fine" is not a measurement. Neither is a single run — every
   budget number is P95 over ≥ 1000 frames or ≥ 1000 dabs.
+
+## Nightly verdict 2026-10-16 (run 38869909446, head `06c1711`)
+
+The first COMPLETED perf-nightly in a week (all prior runs cancelled)
+is RED on a PRE-wave head:
+
+- `viewport_mean_ms` 84.07 vs baseline 5.49 (**x15.3**)
+- `viewport_p95_ms` 91.87 vs baseline 6.24 (**x14.7**)
+- input-photon both OK (p50 x0.33, p95 x0.97)
+
+`06c1711` predates the 2026-10-15/16 host-return wave entirely, so the
+regression is NOT this wave's. The owning wave is whatever touched the
+viewport path between the last green nightly and `06c1711` — no green
+run exists to bisect against (every run since 2026-10-11 was cancelled),
+so the triage is a fresh hunt: profile `viewport_mean` on master, find
+the stall (the two suspects: the per-frame HUD added with the perf
+instrumentation itself, or a recompiled-shader hot path), and either
+fix it or re-baseline with a written justification. Until then the
+nightly stays red and the red is recorded here, per this protocol.
