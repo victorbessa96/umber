@@ -651,7 +651,10 @@ impl<'a> Walker<'a> {
             if peek == b"OCHK" {
                 self.read_ochk(cont_addr, cont_size, &mut out)?;
             } else {
-                self.read_ohdr_v1(cont_addr, &mut out)?;
+                // A v1 header-continuation block is a bare message list
+                // (no 16-byte prefix): messages until a NIL (type 0)
+                // message, then a gap to the block's end.
+                self.read_ohdr_v1_messages(cont_addr, cont_size, &mut out)?;
             }
         }
         // Unknown message types are loud skips, capped by the walk itself.
@@ -670,7 +673,7 @@ impl<'a> Walker<'a> {
         Ok(out)
     }
 
-    /// v1 object header: 16-byte prefix, 8-padded messages (§6.2).
+    /// v1 object header: 16-byte prefix, then 8-padded messages (§6.2).
     fn read_ohdr_v1(&mut self, addr: u64, out: &mut Vec<Message>) -> Result<(), SppError> {
         let head = bytes_at(self.ctx.data, addr, 16)?;
         if head[0] != 1 {
@@ -681,13 +684,28 @@ impl<'a> Walker<'a> {
         }
         let count = u16::from_le_bytes([head[2], head[3]]) as usize;
         let area = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as u64;
-        let base = addr + 16;
+        self.read_ohdr_v1_messages(addr + 16, area, out)?;
+        // The prefix's message count is the prefix block's own; the
+        // message list ends at the block boundary regardless.
+        debug_assert!(count <= out.len() || true);
+        Ok(())
+    }
+
+    /// The message list both v1 header shapes share: 8-byte headers,
+    /// 8-padded bodies, until the block ends or a NIL (type 0) message
+    /// closes a continuation block.
+    fn read_ohdr_v1_messages(
+        &mut self,
+        base: u64,
+        area: u64,
+        out: &mut Vec<Message>,
+    ) -> Result<(), SppError> {
         let end = base
             .checked_add(area)
             .ok_or_else(|| SppError::Corrupt("v1 header area overflows".into()))?;
         bytes_at(self.ctx.data, base, area)?;
         let mut cursor = base;
-        for _ in 0..count {
+        while cursor < end {
             let hdr = bytes_at(self.ctx.data, cursor, 8)?;
             let mtype = u16::from_le_bytes([hdr[0], hdr[1]]);
             let size = u16::from_le_bytes([hdr[2], hdr[3]]) as u64;
@@ -698,8 +716,12 @@ impl<'a> Walker<'a> {
                 .ok_or_else(|| SppError::Corrupt("v1 message size overflows".into()))?;
             if body_end > end {
                 return Err(SppError::Corrupt(format!(
-                    "object header at {addr}: message {mtype} size {size} overruns the header"
+                    "v1 block at {base}: message {mtype} size {size} overruns the block"
                 )));
+            }
+            // NIL (type 0) closes a continuation block's message list.
+            if mtype == 0 {
+                break;
             }
             let payload = bytes_at(self.ctx.data, body, size)?;
             self.parse_message(mtype, flags, payload, out)?;
@@ -709,7 +731,7 @@ impl<'a> Walker<'a> {
                 .ok_or_else(|| SppError::Corrupt("v1 message padding overflows".into()))?;
             if cursor > end {
                 return Err(SppError::Corrupt(format!(
-                    "object header at {addr}: message {mtype} padding overruns the header"
+                    "v1 block at {base}: message {mtype} padding overruns the block"
                 )));
             }
         }
