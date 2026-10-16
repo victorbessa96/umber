@@ -64,7 +64,12 @@ pub fn path_safe_value(value: &str) -> String {
     let mapped: String = value
         .chars()
         .map(|c| match c {
-            '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*' => '_',
+            // Path separators, the drive/stream colon and Windows
+            // wildcards are replaced; angle quotes stay (they cannot
+            // climb a path, and `<UDIM>` is a standard token our own
+            // tiled runs write — the CI-pinned name
+            // `Sword_baseColor_<UDIM>.png` keeps its brackets).
+            '/' | '\\' | ':' | '"' | '|' | '?' | '*' => '_',
             c if c.is_control() => '_',
             c => c,
         })
@@ -98,6 +103,9 @@ mod tests {
             ("a\nb", "a_b"),
             ("Body", "Body"),
             ("Metal 01", "Metal 01"),
+            // Brackets survive: no path can climb through them, and
+            // `<UDIM>` is our own tiled-run token.
+            ("Body_<UDIM>", "Body_<UDIM>"),
             ("Sword_Hilt.v2", "Sword_Hilt.v2"),
         ] {
             assert_eq!(path_safe_value(value), expected, "{value:?}");
