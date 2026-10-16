@@ -1976,7 +1976,11 @@ impl BTreeNode {
             // 0x648_00000000).
             BTreeKind::Group => off as u64,
             // u32 byte-size + u32 filter-mask + (D+1) u64 offsets (§6.4).
-            BTreeKind::Chunk(rank) => 8 + 8 * (rank as u64 + 1),
+            // Chunk key (type-1 node): chunk size (4), filter mask
+            // (4), then one offset PER DIMENSION (8 each) - measured
+            // on the corpus node at 272159007: {65536,1} grid gives a
+            // 24-byte key. The old +1 read each child 8 bytes late.
+            BTreeKind::Chunk(rank) => 8 + 8 * rank as u64,
         };
         let stride = key_size + off as u64;
         let area = used
@@ -1999,11 +2003,8 @@ impl BTreeNode {
                     let size = uint_at(ctx.data, at, 4)?;
                     let mask = uint_at(ctx.data, at + 4, 4)? as u32;
                     let mut coords = Vec::with_capacity(rank);
-                    for k in 0..=rank {
-                        let offset = uint_at(ctx.data, at + 8 + 8 * k as u64, 8)?;
-                        if k < rank {
-                            coords.push(offset);
-                        }
+                    for k in 0..rank {
+                        coords.push(uint_at(ctx.data, at + 8 + 8 * k as u64, 8)?);
                     }
                     let child_stored = uint_at(ctx.data, at + key_size, off)?;
                     // Interior addresses resolve at descent; leaf data at use.
