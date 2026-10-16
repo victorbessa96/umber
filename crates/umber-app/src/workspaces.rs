@@ -347,8 +347,8 @@ mod tests {
     /// shape matches what the writer produces.
     #[test]
     fn a_torn_null_layouts_file_loads_through_the_same_repair() {
-        let mut ws = Workspaces::default();
-        let mut dock = preset(Workspace::Paint);
+        let ws = Workspaces::default();
+        let dock = preset(Workspace::Paint);
         let path =
             std::env::temp_dir().join(format!("umber-layouts-null-{}.json", std::process::id()));
         save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
