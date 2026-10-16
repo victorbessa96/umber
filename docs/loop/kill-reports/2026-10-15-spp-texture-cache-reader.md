@@ -103,6 +103,35 @@ test pins the revert with a hand-made mismatch.
   check that the median sits at 128: two corpus stacks are offset
   (−0.474, +0.453), so a median check would fail on Bessa's own files.
 
+## OPEN: vertical orientation (unverified, must be checked before trusting)
+
+Umber's planes hold GPU row order (row 0 = V 0); its PNG reader flips
+files to match (`umber_export::png::read_png_rgba8`). The PNGs this kill
+writes go through that reader on import. Whether Painter's cache stores
+rows top-first or bottom-first (OpenGL-style) is NOT established. If it
+is bottom-first, every extracted channel imports upside down.
+
+Tried, to settle it from the files alone: rasterize the mesh UVs from
+`paint/scene.assbin` and compare with the cache's coverage alpha.
+Painter's dump is NOT stock Assimp assbin. The banner and version fields
+match, but there is no `compressed` field, no chunk magics, and no scene
+header: the data at offset 512 opens straight into the root node
+(`8, "RootNode"`, identity matrix). Parsing it is its own reverse-
+engineering job, so it was stopped there.
+
+How to settle it, cheapest first:
+1. **On the host, with Bessa's source mesh** (the FBX the project was
+   made from): extract, import the folder in Umber, and look. Flipped
+   UV islands are obvious on any asymmetric model. One look settles it
+   for the format.
+2. Or rasterize the source mesh's UVs (Umber's importer gives them)
+   against the cache's base-colour alpha, both ways; the correct
+   orientation overlaps near 100%.
+
+If it is flipped, the fix is one line in `texture_cache::decode` (reverse
+the row order before returning), plus a test pinning it. Until checked,
+the user docs must not promise correct orientation; they don't.
+
 ## Not done, and why
 
 1. **The one-line hand-off in `main.rs`** waits for
