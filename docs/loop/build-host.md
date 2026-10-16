@@ -48,3 +48,16 @@ by itself; sshd is enabled at boot.
   battery is incremental.
 - `/tmp/umber-cargo.lock`: a stale flock file is harmless (flock locks
   the open file, not its existence).
+
+## The .spp corpus (armed 2026-10-15)
+
+`crates/spp/tests/corpus.rs` reads `~/corpora/umber/spp/` ON THE MACHINE
+RUNNING THE TEST. The armed corpus (3 Painter projects, 1.3 GB, plus
+`manifest.json`) lives on the dev machine only. On the host the
+directory is absent, so the test skips, unless it is copied over once:
+
+    rsync -a --partial ~/corpora/umber/spp/ bessa@192.168.15.64:corpora/umber/spp/
+
+These are Bessa's private projects: LAN copy only, never committed or
+uploaded (`MANIFEST-README.md`). CI never sees them: the test skips
+there by design.
