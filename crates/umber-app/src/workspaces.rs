@@ -18,7 +18,7 @@ use egui_dock::{DockState, NodeIndex};
 use crate::Panel;
 
 /// A named layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Workspace {
     /// Painting: the boot layout.
     Paint,
@@ -165,10 +165,161 @@ impl Workspaces {
     pub fn reset_active(&self) -> DockState<Panel> {
         preset(self.active)
     }
+
+    /// The persisted form: the active workspace, plus every workspace's
+    /// layout, with `live` (the dock on screen) as the active one's.
+    pub fn snapshot(&self, live: &DockState<Panel>) -> SavedLayouts {
+        let mut layouts: Vec<(Workspace, DockState<Panel>)> =
+            self.stored.iter().map(|(w, d)| (*w, d.clone())).collect();
+        layouts.push((self.active, live.clone()));
+        layouts.sort_by_key(|(w, _)| Workspace::ALL.iter().position(|x| x == w));
+        SavedLayouts {
+            version: LAYOUTS_VERSION,
+            active: self.active,
+            layouts,
+        }
+    }
+
+    /// Restores a [`Self::snapshot`]: returns the live dock to show and
+    /// keeps the rest stored. A HIDDEN panel is a legitimate saved state
+    /// (Window ▸ Panels hides panels and re-adds them), so absence is kept.
+    /// A layout docking a panel TWICE, or showing no tab at all, is not
+    /// one the shell can produce: a hand edit or a bug. It is dropped for
+    /// its preset.
+    pub fn restore(saved: SavedLayouts) -> (Self, DockState<Panel>) {
+        let mut stored = HashMap::new();
+        for (workspace, dock) in saved.layouts {
+            if is_showable(&dock) {
+                stored.insert(workspace, dock);
+            }
+        }
+        let live = stored
+            .remove(&saved.active)
+            .unwrap_or_else(|| preset(saved.active));
+        (
+            Workspaces {
+                active: saved.active,
+                stored,
+            },
+            live,
+        )
+    }
+}
+
+/// The layouts file's schema version; another version is ignored (the
+/// presets load instead).
+pub const LAYOUTS_VERSION: u32 = 1;
+
+/// The persisted workspaces (`<state>/layouts.json`).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SavedLayouts {
+    /// [`LAYOUTS_VERSION`].
+    pub version: u32,
+    /// The workspace that was on screen.
+    pub active: Workspace,
+    /// Each workspace's layout, in menu order.
+    pub layouts: Vec<(Workspace, DockState<Panel>)>,
+}
+
+/// Whether `dock` is a layout the shell could have produced: at least
+/// one tab, and no panel docked twice. (Unknown panels cannot occur:
+/// deserializing an unknown `Panel` variant fails the whole file.)
+fn is_showable(dock: &DockState<Panel>) -> bool {
+    let mut tabs: Vec<Panel> = dock.iter_all_tabs().map(|(_, t)| t.clone()).collect();
+    let n = tabs.len();
+    tabs.sort_by_key(|p| crate::shell_menu::ALL_PANELS.iter().position(|q| q == p));
+    tabs.dedup();
+    n > 0 && n == tabs.len()
+}
+
+/// Writes the layouts to `path` as JSON. A failure is the caller's log
+/// line: layouts are a convenience, never worth an error dialog.
+pub fn save_layouts(path: &std::path::Path, saved: &SavedLayouts) -> std::io::Result<()> {
+    let json = serde_json::to_string(saved).map_err(std::io::Error::other)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Write-then-rename, so a crash mid-write never leaves a torn file.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(tmp, path)
+}
+
+/// Reads the layouts from `path`. `None` for a missing, unreadable,
+/// malformed or other-version file (the presets load instead).
+pub fn load_layouts(path: &std::path::Path) -> Option<SavedLayouts> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let saved: SavedLayouts = serde_json::from_str(&text).ok()?;
+    (saved.version == LAYOUTS_VERSION).then_some(saved)
 }
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn layouts_round_trip_through_a_file_with_the_edit_and_the_active_workspace() {
+        let mut ws = Workspaces::default();
+        let mut dock = preset(Workspace::Paint);
+        ws.switch(Workspace::Bake, &mut dock);
+        // An edit on the Bake layout: History hidden, then shown again in
+        // the focused leaf (moved, still docked once).
+        toggle_panel(&mut dock, &Panel::History);
+        toggle_panel(&mut dock, &Panel::History);
+        let edited = dock.clone();
+        let path = std::env::temp_dir().join(format!("umber-layouts-{}.json", std::process::id()));
+        save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
+        let (back, live) = Workspaces::restore(load_layouts(&path).expect("loads"));
+        assert_eq!(back.active(), Workspace::Bake);
+        assert_eq!(docked(&live), docked(&edited));
+        assert_eq!(
+            live.iter_all_tabs()
+                .map(|(_, t)| t.clone())
+                .collect::<Vec<_>>(),
+            edited
+                .iter_all_tabs()
+                .map(|(_, t)| t.clone())
+                .collect::<Vec<_>>(),
+            "the exact edited layout"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_bad_layouts_file_falls_back_to_the_presets() {
+        let path =
+            std::env::temp_dir().join(format!("umber-layouts-bad-{}.json", std::process::id()));
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(load_layouts(&path).is_none());
+        std::fs::write(
+            &path,
+            r#"{"version": 99, "active": "Paint", "layouts": []}"#,
+        )
+        .unwrap();
+        assert!(load_layouts(&path).is_none(), "another version is ignored");
+        // A HIDDEN panel is a real saved state: it survives the reload.
+        let mut hidden = preset(Workspace::Paint);
+        toggle_panel(&mut hidden, &Panel::History);
+        let saved = SavedLayouts {
+            version: LAYOUTS_VERSION,
+            active: Workspace::Paint,
+            layouts: vec![(Workspace::Paint, hidden.clone())],
+        };
+        let (_, live) = Workspaces::restore(saved);
+        assert_eq!(docked(&live), docked(&hidden), "hiding History is kept");
+        assert!(!docked(&live).contains(&Panel::History));
+        // A panel docked TWICE (a hand edit) falls back to the preset.
+        let mut doubled = preset(Workspace::Paint);
+        doubled.push_to_first_leaf(Panel::Viewport);
+        let saved = SavedLayouts {
+            version: LAYOUTS_VERSION,
+            active: Workspace::Paint,
+            layouts: vec![(Workspace::Paint, doubled)],
+        };
+        let (_, live) = Workspaces::restore(saved);
+        assert_eq!(docked(&live), docked(&preset(Workspace::Paint)));
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
     use crate::shell_menu::{toggle_panel, ALL_PANELS};
 

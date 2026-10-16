@@ -588,6 +588,65 @@ mod tests {
         );
     }
 
+    /// Every key of a catalog's source, `message` or `message.attribute`:
+    /// what a locale must define so nothing falls back to English. Message
+    /// ids come from the source's top-level lines (an FTL message starts
+    /// at column 0 with `id =`; comments, blank lines and the indented
+    /// pattern/attribute/variant lines do not). The bundle then reports
+    /// each message's value and attributes, so the parse rule decides
+    /// nothing beyond which ids exist.
+    fn catalog_keys(source: &str) -> std::collections::BTreeSet<String> {
+        let mut bundle = FluentBundle::new(vec![FALLBACK_LOCALE
+            .parse()
+            .expect("en-US parses as a language id")]);
+        bundle
+            .add_resource(
+                FluentResource::try_new(source.to_owned())
+                    .unwrap_or_else(|(_, errors)| panic!("catalog parses: {errors:?}")),
+            )
+            .unwrap_or_else(|errors| panic!("catalog loads: {errors:?}"));
+        let ids = source.lines().filter_map(|line| {
+            let first = line.chars().next()?;
+            if !first.is_ascii_alphabetic() {
+                return None;
+            }
+            let (id, _) = line.split_once('=')?;
+            Some(id.trim())
+        });
+        let mut keys = std::collections::BTreeSet::new();
+        for id in ids {
+            let message = bundle
+                .get_message(id)
+                .unwrap_or_else(|| panic!("{id:?} is a message"));
+            if message.value().is_some() {
+                keys.insert(id.to_owned());
+            }
+            for attribute in message.attributes() {
+                keys.insert(format!("{id}.{}", attribute.id()));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn every_shipped_locale_covers_every_en_us_key() {
+        // pt-BR once missed 21 keys (the whole mesh-map import panel); a
+        // gap renders English mid-UI. Every key en-US defines, every other
+        // built-in locale must define too (extra keys are an error too:
+        // they are typos or stale strings no code reads).
+        let en = catalog_keys(BUILTIN[0].1);
+        assert_eq!(BUILTIN[0].0, FALLBACK_LOCALE);
+        for (locale, source) in &BUILTIN[1..] {
+            let keys = catalog_keys(source);
+            let missing: Vec<&String> = en.difference(&keys).collect();
+            let extra: Vec<&String> = keys.difference(&en).collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "{locale}: missing {missing:?}, extra {extra:?}"
+            );
+        }
+    }
+
     #[test]
     fn completeness_check_catches_a_typod_key() {
         // Built at runtime so this file's own text holds no bad call site.

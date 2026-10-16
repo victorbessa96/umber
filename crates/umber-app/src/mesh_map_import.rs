@@ -128,6 +128,11 @@ pub enum UnmatchedReason {
     /// A tile-suffixed UDIM output (`<set>_<map>_<tile>.png`) — never
     /// misrouted (see the module docs).
     TileSuffixed,
+    /// The suffix cannot be a channel: it would become a directory under
+    /// the project's `paint/`, and a `:`, a Windows-reserved character, a
+    /// control character or a dot-only name is not one on every OS (a
+    /// Linux file name can hold all of them).
+    UnsafeChannel,
 }
 
 impl UnmatchedReason {
@@ -139,6 +144,7 @@ impl UnmatchedReason {
             Self::EmptySet => "import.reason-empty-set",
             Self::EmptySuffix => "import.reason-empty-suffix",
             Self::TileSuffixed => "import.reason-tile-suffixed",
+            Self::UnsafeChannel => "import.reason-unsafe-channel",
         }
     }
 
@@ -248,6 +254,18 @@ pub fn classify_file_name(file_name: &str) -> FileRoute {
         return FileRoute::Unmatched {
             file: name.to_string(),
             reason: UnmatchedReason::EmptySuffix,
+        };
+    }
+    // The suffix names a directory under `paint/` on save: the same rule
+    // the sidecar parser enforces on load, so an import can never create
+    // a channel the project could not reopen.
+    if suffix.chars().all(|c| c == '.')
+        || suffix.contains(['\\', '/', ':', '<', '>', '"', '|', '?', '*'])
+        || suffix.chars().any(char::is_control)
+    {
+        return FileRoute::Unmatched {
+            file: name.to_string(),
+            reason: UnmatchedReason::UnsafeChannel,
         };
     }
     FileRoute::UserChannel {
@@ -987,6 +1005,25 @@ mod tests {
                 ..
             }
         ));
+        // A suffix that could not be a channel folder on every OS is
+        // refused at the source (the sidecar parser rejects it on load).
+        for name in [
+            "Sword_C:.png",
+            "Sword_a*b.png",
+            "Sword_...png",
+            "Sword_x|y.png",
+        ] {
+            assert!(
+                matches!(
+                    classify_file_name(name),
+                    FileRoute::Unmatched {
+                        reason: UnmatchedReason::UnsafeChannel,
+                        ..
+                    }
+                ),
+                "{name}"
+            );
+        }
         // Case-insensitive PNG, case-preserving channel.
         match classify_file_name("Sword_AO.PNG") {
             FileRoute::UserChannel { set, channel } => {
@@ -1156,6 +1193,7 @@ mod tests {
             UnmatchedReason::EmptySet,
             UnmatchedReason::EmptySuffix,
             UnmatchedReason::TileSuffixed,
+            UnmatchedReason::UnsafeChannel,
         ] {
             assert!(reason.key().starts_with("import.reason-"), "{reason:?}");
         }

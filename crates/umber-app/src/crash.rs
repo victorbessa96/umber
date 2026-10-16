@@ -14,6 +14,12 @@
 //!   [`acknowledge`] renames a shown report to `.seen` so it is offered
 //!   only once, while staying on disk for the user to attach.
 //!
+//! - [`note_op`] keeps the last [`RECENT_OPS`] operations the user ran
+//!   (a short label each, `"paint stroke"`, `"layer: set opacity"`), and
+//!   the report lists them (ROADMAP: "the last 10 journal ops"). Labels
+//!   are fixed by the caller's code, never user text, so the report stays
+//!   safe to paste publicly.
+//!
 //! The hook must never panic or block. Every step is fallible and
 //! best-effort: a failed write is printed to stderr and dropped. The hook
 //! also writes nothing user-supplied except the panic text itself (no
@@ -21,7 +27,53 @@
 //! paste into a public issue.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// How many recent operations a report lists.
+pub const RECENT_OPS: usize = 10;
+
+/// The ring behind [`note_op`]: `(unix secs, label)`, oldest first.
+static RECENT: Mutex<Vec<(u64, &'static str)>> = Mutex::new(Vec::new());
+
+/// Records one operation for the next crash report. `label` must be a
+/// fixed string from code (it is `&'static str` so user text cannot reach
+/// it). Cheap: one lock and a push per user action, never per frame.
+pub fn note_op(label: &'static str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // A poisoned lock (a panic while held) still holds a valid Vec.
+    let mut ring = RECENT.lock().unwrap_or_else(|p| p.into_inner());
+    push_capped(&mut ring, now, label);
+}
+
+/// Pushes onto a ring capped at [`RECENT_OPS`] (the pure half of
+/// [`note_op`], testable without the process-global).
+fn push_capped(ring: &mut Vec<(u64, &'static str)>, at: u64, label: &'static str) {
+    if ring.len() == RECENT_OPS {
+        ring.remove(0);
+    }
+    ring.push((at, label));
+}
+
+/// Report lines for `ring`, oldest first.
+fn ring_text(ring: &[(u64, &'static str)]) -> String {
+    if ring.is_empty() {
+        return "  (none recorded)\n".to_owned();
+    }
+    ring.iter().map(|(t, l)| format!("  {t} {l}\n")).collect()
+}
+
+/// The recent operations as report lines. Uses `try_lock`: the hook can
+/// run while the ring's lock is held (a panic inside `note_op`'s caller
+/// on another thread), and it must never block.
+fn recent_ops_text() -> String {
+    match RECENT.try_lock() {
+        Ok(ring) => ring_text(&ring),
+        Err(_) => "  (unavailable: the list was being written)\n".to_owned(),
+    }
+}
 
 /// The reports directory under `state_dir`.
 pub fn crash_dir(state_dir: &Path) -> PathBuf {
@@ -97,13 +149,15 @@ pub fn install(state_dir: PathBuf) {
             .unwrap_or("<unnamed>")
             .to_owned();
         let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-        let body = format_report(
+        let mut body = format_report(
             &payload_text(info.payload()),
             location.as_deref(),
             &thread,
             unix,
             &backtrace,
         );
+        body.push_str("\nlast operations (unix time, oldest first):\n");
+        body.push_str(&recent_ops_text());
         match write_report(&dir, unix, &body) {
             Ok(path) => eprintln!("umber: crash report written to {}", path.display()),
             Err(e) => eprintln!("umber: crash report not written: {e}"),
@@ -192,6 +246,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&state);
     }
 
+    #[test]
+    fn the_ring_keeps_the_last_ten_in_order() {
+        // On a local ring: the process-global one is shared with every
+        // test that runs a document op, in parallel threads.
+        let mut ring = Vec::new();
+        assert_eq!(ring_text(&ring), "  (none recorded)\n");
+        for (i, label) in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+            .into_iter()
+            .enumerate()
+        {
+            push_capped(&mut ring, i as u64, label);
+        }
+        assert_eq!(ring.len(), RECENT_OPS);
+        let text = ring_text(&ring);
+        assert!(text.starts_with("  2 c\n"), "{text}");
+        assert!(text.ends_with("  11 l\n"), "{text}");
+    }
+
     /// The hook test, run as a CHILD PROCESS: the panic hook is
     /// process-global, and libtest runs sibling tests in parallel threads,
     /// so installing it in the test process would also catch their
@@ -223,6 +295,8 @@ mod tests {
         assert!(body.contains("message: deliberate test panic"), "{body}");
         assert!(body.contains("thread: crash-test"), "{body}");
         assert!(body.contains("crash.rs"), "the location names this file");
+        assert!(body.contains("last operations"), "{body}");
+        assert!(body.contains(" layer: set opacity\n"), "{body}");
         assert!(stderr.contains("crash report written to"), "{stderr}");
         let _ = std::fs::remove_dir_all(&state);
     }
@@ -235,6 +309,7 @@ mod tests {
             return;
         };
         install(PathBuf::from(state));
+        note_op("layer: set opacity");
         std::thread::Builder::new()
             .name("crash-test".into())
             .spawn(|| panic!("deliberate test panic"))

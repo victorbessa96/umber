@@ -79,6 +79,10 @@ use umber_brush::{
     SymmetrySettings, WashMode, ANGLE_SNAP_DEFAULT_DEG, ANGLE_SNAP_MAX_DEG, ANGLE_SNAP_MIN_DEG,
 };
 
+/// `.abr` import (ROADMAP wave-abr). A submodule, so it ships with the
+/// panel that uses it and needs no line in `main.rs`.
+pub(crate) mod abr_import;
+
 use crate::paint_state::PaintProjection;
 use crate::paint_state::PaintState;
 
@@ -166,6 +170,12 @@ pub struct BrushPanel {
     dirs: Vec<PathBuf>,
     /// Last save/save-as/reset failure, shown inline (never a panic).
     save_error: Option<String>,
+    /// The last `.abr` import's report lines (brushes made, what did not
+    /// carry over).
+    abr_report: Vec<String>,
+    /// The `.stamp.png` last loaded into the session for the active
+    /// preset, so the tip is decoded once per selection, not per frame.
+    loaded_stamp: Option<PathBuf>,
     /// Buffer for the Save-As name field.
     save_as_name: String,
     /// The active tool (paint / smudge / clone / eraser) and its params.
@@ -236,6 +246,8 @@ impl BrushPanel {
             dirty: false,
             dirs,
             save_error: None,
+            abr_report: Vec::new(),
+            loaded_stamp: None,
             strip: crate::toolbar::ToolKind::Paint,
             save_as_name: String::new(),
             tool: BrushTool::Paint,
@@ -264,6 +276,7 @@ impl BrushPanel {
         line_constraint_rows(ui, &mut self.line_constraint);
         projection_rows(ui, &mut self.projection, &mut self.front_face_falloff);
         if let Some(paint) = paint {
+            self.load_stamp_for_active(paint);
             channel_rows(ui, paint);
             quick_mask_rows(ui, paint);
             cavity_rows(ui, paint);
@@ -293,6 +306,33 @@ impl BrushPanel {
         if let Some(err) = self.save_error.clone() {
             ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color));
         }
+    }
+
+    /// A stamped preset carries its tip beside it as `<stem>.stamp.png`
+    /// (what `.abr` import writes). Loads it into the session when the
+    /// active preset changes to one that has it; a preset without one
+    /// leaves the session's stamp alone (a hand-picked stamp stays).
+    fn load_stamp_for_active(&mut self, paint: &mut PaintState) {
+        let tip = self
+            .active
+            .and_then(|i| self.library.entries.get(i))
+            .filter(|e| e.preset.params.stamped)
+            .map(|e| e.source_path.with_extension("stamp.png"))
+            .filter(|p| p.is_file());
+        if tip == self.loaded_stamp {
+            return;
+        }
+        if let Some(path) = &tip {
+            match umber_export::png::read_png_rgba8(path) {
+                Ok((w, h, rgba)) => {
+                    if let Err(e) = paint.set_stamp(w, h, &stamp_coverage(&rgba)) {
+                        log::warn!("stamp {} refused: {e}", path.display());
+                    }
+                }
+                Err(e) => log::warn!("stamp {} unreadable: {e}", path.display()),
+            }
+        }
+        self.loaded_stamp = tip;
     }
 
     /// The tool selector (paint / smudge / clone / eraser) plus the active
@@ -690,6 +730,69 @@ impl BrushPanel {
                 self.save_as();
             }
         });
+        // Labels are English until the catalogs' lock frees (queue).
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Import .abr…").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Photoshop brushes", &["abr"])
+                    .pick_file()
+                {
+                    self.import_abr(&path);
+                }
+            }
+        });
+        for line in &self.abr_report {
+            ui.weak(line);
+        }
+    }
+
+    /// Imports every brush in an `.abr` into the user preset dir as
+    /// `.umberbrush` files (plus `.stamp.png` tips), then reloads the shelf
+    /// and selects the first imported brush. A stamped preset's tip loads
+    /// into the session when it is selected (`load_stamp_for_active`).
+    fn import_abr(&mut self, path: &std::path::Path) {
+        self.abr_report.clear();
+        let import = match abr_import::import_abr_file(path) {
+            Ok(import) => import,
+            Err(err) => {
+                self.save_error = Some(format!("Import failed: {err}"));
+                return;
+            }
+        };
+        let Some(user_dir) = user_preset_dir() else {
+            self.save_error = Some("Import failed: no user preset dir".to_owned());
+            return;
+        };
+        let written = match abr_import::write_brushes(&import, &user_dir) {
+            Ok(written) => written,
+            Err(err) => {
+                self.save_error = Some(format!("Import failed: {err}"));
+                return;
+            }
+        };
+        self.abr_report = import.report.clone();
+        self.abr_report.insert(
+            0,
+            format!(
+                "{}: {} brush(es) imported",
+                path.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                written.len()
+            ),
+        );
+        if !self.dirs.contains(&user_dir) {
+            let mut dirs = Vec::with_capacity(self.dirs.len() + 1);
+            dirs.push(user_dir);
+            dirs.extend(self.dirs.iter().cloned());
+            self.dirs = dirs;
+        }
+        self.library = Library::load_from_dirs(&self.dirs);
+        let first = written.first().cloned();
+        self.active =
+            first.and_then(|p| self.library.entries.iter().position(|e| e.source_path == p));
+        self.preset_changed = true;
+        self.dirty = false;
+        self.save_error = None;
     }
 
     /// Serialize the active preset back to its source file. IO/serialize

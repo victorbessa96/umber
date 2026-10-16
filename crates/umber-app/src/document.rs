@@ -177,6 +177,9 @@ impl Document {
     /// a v1 brush stroke) as a context row in the History window. Display
     /// only: the row carries no depth and the panel never jumps to it.
     pub fn record_session_event(&mut self, kind: HistoryKind) {
+        // Crash reports list the last operations (crash::note_op): the
+        // fixed English label, never the translated one.
+        crate::crash::note_op(kind.crash_label());
         self.session_history.record_context(kind);
     }
 
@@ -1046,21 +1049,38 @@ pub fn compose_smart_mask(
             _ => {}
         }
     }
+    // Resolve each stage's source to its bytes ONCE: the per-texel loop
+    // below runs width × height times (16.8M at 4K) and must not hash or
+    // clone strings per texel.
+    let stage_bytes: Vec<Option<&[u8]>> = mask
+        .ops
+        .iter()
+        .map(|stage| match &stage.source {
+            MaskSource::Anchor { layer, channel } => anchors
+                .get(&(layer.clone(), channel.clone()))
+                .and_then(|b| b.as_deref()),
+            MaskSource::Generator { map_name, .. } => maps.get(map_name).and_then(|b| b.as_deref()),
+            MaskSource::Constant { .. } => None,
+        })
+        .collect();
     let mut plane = vec![0u8; texels];
     for (texel, out) in plane.iter_mut().enumerate() {
+        // `compose_scalar` hands back the stage's source; its position in
+        // `mask.ops` indexes `stage_bytes`.
         let lookup = |source: &MaskSource| -> f32 {
+            let stage = mask
+                .ops
+                .iter()
+                .position(|s| std::ptr::eq(&s.source, source));
+            let bytes = stage.and_then(|i| stage_bytes[i]);
             match source {
                 MaskSource::Constant { value } => *value,
-                MaskSource::Anchor { layer, channel } => {
-                    match anchors.get(&(layer.clone(), channel.clone())) {
-                        Some(Some(bytes)) => f32::from(bytes[texel * 4]) / 255.0,
-                        _ => 1.0,
-                    }
+                // A missing anchor is the mask slot's no-op: open.
+                MaskSource::Anchor { .. } => bytes.map_or(1.0, |b| f32::from(b[texel * 4]) / 255.0),
+                // A missing bake reads neutral mid-grey.
+                MaskSource::Generator { .. } => {
+                    bytes.map_or(0.5, |b| f32::from(b[texel * 4]) / 255.0)
                 }
-                MaskSource::Generator { map_name, .. } => match maps.get(map_name) {
-                    Some(Some(bytes)) => f32::from(bytes[texel * 4]) / 255.0,
-                    _ => 0.5,
-                },
             }
         };
         let v = mask.compose_scalar(&lookup)?;

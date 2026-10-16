@@ -65,11 +65,17 @@ impl<A: Write, B: Write> Write for Tee<A, B> {
 
 /// Opens `path` with the platform's default handler (a text editor for
 /// `.log`). Spawned detached; the error is the caller's status line.
+///
+/// No shell anywhere: each opener is a normal executable taking the path
+/// as ONE argument. On Windows that rules out `cmd /C start`, because
+/// cmd.exe re-parses its command line, so a path holding `&`, `^` or `%`
+/// (a user name, a redirected profile) would split into a second command.
+/// `explorer.exe <file>` opens it with its associated program instead.
 pub fn open_in_system(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]).arg(path);
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(path);
         c
     };
     #[cfg(target_os = "macos")]

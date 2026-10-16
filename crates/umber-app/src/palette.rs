@@ -257,6 +257,24 @@ impl Palette {
         self.selected = 0;
     }
 
+    /// Whether the overlay is on screen.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Replaces the query (tests drive the filter without a focused text
+    /// field; a live user's typing resets the selection the same way
+    /// through `edit.changed()`).
+    pub fn set_query(&mut self, query: &str) {
+        self.query = query.to_string();
+        self.selected = 0;
+    }
+
+    /// The recent picks, newest first (what an empty query lists first).
+    pub fn recents(&self) -> &[ShellAction] {
+        self.recents.items()
+    }
+
     /// Draws the overlay and returns the action chosen this frame (the
     /// caller dispatches it). `label(key)` translates; `english(key)`
     /// returns the en-US text; `shortcut(action)` the live binding label.

@@ -7,9 +7,15 @@
 //! the import report (the reader's first-class artifact: every dataset
 //! imported/skipped/not-imported with reasons, the HBO era lines, the
 //! version stamp) and the parsed texture sets + channels as the import
-//! preview. The pixels-to-paint-target landing is the same named
-//! follow-up as the psd v2 (the layer/texture-set commit path both
-//! share).
+//! preview.
+//!
+//! Real Painter files fill the sets from `texture-cache/` (the flattened
+//! channels, research §7a), named by their Painter material. "Extract
+//! channels" writes each as `<set>_<channel>.png` into a folder next to
+//! the `.spp` and feeds that folder to the mesh-map import, which routes
+//! every file to its set and channel as a NEW layer: the same landing
+//! path every imported map takes, so nothing is overwritten. The CLI's
+//! `extract-spp` writes the same files.
 
 use std::path::{Path, PathBuf};
 
@@ -35,8 +41,79 @@ pub fn is_spp_file(path: &Path) -> bool {
 pub struct ParsedSpp {
     /// The file as presented.
     pub file: String,
+    /// Where it was read from (the extract folder goes beside it).
+    pub path: Option<PathBuf>,
     /// The parsed project (the reader's full truth).
     pub project: SppProject,
+}
+
+/// A name segment safe as a file-name part: set and channel names come
+/// from the file, so nothing path-like passes, and the `_` the mesh-map
+/// router splits on never appears inside a segment.
+pub fn file_safe(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unnamed".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Writes every RGBA channel of `project` as `<set>_<channel>.png` under
+/// `dir`; returns the written paths. Channels that are not 4-component
+/// (H1 rasters from non-Painter files) are skipped and reported by the
+/// caller.
+pub fn write_channels(project: &SppProject, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut written = Vec::new();
+    for set in &project.texture_sets {
+        for channel in &set.channels {
+            if channel.channels != 4 {
+                continue;
+            }
+            let path = dir.join(format!(
+                "{}_{}.png",
+                file_safe(&set.name),
+                file_safe(&channel.name)
+            ));
+            umber_export::png::write_png(
+                &path,
+                channel.width,
+                channel.height,
+                &channel.pixels,
+                // Linear, ALL channels, colour included: these PNGs are an
+                // internal hand-off to the mesh-map import, which loads
+                // bytes into the linear plane as stored. Writing colour
+                // sRGB here would land it in the plane sRGB-encoded (the
+                // double curve the reader's linearize exists to prevent).
+                // The CLI's `extract-spp`, whose files leave Umber, writes
+                // colour sRGB instead.
+                umber_export::png::Transfer::Linear,
+            )
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+            written.push(path);
+        }
+    }
+    Ok(written)
+}
+
+/// The extract folder for `spp`: `<stem>-channels/` beside it.
+pub fn extract_dir_for(spp: &Path) -> PathBuf {
+    let stem = spp
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(file_safe)
+        .unwrap_or_else(|| "spp".to_string());
+    spp.with_file_name(format!("{stem}-channels"))
 }
 
 /// The import state: drops route here, Import parses + reports.
@@ -98,6 +175,7 @@ impl SppImportState {
                     );
                     self.parsed.push(ParsedSpp {
                         file: name,
+                        path: Some(path),
                         project,
                     });
                 }
@@ -119,15 +197,20 @@ impl SppImportState {
 /// The Assets panel's .spp section: the drop hint, the pending table,
 /// the Import button, and every parsed project's report (the reader's
 /// first-class artifact — version stamp, texture sets + channels, every
-/// dataset line).
-pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) {
+/// dataset line). Returns the folder an "Extract channels" click wrote,
+/// for the caller to hand to the mesh-map import.
+pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) -> Option<PathBuf> {
+    let mut extracted = None;
+    // Set inside the report loop, which borrows `state.parsed`; assigned
+    // to `state.status` after it.
+    let mut status: Option<String> = None;
     use crate::i18n::tr;
     ui.heading(tr("spp-import.title"));
     ui.label(tr("spp-import.hint"));
     ui.add_space(4.0);
     if state.pending.is_empty() && state.parsed.is_empty() {
         ui.label(tr("spp-import.no-files"));
-        return;
+        return None;
     }
     if !state.pending.is_empty() {
         for (name, _) in &state.pending {
@@ -153,6 +236,37 @@ pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) {
                     ),
                 ),
         );
+        let channel_count: usize = parsed
+            .project
+            .texture_sets
+            .iter()
+            .map(|s| s.channels.len())
+            .sum();
+        if channel_count > 0 {
+            if let Some(path) = parsed.path.as_deref() {
+                // Labels are English until the catalogs' lock frees
+                // (`spp-hint-honest` in the queue adds the keys).
+                if ui
+                    .button(format!("Extract {channel_count} channel(s) as layers"))
+                    .clicked()
+                {
+                    let dir = extract_dir_for(path);
+                    status = Some(match write_channels(&parsed.project, &dir) {
+                        Ok(written) => {
+                            let line = format!(
+                                "{}: {} PNG(s) in {}",
+                                parsed.file,
+                                written.len(),
+                                dir.display()
+                            );
+                            extracted = Some(dir);
+                            line
+                        }
+                        Err(err) => format!("{}: extract failed ({err})", parsed.file),
+                    });
+                }
+            }
+        }
         for set in &parsed.project.texture_sets {
             ui.label(
                 tr("spp-import.set-row")
@@ -175,5 +289,103 @@ pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) {
         for dataset in &parsed.project.datasets {
             ui.label(dataset.summary());
         }
+    }
+    if let Some(line) = status {
+        state.status = line;
+    }
+    extracted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracted_names_route_through_the_mesh_map_import() {
+        let mut project = SppProject::default();
+        project.texture_sets.push(umber_spp::TextureSet {
+            name: "Eye Clear Sphere".into(),
+            channels: vec![
+                umber_spp::ChannelImage {
+                    name: "baseColor".into(),
+                    width: 1,
+                    height: 1,
+                    channels: 4,
+                    pixels: vec![1, 2, 3, 4],
+                    ..Default::default()
+                },
+                umber_spp::ChannelImage {
+                    name: "flag_128".into(),
+                    width: 1,
+                    height: 1,
+                    channels: 4,
+                    pixels: vec![9, 9, 9, 255],
+                    ..Default::default()
+                },
+                // Not RGBA: skipped, never a short PNG.
+                umber_spp::ChannelImage {
+                    name: "grey".into(),
+                    width: 1,
+                    height: 1,
+                    channels: 1,
+                    pixels: vec![5],
+                    ..Default::default()
+                },
+            ],
+        });
+        let dir = std::env::temp_dir().join(format!("umber-spp-extract-{}", std::process::id()));
+        let written = write_channels(&project, &dir).unwrap();
+        let names: Vec<String> = written
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Eye-Clear-Sphere_baseColor.png",
+                "Eye-Clear-Sphere_flag-128.png"
+            ]
+        );
+        // The mesh-map router reads them as <set>_<channel> user channels.
+        for name in &names {
+            match crate::mesh_map_import::classify_file_name(name) {
+                crate::mesh_map_import::FileRoute::UserChannel { set, .. } => {
+                    assert_eq!(set, "Eye-Clear-Sphere");
+                }
+                other => panic!("{name} routed as {other:?}"),
+            }
+        }
+        // Every name the reader emits lands in the channel of that name.
+        // `height` matches a bake suffix first (stage 1), and the bake
+        // route's channel is `height` too.
+        use crate::mesh_map_import::{classify_file_name, FileRoute};
+        for channel in [
+            "baseColor",
+            "height",
+            "roughness",
+            "metallic",
+            "normal",
+            "emissive",
+            "opacity",
+        ] {
+            let route = classify_file_name(&format!("Body_{channel}.png"));
+            let (set, routed) = match route {
+                FileRoute::UserChannel { set, channel } => (set, channel),
+                FileRoute::MeshMap { set, channel, .. } => (set, channel.to_string()),
+                other => panic!("{channel} routed as {other:?}"),
+            };
+            assert_eq!((set.as_str(), routed.as_str()), ("Body", channel));
+        }
+        let (w, h, rgba) = umber_export::png::read_png_rgba8(&written[0]).unwrap();
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(rgba, vec![1, 2, 3, 4]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_extract_folder_sits_beside_the_spp() {
+        let dir = extract_dir_for(Path::new("/proj/Bessa Synth.spp"));
+        assert_eq!(dir, Path::new("/proj/Bessa-Synth-channels"));
+        assert_eq!(file_safe("../x"), "---x");
     }
 }

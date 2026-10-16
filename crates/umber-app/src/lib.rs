@@ -38,6 +38,11 @@
 /// stable for the shell and the integration harnesses (tests/).
 pub use umber_paint::{paint_state, retouch};
 
+/// The command palette + the History panel + the document/actions/toolbar
+/// types the behavior kittests drive (`tests/panel_kittest.rs`). The shell
+/// keeps using them through `crate::`; these re-exports only widen the
+/// library surface for the tests.
+pub mod actions;
 /// The viewport's axis gizmo — on the library surface for the kittest
 /// snapshot harness (the pure projection / hit / snap functions and
 /// `paint`; the shell keeps driving them through `crate::axis_gizmo`).
@@ -46,9 +51,17 @@ pub mod axis_gizmo;
 /// for the kittest snapshot harness (tests/panel_snapshot.rs renders both
 /// headless; i18n::init() must run first — the tests call it).
 pub mod display_panel;
+pub mod document;
+pub mod history_panel;
 /// The i18n catalog (the snapshot tests init it before rendering).
 pub mod i18n;
+// `document` names `layers_panel`; `toolbar` names `rich_tooltip`: the
+// lib target needs the whole `crate::` closure of the kittest modules.
+pub mod layers_panel;
+pub mod palette;
 pub mod psd_import;
+pub mod rich_tooltip;
+pub mod toolbar;
 
 /// Dynamic material layers: the headless eval driver, now in
 /// `umber-paint` (re-exported for path stability).

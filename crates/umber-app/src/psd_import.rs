@@ -100,6 +100,12 @@ pub const PSD_TARGET_CHANNEL: &str = "baseColor";
 pub const MAX_PSD_SIDE: u32 = 8192;
 /// Largest allowed flattened frame, bytes (exactly one 8K RGBA8 frame).
 pub const MAX_PSD_BYTES: usize = 256 * 1024 * 1024;
+/// The decode budget handed to ag-psd: four flattened frames (the
+/// composite plus layer canvases), 1 GiB, half ag-psd's 2 GiB default.
+pub const PSD_DECODE_BUDGET: usize = 4 * MAX_PSD_BYTES;
+/// Largest `.psd`/`.psb` read from disk (2 GiB, Photoshop's PSD maximum;
+/// PSB can be larger and is refused here).
+pub const MAX_PSD_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Whether `path` is a PSD/PSB file (case-insensitive extension) — the
 /// predicate the shell's drop router will use beside
@@ -282,7 +288,15 @@ pub struct PsdImport {
 /// and flattens them: composite first ([`FlattenPath::Composite`]), the
 /// fallback rasterizer when it is absent ([`FlattenPath::FallbackRaster`]).
 pub fn import_psd_bytes(bytes: &[u8], file_name: &str) -> Result<PsdImport, PsdImportError> {
-    let detail = match read_psd(bytes, &ReadOptions::default()) {
+    // ag-psd's default budget is 2 GiB of decoded pixels; this import
+    // keeps one flattened frame of at most MAX_PSD_BYTES (256 MiB), so a
+    // layered file is given that frame plus the same again for layers,
+    // and a hostile file fails typed at 1 GiB instead of 2.
+    let options = ReadOptions {
+        total_memory_limit: Some(PSD_DECODE_BUDGET),
+        ..ReadOptions::default()
+    };
+    let detail = match read_psd(bytes, &options) {
         Ok(psd) => return flatten_psd(&psd, file_name),
         Err(err) => err.to_string(),
     };
@@ -1243,6 +1257,15 @@ fn fluent_str(s: &str) -> fluent::FluentValue<'static> {
 /// Reads a pending file's bytes from disk (the future panel's `read`).
 pub fn read_pending_psd_from_disk(pending: &PendingPsd) -> Option<Vec<u8>> {
     let path = pending.path.as_ref()?;
+    // Size first: `fs::read` of a multi-GB file would allocate all of it
+    // before the reader's own caps ever run.
+    if std::fs::metadata(path).ok()?.len() > MAX_PSD_FILE_BYTES {
+        log::warn!(
+            "psd import: {} is over {MAX_PSD_FILE_BYTES} bytes; skipped",
+            path.display()
+        );
+        return None;
+    }
     std::fs::read(path).ok()
 }
 

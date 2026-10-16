@@ -941,6 +941,56 @@ mod tests {
         ExportDialog::new(PathBuf::from("/tmp/umber-export-test"))
     }
 
+    /// kittest (C2-28): the panel's checkboxes and its Export gate, with no
+    /// mesh and no GPU (the reason line shows; Export stays disabled, so a
+    /// click cannot start a run that would fail).
+    #[test]
+    fn the_export_toggles_flip_and_export_is_gated_without_a_mesh() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, d: &mut ExportDialog| {
+                d.show(
+                    ui,
+                    ExportContext {
+                        gpu: None,
+                        mesh: None,
+                        mesh_path: None,
+                        paint: None,
+                        doc: None,
+                        graph: None,
+                        baked_normal: None,
+                    },
+                );
+            },
+            dialog(),
+        );
+        harness.run();
+        // The reason line is on screen (`get_by_label` panics when absent).
+        harness.get_by_label(&crate::i18n::tr("export.no-mesh"));
+        let (mtlx, usda) = (harness.state().materialx(), harness.state().usda());
+        harness
+            .get_by_label(&crate::i18n::tr("export.materialx"))
+            .click();
+        harness.run();
+        harness
+            .get_by_label(&crate::i18n::tr("export.usda"))
+            .click();
+        harness.run();
+        assert_eq!(harness.state().materialx(), !mtlx, "MaterialX toggled");
+        assert_eq!(harness.state().usda(), !usda, "USDA toggled");
+        // The gate: disabled through AccessKit, and a click is inert.
+        let export = crate::i18n::tr("button.export");
+        assert!(harness.get_by_label(&export).accesskit_node().is_disabled());
+        harness.get_by_label(&export).click();
+        harness.run();
+        assert!(harness.state().last_written().is_empty(), "nothing ran");
+        assert_eq!(
+            harness.state().status(),
+            crate::i18n::tr("export.no-export-yet")
+        );
+    }
+
     #[test]
     fn defaults_match_documented_values() {
         let d = dialog();

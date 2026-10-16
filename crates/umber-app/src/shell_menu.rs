@@ -123,6 +123,12 @@ impl FocusState {
         self.mode = target;
     }
 
+    /// The user's real layout: the saved one while a focus mode shows its
+    /// one-tab stand-in, else `live` itself (what the layouts file keeps).
+    pub fn real_layout<'a>(&'a self, live: &'a DockState<Panel>) -> &'a DockState<Panel> {
+        self.saved.as_ref().unwrap_or(live)
+    }
+
     /// Leaves any focus mode, restoring the saved layout (a no-op in
     /// Normal). The Window menu calls this before it edits the layout.
     pub fn restore(&mut self, dock: &mut DockState<Panel>) {

@@ -207,6 +207,35 @@ impl HistoryKind {
             Self::Export => tr("history.op-export"),
         }
     }
+
+    /// A fixed English name for crash reports (`crash::note_op`). Not
+    /// [`Self::label`]: a report is read in any bug tracker, so it must not
+    /// depend on the user's locale, and a panic hook must not run the i18n
+    /// machinery. `&'static str` keeps user text out of reports.
+    pub fn crash_label(self) -> &'static str {
+        match self {
+            Self::AddPaint => "add paint layer",
+            Self::AddFill => "add fill layer",
+            Self::AddFolder => "add folder",
+            Self::AddMaterial => "add material layer",
+            Self::AddInstance => "add instance layer",
+            Self::Remove => "remove layer",
+            Self::Reorder => "reorder layer",
+            Self::SetOpacity => "set opacity",
+            Self::SetVisible => "set visibility",
+            Self::SetBlendMode => "set blend mode",
+            Self::Rename => "rename layer",
+            Self::SetFill => "edit fill",
+            Self::SetMaterial => "edit material",
+            Self::SetInstanceSource => "retarget instance",
+            Self::AttachMask => "attach mask",
+            Self::DetachMask => "detach mask",
+            Self::SetMaskEnabled => "toggle mask",
+            Self::BrushStroke => "brush stroke",
+            Self::Bake => "bake",
+            Self::Export => "export",
+        }
+    }
 }
 
 /// One row of the History window.
@@ -949,6 +978,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn every_kind_has_a_distinct_plain_crash_label() {
+        use HistoryKind::*;
+        let all = [
+            AddPaint,
+            AddFill,
+            AddFolder,
+            AddMaterial,
+            AddInstance,
+            Remove,
+            Reorder,
+            SetOpacity,
+            SetVisible,
+            SetBlendMode,
+            Rename,
+            SetFill,
+            SetMaterial,
+            SetInstanceSource,
+            AttachMask,
+            DetachMask,
+            SetMaskEnabled,
+            BrushStroke,
+            Bake,
+            Export,
+        ];
+        let labels: Vec<&str> = all.iter().map(|k| k.crash_label()).collect();
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "{labels:?}");
+        // Plain ASCII words: readable in any tracker, no locale, no markup.
+        assert!(labels
+            .iter()
+            .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_lowercase() || c == ' ')));
+    }
     use umber_core::layers::LayerKind;
 
     #[test]

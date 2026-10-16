@@ -199,8 +199,9 @@ fn panel_title(panel: &Panel) -> String {
     })
 }
 
-/// Every panel the shell can dock.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// Every panel the shell can dock. Serializable: the workspace layouts
+/// persist across launches (`workspaces::save_layouts`).
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Panel {
     Viewport,
     UvView,
@@ -1274,9 +1275,17 @@ impl UmberApp {
         // (`AppState::display_lut` starts dirty) uploads the chain.
         let display_lut = umber_gpu::DisplayLut::new(&gpu, &umber_gpu::identity_lut_bytes());
 
-        // Layout: the boot shape (`shell_menu::default_dock`, which Window ▸
+        // Layout: the last session's workspaces (`<state>/layouts.json`),
+        // else the boot shape (`shell_menu::default_dock`, which Window ▸
         // Reset Layout rebuilds).
-        let dock = shell_menu::default_dock();
+        let (workspaces, dock) = workspaces::load_layouts(&layouts_path())
+            .map(workspaces::Workspaces::restore)
+            .unwrap_or_else(|| {
+                (
+                    workspaces::Workspaces::default(),
+                    shell_menu::default_dock(),
+                )
+            });
 
         // Paint session on the eframe-owned device/queue (cloned for the
         // thread). Feature-missing devices degrade to view-only with a
@@ -1362,7 +1371,7 @@ impl UmberApp {
             about_open: false,
             shortcuts_open: false,
             focus: shell_menu::FocusState::default(),
-            workspaces: workspaces::Workspaces::default(),
+            workspaces,
             tab_hide_pending: false,
         })
     }
@@ -2381,7 +2390,19 @@ impl UmberApp {
     /// the outgoing workspace stores its real layout.
     fn switch_workspace(&mut self, to: workspaces::Workspace) {
         self.focus.restore(&mut self.dock);
-        self.workspaces.switch(to, &mut self.dock);
+        if self.workspaces.switch(to, &mut self.dock) {
+            self.save_layouts();
+        }
+    }
+
+    /// Persists every workspace's layout (exit + workspace switch). Saved
+    /// out of any focus mode, so the one-tab stand-in is never what
+    /// reopens. A failure only logs.
+    fn save_layouts(&mut self) {
+        let saved = self.workspaces.snapshot(self.focus.real_layout(&self.dock));
+        if let Err(e) = workspaces::save_layouts(&layouts_path(), &saved) {
+            log::warn!("layouts not saved: {e}");
+        }
     }
 
     fn open_project(&mut self) {
@@ -2686,7 +2707,17 @@ impl CurvatureFeed {
     }
 }
 
+/// The workspace layouts file (GUI plan g5-workspaces): the state dir.
+fn layouts_path() -> PathBuf {
+    gpu_startup::state_dir().join("layouts.json")
+}
+
 impl eframe::App for UmberApp {
+    /// Last chance to persist the dock: the workspace layouts.
+    fn on_exit(&mut self) {
+        self.save_layouts();
+    }
+
     /// Bare Tab with nothing focused is Hide UI (Painter's Tab), not
     /// egui's "focus the first widget". Taken out of the input here, before
     /// egui's focus logic runs on it; Tab inside a focused widget still
