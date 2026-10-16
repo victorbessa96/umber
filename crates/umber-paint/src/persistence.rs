@@ -68,6 +68,20 @@ pub fn paint_sidecar_name(channel: &str, tile: u16) -> String {
     }
 }
 
+/// Whether a manifest's channel segment is safe as ONE directory name
+/// under `paint/`, on every OS. The manifest is file content, so this is
+/// the trust boundary. Rejected: empty, dot-only (`.`, `..`, `...`, which
+/// Windows also strips), `\\` (a separator on Windows), `:` (a drive or
+/// NTFS stream: `C:` would make `join` ABSOLUTE on Windows), the other
+/// Windows-reserved characters, and control characters. Real channel
+/// names (`baseColor`, `roughness`, user channels like `dirt_mask`) pass.
+fn is_safe_channel_component(channel: &str) -> bool {
+    !channel.is_empty()
+        && !channel.chars().all(|c| c == '.')
+        && !channel.contains(['\\', ':', '<', '>', '"', '|', '?', '*'])
+        && !channel.chars().any(char::is_control)
+}
+
 /// Parses a manifest `name`/sidecar listing back to its `(owner,
 /// channel, tile)` (per-layer-pool design §6.1's parse rule — the trust
 /// boundary): a bare `tile-<N>.png` is the reserved baseColor channel's
@@ -77,7 +91,7 @@ pub fn paint_sidecar_name(channel: &str, tile: u16) -> String {
 /// channel, a non-numeric id, and 3 components (`layers/7/tile-<N>.png`
 /// rejects). Depth disambiguates a texture-set channel literally named
 /// `layers`: `layers/tile-<N>.png` is that channel's Base plane. `None`
-/// also for a channel component that is empty, `..`, or holds a backslash
+/// also for a channel component [`is_safe_channel_component`] rejects
 /// (texture-set channel names are arbitrary user/import-derived strings,
 /// and the manifest line is space-delimited — this is the trust boundary,
 /// not `is_paint_sidecar_name`'s whitelist alone).
@@ -93,14 +107,14 @@ pub fn parse_paint_sidecar_name(
             Some((base, base_color, tile))
         }
         [channel, tile] => {
-            if channel.is_empty() || *channel == ".." || channel.contains('\\') {
+            if !is_safe_channel_component(channel) {
                 return None;
             }
             let tile = parse_paint_tile_name(tile)?;
             Some((base, channel.to_string(), tile))
         }
         ["layers", id, channel, tile] => {
-            if channel.is_empty() || *channel == ".." || channel.contains('\\') {
+            if !is_safe_channel_component(channel) {
                 return None;
             }
             let id: u64 = id.parse().ok()?;
@@ -2375,6 +2389,13 @@ mod tests {
             "height/tile-abc.png",
             "height/tile-1001.exr",
             "tile-1001.exr",
+            // A drive (Windows `join` makes `C:` ABSOLUTE), an NTFS
+            // stream, and dot-only names Windows strips or resolves.
+            "C:/tile-1001.png",
+            "a:b/tile-1001.png",
+            "./tile-1001.png",
+            ".../tile-1001.png",
+            "a*b/tile-1001.png",
         ] {
             assert_eq!(parse_paint_sidecar_name(bad), None, "{bad:?} must reject");
         }
@@ -2574,6 +2595,9 @@ mod tests {
             "layers/7//tile-1001.png",
             "layers/7/baseColor/tile-1001.png/",
             "layers/7/baseColor/tile-abc.png",
+            "layers/7/C:/tile-1001.png",
+            "layers/7/./tile-1001.png",
+            "layers/7/x|y/tile-1001.png",
         ] {
             assert_eq!(parse_paint_sidecar_name(bad), None, "{bad:?} must reject");
         }
