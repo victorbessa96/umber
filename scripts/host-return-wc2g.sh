@@ -27,7 +27,8 @@ KILLS=(
   "psd-read-caps|umber-app|crates/umber-app/src/psd_import.rs"
 )
 # NOT in the table (needs Cargo.lock regenerated on the host first):
-# spp-texture-cache-reader + spp-extract-cli (spp, umber-cli, umber-app;
+# spp-texture-cache-reader + spp-extract-cli + wave-benchmark-public
+# (spp, umber-cli, umber-app; bench rides spp-extract-cli's main.rs;
 # shares umber-cli/Cargo.toml with win-version-resource). See
 # docs/loop/kill-reports/2026-10-15-spp-texture-cache-reader.md.
 # NOT in the table: win-version-resource. It needs the workspace dep
