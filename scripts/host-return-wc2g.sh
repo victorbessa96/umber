@@ -25,6 +25,7 @@ KILLS=(
   "g5-tab-overflow-core|umber-gui|crates/umber-gui/src/widgets/mod.rs crates/umber-gui/src/widgets/tab_overflow.rs"
   "wave-abr|umber-app|crates/umber-app/src/brush_panel.rs crates/umber-app/src/brush_panel/abr_import.rs"
   "psd-read-caps|umber-app|crates/umber-app/src/psd_import.rs"
+  "crash-recent-ops|umber-app|crates/umber-app/src/crash.rs"
 )
 # NOT in the table (needs Cargo.lock regenerated on the host first):
 # spp-texture-cache-reader + spp-extract-cli + wave-benchmark-public
