@@ -36,11 +36,13 @@ All 61 channels decode, with no name collisions. Every set has a
   - `material_names`: set names from `paint/scene.assbin` (an Assimp
     binary dump: `$mat.uid` = the cache group id, `?mat.name` before it).
     10/10 corpus sets resolve.
-  - `channel_name_for_flag`: flag 1 = `baseColor`, 2²² = `normal` (the
-    pixels admit one reading). Every other flag is `flag_<n>`: the
-    statistics hint (2¹³ often all-zero; 2⁷ mid-grey) but do not settle
-    roughness vs metallic vs height, and a wrong name is worse than an
-    honest number.
+  - `channel_name_for_flag`: the default stack is named (`baseColor`,
+    `height`, `roughness`, `metallic`, `normal`), from the document's own
+    `(format, flag)` records cross-checked against the pixels (research
+    §7a). `emissive` (16) and `opacity` (8) are named as inferred, with
+    a report note. 2⁴⁶ stays `flag_<n>`. A test pins that every emitted
+    name routes through the mesh-map import into the channel of that
+    name (`height` via the bake route, the rest as user channels).
 - `model.rs`:
   - `texture-cache/` is decoded instead of skipped (`cache_index`
     pre-pass, `cache_channel`);

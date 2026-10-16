@@ -287,8 +287,27 @@ source, and it is recorded as such:
 - **Stacks.** `3864292196` is the main stack in every set. Bessa Synth's
   set also has two 2048² stacks (material layering); they import as
   their own sets.
-- **Names.** Flag 1 = base colour, 2²² = normal. Others stay
-  `flag_<n>` (see the kill report for the statistics).
+- **Names.** BessaCreatureV2's `paint/document.bin` declares its
+  channels as `(format, flag)` records. The format codes follow the
+  shader API's documented order (`sRGB8` 0, `L8` 1, `RGB8` 2, `L16` 3,
+  `RGB16` 4, `L16F` 5, `RGB16F` 6): 2 → L16F, 128 → L8, 8192 → L8,
+  4194304 → RGB16F, 16 → sRGB8. Every set carries flags {1, 2, 128,
+  8192, 4194304}, five channels, which is Painter's default PBR
+  Metallic/Roughness stack. The pixels agree:
+
+  | Flag | Name | Pixel evidence |
+  |---|---|---|
+  | 1 | baseColor | opaque sRGB colour |
+  | 2 | height | L16F; flat zero on unsculpted sets |
+  | 128 | roughness | L8 mid-grey everywhere |
+  | 8192 | metallic | L8; zero on organic sets |
+  | 4194304 | normal | RGB16F at (0.5, 0.5, 1) |
+
+  Named as inferred (reported so): 16 → emissive (sRGB, mostly black),
+  8 → opacity (L8). 2⁴⁶ stays `flag_70368744177664`.
+- **Not a source:** the Python API stubs (`types-substance_painter`)
+  list `ChannelType` members alphabetically with no values, and newer
+  Painter adds OpenPBR channel types. Neither gives the bits.
 
 ### What this changes (Bessa decided: build it, 2026-10-15)
 
