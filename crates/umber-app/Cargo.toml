@@ -72,6 +72,8 @@ umber-paint = { workspace = true, features = ["test-hooks"] }
 pollster = { workspace = true }
 wgpu = { workspace = true }
 serde_json = { workspace = true }
+# Panel/Workspace derive Serialize/Deserialize (the persisted dock
+# layouts, g5-workspace-persist).
 serde = { workspace = true }
 # The offscreen UI test harness (queue row 15, absorbed from photocraft):
 # kittest drives panels headless (widget-tree queries) and, with the
