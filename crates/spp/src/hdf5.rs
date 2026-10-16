@@ -1525,9 +1525,14 @@ fn parse_dataspace(ctx: Ctx<'_>, payload: &[u8]) -> Result<Option<Space>, SppErr
         }
         for (i, dim) in dims.iter().take(rank).enumerate() {
             let max = uint_le(payload, dims_end + i * width, width)?;
-            if max != *dim {
+            // HDF5 spells "unlimited" as an all-ones max dim
+            // (0xFFFF…FFFF). The file's CURRENT extent is `dims`;
+            // growth only matters to a writer, so unlimited reads as
+            // the current dims (the corpus's {5826193/Inf} datasets).
+            let unlimited = max == u64::MAX || (width < 8 && max == (1u64 << (8 * width)) - 1);
+            if max != *dim && !unlimited {
                 return Err(SppError::Unsupported(format!(
-                    "max-dims {max} != dims {dim} (unlimited/growing spaces unsupported)"
+                    "max-dims {max} != dims {dim} (growing spaces unsupported)"
                 )));
             }
         }
