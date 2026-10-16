@@ -43,6 +43,19 @@ reference mesh, so community perf reports are comparable".
 hunks (`mod bench`, the route, `bake_context_with_info`) ride that file,
 so **the two kills commit together**, the shared-file rule.
 
+## Static review (no compiler)
+
+- `bench` is a child module of the binary root. It reaches main.rs's
+  private items (`BakeMap`, `BakeFlags`, `bake_map`, `pad_map`,
+  `margin_seams`, `bake_context_with_info`) through `crate::`: a private
+  item is visible to the module it lives in and to every descendant.
+  `agent`/`batch` already rely on this.
+- `DeviceType` and `Backend` derive `Debug` (wgpu-types 30.0.1,
+  `adapter.rs:103`, `backend.rs:18`), so the `{:?}` label compiles.
+- `MeshData` has exactly the five fields the literal sets (no `..`).
+- A `let mut` closure that captures nothing mutable was flagged
+  (clippy `unused_mut`) and fixed to `let`.
+
 ## Host
 
 `cargo test -p umber-cli bench::`, clippy, then run `umber-cli bench`
