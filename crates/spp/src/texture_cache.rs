@@ -399,11 +399,21 @@ pub fn decode_with(bytes: &[u8], remap: Remap) -> Result<CacheChannel, CacheErro
     // so it can only mean end-of-block: keep the decoded prefix and
     // zero-fill the rest, with a report note.
     let mut raw = vec![0u8; header.buffer_size];
+    let marker = lz4_tail_zero_offset(block);
     let written = match lz4_flex::block::decompress_into(block, &mut raw) {
         Ok(written) => written,
-        Err(_e) if lz4_tail_zero_offset(block) => decompress_prefix(block, &mut raw),
+        // The end-of-block marker case: decode the prefix (below).
+        Err(_e) if marker => decompress_prefix(block, &mut raw),
         Err(e) => return Err(CacheError::Lz4(e.to_string())),
     };
+    // A block without the marker must fill the buffer exactly: a short
+    // decode is a corrupt block, not a prefix.
+    if !marker && written != header.buffer_size {
+        return Err(CacheError::Lz4(format!(
+            "decoded {written} of {} bytes",
+            header.buffer_size
+        )));
+    }
     let truncated = written != header.buffer_size;
     let texels = header.width as usize * header.height as usize;
     let mut rgba = Vec::with_capacity(texels * 4);
