@@ -19,6 +19,8 @@ umber-gpu = { workspace = true }
 # The headless paint engine + persistence (agent paint ops): the SAME
 # implementation the GUI paints and saves through — no egui in the tree.
 umber-paint = { workspace = true }
+# `extract-spp`: the read-only .spp reader (binding ruling 1).
+umber-spp = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
@@ -36,3 +38,9 @@ blake3 = { workspace = true }
 [features]
 default = ["gpu"]
 gpu = ["umber-bake/gpu"]
+
+# The Windows version resource (build.rs): SignPath requires product
+# metadata on every signed binary. Target-gated in build.rs; only the
+# windows-msvc job ever runs its resource compiler.
+[build-dependencies]
+winresource = { workspace = true }
