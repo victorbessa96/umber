@@ -490,7 +490,7 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
         let mut lit = (tok >> 4) as usize;
         if lit == 15 {
             loop {
-                let Some(b) = block.get(i) else { return true };
+                let Some(&b) = block.get(i) else { return true };
                 i += 1;
                 lit += b as usize;
                 if b != 255 {
@@ -519,7 +519,7 @@ fn lz4_tail_zero_offset(block: &[u8]) -> bool {
         let mut ml = (tok & 15) as usize;
         if ml == 15 {
             loop {
-                let Some(b) = block.get(i) else { return true };
+                let Some(&b) = block.get(i) else { return true };
                 i += 1;
                 ml += b as usize;
                 if b != 255 {
@@ -546,7 +546,7 @@ fn decompress_prefix(block: &[u8], out: &mut [u8]) -> usize {
         let mut lit = (tok >> 4) as usize;
         if lit == 15 {
             loop {
-                let Some(b) = block.get(i) else { return w };
+                let Some(&b) = block.get(i) else { return w };
                 i += 1;
                 lit += b as usize;
                 if b != 255 {
@@ -572,7 +572,7 @@ fn decompress_prefix(block: &[u8], out: &mut [u8]) -> usize {
         let mut ml = (tok & 15) as usize;
         if ml == 15 {
             loop {
-                let Some(b) = block.get(i) else { return w };
+                let Some(&b) = block.get(i) else { return w };
                 i += 1;
                 ml += b as usize;
                 if b != 255 {
