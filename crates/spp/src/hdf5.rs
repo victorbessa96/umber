@@ -298,6 +298,13 @@ fn check_width(width: u64, what: &str) -> Result<usize, SppError> {
 }
 
 /// Superblock v0/v1: inline root symbol-table entry (§6.1).
+///
+/// After base / free-space / EOF / driver addresses comes the root
+/// GROUP's symbol-table entry — a Link Name Offset, an Object Header
+/// address, a cache type, and a 16-byte scratch pad. The first real
+/// corpus file (Bessa Synth, h5py) exposed the difference from the
+/// synthetic builder files: an old-style root carries its b-tree and
+/// heap in the scratch pad (cache type 1), NOT as two loose pointers.
 fn parse_superblock_v0_v1(
     data: &[u8],
     base_off: u64,
@@ -309,22 +316,43 @@ fn parse_superblock_v0_v1(
     let addrs = base_off + if version == 1 { 28 } else { 24 };
     let off = off_size as u64;
     let base = uint_at(data, addrs, off_size)?;
-    let btree_at = addrs + 4 * off;
-    let heap_at = btree_at + off;
-    bytes_at(data, heap_at, off)?;
     let ctx_probe = Ctx {
         data,
         off_size,
         len_size,
         base,
     };
-    let btree_stored = uint_at(data, btree_at, off_size)?;
-    let heap_stored = uint_at(data, heap_at, off_size)?;
-    let btree = resolve(ctx_probe, btree_stored, "root b-tree")?
-        .ok_or_else(|| SppError::Corrupt("v0/v1 root without symbol table".into()))?;
-    let heap = resolve(ctx_probe, heap_stored, "root heap")?
-        .ok_or_else(|| SppError::Corrupt("v0/v1 root without local heap".into()))?;
-    Ok((off_size, len_size, base, Root::SymTable { btree, heap }))
+    // The root symbol-table entry (§III.A, "Object Level 0"): link name
+    // offset, object header address, cache type, reserved, scratch pad.
+    let entry = addrs + 4 * off;
+    let _link_name = uint_at(data, entry, off_size)?;
+    let oheader = resolve(
+        ctx_probe,
+        uint_at(data, entry + off, off_size)?,
+        "root object header",
+    )?
+    .ok_or_else(|| SppError::Corrupt("v0/v1 root without an object header".into()))?;
+    let cache_type = uint_at(data, entry + 2 * off, 4)?;
+    match cache_type {
+        // 0: no cached data; the root is its object header (v1.8 style).
+        0 => Ok((off_size, len_size, base, Root::ObjectHeader(oheader))),
+        // 1: symbol-table entry — b-tree and local heap cached in the
+        // 16-byte scratch pad.
+        1 => {
+            let scratch = entry + 2 * off + 8;
+            let btree_stored = uint_at(data, scratch, off_size)?;
+            let heap_stored = uint_at(data, scratch + off, off_size)?;
+            let btree = resolve(ctx_probe, btree_stored, "root b-tree")?.ok_or_else(|| {
+                SppError::Corrupt("v0/v1 root symbol table without b-tree".into())
+            })?;
+            let heap = resolve(ctx_probe, heap_stored, "root heap")?
+                .ok_or_else(|| SppError::Corrupt("v0/v1 root symbol table without heap".into()))?;
+            Ok((off_size, len_size, base, Root::SymTable { btree, heap }))
+        }
+        other => Err(SppError::Corrupt(format!(
+            "root symbol entry cache type {other}"
+        ))),
+    }
 }
 
 /// Superblock v2/v3: root-group object-header address (§6.1).
@@ -1278,7 +1306,7 @@ impl<'a> Walker<'a> {
         path: &str,
         mut bytes: Vec<u8>,
         pipeline: &[FilterKind],
-        _expected: usize,
+        expected: usize,
         elem: usize,
     ) -> Result<Vec<u8>, SppError> {
         for filter in pipeline.iter().rev() {
@@ -1287,7 +1315,10 @@ impl<'a> Walker<'a> {
                     // Recorded, never verified (§6.3).
                 }
                 FilterKind::Deflate => {
-                    bytes = inflate_raw(path, &bytes)?;
+                    // Shuffle and Fletcher32 never change the size, so the
+                    // inflated output IS the footprint: stop the stream
+                    // there instead of at the 256 MiB global cap.
+                    bytes = inflate_raw(path, &bytes, expected)?;
                 }
                 FilterKind::Shuffle => {
                     bytes = unshuffle(path, &bytes, elem)?;
@@ -1317,47 +1348,54 @@ fn resolve_soft(group: &str, target: &str) -> String {
 }
 
 /// Raw inflate (no zlib header): the HDF5 deflate filter stream (§6.4).
-fn inflate_raw(path: &str, input: &[u8]) -> Result<Vec<u8>, SppError> {
+fn inflate_raw(path: &str, input: &[u8], limit: usize) -> Result<Vec<u8>, SppError> {
     let mut decoder = flate2::Decompress::new(false);
-    let mut out = Vec::new();
-    // Grow the window until the stream ends; hostile sizes stay capped by
-    // the dataset cap checked before decode (chunk footprints bound this).
-    let mut produced = 0usize;
+    let mut out: Vec<u8> = Vec::new();
+    // Grow the window until the stream ends, never past `limit` + 1: the
+    // caller knows the decoded footprint, and one byte beyond it proves a
+    // mismatch. Without this a 1 KB chunk could inflate 256 MiB before the
+    // footprint check refused it, once per chunk (a deflate bomb).
+    let limit = limit.min(MAX_DATASET_BYTES as usize);
     loop {
-        out.reserve(65536);
-        let capacity = out.capacity() - out.len();
-        // SAFETY-free growth: extend with zeros, then truncate to produced.
-        out.extend(std::iter::repeat_n(0, capacity));
-        let before_in = decoder.total_in();
-        let before_out = decoder.total_out();
-        match decoder.decompress(
-            &input[before_in as usize..],
-            &mut out[produced..],
-            flate2::FlushDecompress::Finish,
-        ) {
-            Ok(status) => {
-                produced = decoder.total_out() as usize;
-                out.truncate(produced);
-                let _ = before_out;
-                if status == flate2::Status::StreamEnd {
-                    return Ok(out);
-                }
-                if produced > MAX_DATASET_BYTES as usize {
-                    let big = path.to_string();
-                    return Err(SppError::Unsupported(format!(
-                        "{big}: inflated payload exceeds the 256 MiB cap"
-                    )));
-                }
-                if status == flate2::Status::Ok {
-                    continue;
-                }
+        let room = (limit + 1).saturating_sub(out.len()).min(65536);
+        if room == 0 {
+            let big = path.to_string();
+            return Err(SppError::Corrupt(format!(
+                "{big}: deflate stream inflates past its {limit}-byte footprint"
+            )));
+        }
+        let written = out.len();
+        out.resize(written + room, 0);
+        let (before_in, before_out) = (decoder.total_in(), decoder.total_out());
+        // Streaming (`None`), not `Finish`: with `Finish`, miniz_oxide
+        // decodes the first call in one shot into a non-wrapping buffer and
+        // fails the stream when it is too small, and zlib-rs answers
+        // `BufError`. Either way a payload over one window was refused as
+        // "stalled". `None` resumes across windows on both backends, and
+        // `StreamEnd` still marks the end.
+        let status = decoder
+            .decompress(
+                &input[before_in as usize..],
+                &mut out[written..],
+                flate2::FlushDecompress::None,
+            )
+            .map_err(|e| {
                 let bad = path.to_string();
-                return Err(SppError::Corrupt(format!("{bad}: deflate stream stalled")));
-            }
-            Err(e) => {
-                let bad = path.to_string();
-                return Err(SppError::Corrupt(format!("{bad}: deflate error ({e})")));
-            }
+                SppError::Corrupt(format!("{bad}: deflate error ({e})"))
+            })?;
+        let produced = (decoder.total_out() - before_out) as usize;
+        out.truncate(written + produced);
+        if status == flate2::Status::StreamEnd {
+            return Ok(out);
+        }
+        // `Ok` or `BufError`: go on while either side moved. Neither moving
+        // means the input ran out before the stream ended: a truncated
+        // chunk.
+        if produced == 0 && decoder.total_in() == before_in {
+            let bad = path.to_string();
+            return Err(SppError::Corrupt(format!(
+                "{bad}: deflate stream ends early (truncated chunk)"
+            )));
         }
     }
 }
@@ -1911,5 +1949,44 @@ impl BTreeNode {
             }
         }
         Ok(BTreeNode { level, entries })
+    }
+}
+
+#[cfg(test)]
+mod inflate_tests {
+    use super::*;
+
+    #[test]
+    fn a_deflate_bomb_stops_at_its_footprint() {
+        // 64 MiB of zeros deflates to ~64 KB. Declared footprint: 4 KiB.
+        let bomb = crate::builder::deflate_bytes(&vec![0u8; 64 << 20]);
+        assert!(bomb.len() < 128 * 1024, "the fixture is a real bomb");
+        let err = inflate_raw("/bomb", &bomb, 4096).unwrap_err();
+        assert!(
+            matches!(&err, SppError::Corrupt(m) if m.contains("past its 4096-byte footprint")),
+            "{err:?}"
+        );
+        // The honest stream for the same footprint still decodes exactly.
+        let ok = crate::builder::deflate_bytes(&[7u8; 4096]);
+        assert_eq!(inflate_raw("/ok", &ok, 4096).unwrap(), vec![7u8; 4096]);
+        // A stream SHORTER than the footprint decodes; the caller's
+        // `!= expected` check owns that refusal.
+        let short = crate::builder::deflate_bytes(&[1u8; 100]);
+        assert_eq!(inflate_raw("/short", &short, 4096).unwrap().len(), 100);
+        // A footprint above 64 KiB crosses windows: the loop must resume
+        // the stream, not call it stalled (the old `Finish` loop refused
+        // every payload over one window).
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        assert_eq!(
+            inflate_raw("/big", &crate::builder::deflate_bytes(&big), 300_000).unwrap(),
+            big
+        );
+        // A truncated stream is refused, not looped on.
+        let cut = crate::builder::deflate_bytes(&big);
+        let err = inflate_raw("/cut", &cut[..cut.len() / 2], 300_000).unwrap_err();
+        assert!(
+            matches!(&err, SppError::Corrupt(m) if m.contains("ends early")),
+            "{err:?}"
+        );
     }
 }
