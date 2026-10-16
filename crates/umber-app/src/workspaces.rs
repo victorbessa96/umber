@@ -353,7 +353,11 @@ mod tests {
             std::env::temp_dir().join(format!("umber-layouts-null-{}.json", std::process::id()));
         save_layouts(&path, &ws.snapshot(&dock)).expect("saves");
         let text = std::fs::read_to_string(&path).expect("file");
-        let torn = text.replace(":0.0,", ":null,").replace(":0.0}", ":null}");
+        // Tear ONLY the x/y corners (a previous version's ±∞ save);
+        // other numbers (scroll, fraction) must survive as numbers.
+        let torn = text
+            .replace("\"x\":0.0", "\"x\":null")
+            .replace("\"y\":0.0", "\"y\":null");
         std::fs::write(&path, torn).expect("write");
         let saved = load_layouts(&path).expect("the null-repair loads it");
         assert_eq!(saved.active, Workspace::Paint);
