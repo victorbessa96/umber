@@ -689,7 +689,6 @@ impl<'a> Walker<'a> {
         // carry the rest (each closed by a NIL message).
         self.read_ohdr_v1_messages(addr + 16, area, out)
     }
-    }
 
     /// The message list both v1 header shapes share: 8-byte headers,
     /// 8-padded bodies, until the block ends or a NIL (type 0) message
