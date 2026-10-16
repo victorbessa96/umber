@@ -51,6 +51,7 @@ profiling = { workspace = true }
 # layouts, g5-workspace-persist).
 serde = { workspace = true }
 
+serde_json = { workspace = true }
 [features]
 # Perf instrumentation backend (tracy). Off by default: with the feature
 # off, every profiling::span! in the workspace compiles to nothing.
@@ -75,7 +76,6 @@ stylus = { workspace = true, features = ["xi2"] }
 umber-paint = { workspace = true, features = ["test-hooks"] }
 pollster = { workspace = true }
 wgpu = { workspace = true }
-serde_json = { workspace = true }
 # The offscreen UI test harness (queue row 15, absorbed from photocraft):
 # kittest drives panels headless (widget-tree queries) and, with the
 # snapshot + wgpu features, renders PNGs compared against committed
