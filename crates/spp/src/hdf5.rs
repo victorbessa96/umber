@@ -1670,7 +1670,7 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
             let dims_end = dims_off
                 .checked_add(rank * 4)
                 .ok_or_else(|| SppError::Corrupt("chunk dims overflow".into()))?;
-            if payload.len() < dims_end + 4 {
+            if payload.len() < dims_end {
                 return Err(SppError::Corrupt("chunked layout truncated".into()));
             }
             let btree_stored = uint_le(payload, 3, off)?;
@@ -1680,10 +1680,18 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
             for i in 0..rank {
                 chunk_dims.push(uint_le(payload, dims_off + 4 * i, 4)?);
             }
-            let elem = uint_le(payload, dims_end, 4)?;
-            if elem == 0 || elem > 64 {
-                return Err(SppError::Corrupt(format!("chunk element size {elem}")));
-            }
+            // v3+ carries the chunk element size after the dims; v1/2
+            // do not (elements are the datatype's size - one element
+            // per cell for the corpus's u8 datasets).
+            let elem: usize = if payload.len() >= dims_end + 4 {
+                let elem = uint_le(payload, dims_end, 4)?;
+                if elem == 0 || elem > 64 {
+                    return Err(SppError::Corrupt(format!("chunk element size {elem}")));
+                }
+                elem as usize
+            } else {
+                1
+            };
             Ok(Layout::Chunked(Chunked {
                 rank,
                 btree,
