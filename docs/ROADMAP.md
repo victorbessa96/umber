@@ -200,6 +200,34 @@ the owner's go-ahead to file.
 | wave-live-mesh-edit | re-topo / live mesh reload | today a mesh reload resets the session; a UV-stable reload (matching by UV islands) keeps paint across topology edits — the deepest engineering row here |
 | wave-community-templates | the .umber template library | ship 10 curated material templates (weathered steel, leather, sci-fi panel — built with the own engine) as first-class File > New options; the fastest way to show what the tool does
 
+## Wave 10 — the SPP-parity census kills (2026-10-16; post-0.1.0 line)
+
+From the full-spectrum parity census
+(`docs/research/spp-parity-census-2026-10-16.md`, every gap grepped
+against the tree) and the .spp import audit
+(`docs/research/spp-import-audit-2026-10-16.md`). Slotted AFTER the
+0.1.0 gates by ruling (the plan of record keeps priority); Tier 2/3
+rows live in the census doc until their wave is cut.
+
+| Kill | Closes | Notes |
+|---|---|---|
+| wave-spp-chunk-index | every chunked .spp dataset decoding, not just chunk 0 | ✓ LANDED 2026-10-16 (the import audit's own fix): the b-tree keys chunks by ELEMENT OFFSET, the odometer counted indices — every real file imported only its first 64 KiB. Fix + regression + the corpus content gate (nonzero floors, material names, no truncation notes); battery GREEN |
+| wave-layer-flatten | R-B1: group → baked fill layer per channel, optional smart-material save | P0, small: the pool owns per-layer planes; the compositor bakes the prefix |
+| wave-assets-panel | R-C1: the Assets window — libraries (brushes/smart materials/masks/filters/meshes/envs), filters, drag-to-stack, import dialog | the census's biggest UX gap; the brush shelf generalizes |
+| wave-stencil | R-A1 + g6-stencil-overlay: paint-through screen mask with transform chords | 8b/6c row, now census-verified as absent |
+| wave-projection-fill | R-A2: screen-space projection fill (pwys-buffer ride) | pairs with stencil; the decal workflow |
+| wave-filled-path | R-A3: filled path tool | stroke-class reuse over the path engine |
+| wave-geometry-masks | R-B2: per-mesh/per-UDIM-tile include/exclude on layers/effects | rides UDIM + the paint gate |
+| wave-material-picker | R-A10: pick all channels at cursor → fill layer | small; per-layer pixel readback |
+| wave-baker-sync | R-D1: linked bake groups + settings copy/paste across texture sets | small; bake-request fan-out |
+| wave-cli-new | R-G4: `umber-cli new <mesh> --maps <dir>` headless project creation | the app flow, headless |
+| wave-channel-manage | R-B4: channel add/remove/rename in Texture Set settings | the model routes user channels already |
+| wave-spp-precision | .spp audit R1: full-precision channel import (f16 → plane formats) | normals stop being 8-bit-clamped |
+| wave-spp-assbin-mesh | .spp audit R2: the scene's own mesh from paint/scene.assbin | an .spp drop loads with its geometry |
+| wave-spp-resources | .spp audit R3: Alg::ResourceImage decode → bitmap layers | QDataStream reader generalizes from the cache |
+| wave-spp-hbo-stack | .spp audit R4: the HBO layer-stack schema → Umber layers (the flagship; staged a-d with the fidelity report) | the v1 flattened import stays the fallback, never silent partial |
+
+
 ## Wave 7 — the moonshots (P2, 2+ years, from [04])
 
 | Kill | Closes |

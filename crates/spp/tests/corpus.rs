@@ -195,6 +195,15 @@ mod tests {
             );
             let mut base_colours = 0;
             for set in &project.texture_sets {
+                // Painter material names resolve from the scene dump; a
+                // `cache-<id>` fallback here means the assbin chunks did
+                // not decode (the 2026-10-16 audit's second symptom).
+                assert!(
+                    !set.name.starts_with("cache-"),
+                    "{}: set {} kept the cache-<id> fallback (scene chunks undecoded)",
+                    entry.file,
+                    set.name
+                );
                 for ch in &set.channels {
                     assert_eq!(
                         ch.pixels.len(),
@@ -205,6 +214,34 @@ mod tests {
                         ch.name
                     );
                     base_colours += usize::from(ch.name == "baseColor");
+                    // The 2026-10-16 import audit: the chunk-index lookup
+                    // bug zero-filled every chunk past the first while this
+                    // gate stayed green (zero-fill satisfies every length
+                    // assertion). Measured margins: the bug landed every
+                    // channel at 1-6% nonzero; real content runs 39%
+                    // (a legitimately mostly-black emissive) to 100%.
+                    // Height (flat 128) is nonzero everywhere.
+                    let texels = ch.width as usize * ch.height as usize;
+                    let nonzero = ch
+                        .pixels
+                        .chunks_exact(usize::from(ch.channels))
+                        .filter(|t| t.iter().any(|&b| b != 0))
+                        .count();
+                    assert!(
+                        nonzero * 10 > texels,
+                        "{}: {} / {} decoded only {nonzero} of {texels} texels nonzero — chunk assembly dropped content",
+                        entry.file,
+                        set.name,
+                        ch.name
+                    );
+                    assert!(
+                        !ch.notes.iter().any(|n| n.contains("ends early")),
+                        "{}: {} / {} decoded a truncated LZ4 block: {:?}",
+                        entry.file,
+                        set.name,
+                        ch.name,
+                        ch.notes
+                    );
                     if ch.name == "height" {
                         // Signed height, ±1 → 0..255 around Umber's flat
                         // 128. The median depends on the sculpt (one corpus
@@ -227,6 +264,18 @@ mod tests {
                 }
             }
             assert!(base_colours > 0, "{}: no baseColor channel", entry.file);
+            // The 2026-10-16 import audit: a truncated LZ4 decode was the
+            // signature of the chunk-index lookup bug (94-98% of every
+            // channel zero-filled while the corpus gate stayed green,
+            // because zero-fill satisfies every length assertion). No
+            // real corpus channel may carry that note anymore.
+            for note in &project.notes {
+                assert!(
+                    !note.contains("ends early"),
+                    "{}: a channel decoded a truncated LZ4 block: {note}",
+                    entry.file
+                );
+            }
             eprintln!(
                 "corpus: {} -> {} set(s): {}",
                 entry.file,

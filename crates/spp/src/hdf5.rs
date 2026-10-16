@@ -1150,7 +1150,25 @@ impl<'a> Walker<'a> {
                 &chunked.chunk_dims,
                 chunked.elem,
             )?;
-            let decoded = match index.get(&coords) {
+            // The b-tree keys a chunk by its start offset IN ELEMENTS
+            // (chunk 3 of a 65536-element grid keys 196608 — measured
+            // on the corpus), while the odometer below counts chunk
+            // INDICES. Translate before the lookup: the direct
+            // `index.get(&coords)` matched only chunk 0 (0 == 0) and
+            // zero-filled every later chunk, so each chunked Painter
+            // dataset imported exactly its first chunk (the 2026-10-16
+            // import audit; see the kill report).
+            let key: Vec<u64> = coords
+                .iter()
+                .zip(chunked.chunk_dims.iter())
+                .map(|(&c, &d)| {
+                    c.checked_mul(d).ok_or_else(|| {
+                        let bad = path.to_string();
+                        SppError::Corrupt(format!("{bad}: chunk offset overflows"))
+                    })
+                })
+                .collect::<Result<Vec<u64>, SppError>>()?;
+            let decoded = match index.get(&key) {
                 None => vec![0u8; expected],
                 Some((mask, addr, stored_size)) => {
                     let stored = bytes_at(self.ctx.data, *addr, *stored_size)?.to_vec();

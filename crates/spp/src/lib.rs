@@ -332,7 +332,10 @@ mod tests {
                 }
                 let stored = sb::deflate_bytes(&sb::shuffle_bytes(&raw, 4));
                 let at = b.bytes(&stored);
-                chunks.push((0u32, stored.len() as u64, vec![cr, cc], at));
+                // Chunk keys are start offsets IN ELEMENTS (the corpus
+                // pins it; see decode_chunked): chunk (1,1) of a [2,2]
+                // grid over a [4,4] dataset keys (2,2), not (1,1).
+                chunks.push((0u32, stored.len() as u64, vec![cr * 2, cc * 2], at));
             }
         }
         let btree = b.btree_chunk_leaf(2, &chunks);
@@ -685,6 +688,50 @@ mod tests {
         let project = open(&path).expect("mask file must open");
         let channel = &project.texture_sets[0].channels[0];
         assert_eq!(channel.pixels, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn every_chunk_of_a_multichunk_dataset_decodes() {
+        // The 2026-10-16 import audit: b-tree keys are start offsets
+        // IN ELEMENTS, but the decode odometer counts chunk indices.
+        // The old direct lookup matched only chunk 0 (0 == 0) and
+        // zero-filled every later chunk — on the real corpus every
+        // chunked Painter dataset (every texture-cache channel, the
+        // scene dump) imported exactly its first 64 KiB. This grid
+        // fails on the old code and pins the fix.
+        let mut b = sb::B::new();
+        let (sb_base, root_patch) = b.superblock_v2_slot();
+        // 1-D, 6 elements, 2-element chunks: three chunks, distinct
+        // bytes in each, keyed by element offset (0, 2, 4).
+        let mut chunks = Vec::new();
+        for (i, bytes) in [[10u8, 11], [20, 21], [30, 31]].iter().enumerate() {
+            let at = b.bytes(bytes);
+            chunks.push((0u32, 2u64, vec![(i * 2) as u64], at));
+        }
+        let btree = b.btree_chunk_leaf(1, &chunks);
+        let dataset = b.ohdr_v1(&[
+            (sb::M_DATASPACE, sb::dataspace_v1(1, &[6], None)),
+            (sb::M_DATATYPE, sb::dtype_u8()),
+            (sb::M_LAYOUT, sb::layout_chunked(1, btree, &[2], 1)),
+        ]);
+        let root = b.ohdr_v2(&[
+            (sb::M_LINK_INFO as u8, sb::link_info(None)),
+            (sb::M_LINK as u8, sb::link_hard("ramp", dataset)),
+        ]);
+        b.patch_u64(root_patch, root);
+        b.finish(sb_base + 28);
+        let path = sb::write_temp("multichunk", &b.buf);
+        let bytes = std::fs::read(&path).unwrap();
+        let tree = hdf5::parse(&bytes).expect("multichunk file must parse");
+        let ds = tree
+            .datasets
+            .iter()
+            .find(|d| d.path == "/ramp")
+            .expect("ramp dataset decoded");
+        // All three chunks: the old index-lookup zero-filled chunks 1
+        // and 2 (keys 2 and 4 never matched indices 1 and 2).
+        assert_eq!(ds.bytes, vec![10, 11, 20, 21, 30, 31]);
+        assert_eq!(ds.shape, vec![6]);
     }
 
     #[test]
