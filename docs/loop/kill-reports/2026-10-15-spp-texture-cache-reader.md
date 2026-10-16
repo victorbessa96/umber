@@ -117,7 +117,15 @@ Painter's dump is NOT stock Assimp assbin. The banner and version fields
 match, but there is no `compressed` field, no chunk magics, and no scene
 header: the data at offset 512 opens straight into the root node
 (`8, "RootNode"`, identity matrix). Parsing it is its own reverse-
-engineering job, so it was stopped there.
+engineering job, so it was stopped there. A second try, scanning for
+plain float UV runs (8- and 12-byte records in [0,1]), found none longer
+than 8 in Bessa Synth's 7.6 MB scene: the mesh data is packed or
+compressed. That track is closed. The host check below is the way.
+
+Side finding: `resources/*.image` (here a 2048×1024 RGBA16F environment)
+use the same QDataStream + LZ4 framing as the cache, plus a `pitch` and
+`dataSizeLZ4` key. The other resources are `jp2` (JPEG 2000), which this
+reader does not decode. Not needed for channel import.
 
 How to settle it, cheapest first:
 1. **On the host, with Bessa's source mesh** (the FBX the project was
