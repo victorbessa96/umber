@@ -1624,12 +1624,27 @@ fn parse_layout(ctx: Ctx<'_>, payload: &[u8]) -> Result<Layout, SppError> {
     if payload.len() < 2 {
         return Err(SppError::Corrupt("layout message truncated".into()));
     }
-    if payload[0] != 3 {
+    // Old-style files (the corpus's superblock is v0, every message
+    // v1) write layout v1/2: [ver, dim, class, 5 reserved, addr(off),
+    // dims (u32 each)] - no element-size field, and the class and
+    // dimensionality sit one byte apart from v3's order. Rebuilt in
+    // the v3 shape [3, class, dim, addr, dims] one parser serves both.
+    let payload_owned: Vec<u8> = if payload[0] == 1 || payload[0] == 2 {
+        if payload.len() < 8 {
+            return Err(SppError::Corrupt("v1 layout header truncated".into()));
+        }
+        let mut norm = vec![3u8, payload[2], payload[1]];
+        norm.extend_from_slice(&payload[8..]);
+        norm
+    } else if payload[0] == 3 {
+        payload.to_vec()
+    } else {
         return Err(SppError::Unsupported(format!(
             "layout version {}",
             payload[0]
         )));
-    }
+    };
+    let payload = payload_owned.as_slice();
     match payload[1] {
         LAYOUT_COMPACT => {
             if payload.len() < 4 {
