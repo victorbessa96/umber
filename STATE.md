@@ -11,50 +11,26 @@
 
 ## Status line
 
-Current phase: **W-GUI-2 PARKED ON BUILD-HOST OUTAGE (2026-10-17).**
-W-GUI-1 fully closed first: `5e0d89e` pushed, CI 38954115915 GREEN
-both platforms. Then the .spp import-audit fix `ee1a078` (chunk b-tree
-keys are ELEMENT OFFSETS — the odometer counted indices, so chunked
-datasets imported only chunk 0; fixed + content-pinned corpus gate),
-and the perf-baseline reseed `9acdc1c` (LOCAL, unpushed — see below).
+Current phase: **W-GUI-2 LANDED (2026-10-17, `d9fa931`+`edb5ffa`+
+`eecf4c6`; CI 39021293485 GREEN both platforms).** The 19-kill wave
+closed through a 10h build-host outage: the wave battery ran GREEN
+(1,589 tests, 8 crates, clippy clean) after 12 fix-forward rounds;
+every kill that landed host-free through the night (the four W-GUI-2
+claw kills + first-run + the a11y sweep + density + held-key +
+polish widgets + icons-a11y + spp f16/m3/dense + assetstore-gc +
+camera zoom/frame + subset-mesh + occluder-scope + psd-publish +
+the inpaint core + snapshot tests) and the cross-review's 11 defect
+fixes (1 BLOCKER) all shipped together, plus the perf-baseline
+reseed that closes the nightly's stale-baseline red.
 
-**The wave:** 18 kills landed through a ~9h SSH outage of the build
-host (centralhost, down since ~18:25 2026-10-16), every one
-statically verified (registry-resolved APIs, Python ground-truth
-ports, blast-radius sweeps, rustfmt) and parked UNCOMMITTED: the four
-W-GUI-2 claw kills (layer-gestures module + integration, overlays
-popover, tab-overflow, context-rail widget), first-run, the
-accesskit sweep (umber-gui half), density-scale (data half),
-held-key-tools (data half), polish widgets (TypeAhead +
-dialog_buttons), icons-a11y, spp-f16-reader (R1 read half),
-assetstore-gc, camera zoom-toward + frame, subset-mesh,
-occluder-scope, psd-publish, plus the cross-review's 11 defect fixes
-(1 BLOCKER: Quick Setup would have re-opened every launch) — the
-review ran BEFORE any battery, per the outage protocol.
-
-**Host diagnosis (03:40):** the box's NIC answers ARP (power + link
-present) but ICMP dies and sshd refuses — it is OS-wedged and likely
-needs a PHYSICAL POWER-CYCLE (Bessa's hands; details in queue.md's
-"Host diagnosis" section). **The recovery:** `bash scripts/recovery-close.sh` — the executable
-runbook (host probe → manifest preconditions → rsync with tip
-assertion → wave battery umber-app + umber-gui + spp + umber-core →
-confirm-green → commit-by-manifest-path → 9-lock release → ONE push
-→ ci-watch). It fires the moment the host answers; the full state also
-lives in `docs/loop/queue.md` (wave table + runbook) and
-`.dragon/wgui2-commit-manifest.txt` (durable manifest).
-
-**Why the perf-nightly is red (do not re-triage):** run 38957356307
-compared the W-GUI-1 head against origin's stale GL-seed baseline;
-the reseed that closes it (`9acdc1c`) is LOCAL and rides the wave
-push. Every nightly until then reads red.
-
-**After the close-out:** W-GUI-3 = the six lock-queued shell halves
-(ContextRail dispatch, a11y umber-app half, density Preferences row +
-HitZone, held-key poll, TypeAhead/dialog consumers, psd publish
-binding) + the per-set masked bakes host-gated steps (the 148-site
-field pass, then the primitives already landed: subset-mesh,
-occluder-scope). Then docs tick (gui-plan rows, CHANGELOG) riding the
-NEXT wave's push.
+**Next (W-GUI-3):** the six lock-released shell halves (ContextRail
+dispatch, a11y umber-app half, density Preferences row + HitZone,
+held-key poll, TypeAhead/dialog consumers, PSD publish binding), the
+per-set masked-bakes host steps (the 148-site field pass, then the
+landed subset-mesh/occluder-scope consumers), the FalloffCurve
+custom-curve design (GPU-stable-id question first), and the Curve
+editors' consumers. Docs tick for W-GUI-2 is written, rides W-GUI-3's
+push.
 
 ## The core-loop queue (the ONLY active hunt)
 

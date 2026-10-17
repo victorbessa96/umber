@@ -236,6 +236,17 @@ watcher's firing session, the morning session, or Bessa's):
 command. The manual sequence below is the documentation of what it
 does.
 
+## W-GUI-2 CLOSED (2026-10-17 09:5x)
+
+Host returned 04:21 (Bessa power-cycled; the ARP diagnosis was
+right). The recovery: 12 battery rounds of fix-forward → **BATTERY
+GREEN: 1,589 tests, 8 crates, all clippy** → committed `d9fa931`
+(the 19-kill wave + cross-review fixes + the baseline reseed) →
+pushed with the fix-forward tail `edb5ffa` and the CI-catch `eecf4c6`
+(scorecard + fmt wrap) → **CI 39021293485 GREEN both platforms**.
+All 11 wave locks released. The host's installed binary refreshed
+(`~/.local/bin/umber`).
+
 ## Host diagnosis (2026-10-17 03:40 — for Bessa's eyes)
 
 The ~9h outage is NOT the LAN and NOT a routing issue:

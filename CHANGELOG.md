@@ -4,6 +4,41 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## W-GUI-2 — the outage wave (2026-10-17, d9fa931..eecf4c6)
+
+Nineteen kills landed through a 10-hour build-host outage, closed by
+one green battery (1,589 tests, 8 crates) and a green CI on both
+platforms:
+
+- **Layer gestures** (module + shell integration): mask thumbnails'
+  Alt+click solo / Shift+click toggle, Ctrl+D duplicate, Ctrl+G
+  group, multi-select, drag-reorder with a drop bar, ✕-with-confirm;
+  the deselect-sticks selection contract.
+- **Overlays popover**, **tab-overflow dock wiring**, the
+  **Properties context rail** widget, **first-run Quick Setup**
+  (re-openable from Help), the **accesskit sweep** (every
+  painter-drawn umber-gui widget now reports role + label), **UI
+  scale Auto mode + tablet splitter hit-zone**, **held-key tools**
+  (the TempTools engine half), **dropdown type-ahead** +
+  **platform-ordered dialog buttons**, **icon-button a11y**.
+- **spp**: f16 channel reads (R1 read half), the m3_x64_128
+  verification (MurmurHash3 x64 128, report-only mismatch), dense
+  groups now report their heap/b-tree addresses + signatures (R7
+  report-only).
+- **umber-core**: the AssetStore GC (report-only default, prune
+  opt-in; sidecars untouched). **umber-gpu**: zoom-toward-cursor +
+  F-frame. **umber-mesh**: the triangle-subset primitive.
+  **umber-bake**: the OccluderScope enum. **umber-app**: PSD
+  publish's linearize rule; the composite snapshot's own contract
+  tests. **umber-brush**: the inpaint core (patch-match, boundary-
+  ring score, deterministic).
+- The cross-review's 11 defect fixes — including the BLOCKER where
+  Quick Setup would have re-opened on every launch — all before any
+  battery ran.
+- Tooling: `recovery-close.sh` (the executable outage runbook), the
+  brief-template verification ladder, CLAUDE.md rule 13, the
+  manifest's durable home under `.dragon/`.
+
 ## [Unreleased]
 
 ### W-GUI-1: four GUI-plan kills land in one wave (2026-10-16, `5e0d89e`)
