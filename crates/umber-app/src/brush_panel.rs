@@ -78,6 +78,7 @@
 use std::path::PathBuf;
 
 use crate::i18n::{tr, tr_args};
+use fluent::FluentValue;
 use umber_gui::widgets::ParamGroupUi;
 use umber_gui::{ParamGroup, ValueField};
 
