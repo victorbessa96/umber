@@ -474,10 +474,15 @@ pub fn link_external(name: &str) -> Vec<u8> {
     out
 }
 
-/// Link-info payload: compact (heap undefined) or dense (heap defined).
+/// Link-info payload (the SPEC's v1 shape, matching
+/// [`crate::hdf5`]'s flag-gated reader — fixed together 2026-10-17
+/// after R7's parse made the layout load-bearing): flags 0x01
+/// (creation-index field present) + 0x02 (name b-tree present); then
+/// the u32 index, the heap address, the name-b-tree address.
+/// Compact = the heap undefined.
 pub fn link_info(heap_addr: Option<u64>) -> Vec<u8> {
-    let mut out = vec![0, 0];
-    out.extend_from_slice(&[0; 8]);
+    let mut out = vec![0, 0x03];
+    out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&heap_addr.unwrap_or(u64::MAX).to_le_bytes());
     out.extend_from_slice(&u64::MAX.to_le_bytes());
     out
@@ -503,6 +508,29 @@ pub fn attr_msg(name: &str) -> Vec<u8> {
         out.push(0);
     }
     out.extend_from_slice(&[0xAA, 0xBB]); // opaque datatype/dataspace/data
+    out
+}
+
+/// Attribute message carrying a full `m3_x64_128` VALUE (R6: the
+/// reader extracts 16 bytes at the v1-layout offset — name (padded),
+/// datatype message (padded), dataspace message (padded), then the
+/// value). The dtype/dataspace size fields are 16 so the reader's
+/// offset math finds the value where this writer puts it.
+pub fn attr_msg_m3(value: [u8; 16]) -> Vec<u8> {
+    let name = b"m3_x64_128";
+    let mut out = vec![1, 0];
+    out.extend_from_slice(&((name.len() + 1) as u16).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes()); // datatype message size
+    out.extend_from_slice(&16u16.to_le_bytes()); // dataspace message size
+    out.extend_from_slice(name);
+    out.push(0);
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    // 16 bytes of datatype message, 16 of dataspace, then the value.
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&value);
     out
 }
 

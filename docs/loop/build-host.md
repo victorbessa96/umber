@@ -4,6 +4,42 @@ Umber's every cargo command runs here (Bessa, 2026-10-15: "use cargo and
 tests and builds on the remote machine"). When it is down, nothing builds
 and kills park uncommitted. This page is the check-and-recover list.
 
+## The 2026-10-16 outage — root cause: hardware, not software
+
+Forensics from the dead boot's journal (`journalctl -b -1`), run
+2026-10-17 ~05:30 after the box answered again:
+
+- **10:15:40** — the kernel logged a machine check:
+  `[Hardware Error]: System Fatal error.` CPU:1 (19:21:0),
+  MC14_STATUS `[Over|UE|MiscV|AddrV|PCC|SyndV|UECC|Deferred|-|Scrub]`,
+  bank 14 (reserved), cache level RESV, tx: INSN. **UECC = an
+  uncorrectable ECC error**; `Deferred` marks the scrub pending.
+- **18:32:16** — the last journal line of that boot. After it: no
+  shutdown record, no panic, no OOM, no thermal trip, nothing. The box
+  froze silently mid-flight, ~8h16m after the MCE.
+- The freeze signature matches the MCE class: NIC answering ARP while
+  ICMP and sshd die = a wedged kernel, not a lost LAN.
+- `last -x` shows a **Sep-30 "crash"** marker too — this box has now
+  hard-frozen twice in ~2.5 weeks.
+- The kernel cmdline runs `nowatchdog` — a hard hang can never
+  self-recover; only a physical power-cycle brings it back.
+
+**What this means:** the 9-hour outage was a hardware fault (likely
+RAM or IMC — the bank-14/UECC signature), not a software wedge. The
+2026-10-15 outage (see below) may share the cause.
+
+**Recommended (for Bessa, next physical access):**
+
+1. `memtest86+` a full pass (or several) — UECC points at RAM first.
+2. If the board supports it, install `rasdaemon` (absent on the box
+   today) + `ras-mc-ctl --summary` for accumulated error history.
+3. Watch for recurrence: any new `Hardware Error` line in
+   `journalctl -k` = the same fault class coming back. One MCE +
+   one freeze is a warning; two is a pattern.
+4. Kernel cmdline `nowatchdog`: consider dropping it so a hang at
+   least panics + reboots instead of sitting dead (it was added for
+   a reason — check what reason before removing).
+
 ## The 2026-10-15 outage
 
 - **~18:43 -03:** mid-battery, SSH refused (port 22 closed) while the
@@ -32,6 +68,9 @@ What the patterns mean:
   `--test-threads`, or add swap.
 - thermal / `critical temperature`: sustained all-core builds. Fix:
   clean the cooling; cap the build parallelism (`CARGO_BUILD_JOBS`).
+- **`[Hardware Error]` / UECC / Machine check**: hardware fault — the
+  2026-10-16 root cause (section above). Memtest next physical
+  access; treat any recurrence as the same pattern.
 - Nothing logged, a hard cut: power. Fix below.
 
 ## Auto power-on (approved by Bessa 2026-10-15)

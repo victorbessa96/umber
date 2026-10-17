@@ -422,21 +422,47 @@ pub fn posix_to_tag(raw: &str) -> Option<String> {
 #[cfg(test)]
 pub fn scan_tr_keys(source: &str) -> Vec<String> {
     let mut keys = Vec::new();
-    for call in ["tr(\"", "tr_args(\""] {
+    // Two scan shapes, both anchored on the call head (the two
+    // tr-functions, named by the loop below): (a) the exact literal
+    // single-line call form, and (b) the line-broken form — the head,
+    // then ONLY whitespace up to the opening quote (rustfmt breaks
+    // long argument lists after the open paren). Anything else
+    // between the head and a quote is NOT a key call — the scan must
+    // not swallow code. (The call heads are spelled by the loop so
+    // this doc never quotes them literally — the scanner scans this
+    // file's own text in the completeness test.)
+    let scan = |head: &str, from: usize, out: &mut Vec<String>| -> Option<usize> {
+        let pos = source[from..].find(head)?;
+        let start = from + pos;
+        let after = start + head.len();
+        // The call name must not be the tail of a longer identifier
+        // (`attr(` is not `tr(`).
+        let preceded_by_ident = source[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if preceded_by_ident {
+            return Some(after);
+        }
+        let quote = source[after..].find('"')?;
+        let between = &source[after..after + quote];
+        if !between.chars().all(char::is_whitespace) {
+            return Some(after);
+        }
+        let key_at = after + quote + 1;
+        let end = source[key_at..].find('"')?;
+        out.push(source[key_at..key_at + end].to_owned());
+        Some(key_at + end)
+    };
+    // The heads, assembled so THIS file's own source never contains
+    // the literal call shapes (the completeness test scans i18n.rs
+    // itself; a quoted head here would read as a key call).
+    let tr_head = String::from("tr") + "(";
+    let tr_args_head = String::from("tr_args") + "(";
+    for head in [tr_head.as_str(), tr_args_head.as_str()] {
         let mut from = 0;
-        while let Some(pos) = source[from..].find(call) {
-            let start = from + pos;
-            from = start + call.len();
-            let preceded_by_ident = source[..start]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-            if preceded_by_ident {
-                continue;
-            }
-            if let Some(len) = source[from..].find('"') {
-                keys.push(source[from..from + len].to_owned());
-            }
+        while let Some(next) = scan(head, from, &mut keys) {
+            from = next;
         }
     }
     keys

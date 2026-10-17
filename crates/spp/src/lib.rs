@@ -354,7 +354,13 @@ mod tests {
                     ],
                 ),
             ),
-            (sb::M_ATTRIBUTE, sb::attr_msg("m3_x64_128")),
+            (
+                sb::M_ATTRIBUTE,
+                sb::attr_msg_m3(crate::hdf5::murmur3_x64_128(
+                    &heights.map(|v| v.to_le_bytes()).concat(),
+                    0xF13A_0239,
+                )),
+            ),
             (sb::M_ATTRIBUTE, sb::attr_msg("units")),
         ]);
         let mask_raw: Vec<u8> = [0x1234u16, 0xABCD, 0x00FF, 0xFF00]
@@ -490,7 +496,7 @@ mod tests {
             .clone();
         assert_eq!(
             detail,
-            "f32 [4, 4] chunked chunks=[2, 2] filters=shuffle+deflate+fletcher32 attrs=2 m3=yes"
+            "f32 [4, 4] chunked chunks=[2, 2] filters=shuffle+deflate+fletcher32 attrs=2 m3=verified"
         );
         let mask = &set.channels[1];
         assert_eq!(mask.pixels, vec![18, 171, 0, 255]);
