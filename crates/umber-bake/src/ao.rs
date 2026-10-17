@@ -779,6 +779,13 @@ fn bake_ao_inner_with_occluder(
     if params.rays == 0 {
         return Err(AoBakeError::InvalidRayCount);
     }
+    // An empty occluder is refused, not silently fully-lit: the bind
+    // group needs a non-empty triangle buffer (wgpu rejects zero-size
+    // storage bindings), and "nothing to hit" is better said by the
+    // caller narrowing the scope than by a map that looks baked.
+    if occluder_mesh.triangle_count() == 0 {
+        return Err(AoBakeError::EmptyMesh);
+    }
 
     let position_map = bake_position_and_normal(device, queue, raster_mesh, width, height)?;
 
@@ -1417,11 +1424,13 @@ mod tests {
                 eprintln!("skipping: no wgpu adapter available");
                 return;
             };
-            let params = AoBakeParams {
-                rays: 16,
-                max_distance: 15.0,
-                ..AoBakeParams::default()
-            };
+            let plane = PlaneDesc::new(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+                [60.0, 60.0],
+            );
+            let params = AoBakeParams::new(15.0, 0.01, plane);
             let mesh = ground_quad();
             let plain =
                 bake_ao_mesh(&device, &queue, &mesh, 64, 64, &params).expect("single-mesh bake");
@@ -1430,22 +1439,25 @@ mod tests {
             assert_eq!(plain, split);
         }
 
-        /// The split narrows for real: the same raster ground, but an
-        /// EMPTY occluder (no triangles) — the rays have nothing to
-        /// hit, so the map is fully lit (255) everywhere the raster
-        /// quad covers. `AoBakeError::EmptyMesh` never fires for the
-        /// occluder side: the raster mesh is what validates.
+        /// The split refuses an empty occluder: the bind group needs a
+        /// non-empty triangle buffer (wgpu's minimum-binding-size
+        /// validation rejects zero-size storage — this test was the
+        /// fully-lit variant until the real GPU caught the panic), and
+        /// a caller who wants "nothing occludes" narrows the scope
+        /// instead.
         #[test]
-        fn with_occluder_empty_occluder_is_fully_lit() {
+        fn with_occluder_empty_occluder_is_refused() {
             let Some((device, queue)) = try_request_device() else {
                 eprintln!("skipping: no wgpu adapter available");
                 return;
             };
-            let params = AoBakeParams {
-                rays: 16,
-                max_distance: 15.0,
-                ..AoBakeParams::default()
-            };
+            let plane = PlaneDesc::new(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+                [60.0, 60.0],
+            );
+            let params = AoBakeParams::new(15.0, 0.01, plane);
             let ground = ground_quad();
             let empty = MeshData {
                 positions: Vec::new(),
@@ -1455,13 +1467,11 @@ mod tests {
                 material_names: Vec::new(),
                 triangle_materials: Vec::new(),
             };
-            let baked =
-                bake_ao_mesh_with_occluder(&device, &queue, &ground, &empty, 64, 64, &params)
-                    .expect("empty-occluder bake");
+            let err = bake_ao_mesh_with_occluder(&device, &queue, &ground, &empty, 64, 64, &params)
+                .expect_err("empty occluder must be refused");
             assert!(
-                baked.iter().all(|&b| b == 255),
-                "empty occluder = fully lit, got {:?}",
-                baked.iter().copied().take(8).collect::<Vec<_>>()
+                matches!(err, AoBakeError::EmptyMesh),
+                "expected EmptyMesh, got {err:?}"
             );
         }
 

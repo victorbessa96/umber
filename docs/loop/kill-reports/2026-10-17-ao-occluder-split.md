@@ -20,17 +20,24 @@
 - `bake_thickness_mesh_with_occluder` (`thickness.rs`): same split,
   same delegation shape.
 - lib.rs re-exports all three.
-- An empty occluder (no triangles) yields a fully-lit map — nothing
-  occludes; `EmptyMesh` validation stays on the raster side only.
+- An empty occluder (no triangles) is REFUSED with
+  `AoBakeError::EmptyMesh`: the real GPU (lavapipe) caught that a
+  zero-size triangle storage buffer panics in
+  `Device::create_bind_group` (minimum-binding-size validation), so
+  the fully-lit map this kill first promised was a contract the
+  hardware does not allow. A caller wanting "nothing occludes"
+  narrows the scope instead. Pinned by the flipped GPU test.
 
 ## Tests (GPU, lavapipe)
 
 - `with_occluder_same_mesh_is_byte_identical`: the split entry passing
   one mesh twice == `bake_ao_mesh`'s bytes, end to end — the
   no-regression pin.
-- `with_occluder_empty_occluder_is_fully_lit`: same raster ground
-  quad, empty occluder — every covered texel reads 255, proving the
-  occluder buffer genuinely narrows the raycast.
+- `with_occluder_empty_occluder_is_refused`: same raster ground
+  quad, empty occluder — `EmptyMesh`, no GPU panic. (This test's
+  first draft asserted the fully-lit map and the real adapter caught
+  the zero-size-bind panic — the test earned its keep on its first
+  run.)
 
 ## Verification
 
@@ -39,6 +46,12 @@
   129 + app 787 + paint 170 — the app count includes the sibling's
   concurrent rail-row-labels landing (787 vs the 778 of my last
   battery; its files are outside my lock).
+- GPU-feature re-run (`--features gpu`, lavapipe): both split tests
+  pass on the real adapter. CI's clippy caught that the default
+  battery does not compile `mod gpu` — the E0599 (`AoBakeParams`
+  has no `Default`) was feature-gated code the plain battery never
+  saw. Named lesson: a kill whose tests live under
+  `#[cfg(feature)]` needs the feature's own battery leg.
 
 ## Deferred (named)
 
