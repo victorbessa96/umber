@@ -62,6 +62,38 @@
 //! its ray from the NDC near/far unprojections) therefore works unchanged:
 //! ortho rays come out parallel instead of fanning, and the y=0 plane
 //! intersection is the same arithmetic.
+//!
+//! # The Overlays button + popover (GUI plan g6-overlays-popover)
+//!
+//! docs/specs/gui-plan-2026-10-15.md row `g6-overlays-popover` (B:C3.1-
+//! C3.4, P:B10): one "Overlays" button at the viewport's top-right opens
+//! a popover over [`crate::display_panel::OverlaySettings`] (drawn by
+//! [`crate::display_panel::overlay_rows`]): wireframe + opacity, grid,
+//! UV seams, face orientation, the channel-name readout.
+//!
+//! - Wireframe / grid stay owned by the shell (`ViewToggles`, W / G, the
+//!   View menu): [`Viewport::set_show_wireframe`] / `set_show_grid` write
+//!   into the overlay struct, and a popover edit is reported back through
+//!   [`Viewport::take_overlay_edit`] for the shell to store — one source
+//!   of truth, the popover a second editor of it.
+//! - Wireframe opacity rides the wire pass's per-draw color
+//!   ([`wire_color_for`]); the default opacity is the old default color,
+//!   so the off-the-shelf frame is unchanged.
+//! - UV seams: [`uv_seam_segments`] (pure, cached per mesh load) turns
+//!   `umber_mesh::seam::build_seam_graph`'s cuts into 3D segments; they
+//!   draw as screen-space lines BEFORE the wireframe callback (so wire
+//!   edges win), skipped when both adjacent faces point away
+//!   ([`face_side`]). No depth test: a seam behind other front-facing
+//!   geometry still shows — a depth-tested seam pass in `umber-gpu` is
+//!   the named follow-up.
+//! - Face orientation: [`face_side`] is the decision; the flag
+//!   round-trips ([`Viewport::face_orientation`]) but the tint needs the
+//!   mesh pipeline to render back faces (it culls them), which is
+//!   renderer work outside this file — the row is disabled with a reason
+//!   until then (`display_panel::FACE_ORIENTATION_RENDERS`).
+//! - Channel readout: the soloed channel / mesh map's name
+//!   ([`readout_text`], the display-mode keys' own toast text) at the
+//!   viewport's top-left while a solo mode is active.
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 use umber_gpu::postfx::PostChain;
@@ -206,9 +238,16 @@ pub struct Viewport {
     /// The home card's click this frame (GUI plan `g5-home-screen`): set
     /// by [`Self::ui_with_home`] while no mesh is loaded, drained by the
     /// shell through [`Self::take_home_action`].
-    // `dead_code`: read only by `take_home_action` until main.rs wires it.
-    #[allow(dead_code)]
     home_action: Option<crate::empty_state::HomeCardAction>,
+    /// The Overlays popover's state (GUI plan `g6-overlays-popover`):
+    /// wireframe/grid mirrored from the shell, the rest owned here.
+    overlays: crate::display_panel::OverlaySettings,
+    /// A popover edit not yet taken by the shell
+    /// ([`Self::take_overlay_edit`]).
+    overlay_edited: bool,
+    /// The loaded mesh's UV-seam segments, built on the first frame the
+    /// seam overlay shows and dropped on every `load_mesh`.
+    seam_cache: Option<Vec<SeamSegment>>,
 }
 
 impl Viewport {
@@ -233,6 +272,7 @@ impl Viewport {
         }
         self.mesh_data = Some(mesh.clone());
         self.mesh = Some(buffers);
+        self.seam_cache = None;
         Ok(())
     }
 
@@ -251,12 +291,61 @@ impl Viewport {
     /// W). Synced from the app shell each frame before `ui`.
     pub fn set_show_wireframe(&mut self, on: bool) {
         self.show_wireframe = on;
+        self.overlays.wireframe = on;
     }
 
     /// Shows or hides the ground grid (View menu `Show Grid`, G).
     /// Synced from the app shell each frame before `ui`.
     pub fn set_show_grid(&mut self, on: bool) {
         self.show_grid = on;
+        self.overlays.grid = on;
+    }
+
+    /// The Overlays popover's current state (test-reached; the shell
+    /// consumes the edit through [`Self::take_overlay_edit`]).
+    #[allow(dead_code)]
+    pub fn overlays(&self) -> crate::display_panel::OverlaySettings {
+        self.overlays
+    }
+
+    /// Replaces the overlay state wholesale (a project/preference load,
+    /// or a test). Wireframe/grid follow it like their own setters.
+    /// (Test-reached; the shell consumes edits through
+    /// [`Self::take_overlay_edit`].)
+    #[allow(dead_code)]
+    pub fn set_overlays(&mut self, overlays: crate::display_panel::OverlaySettings) {
+        self.overlays = overlays;
+        self.overlays.wireframe_opacity = overlays.wireframe_opacity.clamp(0.0, 1.0);
+        self.show_wireframe = overlays.wireframe;
+        self.show_grid = overlays.grid;
+    }
+
+    /// The popover's edit since the last take, for the shell to store
+    /// its wireframe/grid back into `ViewToggles` (otherwise the shell's
+    /// next-frame sync would undo the popover's toggle). `None` when the
+    /// popover changed nothing.
+    // `dead_code`: the shell's sync calls this once main.rs wires the
+    // popover (named in the g6-overlays-popover kill report).
+    #[allow(dead_code)]
+    pub fn take_overlay_edit(&mut self) -> Option<crate::display_panel::OverlaySettings> {
+        std::mem::take(&mut self.overlay_edited).then_some(self.overlays)
+    }
+
+    /// Sets the face-orientation overlay flag (the popover's row; the
+    /// tint itself is renderer follow-up — see the module docs).
+    // `dead_code`: the shell's sync calls this once main.rs wires the
+    // popover (named in the g6-overlays-popover kill report).
+    #[allow(dead_code)]
+    pub fn set_face_orientation(&mut self, on: bool) {
+        self.overlays.face_orientation = on;
+    }
+
+    /// Whether the face-orientation overlay is requested.
+    // `dead_code`: the shell's sync calls this once main.rs wires the
+    // popover (named in the g6-overlays-popover kill report).
+    #[allow(dead_code)]
+    pub fn face_orientation(&self) -> bool {
+        self.overlays.face_orientation
     }
 
     /// Shows or hides the cage wireframe overlay (Bakes panel `Show
@@ -652,8 +741,25 @@ impl Viewport {
                 }
             };
             ui.painter().add(shape);
+            // UV seams (g6-overlays-popover): after the mesh, BEFORE the
+            // wireframe so wire edges draw over them. Off adds no shape.
+            if self.overlays.uv_seams {
+                if let Some(data) = self.mesh_data.as_ref() {
+                    let segments = self
+                        .seam_cache
+                        .get_or_insert_with(|| uv_seam_segments(data));
+                    paint_seams(
+                        &ui.painter().with_clip_rect(rect),
+                        rect,
+                        view_proj,
+                        &self.camera,
+                        segments,
+                    );
+                }
+            }
             if self.show_wireframe {
-                let wire = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::default());
+                let color = wire_color_for(self.overlays.wireframe_opacity);
+                let wire = gpu.wire_callback(&*mesh, uniform, color);
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, wire));
             }
             // Cage overlay (§6:59): after the wireframe so its edges win,
@@ -675,9 +781,67 @@ impl Viewport {
             );
         }
         self.paint_brush_cursor(ui, &response, rect, paint.as_deref());
+        self.paint_channel_readout(ui, rect);
+        self.overlays_header(ui, rect);
         // No strip-tool click this frame: the signature is Option so the
         // shell reads one click per primary press, `None` every other frame.
         None
+    }
+
+    /// The Overlays button at the viewport's top-right and its popover
+    /// (GUI plan `g6-overlays-popover`). Added after the viewport's own
+    /// response, so it takes its clicks first (the home card's rule).
+    fn overlays_header(&mut self, ui: &mut Ui, rect: egui::Rect) {
+        let size = egui::vec2(OVERLAYS_BUTTON_WIDTH, ui.spacing().interact_size.y);
+        let at = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.right() - OVERLAYS_MARGIN - size.x,
+                rect.top() + OVERLAYS_MARGIN,
+            ),
+            size,
+        );
+        // No mesh: the home card owns the viewport, overlays have nothing
+        // to draw on. Too small: no room for the header.
+        if self.mesh.is_none() || !rect.contains_rect(at) {
+            return;
+        }
+        let button = ui
+            .put(
+                at,
+                egui::Button::new(tr("overlays.button")).selected(self.overlays.any_on()),
+            )
+            .on_hover_text(tr("overlays.tooltip"));
+        let mut edited = false;
+        let overlays = &mut self.overlays;
+        egui::Popup::from_toggle_button_response(&button)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .align(egui::RectAlign::BOTTOM_END)
+            .show(|ui| {
+                edited = crate::display_panel::overlay_rows(ui, overlays);
+            });
+        if edited {
+            self.show_wireframe = self.overlays.wireframe;
+            self.show_grid = self.overlays.grid;
+            self.overlay_edited = true;
+        }
+    }
+
+    /// The soloed channel / mesh map's name at the viewport's top-left
+    /// ([`readout_text`]): nothing in the Lit / Unlit views or with the
+    /// readout off.
+    fn paint_channel_readout(&self, ui: &Ui, rect: egui::Rect) {
+        if self.mesh.is_none() {
+            return;
+        }
+        let Some(text) = readout_text(self.view_mode, self.overlays.channel_readout, tr) else {
+            return;
+        };
+        let painter = ui.painter().with_clip_rect(rect);
+        let galley = painter.layout_no_wrap(text, egui::FontId::proportional(13.0), Color32::WHITE);
+        let pos = rect.left_top() + egui::vec2(OVERLAYS_MARGIN, OVERLAYS_MARGIN);
+        let backing = egui::Rect::from_min_size(pos, galley.size()).expand(4.0);
+        painter.rect_filled(backing, 3.0, Color32::from_black_alpha(160));
+        painter.galley(pos, galley, Color32::WHITE);
     }
 
     /// The brush cursor (`crate::brush_cursor`): when the pointer is over
@@ -978,6 +1142,178 @@ impl Viewport {
                 self.camera.toggle_projection();
             }
         }
+    }
+}
+
+/// The Overlays button's width and its inset from the viewport corner.
+const OVERLAYS_BUTTON_WIDTH: f32 = 84.0;
+const OVERLAYS_MARGIN: f32 = 8.0;
+/// The seam overlay's line color: cyan, distinct from the 40%-white
+/// wireframe and the amber cage.
+const SEAM_COLOR: Color32 = Color32::from_rgb(40, 200, 255);
+const SEAM_WIDTH: f32 = 1.5;
+
+/// The wire pass's color at `opacity` (`0..=1`, clamped; NaN = the
+/// default): the default wire rgb with the alpha replaced, so the
+/// default opacity reproduces `WireColor::default()` exactly.
+fn wire_color_for(opacity: f32) -> umber_gpu::WireColor {
+    let mut color = umber_gpu::WireColor::default();
+    if opacity.is_finite() {
+        color.color[3] = opacity.clamp(0.0, 1.0);
+    }
+    color
+}
+
+/// Which side of a face the eye sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceSide {
+    /// The face's winding normal points at the eye.
+    Front,
+    /// The face points away (or is edge-on): a back face.
+    Back,
+}
+
+/// The face-orientation decision: `normal` is the face's CCW winding
+/// normal (the mesh pipeline's front-face convention), `to_eye` points
+/// from the face toward the eye (perspective) or against the view
+/// direction (orthographic). Edge-on (`dot == 0`) and degenerate inputs
+/// read as Back — the side that does not render under back-face culling.
+pub fn face_side(normal: glam::Vec3, to_eye: glam::Vec3) -> FaceSide {
+    if normal.dot(to_eye) > 0.0 {
+        FaceSide::Front
+    } else {
+        FaceSide::Back
+    }
+}
+
+/// One UV-seam edge for the overlay: the shared 3D edge's endpoints and
+/// the two adjacent faces' winding normals (for back-side culling).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeamSegment {
+    /// The edge's 3D endpoints.
+    pub ends: [glam::Vec3; 2],
+    /// The winding normals of the two triangles sharing the edge
+    /// (`Vec3::ZERO` for a degenerate one).
+    pub normals: [glam::Vec3; 2],
+}
+
+impl SeamSegment {
+    /// Whether the eye at `eye` (or, with `view_dir`, an orthographic
+    /// view along it) sees either adjacent face from the front.
+    fn visible(&self, eye: glam::Vec3, view_dir: Option<glam::Vec3>) -> bool {
+        let mid = (self.ends[0] + self.ends[1]) * 0.5;
+        let to_eye = view_dir.map_or(eye - mid, |d| -d);
+        self.normals
+            .iter()
+            .any(|n| face_side(*n, to_eye) == FaceSide::Front)
+    }
+}
+
+/// A triangle's CCW winding normal (unnormalized is fine for the sign
+/// test; `ZERO` when an index is out of range).
+fn tri_normal(mesh: &umber_mesh::MeshData, tri: usize) -> glam::Vec3 {
+    let corner = |k: usize| {
+        mesh.indices
+            .get(tri * 3 + k)
+            .and_then(|&i| mesh.positions.get(i as usize))
+            .map(|&p| glam::Vec3::from(p))
+    };
+    match (corner(0), corner(1), corner(2)) {
+        (Some(a), Some(b), Some(c)) => (b - a).cross(c - a),
+        _ => glam::Vec3::ZERO,
+    }
+}
+
+/// The mesh's UV-seam edges as 3D segments (pure; the seam overlay's
+/// source). Reuses `umber_mesh::seam::build_seam_graph` — the seam-aware
+/// stamping's graph, so the overlay shows exactly the cuts the paint
+/// engine mirrors across — and recovers each cut's endpoints from its
+/// first triangle: the graph keeps only the edge midpoint, computed as
+/// `(a + b) * 0.5` over the exact positions, so the same arithmetic on
+/// the triangle's own corners matches it bit for bit. Open mesh borders
+/// (edges with one triangle) are not seams and do not appear.
+pub fn uv_seam_segments(mesh: &umber_mesh::MeshData) -> Vec<SeamSegment> {
+    let graph = umber_mesh::seam::build_seam_graph(mesh);
+    let mut out = Vec::with_capacity(graph.edges.len());
+    for edge in &graph.edges {
+        let tri = edge.tri_a as usize;
+        let corners: Option<Vec<glam::Vec3>> = (0..3)
+            .map(|k| {
+                mesh.indices
+                    .get(tri * 3 + k)
+                    .and_then(|&i| mesh.positions.get(i as usize))
+                    .map(|&p| glam::Vec3::from(p))
+            })
+            .collect();
+        let Some(c) = corners else { continue };
+        let ends = [(0, 1), (1, 2), (2, 0)]
+            .into_iter()
+            .map(|(a, b)| [c[a], c[b]])
+            .find(|[a, b]| (*a + *b) * 0.5 == edge.mid_3d);
+        if let Some(ends) = ends {
+            out.push(SeamSegment {
+                ends,
+                normals: [
+                    tri_normal(mesh, edge.tri_a as usize),
+                    tri_normal(mesh, edge.tri_b as usize),
+                ],
+            });
+        }
+    }
+    out
+}
+
+/// World → screen through `view_proj` into `rect`; `None` behind the
+/// eye (`w <= 0`) or outside the depth range.
+fn project_to_screen(view_proj: glam::Mat4, rect: egui::Rect, p: glam::Vec3) -> Option<egui::Pos2> {
+    let clip = view_proj * p.extend(1.0);
+    if clip.w <= f32::EPSILON {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !(0.0..=1.0).contains(&ndc.z) {
+        return None;
+    }
+    Some(egui::pos2(
+        rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
+        rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
+    ))
+}
+
+/// Draws the visible seam segments as screen-space lines.
+fn paint_seams(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_proj: glam::Mat4,
+    camera: &OrbitCamera,
+    segments: &[SeamSegment],
+) {
+    let eye = camera.eye();
+    let view_dir = match camera.projection {
+        umber_gpu::camera::Projection::Perspective => None,
+        umber_gpu::camera::Projection::Orthographic => Some(camera.target - eye),
+    };
+    let stroke = egui::Stroke::new(SEAM_WIDTH, SEAM_COLOR);
+    for seg in segments.iter().filter(|s| s.visible(eye, view_dir)) {
+        if let (Some(a), Some(b)) = (
+            project_to_screen(view_proj, rect, seg.ends[0]),
+            project_to_screen(view_proj, rect, seg.ends[1]),
+        ) {
+            painter.line_segment([a, b], stroke);
+        }
+    }
+}
+
+/// The channel-name readout for `mode`: the display-mode keys' toast
+/// text (`crate::display_keys::mode_name`) while a channel or mesh map
+/// is soloed and the readout is on; `None` in Lit / Unlit (nothing is
+/// soloed — the material needs no label) or with the readout off.
+fn readout_text(mode: ViewMode, on: bool, tr: impl Fn(&str) -> String) -> Option<String> {
+    match mode {
+        ViewMode::Solo(_) | ViewMode::MeshMapPreview(_) if on => {
+            Some(crate::display_keys::mode_name(mode, tr))
+        }
+        _ => None,
     }
 }
 
@@ -1396,6 +1732,192 @@ mod tests {
             (ortho_uv[0] - perspective_uv[0]).abs() < 1e-5
                 && (ortho_uv[1] - perspective_uv[1]).abs() < 1e-5,
             "ortho {ortho_uv:?} must match perspective {perspective_uv:?}"
+        );
+    }
+
+    /// Two quads sharing the x = 0 edge, the right one on its own UV
+    /// island (a cut along x = 0), plus one island-internal diagonal per
+    /// quad: exactly one seam edge, from (0,-1,0) to (0,1,0).
+    fn two_island_strip() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            positions: vec![
+                // Left quad (island A): x in -1..0.
+                [-1.0, -1.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+                // Right quad (island B): x in 0..1, its x = 0 corners
+                // duplicated (same positions, different UVs).
+                [0.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs: vec![
+                [0.0, 0.0],
+                [0.4, 0.0],
+                [0.4, 1.0],
+                [0.0, 1.0],
+                [0.6, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.6, 1.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec![],
+        }
+    }
+
+    #[test]
+    fn seam_extraction_finds_exactly_the_uv_cut() {
+        let segs = uv_seam_segments(&two_island_strip());
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        let mut ends = segs[0].ends;
+        ends.sort_by(|a, b| a.y.total_cmp(&b.y));
+        assert_eq!(ends[0], glam::Vec3::new(0.0, -1.0, 0.0));
+        assert_eq!(ends[1], glam::Vec3::new(0.0, 1.0, 0.0));
+        // Both faces wind CCW toward +z.
+        for n in segs[0].normals {
+            assert!(n.z > 0.0 && n.x == 0.0 && n.y == 0.0, "{n:?}");
+        }
+        // A single-island mesh (the unit quad) has no seams — its
+        // diagonal is island-internal and its border is open, not cut.
+        assert!(uv_seam_segments(&quad()).is_empty());
+        // Continuous UVs across the shared edge: the cut disappears.
+        let mut welded = two_island_strip();
+        welded.uvs[4] = welded.uvs[1];
+        welded.uvs[7] = welded.uvs[2];
+        assert!(uv_seam_segments(&welded).is_empty());
+        // An empty mesh is empty, not a panic.
+        let empty = umber_mesh::MeshData {
+            positions: vec![],
+            normals: vec![],
+            uvs: vec![],
+            indices: vec![],
+            material_names: vec![],
+        };
+        assert!(uv_seam_segments(&empty).is_empty());
+    }
+
+    #[test]
+    fn face_side_decides_front_back_and_edge_on() {
+        let n = glam::Vec3::Z;
+        assert_eq!(
+            face_side(n, glam::Vec3::new(0.0, 0.0, 5.0)),
+            FaceSide::Front
+        );
+        assert_eq!(
+            face_side(n, glam::Vec3::new(0.3, 0.2, 1.0)),
+            FaceSide::Front
+        );
+        assert_eq!(
+            face_side(n, glam::Vec3::new(0.0, 0.0, -5.0)),
+            FaceSide::Back
+        );
+        // Edge-on and degenerate read as Back (what culling hides).
+        assert_eq!(face_side(n, glam::Vec3::X), FaceSide::Back);
+        assert_eq!(face_side(glam::Vec3::ZERO, glam::Vec3::Z), FaceSide::Back);
+    }
+
+    #[test]
+    fn seams_hide_when_both_faces_point_away() {
+        let seg = uv_seam_segments(&two_island_strip())[0];
+        // Eye on +z: the faces' fronts. Eye on -z: both backs.
+        assert!(seg.visible(glam::Vec3::new(0.0, 0.0, 5.0), None));
+        assert!(!seg.visible(glam::Vec3::new(0.0, 0.0, -5.0), None));
+        // Orthographic: the view direction decides, not the eye offset.
+        assert!(seg.visible(glam::Vec3::new(9.0, 0.0, -5.0), Some(-glam::Vec3::Z)));
+        assert!(!seg.visible(glam::Vec3::new(0.0, 0.0, 5.0), Some(glam::Vec3::Z)));
+        // One face flipped: the seam borders a front face from either
+        // side, so it shows both ways (any face, not all faces).
+        let mixed = SeamSegment {
+            normals: [glam::Vec3::Z, -glam::Vec3::Z],
+            ..seg
+        };
+        assert!(mixed.visible(glam::Vec3::new(0.0, 0.0, 5.0), None));
+        assert!(mixed.visible(glam::Vec3::new(0.0, 0.0, -5.0), None));
+    }
+
+    #[test]
+    fn seam_endpoints_project_into_the_rect() {
+        // Head-on at the strip: the cut (x = 0) is the vertical centre
+        // line of the 200-px rect; a point behind the eye projects to None.
+        let vp = head_on_viewport();
+        let view_proj = vp.camera.view_proj(1.0);
+        let top = project_to_screen(view_proj, rect200(), glam::Vec3::new(0.0, 1.0, 0.0))
+            .expect("in front of the eye");
+        let bottom = project_to_screen(view_proj, rect200(), glam::Vec3::new(0.0, -1.0, 0.0))
+            .expect("in front of the eye");
+        assert!((top.x - 100.0).abs() < 1e-3 && (bottom.x - 100.0).abs() < 1e-3);
+        assert!(top.y < 100.0 && bottom.y > 100.0, "{top:?} {bottom:?}");
+        assert_eq!(
+            project_to_screen(view_proj, rect200(), glam::Vec3::new(0.0, 0.0, 50.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn wire_opacity_keeps_the_default_color_at_the_default() {
+        use crate::display_panel::OverlaySettings;
+        let default = umber_gpu::WireColor::default().color;
+        assert_eq!(
+            wire_color_for(OverlaySettings::DEFAULT_WIRE_OPACITY).color,
+            default
+        );
+        let half = wire_color_for(0.5).color;
+        assert_eq!(&half[..3], &default[..3], "rgb untouched");
+        assert_eq!(half[3], 0.5);
+        assert_eq!(wire_color_for(7.0).color[3], 1.0);
+        assert_eq!(wire_color_for(-1.0).color[3], 0.0);
+        assert_eq!(wire_color_for(f32::NAN).color, default);
+    }
+
+    #[test]
+    fn overlay_state_round_trips_through_the_shell_setters() {
+        let mut vp = Viewport::default();
+        assert_eq!(
+            vp.overlays(),
+            crate::display_panel::OverlaySettings::default()
+        );
+        // The shell's W / G sync lands in the popover's struct.
+        vp.set_show_wireframe(true);
+        vp.set_show_grid(true);
+        assert!(vp.overlays().wireframe && vp.overlays().grid);
+        // Nothing was edited in the popover: nothing to take.
+        assert_eq!(vp.take_overlay_edit(), None);
+        // A popover edit is taken once.
+        vp.overlay_edited = true;
+        assert_eq!(vp.take_overlay_edit(), Some(vp.overlays()));
+        assert_eq!(vp.take_overlay_edit(), None);
+        // set_overlays drives the draw flags and clamps the opacity.
+        vp.set_overlays(crate::display_panel::OverlaySettings {
+            wireframe: false,
+            grid: false,
+            wireframe_opacity: 3.0,
+            ..crate::display_panel::OverlaySettings::default()
+        });
+        assert!(!vp.show_wireframe && !vp.show_grid);
+        assert_eq!(vp.overlays().wireframe_opacity, 1.0);
+        vp.set_face_orientation(true);
+        assert!(vp.face_orientation());
+    }
+
+    #[test]
+    fn readout_names_only_soloed_modes() {
+        let tr = |k: &str| format!("<{k}>");
+        assert_eq!(readout_text(ViewMode::Lit, true, tr), None);
+        assert_eq!(readout_text(ViewMode::Unlit, true, tr), None);
+        let solo = ViewMode::Solo(SoloChannel::Roughness);
+        assert_eq!(
+            readout_text(solo, true, tr).as_deref(),
+            Some("<viewkeys.toast-channel> <viewmode.roughness>")
+        );
+        assert_eq!(readout_text(solo, false, tr), None);
+        let map = ViewMode::MeshMapPreview(umber_mesh::MeshMapKind::Curvature);
+        assert_eq!(
+            readout_text(map, true, tr).as_deref(),
+            Some("<viewkeys.toast-map> curvature")
         );
     }
 

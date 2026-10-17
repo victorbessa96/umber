@@ -132,6 +132,25 @@ shell =
     .hero-hint = ou use Abrir malha… na barra de ferramentas ou no menu Arquivo
     .hero-formats = Suportados:
 
+## Configuração rápida do primeiro uso (plano de GUI g5-first-run)
+
+setup =
+    .title = Configuração rápida
+    .intro = Algumas escolhas antes da primeira pincelada. Todas ficam em Preferências depois.
+    .language = Idioma
+    .theme = Tema
+    .theme-follow-os = Seguir o sistema
+    .theme-light = Claro
+    .theme-dark = Escuro
+    .navigation = Navegação do mouse
+    .keymap = Mapa de teclas
+    .tablet = Mesa digitalizadora
+    .tablet-live = Caneta detectada — a pressão está ativa.
+    .tablet-pressure = Pressão:
+    .tablet-none = Nenhuma caneta detectada. Mouse e toque continuam pintando.
+    .finish = Concluir
+    .skip = Pular
+
 ## Cartão inicial (plano de GUI g5-home-screen)
 
 home =
@@ -516,6 +535,7 @@ layers =
     .add-fill = ＋ Adicionar camada de preenchimento
     .masks-section = Máscaras
     .mask-add = ＋ Máscara
+    .mask-default-name = Máscara para { $layer }
     .mask-remove = Remover máscara
     .mask-done = Concluir
     .mask-edit = Pintar máscara
@@ -815,6 +835,8 @@ prefs =
     .search = Buscar configurações…
     .section-interface = Interface
     .ui-scale = Escala da interface
+    .ui-scale-auto = Escala da interface: automática (seguir o sistema)
+    .splitter-hit-zone = Zona de ajuste maior dos divisores (mesa digitalizadora)
     .tooltips = Mostrar dicas
     .reduce-motion = Reduzir movimento
     .key-hints = Dicas de teclas na barra de status
@@ -901,3 +923,15 @@ strip =
     .symmetry = Simetria (L)
     .no-paint = sem sessão de pintura
     .no-preset = nenhum preset selecionado
+
+# O botão Overlays do viewport + popover (plano de GUI g6-overlays-popover).
+overlays =
+    .button = Overlays
+    .tooltip = Overlays do viewport: wireframe, grade, costuras UV, orientação das faces, nome do canal.
+    .wireframe = Wireframe
+    .wireframe-opacity = Opacidade
+    .grid = Grade do chão
+    .uv-seams = Costuras UV
+    .face-orientation = Orientação das faces
+    .face-orientation-pending = A cor das faces traseiras depende da atualização do renderizador (ainda não desenhada).
+    .channel-readout = Nome do canal no viewport

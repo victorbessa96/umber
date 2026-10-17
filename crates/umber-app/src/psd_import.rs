@@ -1007,6 +1007,27 @@ pub struct UnmatchedPsd {
     pub reason: PsdSkippedReason,
 }
 
+/// Publishes a flattened PSD into paint-plane bytes (the C2-32 rule
+/// for PSD, named in `2026-10-16-import-srgb-linearize`'s follow-ups):
+/// the reader's pixels are Photoshop's gamma-space composite (the
+/// module's blend rule keeps bytes as given), and the planes are
+/// LINEAR — so RGB linearizes through the shared sRGB→linear curve
+/// BEFORE the premultiply, alpha untouched. A PSD flat is always a
+/// colour image (there is no per-channel kind to check, unlike the
+/// mesh-map importer's `channel_kind_for`).
+///
+/// Pure: bytes in, bytes out. The shell (main.rs, lock-queued) binds
+/// this to `PaintState::publish_plane` at tile 1001 (PSDs carry no
+/// UDIM) with the set's `PsdImport::set_name`.
+/// (Shell-half seam: the W-GUI-3 PSD drop-binding kill wires this to
+/// `publish_plane` at tile 1001; unwired until then.)
+#[allow(dead_code)]
+pub fn publish_psd_pixels(flat: &PsdImport) -> Vec<u8> {
+    let mut rgba = flat.pixels.clone();
+    umber_paint::paint_state::curvature_png_to_linear(&mut rgba);
+    umber_paint::material_layer::straight_to_premultiplied(&rgba)
+}
+
 /// The folder-drop UX state, mirroring `mesh_map_import`'s shape: the
 /// last scan's routed files, the unmatched report, the session set name
 /// the apply path retargets, and the last import's report. The dragon's
@@ -1805,5 +1826,41 @@ mod tests {
                 .is_some_and(|line| line.contains("v2 (deferred)")),
             "{summary:?}"
         );
+    }
+
+    #[test]
+    fn publish_linearizes_colour_and_premultiplies() {
+        // The C2-32 pinned decision: sRGB 188 -> linear 128, alpha
+        // untouched through the curve, THEN premultiplied (RGB scaled
+        // by alpha/255).
+        let flat = PsdImport {
+            set_name: "Set".into(),
+            width: 1,
+            height: 1,
+            pixels: vec![188, 188, 188, 128],
+            report: PsdImportReport::default(),
+        };
+        let out = publish_psd_pixels(&flat);
+        // 188 sRGB -> 128 linear; 128 * (128/255) = 64.25 -> 64 by
+        // f32_to_u8's round; alpha rides at 128.
+        assert_eq!(out, vec![64, 64, 64, 128]);
+        // The input is not consumed:
+        assert_eq!(flat.pixels, vec![188, 188, 188, 128]);
+    }
+
+    #[test]
+    fn publish_leaves_opaque_black_and_white_exact() {
+        // sRGB 0 -> 0 and sRGB 255 -> 255 under the curve; alpha 255
+        // premultiplies to identity. The extremes are the curve's
+        // pinned endpoints (shared with curvature_png_to_linear).
+        let flat = PsdImport {
+            set_name: "Set".into(),
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 0, 255, 255, 255, 255, 255],
+            report: PsdImportReport::default(),
+        };
+        let out = publish_psd_pixels(&flat);
+        assert_eq!(out, vec![0, 0, 0, 255, 255, 255, 255, 255]);
     }
 }

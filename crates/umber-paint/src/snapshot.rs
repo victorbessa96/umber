@@ -189,3 +189,113 @@ pub fn resolve_instance_source(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paint_state::{PlaneOwner, SnapshotLayerKind};
+    use umber_core::layers::{LayerKind, LayerStack};
+
+    #[test]
+    fn base_is_first_and_carries_base_visible() {
+        let stack = LayerStack::new();
+        let snap = build_composite_snapshot(&stack, &Default::default(), false, Vec::new());
+        assert_eq!(snap.layers.len(), 1, "an empty stack is still the Base row");
+        assert_eq!(snap.layers[0].owner, PlaneOwner::Base);
+        assert!(!snap.layers[0].visible, "base_visible=false hides Base");
+        assert!(!snap.base_visible);
+        let shown = build_composite_snapshot(&stack, &Default::default(), true, Vec::new());
+        assert!(shown.layers[0].visible);
+        assert!(shown.base_visible);
+    }
+
+    #[test]
+    fn paint_and_fill_rows_carry_their_own_settings() {
+        let mut stack = LayerStack::new();
+        let paint = stack.add_layer("P", LayerKind::Paint);
+        let fill = stack.add_layer("F", LayerKind::Fill);
+        // stack.add_layer pushes BOTTOM-TO-TOP: the snapshot rows follow.
+        let snap = build_composite_snapshot(&stack, &Default::default(), true, Vec::new());
+        assert_eq!(snap.layers.len(), 3, "Base + paint + fill");
+        assert_eq!(snap.layers[1].owner, PlaneOwner::Layer(paint));
+        assert_eq!(snap.layers[1].kind, SnapshotLayerKind::Paint);
+        assert_eq!(snap.layers[2].owner, PlaneOwner::Layer(fill));
+        assert_eq!(snap.layers[2].kind, SnapshotLayerKind::Fill);
+        // Defaults: visible, full opacity, no mask gate.
+        for row in &snap.layers[1..] {
+            assert!(row.visible);
+            assert_eq!(row.opacity, 1.0);
+            assert!(!row.mask_enabled);
+        }
+    }
+
+    #[test]
+    fn folders_contribute_no_row() {
+        let mut stack = LayerStack::new();
+        stack.add_layer("group", LayerKind::Folder { passthrough: false });
+        let inside = stack.add_layer("in", LayerKind::Paint);
+        let snap = build_composite_snapshot(&stack, &Default::default(), true, Vec::new());
+        // Base + the paint INSIDE the folder; the folder itself has no row.
+        assert_eq!(snap.layers.len(), 2);
+        assert_eq!(snap.layers[1].owner, PlaneOwner::Layer(inside));
+    }
+
+    #[test]
+    fn a_material_without_state_yields_no_channels_the_agent_path() {
+        // umber-cli's agent session passes empty MaterialLayerStates —
+        // its materials evaluate nothing, so the row carries empty
+        // channels (the documented truth of that session).
+        let mut stack = LayerStack::new();
+        stack.add_layer("M", LayerKind::Material);
+        let snap = build_composite_snapshot(&stack, &Default::default(), true, Vec::new());
+        let mat = &snap.layers[1];
+        assert_eq!(mat.kind, SnapshotLayerKind::Material);
+        assert!(mat.material_channels.as_deref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_instance_renders_its_source_and_a_dangling_one_is_skipped() {
+        let mut stack = LayerStack::new();
+        let src = stack.add_layer("src", LayerKind::Paint);
+        let inst = stack.add_layer("inst", LayerKind::Instance { source_id: src });
+        let snap = build_composite_snapshot(&stack, &Default::default(), true, Vec::new());
+        // Row 1 = the source's OWN paint row; row 2 = the instance
+        // rendering the source's owner under the instance's id.
+        assert_eq!(snap.layers.len(), 3, "Base + source + instance");
+        assert_eq!(snap.layers[1].owner, PlaneOwner::Layer(src));
+        assert_eq!(snap.layers[1].layer_id, Some(src));
+        assert_eq!(snap.layers[2].owner, PlaneOwner::Layer(src));
+        assert_eq!(snap.layers[2].layer_id, Some(inst), "stage 5's shape");
+        // A dangling instance: source_id points at nothing.
+        let gone = stack.add_layer("dangle", LayerKind::Instance { source_id: 9999 });
+        let snap2 = build_composite_snapshot(&stack, &Default::default(), true, Vec::new());
+        assert!(
+            snap2.layers.iter().all(|l| l.layer_id != Some(gone)),
+            "the dangling instance contributes no row"
+        );
+    }
+
+    #[test]
+    fn displayed_rides_through_untouched() {
+        let stack = LayerStack::new();
+        let displayed = vec![(1001u16, "baseColor".into()), (1002u16, "height".into())];
+        let snap = build_composite_snapshot(&stack, &Default::default(), true, displayed.clone());
+        assert_eq!(snap.displayed, displayed);
+    }
+
+    #[test]
+    fn resolve_instance_source_walks_chains_and_stops() {
+        let mut stack = LayerStack::new();
+        let src = stack.add_layer("src", LayerKind::Paint);
+        let mid = stack.add_layer("mid", LayerKind::Instance { source_id: src });
+        let top = stack.add_layer("top", LayerKind::Instance { source_id: mid });
+        let resolved = resolve_instance_source(&stack, top);
+        assert_eq!(
+            resolved.map(|l| l.id),
+            Some(src),
+            "the chain walks to the source"
+        );
+        // A dangling id resolves to None, not a hang.
+        assert!(resolve_instance_source(&stack, 9999).is_none());
+    }
+}

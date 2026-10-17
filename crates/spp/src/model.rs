@@ -183,7 +183,15 @@ fn describe(dataset: &RawDataset) -> String {
             .join("+")
     };
     let count = dataset.attr_count;
-    let m3 = if dataset.has_m3 { "yes" } else { "no" };
+    // R6: the checksum state, not just presence — verified / mismatch /
+    // unverified (no stored hash). A mismatch is a report line, never a
+    // failed open.
+    let m3 = match crate::hdf5::m3_verifies(dataset) {
+        Some(true) => "verified",
+        Some(false) => "MISMATCH",
+        None if dataset.has_m3 => "present",
+        None => "no",
+    };
     format!("{dtype} {shape} {layout}{chunks} filters={filters} attrs={count} m3={m3}")
 }
 
@@ -443,6 +451,21 @@ fn convert_samples(
                 let v = u16::from_le_bytes([bytes[0], bytes[1]]);
                 (v >> 8) as u8
             }
+            Dtype::F16 => {
+                // IEEE-754 binary16 → f32, then the same [0,1] clamp as
+                // the other floats (R1: normals keep their float range
+                // in the NATIVE payload; this 8-bit preview is the v1
+                // flattened path's view).
+                let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let v = crate::texture_cache::f16_to_f32(bits);
+                if v.is_nan() || v <= 0.0 {
+                    0
+                } else if v >= 1.0 {
+                    255
+                } else {
+                    (v * 255.0).round() as u8
+                }
+            }
             Dtype::I32 => {
                 let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 v.clamp(0, 255) as u8
@@ -477,6 +500,9 @@ fn convert_samples(
     }
     if dataset.dtype == Dtype::F32 || dataset.dtype == Dtype::F64 {
         notes.push("float clamped to [0,1]".to_string());
+    }
+    if dataset.dtype == Dtype::F16 {
+        notes.push("f16 narrowed to 8-bit (preview; native payload kept)".to_string());
     }
     if dataset.dtype == Dtype::I32 {
         notes.push("i32 clamped to [0,255]".to_string());
@@ -709,6 +735,7 @@ mod tests {
             filters: Vec::new(),
             attr_count: 0,
             has_m3: false,
+            m3: None,
             bytes,
         }
     }
@@ -934,5 +961,66 @@ mod tests {
         let mut both = vec![0x11, 0x0B, 0x00, 0x69];
         both.extend_from_slice(&[0; 12]);
         assert_eq!(classify_hbo(Dtype::U8, &both), Some(HboEra::NewerV11Plus));
+    }
+
+    #[test]
+    fn f16_bits_decode_to_exact_f32_values() {
+        // Ground truth: Python's struct round-trip of each pattern.
+        let cases: &[(u16, f32)] = &[
+            (0x0000, 0.0),
+            (0x3C00, 1.0),
+            (0x3800, 0.5),
+            (0xBC00, -1.0),
+            (0x3400, 0.25),
+            (0x7BFF, 65504.0),
+            (0x7C00, f32::INFINITY),
+            (0xFC00, f32::NEG_INFINITY),
+            (0x3555, 0.33325195),
+        ];
+        for (bits, want) in cases {
+            assert_eq!(
+                crate::texture_cache::f16_to_f32(*bits),
+                *want,
+                "0x{bits:04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn f16_subnormals_decode_to_the_smallest_representable() {
+        // 0x0001 = 2^-24, exactly representable in f32.
+        assert_eq!(crate::texture_cache::f16_to_f32(0x0001), 2f32.powi(-24));
+        // And its negative.
+        assert_eq!(crate::texture_cache::f16_to_f32(0x8001), -2f32.powi(-24));
+        // A mid subnormal: 0x0003 = 3 * 2^-24.
+        assert_eq!(
+            crate::texture_cache::f16_to_f32(0x0003),
+            3.0 * 2f32.powi(-24)
+        );
+    }
+
+    #[test]
+    fn an_f16_channel_decodes_to_the_8bit_preview() {
+        // A 1x1x4 f16 dataset: 0x3800 (0.5) → 128 (0.5 * 255 = 127.5 →
+        // 128) per channel.
+        let d = RawDataset {
+            path: "root/channel".to_string(),
+            shape: vec![1, 1, 4],
+            dtype: Dtype::F16,
+            layout_name: "contiguous",
+            chunk_dims: None,
+            filters: Vec::new(),
+            attr_count: 0,
+            has_m3: false,
+            m3: None,
+            bytes: vec![0x00, 0x38, 0x00, 0x38, 0x00, 0x38, 0x00, 0x38],
+        };
+        let img = channel_from(&d).expect("f16 channel decodes");
+        assert_eq!(img.pixels, vec![128, 128, 128, 128]);
+        assert!(
+            img.notes.iter().any(|n| n.contains("f16 narrowed")),
+            "the f16 note lands: {:?}",
+            img.notes
+        );
     }
 }

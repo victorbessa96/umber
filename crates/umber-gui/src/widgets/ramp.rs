@@ -32,7 +32,9 @@
 //!   darken the midpoint of a red→green ramp.
 
 use egui::epaint::Mesh;
-use egui::{Color32, Pos2, Rect, Rgba, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{
+    Color32, Pos2, Rect, Rgba, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
+};
 
 use crate::theme;
 
@@ -344,6 +346,9 @@ impl<'a> RampEdit<'a> {
         let handle_band = 10.0;
         let size = Vec2::new(width, self.height + handle_band);
         let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        // g7-accesskit-sweep: the gradient ramp strip (Slider role; the
+        // drag edits the stops).
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, true, "gradient"));
         let strip = Rect::from_min_size(rect.min, Vec2::new(width, self.height));
         let ramp = self.ramp;
 
@@ -690,5 +695,16 @@ mod tests {
         assert_eq!(ramp.stops().len(), 3);
         assert_eq!(ramp.active(), 1);
         assert!((ramp.active_stop().position - 0.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_ramp_strip_reports_a_slider_role_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        let mut ramp = Ramp::default();
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            RampEdit::new(&mut ramp).show(ui);
+        });
+        harness.run();
+        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Slider, "gradient");
     }
 }

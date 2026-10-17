@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{
     Color32, ColorImage, Rect, Response, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2,
+    WidgetInfo, WidgetType,
 };
 
 use crate::theme;
@@ -723,6 +724,11 @@ pub fn icon_button_enabled(
 ) -> Response {
     let edge = size + 2.0 * ICON_BUTTON_PAD;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
+    // g7-accesskit-sweep: every painter-drawn icon slot is a Button.
+    // The icon's own name is the label (stable, non-localized — the
+    // caller's tooltip carries the localized description; the role is
+    // what screen readers need first).
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
     if ui.is_rect_visible(rect) {
         let hovered = enabled && response.hovered();
         if hovered || (enabled && response.is_pointer_button_down_on()) {
@@ -1159,5 +1165,18 @@ mod tests {
             // or size violation, so reaching here is the assertion.
             let _view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
+    }
+
+    #[test]
+    fn an_icon_button_reports_a_button_role_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        let atlas = IconAtlas::empty();
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            icon_button(ui, &atlas, "paintbrush", 16.0, false);
+        });
+        harness.run();
+        // The role is what screen readers key on; the icon's name is
+        // the label (get_by_ panics on miss).
+        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Button, "paintbrush");
     }
 }

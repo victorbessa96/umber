@@ -80,6 +80,35 @@ pub fn tile_of_triangle(mesh: &MeshData) -> Vec<u16> {
 /// bakers treat that as "nothing to rasterize" (their filtered mesh is
 /// empty and the bake is rejected as [`EmptyMesh`]-equivalent, never
 /// silently blank).
+/// The triangles of `mesh` (by index), as a sub-`MeshData`: the FULL
+/// vertex arrays ride along (index-subset, not re-indexed — the same
+/// contract as the AO bake's per-tile filter, which resolves every
+/// attribute through `indices`; compacting vertices adds remap risk
+/// for no benefit at this budget). `triangle_materials`, when the
+/// per-set kill lands, rides through; today callers pass
+/// [`triangles_for_tile`]'s output (the per-tile AO bake) or a
+/// material's triangle list (the per-set masked bake, step 2 of
+/// docs/specs/per-set-masked-bakes.md).
+///
+/// An empty triangle list yields a mesh with no indices — callers
+/// treat that as empty, never a silent blank.
+pub fn filter_mesh_for_triangles(mesh: &MeshData, tris: &[u32]) -> MeshData {
+    let mut indices = Vec::with_capacity(tris.len() * 3);
+    for &tri in tris {
+        let base = tri as usize * 3;
+        if let Some(slot) = mesh.indices.get(base..base + 3) {
+            indices.extend_from_slice(slot);
+        }
+    }
+    MeshData {
+        positions: mesh.positions.clone(),
+        normals: mesh.normals.clone(),
+        uvs: mesh.uvs.clone(),
+        indices,
+        material_names: mesh.material_names.clone(),
+    }
+}
+
 pub fn triangles_for_tile(mesh: &MeshData, tile: u16) -> Vec<u32> {
     tile_of_triangle(mesh)
         .into_iter()
@@ -133,18 +162,25 @@ mod tests {
         assert_eq!(tile_of_uv([9.9, 9.9]), 1100);
     }
 
-    #[test]
-    fn two_triangles_span_two_tiles() {
-        // Triangle 0's first vertex UV (0.5, 0.5) -> 1001 + 0 + 0;
-        // triangle 1's first vertex UV (1.5, 0.5) -> 1001 + 1 + 0.
-        let mesh = MeshData {
+    /// The two-triangle fixture: triangle 0 in tile 1001, triangle 1 in
+    /// 1002 (first-vertex UV addressing). Shared by the tile tests and
+    /// the subset-mesh tests below.
+    fn two_triangles_span_two_tiles() -> MeshData {
+        MeshData {
             positions: vec![[0.0; 3]; 4],
             normals: vec![[0.0; 3]; 4],
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
-        };
-        assert_eq!(tile_of_triangle(&mesh), vec![1001, 1002]);
+        }
+    }
+
+    #[test]
+    fn triangles_land_in_their_tiles() {
+        assert_eq!(
+            tile_of_triangle(&two_triangles_span_two_tiles()),
+            vec![1001, 1002]
+        );
     }
 
     #[test]
@@ -226,5 +262,54 @@ mod tests {
             material_names: vec![],
         };
         assert_eq!(present_tiles(&empty), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn filtered_submesh_keeps_vertices_and_subsets_indices() {
+        // Two triangles, both in tile 1001: a filter by [1] keeps the
+        // FULL vertex arrays and only triangle 1's indices.
+        let mesh = two_triangles_span_two_tiles();
+        let sub = filter_mesh_for_triangles(&mesh, &[1]);
+        assert_eq!(
+            sub.positions.len(),
+            mesh.positions.len(),
+            "vertices ride whole"
+        );
+        assert_eq!(sub.normals.len(), mesh.normals.len());
+        assert_eq!(sub.uvs.len(), mesh.uvs.len());
+        assert_eq!(
+            sub.indices,
+            vec![3, 1, 2],
+            "only triangle 1's indices, in original vertex ids"
+        );
+        assert_eq!(sub.material_names, mesh.material_names);
+    }
+
+    #[test]
+    fn filtering_nothing_yields_no_indices() {
+        let mesh = two_triangles_span_two_tiles();
+        let sub = filter_mesh_for_triangles(&mesh, &[]);
+        assert!(
+            sub.indices.is_empty(),
+            "empty list = empty indices, never a blank"
+        );
+        assert!(
+            !sub.positions.is_empty(),
+            "but the vertex arrays still ride"
+        );
+    }
+
+    #[test]
+    fn out_of_range_triangles_are_skipped_not_panicked() {
+        // A hostile triangle list (indices past the mesh) drops the bad
+        // entries instead of panicking — the same leniency as the tile
+        // filter's get() guard.
+        let mesh = two_triangles_span_two_tiles();
+        let sub = filter_mesh_for_triangles(&mesh, &[0, 99]);
+        assert_eq!(
+            sub.indices,
+            vec![0, 1, 2],
+            "the valid triangle lands, the bad one skips"
+        );
     }
 }

@@ -419,6 +419,14 @@ pub struct LayersUiOutcome {
     /// composes its pixels ([`compose_smart_mask`]) into that layer's mask
     /// plane.
     pub smart_mask_applied: Option<(u64, umber_core::smart::SmartMask)>,
+    /// The rows' layer gestures this frame (g2-layer-gestures), in draw
+    /// order: name clicks (with their multi-select mode), mask-thumbnail
+    /// clicks, the ✕ delete request and a drag-reorder drop. The rows
+    /// never apply them: the shell runs each through its one
+    /// [`GestureState::apply`](crate::layers_panel::gestures::GestureState::apply)
+    /// (the same path its key poll feeds) and mirrors the outcome on the
+    /// paint session.
+    pub gestures: Vec<crate::layers_panel::gestures::LayerGesture>,
 }
 
 /// Per-row badge state for [`layers_ui`] (stage 4): the shell owns these
@@ -578,6 +586,14 @@ fn topmost_paintable(stack: &LayerStack) -> Option<(u64, usize)> {
 /// `base_visible` is the Base row's visibility (stage 4's toggle); the
 /// outcome carries the toggle intent back. `badges` renders the per-row
 /// badge lines (fill budget blocks, import refusals, dormancy).
+///
+/// Gestures (g2-layer-gestures): each row carries a drag handle (the
+/// primary reorder; ▲/▼ stay), a mask-thumbnail slot when the layer has a
+/// mask, and a modifier-aware name click. `gestures` is the shell's
+/// state, read-only here: rows highlight its multi-selection and outline
+/// the soloed mask; the clicks themselves return through
+/// [`LayersUiOutcome::gestures`].
+#[allow(clippy::too_many_arguments)]
 pub fn layers_ui(
     ui: &mut egui::Ui,
     doc: &mut Document,
@@ -586,7 +602,9 @@ pub fn layers_ui(
     base_visible: bool,
     badges: &LayerRowBadges,
     thumbs: &std::collections::HashMap<u64, egui::TextureHandle>,
+    gestures: &crate::layers_panel::gestures::GestureState,
 ) -> LayersUiOutcome {
+    use crate::layers_panel::gestures::{self as lg, DeleteSource, LayerGesture};
     let mut outcome = LayersUiOutcome::default();
     // Which set this stack is (C2-9 stage 4): with several sets, the panel
     // shows only the active one's layers.
@@ -673,7 +691,6 @@ pub fn layers_ui(
                 }
             }
         });
-    let mut remove_id = None;
     let mut instance_source_id = None;
     let mut duplicate_id: Option<u64> = None;
     let mut move_by: Option<(u64, i64)> = None;
@@ -692,6 +709,9 @@ pub fn layers_ui(
             /// instances carry the "paint the source" hint, materials the
             /// refresh badge line below their row).
             paint_hint: Option<String>,
+            /// `Some(enabled)` when the layer carries a mask (the mask
+            /// thumbnail slot shows only then).
+            mask: Option<bool>,
         }
         let rows: Vec<Row> = doc
             .layers()
@@ -731,11 +751,16 @@ pub fn layers_ui(
                     visible: layer.visible,
                     instance_of,
                     paint_hint,
+                    mask: layer.mask.as_ref().map(|m| m.enabled),
                 }
             })
             .collect();
+        let mut drops = lg::DropTracker::default();
         for layer in &rows {
-            ui.horizontal(|ui| {
+            let row = ui.horizontal(|ui| {
+                // The drag handle (g2-layer-gestures): the primary reorder;
+                // the drop lands through the tracker below the rows.
+                lg::drag_handle(ui, layer.id);
                 if ui
                     .selectable_label(layer.visible, if layer.visible { "👁" } else { "·" })
                     .clicked()
@@ -760,27 +785,29 @@ pub fn layers_ui(
                         );
                     }
                 }
-                if layer.instance_of.is_some() {
-                    if ui
-                        .selectable_label(active == PlaneOwner::Layer(layer.id), &layer.name)
-                        .on_hover_text(tr("layers.instance-paint-hint"))
-                        .clicked()
-                    {
-                        outcome.select = Some(PlaneOwner::Layer(layer.id));
+                // The mask thumbnail (g2-layer-gestures): Alt+click solos,
+                // Shift+click toggles, a plain click paints the mask. No
+                // mask texture exists yet, so the slot draws outlined.
+                if let Some(enabled) = layer.mask {
+                    let soloed = gestures.mask_solo.layer() == Some(layer.id);
+                    if let Some(g) = lg::mask_thumb(ui, layer.id, None, enabled, soloed) {
+                        outcome.gestures.push(g);
                     }
+                }
+                // The name: highlighted for the whole multi-selection (and
+                // the paint target); the click's modifiers pick the mode.
+                let selected =
+                    gestures.selection.contains(layer.id) || active == PlaneOwner::Layer(layer.id);
+                let name = ui.selectable_label(selected, &layer.name);
+                let name = if layer.instance_of.is_some() {
+                    name.on_hover_text(tr("layers.instance-paint-hint"))
                 } else if let Some(hint) = &layer.paint_hint {
-                    if ui
-                        .selectable_label(active == PlaneOwner::Layer(layer.id), &layer.name)
-                        .on_hover_text(hint)
-                        .clicked()
-                    {
-                        outcome.select = Some(PlaneOwner::Layer(layer.id));
-                    }
-                } else if ui
-                    .selectable_label(active == PlaneOwner::Layer(layer.id), &layer.name)
-                    .clicked()
-                {
-                    outcome.select = Some(PlaneOwner::Layer(layer.id));
+                    name.on_hover_text(hint)
+                } else {
+                    name
+                };
+                if let Some(g) = lg::row_click_gesture(&name, layer.id) {
+                    outcome.gestures.push(g);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -797,8 +824,13 @@ pub fn layers_ui(
                     } else if ui.small_button(tr("layers.instance-this")).clicked() {
                         instance_source_id = Some(layer.id);
                     }
+                    // ✕ arms the confirm window (the Delete key removes at
+                    // once); the shell's gesture state owns the window.
                     if ui.small_button("✕").clicked() {
-                        remove_id = Some(layer.id);
+                        outcome.gestures.push(LayerGesture::Delete {
+                            ids: vec![layer.id],
+                            source: DeleteSource::RowButton,
+                        });
                     }
                     // Duplicate (C2-8): a same-kind copy with the row's
                     // properties, added through the undoable commands.
@@ -826,6 +858,7 @@ pub fn layers_ui(
                     }
                 });
             });
+            drops.push(row.response.rect);
             // The properties row of the SELECTED layer (C2-8): opacity,
             // blend mode and the name, each an undoable command.
             if active == PlaneOwner::Layer(layer.id) {
@@ -859,6 +892,11 @@ pub fn layers_ui(
                 ui.label(egui::RichText::new(line.as_str()).color(ui.visuals().error_fg_color));
             }
         }
+        // The drop bar between rows while a handle drags; the release
+        // yields the drop (rows were pushed top-first, display order).
+        if let Some(g) = drops.finish(ui) {
+            outcome.gestures.push(g);
+        }
         // [M3] The Base pseudo-row, pinned at the bottom of the list:
         // session paint that belongs to no layer (v1 projects, strokes with
         // no layer selected). Selectable like every layer row; the eye
@@ -880,9 +918,6 @@ pub fn layers_ui(
             }
         });
     });
-    if let Some(id) = remove_id {
-        doc.run(LayerCommand::remove(id));
-    }
     if let Some((id, delta)) = move_by {
         if let Some((from, to)) = move_target(doc.layers().len(), doc.stack.index_of(id), delta) {
             doc.run(LayerCommand::reorder(from, to));
@@ -1591,6 +1626,7 @@ mod tests {
                         true,
                         &LayerRowBadges::default(),
                         &std::collections::HashMap::new(),
+                        &crate::layers_panel::gestures::GestureState::default(),
                     );
                 },
                 S {
@@ -1634,6 +1670,87 @@ mod tests {
         assert_eq!(names[0], "Top", "Bottom rose one place: {names:?}");
         assert_eq!(names[1], "Bottom");
         assert_eq!(harness.state().doc.history.len(), before + 2);
+    }
+
+    /// g2-gesture-integration: the rows return gestures instead of
+    /// applying them. A name click yields `Select` (no document edit), the
+    /// ✕ yields a confirm-gated `Delete` and removes NOTHING by itself.
+    #[test]
+    fn layer_rows_return_gestures_instead_of_applying_them() {
+        use crate::layers_panel::gestures::{ClickMode, DeleteSource, GestureState, LayerGesture};
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        struct S {
+            doc: Document,
+            defs: std::collections::BTreeMap<String, String>,
+            badges: std::collections::HashMap<u64, String>,
+            states: crate::material_layer::MaterialLayerStates,
+            gestures: Vec<LayerGesture>,
+        }
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("Bottom", LayerKind::Paint));
+        doc.run(LayerCommand::add("Top", LayerKind::Paint));
+        let ids: Vec<u64> = doc.layers().iter().map(|l| l.id).collect();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(600.0, 800.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let mats = crate::layers_panel::MaterialPanelContext {
+                        defs: &s.defs,
+                        badges: &s.badges,
+                        status: None,
+                        states: &mut s.states,
+                    };
+                    let outcome = layers_ui(
+                        ui,
+                        &mut s.doc,
+                        mats,
+                        PlaneOwner::Base,
+                        true,
+                        &LayerRowBadges::default(),
+                        &std::collections::HashMap::new(),
+                        &GestureState::default(),
+                    );
+                    s.gestures.extend(outcome.gestures);
+                },
+                S {
+                    doc,
+                    defs: Default::default(),
+                    badges: Default::default(),
+                    states: Default::default(),
+                    gestures: Vec::new(),
+                },
+            );
+        harness.run();
+        let history = harness.state().doc.history.len();
+        harness.get_by_label("Top").click();
+        harness.run();
+        assert_eq!(
+            harness.state().gestures,
+            vec![LayerGesture::Select {
+                id: ids[1],
+                mode: ClickMode::Replace
+            }]
+        );
+        harness.state_mut().gestures.clear();
+        // Rows list top-first: the LAST ✕ belongs to "Bottom".
+        let removes: Vec<_> = harness.query_all_by_label("✕").collect();
+        assert_eq!(removes.len(), 2, "one ✕ per row");
+        removes.last().unwrap().click();
+        harness.run();
+        assert_eq!(
+            harness.state().gestures,
+            vec![LayerGesture::Delete {
+                ids: vec![ids[0]],
+                source: DeleteSource::RowButton
+            }]
+        );
+        assert_eq!(
+            harness.state().doc.layers().len(),
+            2,
+            "✕ removes nothing alone"
+        );
+        assert_eq!(harness.state().doc.history.len(), history, "no edit ran");
     }
 
     #[test]

@@ -132,6 +132,104 @@ impl AssetStore {
     pub fn contains(&self, reference: &AssetRef) -> bool {
         reference.validate().is_ok() && self.path_for(&reference.hash, &reference.ext).exists()
     }
+
+    /// The store's garbage collection (the standing-debt GC kill): a
+    /// blob is LIVE when its `<hash>.<ext>` name is in `live`;
+    /// everything else the store holds is an ORPHAN. Report-only by
+    /// default — `prune: true` DELETES the orphans (write-then-rename
+    /// in reverse: unlink; a crash mid-GC leaves the manifest's live
+    /// set intact whatever survives). The empty shard dirs the sweep
+    /// empties are removed too, but `assets/` itself never is.
+    ///
+    /// v1 boundary held: the SIDECASTS stay authoritative for reopen —
+    /// this never touches `paint/`, only content-addressed blobs whose
+    /// sole reference lives in the manifest. Call it AFTER a
+    /// successful save commit, when the manifest's live set is fresh.
+    pub fn collect_garbage(
+        &self,
+        live: &std::collections::HashSet<(String, String)>,
+        prune: bool,
+    ) -> Result<GcReport, AssetError> {
+        let mut report = GcReport::default();
+        let Ok(shards) = fs::read_dir(&self.root) else {
+            // No store at all (or unreadable): nothing to collect.
+            return Ok(report);
+        };
+        for shard in shards {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            let mut emptied = true;
+            for entry in fs::read_dir(shard.path())? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_file() {
+                    emptied = false;
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    emptied = false;
+                    continue;
+                };
+                // `tmp.<pid>` leftovers from a crashed store() are
+                // ALWAYS orphans (the rename is atomic; a live tmp
+                // cannot exist while this runs single-threaded).
+                let (hash, ext) = match name.split_once('.') {
+                    Some(pair) => pair,
+                    None => {
+                        emptied = false;
+                        continue;
+                    }
+                };
+                if ext.starts_with("tmp.")
+                    || hash.len() != 64
+                    || !ext.chars().all(|c| c.is_ascii_alphanumeric())
+                {
+                    // A crashed store()'s `<hash>.tmp.<pid>` rename
+                    // leftover, or a foreign file: always removable.
+                    report.tmp_or_unparsable += 1;
+                    if prune {
+                        fs::remove_file(&path)?;
+                    }
+                    continue;
+                }
+                if live.contains(&(hash.to_string(), ext.to_string())) {
+                    report.live += 1;
+                    emptied = false;
+                } else {
+                    report.orphan += 1;
+                    report.orphan_bytes += entry.metadata()?.len();
+                    if prune {
+                        fs::remove_file(&path)?;
+                    } else {
+                        emptied = false;
+                    }
+                }
+            }
+            if prune && emptied {
+                // Only remove the shard dir the sweep emptied itself.
+                let _ = fs::remove_dir(shard.path());
+                report.shards_removed += 1;
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// One garbage-collection pass's tally (the CLI/report line's data).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcReport {
+    /// Blobs in the live set.
+    pub live: u64,
+    /// Blobs the store holds but nothing references.
+    pub orphan: u64,
+    /// Bytes the orphans occupy.
+    pub orphan_bytes: u64,
+    /// Crashed-store leftovers (tmp files, unparsable names) removed.
+    pub tmp_or_unparsable: u64,
+    /// Shard dirs the pruned sweep emptied.
+    pub shards_removed: u64,
 }
 
 #[cfg(test)]
@@ -250,5 +348,60 @@ mod tests {
             .join(format!("{}.png", reference.hash));
         assert!(expected.exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gc_reports_orphans_without_touching_them() {
+        let (store, dir) = tmp_store("gc-report");
+        let keep = store.store(b"live bytes", "png").unwrap();
+        let _drop = store.store(b"stale bytes", "png").unwrap();
+        // A crashed rename leftover, hand-placed:
+        let shard = dir.join("assets").join(&keep.hash[..2]);
+        fs::write(shard.join(format!("{}.tmp.99999", "a".repeat(64))), b"x").unwrap();
+        let mut live = std::collections::HashSet::new();
+        live.insert((keep.hash.clone(), keep.ext.clone()));
+        let report = store.collect_garbage(&live, false).unwrap();
+        assert_eq!(report.live, 1, "the kept blob counts live");
+        assert_eq!(report.orphan, 1, "the stale blob is an orphan");
+        assert!(report.orphan_bytes > 0);
+        assert_eq!(report.tmp_or_unparsable, 1, "the crashed tmp counts");
+        assert_eq!(report.shards_removed, 0, "report-only removes nothing");
+        // Nothing deleted: both blobs still load.
+        assert!(store.contains(&keep));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gc_prune_deletes_orphans_keeps_live_and_empties_shards() {
+        let (store, dir) = tmp_store("gc-prune");
+        let keep = store.store(b"live bytes", "png").unwrap();
+        let _drop = store.store(b"stale bytes", "png").unwrap();
+        let mut live = std::collections::HashSet::new();
+        live.insert((keep.hash.clone(), keep.ext.clone()));
+        let report = store.collect_garbage(&live, true).unwrap();
+        assert_eq!(report.orphan, 1);
+        assert_eq!(report.live, 1);
+        assert!(store.contains(&keep), "the live blob survives");
+        assert!(
+            store.load(&_drop).map(|_| ()).is_err(),
+            "the orphan is gone"
+        );
+        // The emptied shard dir is removed; the live one stays.
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gc_on_an_absent_store_reports_zero() {
+        let dir = std::env::temp_dir().join(format!(
+            "umber-assets-test-gc-absent-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        // NOTE: not created — the store has no root dir.
+        let store = AssetStore::new(&dir);
+        let report = store
+            .collect_garbage(&std::collections::HashSet::new(), true)
+            .unwrap();
+        assert_eq!(report, GcReport::default(), "an absent store GCs to zero");
     }
 }

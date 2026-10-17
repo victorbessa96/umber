@@ -312,7 +312,9 @@ pub fn parse_header(bytes: &[u8]) -> Result<CacheHeader, CacheError> {
 }
 
 /// IEEE half → f32 (no `half` crate: four lines, exact for every input).
-fn f16_to_f32(bits: u16) -> f32 {
+/// pub(crate): model.rs's f16 channel path shares this (import audit R1)
+/// — one converter, not two.
+pub(crate) fn f16_to_f32(bits: u16) -> f32 {
     let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = i32::from((bits >> 10) & 0x1F);
     let frac = f32::from(bits & 0x3FF);

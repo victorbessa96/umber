@@ -128,6 +128,25 @@ shell =
     .hero-hint = or use Open Mesh… in the toolbar or the File menu
     .hero-formats = Supported:
 
+## First-run Quick Setup (GUI plan g5-first-run)
+
+setup =
+    .title = Quick Setup
+    .intro = A few choices before the first brush stroke. All of them live in Preferences later.
+    .language = Language
+    .theme = Theme
+    .theme-follow-os = Follow the system
+    .theme-light = Light
+    .theme-dark = Dark
+    .navigation = Mouse navigation
+    .keymap = Keymap
+    .tablet = Tablet
+    .tablet-live = Pen detected — pressure is live.
+    .tablet-pressure = Pressure:
+    .tablet-none = No pen detected. Mouse and touch still paint.
+    .finish = Finish
+    .skip = Skip
+
 ## Home card (GUI plan g5-home-screen)
 
 home =
@@ -497,6 +516,7 @@ layers =
     .add-fill = ＋ Add fill layer
     .masks-section = Masks
     .mask-add = ＋ Mask
+    .mask-default-name = Mask for { $layer }
     .mask-remove = Remove mask
     .mask-done = Done
     .mask-edit = Paint mask
@@ -796,6 +816,8 @@ prefs =
     .search = Search settings…
     .section-interface = Interface
     .ui-scale = UI scale
+    .ui-scale-auto = UI scale: auto (follow the system)
+    .splitter-hit-zone = Larger splitter grab zone (tablet)
     .tooltips = Show tooltips
     .reduce-motion = Reduce motion
     .key-hints = Status-bar key hints
@@ -882,3 +904,15 @@ strip =
     .symmetry = Symmetry (L)
     .no-paint = no paint session
     .no-preset = no preset selected
+
+# The viewport's Overlays button + popover (GUI plan g6-overlays-popover).
+overlays =
+    .button = Overlays
+    .tooltip = Viewport overlays: wireframe, grid, UV seams, face orientation, channel name.
+    .wireframe = Wireframe
+    .wireframe-opacity = Opacity
+    .grid = Ground grid
+    .uv-seams = UV seams
+    .face-orientation = Face orientation
+    .face-orientation-pending = Back-face tint needs the renderer update (not drawn yet).
+    .channel-readout = Channel name readout

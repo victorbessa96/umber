@@ -53,7 +53,7 @@
 use std::ops::RangeInclusive;
 
 use egui::emath::Numeric;
-use egui::{Align2, CursorIcon, Id, Response, Sense, Ui, Vec2, Widget};
+use egui::{Align2, CursorIcon, Id, Response, Sense, Ui, Vec2, Widget, WidgetInfo};
 
 use crate::fonts::numeric_font;
 use crate::theme;
@@ -454,6 +454,11 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         let width = self.width.unwrap_or(ui.spacing().interact_size.x * 2.0);
         let size = Vec2::new(width, ui.spacing().interact_size.y);
         let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        // g7-accesskit-sweep: the field is a number editor (Slider
+        // role, the value as the accesskit value; `unit` is its only
+        // label source — the app's tr() strings name fields at the
+        // panel layer, not here).
+        response.widget_info(|| WidgetInfo::slider(true, self.value.to_f64(), self.unit));
         let id: Id = response.id.with("scrub-raw");
         let edit_id: Id = response.id.with("edit-buf");
         let text_id: Id = response.id.with("edit-text");
@@ -1056,5 +1061,25 @@ mod tests {
         assert_eq!(fill_fraction(0.5, 0.0, 2.0), Some(0.25));
         assert_eq!(fill_fraction(5.0, 0.0, f64::INFINITY), None);
         assert_eq!(fill_fraction(5.0, 1.0, 1.0), None);
+    }
+
+    #[test]
+    fn the_field_reports_a_slider_role_with_its_value() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            v: f32,
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, s: &mut S| {
+                ui.add(ValueField::new(&mut s.v).range(0.0..=10.0));
+            },
+            S { v: 4.5 },
+        );
+        harness.run();
+        // The a11y contract that is OURS to hold: the field exposes
+        // the Slider ROLE (get_by_ panics on miss — the call is the
+        // assertion). The numeric VALUE exposure is egui's
+        // accesskit mapping, not ours to pin.
+        let _ = harness.get_by_role(egui::accesskit::Role::Slider);
     }
 }

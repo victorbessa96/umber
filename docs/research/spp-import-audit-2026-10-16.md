@@ -147,11 +147,19 @@ R4. **HBO layer-stack schema** (gap 4) — the flagship. Automap-style
     flattened-channel import with a report line.
 R5. **Baking-config decode** (gap 5): baker params from `baking/`;
     maps onto Umber's baker settings; a "matching bake" one-click.
-R6. **m3 verification** (gap 11): hash check per dataset at open;
-    a mismatch is a report line (the corpus's own files pin the
-    expected values).
-R7. **Dense-group traversal** (gap 12): v2 b-tree types 5/6 +
-    fractal heap; report-only first, import second.
+R6. **m3 verification** (gap 11) — LANDED (2026-10-16, verified
+    post-audit): `hdf5::m3_verifies` (hdf5.rs:2192) computes the
+    MurmurHash3 x64 128 of the decoded payload with the corpus seed
+    (0xF13A_0239) and compares against the stored attribute;
+    `model.rs:189` consumes it at open. None = "unverified" report
+    line; Some(false) = loud mismatch report, never a failed open.
+    Reference vectors tested (hdf5.rs:2315+). Row closed by tree
+    re-derivation, not re-planned.
+R7. **Dense-group traversal** (gap 12) — PHASE 1 LANDED: dense
+    groups are detected (`LinkInfo.dense`, hdf5.rs:530/844/1938) and
+    reported, never traversed. Phase 2 (v2 b-tree types 5/6 + fractal
+    heap IMPORT) is corpus-gated — develops against the real files on
+    the build host.
 
 Non-requisites (deliberate): .spp WRITING (hard wall, binding);
 .sbsar execution (hard wall); shader/GLSL import (out of scope,

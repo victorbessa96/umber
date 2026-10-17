@@ -47,10 +47,16 @@ this report). C2 audit row 32.
 
 ## Deferred
 
-- The audit row's second half — the spp extract writer switching its colour
-  output to sRGB (it writes linear today to round-trip through this gap) —
-  is a separate kill on the spp-extract surface (`spp-extract-cli`'s writer),
-  now UNBLOCKED by this fix landing. Named follow-up.
+- ~~The audit row's second half — the spp extract writer switching its colour
+  output to sRGB~~ — LANDED (verified 2026-10-17):
+  `spp_extract::transfer_for` writes baseColor/emissive as
+  `Transfer::Srgb` (pinned by
+  `colour_channels_are_written_srgb_and_data_linear`) and
+  `png::write_png` encodes + tags the sRGB chunk. Closed by tree
+  re-derivation, not re-hunted.
+- ~~PSD import's publish~~ — LANDED (2026-10-17,
+  `docs/loop/kill-reports/2026-10-17-psd-publish.md`):
+  `publish_psd_pixels` applies the same rule at the plane boundary.
 - PSD import's publish, when its pixels reach a plane, applies the same rule
   (its module docs keep bytes-as-given for gamma-space blending; the publish
   linearizes at the plane boundary, exactly like this kill). Named follow-up

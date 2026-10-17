@@ -11,73 +11,50 @@
 
 ## Status line
 
-Current phase: **W-GUI-1 LANDED (2026-10-16, `5e0d89e`; CI 38954115915 in
-flight).** The four-kill GUI wave: the keymap editor (capture/conflict/
-presets/keymap=-persistence, one funnel), the home card (recents +
-recover, post-dock drain), UV-view parity (UDIM grid, shader-side
-channel isolation with a byte-exact golden, the shift-hold inspector),
-and the contextual strip (Size/Flow/Spacing/Lazy/Symmetry over the
-viewport, no second state copy). Battery GREEN: 687 app + 145 gpu
-tests, clippy -D warnings clean. Before it (same day): the .spp
-import-audit fix `ee1a078` — chunk b-tree keys are ELEMENT OFFSETS,
-the odometer counted indices, so every chunked Painter dataset
-imported only chunk 0 (94-98% zero-fill); fixed + the corpus gate now
-pins CONTENT (nonzero floors, material names, no truncation notes),
-extract-spp writes Body/Eyes/Fur. The prior phase follows. The build host
-returned 2026-10-15 23:41 after a ~5 h outage; the ENTIRE parked kill set
-(g5-workspace-persist, the kittest breadth + lib surface, c2-28, the four
-sec-* kills, spp-extract-cli, wave-benchmark-public, wave-abr, the texture
-cache reader, win-version-resource, crash-recent-ops) ran GREEN in one
-battery at `ddb59e0` (651+97+74+109+36 tests) and the wave pushed through
-Gate 2: CI green on both platforms at the tip `1031b27` (runs 38872572891,
-38885801883). **The .spp corpus gate is LIVE**: umber-spp opens all 3 real
-Painter projects (1.3 GB) and imports texture sets — the corpus hunt
-forced 17 HDF5-format fixes measured on the real bytes (root
-symbol-table entry, SNOD stride, off-wide keys, v1 continuation blocks,
-H5T_STD_U8BE, unlimited max-dims, layout v1→v3 normalize, chunk-key
-shape, padded edge chunks, the LZ4 off0 end marker + prefix decode).
-Post-wave state: The per-layer pool arc
-is complete (stages 1a-5, 2026-10-14). Since then: the paint engine is a
-headless crate (`umber-paint`, PR #8), and the JSONL agent session
-paints through it (`paint_stroke` / `paint_read` / `paint_snapshot` /
-undo, a `version` step, exact wire strokes); the photocraft + Blender
-absorption pass (`docs/research/absorption-2026-10-14-photocraft-blender.md`)
-landed falloff curves + front-face falloff (with brush-panel controls),
-the Adjacent Faces bake margin (CLI + the Bakes panel combo), crash-safe GPU startup, save-format
-completeness, the crate layering gate and the docs-only CI path filter;
-the mesh-importer panic hunt found 24 crash bugs and hardening closed
-all 24 (`.usdz` loads for the first time; the last, an openusd
-allocation abort, closed by the 0.8.0 bump `5b5b0ba`). Stroke methods and the cavity mask now
-reach the brush (51d9047, 4bebc72). The GUI plan
-(`docs/specs/gui-plan-2026-10-15.md`) is the active worklist (queue item
-23): G0 foundations, most of G1-G3, the G4 ramp / ValueField grammar /
-curve widget, the G4 property menu on every value field, the G5 menus
-(Recent, Revert, Window, a real About), Hide UI / Maximize and the
-workspaces, the G6 display-mode keys, and the shared kittest support
-module landed 2026-10-15, two sessions in parallel under kill locks, with
-per-kill state in the plan's tables. Waves are large and push once
-(Bessa 2026-10-15). Next (post-wave): the C2 audit's remaining Tier 1-2 rows first (painting
-beyond Base Color, export beyond Base Color, quit guard, pixel autosave,
-Ctrl+Z paint strokes, Layers reorder/rename — the real-PBR-asset gaps),
-then the rest of the GUI plan (G3 keymap editor, G4 color picker, G5 home
-screen / first run, G6 overlays / contextual toolbar / UV parity, G7),
-ROADMAP 8b's remaining rows (stencil, bitmap stamps → angle/jitter), the
-Flatpak offline-deps kill (the packaging job's cargo cannot fetch crates
-in the sandbox — vendor the registry), the perf-nightly viewport x15
-triage (`docs/perf/protocol.md`), the Win32 tablet path, and the 0.1.0
-gates.
-**The C2 gap audit (2026-10-15, `docs/loop/audit-2026-10-15-c2.md`) is
-the active worklist.** A painter cannot yet finish a real PBR asset in the
-GUI: painting reaches Base Color only, export writes Base Color only from
-paint, there is no quit guard and no pixel autosave, Ctrl+Z misses paint
-strokes, the Layers panel cannot reorder or rename, and a document holds one
-layer stack. Those Tier 1-2 rows come first.
-State: W-GUI-1-LANDED
-GUI/P2 freeze: LIFTED (Bessa's standing directive 2026-10-12 — nothing in this project waits on him).
-SPEC.md: v1.0 DRAFT — not ratified; Bessa's ratification is a release gate (v1.1 amendment drafted: docs/specs/spec-v1.1-amendment-draft.md).
-No tag, no release, no v0.1 claim until the 0.1.0 checklist's gates pass.
-Workspace: 16 crates, 1,700+ tests (the `#[test]` census), CI on Linux + Windows,
-both green at `1031b27`.
+Current phase: **W-GUI-2 PARKED ON BUILD-HOST OUTAGE (2026-10-17).**
+W-GUI-1 fully closed first: `5e0d89e` pushed, CI 38954115915 GREEN
+both platforms. Then the .spp import-audit fix `ee1a078` (chunk b-tree
+keys are ELEMENT OFFSETS — the odometer counted indices, so chunked
+datasets imported only chunk 0; fixed + content-pinned corpus gate),
+and the perf-baseline reseed `9acdc1c` (LOCAL, unpushed — see below).
+
+**The wave:** 18 kills landed through a ~9h SSH outage of the build
+host (centralhost, down since ~18:25 2026-10-16), every one
+statically verified (registry-resolved APIs, Python ground-truth
+ports, blast-radius sweeps, rustfmt) and parked UNCOMMITTED: the four
+W-GUI-2 claw kills (layer-gestures module + integration, overlays
+popover, tab-overflow, context-rail widget), first-run, the
+accesskit sweep (umber-gui half), density-scale (data half),
+held-key-tools (data half), polish widgets (TypeAhead +
+dialog_buttons), icons-a11y, spp-f16-reader (R1 read half),
+assetstore-gc, camera zoom-toward + frame, subset-mesh,
+occluder-scope, psd-publish, plus the cross-review's 11 defect fixes
+(1 BLOCKER: Quick Setup would have re-opened every launch) — the
+review ran BEFORE any battery, per the outage protocol.
+
+**Host diagnosis (03:40):** the box's NIC answers ARP (power + link
+present) but ICMP dies and sshd refuses — it is OS-wedged and likely
+needs a PHYSICAL POWER-CYCLE (Bessa's hands; details in queue.md's
+"Host diagnosis" section). **The recovery:** `bash scripts/recovery-close.sh` — the executable
+runbook (host probe → manifest preconditions → rsync with tip
+assertion → wave battery umber-app + umber-gui + spp + umber-core →
+confirm-green → commit-by-manifest-path → 9-lock release → ONE push
+→ ci-watch). It fires the moment the host answers; the full state also
+lives in `docs/loop/queue.md` (wave table + runbook) and
+`.dragon/wgui2-commit-manifest.txt` (durable manifest).
+
+**Why the perf-nightly is red (do not re-triage):** run 38957356307
+compared the W-GUI-1 head against origin's stale GL-seed baseline;
+the reseed that closes it (`9acdc1c`) is LOCAL and rides the wave
+push. Every nightly until then reads red.
+
+**After the close-out:** W-GUI-3 = the six lock-queued shell halves
+(ContextRail dispatch, a11y umber-app half, density Preferences row +
+HitZone, held-key poll, TypeAhead/dialog consumers, psd publish
+binding) + the per-set masked bakes host-gated steps (the 148-site
+field pass, then the primitives already landed: subset-mesh,
+occluder-scope). Then docs tick (gui-plan rows, CHANGELOG) riding the
+NEXT wave's push.
 
 ## The core-loop queue (the ONLY active hunt)
 

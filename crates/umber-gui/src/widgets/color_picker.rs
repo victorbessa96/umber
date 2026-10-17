@@ -21,7 +21,10 @@
 //! The sRGB transfer functions here are the IEC 61966-2-1 piecewise curve,
 //! the same one egui's `Rgba` ↔ `Color32` conversion uses.
 
-use egui::{Color32, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{
+    Color32, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
+    WidgetType,
+};
 
 /// sRGB-encoded → linear, IEC 61966-2-1.
 pub fn srgb_to_linear(c: f32) -> f32 {
@@ -289,6 +292,8 @@ impl<'a> ColorPicker<'a> {
 
 fn sv_square(ui: &mut Ui, state: &mut ColorState, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click_and_drag());
+    // g7-accesskit-sweep: the picker's saturation/value square.
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, true, "saturation / value"));
     if let Some(pos) = response.interact_pointer_pos() {
         if response.dragged() || response.clicked() {
             let s = (pos.x - rect.left()) / rect.width();
@@ -337,6 +342,8 @@ fn sv_square(ui: &mut Ui, state: &mut ColorState, size: f32) -> Response {
 
 fn hue_strip(ui: &mut Ui, state: &mut ColorState, width: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 14.0), Sense::click_and_drag());
+    // g7-accesskit-sweep: the picker's hue strip.
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, true, "hue"));
     if let Some(pos) = response.interact_pointer_pos() {
         if response.dragged() || response.clicked() {
             let snap = ui.input(|i| i.modifiers.command);
@@ -378,6 +385,8 @@ fn swatches(ui: &mut Ui, state: &mut ColorState) -> Response {
         ui.painter()
             .rect_filled(current, 2.0, color32(state.srgb()));
         let (previous, response) = ui.allocate_exact_size(Vec2::new(36.0, 18.0), Sense::click());
+        // g7-accesskit-sweep: the "previous colour" restore swatch.
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "previous colour"));
         ui.painter()
             .rect_filled(previous, 2.0, color32(state.previous().map(linear_to_srgb)));
         if response.clicked() {
@@ -397,6 +406,8 @@ fn swatches(ui: &mut Ui, state: &mut ColorState) -> Response {
 /// `Ui::color_edit_button_rgb` (same linear-RGB contract).
 pub fn color_button(ui: &mut Ui, linear: &mut [f32; 3]) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(Vec2::new(40.0, 18.0), Sense::click());
+    // g7-accesskit-sweep: the inline colour swatch (opens the picker).
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "colour"));
     if ui.is_rect_visible(rect) {
         ui.painter()
             .rect_filled(rect, 3.0, color32(linear.map(linear_to_srgb)));
@@ -674,5 +685,23 @@ mod tests {
             state.color.hsv()
         );
         assert_eq!(h, 0.0, "an SV click leaves the hue alone");
+    }
+
+    #[test]
+    fn the_inline_swatch_reports_a_button_role_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            color: [f32; 3],
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, s: &mut S| {
+                color_button(ui, &mut s.color);
+            },
+            S {
+                color: [1.0, 0.0, 0.0],
+            },
+        );
+        harness.run();
+        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Button, "colour");
     }
 }

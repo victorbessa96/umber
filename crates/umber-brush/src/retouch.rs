@@ -546,6 +546,229 @@ pub fn clone_dab_masked(
     wrote.then_some(rect)
 }
 
+/// Inpainting parameters (Wave 9's `wave-texture-inpainting`; the
+/// healing-brush class). `search_radius` bounds the patch-match spiral
+/// (how far from the naive source the fill may migrate to find a
+/// better boundary match); `candidates` caps the search (the coarse
+/// v1 budget — a full multiscale search is the follow-up when the
+/// core earns it).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InpaintParams {
+    /// Half-extent of the candidate spiral, in texels.
+    pub search_radius: i32,
+    /// Candidate offsets examined per dab.
+    pub candidates: u32,
+}
+
+impl Default for InpaintParams {
+    fn default() -> Self {
+        // The coarse v1: a 12-texel spiral over 96 candidates. Small
+        // enough for a per-dab budget on the CPU mirror; large enough
+        // to jump a boundary misalignment at common radii.
+        Self {
+            search_radius: 12,
+            candidates: 96,
+        }
+    }
+}
+
+/// Boundary-ring sample count for the patch score (4 pairs × 2 sides).
+const INPAINT_SCORE_PAIRS: usize = 4;
+
+/// One dab of the inpaint brush: fills the dab's disc from the
+/// best-matching patch near the sampled region, blended by the same
+/// gated coverage as [`clone_dab_masked`] — so the footprint, the
+/// falloff and the quick mask behave identically to every other
+/// retouch tool.
+///
+/// The patch match (v1, deterministic): candidate offsets walk a
+/// fixed spiral around the source center's delta; each candidate is
+/// scored by SSD over [`INPAINT_SCORE_PAIRS`] texel pairs straddling
+/// the disc boundary — the ring where continuity is visible — plus the
+/// disc's own texels (a candidate that matches the disc's PARTIAL
+/// state, e.g. after earlier dabs of the same stroke, keeps the
+/// stroke's own fills). The lowest-scoring offset wins; ties resolve
+/// to the FIRST candidate (spiral order = distance order, so the
+/// naive delta wins ties = smoothest fill).
+///
+/// Returns the dirty rect, or `None` when the dab covers nothing.
+pub fn inpaint_dab(
+    dst: &mut RgbaBuffer,
+    source: &RgbaBuffer,
+    dab: &RetouchDab,
+    sample_center: [f32; 2],
+    params: &InpaintParams,
+    mask: Option<MaskView<'_>>,
+) -> Option<DirtyRect> {
+    if dab.alpha <= 0.0 {
+        return None;
+    }
+    let rect = footprint(dab.pos, dab.radius, dst.width, dst.height)?;
+    // The base delta: the naive "copy from the sampled region".
+    let base_dx = (sample_center[0] - dab.pos[0]).round() as i64;
+    let base_dy = (sample_center[1] - dab.pos[1]).round() as i64;
+    // The boundary ring: texels just OUTSIDE the disc (where the
+    // original content lives) paired with their inside-counterparts
+    // (disc edge). Sampled sparsely for a bounded score.
+    let score_pairs = boundary_pairs(dab, rect, dst.width, dst.height);
+    let mut best = (u64::MAX, base_dx, base_dy);
+    'search: for (examined, (ox, oy)) in spiral(params.search_radius).into_iter().enumerate() {
+        if examined as u32 >= params.candidates {
+            break 'search;
+        }
+        let dx = base_dx + i64::from(ox);
+        let dy = base_dy + i64::from(oy);
+        if let Some(s) = patch_score(dst, source, &score_pairs, dx, dy) {
+            if s < best.0 {
+                best = (s, dx, dy);
+            }
+        }
+    }
+    let (_, dx, dy) = best;
+    // Fill: the clone_dab blend math with the matched delta.
+    let mut wrote = false;
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let Some(cov) = gated_coverage(dab, x, y, mask) else {
+                continue;
+            };
+            let sx = i64::from(x) + dx;
+            let sy = i64::from(y) + dy;
+            let in_source = (0..i64::from(source.width)).contains(&sx)
+                && (0..i64::from(source.height)).contains(&sy);
+            if !in_source {
+                continue;
+            }
+            let s = source.texel(sx as u32, sy as u32);
+            let d = dst.texel(x, y);
+            let src_a = f32::from(s[3]) / 255.0 * cov;
+            let out: [u8; 4] = std::array::from_fn(|c| {
+                let sc = f32::from(s[c]) * cov;
+                let dc = f32::from(d[c]) * (1.0 - src_a);
+                (sc + dc).round().clamp(0.0, 255.0) as u8
+            });
+            dst.set_texel(x, y, out);
+            wrote = true;
+        }
+    }
+    wrote.then_some(rect)
+}
+
+/// The boundary pairs for the score: `INPAINT_SCORE_PAIRS` samples on
+/// the disc's edge ring, each paired with the texel just OUTSIDE the
+/// footprint along the same ray (the continuity evidence).
+fn boundary_pairs(
+    dab: &RetouchDab,
+    rect: DirtyRect,
+    width: u32,
+    height: u32,
+) -> Vec<([i64; 2], [i64; 2])> {
+    let cx = dab.pos[0];
+    let cy = dab.pos[1];
+    let r = dab.radius.max(0.5);
+    let mut pairs = Vec::with_capacity(INPAINT_SCORE_PAIRS);
+    for k in 0..INPAINT_SCORE_PAIRS {
+        let theta = k as f32 * std::f32::consts::TAU / INPAINT_SCORE_PAIRS as f32;
+        let (ux, uy) = (theta.cos(), theta.sin());
+        let inside_x = cx + ux * (r - 1.0);
+        let inside_y = cy + uy * (r - 1.0);
+        let outside_x = cx + ux * (r + 1.0);
+        let outside_y = cy + uy * (r + 1.0);
+        let inside = [inside_x.floor() as i64, inside_y.floor() as i64];
+        let outside = [outside_x.floor() as i64, outside_y.floor() as i64];
+        // Both must land in the target AND outside the rect excluded
+        // bounds (the pair must straddle: inside within the rect's
+        // covered area is fine; outside must be a real texel).
+        let ok = |p: [i64; 2]| {
+            p[0] >= i64::from(rect.x0) && p[0] < i64::from(rect.x1)
+                || (p[0] >= 0 && p[0] < i64::from(width))
+        };
+        let _ = ok;
+        if inside[0] >= 0
+            && inside[0] < i64::from(width)
+            && inside[1] >= 0
+            && inside[1] < i64::from(height)
+            && outside[0] >= 0
+            && outside[0] < i64::from(width)
+            && outside[1] >= 0
+            && outside[1] < i64::from(height)
+        {
+            pairs.push((inside, outside));
+        }
+    }
+    pairs
+}
+
+/// SSD of one candidate: the four channel sums over each pair's
+/// (source-under-inside vs dst-under-inside) plus the boundary
+/// continuity (source-under-outside vs dst-under-outside). `None`
+/// when a candidate reads out of the source (skip it).
+fn patch_score(
+    dst: &RgbaBuffer,
+    source: &RgbaBuffer,
+    pairs: &[([i64; 2], [i64; 2])],
+    dx: i64,
+    dy: i64,
+) -> Option<u64> {
+    let mut score = 0u64;
+    for (inside, outside) in pairs {
+        let si = (inside[0] + dx, inside[1] + dy);
+        let so = (outside[0] + dx, outside[1] + dy);
+        if si.0 < 0
+            || si.1 < 0
+            || si.0 >= i64::from(source.width)
+            || si.1 >= i64::from(source.height)
+            || so.0 < 0
+            || so.1 < 0
+            || so.0 >= i64::from(source.width)
+            || so.1 >= i64::from(source.height)
+        {
+            return None;
+        }
+        let di = dst.texel(inside[0] as u32, inside[1] as u32);
+        let do_ = dst.texel(outside[0] as u32, outside[1] as u32);
+        let ssi = source.texel(si.0 as u32, si.1 as u32);
+        let sso = source.texel(so.0 as u32, so.1 as u32);
+        for c in 0..4 {
+            let a = i64::from(ssi[c]) - i64::from(di[c]);
+            score += (a * a) as u64;
+            let b = i64::from(sso[c]) - i64::from(do_[c]);
+            score += (b * b) as u64;
+        }
+    }
+    Some(score)
+}
+
+/// The candidate spiral: every offset within the Chebyshev `radius`,
+/// ordered by distance then by a fixed angle (atan2 buckets), so the
+/// search is deterministic and distance-biased — ties resolve to the
+/// nearest candidate, and equal distances resolve in a fixed order.
+fn spiral(radius: i32) -> Vec<(i32, i32)> {
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            out.push((dx, dy));
+        }
+    }
+    out.sort_by(|a, b| {
+        let da = i64::from(a.0) * a.0 as i64 + i64::from(a.1) * a.1 as i64;
+        let db = i64::from(b.0) * b.0 as i64 + i64::from(b.1) * b.1 as i64;
+        da.cmp(&db).then_with(|| {
+            let angle = |(x, y): (i32, i32)| {
+                // A stable fixed angle: atan2 bucketed to a sortable
+                // integer, with the 0-angle first (east, then
+                // counterclockwise).
+                let a = f32::atan2(y as f32, x as f32);
+                let deg = a.to_degrees();
+                let norm = if deg < 0.0 { deg + 360.0 } else { deg };
+                (norm * 1000.0) as i32
+            };
+            angle(*a).cmp(&angle(*b))
+        })
+    });
+    out
+}
+
 /// The eraser op for one dab: every covered texel's ENABLED channels are
 /// scaled toward zero by the dab's coverage (`alpha * falloff`, the paint
 /// shader's exact footprint math) — `out = round(orig * (1 - coverage))`.
@@ -1385,5 +1608,165 @@ mod tests {
             })
         );
         assert_eq!(footprint([-50.0, 2.0], 6.0, 64, 64), None);
+    }
+
+    // ---- wave9-inpaint-core -------------------------------------------------
+
+    fn solid_buffer(w: u32, h: u32, rgba: [u8; 4]) -> RgbaBuffer {
+        let data: Vec<u8> = rgba.repeat((w * h) as usize);
+        RgbaBuffer::new(w, h, data).expect("solid dims")
+    }
+
+    #[test]
+    fn inpaint_fills_a_hole_from_the_sampled_region() {
+        // The classic healing case: a solid region with one hole,
+        // sampled from clean solid. The fill must reproduce the solid.
+        let mut dst = solid_buffer(32, 32, [90, 90, 90, 255]);
+        for y in 12..20 {
+            for x in 12..20 {
+                dst.set_texel(x, y, [0, 0, 0, 255]);
+            }
+        }
+        let source = solid_buffer(32, 32, [90, 90, 90, 255]);
+        let dab = RetouchDab {
+            pos: [15.5, 15.5],
+            radius: 5.0,
+            alpha: 1.0,
+            hardness: 1.0,
+        };
+        let params = InpaintParams::default();
+        let dirty = inpaint_dab(&mut dst, &source, &dab, [24.5, 24.5], &params, None);
+        assert!(dirty.is_some(), "the dab wrote");
+        // The hole's core is refilled to the solid.
+        assert_eq!(dst.texel(15, 15), [90, 90, 90, 255]);
+        assert_eq!(dst.texel(16, 16), [90, 90, 90, 255]);
+    }
+
+    #[test]
+    fn inpaint_prefers_the_boundary_continuity_match() {
+        // Two candidate regions: a WRONG-color solid and the RIGHT
+        // one. The sampled center points at the wrong one, but the
+        // boundary ring (which the score reads) matches the right
+        // one — the search must migrate to continuity.
+        let w = 48u32;
+        // dst: gray left half, a hole at (15,24), distinct tan right.
+        let mut dst = solid_buffer(w, 32, [100, 100, 100, 255]);
+        for y in 0..32 {
+            for x in 24..w {
+                dst.set_texel(x, y, [180, 160, 120, 255]);
+            }
+        }
+        for y in 12..20 {
+            for x in 12..20 {
+                dst.set_texel(x, y, [0, 0, 0, 255]);
+            }
+        }
+        // source: the same two-tone layout WITHOUT the hole, shifted
+        // so the naive delta points at the tan side; the boundary
+        // evidence (gray surrounds the hole) must pull the match back
+        // to the gray side.
+        let mut source = solid_buffer(w, 32, [100, 100, 100, 255]);
+        for y in 0..32 {
+            for x in 24..w {
+                source.set_texel(x, y, [180, 160, 120, 255]);
+            }
+        }
+        let dab = RetouchDab {
+            pos: [15.5, 15.5],
+            radius: 4.0,
+            alpha: 1.0,
+            hardness: 1.0,
+        };
+        let params = InpaintParams {
+            search_radius: 10,
+            candidates: 400,
+        };
+        let _ = inpaint_dab(&mut dst, &source, &dab, [30.5, 15.5], &params, None);
+        // The hole's core: filled from the gray (100) region, not the
+        // naive tan (180) sample.
+        let filled = dst.texel(15, 15);
+        assert_eq!(
+            filled,
+            [100, 100, 100, 255],
+            "boundary continuity wins over the naive sample: got {filled:?}"
+        );
+    }
+
+    #[test]
+    fn inpaint_respects_the_quick_mask() {
+        let mut dst = solid_buffer(32, 32, [10, 20, 30, 255]);
+        for y in 12..20 {
+            for x in 12..20 {
+                dst.set_texel(x, y, [0, 0, 0, 255]);
+            }
+        }
+        let source = solid_buffer(32, 32, [10, 20, 30, 255]);
+        let dab = RetouchDab {
+            pos: [15.5, 15.5],
+            radius: 5.0,
+            alpha: 1.0,
+            hardness: 1.0,
+        };
+        // A mask that blocks the texel (15,15) entirely (1.0 = allowed).
+        let coverage: Vec<f32> = (0..32)
+            .flat_map(|y| (0..32).map(move |x| if x == 15 && y == 15 { 0.0 } else { 1.0 }))
+            .collect();
+        let mask = MaskView::new(32, 32, &coverage).expect("mask dims");
+        let dirty = inpaint_dab(
+            &mut dst,
+            &source,
+            &dab,
+            [24.5, 24.5],
+            &InpaintParams::default(),
+            Some(mask),
+        );
+        assert!(dirty.is_some());
+        assert_eq!(
+            dst.texel(15, 15),
+            [0, 0, 0, 255],
+            "the masked texel is untouched"
+        );
+        assert_eq!(
+            dst.texel(16, 16),
+            [10, 20, 30, 255],
+            "the unmasked ones fill"
+        );
+    }
+
+    #[test]
+    fn inpaint_zero_alpha_dab_is_a_noop() {
+        let mut dst = solid_buffer(16, 16, [1, 2, 3, 255]);
+        let source = solid_buffer(16, 16, [9, 9, 9, 255]);
+        let dab = RetouchDab {
+            pos: [8.0, 8.0],
+            radius: 4.0,
+            alpha: 0.0,
+            hardness: 1.0,
+        };
+        assert!(inpaint_dab(
+            &mut dst,
+            &source,
+            &dab,
+            [2.0, 2.0],
+            &InpaintParams::default(),
+            None
+        )
+        .is_none());
+        assert_eq!(dst.texel(8, 8), [1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn the_spiral_is_deterministic_distance_ordered_and_complete() {
+        let s = spiral(3);
+        assert_eq!(s[0], (0, 0), "the naive delta is the first candidate");
+        assert_eq!(s.len(), 49, "Chebyshev radius 3 covers 7x7");
+        // Distance-ordered: every prefix is nondecreasing in squared
+        // distance.
+        let d = |(x, y): (i32, i32)| x * x + y * y;
+        for k in 1..s.len() {
+            assert!(d(s[k - 1]) <= d(s[k]), "spiral order broken at {k}");
+        }
+        // Deterministic: the same call gives the same order.
+        assert_eq!(s, spiral(3));
     }
 }

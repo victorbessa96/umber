@@ -24,7 +24,9 @@
 //! free of umber-brush: a consumer converts its own curve type to and from
 //! [`Curve::points`].
 
-use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{
+    Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
+};
 
 use crate::theme;
 
@@ -304,6 +306,9 @@ impl<'a> CurveEdit<'a> {
     pub fn show(self, ui: &mut Ui) -> egui::Response {
         let (rect, mut response) =
             ui.allocate_exact_size(Vec2::splat(self.size), Sense::click_and_drag());
+        // g7-accesskit-sweep: the curve editor canvas (an editor, not a
+        // static plot — Slider role carries the keyboard-adjacency).
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, true, "curve"));
         let curve = self.curve;
         let drag_id = response.id.with("curve-drag");
 
@@ -626,5 +631,16 @@ mod tests {
         // A junk paste changes nothing.
         frame(&ctx, &mut c, false, vec![egui::Event::Paste("junk".into())]);
         assert_eq!(c, three());
+    }
+
+    #[test]
+    fn the_curve_canvas_reports_a_slider_role_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        let mut curve = Curve::default();
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            CurveEdit::new(&mut curve).size(120.0).show(ui);
+        });
+        harness.run();
+        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Slider, "curve");
     }
 }

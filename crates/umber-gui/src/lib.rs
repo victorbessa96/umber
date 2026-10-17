@@ -8,7 +8,7 @@
 //! - [`fonts`]: Inter + JetBrains Mono (§2.2).
 //! - [`icons`]: the lucide atlas model + `icon` / `icon_button` (§2.3).
 //! - [`widgets`]: `param_group`, `value_field`, `tool_row`, `swatch_grid`,
-//!   and the `notices` toast stack.
+//!   the `notices` toast stack, and the Properties `context_rail`.
 //!
 //! The app wiring (apply the style + fonts at boot, migrate the Brush
 //! panel) is a separate step. This crate depends on egui alone. It never
@@ -36,6 +36,8 @@ pub use theme::{
     MOTION_SECS,
 };
 pub use widgets::{
-    ColorPicker, ColorState, Curve, CurveEdit, CurveError, Notice, NoticeLevel, Notices,
-    ParamGroup, Ramp, RampEdit, RecentColors, SwatchGrid, Tool, ToolRow, ValueField,
+    ButtonRole, ColorPicker, ColorState, ContextKind, ContextRail, ContextRailCtx,
+    ContextRailOutcome, Curve, CurveEdit, CurveError, DialogButton, Notice, NoticeLevel, Notices,
+    ParamGroup, PropertyRows, Ramp, RampEdit, RecentColors, SwatchGrid, Tool, ToolRow, TypeAhead,
+    ValueField,
 };

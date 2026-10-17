@@ -62,6 +62,10 @@ pub const SCALE_MAX: f32 = 2.0;
 pub struct Preferences {
     /// UI scale (egui zoom factor; 1.0 = the OS's own scale).
     pub ui_scale: f32,
+    /// g7-density-scale: Auto = follow the OS's native scale (the
+    /// `ui_scale` value is kept but ignored while this is on, so a
+    /// manual value survives a toggle back).
+    pub ui_scale_auto: bool,
     /// Show tooltips.
     pub tooltips: bool,
     /// Reduce Motion: no animations (egui `animation_time` = 0).
@@ -79,6 +83,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             ui_scale: 1.0,
+            ui_scale_auto: true,
             tooltips: true,
             reduce_motion: false,
             key_hints: true,
@@ -100,8 +105,9 @@ impl Preferences {
     /// The `key=value` text (stable key order).
     pub fn serialize(&self) -> String {
         format!(
-            "ui_scale={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nkeymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nkeymap={}\n",
             self.ui_scale,
+            self.ui_scale_auto,
             self.tooltips,
             self.reduce_motion,
             self.key_hints,
@@ -132,6 +138,7 @@ impl Preferences {
                         }
                     }
                 }
+                "ui_scale_auto" => p.ui_scale_auto = bool_of(v).unwrap_or(p.ui_scale_auto),
                 "tooltips" => p.tooltips = bool_of(v).unwrap_or(p.tooltips),
                 "reduce_motion" => p.reduce_motion = bool_of(v).unwrap_or(p.reduce_motion),
                 "key_hints" => p.key_hints = bool_of(v).unwrap_or(p.key_hints),
@@ -217,7 +224,7 @@ pub fn style_delta(
     };
     let differs = |a: f32, b: f32| !(a == b || (a - b).abs() < 1e-6);
     StyleDelta {
-        zoom: differs(zoom, prefs.ui_scale).then_some(prefs.ui_scale),
+        zoom: (!prefs.ui_scale_auto && differs(zoom, prefs.ui_scale)).then_some(prefs.ui_scale),
         tooltip_delay: differs(tooltip_delay, want_tooltip).then_some(want_tooltip),
         animation_time: differs(animation_time, want_anim).then_some(want_anim),
     }
@@ -633,6 +640,7 @@ mod tests {
     fn round_trip_and_defaults() {
         let p = Preferences {
             ui_scale: 1.25,
+            ui_scale_auto: false,
             tooltips: false,
             reduce_motion: true,
             key_hints: false,
@@ -658,6 +666,35 @@ mod tests {
         assert!(p.reduce_motion);
         assert_eq!(Preferences::parse("ui_scale=NaN").ui_scale, 1.0);
         assert_eq!(Preferences::parse("ui_scale=0.1").ui_scale, SCALE_MIN);
+        // g7-density-scale: the auto line parses; a bad value keeps the
+        // default (on).
+        assert!(!Preferences::parse("ui_scale_auto=false").ui_scale_auto);
+        assert!(Preferences::parse("ui_scale_auto=bogus").ui_scale_auto);
+    }
+
+    #[test]
+    fn auto_scale_follows_native_until_disabled() {
+        // Auto (the default): no zoom delta, whatever ui_scale holds —
+        // the OS's native scale rules.
+        let auto = Preferences {
+            ui_scale: 1.5,
+            ..Preferences::default()
+        };
+        assert!(auto.ui_scale_auto);
+        let d = style_delta(&auto, 1.0, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(d.zoom, None, "auto = native, no zoom write");
+        // Manual: the delta carries the value when it differs.
+        let manual = Preferences {
+            ui_scale: 1.5,
+            ui_scale_auto: false,
+            ..Preferences::default()
+        };
+        let d2 = style_delta(&manual, 1.0, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(d2.zoom, Some(1.5));
+        // A round trip keeps both.
+        let back = Preferences::parse(&manual.serialize());
+        assert!(!back.ui_scale_auto);
+        assert_eq!(back.ui_scale, 1.5);
     }
 
     #[test]
@@ -676,11 +713,13 @@ mod tests {
         let p = Preferences::default();
         let d = style_delta(&p, 1.0, 0.35, 0.12, 0.35, 0.12);
         assert!(d.is_empty(), "{d:?}");
-        // Tooltips off -> infinite delay; Reduce Motion -> 0; scale moves.
+        // Tooltips off -> infinite delay; Reduce Motion -> 0; scale moves
+        // (a manual scale write turns auto off — the editor's contract).
         let off = Preferences {
             tooltips: false,
             reduce_motion: true,
             ui_scale: 1.5,
+            ui_scale_auto: false,
             ..p
         };
         let d = style_delta(&off, 1.0, 0.35, 0.12, 0.35, 0.12);

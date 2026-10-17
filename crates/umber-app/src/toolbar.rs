@@ -604,9 +604,154 @@ pub fn contextual_strip(ui: &mut Ui, view: &mut ContextualView<'_>) -> Vec<Strip
     edits
 }
 
+/// g7-polish-batch: held-key temporary tools (Space = pan while held,
+/// hold E = erase while held). A pure state machine — the shell feeds
+/// key-down/key-up events and the current focus; it answers which tool
+/// the strip should show. The restore happens on key UP (not a timer),
+/// so a quick tap leaves the strip untouched and a hold never commits
+/// the switch.
+/// (Shell-half seam: the W-GUI-3 held-key poll kill wires `press`/
+/// `release`/`panning` into the frame loop; unwired until then.)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TempTools {
+    /// The tool to restore on release.
+    restore: Option<ToolKind>,
+    /// The key currently held (one at a time; a second key while one
+    /// is held is ignored until the first releases).
+    held: Option<TempKey>,
+}
+
+/// A holdable key.
+/// (Shell-half seam, same owner as [`TempTools`].)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TempKey {
+    /// Space: pan the view while held (the shell switches to the
+    /// navigate mode, not a ToolKind — the shell interprets).
+    Pan,
+    /// E: erase while held.
+    Erase,
+}
+
+/// (Shell-half seam: same owner as the struct — the W-GUI-3 held-key
+/// poll kill wires these into the frame loop.)
+#[allow(dead_code)]
+impl TempTools {
+    /// A key press. `focus` gates text-edit frames (typing an "e" in
+    /// a layer name must never switch tools). Returns the tool the
+    /// strip should show NOW (`None` = keep the current one).
+    pub fn press(
+        &mut self,
+        key: TempKey,
+        current: ToolKind,
+        focus: crate::actions::Focus,
+    ) -> Option<ToolKind> {
+        if focus == crate::actions::Focus::Text {
+            return None;
+        }
+        if self.held.is_some() {
+            return None; // one hold at a time
+        }
+        self.held = Some(key);
+        match key {
+            TempKey::Pan => None, // the shell owns the navigate switch
+            TempKey::Erase => {
+                if current == ToolKind::Erase {
+                    // Already erasing: nothing to hold.
+                    None
+                } else {
+                    self.restore = Some(current);
+                    Some(ToolKind::Erase)
+                }
+            }
+        }
+    }
+
+    /// A key release. Returns the tool to restore (`None` = none).
+    pub fn release(&mut self, key: TempKey) -> Option<ToolKind> {
+        if self.held == Some(key) {
+            self.held = None;
+            self.restore.take()
+        } else {
+            None
+        }
+    }
+
+    /// Whether the pan hold is active (the shell switches its
+    /// pointer mode while true).
+    pub fn panning(&self) -> bool {
+        self.held == Some(TempKey::Pan)
+    }
+}
+
 #[cfg(test)]
 mod contextual_tests {
     use super::*;
+
+    #[test]
+    fn hold_e_switches_to_erase_and_restores_on_release() {
+        let mut t = TempTools::default();
+        // Press E while painting: switch to erase, remember paint.
+        assert_eq!(
+            t.press(TempKey::Erase, ToolKind::Paint, crate::actions::Focus::None),
+            Some(ToolKind::Erase)
+        );
+        // Release: restore paint.
+        assert_eq!(t.release(TempKey::Erase), Some(ToolKind::Paint));
+        // A second release is a no-op.
+        assert_eq!(t.release(TempKey::Erase), None);
+    }
+
+    #[test]
+    fn a_text_field_owns_the_e_key() {
+        let mut t = TempTools::default();
+        assert_eq!(
+            t.press(TempKey::Erase, ToolKind::Paint, crate::actions::Focus::Text),
+            None
+        );
+        // The press was ignored entirely: a later release restores nothing.
+        assert_eq!(t.release(TempKey::Erase), None);
+    }
+
+    #[test]
+    fn already_erasing_holds_nothing() {
+        let mut t = TempTools::default();
+        assert_eq!(
+            t.press(TempKey::Erase, ToolKind::Erase, crate::actions::Focus::None),
+            None
+        );
+        assert_eq!(t.release(TempKey::Erase), None);
+    }
+
+    #[test]
+    fn one_hold_at_a_time() {
+        let mut t = TempTools::default();
+        assert_eq!(
+            t.press(TempKey::Erase, ToolKind::Paint, crate::actions::Focus::None),
+            Some(ToolKind::Erase)
+        );
+        // Pan while erase is held: ignored (no mode thrash).
+        assert_eq!(
+            t.press(TempKey::Pan, ToolKind::Paint, crate::actions::Focus::None),
+            None
+        );
+        assert!(!t.panning());
+        // The erase release still restores.
+        assert_eq!(t.release(TempKey::Erase), Some(ToolKind::Paint));
+    }
+
+    #[test]
+    fn pan_reports_its_hold_without_touching_tools() {
+        let mut t = TempTools::default();
+        assert_eq!(
+            t.press(TempKey::Pan, ToolKind::Paint, crate::actions::Focus::None),
+            None
+        );
+        assert!(t.panning());
+        assert_eq!(t.release(TempKey::Pan), None, "pan restores no tool");
+        assert!(!t.panning());
+    }
 
     #[test]
     fn strip_edits_report_only_cross_owner_changes() {

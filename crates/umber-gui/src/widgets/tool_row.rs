@@ -10,7 +10,7 @@
 //! The underline's x slides to the active slot over [`theme::MOTION_SECS`]
 //! via `animate_value_with_time`.
 
-use egui::{Id, Pos2, Rect, Response, Ui, Vec2};
+use egui::{Id, Pos2, Rect, Response, Ui, Vec2, WidgetInfo, WidgetType};
 
 use crate::icons::{icon_button, IconAtlas, IconFamily, ICON_BUTTON_PAD};
 use crate::theme;
@@ -104,6 +104,16 @@ impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
             row
         });
         let mut response = inner.inner.unwrap_or(inner.response);
+        // g7-accesskit-sweep: the row IS the interactive widget (its
+        // buttons are painter-drawn icon slots — see icons.rs's own
+        // pending sweep); the union response carries the role + the
+        // active tool's tooltip as its label.
+        if let Some(index) = active_index(self.tools, active) {
+            if let Some(tool) = self.tools.get(index) {
+                response
+                    .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tool.tooltip));
+            }
+        }
 
         let (next, changed) = resolve_click(*active, clicked);
         *active = next;
@@ -134,7 +144,7 @@ impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     enum T {
         Paint,
         Erase,
@@ -190,5 +200,25 @@ mod tests {
     fn underline_slot_positions() {
         assert_eq!(slot_x(10.0, 0, 28.0, 4.0), 10.0);
         assert_eq!(slot_x(10.0, 2, 28.0, 4.0), 74.0);
+    }
+
+    #[test]
+    fn the_row_reports_its_active_tool_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            active: T,
+        }
+        let atlas = crate::icons::IconAtlas::empty();
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, s: &mut S| {
+                ToolRow::new("a11y-test-row", &row()).show(ui, &atlas, &mut s.active);
+            },
+            S { active: T::Paint },
+        );
+        harness.run();
+        // The union response carries a Button role labeled with the
+        // ACTIVE tool's tooltip ("paintbrush" in the fixture). The
+        // get_by_ query panics on miss — the call is the assertion.
+        let _btn = harness.get_by_role_and_label(egui::accesskit::Role::Button, "paintbrush");
     }
 }

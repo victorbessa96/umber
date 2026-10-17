@@ -10,7 +10,7 @@
 //! footprint identical in both modes.
 
 use glam::camera::rh::{proj, view};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 
 /// Unprojects an NDC point (with explicit depth: z=0 near, z=1 far in
 /// wgpu's directx convention) back to world space through the inverse
@@ -201,6 +201,65 @@ impl OrbitCamera {
         self.distance =
             (self.distance * (1.0 - delta).max(0.01)).clamp(self.min_distance, self.max_distance);
     }
+
+    /// g1-nav-presets: wheel-zoom TOWARD a point — the UI-space cursor
+    /// position under the wheel event stays fixed on screen as the
+    /// camera closes. `cursor_ndc` is the cursor in NDC
+    /// (x right ∈ [-1,1], y up ∈ [-1,1]) for the SAME aspect the
+    /// projection uses. Perspective-aware: the target pans along the
+    /// camera's right/up axes by the world-space displacement the
+    /// cursor subtends, recomputed from the POST-zoom frustum.
+    pub fn zoom_toward(&mut self, cursor_ndc: Vec2, delta: f32, aspect: f32) {
+        let before = self.distance;
+        self.zoom(delta);
+        if before == self.distance {
+            return; // clamped at a limit: nothing moves under the cursor
+        }
+        // The world-per-NDC scale at the target plane, before and after.
+        let scale = |dist: f32| -> Vec2 {
+            let half_h = match self.projection {
+                Projection::Perspective => dist * (self.fov_y_radians * 0.5).tan(),
+                Projection::Orthographic => {
+                    // The ortho half-height follows distance too (the
+                    // framing parity in projection_matrix).
+                    dist * (self.fov_y_radians * 0.5).tan()
+                }
+            };
+            Vec2::new(half_h * aspect, half_h)
+        };
+        // The cursor's offset from the view center, in world units at
+        // the target plane. Zooming in shrinks the frustum, so the same
+        // cursor NDC covers LESS world — the target moves toward the
+        // cursor's world point by exactly the difference.
+        let world_before = cursor_ndc * scale(before);
+        let world_after = cursor_ndc * scale(self.distance);
+        let shift = world_before - world_after;
+        let forward = (self.target - self.eye()).normalize_or_zero();
+        let right = forward.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(forward).normalize_or_zero();
+        self.target += right * shift.x + up * shift.y;
+    }
+
+    /// g1-nav-presets: frame a bounding sphere — position the camera so
+    /// `center` with `radius` fits the view with the margin factor
+    /// (1.0 = exactly tangent to the frustum). Keeps the current
+    /// yaw/pitch; resets distance and target. The F-frame key's engine
+    /// half (the shell wiring is queued on the app lock).
+    pub fn frame(&mut self, center: Vec3, radius: f32, margin: f32) {
+        if radius <= 0.0 || !radius.is_finite() {
+            return;
+        }
+        let margin = margin.max(1.0);
+        let fit = radius * margin;
+        // Distance so the sphere fits the SMALLER frustum axis: the
+        // half-angle of the smaller of (fov_y, fov_x) must contain it.
+        let half_y = (self.fov_y_radians * 0.5).tan();
+        // fov_x derives from aspect at the caller; assume the tighter
+        // axis is y when aspect >= 1 (the viewport is landscape).
+        let dist = if half_y > 0.0 { fit / half_y } else { fit };
+        self.target = center;
+        self.distance = dist.clamp(self.min_distance, self.max_distance);
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +425,100 @@ mod tests {
         assert!(
             (x0 - x1).abs() < 1e-5 && (y0 - y1).abs() < 1e-5,
             "ortho must collapse depth: ({x0}, {y0}) vs ({x1}, {y1})"
+        );
+    }
+
+    #[test]
+    fn zoom_toward_keeps_the_cursor_point_fixed_on_screen() {
+        // g1-nav-presets: zoom at the cursor — the world point under the
+        // cursor must land at the SAME NDC before and after.
+        let mut cam = OrbitCamera {
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 10.0,
+            min_distance: 0.1,
+            max_distance: 100.0,
+            target: Vec3::new(1.0, 2.0, 3.0),
+            ..Default::default()
+        };
+        let aspect = 16.0 / 9.0;
+        let cursor = Vec2::new(0.5, -0.25);
+        // The world point under the cursor BEFORE the zoom, at the
+        // target plane:
+        let world_before = {
+            let forward = (cam.target - cam.eye()).normalize_or_zero();
+            let right = forward.cross(Vec3::Y).normalize_or_zero();
+            let up = right.cross(forward).normalize_or_zero();
+            let half_h = cam.distance * (cam.fov_y_radians * 0.5).tan();
+            let s = Vec2::new(half_h * aspect, half_h);
+            cam.target + right * (cursor.x * s.x) + up * (cursor.y * s.y)
+        };
+        cam.zoom_toward(cursor, 0.5, aspect);
+        // Recompute the NDC of that SAME world point after the zoom:
+        let vp = cam.view_proj(aspect);
+        let clip = vp * world_before.extend(1.0);
+        let ndc = Vec2::new(clip.x / clip.w, clip.y / clip.w);
+        assert!(
+            (ndc - cursor).length() < 1e-3,
+            "cursor NDC drifted: {ndc:?} vs {cursor:?}"
+        );
+    }
+
+    #[test]
+    fn zoom_toward_at_a_clamp_moves_nothing() {
+        let mut cam = OrbitCamera {
+            min_distance: 5.0,
+            max_distance: 5.0,
+            distance: 5.0,
+            ..Default::default()
+        };
+        let target = cam.target;
+        cam.zoom_toward(Vec2::new(0.4, 0.4), 0.5, 1.0);
+        assert_eq!(cam.target, target, "a clamped zoom pans nothing");
+    }
+
+    #[test]
+    fn frame_fits_the_sphere_inside_the_frustum() {
+        // g1-nav-presets: F-frame — after framing, the sphere's edge
+        // projects INSIDE the viewport (|ndc| <= 1 with margin).
+        let mut cam = OrbitCamera {
+            yaw: 0.7,
+            pitch: -0.3,
+            ..Default::default()
+        };
+        let center = Vec3::new(-4.0, 1.0, 2.0);
+        let radius = 3.0;
+        cam.frame(center, radius, 1.1);
+        let aspect = 16.0 / 9.0;
+        // The sphere's tangent point toward the camera: center moved
+        // TOWARD the eye by radius.
+        let eye = cam.eye();
+        let toward_eye = (eye - center).normalize_or_zero();
+        let tangent = center + toward_eye * radius;
+        let clip = cam.view_proj(aspect) * tangent.extend(1.0);
+        let ndc_x = clip.x / clip.w;
+        let ndc_y = clip.y / clip.w;
+        assert!(ndc_x.abs() <= 1.0 + 1e-3, "tangent x outside: {ndc_x}");
+        assert!(ndc_y.abs() <= 1.0 + 1e-3, "tangent y outside: {ndc_y}");
+        // And the sphere fits vertically exactly at the margin factor.
+        let up_point = center + Vec3::Y * radius;
+        let clip_up = cam.view_proj(aspect) * up_point.extend(1.0);
+        assert!(
+            (clip_up.y / clip_up.w).abs() <= 1.0 + 1e-3,
+            "top of the sphere outside the frustum"
+        );
+    }
+
+    #[test]
+    fn frame_refuses_degenerate_radii() {
+        let mut cam = OrbitCamera::default();
+        let before = (cam.target, cam.distance);
+        cam.frame(Vec3::ZERO, 0.0, 1.0);
+        cam.frame(Vec3::ZERO, f32::NAN, 1.0);
+        assert_eq!(
+            (cam.target, cam.distance),
+            before,
+            "degenerate frame is a no-op"
         );
     }
 }

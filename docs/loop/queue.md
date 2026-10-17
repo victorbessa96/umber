@@ -156,11 +156,146 @@ for the NEXT audit cycle, not walls.
   in-session `git push` himself. Ratify-or-rollback on the sibling's
   ungated push remains his open call from the disclosure.
 
+## Wave log — W-GUI-2 (2026-10-16, host-outage parked)
+
+State at 21:55. Build host (centralhost 192.168.15.64) SSH-refused
+since ~18:25; ping dead; SSH watcher (proc_fc3e0b60f904) probing.
+W-GUI-1 fully closed earlier (5e0d89e pushed, CI 38954115915 GREEN).
+
+| kill | author | landed | verification class |
+|---|---|---|---|
+| g2-layer-gestures (module) | claw | yes | ad-hoc: 15/15 module tests on host BEFORE the outage |
+| g6-overlays-popover | claw | yes | ad-hoc: 17/17 + clippy clean on host BEFORE the outage |
+| g5-tab-overflow (dock wiring) | claw | yes | static: rustfmt + python width-math port + registry-resolved APIs; 4 headless tests UNRUN |
+| g5-first-run | dragon | yes | static (first 3/3+13/13 on host pre-outage; F1/F2/F8/F9 fixes re-landed after, statically verified 17/17) |
+| g2-gesture-integration | claw | yes | static: 6/6 claims tree-derived, rustfmt; 5 shell tests + kittest UNRUN |
+| g2-context-rail (widget half) | claw | yes | static: 13 tests present, all APIs registry-verified; UNRUN |
+| g7-accesskit-sweep (umber-gui half) | dragon | yes | static: 9 insertions + 6 kittests, APIs registry-verified; UNRUN |
+| g7-density-scale (data half) | dragon | yes | static: 2 new tests + 1 re-pin; UNRUN |
+| icons-a11y (sweep deferred item) | dragon | yes | static: 1 kittest; UNRUN |
+| held-key-tools (data half) | dragon | yes | static: 5 tests; UNRUN |
+| polish-widgets (type_ahead + dialog_buttons) | dragon | yes | static + python port (5+4 tests, cycle-rule + redeclared-index defects found AND fixed by the port); UNRUN |
+
+Cross-review (deleg_17a9b405, artifact
+docs/loop/artifacts/2026-10-16-wgui2-cross-review.md): 1 BLOCKER +
+10 findings, ALL FIXED and re-derived (17/17 checks) — including the
+F1 double-join (Quick Setup re-opens every launch) and the F3 dead
+popover toggles. Full disposition in the artifact.
+
+Locks held (release at commit): wgui2-umber-gui-widgets (all
+umber-gui surfaces, 13 files), wgui2-gesture-integration
+(document/main/layers_panel), wgui2-held-key-tools (toolbar/actions).
+
+Commit surface: 38 dirty/untracked files, hash-pinned in
+~/.hermes/cache/scratch/wgui2-commit-manifest.txt (the scratch
+manifest also lists this wave's 18 kill reports).
+
+## Audit (2026-10-17)
+
+The full-project audit landed:
+`docs/loop/audit-2026-10-17-full-project.md` — measured census (166.5k
+LOC, 2,061 tests, 12.4/kLOC), the strengths (loop under stress,
+security honesty, docs aliveness), the gaps (13 uncompiled kills =
+THIS runbook; the stale-baseline perf red below; 5 no-test files
+named; the shell-halves queue), and the ranked improvements
+(reseed-push rule refinement, automated recovery script, the
+same-kill registration rule, the brief-template verification ladder,
+the two-green-nightlies reseed).
+
+**Perf-nightly red disposition (run 38957356307, 19:46, on 5e0d89e):**
+viewport_mean 45.54ms / p95 57.24ms vs origin baseline 5.49/6.24ms —
+the EXACT numbers the reseed commit (9acdc1c) recorded as the
+hardware-class mismatch. 9acdc1c sits LOCAL, unpushed (rides this
+wave's push per the one-push rule), so every nightly until the
+close-out push compares against the stale GL-seed baseline and reads
+red. NOT a code regression. No re-triage; the runbook's push closes
+it. The audit proposes the rule refinement (a live-red config commit
+may break the wave gate) for Bessa's ruling.
+
+## Loop convergence (2026-10-17 01:35, iteration #6)
+
+The self-paced /loop ran 6 iterations through the outage. Each probed
+the host and landed what was landable; the landable set is now
+EXHAUSTED:
+
+- 18 kills on the recovery manifest (60 rows), every one statically
+  verified; both C2-32 follow-ups closed (psd-publish built;
+  spp-extract's writer verified already-landed by tree
+  re-derivation); polish-widgets' registration Deferred ticked.
+- Every remaining ledger row is one of: HOST-gated (the battery, the
+  corpus, the 148-site field pass — the executable runbook below),
+  LOCK-gated (six shell halves on the main.rs/viewport.rs locks,
+  released at the wave commit), or PARTNER-gated (release decisions).
+- The SSH watcher (proc_4aa810e2a82e) fires the instant port 22
+  answers; the /loop wakeups would only add probe latency on top of
+  it.
+
+The loop's terminal instruction to whatever session next runs (the
+watcher's firing session, the morning session, or Bessa's):
+**`bash scripts/recovery-close.sh`** — the whole wave closes in one
+command. The manual sequence below is the documentation of what it
+does.
+
+## Host diagnosis (2026-10-17 03:40 — for Bessa's eyes)
+
+The ~9h outage is NOT the LAN and NOT a routing issue:
+- The gateway (192.168.15.1) pings at 1.4 ms, 0% loss.
+- centralhost's NIC **answers ARP** (`ip neigh` shows REACHABLE at MAC
+  18:c0:4d:97:a7:41) — so the machine has power and a live-enough
+  kernel to respond at the link layer.
+- But ICMP is 100% loss and port 22 refuses — the box is wedged at
+  the OS level (a hard hang, or reboot-looping before sshd starts).
+
+**Likely needs a physical power-cycle.** Bessa, when you see this:
+hold the power button / pull the plug on centralhost, count to five,
+boot it. The FIRST thing to run after it answers (from any session):
+`bash scripts/recovery-close.sh` — the whole parked wave (18 kills,
+uncommitted) closes in one command: sync → battery → commit → ONE
+push → CI watch.
+
+## RECOVERY RUNBOOK (fires when port 22 answers)
+
+**The executable form is live**: `bash scripts/recovery-close.sh
+[--dry-run]` — encodes every step below (host probe → manifest
+preconditions + hash spot-check → host verify-tree cleanup → rsync
+with tip assertion → detached wave battery with BATTERY_EXIT sentinel →
+confirm-green → commit-by-manifest-path → lock release → push →
+explicit run-id resolution → ci-watch). Idempotent and re-runnable;
+refuses to guess past any failure. The manual sequence below remains
+as the documentation of what the script does:
+
+1. Clean the host's leftover verify trees (~/Projects/umber-verify-*;
+   the tabdock one holds an orphaned cargo verdict).
+2. rsync the working tree (exclude /target/ /.dragon/ /Cargo.lock).
+3. Wave gate — battery over the merged tip naming every touched
+   crate: umber-app, umber-gui (+ the spp/docs-only commits need no
+   battery). Verify the battery's scope from its LOG.
+4. On green: commit by explicit path (manifest is the add list),
+   release the seven locks, ONE push, ci-watch with the explicit
+   run id resolved from headSha.
+5. Tick gui-plan rows + STATE + this log + CHANGELOG in a docs
+   commit (rides the NEXT wave's push per the one-push rule).
+6. DONE (21:58): type_ahead.rs + dialog_buttons.rs registered in
+   mod.rs + lib.rs with re-exports; locks consolidated — five
+   fragment locks merged into wgui2-umber-gui-widgets (13 files);
+   umber-app still holds gesture-integration + held-key-tools.
+
+W-GUI-3 candidates (queued after close-out): the five main.rs shell
+halves (ContextRail wiring, a11y umber-app half, density Preferences
+row, held-key poll, popover consumers), g6-stencil-overlay (needs
+the stencil engine), per-set masked bakes.
+
 ## Scratch
 
-- kill-locks.sh subcommands: add/check/remove/list (no default). No live
-  locks as of this write; zero claws running.
-- Remote build gate (centralhost 192.168.15.64) unreachable this run
-  (ping + ssh dead) — CI is the only runtime verification.
-- Next queue item when nothing is in flight: finish B2 (4K live wiring),
-  then B5. A1 rewrite is the next dragon-authored docs surface (non-colliding).
+- (Rewritten 2026-10-17 03:30 — the previous contents described the
+  2026-10-12 outage and the B2/B5 queue, both long closed.)
+- kill-locks.sh subcommands: add/check/remove/list. Live locks right
+  now: wgui2-umber-gui-widgets (13 files), wgui2-gesture-integration
+  (3), wgui2-held-key-tools (2), sppv2-r1 (4), assetstore-gc,
+  g1-nav-zoom-frame, subset-mesh, occluder-scope, psd-publish — all
+  released at the wave commit.
+- The build host has been SSH-down since ~18:25 (2026-10-16); every
+  cargo-shaped verification is parked on
+  `bash scripts/recovery-close.sh` (the executable runbook above).
+- The commit manifest's durable home: `.dragon/wgui2-commit-manifest.txt`
+  (the scratch copy is the fallback).

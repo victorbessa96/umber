@@ -15,6 +15,21 @@ inventory), exceeded where [04] (next-gen bar) points.
 
 
 > **2026-10-15: the C2 gap audit** (`docs/loop/audit-2026-10-15-c2.md`) is the active worklist. Its headline at audit time was that a painter could not finish a real PBR asset in the GUI (paint reached Base Color only, export wrote Base Color only from paint, no quit guard or pixel autosave, two undo timelines, one layer stack per document). **All five closed the same day** (waves W-C2a..f, every CI green): every channel paints and exports (C2-5/6), a quit guard and silent Ctrl+S (C2-1/4), pixel autosave + recovery (C2-3), one undo timeline with row travel (C2-7), a stack + undo + channel list per texture set (C2-9). Open from the audit: the release decisions (C2-16, 22, 23-25, 30) and per-set masked bakes (`docs/specs/per-set-masked-bakes.md`).
+
+> **2026-10-17: the full-project audit**
+> (`docs/loop/audit-2026-10-17-full-project.md`) supersedes the C2
+> worklist as the active queue source. Census: 166.5k LOC, 2,061
+> tests (12.4/kLOC, no crate below 7), 100 requirement rows with 90
+> ticked, SECURITY.md current (10 rows, 0 stale). Gaps concentrated:
+> 13 uncompiled W-GUI-2 kills (host outage; runbook in queue.md), the
+> stale-baseline perf-nightly red (closes at the wave push — the
+> reseed commit is local), five named no-test files, the five
+> shell-halves queue, the fully corpus-gated .spp v2 lane.
+> Improvements: the reseed-push rule refinement (Bessa's ruling
+> queued), an automated recovery-close script, same-kill registration
+> for new modules, the brief-template verification ladder, the
+> two-green-nightlies baseline reseed.
+
 ## Where we stand (2026-10-15)
 
 The core loop is Gate-0-proven end to end: mesh → 4K pressured paint →
@@ -241,7 +256,7 @@ rows live in the census doc until their wave is cut.
 - The perf nightly's invocation was FIXED (2026-10-13 17:08); the
   baseline artifact seeds the compare gate — the pool's stage-4 perf
   gate re-measures under the new frame path.
-- AssetStore GC (§8's v1 boundary: sidecars authoritative, no store GC).
+- ✓ AssetStore GC LANDED (2026-10-16): `AssetStore::collect_garbage` (umber-core/src/assets.rs) — report-only by default, `prune` opt-in; v1 boundary held (sidecars never touched; absent store → zero). Caller (the shell's post-save report) queued on the main.rs lock. Kill report: docs/loop/kill-reports/2026-10-16-assetstore-gc.md.
 - Split-redo under merged undo entries (#5's named follow-up).
 - Merge below the top undo entry (#5's deferred arm).
 - Cached ID-mask bake (multi-ID, cross-tile — the #11 follow-ups).

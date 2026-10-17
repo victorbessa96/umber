@@ -127,6 +127,7 @@ mod empty_state;
 mod env;
 mod export_dialog;
 mod fill_layer;
+mod first_run;
 mod gpu_startup;
 mod graph_canvas;
 mod graph_panel;
@@ -172,12 +173,13 @@ use bakes_panel::{BakesContext, BakesPanel};
 use brush_panel::BrushPanel;
 use egui::containers::menu::{MenuBar, MenuButton};
 use egui::{CentralPanel, Id, Ui, WidgetText};
-use egui_dock::{DockArea, DockState, Style, TabViewer};
+use egui_dock::{DockArea, DockState, NodePath, Style, TabViewer};
 use export_dialog::{ExportContext, ExportDialog};
 use graph_panel::GraphPanel;
 use i18n::tr;
 use std::path::{Path, PathBuf};
 use umber_gpu::GpuContext;
+use umber_gui::widgets::tab_overflow;
 use uv_view::UvView;
 use viewport::Viewport;
 
@@ -197,6 +199,129 @@ fn panel_title(panel: &Panel) -> String {
         Panel::Graph => "panel.graph",
         Panel::Display => "panel.display",
     })
+}
+
+// --- Tab-strip overflow (GUI plan g5-tab-overflow, the dock wiring) ---
+//
+// The pure half lives in `umber_gui::widgets::tab_overflow`; this is the
+// shell side (docs/specs/g5-tab-overflow-design.md §1, §4):
+// - `TabViewer::title` returns a PRE-LAID galley, elided at
+//   `TAB_TITLE_MAX`: egui_dock 0.21.1 lays a string/LayoutJob title out
+//   at an infinite width (`leaf.rs` `tab_title`), but passes a
+//   `WidgetText::Galley` through untouched. The full title rides the
+//   tab's hover text (`on_tab_button`) whenever the galley was cut.
+// - After each `DockArea::show`, every leaf whose ACTIVE tab changed
+//   since the last pass gets its `LeafNode::scroll` set so that tab is
+//   visible (`tab_overflow::scroll_into_view`). Only a change moves the
+//   strip, so a user's own wheel/drag scroll is never fought.
+//
+// The width arithmetic below restates egui_dock 0.21.1's `tab_bar` /
+// `tab_title` layout (its button sizes are `pub(crate)`); the pinned
+// tests in `tab_overflow_dock_tests` fail loudly if a bump changes it.
+
+/// egui_dock 0.21.1's tab-bar button size (`Style::TAB_CLOSE_BUTTON_SIZE`,
+/// `TAB_CLOSE_ALL_BUTTON_SIZE`, `TAB_COLLAPSE_BUTTON_SIZE`: all 24 pt and
+/// crate-private there).
+const DOCK_BUTTON_SIZE: f32 = 24.0;
+/// egui_dock 0.21.1's horizontal title padding inside a tab (`x_spacing`
+/// in `tab_title`, applied on both sides).
+const DOCK_TAB_X_SPACING: f32 = 8.0;
+
+/// A tab title as the dock draws it: one row, cut with "…" past
+/// `TAB_TITLE_MAX`, pre-laid so egui_dock cannot re-wrap it.
+fn tab_title_text(ctx: &egui::Context, title: &str, font: egui::FontId) -> WidgetText {
+    WidgetText::Galley(tab_overflow::elided_title(
+        ctx,
+        title,
+        font,
+        tab_overflow::TAB_TITLE_MAX,
+    ))
+}
+
+/// Each tab's laid-out width from its title galley widths, the way
+/// egui_dock 0.21.1 allocates them: `max(minimum_width, text + 2·8 +
+/// close)`, plus the inter-tab `spacing`. The spacing is counted at the
+/// END of every tab but the last, so `sum(widths[..k])` is exactly tab
+/// `k`'s left edge and the sum is the strip's full width — the contract
+/// `tab_overflow::scroll_into_view` reads.
+fn dock_tab_widths(text: &[f32], spacing: f32, minimum: Option<f32>, close: f32) -> Vec<f32> {
+    let n = text.len();
+    text.iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let tab = minimum
+                .unwrap_or(0.0)
+                .max(w + 2.0 * DOCK_TAB_X_SPACING + close);
+            if i + 1 < n {
+                tab + spacing
+            } else {
+                tab
+            }
+        })
+        .collect()
+}
+
+/// The visible width of a leaf's tab strip: the leaf's width less the
+/// tab bar's horizontal inner margin and the two buttons the shell's
+/// `DockArea` shows at the bar's end (close-all and collapse; no add
+/// button) — egui_dock 0.21.1 `tab_bar`'s `available_width`.
+fn dock_bar_width(leaf_width: f32, margin_x: f32) -> f32 {
+    (leaf_width - margin_x - 2.0 * DOCK_BUTTON_SIZE).max(0.0)
+}
+
+/// Scrolls every leaf whose active tab changed since the last call so
+/// that tab is visible; `seen` remembers each leaf's last active panel.
+/// A leaf not laid out yet (its rect is still `Rect::NOTHING`) is left
+/// unrecorded, so it is handled once it has a width. Returns whether
+/// any strip moved (the caller repaints, since the dock already drew).
+fn scroll_active_tabs_into_view(
+    dock: &mut DockState<Panel>,
+    seen: &mut std::collections::HashMap<NodePath, Panel>,
+    ctx: &egui::Context,
+    font: &egui::FontId,
+    style: &Style,
+) -> bool {
+    let close = DOCK_BUTTON_SIZE.min(style.tab_bar.height);
+    let margin_x = style.tab_bar.inner_margin.sum().x;
+    let mut live = std::collections::HashSet::new();
+    let mut moved = false;
+    for (path, leaf) in dock.iter_leaves_mut() {
+        live.insert(path);
+        let Some(active) = leaf.tabs.get(leaf.active.0) else {
+            continue;
+        };
+        if seen.get(&path) == Some(active) {
+            continue;
+        }
+        let leaf_width = leaf.rect.width();
+        if !leaf_width.is_finite() || leaf_width <= 0.0 {
+            continue;
+        }
+        seen.insert(path, active.clone());
+        let text: Vec<f32> = leaf
+            .tabs
+            .iter()
+            .map(|panel| {
+                tab_overflow::elided_title(
+                    ctx,
+                    &panel_title(panel),
+                    font.clone(),
+                    tab_overflow::TAB_TITLE_MAX,
+                )
+                .size()
+                .x
+            })
+            .collect();
+        let widths = dock_tab_widths(&text, style.tab.spacing, style.tab.minimum_width, close);
+        let bar = dock_bar_width(leaf_width, margin_x);
+        let scroll = tab_overflow::scroll_into_view(&widths, leaf.active.0, bar, leaf.scroll);
+        if scroll != leaf.scroll {
+            leaf.scroll = scroll;
+            moved = true;
+        }
+    }
+    seen.retain(|path, _| live.contains(path));
+    moved
 }
 
 /// Every panel the shell can dock. Serializable: the workspace layouts
@@ -221,6 +346,12 @@ pub enum Panel {
 /// to the app otherwise, so this is how the viewport panel reaches the GPU
 /// context and the camera/mesh state that outlive a single frame.
 struct PanelViewer<'a> {
+    /// The UI context, for laying out the elided tab titles: `title()`
+    /// gets no `Ui` (g5-tab-overflow).
+    ctx: egui::Context,
+    /// The font the tab titles are laid out in (the Button text style,
+    /// egui_dock's own choice for a plain-string title).
+    tab_font: egui::FontId,
     viewport: &'a mut Viewport,
     uv_view: &'a mut UvView,
     /// The home card's recent-projects source (the empty-viewport card,
@@ -292,6 +423,9 @@ struct PanelViewer<'a> {
     base_visible: &'a mut bool,
     /// The layer thumbnails (g2-layer-thumbnails).
     thumbnails: &'a mut thumbnails::Thumbnails,
+    /// The Layers panel's gesture state (g2-layer-gestures): selection,
+    /// mask solo, the pending ✕ confirm.
+    layer_gestures: &'a mut layers_panel::gestures::GestureState,
     /// A texture-set resize waiting for its confirm.
     pending_resize: &'a mut Option<PendingResize>,
     /// Fill layers blocked by the plane budget: layer id → badge line.
@@ -310,7 +444,22 @@ impl TabViewer for PanelViewer<'_> {
     }
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
-        panel_title(tab).into()
+        tab_title_text(&self.ctx, &panel_title(tab), self.tab_font.clone())
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Self::Tab, response: &egui::Response) {
+        // A cut title keeps its full text in the hover (g5-tab-overflow);
+        // the layout is memoized, so re-laying it here is a cache hit.
+        let title = panel_title(tab);
+        let galley = tab_overflow::elided_title(
+            &self.ctx,
+            &title,
+            self.tab_font.clone(),
+            tab_overflow::TAB_TITLE_MAX,
+        );
+        if galley.elided {
+            response.clone().on_hover_text(title);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
@@ -479,7 +628,28 @@ impl TabViewer for PanelViewer<'_> {
                         ui.ctx().request_repaint();
                     }
                 }
-                let outcome = document::layers_ui(
+                // The panel chords (Ctrl/Cmd+D, Ctrl/Cmd+G, Delete) only
+                // while the pointer is over this tab's body: egui_dock draws
+                // only the visible tab, and the hover keeps the graph
+                // canvas's own Delete (and every other panel's keys) intact.
+                // Polled before the rows so the chord is consumed first.
+                // A session that never clicked a row still has a paint
+                // target (auto-resolved, or restored on open): seed the
+                // selection with it, so Delete / Ctrl+D act on the layer
+                // the rows highlight.
+                // Seed only when the paint TARGET moved since the last
+                // seed (a target switch invalidates an empty selection);
+                // a deliberate deselect (selection emptied, target
+                // unchanged) must STICK, so no per-frame reseed.
+                if self.layer_gestures.should_reseed_from(active) {
+                    sync_gesture_selection(&mut *self.layer_gestures, active);
+                }
+                let layer_key = if ui.rect_contains_pointer(ui.max_rect()) {
+                    layers_panel::gestures::poll_layer_keys(ui.ctx())
+                } else {
+                    None
+                };
+                let mut outcome = document::layers_ui(
                     ui,
                     self.doc,
                     mats,
@@ -487,7 +657,25 @@ impl TabViewer for PanelViewer<'_> {
                     *self.base_visible,
                     &badges,
                     &thumbs,
+                    &*self.layer_gestures,
                 );
+                if let Some(key) = layer_key {
+                    outcome.gestures.push(self.layer_gestures.key_gesture(key));
+                }
+                // The rows' gestures + the key, through the ONE gesture
+                // state; each outcome mirrors onto the paint session.
+                for gesture in std::mem::take(&mut outcome.gestures) {
+                    let applied = self.layer_gestures.apply(self.doc, gesture);
+                    if applied.solo_changed {
+                        // No render path reads the solo yet (the gestures
+                        // module docs); the row outline is the only
+                        // consumer, so a repaint is the whole refresh.
+                        ui.ctx().request_repaint();
+                    }
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        apply_layer_session_ops(paint, &layer_session_ops(&applied));
+                    }
+                }
                 // Smart material generators (C2-10): each fill's mesh map is
                 // the Bakes panel's newest bake of it, snapshotted now.
                 if let Some((material, ids)) = &outcome.smart_applied {
@@ -619,6 +807,9 @@ impl TabViewer for PanelViewer<'_> {
                     if let Some(paint) = self.paint.as_deref_mut() {
                         paint.set_active_target(target);
                     }
+                    // The add buttons, the shelf and the Base row select
+                    // outside the gestures: the multi-selection follows.
+                    sync_gesture_selection(&mut *self.layer_gestures, target);
                 }
                 if let Some(visible) = outcome.base_visible {
                     *self.base_visible = visible;
@@ -892,6 +1083,10 @@ pub struct AppState {
     pub base_visible: bool,
     /// Layer thumbnails, content-keyed (g2-layer-thumbnails).
     pub thumbnails: thumbnails::Thumbnails,
+    /// The Layers panel's gesture state (g2-layer-gestures): the
+    /// multi-selection, the mask solo and the pending ✕ confirm. Session
+    /// state keyed by layer id, so it dies with its document.
+    pub layer_gestures: layers_panel::gestures::GestureState,
     /// A texture-set resize armed by the size combo (confirm first).
     pub pending_resize: Option<PendingResize>,
     /// Dormant fill/material layers (§6.3 [B2, M11]): their pre-v2 result
@@ -1016,6 +1211,9 @@ impl AppState {
         // restarts (the next frame diffs against nothing).
         self.base_visible = true;
         self.dormant.clear();
+        // Layer ids restart per document: a selection or solo must not
+        // alias document B's layer that reuses an id.
+        self.layer_gestures = layers_panel::gestures::GestureState::default();
         self.prev_snapshot = None;
         self.fill_badges.clear();
         self.import_badges.clear();
@@ -1253,6 +1451,9 @@ pub struct UmberApp {
     /// The Preferences ▸ Keymap page's capture / search / paste state
     /// (GUI plan g3-keymap-editor).
     keymap_editor: preferences::KeymapEditor,
+    /// The Quick Setup window (g5-first-run): opens on the very first
+    /// launch (no preferences file yet) and from Help.
+    quick_setup: first_run::QuickSetup,
     /// Which landed Curvature bakes the paint session already loaded (the
     /// cavity mask's input).
     curvature_feed: CurvatureFeed,
@@ -1260,6 +1461,9 @@ pub struct UmberApp {
     /// frame: `umber_gui::theme::apply`).
     style_installed: bool,
     dock: DockState<Panel>,
+    /// Each dock leaf's active panel at the last scroll-into-view pass
+    /// (g5-tab-overflow): a change scrolls that leaf's strip once.
+    tab_active_seen: std::collections::HashMap<NodePath, Panel>,
     gpu: GpuContext,
     /// File > New with unsaved work arms this; the confirm window
     /// (drawn in `ui` beside the Perf HUD) offers Save / Discard /
@@ -1419,6 +1623,7 @@ impl UmberApp {
                 ..AppState::default()
             },
             dock,
+            tab_active_seen: std::collections::HashMap::new(),
             gpu,
             display_lut,
             brush_panel: BrushPanel::new(),
@@ -1440,6 +1645,13 @@ impl UmberApp {
             prefs_open: false,
             prefs_query: String::new(),
             keymap_editor: preferences::KeymapEditor::default(),
+            quick_setup: {
+                let mut s = first_run::QuickSetup::default();
+                if first_run::should_show() {
+                    s.open();
+                }
+                s
+            },
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
             #[cfg(feature = "perf")]
@@ -3260,6 +3472,11 @@ impl eframe::App for UmberApp {
                     self.shortcuts_open = true;
                     ui.close();
                 }
+                // Quick Setup re-opens first-run choices (g5-first-run).
+                if ui.button(tr("setup.title")).clicked() {
+                    self.quick_setup.open();
+                    ui.close();
+                }
                 if ui.button(tr("menu.show-log")).clicked() {
                     ui.close();
                     let path = logfile::log_path(&gpu_startup::state_dir());
@@ -3322,6 +3539,14 @@ impl eframe::App for UmberApp {
         }
         for action in actions {
             self.dispatch(action);
+        }
+        // The Overlays popover's edit (g6-overlays-popover) drains into
+        // the shell's own view state BEFORE the sync below, so the
+        // popover's toggles become the source of truth the sync
+        // propagates — not a value the sync overwrites next frame.
+        if let Some(edit) = self.state.viewport.take_overlay_edit() {
+            self.view.wireframe = edit.wireframe;
+            self.view.grid = edit.grid;
         }
         self.state.viewport.set_show_wireframe(self.view.wireframe);
         self.state.viewport.set_show_grid(self.view.grid);
@@ -3452,7 +3677,11 @@ impl eframe::App for UmberApp {
         };
         let home_actions: Vec<crate::empty_state::HomeCardAction> = CentralPanel::default()
             .show(ui, |ui| {
+                let dock_style = Style::from_egui(ui.style());
+                let tab_font = egui::TextStyle::Button.resolve(ui.style());
                 let mut viewer = PanelViewer {
+                    ctx: ui.ctx().clone(),
+                    tab_font: tab_font.clone(),
                     viewport: &mut self.state.viewport,
                     uv_view: &mut self.state.uv_view,
                     home_recent,
@@ -3486,6 +3715,7 @@ impl eframe::App for UmberApp {
                     spp_import: &mut self.state.spp_import,
                     base_visible: &mut self.state.base_visible,
                     thumbnails: &mut self.state.thumbnails,
+                    layer_gestures: &mut self.state.layer_gestures,
                     pending_resize: &mut self.state.pending_resize,
                     fill_badges: &self.state.fill_badges,
                     import_badges: &self.state.import_badges,
@@ -3495,8 +3725,20 @@ impl eframe::App for UmberApp {
                     stylus_pressure,
                 };
                 DockArea::new(&mut self.dock)
-                    .style(Style::from_egui(ui.style()))
+                    .style(dock_style.clone())
                     .show_inside(ui, &mut viewer);
+                // The selected tab stays visible (g5-tab-overflow): a leaf
+                // whose active tab changed this frame (a click, a panel
+                // toggled in, a restored layout) scrolls it into the strip.
+                if scroll_active_tabs_into_view(
+                    &mut self.dock,
+                    &mut self.tab_active_seen,
+                    ui.ctx(),
+                    &tab_font,
+                    &dock_style,
+                ) {
+                    ui.ctx().request_repaint();
+                }
 
                 let actions: Vec<crate::empty_state::HomeCardAction> =
                     viewer.home_actions.drain(..).collect();
@@ -3538,7 +3780,62 @@ impl eframe::App for UmberApp {
         // The toast stack, drawn after the dock (GUI plan G0): everything
         // under it has laid out, and `show` schedules its own repaints.
         self.notices.show(ui.ctx());
+        // The Layers panel's ✕ confirm (g2-layer-gestures), with the other
+        // shell windows: drawn after the dock so it sits over the panel.
+        let removed = self
+            .state
+            .layer_gestures
+            .confirm_ui(ui.ctx(), &mut self.state.doc);
+        if !removed.is_empty() {
+            if let Some(paint) = self.state.paint.as_mut() {
+                let outcome = layers_panel::gestures::GestureOutcome {
+                    removed,
+                    ..Default::default()
+                };
+                apply_layer_session_ops(paint, &layer_session_ops(&outcome));
+            }
+        }
         self.show_preferences(ui.ctx());
+        // Quick Setup (g5-first-run): the window the first launch shows
+        // (and Help re-opens). The choices apply through the same
+        // setters the Preferences window uses — locale + prefs already
+        // persisted by the picker/apply, theme via the context, nav +
+        // keymap through their own sync paths.
+        if self.quick_setup.is_open() {
+            let before = self.prefs.clone();
+            if let Some(done) = self
+                .quick_setup
+                .show(ui.ctx(), &self.state.stylus, &self.prefs)
+            {
+                self.prefs.nav = done.nav;
+                // The keymap choice applies BEFORE the save (the save
+                // persists it): Blender installs its table, Umber RESETS
+                // any earlier override table.
+                let keymap_overrides = if done.keymap_blender {
+                    actions::KeymapPreset::Blender
+                        .overrides()
+                        .expect("Blender carries overrides")
+                } else {
+                    actions::KeymapPreset::Umber
+                        .overrides()
+                        .expect("Umber carries overrides")
+                };
+                self.prefs.keymap_overrides = keymap_overrides;
+                actions::set_overrides(&self.prefs.keymap_overrides);
+                self.prefs.save(preferences::prefs_path().as_deref());
+                if let Some(theme) = done.theme.egui_theme() {
+                    ui.ctx().set_theme(theme);
+                }
+                // A nav change adopts immediately (the same call the
+                // Preferences window's combo makes).
+                if self.prefs.nav != before.nav {
+                    let env = std::env::var("UMBER_NAV").ok();
+                    self.state
+                        .viewport
+                        .set_nav_preset(self.prefs.effective_nav(env.as_deref()));
+                }
+            }
+        }
         // The command palette overlay (Ctrl+Shift+P / F3), drawn last so it
         // sits over everything; a chosen action runs through the same
         // dispatch as every key and menu row.
@@ -4109,6 +4406,190 @@ fn main() -> eframe::Result<()> {
     result
 }
 
+/// One paint-session step a layer gesture's outcome asks for
+/// (g2-layer-gestures). The pure half of the shell's mirror: the gesture
+/// state edits the document, these touch the paint session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LayerSessionOp {
+    /// Copy every plane of `source` into its duplicate `copy`.
+    CopyPlanes { source: u64, copy: u64 },
+    /// Leave mask editing when the edited layer is among these removed
+    /// layers (their planes stay: undo restores the layer).
+    EndMaskEditIfRemoved(Vec<u64>),
+    /// Select the layer for strokes (explicit).
+    SetTarget(u64),
+    /// Paint this layer's mask (after its `SetTarget`, the mask section's
+    /// [m5] order: the target first, then the mask edit).
+    EditMask(u64),
+}
+
+/// The paint-session steps for one gesture outcome, in apply order:
+/// plane copies first (the copy must hold pixels before it is the
+/// target), then the removed-layer mask check, then the target, then the
+/// mask edit. The target before the mask edit matters when the target
+/// MOVED to the mask's layer from another (`set_active_target` keeps a
+/// mask edit only on the target's OWN layer — a foreign edit is cleared,
+/// which is exactly what a select-then-paint gesture wants). A same-layer
+/// target is a no-op for the edit either way. A solo change has no
+/// session step (no render path reads it yet).
+fn layer_session_ops(outcome: &layers_panel::gestures::GestureOutcome) -> Vec<LayerSessionOp> {
+    let mut ops: Vec<LayerSessionOp> = outcome
+        .duplicated
+        .iter()
+        .map(|&(source, copy)| LayerSessionOp::CopyPlanes { source, copy })
+        .collect();
+    if !outcome.removed.is_empty() {
+        ops.push(LayerSessionOp::EndMaskEditIfRemoved(
+            outcome.removed.clone(),
+        ));
+    }
+    if let Some(id) = outcome.mask_edit.or(outcome.select) {
+        ops.push(LayerSessionOp::SetTarget(id));
+    }
+    if let Some(id) = outcome.mask_edit {
+        ops.push(LayerSessionOp::EditMask(id));
+    }
+    ops
+}
+
+/// Runs [`layer_session_ops`]' steps on the paint session.
+fn apply_layer_session_ops(paint: &mut paint_state::PaintState, ops: &[LayerSessionOp]) {
+    for op in ops {
+        match op {
+            LayerSessionOp::CopyPlanes { source, copy } => {
+                if let Err(refusal) = paint.copy_owner_planes(
+                    paint_state::PlaneOwner::Layer(*source),
+                    paint_state::PlaneOwner::Layer(*copy),
+                ) {
+                    log::warn!("duplicate: plane copy refused: {refusal:?}");
+                }
+            }
+            LayerSessionOp::EndMaskEditIfRemoved(removed) => {
+                if paint
+                    .mask_edit_layer()
+                    .is_some_and(|id| removed.contains(&id))
+                {
+                    paint.set_mask_edit_layer(None);
+                }
+            }
+            LayerSessionOp::SetTarget(id) => {
+                paint.set_active_target(paint_state::PlaneOwner::Layer(*id));
+            }
+            LayerSessionOp::EditMask(id) => paint.set_mask_edit_layer(Some(*id)),
+        }
+    }
+}
+
+/// Follows a selection made outside the gestures (an add button, the
+/// smart shelf, the Base row) with the multi-selection: a layer becomes
+/// the single selection, Base clears it.
+fn sync_gesture_selection(
+    gestures: &mut layers_panel::gestures::GestureState,
+    target: paint_state::PlaneOwner,
+) {
+    match target {
+        paint_state::PlaneOwner::Layer(id) => gestures.selection.set_single(id),
+        paint_state::PlaneOwner::Base => gestures.selection.set_many(&[], None),
+    }
+}
+
+/// g2-gesture-integration: the gesture outcome → paint-session mapping
+/// (headless; the `PaintState` half needs a GPU session — the kill
+/// report names it unverified).
+#[cfg(test)]
+mod layer_gesture_shell_tests {
+    use super::{layer_session_ops, sync_gesture_selection, LayerSessionOp};
+    use crate::layers_panel::gestures::{GestureOutcome, GestureState};
+    use crate::paint_state::PlaneOwner;
+
+    #[test]
+    fn an_empty_outcome_touches_nothing() {
+        assert!(layer_session_ops(&GestureOutcome::default()).is_empty());
+        // A solo change alone has no session step either.
+        let solo = GestureOutcome {
+            solo_changed: true,
+            ..Default::default()
+        };
+        assert!(layer_session_ops(&solo).is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_copies_planes_before_selecting_the_copy() {
+        let outcome = GestureOutcome {
+            select: Some(11),
+            duplicated: vec![(1, 10), (2, 11)],
+            ..Default::default()
+        };
+        assert_eq!(
+            layer_session_ops(&outcome),
+            vec![
+                LayerSessionOp::CopyPlanes {
+                    source: 1,
+                    copy: 10
+                },
+                LayerSessionOp::CopyPlanes {
+                    source: 2,
+                    copy: 11
+                },
+                LayerSessionOp::SetTarget(11),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mask_edit_targets_the_layer_first_then_its_mask() {
+        // [m5]: `set_active_target` clears a foreign mask edit, so the
+        // target must land BEFORE the mask edit or the edit is wiped.
+        let outcome = GestureOutcome {
+            select: Some(4),
+            mask_edit: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(
+            layer_session_ops(&outcome),
+            vec![LayerSessionOp::SetTarget(4), LayerSessionOp::EditMask(4)]
+        );
+    }
+
+    #[test]
+    fn a_removal_ends_its_mask_edit_and_retargets() {
+        let outcome = GestureOutcome {
+            select: Some(2),
+            removed: vec![5, 6],
+            ..Default::default()
+        };
+        assert_eq!(
+            layer_session_ops(&outcome),
+            vec![
+                LayerSessionOp::EndMaskEditIfRemoved(vec![5, 6]),
+                LayerSessionOp::SetTarget(2),
+            ]
+        );
+        // Everything removed: no target step (the per-frame revalidation
+        // resolves the vanished id to a neighbour or Base).
+        let all = GestureOutcome {
+            removed: vec![5],
+            ..Default::default()
+        };
+        assert_eq!(
+            layer_session_ops(&all),
+            vec![LayerSessionOp::EndMaskEditIfRemoved(vec![5])]
+        );
+    }
+
+    #[test]
+    fn outside_selections_follow_into_the_gesture_selection() {
+        let mut state = GestureState::default();
+        state.selection.set_many(&[1, 2, 3], Some(2));
+        sync_gesture_selection(&mut state, PlaneOwner::Layer(7));
+        assert_eq!(state.selection.ids(), vec![7]);
+        assert_eq!(state.selection.primary(), Some(7));
+        sync_gesture_selection(&mut state, PlaneOwner::Base);
+        assert!(state.selection.is_empty());
+        assert_eq!(state.selection.primary(), None);
+    }
+}
+
 /// File > New tests: the headless reset half (`AppState::reset_for_new` —
 /// every field pinned to its exact boot-fresh value, not a range check).
 /// The GPU half (the paint-session rebuild inside `new_project`) needs an
@@ -4257,6 +4738,9 @@ mod new_project_tests {
         state.dormant.insert(3);
         state.fill_badges.insert(3, "blocked".to_string());
         state.import_badges.insert(5, "refused".to_string());
+        state.layer_gestures.selection.set_single(3);
+        state.layer_gestures.mask_solo.toggle(3);
+        state.layer_gestures.pending_delete = Some(vec![3]);
         state.pending_resize = Some(PendingResize {
             set: "Old".to_string(),
             from: (512, 512),
@@ -4316,6 +4800,12 @@ mod new_project_tests {
         assert!(
             state.import_badges.is_empty(),
             "import badges die with their document"
+        );
+        assert!(
+            state.layer_gestures.selection.is_empty()
+                && state.layer_gestures.mask_solo.layer().is_none()
+                && state.layer_gestures.pending_delete.is_none(),
+            "the layer gestures die with their document (ids restart)"
         );
     }
 
@@ -4572,5 +5062,182 @@ mod pool_stage4_tests {
             Some(material)
         );
         assert!(resolve_instance_source(&stack, dangling).is_none());
+    }
+}
+
+/// g5-tab-overflow dock wiring: the title galley the `TabViewer` returns,
+/// egui_dock 0.21.1's tab-width arithmetic, and the post-show
+/// scroll-into-view pass on a real `DockState` — all headless (fonts
+/// only, no GPU, no rendered dock).
+#[cfg(test)]
+mod tab_overflow_dock_tests {
+    use super::*;
+
+    /// A context with fonts loaded (the first pass builds the atlas);
+    /// the first frame's texture delta is cleared so its Drop bomb
+    /// cannot fire (epaint 0.36 `textures.rs`).
+    fn ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        ctx
+    }
+
+    /// Galleys built after the first pass queue a font-texture delta;
+    /// clear it before the test ends (same disarm as the widget's tests).
+    fn disarm(ctx: &egui::Context) {
+        ctx.tex_manager().write().take_delta().clear();
+    }
+
+    #[test]
+    fn the_tab_title_is_a_pre_laid_elided_galley() {
+        let ctx = ctx();
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        let long = "Conjuntos de texturas e muito mais texto que nunca cabe";
+        let WidgetText::Galley(cut) = tab_title_text(&ctx, long, font.clone()) else {
+            panic!("the title must be a Galley: egui_dock re-wraps any other shape");
+        };
+        let WidgetText::Galley(short) = tab_title_text(&ctx, "Layers", font) else {
+            panic!("the title must be a Galley");
+        };
+        disarm(&ctx);
+        // What is DRAWN is the row's text; `Galley::text()` is the input.
+        let drawn = cut.rows[0].text();
+        assert!(cut.elided && drawn.ends_with('…'), "{drawn:?}");
+        assert_eq!(cut.text(), long, "the full title survives for the hover");
+        assert!(cut.size().x <= tab_overflow::TAB_TITLE_MAX + 0.5);
+        assert!(!short.elided);
+        assert_eq!(short.rows[0].text(), "Layers");
+    }
+
+    #[test]
+    fn tab_widths_follow_egui_dock_layout() {
+        // text + 2·8 padding + close, spacing after all but the last.
+        assert_eq!(
+            dock_tab_widths(&[50.0, 60.0, 10.0], 2.0, None, 24.0),
+            [92.0, 102.0, 50.0]
+        );
+        // `minimum_width` is a floor, never a cap.
+        assert_eq!(
+            dock_tab_widths(&[10.0, 100.0], 0.0, Some(80.0), 0.0),
+            [80.0, 116.0]
+        );
+        assert!(dock_tab_widths(&[], 2.0, None, 24.0).is_empty());
+        // The bar loses the margin and the close-all + collapse buttons.
+        assert_eq!(dock_bar_width(300.0, 4.0), 248.0);
+        assert_eq!(dock_bar_width(30.0, 0.0), 0.0);
+    }
+
+    /// Every panel in one leaf: eleven tabs, far wider than 300 pt.
+    fn crowded_dock(width: f32) -> DockState<Panel> {
+        let mut dock = DockState::new(vec![
+            Panel::Viewport,
+            Panel::UvView,
+            Panel::LayerStack,
+            Panel::Properties,
+            Panel::Assets,
+            Panel::History,
+            Panel::TextureSets,
+            Panel::Bakes,
+            Panel::Export,
+            Panel::Graph,
+            Panel::Display,
+        ]);
+        if width > 0.0 {
+            let (_, leaf) = dock.iter_leaves_mut().next().expect("one leaf");
+            leaf.rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 200.0));
+        }
+        dock
+    }
+
+    #[test]
+    fn a_newly_active_tab_is_scrolled_into_the_strip_once() {
+        let ctx = ctx();
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        let style = Style::from_egui(&ctx.global_style());
+        let mut seen = std::collections::HashMap::new();
+        let mut dock = crowded_dock(300.0);
+
+        // First pass: tab 0 is active and already visible — recorded,
+        // nothing moves.
+        assert!(!scroll_active_tabs_into_view(
+            &mut dock, &mut seen, &ctx, &font, &style
+        ));
+        assert_eq!(seen.len(), 1);
+
+        // Activate the LAST tab (what a click or a panel toggle does):
+        // the strip scrolls to egui_dock's own clamp end, -(total - bar).
+        {
+            let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
+            leaf.set_active_tab(10).unwrap();
+        }
+        assert!(scroll_active_tabs_into_view(
+            &mut dock, &mut seen, &ctx, &font, &style
+        ));
+        let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
+        let close = DOCK_BUTTON_SIZE.min(style.tab_bar.height);
+        let text: Vec<f32> = leaf
+            .tabs
+            .iter()
+            .map(|p| {
+                tab_overflow::elided_title(
+                    &ctx,
+                    &panel_title(p),
+                    font.clone(),
+                    tab_overflow::TAB_TITLE_MAX,
+                )
+                .size()
+                .x
+            })
+            .collect();
+        let widths = dock_tab_widths(&text, style.tab.spacing, style.tab.minimum_width, close);
+        let total: f32 = widths.iter().sum();
+        let bar = dock_bar_width(300.0, style.tab_bar.inner_margin.sum().x);
+        assert!(total > bar, "the fixture must overflow: {total} vs {bar}");
+        assert!(
+            (leaf.scroll - (bar - total)).abs() < 0.01,
+            "{}",
+            leaf.scroll
+        );
+
+        // The user scrolls back by hand: the SAME active tab never
+        // fights it.
+        leaf.scroll = 0.0;
+        assert!(!scroll_active_tabs_into_view(
+            &mut dock, &mut seen, &ctx, &font, &style
+        ));
+        let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
+        assert_eq!(leaf.scroll, 0.0);
+        disarm(&ctx);
+    }
+
+    #[test]
+    fn a_leaf_not_laid_out_yet_is_retried_later() {
+        // Before the first `DockArea::show` the leaf rect is NOTHING: the
+        // pass must not record it, or the first real frame would skip it.
+        let ctx = ctx();
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        let style = Style::from_egui(&ctx.global_style());
+        let mut seen = std::collections::HashMap::new();
+        let mut dock = crowded_dock(0.0);
+        {
+            let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
+            leaf.set_active_tab(10).unwrap();
+        }
+        assert!(!scroll_active_tabs_into_view(
+            &mut dock, &mut seen, &ctx, &font, &style
+        ));
+        assert!(seen.is_empty());
+        {
+            let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
+            leaf.rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
+        }
+        assert!(scroll_active_tabs_into_view(
+            &mut dock, &mut seen, &ctx, &font, &style
+        ));
+        let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
+        assert!(leaf.scroll < 0.0);
+        disarm(&ctx);
     }
 }

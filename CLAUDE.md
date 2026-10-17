@@ -33,6 +33,15 @@ Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, th
 11. **Never crash in the engine crates** (the never-crash gate, 2026-10-13): `umber-core`, `umber-color`, `umber-spp` deny `unwrap`/`expect`/`panic` in non-test code (`cfg_attr(not(test), deny(...))` at the crate root + `clippy.toml`). Return typed errors; a provably-infallible case needs `#[allow(clippy::expect_used)]` + the reason. `umber-gpu`/`umber-app` are exempt (harness + UI code), but the discipline is the same there.
 12. **Crate layering** (2026-10-14, absorbed from photocraft): every crate sits in a layer in `scripts/check-layers.py` (L0 leaves … L6 the shell); dependencies point DOWN only, and UI crates (egui/eframe/winit/rfd/egui_dock) stay in umber-gpu (egui-wgpu only) / umber-gui / umber-app. A NEW crate fails the gate until registered there in the same commit. Pure Python, no cargo — run it any time: `python3 scripts/check-layers.py`.
 
+13. **A new module registers in the kill that creates it** (2026-10-17,
+    from the full-project audit): if your kill writes a new `.rs` file,
+    the `mod x;` / `pub use` lines land IN THE SAME KILL — negotiate the
+    lock extension in your brief if the registration point (mod.rs,
+    lib.rs) sits under a live lock. An unregistered new file is dead
+    bytes the battery silently skips. (Cost: type_ahead.rs +
+    dialog_buttons.rs sat unregistered for hours because mod.rs was
+    lock-held; caught at the wave-close consolidation, not by any gate.)
+
 ## Rust traps (each one cost a CI round; check your diff for all of them)
 
 Compile errors:

@@ -76,6 +76,20 @@
 //!   groups draw entirely on `group.ui` (custom canvas / shared-combo /
 //!   checkbox bodies), so their headers show no count — the same wart
 //!   class `brush_panel.rs` documents.
+//!
+//! # Viewport overlays (GUI plan g6-overlays-popover, B:C3.1-C3.4, P:B10)
+//!
+//! [`OverlaySettings`] is the one state struct behind the viewport
+//! header's Overlays popover (docs/specs/gui-plan-2026-10-15.md row
+//! `g6-overlays-popover`): wireframe (+ opacity), ground grid, UV seams,
+//! face orientation and the soloed-channel name readout.
+//! [`overlay_rows`] draws its rows; the viewport's popover calls it, so
+//! any other surface that wants the same toggles (a Display-panel
+//! section, a preferences page) calls the same fn on the same struct and
+//! cannot drift. The plan row says the Display panel's view toggles
+//! "move here" — the tree had none to move (wireframe/grid live in the
+//! shell's `ViewToggles`, W/G and the View menu), so this module gains
+//! the overlay state instead of losing a section.
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -150,6 +164,112 @@ impl DisplayLutState {
     pub fn is_live(&self, settings: &DisplaySettings) -> bool {
         !self.dirty && self.built.as_ref() == Some(settings)
     }
+}
+
+/// The viewport overlays the Overlays popover gathers (see the module
+/// docs). The derived-looking defaults are written out by hand: every
+/// overlay starts OFF (today's frame, byte-identical), the wireframe
+/// opacity starts at the wire pass's own default alpha, and the channel
+/// readout starts ON — it draws only while a channel or mesh map is
+/// soloed, which is exactly when the plan wants the name visible.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlaySettings {
+    /// The barycentric-edge wireframe (W, View menu).
+    pub wireframe: bool,
+    /// The wireframe's alpha, `0..=1` ([`Self::DEFAULT_WIRE_OPACITY`]
+    /// reproduces the pre-popover wire color exactly).
+    pub wireframe_opacity: f32,
+    /// The procedural ground grid (G, View menu).
+    pub grid: bool,
+    /// The UV-seam overlay: island-boundary edges in a distinct color,
+    /// drawn behind the wireframe.
+    pub uv_seams: bool,
+    /// Face orientation (back faces tinted). The flag round-trips today;
+    /// the tint needs the mesh pass to stop culling back faces, which is
+    /// renderer work ([`FACE_ORIENTATION_RENDERS`]).
+    pub face_orientation: bool,
+    /// The soloed channel / mesh map's name, drawn in the viewport.
+    pub channel_readout: bool,
+}
+
+impl OverlaySettings {
+    /// `umber_gpu::WireColor::default()`'s alpha: the opacity that keeps
+    /// the wireframe identical to its pre-popover look.
+    pub const DEFAULT_WIRE_OPACITY: f32 = 0.4;
+
+    /// Whether any drawn overlay is on (the header button's highlight).
+    /// The channel readout is not counted: it is a label, not an overlay
+    /// on the mesh, and it defaults on.
+    pub fn any_on(&self) -> bool {
+        self.wireframe || self.grid || self.uv_seams || self.face_orientation
+    }
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self {
+            wireframe: false,
+            wireframe_opacity: Self::DEFAULT_WIRE_OPACITY,
+            grid: false,
+            uv_seams: false,
+            face_orientation: false,
+            channel_readout: true,
+        }
+    }
+}
+
+/// Whether the face-orientation tint actually draws. `false` until the
+/// mesh pass renders back faces (umber-gpu's mesh pipeline culls them,
+/// `cull_mode: Some(Face::Back)`): the row is disabled with a visible
+/// reason rather than a toggle that changes nothing on screen.
+pub const FACE_ORIENTATION_RENDERS: bool = false;
+
+/// The Overlays popover's rows, editing `s` in place. Returns whether
+/// anything changed this frame.
+pub fn overlay_rows(ui: &mut Ui, s: &mut OverlaySettings) -> bool {
+    let mut changed = false;
+    changed |= ui
+        .checkbox(&mut s.wireframe, i18n::tr("overlays.wireframe"))
+        .changed();
+    ui.add_enabled_ui(s.wireframe, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(i18n::tr("overlays.wireframe-opacity"));
+            changed |= ui
+                .add(
+                    ValueField::new(&mut s.wireframe_opacity)
+                        .context_menu(crate::i18n::prop_menu_labels())
+                        .default_value(OverlaySettings::DEFAULT_WIRE_OPACITY)
+                        .range(0.0..=1.0)
+                        .step(0.05),
+                )
+                .changed();
+        });
+    });
+    changed |= ui
+        .checkbox(&mut s.grid, i18n::tr("overlays.grid"))
+        .changed();
+    changed |= ui
+        .checkbox(&mut s.uv_seams, i18n::tr("overlays.uv-seams"))
+        .changed();
+    changed |= ui
+        .add_enabled(
+            FACE_ORIENTATION_RENDERS,
+            egui::Checkbox::new(
+                &mut s.face_orientation,
+                i18n::tr("overlays.face-orientation"),
+            ),
+        )
+        .changed();
+    if !FACE_ORIENTATION_RENDERS {
+        ui.add_enabled(
+            false,
+            egui::Label::new(i18n::tr("overlays.face-orientation-pending")),
+        );
+    }
+    changed |= ui
+        .checkbox(&mut s.channel_readout, i18n::tr("overlays.channel-readout"))
+        .changed();
+    changed
 }
 
 /// Number of preview swatches.
@@ -674,6 +794,92 @@ mod tests {
             gamma,
             #[cfg(feature = "ocio")]
             ocio: None,
+        }
+    }
+
+    #[test]
+    fn overlay_defaults_are_off_with_the_readout_on() {
+        let s = OverlaySettings::default();
+        assert!(!s.wireframe && !s.grid && !s.uv_seams && !s.face_orientation);
+        assert!(s.channel_readout, "the readout shows only while soloed");
+        assert_eq!(s.wireframe_opacity, OverlaySettings::DEFAULT_WIRE_OPACITY);
+        assert!(!s.any_on());
+        // The readout alone is not an overlay; each drawn overlay is.
+        let setters: [fn(&mut OverlaySettings); 4] = [
+            |s: &mut OverlaySettings| s.wireframe = true,
+            |s: &mut OverlaySettings| s.grid = true,
+            |s: &mut OverlaySettings| s.uv_seams = true,
+            |s: &mut OverlaySettings| s.face_orientation = true,
+        ];
+        for set in setters {
+            let mut on = OverlaySettings::default();
+            set(&mut on);
+            assert!(on.any_on(), "{on:?}");
+        }
+        let readout_only = OverlaySettings {
+            channel_readout: true,
+            ..OverlaySettings::default()
+        };
+        assert!(!readout_only.any_on());
+    }
+
+    #[test]
+    fn overlay_popover_rows_round_trip_the_toggles() {
+        // The popover body edits the one struct: clicking a row flips its
+        // field, clicking again restores it, and no other field moves.
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 260.0))
+            .build_ui_state(
+                |ui, s: &mut OverlaySettings| {
+                    overlay_rows(ui, s);
+                },
+                OverlaySettings::default(),
+            );
+        harness.run();
+        type OverlayRow = (&'static str, fn(&OverlaySettings) -> bool);
+        let rows: [OverlayRow; 4] = [
+            ("Wireframe", |s| s.wireframe),
+            ("Ground grid", |s| s.grid),
+            ("UV seams", |s| s.uv_seams),
+            ("Channel name readout", |s| s.channel_readout),
+        ];
+        for (label, field) in rows {
+            let before = *harness.state();
+            harness.get_by_label(label).click();
+            harness.run();
+            let after = *harness.state();
+            assert_ne!(field(&after), field(&before), "{label} must flip");
+            harness.get_by_label(label).click();
+            harness.run();
+            assert_eq!(*harness.state(), before, "{label} must restore");
+        }
+        // The face-orientation row stays disabled until the renderer
+        // draws back faces (FACE_ORIENTATION_RENDERS is false): a click
+        // there changes nothing. Flipping the const re-pins this line.
+        harness.get_by_label("Face orientation").click();
+        harness.run();
+        assert!(!harness.state().face_orientation);
+    }
+
+    #[test]
+    fn overlay_keys_exist_in_both_catalogs() {
+        let i18n = i18n::I18n::builtin();
+        for key in [
+            "overlays.button",
+            "overlays.tooltip",
+            "overlays.wireframe",
+            "overlays.wireframe-opacity",
+            "overlays.grid",
+            "overlays.uv-seams",
+            "overlays.face-orientation",
+            "overlays.face-orientation-pending",
+            "overlays.channel-readout",
+        ] {
+            for locale in ["en-US", "pt-BR"] {
+                assert!(i18n.has_key(locale, key), "{locale} missing {key}");
+            }
         }
     }
 

@@ -21,7 +21,7 @@ import json, sys
 out, body = sys.argv[1], sys.argv[2]
 brief = {
     "task": body,
-    "context": "Umber Rust DCC. Code-only: no cargo build/test. The dragon gates your files through scripts/verify-kill.sh at consumption.",
+    "context": "Umber Rust DCC. Code-only: no cargo build/test. The dragon gates your files through scripts/verify-kill.sh at consumption. VERIFICATION LADDER (mandatory before you claim done): (1) ~/.cargo/bin/rustfmt --check --edition 2021 on every .rs you touched; (2) resolve EVERY external API you call against the pinned source — ~/.cargo/registry/src/*/ for registry crates, docs/claw-artifacts/ for vendored ones; a guessed API is a fabricated API; (3) for arithmetic-only logic, port the function line-for-line to Python, run your tests' pinned cases against the port, then MUTATE one branch and require the cases to catch it; (4) for any new struct field or enum variant, sweep the workspace for every construction site and exhaustive match — list them, do not guess. State which rungs you ran in the report's Unverified section.",
     "allowedTools": ["read", "edit", "write", "bash", "grep", "glob"],
     "disallowedTools": ["webfetch", "notebook"],
 }

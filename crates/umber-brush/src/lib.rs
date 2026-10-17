@@ -63,7 +63,9 @@ pub use path::{
 };
 pub use preset_library::{Library, LibraryEntry};
 pub use quick_mask::{MaskPaint, MaskView, QuickMask};
-pub use retouch::{BrushTool, CloneParams, EraseChannels, EraseParams, RgbaBuffer, SmudgeParams};
+pub use retouch::{
+    BrushTool, CloneParams, EraseChannels, EraseParams, InpaintParams, RgbaBuffer, SmudgeParams,
+};
 pub use spacing::{DabPlan, SpacingAccumulator, SpacingError};
 pub use stroke_method::{MethodState, StrokeMethod, StrokeMethodError, AIRBRUSH_MAX_DABS_PER_PUSH};
 pub use symmetry::{MirrorAxis, MirrorSettings, RadialSettings, SymTransform, SymmetrySettings};

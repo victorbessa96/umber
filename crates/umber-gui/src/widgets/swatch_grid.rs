@@ -9,7 +9,10 @@
 //! eyedropper) is Phase 2's `widgets/color_picker.rs`.
 
 use egui::epaint::Mesh;
-use egui::{Color32, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{
+    Color32, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
+    WidgetType,
+};
 
 use crate::theme;
 
@@ -99,6 +102,11 @@ impl<'a> SwatchGrid<'a> {
         )
         .max(Vec2::ZERO);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        // g7-accesskit-sweep: the palette grid body (per-cell responses
+        // would need per-cell allocation — the sweep's follow-up when
+        // the grid migrates to per-cell widgets; the body carries the
+        // role so the region is not invisible to screen readers).
+        response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "colour palette"));
         let mut clicked = None;
         let hover_pos = response.hover_pos();
         for (i, &color) in self.colors.iter().enumerate() {
@@ -228,5 +236,16 @@ mod tests {
         );
         assert_eq!(m.vertices.len(), 4);
         assert_eq!(m.indices.len(), 6);
+    }
+
+    #[test]
+    fn the_palette_grid_reports_a_button_role_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        let colors = vec![Color32::RED, Color32::GREEN, Color32::BLUE];
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            SwatchGrid::new(&colors).columns(3).show(ui);
+        });
+        harness.run();
+        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Button, "colour palette");
     }
 }

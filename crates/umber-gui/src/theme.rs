@@ -107,6 +107,34 @@ impl Density {
     }
 }
 
+/// g7-density-scale (B:F10): the extra grab width added to dock
+/// separators (`egui_dock::SeparatorStyle::extra_interact_width`).
+/// The default matches egui_dock's own (4 pt); a tablet/pen session
+/// doubles it so a 1 pt splitter is grabbable with a stylus tip.
+pub const SPLITTER_HIT_ZONE: f32 = 4.0;
+/// The tablet variant: 8 pt of extra grab width.
+pub const SPLITTER_HIT_ZONE_TABLET: f32 = 8.0;
+
+/// g7-density-scale: how grabbable the dock separators are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HitZone {
+    /// egui_dock's default (4 pt extra).
+    #[default]
+    Standard,
+    /// Doubled for stylus work.
+    Tablet,
+}
+
+impl HitZone {
+    /// The `extra_interact_width` this mode resolves to.
+    pub fn extra_interact_width(self) -> f32 {
+        match self {
+            HitZone::Standard => SPLITTER_HIT_ZONE,
+            HitZone::Tablet => SPLITTER_HIT_ZONE_TABLET,
+        }
+    }
+}
+
 /// The spacing tokens one density resolves to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpacingTokens {
@@ -462,5 +490,16 @@ mod tests {
             s.text_styles[&TextStyle::Body].size,
             TEXT_UI * TEXT_SCALE_MAX
         );
+    }
+
+    #[test]
+    fn hit_zones_resolve_to_grab_widths() {
+        // g7-density-scale: the defaults match egui_dock's own; the
+        // tablet mode doubles the grab width.
+        assert_eq!(HitZone::default(), HitZone::Standard);
+        assert_eq!(HitZone::Standard.extra_interact_width(), 4.0);
+        assert_eq!(HitZone::Tablet.extra_interact_width(), 8.0);
+        assert_eq!(SPLITTER_HIT_ZONE, 4.0);
+        assert_eq!(SPLITTER_HIT_ZONE_TABLET, 8.0);
     }
 }

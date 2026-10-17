@@ -40,7 +40,10 @@ pub use polygon_fill::{
 pub use raycast::{
     face_normal, front_facing_weight, ray_intersect, uv_at, walk_surface_path, RayHit,
 };
-pub use udim::{present_tiles, tile_of_triangle, tile_of_uv, triangles_for_tile, FIRST_TILE};
+pub use udim::{
+    filter_mesh_for_triangles, present_tiles, tile_of_triangle, tile_of_uv, triangles_for_tile,
+    FIRST_TILE,
+};
 pub use usd::load_usda;
 
 /// Interleaved mesh data as imported, before any GPU upload.
