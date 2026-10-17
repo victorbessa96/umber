@@ -949,6 +949,80 @@ impl Default for BrushPanel {
     }
 }
 
+/// The catalog keys of [`BrushPanel::show`]'s labelled rows, in draw
+/// order: the Properties rail's search vocabulary for the Brush context
+/// (the W-GUI-3 shell-halves follow-up, `rail-row-labels`).
+///
+/// One inclusion rule, shared with the other four context bodies: a
+/// section title, a labelled row's leading label, or a checkbox that is
+/// its own row. Skipped: radio / combo option values, hints and weak
+/// notes, buttons, status readouts, and the preset editor's hardcoded
+/// English rows ("Preset", "Name", "Alpha", "Hardness", "Pressure gamma",
+/// the stabilizer / lazy-mouse / spacing groups, the pressure curves).
+/// Those draw no `tr()` key yet (the module docs' i18n deferral), so a
+/// catalog label would not match the drawn text in pt-BR; they join this
+/// list when that kill lands.
+///
+/// v1 boundary: the list is STATIC, the union of every row the body can
+/// draw. The tool-, stamp-, method- and session-gated rows (smudge, clone,
+/// eraser, the paint-session sections, the angle and method params) stay
+/// listed while hidden, so a search can count a hit the body is not
+/// drawing this frame. A fixed list keeps each row's index stable for the
+/// `PropertyRows::row` wiring, and a toggle mid-search does not restart
+/// the search (`ContextRail::set_labels` restarts on any list change).
+const ROW_LABEL_KEYS: &[&str] = &[
+    "brush.tool",
+    "brush.smudge-strength",
+    "brush.smudge-smear",
+    "brush.clone-offset",
+    "brush.clone-follow",
+    "brush.erase-channels",
+    "brush.symmetry",
+    "brush.symmetry-mirror",
+    "brush.symmetry-axis",
+    "brush.symmetry-offset",
+    "brush.symmetry-radial",
+    "brush.symmetry-count",
+    "brush.symmetry-flip-u",
+    "brush.symmetry-flip-v",
+    "brush.line-constraint",
+    "brush.line-constraint-angle",
+    "brush.projection",
+    "brush.front-face-falloff",
+    "viewmode.channel",
+    "brush.quick-mask",
+    "brush.quick-mask-mode",
+    "brush.quick-mask-active",
+    "brush.quick-mask-paint",
+    "brush.cavity",
+    "brush.cavity-enable",
+    "brush.cavity-threshold",
+    "brush.cavity-width",
+    "brush.cavity-invert",
+    "brush.stamp-image",
+    "brush.wash-mode",
+    "brush.stamped",
+    "brush.stamp-angle",
+    "brush.angle-degrees",
+    "brush.angle-offset",
+    "brush.jitter-size",
+    "brush.jitter-angle",
+    "brush.jitter-position",
+    "brush.jitter-flow",
+    "brush.falloff",
+    "brush.size",
+    "brush.method",
+    "brush.method-rate",
+    "brush.method-dash-ratio",
+    "brush.method-dash-length",
+];
+
+/// The Brush body's row labels, localized ([`ROW_LABEL_KEYS`] through
+/// `tr`). Pure: no `Ui`, no panel state.
+pub fn row_labels() -> Vec<String> {
+    ROW_LABEL_KEYS.iter().copied().map(tr).collect()
+}
+
 /// The tool selector radio row (paint / smudge / clone / eraser), split
 /// out of [`BrushPanel::tool_rows`] so that method stays a chrome wrapper:
 /// the banked params arrive by value and the picked tool writes back
@@ -2069,6 +2143,25 @@ fn apply_falloff_edit(curve: &mut ControlCurve, model: &umber_gui::Curve) -> boo
             true
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod row_label_tests {
+    use super::*;
+    use crate::document::{assert_row_label_keys, drawn_source};
+
+    #[test]
+    fn the_brush_row_labels_are_the_rows_the_panel_draws() {
+        let src = include_str!("brush_panel.rs");
+        let drawn = drawn_source(src, "ROW_LABEL_KEYS").expect("list");
+        let labels = row_labels();
+        assert_row_label_keys(ROW_LABEL_KEYS, &labels, &drawn);
+        // 44 labelled rows; the ends pin the draw order: the tool section
+        // first, the dash method's last parameter last.
+        assert_eq!(labels.len(), 44);
+        assert_eq!(labels.first().map(String::as_str), Some("Tool"));
+        assert_eq!(labels.last().map(String::as_str), Some("Dash length"));
     }
 }
 

@@ -928,6 +928,42 @@ impl FillLayerStates {
     }
 }
 
+/// The catalog keys of [`fill_section_ui`]'s labelled rows, in draw
+/// order: the section title, one fill layer's projection and source
+/// parameter rows, then [`polygon_fill_rows`] (which the section draws
+/// last). The Properties rail's search vocabulary for the Fill context,
+/// ahead of `path_tool::ROW_LABEL_KEYS` (`rail-row-labels`; the inclusion
+/// rule is stated on `brush_panel::ROW_LABEL_KEYS`).
+///
+/// - The projection and source combos have no leading label, so they are
+///   absent; so are the empty-state line, the graph note and the
+///   polygon tool's hint, status readouts and buttons.
+/// - `fill.scale` is drawn twice (triplanar scale, noise scale): listed
+///   once, at its first row.
+/// - Static, one layer's worth: the section repeats these rows per fill
+///   layer under the layer's own name, and the projection- and
+///   source-gated rows stay listed while hidden (the Brush list's v1
+///   boundary).
+const ROW_LABEL_KEYS: &[&str] = &[
+    "fill.section",
+    "fill.sharpness",
+    "fill.scale",
+    "fill.axis",
+    "fill.alpha",
+    "fill.color-a",
+    "fill.color-b",
+    "fill.angle",
+    "fill.seed",
+    "fill.octaves",
+    "fill.poly-tool",
+    "fill.poly-armed",
+];
+
+/// The fill section's row labels, localized. Pure: no `Ui`, no document.
+pub fn row_labels() -> Vec<String> {
+    ROW_LABEL_KEYS.iter().copied().map(tr).collect()
+}
+
 pub fn fill_section_ui(
     ui: &mut egui::Ui,
     doc: &mut Document,
@@ -1199,6 +1235,28 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
             ui.label(format!("{width} × {height} ({} bytes)", rgba.len()));
             ui.label(tr("fill.graph-note"));
         }
+    }
+}
+
+#[cfg(test)]
+mod row_label_tests {
+    use super::*;
+    use crate::document::{assert_row_label_keys, drawn_source};
+
+    #[test]
+    fn the_fill_row_labels_are_the_rows_the_section_draws() {
+        let src = include_str!("fill_layer.rs");
+        let drawn = drawn_source(src, "ROW_LABEL_KEYS").expect("list");
+        let labels = row_labels();
+        assert_row_label_keys(ROW_LABEL_KEYS, &labels, &drawn);
+        // 12 labelled rows: the section title first, the polygon tool's
+        // armed toggle (the section's last labelled row) last.
+        assert_eq!(labels.len(), 12);
+        assert_eq!(labels.first().map(String::as_str), Some("Fill layers"));
+        assert_eq!(
+            labels.last().map(String::as_str),
+            Some("Capture clicks (lasso)")
+        );
     }
 }
 

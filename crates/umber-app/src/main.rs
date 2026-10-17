@@ -976,6 +976,11 @@ impl TabViewer for PanelViewer<'_> {
                 // rail's own highlight still lands this frame.
                 let kind = self.properties_rail.active();
                 let body_kind = kind;
+                // The search's vocabulary: the same kind's row labels,
+                // re-registered every frame (an unchanged list keeps the
+                // current hit; a switch restarts at the new list's first).
+                self.properties_rail
+                    .set_labels(properties_row_labels(body_kind));
                 let target_id = target.as_ref().map(|(id, _, _, _)| *id);
                 let (_, ()) = self
                     .properties_rail
@@ -2415,6 +2420,28 @@ fn properties_kinds(
     kinds
 }
 
+/// The row labels the Properties rail's search runs over for `kind`: the
+/// label fn sitting beside the body the shell draws for that kind
+/// (`rail-row-labels`, the W-GUI-3 shell-halves follow-up). Pure, so a
+/// unit test pins the kind → list pairing; the arm registers the result
+/// before `rail.ui` every frame (`ContextRail::set_labels` keeps the
+/// current hit while the list is unchanged). Fill is the fill section's
+/// rows then the path tool's, the order the Fill body draws them.
+fn properties_row_labels(kind: umber_gui::ContextKind) -> Vec<String> {
+    use umber_gui::ContextKind;
+    match kind {
+        ContextKind::Brush => brush_panel::row_labels(),
+        ContextKind::Layer => document::layer_properties_row_labels(),
+        ContextKind::Fill => {
+            let mut labels = fill_layer::row_labels();
+            labels.extend(path_tool::row_labels());
+            labels
+        }
+        ContextKind::Mask => document::layer_mask_row_labels(),
+        ContextKind::TextureSet => texture_sets_row_labels(),
+    }
+}
+
 /// The Texture Sets panel's per-set paint-target size section (CORE-LOOP
 /// CRITICAL 2, the 2026-10-12 strategy review): one selectable row per
 /// known set (the session set is always listed — mesh load retargets it),
@@ -2584,6 +2611,27 @@ fn texture_sets_panel_ui(
         }
     }
     ui.label(tr("texturesets.channel-resize-clears"));
+}
+
+/// The catalog keys of [`texture_sets_panel_ui`]'s labelled rows, in draw
+/// order (the set picker, the size combo, the per-channel heading): the
+/// Properties rail's search vocabulary for the TextureSet context
+/// (`rail-row-labels`; the inclusion rule is stated on
+/// `brush_panel::ROW_LABEL_KEYS`). The per-channel rows are labelled by
+/// channel name (data, not a catalog key), and the resize confirm, the
+/// hints and the no-paint line are skipped. Static: the per-channel
+/// heading stays listed when no channel row is drawn (the Brush list's
+/// v1 boundary).
+const TEXTURE_SET_LABEL_KEYS: &[&str] = &[
+    "texturesets.set",
+    "texturesets.size",
+    "texturesets.per-channel",
+];
+
+/// The TextureSet body's row labels, localized. Pure: no `Ui`, no paint
+/// session.
+fn texture_sets_row_labels() -> Vec<String> {
+    TEXTURE_SET_LABEL_KEYS.iter().copied().map(tr).collect()
 }
 
 impl UmberApp {
@@ -4902,6 +4950,106 @@ mod properties_rail_tests {
             &properties_kinds(Some(umber_core::LayerKind::Paint), false, false),
             &["Layer", "Brush", "Texture set"],
             &["Fill"],
+        );
+    }
+}
+
+/// The rail's row-label registry (`rail-row-labels`): each kind's search
+/// vocabulary is its own body's label list, and the Properties arm
+/// registers it before drawing.
+#[cfg(test)]
+mod properties_row_label_tests {
+    use super::*;
+    use umber_gui::{ContextKind, ContextRail};
+
+    #[test]
+    fn the_texture_set_row_labels_are_the_rows_the_panel_draws() {
+        let src = include_str!("main.rs");
+        let start = src
+            .find("fn texture_sets_panel_ui(")
+            .expect("the texture-set body");
+        let end = start + src[start..].find("\n}").expect("its closing brace");
+        crate::document::assert_row_label_keys(
+            TEXTURE_SET_LABEL_KEYS,
+            &texture_sets_row_labels(),
+            &src[start..end],
+        );
+        assert_eq!(
+            texture_sets_row_labels(),
+            ["Texture set", "Paint target size", "Per-channel sizes"]
+        );
+    }
+
+    #[test]
+    fn each_kind_registers_its_own_bodys_labels() {
+        assert_eq!(
+            properties_row_labels(ContextKind::Brush),
+            brush_panel::row_labels()
+        );
+        assert_eq!(
+            properties_row_labels(ContextKind::Layer),
+            document::layer_properties_row_labels()
+        );
+        let mut fill = fill_layer::row_labels();
+        fill.extend(path_tool::row_labels());
+        assert_eq!(properties_row_labels(ContextKind::Fill), fill);
+        assert_eq!(
+            properties_row_labels(ContextKind::Mask),
+            document::layer_mask_row_labels()
+        );
+        assert_eq!(
+            properties_row_labels(ContextKind::TextureSet),
+            texture_sets_row_labels()
+        );
+        // Pairwise distinct, so two swapped arms cannot pass the pins
+        // above; the Fill union (two modules' lists) stays unique too.
+        let lists: Vec<Vec<String>> = ContextKind::ALL
+            .into_iter()
+            .map(properties_row_labels)
+            .collect();
+        for (i, a) in lists.iter().enumerate() {
+            for b in &lists[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        let unique: std::collections::HashSet<&String> = fill.iter().collect();
+        assert_eq!(unique.len(), fill.len(), "{fill:?}");
+        assert_eq!(fill.len(), 20);
+    }
+
+    #[test]
+    fn the_registered_labels_drive_the_rails_search() {
+        let mut rail = ContextRail::new("row-labels", ContextKind::Brush);
+        rail.set_labels(properties_row_labels(ContextKind::Brush));
+        rail.set_query("jitter");
+        // Size / Angle / Flow jitter; the position jitter reads "Scatter".
+        assert_eq!(rail.matches(), [34, 35, 37]);
+        assert_eq!(rail.next_hit(), Some(35));
+        // Re-registering the same list (every frame) keeps the hit.
+        rail.set_labels(properties_row_labels(ContextKind::Brush));
+        assert_eq!(rail.current_hit(), Some(35));
+        // A context switch registers a different list: the search
+        // restarts at that list's first hit.
+        assert!(rail.select(ContextKind::Layer));
+        rail.set_labels(properties_row_labels(ContextKind::Layer));
+        rail.set_query("blend");
+        assert_eq!(rail.current_hit(), Some(1));
+    }
+
+    #[test]
+    fn the_properties_arm_registers_the_labels_before_drawing_the_body() {
+        // Source order in the arm: the kind is read, its labels are
+        // registered, then the rail draws (the first occurrences sit in
+        // the arm; this test's own copies come later in the file).
+        let src = include_str!("main.rs");
+        let kind = src.find("let body_kind = kind;").expect("the kind read");
+        let register = src
+            .find("set_labels(properties_row_labels(body_kind))")
+            .expect("the registration");
+        let draw = src.find(".ui(ui, &rail_ctx,").expect("the rail draw");
+        assert!(
+            kind < register && register < draw,
+            "{kind} {register} {draw}"
         );
     }
 }

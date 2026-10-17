@@ -1455,6 +1455,23 @@ pub fn layer_blend_options(kind: &LayerKind) -> Vec<umber_core::BlendMode> {
     modes
 }
 
+/// The catalog keys of [`layer_properties_row`]'s rows, in draw order
+/// (opacity, blend mode, rename): the Properties rail's search vocabulary
+/// for the Layer context (`rail-row-labels`; the inclusion rule is stated
+/// on `brush_panel::ROW_LABEL_KEYS`). Static: the blend row stays listed
+/// for a material layer, which does not draw it (the same v1 boundary as
+/// the Brush list).
+const LAYER_ROW_LABEL_KEYS: &[&str] = &[
+    "history.op-set-opacity",
+    "history.op-set-blend",
+    "history.op-rename",
+];
+
+/// The Layer body's row labels, localized. Pure: no `Ui`, no document.
+pub fn layer_properties_row_labels() -> Vec<String> {
+    LAYER_ROW_LABEL_KEYS.iter().copied().map(tr).collect()
+}
+
 /// The name a rename commits: trimmed, `None` when empty or unchanged.
 pub fn rename_commit(old: &str, typed: &str) -> Option<String> {
     let name = typed.trim();
@@ -1579,6 +1596,77 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
                 paint.remove_layer_masks(id);
             }
         }
+    }
+}
+
+/// The catalog keys of [`layer_mask_ui`]'s labelled rows: its section
+/// title only. Each per-layer row is labelled by the layer's own name
+/// (user data, not a catalog key, and not guaranteed unique) and carries
+/// buttons and a glyph toggle, all skipped by the shared inclusion rule
+/// (stated on `brush_panel::ROW_LABEL_KEYS`).
+const MASK_ROW_LABEL_KEYS: &[&str] = &["layers.masks-section"];
+
+/// The Mask body's row labels, localized. Pure: no `Ui`, no document.
+pub fn layer_mask_row_labels() -> Vec<String> {
+    MASK_ROW_LABEL_KEYS.iter().copied().map(tr).collect()
+}
+
+/// Test support for the rail row-label lists (`rail-row-labels`): `src`
+/// (a module's `include_str!`) cut before its `mod tests` and with the
+/// `const <keys_const>` list removed, so a key found in what remains is
+/// one the module's draw code names, not the list naming itself. `None`
+/// when the list is absent (the cut would prove nothing).
+#[cfg(test)]
+pub(crate) fn drawn_source(src: &str, keys_const: &str) -> Option<String> {
+    let body = src.split("\nmod tests {").next().unwrap_or(src);
+    let start = body.find(&format!("const {keys_const}: &[&str] = &["))?;
+    let end = start + body[start..].find("];")? + 2;
+    Some(format!("{}{}", &body[..start], &body[end..]))
+}
+
+/// Pins a body's row-label list (`rail-row-labels`): non-empty, no empty
+/// key, every key resolves in the en-US catalog (`tr` falls back to the
+/// key itself, so a typo would otherwise pass), keys and rendered labels
+/// both unique, and every key named by the body's draw code (`drawn`,
+/// from [`drawn_source`]) as a quoted literal: the jitter rows pass
+/// theirs through a key variable, so a literal-call scan would miss them.
+#[cfg(test)]
+pub(crate) fn assert_row_label_keys(keys: &[&str], labels: &[String], drawn: &str) {
+    assert!(!keys.is_empty());
+    assert_eq!(keys.len(), labels.len());
+    for (key, label) in keys.iter().zip(labels) {
+        assert!(!key.is_empty());
+        assert_eq!(*label, crate::i18n::tr_en(key), "{key}");
+        assert_ne!(label, key, "{key} is not in the en-US catalog");
+        assert!(!label.is_empty(), "{key}");
+        let quoted = format!("\"{key}\"");
+        assert!(drawn.contains(&quoted), "{key} is not drawn");
+    }
+    let keys_unique: HashSet<&str> = keys.iter().copied().collect();
+    assert_eq!(keys_unique.len(), keys.len(), "duplicate key: {keys:?}");
+    let labels_unique: HashSet<&str> = labels.iter().map(String::as_str).collect();
+    assert_eq!(
+        labels_unique.len(),
+        labels.len(),
+        "duplicate label: {labels:?}"
+    );
+}
+
+#[cfg(test)]
+mod row_label_tests {
+    use super::*;
+
+    #[test]
+    fn the_layer_and_mask_row_labels_are_the_rows_the_bodies_draw() {
+        let src = include_str!("document.rs");
+        let drawn = drawn_source(src, "LAYER_ROW_LABEL_KEYS").expect("list");
+        let labels = layer_properties_row_labels();
+        assert_row_label_keys(LAYER_ROW_LABEL_KEYS, &labels, &drawn);
+        // Opacity, blend, rename: the order `layer_properties_row` draws.
+        assert_eq!(labels, ["Set opacity", "Set blend mode", "Rename layer"]);
+        let drawn = drawn_source(src, "MASK_ROW_LABEL_KEYS").expect("list");
+        assert_row_label_keys(MASK_ROW_LABEL_KEYS, &layer_mask_row_labels(), &drawn);
+        assert_eq!(layer_mask_row_labels(), ["Masks"]);
     }
 }
 

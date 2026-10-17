@@ -373,6 +373,35 @@ fn dist_to_segment_t(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> (f32, f32) {
     (dx * dx + dy * dy, t)
 }
 
+/// The catalog keys of [`path_tool_rows`]' labelled rows, in draw order:
+/// the Properties rail's search vocabulary for the Fill context, after
+/// `fill_layer::ROW_LABEL_KEYS` (`rail-row-labels`; the inclusion rule
+/// is stated on `brush_panel::ROW_LABEL_KEYS`).
+///
+/// - The mode combo has no leading label, so it is absent; so are the
+///   hint, the points / selected readouts, the buttons and the
+///   no-paint / need-points lines.
+/// - The smudge and eraser rows reuse the brush panel's keys, which the
+///   Fill context never draws twice (the brush rows live in the Brush
+///   context), so the Fill list stays unique.
+/// - Static: the mode-gated rows and the selected point's size / opacity
+///   stay listed while hidden (the Brush list's v1 boundary).
+const ROW_LABEL_KEYS: &[&str] = &[
+    "path.tool",
+    "path.armed",
+    "brush.smudge-strength",
+    "brush.smudge-smear",
+    "brush.erase-channels",
+    "path.closed",
+    "path.size",
+    "path.opacity",
+];
+
+/// The path-tool rows' labels, localized. Pure: no `Ui`, no tool.
+pub fn row_labels() -> Vec<String> {
+    ROW_LABEL_KEYS.iter().copied().map(tr).collect()
+}
+
 /// The path-tool rows of the Properties panel: the armed toggle, the
 /// three-mode picker, the mode's params, the closed flag, the capture
 /// status, the selected point's size/opacity sliders, and the Replay /
@@ -524,6 +553,33 @@ fn field_row<N: egui::emath::Numeric>(
         ui.add(field).changed()
     })
     .inner
+}
+
+#[cfg(test)]
+mod row_label_tests {
+    use super::*;
+    use crate::document::{assert_row_label_keys, drawn_source};
+
+    #[test]
+    fn the_path_row_labels_are_the_rows_the_tool_draws() {
+        let src = include_str!("path_tool.rs");
+        let drawn = drawn_source(src, "ROW_LABEL_KEYS").expect("list");
+        let labels = row_labels();
+        assert_row_label_keys(ROW_LABEL_KEYS, &labels, &drawn);
+        assert_eq!(
+            labels,
+            [
+                "Paint path",
+                "Edit path (captures clicks)",
+                "Strength",
+                "Smear",
+                "Erase channels",
+                "Closed loop",
+                "Size",
+                "Opacity",
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
