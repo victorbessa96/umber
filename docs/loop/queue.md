@@ -305,15 +305,25 @@ W-GUI-4 candidates, in dependency order:
    tests, 5 crates; design doc + kill report + panel editor).
 2. **Levels' CurveEdit consumer** — ✓ LANDED `7208a7b` (the curves
    node edits as one in-row CurveEdit; battery GREEN: 905 tests).
-3. **per-set masked bakes** — the missing fact is LANDED:
+3. **per-set masked bakes** — ✓ LANDED end to end:
    `a23bcac` (triangle_materials + submesh_for_material + the three
-   importer fills, all-or-nothing at file scope; battery GREEN: 129
-   tests). NEXT: the bakes-panel consumer (bake_jobs per-set split
-   through the landed filter_mesh_for_triangles/occluding_triangles
-   pair — bakes_panel.rs work), then the multi-material FBX fixture.
+   importer fills), `5aae0ec` (the bakes-panel consumer: each enabled
+   set bakes from its own submesh), `c59034b` (with_occluder: the
+   AO/thickness raster-vs-occluder split), `59c679a`+`73a57cd` (the
+   empty-occluder refusal, SPLIT-path-gated — CI green 39056807314).
+   Battery green at every step. Remaining: the multi-material FBX
+   fixture (named follow-up).
 4. **g6-stencil-overlay** — still blocked on the stencil engine.
-5. **The rail's row-label registry** (W-GUI-3's named follow-up:
-   the ContextRail search needs the body-side row decomposition).
+5. **The rail's row-label registry** — ✓ LANDED `8eb02c9` (every
+   Properties body's pure label fn + the shell's per-frame
+   set_labels; Ctrl+F greys non-matching rows and jumps to hits;
+   insert-only, battery GREEN: 914 tests).
+
+Plus the `a394876` E0063 tail (52 MeshData test literals across 7
+crates gain triangle_materials) and the scorecard fix `6f3c58b`.
+W-GUI-4 is CLOSED except g6-stencil-overlay (stencil-engine
+blocked), the perf reseed (awaiting green nightlies on the reseeded
+baseline), and the partner-gated release lane.
 
 ## Scratch
 

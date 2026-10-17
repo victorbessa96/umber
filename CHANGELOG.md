@@ -4,6 +4,43 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## W-GUI-3 + W-GUI-4 — the shell-halves and curves day (2026-10-17, 7b5b33e..73a57cd)
+
+Two waves landed in one day, all CI green on both platforms:
+
+- **The six lock-queued shell halves** (W-GUI-3, `7b5b33e`): the
+  Properties ContextRail dispatch with per-target applicable kinds +
+  breadcrumb, the a11y umber-app half (eye/mask-thumb/drag-handle rows
+  report role + label), the density Preferences row + the dock's
+  tablet splitter hit-zone, the held-key E/Space poll through
+  TempTools, the blend combo's TypeAhead + the delete-confirm's
+  platform-ordered dialog buttons, and the PSD publish binding at
+  tile 1001 (`publish_psd_pixels` wired through `publish_plane`).
+- **FalloffCurve::Custom** (`4a2e3c2`): GPU id 10 with a 256x1
+  R32Float LUT texture on the paint pass's binding 5 (the stamp's
+  RwLock fallback pattern), `eval_with` as the curve-aware CPU
+  reference, `BrushParams.falloff_custom` (serde-default identity),
+  the sync_brush_params change-detected upload, and the in-row
+  CurveEdit panel editor. The design doc is
+  `docs/specs/falloff-custom-design.md`.
+- **The graph curves node's CurveEdit consumer** (`7208a7b`): the
+  four control points edit as ONE in-row curve editor with the
+  MIN_GAP-nudged sanitize against the graph_eval monotonic
+  contract — the g4 census finding closed.
+- **Per-set masked bakes, end to end** (`a23bcac` + `5aae0ec` +
+  `c59034b` + `59c679a`/`73a57cd`): MeshData gains
+  `triangle_materials` (FBX/glTF/OBJ fill it), each enabled set
+  bakes from its own submesh while rays hit the whole mesh, and the
+  AO/thickness raster-vs-occluder split names its occluder
+  explicitly (the empty-occluder refusal fires only on the split
+  path).
+- **The rail's row-label registry** (`8eb02c9`): every Properties
+  body's pure label fn feeds the ContextRail's per-frame
+  set_labels, so the Ctrl+F property search greys non-matching rows
+  and jumps to hits.
+- Plus the `a394876` E0063 tail (52 test literals across 7 crates)
+  and the `6f3c58b` scorecard fix.
+
 ## W-GUI-2 — the outage wave (2026-10-17, d9fa931..eecf4c6)
 
 Nineteen kills landed through a 10-hour build-host outage, closed by

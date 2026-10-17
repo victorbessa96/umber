@@ -11,8 +11,14 @@
 
 ## Status line
 
-Current phase: **W-GUI-2 LANDED (2026-10-17, `d9fa931`+`edb5ffa`+
-`eecf4c6`; CI 39021293485 GREEN both platforms).** The 19-kill wave
+Current phase: **W-GUI-4 CLOSED (2026-10-17, `73a57cd`; CI 39056807314
+GREEN both platforms).** Three waves landed in one day: W-GUI-2 (19
+kills through the 10h host outage, `d9fa931`..`eecf4c6`), W-GUI-3
+(the six lock-queued shell halves, `7b5b33e`+`efd0cbf`), and
+W-GUI-4's kills (falloff Custom `4a2e3c2`, the curves CurveEdit
+consumer `7208a7b`, triangle_materials + per-set masked bakes
+end-to-end `a23bcac`/`5aae0ec`/`c59034b`/`59c679a`/`73a57cd`, the
+rail's row-label registry `8eb02c9`, the E0063 tail `a394876`). The 19-kill wave
 closed through a 10h build-host outage: the wave battery ran GREEN
 (1,589 tests, 8 crates, clippy clean) after 12 fix-forward rounds;
 every kill that landed host-free through the night (the four W-GUI-2
@@ -23,14 +29,13 @@ the inpaint core + snapshot tests) and the cross-review's 11 defect
 fixes (1 BLOCKER) all shipped together, plus the perf-baseline
 reseed that closes the nightly's stale-baseline red.
 
-**Next (W-GUI-3):** the six lock-released shell halves (ContextRail
-dispatch, a11y umber-app half, density Preferences row + HitZone,
-held-key poll, TypeAhead/dialog consumers, PSD publish binding), the
-per-set masked-bakes host steps (the 148-site field pass, then the
-landed subset-mesh/occluder-scope consumers), the FalloffCurve
-custom-curve design (GPU-stable-id question first), and the Curve
-editors' consumers. Docs tick for W-GUI-2 is written, rides W-GUI-3's
-push.
+**Next:** g6-stencil-overlay (still blocked on the stencil engine),
+the perf-baseline reseed from two green nightlies (the first nightly
+on the reseeded baseline has not run yet), the multi-material FBX
+fixture (per-set masked bakes' named follow-up), and the
+partner-gated release lane (SPEC v1.1 ratification, Windows signing,
+the alpha tag — evidence packets written). Docs tick for W-GUI-3/4
+rides the next push.
 
 ## The core-loop queue (the ONLY active hunt)
 
