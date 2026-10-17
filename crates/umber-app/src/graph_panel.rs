@@ -40,6 +40,40 @@
 //! Add-Node menu beside the built-ins (the registry's `node_defs` is the
 //! one listing), dispatch through the same `eval_graph_cached`, and save
 //! as custom nodedefs declared after [`umber_graph::mtlx::painter_nodedefs`].
+//!
+//! # The curves editor (g4 census consumer)
+//!
+//! A `curves` node's four `Vec2` params `curve_p0..curve_p3` edit as ONE
+//! [`umber_gui::CurveEdit`] (fixed count, no label of its own: the node
+//! title names the def), drawn at the first curve param's slot in the param
+//! loop. The special case keys on `def == "curves"` AND all four params
+//! being `Vec2` ([`curve_points`]); no other built-in def carries a
+//! `curve_p*` param, and plugins can never register as `curves` (the
+//! no-shadowing rule). Anything else, a partial curves node included,
+//! keeps the raw rows. The model is rebuilt from the params every frame
+//! (the brush_panel falloff-Custom pattern: clamp + `MIN_GAP + 1e-6` nudge,
+//! identity fallback). Judgment calls:
+//!
+//! - **The write-back contract is the eval's, not the widget's.** graph_eval
+//!   and umber-graph's `CurvesNode` require only finite coordinates and
+//!   strictly increasing x. y (and x) are not range-limited, so the write-back
+//!   ([`curve_write_back`]) invents no clamp. Only the point the user moved
+//!   takes the editor's value; the others keep their stored value, so a
+//!   stored `y = 2.0` survives an edit elsewhere. The point being dragged is
+//!   clamped into `[0, 1]²`; the widget cannot represent anything else.
+//! - **The identity fallback writes back whole.** When the model refuses
+//!   the stored curve (e.g. three points crowded within `MIN_GAP` of
+//!   `x = 1`), the editor shows [`CURVE_IDENTITY`], and the first edit
+//!   replaces the whole curve with the edited one. A merge there would keep
+//!   the crowded points, and the editor would show the identity forever.
+//! - **Write-back only on change.** It needs both the widget's `changed()`
+//!   and a result different from the stored points. Then four `set_param`
+//!   calls follow (the node goes dirty once).
+//! - **A fresh `curves` node starts at the identity** ([`default_params`]),
+//!   so a node added from the menu evaluates and shows the editor.
+//!   Before this it started empty and reported the missing-param error.
+//! - **Size 160 px** (brush's in-row editor is 120): here the curve is the
+//!   node's whole body, not a row beside a combo.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -95,6 +129,13 @@ fn default_params(node_def: &str) -> Vec<(String, ParamValue)> {
             ("randomness".into(), ParamValue::Float(0.0)),
             ("seed".into(), ParamValue::Int(1)),
         ],
+        // The identity curve, so a node added from the menu evaluates and
+        // shows the curve editor (which keys on the four params).
+        "curves" => CURVE_PARAMS
+            .iter()
+            .zip(CURVE_IDENTITY)
+            .map(|(name, point)| ((*name).to_string(), ParamValue::Vec2(point)))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1016,7 +1057,23 @@ impl GraphPanel {
         // the write-back (E0502): each editor produces an optional
         // replacement routed through set_param (which marks dirty).
         let params = self.graph.nodes[pos].params.clone();
+        // A `curves` node's four points draw as ONE curve editor, at the
+        // first curve param's slot (see the module docs); every other
+        // param keeps its row.
+        let curve = curve_points(&def, &params);
+        let mut curve_drawn = false;
         for (name, value) in &params {
+            if curve.is_some() && CURVE_PARAMS.contains(&name.as_str()) {
+                if let (false, Some(stored)) = (curve_drawn, curve.as_ref()) {
+                    curve_drawn = true;
+                    if let Some(next) = curves_editor(ui, id, stored) {
+                        for (point_name, point) in CURVE_PARAMS.iter().zip(next) {
+                            self.set_param(id, point_name, ParamValue::Vec2(point));
+                        }
+                    }
+                }
+                continue;
+            }
             let replacement = param_editor(ui, name, value, self);
             if let Some(new_value) = replacement {
                 self.set_param(id, name, new_value);
@@ -1250,6 +1307,135 @@ fn param_editor(
             result
         }
     }
+}
+
+/// The `curves` node's point params, in order (`curve_p0..curve_p3`, the
+/// contract shared by umber-graph's `CurvesNode` and umber-gpu's
+/// `GpuOp::Curves`).
+const CURVE_PARAMS: [&str; 4] = ["curve_p0", "curve_p1", "curve_p2", "curve_p3"];
+
+/// The identity curve a fresh `curves` node starts with: the points
+/// umber-graph's `CurvesNode` docs pin as byte-exact on the input.
+const CURVE_IDENTITY: [[f32; 2]; 4] = [
+    [0.0, 0.0],
+    [1.0 / 3.0, 1.0 / 3.0],
+    [2.0 / 3.0, 2.0 / 3.0],
+    [1.0, 1.0],
+];
+
+/// The four stored points of a `curves` node, or `None` when `def` is not
+/// `curves` or any of the four params is missing or not a `Vec2` (those
+/// rows then stay raw editors, and eval reports the honest error).
+/// First match per name, the lookup both evaluators use.
+fn curve_points(def: &str, params: &[(String, ParamValue)]) -> Option<[[f32; 2]; 4]> {
+    if def != "curves" {
+        return None;
+    }
+    let mut points = [[0.0; 2]; 4];
+    for (point, name) in points.iter_mut().zip(CURVE_PARAMS) {
+        match params.iter().find(|(n, _)| n == name).map(|(_, v)| v) {
+            Some(ParamValue::Vec2(v)) => *point = *v,
+            _ => return None,
+        }
+    }
+    Some(points)
+}
+
+/// The `curves` node's editor: [`umber_gui::CurveEdit`] over the four
+/// points (fixed count: the node has exactly four), under a per-node id.
+/// Returns the four points to write back, only when an edit changed the
+/// stored curve.
+fn curves_editor(ui: &mut egui::Ui, id: u64, stored: &[[f32; 2]; 4]) -> Option<[[f32; 2]; 4]> {
+    let (shown, fallback) = curve_edit_model(stored);
+    let mut model = shown.clone();
+    let response = ui
+        .push_id(("graph_curves_curve", id), |ui| {
+            umber_gui::CurveEdit::new(&mut model)
+                .size(160.0)
+                .fixed_count(true)
+                .show(ui)
+        })
+        .inner;
+    if !response.changed() {
+        return None;
+    }
+    curve_write_back(stored, &shown, fallback, &model)
+}
+
+/// The editor model for `stored`, rebuilt every frame (the node params
+/// are the state), and whether it is the identity fallback. The
+/// brush_panel `falloff_edit_model` approach: [`umber_gui::Curve`] is
+/// stricter than the eval contract (points inside `[0, 1]²`, x gaps of at
+/// least `MIN_GAP`), so the points are shown clamped into `[0, 1]²` and
+/// each x nudged to at least `MIN_GAP + 1e-6` past its left neighbour
+/// (the f32-ulp margin: `move_point` parks a point exactly `MIN_GAP` from
+/// its neighbour, which can fall an ulp short on the next frame's
+/// `Curve::new`). A curve still refused (non-finite, or the nudge pushed
+/// the last x past 1) shows as [`CURVE_IDENTITY`] with `fallback` set.
+fn curve_edit_model(stored: &[[f32; 2]; 4]) -> (umber_gui::Curve, bool) {
+    use umber_gui::widgets::curve::MIN_GAP;
+    let unit = |v: f32| v.clamp(0.0, 1.0);
+    let mut points = stored.map(|[x, y]| (unit(x), unit(y)));
+    for i in 1..points.len() {
+        points[i].0 = points[i].0.max(points[i - 1].0 + MIN_GAP + 1e-6);
+    }
+    match umber_gui::Curve::new(points.to_vec()) {
+        Ok(curve) => (curve, false),
+        Err(_) => {
+            let identity = CURVE_IDENTITY.map(|[x, y]| (x, y)).to_vec();
+            (umber_gui::Curve::new(identity).unwrap_or_default(), true)
+        }
+    }
+}
+
+/// The eval contract as a gate (graph_eval `GpuOp::Curves` and
+/// umber-graph `Curve4::try_new`): every coordinate finite, x strictly
+/// increasing. Nothing else: y and x are NOT range-limited there, so
+/// they are not here. `None` = refused.
+fn sanitize_curve(points: [[f32; 2]; 4]) -> Option<[[f32; 2]; 4]> {
+    let finite = points.iter().flatten().all(|c| c.is_finite());
+    let increasing = points.windows(2).all(|w| w[0][0] < w[1][0]);
+    (finite && increasing).then_some(points)
+}
+
+/// What an edit writes back: only the points the editor moved (`edited`
+/// differs from `shown`) take the editor's value; the rest keep their
+/// STORED value, so the display clamp and nudge never leak into the
+/// graph. The merge goes through [`sanitize_curve`]; when it is refused
+/// (a stored curve that broke the contract), or the model was the
+/// identity fallback (its points are not the stored ones), the whole
+/// edited curve is written instead (always valid: the editor keeps
+/// `MIN_GAP`). `None` when the result equals `stored`.
+fn curve_write_back(
+    stored: &[[f32; 2]; 4],
+    shown: &umber_gui::Curve,
+    fallback: bool,
+    edited: &umber_gui::Curve,
+) -> Option<[[f32; 2]; 4]> {
+    let four = |curve: &umber_gui::Curve| -> Option<[[f32; 2]; 4]> {
+        <[(f32, f32); 4]>::try_from(curve.points())
+            .ok()
+            .map(|p| p.map(|(x, y)| [x, y]))
+    };
+    let (shown, edited) = (four(shown)?, four(edited)?);
+    if edited == shown {
+        // No edit (an untouched re-render, or a drag back to the start):
+        // even the identity fallback stays unwritten.
+        return None;
+    }
+    let merged = if fallback {
+        None
+    } else {
+        let mut merged = *stored;
+        for ((slot, edit), seen) in merged.iter_mut().zip(edited).zip(shown) {
+            if edit != seen {
+                *slot = edit;
+            }
+        }
+        sanitize_curve(merged)
+    };
+    let next = merged.or_else(|| sanitize_curve(edited))?;
+    (next != *stored).then_some(next)
 }
 
 /// Lifts every carried [`CANVAS_POS_PARAM`] out of the node params into
@@ -1982,5 +2168,217 @@ mod tests {
             "an empty graph has no definition to copy"
         );
         assert!(defs.is_empty(), "the no-op stores nothing");
+    }
+
+    /// Four `curve_p*` params in order, as a node's param list.
+    fn curve_params(points: [[f32; 2]; 4]) -> Vec<(String, ParamValue)> {
+        CURVE_PARAMS
+            .iter()
+            .zip(points)
+            .map(|(name, point)| ((*name).to_string(), ParamValue::Vec2(point)))
+            .collect()
+    }
+
+    /// (a) A fresh `curves` node carries the identity curve; the model
+    /// shows a valid stored curve exactly; moving one point writes back
+    /// exactly that point, the other three verbatim.
+    #[test]
+    fn curves_model_round_trips_and_writes_back_the_moved_point() {
+        let mut panel = GraphPanel::new();
+        let id = panel.add_node("curves");
+        let node = panel.graph.nodes.iter().find(|n| n.id == id).unwrap();
+        let fresh = curve_points("curves", &node.params);
+        assert_eq!(fresh, Some(CURVE_IDENTITY));
+
+        let stored = [[0.0, 0.0], [0.25, 0.8], [0.6, 0.3], [1.0, 1.0]];
+        let (shown, fallback) = curve_edit_model(&stored);
+        assert!(!fallback);
+        let as_pairs: [(f32, f32); 4] = [(0.0, 0.0), (0.25, 0.8), (0.6, 0.3), (1.0, 1.0)];
+        assert_eq!(shown.points(), &as_pairs);
+        let mut moved = shown.clone();
+        assert!(moved.move_point(1, 0.3, 0.5));
+        let written = curve_write_back(&stored, &shown, fallback, &moved);
+        let expected = [[0.0, 0.0], [0.3, 0.5], [0.6, 0.3], [1.0, 1.0]];
+        assert_eq!(written, Some(expected));
+
+        // Through the panel: the four params land, the node goes dirty.
+        panel.dirty.clear();
+        for (name, point) in CURVE_PARAMS.iter().zip(expected) {
+            assert!(panel.set_param(id, name, ParamValue::Vec2(point)));
+        }
+        let node = panel.graph.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(curve_points("curves", &node.params), Some(expected));
+        assert!(panel.dirty.contains(&id));
+    }
+
+    /// (b) The write-back follows the eval contract, not the widget's
+    /// range: a stored y outside `[0, 1]` (eval-valid) survives an edit to
+    /// another point; the display nudge never reaches the graph; a merge
+    /// the contract refuses falls back to the edited curve; an identity
+    /// fallback model writes back whole.
+    #[test]
+    fn curves_write_back_keeps_the_eval_contract() {
+        use umber_gui::widgets::curve::MIN_GAP;
+
+        // Out-of-range y: shown clamped, kept on an edit elsewhere.
+        let stored = [[0.0, -1.0], [0.3, 0.5], [0.6, 0.5], [1.0, 2.0]];
+        let (shown, fallback) = curve_edit_model(&stored);
+        assert!(!fallback);
+        let clamped: [(f32, f32); 4] = [(0.0, 0.0), (0.3, 0.5), (0.6, 0.5), (1.0, 1.0)];
+        assert_eq!(shown.points(), &clamped);
+        let mut moved = shown.clone();
+        assert!(moved.move_point(1, 0.4, 0.7));
+        assert_eq!(
+            curve_write_back(&stored, &shown, fallback, &moved),
+            Some([[0.0, -1.0], [0.4, 0.7], [0.6, 0.5], [1.0, 2.0]])
+        );
+
+        // A gap of exactly MIN_GAP is nudged ~1e-6 for display only; an
+        // edit to p0 writes p2's STORED x back.
+        let tight_x = 0.5 + MIN_GAP;
+        let stored = [[0.0, 0.0], [0.5, 0.2], [tight_x, 0.9], [1.0, 1.0]];
+        let (shown, fallback) = curve_edit_model(&stored);
+        assert!(!fallback);
+        assert!(shown.points()[2].0 > tight_x, "display nudged");
+        let mut moved = shown.clone();
+        assert!(moved.move_point(0, 0.0, 0.3));
+        assert_eq!(
+            curve_write_back(&stored, &shown, fallback, &moved),
+            Some([[0.0, 0.3], [0.5, 0.2], [tight_x, 0.9], [1.0, 1.0]])
+        );
+
+        // A stored non-monotone curve (p1.x == p2.x, eval refuses it):
+        // shown nudged, an edit to p3 would keep the tie, so the merge is
+        // refused and the whole edited curve lands (valid by the editor).
+        let stored = [[0.0, 0.0], [0.3, 0.2], [0.3, 0.6], [1.0, 1.0]];
+        assert_eq!(sanitize_curve(stored), None);
+        let (shown, fallback) = curve_edit_model(&stored);
+        assert!(!fallback);
+        let mut moved = shown.clone();
+        assert!(moved.move_point(3, 1.0, 0.5));
+        let written = curve_write_back(&stored, &shown, fallback, &moved);
+        let next = written.expect("the edited curve lands");
+        assert_eq!(next[0], [0.0, 0.0]);
+        assert_eq!(next[1], [0.3, 0.2]);
+        assert_eq!(next[2], [shown.points()[2].0, 0.6], "the nudged x");
+        assert_eq!(next[3], [1.0, 0.5]);
+        assert!(sanitize_curve(next).is_some());
+
+        // Crowded at x = 1 (eval-valid, but the nudge pushes x past 1):
+        // the identity shows, and the first edit replaces the whole curve.
+        let stored = [[0.0, 0.0], [0.999, 0.2], [0.9995, 0.3], [1.0, 1.0]];
+        assert!(sanitize_curve(stored).is_some());
+        let (shown, fallback) = curve_edit_model(&stored);
+        assert!(fallback);
+        let identity = CURVE_IDENTITY.map(|[x, y]| (x, y));
+        assert_eq!(shown.points(), &identity);
+        let mut moved = shown.clone();
+        assert!(moved.move_point(1, 0.5, 0.5));
+        assert_eq!(
+            curve_write_back(&stored, &shown, fallback, &moved),
+            Some([[0.0, 0.0], [0.5, 0.5], CURVE_IDENTITY[2], [1.0, 1.0]])
+        );
+
+        // The gate itself: non-finite and non-increasing are refused,
+        // out-of-range y/x are not.
+        assert_eq!(
+            sanitize_curve([[0.0, f32::NAN], [0.3, 0.5], [0.6, 0.5], [1.0, 1.0]]),
+            None
+        );
+        assert_eq!(
+            sanitize_curve([[0.0, 0.0], [0.6, 0.5], [0.3, 0.5], [1.0, 1.0]]),
+            None
+        );
+        let wide = [[-0.5, -3.0], [0.3, 0.5], [0.6, 0.5], [1.5, 4.0]];
+        assert_eq!(sanitize_curve(wide), Some(wide));
+    }
+
+    /// (c) Only `def == "curves"` with all four `Vec2` params builds the
+    /// editor: another def carrying the same params, a partial curves
+    /// node, and a def with an ordinary Vec2 param all stay raw rows.
+    #[test]
+    fn only_a_complete_curves_node_builds_the_editor() {
+        let params = curve_params(CURVE_IDENTITY);
+        assert_eq!(curve_points("curves", &params), Some(CURVE_IDENTITY));
+        assert_eq!(curve_points("levels", &params), None);
+        assert_eq!(curve_points("gradient", &params), None);
+
+        let mut partial = params.clone();
+        partial[3].1 = ParamValue::Float(1.0);
+        assert_eq!(curve_points("curves", &partial), None);
+        assert_eq!(curve_points("curves", &params[..3]), None);
+
+        let center = vec![("center".to_string(), ParamValue::Vec2([0.5, 0.5]))];
+        assert_eq!(curve_points("gradient", &center), None);
+        assert_eq!(curve_points("curves", &center), None);
+
+        // A fresh node of any other def never carries the curve params.
+        let mut panel = GraphPanel::new();
+        let defs: Vec<String> = panel
+            .registry()
+            .node_defs()
+            .iter()
+            .map(|d| (*d).to_string())
+            .collect();
+        for def in defs.iter().filter(|d| *d != "curves") {
+            let id = panel.add_node(def);
+            let node = panel.graph.nodes.iter().find(|n| n.id == id).unwrap();
+            assert_eq!(curve_points(def, &node.params), None, "{def}");
+        }
+    }
+
+    /// (d) Re-rendering an untouched model writes nothing, for a valid
+    /// curve, a display-nudged one, and the identity fallback. Dragging a
+    /// point back onto its stored value writes nothing either.
+    #[test]
+    fn curves_write_back_fires_only_on_change() {
+        use umber_gui::widgets::curve::MIN_GAP;
+        for stored in [
+            CURVE_IDENTITY,
+            [[0.0, -1.0], [0.3, 0.5], [0.6, 0.5], [1.0, 2.0]],
+            [[0.0, 0.0], [0.5, 0.2], [0.5 + MIN_GAP, 0.9], [1.0, 1.0]],
+            [[0.0, 0.0], [0.999, 0.2], [0.9995, 0.3], [1.0, 1.0]],
+        ] {
+            let (shown, fallback) = curve_edit_model(&stored);
+            let rerender = shown.clone();
+            assert_eq!(
+                curve_write_back(&stored, &shown, fallback, &rerender),
+                None,
+                "{stored:?}"
+            );
+        }
+        let stored = [[0.0, 0.0], [0.25, 0.8], [0.6, 0.3], [1.0, 1.0]];
+        let (shown, fallback) = curve_edit_model(&stored);
+        let mut moved = shown.clone();
+        assert!(moved.move_point(1, 0.3, 0.5));
+        assert!(moved.move_point(1, 0.25, 0.8));
+        assert_eq!(curve_write_back(&stored, &shown, fallback, &moved), None);
+    }
+
+    /// kittest: a selected `curves` node draws no raw `curve_p*` rows (the
+    /// editor replaces them); the same params on a `levels` node keep their
+    /// rows (the positive control: the label query does reach the editor
+    /// section).
+    #[test]
+    fn curves_node_replaces_the_raw_point_rows() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let rows = |def: &str| -> bool {
+            let mut panel = GraphPanel::new();
+            let id = panel.add_node(def);
+            for (name, value) in curve_params(CURVE_IDENTITY) {
+                assert!(panel.set_param(id, &name, value));
+            }
+            panel.select(Some(id));
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(900.0, 2000.0))
+                .build_ui_state(|ui, panel: &mut GraphPanel| panel.show(ui), panel);
+            harness.run();
+            let found = harness.query_by_label("curve_p0").is_some();
+            drop(harness);
+            found
+        };
+        assert!(rows("levels"), "levels keeps the raw rows");
+        assert!(!rows("curves"), "curves draws the editor instead");
     }
 }
