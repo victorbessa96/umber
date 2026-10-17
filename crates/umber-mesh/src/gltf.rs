@@ -20,10 +20,23 @@ pub fn load_gltf(path: &Path) -> Result<MeshData, ImportError> {
         gltf::import(path).map_err(|e| ImportError::Gltf(e.to_string()))?;
     validate_accessors(&document)?;
     let mut data = MeshData::default();
+    // Per-set masked bakes §1: the triangle→material map attaches only
+    // when every primitive that emitted triangles named its material.
+    let mut pending_triangle_materials: Vec<u16> = Vec::new();
+    let mut complete = true;
     for mesh in document.meshes() {
         for primitive in mesh.primitives() {
-            append_primitive(&mut data, &primitive, &buffers)?;
+            append_primitive(
+                &mut data,
+                &primitive,
+                &buffers,
+                &mut pending_triangle_materials,
+                &mut complete,
+            )?;
         }
+    }
+    if complete && pending_triangle_materials.len() == data.triangle_count() {
+        data.triangle_materials = pending_triangle_materials;
     }
     if data.positions.is_empty() {
         return Err(ImportError::Gltf("no mesh geometry found".into()));
@@ -125,6 +138,8 @@ fn append_primitive(
     data: &mut MeshData,
     primitive: &gltf::Primitive<'_>,
     buffers: &[gltf::buffer::Data],
+    pending_triangle_materials: &mut Vec<u16>,
+    complete: &mut bool,
 ) -> Result<(), ImportError> {
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
     let positions: Vec<[f32; 3]> = reader
@@ -134,6 +149,7 @@ fn append_primitive(
     if positions.is_empty() {
         return Ok(());
     }
+    let indices_before = data.indices.len();
     let base = u32::try_from(data.positions.len())
         .map_err(|_| ImportError::Gltf("more than u32::MAX vertices".into()))?;
     let vertex_count = u32::try_from(positions.len())
@@ -180,10 +196,38 @@ fn append_primitive(
         }
     }
 
-    if let Some(name) = primitive.material().name() {
-        if !data.material_names.iter().any(|n| n == name) {
-            data.material_names.push(name.to_string());
+    let material_slot = if let Some(name) = primitive.material().name() {
+        match data.material_names.iter().position(|n| n == name) {
+            Some(slot) => u16::try_from(slot).ok(),
+            None => {
+                if u16::try_from(data.material_names.len()).is_ok() {
+                    data.material_names.push(name.to_string());
+                    u16::try_from(data.material_names.len() - 1).ok()
+                } else {
+                    None
+                }
+            }
         }
+    } else {
+        None
+    };
+
+    // Per-set masked bakes §1: one material per triangle — a glTF
+    // primitive is single-material, so every triangle this primitive
+    // emits carries the same slot. Collect per-primitive, attach
+    // only when EVERY primitive in the file mapped (all-or-nothing:
+    // the map is either empty or exactly `triangle_count()` long; a
+    // mixed named/unnamed file keeps the whole-mesh fallback).
+    if let Some(slot) = material_slot {
+        // indices are 3-per-triangle: the count is the emitted corners / 3.
+        let triangles = (data.indices.len() - indices_before) / 3;
+        if triangles > 0 {
+            pending_triangle_materials.extend(std::iter::repeat_n(slot, triangles));
+        }
+    } else if indices_before != data.indices.len() {
+        // This primitive emitted triangles but has no named material:
+        // the whole-mesh fallback fires for the entire file.
+        *complete = false;
     }
     Ok(())
 }
@@ -314,6 +358,10 @@ mod tests {
         assert_eq!(data.uvs, vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
         assert_eq!(data.indices, vec![0, 1, 2]);
         assert_eq!(data.material_names, vec!["TestMat".to_string()]);
+        // Per-set masked bakes §1: the primitive named its material, so the
+        // triangle→material map is complete — one slot per triangle.
+        assert_eq!(data.triangle_materials, vec![0u16]);
+        assert_eq!(data.triangle_materials.len(), data.triangle_count());
     }
 
     /// Minimal valid `.glb`: JSON chunk (padded to 4 bytes) plus a BIN chunk
@@ -382,5 +430,7 @@ mod tests {
         assert_eq!(data.uvs, vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
         assert_eq!(data.indices, vec![0, 1, 2]);
         assert_eq!(data.material_names, vec!["TestMat".to_string()]);
+        assert_eq!(data.triangle_materials, vec![0u16]);
+        assert_eq!(data.triangle_materials.len(), data.triangle_count());
     }
 }

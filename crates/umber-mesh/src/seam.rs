@@ -215,6 +215,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -241,6 +242,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -321,6 +323,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let graph = build_seam_graph(&mesh);
         assert_eq!(
@@ -344,6 +347,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![0, 1, 9, 0],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let graph = build_seam_graph(&mesh);
         assert!(graph.edges.is_empty());

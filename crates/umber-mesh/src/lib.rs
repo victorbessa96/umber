@@ -56,6 +56,14 @@ pub struct MeshData {
     pub indices: Vec<u32>,
     /// Materials present on the mesh (one texture set per material in the app).
     pub material_names: Vec<String>,
+    /// Which material each triangle uses: one index into
+    /// `material_names` per triangle (`triangle_count()` long).
+    /// Empty means "one material" — every existing mesh and test
+    /// literal predates the field, so `..Default::default()` keeps
+    /// them valid and consumers treat empty as the whole mesh
+    /// (per-set masked bakes, `docs/specs/per-set-masked-bakes.md`
+    /// §1).
+    pub triangle_materials: Vec<u16>,
 }
 
 impl MeshData {
@@ -67,6 +75,46 @@ impl MeshData {
     /// Number of triangles (one third of the index count).
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// The triangles that use material `material` (an index into
+    /// `material_names`), as a submesh for per-set bakes
+    /// (`docs/specs/per-set-masked-bakes.md` §2): the FULL vertex
+    /// arrays ride along, `indices` holds the kept triangles'
+    /// original vertex ids — the exact shape
+    /// [`filter_mesh_for_triangles`] already proven for per-tile AO.
+    /// Material index out of range, or a mesh with no
+    /// `triangle_materials`, yields an empty submesh — never a silent
+    /// whole-mesh bake.
+    pub fn submesh_for_material(&self, material: usize) -> MeshData {
+        let empty = MeshData {
+            positions: self.positions.clone(),
+            normals: self.normals.clone(),
+            uvs: self.uvs.clone(),
+            indices: Vec::new(),
+            material_names: self.material_names.clone(),
+            triangle_materials: Vec::new(),
+        };
+        let Some(tris) = self.triangles_of_material(material) else {
+            return empty;
+        };
+        filter_mesh_for_triangles(self, &tris)
+    }
+
+    /// The triangle ids (0-based, into `indices`) that use `material`.
+    /// `None` when the mesh carries no triangle→material mapping.
+    pub fn triangles_of_material(&self, material: usize) -> Option<Vec<u32>> {
+        if self.triangle_materials.is_empty() {
+            return None;
+        }
+        let indices: Vec<u32> = self
+            .triangle_materials
+            .iter()
+            .enumerate()
+            .filter(|&(_, &m)| usize::from(m) == material)
+            .map(|(t, _)| u32::try_from(t).unwrap_or(u32::MAX))
+            .collect();
+        Some(indices)
     }
 
     /// Axis-aligned bounds of the vertex positions.
@@ -209,8 +257,18 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
         material_names,
         ..Default::default()
     };
+    // Per-set masked bakes §1: each OBJ model carries tobj's
+    // `material_id` — one material per model's triangles. All-or-nothing
+    // at file scope: any model without a material keeps the whole-mesh
+    // fallback for the whole file.
+    let mut pending_triangle_materials: Vec<u16> = Vec::new();
+    let mut complete = true;
     for model in models {
         let mesh = model.mesh;
+        let model_material = mesh
+            .material_id
+            .and_then(|id| u16::try_from(id).ok())
+            .filter(|&id| usize::from(id) < data.material_names.len());
         // Validate attribute lengths before chunking: tobj does not guarantee
         // exact multiples for malformed files (review #1 — silent-drop risk).
         if mesh.positions.len() % 3 != 0
@@ -232,6 +290,16 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
         data.uvs
             .extend(mesh.texcoords.chunks_exact(2).map(|c| [c[0], c[1]]));
         data.indices.extend(mesh.indices.iter().copied());
+        match model_material {
+            Some(slot) => {
+                let triangles = mesh.indices.len() / 3;
+                pending_triangle_materials.extend(std::iter::repeat_n(slot, triangles));
+            }
+            None => complete = false,
+        }
+    }
+    if complete && pending_triangle_materials.len() == data.triangle_count() {
+        data.triangle_materials = pending_triangle_materials;
     }
     Ok(data)
 }
@@ -239,6 +307,63 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn triangle_materials_empty_means_whole_mesh() {
+        // §1's contract: a mesh without the map (every pre-field mesh)
+        // has no triangles_of_material — the caller's whole-mesh
+        // fallback — and an out-of-range material on a MAPPED mesh
+        // yields an empty submesh, never a silent whole-mesh bake.
+        let mesh = MeshData {
+            positions: vec![[0.0; 3], [1.0; 3], [0.0; 3], [1.0; 3]],
+            normals: vec![[0.0; 3]; 4],
+            uvs: vec![[0.0; 2]; 4],
+            indices: vec![0, 1, 2, 1, 3, 2],
+            material_names: vec!["Body".into()],
+            triangle_materials: Vec::new(),
+        };
+        assert!(mesh.triangles_of_material(0).is_none());
+        let unmapped = mesh.submesh_for_material(0);
+        assert!(unmapped.indices.is_empty());
+        assert_eq!(unmapped.positions.len(), 4, "vertex arrays ride along");
+    }
+
+    #[test]
+    fn submesh_for_material_keeps_the_sets_triangles() {
+        // Two materials, two triangles: material 1 owns triangle 1.
+        // The submesh keeps the FULL vertex arrays (the bake cores
+        // resolve through `indices` — the subset-mesh kill's contract)
+        // and only the kept triangle's original ids.
+        let mesh = MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            indices: vec![0, 1, 2, 1, 3, 2],
+            material_names: vec!["Body".into(), "Hilt".into()],
+            triangle_materials: vec![0, 1],
+        };
+        let body = mesh.submesh_for_material(0);
+        assert_eq!(body.indices, vec![0, 1, 2]);
+        assert_eq!(body.positions.len(), 4, "full vertex arrays ride along");
+        assert_eq!(body.triangle_count(), 1);
+
+        let hilt = mesh.submesh_for_material(1);
+        assert_eq!(hilt.indices, vec![1, 3, 2]);
+
+        // Out-of-range material: empty submesh, not a whole-mesh bake.
+        assert!(mesh.submesh_for_material(2).indices.is_empty());
+        // And the triangle census matches the map's length exactly.
+        assert_eq!(
+            mesh.triangles_of_material(1),
+            Some(vec![1]),
+            "the map is exactly triangle_count long"
+        );
+    }
 
     #[test]
     fn detect_format_routes_by_extension() {
@@ -281,6 +406,7 @@ mod tests {
             uvs: vec![[0.0; 2]; 2],
             indices: vec![0, 1, 0],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(data.vertex_count(), 2);
         assert_eq!(data.triangle_count(), 1);

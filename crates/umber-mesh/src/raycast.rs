@@ -209,6 +209,7 @@ mod tests {
             // tri 0: CCW in xy -> +z; tri 1: collinear (degenerate).
             indices: vec![0, 1, 2, 0, 1, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let hit = |triangle| RayHit {
             triangle,
@@ -233,6 +234,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 

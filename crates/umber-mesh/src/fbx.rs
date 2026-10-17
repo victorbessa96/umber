@@ -49,6 +49,32 @@ fn append_mesh(data: &mut MeshData, mesh: &ufbx::Mesh) -> Result<(), ImportError
         }
     }
 
+    // Face -> index into `data.material_names` (per-set masked bakes
+    // §1): ufbx exposes per-material parts, each carrying the face
+    // ids it covers. Faces no part claims get u16::MAX — the caller's
+    // whole-mesh fallback, never a wrong-set attribution.
+    let mut face_material = vec![u16::MAX; mesh.faces.len()];
+    for part in &mesh.material_parts {
+        let part_index = mesh
+            .materials
+            .get(part.index as usize)
+            .map(|material| material.element.name.to_string());
+        let Some(name) = part_index else { continue };
+        let Some(slot) = data
+            .material_names
+            .iter()
+            .position(|n| n == &name)
+            .and_then(|i| u16::try_from(i).ok())
+        else {
+            continue;
+        };
+        for face in &part.face_indices {
+            if let Some(slot_ref) = face_material.get_mut(*face as usize) {
+                *slot_ref = slot;
+            }
+        }
+    }
+
     let positions: &[ufbx::Vec3] = &mesh.vertices;
     let position_indices: &[u32] = &mesh.vertex_indices;
     let uv = &mesh.vertex_uv;
@@ -56,10 +82,18 @@ fn append_mesh(data: &mut MeshData, mesh: &ufbx::Mesh) -> Result<(), ImportError
     let has_uv = uv.exists && !uv.values.is_empty() && !uv.indices.is_empty();
     let has_normal = normal.exists && !normal.values.is_empty() && !normal.indices.is_empty();
 
+    // All-or-nothing (§1's contract): the map is either empty or exactly
+    // `triangle_count()` long. A mesh with any unmapped face keeps the
+    // whole-mesh fallback rather than a ragged half-map.
+    let all_faces_mapped =
+        !face_material.is_empty() && face_material.iter().all(|&slot| slot != u16::MAX);
+    let mut mesh_triangle_materials: Vec<u16> = Vec::new();
+
     let mut corners = Vec::new();
-    for face in &mesh.faces {
+    for (face_id, face) in mesh.faces.iter().enumerate() {
         corners.clear();
         ufbx::triangulate_face_vec(&mut corners, mesh, *face);
+        let face_material_slot = face_material[face_id];
         for corner in &corners {
             let corner = *corner as usize;
             let position_index =
@@ -101,6 +135,17 @@ fn append_mesh(data: &mut MeshData, mesh: &ufbx::Mesh) -> Result<(), ImportError
 
             data.indices.push(data.positions.len() as u32 - 1);
         }
+        // One material per emitted triangle: `corners.len() / 3`
+        // triangles came out of this face (a quad yields two).
+        if all_faces_mapped {
+            let triangles = corners.len() / 3;
+            if triangles > 0 {
+                mesh_triangle_materials.extend(std::iter::repeat_n(face_material_slot, triangles));
+            }
+        }
+    }
+    if all_faces_mapped {
+        data.triangle_materials.extend(mesh_triangle_materials);
     }
     Ok(())
 }

@@ -1074,6 +1074,9 @@ fn build_mesh(raw: &RawMesh) -> Result<MeshData, ImportError> {
         uvs: Vec::with_capacity(total),
         indices: Vec::with_capacity((total - 2 * counts.len()) * 3),
         material_names: Vec::new(),
+        // Per-set masked bakes §1: USD's GeomSubset binding is the named
+        // follow-up; empty is the honest whole-mesh state.
+        triangle_materials: Vec::new(),
     };
     let mut corner = 0usize;
     for (face, &count) in counts.iter().enumerate() {

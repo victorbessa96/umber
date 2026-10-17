@@ -100,12 +100,22 @@ pub fn filter_mesh_for_triangles(mesh: &MeshData, tris: &[u32]) -> MeshData {
             indices.extend_from_slice(slot);
         }
     }
+    // Per-set masked bakes: the submesh keeps its own triangles'
+    // material slots so nested submeshing stays honest.
+    let triangle_materials = if mesh.triangle_materials.is_empty() {
+        Vec::new()
+    } else {
+        tris.iter()
+            .filter_map(|&tri| mesh.triangle_materials.get(tri as usize).copied())
+            .collect()
+    };
     MeshData {
         positions: mesh.positions.clone(),
         normals: mesh.normals.clone(),
         uvs: mesh.uvs.clone(),
         indices,
         material_names: mesh.material_names.clone(),
+        triangle_materials,
     }
 }
 
@@ -141,6 +151,7 @@ mod tests {
             uvs,
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -172,6 +183,7 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -204,6 +216,7 @@ mod tests {
             uvs: vec![[2.5, 0.3]],
             indices: vec![7, 8, 9],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(tile_of_triangle(&mesh), vec![1001]);
     }
@@ -217,6 +230,7 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(triangles_for_tile(&mesh, 1001), vec![0]);
         assert_eq!(triangles_for_tile(&mesh, 1002), vec![1]);
@@ -233,6 +247,7 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(present_tiles(&two), vec![1001, 1002]);
 
@@ -245,6 +260,7 @@ mod tests {
             uvs: vec![[0.5, 1.5], [0.5, 0.5]],
             indices: vec![0, 1, 1, 1, 0, 0, 0, 1, 1],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(tile_of_triangle(&shuffled), vec![1011, 1001, 1011]);
         assert_eq!(present_tiles(&shuffled), vec![1001, 1011]);
@@ -260,6 +276,7 @@ mod tests {
             uvs: vec![],
             indices: vec![],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(present_tiles(&empty), Vec::<u16>::new());
     }

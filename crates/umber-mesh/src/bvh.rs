@@ -527,6 +527,7 @@ mod tests {
             uvs,
             indices,
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -628,6 +629,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![0, 0, 0, 0, 0, 0],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let bvh = build(&flat);
         // Degenerate triangles are skipped at build time: nothing to hit.
@@ -647,6 +649,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![7, 8, 9],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let bvh = build(&bad);
         assert!(traverse(
@@ -667,6 +670,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             indices: vec![0, 1, 2],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let bvh = build(&mesh);
 

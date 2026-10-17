@@ -312,6 +312,9 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
         uvs: out_uvs,
         indices: out_indices,
         material_names: Vec::new(),
+        // Per-set masked bakes §1: USD's GeomSubset binding is the named
+        // follow-up; empty is the honest whole-mesh state.
+        triangle_materials: Vec::new(),
     })
 }
 
