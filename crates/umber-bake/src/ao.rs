@@ -779,11 +779,14 @@ fn bake_ao_inner_with_occluder(
     if params.rays == 0 {
         return Err(AoBakeError::InvalidRayCount);
     }
-    // An empty occluder is refused, not silently fully-lit: the bind
-    // group needs a non-empty triangle buffer (wgpu rejects zero-size
-    // storage bindings), and "nothing to hit" is better said by the
+    // An empty occluder is refused when the SPLIT names it — not on
+    // the single-mesh path, whose error ordering
+    // (`PositionMap(EmptyMesh)` from the position pass first) an
+    // existing test pins. The split's caller cannot build a
+    // zero-size triangle storage buffer (wgpu's minimum-binding-size
+    // validation panics), and "nothing to hit" is better said by the
     // caller narrowing the scope than by a map that looks baked.
-    if occluder_mesh.triangle_count() == 0 {
+    if !std::ptr::eq(raster_mesh, occluder_mesh) && occluder_mesh.triangle_count() == 0 {
         return Err(AoBakeError::EmptyMesh);
     }
 
