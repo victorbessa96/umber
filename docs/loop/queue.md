@@ -301,18 +301,16 @@ the six shell halves above are DONE (the wave landed; the CI catch
 was the crate-root re-export, fixed same-push). The remaining
 W-GUI-4 candidates, in dependency order:
 
-1. **falloff Custom** — DESIGN WRITTEN:
-   `docs/specs/falloff-custom-design.md` (id 10 + a 256×1 LUT
-   texture on the paint pass's binding 5, the stamp's RwLock
-   fallback pattern; enum stays Copy — the curve lives in
-   `BrushParams.falloff_custom`, serde-default identity). The
-   design answers the GPU-stable-id question STATE.md:31 asked;
-   implementation = one 6-file kill, GPU goldens host-gated.
-2. **Levels' CurveEdit consumer** — `GpuOp::Levels`
-   (graph_eval.rs:157) grows a curve param; shares the CurveEdit
-   dependency, lands AFTER falloff Custom.
-3. **per-set masked bakes** — the 148-site field pass, then the
-   landed subset-mesh/occluder-scope consumers (host-gated).
+1. **falloff Custom** — ✓ LANDED `4a2e3c2` (battery GREEN: 1,279
+   tests, 5 crates; design doc + kill report + panel editor).
+2. **Levels' CurveEdit consumer** — ✓ LANDED `7208a7b` (the curves
+   node edits as one in-row CurveEdit; battery GREEN: 905 tests).
+3. **per-set masked bakes** — the missing fact is LANDED:
+   `a23bcac` (triangle_materials + submesh_for_material + the three
+   importer fills, all-or-nothing at file scope; battery GREEN: 129
+   tests). NEXT: the bakes-panel consumer (bake_jobs per-set split
+   through the landed filter_mesh_for_triangles/occluding_triangles
+   pair — bakes_panel.rs work), then the multi-material FBX fixture.
 4. **g6-stencil-overlay** — still blocked on the stencil engine.
 5. **The rail's row-label registry** (W-GUI-3's named follow-up:
    the ContextRail search needs the body-side row decomposition).
