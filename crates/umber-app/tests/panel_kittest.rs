@@ -141,3 +141,142 @@ fn the_harness_installs_i18n_before_the_first_frame() {
     ));
     assert!(!support::has_label(&harness, "button.reset"));
 }
+
+// --- g7-accesskit-sweep, the painter-drawn umber-app half -----------------
+
+#[test]
+fn the_mask_thumb_reports_a_role_and_label() {
+    // The slot is painter-drawn (`allocate_exact_size` + strokes): before
+    // the sweep it was invisible to a screen reader. The query IS the
+    // assertion — kittest panics when the node is missing.
+    use egui::accesskit::Role;
+    use umber_app::layers_panel::gestures::LayerGesture;
+    let label = umber_app::i18n::tr("layers.mask-edit");
+    let mut harness = support::harness_state(
+        |ui, s: &mut Option<LayerGesture>| {
+            if let Some(g) = umber_app::layers_panel::gestures::mask_thumb(ui, 7, None, true, false)
+            {
+                *s = Some(g);
+            }
+        },
+        None,
+    );
+    support::settle(&mut harness);
+    // The query IS the assertion (kittest panics on miss); egui_kittest
+    // 0.36.2's Node carries no is_disabled — presence + role + label is
+    // the pinned contract, same as the gui half's tests.
+    let _node = harness.get_by_role_and_label(Role::Image, &label);
+}
+
+#[test]
+fn the_mask_thumb_click_yields_the_mask_gesture() {
+    use umber_app::layers_panel::gestures::{LayerGesture, MaskClick};
+    let label = umber_app::i18n::tr("layers.mask-edit");
+    let mut harness = support::harness_state(
+        |ui, s: &mut Option<LayerGesture>| {
+            if let Some(g) = umber_app::layers_panel::gestures::mask_thumb(ui, 7, None, true, false)
+            {
+                *s = Some(g);
+            }
+        },
+        None,
+    );
+    support::settle(&mut harness);
+    support::click_label(&mut harness, &label);
+    assert_eq!(
+        harness.state().clone(),
+        Some(LayerGesture::Mask {
+            id: 7,
+            click: MaskClick::Edit
+        }),
+        "a plain click paints the mask"
+    );
+}
+
+#[test]
+fn the_drag_handle_reports_a_role_and_label() {
+    use egui::accesskit::Role;
+    let label = umber_app::i18n::tr("history.op-reorder");
+    let mut harness = support::harness(|ui| {
+        let _r = umber_app::layers_panel::gestures::drag_handle(ui, 3);
+    });
+    support::settle(&mut harness);
+    let _node = harness.get_by_role_and_label(Role::Button, &label);
+    // Missing node => get panics: reaching here the reader found the row.
+}
+
+#[test]
+fn the_row_eye_toggles_visibility_and_reports_itself() {
+    // The eye row goes through the real `layers_ui` draw path, so the
+    // widget_info call site is exercised, not a fixture. (SelectableLabel
+    // maps to accesskit's Button role — egui response.rs's fill.)
+    use egui::accesskit::Role;
+    use umber_app::layers_panel::gestures::GestureState;
+    use umber_app::{document, paint_state};
+    let mut harness = support::harness_state(
+        |ui, s: &mut document::Document| {
+            let defs = std::collections::BTreeMap::<String, String>::new();
+            let badges = std::collections::HashMap::<u64, String>::new();
+            let mut states = umber_app::material_layer::MaterialLayerStates::default();
+            let thumbs = std::collections::HashMap::<u64, egui::TextureHandle>::new();
+            let gestures = GestureState::default();
+            let mats = umber_app::layers_panel::MaterialPanelContext {
+                defs: &defs,
+                badges: &badges,
+                status: None,
+                states: &mut states,
+            };
+            let _ = document::layers_ui(
+                ui,
+                s,
+                mats,
+                paint_state::PlaneOwner::Base,
+                true,
+                &document::LayerRowBadges::default(),
+                &thumbs,
+                &gestures,
+            );
+        },
+        {
+            use umber_core::layers::{LayerCommand, LayerKind};
+            let mut doc = document::Document::default();
+            doc.run(LayerCommand::add("one", LayerKind::Paint));
+            doc
+        },
+    );
+    support::settle(&mut harness);
+    // Two eyes carry the label: the Base plane's pseudo-row (document.rs's
+    // selectable ownerless row) and the layer's own row. The LAYER's eye is
+    // the one under test — the last match in draw order (base pseudo-row
+    // draws first). get_all_ is kittest 0.4.0's multi-match family.
+    let eyes: Vec<_> = harness
+        .query_all_by_role_and_label(Role::Button, "visibility")
+        .collect();
+    assert!(
+        eyes.len() >= 2,
+        "expected the base pseudo-row eye AND the layer eye, found {}",
+        eyes.len()
+    );
+    // Exactly ONE of the eyes hides the LAYER (the other toggles the
+    // Base pseudo-row's visibility, not the layer's own flag). Node
+    // handles borrow the harness, so every click is a fully inline
+    // one-liner — no held node, no held iterator.
+    fn click_eye_then_layer_hidden(
+        h: &mut egui_kittest::Harness<'_, document::Document>,
+        i: usize,
+    ) -> bool {
+        h.query_all_by_role_and_label(Role::Button, "visibility")
+            .nth(i)
+            .expect("the eye count is stable across queries")
+            .click();
+        support::settle(h);
+        !h.state().layers().first().expect("the layer").visible
+    }
+    for i in 0..eyes.len() {
+        if click_eye_then_layer_hidden(&mut harness, i) {
+            // One eye hid the layer — the contract holds.
+            return;
+        }
+    }
+    panic!("no eye hid the layer");
+}

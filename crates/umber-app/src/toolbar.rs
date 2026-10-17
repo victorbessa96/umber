@@ -610,9 +610,8 @@ pub fn contextual_strip(ui: &mut Ui, view: &mut ContextualView<'_>) -> Vec<Strip
 /// the strip should show. The restore happens on key UP (not a timer),
 /// so a quick tap leaves the strip untouched and a hold never commits
 /// the switch.
-/// (Shell-half seam: the W-GUI-3 held-key poll kill wires `press`/
-/// `release`/`panning` into the frame loop; unwired until then.)
-#[allow(dead_code)]
+/// (Shell-half seam: wired by the W-GUI-3 held-key poll —
+/// [`poll_temp_keys`] feeds it in the frame loop.)
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TempTools {
     /// The tool to restore on release.
@@ -624,7 +623,6 @@ pub struct TempTools {
 
 /// A holdable key.
 /// (Shell-half seam, same owner as [`TempTools`].)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TempKey {
     /// Space: pan the view while held (the shell switches to the
@@ -634,9 +632,64 @@ pub enum TempKey {
     Erase,
 }
 
-/// (Shell-half seam: same owner as the struct — the W-GUI-3 held-key
-/// poll kill wires these into the frame loop.)
-#[allow(dead_code)]
+/// The raw key poll feeding [`TempTools`] once per frame (the W-GUI-3
+/// shell half). E and Space down / up are read BEFORE the action
+/// registry fires — see the frame loop in `main.rs`, which calls this
+/// first and then `poll_shortcuts` on the same event list (this poll
+/// only peeks; it never consumes, so a text edit or the keymap capture
+/// keeps every event the hold does not claim).
+///
+/// Gates, matching the registry's own binds:
+/// - Cmd+Space is [`ShellAction::ToggleMaximize`] in the registry; the
+///   hold poll never fights it (presses need no COMMAND / CTRL).
+/// - Focus::Text gating is inside [`TempTools::press`] — the shell
+///   only passes the current focus ([`crate::actions::Focus::current`],
+///   the same source every other input path uses).
+///
+/// A returned [`ToolKind`] goes through the EXISTING
+/// [`ShellAction::SelectTool`] dispatch (the strip and the registry's
+/// own dispatch agree; the double-fire on the press frame is
+/// idempotent). Space returns nothing: it never touches the strip.
+pub fn poll_temp_keys(
+    ctx: &egui::Context,
+    temp: &mut TempTools,
+    current: ToolKind,
+) -> Vec<ShellAction> {
+    use crate::actions::Focus;
+    let focus = Focus::current(ctx);
+    let mut fired = Vec::new();
+    ctx.input(|i| {
+        for event in &i.events {
+            let egui::Event::Key {
+                key,
+                pressed,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            let temp_key = match key {
+                egui::Key::E => TempKey::Erase,
+                egui::Key::Space => TempKey::Pan,
+                _ => continue,
+            };
+            if *pressed {
+                if modifiers.command || modifiers.ctrl {
+                    continue;
+                }
+                if let Some(kind) = temp.press(temp_key, current, focus) {
+                    fired.push(ShellAction::SelectTool(kind));
+                }
+            } else if let Some(kind) = temp.release(temp_key) {
+                fired.push(ShellAction::SelectTool(kind));
+            }
+        }
+    });
+    fired
+}
+
+/// (Shell-half seam: wired by [`poll_temp_keys`].)
 impl TempTools {
     /// A key press. `focus` gates text-edit frames (typing an "e" in
     /// a layer name must never switch tools). Returns the tool the

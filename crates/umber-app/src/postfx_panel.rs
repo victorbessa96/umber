@@ -352,6 +352,16 @@ fn show_body(ui: &mut Ui, chain: &mut PostChain, panel: &mut PostFxPanel, mode: 
                     let handle = ui
                         .add(egui::Label::new("☰").sense(egui::Sense::drag()))
                         .on_hover_text(i18n::tr("postfx.drag-hint"));
+                    // g7-accesskit-sweep (the painter-drawn half): the
+                    // glyph handle names its action (English-only at the
+                    // widget layer; the localized hint is the tooltip).
+                    handle.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            i18n::tr("postfx.drag-hint"),
+                        )
+                    });
                     if handle.drag_started() {
                         panel.drag = Some(RowDrag { from: i, to: i });
                     }

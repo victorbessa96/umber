@@ -67,11 +67,24 @@
 //!   i18n's the chrome around them; the per-file lines must read
 //!   identically across locales. This keeps the i18n completeness test
 //!   green with no `.ftl` delta from this kill.
-//! * **No egui here.** The panel/menu wiring rides the wave-end merge
-//!   (another claw owns the import-menu section this wave), so this
-//!   module exposes the pure core + the [`PsdImportState`] drop/scan
-//!   shape (mirroring `mesh_map_import`) with zero UI calls. An egui
-//!   `show()` that nothing calls would be dead code under `-D warnings`.
+//! * **No egui rendering here — only the Assets panel's section.** The
+//!   landing (W-GUI-3 shell half): the Import button runs
+//!   [`PsdImportState::apply_session_set`], which creates the paint
+//!   layer under the document (undoable) and queues a
+//!   [`PsdPublish`]; the frame loop in `main.rs` drains the queue and
+//!   publishes through `PaintState::publish_plane` at
+//!   [`PSD_PUBLISH_TILE`]/[`PSD_TARGET_CHANNEL`] with the flat's OWN
+//!   w/h (`publish_plane` drops on mismatch, so the drain's size gate
+//!   badges loudly instead — same shape as the mesh-map drain).
+//! * **The drain's badges reuse the mesh-map import row keys** so the
+//!   layer row treats both imports the same (no new PSD-specific keys
+//!   for a refusal the row cannot tell apart anyway).
+//! * **A same-frame undo between Import and the next frame's drain
+//!   publishes into a dead owner** (the layer exists no more): the
+//!   orphan plane reads as blank and is inert. Same contract as the
+//!   mesh-map `to_publish` drain; noted in the kill report, not fixed
+//!   here (v2 could drain synchronously inside the Import click — the
+//!   thread-side publish is the reason it is not trivial).
 //! * **Dims cap.** Sides `1..=8192`, total `<= 256 MiB` (an 8K RGBA8
 //!   frame). Photoshop allows 30000px; the reader budgets 2 GiB. Above
 //!   the cap is [`PsdImportError::InvalidDimensions`], not a 1 GiB
@@ -95,6 +108,11 @@ pub const PSD_EXTENSIONS: [&str; 2] = ["psd", "psb"];
 /// `umber_core::TextureSet::new_default`'s first channel; kept as a local
 /// const because the Document/paint wiring lands with the menu merge).
 pub const PSD_TARGET_CHANNEL: &str = "baseColor";
+
+/// The tile flattened PSD pixels publish at (W-GUI-3 shell half, the
+/// C2-32 pinned convention — the same landing the sRGB linearize fix
+/// verified). PSDs carry no UDIM, so there is exactly one tile.
+pub const PSD_PUBLISH_TILE: u16 = 1001;
 
 /// Longest allowed PSD side, pixels (see the module docs).
 pub const MAX_PSD_SIDE: u32 = 8192;
@@ -1016,16 +1034,30 @@ pub struct UnmatchedPsd {
 /// colour image (there is no per-channel kind to check, unlike the
 /// mesh-map importer's `channel_kind_for`).
 ///
-/// Pure: bytes in, bytes out. The shell (main.rs, lock-queued) binds
-/// this to `PaintState::publish_plane` at tile 1001 (PSDs carry no
-/// UDIM) with the set's `PsdImport::set_name`.
-/// (Shell-half seam: the W-GUI-3 PSD drop-binding kill wires this to
-/// `publish_plane` at tile 1001; unwired until then.)
-#[allow(dead_code)]
+/// Pure: bytes in, bytes out. The shell (main.rs) publishes this
+/// through `PaintState::publish_plane` at tile 1001 with the set's
+/// `PsdImport::set_name` (the W-GUI-3 PSD binding — wired by the
+/// `psd_import::PsdPublish` drain in the frame loop).
 pub fn publish_psd_pixels(flat: &PsdImport) -> Vec<u8> {
     let mut rgba = flat.pixels.clone();
     umber_paint::paint_state::curvature_png_to_linear(&mut rgba);
     umber_paint::material_layer::straight_to_premultiplied(&rgba)
+}
+
+/// One applied import queued for the shell's per-frame publish drain
+/// (the mesh_map_import::to_publish mirror): the freshly created layer
+/// and the flattened truth to publish into it. The shell publishes
+/// `(plane_owner(layer_id), PSD_PUBLISH_TILE, PSD_TARGET_CHANNEL,
+/// flat.width, flat.height, publish_psd_pixels(&flat))` — the flat's
+/// OWN w/h, never a recomputed size (publish_plane drops on mismatch).
+#[derive(Debug, Clone)]
+pub struct PsdPublish {
+    /// The layer `doc.run(LayerCommand::add(..))` created first — the
+    /// pixel landing is in the same user step as its layer, so undo
+    /// removes layer + pixels together.
+    pub layer_id: u64,
+    /// The flattened import to publish.
+    pub flat: PsdImport,
 }
 
 /// The folder-drop UX state, mirroring `mesh_map_import`'s shape: the
@@ -1048,6 +1080,10 @@ pub struct PsdImportState {
     /// Status line for the future panel (plain English document data —
     /// see the module docs).
     pub status: String,
+    /// The W-GUI-3 shell half: imports applied to a document this
+    /// session, queued for the per-frame publish drain (the shell takes
+    /// the queue each frame — never held across frames by the shell).
+    pub to_publish: Vec<PsdPublish>,
 }
 
 // Tuned default (a real set name, not empty): manual impl, not derivable.
@@ -1060,6 +1096,7 @@ impl Default for PsdImportState {
             session_set_name: "TextureSet".to_string(),
             last_report: None,
             status: String::new(),
+            to_publish: Vec::new(),
         }
     }
 }
@@ -1200,14 +1237,69 @@ impl PsdImportState {
         self.last_report = Some(import.report.clone());
         Ok(import)
     }
+
+    /// W-GUI-3 shell half (the `apply_session_set` mirror): flattens each
+    /// pending file routed to the session set, creates one paint layer
+    /// named after the file under `doc` (through `Document::run`, so the
+    /// layer creation is undoable) and queues the flattening on
+    /// [`Self::to_publish`] — the shell's per-frame drain publishes it
+    /// into the new layer's plane (or refuses loudly). Files routed to a
+    /// different set stay pending (same boundary as the mesh-map
+    /// import). Import never moves an existing selection.
+    pub fn apply_session_set(
+        &mut self,
+        doc: &mut crate::document::Document,
+        read: impl Fn(&PendingPsd) -> Option<Vec<u8>>,
+    ) -> Vec<PsdPublish> {
+        let mut applied = Vec::new();
+        let mut still_pending = Vec::with_capacity(self.pending.len());
+        let mut queue = std::mem::take(&mut self.pending);
+        for pending in queue.drain(..) {
+            if pending.set_name != self.session_set_name {
+                still_pending.push(pending);
+                continue;
+            }
+            match self.import_one(&pending, &read) {
+                Ok(flat) => {
+                    self.status = format!("applied {} as set {}", pending.file, flat.set_name);
+                    let layer_name = pending.file.clone();
+                    doc.run(umber_core::layers::LayerCommand::add(
+                        layer_name,
+                        umber_core::LayerKind::Paint,
+                    ));
+                    let layer_id = doc
+                        .layers()
+                        .last()
+                        .map(|layer| layer.id)
+                        .unwrap_or_default();
+                    let publish = PsdPublish {
+                        layer_id,
+                        flat: flat.clone(),
+                    };
+                    self.to_publish.push(publish.clone());
+                    applied.push(publish);
+                }
+                Err(err) => {
+                    self.status = format!("psd import failed: {err}");
+                }
+            }
+        }
+        self.pending = still_pending;
+        applied
+    }
 }
 
-/// The Assets panel's PSD section (the mesh-map `show` mirror): the
-/// drop hint, the routed table, the Import button, and the import
-/// report. v1's apply routes the flatten result into the import
-/// state's report (the texture-set/paint landing is the named
-/// follow-up this wave's report records); the report rows always show.
-pub fn show_section(ui: &mut egui::Ui, state: &mut PsdImportState) {
+/// Draws the Assets panel's PSD section (the mesh-map `show` mirror):
+/// the drop hint, the routed table, the Import button, and the import
+/// report. The Import button flattens into truth and creates the paint
+/// layer under `doc` (undoable); the pixel landing is the shell's
+/// per-frame drain of [`PsdImportState::to_publish`] (`publish_plane`
+/// at tile 1001 — §6). The report rows always show.
+pub fn show_section(
+    ui: &mut egui::Ui,
+    state: &mut PsdImportState,
+    doc: &mut crate::document::Document,
+) {
     use crate::i18n::tr;
     ui.heading(tr("psd-import.title"));
     ui.label(tr("psd-import.hint"));
@@ -1246,12 +1338,7 @@ pub fn show_section(ui: &mut egui::Ui, state: &mut PsdImportState) {
         ui.label(line);
     }
     if ui.button(tr("psd-import.apply")).clicked() {
-        let pending: Vec<PendingPsd> = state.pending.clone();
-        for file in &pending {
-            if let Err(err) = state.import_one(file, read_pending_psd_from_disk) {
-                state.status = format!("psd import failed: {err}");
-            }
-        }
+        state.apply_session_set(doc, read_pending_psd_from_disk);
     }
     if !state.status.is_empty() {
         ui.label(&state.status);
@@ -1862,5 +1949,65 @@ mod tests {
         };
         let out = publish_psd_pixels(&flat);
         assert_eq!(out, vec![0, 0, 0, 255, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn apply_session_set_creates_the_layer_and_queues_the_publish() {
+        // The W-GUI-3 binding's document half: Import flattens each file
+        // routed to the session set, runs the layer creation through
+        // `Document::run` (the same transaction shape as the panel's add
+        // buttons — undoable) and queues the flattening for the shell's
+        // per-frame publish drain.
+        use umber_export::driver::MapSet;
+        use umber_export::presets::MapKind;
+        let size = 4u32;
+        let mut map = vec![0u8; (size * size * 4) as usize];
+        for pixel in map.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[200, 200, 200, 255]);
+        }
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, map);
+        // A per-test dir (libtest runs tests in parallel — the roundtrip
+        // sibling's contract, same file name pattern).
+        let dir = std::env::temp_dir().join(format!("umber-psd-test-apply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Sword.psd");
+        umber_export::psd::write_psd_maps(&set, &path).unwrap();
+        let mut state = PsdImportState::default();
+        state.retarget_set("Sword");
+        state.ingest_name("Sword.psd", Some(path.clone()));
+        // A file of another set: stays pending (mesh-map boundary).
+        state.ingest_name("Scabbard.psd", None);
+        let mut doc = crate::document::Document::default();
+        let applied = state.apply_session_set(&mut doc, read_pending_psd_from_disk);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(applied.len(), 1, "only the session-set file applies");
+        assert_eq!(
+            state
+                .pending
+                .iter()
+                .map(|p| p.file.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Scabbard.psd"],
+            "the other set's file stays pending"
+        );
+        let layer = doc.layers().last().unwrap();
+        assert_eq!(applied[0].layer_id, layer.id, "the flat targets its layer");
+        assert_eq!(layer.name, "Sword.psd");
+        assert_eq!(layer.kind, umber_core::LayerKind::Paint);
+        assert_eq!(applied[0].flat.set_name, "Sword");
+        assert_eq!(applied[0].flat.pixels.len(), (size * size * 4) as usize);
+        assert_eq!(
+            state.to_publish.len(),
+            1,
+            "the drain queue holds exactly the applied import"
+        );
+        // The layer creation is undoable; the queued pixels are session
+        // state that drains next frame (a same-frame undo leaves an
+        // empty-layer-name gap named in the kill report — same contract
+        // as the mesh-map import).
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
     }
 }

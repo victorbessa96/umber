@@ -59,6 +59,16 @@ panel =
     .graph = Grafo
     .display = Exibição
 
+## Properties context rail (g2-properties-context)
+
+ctx-rail =
+    .brush = Pincel
+    .layer = Camada
+    .fill = Preenchimento
+    .mask = Máscara
+    .texture-set = Conjunto de texturas
+    .search-hint = Pesquisar propriedades…
+
 ## Botões principais
 
 button =

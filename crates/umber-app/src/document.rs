@@ -761,10 +761,19 @@ pub fn layers_ui(
                 // The drag handle (g2-layer-gestures): the primary reorder;
                 // the drop lands through the tracker below the rows.
                 lg::drag_handle(ui, layer.id);
-                if ui
-                    .selectable_label(layer.visible, if layer.visible { "👁" } else { "·" })
-                    .clicked()
-                {
+                let eye = ui.selectable_label(layer.visible, if layer.visible { "👁" } else { "·" });
+                // (g7-accesskit-sweep, the painter-drawn half): the
+                // glyph-only eye names its action; the widget layer's
+                // labels are English-only by the established ruling.
+                eye.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::SelectableLabel,
+                        layer.visible,
+                        true,
+                        "visibility",
+                    )
+                });
+                if eye.clicked() {
                     doc.run(LayerCommand::set_visible(layer.id, !layer.visible));
                 }
                 // The content thumbnail (g2-layer-thumbnails; Painter B1):
@@ -903,10 +912,17 @@ pub fn layers_ui(
         // toggles its composite visibility (stage 4 — there is a live
         // composite for it to affect now).
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(base_visible, if base_visible { "👁" } else { "·" })
-                .clicked()
-            {
+            let base_eye = ui.selectable_label(base_visible, if base_visible { "👁" } else { "·" });
+            // (g7-accesskit-sweep): same ruling as the layer rows' eye.
+            base_eye.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::SelectableLabel,
+                    base_visible,
+                    true,
+                    "visibility",
+                )
+            });
+            if base_eye.clicked() {
                 outcome.base_visible = Some(!base_visible);
             }
             if ui
@@ -1319,9 +1335,12 @@ pub fn duplicate_layer(doc: &mut Document, id: u64) -> Option<u64> {
     Some(new_id)
 }
 
-/// The selected layer's properties row: opacity, blend mode, name. Each
-/// edit is one undoable command, issued only when the value changes.
-fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u64) {
+/// The selected layer's properties rows: opacity, blend mode, visibility.
+/// Each edit is one undoable command, issued only when the value changes.
+/// Drawn in the Layers panel's Properties section AND the Properties
+/// panel's Layer context body (g2-properties-context shell half) — one
+/// source of truth for the rows, two consumers.
+pub(crate) fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u64) {
     let Some(layer) = doc.stack.layer(id).cloned() else {
         return;
     };
@@ -1350,10 +1369,52 @@ fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u64) {
             ui.horizontal(|ui| {
                 ui.label(tr("history.op-set-blend"));
                 let mut mode = layer.blend_mode;
-                egui::ComboBox::from_id_salt(("layer-blend", id))
+                // Type-ahead in the open dropdown (g7-polish-batch, the
+                // polish-widgets shell half; photocraft #13): typing a
+                // letter jumps to the next matching mode, the same letter
+                // again cycles. The state is per-open-list: egui temp data
+                // under the combo's id, dropped when the popup closes.
+                let combo_id = egui::Id::new(("layer-blend", id));
+                let ahead_id = combo_id.with("typeahead");
+                let options = layer_blend_options(&layer.kind);
+                let open = egui::ComboBox::is_open(ui.ctx(), combo_id);
+                if !open {
+                    ui.ctx()
+                        .data_mut(|d| d.remove::<umber_gui::TypeAhead>(ahead_id));
+                }
+                let jump = if open {
+                    let dt = ui.input(|i| i.unstable_dt.max(0.0));
+                    let typed: Vec<char> = ui.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|event| match event {
+                                egui::Event::Text(text) => text.chars().next(),
+                                _ => None,
+                            })
+                            .collect()
+                    });
+                    let labels: Vec<String> = options.iter().map(|m| format!("{m:?}")).collect();
+                    ui.ctx().data_mut(|d| {
+                        d.get_temp_mut_or_insert_with(ahead_id, umber_gui::TypeAhead::default)
+                            .frame(std::time::Duration::from_secs_f32(dt), typed, &labels)
+                            .map(|index| labels[index].clone())
+                    })
+                } else {
+                    None
+                };
+                egui::ComboBox::from_id_salt(combo_id)
                     .selected_text(format!("{mode:?}"))
                     .show_ui(ui, |ui| {
-                        for candidate in layer_blend_options(&layer.kind) {
+                        for candidate in options {
+                            // The type-ahead's jump targets by CURRENTLY
+                            // selected label text (the state machine is
+                            // index-based; the index <=> label crossing
+                            // happens on the labels list above).
+                            if let Some(jump_label) = &jump {
+                                if format!("{candidate:?}") == *jump_label {
+                                    mode = candidate;
+                                }
+                            }
                             ui.selectable_value(&mut mode, candidate, format!("{candidate:?}"));
                         }
                     });

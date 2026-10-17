@@ -8,8 +8,11 @@
 //!
 //! Edit ▸ Preferences (Ctrl+,) opens a window with searchable sections:
 //!
-//! - **Interface:** UI scale, tooltips on/off, Reduce Motion, the
-//!   status-bar key hints;
+//! - **Interface:** UI scale (Auto follows the OS's native scale — a
+//!   manual value write leaves Auto, keeping the value), the dock
+//!   separators' hit zone (standard 4 pt / tablet 8 pt, applied per
+//!   frame where the dock style is built), tooltips on/off, Reduce
+//!   Motion, the status-bar key hints;
 //! - **Navigation:** the preset (Painter / Umber / Blender), replacing the
 //!   `UMBER_NAV` env var as the normal way to choose; the env still wins
 //!   if set, as an override for scripted launches.
@@ -57,6 +60,53 @@ pub const PREFS_FILE: &str = "preferences";
 pub const SCALE_MIN: f32 = 0.75;
 pub const SCALE_MAX: f32 = 2.0;
 
+/// g7-density-scale: `splitter_hit_zone` as a persisted string. Own
+/// wrapper so `preferences.rs` never leaks egui's serde machinery, and
+/// hand edits read the same way in both catalogs' docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitZoneName {
+    /// egui_dock's default (4 pt extra grab width).
+    Standard,
+    /// Doubled for stylus work (8 pt).
+    Tablet,
+}
+
+impl HitZoneName {
+    /// The persisted token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HitZoneName::Standard => "standard",
+            HitZoneName::Tablet => "tablet",
+        }
+    }
+
+    /// Lenient parse (unknown tokens keep the default: [`Self::Standard`]).
+    pub fn from_str(text: &str) -> Self {
+        match text.trim() {
+            "tablet" => HitZoneName::Tablet,
+            _ => HitZoneName::Standard,
+        }
+    }
+
+    /// The resolved hit-zone enum (the dock style's input).
+    pub fn hit_zone(self) -> umber_gui::theme::HitZone {
+        match self {
+            HitZoneName::Standard => umber_gui::theme::HitZone::Standard,
+            HitZoneName::Tablet => umber_gui::theme::HitZone::Tablet,
+        }
+    }
+
+    /// From the resolved enum (round trips with [`Self::hit_zone`]).
+    /// Test-only (the round-trip pin); no non-test caller yet.
+    #[cfg(test)]
+    pub fn of(zone: umber_gui::theme::HitZone) -> Self {
+        match zone {
+            umber_gui::theme::HitZone::Standard => HitZoneName::Standard,
+            umber_gui::theme::HitZone::Tablet => HitZoneName::Tablet,
+        }
+    }
+}
+
 /// The user's preferences.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Preferences {
@@ -66,6 +116,11 @@ pub struct Preferences {
     /// `ui_scale` value is kept but ignored while this is on, so a
     /// manual value survives a toggle back).
     pub ui_scale_auto: bool,
+    /// g7-density-scale: how grabbable the dock separators are
+    /// (`egui_dock::SeparatorStyle::extra_interact_width` — 4 pt
+    /// standard, 8 pt for stylus sessions). Persisted as its string
+    /// token.
+    pub splitter_hit_zone: HitZoneName,
     /// Show tooltips.
     pub tooltips: bool,
     /// Reduce Motion: no animations (egui `animation_time` = 0).
@@ -84,6 +139,7 @@ impl Default for Preferences {
         Self {
             ui_scale: 1.0,
             ui_scale_auto: true,
+            splitter_hit_zone: HitZoneName::Standard,
             tooltips: true,
             reduce_motion: false,
             key_hints: true,
@@ -105,9 +161,10 @@ impl Preferences {
     /// The `key=value` text (stable key order).
     pub fn serialize(&self) -> String {
         format!(
-            "ui_scale={}\nui_scale_auto={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nkeymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nkeymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
+            self.splitter_hit_zone.as_str(),
             self.tooltips,
             self.reduce_motion,
             self.key_hints,
@@ -139,6 +196,7 @@ impl Preferences {
                     }
                 }
                 "ui_scale_auto" => p.ui_scale_auto = bool_of(v).unwrap_or(p.ui_scale_auto),
+                "splitter_hit_zone" => p.splitter_hit_zone = HitZoneName::from_str(v),
                 "tooltips" => p.tooltips = bool_of(v).unwrap_or(p.tooltips),
                 "reduce_motion" => p.reduce_motion = bool_of(v).unwrap_or(p.reduce_motion),
                 "key_hints" => p.key_hints = bool_of(v).unwrap_or(p.key_hints),
@@ -641,6 +699,7 @@ mod tests {
         let p = Preferences {
             ui_scale: 1.25,
             ui_scale_auto: false,
+            splitter_hit_zone: HitZoneName::Tablet,
             tooltips: false,
             reduce_motion: true,
             key_hints: false,
@@ -670,6 +729,43 @@ mod tests {
         // default (on).
         assert!(!Preferences::parse("ui_scale_auto=false").ui_scale_auto);
         assert!(Preferences::parse("ui_scale_auto=bogus").ui_scale_auto);
+        // g7-density-scale: the hit zone line parses; unknown tokens keep
+        // the default (standard), and the resolved enum follows.
+        assert_eq!(
+            Preferences::parse("splitter_hit_zone=tablet").splitter_hit_zone,
+            HitZoneName::Tablet
+        );
+        assert_eq!(
+            Preferences::parse("splitter_hit_zone=tablet")
+                .splitter_hit_zone
+                .hit_zone(),
+            umber_gui::theme::HitZone::Tablet
+        );
+        assert_eq!(
+            Preferences::parse("splitter_hit_zone=standard").splitter_hit_zone,
+            HitZoneName::Standard
+        );
+        assert_eq!(
+            Preferences::parse("splitter_hit_zone=bogus").splitter_hit_zone,
+            Preferences::default().splitter_hit_zone,
+        );
+    }
+
+    #[test]
+    fn the_hit_zone_resolves_its_underscore_width() {
+        // Pinned to the umber_gui constants (theme.rs:114-117): the
+        // tablet doubling is the 2× contract g7-density-scale pins.
+        assert_eq!(HitZoneName::Standard.hit_zone().extra_interact_width(), 4.0);
+        assert_eq!(HitZoneName::Tablet.hit_zone().extra_interact_width(), 8.0);
+        // The enum round-trips through the persisted token both ways.
+        assert_eq!(
+            HitZoneName::of(umber_gui::theme::HitZone::Tablet),
+            HitZoneName::Tablet
+        );
+        assert_eq!(
+            HitZoneName::of(umber_gui::theme::HitZone::Standard),
+            HitZoneName::Standard
+        );
     }
 
     #[test]

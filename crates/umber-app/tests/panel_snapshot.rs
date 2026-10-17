@@ -96,8 +96,9 @@ fn display_panel_snapshot() {
 fn psd_import_section_snapshot() {
     ensure_i18n();
     let mut state = umber_app::psd_import::PsdImportState::default();
+    let mut doc = umber_app::document::Document::default();
     let mut harness = Harness::builder().build_ui(|ui| {
-        umber_app::psd_import::show_section(ui, &mut state);
+        umber_app::psd_import::show_section(ui, &mut state, &mut doc);
     });
     harness.run_ok();
     harness.snapshot("psd_import_section");

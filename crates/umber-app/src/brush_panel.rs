@@ -1789,6 +1789,12 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     // relied on for its drag handles) and a click landing on a handle
     // does not also register as a canvas-level insert.
     let (rect, canvas_response) = ui.allocate_exact_size(CURVE_PLOT_SIZE, egui::Sense::click());
+    // g7-accesskit-sweep (the painter-drawn half): the curve canvas is
+    // one painted + clicked allocation; it names itself for the reader
+    // (the per-point handles draw on top with their own ids — the
+    // reader already sees them as interactables).
+    canvas_response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "curve editor"));
     let base_id = canvas_response.id;
 
     let to_screen = |p: (f32, f32)| {

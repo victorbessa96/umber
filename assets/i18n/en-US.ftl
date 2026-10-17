@@ -58,6 +58,16 @@ panel =
     .graph = Graph
     .display = Display
 
+## Properties context rail (g2-properties-context)
+
+ctx-rail =
+    .brush = Brush
+    .layer = Layer
+    .fill = Fill
+    .mask = Mask
+    .texture-set = Texture Set
+    .search-hint = Search properties…
+
 ## Primary buttons
 
 button =

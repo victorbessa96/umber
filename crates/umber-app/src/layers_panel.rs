@@ -986,8 +986,7 @@ pub mod gestures {
                 .iter()
                 .filter_map(|id| doc.stack.layer(*id).map(|l| l.name.clone()))
                 .collect();
-            let mut choice = None;
-            egui::Window::new(tr("history.op-remove"))
+            let choice = egui::Window::new(tr("history.op-remove"))
                 .id(egui::Id::new("layers-delete-confirm"))
                 .collapsible(false)
                 .resizable(false)
@@ -996,15 +995,35 @@ pub mod gestures {
                 .show(ctx, |ui| {
                     ui.label(names.join(", "));
                     ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button(tr("history.op-remove")).clicked() {
-                            choice = Some(ConfirmChoice::Remove);
-                        }
-                        if ui.button(tr("shell.new-confirm-cancel")).clicked() {
-                            choice = Some(ConfirmChoice::Cancel);
-                        }
+                    // Platform-ordered dialog buttons (g7-polish-batch, the
+                    // polish-widgets shell half; photocraft #16): the
+                    // Remove role is the affirmative (Enter's target,
+                    // rendered strong) and Cancel cancels (Esc's target)
+                    // — order follows the platform convention
+                    // (`platform_order`: Windows/Linux Cancel rightmost,
+                    // macOS the primary first).
+                    let choice = umber_gui::dialog_buttons(
+                        ui,
+                        ui.ctx().os(),
+                        &[
+                            umber_gui::DialogButton::new(
+                                umber_gui::ButtonRole::Default,
+                                tr("history.op-remove"),
+                            ),
+                            umber_gui::DialogButton::new(
+                                umber_gui::ButtonRole::Cancel,
+                                tr("shell.new-confirm-cancel"),
+                            ),
+                        ],
+                    )
+                    .map(|clicked| match clicked {
+                        0 => ConfirmChoice::Remove,
+                        _ => ConfirmChoice::Cancel,
                     });
-                });
+                    choice
+                })
+                .and_then(|response| response.inner)
+                .flatten();
             match choice {
                 Some(choice) => self.resolve_pending(doc, choice),
                 None => Vec::new(),
@@ -1104,6 +1123,12 @@ pub mod gestures {
                 egui::Stroke::new(1.5, ui.visuals().error_fg_color),
             );
         }
+        // g7-accesskit-sweep (the painter-drawn half): the slot is one
+        // click target — report it as `large_image` (a painter-drawn
+        // texture cell; the English-only widget-layer label ruling).
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Image, true, tr("layers.mask-edit"))
+        });
         let response = response.on_hover_text(tr("layers.mask-edit"));
         response.clicked().then(|| LayerGesture::Mask {
             id,
@@ -1111,11 +1136,16 @@ pub mod gestures {
         })
     }
 
-    /// The row's drag handle: dragging it carries a [`LayerDrag`].
+    /// The drag handle: dragging it carries a [`LayerDrag`].
     pub fn drag_handle(ui: &mut egui::Ui, id: u64) -> egui::Response {
         let response = ui
             .add(egui::Label::new("↕").sense(egui::Sense::drag()))
             .on_hover_text(tr("history.op-reorder"));
+        // g7-accesskit-sweep (the painter-drawn half): the glyph-only
+        // handle names its action (English-only at the widget layer).
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("history.op-reorder"))
+        });
         response.dnd_set_drag_payload(LayerDrag(id));
         response
     }

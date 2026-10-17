@@ -372,6 +372,11 @@ struct PanelViewer<'a> {
     paint: Option<&'a mut paint_state::PaintState>,
     doc: &'a mut document::Document,
     brush: &'a mut BrushPanel,
+    /// The Properties context rail's state (the Properties panel draws
+    /// it; deciding apparatus itself is `properties_kinds`).
+    properties_rail: &'a mut umber_gui::ContextRail,
+    /// The icon atlas (the rail's kinds draw from the Panel family).
+    icons: &'a umber_gui::IconAtlas,
     mesh_import: &'a mut mesh_map_import::MeshMapImportState,
     /// Inactive sets' channel lists (C2-9 stage 4).
     parked_texture_sets: &'a mut std::collections::BTreeMap<String, umber_core::TextureSet>,
@@ -858,7 +863,6 @@ impl TabViewer for PanelViewer<'_> {
                 }
             }
             Panel::Properties => {
-                self.brush.show(ui, self.paint.as_deref_mut());
                 // The paint session adopts the panel's tool and symmetry
                 // (and hands back an alt-click-resolved clone offset and a
                 // UV-view mirror-manipulator drag).
@@ -899,13 +903,152 @@ impl TabViewer for PanelViewer<'_> {
                         }
                     }
                 }
-                // One collapsible row per fill layer (projection picker +
-                // v1 source editor) plus the polygon-fill tool rows; edits
-                // run through Document as undoable, journaled SetFill ops.
-                fill_layer::fill_section_ui(ui, self.doc, self.mesh, &mut *self.polygon_fill);
-                // The paint-path tool rows (editable polyline → replayed
-                // stroke / closed-path fill through the paint session).
-                path_tool::path_tool_rows(ui, self.paint.as_deref_mut(), &mut *self.path_tool);
+                // g2-properties-context (the shell half): the rail
+                // decides which contexts apply to the target, the bodies
+                // below are per kind. The sync above runs EVERY frame —
+                // the viewport strokes while another context's body
+                // shows, so its session sync may never gate on the
+                // rail's kind.
+                let (crumb_set_name, mask_focus) = match self.paint.as_deref() {
+                    Some(paint) => {
+                        let set = paint.active_set().to_string();
+                        let mask = paint.mask_edit_layer();
+                        ((!set.is_empty()).then_some(set), mask)
+                    }
+                    None => (None, None),
+                };
+                let mask_name = mask_focus.and_then(|id| {
+                    self.doc
+                        .layers()
+                        .iter()
+                        .find(|l| l.id == id)
+                        .map(|l| l.name.clone())
+                });
+                // Owned snapshot: the rail call needs `&mut self.doc` and
+                // friends in its bodies — the borrow cannot stay held.
+                let target = self
+                    .layer_gestures
+                    .selection
+                    .primary()
+                    .and_then(|id| self.doc.layers().iter().find(|l| l.id == id))
+                    .map(|l| (l.id, l.kind.clone(), l.mask.is_some(), l.name.clone()));
+                let kinds = properties_kinds(
+                    target.as_ref().map(|(_, kind, _, _)| kind.clone()),
+                    target.as_ref().is_some_and(|(_, _, has_mask, _)| *has_mask),
+                    mask_focus.is_some(),
+                );
+                // The rail keeps its own active kind (radio); a fallback
+                // switch reads back through `rail.active()` next body.
+                let _ = self.properties_rail.set_applicable(&kinds);
+                let set_name = crumb_set_name.unwrap_or_else(|| tr("ctx-rail.texture-set"));
+                let mut crumb = vec![set_name];
+                if let Some((_, _, _, name)) = &target {
+                    crumb.push(name.clone());
+                }
+                if let Some(name) = mask_name {
+                    crumb.push(name);
+                }
+                let tips_raw = [
+                    tr("ctx-rail.brush"),
+                    tr("ctx-rail.layer"),
+                    tr("ctx-rail.fill"),
+                    tr("ctx-rail.mask"),
+                    tr("ctx-rail.texture-set"),
+                ];
+                let hint = tr("ctx-rail.search-hint");
+                let rail_ctx = umber_gui::ContextRailCtx {
+                    atlas: self.icons,
+                    tooltips: [
+                        &tips_raw[0],
+                        &tips_raw[1],
+                        &tips_raw[2],
+                        &tips_raw[3],
+                        &tips_raw[4],
+                    ],
+                    breadcrumb: &crumb,
+                    search_hint: &hint,
+                };
+                // The body reads the kind the rail held BEFORE this
+                // frame's clicks: the closure's captures are fixed at
+                // construction, and `rail_ui` runs inside the widget
+                // after them (a same-frame re-read is a shared-borrow
+                // conflict). A click switches the body next frame — the
+                // rail's own highlight still lands this frame.
+                let kind = self.properties_rail.active();
+                let body_kind = kind;
+                let target_id = target.as_ref().map(|(id, _, _, _)| *id);
+                let (_, ()) = self
+                    .properties_rail
+                    .ui(ui, &rail_ctx, |ui, _| match body_kind {
+                        umber_gui::ContextKind::Brush => {
+                            self.brush.show(ui, self.paint.as_deref_mut());
+                        }
+                        umber_gui::ContextKind::Layer => {
+                            if let Some(id) = target_id {
+                                document::layer_properties_row(ui, self.doc, id);
+                            }
+                        }
+                        umber_gui::ContextKind::Fill => {
+                            // One collapsible row per fill layer (projection
+                            // picker + v1 source editor) plus the
+                            // polygon-fill tool rows; edits run through
+                            // Document as undoable, journaled SetFill ops.
+                            fill_layer::fill_section_ui(
+                                ui,
+                                self.doc,
+                                self.mesh,
+                                &mut *self.polygon_fill,
+                            );
+                            // The paint-path tool rows (editable polyline →
+                            // replayed stroke / closed-path fill through the
+                            // paint session).
+                            path_tool::path_tool_rows(
+                                ui,
+                                self.paint.as_deref_mut(),
+                                &mut *self.path_tool,
+                            );
+                        }
+                        umber_gui::ContextKind::Mask => {
+                            if let Some(paint) = self.paint.as_deref_mut() {
+                                document::layer_mask_ui(ui, self.doc, paint);
+                            }
+                        }
+                        umber_gui::ContextKind::TextureSet => {
+                            let channels: Vec<String> = self
+                                .mesh_import
+                                .session_set
+                                .channels
+                                .iter()
+                                .map(|channel| channel.name.clone())
+                                .collect();
+                            texture_sets_panel_ui(
+                                ui,
+                                self.paint.as_deref_mut(),
+                                self.mesh_import.session_set.name.as_str(),
+                                &channels,
+                                self.pending_resize,
+                            );
+                            // The document follows the paint session's
+                            // active set (C2-9): the Layers panel, undo and
+                            // History then act on that set's own stack.
+                            if let Some(paint) = self.paint.as_deref() {
+                                let active = paint.active_set().to_string();
+                                // (The first activation adopts the current
+                                // stack: see `Document::activate_set`.)
+                                if !active.is_empty() && self.doc.active_set() != active {
+                                    self.doc.activate_set(&active);
+                                    // Its channel list follows (C2-9
+                                    // stage 4).
+                                    self.mesh_import
+                                        .switch_set(&active, self.parked_texture_sets);
+                                }
+                            }
+                        }
+                    });
+                // (The outcome's flags are consumed states: switched is
+                // the rail's own next-frame active, the search flags are
+                // informational — the row-label registry is the named
+                // follow-up, see the module docs.)
             }
             Panel::Assets => {
                 ui.label(tr("shell.assets-placeholder"));
@@ -917,7 +1060,7 @@ impl TabViewer for PanelViewer<'_> {
                     mesh_map_import::read_pending_from_disk,
                 );
                 ui.separator();
-                psd_import::show_section(ui, self.psd_import);
+                psd_import::show_section(ui, self.psd_import, self.doc);
                 ui.separator();
                 spp_import::show_section(ui, self.spp_import);
             }
@@ -1107,6 +1250,10 @@ pub struct AppState {
     /// The paint-path tool: the editable polyline replayed as
     /// paint/erase/smudge strokes (session state, never serialized).
     pub path_tool: path_tool::PaintPathTool,
+    /// g7-polish-batch: the held-key temp-tool state (hold E = erase
+    /// while held, restore on release; Space = pan hold the viewport
+    /// will read). Fed by [`toolbar::poll_temp_keys`] every frame.
+    pub temp_tools: toolbar::TempTools,
     /// The bakes panel: mesh-map bake settings + last-bake status.
     pub bakes: BakesPanel,
     /// The export dialog: preset choice, output dir + last-export status.
@@ -1330,6 +1477,66 @@ fn publish_import_plane(
     }
 }
 
+/// The W-GUI-3 PSD binding: drains one queued [`psd_import::PsdPublish`]
+/// — publishes the flattened import into the layer JUST created for it
+/// (`apply_session_set`'s `doc.run(LayerCommand::add(..))`, the same
+/// user step — undo removes layer + pixels together). The flat's OWN
+/// w/h are passed (never recomputed — `publish_plane` drops on
+/// mismatch, which the size gate here turns into the row badge so the
+/// layer is left empty loudly, exactly like the mesh-map drain).
+///
+/// The curve: `publish_psd_pixels` linearizes (Photoshop gamma-space →
+/// the linear planes, the C2-32 rule) and premultiplies, so the drain
+/// carries no extra curve. Badges reuse the mesh-map import row keys —
+/// the layer row treats both imports the same.
+fn publish_psd_plane(
+    paint: &mut paint_state::PaintState,
+    badges: &mut std::collections::HashMap<u64, String>,
+    applied: &psd_import::PsdPublish,
+) {
+    use paint_state::{PaintRefusal, PlaneOwner};
+    let id = applied.layer_id;
+    let expected =
+        paint.tile_channel_size(psd_import::PSD_PUBLISH_TILE, psd_import::PSD_TARGET_CHANNEL);
+    if (applied.flat.width, applied.flat.height) != expected {
+        let (ew, eh) = expected;
+        log::warn!(
+            "psd import: layer {id} flat is {}x{}, want {ew}x{eh}; leaving the layer empty",
+            applied.flat.width,
+            applied.flat.height
+        );
+        badges.insert(id, crate::i18n::tr("import.size-mismatch"));
+        return;
+    }
+    let rgba = psd_import::publish_psd_pixels(&applied.flat);
+    match paint.publish_plane(
+        PlaneOwner::Layer(id),
+        psd_import::PSD_PUBLISH_TILE,
+        psd_import::PSD_TARGET_CHANNEL,
+        applied.flat.width,
+        applied.flat.height,
+        rgba,
+    ) {
+        Ok(()) => {
+            badges.remove(&id);
+        }
+        Err(PaintRefusal::PlaneBudget { bytes }) => {
+            log::warn!("psd import: layer {id} plane budget refused ({bytes} bytes)");
+            badges.insert(
+                id,
+                crate::i18n::tr_args(
+                    "import.budget-refused",
+                    [("bytes", fluent::FluentValue::from(bytes as i64))],
+                ),
+            );
+        }
+        Err(other) => {
+            log::warn!("psd import: layer {id} publish refused ({other:?})");
+            badges.insert(id, crate::i18n::tr("import.decode-failed"));
+        }
+    }
+}
+
 /// Adapts the live paint session to the headless material seam
 /// ([`material_layer::MaterialTileIo`], Kill A): sizes/tiles stay on the
 /// session's channel-aware paths (non-side-effecting reads), publishes
@@ -1501,6 +1708,10 @@ pub struct UmberApp {
     /// the viewport's mesh pass and the UV view's paint display.
     display_lut: umber_gpu::DisplayLut,
     brush_panel: BrushPanel,
+    /// The Properties context rail (g2-properties-context, shell half):
+    /// the active kind, the applicable per-target set, the property-row
+    /// search. Session state (menu switching survives across panels).
+    properties_rail: umber_gui::ContextRail,
     /// Whether the axis gizmo draws (View menu; GUI plan G1
     /// `g1-axis-gizmo`). Shell state synced into the viewport each
     /// frame, like the view toggles. On by default.
@@ -1627,6 +1838,10 @@ impl UmberApp {
             gpu,
             display_lut,
             brush_panel: BrushPanel::new(),
+            properties_rail: umber_gui::ContextRail::new(
+                "properties-rail",
+                umber_gui::ContextKind::Brush,
+            ),
             show_gizmo: true,
             #[cfg(feature = "perf")]
             show_perf_hud: false,
@@ -1704,6 +1919,8 @@ impl UmberApp {
                     let p = &mut self.prefs;
                     let interface = tr("prefs.section-interface");
                     let scale = tr("prefs.ui-scale");
+                    let auto_scale = tr("prefs.ui-scale-auto");
+                    let hit_zone = tr("prefs.splitter-hit-zone");
                     let tips = tr("prefs.tooltips");
                     let motion = tr("prefs.reduce-motion");
                     let hints = tr("prefs.key-hints");
@@ -1711,20 +1928,54 @@ impl UmberApp {
                     let nav = tr("prefs.nav-preset");
                     let any =
                         |labels: &[&str]| labels.iter().any(|l| preferences::row_matches(&q, l));
-                    if any(&[&interface, &scale, &tips, &motion, &hints]) {
+                    if any(&[
+                        &interface,
+                        &scale,
+                        &auto_scale,
+                        &hit_zone,
+                        &tips,
+                        &motion,
+                        &hints,
+                    ]) {
                         ui.strong(&interface);
                         if preferences::row_matches(&q, &scale)
+                            || preferences::row_matches(&q, &auto_scale)
                             || preferences::row_matches(&q, &interface)
                         {
                             ui.horizontal(|ui| {
                                 ui.label(&scale);
-                                ui.add(
-                                    umber_gui::ValueField::new(&mut p.ui_scale)
-                                        .context_menu(crate::i18n::prop_menu_labels())
-                                        .range(preferences::SCALE_MIN..=preferences::SCALE_MAX)
-                                        .step(0.05),
-                                );
+                                // g7-density-scale: Auto = native scale; the
+                                // manual value survives a toggle back.
+                                ui.checkbox(&mut p.ui_scale_auto, auto_scale.as_str());
+                                let field = umber_gui::ValueField::new(&mut p.ui_scale)
+                                    .context_menu(crate::i18n::prop_menu_labels())
+                                    .range(preferences::SCALE_MIN..=preferences::SCALE_MAX)
+                                    .step(0.05);
+                                let response = ui.add(field);
+                                // Writing a number IS leaving Auto (the
+                                // pinned contract: the re-pinned
+                                // `style_delta_is_empty...` test encodes
+                                // it); the written value becomes the zoom
+                                // on the next frame's delta.
+                                if response.changed() {
+                                    p.ui_scale_auto = false;
+                                }
                             });
+                        }
+                        // g7-density-scale: the dock separators' hit zone
+                        // (the dock style applies it where it is built).
+                        if preferences::row_matches(&q, &hit_zone)
+                            || preferences::row_matches(&q, &interface)
+                        {
+                            let mut tablet =
+                                p.splitter_hit_zone == preferences::HitZoneName::Tablet;
+                            if ui.checkbox(&mut tablet, hit_zone.as_str()).changed() {
+                                p.splitter_hit_zone = if tablet {
+                                    preferences::HitZoneName::Tablet
+                                } else {
+                                    preferences::HitZoneName::Standard
+                                };
+                            }
                         }
                         for (label, value) in [
                             (&tips, &mut p.tooltips),
@@ -2129,6 +2380,39 @@ impl ChannelSizeChoice {
             Self::Custom(width, height) => format!("{width} × {height}"),
         }
     }
+}
+
+/// The Properties rail's per-target applicable kinds (g2-properties-context,
+/// the shell dispatch's decision half — pure, so the kittest pins it):
+/// - every target with a selected layer shows Layer + TextureSet; a fill
+///   layer adds Fill,
+/// - a mask target (the layer owns a mask, or the paint session is
+///   editing one) adds Mask,
+/// - the Brush body applies whenever the panel exists (the strokes'
+///   session sync runs per frame regardless of the rail's kind).
+/// - hidden kinds are ABSENT from the rail (the widget's
+///   `set_applicable` contract), never greyed.
+///
+/// No selection (or a stale id, e.g. after a set switch): Brush +
+/// TextureSet only.
+fn properties_kinds(
+    target: Option<umber_core::LayerKind>,
+    has_mask: bool,
+    mask_focus: bool,
+) -> Vec<umber_gui::ContextKind> {
+    use umber_gui::ContextKind;
+    let mut kinds = vec![ContextKind::Brush];
+    if target.is_some() {
+        kinds.push(ContextKind::Layer);
+    }
+    if target == Some(umber_core::LayerKind::Fill) {
+        kinds.push(ContextKind::Fill);
+    }
+    if has_mask || mask_focus {
+        kinds.push(ContextKind::Mask);
+    }
+    kinds.push(ContextKind::TextureSet);
+    kinds
 }
 
 /// The Texture Sets panel's per-set paint-target size section (CORE-LOOP
@@ -3311,6 +3595,16 @@ impl eframe::App for UmberApp {
         self.state.psd_import.poll_drops(ui.ctx());
         self.state.spp_import.poll_drops(ui.ctx());
         self.load_dropped_mesh(ui.ctx());
+        // g7-polish-batch: the held-key poll runs BEFORE the registry so
+        // it sees the raw E / Space down-up pair (`poll_shortcuts`
+        // consumes the events the hold resolved; this poll only peeks,
+        // so nothing else loses an event). A returned tool rides the
+        // same SelectTool dispatch the E registry binding uses.
+        let mut actions = toolbar::poll_temp_keys(
+            ui.ctx(),
+            &mut self.state.temp_tools,
+            toolbar::ToolKind::of(&self.brush_panel.tool),
+        );
         // Shell shortcuts (`toolbar`'s key table): the overlay keys (W
         // wireframe, G grid — Wave-4 item 7), V lit ↔ unlit (§5's P0 row),
         // X / I quick mask (§2's P1 row), E eraser (§2's P0 row), plus the
@@ -3318,7 +3612,7 @@ impl eframe::App for UmberApp {
         // focus (brush preset names, save-as dialog), so typing never
         // flips the viewport, the mask, or the tool. Dispatched with the
         // toolbar's clicks below, through the same `dispatch`.
-        let mut actions = toolbar::poll_shortcuts(ui.ctx());
+        actions.extend(toolbar::poll_shortcuts(ui.ctx()));
         // Keys only a keymap override binds (the main poll pre-filters to
         // the default keys).
         actions.extend(crate::actions::poll_override_keys(
@@ -3677,7 +3971,17 @@ impl eframe::App for UmberApp {
         };
         let home_actions: Vec<crate::empty_state::HomeCardAction> = CentralPanel::default()
             .show(ui, |ui| {
-                let dock_style = Style::from_egui(ui.style());
+                let mut dock_style = Style::from_egui(ui.style());
+                // g7-density-scale: the separators' grab width follows the
+                // hit-zone preference (4 pt standard, 8 pt tablet). The
+                // value only changes on a preference change, so this
+                // per-frame write is exactly the apply-on-change pattern
+                // the Preferences window's ruling pins.
+                dock_style.separator.extra_interact_width = self
+                    .prefs
+                    .splitter_hit_zone
+                    .hit_zone()
+                    .extra_interact_width();
                 let tab_font = egui::TextStyle::Button.resolve(ui.style());
                 let mut viewer = PanelViewer {
                     ctx: ui.ctx().clone(),
@@ -3696,6 +4000,8 @@ impl eframe::App for UmberApp {
                     paint: self.state.paint.as_mut(),
                     doc: &mut self.state.doc,
                     brush: &mut self.brush_panel,
+                    properties_rail: &mut self.properties_rail,
+                    icons: &self.icons,
                     polygon_fill: &mut self.state.polygon_fill,
                     path_tool: &mut self.state.path_tool,
                     material_defs: &mut self.state.material_defs,
@@ -4199,6 +4505,14 @@ impl eframe::App for UmberApp {
                     applied,
                 );
             }
+            // § psd-publish (W-GUI-3): the same drain for flattened PSD
+            // imports — layer creation already happened in the Assets
+            // panel's apply; the flat pixels publish here into the new
+            // layer's plane (or the row badge refuses loudly).
+            let psd_imports = std::mem::take(&mut self.state.psd_import.to_publish);
+            for applied in &psd_imports {
+                publish_psd_plane(paint, &mut self.state.import_badges, applied);
+            }
             paint.flush_composite(&snapshot);
             // Tombstone losses surface on the Layers rows (undo revives
             // EMPTY — the `layers.tombstone-lost` line).
@@ -4490,6 +4804,214 @@ fn sync_gesture_selection(
     match target {
         paint_state::PlaneOwner::Layer(id) => gestures.selection.set_single(id),
         paint_state::PlaneOwner::Base => gestures.selection.set_many(&[], None),
+    }
+}
+
+/// g2-properties-context (the shell half): the decision fn pinned above,
+/// the drawn rail pinned here.
+#[cfg(test)]
+mod properties_rail_tests {
+    use super::properties_kinds;
+    use umber_gui::ContextKind;
+
+    #[test]
+    fn a_fill_target_puts_fill_on_the_rail_a_paint_target_does_not() {
+        // The brief's pinned decision: a fill layer shows Fill; Layer +
+        // TextureSet show for every layer target; a paint layer has no
+        // Fill; no selection leaves Brush + TextureSet.
+        let fill = properties_kinds(Some(umber_core::LayerKind::Fill), false, false);
+        assert_eq!(
+            fill,
+            vec![
+                ContextKind::Brush,
+                ContextKind::Layer,
+                ContextKind::Fill,
+                ContextKind::TextureSet
+            ]
+        );
+        let paint = properties_kinds(Some(umber_core::LayerKind::Paint), false, false);
+        assert!(
+            !paint.contains(&ContextKind::Fill),
+            "a paint layer has no fill context"
+        );
+        let none = properties_kinds(None, false, false);
+        assert_eq!(none, vec![ContextKind::Brush, ContextKind::TextureSet]);
+        let masked = properties_kinds(Some(umber_core::LayerKind::Paint), true, false);
+        assert!(
+            masked.contains(&ContextKind::Mask),
+            "a layer mask shows Mask"
+        );
+        let focus = properties_kinds(None, false, true);
+        assert!(focus.contains(&ContextKind::Mask), "a mask edit shows Mask");
+    }
+
+    /// The plan row's kittest pin, drawn headless: a fill target's rail
+    /// actually SHOWS the fill tab, a paint target's does not. The
+    /// queries are what a screen reader sees (the tooltip label rides
+    /// the widget_info). English tooltips in-fixture: the widget holds
+    /// no strings; the shell's localized ones are the live path's.
+    #[test]
+    fn a_fill_layer_shows_the_fill_tab_on_the_drawn_rail() {
+        use egui_kittest::kittest::Queryable;
+        use egui_kittest::Harness;
+
+        /// Draws the rail once (the harness's lifetime keeps the
+        /// fixture's borrows, so the assertions run INSIDE) and checks
+        /// which tabs are present / absent by label.
+        fn assert_rail_tabs(kinds: &[ContextKind], present: &[&str], absent: &[&str]) {
+            let mut rail = umber_gui::ContextRail::new("kit-rail", ContextKind::Brush);
+            let _ = rail.set_applicable(kinds);
+            let atlas = umber_gui::IconAtlas::empty();
+            const TIPS: [&str; ContextKind::COUNT] =
+                ["Brush", "Layer", "Fill", "Mask", "Texture set"];
+            let crumb = vec!["Set".to_owned(), "Sword".to_owned()];
+            let ctx = umber_gui::ContextRailCtx {
+                atlas: &atlas,
+                tooltips: TIPS,
+                breadcrumb: &crumb,
+                search_hint: "Search",
+            };
+            let mut harness = Harness::<()>::builder()
+                .with_size(egui::vec2(320.0, 240.0))
+                .build_ui(|ui| {
+                    let (_, ()) = rail.ui(ui, &ctx, |ui, _| {
+                        ui.label("body");
+                    });
+                });
+            assert!(harness.run_ok().is_some(), "the rail frame laid out");
+            for tab in present {
+                assert!(
+                    harness.query_by_label(tab).is_some(),
+                    "expected tab {tab:?} on the drawn rail"
+                );
+            }
+            for tab in absent {
+                assert!(
+                    harness.query_by_label(tab).is_none(),
+                    "tab {tab:?} must be absent from the drawn rail"
+                );
+            }
+        }
+
+        assert_rail_tabs(
+            &properties_kinds(Some(umber_core::LayerKind::Fill), false, false),
+            &["Fill", "Layer", "Brush", "Texture set"],
+            &[],
+        );
+        assert_rail_tabs(
+            &properties_kinds(Some(umber_core::LayerKind::Paint), false, false),
+            &["Layer", "Brush", "Texture set"],
+            &["Fill"],
+        );
+    }
+}
+
+/// The PSD publish binding's drain test: a matching flat publishes,
+/// a size-mismatched flat refuses loudly (the kill report's pin).
+#[cfg(test)]
+mod psd_publish_tests {
+    /// Requests a paint-capable device (graceful skip where no wgpu
+    /// adapter exists — the same pattern as `paint_state`'s and
+    /// `bake_sources`' GPU tests). Returns `None` when skipped.
+    fn try_request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no wgpu adapter available");
+            return None;
+        };
+        if !adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            eprintln!("skipping: adapter lacks TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    use super::{psd_import, publish_psd_plane};
+    use umber_paint::paint_state;
+
+    #[test]
+    fn the_psd_drain_publishes_a_matching_flat_and_refuses_a_mismatch_loudly() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let size = 4u32;
+        let mut paint = paint_state::PaintState::with_target_size(device, queue, size)
+            .expect("paint state builds");
+        let flat = psd_import::PsdImport {
+            set_name: "Sword".into(),
+            width: size,
+            height: size,
+            pixels: [188, 188, 188, 255].repeat(4 * 4),
+            report: psd_import::PsdImportReport::default(),
+        };
+        let mut badges = std::collections::HashMap::<u64, String>::new();
+        publish_psd_plane(
+            &mut paint,
+            &mut badges,
+            &psd_import::PsdPublish {
+                layer_id: 7,
+                flat: flat.clone(),
+            },
+        );
+        assert!(
+            badges.is_empty(),
+            "a target-sized flat publishes with no badge"
+        );
+        let plane = paint
+            .read_plane(
+                paint_state::PlaneOwner::Layer(7),
+                psd_import::PSD_PUBLISH_TILE,
+                psd_import::PSD_TARGET_CHANNEL,
+            )
+            .expect("the publish materializes the layer's plane");
+        assert_eq!((plane.width, plane.height), (size, size));
+        assert_eq!(
+            plane.data,
+            psd_import::publish_psd_pixels(&flat),
+            "the plane carries the curve's linearized premultiplied rows (the drain must not skip the curve)"
+        );
+        // A flat bigger than the target: the drain's gate badges instead
+        // of trusting `publish_plane`'s silent drop; the layer stays
+        // empty (the plane read above is untouched).
+        let big = psd_import::PsdImport {
+            set_name: "Scabbard".into(),
+            width: 8,
+            height: 8,
+            pixels: [64, 64, 64, 255].repeat(8 * 8),
+            report: psd_import::PsdImportReport::default(),
+        };
+        publish_psd_plane(
+            &mut paint,
+            &mut badges,
+            &psd_import::PsdPublish {
+                layer_id: 9,
+                flat: big,
+            },
+        );
+        assert_eq!(
+            badges.get(&9).map(String::as_str),
+            Some(crate::i18n::tr("import.size-mismatch").as_str()),
+            "the mismatch is the row badge, not a silent drop"
+        );
+        assert!(
+            paint
+                .read_plane(
+                    paint_state::PlaneOwner::Layer(9),
+                    psd_import::PSD_PUBLISH_TILE,
+                    psd_import::PSD_TARGET_CHANNEL
+                )
+                .is_none(),
+            "the refused flat leaves the layer with no plane"
+        );
     }
 }
 
