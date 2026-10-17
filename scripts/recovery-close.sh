@@ -84,16 +84,16 @@ else
 fi
 
 # --- 4. wave battery ------------------------------------------------------
-say "4. wave battery (umber-app + umber-gui + spp + umber-core)"
+say "4. wave battery (umber-app + umber-gui + umber-spp + umber-core)"
 if [ "$DRY" -eq 1 ]; then
-    echo "  (dry-run) would: ssh + nohup bash scripts/wave-battery.sh umber-app umber-gui spp umber-core"
+    echo "  (dry-run) would: ssh + nohup bash scripts/wave-battery.sh umber-app umber-gui umber-spp umber-core"
     echo "  then poll the sentinel for BATTERY_EXIT="
 else
     # Detach ON THE REMOTE per the wave-ops rules (all three streams
     # redirected, stdin included). The battery takes the cargo lock
     # itself — NEVER wrap it in an outer flock.
     ssh -o ConnectTimeout=10 "$HOST" \
-        "cd Projects/umber && export PATH=\$HOME/.cargo/bin:\$PATH && rm -f $BATTERY_LOG && nohup bash -c 'bash scripts/wave-battery.sh umber-app umber-gui spp umber-core > $BATTERY_LOG 2>&1; echo BATTERY_EXIT=\$? >> $BATTERY_LOG' </dev/null >/dev/null 2>&1 &" \
+        "cd Projects/umber && export PATH=\$HOME/.cargo/bin:\$PATH && rm -f $BATTERY_LOG && nohup bash -c 'bash scripts/wave-battery.sh umber-app umber-gui umber-spp umber-core > $BATTERY_LOG 2>&1; echo BATTERY_EXIT=\$? >> $BATTERY_LOG' </dev/null >/dev/null 2>&1 &" \
         || die "battery launch failed"
     echo "  battery launched (remote log: $BATTERY_LOG)."
     echo "  Poll with: ssh $HOST 'tail -3 $BATTERY_LOG'"
