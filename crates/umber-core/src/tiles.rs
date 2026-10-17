@@ -314,6 +314,9 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            // One material across both triangles (the empty default's
+            // "whole mesh" reading — per-set masked bakes §1).
+            triangle_materials: vec![0, 0],
         };
         let per_triangle = umber_mesh::tile_of_triangle(&mesh);
         assert_eq!(per_triangle, vec![1001, 1002]);

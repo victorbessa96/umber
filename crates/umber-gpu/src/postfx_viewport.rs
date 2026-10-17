@@ -917,6 +917,7 @@ mod tests {
                 uvs: vec![],
                 indices: vec![0, 1, 2],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             };
             MeshBuffers::upload(gpu, &mesh).expect("upload")
         }

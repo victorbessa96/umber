@@ -1223,6 +1223,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -1444,6 +1445,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let raw = evaluate_fill_tile(&full, &solid_fill([1.0, 0.0, 0.0, 1.0]), 1001, 16, 16);
         let gated = apply_quick_mask(

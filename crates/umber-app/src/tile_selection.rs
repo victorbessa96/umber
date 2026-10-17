@@ -266,6 +266,7 @@ mod tests {
             uvs: vec![[0.1, 0.1], [0.9, 0.1], [0.1, 0.9]],
             indices: vec![0, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         let two = umber_mesh::MeshData {
             positions: vec![[0.0; 3]; 4],
@@ -273,6 +274,7 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         let mut cache = MeshTilesCache::default();
         assert_eq!(cache.get(&single), &[1001]);

@@ -5586,6 +5586,7 @@ pub fn two_tile_strip() -> umber_mesh::MeshData {
         uvs,
         indices: vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4],
         material_names: vec![],
+        triangle_materials: Vec::new(),
     }
 }
 
@@ -8012,6 +8013,7 @@ mod tests {
             uvs: vec![[0.2, 0.2], [1.2, 0.2], [0.2, 0.8], [1.2, 0.8]],
             indices: vec![0, 1, 3, 1, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         });
         state.set_active_target(PlaneOwner::Layer(1));
         state.sync_active_target(PlaneOwner::Layer(1), Ok(()), 0);
@@ -8310,6 +8312,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -8336,6 +8339,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -9458,6 +9462,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         }
     }
 

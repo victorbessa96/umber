@@ -1049,6 +1049,7 @@ mod tests {
             uvs,
             indices: vec![0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -1080,6 +1081,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![2, 3, 0, 2, 0, 1],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         assert_eq!(umber_mesh::tile_of_triangle(&mesh), vec![1012, 1012]);
         assert_eq!(present_tiles(&mesh), vec![1001]);

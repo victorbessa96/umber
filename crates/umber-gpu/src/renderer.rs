@@ -2206,6 +2206,7 @@ mod tests {
                 uvs: vec![],
                 indices: vec![0, 1, 2],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             };
             let buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload should succeed");
             assert_eq!(buffers.index_count(), 3);
@@ -2244,6 +2245,7 @@ mod tests {
                 uvs: vec![],
                 indices: vec![0, 1, 2],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             };
             let buffers = MeshBuffers::upload(gpu, &mesh).expect("upload succeeds");
             let uniform = CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y);
@@ -2822,6 +2824,7 @@ mod tests {
                 uvs: vec![],
                 indices: vec![0, 1, 2, 0, 2, 3],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             };
             let buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
             // Builder→GPU plumbing pin: 2 triangles → 6 wire verts.
@@ -2955,6 +2958,7 @@ mod tests {
                 uvs: vec![],
                 indices: vec![],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             };
             let buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
             assert_eq!(buffers.wire_count(), 0);
@@ -2993,6 +2997,7 @@ mod tests {
                 uvs: vec![],
                 indices: vec![0, 1, 2],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -3606,6 +3611,7 @@ mod tests {
                 uvs: vec![uv; 3],
                 indices: vec![0, 1, 2],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -3931,6 +3937,7 @@ mod tests {
                 uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 indices: vec![0, 1, 2, 0, 2, 3],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 

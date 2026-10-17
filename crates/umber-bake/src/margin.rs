@@ -397,6 +397,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 

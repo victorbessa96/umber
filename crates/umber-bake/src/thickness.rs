@@ -402,6 +402,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]; 3],
             indices: vec![0, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -512,6 +513,7 @@ mod tests {
                 uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 indices: vec![0, 1, 2, 0, 2, 3],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -560,6 +562,7 @@ mod tests {
                 ],
                 indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
