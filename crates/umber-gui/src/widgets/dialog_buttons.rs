@@ -66,7 +66,10 @@ impl DialogButton {
 ///   Default beside it (WinForms/WPF convention: OK left of Cancel,
 ///   extras leftmost).
 /// * macOS: `[Default, Cancel, Plain…]` — the primary leads.
-pub fn platform_order(os: egui::os::OperatingSystem, buttons: &[(usize, ButtonRole)]) -> Vec<usize> {
+pub fn platform_order(
+    os: egui::os::OperatingSystem,
+    buttons: &[(usize, ButtonRole)],
+) -> Vec<usize> {
     // buttons: (original index, role) pairs, declared left-to-right.
     let mut sorted: Vec<(usize, ButtonRole)> = buttons.to_vec();
     if os == egui::os::OperatingSystem::Mac {
