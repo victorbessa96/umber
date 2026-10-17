@@ -53,6 +53,7 @@ pub fn bench_mesh(subdivisions: u32) -> umber_mesh::MeshData {
         uvs: Vec::with_capacity(6 * row * row),
         indices: Vec::with_capacity(6 * n * n * 6),
         material_names: vec!["BenchCube".to_string()],
+        triangle_materials: Vec::new(),
     };
     for (face, (normal, u, v)) in FACES.iter().enumerate() {
         for j in 0..row {

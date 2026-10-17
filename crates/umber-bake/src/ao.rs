@@ -639,12 +639,21 @@ pub fn filter_mesh_for_tile(mesh: &MeshData, tile: u16) -> MeshData {
         .iter()
         .map(|uv| [uv[0] - u_offset, uv[1] - v_offset])
         .collect();
+    // The tile's triangles' material indices, subset in lockstep with
+    // `indices` (triangle t's material = triangle_materials[t]). An
+    // empty input stays empty — the whole-mesh default (per-set masked
+    // bakes, docs/specs/per-set-masked-bakes.md §1).
+    let triangle_materials = triangles_for_tile(mesh, tile)
+        .iter()
+        .filter_map(|&tri| mesh.triangle_materials.get(tri as usize).copied())
+        .collect();
     MeshData {
         positions: mesh.positions.clone(),
         normals: mesh.normals.clone(),
         uvs,
         indices,
         material_names: mesh.material_names.clone(),
+        triangle_materials,
     }
 }
 
@@ -989,6 +998,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]; 3],
             indices: vec![0, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -1256,6 +1266,7 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         // Tile 1001: tri 0 only, UVs rebased by -(0, 0) = identity.
         let t1001 = filter_mesh_for_tile(&mesh, 1001);
@@ -1304,6 +1315,7 @@ mod tests {
                 uvs: vec![[0.0, 0.0]; 3],
                 indices: vec![0, 1, 2],
                 material_names: vec!["m".into()],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -1429,6 +1441,7 @@ mod tests {
                 ],
                 indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -1562,6 +1575,7 @@ mod tests {
                 uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 indices: vec![0, 1, 2, 0, 2, 3],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -1651,6 +1665,7 @@ mod tests {
                 ],
                 indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -1795,6 +1810,9 @@ mod tests {
                     20, 21, 22, 20, 22, 23, // Ceiling.
                 ],
                 material_names: vec![],
+                // No materials — the empty triangle_materials stays
+                // honest (whole-mesh reading, per-set masked bakes §1).
+                triangle_materials: Vec::new(),
             }
         }
 
@@ -1931,6 +1949,7 @@ mod tests {
                 ],
                 indices: vec![0, 1, 2, 3, 4, 5],
                 material_names: vec![],
+                triangle_materials: Vec::new(),
             }
         }
 

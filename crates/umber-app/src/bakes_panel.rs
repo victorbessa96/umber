@@ -633,9 +633,11 @@ struct BakeRequest {
     /// Skew edge-protection threshold in degrees (the AO guard).
     skew_threshold_deg: f32,
     /// The planned jobs, each with its output path (resolved on the main
-    /// thread from the panel's output dir + texture-set name) and the set
-    /// it belongs to (the per-set checklist fan-out).
-    jobs: Vec<(BakeJob, PathBuf, String)>,
+    /// thread from the panel's output dir + texture-set name), the set
+    /// it belongs to (the per-set checklist fan-out), and the set's
+    /// RASTER submesh (per-set masked bakes §3: `None` = whole mesh —
+    /// unmapped meshes and ray maps keep today's behavior).
+    jobs: Vec<(BakeJob, PathBuf, String, Option<umber_mesh::MeshData>)>,
     /// The skew-map tiles to emit, each with its output path and set
     /// (the whole-mesh path only rasterizes `[0, 1]`, so skew — like
     /// curvature — bakes for tile 1001 only; see
@@ -1776,14 +1778,42 @@ impl BakesPanel {
         // is already the borrowed field — re-binding with `&` made `&&Vec`s.
         let mut jobs = Vec::new();
         let mut skew_jobs = Vec::new();
-        for set in &dispatch.sets {
+        // Per-set masked bakes §3: the raster mesh per enabled set. A
+        // mesh with the triangle→material map bakes each set from its
+        // OWN submesh (the whole-mesh `None` keeps today's byte-for-byte
+        // behavior — the v1 no-regression contract). The set→slot
+        // resolution mirrors `set_names_for`'s material_names source;
+        // the sort there is display-only, `material_names` order is the
+        // map's index space.
+        let set_raster_meshes: Vec<Option<umber_mesh::MeshData>> = dispatch
+            .sets
+            .iter()
+            .map(|set| {
+                if dispatch.mesh.triangle_materials.is_empty() {
+                    None
+                } else {
+                    dispatch
+                        .mesh
+                        .material_names
+                        .iter()
+                        .position(|name| name == set)
+                        .map(|slot| dispatch.mesh.submesh_for_material(slot))
+                }
+            })
+            .collect();
+        for (set_index, set) in dispatch.sets.iter().enumerate() {
             for job in &dispatch.plan.jobs {
                 let path = if dispatch.plan.tiled {
                     self.tiled_output_path_for(set, job.selection, job.tile)
                 } else {
                     self.output_path_for(set, job.selection)
                 };
-                jobs.push((*job, path, set.clone()));
+                jobs.push((
+                    *job,
+                    path,
+                    set.clone(),
+                    set_raster_meshes[set_index].clone(),
+                ));
             }
             for tile in &dispatch.skew_tiles {
                 let path = if dispatch.plan.tiled {
@@ -1935,6 +1965,31 @@ impl BakesPanel {
 /// for the same tile (no skew bytes for the tile = uncovered guard = no
 /// clamp, never a misaligned guard). The clamped count lands in the
 /// record (the bake log's warnings column).
+/// The margin for a RASTER map's fill (per-set masked bakes §3):
+/// whole-mesh rasters share the whole-mesh seam graph (today's
+/// cache); a set's submesh builds its own seam graph — same shape as
+/// the AO tile cache (`tile_seams`), keyed by the mesh identity so a
+/// multi-set bake does not rebuild per job. The seam graph follows the
+/// mesh the map was RASTERIZED from (the existing margin contract).
+fn raster_margin(
+    pad: &Padding,
+    whole_seams: &mut Option<Option<umber_mesh::seam::SeamGraph>>,
+    set_seams: &mut HashMap<*const umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>>,
+    raster_source: &umber_mesh::MeshData,
+    raster_is_submesh: bool,
+    whole_mesh: &umber_mesh::MeshData,
+    raw: Vec<u8>,
+) -> anyhow::Result<Vec<u8>> {
+    if !raster_is_submesh {
+        let seams = whole_seams.get_or_insert_with(|| pad.seams(whole_mesh));
+        return Ok(pad.fill(whole_mesh, seams.as_ref(), raw)?);
+    }
+    let seams = set_seams
+        .entry(raster_source as *const _)
+        .or_insert_with(|| pad.seams(raster_source));
+    Ok(pad.fill(raster_source, seams.as_ref(), raw)?)
+}
+
 fn run_bake(request: BakeRequest) -> BakeOutcome {
     use anyhow::Context as _;
 
@@ -1963,6 +2018,8 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
     // jobs (those bake a filtered, UV-rebased mesh, and the margin reads
     // the mesh the map was rasterized from).
     let mut whole_seams: Option<Option<umber_mesh::seam::SeamGraph>> = None;
+    let mut set_seams: HashMap<*const umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>> =
+        HashMap::new();
     let mut tile_seams: HashMap<u16, (umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>)> =
         HashMap::new();
     let mut records = Vec::new();
@@ -1998,9 +2055,17 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         });
     }
 
-    for (job, path, set) in jobs {
+    for (job, path, set, raster_mesh) in jobs {
         let selection = job.selection;
         let started = Instant::now();
+        // Per-set masked bakes §3: RASTER maps read the set's submesh
+        // when the mesh carries the map (the raster mesh drives UV
+        // coverage); RAY maps (AO/thickness/bent/transfer) keep the
+        // whole mesh — occluders cross materials, and the baker's
+        // with_occluder split is the named host-gated follow-up.
+        let raster_mesh = raster_mesh.as_ref();
+        let raster_source = raster_mesh.unwrap_or(mesh);
+        let raster_is_submesh = raster_mesh.is_some();
         // `plan_bake` routes only AO to `BakeSource::Tile`; every
         // other map's job is a whole-mesh bake.
         let mut skew_clamped = 0usize;
@@ -2082,16 +2147,22 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                     let raw = umber_bake::curvature::bake_curvature_mesh(
                         device,
                         queue,
-                        mesh,
+                        raster_source,
                         size,
                         size,
                         &umber_bake::CurvatureParams::default(),
                     )
                     .context("curvature bake")?;
-                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                    let filled = pad
-                        .fill(mesh, seams.as_ref(), raw)
-                        .context("curvature margin")?;
+                    let filled = raster_margin(
+                        &pad,
+                        &mut whole_seams,
+                        &mut set_seams,
+                        raster_source,
+                        raster_is_submesh,
+                        mesh,
+                        raw,
+                    )
+                    .context("curvature margin")?;
                     umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                         .context("curvature dilation")?
                 }
@@ -2116,25 +2187,63 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                         width: size,
                         height: size,
                     };
-                    let f32map =
-                        umber_bake::position::bake_position_map(device, queue, mesh, &params)
-                            .context("position bake")?;
+                    let f32map = umber_bake::position::bake_position_map(
+                        device,
+                        queue,
+                        raster_source,
+                        &params,
+                    )
+                    .context("position bake")?;
                     let raw = encode_position_rgba8(&f32map);
-                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                    let filled = pad
-                        .fill(mesh, seams.as_ref(), raw)
-                        .context("position margin")?;
+                    let filled = raster_margin(
+                        &pad,
+                        &mut whole_seams,
+                        &mut set_seams,
+                        raster_source,
+                        raster_is_submesh,
+                        mesh,
+                        raw,
+                    )
+                    .context("position margin")?;
                     umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                         .context("position dilation")?
                 }
                 other => {
                     // C2-29: the four maps the panel did not bake before, the
                     // same bakers and encodings `umber-cli bake-all` uses.
-                    let raw = bake_extra_map(device, queue, mesh, size, rays, other)?;
-                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                    let filled = pad
-                        .fill(mesh, seams.as_ref(), raw)
-                        .with_context(|| format!("{other:?} margin"))?;
+                    // Per-set masked bakes §3: Normal/WorldNormal/Id are
+                    // RASTER maps — they read the set's submesh. BentNormal
+                    // (a ray map) keeps the whole mesh; its with_occluder
+                    // split is the named host-gated follow-up.
+                    let raw = if raster_is_submesh
+                        && matches!(
+                            other,
+                            BakeSelection::Normal | BakeSelection::WorldNormal | BakeSelection::Id
+                        ) {
+                        bake_extra_map(device, queue, raster_source, size, rays, other)?
+                    } else {
+                        bake_extra_map(device, queue, mesh, size, rays, other)?
+                    };
+                    let filled = if raster_is_submesh
+                        && matches!(
+                            other,
+                            BakeSelection::Normal | BakeSelection::WorldNormal | BakeSelection::Id
+                        ) {
+                        raster_margin(
+                            &pad,
+                            &mut whole_seams,
+                            &mut set_seams,
+                            raster_source,
+                            raster_is_submesh,
+                            mesh,
+                            raw,
+                        )
+                        .with_context(|| format!("{other:?} margin"))?
+                    } else {
+                        let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                        pad.fill(mesh, seams.as_ref(), raw)
+                            .with_context(|| format!("{other:?} margin"))?
+                    };
                     umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                         .with_context(|| format!("{other:?} dilation"))?
                 }
@@ -2461,6 +2570,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let dir = std::env::temp_dir().join(format!("umber-high-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2528,6 +2638,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let size = 64;
         for selection in [
@@ -2716,6 +2827,7 @@ mod tests {
             uvs: vec![[0.5, 0.5], [0.7, 0.5], [0.5, 0.7], [1.5, 0.5]],
             indices: vec![0, 1, 2, 3, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         }
     }
 
@@ -2812,6 +2924,7 @@ mod tests {
             uvs: vec![[0.1, 0.1], [0.9, 0.1], [0.1, 0.9]],
             indices: vec![0, 1, 2],
             material_names: vec!["m".into()],
+            triangle_materials: Vec::new(),
         };
         let present = umber_mesh::present_tiles(&single);
         assert_eq!(present, vec![1001]);
@@ -3029,6 +3142,7 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             indices: vec![0, 1, 2, 0, 2, 3],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         };
         let dir = std::env::temp_dir().join(format!("umber-bake-job-{}", std::process::id()));
         let mut p = BakesPanel::new(dir.clone());
@@ -3350,6 +3464,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2, 3, 4, 5],
             material_names: vec![],
+            triangle_materials: Vec::new(),
         }
     }
 
