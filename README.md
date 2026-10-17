@@ -4,7 +4,7 @@
 
 Umber is a ground-up reimagining of the 3D texture-painting DCC: paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps, and export engine-ready texture sets — fast, local-first, and free forever. Built completely in Rust for **Windows and Linux**.
 
-> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,000+<!-- /scorecard --> tests. No release tag yet: SPEC ratification and the perf baseline lead the 0.1.0 checklist (`docs/specs/release-checklist-0.1.0.md`).
+> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,100+<!-- /scorecard --> tests. No release tag yet: SPEC ratification and the perf baseline lead the 0.1.0 checklist (`docs/specs/release-checklist-0.1.0.md`).
 
 ## Why
 
