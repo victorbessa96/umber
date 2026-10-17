@@ -38,10 +38,11 @@
 //! - The curve editor, its "Pressure → …" section headers, and the preset
 //!   selector / save rows stay as-is (roadmap Phase 2 scope).
 //! - The clone-offset [`egui::DragValue`]s are not sliders, so they stay.
-//! - The preset editor's hardcoded English labels ("Alpha", "Min cutoff",
-//!   …) stay hardcoded: converting them to `tr()` would change pt-BR
-//!   rendering, which is a separate i18n kill. The `ftl` catalogs already
-//!   carry matching keys; wiring them is deferred, not forgotten.
+//! - The preset editor's labels went through `tr()` in the
+//!   preset-editor-i18n kill (2026-10-17): preset/name/alpha/hardness/
+//!   pressure-gamma, the broken/overridden badges, and the stabilizer/
+//!   lazy-mouse/spacing groups. The curve editor's section headers and
+//!   the preset save rows remain Phase 2 scope.
 //! - No `umber_style`/fonts call at boot or panel level: `main.rs` applies
 //!   no Umber style today (only a dock `Style::from_egui`), `assets/fonts`
 //!   is not in the tree yet so `install_fonts` would panic (see
@@ -76,7 +77,7 @@
 
 use std::path::PathBuf;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use umber_gui::widgets::ParamGroupUi;
 use umber_gui::{ParamGroup, ValueField};
 
@@ -473,7 +474,7 @@ impl BrushPanel {
     /// Preset combo + broken-file badge + overridden count.
     fn preset_selector(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.strong("Preset");
+            ui.strong(tr("brush.preset"));
             let current = self
                 .active
                 .and_then(|i| self.library.entries.get(i))
@@ -502,14 +503,20 @@ impl BrushPanel {
         ui.horizontal_wrapped(|ui| {
             if !self.library.errors.is_empty() {
                 let n = self.library.errors.len();
-                ui.collapsing(format!("{n} broken"), |ui| {
-                    for (path, err) in &self.library.errors {
-                        ui.label(format!("{}: {err}", path.display()));
-                    }
-                });
+                ui.collapsing(
+                    tr_args("brush.broken", [("count", FluentValue::from(n))]),
+                    |ui| {
+                        for (path, err) in &self.library.errors {
+                            ui.label(format!("{}: {err}", path.display()));
+                        }
+                    },
+                );
             }
             if self.library.overridden > 0 {
-                ui.weak(format!("{} overridden", self.library.overridden));
+                ui.weak(tr_args(
+                    "brush.overridden",
+                    [("count", FluentValue::from(self.library.overridden))],
+                ));
             }
         });
     }
@@ -521,7 +528,7 @@ impl BrushPanel {
         let mut changed = false;
 
         ui.horizontal_wrapped(|ui| {
-            ui.label("Name");
+            ui.label(tr("brush.name"));
             changed |= ui
                 .add(egui::TextEdit::singleline(&mut preset.name))
                 .changed();
@@ -544,7 +551,7 @@ impl BrushPanel {
 
         changed |= value_row(
             ui,
-            "Alpha",
+            &tr("brush.alpha"),
             ValueField::new(&mut preset.params.alpha)
                 .context_menu(crate::i18n::prop_menu_labels())
                 .range(0.0..=1.0),
@@ -552,7 +559,7 @@ impl BrushPanel {
         .changed();
         changed |= value_row(
             ui,
-            "Hardness",
+            &tr("brush.hardness"),
             ValueField::new(&mut preset.params.hardness)
                 .context_menu(crate::i18n::prop_menu_labels())
                 .range(0.0..=1.0),
@@ -562,7 +569,7 @@ impl BrushPanel {
         // div-by-zero downstream.
         changed |= value_row(
             ui,
-            "Pressure gamma",
+            &tr("brush.pressure-gamma"),
             ValueField::new(&mut preset.params.pressure_gamma)
                 .context_menu(crate::i18n::prop_menu_labels())
                 .range(0.05..=4.0)
@@ -633,9 +640,9 @@ impl BrushPanel {
         changed |= stroke_method_rows(ui, &mut preset.stroke_method);
 
         ui.add_space(4.0);
-        ParamGroup::new("brush-stabilizer", "Stabilizer (one-euro)").show(ui, |group| {
+        ParamGroup::new("brush-stabilizer", &tr("brush.stabilizer")).show(ui, |group| {
             changed |= group
-                .row("Min cutoff", |ui| {
+                .row(&tr("brush.min-cutoff"), |ui| {
                     ui.add(
                         ValueField::new(&mut preset.one_euro.min_cutoff)
                             .context_menu(crate::i18n::prop_menu_labels())
@@ -645,7 +652,7 @@ impl BrushPanel {
                 })
                 .changed();
             changed |= group
-                .row("Beta", |ui| {
+                .row(&tr("brush.beta"), |ui| {
                     ui.add(
                         ValueField::new(&mut preset.one_euro.beta)
                             .context_menu(crate::i18n::prop_menu_labels())
@@ -656,7 +663,7 @@ impl BrushPanel {
                 })
                 .changed();
             changed |= group
-                .row("d cutoff", |ui| {
+                .row(&tr("brush.d-cutoff"), |ui| {
                     ui.add(
                         ValueField::new(&mut preset.one_euro.d_cutoff)
                             .context_menu(crate::i18n::prop_menu_labels())
@@ -668,9 +675,9 @@ impl BrushPanel {
         });
 
         ui.add_space(4.0);
-        ParamGroup::new("brush-lazy-mouse", "Lazy mouse").show(ui, |group| {
+        ParamGroup::new("brush-lazy-mouse", &tr("brush.lazy-mouse")).show(ui, |group| {
             changed |= group
-                .row("Radius px", |ui| {
+                .row(&tr("brush.radius-px"), |ui| {
                     ui.add(
                         ValueField::new(&mut preset.lazy_mouse.radius_px)
                             .context_menu(crate::i18n::prop_menu_labels())
@@ -682,7 +689,7 @@ impl BrushPanel {
                 })
                 .changed();
             changed |= group
-                .row("Strength", |ui| {
+                .row(&tr("brush.strength"), |ui| {
                     ui.add(
                         ValueField::new(&mut preset.lazy_mouse.strength)
                             .context_menu(crate::i18n::prop_menu_labels())
@@ -693,9 +700,9 @@ impl BrushPanel {
         });
 
         ui.add_space(4.0);
-        ParamGroup::new("brush-spacing", "Spacing").show(ui, |group| {
+        ParamGroup::new("brush-spacing", &tr("brush.spacing")).show(ui, |group| {
             changed |= group
-                .row("Dabs per radius", |ui| {
+                .row(&tr("brush.dabs-per-radius"), |ui| {
                     ui.add(
                         ValueField::new(&mut preset.spacing.dabs_per_radius)
                             .context_menu(crate::i18n::prop_menu_labels())
@@ -956,12 +963,11 @@ impl Default for BrushPanel {
 /// One inclusion rule, shared with the other four context bodies: a
 /// section title, a labelled row's leading label, or a checkbox that is
 /// its own row. Skipped: radio / combo option values, hints and weak
-/// notes, buttons, status readouts, and the preset editor's hardcoded
-/// English rows ("Preset", "Name", "Alpha", "Hardness", "Pressure gamma",
-/// the stabilizer / lazy-mouse / spacing groups, the pressure curves).
-/// Those draw no `tr()` key yet (the module docs' i18n deferral), so a
-/// catalog label would not match the drawn text in pt-BR; they join this
-/// list when that kill lands.
+/// notes, buttons, status readouts, the curve editor's section headers
+/// and the preset save rows (Phase 2 scope — see the module docs). The
+/// preset editor's rows went through `tr()` in the preset-editor-i18n
+/// kill and joined this list the same hour (drawn text now matches the
+/// catalog label in both locales).
 ///
 /// v1 boundary: the list is STATIC, the union of every row the body can
 /// draw. The tool-, stamp-, method- and session-gated rows (smudge, clone,
@@ -1015,6 +1021,23 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "brush.method-rate",
     "brush.method-dash-ratio",
     "brush.method-dash-length",
+    // The preset editor's rows, now tr()-drawn (the preset-editor-i18n
+    // kill): in draw order — selector, editor, the stabilizer /
+    // lazy-mouse / spacing groups (the rail doc's deferred set).
+    "brush.preset",
+    "brush.name",
+    "brush.alpha",
+    "brush.hardness",
+    "brush.pressure-gamma",
+    "brush.stabilizer",
+    "brush.min-cutoff",
+    "brush.beta",
+    "brush.d-cutoff",
+    "brush.lazy-mouse",
+    "brush.radius-px",
+    "brush.strength",
+    "brush.spacing",
+    "brush.dabs-per-radius",
 ];
 
 /// The Brush body's row labels, localized ([`ROW_LABEL_KEYS`] through
@@ -2157,11 +2180,13 @@ mod row_label_tests {
         let drawn = drawn_source(src, "ROW_LABEL_KEYS").expect("list");
         let labels = row_labels();
         assert_row_label_keys(ROW_LABEL_KEYS, &labels, &drawn);
-        // 44 labelled rows; the ends pin the draw order: the tool section
-        // first, the dash method's last parameter last.
-        assert_eq!(labels.len(), 44);
+        // 58 labelled rows after the preset-editor i18n kill; the ends pin
+        // the draw order: the tool section first, the spacing group's
+        // dabs-per-radius last (the preset editor draws after the method
+        // rows).
+        assert_eq!(labels.len(), 58);
         assert_eq!(labels.first().map(String::as_str), Some("Tool"));
-        assert_eq!(labels.last().map(String::as_str), Some("Dash length"));
+        assert_eq!(labels.last().map(String::as_str), Some("Dabs per radius"));
     }
 }
 
