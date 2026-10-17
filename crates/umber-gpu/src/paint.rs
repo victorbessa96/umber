@@ -109,6 +109,16 @@ pub const FALLOFF_CONSTANT: u32 = 8;
 /// square and rotated by the dab's angle ([`Dab::with_angle`]).
 /// `hardness` is ignored.
 pub const FALLOFF_STAMP: u32 = 9;
+/// User-authored curve (docs/specs/falloff-custom-design.md): the dab's
+/// strength is a tap of the compositor's falloff LUT
+/// ([`PaintCompositor::set_falloff_lut`], binding 5), indexed by the same
+/// remapped edge parameter `e` the analytic curves use, at
+/// `min(u32(e * 255), width - 1)` (a truncated nearest tap, no lerp). The
+/// LUT is a 1x1 white texel until one is set, so a Custom dab with no LUT
+/// paints the full disc.
+pub const FALLOFF_CUSTOM: u32 = 10;
+/// Taps in the [`FALLOFF_CUSTOM`] LUT (a 256x1 R32Float texture).
+pub const FALLOFF_LUT_LEN: usize = 256;
 
 const _: () = assert!(size_of::<Dab>() == 48, "Dab must match the WGSL Dab layout");
 
@@ -679,6 +689,13 @@ pub struct PaintCompositor {
     /// Whether the white fallback's single texel still needs its upload
     /// (recorded on the next splat's encoder: construction has no queue).
     stamp_needs_white: std::sync::atomic::AtomicBool,
+    /// The [`FALLOFF_CUSTOM`] curve LUT (binding 5): a 1x1 white R32Float
+    /// texel until [`Self::set_falloff_lut`] uploads the 256 taps. Same
+    /// lock discipline as `stamp`.
+    falloff_lut: std::sync::RwLock<(wgpu::Texture, wgpu::TextureView)>,
+    /// Whether the white fallback's texel still needs its upload (the
+    /// `stamp_needs_white` pattern).
+    falloff_lut_needs_white: std::sync::atomic::AtomicBool,
     max_dabs_per_batch: usize,
 }
 
@@ -761,6 +778,16 @@ impl PaintCompositor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -797,6 +824,7 @@ impl PaintCompositor {
 
         let max_dabs_per_batch = device.limits().max_compute_workgroups_per_dimension as usize;
         let stamp = Self::stamp_texture(&device, None, 1, 1, &[255]);
+        let falloff_lut = Self::falloff_lut_texture(&device, None, 1, &[1.0]);
 
         Ok(Self {
             device,
@@ -806,8 +834,94 @@ impl PaintCompositor {
             fallback_mask_view,
             stamp: std::sync::RwLock::new(stamp),
             stamp_needs_white: std::sync::atomic::AtomicBool::new(true),
+            falloff_lut: std::sync::RwLock::new(falloff_lut),
+            falloff_lut_needs_white: std::sync::atomic::AtomicBool::new(true),
             max_dabs_per_batch,
         })
+    }
+
+    /// Uploads `samples` as the curve every [`FALLOFF_CUSTOM`] dab taps
+    /// from now on (tap `i` is the strength at edge parameter
+    /// `e = i / 255`; the brush side builds them from the preset's
+    /// curve). Non-finite taps store `0.0`, the rest are clamped to
+    /// `0..=1`. Uploaded through `queue` at once, so call it between
+    /// strokes (the [`Self::set_stamp`] rule).
+    pub fn set_falloff_lut(&self, queue: &wgpu::Queue, samples: [f32; FALLOFF_LUT_LEN]) {
+        let clean = samples.map(|s| {
+            if s.is_finite() {
+                s.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
+        let fresh =
+            Self::falloff_lut_texture(&self.device, Some(queue), FALLOFF_LUT_LEN as u32, &clean);
+        *self
+            .falloff_lut
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
+        // The deferred white texel must not land on the real LUT: it
+        // would overwrite tap 0, the one the hardness core reads.
+        self.falloff_lut_needs_white
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The falloff LUT's width (`1` = the white fallback, else
+    /// [`FALLOFF_LUT_LEN`]).
+    pub fn falloff_lut_len(&self) -> u32 {
+        self.falloff_lut
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .size()
+            .width
+    }
+
+    /// A `width`x1 R32Float LUT texture holding `taps`. With a `queue`
+    /// the taps go through `write_texture`; without one (construction,
+    /// the 1x1 white fallback) the texture is created empty and
+    /// `splat_dabs` records its texel on the next encoder
+    /// (`falloff_lut_needs_white`).
+    fn falloff_lut_texture(
+        device: &wgpu::Device,
+        queue: Option<&wgpu::Queue>,
+        width: u32,
+        taps: &[f32],
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let desc = wgpu::TextureDescriptor {
+            label: Some("umber_paint_falloff_lut"),
+            size: wgpu::Extent3d {
+                width,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        };
+        let texture = device.create_texture(&desc);
+        if let Some(queue) = queue {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(taps),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(1),
+                },
+                desc.size,
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
     }
 
     /// Uploads `values` (`width * height` R8 coverage, row-major, top row
@@ -995,6 +1109,47 @@ impl PaintCompositor {
                 },
             );
         }
+        let falloff_lut = self
+            .falloff_lut
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .falloff_lut_needs_white
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            // The LUT fallback's one 1.0 texel (R32Float: 4 bytes), in a
+            // 256-byte row like the stamp's.
+            let mut row = vec![0u8; 256];
+            row[..4].copy_from_slice(&1.0f32.to_le_bytes());
+            let white = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("umber_paint_falloff_lut_white"),
+                    contents: &row,
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                });
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &white,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &falloff_lut.0,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("umber_paint_bind_group"),
@@ -1032,6 +1187,10 @@ impl PaintCompositor {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&stamp.1),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&falloff_lut.1),
                 },
             ],
         });
@@ -1155,6 +1314,22 @@ mod tests {
                 "shader lacks a case for falloff id {id}"
             );
         }
+    }
+
+    /// The Custom curve's shader half: the id const, its switch arm, the
+    /// binding-5 LUT, and the truncated tap clamped to the LUT's width
+    /// (the 1x1 fallback must never be read out of bounds).
+    #[test]
+    fn shader_carries_the_custom_falloff_lut() {
+        assert_eq!(FALLOFF_CUSTOM, 10);
+        assert_eq!(FALLOFF_LUT_LEN, 256);
+        let id_const = format!("FALLOFF_CUSTOM: u32 = {FALLOFF_CUSTOM}u");
+        assert!(PAINT_COMPUTE_SHADER.contains(&id_const));
+        assert!(PAINT_COMPUTE_SHADER.contains(&format!("case {FALLOFF_CUSTOM}u")));
+        let binding = "@group(0) @binding(5) var falloff_lut: texture_2d<f32>;";
+        assert!(PAINT_COMPUTE_SHADER.contains(binding));
+        let tap = "min(u32(e * 255.0), textureDimensions(falloff_lut).x - 1u)";
+        assert!(PAINT_COMPUTE_SHADER.contains(tap));
     }
 
     #[cfg(feature = "gpu")]
@@ -1356,6 +1531,81 @@ mod tests {
             // upload re-arms).
             let out = splat_one(&device, &queue, &compositor, dab);
             assert_eq!(pixel(&out, 64, 42, 32)[3], 255, "cleared: full square");
+        }
+
+        /// A Custom dab with no LUT set reads the 1x1 white fallback: the
+        /// full disc at full strength, where a soft Smooth dab has
+        /// already faded. Probes: the centre texel, texel (44, 32)
+        /// (centre (44.5, 32.5), dist ~12.51, t ~0.78) and (50, 32)
+        /// (dist ~18.5, outside r 16).
+        #[test]
+        fn a_custom_dab_without_a_lut_paints_the_full_disc() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let compositor = PaintCompositor::new(device.clone()).expect("compositor");
+            assert_eq!(compositor.falloff_lut_len(), 1);
+            let dab = Dab::new([32.0, 32.0], 16.0, [1.0, 0.0, 0.0, 1.0], 1.0, 0.0)
+                .with_falloff(FALLOFF_CUSTOM);
+            let out = splat_one(&device, &queue, &compositor, dab);
+            // Coverage 1.0 * tap 1.0 over a clear texel stores exactly 1.0.
+            assert_eq!(pixel(&out, 64, 32, 32), [255, 0, 0, 255]);
+            assert_eq!(pixel(&out, 64, 44, 32), [255, 0, 0, 255], "the rim ring");
+            assert_eq!(pixel(&out, 64, 50, 32), [0, 0, 0, 0], "outside the disc");
+            // The same soft dab on Smooth has faded there: t =
+            // sqrt(12.5² + 0.5²) / 16, smoothstep ~0.122 (byte 31), ±1
+            // for the unorm conversion (implementation-defined rounding).
+            let smooth = splat_one(
+                &device,
+                &queue,
+                &compositor,
+                dab.with_falloff(FALLOFF_SMOOTH),
+            );
+            let t = 156.5f32.sqrt() / 16.0;
+            let want = ((1.0 - t * t * (3.0 - 2.0 * t)) * 255.0).round() as i32;
+            let got = pixel(&smooth, 64, 44, 32)[3] as i32;
+            assert!((got - want).abs() <= 1, "smooth rim {got} vs {want}");
+        }
+
+        /// A step LUT (taps 0..128 = 0, 128..256 = 1: the edge at
+        /// e = 128/255, dist ~8.03 for r 16, h 0) paints a ring: the
+        /// centre and texel (36, 32) (dist ~4.53, tap 72) stay clear,
+        /// texel (44, 32) (dist ~12.51, tap 199) is fully painted. Every
+        /// probe sits >= 0.5 texel (>= 30 taps) from the step, so the
+        /// GPU's not-correctly-rounded `distance`/division cannot flip a
+        /// tap.
+        #[test]
+        fn a_step_lut_custom_dab_paints_a_ring() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let compositor = PaintCompositor::new(device.clone()).expect("compositor");
+            let step: [f32; FALLOFF_LUT_LEN] =
+                std::array::from_fn(|i| if i < 128 { 0.0 } else { 1.0 });
+            compositor.set_falloff_lut(&queue, step);
+            assert_eq!(compositor.falloff_lut_len(), FALLOFF_LUT_LEN as u32);
+            let dab = Dab::new([32.0, 32.0], 16.0, [0.0, 1.0, 0.0, 1.0], 1.0, 0.0)
+                .with_falloff(FALLOFF_CUSTOM);
+            let out = splat_one(&device, &queue, &compositor, dab);
+            assert_eq!(pixel(&out, 64, 32, 32), [0, 0, 0, 0], "the hole");
+            assert_eq!(pixel(&out, 64, 36, 32), [0, 0, 0, 0], "inside the step");
+            assert_eq!(pixel(&out, 64, 44, 32), [0, 255, 0, 255], "the ring");
+            assert_eq!(pixel(&out, 64, 50, 32), [0, 0, 0, 0], "outside the disc");
+            // The hardness core reads tap 0 (e = 0): with h 0.75 the
+            // whole t <= 0.75 core is that tap — clear. Texel (40, 32)
+            // (dist ~8.51, t ~0.53) sits in the core; texel (46, 32)
+            // (dist ~14.51, t ~0.907, e ~0.627, tap 159; the step is at
+            // tap 128, e ~0.502) paints. This also pins that the deferred
+            // white texel never lands on a real LUT's tap 0.
+            let cored = splat_one(
+                &device,
+                &queue,
+                &compositor,
+                Dab::new([32.0, 32.0], 16.0, [0.0, 1.0, 0.0, 1.0], 1.0, 0.75)
+                    .with_falloff(FALLOFF_CUSTOM),
+            );
+            assert_eq!(pixel(&cored, 64, 40, 32), [0, 0, 0, 0], "inside the core");
+            assert_eq!(pixel(&cored, 64, 46, 32), [0, 255, 0, 255]);
         }
 
         #[test]

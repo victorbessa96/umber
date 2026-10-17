@@ -1865,6 +1865,7 @@ impl PaintState {
         if self.stroking {
             return;
         }
+        let before = self.brush;
         let color = self.brush.color;
         self.brush = BrushParams {
             wash_mode: self.brush.wash_mode,
@@ -1872,6 +1873,17 @@ impl PaintState {
         };
         if preserve_color {
             self.brush.color = color;
+        }
+        // The Custom falloff's LUT (id 10): uploaded only when the curve
+        // or the switch onto Custom changed — 256 taps once, not per frame.
+        // `falloff_lut()` deliberately ignores `stamped`, so the
+        // stamped->unstamped toggle cannot miss an upload.
+        if before.falloff != self.brush.falloff
+            || before.falloff_custom != self.brush.falloff_custom
+        {
+            if let Some(lut) = self.brush.falloff_lut() {
+                self.compositor.set_falloff_lut(&self.queue, lut);
+            }
         }
     }
 
@@ -5738,6 +5750,7 @@ mod tests {
             pressure_gamma: 2.0,
             wash_mode: WashMode::BuildUp,
             falloff: umber_brush::FalloffCurve::Sharp,
+            falloff_custom: Default::default(),
             stamped: false,
             stamp_angle: Default::default(),
             jitter: Default::default(),

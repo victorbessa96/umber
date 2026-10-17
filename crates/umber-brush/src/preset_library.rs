@@ -270,6 +270,7 @@ mod tests {
                 pressure_gamma: 1.0,
                 wash_mode: crate::WashMode::BuildUp,
                 falloff: crate::FalloffCurve::Smooth,
+                falloff_custom: Default::default(),
                 stamped: false,
                 stamp_angle: Default::default(),
                 jitter: Default::default(),

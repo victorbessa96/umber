@@ -64,6 +64,15 @@
 //!   [`umber_gui::ParamGroupUi::row`] calls; rows inside `add_enabled_ui`
 //!   blocks (mirror/radial bodies) use manual label + field rows and do
 //!   not count, so a fully-disabled section header can read "0".
+//!
+//! The Custom falloff (docs/specs/falloff-custom-design.md): choosing
+//! Custom in the falloff combo adds an [`umber_gui::CurveEdit`] to the
+//! SAME row, bound to `params.falloff_custom`. The combo stays beside it
+//! (a literal swap would leave no way back out of Custom). The editor is
+//! fixed-count (4 points, the [`ControlCurve`] shape) and its x axis is
+//! the ring parameter `u` (0 = rim, 1 = core edge). The panel only edits
+//! the preset; uploading the curve's LUT to the GPU belongs to the paint
+//! session's per-frame brush sync (`PaintState::sync_brush_params`).
 
 use std::path::PathBuf;
 
@@ -605,6 +614,11 @@ impl BrushPanel {
                             .changed();
                     }
                 });
+            // Custom: the curve editor joins the combo in this row (the
+            // combo stays, so the curve can be left again).
+            if preset.params.falloff == umber_brush::FalloffCurve::Custom {
+                changed |= falloff_custom_editor(ui, &mut preset.params.falloff_custom);
+            }
         });
 
         changed |= value_row(
@@ -2000,6 +2014,61 @@ fn falloff_key(curve: umber_brush::FalloffCurve) -> &'static str {
         F::Linear => "brush.falloff-linear",
         F::InverseSquare => "brush.falloff-inverse-square",
         F::Constant => "brush.falloff-constant",
+        F::Custom => "brush.falloff-custom",
+    }
+}
+
+/// The Custom falloff's editor: [`umber_gui::CurveEdit`] over the
+/// preset's 4-point curve (fixed count: [`ControlCurve`] cannot grow).
+/// x is the ring parameter `u` (0 = rim, 1 = core edge, see
+/// `umber_brush::falloff`). Returns whether the curve changed.
+fn falloff_custom_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
+    let mut model = falloff_edit_model(curve);
+    let response = ui
+        .push_id("brush_falloff_custom_curve", |ui| {
+            umber_gui::CurveEdit::new(&mut model)
+                .size(120.0)
+                .fixed_count(true)
+                .show(ui)
+        })
+        .inner;
+    response.changed() && apply_falloff_edit(curve, &model)
+}
+
+/// The editor model for `curve`, rebuilt every frame (the preset is the
+/// state). [`umber_gui::Curve`] is stricter than [`ControlCurve`] (points
+/// inside `[0, 1]²`, x gaps of at least `MIN_GAP`, from
+/// `umber_gui::widgets::curve`), so the points are
+/// shown clamped into `[0, 1]²` and each x nudged to at least
+/// `MIN_GAP + 1e-6` past its left neighbour. The nudge matters for the
+/// editor's own output too: `move_point` parks a point exactly `MIN_GAP`
+/// from its neighbour, and that f32 difference can fall an ulp short of
+/// `MIN_GAP` on the next frame's `Curve::new`. A curve still refused (the
+/// nudge pushed the last x past 1) shows as the identity; the first drag
+/// then replaces it. The preset changes only on an edit.
+fn falloff_edit_model(curve: &ControlCurve) -> umber_gui::Curve {
+    use umber_gui::widgets::curve::MIN_GAP;
+    let mut points = curve
+        .points
+        .map(|(x, y)| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+    for i in 1..points.len() {
+        points[i].0 = points[i].0.max(points[i - 1].0 + MIN_GAP + 1e-6);
+    }
+    umber_gui::Curve::new(points.to_vec())
+        .or_else(|_| umber_gui::Curve::new(ControlCurve::identity().points.to_vec()))
+        .unwrap_or_default()
+}
+
+/// Writes the editor's points back into `curve` (they always form a valid
+/// [`ControlCurve`]: four points, strictly increasing x). Returns whether
+/// `curve` changed.
+fn apply_falloff_edit(curve: &mut ControlCurve, model: &umber_gui::Curve) -> bool {
+    match ControlCurve::try_new(model.points()) {
+        Ok(next) if next != *curve => {
+            *curve = next;
+            true
+        }
+        _ => false,
     }
 }
 
@@ -2125,6 +2194,57 @@ mod tests {
         assert_eq!(BrushPanel::new().front_face_falloff, None);
     }
 
+    /// The Custom editor's model round-trips a valid curve exactly, and
+    /// a write-back reports a change only when the points moved.
+    #[test]
+    fn falloff_custom_model_round_trips_and_writes_back() {
+        let points: [(f32, f32); 4] = [(0.0, 0.0), (0.25, 0.8), (0.6, 0.3), (1.0, 1.0)];
+        let drawn = ControlCurve::try_new(&points).unwrap();
+        let model = falloff_edit_model(&drawn);
+        assert_eq!(model.points(), &drawn.points);
+        let mut curve = drawn;
+        assert!(!apply_falloff_edit(&mut curve, &model), "unchanged");
+        let mut moved = model.clone();
+        assert!(moved.move_point(1, 0.3, 0.5));
+        assert!(apply_falloff_edit(&mut curve, &moved));
+        assert_eq!(curve.points[1], (0.3, 0.5));
+        assert_eq!(curve.points[0], (0.0, 0.0));
+    }
+
+    /// Curves the editor model refuses: y outside `[0, 1]` shows
+    /// clamped; a gap at exactly `MIN_GAP` (what a drag to the limit
+    /// leaves) is nudged instead of collapsing to the identity; an
+    /// unrecoverable one shows as the identity. All keep four points.
+    #[test]
+    fn falloff_custom_model_sanitizes_what_the_editor_refuses() {
+        use umber_gui::widgets::curve::MIN_GAP;
+        let points: [(f32, f32); 4] = [(0.0, -1.0), (0.3, 0.5), (0.6, 0.5), (1.0, 2.0)];
+        let wild = ControlCurve::try_new(&points).unwrap();
+        let shown = falloff_edit_model(&wild);
+        let clamped: [(f32, f32); 4] = [(0.0, 0.0), (0.3, 0.5), (0.6, 0.5), (1.0, 1.0)];
+        assert_eq!(shown.points(), &clamped);
+
+        let points: [(f32, f32); 4] = [(0.0, 0.0), (0.5, 0.2), (0.5 + MIN_GAP, 0.9), (1.0, 1.0)];
+        let tight = ControlCurve::try_new(&points).unwrap();
+        let shown = falloff_edit_model(&tight);
+        assert_eq!(shown.points()[1], (0.5, 0.2));
+        let x2 = shown.points()[2].0;
+        assert!(x2 >= 0.5 + MIN_GAP && x2 - 0.5 >= MIN_GAP, "nudged: {x2}");
+        assert!(x2 < 0.5 + MIN_GAP + 1e-5, "by ~1e-6 only: {x2}");
+        assert_eq!(shown.points()[2].1, 0.9);
+
+        let points: [(f32, f32); 4] = [(0.0, 0.0), (0.999, 0.2), (0.9995, 0.3), (1.0, 1.0)];
+        let crowded = ControlCurve::try_new(&points).unwrap();
+        let shown = falloff_edit_model(&crowded);
+        assert_eq!(shown.points(), &ControlCurve::identity().points);
+
+        // The Custom label is in both catalogs (pt-BR is house rule).
+        let i18n = crate::i18n::I18n::builtin();
+        for locale in ["en-US", "pt-BR"] {
+            assert!(i18n.has_key(locale, "brush.falloff-custom"), "{locale}");
+        }
+    }
+
     #[test]
     fn every_falloff_curve_has_a_distinct_catalog_key() {
         let keys: std::collections::BTreeSet<&str> = umber_brush::FalloffCurve::ALL
@@ -2170,6 +2290,7 @@ mod tests {
                 pressure_gamma: 1.0,
                 wash_mode: umber_brush::WashMode::BuildUp,
                 falloff: Default::default(),
+                falloff_custom: ControlCurve::identity(),
                 stamped: false,
                 stamp_angle: Default::default(),
                 jitter: Default::default(),

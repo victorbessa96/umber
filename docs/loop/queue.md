@@ -296,6 +296,27 @@ halves (ContextRail wiring, a11y umber-app half, density Preferences
 row, held-key poll, popover consumers), g6-stencil-overlay (needs
 the stencil engine), per-set masked bakes.
 
+**Status 2026-10-17 (post-W-GUI-3 landing, `7b5b33e`+`efd0cbf`):**
+the six shell halves above are DONE (the wave landed; the CI catch
+was the crate-root re-export, fixed same-push). The remaining
+W-GUI-4 candidates, in dependency order:
+
+1. **falloff Custom** — DESIGN WRITTEN:
+   `docs/specs/falloff-custom-design.md` (id 10 + a 256×1 LUT
+   texture on the paint pass's binding 5, the stamp's RwLock
+   fallback pattern; enum stays Copy — the curve lives in
+   `BrushParams.falloff_custom`, serde-default identity). The
+   design answers the GPU-stable-id question STATE.md:31 asked;
+   implementation = one 6-file kill, GPU goldens host-gated.
+2. **Levels' CurveEdit consumer** — `GpuOp::Levels`
+   (graph_eval.rs:157) grows a curve param; shares the CurveEdit
+   dependency, lands AFTER falloff Custom.
+3. **per-set masked bakes** — the 148-site field pass, then the
+   landed subset-mesh/occluder-scope consumers (host-gated).
+4. **g6-stencil-overlay** — still blocked on the stencil engine.
+5. **The rail's row-label registry** (W-GUI-3's named follow-up:
+   the ContextRail search needs the body-side row decomposition).
+
 ## Scratch
 
 - (Rewritten 2026-10-17 03:30 — the previous contents described the

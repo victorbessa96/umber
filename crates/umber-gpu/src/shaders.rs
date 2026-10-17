@@ -536,9 +536,14 @@ struct Dab {
 /// The bitmap stamp (C2-11): R8, any size, read by falloff id 9 only.
 /// A 1x1 white fallback is bound when no stamp is set.
 @group(0) @binding(4) var stamp_tex: texture_2d<f32>;
+/// The Custom falloff curve (falloff id 10): an R32Float LUT, 256x1 once
+/// set, a 1x1 white texel until then. Tap i = strength at e = i / 255.
+@group(0) @binding(5) var falloff_lut: texture_2d<f32>;
 
 /// `paint::FALLOFF_STAMP`: coverage comes from the stamp, not a curve.
 const FALLOFF_STAMP: u32 = 9u;
+/// `paint::FALLOFF_CUSTOM`: coverage is a tap of `falloff_lut`.
+const FALLOFF_CUSTOM: u32 = 10u;
 
 /// Bilinear sample of the stamp at `uv` in [0, 1]^2 (texel centres at
 /// (i + 0.5) / size), clamped to the edge. Manual: the stamp is bound
@@ -566,12 +571,19 @@ const WORKGROUP_SIZE: u32 = 64u;
 /// `smoothstep` so the `hardness == 1.0` (hard disc) case can't divide by
 /// zero. Ids are `paint::FALLOFF_*`; the CPU reference is
 /// `umber_brush::falloff::FalloffCurve::eval` (same operations, same
-/// order). Id 0 / unknown ids = the historical smoothstep.
+/// order). Id 0 / unknown ids = the historical smoothstep. Custom (10)
+/// taps the LUT at the truncated `u32(e * 255)`, clamped to the bound
+/// texture's width so the 1x1 fallback is never read out of bounds; the
+/// CPU mirror is `FalloffCurve::eval_with`.
 fn radial_falloff(t: f32, hardness: f32, curve: u32) -> f32 {
     let denom = max(1.0 - hardness, 1e-4);
     let e = clamp((t - hardness) / denom, 0.0, 1.0);
     let u = 1.0 - e;
     switch curve {
+        case 10u: {
+            let tap = min(u32(e * 255.0), textureDimensions(falloff_lut).x - 1u);
+            return textureLoad(falloff_lut, vec2<i32>(i32(tap), 0), 0).r;
+        }
         case 1u: { return u * u * u * (u * (u * 6.0 - 15.0) + 10.0); }
         case 2u: { return sqrt(max(2.0 * u - u * u, 0.0)); }
         case 3u: { return sqrt(u); }

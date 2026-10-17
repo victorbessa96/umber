@@ -482,6 +482,7 @@ brush =
     .falloff-linear = Linear
     .falloff-inverse-square = Quadrado inverso
     .falloff-constant = Constante
+    .falloff-custom = Personalizada
     .front-face-falloff = Atenuação de faces oblíquas
     .save-as-label = Salvar como
     .save-as-hint = Nome da nova predefinição

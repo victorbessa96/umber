@@ -463,6 +463,7 @@ brush =
     .falloff-linear = Linear
     .falloff-inverse-square = Inverse square
     .falloff-constant = Constant
+    .falloff-custom = Custom
     .front-face-falloff = Front-face falloff
     .save-as-label = Save as
     .save-as-hint = New preset name

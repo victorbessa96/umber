@@ -11,6 +11,7 @@
 //! paint-target texel grid (the app maps UV → texel before spacing);
 //! the adapter neither knows nor scales by texture size.
 
+use crate::preset::ControlCurve;
 use crate::{DabPlan, FalloffCurve};
 use serde::{Deserialize, Serialize};
 use umber_gpu::paint::Dab;
@@ -195,6 +196,12 @@ pub struct BrushParams {
     /// `.umberbrush` files loading unchanged.
     #[serde(default)]
     pub falloff: FalloffCurve,
+    /// The user-drawn curve [`FalloffCurve::Custom`] dabs follow (x = the
+    /// ring parameter `u`, 0 at the rim; see [`crate::falloff`]). Inert
+    /// unless `falloff` is `Custom`. `#[serde(default)]` = the identity
+    /// curve, so pre-Custom `.umberbrush` files load unchanged.
+    #[serde(default)]
+    pub falloff_custom: ControlCurve,
     /// Whether dabs use the session's bitmap stamp (C2-11) instead of the
     /// radial falloff. The stamp's pixels live in the paint session
     /// (`PaintState::set_stamp`), so the params stay `Copy`.
@@ -219,10 +226,24 @@ impl Default for BrushParams {
             pressure_gamma: 1.0,
             wash_mode: WashMode::BuildUp,
             falloff: FalloffCurve::Smooth,
+            falloff_custom: ControlCurve::identity(),
             stamped: false,
             stamp_angle: StampAngle::None,
             jitter: Jitter::default(),
         }
+    }
+}
+
+impl BrushParams {
+    /// The 256 LUT taps the paint session uploads
+    /// (`PaintCompositor::set_falloff_lut`) when these params paint with
+    /// [`FalloffCurve::Custom`], or `None` for every other curve (the LUT
+    /// is not read, so nothing needs uploading). A stamped Custom brush
+    /// still gets its LUT: the stamp ignores it, but a change-detected
+    /// upload must not miss the moment `stamped` is switched off.
+    pub fn falloff_lut(&self) -> Option<[f32; crate::falloff::CUSTOM_LUT_LEN]> {
+        (self.falloff == FalloffCurve::Custom)
+            .then(|| crate::falloff::custom_lut(&self.falloff_custom))
     }
 }
 
@@ -620,6 +641,73 @@ mod tests {
         assert!(text.contains(r#""falloff":"sharp""#), "{text}");
         let back: BrushParams = serde_json::from_str(&text).expect("round trip");
         assert_eq!(back, sharp);
+    }
+
+    fn zigzag() -> ControlCurve {
+        ControlCurve::try_new(&[(0.0, 0.0), (0.25, 0.8), (0.6, 0.3), (1.0, 1.0)]).expect("valid")
+    }
+
+    /// `"falloff":"custom"` round-trips, and params without
+    /// `falloff_custom` load with the identity curve.
+    #[test]
+    fn custom_falloff_round_trips_and_a_missing_curve_is_identity() {
+        let json = r#"{"color":[1.0,0.0,0.0,1.0],"alpha":0.5,"hardness":0.3,"pressure_gamma":1.0,"falloff":"custom"}"#;
+        let params: BrushParams = serde_json::from_str(json).expect("custom loads");
+        assert_eq!(params.falloff, FalloffCurve::Custom);
+        assert_eq!(params.falloff_custom, ControlCurve::identity());
+        let drawn = BrushParams {
+            falloff_custom: zigzag(),
+            ..params
+        };
+        let text = serde_json::to_string(&drawn).expect("serialize");
+        assert!(text.contains(r#""falloff":"custom""#), "{text}");
+        assert!(
+            text.contains(r#""falloff_custom":[[0.0,0.0],[0.25,0.8],[0.6,0.3],[1.0,1.0]]"#),
+            "{text}"
+        );
+        let back: BrushParams = serde_json::from_str(&text).expect("round trip");
+        assert_eq!(back, drawn);
+        // Custom dabs carry id 10 on both paths; the LUT is the curve's.
+        let stamps = [stamp([1.0, 1.0], 1.0)];
+        let build_up = DabAdapter::stamps_to_dabs(&stamps, 4.0, &drawn);
+        let wash = DabAdapter::stamps_to_dabs_wash(&stamps, 4.0, &drawn, 4.0);
+        assert_eq!(build_up[0].falloff(), umber_gpu::paint::FALLOFF_CUSTOM);
+        assert_eq!(wash[0].falloff(), umber_gpu::paint::FALLOFF_CUSTOM);
+        let want = crate::falloff::custom_lut(&zigzag());
+        assert_eq!(drawn.falloff_lut(), Some(want));
+    }
+
+    /// A drawn curve with a non-Custom falloff is inert: same dabs as
+    /// the identity curve, no LUT to upload. A stamped Custom brush keeps
+    /// its LUT (see [`BrushParams::falloff_lut`]) while its dabs carry the
+    /// stamp id.
+    #[test]
+    fn falloff_custom_without_custom_falloff_is_inert() {
+        let sharp = BrushParams {
+            falloff: FalloffCurve::Sharp,
+            ..BrushParams::default()
+        };
+        let drawn = BrushParams {
+            falloff_custom: zigzag(),
+            ..sharp
+        };
+        let stamps = [stamp([1.0, 1.0], 1.0), stamp([3.0, 1.0], 0.5)];
+        let a = DabAdapter::stamps_to_dabs(&stamps, 4.0, &sharp);
+        let b = DabAdapter::stamps_to_dabs(&stamps, 4.0, &drawn);
+        // Debug covers every field, the private padding slots included.
+        assert_eq!(format!("{a:?}"), format!("{b:?}"), "same dabs");
+        assert_eq!(a[0].falloff(), umber_gpu::paint::FALLOFF_SHARP);
+        assert_eq!(drawn.falloff_lut(), None);
+        assert_eq!(BrushParams::default().falloff_lut(), None);
+        let stamped = BrushParams {
+            falloff: FalloffCurve::Custom,
+            stamped: true,
+            ..drawn
+        };
+        let want = crate::falloff::custom_lut(&zigzag());
+        assert_eq!(stamped.falloff_lut(), Some(want));
+        let dabs = DabAdapter::stamps_to_dabs(&stamps, 4.0, &stamped);
+        assert_eq!(dabs[0].falloff(), umber_gpu::paint::FALLOFF_STAMP);
     }
 
     #[test]

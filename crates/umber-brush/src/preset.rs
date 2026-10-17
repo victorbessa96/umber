@@ -358,7 +358,11 @@ impl BrushPreset {
         if !self.spacing.dabs_per_radius.is_finite() || self.spacing.dabs_per_radius <= 0.0 {
             return Err(PresetError::InvalidParams);
         }
-        for curve in [&self.alpha_curve, &self.radius_curve] {
+        for curve in [
+            &self.alpha_curve,
+            &self.radius_curve,
+            &self.params.falloff_custom,
+        ] {
             let p = curve.points;
             if p.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
                 return Err(PresetError::NonFinite);
@@ -413,6 +417,13 @@ mod tests {
                 pressure_gamma: 2.2,
                 wash_mode: WashMode::Wash,
                 falloff: FalloffCurve::Sphere,
+                falloff_custom: ControlCurve::try_new(&[
+                    (0.0, 0.0),
+                    (0.4, 0.7),
+                    (0.8, 0.9),
+                    (1.0, 1.0),
+                ])
+                .expect("valid test curve"),
                 stamped: false,
                 stamp_angle: Default::default(),
                 jitter: Default::default(),
@@ -634,6 +645,40 @@ mod tests {
         let back = BrushPreset::from_json(&legacy).expect("missing falloff must default");
         assert_eq!(back.params.falloff, FalloffCurve::Smooth);
         back.validate().expect("legacy preset must validate");
+    }
+
+    /// A `.umberbrush` on the Custom falloff: the curve survives the file
+    /// round trip (the fixture carries a drawn curve under Sphere, where
+    /// it is inert but still saved), and a Custom file without the
+    /// `falloff_custom` key loads with the identity curve and validates.
+    #[test]
+    fn custom_falloff_files_round_trip_and_default_the_curve() {
+        let mut custom = non_default_preset();
+        custom.params.falloff = FalloffCurve::Custom;
+        let text = custom.to_json().expect("serialize");
+        assert!(text.contains(r#""falloff": "custom""#), "{text}");
+        assert_eq!(BrushPreset::from_json(&text).expect("round trip"), custom);
+
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let removed = value
+            .as_object_mut()
+            .expect("top-level object")
+            .get_mut("params")
+            .expect("params object")
+            .as_object_mut()
+            .expect("params is an object")
+            .remove("falloff_custom");
+        assert!(removed.is_some(), "the fixture writes the key");
+        let legacy = serde_json::to_string_pretty(&value).expect("re-serialize");
+        let back = BrushPreset::from_json(&legacy).expect("missing curve must default");
+        assert_eq!(back.params.falloff, FalloffCurve::Custom);
+        assert_eq!(back.params.falloff_custom, ControlCurve::identity());
+        back.validate().expect("defaulted custom preset validates");
+
+        // validate() re-checks the falloff curve like the pressure pair.
+        let mut bad = non_default_preset();
+        bad.params.falloff_custom.points[2].0 = 0.1;
+        assert_eq!(bad.validate(), Err(PresetError::NonMonotonicX));
     }
 
     #[test]
