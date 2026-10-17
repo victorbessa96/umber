@@ -17,8 +17,9 @@ pub mod thickness;
 pub mod transfer;
 
 pub use ao::{
-    bake_ao_tile, bake_tile_window, filter_mesh_for_tile, AoBakeError, AoBakeParams, AoWithBent,
-    BakeTarget, PlaneDesc,
+    bake_ao_and_bent_mesh_with_occluder, bake_ao_mesh_with_occluder, bake_ao_tile,
+    bake_tile_window, filter_mesh_for_tile, AoBakeError, AoBakeParams, AoWithBent, BakeTarget,
+    PlaneDesc,
 };
 pub use curvature::{CurvatureBakeError, CurvatureParams};
 pub use dilation::{DilateError, DilateParams};
@@ -30,7 +31,7 @@ pub use skew::{
     AutoRebake, BakeParam, AUTOREBAKE_DEBOUNCE, DEFAULT_SKEW_THRESHOLD_DEG, EDGE_SAFE_NEUTRAL,
     MAX_SKEW_THRESHOLD_DEG, MIN_SKEW_THRESHOLD_DEG,
 };
-pub use thickness::{ThicknessBakeError, ThicknessParams};
+pub use thickness::{bake_thickness_mesh_with_occluder, ThicknessBakeError, ThicknessParams};
 pub use transfer::{bake_transfer_mesh, TransferError, TransferMap, TransferParams};
 
 /// Which triangles occlude a bake's rays

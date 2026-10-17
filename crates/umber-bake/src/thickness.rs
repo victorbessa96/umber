@@ -221,11 +221,50 @@ pub fn bake_thickness_mesh(
     params: &ThicknessParams,
 ) -> Result<Vec<u8>, ThicknessBakeError> {
     profiling::scope!("bake_pass");
+    bake_thickness_with_occluder(device, queue, mesh, mesh, width, height, params)
+}
+
+/// [`bake_thickness_mesh`] with the raster/occluder split (per-set
+/// masked bakes §3): rays cast from `raster_mesh`'s surface texels and
+/// may hit `occluder_mesh`'s triangles. The single-mesh entry passes
+/// the same mesh twice — byte-identical to today's output.
+pub fn bake_thickness_mesh_with_occluder(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster_mesh: &MeshData,
+    occluder_mesh: &MeshData,
+    width: u32,
+    height: u32,
+    params: &ThicknessParams,
+) -> Result<Vec<u8>, ThicknessBakeError> {
+    profiling::scope!("bake_pass");
+    bake_thickness_with_occluder(
+        device,
+        queue,
+        raster_mesh,
+        occluder_mesh,
+        width,
+        height,
+        params,
+    )
+}
+
+/// The shared core behind both entries: `bake_thickness_mesh` with the
+/// occluder argument made explicit.
+fn bake_thickness_with_occluder(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster_mesh: &MeshData,
+    occluder_mesh: &MeshData,
+    width: u32,
+    height: u32,
+    params: &ThicknessParams,
+) -> Result<Vec<u8>, ThicknessBakeError> {
     validate(params, width, height)?;
 
-    let position_map = bake_position_and_normal(device, queue, mesh, width, height)?;
+    let position_map = bake_position_and_normal(device, queue, raster_mesh, width, height)?;
 
-    let triangles = build_triangles(mesh);
+    let triangles = build_triangles(occluder_mesh);
     let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("umber_bake_thickness_triangles"),
         contents: bytemuck::cast_slice(&triangles),

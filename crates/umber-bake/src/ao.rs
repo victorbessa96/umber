@@ -574,6 +574,54 @@ pub fn bake_ao_and_bent_mesh(
     bake_ao_mesh_inner(device, queue, mesh, width, height, params)
 }
 
+/// [`bake_ao_mesh`] with the raster/occluder split (per-set masked
+/// bakes §3): rays cast from `raster_mesh`'s surface texels and may hit
+/// `occluder_mesh`'s triangles. The single-mesh entries pass the same
+/// mesh twice — byte-identical to today's output.
+pub fn bake_ao_mesh_with_occluder(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster_mesh: &MeshData,
+    occluder_mesh: &MeshData,
+    width: u32,
+    height: u32,
+    params: &AoBakeParams,
+) -> Result<Vec<u8>, AoBakeError> {
+    profiling::scope!("bake_pass");
+    bake_ao_inner_with_occluder(
+        device,
+        queue,
+        raster_mesh,
+        occluder_mesh,
+        width,
+        height,
+        params,
+    )
+    .map(|both| both.ao)
+}
+
+/// [`bake_ao_and_bent_mesh`] with the raster/occluder split.
+pub fn bake_ao_and_bent_mesh_with_occluder(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster_mesh: &MeshData,
+    occluder_mesh: &MeshData,
+    width: u32,
+    height: u32,
+    params: &AoBakeParams,
+) -> Result<AoWithBent, AoBakeError> {
+    profiling::scope!("bake_pass");
+    bake_ao_inner_with_occluder(
+        device,
+        queue,
+        raster_mesh,
+        occluder_mesh,
+        width,
+        height,
+        params,
+    )
+}
+
 /// Integer UV offset of a UDIM tile: the same tens/ones split as the
 /// foundation (`tile = 1001 + u + 10 * v`, so `u = (tile - 1001) % 10`,
 /// `v = (tile - 1001) / 10`). Tile 1003 -> (2, 0); tile 1011 -> (0, 1).
@@ -706,13 +754,35 @@ fn bake_ao_mesh_inner(
     height: u32,
     params: &AoBakeParams,
 ) -> Result<AoWithBent, AoBakeError> {
+    bake_ao_inner_with_occluder(device, queue, mesh, mesh, width, height, params)
+}
+
+/// The raster/occluder split (per-set masked bakes §3, the design's
+/// named follow-up): the position map — which decides WHERE each texel
+/// casts from — comes from `raster_mesh` (the baked set's submesh),
+/// while the raycast triangles — what the rays may HIT — come from
+/// `occluder_mesh` (the whole mesh, or a narrowed
+/// [`crate::OccluderScope`]). `bake_ao_mesh` and `bake_ao_and_bent_mesh`
+/// pass the same mesh for both (today's byte-for-byte behavior).
+///
+/// An `occluder_mesh` with no triangles yields a fully-lit (all 0xFF)
+/// map: nothing occludes, the same as an empty scene.
+fn bake_ao_inner_with_occluder(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    raster_mesh: &MeshData,
+    occluder_mesh: &MeshData,
+    width: u32,
+    height: u32,
+    params: &AoBakeParams,
+) -> Result<AoWithBent, AoBakeError> {
     if params.rays == 0 {
         return Err(AoBakeError::InvalidRayCount);
     }
 
-    let position_map = bake_position_and_normal(device, queue, mesh, width, height)?;
+    let position_map = bake_position_and_normal(device, queue, raster_mesh, width, height)?;
 
-    let triangles = build_triangles(mesh);
+    let triangles = build_triangles(occluder_mesh);
     let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("umber_bake_ao_mesh_triangles"),
         contents: bytemuck::cast_slice(&triangles),
@@ -1317,6 +1387,82 @@ mod tests {
                 material_names: vec!["m".into()],
                 triangle_materials: Vec::new(),
             }
+        }
+
+        /// A ground quad spanning UV `[0,1]^2` at `y=0`, four verts, two
+        /// triangles — the raster mesh for the split tests.
+        fn ground_quad() -> MeshData {
+            MeshData {
+                positions: vec![
+                    [-30.0, 0.0, -30.0],
+                    [30.0, 0.0, -30.0],
+                    [30.0, 0.0, 30.0],
+                    [-30.0, 0.0, 30.0],
+                ],
+                normals: vec![[0.0, 1.0, 0.0]; 4],
+                uvs: vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material_names: vec!["ground".into()],
+                triangle_materials: Vec::new(),
+            }
+        }
+
+        /// Per-set masked bakes §3, the no-regression pin: the
+        /// `_with_occluder` entry passing the SAME mesh twice is
+        /// byte-identical to `bake_ao_mesh` (the single-mesh entries
+        /// delegate through the split, but pin it end to end).
+        #[test]
+        fn with_occluder_same_mesh_is_byte_identical() {
+            let Some((device, queue)) = try_request_device() else {
+                eprintln!("skipping: no wgpu adapter available");
+                return;
+            };
+            let params = AoBakeParams {
+                rays: 16,
+                max_distance: 15.0,
+                ..AoBakeParams::default()
+            };
+            let mesh = ground_quad();
+            let plain =
+                bake_ao_mesh(&device, &queue, &mesh, 64, 64, &params).expect("single-mesh bake");
+            let split = bake_ao_mesh_with_occluder(&device, &queue, &mesh, &mesh, 64, 64, &params)
+                .expect("split bake with same meshes");
+            assert_eq!(plain, split);
+        }
+
+        /// The split narrows for real: the same raster ground, but an
+        /// EMPTY occluder (no triangles) — the rays have nothing to
+        /// hit, so the map is fully lit (255) everywhere the raster
+        /// quad covers. `AoBakeError::EmptyMesh` never fires for the
+        /// occluder side: the raster mesh is what validates.
+        #[test]
+        fn with_occluder_empty_occluder_is_fully_lit() {
+            let Some((device, queue)) = try_request_device() else {
+                eprintln!("skipping: no wgpu adapter available");
+                return;
+            };
+            let params = AoBakeParams {
+                rays: 16,
+                max_distance: 15.0,
+                ..AoBakeParams::default()
+            };
+            let ground = ground_quad();
+            let empty = MeshData {
+                positions: Vec::new(),
+                normals: Vec::new(),
+                uvs: Vec::new(),
+                indices: Vec::new(),
+                material_names: Vec::new(),
+                triangle_materials: Vec::new(),
+            };
+            let baked =
+                bake_ao_mesh_with_occluder(&device, &queue, &ground, &empty, 64, 64, &params)
+                    .expect("empty-occluder bake");
+            assert!(
+                baked.iter().all(|&b| b == 255),
+                "empty occluder = fully lit, got {:?}",
+                baked.iter().copied().take(8).collect::<Vec<_>>()
+            );
         }
 
         /// The task's literal scenario: a large triangle floats above a
