@@ -571,7 +571,7 @@ mod row_label_tests {
             [
                 "Paint path",
                 "Edit path (captures clicks)",
-                "Strength",
+                "Strength (smudge)",
                 "Smear",
                 "Erase channels",
                 "Closed loop",
