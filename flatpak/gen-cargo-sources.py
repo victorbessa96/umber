@@ -12,7 +12,8 @@ Each registry package becomes:
       "archive-type": "tar-gzip",
       "url": "https://static.crates.io/crates/<name>/<name>-<version>.crate",
       "sha256": "<Cargo.lock checksum>",
-      "dest": "vendor" }
+      "dest": "vendor",
+      "strip-components": 0 }
 
 `archive-type` is declared explicitly: flatpak-builder infers the
 archive format from the URL suffix and `.crate` is not in its table —
@@ -131,6 +132,7 @@ def render() -> str:
                 "url": f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
                 "sha256": checksum,
                 "dest": "vendor",
+                "strip-components": 0,
             },
             indent=8,
         )
