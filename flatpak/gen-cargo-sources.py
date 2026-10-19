@@ -9,9 +9,17 @@ per registry crate into the `@@CARGO_SOURCES@@` slot, and writes
 Each registry package becomes:
 
     { "type": "archive",
+      "archive-type": "tar-gzip",
       "url": "https://static.crates.io/crates/<name>/<name>-<version>.crate",
       "sha256": "<Cargo.lock checksum>",
       "dest": "vendor" }
+
+`archive-type` is declared explicitly: flatpak-builder infers the
+archive format from the URL suffix and `.crate` is not in its table —
+the packaging dispatch 39263847856 died with `Unknown archive format`
+after the sha256 had already verified (the downloads were the real
+crate bytes, not a CDN transient). The official command reference
+lists `tar-gzip` among the accepted values for unguessable suffixes.
 
 flatpak-builder downloads the archives in its SOURCE phase (network
 allowed there), and the `.crate` gzipped tar's single root directory
@@ -119,6 +127,7 @@ def render() -> str:
         json.dumps(
             {
                 "type": "archive",
+                "archive-type": "tar-gzip",
                 "url": f"https://static.crates.io/crates/{name}/{name}-{version}.crate",
                 "sha256": checksum,
                 "dest": "vendor",

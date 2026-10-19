@@ -361,9 +361,18 @@ overwrite; tree_state now hashes dirty-file BYTES over the exact rsync
 surface) — harness-verified 3/3 + 5/5 + 10/10, production-proven on
 the clean run, documented as addenda 1+2 in the script's own report.
 Push `ff9ac02..0955ac8` (7 rows), CI 39263817670 GREEN both
-platforms; the packaging push-run GREEN 4m15s = the flatpak kill's
-verdict gate (the failed dispatch 39263847856 was a CDN transient —
-ab_glyph fetched as an error page — dispositioned). perf-nightly
+platforms. CORRECTION (flatpak-archive-type kill, same day): the
+earlier record here — "packaging push-run GREEN 4m15s = the flatpak
+kill's verdict gate (the failed dispatch 39263847856 was a CDN
+transient — ab_glyph fetched as an error page)" — was wrong on both
+halves. The push-run 39263817851 SKIPS the Flatpak job by trigger
+design (its green is lint+AppImage); the dispatch failed at
+EXTRACTION — "Unknown archive format of ab_glyph-0.2.32.crate" —
+AFTER the sha256 verified (the download was the real 20,967-byte
+crate). Real defect: flatpak-builder's archive-format guess from
+the URL suffix (.crate is not in its table); fix = archive-type:
+tar-gzip per source, landed in the flatpak-archive-type kill; the
+post-push packaging re-dispatch is the verdict gate. perf-nightly
 39263843229: BUILD GREEN (e0063 VERIFIED — the nightly's first full
 run since the reseed) but COMPARE RED on real numbers (viewport_mean
 x1.83, viewport_p95 x1.59, input_photon_p50 x2.32 vs the authentic

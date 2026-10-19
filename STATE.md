@@ -27,7 +27,12 @@ after ONE clippy fix-forward (viewport needless_option_as_deref);
 TWO recovery-script defects fixed live and harness-verified (the
 step-2 probe's self-match; the vacuous byte-blind verdict-reuse —
 addenda 1+2 in the script's report). The flatpak kill's verdict gate:
-packaging push-run GREEN. The perf-nightly's first full run since
+the packaging DISPATCH (39263847856 — red at archive-extraction,
+"Unknown archive format" on .crate AFTER sha256 verified; the
+push-run skips the Flatpak job by trigger design); fixed same-day by
+the flatpak-archive-type kill (archive-type: tar-gzip per source) —
+the post-push re-dispatch is the verdict gate. The perf-nightly's
+first full run since
 the reseed: BUILD green (e0063 verified) but COMPARE red on real
 numbers (viewport_mean x1.83) — the live-regression hunt is NAMED.
 
