@@ -37,8 +37,34 @@ RAM or IMC — the bank-14/UECC signature), not a software wedge. The
    `journalctl -k` = the same fault class coming back. One MCE +
    one freeze is a warning; two is a pattern.
 4. Kernel cmdline `nowatchdog`: consider dropping it so a hang at
-   least panics + reboots instead of sitting dead (it was added for
-   a reason — check what reason before removing).
+   least panics + reboots instead of sitting dead (it was added for a
+   reason — check what reason before removing).
+
+## The 2026-10-17 evening — three wedges in ~6 hours
+
+17:29 → ≤19:05 → 21:48-23:17 (all -03), each with the ARP-REACHABLE /
+ICMP-100%-loss / port-22-refused signature. wtmp on the dev machine
+pins the timeline: all six SSH pipes from .64 died simultaneously at
+17:29 (event A — a bare/half-configured gpu-bake run was 20 min in =
+deadlock-class prime suspect, 94469e8), host back 18:52-18:54,
+wedged again by 19:05 on an IDLE boot (event B — no battery running;
+leans the 10-16 UECC/MCE class), back at 21:48, wedged again by 23:17
+(event C). Two of three wedges hit idle boots — the hardware class,
+accelerating (one wedge on 10-16, three on 10-17). Full dossier +
+boot discriminators: vault projects/umber/2026-10-17-centralhost-freeze3-evidence.md.
+
+- memtest86+ at next physical access is CRITICAL — boot straight into
+  it, skip the OS (the OS will likely wedge before a battery finishes;
+  three dirty cuts in one evening each cost a journal replay).
+- Recovery guard: any post-recovery window may be minutes long — run
+  the stencil wave's runbook (.dragon/COORDINATION-stencil-wave.md)
+  in ONE continuous session, and run NO `--features gpu` verification
+  inside the window; wave-battery.sh's default legs have five rounds
+  of green history and this wave owes no gpu-suite run.
+- wave-battery.sh carries only the `--test-threads=1` half of the
+  verified GPU config; the `WGPU_BACKEND=vulkan` half and the
+  `--features gpu` leg itself are the 94469e8 standing tweak — a
+  post-recovery kill, now triply motivated.
 
 ## The 2026-10-15 outage
 

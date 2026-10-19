@@ -15,8 +15,9 @@
 
 Date: 2026-10-13 (wave-3 kill 3, doc-only kill per BINDING ruling 5 #3:
 "dynamic material layering (design-doc first, likely 2 kills)").
-Status: READY TO IMPLEMENT (r2; the two implementation kills derive from
-this doc).
+Status: LANDED (Kill A 2026-10-13, Kill B 2026-10-14 — both
+implementation kills derived from this doc and shipped; CLOSED
+2026-10-18 — read the dated closure at this doc's tail)
 Requirement: `docs/specs/requirements.md:46` —
 "Dynamic material layering (shader-declared sub-stacks) | P2 | 6+".
 
@@ -829,3 +830,55 @@ texel-exact per-size graph eval; the fill path's compound-on-open bug
   graph?)": no attribute; the `material_output` nodes ARE the
   declaration (§1.2). r1's `out:<channel>` node-name convention is
   withdrawn (review #5).
+
+---
+
+## Closure (2026-10-18 — the design-review kill, verified against the live tree)
+
+This doc's two implementation kills both shipped the day after it
+was written, and the doc never got its status line back. The closure
+record, every symbol grep-verified against the tree on 2026-10-18:
+
+**Kill A — model + eval + persistence (2026-10-13,
+`2026-10-13-dynmat-kill-a.md`):** `LayerKind::Material`,
+`MaterialParams` / `MaterialParamOverride` / the channel + value
+types, `Layer::material`, `LayerCommand::SetMaterial` + the
+`check_paintable` arm and `memory_bytes` honesty all live in
+`umber-core/src/layers.rs`; `JournalOp::SetMaterial` in `journal.rs`;
+`material_defs_mtlx` carry in `project.rs`; the `material_output`
+declared nodedef + `register_material_nodes` + the public
+`full_registry()` in `umber-graph` (`mtlx.rs`/`material.rs`/`lib.rs`).
+
+**Kill B — the shell wiring (2026-10-14,
+`2026-10-14-dynmat-kill-b.md`):** the document's `match layer.kind`
+arm + `tr("layers.kind-material")` (en-US.ftl:539, pt-BR both),
+`HistoryKind::SetMaterial` + its `label()` arm
+(`history.op-set-material`, en-US.ftl:634), `graph_panel`'s
+`full_registry` delegation, `material_layer.rs` (the
+`MaterialLayerStates` composite + resampler — consumed by today's
+kittests through `umber_app::material_layer`), and the Layers
+panel's `material_section` rows under `layers_ui`.
+
+**Still true, by design (not staleness):** v1 has NO per-layer param
+editor (§5's cut — overrides are written by the wire and carried;
+the editor remains the named follow-up, blocked on new i18n keys
+while the catalogs sit under the stencil lock, not on this doc); the
+per-channel config checks (Uniform on `normal` only, Passthrough
+publishes nothing) hold in `material_layer`; malformed material rows
+render the error badge through the never-crash path.
+
+**Anchor drift, positional only:** the "What umber already has"
+anchors cite pre-extraction paths (`umber-app/src/paint_state.rs`,
+now `umber-paint/src/paint_state.rs`) and pre-wave line numbers; the
+facts they name are unchanged — including the doc's own Kill-A
+placement of `material_layer.rs` "in umber-app": the extraction moved
+it to `umber-paint/src/material_layer.rs` and umber-app re-exports it
+(`pub use umber_paint::material_layer;`, umber-app lib.rs:73), so the
+`umber_app::material_layer` path this doc and its consumers cite
+still resolves. No § of this doc was falsified by either kill's
+implementation; the reconciling deviations (if any) live in the two
+kill reports, which remain the authoritative implementation record.
+
+This doc's residual authority: the §5–§6 split's rationale, the
+non-goals that bound v1, and the cut-list the per-layer param editor
+will re-open.

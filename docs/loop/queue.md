@@ -339,3 +339,98 @@ baseline), and the partner-gated release lane.
   `bash scripts/recovery-close.sh` (the executable runbook above).
 - The commit manifest's durable home: `.dragon/wgui2-commit-manifest.txt`
   (the scratch copy is the fallback).
+
+## Stencil wave + freeze-3 outage (2026-10-18 ~02:00 — CURRENT, supersedes the sections above for recovery)
+
+**Read this before any recovery action.** The "Host diagnosis" section
+and its `recovery-close.sh` instruction above belong to the 10-16
+outage and are SUPERSEDED — do NOT fire recovery-close.sh for the
+current wave (it interpolates W-GUI-2's manifest and strings; the
+current wave closes by the manual sequence below).
+
+Host state: wedged since ~21:48 10-17 (event C — the third wedge of
+10-17; dossier: vault `projects/umber/2026-10-17-centralhost-freeze3-evidence.md`,
+entry in docs/loop/build-host.md). ARP REACHABLE, ICMP 100% loss,
+port 22 dead. Needs Bessa's power-cycle. **Recommendation for Bessa:
+boot straight into memtest86+ at next power-on, skip the OS** — two
+of the three 10-17 wedges hit idle boots within minutes; the memtest
+debt is now critical. If booting the OS instead to unblock the wave:
+the alive window may be MINUTES — execute the recovery in ONE
+continuous session, and run NO `--features gpu` verification inside
+it (the wgpu deadlock class, 94469e8, is the one wedge cause under
+our control; the default-leg battery is the green-history path).
+
+### Parked kills awaiting the host (dated table)
+
+| Kill | Files | Author | Verification class |
+|---|---|---|---|
+| stencil-core | NEW umber-core/src/stencil.rs + lib.rs mod | claw kill, cross-reviewed 5e730b4 | math PORT-VERIFIED (5 contract cases, 3 mutations caught); serde caveat resolved host-free (workspace derive, root Cargo.toml:52); tests UNRUN |
+| stencil-app | NEW umber-app/src/stencil.rs + main.rs wiring + display_panel.rs surface | claw kill, cross-reviewed 5e730b4 | claim-chain verified line-anchored; honest design-gap seam + pending notice; 12 i18n keys landed both locales (cae97d4/7f1aa5a, CI green); tests UNRUN |
+| stencil-viewport | viewport.rs quad math + eyedropper/id-mask gating | claw kill, cross-reviewed 5e730b4 | quad math + blast radius verified; tests UNRUN |
+| e0063-refscene | umber-gpu/src/ref_scene.rs (4-line triangle_materials default) | sibling e78fd809 (10-18 ~01:5x) | 5-check gate green host-free (brace census, rustfmt, trap greps, doc-attach, lock audit); tests UNRUN |
+| stencil-recovery-close | scripts/stencil-wave-close.sh (the runbook, executable — one-command recovery: claim interlock, both-manifest full verify, hardened rsync, default-leg battery with sentinel poll, e0063 own-row + wave commits, ONE push, ci-watch, perf-nightly re-dispatch) | sibling d9bc9a66 (10-18 ~14:00) | dry-run ×2 byte-identical host-free (18/18 manifest rows verified live by the script's own verifier, push gate, claim-grep 3/3 unit cases); the real run is host-gated by design |
+| agent-brush-radius | umber-paint/src/paint_state.rs (`set_brush_radius_texels` seam) + umber-cli/src/agent.rs (`paint_stroke.radius`) + tests/agent_paint_ops.rs | sibling local-d3deea (10-18 ~13:3x, wakeup #1; the paint-ops design doc's named follow-up) | rustfmt clean 3/3, verify-kill 3/3 PASS, interface census done; tests UNRUN (GPU legs at battery) |
+| agent-export-naming | umber-cli/src/main.rs (`ExportAsk.set_override`) + tests/agent_export_naming.rs (the first CLI export integration test); agent.rs rides the agent-brush-radius row | sibling local-d3deea (10-18 ~13:5x, wakeup #1; the module docs' named deferral — export unified to bake's active-set rule) | rustfmt clean, verify-kill 3/3 PASS, both ExportAsk constructors compiler-enforced; tests UNRUN (GPU legs at battery) |
+| stamp-preset-persist | umber-app/src/brush_panel.rs (picked-stamp retention + `<stem>.stamp.png` sidecar on Save/Save As + 2 tests) | sibling local-d3deea (10-18 ~14:4x, wakeup #2; C2-11's open tail — the save half of the .abr sidecar convention) | rustfmt clean, verify-kill PASS, coverage pin corrected by the python port (9, not 10); tests UNRUN (pure fs, at battery) |
+| flatpak-offline-deps | flatpak/{org.umber.Umber.json (GENERATED, 621 crate sources) + .json.in template + gen-cargo-sources.py + vendor-checksums.py} + packaging.yml drift gate | sibling local-d3deea (10-18 ~15:2x, wakeup #3; CI run 38883955783's red root-caused live — the sandbox has no DNS) | json.tool VALID, generator --check idempotent, 621↔621 lock cross-check verbatim, the `.crate`-URL + checksum contract verified against the LIVE CDN; the real gate = the packaging workflow re-dispatch post-recovery |
+| kittest-layers-breadth | umber-app/tests/panel_kittest.rs (3 kittests + shared closure: ⧉ duplicate, selection-gated properties rows, blend combo + one-undo) | sibling local-d3deea (10-18 ~15:5x, wakeup #4; C2-28's named follow-up) | rustfmt clean, verify-kill PASS, all 4 i18n keys verified present in BOTH catalogs (group+.attr); kittest legs UNRUN (at battery) |
+| pcpool-design-review | docs/specs/per-channel-tile-pool-design.md (status DRAFT→LANDED/CLOSED + the verified-truth closure tail) + the closure kill report | sibling local-d3deea (10-18 ~17:5x, Bessa live-steer pass; the doc was stale-DRAFT — the implementation landed 10-12 and the tree evolved a generation past it) | 21/21 closure-claims census vs the live tree (all anchors grep-verified: TileTargets, the viewport seam, the migration test, successors); doc-only — NO battery legs |
+| dynmat-design-closure | docs/specs/dynamic-materials-design.md (status READY-TO-IMPLEMENT→LANDED/CLOSED + the verified-truth tail incl. the material_layer move + re-export) + the closure kill report | sibling local-d3deea (10-18 ~17:5x, same closure pattern; Kill A 10-13 + Kill B 10-14 both landed — every symbol grep-verified live) | 23/23 closure-claims census vs the live tree (Kill A/B symbols, both catalogs' keys, the landing reports, the umber-paint move + umber-app re-export); doc-only — NO battery legs |
+| per-set-stacks-closure | docs/specs/per-set-stacks-design.md (status DRAFT→LANDED/CLOSED + the verified-truth tail: both hazards resolved as designed, the reconciling set_layers rename cited to its report) + the closure kill report | sibling local-d3deea (10-18 ~19:2x, Bessa live-steer pass 2; all four C2-9 stages + two follow-ups landed 10-15 — seven reports) | census vs the live tree (from_parts/next_id, set_layers + set_of_tile + the union census, activate_set/active_set, the seven reports); doc-only — NO battery legs |
+| masked-bakes-ray-half | bakes_panel.rs + bake_sources.rs (the ray half BUILT: 2 with_occluder helpers, 3 mapped arms + margins, the (u16,bool) tile-seams key, bake_extra_map's occluder param, the GPU cross-material occlusion pin + control) + the brief + the built report | sibling local-d3deea (10-18 ~19:5x, Bessa steer pass 3 — the brief AND its build in one evening; unmapped meshes keep byte-for-byte output) | rustfmt clean both, verify-kill both PASS, every signature matched live (incl. the &self submesh_for_material fix); the new GPU test + the full suite run at the battery (umber-app + umber-bake) |
+| falloff-design-closure | docs/specs/falloff-custom-design.md (status DRAFT-panel-round→LANDED/CLOSED + the verified-truth tail: engine + panel both in the tree, 3 open questions resolved, the serde VERIFY answered) + the closure kill report | sibling local-d3deea (10-18 ~20:5x, Bessa steer pass 4; the fourth stale-design closure — the ENTIRE design was live: LUT binding 5, id 10, the in-place CurveEdit row, the catalog key, every planned test) | census vs the live tree (set_falloff_lut, the WGSL binding + case-10, the variant + eval arm, the panel Custom branch, the key); doc-only — NO battery legs |
+
+Static state of the parked bytes (verified 10-17 23:3x, re-verified
+01:5x): `cargo fmt --all --check` CLEAN on the exact parked bytes;
+i18n 735 keys per catalog, en==pt pair complete, all 168 referenced
+code keys present both locales; `mod stencil` registered in both
+crates; zero byte drift vs the 20:46 cross-review. Remaining
+unknowns: compile + suites ONLY.
+
+Manifests (sha-pinned, re-verify before rsync — mismatch = drift):
+`.dragon/stencil-wave-recovery-manifest.txt` (16 pins, twice-verified),
+`.dragon/e0063-refscene-manifest.txt` (refscene kill). Locks live:
+stencil-core, stencil-app, stencil-viewport, e0063-refscene,
+agent-brush-radius, agent-export-naming, stamp-preset-persist,
+flatpak-offline-deps, kittest-layers-breadth,
+pcpool-design-review, dynmat-design-closure,
+per-set-stacks-closure, masked-bakes-ray-half,
+falloff-design-closure —
+release at the wave commit (agent-brush-radius + agent-export-naming
+are ONE combined commit row — agent.rs carries both kills' hunks;
+manifests: `.dragon/agent-brush-radius-manifest.txt`,
+`.dragon/agent-export-naming-manifest.txt`,
+`.dragon/stamp-preset-persist-manifest.txt`,
+`.dragon/flatpak-offline-deps-manifest.txt`,
+`.dragon/kittest-layers-breadth-manifest.txt`,
+`.dragon/pcpool-design-review-manifest.txt`). Full
+coordination map + watcher state:
+`.dragon/COORDINATION-stencil-wave.md` (the loop sessions' channel).
+
+### Recovery runbook (stencil wave — full detail in the coordination note)
+
+**Executable form (2026-10-18 ~14:00): `nohup bash scripts/stencil-wave-close.sh > /tmp/stencil-close.log 2>&1 &`**
+— encodes steps 1-6 below (claim interlock on the note, both-manifest
+full verify, hardened rsync — adds W-GUI-2's /.git/ /.dragon/
+/Cargo.lock exclusions, host-side .git stays behind, default-leg
+battery with a bounded BATTERY_EXIT poll + a tree-state sentinel so a
+finished verdict is reused but a fix-forward forces a fresh battery,
+e0063 own-row commit then the wave commit-by-manifest, ONE push,
+ci-watch, perf-nightly re-dispatch). Step 7 (the docs pass) stays
+manual post-CI-green. Dry-run verified host-free: ×2 byte-identical,
+18/18 manifest rows clean, claim-grep 3/3. Battery scope = umber-app
+umber-core umber-gpu; the agent-rows' crates (umber-paint, umber-cli)
+extend CRATES when those kills pin + announce.
+
+1. Claim first: append "RECOVERY CLAIMED by <session>" to
+   `.dragon/COORDINATION-stencil-wave.md`, then execute 2-7 without pause.
+2. Host pre-flight: reflog -5, pgrep -af cargo, porcelain count — stand
+   down if a sibling is mid-recovery.
+3. Verify manifest hashes (both manifests).
+4. rsync -az --delete --exclude=/target/ → host.
+5. Gate 1: scripts/wave-battery.sh on the host (default features only).
+6. Gate 2: commit-by-path per manifest labels (code kills + wave docs +
+   the docs ticks this section owes), release the four locks, ONE push,
+   scripts/ci-watch.sh.
+7. Green → wave closed; docs pass deletes the consumed coordination
+   notes and manifests, ticks this section, STATE.md, CHANGELOG.md.

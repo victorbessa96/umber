@@ -162,6 +162,7 @@ use umber_paint::snapshot::build_composite_snapshot;
 mod size_presets;
 mod spp_import;
 mod status_bar;
+mod stencil;
 mod stylus_input;
 mod thumbnails;
 mod tile_selection;
@@ -439,6 +440,8 @@ struct PanelViewer<'a> {
     import_badges: &'a std::collections::HashMap<u64, String>,
     /// Dormant fill/material layers (§6.3): layer ids.
     dormant: &'a std::collections::HashSet<u64>,
+    /// The session stencil (the Display panel's stencil section edits it).
+    stencil: &'a mut stencil::StencilState,
 }
 
 impl TabViewer for PanelViewer<'_> {
@@ -1169,6 +1172,10 @@ impl TabViewer for PanelViewer<'_> {
                     ui.separator();
                     display_panel::hdr_row(ui, self.hdr_mode, &self.gpu.hdr_probe);
                     ui.separator();
+                    // The stencil section: loads, toggles, Resets and
+                    // re-stages the gate (the upload seam — `stencil`).
+                    stencil::panel_section(ui, self.stencil, self.paint.as_deref());
+                    ui.separator();
                     // The view mode decides whether an active chain is
                     // live or bypassed (data modes) — the status line.
                     let mode = self.viewport.view_mode();
@@ -1286,6 +1293,10 @@ pub struct AppState {
     pub postfx: umber_gpu::postfx::PostChain,
     /// The postfx section's UI state (never serialized).
     pub postfx_panel: postfx_panel::PostFxPanel,
+    /// The session stencil (stencil-engine design step 2): image,
+    /// transform, gating flag, overlay opacity and the staged gate.
+    /// Session state, never serialized.
+    pub stencil: stencil::StencilState,
     /// Mesh-map import by naming convention (§7 P1 row): the folder-scan
     /// routing + unmatched report + session texture set (channels ensured
     /// on apply). Owns the session set so imported user channels survive
@@ -4074,6 +4085,7 @@ impl eframe::App for UmberApp {
                     fill_badges: &self.state.fill_badges,
                     import_badges: &self.state.import_badges,
                     dormant: &self.state.dormant,
+                    stencil: &mut self.state.stencil,
                     store: store.as_ref(),
                     hdr_mode: &mut self.hdr_mode,
                     stylus_pressure,

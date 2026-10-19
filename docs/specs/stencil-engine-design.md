@@ -137,3 +137,64 @@ write_mask_region-shaped gate
 3. The viewport overlay + chords + popover row — battery
    umber-app (+ the kittest).
 4. Docs tick (gui-plan g6 row, ROADMAP wave-stencil, queue).
+
+## Amendment A (2026-10-18 — the paint hook: the wiring bullet corrected)
+
+The "The paint-path wiring" bullet above is WRONG about the
+mechanism, and this amendment records the verified truth (the
+stencil-app kill's cross-reviewed headline, commit 5e730b4; every
+anchor below re-verified against the tree):
+
+1. The shell CANNOT hand composed bytes to
+   `write_mask_region`: every link in that chain is private to
+   umber-paint — `stroke_mask_gate` is armed only by the quick mask
+   or the cavity (paint_state.rs:1714), `sync_mask_tile` →
+   `publish_mask` → `gate_bytes` → `gate_plane` are all private
+   (:5218, :5240, :5197, :5171), and the only byte-taking pub,
+   `publish_layer_mask` (:2243), is the LAYER-mask lane. Even with a
+   lane, two breaks remain: with the quick mask off, nothing arms
+   `stroke_mask_gate`, and every resync or incremental stamp
+   (`mask_event`, :5074) would overwrite shell-written bytes with
+   `gate_plane`'s quick-mask-only product.
+2. The composition lives INSIDE `gate_plane`, the way the cavity
+   plane folds in (:5183-5191): a pub
+   `PaintState::set_stencil_gate(Option<(u32, u32, Vec<u8>)>)`,
+   following the `set_cavity_mask` precedent (:5103) — refused
+   mid-stroke (one stroke never changes its gate partway), a
+   same-value re-set is a no-op, and adoption clears `mask_synced`
+   (the `rebuild_cavity_coverage` precedent, :5165 — the next gated
+   dab re-uploads).
+3. The bytes are the stencil's RAW R8 coverage (0 = blocked,
+   255 = passes) at the tile's quick-mask plane size — NOT
+   pre-composed with the quick mask. `gate_plane` folds them in as
+   f32 (byte / 255.0) after the cavity block, consistent with its
+   existing quick × cavity product. The shell-side `compose_gate`
+   min stays the STAGED LABEL's contract only (the app report's
+   judgment call 7).
+4. Dimension match is the per-set scope: `gate_plane` composes only
+   for the tile whose quick-mask dims equal the gate's (w, h) — the
+   gate stages at the ACTIVE tile's plane (judgment call 8);
+   other-sized tiles pass through stencil-ungated until the shell
+   re-stages on active-tile change. Malformed bytes (zero side,
+   len != w*h) are refused AT the setter, fail-closed (judgment
+   call 12).
+5. `stroke_mask_gate` arms with `|| stencil_gates()` at :1714.
+6. Cost class unchanged: staged once per stencil change on the UI
+   thread, never per frame (judgment call 17); the hook inherits
+   the change-driven contract.
+
+## Amendment B (2026-10-18 — soft edges: Open question 3 answered)
+
+v1 ships binary (alpha >= 0.5 → 255 else 0). Soft edges are a
+RASTERIZE-ONLY change: `rasterize_gate` carries the bilinear
+coverage byte (0-255) instead of the threshold. The gate then
+composes correctly at BOTH sites, and the divergence between them is
+the contract, named here so the soft-edges kill does not re-litigate
+it: the SHELL-side staged-label compose is min (the app report's
+judgment call 6, pinned by test 3's soft case — min over bitwise &
+is what keeps partial coverage honest there), while `gate_plane`'s
+internal fold of the three planes is PRODUCT (the quick × cavity
+precedent :5171-5179) — identical for binary v1 bytes, and for soft
+values the hook consumes RAW stencil bytes so the product fold is
+the one in force at paint time. Both choices keep their existing
+tests green; neither site changes when soft edges land.

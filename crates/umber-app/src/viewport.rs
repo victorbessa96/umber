@@ -94,8 +94,77 @@
 //! - Channel readout: the soloed channel / mesh map's name
 //!   ([`readout_text`], the display-mode keys' own toast text) at the
 //!   viewport's top-left while a solo mode is active.
+//!
+//! # The stencil overlay + chords (wave-stencil step 3, g6-stencil-overlay)
+//!
+//! docs/specs/stencil-engine-design.md "What the user sees" + "The
+//! chords". The shell hands its [`crate::stencil::StencilState`] in
+//! through [`ViewportExtras`] ([`Viewport::ui_with_stencil`]); `None`
+//! (every [`Viewport::ui_with_home`] call) draws and gates nothing.
+//! Judgment calls, all v1:
+//!
+//! - **The transform's space is VIEWPORT-LOCAL px** (origin at the
+//!   viewport rect's top-left): the design's "center (screen px)" and
+//!   `fit_to_viewport`'s `[w/2, h/2]` center. The pointer converts with
+//!   `pos - rect.min` before any math against `center`. Step 2's
+//!   `StencilState` docs say "target texel space" and its Display-panel
+//!   Reset fits to the quick-mask plane size; that Reset and the gate's
+//!   target-texel rasterize are the named handoffs (the screen -> UV
+//!   projection belongs to the paint-hook kill).
+//! - **The quad is a textured `egui::epaint::Mesh`** (4 vertices, 2
+//!   triangles): the corners come from [`screen_quad`], which is
+//!   `umber_core::stencil::forward_map` at the image's four corners — the
+//!   gate's own map, never re-derived. The texture follows uv_view.rs's
+//!   quick-mask overlay (`mask_overlay_texture`): cached and keyed, built
+//!   point-sampled at most [`STENCIL_OVERLAY_MAX_SIDE`] per side, and
+//!   uploaded with `TextureOptions::NEAREST`. Nearest, not bilinear: the
+//!   gate is binary, so the preview's hard edges are the truth. It is
+//!   tinted [`STENCIL_TINT`] (the image keeps coverage only, no RGB),
+//!   drawn at `overlay_opacity`, with an outline in the full tint so a
+//!   faint stencil's bounds still show.
+//! - **Draw order**: after the mesh, the seams, the wireframe and the cage
+//!   (the overlays family's slot), before the line preview, the gizmo and
+//!   the brush cursor, so the tools' own marks stay on top. It is hidden
+//!   while the stencil is inactive (the design: N hides it), without a
+//!   mesh, and at opacity 0.
+//! - **The chords** (S held, no Ctrl/Alt; Shift is free for the snap):
+//!   S+LMB rotates around the center, S+RMB scales, S+MMB moves. A drag
+//!   latches its chord and the transform at its PRESS
+//!   (`pointer.press_origin()`, graph_canvas.rs's precedent).
+//!   [`stencil_drag`] always maps from that snapshot, so frames never
+//!   compound. Releasing S mid-drag keeps the gesture, and pressing S
+//!   mid-orbit doesn't take it over. While a chord is latched, or S is
+//!   armed on a click, the gizmo, eyedropper, ID mask, straight line,
+//!   brush resize, painting and navigation all stand down.
+//! - **Rotate**: the arc's angle change around the center (`atan2`; on
+//!   the y-down screen that is clockwise-positive, the core's own sign).
+//!   Shift snaps the RESULT to quarter turns (the straight line's
+//!   round-to-step idiom, [`straight_line_end`]). The result wraps into
+//!   `(-π, π]`. A pointer within [`STENCIL_MIN_ARM_PX`] of the center
+//!   holds the rotation (the angle is undefined there).
+//! - **Scale**: the image's on-screen half-width grows by the drag's
+//!   horizontal delta (`scale + dx / (image_w / 2)`), so a drag from the
+//!   unrotated image's right edge keeps that edge under the pointer.
+//!   Vertical motion is ignored; the result is clamped to at least
+//!   [`MIN_STENCIL_SCALE`].
+//! - **Move**: the center follows the pointer delta, clamped into the
+//!   viewport so a stencil can't be flung out of reach.
+//! - **The gate re-stages ONCE, on release** (and on a popover toggle,
+//!   Reset or load), never per drag frame: step 2's judgment call 17 puts
+//!   a 4K rasterize at ~16M samples.
+//! - **The Overlays popover hosts step 2's rows**
+//!   (`display_panel::stencil_rows`) with THIS viewport's rect as the
+//!   fit view, so the popover's Reset and the load-time fit land on
+//!   screen. It mirrors `stencil::panel_section`'s adapter rather than
+//!   calling it, because that fn fits to the target size (stencil.rs is
+//!   lock-held).
+//! - **N is not wired here**: W/G (the overlays family) are shell-owned
+//!   registry rows (actions.rs `BINDINGS`), so N's toggle is the shell's
+//!   handoff (a `ShellAction` row; P-in-viewport is the alternative
+//!   precedent).
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
+use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
 use umber_gpu::postfx::PostChain;
 use umber_gpu::renderer::PaintParams;
 use umber_gpu::{
@@ -105,6 +174,8 @@ use umber_gpu::{
 use umber_mesh::tile_of_uv;
 
 use crate::i18n::tr;
+use crate::paint_state::PaintState;
+use crate::stencil::{quick_mask_gate_bytes, StencilState};
 
 /// Background shown when there is no mesh loaded (and behind the mesh
 /// otherwise, since the shared egui render pass has no clear op of its
@@ -248,7 +319,85 @@ pub struct Viewport {
     /// The loaded mesh's UV-seam segments, built on the first frame the
     /// seam overlay shows and dropped on every `load_mesh`.
     seam_cache: Option<Vec<SeamSegment>>,
+    /// An S-chord stencil drag in flight (latched at its press; see the
+    /// module docs' stencil section).
+    stencil_drag: Option<StencilDrag>,
+    /// The stencil overlay's texture and the image it was built from.
+    stencil_texture: Option<(StencilTextureKey, egui::TextureHandle)>,
 }
+
+/// The shell state the viewport reads beyond the GPU / paint inputs (one
+/// struct so [`Viewport::ui_with_stencil`] stays within clippy's argument
+/// count).
+pub struct ViewportExtras<'a> {
+    /// The home card's input (see [`Viewport::ui_with_home`]).
+    pub home: Option<crate::empty_state::HomeCardInput<'a>>,
+    /// The session's stencil: drawn, chord-edited and hosted in the
+    /// Overlays popover. `None` = no stencil at all.
+    pub stencil: Option<&'a mut StencilState>,
+}
+
+/// Which transform an S-chord drag edits (g6-stencil-overlay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StencilChord {
+    /// S+LMB: turn around the center; `snap` (Shift) rounds the result
+    /// to quarter turns.
+    Rotate {
+        /// Shift held this frame.
+        snap: bool,
+    },
+    /// S+RMB: uniform scale from the horizontal delta.
+    Scale,
+    /// S+MMB: move the center.
+    Move,
+}
+
+impl StencilChord {
+    /// The chord an S-held drag with `button` runs (Rotate unsnapped;
+    /// the snap is read live each frame).
+    pub fn for_button(button: PointerButton) -> Option<Self> {
+        match button {
+            PointerButton::Primary => Some(Self::Rotate { snap: false }),
+            PointerButton::Secondary => Some(Self::Scale),
+            PointerButton::Middle => Some(Self::Move),
+            _ => None,
+        }
+    }
+
+    /// The button that keeps this chord's drag alive.
+    fn button(self) -> PointerButton {
+        match self {
+            Self::Rotate { .. } => PointerButton::Primary,
+            Self::Scale => PointerButton::Secondary,
+            Self::Move => PointerButton::Middle,
+        }
+    }
+
+    /// This chord with Rotate's snap set to `snap` (the others ignore it).
+    fn with_snap(self, snap: bool) -> Self {
+        match self {
+            Self::Rotate { .. } => Self::Rotate { snap },
+            other => other,
+        }
+    }
+}
+
+/// An S-chord drag in flight: everything it maps from, fixed at the
+/// press, so a frame never compounds on the last one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StencilDrag {
+    chord: StencilChord,
+    /// The stencil's transform at the press.
+    start: StencilTransform,
+    /// The press, viewport-local px.
+    origin: [f32; 2],
+}
+
+/// Identifies the image a stencil texture was built from: the coverage
+/// buffer's address and length plus the dims. `StencilState::adopt`
+/// decodes the new image while the old one is still held, so a reload
+/// always arrives at a fresh address.
+type StencilTextureKey = (usize, usize, u32, u32);
 
 impl Viewport {
     /// Uploads `mesh` to the GPU and re-frames the camera on its bounds,
@@ -413,18 +562,52 @@ impl Viewport {
         &mut self,
         ui: &mut Ui,
         gpu: &GpuContext,
-        mut paint: Option<&mut crate::paint_state::PaintState>,
+        paint: Option<&mut crate::paint_state::PaintState>,
         stylus_pressure: Option<f32>,
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
         home: Option<crate::empty_state::HomeCardInput<'_>>,
     ) -> Option<ViewportClick> {
+        let extras = ViewportExtras {
+            home,
+            stencil: None,
+        };
+        self.ui_with_stencil(ui, gpu, paint, stylus_pressure, display_lut, postfx, extras)
+    }
+
+    /// [`Self::ui_with_home`] plus the session's stencil
+    /// (`extras.stencil`; see the module docs' stencil section): the
+    /// overlay quad draws, the S chords edit its transform (re-staging
+    /// the gate on release), and the Overlays popover hosts its rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ui_with_stencil(
+        &mut self,
+        ui: &mut Ui,
+        gpu: &GpuContext,
+        mut paint: Option<&mut crate::paint_state::PaintState>,
+        stylus_pressure: Option<f32>,
+        display_lut: Option<&DisplayLut>,
+        postfx: &PostChain,
+        extras: ViewportExtras<'_>,
+    ) -> Option<ViewportClick> {
+        let ViewportExtras { home, mut stencil } = extras;
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
         }
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         self.gizmo_clicked = false;
+
+        // The stencil chords (S + LMB / RMB / MMB, the module docs): run
+        // before every other click/drag consumer, which all stand down
+        // while the chord owns the pointer.
+        let stencil_owns = self.stencil_input(
+            ui,
+            &response,
+            rect,
+            stencil.as_deref_mut(),
+            paint.as_deref(),
+        );
 
         // The axis gizmo (GUI plan G1): a primary click on a tip snaps the
         // view down that axis (again: the opposite side). It takes the
@@ -440,7 +623,11 @@ impl Viewport {
                 .hover_pos()
                 .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre))
         });
-        if self.mesh.is_some() && self.show_gizmo && response.clicked_by(PointerButton::Primary) {
+        if self.mesh.is_some()
+            && self.show_gizmo
+            && !stencil_owns
+            && response.clicked_by(PointerButton::Primary)
+        {
             if let Some(axis) = response
                 .interact_pointer_pos()
                 .and_then(|p| crate::axis_gizmo::hit(&gizmo_tips, p - gizmo_centre))
@@ -459,7 +646,11 @@ impl Viewport {
         // texel at the picked UV. Returns the sRGBA sample for the shell to
         // feed the brush; painting is disabled while the eyedropper is the
         // active tool (it never strokes).
-        if self.pick_armed && !self.gizmo_clicked && response.clicked_by(PointerButton::Primary) {
+        if self.pick_armed
+            && !self.gizmo_clicked
+            && !stencil_owns
+            && response.clicked_by(PointerButton::Primary)
+        {
             if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
@@ -496,7 +687,11 @@ impl Viewport {
         // mesh UV. The shell bakes the region IDs and selects through the
         // paint session; painting is disabled while armed (it never
         // strokes). A miss falls through to orbit, like the eyedropper.
-        if self.idmask_armed && !self.gizmo_clicked && response.clicked_by(PointerButton::Primary) {
+        if self.idmask_armed
+            && !self.gizmo_clicked
+            && !stencil_owns
+            && response.clicked_by(PointerButton::Primary)
+        {
             if let (Some(mesh), Some(_)) = (self.mesh_data.as_ref(), paint.as_ref()) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
@@ -510,8 +705,8 @@ impl Viewport {
         // size, vertical = hardness, relative to the drag origin. It is
         // never navigation under any preset (`navigation.rs` binds RMB
         // only with Alt), so it is handled before the camera.
-        let resize_chord = ui
-            .input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
+        let resize_chord = !stencil_owns
+            && ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
             && response.dragged_by(PointerButton::Secondary);
         match (resize_chord, paint.as_mut()) {
             (true, Some(p)) => {
@@ -547,6 +742,7 @@ impl Viewport {
                 && !self.idmask_armed
                 && !p.is_stroking()
                 && !self.gizmo_clicked
+                && !stencil_owns
                 && p.projection().viewport_paints()
                 && response.clicked_by(PointerButton::Primary)
             {
@@ -558,7 +754,8 @@ impl Viewport {
             }
         }
 
-        let painting = !self.pick_armed
+        let painting = !stencil_owns
+            && !self.pick_armed
             && !self.idmask_armed
             && ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
             && response.dragged_by(PointerButton::Primary)
@@ -582,7 +779,10 @@ impl Viewport {
             self.stroke_from_viewport = false;
         }
         if !painting {
-            self.handle_input(ui, &response);
+            // A stencil chord owns the pointer: no navigation under it.
+            if !stencil_owns {
+                self.handle_input(ui, &response);
+            }
         } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let picked = self.pick(rect, mesh, pos);
@@ -769,6 +969,11 @@ impl Viewport {
                 ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
             }
         }
+        // The stencil overlay (g6-stencil-overlay): the overlays family's
+        // slot — after the wire/cage callbacks, before the tools' marks.
+        if let (true, Some(s)) = (self.mesh.is_some(), stencil.as_deref()) {
+            self.paint_stencil_overlay(ui, rect, s);
+        }
         // The brush cursor (GUI plan G1): the ring at the brush's on-screen
         // radius, over everything above. Drawn last so no overlay hides it.
         self.paint_line_preview(ui, &response, rect);
@@ -782,7 +987,7 @@ impl Viewport {
         }
         self.paint_brush_cursor(ui, &response, rect, paint.as_deref());
         self.paint_channel_readout(ui, rect);
-        self.overlays_header(ui, rect);
+        self.overlays_header(ui, rect, stencil, paint.as_deref());
         // No strip-tool click this frame: the signature is Option so the
         // shell reads one click per primary press, `None` every other frame.
         None
@@ -791,7 +996,14 @@ impl Viewport {
     /// The Overlays button at the viewport's top-right and its popover
     /// (GUI plan `g6-overlays-popover`). Added after the viewport's own
     /// response, so it takes its clicks first (the home card's rule).
-    fn overlays_header(&mut self, ui: &mut Ui, rect: egui::Rect) {
+    /// With a `stencil`, its rows follow the overlay rows.
+    fn overlays_header(
+        &mut self,
+        ui: &mut Ui,
+        rect: egui::Rect,
+        stencil: Option<&mut StencilState>,
+        paint: Option<&PaintState>,
+    ) {
         let size = egui::vec2(OVERLAYS_BUTTON_WIDTH, ui.spacing().interact_size.y);
         let at = egui::Rect::from_min_size(
             egui::pos2(
@@ -818,12 +1030,146 @@ impl Viewport {
             .align(egui::RectAlign::BOTTOM_END)
             .show(|ui| {
                 edited = crate::display_panel::overlay_rows(ui, overlays);
+                if let Some(stencil) = stencil {
+                    ui.separator();
+                    stencil_popover_rows(ui, stencil, paint, [rect.width(), rect.height()]);
+                }
             });
         if edited {
             self.show_wireframe = self.overlays.wireframe;
             self.show_grid = self.overlays.grid;
             self.overlay_edited = true;
         }
+    }
+
+    /// The stencil chords' input block (the module docs' stencil
+    /// section): latches an S-held drag at its press, maps every frame
+    /// through [`stencil_drag`] from that snapshot into
+    /// `stencil.transform`, and re-stages the gate once on release.
+    /// Returns whether the stencil owns the pointer this frame (a latched
+    /// drag, or S armed on a click), which every other consumer obeys.
+    fn stencil_input(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        rect: egui::Rect,
+        stencil: Option<&mut StencilState>,
+        paint: Option<&PaintState>,
+    ) -> bool {
+        let Some(stencil) = stencil else {
+            self.stencil_drag = None;
+            return false;
+        };
+        let mods = ui.input(|i| i.modifiers);
+        let armed = self.mesh.is_some()
+            && stencil.active
+            && stencil.image.is_some()
+            && !mods.alt
+            && !(mods.ctrl || mods.command)
+            && ui.input(|i| i.key_down(egui::Key::S));
+        let local = |p: egui::Pos2| [p.x - rect.min.x, p.y - rect.min.y];
+        if self.stencil_drag.is_none() && armed {
+            let started = [
+                PointerButton::Primary,
+                PointerButton::Secondary,
+                PointerButton::Middle,
+            ]
+            .into_iter()
+            .find(|b| response.drag_started_by(*b));
+            let chord = started.and_then(StencilChord::for_button);
+            // Map from the PRESS: drag_started fires past the threshold.
+            let origin = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            if let (Some(chord), Some(origin)) = (chord, origin) {
+                self.stencil_drag = Some(StencilDrag {
+                    chord,
+                    start: stencil.transform,
+                    origin: local(origin),
+                });
+            }
+        }
+        let Some(drag) = self.stencil_drag else {
+            return armed && !response.dragged();
+        };
+        if response.dragged_by(drag.chord.button()) {
+            let dims = stencil.image.as_ref().map(|i| [i.width(), i.height()]);
+            if let (Some(pos), Some(dims)) = (response.interact_pointer_pos(), dims) {
+                stencil.transform = stencil_drag(
+                    &drag.start,
+                    drag.chord.with_snap(mods.shift),
+                    drag.origin,
+                    local(pos),
+                    dims,
+                    [rect.width(), rect.height()],
+                );
+            }
+        } else {
+            // Released: the one re-rasterize this gesture costs.
+            self.stencil_drag = None;
+            restage_stencil(stencil, paint);
+        }
+        true
+    }
+
+    /// Draws the stencil quad (see the module docs): the cached coverage
+    /// texture on [`screen_quad`]'s corners at `overlay_opacity`, plus
+    /// its outline. Nothing while inactive, imageless or fully faded.
+    fn paint_stencil_overlay(&mut self, ui: &Ui, rect: egui::Rect, stencil: &StencilState) {
+        let Some(image) = stencil.image.as_ref() else {
+            return;
+        };
+        let opacity = stencil.overlay_opacity;
+        if !stencil.active || opacity.is_nan() || opacity <= 0.0 {
+            return;
+        }
+        let texture = self.stencil_texture(ui.ctx(), image);
+        let corners = screen_quad(&stencil.transform, image.width(), image.height())
+            .map(|[x, y]| rect.min + egui::vec2(x, y));
+        if corners.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return;
+        }
+        let tint = Color32::WHITE.gamma_multiply(opacity.min(1.0));
+        let mut mesh = egui::epaint::Mesh::with_texture(texture);
+        for (pos, uv) in corners.iter().zip(STENCIL_QUAD_UVS) {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: *pos,
+                uv: egui::pos2(uv[0], uv[1]),
+                color: tint,
+            });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.add(egui::Shape::mesh(mesh));
+        let [r, g, b] = STENCIL_TINT;
+        let outline = egui::Stroke::new(STENCIL_OUTLINE_WIDTH, Color32::from_rgb(r, g, b));
+        for (a, b) in corners.iter().zip(corners.iter().cycle().skip(1)) {
+            painter.line_segment([*a, *b], outline);
+        }
+    }
+
+    /// The overlay texture for `image`, rebuilt only when the image
+    /// changes (uv_view.rs's `mask_overlay_texture` shape).
+    fn stencil_texture(&mut self, ctx: &egui::Context, image: &StencilImage) -> egui::TextureId {
+        let coverage = image.coverage();
+        let key = (
+            coverage.as_ptr() as usize,
+            coverage.len(),
+            image.width(),
+            image.height(),
+        );
+        if let Some((cached, texture)) = &self.stencil_texture {
+            if *cached == key {
+                return texture.id();
+            }
+        }
+        let (size, rgba) = stencil_overlay_rgba(image);
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let texture = ctx.load_texture("viewport-stencil", color, egui::TextureOptions::NEAREST);
+        let id = texture.id();
+        self.stencil_texture = Some((key, texture));
+        id
     }
 
     /// The soloed channel / mesh map's name at the viewport's top-left
@@ -1162,6 +1508,192 @@ fn wire_color_for(opacity: f32) -> umber_gpu::WireColor {
         color.color[3] = opacity.clamp(0.0, 1.0);
     }
     color
+}
+
+/// The stencil chords' smallest scale (g6's clamp): a smaller quad is a
+/// speck no chord can grab back.
+const MIN_STENCIL_SCALE: f32 = 0.05;
+/// Shift+S+LMB snaps the stencil's rotation to quarter turns.
+const STENCIL_SNAP_STEP: f32 = std::f32::consts::FRAC_PI_2;
+/// Within this many px of the center the drag angle is undefined (the
+/// `atan2` of a ~zero vector): the rotation holds.
+const STENCIL_MIN_ARM_PX: f32 = 1.0;
+/// The overlay texture's longest side, texels: larger stencils are
+/// point-sampled down (uv_view.rs `MASK_OVERLAY_MAX_SIDE`'s cap — a 4096²
+/// stencil would otherwise upload 64 MB).
+const STENCIL_OVERLAY_MAX_SIDE: u32 = 512;
+/// The overlay's tint where the stencil paints through: violet, distinct
+/// from the white wireframe, cyan seams, amber cage and the quick mask's
+/// red.
+const STENCIL_TINT: [u8; 3] = [190, 120, 255];
+const STENCIL_OUTLINE_WIDTH: f32 = 1.0;
+/// Texture coords for [`screen_quad`]'s corner order (image rows run
+/// top-down, as egui's v does).
+const STENCIL_QUAD_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// The stencil quad's corners in viewport-local px under `transform`:
+/// the image px corners `(0,0)`, `(w,0)`, `(w,h)`, `(0,h)` through
+/// `umber_core::stencil::forward_map` — the gate's own map, so the quad
+/// the eye sees is the region the rasterizer opens. At rotation 0 the
+/// order runs top-left, top-right, bottom-right, bottom-left.
+pub fn screen_quad(transform: &StencilTransform, image_w: u32, image_h: u32) -> [[f32; 2]; 4] {
+    let (w, h) = (image_w as f32, image_h as f32);
+    [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]
+        .map(|corner| forward_map(transform, [image_w, image_h], corner))
+}
+
+/// One S-chord drag's transform (pure; the module docs' stencil
+/// section): `start` is the transform at the press, `drag_start` the
+/// press and `drag_current` the pointer (viewport-local px). Rotate turns
+/// by the arc's angle change around the center, snapping the result to
+/// quarter turns with `snap`, wrapped into `(-π, π]`. Scale grows the
+/// on-screen half-width (`image_dims[0] / 2 * scale`) by the horizontal
+/// delta, clamped to [`MIN_STENCIL_SCALE`]. Move shifts the center by the
+/// delta, clamped into `view_dims`.
+pub fn stencil_drag(
+    start: &StencilTransform,
+    chord: StencilChord,
+    drag_start: [f32; 2],
+    drag_current: [f32; 2],
+    image_dims: [u32; 2],
+    view_dims: [f32; 2],
+) -> StencilTransform {
+    let delta = [
+        drag_current[0] - drag_start[0],
+        drag_current[1] - drag_start[1],
+    ];
+    match chord {
+        StencilChord::Rotate { snap } => {
+            let arm = |p: [f32; 2]| [p[0] - start.center[0], p[1] - start.center[1]];
+            let (from, to) = (arm(drag_start), arm(drag_current));
+            let short = |v: [f32; 2]| v[0].hypot(v[1]) < STENCIL_MIN_ARM_PX;
+            let mut rotation = start.rotation;
+            if !short(from) && !short(to) {
+                rotation += to[1].atan2(to[0]) - from[1].atan2(from[0]);
+            }
+            if snap {
+                rotation = (rotation / STENCIL_SNAP_STEP).round() * STENCIL_SNAP_STEP;
+            }
+            StencilTransform {
+                rotation: wrap_angle(rotation),
+                ..*start
+            }
+        }
+        StencilChord::Scale => {
+            let half_w = image_dims[0].max(1) as f32 * 0.5;
+            StencilTransform {
+                scale: (start.scale + delta[0] / half_w).max(MIN_STENCIL_SCALE),
+                ..*start
+            }
+        }
+        StencilChord::Move => {
+            let keep_in = |v: f32, max: f32| {
+                if max.is_finite() && max > 0.0 {
+                    v.clamp(0.0, max)
+                } else {
+                    v
+                }
+            };
+            StencilTransform {
+                center: [
+                    keep_in(start.center[0] + delta[0], view_dims[0]),
+                    keep_in(start.center[1] + delta[1], view_dims[1]),
+                ],
+                ..*start
+            }
+        }
+    }
+}
+
+/// `angle` wrapped into `(-π, π]`. In-range angles pass through
+/// untouched, so a quarter-turn snap stays bit-exact (a `rem_euclid`
+/// round trip would round `-π/2` through `3π/2`).
+fn wrap_angle(angle: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    if angle > -PI && angle <= PI {
+        return angle;
+    }
+    let a = angle.rem_euclid(TAU);
+    if a > PI {
+        a - TAU
+    } else {
+        a
+    }
+}
+
+/// `image`'s coverage as the overlay's unmultiplied RGBA: [`STENCIL_TINT`]
+/// opaque where it paints through, clear elsewhere, point-sampled to at
+/// most [`STENCIL_OVERLAY_MAX_SIDE`] per side. Returns the overlay's
+/// `[width, height]` and its bytes, rows top-down (the image's order).
+fn stencil_overlay_rgba(image: &StencilImage) -> ([usize; 2], Vec<u8>) {
+    let (w, h) = (image.width(), image.height());
+    let step = w.max(h).div_ceil(STENCIL_OVERLAY_MAX_SIDE).max(1);
+    let (ow, oh) = (w.div_ceil(step), h.div_ceil(step));
+    let [r, g, b] = STENCIL_TINT;
+    let coverage = image.coverage();
+    let mut rgba = Vec::with_capacity(ow as usize * oh as usize * 4);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let at = (oy * step) as usize * w as usize + (ox * step) as usize;
+            let on = coverage.get(at).is_some_and(|&c| c != 0);
+            rgba.extend_from_slice(&if on { [r, g, b, 255] } else { [0; 4] });
+        }
+    }
+    ([ow as usize, oh as usize], rgba)
+}
+
+/// Re-stages the stencil gate against the paint session's active tile:
+/// `stencil::panel_section`'s own target + quick-mask lines (stencil.rs
+/// is lock-held, so they are mirrored, not shared).
+fn restage_stencil(stencil: &mut StencilState, paint: Option<&PaintState>) {
+    let mask = paint.map(|p| {
+        let tile = p.active_tile();
+        (p.quick_mask_for_tile(tile), tile)
+    });
+    let target = mask.map(|(m, _)| m.dimensions());
+    let quick = mask.and_then(|(m, tile)| quick_mask_gate_bytes(m, tile));
+    stencil.stage_gate(target, quick.as_deref());
+}
+
+/// The Overlays popover's stencil rows: step 2's
+/// `display_panel::stencil_rows` with `view` (this viewport's size) as
+/// the fit for a load and for Reset — `stencil::panel_section`'s adapter
+/// with the viewport rect in place of its target size (see the module
+/// docs).
+fn stencil_popover_rows(
+    ui: &mut Ui,
+    stencil: &mut StencilState,
+    paint: Option<&PaintState>,
+    view: [f32; 2],
+) {
+    let staged = stencil
+        .staged
+        .as_ref()
+        .map(|g| (g.width, g.height, g.open_percent()));
+    let response = crate::display_panel::stencil_rows(
+        ui,
+        crate::display_panel::StencilRow {
+            active: &mut stencil.active,
+            opacity: &mut stencil.overlay_opacity,
+            path: stencil.path.as_deref(),
+            has_image: stencil.image.is_some(),
+            load_error: stencil.load_error.as_deref(),
+            staged,
+        },
+    );
+    let mut restage = response.toggled;
+    if let Some(path) = response.picked {
+        let result = crate::stencil::load_png_rgba(&path);
+        stencil.adopt(path, result, view);
+        restage = true;
+    }
+    if response.reset {
+        stencil.reset(view[0], view[1]);
+        restage = true;
+    }
+    if restage {
+        restage_stencil(stencil, paint);
+    }
 }
 
 /// Which side of a face the eye sees.
@@ -1942,5 +2474,314 @@ mod tests {
             (uv[0] - 0.914_213_6).abs() < 1e-4 && (uv[1] - 0.5).abs() < 1e-4,
             "ortho off-centre pick must land at u = 0.9142136, got {uv:?}"
         );
+    }
+
+    /// Both coordinates within `tol`.
+    fn near(a: [f32; 2], b: [f32; 2], tol: f32) -> bool {
+        (a[0] - b[0]).abs() <= tol && (a[1] - b[1]).abs() <= tol
+    }
+
+    /// The four corners pairwise within `tol`.
+    fn quad_near(got: [[f32; 2]; 4], want: [[f32; 2]; 4], tol: f32) -> bool {
+        got.iter().zip(want.iter()).all(|(g, w)| near(*g, *w, tol))
+    }
+
+    /// The inverse test helper: viewport px -> image px, the core's own
+    /// `inverse_map` (the exact inverse of the map `screen_quad` uses).
+    fn image_point_of(t: &StencilTransform, dims: [u32; 2], screen: [f32; 2]) -> [f32; 2] {
+        umber_core::stencil::inverse_map(t, dims, screen)
+    }
+
+    /// A stencil sitting at viewport px (100, 100), unit scale, turned
+    /// 0.3 rad: a non-quarter start, so snapping the result and snapping
+    /// the delta disagree.
+    const DRAG_START: StencilTransform = StencilTransform {
+        center: [100.0, 100.0],
+        scale: 1.0,
+        rotation: 0.3,
+    };
+
+    /// The pointer 50 px from DRAG_START's center at `angle` (y-down:
+    /// positive angles turn clockwise).
+    fn at_angle(angle: f32) -> [f32; 2] {
+        [100.0 + 50.0 * angle.cos(), 100.0 + 50.0 * angle.sin()]
+    }
+
+    fn rotate(snap: bool, from: [f32; 2], to: [f32; 2]) -> StencilTransform {
+        let chord = StencilChord::Rotate { snap };
+        stencil_drag(&DRAG_START, chord, from, to, [64, 64], [800.0, 600.0])
+    }
+
+    #[test]
+    fn screen_quad_at_identity_is_the_image_bounds_centered_at_the_origin() {
+        // Default transform: center (0,0), scale 1, rotation 0. A 4x2
+        // image's corners sit at ±(w/2, h/2) = ±(2, 1); sin 0 = 0 and
+        // cos 0 = 1 exactly, so the pin is exact.
+        let quad = screen_quad(&StencilTransform::default(), 4, 2);
+        assert_eq!(quad, [[-2.0, -1.0], [2.0, -1.0], [2.0, 1.0], [-2.0, 1.0]]);
+    }
+
+    #[test]
+    fn screen_quad_quarter_turn_permutes_the_corners_clockwise() {
+        // θ = π/2, center (10, 20), 4x2 image. forward: c + R·d with
+        // R·(dx, dy) = (cos·dx − sin·dy, sin·dx + cos·dy) = (−dy, dx):
+        //   (0,0): d = (−2,−1) -> (1, −2)  -> (11, 18)
+        //   (4,0): d = ( 2,−1) -> (1,  2)  -> (11, 22)
+        //   (4,2): d = ( 2, 1) -> (−1, 2)  -> ( 9, 22)
+        //   (0,2): d = (−2, 1) -> (−1,−2)  -> ( 9, 18)
+        // The top-left corner lands top-RIGHT of the turned 2x4 box: a
+        // clockwise turn on the y-down screen. f32 cos(π/2) ≈ −4.4e-8,
+        // so each coordinate is ~1e-7 off: 1e-5 tolerance.
+        let t = StencilTransform {
+            center: [10.0, 20.0],
+            scale: 1.0,
+            rotation: std::f32::consts::FRAC_PI_2,
+        };
+        let quad = screen_quad(&t, 4, 2);
+        let want = [[11.0, 18.0], [11.0, 22.0], [9.0, 22.0], [9.0, 18.0]];
+        assert!(quad_near(quad, want, 1e-5), "{quad:?}");
+    }
+
+    #[test]
+    fn screen_quad_at_scale_two_doubles_the_extent() {
+        let t = StencilTransform {
+            scale: 2.0,
+            ..StencilTransform::default()
+        };
+        let quad = screen_quad(&t, 4, 2);
+        assert_eq!(quad, [[-4.0, -2.0], [4.0, -2.0], [4.0, 2.0], [-4.0, 2.0]]);
+    }
+
+    #[test]
+    fn screen_quad_corners_invert_to_the_image_corners() {
+        // An arbitrary transform: each corner maps back through the
+        // core's inverse to its image px corner, and the corners average
+        // to the center. Magnitudes ~400 px put the f32 ulp near 3e-5, so
+        // 1e-3 holds any real map error out.
+        let t = StencilTransform {
+            center: [320.0, 240.0],
+            scale: 1.5,
+            rotation: 0.7,
+        };
+        let quad = screen_quad(&t, 200, 100);
+        let corners = [[0.0, 0.0], [200.0, 0.0], [200.0, 100.0], [0.0, 100.0]];
+        for (screen, image) in quad.iter().zip(corners) {
+            let back = image_point_of(&t, [200, 100], *screen);
+            assert!(near(back, image, 1e-3), "{screen:?} -> {back:?}");
+        }
+        let mean = [
+            quad.iter().map(|p| p[0]).sum::<f32>() / 4.0,
+            quad.iter().map(|p| p[1]).sum::<f32>() / 4.0,
+        ];
+        assert!(near(mean, t.center, 1e-3), "{mean:?}");
+    }
+
+    #[test]
+    fn rotate_drag_turns_by_the_arc_angle() {
+        // From angle 0 (east of the center) to π/2 (south: clockwise on
+        // the y-down screen): +π/2. atan2(0, 50) = 0 and atan2(50, 0) =
+        // π/2 are exact, so only the one add rounds.
+        let t = rotate(false, [150.0, 100.0], [100.0, 150.0]);
+        let want = 0.3 + std::f32::consts::FRAC_PI_2;
+        assert!((t.rotation - want).abs() < 1e-6, "{}", t.rotation);
+        assert_eq!((t.center, t.scale), (DRAG_START.center, DRAG_START.scale));
+        // The reverse arc turns the other way.
+        let t = rotate(false, [100.0, 150.0], [150.0, 100.0]);
+        let want = 0.3 - std::f32::consts::FRAC_PI_2;
+        assert!((t.rotation - want).abs() < 1e-6, "{}", t.rotation);
+        // A generic arc a1 = 0.4 -> a2 = 1.1 turns by 0.7 (the pointer px
+        // round to ~4e-6, i.e. ~1e-7 rad at 50 px).
+        let t = rotate(false, at_angle(0.4), at_angle(1.1));
+        assert!((t.rotation - 1.0).abs() < 1e-5, "{}", t.rotation);
+    }
+
+    #[test]
+    fn shift_snaps_the_resulting_angle_to_quarter_turns() {
+        // 0.3 + 1.2 = 1.5 -> 1.5 / (π/2) = 0.955 -> 1 quarter: exactly
+        // π/2. Snapping the DELTA instead gives 0.3 + π/2 = 1.87.
+        let t = rotate(true, at_angle(0.0), at_angle(1.2));
+        assert_eq!(t.rotation, std::f32::consts::FRAC_PI_2);
+        // 0.3 − 0.2 = 0.1 -> 0 quarters: exactly 0.
+        let t = rotate(true, at_angle(0.0), at_angle(-0.2));
+        assert_eq!(t.rotation, 0.0);
+        // 0.3 − 1.9 = −1.6 -> −1.019 -> −1 quarter: exactly −π/2 (the
+        // in-range wrap passes it through untouched).
+        let t = rotate(true, at_angle(0.0), at_angle(-1.9));
+        assert_eq!(t.rotation, -std::f32::consts::FRAC_PI_2);
+        // No snap: the raw 1.5.
+        let t = rotate(false, at_angle(0.0), at_angle(1.2));
+        assert!((t.rotation - 1.5).abs() < 1e-5, "{}", t.rotation);
+    }
+
+    #[test]
+    fn rotate_holds_when_the_pointer_sits_on_the_center() {
+        // atan2 of a zero arm is undefined (it reads 0): the rotation
+        // must hold, not jump to the arc from angle 0.
+        let center = DRAG_START.center;
+        assert_eq!(rotate(false, [150.0, 120.0], center).rotation, 0.3);
+        assert_eq!(rotate(false, center, [150.0, 120.0]).rotation, 0.3);
+    }
+
+    #[test]
+    fn rotation_wraps_into_minus_pi_to_pi() {
+        // 3.0 + 0.5 = 3.5 > π -> 3.5 − 2π = −2.7831853.
+        let start = StencilTransform {
+            rotation: 3.0,
+            ..DRAG_START
+        };
+        let chord = StencilChord::Rotate { snap: false };
+        let t = stencil_drag(
+            &start,
+            chord,
+            at_angle(0.0),
+            at_angle(0.5),
+            [64, 64],
+            [800.0, 600.0],
+        );
+        assert!((t.rotation - (3.5 - std::f32::consts::TAU)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scale_drag_follows_the_horizontal_delta_monotonically() {
+        // A 200-px-wide image: half-width 100 image px. scale' = 1 +
+        // dx / 100 (exact in binary for these deltas).
+        let scale_at = |dx: f32, dy: f32| {
+            let t = stencil_drag(
+                &StencilTransform {
+                    rotation: 0.0,
+                    ..DRAG_START
+                },
+                StencilChord::Scale,
+                [200.0, 100.0],
+                [200.0 + dx, 100.0 + dy],
+                [200, 50],
+                [800.0, 600.0],
+            );
+            assert_eq!((t.center, t.rotation), (DRAG_START.center, 0.0));
+            t.scale
+        };
+        assert_eq!(scale_at(50.0, 0.0), 1.5);
+        assert_eq!(scale_at(100.0, 0.0), 2.0);
+        assert_eq!(scale_at(-50.0, 0.0), 0.5);
+        // Vertical motion is ignored.
+        assert_eq!(scale_at(0.0, 80.0), 1.0);
+        // Strictly increasing in dx above the clamp.
+        let sweep: Vec<f32> = (-8..=8).map(|k| scale_at(k as f32 * 10.0, 0.0)).collect();
+        assert!(sweep.windows(2).all(|w| w[1] > w[0]), "{sweep:?}");
+        // Dragged from the right edge (x = 100 + 100·1 = 200), the edge
+        // stays under the pointer: scale 1.5 puts it at 100 + 150 = 250.
+        let t = StencilTransform {
+            scale: scale_at(50.0, 0.0),
+            rotation: 0.0,
+            ..DRAG_START
+        };
+        assert_eq!(screen_quad(&t, 200, 50)[1][0], 250.0);
+    }
+
+    #[test]
+    fn scale_drag_clamps_at_the_minimum() {
+        let scale_at = |dx: f32| {
+            let current = [200.0 + dx, 100.0];
+            stencil_drag(
+                &DRAG_START,
+                StencilChord::Scale,
+                [200.0, 100.0],
+                current,
+                [200, 50],
+                [800.0, 600.0],
+            )
+            .scale
+        };
+        // 1 − 150/100 = −0.5 and 1 − 10 = −9: both clamp.
+        assert_eq!(scale_at(-150.0), MIN_STENCIL_SCALE);
+        assert_eq!(scale_at(-1000.0), MIN_STENCIL_SCALE);
+    }
+
+    #[test]
+    fn move_drag_translates_by_the_delta_inside_the_view() {
+        let moved = |to: [f32; 2]| {
+            let t = stencil_drag(
+                &DRAG_START,
+                StencilChord::Move,
+                [10.0, 10.0],
+                to,
+                [64, 64],
+                [200.0, 150.0],
+            );
+            assert_eq!((t.scale, t.rotation), (1.0, 0.3));
+            t.center
+        };
+        // Delta (30, −20): (100, 100) -> (130, 80).
+        assert_eq!(moved([40.0, -10.0]), [130.0, 80.0]);
+        // Flung past either edge: clamped to the 200x150 view.
+        assert_eq!(moved([1000.0, 1000.0]), [200.0, 150.0]);
+        assert_eq!(moved([-1000.0, -1000.0]), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn each_mouse_button_maps_to_its_chord() {
+        assert_eq!(
+            StencilChord::for_button(PointerButton::Primary),
+            Some(StencilChord::Rotate { snap: false })
+        );
+        assert_eq!(
+            StencilChord::for_button(PointerButton::Secondary),
+            Some(StencilChord::Scale)
+        );
+        assert_eq!(
+            StencilChord::for_button(PointerButton::Middle),
+            Some(StencilChord::Move)
+        );
+        assert_eq!(StencilChord::for_button(PointerButton::Extra1), None);
+        // The latch keeps its drag alive on the same button.
+        for b in [
+            PointerButton::Primary,
+            PointerButton::Secondary,
+            PointerButton::Middle,
+        ] {
+            let chord = StencilChord::for_button(b).expect("bound");
+            assert_eq!(chord.button(), b);
+        }
+        // Shift rides Rotate only.
+        let rotate = StencilChord::Rotate { snap: false };
+        assert_eq!(rotate.with_snap(true), StencilChord::Rotate { snap: true });
+        assert_eq!(StencilChord::Scale.with_snap(true), StencilChord::Scale);
+    }
+
+    /// A `w` x `h` stencil whose texel `(x, y)` is covered iff `on(x, y)`.
+    fn stencil_image(w: u32, h: u32, on: impl Fn(u32, u32) -> bool) -> StencilImage {
+        let rgba: Vec<u8> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| [0, 0, 0, if on(x, y) { 255 } else { 0 }])
+            .collect();
+        StencilImage::from_alpha(w, h, &rgba).expect("valid stencil")
+    }
+
+    #[test]
+    fn overlay_rgba_tints_the_coverage_and_caps_the_side() {
+        // 4x4, the diagonal covered: under the cap, texel for texel.
+        let image = stencil_image(4, 4, |x, y| x == y);
+        let (size, rgba) = stencil_overlay_rgba(&image);
+        assert_eq!(size, [4, 4]);
+        let [r, g, b] = STENCIL_TINT;
+        for (i, px) in rgba.chunks_exact(4).enumerate() {
+            let on = i % 4 == i / 4;
+            let want = if on { [r, g, b, 255] } else { [0; 4] };
+            assert_eq!(px, &want[..], "texel {i}");
+        }
+        // 1030 wide: step = ceil(1030 / 512) = 3 -> ceil(1030 / 3) = 344
+        // texels sampled at x = 0, 3, 6, … — exactly the covered columns
+        // (a floor step of 2 would sample x = 2, which is clear).
+        let image = stencil_image(1030, 1, |x, _| x % 3 == 0);
+        let (size, rgba) = stencil_overlay_rgba(&image);
+        assert_eq!(size, [344, 1]);
+        assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
+        // 3x600, the even rows covered: step 2 -> 2x300, sampling rows
+        // 0, 2, 4, … (all covered). The row stride is the WIDTH: a stride
+        // of the height would index past the coverage and read clear.
+        let image = stencil_image(3, 600, |_, y| y % 2 == 0);
+        let (size, rgba) = stencil_overlay_rgba(&image);
+        assert_eq!(size, [2, 300]);
+        assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
     }
 }

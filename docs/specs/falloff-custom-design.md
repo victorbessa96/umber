@@ -1,6 +1,8 @@
 # FalloffCurve::Custom — the curve-payload design (W-GUI-3 follow-up)
 
-Status: DRAFT for the panel round. Owner: dragon. Written 2026-10-17
+Status: LANDED (engine + panel round, verified 2026-10-18 — see the
+dated closure at this doc's tail; CLOSED 2026-10-18). Owner: dragon.
+Written 2026-10-17
 against HEAD `efd0cbf` (every claim cites file:line in that tree).
 This is the GPU-stable-id question the snapshot-tests kill parked:
 how a user-authored falloff curve reaches the WGSL `radial_falloff`
@@ -159,3 +161,56 @@ switch without renumbering the stable ids.
   host-gated. The Level editor's consumer (GpuOp::Levels growing a
   CurveEdit param) is the NEXT kill after this one — shared
   dependency, separate surface (graph_eval.rs).
+
+---
+
+## Closure (2026-10-18 — the design-review kill, verified against the live tree)
+
+The "panel round" this doc waited for is in the tree. Every piece of
+the design, grep-verified on 2026-10-18:
+
+- **The GPU half**: `FALLOFF_CUSTOM = 10` + `FALLOFF_LUT_LEN` live in
+  `umber-gpu/src/paint.rs` alongside the compositor's
+  `falloff_lut: RwLock<(Texture, TextureView)>` +
+  `falloff_lut_needs_white` (exactly the stamp's lock + lazy-upload
+  pattern this doc prescribes) and
+  `set_falloff_lut(&self, queue, [f32; FALLOFF_LUT_LEN])` (:849).
+  The WGSL carries `@group(0) @binding(5) var falloff_lut` + the
+  `radial_falloff` case-10 tap at the truncated, clamped index —
+  the binding the design chose over the four killed alternatives,
+  and the 1×1 white fallback's solid-disc degradation.
+- **The brush half**: `FalloffCurve::Custom` (unit variant, the
+  samples in `BrushParams.falloff_custom: ControlCurve` as designed —
+  the Copy constraint honored), `ALL` in id order, `as_u32/from_u32`,
+  and `eval`'s Custom arm reading the same 256 taps (`custom_tap` +
+  `custom_index`). Serde: lowercase `custom`, and the migration
+  question this doc left as "VERIFY at implementation" is ANSWERED
+  in the enum's own module docs — old binaries REJECT the unknown
+  variant (the preset errors, no silent Smooth fallback), while the
+  `falloff_custom` key alone stays harmless.
+- **The panel round**: brush_panel's falloff combo row carries the
+  Custom branch — `falloff_custom_editor` joins the combo IN the
+  same row (the in-place placement this doc's open question 3
+  recommended), editing `params.falloff_custom`; the combo key
+  `brush.falloff-custom` ships in the catalogs (en-US :466). Zero
+  panel renumbering, zero stable-id churn — the doc's constraint set
+  held exactly.
+- **The apply path**: `paint_state.rs` calls `set_falloff_lut` when
+  the painting params change (:1885) — the set_stamp placement this
+  doc prescribed.
+- **The tests this doc planned** all exist: the CPU/GPU parity
+  harness, the serde round-trips (a preset WITHOUT `falloff_custom`
+  loads identity; the inert-key case), the step-LUT GPU golden, and
+  the white-fallback disc (paint.rs's own test module).
+
+Open question 1 (R32 vs R16) resolved to R32Float — the live binding
+is `texture_2d<f32>`; question 2 (256 taps) is `FALLOFF_LUT_LEN`;
+question 3 (in-place row) is the live row. The doc's ONE named
+sequel — the Level editor's `CurveEdit` consumer (`GpuOp::Levels`
+growing a curve param, `graph_eval.rs`) — remains the named
+follow-up, not staleness.
+
+This doc's residual authority: the constraint analysis (Dab's
+exhausted padding, the never-renumber rule, the per-pipeline
+binding-number argument) and the four killed alternatives — the
+reference for WHY the curve rides a LUT binding and not a uniform.

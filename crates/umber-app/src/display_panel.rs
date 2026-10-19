@@ -90,6 +90,19 @@
 //! "move here" — the tree had none to move (wireframe/grid live in the
 //! shell's `ViewToggles`, W/G and the View menu), so this module gains
 //! the overlay state instead of losing a section.
+//!
+//! # The stencil rows (stencil-engine design, sequencing step 2)
+//!
+//! [`stencil_rows`] draws the stencil section: enable, overlay opacity,
+//! Reset, the image path + Load…, the N hint, and the honest pending
+//! line. It is deliberately type-free ([`StencilRow`] borrows plain
+//! fields): this module also compiles into the lib target (`lib.rs`),
+//! which does not carry `crate::stencil`, so naming `StencilState` here
+//! would break it. `crate::stencil::panel_section` adapts the state.
+//! v1 host: the Display panel (the "a Display-panel section calls the
+//! same fn" shape above); the Overlays popover (viewport.rs) gains the
+//! same call with the overlay draw and chords — step 3. The N hint and
+//! the pending line say what is not wired yet rather than implying it.
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -270,6 +283,100 @@ pub fn overlay_rows(ui: &mut Ui, s: &mut OverlaySettings) -> bool {
         .checkbox(&mut s.channel_readout, i18n::tr("overlays.channel-readout"))
         .changed();
     changed
+}
+
+/// The stencil overlay's opacity on a fresh session (and the opacity
+/// field's reset value). Lives here, not in `crate::stencil`, so the
+/// lib target sees it too.
+pub const DEFAULT_STENCIL_OPACITY: f32 = 0.5;
+
+/// What the stencil rows edit and show (see the module docs for why
+/// this borrows fields instead of naming `crate::stencil::StencilState`).
+pub struct StencilRow<'a> {
+    /// Whether the stencil gates paint.
+    pub active: &'a mut bool,
+    /// The overlay's drawn opacity, `0..=1`.
+    pub opacity: &'a mut f32,
+    /// The loaded image's file, if any.
+    pub path: Option<&'a Path>,
+    /// Whether an image is loaded (enable and Reset need one).
+    pub has_image: bool,
+    /// The last load's refusal.
+    pub load_error: Option<&'a str>,
+    /// The staged gate's `(width, height, open percent)`.
+    pub staged: Option<(u32, u32, u32)>,
+}
+
+/// What the stencil rows asked for this frame.
+#[derive(Debug, Default)]
+pub struct StencilRowResponse {
+    /// The enable checkbox flipped.
+    pub toggled: bool,
+    /// Reset was clicked.
+    pub reset: bool,
+    /// Load… picked this file.
+    pub picked: Option<PathBuf>,
+}
+
+/// The stencil section's rows over `row`.
+pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
+    let mut out = StencilRowResponse::default();
+    ui.label(i18n::tr("overlays.stencil"));
+    ui.horizontal(|ui| {
+        let path = match row.path {
+            Some(path) => path.display().to_string(),
+            None => i18n::tr("overlays.stencil-no-image"),
+        };
+        ui.weak(path);
+        if ui.button(i18n::tr("overlays.stencil-load")).clicked() {
+            out.picked = rfd::FileDialog::new()
+                .add_filter("PNG", &["png"])
+                .pick_file();
+        }
+    });
+    if let Some(reason) = row.load_error {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            i18n::tr_args(
+                "overlays.stencil-load-failed",
+                [("reason", FluentValue::from(reason))],
+            ),
+        );
+    }
+    out.toggled = ui
+        .add_enabled(
+            row.has_image,
+            egui::Checkbox::new(row.active, i18n::tr("overlays.stencil-enable")),
+        )
+        .changed();
+    ui.add_enabled_ui(row.has_image, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(i18n::tr("overlays.stencil-opacity"));
+            // Opacity only feeds the overlay draw, which reads the field
+            // itself: no response flag (nothing to re-stage).
+            let field = ValueField::new(row.opacity)
+                .context_menu(crate::i18n::prop_menu_labels())
+                .default_value(DEFAULT_STENCIL_OPACITY)
+                .range(0.0..=1.0)
+                .step(0.05);
+            let _ = ui.add(field);
+        });
+        out.reset = ui.button(i18n::tr("overlays.stencil-reset")).clicked();
+    });
+    let hint = egui::Label::new(i18n::tr("overlays.stencil-n-hint"));
+    ui.add_enabled(false, hint);
+    if let Some((width, height, open)) = row.staged {
+        let line = i18n::tr_args(
+            "overlays.stencil-gate-pending",
+            [
+                ("width", FluentValue::from(i64::from(width))),
+                ("height", FluentValue::from(i64::from(height))),
+                ("open", FluentValue::from(i64::from(open))),
+            ],
+        );
+        ui.add_enabled(false, egui::Label::new(line));
+    }
+    out
 }
 
 /// Number of preview swatches.
@@ -864,6 +971,49 @@ mod tests {
     }
 
     #[test]
+    fn stencil_rows_toggle_only_with_an_image() {
+        // (active, opacity, has_image, toggled-this-frame)
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        type RowState = (bool, f32, bool, bool);
+        let build = |has_image: bool| {
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(360.0, 260.0))
+                .build_ui_state(
+                    |ui, s: &mut RowState| {
+                        let (active, opacity, has_image, toggled) = s;
+                        let response = stencil_rows(
+                            ui,
+                            StencilRow {
+                                active,
+                                opacity,
+                                path: None,
+                                has_image: *has_image,
+                                load_error: None,
+                                staged: None,
+                            },
+                        );
+                        *toggled |= response.toggled;
+                    },
+                    (false, DEFAULT_STENCIL_OPACITY, has_image, false),
+                )
+        };
+        let mut harness = build(true);
+        harness.run();
+        harness.get_by_label("Paint through stencil").click();
+        harness.run();
+        assert!(harness.state().0, "enable must flip on");
+        assert!(harness.state().3, "the flip is reported");
+        assert_eq!(harness.state().1, DEFAULT_STENCIL_OPACITY);
+        // Without an image the checkbox is disabled: nothing flips.
+        let mut harness = build(false);
+        harness.run();
+        harness.get_by_label("Paint through stencil").click();
+        harness.run();
+        assert!(!harness.state().0 && !harness.state().3);
+    }
+
+    #[test]
     fn overlay_keys_exist_in_both_catalogs() {
         let i18n = i18n::I18n::builtin();
         for key in [
@@ -876,6 +1026,18 @@ mod tests {
             "overlays.face-orientation",
             "overlays.face-orientation-pending",
             "overlays.channel-readout",
+            "overlays.stencil",
+            "overlays.stencil-enable",
+            "overlays.stencil-opacity",
+            "overlays.stencil-reset",
+            "overlays.stencil-load",
+            "overlays.stencil-no-image",
+            "overlays.stencil-load-failed",
+            "overlays.stencil-unreadable",
+            "overlays.stencil-too-large",
+            "overlays.stencil-unsupported",
+            "overlays.stencil-n-hint",
+            "overlays.stencil-gate-pending",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");

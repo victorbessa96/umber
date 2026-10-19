@@ -434,3 +434,28 @@ down at ~18:5x) and the serde-derive claim (umber-core's Cargo.toml
 does not appear to carry serde — the claw's own API-precedent table
 will answer whether the derives compile; if not, that is a one-line
 fix the battery will name).**
+
+## Serde-claim closure + drift re-verification (2026-10-17 23:5x, the 23:18 wake session e78fd809)
+
+The cross-review verdict's one open caveat — "umber-core's Cargo.toml
+does not appear to carry serde" — is RESOLVED host-free, no fix owed:
+`crates/umber-core/Cargo.toml:12-13` carries `serde = { workspace =
+true }` and `serde_json = { workspace = true }`, and the workspace
+`Cargo.toml:52` pins `serde = { version = "1", features = ["derive"] }`
+— so stencil.rs's `use serde::{Deserialize, Serialize}` (:47),
+`#[serde(default)]` (:95) and the serde_json round-trip tests (:383-396)
+all resolve against pinned workspace deps. The battery will not name a
+serde fix.
+
+Also re-verified this wakeup (independent reproduction + drift check):
+rustfmt `--check --edition 2021` (rustfmt 1.9.0-stable) CLEAN on all
+six parked wave files; `scripts/verify-kill.sh` over the six: braces
+PASS (main.rs's 876/877 raw count is the documented string-literal
+false-positive — 740/740 code-only, pre-existing at HEAD per the app
+report's addendum), trap-greps clean, doc-attachment clean, lock-audit
+PASS (every dirty file matches its live kill-lock); the 52239d
+sibling's recovery manifest
+(`.dragon/stencil-wave-recovery-manifest.txt`) re-hashed: **all 14
+paths MATCH — pinned bytes == live bytes, zero drift.** Remaining
+gates owed to the host: unchanged (compile + clippy + test battery).
+Static verification only; does not upgrade suite-verified status.

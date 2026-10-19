@@ -1,7 +1,10 @@
 # Per-Channel Tile Pool — Design
 
 Date: 2026-10-12
-Status: DRAFT (pre-review; the implementation brief derives from this doc)
+Status: LANDED (implemented 2026-10-12 in dc5c2c9; CLOSED 2026-10-18 —
+read the dated closure at this doc's tail before citing anything above
+it: the tree has since evolved through the per-layer pool and the
+per-channel resolution rows, both of which this design predates)
 Blocks: heightnormal's app wiring (worklist #12's named follow-up — "NOT
 REACHABLE from the app: PaintState has no per-channel paint target to bind
 from"); unblocks Solo-channel painting, per-channel export feeds, and the
@@ -163,3 +166,68 @@ One kill, three landings inside it: (a) the storage + routing + tests
 end-to-end. (a) and (b) are claw-shaped; (c) touches the lit path the
 heightnormal kill just landed — dragon-authored or claw with the
 heightnormal report as required reading.
+
+---
+
+## Closure (2026-10-18 — the design-review kill, verified against the live tree)
+
+This doc never got its review: the implementation outran it. What it
+designed landed six days later, and the tree has since evolved a
+generation beyond it. This section is the verified truth, checked
+line-and-symbol against the tree on 2026-10-18 (every anchor below
+was grep-verified the day this closure was written):
+
+**Landed as designed (2026-10-12, dc5c2c9 — the tilepool finish
+kill's report carries the authorship: a claude claw wrote ~581 lines,
+died on budget before tests, the dragon landed it with 3 borrow
+fixes):** the storage shape verbatim — `TileTargets { base_color,
+channels: BTreeMap<String, PaintThread> }` (now at
+`crates/umber-paint/src/paint_state.rs:572`, the file having moved
+from umber-app in the crate extraction; the doc's `:408` anchor is
+pre-move), `targets: BTreeMap<u16, TileTargets>`, `active_channel` +
+`set_active_channel` (the combo in `brush_panel::channel_rows`), lazy
+materialization via `ensure_channel(tile, channel)`, and the
+readers (`read_channel_tile` et al). Rollout landings (a)
+storage+routing+tests and (b) save/load+migration both shipped in the
+one commit.
+
+**Landed later, closing the doc's named blockers:** the binding seam
+(rollout landing (c), the tilepool kill's deferred half) —
+`viewport.rs::bind_paint_target` binds the active tile's
+height-channel target through `MeshBuffers::set_height_texture`
+(viewport.rs:1915-1942), the exact call the heightnormal kill built
+and could not reach; the NOT-REACHABLE mark in the requirements §5 row
+is gone with it. Solo-channel painting, per-channel export feeds and
+the ID-mask's channel-scoped variants all compose on the landed
+storage.
+
+**Outgrown by its successors, both of which cite forward from here:**
+per-CHANNEL RESOLUTION — this doc's v1 non-goal — was un-deferred and
+landed (2026-10-12 wave-perchanres: each channel of a set carries its
+own resolution, `target_sizes.txt` rows keyed `(set, channel)`); and
+the per-layer pool (docs/specs/per-layer-pool-design.md, stages 1b +
+4, 2026-10-14) generalized channels into `(owner, tile, channel)`
+planes — `PlaneOwner::Base | Layer(u64)` — with the composite cache
+and per-layer strokes writing through `plane_of_mut`. The doc's
+"Compositor reads base color only in v1" boundary was superseded by
+that stage 4 (strokes, fills, materials and imports each write their
+own planes; the cache composites every frame). The one deferral that
+STILL stands from the successor line: the §1.4 store unification
+(Base into the `planes` map) — see paint_state's module docs, which
+record why the two-store dispatch seam is the better shape for now.
+
+**The doc's residual authority:** the channel identity rules (String
+names from the document's TextureSet; reserved `baseColor` mapping to
+the field; `ChannelKind` as a bind-time concern, not stored), the
+v2→v3 migration contract (a flat manifest loads all-baseColor —
+pinned live by `v2_flat_manifest_loads_all_base_color` in
+persistence's tests), and the tile-major iteration rationale. The
+91-test suite in the (moved) paint_state.rs and the
+`(owner, tile, channel)` census (`planes_present`) hold the rest.
+
+**Correction to the doc's own claims, for the record:** none of the
+five test gates were falsified by the implementation — gate 3's
+migration test and gate 1's per-channel stroke isolation live by
+their design names; gates 4 and 5 landed with the seam and the
+ID-mask channel variants. The only stale text is positional (the
+pre-extraction paths) and the Status line this closure replaces.
