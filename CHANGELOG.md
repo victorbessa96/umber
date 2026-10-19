@@ -4,6 +4,37 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## The stencil chain completed + the perf instrument rebuilt (2026-10-19, thirteen rows at push)
+
+- **Added — the stencil engine end to end:** the gate_plane paint hook
+  (Amendment A: `set_stencil_gate` on the cavity-mask precedent,
+  mid-stroke refusal, the RAW-byte fold in gate_plane), the app
+  wiring (every panel frame hands the gate to umber-paint, the
+  pending row flips live), the viewport shell path (the overlay
+  finally draws — the shell's hard-coded `stencil: None` fixed; the
+  N toggle in both catalogs; the S chords), the set-switch re-stage
+  (the per-set scope closed at the real event site), the cross-tile
+  observer (a `staged_for` record watched per-frame — the restage's
+  residual seam closed; the mid-stroke window stays BY DESIGN), and
+  the design doc's closure (DRAFT → LANDED+CLOSED, step 4 of 4).
+  Host battery green at the chain's close: 822 tests.
+- **Fixed — the Flatpak extraction red:** every generated crate
+  source declares `archive-type: tar-gzip` — flatpak-builder cannot
+  extract bare `.crate` URLs; the sha256 had verified, so the
+  download was never the problem.
+- **Changed — the nightly perf gate drift-hardened:** median-of-3
+  before any verdict + the same-tip canary leg on any red
+  (`perf_gate.sh` + `perf_median.py`); the baseline reseeded to the
+  2026-10-19 fleet era after the four-leg bisect convicted the
+  RUNNER FLEET, not the code (the baseline's own tip read 89.29
+  today vs 45.54 three days prior — the full leg log in
+  docs/perf/protocol.md).
+- **Docs — C2-16 closed:** the §12 budgets' first real-hardware
+  record on the RTX 3070 — viewport p95 0.2034ms vs the 16.7ms
+  budget (82x inside, 1M tris + the 4K set), input-photon p95
+  10.08ms vs 20ms, the 200Hz soak zero drops. The C2-13..19
+  honest-claims row is all seven closed.
+
 ## The stencil wave + the freeze-3 fleet — the host-return close (2026-10-19, ff9ac02..0955ac8)
 
 The build host's third freeze parked 16 kills for two days; one

@@ -11,40 +11,40 @@
 
 ## Status line
 
-Current phase: **STENCIL WAVE + THE FREEZE-3 FLEET CLOSED (2026-10-19,
-push `ff9ac02..0955ac8`, CI 39263817670 GREEN both platforms).** The
-build host's third freeze (10-17/18, UECC bank-14 class) parked 16
-kills for two days; its return 08:42:55 closed them in ONE session
-through `scripts/stencil-wave-close.sh` (claim interlock, 51 manifest
-rows zero-drift, rsync, default-leg battery): the stencil engine
-(umber-core transform+rasterize port-verified + umber-app
-state/chords/overlay, 12 i18n keys both locales, viewport quad math +
-stencil_owns gating), e0063, the agent paint-ops pair, the stamp
-sidecar save, the hermetic Flatpak manifest, kittest layers breadth,
-the masked-bakes ray half, five design closures, and the recovery
-runbook itself. Battery GREEN (1,434 tests, 6 crates, clippy all-6)
-after ONE clippy fix-forward (viewport needless_option_as_deref);
-TWO recovery-script defects fixed live and harness-verified (the
-step-2 probe's self-match; the vacuous byte-blind verdict-reuse —
-addenda 1+2 in the script's report). The flatpak kill's verdict gate:
-the packaging DISPATCH (39263847856 — red at archive-extraction,
-"Unknown archive format" on .crate AFTER sha256 verified; the
-push-run skips the Flatpak job by trigger design); fixed same-day by
-the flatpak-archive-type kill (archive-type: tar-gzip per source) —
-the post-push re-dispatch is the verdict gate. The perf-nightly's
-first full run since
-the reseed: BUILD green (e0063 verified) but COMPARE red on real
-numbers (viewport_mean x1.83) — the live-regression hunt is NAMED.
+Current phase: **THE STENCIL ENGINE LANDED END TO END + THE PERF
+INSTRUMENT REBUILT (2026-10-19, thirteen rows local, push pending).**
+The morning closed the freeze-3 fleet (push `ff9ac02..0955ac8`, CI
+39263817670 GREEN both platforms; one clippy fix-forward, two
+recovery-script defects fixed live — addenda 1+2 in the script's
+report); the afternoon completed the stencil engine's whole chain
+on top: the gate_plane paint hook (`3a8b4cb`, Amendment A), the app
+wiring (`6c95e26`), the viewport shell path + the N toggle
+(`2bb8c60`), the set-switch re-stage (`dcc5e89`), the cross-tile
+observer (`45ad4e4` — coded by the opencode claw on
+deepseek-v4.1-flash, host battery 822 tests green), and the design
+doc's closure tick (`450b3e1`) — the lane's step-4 CLOSED, soft
+edges answered by design, the mid-stroke window BY DESIGN. The
+flatpak kill's verdict gate: fixed same-day by the
+flatpak-archive-type kill (archive-type: tar-gzip per source) — the
+post-push re-dispatch is the verdict gate. The perf instrument was
+rebuilt the same day: the four-leg bisect CONVICTED THE RUNNER
+FLEET, not the code (the baseline's own tip reads 89.29 today vs
+45.54 on 10-16; every commit reads 78-91 on today's fleet — the
+full leg log in docs/perf/protocol.md), the baseline reseeded to
+today's fleet era (`c53a08d`+`b1d3660`), the nightly drift-hardened
+(`dc4b355`: median-of-3 + the same-tip canary — no single sample
+carries a verdict), and C2-16 closed with the §12 budgets' first
+real-hardware record (`dc0c599`: the RTX 3070 at 82x/2x/zero-drop
+margins) — the C2-13..19 honest-claims row is ALL SEVEN CLOSED.
 
-**Next:** the live-regression verdict (confirmation re-run 39268968173
-on the same tip; then either the runner-variance close or the
-`5e0d89e..0955ac8` bisect with the stencil wave's viewport/app
-per-frame surface as lead suspect); the gate_plane paint hook
-(umber-paint — the stencil wave's named follow-up, lock released at
-the recovery); the partner-gated release lane (SPEC v1.1
-ratification, Windows signing, the alpha tag); memtest86+ at Bessa's
-next physical access to centralhost. Per-set-stacks closure
-(`f0d49ad`) + the wave's docs tick ride the next push.
+**Next:** the wave push (thirteen rows, ONE push + ci-watch + the
+first HARDENED nightly on the pushed tip — the drift gate's live
+proof); then the queue's remaining open lanes (C2-8's drag
+reorder, the display-chain-aware eyedropper sample, cached-bake +
+multi-tile ID-mask follow-ups, the release lane is Bessa-gated:
+SPEC ratification, Windows signing, the alpha tag);
+memtest86+'s verdict at Bessa's next physical access to
+centralhost.
 
 ## The core-loop queue (the ONLY active hunt)
 
