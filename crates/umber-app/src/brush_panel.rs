@@ -228,6 +228,23 @@ pub struct BrushPanel {
     /// preset's color and size too, not just its dab params (an
     /// eyedropper pick survives until the preset itself changes).
     preset_changed: bool,
+    /// The stamp image the user hand-picked for the active preset
+    /// (`stamp_image_rows`), retained so an explicit Save / Save As can
+    /// write it beside the preset as `<stem>.stamp.png` — the same
+    /// sidecar `.abr` import writes, which `load_stamp_for_active`
+    /// restores. `None` = no pick this session (a sidecar preset's own
+    /// tip stands). Cleared when the active preset changes: the pick
+    /// belonged to the preset being edited.
+    picked_stamp: Option<PickedStamp>,
+}
+
+/// A hand-picked stamp image retained for persistence: the decoded RGBA
+/// (what the sidecar write needs; `stamp_coverage` re-derives from it at
+/// load exactly as the picker did live).
+struct PickedStamp {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
 }
 
 impl BrushPanel {
@@ -259,6 +276,7 @@ impl BrushPanel {
             save_error: None,
             abr_report: Vec::new(),
             loaded_stamp: None,
+            picked_stamp: None,
             strip: crate::toolbar::ToolKind::Paint,
             save_as_name: String::new(),
             tool: BrushTool::Paint,
@@ -291,7 +309,7 @@ impl BrushPanel {
             channel_rows(ui, paint);
             quick_mask_rows(ui, paint);
             cavity_rows(ui, paint);
-            stamp_image_rows(ui, paint);
+            stamp_image_rows(ui, &mut self.picked_stamp, paint);
         }
         ui.separator();
         self.preset_selector(ui);
@@ -333,6 +351,10 @@ impl BrushPanel {
         if tip == self.loaded_stamp {
             return;
         }
+        // A preset switch invalidates the hand-picked stamp: the pick
+        // belonged to the preset being edited, and the sidecar loading
+        // here (if any) is the NEW preset's own tip.
+        self.picked_stamp = None;
         if let Some(path) = &tip {
             match umber_export::png::read_png_rgba8(path) {
                 Ok((w, h, rgba)) => {
@@ -835,7 +857,11 @@ impl BrushPanel {
 
     /// Serialize the active preset back to its source file. IO/serialize
     /// failures surface inline via `save_error`; never a panic. Clears
-    /// `dirty` on success.
+    /// `dirty` on success. A retained hand-picked stamp rides the same
+    /// explicit save: the preset is marked `stamped` (the flag the load
+    /// path keys on) and the image is written beside it as the
+    /// `<stem>.stamp.png` sidecar — a sidecar write failure reports and
+    /// leaves `dirty` set, so a retry rewrites both halves.
     fn save_active(&mut self) {
         let Some(idx) = self.active else {
             return;
@@ -843,16 +869,28 @@ impl BrushPanel {
         if idx >= self.library.entries.len() {
             return;
         }
-        let entry = &self.library.entries[idx];
-        let json = match entry.preset.to_json() {
+        // A hand-picked stamp makes the preset a stamp brush: the flag is
+        // what `load_stamp_for_active` keys on, and the sidecar written
+        // below supplies the tip it restores.
+        if self.picked_stamp.is_some() {
+            self.library.entries[idx].preset.params.stamped = true;
+        }
+        let source_path = self.library.entries[idx].source_path.clone();
+        let json = match self.library.entries[idx].preset.to_json() {
             Ok(json) => json,
             Err(err) => {
                 self.save_error = Some(format!("Save failed: {err}"));
                 return;
             }
         };
-        match std::fs::write(&entry.source_path, json) {
+        match std::fs::write(&source_path, json) {
             Ok(()) => {
+                if let Some(stamp) = &self.picked_stamp {
+                    if let Err(err) = write_stamp_sidecar(&source_path, stamp) {
+                        self.save_error = Some(format!("Save failed: stamp {err}"));
+                        return;
+                    }
+                }
                 self.dirty = false;
                 self.save_error = None;
             }
@@ -864,7 +902,9 @@ impl BrushPanel {
 
     /// Write the active preset under a new name into the user library
     /// dir (created when missing), then reload the shelf so the new
-    /// entry appears and select it by name lookup.
+    /// entry appears and select it by name lookup. A retained
+    /// hand-picked stamp rides along: the new preset is marked
+    /// `stamped` and the sidecar is written beside the NEW stem.
     fn save_as(&mut self) {
         let name = self.save_as_name.trim().to_owned();
         if name.is_empty() {
@@ -888,6 +928,9 @@ impl BrushPanel {
         }
         let mut preset = self.library.entries[idx].preset.clone();
         preset.name = name.clone();
+        if self.picked_stamp.is_some() {
+            preset.params.stamped = true;
+        }
         let json = match preset.to_json() {
             Ok(json) => json,
             Err(err) => {
@@ -899,6 +942,12 @@ impl BrushPanel {
         if let Err(err) = std::fs::write(&path, json) {
             self.save_error = Some(format!("Save As failed: {err}"));
             return;
+        }
+        if let Some(stamp) = &self.picked_stamp {
+            if let Err(err) = write_stamp_sidecar(&path, stamp) {
+                self.save_error = Some(format!("Save As failed: stamp {err}"));
+                return;
+            }
         }
         // Reload the same search path (plus the user dir, in case this
         // panel was built from dirs that omit it) so the new entry
@@ -1251,7 +1300,7 @@ fn stamp_rows(ui: &mut egui::Ui, params: &mut umber_brush::BrushParams) -> bool 
 
 /// The session's stamp image (C2-11): load a PNG (its luminance becomes
 /// the R8 coverage, alpha-weighted) or clear back to the full square.
-fn stamp_image_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
+fn stamp_image_rows(ui: &mut egui::Ui, picked: &mut Option<PickedStamp>, paint: &mut PaintState) {
     let title = tr("brush.stamp-image");
     ParamGroup::new("brush-stamp", title.as_str()).show(ui, |group| {
         let ui: &mut egui::Ui = &mut *group.ui;
@@ -1271,6 +1320,16 @@ fn stamp_image_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
                         Ok((w, h, rgba)) => {
                             if let Err(e) = paint.set_stamp(w, h, &stamp_coverage(&rgba)) {
                                 log::warn!("stamp {} refused: {e}", path.display());
+                            } else {
+                                // Retained for persistence: an explicit
+                                // Save / Save As writes it beside the
+                                // preset as the `.stamp.png` sidecar
+                                // (see `save_active`).
+                                *picked = Some(PickedStamp {
+                                    width: w,
+                                    height: h,
+                                    rgba,
+                                });
                             }
                         }
                         Err(e) => log::warn!("stamp {} unreadable: {e}", path.display()),
@@ -1278,6 +1337,7 @@ fn stamp_image_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
                 }
             }
             if (w, h) != (1, 1) && ui.button(tr("button.reset")).clicked() {
+                *picked = None;
                 paint.clear_stamp();
             }
         });
@@ -1294,6 +1354,23 @@ pub(crate) fn stamp_coverage(rgba: &[u8]) -> Vec<u8> {
             (luma * f32::from(px[3]) / 255.0).round().clamp(0.0, 255.0) as u8
         })
         .collect()
+}
+
+/// Writes a retained hand-picked stamp beside a preset as
+/// `<stem>.stamp.png` — the sidecar shape `.abr` import writes and
+/// `load_stamp_for_active` restores: an RGBA PNG, linear transfer, the
+/// picked image's own bytes (load re-derives coverage through
+/// `stamp_coverage`, exactly as the picker did live).
+fn write_stamp_sidecar(preset_path: &std::path::Path, stamp: &PickedStamp) -> Result<(), String> {
+    let sidecar = preset_path.with_extension("stamp.png");
+    umber_export::png::write_png(
+        &sidecar,
+        stamp.width,
+        stamp.height,
+        &stamp.rgba,
+        umber_export::png::Transfer::Linear,
+    )
+    .map_err(|e| format!("{}: {e}", sidecar.display()))
 }
 
 fn cavity_rows(ui: &mut egui::Ui, paint: &mut PaintState) {
@@ -2580,6 +2657,71 @@ mod tests {
             "on-disk alpha must reflect the edit, got {}",
             back.params.alpha
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_persists_a_hand_picked_stamp_as_the_sidecar() {
+        let dir = fresh_tmpdir("stamp-persist");
+        write_preset(&dir, "stamped.umberbrush", &test_preset("Stamped", 0.5));
+
+        let mut panel = BrushPanel::with_dirs(vec![dir.clone()]);
+        assert_eq!(panel.library.entries.len(), 1);
+        panel.active = Some(0);
+        panel.picked_stamp = Some(PickedStamp {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 255, 255, 255, 10, 20, 30, 128],
+        });
+        panel.save_active();
+
+        assert!(!panel.dirty, "successful save clears dirty");
+        assert!(panel.save_error.is_none(), "{:?}", panel.save_error);
+
+        // The sidecar sits beside the preset with `.abr`'s exact shape,
+        // and the bytes round-trip: what the picker stamped live is what
+        // a reload stamps (coverage re-derived identically).
+        let sidecar = dir.join("stamped.stamp.png");
+        let (w, h, rgba) = umber_export::png::read_png_rgba8(&sidecar).expect("sidecar PNG");
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba, vec![255, 255, 255, 255, 10, 20, 30, 128]);
+        // Coverage re-derives identically: white opaque -> 255; the
+        // [10, 20, 30, 128] pixel -> luma 18.596 × 128/255 -> 9 (the
+        // exact value the python port of stamp_coverage computes).
+        assert_eq!(stamp_coverage(&rgba), vec![255, 9]);
+
+        // The flag the load path keys on is set in the saved preset.
+        let fresh = Library::load_from_dirs(std::slice::from_ref(&dir));
+        let back = BrushPreset::from_json(
+            &std::fs::read_to_string(&fresh.entries[0].source_path).expect("readable"),
+        )
+        .expect("parseable");
+        assert!(back.params.stamped, "save marks the preset stamped");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_without_a_pick_touches_no_sidecar_and_flips_no_flag() {
+        let dir = fresh_tmpdir("stamp-nopick");
+        write_preset(&dir, "plain.umberbrush", &test_preset("Plain", 0.5));
+
+        let mut panel = BrushPanel::with_dirs(vec![dir.clone()]);
+        panel.active = Some(0);
+        panel.save_active();
+
+        assert!(panel.save_error.is_none(), "{:?}", panel.save_error);
+        assert!(
+            !dir.join("plain.stamp.png").exists(),
+            "no sidecar without a pick"
+        );
+        let fresh = Library::load_from_dirs(std::slice::from_ref(&dir));
+        let back = BrushPreset::from_json(
+            &std::fs::read_to_string(&fresh.entries[0].source_path).expect("readable"),
+        )
+        .expect("parseable");
+        assert!(!back.params.stamped, "no pick, no flag flip");
 
         std::fs::remove_dir_all(&dir).ok();
     }
