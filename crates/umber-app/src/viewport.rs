@@ -601,6 +601,38 @@ impl Viewport {
         extras: ViewportExtras<'_>,
     ) -> Option<ViewportClick> {
         let ViewportExtras { home, mut stencil } = extras;
+
+        // THE TILE OBSERVER (the cross-tile-stroke residual seam):
+        // umber-paint's `push_event_styled` moves `active_tile` when a
+        // stroke crosses into another tile (paint_state.rs:4694-4697),
+        // but the staged gate keeps the OLD tile's dims; `gate_plane`
+        // skips composing on a dims mismatch, so the new tile's dabs
+        // paint stencil-ungated until something re-stages. Watch the
+        // gate's dims (`staged_for`, set only on an adopted hand-off)
+        // against paint's current tile's quick-mask dims, and re-stage on
+        // the first frame they differ. Frame-cheap: the watch is a dims
+        // compare; the re-stage only fires on a size-change frame. The
+        // tile id is deliberately not part of the compare: the hook's
+        // bytes are a pure function of the dims, so a same-size tile
+        // change needs no re-hand-off — and comparing the id would call
+        // `set_stencil_gate`, whose identical-value no-op returns `false`
+        // without refreshing the record, re-staging every frame.
+        //
+        // The mid-stroke window stays BY DESIGN: one stroke never changes
+        // its gate partway (the snapshot contract, `set_stencil_gate`'s
+        // own refusal). After the stroke ends, the next frame's observer
+        // closes the gap.
+        if let (Some(stencil), Some(p)) = (stencil.as_deref_mut(), paint.as_deref_mut()) {
+            if stencil.active && stencil.image.is_some() && !p.is_stroking() {
+                let tile = p.active_tile();
+                let (w, h) = p.quick_mask_for_tile(tile).dimensions();
+                let staged_dims = stencil.staged_for.map(|(_, sw, sh)| (sw, sh));
+                if staged_dims != Some((w, h)) {
+                    restage_stencil(&mut *stencil, Some(&mut *p));
+                }
+            }
+        }
+
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
             return None;
@@ -1678,10 +1710,23 @@ pub(crate) fn restage_stencil(stencil: &mut StencilState, paint: Option<&mut Pai
     if let Some(p) = paint {
         let tile = p.active_tile();
         let mask = p.quick_mask_for_tile(tile);
-        let target = Some(mask.dimensions());
+        let (w, h) = mask.dimensions();
+        let target = Some((w, h));
         let quick = quick_mask_gate_bytes(mask, tile);
         stencil.stage_gate(target, quick.as_deref());
-        p.set_stencil_gate(stencil.hook_gate(target));
+        // The observer's record follows the HOOK, not the label: only an
+        // ADOPTED hand-off proves paint's gate matches this tile + these
+        // dims. `set_stencil_gate` refuses mid-stroke (and no-ops on a
+        // same value), and the label above still stages on a refusal — so
+        // recording on anything but `true` would make the observer read
+        // the label's dims as a match and never retry, leaving the stale
+        // gate in place forever. An adopted CLEAR (a deactivation hands
+        // off `None`) records `None`: there are no bytes staged to claim.
+        let gate = stencil.hook_gate(target);
+        let has_gate = gate.is_some();
+        if p.set_stencil_gate(gate) {
+            stencil.staged_for = if has_gate { Some((tile, w, h)) } else { None };
+        }
     } else {
         stencil.stage_gate(None, None);
     }

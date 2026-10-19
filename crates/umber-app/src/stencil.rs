@@ -50,9 +50,13 @@
 //!   composed label bytes (Amendment A: `gate_plane` composes with the
 //!   quick mask itself). [`StencilState::staged`] keeps its
 //!   composed-label contract (Amendment B's `min`) for the panel's
-//!   read-only row only. Named follow-ups: the active-tile-change
-//!   re-stage (per-set scope — other-sized tiles paint stencil-ungated
-//!   until then) and the viewport chords (design step 3).
+//!   read-only row only. The active-tile-change re-stage now has its
+//!   observer ([`StencilState::staged_for`], set only on an ADOPTED
+//!   hand-off; the viewport's `ui_with_stencil` re-stages on the first
+//!   non-stroking frame whose tile dims differ). The mid-stroke window
+//!   stays BY DESIGN: one stroke never changes its gate partway (the
+//!   snapshot contract, `set_stencil_gate`'s own refusal). Named
+//!   follow-up: the viewport chords (design step 3).
 //! - **The screen <-> UV gap** (stencil-core's judgment call 4) is carried
 //!   forward unchanged: the gate is rasterized in target texel space,
 //!   and projecting the screen-space quad onto UV texels is the hook
@@ -177,6 +181,14 @@ pub struct StencilState {
     pub load_error: Option<String>,
     /// The composed gate the last change built (the upload seam).
     pub staged: Option<StagedGate>,
+    /// The observer's bookkeeping: the tile id and gate dims the HOOK's
+    /// staged bytes were handed off for (`(tile, width, height)`), or
+    /// `None` before the first ADOPTED hand-off. Set only on adoption —
+    /// a refused or same-value `set_stencil_gate` leaves it untouched.
+    /// Recording on a refusal would let the label bytes (`staged`, which
+    /// always stage) convince the observer the hook matches, so the gate
+    /// would stay stale forever.
+    pub staged_for: Option<(u16, u32, u32)>,
 }
 
 impl Default for StencilState {
@@ -191,6 +203,7 @@ impl Default for StencilState {
             path: None,
             load_error: None,
             staged: None,
+            staged_for: None,
         }
     }
 }
@@ -434,8 +447,20 @@ pub fn panel_section(ui: &mut egui::Ui, state: &mut StencilState, paint: Option<
     // Runs every panel frame: `set_stencil_gate`'s same-value no-op
     // carries the change-driven cost contract, and a stencil staged
     // before a document opened still hands off on the next open.
+    // Record the adoption for the viewport observer (the same rule as
+    // `restage_stencil`): a refusal mid-stroke must leave the record
+    // untouched, or the observer would read the label's dims as a
+    // matching hook and never retry.
     if let Some(p) = paint {
-        p.set_stencil_gate(state.hook_gate(target));
+        let gate = state.hook_gate(target);
+        let has_gate = gate.is_some();
+        let adopted = p.set_stencil_gate(gate);
+        if adopted {
+            state.staged_for = match (has_gate, tile, target) {
+                (true, Some(tile), Some((w, h))) => Some((tile, w, h)),
+                _ => None,
+            };
+        }
     }
 }
 
@@ -494,6 +519,18 @@ mod tests {
         assert_eq!(s.transform, StencilTransform::default());
         assert!(s.image.is_none() && s.path.is_none());
         assert!(s.load_error.is_none() && s.staged.is_none());
+        assert!(s.staged_for.is_none(), "no hand-off has been adopted");
+    }
+
+    #[test]
+    fn label_staging_never_records_an_adopted_hand_off() {
+        let mut s = active_pattern();
+        s.stage_gate(Some((4, 4)), None);
+        assert!(s.staged.is_some(), "the panel label always stages");
+        assert_eq!(
+            s.staged_for, None,
+            "only an ADOPTED hook hand-off records the tile + dims"
+        );
     }
 
     #[test]
