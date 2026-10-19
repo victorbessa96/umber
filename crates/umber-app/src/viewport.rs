@@ -1668,8 +1668,13 @@ fn stencil_overlay_rgba(image: &StencilImage) -> ([usize; 2], Vec<u8>) {
 /// target + quick-mask lines, mirrored because stencil.rs is lock-held)
 /// and the HOOK hand-off (Amendment A: the RAW coverage through
 /// `set_stencil_gate`, so every viewport path — chord release, popover
-/// edit, N — and the panel path keep one gate).
-fn restage_stencil(stencil: &mut StencilState, paint: Option<&mut PaintState>) {
+/// edit, N — and the panel path keep one gate). `pub(crate)` because the
+/// set switch's paint-side event (`texture_sets_panel_ui`, main.rs) is
+/// the fourth caller: Amendment A point 4's per-set scope, the gate
+/// stages at the ACTIVE tile's quick-mask plane, so a set switch must
+/// re-stage at the newly-resolved plane or the new tile paints
+/// stencil-ungated.
+pub(crate) fn restage_stencil(stencil: &mut StencilState, paint: Option<&mut PaintState>) {
     if let Some(p) = paint {
         let tile = p.active_tile();
         let mask = p.quick_mask_for_tile(tile);

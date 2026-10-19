@@ -1033,6 +1033,7 @@ impl TabViewer for PanelViewer<'_> {
                             texture_sets_panel_ui(
                                 ui,
                                 self.paint.as_deref_mut(),
+                                Some(&mut *self.stencil),
                                 self.mesh_import.session_set.name.as_str(),
                                 &channels,
                                 self.pending_resize,
@@ -1104,6 +1105,7 @@ impl TabViewer for PanelViewer<'_> {
                 texture_sets_panel_ui(
                     ui,
                     self.paint.as_deref_mut(),
+                    Some(&mut *self.stencil),
                     self.mesh_import.session_set.name.as_str(),
                     &channels,
                     self.pending_resize,
@@ -2495,6 +2497,7 @@ pub struct PendingResize {
 fn texture_sets_panel_ui(
     ui: &mut Ui,
     paint: Option<&mut paint_state::PaintState>,
+    stencil: Option<&mut stencil::StencilState>,
     session_set: &str,
     channels: &[String],
     pending: &mut Option<PendingResize>,
@@ -2522,6 +2525,18 @@ fn texture_sets_panel_ui(
     });
     if active != paint.active_set() {
         paint.set_active_set(&active);
+        // Amendment A point 4 (the per-set scope): the stencil gate
+        // stages at the ACTIVE tile's quick-mask plane size, so this
+        // paint-side set switch must re-stage — its tile's now-resolved
+        // set can carry a differently-sized quick mask, and the new tile
+        // would otherwise paint stencil-ungated. Guarded to a live
+        // stencil (an inactive or imageless one already holds no gate;
+        // re-staging it would only clear paint's gate for nothing).
+        if let Some(s) = stencil {
+            if s.active && s.image.is_some() {
+                crate::viewport::restage_stencil(s, Some(&mut *paint));
+            }
+        }
     }
     let (width, height) = paint.size_of_set(&active);
     let mut size = width;
