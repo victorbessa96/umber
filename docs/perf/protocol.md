@@ -434,3 +434,28 @@ kill): N>=3-run medians before any REGRESSION verdict + the
 same-tip canary leg on any red — this hunt cost four legs because
 neither existed. The hunt closes as INFRA-DRIFT-ANSWERED: no code
 regression, the instrument reset, the prescription on file.
+
+## The real-GPU budget record (2026-10-19 ~15:5xZ) — C2-16 closed
+
+The §12 budgets' first real-hardware record — centralhost's RTX
+3070 (Vulkan, DiscreteGpu; at/above the §12 reference class), tip
+`dc4b355` exported clean via git archive into an isolated host dir
+(a sibling's in-flight bytes were never measured):
+
+- **Viewport** (ref_scene_bench, 1000 frames, 1,002,252 tris, the
+  4K set at 268,435,456 bytes resident, 1080p target): mean
+  0.1931ms / p50 0.1900 / p95 0.2034 / p99 0.2081 — the bench's own
+  verdict field `within_budget: true` against `budget_p95_ms: 16.7`
+  (**~82x inside** the 60fps-sustained budget).
+- **Input-to-photon** (4,998 events): p50 0.0877ms / p95
+  10.0825ms / p99 10.0894ms against `budget_ms: 20.0` — half the
+  budget; the ~10ms tail is the 60Hz present cadence of the
+  drain-events-then-acquire loop.
+- **Stroke throughput** (the 200Hz soak, 4096x4096 target):
+  `staged=2914 composited=2914 drops=0` (inter-dispatch mean
+  8.56ms), `test result: ok` — zero dropped dabs.
+
+The lavapipe CI gate stays the regression instrument (fleet-era
+baselined, drift-hardened by `perf_gate.sh`); this record is the
+honest-claims data point the C2-16 row wanted — the budgets hold on
+real hardware with 82x, 2x, and zero-drop margins.
