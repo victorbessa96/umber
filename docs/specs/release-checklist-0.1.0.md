@@ -4,10 +4,14 @@ The tag fires on Bessa's word (the standing rule from the packaging
 commit). This is the readiness state, so the word is the only
 remaining input.
 
-Updated 2026-10-15 against the C2 gap audit (`docs/loop/audit-2026-10-15-c2.md`):
-gates 6-9 are NOT MET. Earlier, 2026-10-12, per the strategy review: every
+Re-verified 2026-10-19 against the live queue rows + kill reports (the
+stale-claim sweep, kill `release-checklist-truth`): gate 6 is MET
+PENDING the first drift-hardened nightly green on a pushed tip; gates
+7-9 are NOT MET (Bessa's). Earlier, 2026-10-12, per the strategy review: every
 gate below checked process; none checked FUNCTION. Gate 0 (the
 journey test) is now the first gate — the process gates follow it.
+The 2026-10-15 C2-audit update's claims that landed since are
+corrected in place below.
 
 ## Gate 0 — the journey test (the FUNCTION gate, added by the review)
 
@@ -17,8 +21,10 @@ core-loop criticals JOINED — not each in isolation. The harness:
 `crates/umber-app/tests/gate0_journey.rs` (`15c072e`; the compositor
 assertion is the headless 'see lit' equivalent, the shell frame named
 as the shell-only remainder). [PASSED — CI run 38255484123 at `70dc67a`,
-lavapipe + WARP. Caveat (C2-17): the FBX fixture carries no UV layer, so
-the FBX leg proves the import, not a UV paint on it.]
+lavapipe + WARP. The old C2-17 caveat (the FBX fixture carried no UV
+layer, so the FBX leg proved only the import) is CLOSED: the generated
+`cube_uv_ascii7400.fbx` carries UVs and Gate 0 asserts the unwrap —
+queue row C2-13..19, closed 2026-10-15.]
 
 ## The gate (what must be true when the tag fires)
 
@@ -38,16 +44,26 @@ the FBX leg proves the import, not a UV paint on it.]
 5. **The requirements marked** — ✓ the census current through the
    core-loop phase: all six criticals' rows marked ✓ code with the
    code-vs-reachable split (the last marks: `472b774`).
-6. **The perf baselines** — seeded at the 4K default (`fd49627`), but
-   from a local Intel HD 530 over GL, not the nightly's lavapipe. NOT MET
-   until: the nightly actually runs (C2-14: `runs-on: [self-hosted]` has
-   no hosted fallback), the gate stops passing missing metrics (C2-15),
-   and the 60 fps / 1M-tri / 4K budget is measured as specified (C2-16).
+6. **The perf baselines** — MET PENDING the first drift-hardened nightly
+   green on a pushed tip. Every sub-item the 10-15 audit named is
+   closed (queue row C2-13..19, ALL SEVEN CLOSED): the nightly runs
+   (C2-14), the gate is leak-proof (C2-15), and the 60 fps / 1M-tri /
+   4K budget is measured on real hardware (C2-16 — the RTX 3070
+   record: viewport p95 0.2034 ms vs the 16.7 ms budget, kill report
+   `2026-10-19-real-gpu-budget`). The baseline was reseeded from
+   authentic runs after the runner-fleet drift conviction
+   (`c53a08d`/`b1d3660`, triage in `docs/perf/protocol.md`) and the
+   nightly is drift-hardened — median-of-3 plus a same-tip canary leg
+   (`dc4b355`). The gate reads MET when the first hardened nightly
+   runs green on a pushed tip (the pending W-C3a wave push carries
+   it).
 7. **SPEC ratified** (Bessa) — NOT MET: SPEC.md v1.0 is DRAFT, and the
    v1.1 amendment draft waits.
-8. **One dogfood asset painted end to end** (Bessa first) — NOT MET, and
-   blocked on the C2 Tier 1-2 rows: painting reaches Base Color only, and
-   export writes Base Color only from paint.
+8. **One dogfood asset painted end to end** (Bessa first) — NOT MET: the
+   dogfood pass has not happened. The 10-15 blocker is GONE — painting
+   reaches every channel and export writes every painted channel
+   (C2-5 + C2-6, queue rows closed 2026-10-15); what remains is the
+   pass itself (Bessa's two-material prop, C2-24).
 9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — NOT MET: no tag has
    ever run `release.yml` (C2-25).
    - The local half ran 2026-10-15. `dist plan` (cargo-dist 0.32.0) shows
@@ -61,7 +77,10 @@ the FBX leg proves the import, not a UV paint on it.]
      shell + PowerShell installers and the sha256 sums.
    - Afterwards, set the version back to `0.1.0` for the real tag.
    - Pushing either tag is Bessa's call. It publishes a GitHub pre-release.
-   - **APPROVED by Bessa 2026-10-15.** It fires after W-C2g's CI is green.
+   - **APPROVED by Bessa 2026-10-15.** The W-C2g CI-green precondition
+     is long met (runs 38872572891 / 38885801883, both platforms);
+     what remains is the version-bump commit and the tag push, which
+     is Bessa's call (above).
      The exact steps:
      0. Land kill `win-version-resource` first (Windows ProductName/Version
         metadata, which SignPath requires; `2026-10-15-c2-22-signing.md`).
@@ -135,8 +154,16 @@ protocol had no number to freeze). After 0.1.0, any step change bumps it.
   only). An OV certificate ($150–300/yr) is the fallback; EV no longer
   bypasses SmartScreen since 2024.
 
-- PSD import (P3-designed), .usdz read beyond the first layer, the
-  full-32 blend set, OCIO configs (the adoption probe's rule), the
-  path tools, the post-effects stack — all tracked, none blocking
-  the 0.1.0 floor. (Review-audit note: nothing P0 hides here — the
+- .usdz read beyond the first layer — still true and tracked
+  (`umber-mesh/src/usdc.rs:43` loads the package's first layer's first
+  Mesh prim); non-blocking. (Sweep note 2026-10-19, kill
+  `release-checklist-truth`: PSD import LANDED — `mod psd` lives in
+  umber-app + umber-export, queue row 18 `a4bf81a`; the full-32 blend
+  set LANDED — `d861482`, all 32 variants live in `layers.rs`'s
+  `BlendMode` (counted); the OCIO config panel LANDED — `9a1a808`,
+  ocio wired in `display_panel.rs`; the path tools LANDED —
+  `path_tool.rs` + the parity row's smudge/clone/symmetry/path/polygon
+  ✓; the post-effects stack LANDED — requirements row 84: built
+  `86e77ff`+`a523647`+`112b378` and persisted `f35cf48`. All five
+  removed from this list.) (Review-audit note: nothing P0 hides here — the
   P0 holes all live in the census's code-vs-reachable split now.)
