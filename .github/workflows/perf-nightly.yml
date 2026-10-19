@@ -5,6 +5,11 @@ name: perf-nightly
 # perf/baseline.json — a >10% regression on any budget fails the job, and
 # so does a tracked metric the run did not produce (perf_compare.py), and
 # so does a failing harness (the stroke soak's zero-drop assert).
+# Drift-hardened 2026-10-19: scripts/perf_gate.sh runs the metric
+# harnesses as median-of-3 (perf_median.py) and, on a red, a same-tip
+# canary leg (median-of-5) before the job may fail — the runner-fleet
+# CPU drift of 2026-10-19 read red on five commits in one day (image
+# identical) and a single sample can no longer carry a verdict.
 # NOT per-commit (the load directive): failures here don't block merges;
 # they surface the drift the protocol tracks.
 
@@ -23,7 +28,9 @@ jobs:
     # then cancelled). The 3070 runner opts in through the repo variable
     # PERF_RUNNER=self-hosted once it is online; until then the gate runs.
     runs-on: ${{ vars.PERF_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 40
+    # Gate 1 is 3 harness passes; a red adds the 2-pass canary leg —
+    # 90 min holds build + soak + five passes + two compares with margin.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -44,27 +51,12 @@ jobs:
       - name: Build the perf harnesses
         run: cargo build --release -p umber-app -p umber-gpu --features perf
 
-      - name: Run the perf harnesses (JSON out)
-        env:
-          UMBER_REF_SCENE_FRAMES: "1000"
-          UMBER_REF_SCENE_JSON: /tmp/ref-scene.json
-          UMBER_I2P_EVENTS: "5000"
-          UMBER_I2P_JSON: /tmp/i2p.json
-        # No `|| true`: a harness that fails (the stroke soak's zero-drop
-        # assert, a panicking bench) fails the job. Every step still runs
-        # (`set +e` + the exit tally) so one failure does not hide the
-        # others' numbers.
-        run: |
-          # The harness tests are NOT #[ignore] (the 2026-10-12 seed run
-          # proved: --ignored filtered EVERYTHING and the job compared an
-          # empty report). One filter per invocation — cargo test takes
-          # exactly one TESTNAME.
-          set +e
-          fail=0
-          cargo test -p umber-gpu --features perf --release ref_scene_bench -- --nocapture || fail=1
-          cargo test -p umber-app --features perf --release input_photon_session -- --nocapture || fail=1
-          cargo test -p umber-app --features perf --release stroke_soak -- --nocapture || fail=1
-          exit $fail
+      - name: Run the drift-hardened perf gate (median-of-3 + same-tip canary)
+        # perf_gate.sh owns the harness env vars, the N-pass medians, and
+        # the two-gate verdict; its stdout carries every per-pass number.
+        # A harness failure (the soak's zero-drop assert, a panicking
+        # bench) fails the job before any comparison, as before.
+        run: bash scripts/perf_gate.sh
 
       - name: Compare against perf/baseline.json (>10% fails)
         if: always()
@@ -78,4 +70,6 @@ jobs:
           path: |
             /tmp/ref-scene.json
             /tmp/i2p.json
+            /tmp/ref-r*.json
+            /tmp/i2p-r*.json
           retention-days: 30
