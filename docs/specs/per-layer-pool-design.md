@@ -2,9 +2,14 @@
 
 Date: 2026-10-14 (doc-only kill, lock `perlayer-pool-doc`; r2 rewrite
 under lock `pool-r2`).
-Status: READY TO IMPLEMENT (stages 1b–5). Stage 1a is LANDED
-(commit `b1ceb2c`, kill report
-`docs/loop/kill-reports/2026-10-14-pool-stage1a.md`).
+Status: LANDED + CLOSED 2026-10-14 — all five stages landed
+(1a+1b+2 `b1ceb2c`/`f2aff9f`, 3 selection + stroke gate `ed64a58`,
+4 per-layer pixels `dd6e1cd`, 5 anchors + instances `ec6d552`), the
+arc closed in `cfb205c`; the binding review artifact:
+`docs/loop/artifacts/2026-10-14-perlayer-pool-review.json`. Stage
+1a's kill report: `docs/loop/kill-reports/2026-10-14-pool-stage1a.md`.
+(Status line corrected 2026-10-19 by the docs audit — it still read
+READY TO IMPLEMENT five days after the landing.)
 
 **Revision history**
 - **r1 (DRAFT, pre-review).** The original design.

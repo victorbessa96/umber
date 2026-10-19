@@ -2,7 +2,9 @@
 
 The loop's rulings, one entry each, newest first. A decision lands here when
 it changes standing behavior (not per-kill choices, which live in kill
-reports). Bessa's overrides are BINDING and marked.
+reports). Bessa's overrides are BINDING and marked. Alignment-session
+and mid-execution decisions live in the root DECISIONS.md (the two
+files are distinct by scope, not duplicates).
 
 ## 2026-10-12 ~23:20 — The five-ruling alignment pass (ALL BINDING, Bessa)
 

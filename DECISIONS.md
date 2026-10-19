@@ -1,6 +1,7 @@
 # umber — Decisions
 
 > Alignment-session + mid-execution decisions, append-only. Never edit history; supersede by adding a new entry that names the old one.
+> The LOOP's rulings live in a separate registry: docs/loop/decisions.md (the two files are distinct by scope, not duplicates).
 
 Format per entry:
 

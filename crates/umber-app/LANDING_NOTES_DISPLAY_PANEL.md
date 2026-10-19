@@ -9,6 +9,13 @@ and its API shapes are still the contract its gated tests verify.
 Written cargo-free (headless session; rustfmt/cargo not run locally). The
 remote gate is the first compile.
 
+NOTE (2026-10-19 docs audit): this is the CANONICAL display-panel
+landing note. An earlier copy lived at the REPO ROOT under the same
+filename through 2026-10-19, carrying the §9 chain-era record; it
+was removed by the docs audit as a stale duplicate (the code's
+references — display_panel.rs, display_lut.rs — resolve here). Its
+bytes remain retrievable at commit `146d7a0`.
+
 ## Reconciliation: extend `DisplayTransform`, don't invent `ViewTransform`
 
 `umber-color::display` already had `DisplayTransform { None, Srgb }` with
