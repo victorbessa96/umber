@@ -280,3 +280,190 @@ fn the_row_eye_toggles_visibility_and_reports_itself() {
     }
     panic!("no eye hid the layer");
 }
+
+/// The layers_ui draw closure the breadth tests share (the row-eye
+/// test's shape): one empty-materials context, Base visible, badges
+/// and thumbs empty — `active` is the parameter under test.
+fn layers_ui_closure(
+    active: umber_app::paint_state::PlaneOwner,
+) -> impl FnMut(&mut egui::Ui, &mut umber_app::document::Document) {
+    use umber_app::layers_panel::gestures::GestureState;
+    move |ui, s: &mut umber_app::document::Document| {
+        let defs = std::collections::BTreeMap::<String, String>::new();
+        let badges = std::collections::HashMap::<u64, String>::new();
+        let mut states = umber_app::material_layer::MaterialLayerStates::default();
+        let thumbs = std::collections::HashMap::<u64, egui::TextureHandle>::new();
+        let gestures = GestureState::default();
+        let mats = umber_app::layers_panel::MaterialPanelContext {
+            defs: &defs,
+            badges: &badges,
+            status: None,
+            states: &mut states,
+        };
+        let _ = umber_app::document::layers_ui(
+            ui,
+            s,
+            mats,
+            active,
+            true,
+            &umber_app::document::LayerRowBadges::default(),
+            &thumbs,
+            &gestures,
+        );
+    }
+}
+
+/// The ⧉ row button duplicates the layer: a same-kind "copy" above the
+/// source, settings carried (C2-8's duplicate; the undoable-command
+/// path is the History panel's own test).
+#[test]
+fn the_duplicate_button_copies_the_layer_row() {
+    use umber_core::layers::{LayerCommand, LayerKind};
+    let mut harness = support::harness_state(
+        layers_ui_closure(umber_app::paint_state::PlaneOwner::Base),
+        {
+            let mut doc = umber_app::document::Document::default();
+            doc.run(LayerCommand::add("one", LayerKind::Paint));
+            doc
+        },
+    );
+    support::settle(&mut harness);
+    assert_eq!(harness.state().layers().len(), 1);
+    // The glyph button's accessible label is its text (the duplicate
+    // row deliberately carries no tooltip: its catalog key waits on
+    // the stencil wave's i18n lock — see document.rs's row comment).
+    harness.get_by_label("⧉").click();
+    support::settle(&mut harness);
+    let doc = harness.state();
+    assert_eq!(doc.layers().len(), 2, "the duplicate landed");
+    let copy = doc
+        .layers()
+        .iter()
+        .find(|l| l.name == umber_app::document::duplicate_name("one"))
+        .expect("the copy carries the ' copy' name");
+    assert_eq!(copy.kind, LayerKind::Paint, "same kind as the source");
+    assert!(
+        (copy.opacity - 1.0).abs() < f32::EPSILON,
+        "settings carried at the default"
+    );
+    assert_eq!(doc.layers().len(), 2);
+}
+
+/// The selected layer's properties rows render under ITS row only:
+/// with the layer active they draw (opacity, blend, rename); with Base
+/// active they do not — the selection gate is the behavior under test.
+#[test]
+fn the_properties_rows_render_for_the_selected_layer_only() {
+    use umber_core::layers::{LayerCommand, LayerKind};
+    let mut selected = support::harness_state(
+        layers_ui_closure(umber_app::paint_state::PlaneOwner::Layer(0)),
+        {
+            let mut doc = umber_app::document::Document::default();
+            doc.run(LayerCommand::add("one", LayerKind::Paint));
+            doc
+        },
+    );
+    support::settle(&mut selected);
+    for key in [
+        "history.op-set-opacity",
+        "history.op-set-blend",
+        "history.op-rename",
+    ] {
+        assert!(
+            support::has_label(&selected, &umber_app::i18n::tr(key)),
+            "the {key} row renders for the selected layer"
+        );
+    }
+    let mut base = support::harness_state(
+        layers_ui_closure(umber_app::paint_state::PlaneOwner::Base),
+        {
+            let mut doc = umber_app::document::Document::default();
+            doc.run(LayerCommand::add("one", LayerKind::Paint));
+            doc
+        },
+    );
+    support::settle(&mut base);
+    for key in [
+        "history.op-set-opacity",
+        "history.op-set-blend",
+        "history.op-rename",
+    ] {
+        assert!(
+            !support::has_label(&base, &umber_app::i18n::tr(key)),
+            "the {key} row stays hidden while Base is the active plane"
+        );
+    }
+}
+
+/// The blend combo (the channel-picker idiom): open it, pick Multiply,
+/// the selected layer's mode becomes Multiply through ONE undoable
+/// command — the History panel's undo restores Normal exactly.
+#[test]
+fn the_blend_combo_sets_the_selected_layers_mode_and_undo_restores() {
+    use umber_core::layers::{LayerCommand, LayerKind};
+    // Layers + History in ONE draw: the combo lives in the layers
+    // properties rows, the ↶ Undo button in the history panel, and the
+    // undo must reach the SAME document through the panel a user would
+    // click. (The battery's first run caught the layers-only closure:
+    // no history node, so the undo query panicked at support's
+    // get_by_label.)
+    let mut harness = support::harness_state(
+        {
+            use umber_app::layers_panel::gestures::GestureState;
+            move |ui, s: &mut umber_app::document::Document| {
+                let defs = std::collections::BTreeMap::<String, String>::new();
+                let badges = std::collections::HashMap::<u64, String>::new();
+                let mut states = umber_app::material_layer::MaterialLayerStates::default();
+                let thumbs = std::collections::HashMap::<u64, egui::TextureHandle>::new();
+                let gestures = GestureState::default();
+                let mats = umber_app::layers_panel::MaterialPanelContext {
+                    defs: &defs,
+                    badges: &badges,
+                    status: None,
+                    states: &mut states,
+                };
+                let _ = umber_app::document::layers_ui(
+                    ui,
+                    s,
+                    mats,
+                    umber_app::paint_state::PlaneOwner::Layer(0),
+                    true,
+                    &umber_app::document::LayerRowBadges::default(),
+                    &thumbs,
+                    &gestures,
+                );
+                umber_app::history_panel::history_ui(ui, s, None);
+            }
+        },
+        {
+            let mut doc = umber_app::document::Document::default();
+            doc.run(LayerCommand::add("one", LayerKind::Paint));
+            doc
+        },
+    );
+    support::settle(&mut harness);
+    assert_eq!(
+        harness.state().layers()[0].blend_mode,
+        umber_core::BlendMode::Normal,
+        "the default mode is Normal"
+    );
+    // The blend combo is the only ComboBox in the layers draw. The
+    // options carry egui's Debug labels ("Multiply" — the mode set's
+    // own spelling, no i18n involvement).
+    harness.get_by_role(egui::accesskit::Role::ComboBox).click();
+    support::settle(&mut harness);
+    harness.get_by_label("Multiply").click();
+    support::settle(&mut harness);
+    assert_eq!(
+        harness.state().layers()[0].blend_mode,
+        umber_core::BlendMode::Multiply,
+        "the combo picked Multiply"
+    );
+    support::click_label(&mut harness, &umber_app::i18n::tr("history.undo"));
+    support::settle(&mut harness);
+    assert_eq!(
+        harness.state().layers()[0].blend_mode,
+        umber_core::BlendMode::Normal,
+        "one undo restores the mode (one command per change)"
+    );
+}
