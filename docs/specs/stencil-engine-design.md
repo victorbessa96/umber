@@ -1,7 +1,8 @@
 # The stencil engine (wave-stencil) — design (R-A1 + g6-stencil-overlay)
 
-Status: DRAFT for implementation. Owner: dragon. Written 2026-10-17
-against HEAD `7f3d529` (every claim cites file:line in that tree).
+Status: LANDED + CLOSED 2026-10-19 (see the Closure tail). Owner:
+dragon. Written 2026-10-17 against HEAD `7f3d529` (every claim
+cites file:line in that tree).
 This is the engine g6-stencil-overlay (gui-plan:143) is blocked on:
 a paint-through screen mask with transform chords — the logo/decal
 workflow (ROADMAP:146).
@@ -198,3 +199,40 @@ precedent :5171-5179) — identical for binary v1 bytes, and for soft
 values the hook consumes RAW stencil bytes so the product fold is
 the one in force at paint time. Both choices keep their existing
 tests green; neither site changes when soft edges land.
+
+
+## Closure (2026-10-19 — landed + closed)
+
+Every stage landed in the design's own sequencing, all four steps
+plus the amendments recorded in-flight:
+
+- **Step 1** (umber-core transform + rasterize): the wave's
+  stencil-core kill (`docs/loop/kill-reports/2026-10-18-stencil-core.md`),
+  port-verified + battery-green in the stencil-wave close (`0955ac8`).
+- **Step 2** (umber-app state + the seam): stencil-app
+  (`2026-10-18-stencil-app.md`), then the paint hook (`3a8b4cb`,
+  `2026-10-19-stencil-paint-hook.md`), the panel wiring (`6c95e26`,
+  `2026-10-19-stencil-app-wiring.md`), the set-switch re-stage
+  (`dcc5e89`, `2026-10-19-stencil-tile-restage.md`).
+- **Step 3** (the viewport overlay + chords + the popover row): the
+  wave's stencil-viewport kill (`2026-10-18-stencil-viewport.md`),
+  then the shell wiring + the N key (`2bb8c60`,
+  `2026-10-19-stencil-viewport-shell.md`) and the cross-tile
+  observer (`45ad4e4`, `2026-10-19-stencil-tile-observer.md`).
+- **Step 4** (this docs tick): the gui-plan g6 row, the ROADMAP
+  wave-stencil row, and this status line
+  (`2026-10-19-stencil-docs-tick.md`).
+- **Amendment A** corrected the original wiring bullet (the
+  composition lives INSIDE `gate_plane`; the shell stages RAW
+  bytes through `set_stencil_gate`). **Amendment B** answered the
+  soft-edges question (rasterize-only; `min` at the label, product
+  at the fold — should soft edges ever land, both sites keep their
+  own semantics by contract).
+- **Open question 1** (image source): the file dialog, v1 as
+  built. **Open question 2** (per-set stencils): still a named
+  follow-up — v1 is one global stencil. **Open question 3** (soft
+  edges): answered by Amendment B; binary v1 shipped.
+- The **mid-stroke window** (one stroke never changes its gate
+  partway) is the snapshot contract, BY DESIGN; the observer closes
+  the cross-tile gap on the first non-stroking frame after the
+  stroke ends.
