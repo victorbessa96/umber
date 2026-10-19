@@ -937,5 +937,5 @@ overlays =
     .stencil-unreadable = the file could not be read.
     .stencil-too-large = { $width }×{ $height } is over the { $max }-pixel limit.
     .stencil-unsupported = not a supported PNG (8-bit RGB or RGBA).
-    .stencil-n-hint = N will ignore the stencil (the shortcut arrives with the viewport overlay).
+    .stencil-n-hint = N toggles the stencil — paint passes through while it is ignored.
     .stencil-gate-live = Gate live ({ $width }×{ $height }, { $open }% open) — paint passes only where it opens.

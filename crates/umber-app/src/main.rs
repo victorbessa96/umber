@@ -541,6 +541,7 @@ impl TabViewer for PanelViewer<'_> {
                     self.display_lut,
                     self.postfx,
                     home,
+                    Some(&mut *self.stencil),
                 );
                 // The card's click (or the double-click) is collected and
                 // the app drains it after the dock: the viewer cannot

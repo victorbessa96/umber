@@ -363,8 +363,7 @@ pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
         });
         out.reset = ui.button(i18n::tr("overlays.stencil-reset")).clicked();
     });
-    let hint = egui::Label::new(i18n::tr("overlays.stencil-n-hint"));
-    ui.add_enabled(false, hint);
+    ui.add(egui::Label::new(i18n::tr("overlays.stencil-n-hint")));
     if let Some((width, height, open)) = row.staged {
         let line = i18n::tr_args(
             "overlays.stencil-gate-live",

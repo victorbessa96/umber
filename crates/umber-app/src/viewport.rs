@@ -547,7 +547,16 @@ impl Viewport {
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
     ) -> Option<ViewportClick> {
-        self.ui_with_home(ui, gpu, paint, stylus_pressure, display_lut, postfx, None)
+        self.ui_with_home(
+            ui,
+            gpu,
+            paint,
+            stylus_pressure,
+            display_lut,
+            postfx,
+            None,
+            None,
+        )
     }
 
     /// [`Self::ui`] with the home card's shell state (GUI plan
@@ -557,6 +566,9 @@ impl Viewport {
     /// card with New / Open only. The card's click (or a double-click on
     /// the empty viewport = Open) is kept for [`Self::take_home_action`],
     /// so the strip-tool return value stays one `ViewportClick` per frame.
+    /// With `stencil`, the session's stencil reaches the viewport too
+    /// (the overlay draws, the S chords and N edit it, and the Overlays
+    /// popover hosts its rows).
     #[allow(clippy::too_many_arguments)]
     pub fn ui_with_home(
         &mut self,
@@ -567,11 +579,9 @@ impl Viewport {
         display_lut: Option<&DisplayLut>,
         postfx: &PostChain,
         home: Option<crate::empty_state::HomeCardInput<'_>>,
+        stencil: Option<&mut StencilState>,
     ) -> Option<ViewportClick> {
-        let extras = ViewportExtras {
-            home,
-            stencil: None,
-        };
+        let extras = ViewportExtras { home, stencil };
         self.ui_with_stencil(ui, gpu, paint, stylus_pressure, display_lut, postfx, extras)
     }
 
@@ -606,7 +616,7 @@ impl Viewport {
             &response,
             rect,
             stencil.as_deref_mut(),
-            paint.as_deref(),
+            paint.as_deref_mut(),
         );
 
         // The axis gizmo (GUI plan G1): a primary click on a tip snaps the
@@ -987,7 +997,7 @@ impl Viewport {
         }
         self.paint_brush_cursor(ui, &response, rect, paint.as_deref());
         self.paint_channel_readout(ui, rect);
-        self.overlays_header(ui, rect, stencil, paint.as_deref());
+        self.overlays_header(ui, rect, stencil, paint);
         // No strip-tool click this frame: the signature is Option so the
         // shell reads one click per primary press, `None` every other frame.
         None
@@ -1002,7 +1012,7 @@ impl Viewport {
         ui: &mut Ui,
         rect: egui::Rect,
         stencil: Option<&mut StencilState>,
-        paint: Option<&PaintState>,
+        paint: Option<&mut PaintState>,
     ) {
         let size = egui::vec2(OVERLAYS_BUTTON_WIDTH, ui.spacing().interact_size.y);
         let at = egui::Rect::from_min_size(
@@ -1054,12 +1064,23 @@ impl Viewport {
         response: &Response,
         rect: egui::Rect,
         stencil: Option<&mut StencilState>,
-        paint: Option<&PaintState>,
+        mut paint: Option<&mut PaintState>,
     ) -> bool {
         let Some(stencil) = stencil else {
             self.stencil_drag = None;
             return false;
         };
+        // N toggles the stencil (the design: ignored = paint passes
+        // through, the overlay hides). Only with an image, never while
+        // a text field has the keyboard, and the gate follows the
+        // flip immediately through the unified re-stage + hand-off.
+        if stencil.image.is_some()
+            && ui.input(|i| i.key_pressed(egui::Key::N))
+            && !ui.ctx().memory(|m| m.focused().is_some())
+        {
+            stencil.active = !stencil.active;
+            restage_stencil(stencil, paint.as_deref_mut());
+        }
         let mods = ui.input(|i| i.modifiers);
         let armed = self.mesh.is_some()
             && stencil.active
@@ -1642,17 +1663,23 @@ fn stencil_overlay_rgba(image: &StencilImage) -> ([usize; 2], Vec<u8>) {
     ([ow as usize, oh as usize], rgba)
 }
 
-/// Re-stages the stencil gate against the paint session's active tile:
-/// `stencil::panel_section`'s own target + quick-mask lines (stencil.rs
-/// is lock-held, so they are mirrored, not shared).
-fn restage_stencil(stencil: &mut StencilState, paint: Option<&PaintState>) {
-    let mask = paint.map(|p| {
+/// Re-stages the stencil gate against the paint session's active tile —
+/// BOTH halves: the composed LABEL bytes (`stencil::panel_section`'s own
+/// target + quick-mask lines, mirrored because stencil.rs is lock-held)
+/// and the HOOK hand-off (Amendment A: the RAW coverage through
+/// `set_stencil_gate`, so every viewport path — chord release, popover
+/// edit, N — and the panel path keep one gate).
+fn restage_stencil(stencil: &mut StencilState, paint: Option<&mut PaintState>) {
+    if let Some(p) = paint {
         let tile = p.active_tile();
-        (p.quick_mask_for_tile(tile), tile)
-    });
-    let target = mask.map(|(m, _)| m.dimensions());
-    let quick = mask.and_then(|(m, tile)| quick_mask_gate_bytes(m, tile));
-    stencil.stage_gate(target, quick.as_deref());
+        let mask = p.quick_mask_for_tile(tile);
+        let target = Some(mask.dimensions());
+        let quick = quick_mask_gate_bytes(mask, tile);
+        stencil.stage_gate(target, quick.as_deref());
+        p.set_stencil_gate(stencil.hook_gate(target));
+    } else {
+        stencil.stage_gate(None, None);
+    }
 }
 
 /// The Overlays popover's stencil rows: step 2's
@@ -1663,7 +1690,7 @@ fn restage_stencil(stencil: &mut StencilState, paint: Option<&PaintState>) {
 fn stencil_popover_rows(
     ui: &mut Ui,
     stencil: &mut StencilState,
-    paint: Option<&PaintState>,
+    paint: Option<&mut PaintState>,
     view: [f32; 2],
 ) {
     let staged = stencil

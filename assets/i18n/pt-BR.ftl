@@ -956,5 +956,5 @@ overlays =
     .stencil-unreadable = não foi possível ler o arquivo.
     .stencil-too-large = { $width }×{ $height } passa do limite de { $max } pixels.
     .stencil-unsupported = não é um PNG suportado (RGB ou RGBA de 8 bits).
-    .stencil-n-hint = N vai ignorar o estêncil (o atalho chega com o overlay do viewport).
+    .stencil-n-hint = N alterna o estêncil — a tinta passa livre enquanto ele é ignorado.
     .stencil-gate-live = Máscara ativa ({ $width }×{ $height }, { $open }% aberta) — a tinta passa apenas onde ela abre.
