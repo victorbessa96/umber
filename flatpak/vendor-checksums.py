@@ -61,7 +61,14 @@ def split_dirname(dirname: str):
     with a digit and never contain '-', so the last '-' is the seam."""
     name, _, version = dirname.rpartition("-")
     if not name or not version or not version[0].isdigit():
-        sys.exit(f"vendor-checksums: unparseable vendor dir {dirname!r}")
+        sys.exit(
+            f"vendor-checksums: unparseable vendor dir {dirname!r} — every"
+            " dir must be <crate>-<version>/ as cargo stages them. Flat"
+            " crate CONTENTS (src/, benches/, .cargo/) means the"
+            " flatpak-builder archive sources stripped their top dir:"
+            " every .crate source needs \"strip-components\": 0"
+            " (flatpak-builder's archive default is 1)."
+        )
     return name, version
 
 
