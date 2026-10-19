@@ -43,6 +43,13 @@ jobs:
       - name: Flatpak manifest parses as JSON
         run: python3 -m json.tool flatpak/org.umber.Umber.json > /dev/null
 
+      # The manifest is GENERATED (gen-cargo-sources.py renders it from
+      # Cargo.lock + the .in template). A Cargo.lock change without a
+      # regenerated manifest fails here — the drift gate.
+      - name: Flatpak manifest drift gate (regenerate + diff)
+        run: |
+          python3 flatpak/gen-cargo-sources.py --check
+
       - name: Install lint tools (no runtimes)
         run: |
           sudo apt-get update

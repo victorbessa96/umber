@@ -11,7 +11,10 @@ see below), not by this kill (no cargo / no downloads in the claw).
 
 | File | Role |
 |---|---|
-| `org.umber.Umber.json` | flatpak-builder manifest (schema: app-id, runtime, sdk, command, finish-args, modules) |
+| `org.umber.Umber.json.in` | the hand-maintained manifest TEMPLATE: app metadata, module, build-commands. The `@@CARGO_SOURCES@@` slot is where the generator splices the crate sources |
+| `org.umber.Umber.json` | the GENERATED manifest (committed artifact — `gen-cargo-sources.py` renders it from the template + Cargo.lock; CI's lint job re-runs the generator and fails on drift) |
+| `gen-cargo-sources.py` | Cargo.lock → one `type: archive` source per registry crate (url = `static.crates.io/crates/<n>/<n>-<v>.crate`, sha256 = the lock's own checksum — verified live: a fetched `.crate`'s sha256 equals the lock entry byte-for-byte), spliced into the template |
+| `vendor-checksums.py` | build-command #1 inside the sandbox: writes each staged `vendor/<crate>/.cargo-checksum.json` exactly like `cargo vendor` (full files map + the lock's package checksum), so cargo's source-replacement consumer accepts the tree |
 | `org.umber.Umber.desktop` | desktop entry, installed to `/app/share/applications/` |
 | `org.umber.Umber.metainfo.xml` | AppStream metadata, installed to `/app/share/metainfo/` |
 | `LICENSE`, `LICENSES/THIRD_PARTY_FONTS.txt`, `THIRD_PARTY.md` (repo root, from the git source) | installed to `/app/share/licenses/org.umber.Umber/`: the GPL text plus the embedded egui fonts' OFL/UFL/MIT notices, which must accompany every copy |
@@ -21,10 +24,14 @@ see below), not by this kill (no cargo / no downloads in the claw).
 
 - **Buildsystem `simple`, cargo run directly.** No meson/cmake wrapper:
   flatpak-builder executes `build-commands` in the SDK shell, and the
-  workspace builds with plain `cargo --locked build --release -p umber-app`.
-  `--locked` pins every dependency to `Cargo.lock`; the build still needs
-  network (crates.io fetch at build time — NOT hermetic/offline; a Flathub
-  submission would need vendored sources, recorded as the deferred item).
+  workspace builds with `cargo --offline --locked build --release -p
+  umber-app`. Hermetic since 2026-10-18: every registry crate is a
+  manifest SOURCE (flatpak-builder downloads them in its network-legal
+  source phase), staged into `vendor/` + consumed through cargo's
+  documented source-replacement — no network at build time, Flathub-
+  submission-shaped. The hermetic closure is what run 38883955783's
+  red demanded (the sandbox has no DNS: `index.crates.io`
+  unresolvable, exit 101).
 - **Runtime `org.freedesktop.Platform` 24.08, SDK `org.freedesktop.Sdk`.**
   24.08 is the brief-pinned branch (verified live on Flathub at kill time;
   25.08/26.08 exist — bumping the branch is a one-line follow-up, not v1).

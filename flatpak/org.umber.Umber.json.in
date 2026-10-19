@@ -1,0 +1,74 @@
+{
+    "app-id": "org.umber.Umber",
+    "runtime": "org.freedesktop.Platform",
+    "runtime-version": "24.08",
+    "sdk": "org.freedesktop.Sdk",
+    "command": "umber",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--device=dri",
+        "--talk-name=org.freedesktop.portal.*",
+        "--talk-name=org.a11y.Bus",
+        "--filesystem=xdg-documents",
+        "--filesystem=xdg-pictures"
+    ],
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+            "CARGO_HOME": "/run/build/umber/.cargo-home"
+        }
+    },
+    "cleanup": [
+        "/include",
+        "/lib/pkgconfig",
+        "/share/man"
+    ],
+    "modules": [
+        {
+            "name": "umber",
+            "buildsystem": "simple",
+            "sources": [
+                {
+                    "type": "git",
+                    "url": "https://github.com/victorbessa96/umber",
+                    "branch": "master"
+                },
+                {
+                    "type": "file",
+                    "path": "org.umber.Umber.desktop"
+                },
+                {
+                    "type": "file",
+                    "path": "org.umber.Umber.metainfo.xml"
+                },
+                {
+                    "type": "file",
+                    "path": "org.umber.Umber.svg"
+                },
+                {
+                    "type": "inline",
+                    "dest": ".cargo",
+                    "dest-filename": "config.toml",
+                    "contents": "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n"
+                },
+                "@@CARGO_SOURCES@@"
+            ],
+            "build-commands": [
+                "python3 flatpak/vendor-checksums.py",
+                "cargo --offline --locked build --release -p umber-app",
+                "install -Dm755 target/release/umber /app/bin/umber",
+                "install -Dm644 org.umber.Umber.desktop /app/share/applications/org.umber.Umber.desktop",
+                "install -Dm644 org.umber.Umber.metainfo.xml /app/share/metainfo/org.umber.Umber.metainfo.xml",
+                "install -Dm644 org.umber.Umber.svg /app/share/icons/hicolor/scalable/apps/org.umber.Umber.svg",
+                "install -Dm644 LICENSE /app/share/licenses/org.umber.Umber/LICENSE",
+                "install -Dm644 LICENSES/THIRD_PARTY_FONTS.txt /app/share/licenses/org.umber.Umber/THIRD_PARTY_FONTS.txt",
+                "install -Dm644 THIRD_PARTY.md /app/share/licenses/org.umber.Umber/THIRD_PARTY.md"
+            ]
+        }
+    ]
+}
