@@ -96,6 +96,10 @@ pub fn cube_grid(subdivisions: u32) -> umber_mesh::MeshData {
         uvs: Vec::with_capacity(6 * verts_per_face),
         indices: Vec::with_capacity(6 * n * n * 6),
         material_names: vec!["ReferenceMaterial".to_string()],
+        // Empty = the whole-mesh default (every triangle → material 0),
+        // the migration rule the a394876 sweep applied to every other
+        // literal; this scene has exactly the one material by design.
+        triangle_materials: Vec::new(),
     };
     for (face, (normal, u, v)) in FACES.iter().enumerate() {
         for j in 0..row {
