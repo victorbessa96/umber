@@ -228,6 +228,62 @@ pub fn bake_ao_tile(
         .with_context(|| format!("ao bake, tile {tile}"))
 }
 
+/// [`bake_ao`] with the raster/occluder split (per-set masked bakes
+/// §3, the ray half): `raster_mesh` decides where each texel casts
+/// from (the baked set's submesh), `occluder_mesh` is what the rays
+/// may hit (the whole mesh — occluders cross materials). Raw RGBA8,
+/// no dilation, like [`bake_ao`].
+pub fn bake_ao_with_occluder(
+    device: &umber_gpu::WgpuDevice,
+    queue: &umber_gpu::WgpuQueue,
+    raster_mesh: &umber_mesh::MeshData,
+    occluder_mesh: &umber_mesh::MeshData,
+    size: u32,
+    rays: u32,
+) -> anyhow::Result<Vec<u8>> {
+    umber_bake::ao::bake_ao_mesh_with_occluder(
+        device,
+        queue,
+        raster_mesh,
+        occluder_mesh,
+        size,
+        size,
+        &ao_params(rays),
+    )
+    .context("ao bake")
+}
+
+/// [`bake_ao_tile`] with the raster/occluder split: the tile filter
+/// applies to the RASTER argument only; the occluder stays whole (a
+/// mapped set's tile bakes from its own triangles, occluded by
+/// everything — per-set masked bakes §3). Raw RGBA8, no dilation.
+/// Errors when the set's submesh owns no triangles in the tile (the
+/// bake core rejects the empty filtered mesh, as [`bake_ao_tile`]
+/// does for an empty whole-mesh tile).
+pub fn bake_ao_tile_with_occluder(
+    device: &umber_gpu::WgpuDevice,
+    queue: &umber_gpu::WgpuQueue,
+    raster_mesh: &umber_mesh::MeshData,
+    occluder_mesh: &umber_mesh::MeshData,
+    size: u32,
+    rays: u32,
+    tile: u16,
+) -> anyhow::Result<Vec<u8>> {
+    let mut params = ao_params(rays);
+    params.plane = umber_bake::ao::bake_tile_window(tile);
+    let filtered = umber_bake::ao::filter_mesh_for_tile(raster_mesh, tile);
+    umber_bake::ao::bake_ao_mesh_with_occluder(
+        device,
+        queue,
+        &filtered,
+        occluder_mesh,
+        size,
+        size,
+        &params,
+    )
+    .with_context(|| format!("ao bake, tile {tile}"))
+}
+
 /// The AO params both entry points share: max_distance/bias per the
 /// bake tests' convention; the plane is unused by the mesh-fed path (the
 /// mesh's position map supplies ray origins).

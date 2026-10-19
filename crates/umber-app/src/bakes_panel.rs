@@ -2020,8 +2020,10 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
     let mut whole_seams: Option<Option<umber_mesh::seam::SeamGraph>> = None;
     let mut set_seams: HashMap<*const umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>> =
         HashMap::new();
-    let mut tile_seams: HashMap<u16, (umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>)> =
-        HashMap::new();
+    let mut tile_seams: HashMap<
+        (u16, bool),
+        (umber_mesh::MeshData, Option<umber_mesh::seam::SeamGraph>),
+    > = HashMap::new();
     let mut records = Vec::new();
     let mut skew_by_tile: HashMap<u16, Vec<u8>> = HashMap::new();
 
@@ -2060,9 +2062,10 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         let started = Instant::now();
         // Per-set masked bakes §3: RASTER maps read the set's submesh
         // when the mesh carries the map (the raster mesh drives UV
-        // coverage); RAY maps (AO/thickness/bent/transfer) keep the
-        // whole mesh — occluders cross materials, and the baker's
-        // with_occluder split is the named host-gated follow-up.
+        // coverage); RAY maps (AO/thickness/bent) raster the set's
+        // SUBMESH against the WHOLE-mesh occluder — rays cross
+        // materials, coverage is the set's. Transfer keeps the whole
+        // mesh entirely (its rays come from the high-poly group).
         let raster_mesh = raster_mesh.as_ref();
         let raster_source = raster_mesh.unwrap_or(mesh);
         let raster_is_submesh = raster_mesh.is_some();
@@ -2103,28 +2106,77 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                     // Shared with the Export dialog (`bake_sources::bake_ao`)
                     // — this panel dilates afterward; the export path uses
                     // the raw bake directly (see `bake_sources` docs).
-                    let raw = match job.source {
-                        BakeSource::WholeMesh => {
+                    let raw = match (job.source, raster_is_submesh) {
+                        // Per-set masked bakes §3, the ray half: a mapped
+                        // set rasters its own submesh (tile-filtered for
+                        // tile jobs) against the WHOLE-mesh occluder —
+                        // rays cross materials, coverage is the set's.
+                        (BakeSource::WholeMesh, true) => {
+                            crate::bake_sources::bake_ao_with_occluder(
+                                device,
+                                queue,
+                                raster_source,
+                                mesh,
+                                size,
+                                rays,
+                            )?
+                        }
+                        (BakeSource::WholeMesh, false) => {
                             crate::bake_sources::bake_ao(device, queue, mesh, size, rays)?
                         }
-                        BakeSource::Tile => crate::bake_sources::bake_ao_tile(
+                        (BakeSource::Tile, true) => {
+                            crate::bake_sources::bake_ao_tile_with_occluder(
+                                device,
+                                queue,
+                                raster_source,
+                                mesh,
+                                size,
+                                rays,
+                                job.tile,
+                            )?
+                        }
+                        (BakeSource::Tile, false) => crate::bake_sources::bake_ao_tile(
                             device, queue, mesh, size, rays, job.tile,
                         )?,
                     };
-                    let filled = match job.source {
-                        BakeSource::WholeMesh => {
+                    let filled = match (job.source, raster_is_submesh) {
+                        (BakeSource::WholeMesh, true) => raster_margin(
+                            &pad,
+                            &mut whole_seams,
+                            &mut set_seams,
+                            raster_source,
+                            true,
+                            mesh,
+                            raw,
+                        ),
+                        (BakeSource::WholeMesh, false) => {
                             let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
                             pad.fill(mesh, seams.as_ref(), raw)
+                                .map_err(anyhow::Error::from)
                         }
-                        BakeSource::Tile => {
+                        (BakeSource::Tile, true) => {
                             let (tile_mesh, seams) =
-                                tile_seams.entry(job.tile).or_insert_with(|| {
+                                tile_seams.entry((job.tile, true)).or_insert_with(|| {
+                                    let tile_mesh = umber_bake::ao::filter_mesh_for_tile(
+                                        raster_source,
+                                        job.tile,
+                                    );
+                                    let seams = pad.seams(&tile_mesh);
+                                    (tile_mesh, seams)
+                                });
+                            pad.fill(tile_mesh, seams.as_ref(), raw)
+                                .map_err(anyhow::Error::from)
+                        }
+                        (BakeSource::Tile, false) => {
+                            let (tile_mesh, seams) =
+                                tile_seams.entry((job.tile, false)).or_insert_with(|| {
                                     let tile_mesh =
                                         umber_bake::ao::filter_mesh_for_tile(mesh, job.tile);
                                     let seams = pad.seams(&tile_mesh);
                                     (tile_mesh, seams)
                                 });
                             pad.fill(tile_mesh, seams.as_ref(), raw)
+                                .map_err(anyhow::Error::from)
                         }
                     }
                     .context("ao margin")?;
@@ -2171,14 +2223,40 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                         rays,
                         ..umber_bake::ThicknessParams::default()
                     };
-                    let raw = umber_bake::thickness::bake_thickness_mesh(
-                        device, queue, mesh, size, size, &params,
-                    )
+                    // Per-set masked bakes §3, the ray half: a mapped set
+                    // rasters its submesh against the WHOLE-mesh occluder.
+                    let raw = if raster_is_submesh {
+                        umber_bake::thickness::bake_thickness_mesh_with_occluder(
+                            device,
+                            queue,
+                            raster_source,
+                            mesh,
+                            size,
+                            size,
+                            &params,
+                        )
+                    } else {
+                        umber_bake::thickness::bake_thickness_mesh(
+                            device, queue, mesh, size, size, &params,
+                        )
+                    }
                     .context("thickness bake")?;
-                    let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
-                    let filled = pad
-                        .fill(mesh, seams.as_ref(), raw)
-                        .context("thickness margin")?;
+                    let filled = if raster_is_submesh {
+                        raster_margin(
+                            &pad,
+                            &mut whole_seams,
+                            &mut set_seams,
+                            raster_source,
+                            true,
+                            mesh,
+                            raw,
+                        )
+                    } else {
+                        let seams = whole_seams.get_or_insert_with(|| pad.seams(mesh));
+                        pad.fill(mesh, seams.as_ref(), raw)
+                            .map_err(anyhow::Error::from)
+                    }
+                    .context("thickness margin")?;
                     umber_bake::dilation::dilate_map(device, queue, &filled, size, size, &dilate)
                         .context("thickness dilation")?
                 }
@@ -2212,23 +2290,23 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                     // C2-29: the four maps the panel did not bake before, the
                     // same bakers and encodings `umber-cli bake-all` uses.
                     // Per-set masked bakes §3: Normal/WorldNormal/Id are
-                    // RASTER maps — they read the set's submesh. BentNormal
-                    // (a ray map) keeps the whole mesh; its with_occluder
-                    // split is the named host-gated follow-up.
-                    let raw = if raster_is_submesh
+                    // RASTER maps and BentNormal is a RAY map — all four
+                    // read the set's submesh; BentNormal's occluder stays
+                    // the WHOLE mesh (the ray half of the split).
+                    let mapped = raster_is_submesh
                         && matches!(
                             other,
-                            BakeSelection::Normal | BakeSelection::WorldNormal | BakeSelection::Id
-                        ) {
-                        bake_extra_map(device, queue, raster_source, size, rays, other)?
+                            BakeSelection::Normal
+                                | BakeSelection::WorldNormal
+                                | BakeSelection::Id
+                                | BakeSelection::BentNormal
+                        );
+                    let raw = if mapped {
+                        bake_extra_map(device, queue, raster_source, size, rays, other, Some(mesh))?
                     } else {
-                        bake_extra_map(device, queue, mesh, size, rays, other)?
+                        bake_extra_map(device, queue, mesh, size, rays, other, None)?
                     };
-                    let filled = if raster_is_submesh
-                        && matches!(
-                            other,
-                            BakeSelection::Normal | BakeSelection::WorldNormal | BakeSelection::Id
-                        ) {
+                    let filled = if mapped {
                         raster_margin(
                             &pad,
                             &mut whole_seams,
@@ -2280,6 +2358,7 @@ fn bake_extra_map(
     size: u32,
     rays: u32,
     selection: BakeSelection,
+    occluder: Option<&umber_mesh::MeshData>,
 ) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context as _;
     Ok(match selection {
@@ -2313,16 +2392,19 @@ fn bake_extra_map(
         )
         .context("id bake")?,
         BakeSelection::BentNormal => {
-            umber_bake::ao::bake_ao_and_bent_mesh(
-                device,
-                queue,
-                mesh,
-                size,
-                size,
-                &crate::bake_sources::ao_params_for(rays).with_bent_normals(true),
-            )
-            .context("bent normal bake")?
-            .bent
+            let params = crate::bake_sources::ao_params_for(rays).with_bent_normals(true);
+            // The ray half (per-set masked bakes §3): with an occluder, the
+            // set's submesh rasters against it — rays cross materials.
+            // `None` is today's single-mesh call, byte-identical.
+            let baked = match occluder {
+                Some(occluder) => umber_bake::ao::bake_ao_and_bent_mesh_with_occluder(
+                    device, queue, mesh, occluder, size, size, &params,
+                ),
+                None => {
+                    umber_bake::ao::bake_ao_and_bent_mesh(device, queue, mesh, size, size, &params)
+                }
+            };
+            baked.context("bent normal bake")?.bent
         }
         other => anyhow::bail!("{other:?} is baked by its own arm"),
     })
@@ -2647,7 +2729,7 @@ mod tests {
             BakeSelection::Id,
             BakeSelection::BentNormal,
         ] {
-            let bytes = bake_extra_map(&device, &queue, &quad, size, 8, selection)
+            let bytes = bake_extra_map(&device, &queue, &quad, size, 8, selection, None)
                 .unwrap_or_else(|e| panic!("{selection:?}: {e:#}"));
             assert_eq!(bytes.len(), (size * size * 4) as usize, "{selection:?}");
             let covered = bytes.chunks_exact(4).filter(|px| px[3] > 0).count();
@@ -2665,7 +2747,88 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(bake_extra_map(&device, &queue, &quad, size, 8, BakeSelection::Ao).is_err());
+        assert!(bake_extra_map(&device, &queue, &quad, size, 8, BakeSelection::Ao, None).is_err());
+    }
+
+    #[test]
+    fn mapped_ray_maps_raster_the_submesh_but_occlude_cross_material() {
+        // Per-set masked bakes §3, the ray half's load-bearing property: a
+        // ground quad (material 0) with a floating slab (material 1)
+        // hovering over half of it. The ground's AO — rasterized from its
+        // OWN submesh — still darkens under the slab when the occluder is
+        // the whole mesh (rays cross materials: the property a
+        // submesh-only bake would lose), while a ground-only occluder
+        // stays fully lit (the control). Coverage is identical in both
+        // (the raster submesh is the same).
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let quad = |z: f32, y0: f32, y1: f32| umber_mesh::MeshData {
+            positions: vec![[-1.0, y0, z], [1.0, y0, z], [1.0, y1, z], [-1.0, y1, z]],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let ground = quad(0.0, 0.0, 2.0);
+        let slab = quad(0.5, 0.0, 1.0);
+        let whole = umber_mesh::MeshData {
+            positions: [ground.positions.clone(), slab.positions.clone()].concat(),
+            normals: [ground.normals.clone(), slab.normals.clone()].concat(),
+            uvs: [ground.uvs.clone(), slab.uvs.clone()].concat(),
+            // The slab's 4 verts re-index the ground's 4.
+            indices: [ground.indices.clone(), vec![4, 5, 6, 4, 6, 7]].concat(),
+            material_names: vec!["Ground".into(), "Slab".into()],
+            // Ground's 2 triangles = material 0; the slab's = material 1.
+            triangle_materials: vec![0, 0, 1, 1],
+        };
+        let ground_sub = whole.submesh_for_material(0);
+        let size = 64;
+        let with_slab = crate::bake_sources::bake_ao_with_occluder(
+            &device,
+            &queue,
+            &ground_sub,
+            &whole,
+            size,
+            16,
+        )
+        .unwrap_or_else(|e| panic!("with-slab bake: {e:#}"));
+        let ground_only = crate::bake_sources::bake_ao_with_occluder(
+            &device,
+            &queue,
+            &ground_sub,
+            &ground_sub,
+            size,
+            16,
+        )
+        .unwrap_or_else(|e| panic!("ground-only bake: {e:#}"));
+        let covered = |bytes: &[u8]| bytes.chunks_exact(4).filter(|px| px[3] > 0).count();
+        assert_eq!(
+            covered(&with_slab),
+            covered(&ground_only),
+            "same raster submesh"
+        );
+        let min_lit = |bytes: &[u8]| {
+            bytes
+                .chunks_exact(4)
+                .filter(|px| px[3] > 0)
+                .map(|px| px[0])
+                .min()
+                .expect("covered texels exist")
+        };
+        // The slab darkens the ground under it: something < fully lit.
+        assert!(
+            min_lit(&with_slab) < 255,
+            "the whole-mesh occluder must darken under the slab (got {})",
+            min_lit(&with_slab)
+        );
+        // The control: nothing above the ground's own submesh — fully lit.
+        assert_eq!(
+            min_lit(&ground_only),
+            255,
+            "the ground alone cannot occlude itself"
+        );
     }
 
     use super::*;
