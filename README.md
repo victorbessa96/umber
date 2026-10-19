@@ -75,7 +75,11 @@ umber/
 ├── docs/
 │   ├── ROADMAP.md     # the plan of record
 │   ├── specs/         # design docs per subsystem
-│   └── research/      # cited research (Painter inventory, competitors, absorption ledgers)
+│   ├── loop/          # the autonomous-build records: queue, kill-ledger,
+│   │                  #   kill-reports/ (per-kill evidence), briefs, coordination notes
+│   ├── research/      # cited research (Painter inventory, competitors, absorption ledgers)
+│   └── claw-artifacts/ # vendored third-party source dumps from claw research
+│                      #   (large; historical, kept for provenance)
 ├── scripts/           # the local battery, CI helpers, the crate layering gate
 └── crates/            # Rust workspace — <!-- scorecard:crates -->16<!-- /scorecard --> crates in a layered dependency graph
 ```
