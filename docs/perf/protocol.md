@@ -258,3 +258,179 @@ Discriminator before the bisect: confirmation re-run 39268968173 on
 the SAME tip (`0955ac8`) — a second ~83 read excludes runner
 variance and opens the bisect; a ~48 read closes this red as
 variance. Verdict updates this note.
+
+## CONFIRMED 2026-10-19 ~14:50Z — runner variance excluded, the bisect opens
+
+Confirmation run 39268968173 (same tip `0955ac8`): viewport_mean
+87.28 (**x1.92**), viewport_p95 95.63 (**x1.67**), input_photon_p50
+0.167 (x1.77), input_photon_p95 x1.01 OK. Two independent reads —
+83.47 and 87.28 — agree within x1.05 of each other and both nearly
+double the baseline. The live regression is REAL: the viewport frame
+time nearly doubled somewhere in `5e0d89e..0955ac8`, back to the
+pre-wave `06c1711` level (84.07).
+
+Correction to the triage above: the 10-17 nightly (39013831785) ran
+on head `5e0d89e` itself — the same tip that seeded the baseline —
+so the 45.54-vs-48.31 pair is the same-tip noise floor (x1.06), and
+NOTHING past `5e0d89e` is exonerated: the suspect window includes
+W-GUI-3/4's GPU-side work (the masked-bakes end-to-end chain
+`a23bcac`..`73a57cd`) as much as the stencil wave and the fleet.
+
+Bisect leg 1: run 39273743336 on `bisect/perf-2026-10-19` (`b942d64`
+— post-e0063, pre-stencil-wave; the boundary that splits the
+W-GUI-3/4+i18n era from the stencil-wave+fleet era). A ~48 read
+puts the guilt in `caa21e1..0955ac8`; a ~84 read puts it in
+`5e0d89e..b942d64`. Each leg is a ~20-min nightly dispatch on a
+temporary branch ref (workflow_dispatch needs a ref, not a raw SHA);
+the branch is deleted at hunt close. The next session reads
+39273743336 live and fires leg 2 from its verdict.
+
+## Bisect leg 1 verdict (2026-10-19 ~15:2xZ) — the guilt PREDATES the stencil wave
+
+Run 39273743336 on `bisect/perf-2026-10-19` (`b942d64`):
+viewport_mean 85.99 (**x1.89**), viewport_p95 94.58 (x1.65),
+input_photon_p50 0.211 (x2.24). The regression is FULLY PRESENT
+before the stencil wave — the stencil-fleet era (`caa21e1..0955ac8`)
+is EXONERATED (86.0 at b942d64 → 83.5/87.3 at 0955ac8 is flat
+within the x1.05 read-to-read noise).
+
+The guilty window is `5e0d89e..b942d64` (32 commits; the
+code-relevant set): the W-GUI-2 wave (`d9fa931` — 19 kills incl.
+camera frame/zoom, context rail, density, held-key poll, the
+overlays popover), W-GUI-3's shell halves (`7b5b33e`), falloff
+Custom (`4a2e3c2`, the paint pass's binding-5 LUT), the CurveEdit
+consumer (`7208a7b`), the triangle_materials / masked-bakes chain
+(`a23bcac`/`5aae0ec`/`c59034b`/`59c679a`/`73a57cd`), the row-label
+registry (`8eb02c9` — its own commit reads "the shell re-registers
+per frame"), the E0063 tail (`a394876`, test-gated), the FBX fixture
+(`7f3d529`, test), and e0063 itself (`b942d64`, one harness-gated
+line).
+
+Bisect leg 2: run 39278581016 on `bisect/perf-leg2` (`7208a7b` —
+post-falloff+CurveEdit, pre-masked-bakes; the W-GUI-2/3 | W-GUI-4
+boundary). A ~48 read puts the guilt in `a23bcac..b942d64` (the
+masked-bakes chain, the registry, e0063); a ~84 read puts it in
+`5e0d89e..7208a7b` (W-GUI-2's giant `d9fa931` the heaviest single
+suspect). One fresh branch per leg — force-moving a bisect cursor
+trips the destructive-command guard, and per-leg branches sweep
+clean at hunt close either way.
+
+## Bisect leg 2 verdict (2026-10-19 ~15:53Z) — the guilt is in the W-GUI-2/3 + falloff half; the dark zone is exonerated
+
+Run 39278581016 on `bisect/perf-leg2` (`7208a7b`): viewport_mean
+90.82 (**x1.99**), viewport_p95 99.45 (x1.74), input_photon_p50 0.187
+(x1.98); the stroke soak stayed green (2914/2914, zero drops). The
+regression is FULLY FORMED at 7208a7b — everything after it (the
+masked-bakes chain, the row-label registry, the E0063 class, the
+stencil wave, the fleet) is exonerated, and the a23bcac..b942d64
+dark zone needs no cherry-pick bridge after all.
+
+Within `5e0d89e..7208a7b`, the static narrowing holds: exactly TWO
+commits touched umber-gpu (the bench's own crate) — `d9fa931` (the
+W-GUI-2 wave's umber-gpu half: camera frame/zoom, subset-mesh,
+occluder-scope) and `4a2e3c2` (falloff Custom: the paint pass's
+binding-5 LUT + the pipeline change). Leg 3 at `7b5b33e`
+(post-shell-halves, PRE-falloff) decides between them: a normal
+(~48) read convicts 4a2e3c2; a ~84+ read convicts d9fa931 and the
+hunt goes inside its umber-gpu diff.
+
+Bisect leg 3: run 39285259123 on `bisect/perf-leg3` (`7b5b33e`),
+dispatched 16:25Z.
+
+## Bisect leg 3, first attempt (16:29Z) — a build-failure non-verdict; re-dispatched as 3b
+
+Run 39285259123 on `bisect/perf-leg3` (`7b5b33e`) died at the BUILD
+step: E0425, `dialog_buttons` not found in `umber_gui` — the known
+missing re-export that `efd0cbf` (7b5b33e's immediate child) fixed;
+the wave commit's own battery had run on the rsynced host tree and
+CI caught the pushed-tree gap. NOT a data point. Re-dispatched at
+the buildable boundary: run 39288080877 on `bisect/perf-leg3b`
+(`efd0cbf`), same tree shape — post-W-GUI-3, pre-falloff. Decision
+rule unchanged: a ~48 read convicts 4a2e3c2 (falloff — the fix hunt
+opens on paint_callback's per-frame bind-group/LUT path, provable
+with a local Lavapipe run on the host); a ~84+ read convicts
+d9fa931 and the hunt goes inside its udim.rs/assets.rs/snapshot.rs
+(camera.rs analytically cleared; the falloff WGSL fetch is
+case-10-gated and the LUT texture is created once at compositor
+construction).
+
+## Bisect leg 3b verdict (2026-10-19 17:06Z) — the W-GUI-2 window is CONVICTED, and the paradox is live
+
+Run 39288080877 on `bisect/perf-leg3b` (`efd0cbf`, buildable,
+post-W-GUI-3, PRE-falloff): viewport_mean 78.07 (**x1.72**),
+viewport_p95 87.04 (x1.52), input_photon_p50 0.169 (x1.80). The
+regression PREDATES falloff — `4a2e3c2` is exonerated; the guilt
+entered in `5e0d89e..efd0cbf`, whose only code payload is the
+W-GUI-2 wave (`d9fa931`) plus off-path fix tails.
+
+**The paradox**: the completed static map cleared EVERY file
+d9fa931 touched — camera.rs (event-driven adds, never in the bench
+loop), udim.rs (`filter_mesh_for_triangles`, a bake-side helper),
+assets.rs, snapshot.rs (the bench passes None brush). A conviction
+with no on-path code change means either the per-frame path model
+is incomplete, or the comparison's YARDSTICK moved: the conviction
+compares today's reads (78-91 across five runs, all red) against a
+baseline measured 10-16/17 (~45-48). The runner image is IDENTICAL
+both eras (ubuntu-24.04, Version 20261012.334.1) — the remaining
+confound is the fleet's CPU mix (lavapipe is CPU-bound; hosted
+runners span Intel/AMD generations at different clocks).
+
+**Leg 4 — the decisive infra-vs-code discriminator**: run
+39292605800 on `bisect/perf-leg4` (`5e0d89e`, the baseline's OWN
+tip), dispatched 17:15Z. A ~84 read TODAY convicts the runner
+fleet (the code is innocent; the nightly needs a fresh same-era
+reseed + a drift-hardened yardstick — the hunt reframes to
+instrument). A ~48 read keeps the code guilty and the hunt goes
+inside paint_callback's internals with the local Lavapipe repro.
+
+## Bisect leg 4 verdict (2026-10-19 17:36Z) — THE RUNNER FLEET IS CONVICTED, THE CODE IS INNOCENT
+
+Run 39292605800 on `bisect/perf-leg4` (`5e0d89e` — the baseline's
+own tip, the commit whose CI run seeded the 45.54 baseline on
+10-16 and re-read 48.31 on 10-17):
+
+- **viewport_mean 89.29 benched TODAY.** The baseline's own tip,
+  with byte-identical bench code and scene, reads ~2x its
+  three-day-old measurement on today's fleet.
+- The compare's x16.26 line is this checkout's OWN baseline file —
+  5e0d89e predates the 9acdc1c reseed, so its compare ran against
+  the 10-13 Intel-GL numbers (5.49); the hardware-class mismatch
+  redux, not a datum. The RAW MEAN is the evidence.
+- input_photon_p95 stable (10.15, x0.97 vs even the GL baseline's
+  10.53) — the metric dominated by fixed-latency work barely moved;
+  the CPU-bound means halved.
+
+**The full read table**: 5e0d89e 89.29 (today) vs 45.54/48.31
+(10-16/17); efd0cbf 78.07; b942d64 85.99; 7208a7b 90.82; 0955ac8
+83.47/87.28. Every commit reads 78-91 today, every era-of-baseline
+read sat at 45-48. **No code regression exists.** GitHub's
+ubuntu-24.04 fleet (image v20261012.334.1, identical both eras —
+so the physical host population, its CPU mix, is the mover)
+shifted CPU throughput for this llvmpipe-bound bench by ~x0.5
+between 10-17 and 10-19. The static map was right: every
+"conviction" was the yardstick moving.
+
+**The hunt's verdict**: the nightly's ABSOLUTE-ms baseline on a
+mutable shared fleet is a broken instrument. The prescription:
+(1) reseed the baseline from today's fleet on the current tip,
+with the written justification this note carries; (2) harden the
+yardstick against the NEXT drift — multi-run medians (N>=3) before
+a REGRESSION verdict, a same-tip canary leg when a red lands
+exactly like this one, or a normalized metric. The bisect branches
+sweep at close. The x1.06 "noise floor" reading of 10-17 was two
+samples of a fleet in transition — the floor is wider than
+measured.
+
+## The reseed lands (2026-10-19 ~17:5xZ)
+
+`perf/baseline.json` reseeded per this note's prescription and the
+`9acdc1c` precedent: same-tip means of the two `0955ac8` master
+runs measured today (39263843229 + 39268968173) — viewport_mean
+85.3739, viewport_p95 93.438, input_photon p50 0.1927 / p95
+10.1799. The nightly's gate is apples-to-apples with today's fleet
+again; the baseline file's own note carries the conviction record
+and the fleet-era stamp. NAMED FOLLOW-UP (the drift-hardening
+kill): N>=3-run medians before any REGRESSION verdict + the
+same-tip canary leg on any red — this hunt cost four legs because
+neither existed. The hunt closes as INFRA-DRIFT-ANSWERED: no code
+regression, the instrument reset, the prescription on file.
