@@ -231,7 +231,10 @@ plus the amendments recorded in-flight:
 - **Open question 1** (image source): the file dialog, v1 as
   built. **Open question 2** (per-set stencils): still a named
   follow-up — v1 is one global stencil. **Open question 3** (soft
-  edges): answered by Amendment B; binary v1 shipped.
+  edges): answered by Amendment B; binary v1 shipped, then soft edges
+  LANDED 2026-10-19 (`stencil-soft-edges`) — rasterize-only (the gate
+  carries the sampled coverage byte), both composition sites unchanged
+  per Amendment B (label `min`, `gate_plane` product).
 - The **mid-stroke window** (one stroke never changes its gate
   partway) is the snapshot contract, BY DESIGN; the observer closes
   the cross-tile gap on the first non-stroking frame after the

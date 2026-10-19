@@ -21,9 +21,10 @@
 //!   The cap runs TWICE: on the IHDR's declared size before any decode
 //!   allocation ([`png_dimensions`]), and on the decoded size (the
 //!   decoder's dims are authoritative).
-//! - **Composition is `min` per byte**, not bitwise `&`. For the binary
-//!   v1 gate (0/255) both agree; `min` stays correct once the design's
-//!   soft edges (Open question 3) put partial values in the stencil.
+//! - **Composition is `min` per byte**, not bitwise `&`. For a binary
+//!   gate (0/255) both agree; since the stencil's soft edges LANDED
+//!   (2026-10-19, rasterize-only, Amendment B) boundaries carry partial
+//!   bytes, and `min` keeps that coverage honest.
 //! - **The composition order** (stencil first, quick mask folded in
 //!   second) is a statement about who writes LAST, since `min` itself
 //!   commutes: the quick mask's in-place edits republish rects of the
@@ -76,7 +77,7 @@ use umber_paint::paint_state::PaintState;
 pub const DEFAULT_MAX_STENCIL_PIXELS: usize = 4096 * 4096;
 
 /// The overlay's drawn opacity on a fresh session (the overlay, not the
-/// mask: the gate stays binary whatever this is). One value with the
+/// mask: opacity never scales the gate's coverage). One value with the
 /// panel field's reset.
 pub const DEFAULT_OVERLAY_OPACITY: f32 = crate::display_panel::DEFAULT_STENCIL_OPACITY;
 

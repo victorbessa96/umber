@@ -4,9 +4,11 @@
 //!
 //! The gate [`rasterize_gate`] returns is exactly the shape
 //! `umber_gpu::paint::PaintTarget::write_mask_region` takes: `w * h`
-//! bytes, row-major, `255` = paint allowed, `0` = blocked. No GPU, no
-//! egui, no I/O — the shell (umber-app) owns the session state, the PNG
-//! load, the gate upload and the overlay draw.
+//! bytes, row-major, `255` = fully open, `0` = blocked, and (since the
+//! soft-edges kill, 2026-10-19) intermediate bytes at stencil
+//! boundaries = partial paint. No GPU, no egui, no I/O — the shell
+//! (umber-app) owns the session state, the PNG load, the gate upload
+//! and the overlay draw.
 //!
 //! Conventions (the judgment calls the next kill extends from):
 //!
@@ -28,14 +30,18 @@
 //!   transform; any viewport-px -> target-texel mapping is the shell's
 //!   job before it builds the transform.
 //! - **Bilinear with a zero border**: a tap outside the image reads `0`
-//!   (the brief's "out-of-bounds sample = 0"). With binary coverage and
-//!   the `>= 0.5` threshold, the stencil's edge lands exactly on the
-//!   image's bounds (a sample at image px `x = 0` or `x = width` sits
-//!   midway between a covered texel and the zero border and passes).
-//! - **Binary gate, inclusive threshold**: a sample whose coverage is
-//!   `>= 0.5` (`>= 127.5` of 255) writes `255`, else `0` — the design's
-//!   binary v1. Soft edges (writing the sampled coverage itself) are the
-//!   design's named follow-up (Open question 3).
+//!   (the brief's "out-of-bounds sample = 0"). Coverage is soft at the
+//!   image's bounds too: a sample at image px `x = 0` or `x = width`
+//!   sits midway between a covered texel and the zero border and reads
+//!   half coverage (`128`), not a hard edge.
+//! - **Soft coverage (landed 2026-10-19, Open question 3)**: the gate
+//!   carries the bilinear sample rounded to the nearest byte
+//!   (`0..=255`) — no threshold in the rasterize path. Interior texels
+//!   of a binary image sample their own texel value exactly (`0` or
+//!   `255`), so binary images stay binary inside and soften only where
+//!   a sample straddles an edge. The LOAD-time alpha cut
+//!   ([`StencilImage::from_alpha`], `>= 128` -> `255` else `0`) is
+//!   unchanged: the softness comes from sampling, not from the loader.
 //! - **The map math runs in f64** and only the public API speaks f32:
 //!   targets reach 8K px, where f32's ulp is ~5e-4, and the inverse's
 //!   round trip is pinned to 1e-6.
@@ -46,10 +52,6 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-/// The sampled coverage at or above which a gate texel opens (alpha
-/// `>= 0.5`, expressed on the 0..=255 byte scale).
-const GATE_THRESHOLD: f64 = 127.5;
 
 /// The loader's alpha cut: an RGBA alpha byte `>= 128` is covered.
 const ALPHA_CUT: u8 = 128;
@@ -283,11 +285,12 @@ pub fn inverse_map(
 }
 
 /// Rasterizes `image` under `transform` into a `target_w * target_h`
-/// gate (row-major, `255` open / `0` blocked — `write_mask_region`'s
-/// byte shape): each target texel's center maps through
-/// [`inverse_map`], bilinear-samples the coverage (zero border), and
-/// opens iff the sample is `>= 0.5`. A degenerate transform (scale not
-/// finite and positive) blocks every texel.
+/// gate (row-major, `write_mask_region`'s byte shape): each target
+/// texel's center maps through [`inverse_map`], bilinear-samples the
+/// coverage (zero border), and writes the sample rounded to the nearest
+/// byte (`0..=255`; soft at boundaries since 2026-10-19). Interior
+/// texels of a binary image write `0`/`255` exactly. A degenerate
+/// transform (scale not finite and positive) blocks every texel.
 pub fn rasterize_gate(
     image: &StencilImage,
     transform: &StencilTransform,
@@ -303,8 +306,11 @@ pub fn rasterize_gate(
     for y in 0..target_h {
         for x in 0..target_w {
             let screen = [f64::from(x) + 0.5, f64::from(y) + 0.5];
-            let open = image.sample(mapping.inverse(screen)) >= GATE_THRESHOLD;
-            gate.push(if open { 255 } else { 0 });
+            // The sample is a convex combination of 0..=255 taps, so the
+            // rounded value is in range; the cast saturates regardless
+            // (the never-crash gate).
+            let coverage = image.sample(mapping.inverse(screen)).round();
+            gate.push(coverage as u8);
         }
     }
     gate
@@ -466,36 +472,44 @@ mod tests {
     }
 
     #[test]
-    fn two_x_scale_doubles_each_texel_and_centers() {
+    fn two_x_scale_doubles_each_texel_and_softens_the_ring() {
         // Target 10x10, center (5,5), scale 2: the 8x8 footprint spans
         // screen [1, 9). Texel x samples image px p = (x+.5-5)/2 + 2 =
-        // x/2 - 0.25, worked per column:
-        //   x=0: p=-0.25 -> u=-0.75: taps (-1 border, 0) weights .75/.25
-        //        -> at most .25 coverage -> 0 (the zero ring).
-        //   x=1: p=0.25 -> u=-.25 -> col 0 at .75;  x=2: p=.75 -> col 0 at .75
-        //   x=3: p=1.25 -> col 0 at .25 / col 1 at .75 -> col 1;  x=4 -> col 1
-        //   ... x=7,8 -> col 3;  x=9: p=4.25 -> u=3.75: col 3 at .25 -> 0.
-        // The dominant 2D weight is .75*.75 = .5625 >= .5 and the other
-        // three sum to .4375 < .5, so each sample takes its dominant
-        // texel: a pixel-doubled image inside a one-texel zero ring.
+        // x/2 - 0.25, so u = x/2 - 0.75 and the column weights are:
+        //   x=0: col -1 .75 / col 0 .25   x=1: col -1 .25 / col 0 .75
+        //   x=2: col 0 .75 / col 1 .25    x=3: col 0 .25 / col 1 .75
+        //   x=4: col 1 .75 / col 2 .25    x=5: col 1 .25 / col 2 .75
+        //   x=6: col 2 .75 / col 3 .25    x=7: col 2 .25 / col 3 .75
+        //   x=8: col 3 .75 / border .25   x=9: col 3 .25 / border .75
+        // and identically down the rows (2D weights are the products).
+        // Texels whose taps all read 0 stay exactly 0; a sample with all
+        // four taps covered would read exactly 255, but PATTERN has no
+        // 2x2 all-covered block and every sample here sits a quarter
+        // texel off the centers, so the brightest byte is 239. Every
+        // texel straddling an edge gives the partial byte, rounded to
+        // nearest. Hand examples: (0,0) = .25*.25*255 = 15.9375 ->
+        // 16; (1,0) = .75*.25*255 = 47.8125 -> 48; (2,2) =
+        // (.75*.75 + .25*.75 + .25*.25)*255 = .8125*255 = 207.1875 ->
+        // 207; (2,3) = (.25*.75 + .75*.75 + .75*.25)*255 = .9375*255 =
+        // 239.0625 -> 239.
         let image = image_4x4(PATTERN);
         let t = StencilTransform {
             center: [5.0, 5.0],
             scale: 2.0,
             rotation: 0.0,
         };
-        let expected = bytes(&[
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-            [0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-            [0, 1, 1, 1, 1, 0, 0, 0, 0, 0],
-            [0, 1, 1, 1, 1, 0, 0, 0, 0, 0],
-            [0, 0, 0, 1, 1, 1, 1, 0, 0, 0],
-            [0, 0, 0, 1, 1, 1, 1, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 1, 1, 0],
-            [0, 0, 0, 0, 0, 0, 0, 1, 1, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        ]);
+        let expected = vec![
+            16, 48, 48, 16, 0, 0, 0, 0, 0, 0, //
+            48, 143, 143, 48, 0, 0, 0, 0, 0, 0, //
+            64, 191, 207, 112, 48, 16, 0, 0, 0, 0, //
+            64, 191, 239, 207, 143, 48, 0, 0, 0, 0, //
+            48, 143, 207, 239, 207, 112, 48, 16, 0, 0, //
+            16, 48, 112, 207, 239, 207, 143, 48, 0, 0, //
+            0, 0, 48, 143, 191, 191, 159, 96, 48, 16, //
+            0, 0, 16, 48, 64, 64, 96, 159, 143, 48, //
+            0, 0, 0, 0, 0, 0, 48, 143, 143, 48, //
+            0, 0, 0, 0, 0, 0, 16, 48, 48, 16, //
+        ];
         assert_eq!(rasterize_gate(&image, &t, 10, 10), expected);
     }
 
@@ -513,7 +527,8 @@ mod tests {
         // (Cross-check: a clockwise turn's top row is the old left
         // column read bottom-up: 0 0 1 1.) f32 cos(π/2) ≈ -4.4e-8, so
         // samples sit ~1e-7 off the centers; the dominant weight stays
-        // ~1, far from the threshold.
+        // ~1 (the residual coverage is ~5e-5 of a byte), so every sample
+        // still rounds to its own 0/255.
         let image = image_4x4(PATTERN);
         let t = StencilTransform {
             rotation: FRAC_PI_2,
@@ -546,11 +561,13 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_exactly_midway_opens_the_inclusive_threshold() {
-        // Image 2x1 = [covered, empty]; center (0.5, 0.5) puts target
-        // texel (0,0)'s center at image px (1.0, 0.5): u = (0.5, 0) ->
-        // half of texel 0 + half of texel 1 = 127.5 exactly (exact in
-        // binary) -> `>= 0.5` opens it.
+    fn half_texel_boundary_samples_read_the_soft_coverage() {
+        // Image 2x1 = [covered, empty]; target texel (0,0)'s center is
+        // image px (1.0, 0.5) when the transform's center is (0.5, 0.5):
+        // u = p - 0.5 = (0.5, 0) -> half of texel 0 + half of texel 1 =
+        // 127.5 of 255, which rounds to 128 (ties away from zero). This
+        // is the intermediate byte the soft gate writes; there is no
+        // threshold left in the rasterize path.
         let rgba = [0, 0, 0, 255, 0, 0, 0, 0];
         let image = StencilImage::from_alpha(2, 1, &rgba).unwrap();
         let t = StencilTransform {
@@ -558,13 +575,35 @@ mod tests {
             scale: 1.0,
             rotation: 0.0,
         };
-        assert_eq!(rasterize_gate(&image, &t, 1, 1), vec![255]);
-        // A quarter texel further toward the empty side: .25 -> blocked.
-        let t = StencilTransform {
+        assert_eq!(rasterize_gate(&image, &t, 1, 1), vec![128]);
+        // A quarter texel toward the empty side: p = (1.25, 0.5), u =
+        // (0.75, 0) -> texel 0 at weight 0.25 = 63.75 -> 64.
+        let t_low = StencilTransform {
             center: [0.25, 0.5],
             ..t
         };
-        assert_eq!(rasterize_gate(&image, &t, 1, 1), vec![0]);
+        assert_eq!(rasterize_gate(&image, &t_low, 1, 1), vec![64]);
+        // A quarter texel toward the covered side: p = (0.75, 0.5), u =
+        // (0.25, 0) -> texel 0 at weight 0.75 = 191.25 -> 191.
+        let t_high = StencilTransform {
+            center: [0.75, 0.5],
+            ..t
+        };
+        assert_eq!(rasterize_gate(&image, &t_high, 1, 1), vec![191]);
+        // Both taps fully on one side stay exactly binary (regression:
+        // softness is a boundary effect, not a global scale). Center 1.0
+        // puts the sample at image px 0.5 (u = 0, texel 0 exactly).
+        let covered = StencilTransform {
+            center: [1.0, 0.5],
+            ..t
+        };
+        assert_eq!(rasterize_gate(&image, &covered, 1, 1), vec![255]);
+        // Center 0.0 puts it at image px 1.5 (u = 1.0, texel 1 exactly).
+        let empty = StencilTransform {
+            center: [0.0, 0.5],
+            ..t
+        };
+        assert_eq!(rasterize_gate(&image, &empty, 1, 1), vec![0]);
     }
 
     #[test]
