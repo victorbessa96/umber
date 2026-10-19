@@ -340,6 +340,20 @@ for m in ['M1','M2','M3','M4','M5','M6','M7','M8','M9','M10','M11a','M11b','M12'
   The port merges Rust tests 1 and 2 into `t01_02`, because serde
   can't be ported; M14 is modeled through `Default`. Python's
   `math.cos(inf)` raises, but no case feeds an infinite rotation.
+
+> **NOTE (2026-10-19, `stencil-core-port-annotation`):** this port
+> pins the BINARY-era expectations — `rasterize` writes
+> `255 if v >= 127.5 else 0`, matching the code as this kill landed
+> it. Soft edges landed later the same week (35ad8bd,
+> `stencil-soft-edges`): `rasterize_gate` now writes the bilinear
+> sample ROUNDED to the nearest byte, no threshold, and the
+> boundary expectations moved with it (the half-texel ramp reads
+> 64/128/191, the 2x-scale matrix is soft). Re-run this port
+> against the CURRENT code and the boundary rows mismatch by
+> design; the soft-shape port + its re-derivation live in
+> docs/loop/kill-reports/2026-10-19-stencil-soft-edges.md. The
+> block above stays byte-intact as this kill's evidence.
+
 - **The 1e-6 round-trip margin is hand-derived:** the f32 ulp is
   ≤ 4.8e-7 at |screen| < 8 and ≤ 2.4e-7 at |image px| < 4, and the
   worst stacked rounding is about 4.8e-7. This was never measured.
