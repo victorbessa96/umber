@@ -120,6 +120,7 @@ for the NEXT audit cycle, not walls.
 
   | wave | tip | what landed | gate | CI |
   |---|---|---|---|---|
+  | stencil-wave (host-return #3, 2026-10-19) | `0955ac8` | The ENTIRE freeze-3 parked fleet in one close: the stencil engine (core transform+rasterize port-verified, app state/chords/overlay with 12 i18n keys both locales, viewport quad math + stencil_owns gating), e0063 (the perf-harness triangle_materials default — every nightly's build-step red), the agent paint-ops pair (set_brush_radius_texels seam + paint_stroke.radius refusal + ExportAsk.set_override naming), stamp sidecar save (C2-11's tail), the hermetic Flatpak manifest (621 CDN-verified sources + template/generator + drift gate), kittest layers breadth, masked-bakes ray half, five design closures (pcpool, dynmat, per-set-stacks, masked-bakes, falloff) + the executable recovery runbook. Closed through `scripts/stencil-wave-close.sh`: battery GREEN 1,434 tests / 6 crates after ONE clippy fix-forward (viewport needless_option_as_deref); two recovery-script defects fixed live (probe self-match; vacuous byte-blind verdict-reuse — addenda 1+2 in its report) | green, 1,434 | **green** 39263817670 both platforms; packaging push-run **green** 39263817851 (the flatpak verdict gate); perf-nightly 39263843229 build **green** (e0063) but compare **red** on real numbers → live-regression hunt named, confirmation 39268968173 |
   | W-GUI-1 (2026-10-16) | `5e0d89e` | Four GUI-plan kills in one wave: g3-keymap-editor (claw: capture/conflict/presets/delta, one `with_table` funnel), g5-home-screen (claw + dragon wiring: the home card with recents + recover, actions drained post-dock), g6-uv-view-parity (dragon: UDIM grid + tile numbers, shader-side channel isolation with the `isolate_picks_its_channel` golden, shift-hold pixel inspector), g6-contextual-toolbar (dragon: the strip editing the panel's own state, StripEdit channel). 18+9+7 ftl keys; the no-mesh literal now i18n'd. Kittest capture flow + strip render test = named follow-ups with the wiring | green, app 687 + gpu 145 | **green** 38954115915 (both platforms) |
     | W-C2g (host-return) | `1031b27` | The ENTIRE parked set landed in one battery (`ddb59e0`: 967 tests green, clippy clean): g5-workspace-persist, kittest breadth + lib surface, c2-28, the 4 sec-* kills, spp-extract-cli, wave-benchmark-public, wave-abr, spp-texture-cache-reader (corpus gate LIVE — 3 real Painter files, 17 spec fixes), win-version-resource, crash-recent-ops. Push flushes: the host lock (`ed56755`), the UDIM sanitizer (`eca286b`). Post-wave: packaging lint+AppImage GREEN after the OARS-id + SDK-extension fixes (`6758619`); Flatpak offline-deps = named kill. Perf-nightly's first completed run RED on viewport x15.3 at PRE-wave head `06c1711` (triage in docs/perf/protocol.md, not this wave's). The interrupted corpus rsync from the outage window completed 2026-10-16 08:31 — all three .spp files hash-match local AND manifest on the host (the corpus gate ran green against these bytes) | green, app 651 + gui 97 + cli 74 + core 109 + spp 36 | **green** 38872572891/`eca286b` + 38885801883/`1031b27` (both platforms); packaging 38883914616 lint+AppImage green, 38883955783 Flatpak red (offline deps) |
   | W-C2f | `06c1711` | W-C2e's Windows red fixed (the panel transfer test's WARP deadline); Windows CI skips four WARP-slow GPU tests; C2-10 noise generators + mask anchors; C2-9 materials/fills scoped to their set's tiles, Export named per set | green, app 533 | **green** 38807725408 (Windows tests 41 → 17 min) |
@@ -340,13 +341,43 @@ baseline), and the partner-gated release lane.
 - The commit manifest's durable home: `.dragon/wgui2-commit-manifest.txt`
   (the scratch copy is the fallback).
 
-## Stencil wave + freeze-3 outage (2026-10-18 ~02:00 — CURRENT, supersedes the sections above for recovery)
+## Stencil wave + freeze-3 outage (2026-10-18 ~02:00 — CLOSED 2026-10-19 through the host-return recovery; kept as the wave's historical record)
 
-**Read this before any recovery action.** The "Host diagnosis" section
-and its `recovery-close.sh` instruction above belong to the 10-16
-outage and are SUPERSEDED — do NOT fire recovery-close.sh for the
-current wave (it interpolates W-GUI-2's manifest and strings; the
-current wave closes by the manual sequence below).
+**CLOSED 2026-10-19 (~11:00 -03).** The host returned 08:42:55 (watcher
+probe 1188); boot journal clean this boot (zero Hardware Error/MCE
+beyond the boot banner — memtest86+ remains OWED at Bessa's next
+physical access). The recovery ran as ONE session per the runbook:
+claim through the interlock, all 51 manifest rows zero-drift, rsync,
+default-leg battery (NO gpu features). The first battery RED was ONE
+clippy red — viewport.rs `needless_option_as_deref` (:1033, an
+identity rebind on an already-`Option<&mut T>`) — with ALL 1,434 tests
+green in the red run; fixed, manifest re-pinned (74e125a4), fresh
+battery GREEN (1,434 tests, 6 crates, clippy clean all-6). TWO defects
+in the recovery script itself were found and fixed live: the step-2
+host probe matched its own compound wrapper (`pgrep -af cargo` →
+`pgrep -ax` exact-name), and the verdict-reuse path was vacuous by
+construction plus byte-blind (launch-time sentinel captured before the
+overwrite; tree_state now hashes dirty-file BYTES over the exact rsync
+surface) — harness-verified 3/3 + 5/5 + 10/10, production-proven on
+the clean run, documented as addenda 1+2 in the script's own report.
+Push `ff9ac02..0955ac8` (7 rows), CI 39263817670 GREEN both
+platforms; the packaging push-run GREEN 4m15s = the flatpak kill's
+verdict gate (the failed dispatch 39263847856 was a CDN transient —
+ab_glyph fetched as an error page — dispositioned). perf-nightly
+39263843229: BUILD GREEN (e0063 VERIFIED — the nightly's first full
+run since the reseed) but COMPARE RED on real numbers (viewport_mean
+x1.83, viewport_p95 x1.59, input_photon_p50 x2.32 vs the authentic
+5e0d89e-seeded baseline) → the live-regression hunt is NAMED (triage
+in docs/perf/protocol.md; confirmation re-run 39268968173 on the same
+tip). All 16 kill locks released at their commits; the consumed
+coordination notes + manifests + sentinel deleted at this docs pass
+(the per-set-stacks closure row f0d49ad and this docs pass ride the
+NEXT push). The wave's named next kill: the gate_plane paint hook
+(umber-paint). Historical record below.
+
+The "Host diagnosis" section and its `recovery-close.sh` instruction
+above belong to the 10-16 outage and are superseded (the stencil wave
+closed through `scripts/stencil-wave-close.sh`, now consumed).
 
 Host state: wedged since ~21:48 10-17 (event C — the third wedge of
 10-17; dossier: vault `projects/umber/2026-10-17-centralhost-freeze3-evidence.md`,

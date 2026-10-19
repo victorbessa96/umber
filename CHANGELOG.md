@@ -4,6 +4,50 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## The stencil wave + the freeze-3 fleet — the host-return close (2026-10-19, ff9ac02..0955ac8)
+
+The build host's third freeze parked 16 kills for two days; one
+session closed them all on its return. CI 39263817670 green both
+platforms; battery green 1,434 tests / 6 crates after one clippy
+fix-forward.
+
+- **Added — the stencil engine:** umber-core's pure transform+rasterize
+  (port-verified: 5 contract cases, 3 mutations caught), umber-app's
+  state/PNG-load/chords/overlay rows (the honest gate seam + on-screen
+  pending notice; 12 i18n keys both locales), the viewport quad math
+  with stencil_owns gating the eyedropper/id-mask paths.
+- **Fixed — E0063:** the perf-harness's cube_grid gains the
+  triangle_materials default; every nightly's build-step red class is
+  closed (verified live: the nightly's build step is green on this tip).
+- **Added — agent paint-ops follow-ups:** the absolute-radius wire
+  field (set_brush_radius_texels seam, typed refusal before GPU work,
+  clamped reply) and export naming unified to bake's active-set rule
+  (the first CLI export integration test).
+- **Added — the stamp sidecar's save half:** a hand-picked stamp
+  persists beside the preset as `<stem>.stamp.png` (.abr), restored
+  unchanged by the existing load path.
+- **Fixed — the Flatpak offline-deps red (38883955783):** the manifest
+  renders hermetic from Cargo.lock (621 CDN-verified sources,
+  template + generators, `--offline --locked` build, CI drift gate);
+  the packaging push-run green = the kill's verdict gate.
+- **Added — kittest layers breadth:** the duplicate button,
+  selection-gated properties rows, the blend combo with one-undo.
+- **Added — the masked-bakes ray half:** AO/thickness/bent gain the
+  occluder split — the raster submesh drives UV coverage, the whole
+  mesh stays the occluder; per-set ray maps stop writing the shared
+  bake under every set's name.
+- **Docs:** five design closures (pcpool, dynmat, per-set-stacks,
+  masked-bakes, falloff — every closure claim grep-verified at its
+  landing site), the executable recovery runbook
+  (stencil-wave-close.sh — claim interlock, manifest gates, sentinel
+  battery, commit-by-path, ONE push; two defects in it fixed live
+  during the recovery, addenda 1+2 in its report), and the wave's
+  briefs/reports.
+- **Perf:** the nightly's first full run since the baseline reseed
+  reads viewport_mean x1.83 on real numbers — the live-regression
+  hunt is named (triage in docs/perf/protocol.md); confirmation
+  re-run 39268968173 in flight on the same tip.
+
 ## W-GUI-3 + W-GUI-4 — the shell-halves and curves day (2026-10-17, 7b5b33e..73a57cd)
 
 Two waves landed in one day, all CI green on both platforms:

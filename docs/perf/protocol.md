@@ -223,3 +223,38 @@ justification (this section), exactly the remedy the original triage
 row named. The nightly's compare gate is now apples-to-apples
 (lavapipe baseline vs lavapipe runs); the next nightly is the first
 clean read of the gate.
+
+## Triage verdict 2026-10-19 (run 39263843229, head `0955ac8`) — e0063 VERIFIED; the first clean gate read is RED on real numbers — the live-regression hunt is NAMED
+
+The E0063 fix (`b942d64`, cube_grid's `triangle_materials` default)
+unblocked the nightly's build step — the first run to reach the
+compare gate since the reseed:
+
+- BUILD GREEN: the perf-harness compiles; the 39097675689 /
+  39108802121 / 39222850046 build-step red class is closed.
+- COMPARE RED on real numbers, against the AUTHENTIC runner-lavapipe
+  baseline (9acdc1c, seeded from 38957356307's own metrics on
+  `5e0d89e`):
+  - `viewport_mean_ms` 83.47 vs 45.54 (**x1.83**)
+  - `viewport_p95_ms` 91.25 vs 57.24 (**x1.59**)
+  - `input_photon_p50_ms` 0.219 vs 0.094 (**x2.32**)
+  - `input_photon_p95_ms` x1.01 OK
+
+This is NOT a replay of the x8/x15 hardware-class mismatch (that
+closed with the reseed). The same-tip noise floor measured so far is
+TIGHT: 45.54 (the seed run) vs 48.31 (the 10-17 nightly,
+39013831785, one day and a handful of commits later) = x1.06. A x1.83
+viewport reading against a x1.06 floor is a LIVE regression signal,
+not runner noise — the viewport frame time is back to nearly the
+pre-wave `06c1711` level (84.07ms).
+
+Suspect window: `5e0d89e..0955ac8`. Lead suspects: the stencil
+wave's per-frame viewport/app surface (viewport.rs's overlays_header
++ stencil_owns gating in the eyedropper/id-mask paths,
+display_panel.rs's stencil rows, the app's stencil state) and the
+masked-bakes ray half's bake_sources helpers — the first bisect leg.
+
+Discriminator before the bisect: confirmation re-run 39268968173 on
+the SAME tip (`0955ac8`) — a second ~83 read excludes runner
+variance and opens the bisect; a ~48 read closes this red as
+variance. Verdict updates this note.

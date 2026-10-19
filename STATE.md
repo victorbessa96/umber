@@ -11,31 +11,35 @@
 
 ## Status line
 
-Current phase: **W-GUI-4 CLOSED (2026-10-17, `73a57cd`; CI 39056807314
-GREEN both platforms).** Three waves landed in one day: W-GUI-2 (19
-kills through the 10h host outage, `d9fa931`..`eecf4c6`), W-GUI-3
-(the six lock-queued shell halves, `7b5b33e`+`efd0cbf`), and
-W-GUI-4's kills (falloff Custom `4a2e3c2`, the curves CurveEdit
-consumer `7208a7b`, triangle_materials + per-set masked bakes
-end-to-end `a23bcac`/`5aae0ec`/`c59034b`/`59c679a`/`73a57cd`, the
-rail's row-label registry `8eb02c9`, the E0063 tail `a394876`). The 19-kill wave
-closed through a 10h build-host outage: the wave battery ran GREEN
-(1,589 tests, 8 crates, clippy clean) after 12 fix-forward rounds;
-every kill that landed host-free through the night (the four W-GUI-2
-claw kills + first-run + the a11y sweep + density + held-key +
-polish widgets + icons-a11y + spp f16/m3/dense + assetstore-gc +
-camera zoom/frame + subset-mesh + occluder-scope + psd-publish +
-the inpaint core + snapshot tests) and the cross-review's 11 defect
-fixes (1 BLOCKER) all shipped together, plus the perf-baseline
-reseed that closes the nightly's stale-baseline red.
+Current phase: **STENCIL WAVE + THE FREEZE-3 FLEET CLOSED (2026-10-19,
+push `ff9ac02..0955ac8`, CI 39263817670 GREEN both platforms).** The
+build host's third freeze (10-17/18, UECC bank-14 class) parked 16
+kills for two days; its return 08:42:55 closed them in ONE session
+through `scripts/stencil-wave-close.sh` (claim interlock, 51 manifest
+rows zero-drift, rsync, default-leg battery): the stencil engine
+(umber-core transform+rasterize port-verified + umber-app
+state/chords/overlay, 12 i18n keys both locales, viewport quad math +
+stencil_owns gating), e0063, the agent paint-ops pair, the stamp
+sidecar save, the hermetic Flatpak manifest, kittest layers breadth,
+the masked-bakes ray half, five design closures, and the recovery
+runbook itself. Battery GREEN (1,434 tests, 6 crates, clippy all-6)
+after ONE clippy fix-forward (viewport needless_option_as_deref);
+TWO recovery-script defects fixed live and harness-verified (the
+step-2 probe's self-match; the vacuous byte-blind verdict-reuse —
+addenda 1+2 in the script's report). The flatpak kill's verdict gate:
+packaging push-run GREEN. The perf-nightly's first full run since
+the reseed: BUILD green (e0063 verified) but COMPARE red on real
+numbers (viewport_mean x1.83) — the live-regression hunt is NAMED.
 
-**Next:** g6-stencil-overlay (still blocked on the stencil engine),
-the perf-baseline reseed from two green nightlies (the first nightly
-on the reseeded baseline has not run yet), the multi-material FBX
-fixture (per-set masked bakes' named follow-up), and the
-partner-gated release lane (SPEC v1.1 ratification, Windows signing,
-the alpha tag — evidence packets written). Docs tick for W-GUI-3/4
-rides the next push.
+**Next:** the live-regression verdict (confirmation re-run 39268968173
+on the same tip; then either the runner-variance close or the
+`5e0d89e..0955ac8` bisect with the stencil wave's viewport/app
+per-frame surface as lead suspect); the gate_plane paint hook
+(umber-paint — the stencil wave's named follow-up, lock released at
+the recovery); the partner-gated release lane (SPEC v1.1
+ratification, Windows signing, the alpha tag); memtest86+ at Bessa's
+next physical access to centralhost. Per-set-stacks closure
+(`f0d49ad`) + the wave's docs tick ride the next push.
 
 ## The core-loop queue (the ONLY active hunt)
 
