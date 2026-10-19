@@ -1,9 +1,12 @@
 # Design: per-texture-set layer stacks (C2-9)
 
-Date: 2026-10-15. Author: dragon. Status: DRAFT for review. Audit row
-C2-9: "`Document` holds one stack per set; switching sets switches
-stacks; save writes every set". This doc exists because the naive change
-is wrong in two places the code makes easy to miss.
+Date: 2026-10-15. Author: dragon. Status: LANDED (all four stages +
+the export-sets and parked-materials follow-ups, 2026-10-15 — seven
+c2-9 kill reports); CLOSED 2026-10-18 — read the dated closure at this
+doc's tail. The audit row C2-9: "`Document` holds one stack per set;
+switching sets switches stacks; save writes every set". This doc exists
+because the naive change is wrong in two places the code makes easy to
+miss.
 
 ## Today (verified in the tree)
 
@@ -100,3 +103,49 @@ set's tiles, which is already how `PaintState` routes.
 - **The Bakes and Export panels already iterate sets.** They read the
   composite through `read_target`, so stage 2 makes them correct with
   no change. Stage 2's GPU test pins that.
+
+---
+
+## Closure (2026-10-18 — the design-review kill, verified against the live tree)
+
+All four stages landed the day after this doc was written, plus two
+follow-ups. Every symbol below grep-verified against the tree on
+2026-10-18:
+
+- **Hazard 1 resolved as designed — global ids** (stage 1,
+  `2026-10-15-c2-9-stage1-ids.md`): `LayerStack::next_id` +
+  `from_parts(layers, saved_next_id)`
+  (`umber-core/src/layers.rs:913/:937`) — one id space per document,
+  planes keyed by id need no set dimension, old single-set files load
+  unchanged.
+- **Hazard 2 resolved as designed — per-set compositing** (stage 2,
+  `2026-10-15-c2-9-stage2-composite.md`): the design's
+  `CompositeSnapshot.layers_by_set` landed as `set_layers:
+  BTreeMap<String, Vec<SnapshotLayer>>` (the implementation's
+  reconciling name, recorded in that report) with `rows_for(set)` +
+  `set_of_tile(tile)` routing each tile to its own set's rows, and
+  `all_rows()` (the union) feeding the retire census so switching sets
+  retires nothing — exactly the doc's stage-2 contract.
+- **Stage 3 — the per-set document**
+  (`2026-10-15-c2-9-stage3-doc.md` + `-stage3b.md`):
+  `Document::activate_set(name)` + `active_set()` live
+  (`umber-app/src/document.rs:321/:348`); stack + history swap per
+  set; save/open round-trips every set.
+- **Stage 4 — panel + docs** (`2026-10-15-c2-9-export-sets.md`,
+  `-parked-materials.md`): the Layers panel names the active set and
+  shows only its stack (the C2-9 stage-4 comment in `layers_ui`); the
+  Bakes/Export panels ride `set_of_tile` with no change of their own,
+  as the open questions predicted.
+- **Open questions, resolved by the landing**: the stroke timeline
+  stayed global in v1 (the stage-3b report's boundary, exactly the
+  doc's v1 statement); the panels needed no stage-2 changes — the
+  design's prediction held.
+
+No section of this doc was falsified by the implementation; the one
+reconciling rename (`layers_by_set` → `set_layers`) is recorded where
+it belongs, in the stage-2 report. The landing reports (seven c2-9
+entries, 2026-10-15) remain the authoritative implementation record.
+
+Residual authority of this doc: the two-hazard analysis (still the
+reference for WHY per-set ids are global and WHY the composite unions
+across sets) and the stage ordering rationale.
