@@ -367,7 +367,7 @@ pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
     ui.add_enabled(false, hint);
     if let Some((width, height, open)) = row.staged {
         let line = i18n::tr_args(
-            "overlays.stencil-gate-pending",
+            "overlays.stencil-gate-live",
             [
                 ("width", FluentValue::from(i64::from(width))),
                 ("height", FluentValue::from(i64::from(height))),
@@ -1037,7 +1037,7 @@ mod tests {
             "overlays.stencil-too-large",
             "overlays.stencil-unsupported",
             "overlays.stencil-n-hint",
-            "overlays.stencil-gate-pending",
+            "overlays.stencil-gate-live",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");

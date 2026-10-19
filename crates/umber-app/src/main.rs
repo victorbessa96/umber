@@ -1172,9 +1172,10 @@ impl TabViewer for PanelViewer<'_> {
                     ui.separator();
                     display_panel::hdr_row(ui, self.hdr_mode, &self.gpu.hdr_probe);
                     ui.separator();
-                    // The stencil section: loads, toggles, Resets and
-                    // re-stages the gate (the upload seam — `stencil`).
-                    stencil::panel_section(ui, self.stencil, self.paint.as_deref());
+                    // The stencil section: loads, toggles, Resets,
+                    // re-stages the label bytes, and hands the RAW gate
+                    // to umber-paint's hook (`stencil`).
+                    stencil::panel_section(ui, self.stencil, self.paint.as_deref_mut());
                     ui.separator();
                     // The view mode decides whether an active chain is
                     // live or bypassed (data modes) — the status line.

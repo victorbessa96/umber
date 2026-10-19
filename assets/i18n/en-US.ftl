@@ -938,4 +938,4 @@ overlays =
     .stencil-too-large = { $width }×{ $height } is over the { $max }-pixel limit.
     .stencil-unsupported = not a supported PNG (8-bit RGB or RGBA).
     .stencil-n-hint = N will ignore the stencil (the shortcut arrives with the viewport overlay).
-    .stencil-gate-pending = Gate built ({ $width }×{ $height }, { $open }% open); painting through it is not wired yet.
+    .stencil-gate-live = Gate live ({ $width }×{ $height }, { $open }% open) — paint passes only where it opens.

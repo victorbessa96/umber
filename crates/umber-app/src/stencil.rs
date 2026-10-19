@@ -41,19 +41,18 @@
 //!   (step 3) give Reset a real viewport rect.
 //! - **A successful load activates the stencil and Resets it**: loading
 //!   an image is the request to paint through it.
-//! - **v1 boundary — the gate does NOT reach the GPU yet.** umber-paint
-//!   has no public lane that queues caller bytes as a `WriteMask`
-//!   (`publish_mask` / `sync_mask_tile` / `gate_bytes` are private,
-//!   paint_state.rs:5184-5226); dabs only read the gate while
-//!   `stroke_mask_gate` is armed, which only the quick mask or the cavity
-//!   arms (paint_state.rs:1714); and every quick-mask resync re-uploads
-//!   `gate_plane` (paint_state.rs:5158), which would overwrite shell-
-//!   written bytes. The real hook is an umber-paint change — a stencil
-//!   plane multiplied into `gate_plane` the way the cavity plane is
-//!   (paint_state.rs:5171-5179), plus `|| stencil_gates()` at :1714. So
-//!   [`StencilState::stage_gate`] builds the composed bytes the upload
-//!   will carry and parks them in [`StencilState::staged`] (the seam);
-//!   the panel says plainly that painting through it is pending.
+//! - **The gate reaches the GPU through the hook (landed 2026-10-19,
+//!   `stencil-paint-hook`).** umber-paint's
+//!   `PaintState::set_stencil_gate` stages the RAW coverage and
+//!   `gate_plane` folds it in after the cavity block (product), with
+//!   `stroke_mask_gate` armed by `|| stencil_gates()`. The shell hands
+//!   off through [`StencilState::hook_gate`] — RAW bytes, never the
+//!   composed label bytes (Amendment A: `gate_plane` composes with the
+//!   quick mask itself). [`StencilState::staged`] keeps its
+//!   composed-label contract (Amendment B's `min`) for the panel's
+//!   read-only row only. Named follow-ups: the active-tile-change
+//!   re-stage (per-set scope — other-sized tiles paint stencil-ungated
+//!   until then) and the viewport chords (design step 3).
 //! - **The screen <-> UV gap** (stencil-core's judgment call 4) is carried
 //!   forward unchanged: the gate is rasterized in target texel space,
 //!   and projecting the screen-space quad onto UV texels is the hook
@@ -239,11 +238,12 @@ impl StencilState {
         }
     }
 
-    /// THE UPLOAD SEAM (TODO(stencil-paint-hook)): composes the gate for
-    /// `target` with the quick-mask bytes `quick` and parks it in
-    /// [`Self::staged`]. The hook kill hands `staged` to umber-paint's
-    /// gate lane instead (see the module docs' v1 boundary). Nothing is
-    /// staged without a target, or while the stencil contributes no gate.
+    /// Stages the gate for `target` composed with the quick-mask bytes
+    /// `quick` — the PANEL LABEL's data (Amendment B's `min` contract),
+    /// NOT the hook's bytes: the paint hook takes the RAW coverage
+    /// through [`Self::hook_gate`] (Amendment A; the hook landed
+    /// 2026-10-19 in `stencil-paint-hook`). Nothing is staged without
+    /// a target, or while the stencil contributes no gate.
     pub fn stage_gate(&mut self, target: Option<(u32, u32)>, quick: Option<&[u8]>) {
         self.staged = target.and_then(|(width, height)| {
             let stencil = self.gate_bytes(width, height)?;
@@ -254,6 +254,20 @@ impl StencilState {
                 values,
             })
         });
+    }
+
+    /// The hook's bytes (Amendment A): the stencil's RAW coverage at
+    /// `target` — `255` passes, `0` blocked — for
+    /// [`PaintState::set_stencil_gate`]. `None` while the stencil
+    /// contributes no gate (no target, inactive, or no image): the
+    /// hand-off CLEARS paint's staged gate, so paint passes ungated.
+    /// NEVER the composed [`Self::staged`] bytes — `gate_plane` folds
+    /// the quick mask in itself (product; the shell-side `min` is the
+    /// label's contract only, Amendment B).
+    pub fn hook_gate(&self, target: Option<(u32, u32)>) -> Option<(u32, u32, Vec<u8>)> {
+        let (width, height) = target?;
+        let values = self.gate_bytes(width, height)?;
+        Some((width, height, values))
     }
 }
 
@@ -359,12 +373,16 @@ pub fn load_png_rgba(path: &Path) -> Result<StencilImage, StencilLoadError> {
 /// The Display panel's stencil section (the Overlays popover hosts the
 /// same rows once the viewport kill lands — step 3): draws
 /// [`crate::display_panel::stencil_rows`] over `state`, loads a picked
-/// file, Resets, and re-stages the gate after every gate-affecting
-/// change (load, toggle, Reset — not opacity, which only the overlay
-/// reads). The one egui-touching fn here: a thin adapter.
-pub fn panel_section(ui: &mut egui::Ui, state: &mut StencilState, paint: Option<&PaintState>) {
-    let tile = paint.map(|p| p.active_tile());
+/// file, Resets, and re-stages the label bytes after every
+/// gate-affecting change (load, toggle, Reset — not opacity, which
+/// only the overlay reads), and hands the RAW coverage to umber-paint's
+/// `set_stencil_gate` every panel frame (the hook hand-off; a
+/// same-value call is a no-op there, so the change-driven cost
+/// contract holds). The one egui-touching fn here: a thin adapter.
+pub fn panel_section(ui: &mut egui::Ui, state: &mut StencilState, paint: Option<&mut PaintState>) {
+    let tile = paint.as_ref().map(|p| p.active_tile());
     let target = paint
+        .as_ref()
         .zip(tile)
         .map(|(p, t)| p.quick_mask_for_tile(t).dimensions());
     // No paint session: fit to the image's own size (scale 1).
@@ -405,9 +423,19 @@ pub fn panel_section(ui: &mut egui::Ui, state: &mut StencilState, paint: Option<
     }
     if restage {
         let quick = paint
+            .as_ref()
             .zip(tile)
             .and_then(|(p, t)| quick_mask_gate_bytes(p.quick_mask_for_tile(t), t));
         state.stage_gate(target, quick.as_deref());
+    }
+    // THE HOOK HAND-OFF (Amendment A; the hook landed in
+    // `stencil-paint-hook`): the RAW coverage goes to umber-paint's
+    // `set_stencil_gate` — never the composed label bytes above.
+    // Runs every panel frame: `set_stencil_gate`'s same-value no-op
+    // carries the change-driven cost contract, and a stencil staged
+    // before a document opened still hands off on the next open.
+    if let Some(p) = paint {
+        p.set_stencil_gate(state.hook_gate(target));
     }
 }
 
@@ -673,6 +701,42 @@ mod tests {
         assert_eq!(quick_mask_gate_bytes(&mask, 1001), Some(vec![0; 4]));
         mask.set_editing(true);
         assert_eq!(quick_mask_gate_bytes(&mask, 1001), None, "mask mode");
+    }
+
+    #[test]
+    fn hook_gate_hands_off_raw_coverage_and_clears_when_gone() {
+        let s = active_pattern();
+        assert_eq!(
+            s.hook_gate(Some((4, 4))),
+            Some((4, 4, pattern_bytes())),
+            "raw coverage at the identity transform"
+        );
+        assert_eq!(s.hook_gate(None), None, "no target = a clearing hand-off");
+        let inactive = StencilState { active: false, ..s };
+        assert_eq!(
+            inactive.hook_gate(Some((4, 4))),
+            None,
+            "inactive = a clearing hand-off"
+        );
+        let mut live = inactive;
+        live.active = true;
+        // The two contracts pinned apart: the LABEL composes with the
+        // quick mask (min, Amendment B); the HOOK stays RAW (Amendment A
+        // — gate_plane folds the quick mask in itself).
+        let quick = [
+            255u8, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0,
+        ];
+        live.stage_gate(Some((4, 4)), Some(&quick));
+        assert_eq!(
+            live.staged.as_ref().map(|g| g.values.clone()),
+            Some(vec![255, 0, 0, 0, 255, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0]),
+            "the label composes min with the quick gate"
+        );
+        assert_eq!(
+            live.hook_gate(Some((4, 4))),
+            Some((4, 4, pattern_bytes())),
+            "the hook ignores the quick mask (raw, not composed)"
+        );
     }
 
     #[test]

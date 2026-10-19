@@ -957,4 +957,4 @@ overlays =
     .stencil-too-large = { $width }×{ $height } passa do limite de { $max } pixels.
     .stencil-unsupported = não é um PNG suportado (RGB ou RGBA de 8 bits).
     .stencil-n-hint = N vai ignorar o estêncil (o atalho chega com o overlay do viewport).
-    .stencil-gate-pending = Máscara gerada ({ $width }×{ $height }, { $open }% aberta); pintar através dela ainda não está conectado.
+    .stencil-gate-live = Máscara ativa ({ $width }×{ $height }, { $open }% aberta) — a tinta passa apenas onde ela abre.
