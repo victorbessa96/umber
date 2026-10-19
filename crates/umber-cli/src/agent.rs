@@ -27,10 +27,10 @@
 //! `project_save` writes it back (with the paint sidecar when the session
 //! painted or opened paint — `painted` counts the staged planes), `set_active`
 //! chooses the working set, and `undo`/`redo` drive the model's per-set
-//! undo journals. When a project is open, `bake` names its outputs after
-//! the active set; `export` still names from the mesh (its naming lives
-//! in main.rs's `export_mesh`, out of this surface — unifying it is
-//! deferred). The session attaches the project's autosave journal on
+//! undo journals. When a project is open, `bake` AND `export` name their
+//! outputs after the active set (export through `ExportAsk`'s
+//! `set_override` — the deferred unification, landed 2026-10-18). The
+//! session attaches the project's autosave journal on
 //! open like the app does, so undo/redo record the edit they perform
 //! and saves stamp the live high-water mark.
 //!
@@ -53,6 +53,9 @@
 //! is the engine's own history, separate from the model's `undo` (the
 //! app's two-stack shape). v1 boundaries: no fill/material evaluation
 //! (their rows composite nothing here), no mask strokes, no pressure.
+//! `paint_stroke`'s optional `radius` sets the session brush's ABSOLUTE
+//! radius in target texels (state, not per-stroke — later strokes
+//! inherit it; see [`PaintStrokeStep`]).
 //!
 //! Judgment calls (v1 boundaries): there is no `layer_rename` —
 //! [`LayerCommand`] carries no rename op and the journal has no name-only
@@ -146,7 +149,8 @@ enum AgentStep {
 /// ANY change to a step's name, fields or reply shape once 0.1.0 is
 /// tagged (the release checklist's Beta freeze points at this number). A
 /// client asks once at session start and refuses a version it does not
-/// know. 1 = the protocol as of the paint ops (2026-10-14).
+/// know. 1 = the protocol as of the paint ops (2026-10-14) + the
+/// `paint_stroke.radius` field (2026-10-18; pre-tag, so no bump yet).
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The body of a step that takes no fields (`{}`; `null` and the bare
@@ -189,7 +193,9 @@ struct AgentBakeStep {
 }
 
 /// `export` — the batch `export` run on the held mesh. `tiles` empty or
-/// absent exports every present tile.
+/// absent exports every present tile. When a project is open, outputs
+/// are named after the ACTIVE set (bake's v0 rule, unified) instead of
+/// the mesh-derived set name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentExportStep {
@@ -234,8 +240,17 @@ struct SetActiveStep {
 /// (docs/specs/agent-paint-ops-design.md). `layer` absent paints Base.
 /// `points` are UV (≥ 1; a point's integer part routes it to its UDIM
 /// tile). `color` is straight RGBA in `0..=1`; `radius_scale` multiplies
-/// the session brush's radius (the engine's per-stroke scale — v1 has no
-/// absolute-radius seam).
+/// the session brush's radius (the engine's per-stroke scale).
+///
+/// `radius` (optional) is the ABSOLUTE brush radius in target texels for
+/// this stroke: applied through [`PaintState::set_brush_radius_texels`]
+/// before the stroke begins, it SETS THE SESSION BRUSH — later strokes
+/// inherit it until another `radius` arrives (the GUI's brush-size rule:
+/// the size is state, not per-stroke; `paint_undo` restores pixels,
+/// never the brush). The engine clamps the implied multiplier
+/// (`sanitize_size`, `0.05..=8.0` → `1.2..=192.0` texels); non-finite or
+/// `<= 0` input is a typed error BEFORE any GPU work, and the reply
+/// reports the radius actually in force.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaintStrokeStep {
@@ -245,6 +260,10 @@ struct PaintStrokeStep {
     color: [f32; 4],
     #[serde(default = "default_radius_scale")]
     radius_scale: f32,
+    /// The absolute brush radius in target texels (see the struct docs):
+    /// sets the session brush before the stroke; absent keeps it.
+    #[serde(default)]
+    radius: Option<f32>,
 }
 
 /// The `paint_stroke` radius scale when absent: the session brush as-is.
@@ -953,6 +972,9 @@ impl Session {
                     flags: &flags,
                     requested_tiles: &s.tiles,
                     usda: s.usda,
+                    // Bake's v0 rule, unified: an open project's active
+                    // set names the export; none open = the mesh's set.
+                    set_override: self.project.as_ref().map(|held| held.active.as_str()),
                 };
                 let (written, tiles) = export_mesh(
                     &loaded.path,
@@ -1446,6 +1468,13 @@ impl Session {
                 "radius_scale {scale} must be finite and > 0"
             ));
         }
+        if let Some(radius) = s.radius {
+            if !radius.is_finite() || radius <= 0.0 {
+                return Err(anyhow::anyhow!(
+                    "radius {radius} must be finite and > 0 (target texels; the engine clamps 1.2..=192.0)"
+                ));
+            }
+        }
         let held = self.project_mut()?;
         let (target, verdict, index) = {
             let stack = active_stack(held)?;
@@ -1479,13 +1508,30 @@ impl Session {
         // never travelled one dab spacing and painted nothing (found by the
         // paint_snapshot test). Set once per session; idempotent.
         paint.set_exact_input(true);
+        // The absolute radius SETS the session brush (persisting for
+        // later strokes — the GUI's brush-size rule); absent keeps it.
+        // Captured after the apply so the reply reports what this stroke
+        // actually painted with, clamped value included.
+        if let Some(radius) = s.radius {
+            paint.set_brush_radius_texels(radius);
+        }
+        let radius = paint.brush_radius_texels();
+        // The stroke machinery reads only the per-stroke scale — its
+        // dabs take `BRUSH_RADIUS_TEXELS * sanitize_size(radius_scale)`;
+        // the `brush_size` field never enters the stroke path on its
+        // own. The live-event precedent composes the session brush at
+        // the CALL SITE (`push_event` passes `brush_size` as the
+        // scale), so an agent stroke folds the same way: per-stroke
+        // scale x session brush, and the engine's `sanitize_size` on
+        // the product is the documented 0.05..=8.0 multiplier clamp.
+        let scale = s.radius_scale * paint.brush_size();
         let first = s.points[0];
-        paint.begin_stroke_styled(emath::pos2(first[0], first[1]), 1.0, s.radius_scale);
+        paint.begin_stroke_styled(emath::pos2(first[0], first[1]), 1.0, scale);
         if let Some(refusal) = paint.stroke_refusal() {
             return Err(anyhow::anyhow!("{refusal}"));
         }
         for p in &s.points[1..] {
-            paint.extend_stroke_styled(emath::pos2(p[0], p[1]), 1.0, s.radius_scale);
+            paint.extend_stroke_styled(emath::pos2(p[0], p[1]), 1.0, scale);
         }
         paint.end_stroke();
         paint
@@ -1501,6 +1547,7 @@ impl Session {
         fields(serde_json::json!({
             "layer": s.layer,
             "tiles": tiles,
+            "radius": radius,
             "can_undo_stroke": can_undo,
             "can_redo_stroke": can_redo,
         }))
@@ -1754,9 +1801,8 @@ impl Session {
         };
         // v0 (`set_active`'s contract): an open project's working set
         // names the bake; otherwise the mesh's own set, as before.
-        // `export` keeps the mesh's set: its naming lives inside
-        // main.rs's `export_mesh` (out of this surface), so unifying it
-        // is deferred — see the module docs.
+        // `export` follows the same rule (unified 2026-10-18 through
+        // `ExportAsk`'s `set_override` — see the module docs).
         let set = self
             .project
             .as_ref()

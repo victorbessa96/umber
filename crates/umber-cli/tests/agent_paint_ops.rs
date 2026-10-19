@@ -407,6 +407,17 @@ fn paint_inputs_are_validated_before_any_gpu_work() {
         "{hot}"
     );
 
+    let zero = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.5, 0.5]], "color": [0, 1, 0, 1], "radius": 0 } }));
+    assert_eq!(zero["ok"], false, "{zero}");
+    assert!(
+        zero["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("finite and > 0"),
+        "{zero}"
+    );
+
     let ghost = agent.call(&json!({ "paint_stroke": {
         "layer": 99, "points": [[0.5, 0.5]], "color": [0, 1, 0, 1] } }));
     assert_eq!(ghost["ok"], false, "{ghost}");
@@ -611,6 +622,101 @@ fn snapshot_hash_tracks_strokes_and_undo_exactly() {
             .contains("drop `layer`"),
         "{both}"
     );
+
+    assert_ok(&agent.call(&json!("quit")), "quit");
+    assert!(agent.wait_exit().success());
+}
+
+/// The absolute-radius field (docs/specs/agent-paint-ops-design.md, the
+/// named follow-up): `radius` sets the SESSION brush in target texels —
+/// a 96-texel stroke paints where the default 24 cannot reach, a
+/// follow-up stroke without `radius` inherits 96 (the GUI's brush-size
+/// rule: the size is state, not per-stroke), and an out-of-range radius
+/// clamps through the engine's multiplier (1000 → 192). The reply
+/// always reports the radius actually in force.
+#[test]
+fn an_absolute_radius_paints_wider_and_persists() {
+    let dir = write_fixture_project("radius");
+    let mut agent = Agent::spawn();
+    assert_ok(
+        &agent.call(&json!({ "project_open": { "dir": dir } })),
+        "project_open",
+    );
+
+    // Default brush first: (0.20, 0.50) -> (0.30, 0.50) is texel row 255,
+    // x 102..=154 (v flips: row = (1 − 0.5)·512 − ½). Its reply reports
+    // the default radius — the historical 24 texels.
+    let narrow = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.20, 0.50], [0.30, 0.50]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+    } }));
+    if is_gpu_skip(&narrow) {
+        eprintln!("skipping: {narrow}");
+        return;
+    }
+    assert_ok(&narrow, "paint_stroke");
+    assert_eq!(narrow["radius"], 24.0, "{narrow}");
+
+    // The wide stroke, radius 96: (0.60, 0.50) -> (0.70, 0.50), row 255,
+    // x 307..=358. The stored radius reports back exactly.
+    let wide = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.60, 0.50], [0.70, 0.50]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+        "radius": 96,
+    } }));
+    assert_ok(&wide, "paint_stroke");
+    assert_eq!(wide["radius"], 96.0, "{wide}");
+
+    // (128, 255): on the narrow stroke's path — painted by the default
+    // radius. (202, 255): 48 texels past the narrow stroke's end (154),
+    // 105 short of the wide stroke's start (307) — outside BOTH radii:
+    // byte-exact zero. (406, 255): 48 texels past the wide stroke's end
+    // (358) — inside its 96-texel radius, unreachable by the narrow one.
+    // Color pins per the exactness rule (R = B = 0 under green; presence,
+    // never an exact alpha).
+    let after = agent.call(&json!({ "paint_read": {
+        "composite": false,
+        "texels": [[128, 255], [202, 255], [406, 255]],
+    } }));
+    assert_ok(&after, "paint_read");
+    let painted = |i: usize, which: &str| {
+        let px = &after["texels"][i];
+        assert_eq!(px[0], 0, "R stays 0 under green ({which}): {after}");
+        assert_eq!(px[2], 0, "B stays 0 under green ({which}): {after}");
+        assert!(
+            px[1].as_u64().unwrap_or(0) > 0,
+            "{which} G painted: {after}"
+        );
+        assert!(
+            px[3].as_u64().unwrap_or(0) > 0,
+            "{which} A painted: {after}"
+        );
+    };
+    painted(0, "narrow centre");
+    assert_eq!(
+        after["texels"][1],
+        json!([0, 0, 0, 0]),
+        "the gap between the strokes stays untouched: {after}"
+    );
+    painted(2, "wide edge");
+
+    // Session state: a stroke WITHOUT `radius` inherits 96 — the size
+    // persists exactly like the GUI's brush-size slider.
+    let inherit = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.60, 0.10], [0.70, 0.10]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+    } }));
+    assert_ok(&inherit, "paint_stroke");
+    assert_eq!(inherit["radius"], 96.0, "{inherit}");
+
+    // Out-of-range clamps through the engine's multiplier (8.0 × 24).
+    let clamped = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.60, 0.90], [0.70, 0.90]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+        "radius": 1000,
+    } }));
+    assert_ok(&clamped, "paint_stroke");
+    assert_eq!(clamped["radius"], 192.0, "{clamped}");
 
     assert_ok(&agent.call(&json!("quit")), "quit");
     assert!(agent.wait_exit().success());

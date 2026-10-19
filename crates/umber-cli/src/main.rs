@@ -885,13 +885,17 @@ fn run_export(
         flags,
         requested_tiles,
         usda,
+        // The batch path never overrides: the mesh-derived set name,
+        // byte-identical to the pre-override behavior.
+        set_override: None,
     };
     export_mesh(mesh_path, &mesh, out_dir, &ask, on_skip)
 }
 
 /// [`run_export`]'s body over an already-loaded mesh (the agent session
-/// exports the mesh it holds). `mesh_path` supplies the texture-set name
-/// and the `$mesh` token.
+/// exports the mesh it holds). `mesh_path` supplies the `$mesh` token;
+/// the texture-set name is the request's `set_override` when one is
+/// set, else the mesh-derived name.
 /// The export request's tunables, bundled to stay under clippy's
 /// 7-argument floor (mesh/out_dir/reporting stay separate — they vary
 /// per call site in ways a bundle would obscure).
@@ -900,6 +904,11 @@ pub struct ExportAsk<'a> {
     flags: &'a BakeFlags,
     requested_tiles: &'a [u16],
     usda: bool,
+    /// The texture-set name override: `Some(name)` names every output
+    /// after `name` instead of the mesh-derived set — the agent
+    /// session's project rule (bake's v0 contract, unified). The batch
+    /// path passes `None` and stays byte-identical.
+    set_override: Option<&'a str>,
 }
 
 fn export_mesh(
@@ -912,7 +921,13 @@ fn export_mesh(
     let mut full_preset = preset_by_name(ask.preset_name)?;
     full_preset.usda |= ask.usda;
     let ctx = bake_context()?;
-    let set_name = umber_mesh::texture_set_name(mesh_path, mesh);
+    // The project rule (bake's v0 contract, unified): an explicit
+    // override names the outputs; none keeps the mesh-derived name
+    // (the batch path's behavior, byte-identical).
+    let set_name: String = ask
+        .set_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| umber_mesh::texture_set_name(mesh_path, mesh));
     let present = present_tiles(mesh);
     let tiles = select_tiles(ask.requested_tiles, &present)?;
     // The pre-UDIM path: a mesh living only in tile 1001 bakes whole.

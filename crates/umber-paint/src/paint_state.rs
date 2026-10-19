@@ -4242,6 +4242,19 @@ impl PaintState {
         self.brush_size = sanitize_size(size);
     }
 
+    /// Sets the live brush radius in target texels — the ABSOLUTE form of
+    /// [`Self::set_brush_size`]: the implied multiplier
+    /// `radius / BRUSH_RADIUS_TEXELS` rides the same `sanitize_size`
+    /// clamp, so a finite radius lands in `1.2..=192.0` texels and a
+    /// non-finite radius resets to the historical 24. A stroke in flight
+    /// keeps the size it began with (the [`Self::set_brush_size`] rule).
+    /// The agent protocol's `paint_stroke.radius` seam — the
+    /// absolute-radius follow-up docs/specs/agent-paint-ops-design.md
+    /// names.
+    pub fn set_brush_radius_texels(&mut self, radius: f32) {
+        self.set_brush_size(radius / BRUSH_RADIUS_TEXELS);
+    }
+
     /// Sets the brush hardness, clamped to `0..=1` (non-finite ignored).
     pub fn set_brush_hardness(&mut self, hardness: f32) {
         if hardness.is_finite() {

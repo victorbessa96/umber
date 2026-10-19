@@ -161,3 +161,30 @@ class) is the follow-up if cross-machine pins are needed.
    tests 1–7, Gate 1.
 3. One push + one CI run (the extraction is a big diff; CI on both OSes
    is the real proof).
+
+## The absolute-radius field (2026-10-18)
+
+The named follow-up ("an absolute-radius field needs a `set_brush_radius`
+pub seam") closed, wire-shaped: the engine seam already existed as
+`PaintState::set_brush_size` (the multiplier, `sanitize_size`-clamped
+`0.05..=8.0`), so the kill adds the absolute form on top of it and the
+wire field that drives it.
+
+- `PaintState::set_brush_radius_texels(radius)` — the pub seam:
+  `set_brush_size(radius / BRUSH_RADIUS_TEXELS)`, so a finite radius
+  lands in `1.2..=192.0` texels and a non-finite radius resets to the
+  historical 24. A stroke in flight keeps the size it began with (the
+  `set_brush_size` rule).
+- `paint_stroke.radius` (optional, target texels) — applied before the
+  stroke begins. It SETS THE SESSION BRUSH: later strokes inherit it
+  until another `radius` arrives (the GUI's brush-size rule — the size
+  is state, not per-stroke; `paint_undo` restores pixels, never the
+  brush). Absent keeps the current size.
+- Validation: non-finite or `<= 0` is a typed error BEFORE any GPU
+  work (wire input can only express the `<= 0` half — JSON carries no
+  NaN/Inf tokens; the non-finite arm guards internal callers).
+- Reply: `paint_stroke` now carries `radius` — the radius actually in
+  force for the stroke, the clamped value included (a driver that sends
+  1000 learns 192).
+- `PROTOCOL_VERSION` stays 1: the bump rule is post-0.1.0-tag only
+  (pre-tag, the protocol is fluid by contract).
