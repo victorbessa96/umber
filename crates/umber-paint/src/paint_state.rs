@@ -1242,6 +1242,11 @@ pub struct PaintState {
     cavity: Option<umber_brush::CavityMask>,
     cavity_maps: BTreeMap<u16, (u32, u32, Vec<u8>)>,
     cavity_coverage: BTreeMap<u16, Vec<f32>>,
+    /// The staged stencil gate: the shell's CPU-rasterized stencil
+    /// coverage, RAW R8 bytes (`255` passes, `0` blocked) at the active
+    /// tile's quick-mask plane size — staged once per stencil change,
+    /// never per frame (the design's cost class).
+    stencil_gate: Option<(u32, u32, Vec<u8>)>,
     /// The layer-mask planes: one grayscale `u8` plane per
     /// `(layer id, tile)` at the tile's set size, `255` = open (see the
     /// module docs). Lazy — a layer with no mask stroke costs nothing.
@@ -1447,6 +1452,7 @@ impl PaintState {
             cavity: None,
             cavity_maps: BTreeMap::new(),
             cavity_coverage: BTreeMap::new(),
+            stencil_gate: None,
             layer_masks: BTreeMap::new(),
             mask_edit_layer: None,
             stroke_mask_layer: None,
@@ -1711,7 +1717,8 @@ impl PaintState {
         // Snapshot the quick-mask modes too: X / I mid-stroke never split
         // one stroke between the mask and the layer.
         self.stroke_mask_edit = self.quick_mask().is_editing();
-        self.stroke_mask_gate = self.quick_mask().gates() || self.cavity_gates();
+        self.stroke_mask_gate =
+            self.quick_mask().gates() || self.cavity_gates() || self.stencil_gates();
         // Snapshot the layer-mask target too: a mid-stroke panel switch
         // never splits one stroke across two planes.
         self.stroke_mask_layer = self.mask_edit_layer;
@@ -5119,6 +5126,37 @@ impl PaintState {
         self.cavity
     }
 
+    /// Sets (`Some`) or clears (`None`) the stencil gate. The bytes are
+    /// the stencil's RAW R8 coverage — NOT pre-composed with the quick
+    /// mask: `gate_plane` folds them in as `byte / 255.0` after the
+    /// cavity block (the quick × cavity product precedent). Per-set
+    /// scope: only the tile whose quick-mask dimensions equal the
+    /// gate's `(w, h)` composes; other-sized tiles pass through
+    /// stencil-ungated until the shell re-stages. Malformed bytes (a
+    /// zero side, or `len != w * h`) are refused fail-closed. Refused
+    /// mid-stroke (one stroke never changes its gate partway); a
+    /// same-value re-set is a no-op. Adoption clears `mask_synced`
+    /// (the `rebuild_cavity_coverage` precedent — the next gated dab
+    /// re-uploads the composed plane). Returns whether it was adopted.
+    pub fn set_stencil_gate(&mut self, gate: Option<(u32, u32, Vec<u8>)>) -> bool {
+        if self.stroking || self.stencil_gate == gate {
+            return false;
+        }
+        if let Some((w, h, bytes)) = &gate {
+            if *w == 0 || *h == 0 || bytes.len() != *w as usize * *h as usize {
+                return false;
+            }
+        }
+        self.stencil_gate = gate;
+        self.mask_synced.clear();
+        true
+    }
+
+    /// Whether the stencil gate stages coverage for any tile right now.
+    fn stencil_gates(&self) -> bool {
+        self.stencil_gate.is_some()
+    }
+
     /// Hands the session `tile`'s baked curvature map as RGBA8 at the
     /// paint target's size, in the bake's LINEAR encoding (`g = (curv + 1)
     /// / 2`). The Bakes panel writes curvature PNGs through the sRGB
@@ -5187,6 +5225,16 @@ impl PaintState {
                     for (g, c) in plane.iter_mut().zip(cov) {
                         *g *= c;
                     }
+                }
+            }
+        }
+        if let Some((gw, gh, bytes)) = &self.stencil_gate {
+            // Per-set scope: only the tile whose quick-mask plane is the
+            // gate's own size composes (the design's dimension match);
+            // the fold is the product the quick × cavity planes set.
+            if (*gw, *gh) == (w, h) {
+                for (g, s) in plane.iter_mut().zip(bytes) {
+                    *g *= f32::from(*s) / 255.0;
                 }
             }
         }
@@ -5696,6 +5744,61 @@ mod tests {
         // Clearing the mask lifts the gate.
         assert!(s.set_cavity_mask(None));
         assert!(!s.cavity_gates());
+        assert!(s.gate_plane(tile).iter().all(|v| *v == 1.0));
+    }
+
+    #[test]
+    fn stencil_gate_composes_into_the_gate_plane_and_arms_alone() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        let tile = FIRST_TILE;
+        // Off: all-pass, and nothing arms.
+        assert!(s.gate_plane(tile).iter().all(|v| *v == 1.0));
+        assert!(!s.stencil_gates());
+        // Malformed bytes are refused fail-closed: a zero side and a
+        // short buffer both leave the gate unset.
+        assert!(!s.set_stencil_gate(Some((0, 4, vec![255; 16]))));
+        assert!(!s.set_stencil_gate(Some((4, 4, vec![255; 15]))));
+        assert!(!s.stencil_gates(), "refused bytes never stage");
+        // A same-value re-set is a no-op (the second call returns false).
+        let left_open: Vec<u8> = (0..16).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
+        assert!(s.set_stencil_gate(Some((4, 4, left_open.clone()))));
+        assert!(
+            !s.set_stencil_gate(Some((4, 4, left_open.clone()))),
+            "re-set is a no-op"
+        );
+        assert!(s.stencil_gates());
+        // Composition: the open half passes, the blocked half gates out.
+        let plane = s.gate_plane(tile);
+        assert!(plane[0] > 0.99, "stencil-open texel paints: {}", plane[0]);
+        assert!(
+            plane[3] < 0.01,
+            "stencil-blocked texel is gated out: {}",
+            plane[3]
+        );
+        // Dimension mismatch is per-set: an 8x8 gate composes nothing on
+        // the 4x4 tile (pass-through, not a refusal).
+        assert!(s.set_stencil_gate(Some((8, 8, vec![255; 64]))));
+        assert!(
+            s.gate_plane(tile).iter().all(|v| *v == 1.0),
+            "mismatched dims compose nothing"
+        );
+        // Arming: the stencil ALONE arms the stroke gate — no quick
+        // mask, no cavity — and re-staging mid-stroke is refused.
+        assert!(s.set_stencil_gate(Some((4, 4, left_open))));
+        assert!(!s.quick_mask().gates() && !s.cavity_gates());
+        s.begin_stroke(emath::pos2(0.5, 0.5));
+        assert!(s.stroke_mask_gate, "the stencil alone arms the stroke gate");
+        assert!(
+            !s.set_stencil_gate(None),
+            "mid-stroke re-staging is refused"
+        );
+        s.end_stroke();
+        // Clearing the gate lifts it.
+        assert!(s.set_stencil_gate(None));
+        assert!(!s.stencil_gates());
         assert!(s.gate_plane(tile).iter().all(|v| *v == 1.0));
     }
 
