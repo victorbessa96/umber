@@ -11,27 +11,36 @@
 # files' BYTES) so a finished verdict resumes but a fix-forward
 # forces a fresh battery.
 #
-# The fleet (six kills, each with a 16-hex manifest pinned 2026-10-20
+# The fleet (NINE kills, each with a 16-hex manifest pinned 2026-10-20
 # from its kill report's file list):
 #   A1 channel-export-resample   P1 idmask-tile-cache
 #   G1 picker-sliders-recents    S1 winink-pen-flags
 #   C1 snapshot-dir              graph-history
+#   B10 display-chain-eyedropper (ADOPTED 2026-10-20 from the dead
+#       fleet-era session — the adoption rules ran; static gate
+#       re-derived, the pins python-ported)
+#   A2 snapshot-breadth          A3 picker-app-sites
 # plus the docs/tooling row (the plan draft, the kill-ledger's
 # accumulated worktree rows, this script, its report).
-# NOT committed by this script, by design: the display-chain
-# eyedropper's dirty viewport.rs/main.rs (its owner's lane — they
-# ride the battery compile; a red inside them routes to the owner)
-# and everything under .dragon/ (untracked by convention).
+# NOT committed by this script, by design: everything under .dragon/
+# (untracked by convention). The A2 row's four PNG baselines are
+# HOST-GENERATED in step 4a (before the battery) and ride the a2 row.
 #
 # Steps (idempotent, re-runnable; refuses to guess past any failure):
 #   0. host liveness (port 22) + the note's claim interlock
-#   1. preconditions: all SIX manifests fully hash-verified, push gate
+#   1. preconditions: all NINE manifests fully hash-verified, push gate
 #      approved, fleet lock census, the dirty-file ownership map
 #   2. host pre-flight: reflog -5 (a sibling's fresh reset = stand
 #      down), pgrep -ax cargo/rustc (a live battery = stand down),
 #      tip + porcelain
 #   3. rsync the tree (target/.git/.dragon/Cargo.lock excluded),
 #      then write the battery sentinel (HEAD + porcelain + bytes)
+#   4a. A2 snapshot baselines ON THE HOST (UPDATE_SNAPSHOTS=1, one
+#      cargo under the flock), pulled back, the three existing
+#      baselines cmp-verified unchanged, the four new ones
+#      existence-checked — then the recovery session VISION-CHECKS
+#      them (widgets visible, not blank; the g1-axis-gizmo precedent)
+#      before the battery continues
 #   4. wave battery on the host: umber-app umber-paint umber-brush
 #      umber-gui umber-cli stylus (default features ONLY — never
 #      --features gpu inside the recovery window; the wgpu deadlock
@@ -62,7 +71,9 @@
 #   manifests, push gate, the ownership map — and prints the plan)
 #
 # Exit codes: 0 wave closed (pending CI); 2 host down; 3 battery RED
-# or poll exhausted; 4 interlock/precondition refusal.
+# or poll exhausted; 4 interlock/precondition refusal; 5 the A2
+# baselines were generated — the vision check is owed, re-run after
+# it passes (the generation is skipped when the four PNGs exist).
 set -u
 
 DRY=0
@@ -76,6 +87,9 @@ MANIFEST_G1="$REPO/.dragon/picker-sliders-recents-manifest.txt"
 MANIFEST_S1="$REPO/.dragon/winink-pen-flags-manifest.txt"
 MANIFEST_C1="$REPO/.dragon/snapshot-dir-manifest.txt"
 MANIFEST_GH="$REPO/.dragon/graph-history-manifest.txt"
+MANIFEST_B10="$REPO/.dragon/b10-eyedropper-manifest.txt"
+MANIFEST_A2="$REPO/.dragon/a2-snapshot-breadth-manifest.txt"
+MANIFEST_A3="$REPO/.dragon/a3-picker-app-sites-manifest.txt"
 BATTERY_LOG="/tmp/w-c3a-recovery-battery.log"
 SENTINEL="$REPO/.dragon/battery-sentinel"
 CRATES="umber-app umber-paint umber-brush umber-gui umber-cli stylus"
@@ -203,8 +217,8 @@ if [ "$DRY" -eq 0 ]; then
 fi
 
 # --- 1. preconditions -----------------------------------------------------
-say "1. preconditions (all six manifests FULLY hash-verified, push gate, ownership map)"
-for m in "$MANIFEST_A1" "$MANIFEST_P1" "$MANIFEST_G1" "$MANIFEST_S1" "$MANIFEST_C1" "$MANIFEST_GH"; do
+say "1. preconditions (all nine manifests FULLY hash-verified, push gate, ownership map)"
+for m in "$MANIFEST_A1" "$MANIFEST_P1" "$MANIFEST_G1" "$MANIFEST_S1" "$MANIFEST_C1" "$MANIFEST_GH" "$MANIFEST_B10" "$MANIFEST_A2" "$MANIFEST_A3"; do
     [ -f "$m" ] || die "manifest missing: $m"
 done
 cd "$REPO" || die "repo missing: $REPO"
@@ -214,11 +228,14 @@ verify_manifest "$MANIFEST_G1" || die "picker-sliders-recents manifest drift —
 verify_manifest "$MANIFEST_S1" || die "winink-pen-flags manifest drift — reconcile the edited rows, then re-run." 4
 verify_manifest "$MANIFEST_C1" || die "snapshot-dir manifest drift — reconcile the edited rows, then re-run." 4
 verify_manifest "$MANIFEST_GH" || die "graph-history manifest drift — reconcile the edited rows, then re-run." 4
+verify_manifest "$MANIFEST_B10" || die "b10-eyedropper manifest drift — reconcile the edited rows, then re-run." 4
+verify_manifest "$MANIFEST_A2" || die "a2-snapshot-breadth manifest drift — reconcile the edited rows, then re-run." 4
+verify_manifest "$MANIFEST_A3" || die "a3-picker-app-sites manifest drift — reconcile the edited rows, then re-run." 4
 grep -q '"approved": true' docs/loop/push-gate.json || die "push gate not approved"
 echo "push gate: approved (standing, 2026-10-12)."
 
 echo "fleet lock census (the /tmp registry was cleaned since the fleet parked; absence is expected, the claim governs):"
-for lock in channel-export-resample idmask-tile-cache picker-sliders-recents winink-pen-flags snapshot-dir graph-history; do
+for lock in channel-export-resample idmask-tile-cache picker-sliders-recents winink-pen-flags snapshot-dir graph-history b10-eyedropper-adoption a2-snapshot-breadth a3-picker-app-sites; do
     if [ -f "/tmp/umber-kill-locks/$lock.lock" ]; then
         echo "  lock live: $lock ($(wc -l < "/tmp/umber-kill-locks/$lock.lock") files)"
     else
@@ -226,11 +243,12 @@ for lock in channel-export-resample idmask-tile-cache picker-sliders-recents win
     fi
 done
 
-echo "CAVEAT — the display-chain eyedropper's uncommitted hunks (its owner's lane):"
+echo "Fleet note — the display-chain eyedropper is ADOPTED (2026-10-20, the"
+echo "  adoption rules ran: holder exit confirmed, static gates re-derived,"
+echo "  the test pins python-ported). Its uncommitted hunks now ride BOTH the"
+echo "  battery compile AND row 7's commit; a red inside them is this wave's"
+echo "  to fix-forward. Current status:"
 git status --porcelain -- crates/umber-app/src/viewport.rs crates/umber-app/src/main.rs | sed 's/^/  /'
-echo "  They ride the battery compile (the rsync carries them) but are NOT in"
-echo "  any commit row — dcommit --path-limited cannot pick them up. A battery"
-echo "  red inside their hunks routes to the eyedropper's owner, not this wave."
 
 LOCAL_TIP=$(git rev-parse HEAD)
 ORIGIN_TIP=$(git rev-parse origin/master 2>/dev/null || echo unknown)
@@ -270,11 +288,48 @@ else
     sed 's/^/  /' "$SENTINEL"
 fi
 
+# --- 4a. A2 snapshot baselines (host-side, pre-battery) -----------------------
+say "4a. A2 snapshot baselines on the host (UPDATE_SNAPSHOTS=1, one cargo under the flock)"
+snap_dir="crates/umber-app/tests/snapshots"
+NEW_BASELINES="history_panel_empty history_panel_ops toolbar rich_tooltip"
+gen_needed=0
+for p in $NEW_BASELINES; do
+    [ -s "$REPO/$snap_dir/$p.png" ] || gen_needed=1
+done
+if [ "$gen_needed" -eq 1 ]; then
+    if [ "$DRY" -eq 1 ]; then
+        echo "  (dry-run) would: ssh + flock /tmp/umber-cargo.lock UPDATE_SNAPSHOTS=1 cargo test -p umber-app --test panel_snapshot"
+        echo "  (dry-run) then rsync the snapshots back, cmp the three existing baselines, existence-check the four new ones,"
+        echo "  (dry-run) then EXIT 5 for the recovery session's vision check (widgets visible, not blank)."
+    else
+        ssh -o ConnectTimeout=10 "$HOST" \
+            "cd Projects/umber && export PATH=\$HOME/.cargo/bin:\$PATH && flock /tmp/umber-cargo.lock bash -c 'UPDATE_SNAPSHOTS=1 cargo test -p umber-app --test panel_snapshot'" \
+            || fail_claimed "the A2 baseline generation run FAILED — fetch the failure from the host before retrying" 4
+        rsync -az -e 'ssh -o ConnectTimeout=10' "$HOST":Projects/umber/$snap_dir/ "$REPO/$snap_dir/" \
+            || fail_claimed "pulling the generated baselines back failed (rsync)" 4
+        for p in axis_gizmo display_panel psd_import_section; do
+            git -C "$REPO" diff --quiet -- "$snap_dir/$p.png" \
+                || fail_claimed "existing baseline $p.png DRIFTED during generation — a panel moved; reconcile before the battery" 4
+        done
+        for p in $NEW_BASELINES; do
+            [ -s "$REPO/$snap_dir/$p.png" ] || fail_claimed "baseline $p.png was not generated" 4
+        done
+        echo "  four new baselines pulled; the three existing baselines byte-unchanged."
+        echo "  >>> VISION CHECK OWED: open the four new PNGs in $snap_dir and confirm"
+        echo "  >>> widgets are VISIBLE, not blank (the g1-axis-gizmo precedent)."
+        echo "  >>> Then RE-RUN this script: it skips the generation and continues."
+        relinquish "4a complete — the vision check on the four new baselines gates the battery; re-run after it passes"
+        die "4a complete, vision check owed before the battery — re-run this script after checking the four PNGs" 5
+    fi
+else
+    echo "  all four baselines present — the vision check is recorded as done; continuing."
+fi
+
 # --- 4. wave battery (default features only) --------------------------------
 say "4. wave battery: $CRATES (default features; NEVER --features gpu in the recovery window)"
-echo "  CAVEAT again: the eyedropper's dirty viewport.rs/main.rs hunks are in"
-echo "  umber-app's compile (the rsync carries the whole tree). A red inside"
-echo "  their hunks routes to the owner — do not fix-forward them here."
+echo "  Fleet note: the adopted eyedropper's viewport.rs/main.rs hunks are in"
+echo "  umber-app's compile (the rsync carries the whole tree) — a red inside"
+echo "  them is this wave's to fix-forward (the adoption re-derived the gates)."
 if [ "$DRY" -eq 1 ]; then
     echo "  (dry-run) would: ssh + rm -f $BATTERY_LOG + nohup wave-battery.sh $CRATES"
     echo "  (dry-run) then poll $BATTERY_LOG for BATTERY_EXIT (30s probes, 90 min cap),"
@@ -287,7 +342,10 @@ if [ "$DRY" -eq 1 ]; then
     echo "  row 4  winink-pen-flags ($(grep -vc '^#' "$MANIFEST_S1") paths)"
     echo "  row 5  snapshot-dir ($(grep -vc '^#' "$MANIFEST_C1") paths)"
     echo "  row 6  graph-history ($(grep -vc '^#' "$MANIFEST_GH") paths)"
-    echo "  row 7  docs/tooling: next-wave-plan-draft.md + kill-ledger.md + this script + its report"
+    echo "  row 7  b10-eyedropper, adopted ($(grep -vc '^#' "$MANIFEST_B10") paths)"
+    echo "  row 8  a2-snapshot-breadth ($(grep -vc '^#' "$MANIFEST_A2") paths + the four host-generated PNGs)"
+    echo "  row 9  a3-picker-app-sites ($(grep -vc '^#' "$MANIFEST_A3") paths)"
+    echo "  row 10 docs/tooling: next-wave-plan-draft.md + kill-ledger.md + this script + its report"
     echo "  then: ONE push (local tail + rows) + explicit run-id ci-watch + the packaging re-dispatch."
     exit 0
 fi
@@ -352,6 +410,21 @@ commit_row snapshot-dir "$MANIFEST_C1" \
 commit_row graph-history "$MANIFEST_GH" \
 "feat(graph): the procedural history panel k1 (wave-procedural-history) — graph_panel.rs + the new graph_panel/history.rs: per-node procedural history with journal-integrated commands; the cross-review BLOCKER (AddNode carrying no redo id — an undo would strand the node) found and fixed BEFORE the battery, nemotron cross-reviewed; 13 tests, fmt-clean, both locales' keys landed; the unified timeline remains kill 2 (named follow-up); parked through freeze-4, battery-green this recovery" 5
 
+commit_row b10-eyedropper "$MANIFEST_B10" \
+"feat(eyedropper): the display-chain-aware pick (B-10's named follow-up, ADOPTED) — the viewport's pick builds the v1 sRGB sample then runs it through the session's apply_display_chain (the preview strip's exact input shape) and quantizes with the strip's rule; the shell syncs DisplaySettings into the viewport each frame (one line beside the picker-arm sync); the pure chain helper carries two unit-pinned expectations (re-derived by an independent python port at adoption: [137,188,229,173] -> [158,185,204,173] under Srgb/-0.5EV/0.9gamma, identity default passthrough); adopted from the dead fleet-era session per the full rules — holder exit confirmed, fresh lock, static gates re-run (fmt clean re-derived, the brace-count false positive confirmed pre-existing at HEAD), manifest-pinned for this row; parked through freeze-4, battery-green this recovery" 3
+
+commit_row a2-snapshot-breadth - \
+"test(kittest): snapshot breadth — the History panel the harness doc has claimed since v1 (an empty session, then after two journalled LayerCommand::Add ops), the toolbar through the headless IconAtlas::empty precedent (a fully specified ToolbarView), and the rich tooltip's full fixture; four baselines host-generated pre-battery (UPDATE_SNAPSHOTS=1 under the cargo flock, the three existing baselines byte-verified unchanged, the four new ones vision-checked before the battery ran); parked through freeze-4, battery-green this recovery" 6 \
+    crates/umber-app/tests/panel_snapshot.rs \
+    docs/loop/kill-reports/2026-10-20-a2-snapshot-breadth.md \
+    crates/umber-app/tests/snapshots/history_panel_empty.png \
+    crates/umber-app/tests/snapshots/history_panel_ops.png \
+    crates/umber-app/tests/snapshots/toolbar.png \
+    crates/umber-app/tests/snapshots/rich_tooltip.png
+
+commit_row a3-picker-app-sites "$MANIFEST_A3" \
+"feat(picker): the picker's app sites — the brush preset colour row and the fill layer's two colour rows (Solid + the gradient's A/B stops) move to the shared preferences::picker_button: G1's sliders + swatch-grid popup over the session-shared recents (egui memory under one fixed Id, seeded from the swatches file on first use, persisted on change); preferences gains the swatches codec (plain #rrggbb lines beside the preferences file, garbage skipped, the RecentColors cap trims) + the shared-row helper + four codec tests; both catalogs gain the shared picker.* label group (identical attribute sets, python-verified); the stock color_button keeps its kittest consumers — the delegate conversion is a named follow-up; graph-history's manifest re-pinned for the additive catalog keys (recorded in its header); parked through freeze-4, battery-green this recovery" 6
+
 commit_row wave-docs-and-tooling - \
 "docs(wave): the W-C3a close tooling + the plan-of-record + the ledger's accumulated rows — scripts/w-c3a-close.sh (the executable recovery: claim interlock anchored at line start, six 16-hex manifests full-verified, hardened rsync + the tree-state sentinel, default-leg battery with the bounded verdict-reuse poll, commit rows through dcommit --path-limited so foreign dirt cannot ride, ONE push + explicit run-id ci-watch, the packaging re-dispatch — both stencil-wave-close defects pre-fixed) + its kill report + docs/loop/next-wave-plan-draft.md (the claude planner's W-C3a plan, executed as the fleet) + docs/loop/kill-ledger.md (the single-owner rule's ledger commit: the M1/M3/M4/M5 landed rows + the fleet status ticks that accumulated worktree-side through the freeze); rides this push" 4 \
     docs/loop/next-wave-plan-draft.md \
@@ -397,7 +470,7 @@ echo "  - delete the consumed manifests (.dragon/*-manifest.txt) + .dragon/batte
 echo "  - tick queue.md (the C2 rows the fleet closes: C2-12 sliders/swatches, row 15's snapshot-dir residual),"
 echo "    STATE.md, CHANGELOG.md; the desktop-checks Result lines stay open until a desktop session runs them"
 echo "  - the kill-ledger rows: fleet -> LANDED, the waiting rows -> closed"
-echo "  - the eyedropper: its owner commits viewport.rs/main.rs + its report, or the next session adopts it"
-echo "    (holder-exit confirmed, fresh lock, full gate sequence — the adoption rules)"
+echo "  - the eyedropper landed with the wave (row 7, the adoption); its kittest extension (a GPU pick"
+echo "    fixture) remains the named follow-up"
 echo "  - memtest86+ stays OWED at the next physical access: boot straight into it, skip the OS"
 exit 0
