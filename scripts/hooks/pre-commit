@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# pre-commit — the shared-tree commit gate's enforcement sample (2026-10-20,
+# the dcommit-pre-commit-hook lane, the last M3 tail).
+#
+# INSTALL (per clone; .git is never rsynced or pushed):
+#   cp scripts/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# The shared umber tree commits through .dragon/dcommit.py (the M3
+# fail-closed gate: lock-scoped staged sets, ledger-attributed ownership,
+# amend ownership checks). A bare `git commit` bypasses every one of
+# those interlocks — the 19:3x index sweep and the 14:5x amend fold were
+# both bare commits. This hook refuses a bare commit unless dcommit
+# invoked it (dcommit stamps DCOMMIT_INVOCATION=1 into the commit's
+# environment).
+#
+# The human override is deliberate and stays: `git commit --no-verify`
+# bypasses this hook — the partner can always commit by hand; the hook
+# exists to catch agent forgetfulness, never to gate the partner.
+
+if [ "${DCOMMIT_INVOCATION:-}" = "1" ]; then
+    exit 0
+fi
+cat >&2 <<'EOF'
+REFUSING: a bare `git commit` on the shared umber tree.
+
+This tree commits through the fail-closed gate:
+  python3 .dragon/dcommit.py --session <id> --lock <paths>... -- -m "<msg>"
+    (index mode: stage exactly the lock paths first)
+  python3 .dragon/dcommit.py --path-limited --lock <paths>... -- -m "<msg>"
+    (path-limited mode: commits only the lock paths)
+
+Why: the staged set must sit inside declared lock paths (the 19:3x
+index sweep) and --amend must prove HEAD belongs to the calling
+session (the 14:5x amend fold). A bare commit has neither interlock.
+
+Deliberate human override: `git commit --no-verify`.
+EOF
+exit 1
