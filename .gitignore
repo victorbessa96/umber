@@ -1,5 +1,7 @@
 # Dragon project state (local)
 .dragon/local/
+# dcommit ownership ledger (append-only, session-attribution oracle)
+.dragon/commit-ledger.jsonl
 __pycache__/
 *.pyc
 
