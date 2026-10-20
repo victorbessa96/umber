@@ -45,15 +45,15 @@ margins) — the C2-13..19 honest-claims row is ALL SEVEN CLOSED.
 
 **Next:** HOST_BACK (freeze-4, day 4 — Bessa's power-cycle, then boot
 STRAIGHT into memtest86+ per the standing protocol) → the recovery
-session lands the parked fleet (A1 channel-export-resample, P1
-idmask-tile-cache, G1 picker-sliders-recents, S1 winink-pen-flags,
-graph-history, snapshot-dir + the display-chain eyedropper) with its
-batteries → ONE push of the 12-commit local tail + ci-watch + the
-packaging re-dispatch (the flatpak chain's verdict gate — PUSH FIRST).
-C2-8's drag reorder is CLOSED (f2c87d4); the cached-bake/multi-tile
-follow-ups ride the parked fleet. The release lane is Bessa-gated:
-SPEC ratification (SPEC.md still DRAFT), Windows signing, the alpha
-tag. (Ticked in the 2026-10-20 M1 sweep.)
+runbook: `.dragon/runbooks/host-back-recovery.md` (the parked fleet's
+per-kill batteries + commits, then the ONE push of the doc/tooling
+tail + ci-watch, then the packaging re-dispatch — PUSH FIRST; the
+fleet's scopes live in its table). C2-8's drag reorder is CLOSED
+(f2c87d4); the cached-bake/multi-tile follow-ups ride the parked
+fleet. The release lane is Bessa-gated: SPEC ratification (SPEC.md
+still DRAFT), Windows signing, the alpha tag
+(`docs/specs/release-checklist-0.1.0.md`). (Ticked in the 2026-10-20
+M5 runbook pass — the recovery-order prose moved to the runbook.)
 
 ## The core-loop queue (the ONLY active hunt)
 
