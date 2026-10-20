@@ -12,7 +12,13 @@
 ## Status line
 
 Current phase: **THE STENCIL ENGINE LANDED END TO END + THE PERF
-INSTRUMENT REBUILT (2026-10-19, thirteen rows local, push pending).**
+INSTRUMENT REBUILT (2026-10-19) — PUSHED 2026-10-19 15:54 local, origin
+`aac1c4a`: CI 39306460278 green both platforms, the first hardened
+nightlies green ×2 on the pushed tip (39306559332 + 39391362339). The
+post-push doc/tooling tail (12 commits, 4d69808..86fe4a4) rides the
+recovery push under the freeze-4 envelope.** (Ticked in the 2026-10-20
+M1 sweep — the pre-push "thirteen rows local, push pending" wording is
+preserved in git history at aac1c4a.)
 The morning closed the freeze-3 fleet (push `ff9ac02..0955ac8`, CI
 39263817670 GREEN both platforms; one clippy fix-forward, two
 recovery-script defects fixed live — addenda 1+2 in the script's
@@ -37,14 +43,17 @@ carries a verdict), and C2-16 closed with the §12 budgets' first
 real-hardware record (`dc0c599`: the RTX 3070 at 82x/2x/zero-drop
 margins) — the C2-13..19 honest-claims row is ALL SEVEN CLOSED.
 
-**Next:** the wave push (thirteen rows, ONE push + ci-watch + the
-first HARDENED nightly on the pushed tip — the drift gate's live
-proof); then the queue's remaining open lanes (C2-8's drag
-reorder, the display-chain-aware eyedropper sample, cached-bake +
-multi-tile ID-mask follow-ups, the release lane is Bessa-gated:
-SPEC ratification, Windows signing, the alpha tag);
-memtest86+'s verdict at Bessa's next physical access to
-centralhost.
+**Next:** HOST_BACK (freeze-4, day 4 — Bessa's power-cycle, then boot
+STRAIGHT into memtest86+ per the standing protocol) → the recovery
+session lands the parked fleet (A1 channel-export-resample, P1
+idmask-tile-cache, G1 picker-sliders-recents, S1 winink-pen-flags,
+graph-history, snapshot-dir + the display-chain eyedropper) with its
+batteries → ONE push of the 12-commit local tail + ci-watch + the
+packaging re-dispatch (the flatpak chain's verdict gate — PUSH FIRST).
+C2-8's drag reorder is CLOSED (f2c87d4); the cached-bake/multi-tile
+follow-ups ride the parked fleet. The release lane is Bessa-gated:
+SPEC ratification (SPEC.md still DRAFT), Windows signing, the alpha
+tag. (Ticked in the 2026-10-20 M1 sweep.)
 
 ## The core-loop queue (the ONLY active hunt)
 
@@ -104,16 +113,29 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
 
 ## Blocked / waiting
 
-- B5's Windows Ink path: Windows-first CI gate applies; Linux path is
-  the queue item.
-- Flatpak bundle build: the sandbox has no network at the cargo step, so
-  `--locked` cannot fetch crates — vendored registry is the named kill.
-- Perf-nightly: viewport_mean x15.3 on head `06c1711` (a PRE-wave head;
-  first completed nightly after a week of cancelled runs) — triage owed,
-  recorded in docs/perf/protocol.md.
+- FREEZE-4 (since 2026-10-17 ~18:14): centralhost wedged, day 4 at this
+  write — NO cargo, NO batteries, NO pushes until HOST_BACK
+  (build-host-outage protocol + Bessa's 23:52 steer). Live state: the
+  STATE block in `.dragon/COORDINATION-next-wave.md`; memtest86+ owed at
+  Bessa's next physical access (boot straight into it, skip the OS).
+- Windows Ink: winink stays default-off and hook-less (C2-30 closed —
+  winit's WM_POINTER path carries pen pressure on Windows); the
+  pen-flags half (S1) sits in the parked fleet, HOST_BACK-gated.
+- Flatpak bundle build: the hermetic manifest landed (621 vendored
+  sources; archive-type + strip-components fixes); extraction VERIFIED
+  live by dispatch 39306564270 (621 crates past the old wall; its
+  vendor-checksums death root-caused + fixed by 4d69808, riding the
+  recovery push) — the verdict gate is the post-push packaging
+  re-dispatch.
+- Perf-nightly: RESOLVED — the four-leg bisect convicted the runner
+  FLEET, not the code (docs/perf/protocol.md); baseline reseeded
+  (c53a08d/b1d3660), nightly drift-hardened (dc4b355), and the first
+  hardened nightlies ran GREEN on the pushed tip (39306559332 +
+  39391362339). (Rows re-derived in the 2026-10-20 M1 sweep.)
 - Pushes are autonomous: push-gate.json is STANDING approval (Bessa's
   directive: keep it true, push when needed) — for WAVE pushes (Gate 2,
-  loop-prompt v1.2 §5).
+  loop-prompt v1.2 §5). Current envelope (freeze-4) pauses pushes until
+  HOST_BACK; the recovery session owns the ONE push.
 
 ## Handoff note (what the next session must know)
 
