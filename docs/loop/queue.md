@@ -30,7 +30,7 @@ recorded in STATE.md; the strategy-review queue is the active wave.
 | B3 stroke undo journal (critical 3) | **done** | f78e6c1: PaintStrokeCommand per stroke, 64-entry/256MiB caps, v1 clear() deleted. Test premise fixed bed9e0a (smudge stacking contract). |
 | B4 pixel save/load (critical 4) | **done** | d834d77 + c999da6: painted maps through content-hash AssetStore; reopen restores. |
 | B5 pen pressure end-to-end (critical 5) | **done + source fixed** | f867215 + 973e8025: pressured API pair + DabPlan.alpha_multiplier shaping + can-fail test. Cross-review found the multi_touch() source dead for single pens (2+ touch gate); the fix (raw `Event::Touch` force scan, viewport-rect filtered) landed dragon-authored (6430623). Receipt: vault 2026-10-12-pressure-kill-cross-review-receipt.md. The stylus-crate wiring (Windows Ink, XI2) = named follow-up. |
-| B6 Gate 0 journey test | **done (code; CI verdict pending)** | 15c072e: crates/umber-app/tests/gate0_journey.rs — FBX → 4K pressured paint → compositor (the headless see-lit) → undo/redo byte-exact → sidecar save/reopen byte-identical → ORM export decode-verified. umber-app gains a lib target (lib.rs) + two pub seams (publish_fill, set_brush_color). The claw-authored kill landed dragon-verified (six legs read, boundaries checked, the WGSL isNan story verified against naga 30's vendored front); clippy -D warnings clean on both crates at final state. Gate 0's runtime verdict = CI at push (lavapipe/WARP). Report: docs/loop/kill-reports/2026-10-12-gate0.json. |
+| B6 Gate 0 journey test | **done (Gate 0 PASS — run 38255484123 both platforms)** | 15c072e: crates/umber-app/tests/gate0_journey.rs — FBX → 4K pressured paint → compositor (the headless see-lit) → undo/redo byte-exact → sidecar save/reopen byte-identical → ORM export decode-verified. umber-app gains a lib target (lib.rs) + two pub seams (publish_fill, set_brush_color). The claw-authored kill landed dragon-verified (six legs read, boundaries checked, the WGSL isNan story verified against naga 30's vendored front); clippy -D warnings clean on both crates at final state. Gate 0's runtime verdict LANDED 10-12: PASS run 38255484123 (ubuntu + windows GREEN — the queue's own GATE 0 section; the stale "verdict pending" cell ticked in the 2026-10-20 M1 pass-2 sweep). Report: docs/loop/kill-reports/2026-10-12-gate0.json. |
 
 **PHASE B COMPLETE IN CODE (2026-10-12 05:2x).** All six criticals landed.
 Gate 0's verdict is CI's at the next push; the phase's exit condition is
@@ -340,13 +340,17 @@ baseline), and the partner-gated release lane.
   the build-host-outage protocol + Bessa's 23:52 steer. The live
   coordination surface (STATE block, parked fleet, watchers):
   `.dragon/COORDINATION-next-wave.md`.
-- The doc/tooling tail (everything after origin `aac1c4a` — 13 commits through the M1 sweep 8cd3bf4 + the M5 runbook pass) rides the ONE recovery push at HOST_BACK, after the parked fleet's batteries; the recovery order + the fleet's battery scopes live in `.dragon/runbooks/host-back-recovery.md`.
+- The doc/tooling tail (everything after origin `aac1c4a` — 17 commits through the dcommit pre-commit-hook a178913: the M1 sweep, the M4 STATE block, the M5/M5b runbook passes, the W-C3a close script, the commit-gate hook) rides the ONE recovery push at HOST_BACK, after the parked fleet's batteries; the recovery order + the fleet's battery scopes live in `.dragon/runbooks/host-back-recovery.md` (count ticked in the 2026-10-20 M1 pass-2 sweep).
 - kill-locks.sh (scripts/): add/check/remove/list. Live locks: the
   parked fleet + the eyedropper (their rows in the kill ledger),
   released at their commits.
 - The commit gate for this shared tree: `python3 .dragon/dcommit.py`
   (fail-closed, lock-scoped; `.dragon/commit-ledger.jsonl` is the
-  ownership record).
+  ownership record) — now ENFORCED, not just conventional:
+  `scripts/hooks/pre-commit` (committed, a178913) is installed at
+  `.git/hooks/pre-commit`; a bare `git commit` refuses with the dcommit
+  usage, dcommit stamps `DCOMMIT_INVOCATION=1`, and the partner
+  override is `git commit --no-verify` (deliberate, visible in history).
 
 ## Stencil wave + freeze-3 outage (2026-10-18 ~02:00 — CLOSED 2026-10-19 through the host-return recovery; kept as the wave's historical record)
 

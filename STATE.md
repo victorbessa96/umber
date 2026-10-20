@@ -15,10 +15,10 @@ Current phase: **THE STENCIL ENGINE LANDED END TO END + THE PERF
 INSTRUMENT REBUILT (2026-10-19) — PUSHED 2026-10-19 15:54 local, origin
 `aac1c4a`: CI 39306460278 green both platforms, the first hardened
 nightlies green ×2 on the pushed tip (39306559332 + 39391362339). The
-post-push doc/tooling tail (12 commits, 4d69808..86fe4a4) rides the
-recovery push under the freeze-4 envelope.** (Ticked in the 2026-10-20
-M1 sweep — the pre-push "thirteen rows local, push pending" wording is
-preserved in git history at aac1c4a.)
+post-push doc/tooling tail (17 commits, 4d69808..a178913) rides the
+recovery push under the freeze-4 envelope.** (Tail count ticked in the
+2026-10-20 M1 pass-2 sweep; the pre-push "thirteen rows local, push
+pending" wording is preserved in git history at aac1c4a.)
 The morning closed the freeze-3 fleet (push `ff9ac02..0955ac8`, CI
 39263817670 GREEN both platforms; one clippy fix-forward, two
 recovery-script defects fixed live — addenda 1+2 in the script's
