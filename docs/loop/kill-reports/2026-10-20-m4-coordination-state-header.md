@@ -54,11 +54,18 @@ Every row in the block traced to evidence before landing:
 
 ## Body integrity
 
-The pre-M4 file (md5 9fc5e531ac28f323201e0b0e1f8924fc) is a
-contiguous byte-identical substring of the post-M4 file: pure
-insertion at the top, plus the M4 claim/land section appended at the
-tail. Verified programmatically at landing; the append-only history
-is untouched.
+The pre-M4 BODY — the file minus its title line, 33,610 bytes — is a
+contiguous byte-identical substring of the post-M4 file at byte
+1824: the STATE block (bytes 57-1824) is a pure insertion between
+title and body, plus the M4 claim/land section appended at the tail
+(1,474 bytes). The append-only history is untouched. Verified
+programmatically with an asserting check. Precision note: the first
+check run in the landing chain was mis-designed (it compared the
+full pre-M4 file, title included, which a between-title-and-body
+insertion can never match) and printed False while the commit
+proceeded on a toothless `&&` guard — this fixup records the exact
+check shape and the miss; the same python now asserts, so a red
+check blocks the chain.
 
 ## Commit shape
 
