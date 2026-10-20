@@ -255,7 +255,10 @@ def main():
         mode = "index"
         committed_paths = staged
 
-    p = subprocess.run(["git", "-C", root, *commit_cmd])
+    p = subprocess.run(
+        ["git", "-C", root, *commit_cmd],
+        env={**os.environ, "DCOMMIT_INVOCATION": "1"},
+    )
     if p.returncode != 0:
         print(f"dcommit: git commit exited {p.returncode}; nothing ledgered", file=sys.stderr)
         sys.exit(p.returncode)
