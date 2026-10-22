@@ -1,4 +1,14 @@
-# UMBER AUTONOMOUS LOOP PROMPT v1.2
+# UMBER AUTONOMOUS LOOP PROMPT v1.2 (superseded as the loop contract)
+
+> **SUPERSEDED 2026-10-22 as the wake-loop contract** by the standing
+> charter at vault `projects/umber/loop-charter.md` (v1, the private
+> spine; skill `umber-wave-ops` + the charter are the co-requisite reads
+> now, and the coordination STATE block carries the live envelope). This
+> file remains the public-facing historical contract. Live envelope per
+> Bessa 2026-10-22: full autonomy on every lane EXCEPT cargo build and
+> cargo test. The sections below are historical as of their dates — do
+> not follow v1.2's stale specifics (audit pointers, claw defaults, host
+> state) against the charter.
 
 (v1.2 2026-10-16: push policy aligned to the two-gate ruling — one push per
 WAVE, not per kill; Gate 1 moved to the build host with the lock-exclusion
