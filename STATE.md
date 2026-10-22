@@ -15,10 +15,12 @@ Current phase: **THE STENCIL ENGINE LANDED END TO END + THE PERF
 INSTRUMENT REBUILT (2026-10-19) — PUSHED 2026-10-19 15:54 local, origin
 `aac1c4a`: CI 39306460278 green both platforms, the first hardened
 nightlies green ×2 on the pushed tip (39306559332 + 39391362339). The
-post-push doc/tooling tail (17 commits, 4d69808..a178913) rides the
-recovery push under the freeze-4 envelope.** (Tail count ticked in the
-2026-10-20 M1 pass-2 sweep; the pre-push "thirteen rows local, push
-pending" wording is preserved in git history at aac1c4a.)
+post-push doc/tooling tail (23 commits, 4d69808..e50bbe9) rides the ONE
+recovery push at the wave close.** (Count + endpoints re-derived live in
+the 2026-10-22 M1 pass-3 sweep — the 2026-10-22 envelope, Bessa: full
+autonomy except cargo build/test, parks the fleet closes on the
+prohibition; prior counts + the pre-push wording are preserved in git
+history at aac1c4a.)
 The morning closed the freeze-3 fleet (push `ff9ac02..0955ac8`, CI
 39263817670 GREEN both platforms; one clippy fix-forward, two
 recovery-script defects fixed live — addenda 1+2 in the script's
@@ -43,17 +45,22 @@ carries a verdict), and C2-16 closed with the §12 budgets' first
 real-hardware record (`dc0c599`: the RTX 3070 at 82x/2x/zero-drop
 margins) — the C2-13..19 honest-claims row is ALL SEVEN CLOSED.
 
-**Next:** HOST_BACK (freeze-4, day 4 — Bessa's power-cycle, then boot
-STRAIGHT into memtest86+ per the standing protocol) → the recovery
-runbook: `.dragon/runbooks/host-back-recovery.md` (the parked fleet's
-per-kill batteries + commits, then the ONE push of the doc/tooling
-tail + ci-watch, then the packaging re-dispatch — PUSH FIRST; the
-fleet's scopes live in its table). C2-8's drag reorder is CLOSED
-(f2c87d4); the cached-bake/multi-tile follow-ups ride the parked
-fleet. The release lane is Bessa-gated: SPEC ratification (SPEC.md
-still DRAFT), Windows signing, the alpha tag
-(`docs/specs/release-checklist-0.1.0.md`). (Ticked in the 2026-10-20
-M5 runbook pass — the recovery-order prose moved to the runbook.)
+**Next:** the fleet closes are BLOCKED on the 2026-10-22 cargo
+prohibition (Bessa: full autonomy except cargo build/test) — when it
+lifts: re-add per-kill locks, adopt the dead 10-30 claim, fresh battery
+(no reusable verdict exists — the 10-21 attempts died un-landed, logs
+gone), then `w-c3a-close.sh` → `w-c3b-close.sh` per the recovery runbook
+`.dragon/runbooks/host-back-recovery.md` (the ONE push of the whole
+doc/tooling tail + ci-watch, then the packaging re-dispatch — PUSH
+FIRST). Until then the unblocked lanes run: the PerChannel design doc,
+the M1 sweep, the audit cycle (charter:
+vault `projects/umber/loop-charter.md`). centralhost came back
+2026-10-21 ~13:32 (plain boot, FRAGILE, no MCE lines that boot);
+memtest86+ stays owed at Bessa's next physical access (boot straight
+into it, skip the OS) and host checking is STOOD DOWN by his order. The
+release lane is Bessa-gated: SPEC ratification (SPEC.md still DRAFT),
+Windows signing, the alpha tag
+(`docs/specs/release-checklist-0.1.0.md`).
 
 ## The core-loop queue (the ONLY active hunt)
 
@@ -113,14 +120,18 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
 
 ## Blocked / waiting
 
-- FREEZE-4 (since 2026-10-17 ~18:14): centralhost wedged, day 4 at this
-  write — NO cargo, NO batteries, NO pushes until HOST_BACK
-  (build-host-outage protocol + Bessa's 23:52 steer). Live state: the
-  STATE block in `.dragon/COORDINATION-next-wave.md`; memtest86+ owed at
-  Bessa's next physical access (boot straight into it, skip the OS).
+- Cargo prohibition (Bessa 2026-10-22): full autonomy except cargo
+  build/test — the parked fleet closes (W-C3a nine + W-C3b four +
+  rider; bytes dirty, 13 manifests pinned) wait for it to lift; the
+  10-21 close attempts died un-landed and their logs are gone, so a
+  fresh battery gates every close. centralhost: HOST_BACK 2026-10-21
+  ~13:32 (plain boot, FRAGILE); memtest86+ still owed at Bessa's next
+  physical access (boot straight into it, skip the OS); host checking
+  STOOD DOWN by his order. Live state: the STATE block in
+  `.dragon/COORDINATION-next-wave.md`.
 - Windows Ink: winink stays default-off and hook-less (C2-30 closed —
   winit's WM_POINTER path carries pen pressure on Windows); the
-  pen-flags half (S1) sits in the parked fleet, HOST_BACK-gated.
+  pen-flags half (S1) sits in the parked fleet, gated on the cargo prohibition lifting.
 - Flatpak bundle build: the hermetic manifest landed (621 vendored
   sources; archive-type + strip-components fixes); extraction VERIFIED
   live by dispatch 39306564270 (621 crates past the old wall; its
@@ -134,14 +145,19 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
   39391362339). (Rows re-derived in the 2026-10-20 M1 sweep.)
 - Pushes are autonomous: push-gate.json is STANDING approval (Bessa's
   directive: keep it true, push when needed) — for WAVE pushes (Gate 2,
-  loop-prompt v1.2 §5). Current envelope (freeze-4) pauses pushes until
-  HOST_BACK; the recovery session owns the ONE push.
+  charter + umber-wave-ops skill). Current envelope (2026-10-22 cargo
+  prohibition): pushes wait for the fleet's wave close — the close
+  session owns the ONE push of the whole tail.
 
 ## Handoff note (what the next session must know)
 
-1. **Read docs/loop/loop-prompt.md first** — it is the loop contract
-   (rules, queue, iteration protocol, failure modes). Read
-   docs/loop/queue.md second — per-item state lives there.
+1. **Read the standing charter first** — vault
+   `projects/umber/loop-charter.md` (v1, 2026-10-22; skill
+   `umber-wave-ops` + the STATE block in
+   `.dragon/COORDINATION-next-wave.md` beside it). docs/loop/loop-prompt.md
+   carries the supersession banner (ff92379) and stays as the
+   public-facing historical contract. Read docs/loop/queue.md second —
+   per-item state lives there.
 2. The criticals landed as a commit chain in one evening and the CI red
    streak on their wake is closed: bed9e0a (the smudge stacking-contract
    fix — the sibling test two_paint_strokes_undo_reverts_only_the_latest
@@ -156,8 +172,9 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
    cross-cutting invariant (every stroke = one history entry), grep the
    test suite for every consumer of the OLD invariant before marking done.
 5. Kill-locks before dispatch (scripts/kill-locks.sh add|check|remove|list)
-   — no live locks (all released at the 2026-10-16 wave close); zero claws
-   running as of this write. Dragon-loop wake
+   — no live locks (the locks dir was emptied 10-22 01:47 with no
+   owner; re-add per-kill locks at close time); zero claws running at
+   the pass-3 sweep. Dragon-loop wake
    and leisure sessions write into the shared main tree too: a hold set
    in a live session (e.g. "no cargo") must be written into any queued
    hunt's goal, or a wake session will not see it.

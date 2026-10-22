@@ -334,16 +334,18 @@ baseline), and the partner-gated release lane.
 - (Rewritten 2026-10-20 — the previous contents described the 10-16
   outage, the W-GUI-2 locks, and recovery-close.sh, all closed 10-17;
   that history lives in the sections above and CHANGELOG.md.)
-- The build host (centralhost 192.168.15.64) is FREEZE-4 wedged since
-  2026-10-17 ~18:14 (day 4 at this write: ARP FAILED, log-only watcher
-  armed). Envelope: NO cargo, NO batteries, NO pushes until HOST_BACK —
-  the build-host-outage protocol + Bessa's 23:52 steer. The live
-  coordination surface (STATE block, parked fleet, watchers):
-  `.dragon/COORDINATION-next-wave.md`.
-- The doc/tooling tail (everything after origin `aac1c4a` — 17 commits through the dcommit pre-commit-hook a178913: the M1 sweep, the M4 STATE block, the M5/M5b runbook passes, the W-C3a close script, the commit-gate hook) rides the ONE recovery push at HOST_BACK, after the parked fleet's batteries; the recovery order + the fleet's battery scopes live in `.dragon/runbooks/host-back-recovery.md` (count ticked in the 2026-10-20 M1 pass-2 sweep).
-- kill-locks.sh (scripts/): add/check/remove/list. Live locks: the
-  parked fleet + the eyedropper (their rows in the kill ledger),
-  released at their commits.
+- Host + envelope (ticked 2026-10-22 M1 pass-3): centralhost came back
+  2026-10-21 ~13:32 (plain boot, FRAGILE; memtest86+ owed at Bessa's
+  next physical access; host checking STOOD DOWN by his order). The
+  2026-10-22 envelope (Bessa): full autonomy except cargo build/test —
+  the parked fleet closes block on the prohibition, no batteries
+  anywhere while it stands. The live coordination surface (STATE block,
+  parked fleet, watchers): `.dragon/COORDINATION-next-wave.md`.
+- The doc/tooling tail (everything after origin `aac1c4a` — 23 commits through e50bbe9, counted live at the pass-3 sweep: the M1/M4/M5/M5b passes, the W-C3a close script, the commit-gate hook, the W-C4 plan, the standing-charter supersession banner ff92379, the tangent-TBN static prep e50bbe9) rides the ONE recovery push at the fleet's wave close, after the parked fleet's batteries; the recovery order + the fleet's battery scopes live in `.dragon/runbooks/host-back-recovery.md` (count re-ticked in the 2026-10-22 M1 pass-3 sweep).
+- kill-locks.sh (scripts/): add/check/remove/list. Live locks: NONE
+  (the locks dir was emptied 10-22 01:47 with no owner; re-add per-kill
+  locks at close time — lockless ≠ unowned, the fleet bytes belong to
+  their kills).
 - The commit gate for this shared tree: `python3 .dragon/dcommit.py`
   (fail-closed, lock-scoped; `.dragon/commit-ledger.jsonl` is the
   ownership record) — now ENFORCED, not just conventional:
