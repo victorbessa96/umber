@@ -365,7 +365,24 @@ fn solo_proxy(channel: u32, n: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
         return vec3<f32>(0.2126 * e.r + 0.7152 * e.g + 0.0722 * e.b);
     }
     if (channel == VIEW_MODE_SOLO_HEIGHT) {
-        // No height source bound in v1 — mid-gray stand-in.
+        // The bound height tile at the interpolated uv — the same
+        // addressing and the same flag gate as
+        // `height_perturbed_normal`: the fallback texture is never
+        // sampled while the flag is clear, so a mesh with no height
+        // channel keeps the mid-gray stand-in. Solo Height therefore
+        // shows the paint's own height data, and the mesh-map
+        // PREVIEW_HEIGHT delegation below inherits it.
+        if ((paint_params.flags & PAINT_HAS_HEIGHT_TEXTURE) != 0u) {
+            let tile_uv = paint_tile_uv(uv);
+            let dims = textureDimensions(height_tex);
+            let max_texel = vec2<i32>(dims) - vec2<i32>(1, 1);
+            let texel = clamp(
+                vec2<i32>(floor(tile_uv * vec2<f32>(dims))),
+                vec2<i32>(0, 0),
+                max_texel,
+            );
+            return vec3<f32>(textureLoad(height_tex, texel, 0).r);
+        }
         return vec3<f32>(0.5);
     }
     // VIEW_MODE_SOLO_NORMAL: no tangent-space map bound yet — the

@@ -4131,6 +4131,72 @@ mod tests {
             assert_ne!(u_px, v_px, "a +u ramp must differ from a +v ramp");
         }
 
+        /// The solo HEIGHT view reads the bound height tile (the
+        /// view_mode doc's "small, separate follow-up", closed): a
+        /// bound ramp's texel renders as its grayscale value; with no
+        /// height bound the mid-gray stand-in stays (the fallback
+        /// texture is never sampled while the flag is clear).
+        #[test]
+        fn solo_height_reads_the_bound_height_tile() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping solo_height_reads_the_bound_height_tile: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let mesh = textured_quad_mesh();
+            let camera =
+                CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::new(-1.0, -1.0, -1.0));
+            // Pixel (row=1, col=1) → byte offset (1*4 + 1) * 4 = 20.
+            const OFFSET: usize = 20;
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+
+            // Unbound: the mid-gray stand-in (0.5 linear ≈ byte 128).
+            let flat = render_mesh_mode_with_camera(
+                &gpu,
+                &buffers,
+                ViewMode::Solo(SoloChannel::Height),
+                4,
+                4,
+                camera,
+            );
+            for c in 0..3 {
+                assert!(
+                    flat[OFFSET + c].abs_diff(128) <= 1,
+                    "unbound solo height ch{c}: got {:?}, want ~128",
+                    &flat[OFFSET..OFFSET + 4]
+                );
+            }
+
+            // Bound: the u-ramp's texel (row 1, col 1) holds 85/255,
+            // so the solo pixel is that grayscale value (byte 85).
+            let strength = 0.75;
+            let u_ramp = height_ramp_target(&gpu, true);
+            buffers.set_height_texture(&gpu, &u_ramp, PaintParams::height(strength));
+            let bound = render_mesh_mode_with_camera(
+                &gpu,
+                &buffers,
+                ViewMode::Solo(SoloChannel::Height),
+                4,
+                4,
+                camera,
+            );
+            for c in 0..3 {
+                assert!(
+                    bound[OFFSET + c].abs_diff(85) <= 1,
+                    "bound solo height ch{c}: got {:?}, want ~85 (the ramp texel)",
+                    &bound[OFFSET..OFFSET + 4]
+                );
+            }
+        }
+
         /// FALLBACK REGRESSION for the height kill: binding then
         /// clearing a height texture renders byte-identical to a mesh
         /// that never touched the height API — mirrors

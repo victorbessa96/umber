@@ -51,13 +51,17 @@
 //! and the [`ViewMode::Lit`] path folds it into the shaded normal
 //! per frame (`shaders::MESH_SHADER`'s `height_perturbed_normal`) —
 //! that sentence above ("no per-channel GPU textures") is no longer
-//! true for Lit specifically. `SoloChannel::Height`'s `solo_proxy`
-//! arm is UNCHANGED: it still returns the mid-gray stand-in, not the
-//! bound height value — only Lit consumes binding 12 today. Wiring
-//! Solo/Preview to it too is a small, separate follow-up (same
-//! texture, different consumer), deliberately left out of this kill
-//! to keep its surface to the one audited gate (the lit normal
-//! response). See `docs/loop/kill-reports/2026-10-12-height-normal.md`.
+//! true for Lit — and, since the W-C3b solo-height kill, for the
+//! Solo/Preview consumers too: `SoloChannel::Height`'s `solo_proxy`
+//! arm reads the bound height tile through the same addressing and
+//! flag gate as `height_perturbed_normal` (the mid-gray stand-in
+//! stays for a mesh with no height channel, and the mesh-map
+//! PREVIEW_HEIGHT delegation inherits the real data). The original
+//! lit-only landing kept its surface to the one audited gate (the
+//! lit normal response):
+//! `docs/loop/kill-reports/2026-10-12-height-normal.md`; the
+//! solo/preview wiring is
+//! `docs/loop/kill-reports/2026-10-20-solo-height.md`.
 
 use umber_mesh::MeshMapKind;
 
