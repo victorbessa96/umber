@@ -63,6 +63,20 @@
 //! ortho rays come out parallel instead of fanning, and the y=0 plane
 //! intersection is the same arithmetic.
 //!
+//! # The display-chain-aware eyedropper (B-10's named follow-up)
+//!
+//! The picker reads the paint target's linear RGBA8 texel, converts it
+//! per-texel to an sRGB byte (the v1 sample), then runs that sample
+//! through the session's viewer chain — the same `apply_display_chain`
+//! call the Display panel's preview strip makes on the same
+//! `DisplaySettings` — before returning [`PickSample`]. The default
+//! settings (Raw / 0 EV / gamma 1) are the bit-exact identity chain, so
+//! an untouched project picks byte-for-byte as before. Judgment calls:
+//! the chain's input is the display-encoded sample (the brief's stage
+//! order — `linear_to_srgb_byte`, then the chain), and the adopted OCIO
+//! processor is not threaded here (the preview strip threads it only in
+//! `ocio` builds), so an adopted config's pick uses the fixed view stage.
+//!
 //! # The Overlays button + popover (GUI plan g6-overlays-popover)
 //!
 //! docs/specs/gui-plan-2026-10-15.md row `g6-overlays-popover` (B:C3.1-
@@ -164,6 +178,7 @@
 //!   precedent).
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
+use umber_color::{apply_display_chain, DisplaySettings};
 use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
 use umber_gpu::postfx::PostChain;
 use umber_gpu::renderer::PaintParams;
@@ -193,18 +208,20 @@ const ZOOM_SENSITIVITY: f32 = 0.08;
 /// the distance: 200 px of drag ≈ the wheel's 8 % notch, twenty times over.
 const ZOOM_DRAG_SENSITIVITY: f32 = 0.004;
 
-/// An eyedropper sample (C1 worklist #10): the sRGBA bytes the viewport
-/// read from the paint target at the clicked UV, one per Pick click.
-/// Carried to the shell so it can set the brush color (and later: the
-/// alpha, masks, anything color-keyed) from what the artist actually
-/// sees on the mesh.
+/// An eyedropper sample (C1 worklist #10): the display-chain sRGBA bytes
+/// the viewport read from the paint target at the clicked UV, one per Pick
+/// click. The texel is linear RGBA8; the sample runs it through
+/// [`linear_to_srgb_byte`] and then the session's viewer chain
+/// ([`display_chain_srgba`]), so it carries what the artist actually sees
+/// on the mesh. Carried to the shell so it can set the brush color (and
+/// later: the alpha, masks, anything color-keyed).
 pub struct PickSample(pub [u8; 4]);
 
 /// What a strip-only tool's click resolved to (C1 worklist #10, extended
 /// by #11): the viewport never acts on these itself — the shell matches
 /// on the variant and routes through the paint session.
 pub enum ViewportClick {
-    /// The eyedropper's sRGBA sample at the picked UV.
+    /// The eyedropper's display-chain sRGBA sample at the picked UV.
     Pick(PickSample),
     /// The ID-mask select's click UV (mesh space, `0..1` frame): the shell
     /// bakes the region IDs and selects through the paint session.
@@ -222,6 +239,21 @@ fn linear_to_srgb_byte(linear: u8) -> u8 {
         1.055 * l.powf(1.0 / 2.4) - 0.055
     };
     (s.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The eyedropper's viewer-chain step: [`linear_to_srgb_byte`]'s RGB
+/// channels run through the session's display chain and quantize back to
+/// display bytes — the same [`apply_display_chain`] call the Display
+/// panel's preview strip makes on `PREVIEW_RAMP`
+/// (`display_panel::preview_values`). The input is the sRGB byte already
+/// produced from the linear texel (the v1 sample), so the identity chain
+/// (`DisplaySettings::default()`: Raw / 0 EV / gamma 1) returns those
+/// bytes unchanged; alpha passes through.
+fn display_chain_srgba(srgba: [u8; 4], settings: &DisplaySettings) -> [u8; 4] {
+    let unit = |b: u8| b as f32 / 255.0;
+    let [r, g, b] = apply_display_chain([unit(srgba[0]), unit(srgba[1]), unit(srgba[2])], settings);
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [byte(r), byte(g), byte(b), srgba[3]]
 }
 
 /// An in-flight Ctrl+RMB brush-resize drag (see `Viewport::resize`).
@@ -272,6 +304,13 @@ pub struct Viewport {
     /// samples the paint target at the picked UV instead of orbiting
     /// or painting; the sample returns to the shell as [`PickSample`].
     pick_armed: bool,
+    /// The session's viewer chain (the Display panel's
+    /// [`DisplaySettings`]), synced from the shell each frame beside the
+    /// picker arm. The eyedropper runs each sampled texel through it
+    /// ([`display_chain_srgba`]) so the pick matches the displayed mesh;
+    /// the default settings are the identity chain, so the v1 sample is
+    /// byte-for-byte unchanged until the artist edits the Display panel.
+    display_settings: DisplaySettings,
     /// The ID-mask arm (C1 worklist #11): set by the shell when
     /// ToolKind::IdMask is the active tool. While armed, a primary click
     /// resolves to the mesh UV instead of orbiting or painting; the UV
@@ -698,10 +737,13 @@ impl Viewport {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
                         // Read the texel from the tile the UV routes to: the
                         // paint target holds LINEAR RGBA8, the shell wants
-                        // sRGB bytes — convert per-texel here (the identity
-                        // for the v1 no-LUT path; a display-transform-aware
-                        // sample is the follow-up when the picker meets the
-                        // display chain).
+                        // sRGB bytes — convert per-texel, then run the
+                        // session's display chain over those bytes so the
+                        // pick matches the displayed mesh (the Display
+                        // panel's preview strip applies the SAME chain to the
+                        // same `DisplaySettings`). The default settings are
+                        // the identity chain, so the v1 no-LUT sample is
+                        // unchanged.
                         let tile = tile_of_uv(uv);
                         if let Some(image) = paint.read_tile(tile) {
                             let x = ((uv[0].clamp(0.0, 1.0)) * (image.width as f32 - 1.0)).round()
@@ -710,12 +752,15 @@ impl Viewport {
                                 as u32;
                             let i = (y * image.width + x) as usize * 4;
                             if i + 3 < image.data.len() {
-                                let srgba = [
-                                    linear_to_srgb_byte(image.data[i]),
-                                    linear_to_srgb_byte(image.data[i + 1]),
-                                    linear_to_srgb_byte(image.data[i + 2]),
-                                    image.data[i + 3],
-                                ];
+                                let srgba = display_chain_srgba(
+                                    [
+                                        linear_to_srgb_byte(image.data[i]),
+                                        linear_to_srgb_byte(image.data[i + 1]),
+                                        linear_to_srgb_byte(image.data[i + 2]),
+                                        image.data[i + 3],
+                                    ],
+                                    &self.display_settings,
+                                );
                                 return Some(ViewportClick::Pick(PickSample(srgba)));
                             }
                         }
@@ -1431,6 +1476,15 @@ impl Viewport {
     /// ToolKind::Pick each frame; painting is suppressed while armed).
     pub fn set_pick_armed(&mut self, armed: bool) {
         self.pick_armed = armed;
+    }
+
+    /// Syncs the session's viewer chain — the same `DisplaySettings` the
+    /// Display panel edits and its preview strip transforms. The
+    /// eyedropper applies it to the sampled texel; the default settings
+    /// are the identity chain, so an untouched project picks exactly as
+    /// it did before this chain reached the picker.
+    pub fn set_display_settings(&mut self, settings: &DisplaySettings) {
+        self.display_settings.clone_from(settings);
     }
 
     /// Arms or disarms the ID-mask select (the shell syncs this from
@@ -2203,6 +2257,65 @@ mod tests {
             line_samples(egui::pos2(3.0, 3.0), egui::pos2(3.0, 3.0), 2.0).len(),
             2
         );
+    }
+
+    #[test]
+    fn eyedropper_picks_the_display_chained_texel() {
+        // B-10 follow-up: a known linear texel plus known non-default
+        // display settings picks the exact bytes the artist sees. The
+        // v1 step converts the linear texel to sRGB first ...
+        let texel = [64u8, 128, 200, 173];
+        let srgb = [
+            linear_to_srgb_byte(texel[0]),
+            linear_to_srgb_byte(texel[1]),
+            linear_to_srgb_byte(texel[2]),
+            texel[3],
+        ];
+        assert_eq!(srgb, [137, 188, 229, 173], "the v1 linear->sRGB step");
+        // ... then the session chain runs on those display-encoded bytes
+        // (the Display panel's preview-strip input shape).
+        let settings = DisplaySettings {
+            view: umber_color::DisplayTransform::Srgb,
+            exposure: -0.5,
+            gamma: 0.9,
+        };
+        let picked = display_chain_srgba(srgb, &settings);
+        // Mirror `display_panel::preview_values`: `apply_display_chain`
+        // on the sample, quantized like `display_panel::to_color32`.
+        let expected = apply_display_chain(
+            [
+                f32::from(srgb[0]) / 255.0,
+                f32::from(srgb[1]) / 255.0,
+                f32::from(srgb[2]) / 255.0,
+            ],
+            &settings,
+        )
+        .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        assert_eq!(
+            picked,
+            [expected[0], expected[1], expected[2], texel[3]],
+            "the pick must be the preview strip's chain on the sRGB sample"
+        );
+        // Hand-pinned from that arithmetic (linear_to_srgb_byte -> chain ->
+        // quantize), so a drift in the input space, stage order or
+        // rounding fails even if the two calls stay in lockstep.
+        assert_eq!(picked, [158, 185, 204, 173]);
+    }
+
+    #[test]
+    fn eyedropper_default_settings_keep_the_v1_srgb_bytes() {
+        // `DisplaySettings::default()` is Raw / 0 EV / gamma 1 — the
+        // bit-exact identity chain (read from umber-color's
+        // `apply_display_chain`, not assumed): an untouched project's
+        // pick is the v1 linear->sRGB sample, byte for byte.
+        let settings = DisplaySettings::default();
+        assert!(settings.is_identity());
+        assert!(
+            Viewport::default().display_settings.is_identity(),
+            "a fresh viewport starts on the identity chain"
+        );
+        let srgba = [137, 188, 229, 173];
+        assert_eq!(display_chain_srgba(srgba, &settings), srgba);
     }
 
     #[test]

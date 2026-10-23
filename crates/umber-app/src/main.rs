@@ -520,6 +520,10 @@ impl TabViewer for PanelViewer<'_> {
                 // the paint session's existing color seam.
                 let pick_armed = self.brush.strip == toolbar::ToolKind::Pick;
                 self.viewport.set_pick_armed(pick_armed);
+                // The picker samples what the artist sees: the session's
+                // viewer chain (the same DisplaySettings the Display panel
+                // edits) rides along every frame, identity by default.
+                self.viewport.set_display_settings(self.display);
                 // The ID-mask arm (C1 worklist #11): same strip-only shape.
                 // A click bakes the mesh's region IDs at the paint target's
                 // size and selects the clicked region through the paint
