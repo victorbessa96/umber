@@ -4,6 +4,35 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## The W-C3a fleet closed through the local port + the runner-rotation reds pinned (2026-10-23, eleven rows at push + the pins behind)
+
+- **Added — the parked W-C3a fleet, all nine kills:** the painted
+  readbacks' export-fit (channel-export-resample `8f85074`), the ID-mask
+  multi-tile bake + content-keyed cache (`7ade11c`), the picker's
+  HSV/RGB slider rows + recents popup (`21ada34`), the platform-free
+  Windows pen-flags tracker (`8d7bf8a`), the CLI's `snapshot-dir`
+  (`db63487`), the procedural history panel (`2a84fb8`), the adopted
+  display-chain eyedropper (`8e33c8f`), the History/toolbar/tooltip
+  snapshot breadth (`42cbc7c`), and the shared picker row across the
+  app's colour sites (`5b38c96`) — plus the wave docs row (`5781600`)
+  and the local close port (`96edd1e`).
+- **Fixed — the battery's one real bug:** the G1 sRGB-endpoint ULP red,
+  fixed production-side mid-close (linear_to_srgb's boundary-exact top,
+  f32-port verified, manifest + report re-pinned).
+- **Fixed — the runner-image rotation, both surfaces:** ubuntu-latest
+  moved 24.04→26.04 on 10-21; its mesa 26.0.8 lavapipe stack SIGSEGVs
+  the test binary mid-suite with a wandering crash site — the check
+  matrix's linux leg pinned to ubuntu-24.04 (`c697bab`, rides the
+  W-C3b push); the same rotation kills the Flatpak job's bwrap/rofiles
+  sandbox before the build command runs — the packaging job pinned to
+  ubuntu-24.04 too.
+- **Changed — the close discipline:** the fleet closed LOCALLY through
+  scripts/w-c3a-local-close.sh (the degraded-mode port born from
+  Bessa's slow-envelope steer) under the one-cargo-stack rule, the
+  -j3/nice-19 throttle, and the 8G/2G oomd scope shield; the README
+  scorecard regenerated (2,100+ → 2,200+ tests) after the fleet crossed
+  the floor and red the layering gate.
+
 ## The stencil chain completed + the perf instrument rebuilt (2026-10-19, thirteen rows at push)
 
 - **Added — the stencil engine end to end:** the gate_plane paint hook
