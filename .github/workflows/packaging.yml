@@ -180,7 +180,19 @@ jobs:
 
       - name: Build the Flatpak
         run: |
-          sudo flatpak-builder --force-clean --repo=repo build-dir flatpak/org.umber.Umber.json
+          # --disable-rofiles-fuse: the export-phase appstreamcli compose died
+          # reading the hicolor icon THROUGH the rofiles-fuse view (run
+          # 40026754260: E: file-read-error on org.umber.Umber, component
+          # dropped, E: filters-but-no-output). The exact inputs compose GREEN
+          # on a plain tree with the identical compose lib (noble
+          # appstream-compose 1.0.2-1build6); the only local mutation that
+          # reproduces the exact error pair is an unreadable icon — an absent
+          # icon raises a different tag, so the runner FOUND the SVG and
+          # failed reading it through the layer. flatpak-builder's own
+          # documented workaround, present in the runner's 1.4.2
+          # (builder-main.c:103). Evidence:
+          # docs/loop/kill-reports/2026-10-23-flatpak-compose-rofiles.md
+          sudo flatpak-builder --disable-rofiles-fuse --force-clean --repo=repo build-dir flatpak/org.umber.Umber.json
 
       - name: Export single-file bundle
         run: |
