@@ -151,7 +151,20 @@ jobs:
     name: build Flatpak bundle (x86_64)
     # Heaviest job (~1 GB runtime+SDK): release tags or manual dispatch only.
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    # ubuntu-latest rotated to ubuntu-26.04 (resolute) on 2026-10-21 and
+    # that image's bwrap/rofiles sandbox dies at module-build setup
+    # ("bwrap: Can't find source path .../rofiles/rofiles-*/files:
+    # Permission denied") before the build command runs: the 10-19
+    # dispatch (ubuntu-24.04) got PAST the sandbox and failed on content
+    # (the vendor-checksums bug, fixed by 4d69808); the 10-23 dispatch
+    # (ubuntu-26.04, zero packaging.yml/manifest delta between them —
+    # git log names 1b0616c as the last workflow change, pre-rotation)
+    # dies before vendor-checksums can start. Same rotation class as the
+    # ci.yml check-matrix pin. Pinned to the last-known-good LTS image;
+    # revisit when 26.04's bwrap/flatpak-builder stack is fixed upstream
+    # or 24.04 approaches runner retirement. Evidence:
+    # docs/loop/kill-reports/2026-10-23-flatpak-runner-pin.md
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
