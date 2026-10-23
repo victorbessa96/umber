@@ -1158,7 +1158,7 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
     match source {
         FillSource::Solid { color } => {
             let mut rgb = [color[0], color[1], color[2]];
-            if umber_gui::widgets::color_picker::color_button(ui, &mut rgb).changed() {
+            if crate::preferences::picker_button(ui, &mut rgb).changed() {
                 color[0] = rgb[0];
                 color[1] = rgb[1];
                 color[2] = rgb[2];
@@ -1179,7 +1179,7 @@ fn source_rows(ui: &mut egui::Ui, layer_id: u64, source: &mut FillSource, change
                 let mut rgb = [c[0], c[1], c[2]];
                 ui.horizontal(|ui| {
                     ui.label(label);
-                    if umber_gui::widgets::color_picker::color_button(ui, &mut rgb).changed() {
+                    if crate::preferences::picker_button(ui, &mut rgb).changed() {
                         c[0] = rgb[0];
                         c[1] = rgb[1];
                         c[2] = rgb[2];

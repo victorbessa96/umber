@@ -564,7 +564,7 @@ impl BrushPanel {
                 preset.params.color[1],
                 preset.params.color[2],
             ];
-            if umber_gui::widgets::color_picker::color_button(ui, &mut rgb).changed() {
+            if crate::preferences::picker_button(ui, &mut rgb).changed() {
                 preset.params.color[0] = rgb[0];
                 preset.params.color[1] = rgb[1];
                 preset.params.color[2] = rgb[2];

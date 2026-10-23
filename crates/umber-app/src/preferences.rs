@@ -242,6 +242,100 @@ pub fn prefs_path() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(|d| d.join(PREFS_FILE)))
 }
 
+// ---------------------------------------------------------------------------
+// The shared picker recents (picker-app-sites, the W-C3a plan's lane A3)
+// ---------------------------------------------------------------------------
+
+use umber_gui::widgets::color_picker::{color_button_with, PickerLabels};
+use umber_gui::widgets::swatch_grid::RecentColors;
+
+/// The persisted swatch list's file name, beside [`PREFS_FILE`] in the
+/// same state dir. Plain text, one `#rrggbb` per line (most recent
+/// first), unknown lines skipped — the same key=value-free shape the
+/// preferences file itself uses.
+pub const SWATCHES_FILE: &str = "swatches";
+
+/// The swatch file path (the same state dir `prefs_path` uses).
+pub fn swatches_path() -> Option<PathBuf> {
+    umber_brush::preset_library::user_preset_dir()
+        .and_then(|p| p.parent().map(|d| d.join(SWATCHES_FILE)))
+}
+
+/// Parses one `#rrggbb` line; `None` for anything else (case-insensitive
+/// hex, exactly six digits after the `#`).
+fn parse_hex_swatch(line: &str) -> Option<egui::Color32> {
+    let hex = line.trim().strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
+
+/// Loads the persisted swatches from `path` (a missing or unreadable
+/// file reads as an empty list). The file is most-recent-first; the
+/// list is rebuilt oldest-first so every `push` lands the newest at
+/// the front again, and the capacity cap trims an over-long file on
+/// load.
+pub fn load_swatches(path: Option<&Path>) -> RecentColors {
+    let text = path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let mut swatches = RecentColors::default();
+    for color in text.lines().rev().filter_map(parse_hex_swatch) {
+        swatches.push(color);
+    }
+    swatches
+}
+
+/// Writes the swatch list to `path` (creating the dir; mirroring
+/// [`Preferences::save`]: errors log, the session keeps its values).
+pub fn save_swatches(swatches: &RecentColors, path: Option<&Path>) {
+    let Some(path) = path else { return };
+    let Some(dir) = path.parent() else { return };
+    let _ = std::fs::create_dir_all(dir);
+    let mut text = String::new();
+    for color in swatches.colors() {
+        let [r, g, b] = [color.r(), color.g(), color.b()];
+        text.push_str(&format!("#{r:02x}{g:02x}{b:02x}\n"));
+    }
+    if let Err(e) = std::fs::write(path, text) {
+        log::warn!("preferences: could not save {}: {e}", path.display());
+    }
+}
+
+/// The egui memory slot all three picker sites share (one recents list
+/// per session, seeded from the swatch file on first use).
+const PICKER_RECENTS_KEY: &str = "umber::picker-recents";
+
+/// The shared colour-button row: [`color_button_with`]'s sliders +
+/// swatch-grid popup over the session-shared recents. The list is
+/// seeded from the swatch file on first use; any change is written
+/// back to memory and persisted to the file. Additive beside the stock
+/// `color_button`, whose kittests remain its consumer (the delegate
+/// conversion is a named follow-up, not this kill's).
+pub fn picker_button(ui: &mut egui::Ui, linear: &mut [f32; 3]) -> egui::Response {
+    let labels = PickerLabels {
+        rgb: [tr("picker.r"), tr("picker.g"), tr("picker.b")],
+        hsv: [tr("picker.h"), tr("picker.s"), tr("picker.v")],
+    };
+    let id = egui::Id::new(PICKER_RECENTS_KEY);
+    let mut recents = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<RecentColors>(id))
+        .unwrap_or_else(|| load_swatches(swatches_path().as_deref()));
+    let before = recents.clone();
+    let response = color_button_with(ui, linear, &labels, &mut recents);
+    ui.ctx()
+        .memory_mut(|m| m.data.insert_temp(id, recents.clone()));
+    if recents != before {
+        save_swatches(&recents, swatches_path().as_deref());
+    }
+    response
+}
+
 /// What applying a preference set to egui would change: `None` per field
 /// when egui already holds that value, so the per-frame sync writes the
 /// style only when something differs (photocraft #10: a style write
@@ -1062,5 +1156,68 @@ mod tests {
             assert!(en.contains(&format!("    .{key} =")), "en-US {key}");
             assert!(pt.contains(&format!("    .{key} =")), "pt-BR {key}");
         }
+    }
+}
+
+#[cfg(test)]
+mod swatches_tests {
+    use super::*;
+
+    /// Per-test directory (the parallel-tests lesson: two tests sharing
+    /// one fixed name race).
+    fn unique_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("umber-swatches-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn round_trips_most_recent_first() {
+        let path = unique_dir().join(SWATCHES_FILE);
+        let mut swatches = RecentColors::default();
+        swatches.push(egui::Color32::from_rgb(0x12, 0x34, 0x56));
+        swatches.push(egui::Color32::from_rgb(0xff, 0x00, 0x00));
+        save_swatches(&swatches, Some(&path));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "#ff0000\n#123456\n");
+        let loaded = load_swatches(Some(&path));
+        assert_eq!(loaded.colors(), swatches.colors());
+    }
+
+    #[test]
+    fn garbage_lines_are_skipped() {
+        let path = unique_dir().join(SWATCHES_FILE);
+        // Garbage lines (no leading #, wrong length, non-hex) are skipped;
+        // `#AB12CD` proves uppercase hex IS accepted.
+        std::fs::write(&path, "#ff0000\nnot a color\n#zz\n\n#00ff00\n#AB12CD\n").unwrap();
+        let loaded = load_swatches(Some(&path));
+        assert_eq!(
+            loaded.colors(),
+            &[
+                egui::Color32::from_rgb(0xff, 0x00, 0x00),
+                egui::Color32::from_rgb(0x00, 0xff, 0x00),
+                egui::Color32::from_rgb(0xab, 0x12, 0xcd),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_file_trims_to_capacity() {
+        let path = unique_dir().join(SWATCHES_FILE);
+        let text: String = (0..40).map(|i| format!("#{i:02x}0000\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let loaded = load_swatches(Some(&path));
+        assert_eq!(loaded.colors().len(), 16);
+        // The file's first line is the newest; the rebuilt list keeps it
+        // at the front and the cap drops the 24 oldest.
+        assert_eq!(loaded.colors()[0], egui::Color32::from_rgb(0x00, 0, 0));
+        assert_eq!(loaded.colors()[15], egui::Color32::from_rgb(0x0f, 0, 0));
+    }
+
+    #[test]
+    fn a_missing_file_is_empty() {
+        let loaded = load_swatches(Some(Path::new("/nonexistent-umber-swatches-dir/swatches")));
+        assert!(loaded.colors().is_empty());
     }
 }
