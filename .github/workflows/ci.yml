@@ -56,7 +56,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-latest rotated to ubuntu-26.04 (resolute, mesa 26.0.8
+        # lavapipe) on 2026-10-21 and that stack SIGSEGVs the umber bin
+        # test binary mid-suite — green through 10-20 on ubuntu-24.04 +
+        # mesa 25.2.8 with zero code change, and the same suite passes
+        # 635/635 on local lavapipe. Pinned to the last-known-good LTS
+        # image; revisit when 26.04's stack is fixed upstream or 24.04
+        # approaches runner retirement. Evidence:
+        # docs/loop/kill-reports/2026-10-23-ci-ubuntu-image-pin.md
+        os: [ubuntu-24.04, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
