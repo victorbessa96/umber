@@ -43,10 +43,13 @@
 //!   edges are texel-exact by construction), replacing any previous mask
 //!   content, and resetting the invert parity like `clear`/`resize` do, so
 //!   a later-created tile plane agrees with the selected one.
-//! * **Single tile.** Only `tile`'s plane is filled (the click routes there
-//!   via the shell). The ID bake spans the mesh's `0..1` UV frame, so on a
-//!   multi-tile mesh the selection is that frame's region on the clicked
-//!   tile — per-tile bakes for UDIM selection are deferred.
+//! * **Single tile.** Only `tile`'s plane is filled. The shell routes the
+//!   click and, on a multi-tile mesh, supplies a per-tile bake — that tile's
+//!   triangles with UVs rebased onto `0..1`
+//!   (`umber_bake::ao::filter_mesh_for_tile`) — plus a click UV rebased by
+//!   the same integer tile offset, so this module stays a pure
+//!   `0..1`-frame mapping. An out-of-frame UV still clamps to the frame edge
+//!   here ([`select_id`]'s contract); the shell never hands one down.
 //! * **Refused mid-stroke is the caller's rule.** This module knows no
 //!   strokes; `PaintState::select_id_mask` refuses while `stroking` (the
 //!   live stroke snapshotted its gate at `begin_stroke`).

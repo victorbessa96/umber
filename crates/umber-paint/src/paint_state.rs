@@ -498,6 +498,33 @@ pub enum IdSelectError {
     StrokeInFlight,
 }
 
+/// A single-entry cache of the last click-time ID bake
+/// ([`PaintState::bake_and_select_id`]): the bytes plus the content key,
+/// tile and frame that produced them.
+///
+/// Judgment call — one entry, no LRU: the artist re-clicks one tile far
+/// more often than they alternate tiles, and that repeat is the case worth
+/// caching; a mesh spanning N tiles pays one re-bake per tile switch, which
+/// the router already makes uncommon. The resident cost is whatever one
+/// entry's `bytes` hold (~64 MB at the 4K default) until the next bake
+/// replaces it — see the cost note on
+/// [`PaintState::bake_and_select_id`].
+#[derive(Debug)]
+struct CachedIdBake {
+    /// Content key of the baked mesh (see [`id_bake_key`]); subsumes the
+    /// flavor (folded into the hash, so a future Material/island flavor
+    /// never hits a Triangle entry).
+    key: u64,
+    /// The tile the bytes were baked for.
+    tile: u16,
+    /// Bake width in texels.
+    width: u32,
+    /// Bake height in texels.
+    height: u32,
+    /// The bake's `width * height * 4` RGBA8 bytes, row-major.
+    bytes: Vec<u8>,
+}
+
 /// Default paint-target edge length in texels: 4096 (CORE-LOOP CRITICAL 2,
 /// the 2026-10-12 strategy review's directive — the live target is 4K, not
 /// 512; the 4K/8K-via-test-hook era ends here). 4096² RGBA8 = 64 MiB per
@@ -1230,6 +1257,13 @@ pub struct PaintState {
     /// clear, resize); a gated dab's plane is brought back in sync before
     /// it is staged.
     mask_synced: BTreeSet<(PlaneOwner, u16, String)>,
+    /// Single-entry cache of the last click-time ID bake
+    /// ([`Self::bake_and_select_id`]): re-clicking the same mesh at the
+    /// same tile and size reuses the bytes instead of running the GPU
+    /// bake again. `None` until the first click; replaced on every miss
+    /// and left untouched on any error path. See [`CachedIdBake`] for the
+    /// one-entry judgment call.
+    id_bake_cache: Option<CachedIdBake>,
     /// The live stroke paints the mask (mask mode at `begin_stroke`).
     stroke_mask_edit: bool,
     /// The live stroke is gated by the mask (gating at `begin_stroke`).
@@ -1340,6 +1374,10 @@ pub struct PaintState {
     /// drain — and the symmetry sibling count).
     #[cfg(any(test, feature = "test-hooks"))]
     staged_dabs: u64,
+    /// ID bakes actually run (cache misses) since construction (test
+    /// observability for the single-entry cache's hit contract).
+    #[cfg(test)]
+    id_bakes: u64,
 }
 
 impl PaintState {
@@ -1447,6 +1485,7 @@ impl PaintState {
             stroke_symmetry: None,
             masks: BTreeMap::from([(default_set, QuickMask::new(size, size))]),
             mask_synced: BTreeSet::new(),
+            id_bake_cache: None,
             stroke_mask_edit: false,
             stroke_mask_gate: false,
             cavity: None,
@@ -1480,6 +1519,8 @@ impl PaintState {
             staged_batches_per_tile: BTreeMap::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             staged_dabs: 0,
+            #[cfg(test)]
+            id_bakes: 0,
         })
     }
 
@@ -2387,20 +2428,29 @@ impl PaintState {
     /// clicked tile's set size, then [`Self::select_id_mask`]s the ID under
     /// `uv` (see that method for the fill + sync contract).
     ///
-    /// Judgment call — bake on every click, no cached store: no persistent
-    /// ID-bake store exists in the app yet (nothing calls `bake_id_mesh`
-    /// outside its own tests), and inventing a new global cache for v1
-    /// would split bake freshness across the Bakes panel's future ID rows.
-    /// The cost is one full-frame compute bake per click at the set size
-    /// (the 4K default = 16M texels); baking on tool-entry and re-baking
-    /// on mesh change is the named follow-up. Single-tile v1 (see
-    /// `umber_brush::id_mask`'s module docs): the tile routes by
-    /// [`Self::route_tile`], but the bake spans the mesh's `0..1` UV frame.
+    /// Multi-tile: a mesh spanning more than tile 1001
+    /// ([`umber_mesh::present_tiles`]) bakes only the clicked tile's
+    /// triangles with their UVs rebased onto `0..1`
+    /// ([`umber_bake::ao::filter_mesh_for_tile`]) and rebases the click UV
+    /// by the same integer tile offset ([`rebase_uv_for_tile`]), so the
+    /// selection lands on the clicked tile's region rather than clamping a
+    /// `>1` UV to the `0..1` frame's edge. A single-tile mesh (tile 1001
+    /// only) takes the whole-mesh path unchanged — the CLI's `whole_mesh`
+    /// precedent — byte-identical to the pre-UDIM behavior.
+    ///
+    /// Caching: one [`CachedIdBake`] holds the last bake, keyed by mesh
+    /// content ([`id_bake_key`], which folds in the flavor), tile and frame.
+    /// A hit skips the GPU bake; a miss bakes and replaces the entry. The
+    /// entry is never written on an error path. Cost: one O(tris) CPU hash
+    /// per click (~20 MB of UV/indices touched at 1M triangles) against a
+    /// full-frame compute bake plus readback (16M texels and ~64 MB at the
+    /// 4K default), and ~64 MB resident for one 4K entry.
     ///
     /// # Errors
     ///
     /// Same as [`Self::select_id_mask`], plus the bake's own errors (empty
-    /// mesh, triangle budget — see `umber_bake::id`).
+    /// mesh, triangle budget — see `umber_bake::id`). The refusal mid-stroke
+    /// stays first: neither the cache nor the bake is touched in flight.
     pub fn bake_and_select_id(
         &mut self,
         mesh: &umber_mesh::MeshData,
@@ -2409,19 +2459,82 @@ impl PaintState {
         if self.stroking {
             return Err(IdSelectError::StrokeInFlight);
         }
-        let tile = self.route_tile(Pos2::new(uv[0], uv[1]));
+        // The CLI's `whole_mesh` precedent: a mesh living only in tile 1001
+        // bakes whole, byte-identically to v1. An empty mesh (`present ==
+        // []`) takes the per-tile branch so its bake still rejects EmptyMesh.
+        let whole_mesh = umber_mesh::present_tiles(mesh) == [FIRST_TILE];
+        let (tile, local_uv) = if whole_mesh {
+            (FIRST_TILE, uv)
+        } else {
+            // Route the click by its OWN tile (the UDIM rule, independent of
+            // whether `set_mesh` has armed the stroke router) and rebase the
+            // UV into that tile's `0..1` frame — the same offset the bake
+            // rebase applies. Without this, `select_id` clamps the
+            // out-of-frame `>1` UV to the edge and picks the wrong texel.
+            let tile = tile_of_uv([uv[0], uv[1]]);
+            (tile, rebase_uv_for_tile(uv, tile))
+        };
         let (width, height) = self.tile_size(tile);
+        let key = id_bake_key(mesh, IdFlavor::Triangle);
+
+        // Hit test first, WITHOUT taking the entry: a miss must leave the
+        // existing entry exactly as it was, so an error path never touches
+        // the cache. A hit then hands the cached bytes out via `take` so
+        // `select_id_mask` can borrow `self` mutably; the entry (content
+        // unchanged) goes straight back whether the selection succeeds or
+        // not.
+        let hit = self.id_bake_cache.as_ref().is_some_and(|cached| {
+            cached.key == key
+                && cached.tile == tile
+                && cached.width == width
+                && cached.height == height
+        });
+        let taken = if hit { self.id_bake_cache.take() } else { None };
+        if let Some(cached) = taken {
+            let id = self.select_id_mask(tile, &cached.bytes, width, height, local_uv);
+            self.id_bake_cache = Some(cached);
+            return id;
+        }
+
+        let filtered;
+        let bake_mesh = if whole_mesh {
+            mesh
+        } else {
+            filtered = umber_bake::ao::filter_mesh_for_tile(mesh, tile);
+            &filtered
+        };
         let bytes = bake_id_mesh(
             &self.device,
             &self.queue,
-            mesh,
+            bake_mesh,
             &IdBakeParams {
                 flavor: IdFlavor::Triangle,
                 width,
                 height,
             },
         )?;
-        self.select_id_mask(tile, &bytes, width, height, uv)
+        // The test-only bake counter (the cache-hit test observes it via
+        // `id_bakes_run`): the field is `#[cfg(test)]`-gated, so the
+        // increment must be too — as a cfg-guarded BLOCK, the one legal
+        // statement form (the claw's bare attribute on the assignment
+        // expression was E0658, and it left the increment in release
+        // builds where the field does not exist — E0609; caught by the
+        // first real compile, the 2026-10-20 degraded-mode battery).
+        #[cfg(test)]
+        {
+            self.id_bakes += 1;
+        }
+        // Replace the entry only after the selection succeeded: an error
+        // path leaves the previous entry untouched.
+        let id = self.select_id_mask(tile, &bytes, width, height, local_uv)?;
+        self.id_bake_cache = Some(CachedIdBake {
+            key,
+            tile,
+            width,
+            height,
+            bytes,
+        });
+        Ok(id)
     }
 
     /// Reverts the last stroke (paint or retouch — one entry per stroke);
@@ -5389,6 +5502,14 @@ impl PaintState {
         self.targets.len()
     }
 
+    /// ID bakes actually run (cache misses) since construction (test
+    /// observability for [`Self::bake_and_select_id`]'s single-entry
+    /// cache: a repeat click on the same tile must not move this).
+    #[cfg(test)]
+    pub(crate) fn id_bakes_run(&self) -> u64 {
+        self.id_bakes
+    }
+
     /// Staged dabs since construction (test observability; see the
     /// stroke soak's zero-drop assert in umber-app's `perf_soak` and the
     /// symmetry staging test). Behind `test-hooks` for the cross-crate
@@ -5445,6 +5566,48 @@ fn clone_offset_texels(offset_uv: (f32, f32), texels_per_uv: f32) -> [f32; 2] {
 fn tile_uv_offset(tile: u16) -> (f32, f32) {
     let index = tile.saturating_sub(FIRST_TILE);
     (f32::from(index % 10), f32::from(index / 10))
+}
+
+/// Rebases a click `uv` into `tile`'s local `[0, 1]` frame by subtracting
+/// the tile's integer UV offsets ([`tile_uv_offset`]) — the UDIM twin of
+/// [`local_texel`]'s subtraction, without the V flip or texel scaling
+/// (`select_id`, not this helper, applies the texel-center V-flipped
+/// mapping). Tile 1001 is the identity; a click at `u = 1.25` on tile 1002
+/// (offset `(1, 0)`) becomes `0.25`, which `select_id` then resolves to
+/// texel `round(0.25 * w - 0.5)`.
+fn rebase_uv_for_tile(uv: [f32; 2], tile: u16) -> [f32; 2] {
+    let (tile_u, tile_v) = tile_uv_offset(tile);
+    [uv[0] - tile_u, uv[1] - tile_v]
+}
+
+/// Content key of `mesh`'s ID bake for `flavor`: a
+/// [`std::collections::hash_map::DefaultHasher`] over the mesh's `indices`,
+/// the `uvs` f32 bit patterns, `positions.len()`, and a flavor tag. The
+/// same mesh at the same tile and mask size yields the same key, so the
+/// second click reuses the bake; nudging any UV bit or changing the
+/// topology yields a different key.
+///
+/// The cost is one O(tris) CPU hash per click — roughly 20 MB of
+/// UV/indices touched at 1M triangles — against a full-frame GPU compute
+/// bake plus readback (16M texels and ~64 MB at the 4K default). The key
+/// folds in the flavor (via a tag, since [`IdFlavor`] does not derive
+/// `Hash`) so a future Material/island bake can never hit a Triangle entry
+/// (see [`PaintState::bake_and_select_id`]).
+fn id_bake_key(mesh: &umber_mesh::MeshData, flavor: IdFlavor) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mesh.indices.hash(&mut hasher);
+    for uv in &mesh.uvs {
+        uv[0].to_bits().hash(&mut hasher);
+        uv[1].to_bits().hash(&mut hasher);
+    }
+    mesh.positions.len().hash(&mut hasher);
+    let flavor_tag: u8 = match flavor {
+        IdFlavor::Triangle => 0,
+        IdFlavor::Material => 1,
+    };
+    flavor_tag.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Global UV of a tile-local texel CENTER (the exact inverse of
@@ -9727,6 +9890,128 @@ mod tests {
             Err(IdSelectError::StrokeInFlight)
         ));
         state.end_stroke();
+    }
+
+    // --- ID-mask cache + tile rebase (W-C3a lane P1) ---
+
+    /// The pure key fn (W-C3a): content-derived, so the same mesh keys the
+    /// same and any UV/topology edit keys differently; the flavor is folded
+    /// in so a future Material bake can never hit a Triangle entry.
+    #[test]
+    fn id_bake_key_is_content_derived_and_flavor_separated() {
+        let mesh = two_tile_strip();
+        let key = id_bake_key(&mesh, IdFlavor::Triangle);
+        // Same content, same key — this is what makes the second click a hit.
+        assert_eq!(id_bake_key(&mesh, IdFlavor::Triangle), key);
+
+        // One nudged UV bit is a different key: no stale hit after an edit.
+        let mut nudged = mesh.clone();
+        nudged.uvs[0][0] += 0.001;
+        assert_ne!(
+            id_bake_key(&nudged, IdFlavor::Triangle),
+            key,
+            "one UV nudge must change the key"
+        );
+
+        // The flavor is folded in (via a tag): a Material request never hits
+        // this Triangle entry.
+        assert_ne!(
+            id_bake_key(&mesh, IdFlavor::Material),
+            key,
+            "flavor must separate keys"
+        );
+
+        // `positions.len()` participates: a topology-only change still misses.
+        let mut fewer = mesh.clone();
+        fewer.positions.pop();
+        assert_ne!(id_bake_key(&fewer, IdFlavor::Triangle), key);
+    }
+
+    /// The UV rebase helper (W-C3a): subtract the tile's integer offsets.
+    /// Tile 1001 is the identity; tile 1002 shifts U; tile 1011 shifts V
+    /// (the tens-come-from-v trap).
+    #[test]
+    fn rebase_uv_for_tile_subtracts_the_tile_offset() {
+        // Tile 1001: offsets (0, 0) — bit-identical to the raw UV.
+        assert_eq!(rebase_uv_for_tile([0.25, 0.75], FIRST_TILE), [0.25, 0.75]);
+        assert_eq!(rebase_uv_for_tile([1.0, 0.0], FIRST_TILE), [1.0, 0.0]);
+
+        // Tile 1002: U offset 1. u = 1.25 -> 0.25 exactly (representable),
+        // which `select_id` resolves to texel round(0.25 * w - 0.5).
+        assert_eq!(rebase_uv_for_tile([1.25, 0.5], 1002), [0.25, 0.5]);
+
+        // Tile 1011: V offset 1. 1.2_f32 - 1.0 is 0.20000005 in f32, so
+        // assert the derived expression exactly (the `local_texel` test's
+        // precedent), not the literal 0.2_f32.
+        assert_eq!(rebase_uv_for_tile([0.5, 1.2], 1011), [0.5, 1.2_f32 - 1.0]);
+    }
+
+    /// The single-entry cache, end to end (W-C3a): on a two-tile mesh a
+    /// click in tile 1002 bakes THAT tile's rebased geometry and selects the
+    /// region there; a repeat click on the same tile is a cache hit (no GPU
+    /// bake), and a click on the other tile misses (the entry holds the last
+    /// tile only).
+    #[test]
+    fn two_tile_id_bake_selects_the_clicked_tile_and_caches() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mesh = two_tile_strip();
+        let mut state =
+            PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
+        assert_eq!(state.id_bakes_run(), 0, "no bake yet");
+
+        // Tile 1002: u = 1.25 -> local 0.25 -> x = round(0.25 * 32 - 0.5) =
+        // 8; v = 0.5 -> y = round((1 - 0.5) * 32 - 0.5) = 16. The tile-1002
+        // half covers the full 0..1 square, so this texel is covered.
+        let click_1002 = [1.25, 0.5];
+        let id_1002 = state
+            .bake_and_select_id(&mesh, click_1002)
+            .expect("tile-1002 click bakes + selects");
+        assert_eq!(state.id_bakes_run(), 1, "first click is a miss");
+        let plane = state
+            .quick_mask()
+            .coverage(1002)
+            .expect("the click materialized tile 1002's plane")
+            .to_vec();
+        // Can-fail: without the UV rebase, select_id would clamp u = 1.25 to
+        // the frame edge and select texel (31, 16)'s region instead, leaving
+        // the clicked texel at 0.0.
+        assert_eq!(
+            plane[16 * ID_SIZE as usize + 8],
+            1.0,
+            "the clicked tile-1002 texel is in the selected region"
+        );
+        assert!(
+            plane.contains(&0.0),
+            "the tile's two triangles bake to different regions — a one-region bake cannot pass"
+        );
+        assert!(
+            state.quick_mask().coverage(FIRST_TILE).is_none(),
+            "the click selected tile 1002, not tile 1001"
+        );
+
+        // Same tile again: key, flavor (in key), tile and frame all match, so
+        // the bake is reused — the counter must not move.
+        let again = state
+            .bake_and_select_id(&mesh, click_1002)
+            .expect("second click hits the cache");
+        assert_eq!(again, id_1002, "the same region id");
+        assert_eq!(
+            state.id_bakes_run(),
+            1,
+            "the second click reuses the bake (cache hit)"
+        );
+
+        // A different tile is a miss: the entry holds only the last tile.
+        state
+            .bake_and_select_id(&mesh, [0.25, 0.5])
+            .expect("tile-1001 click bakes + selects");
+        assert_eq!(state.id_bakes_run(), 2, "switching tiles re-bakes");
+        assert!(
+            state.quick_mask().coverage(FIRST_TILE).is_some(),
+            "the tile-1001 click selected on tile 1001"
+        );
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---
