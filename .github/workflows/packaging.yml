@@ -168,10 +168,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install flatpak + builder
+      - name: Install flatpak + builder (+ the SVG pixbuf loader the compose needs)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          # librsvg2-common: flatpak-builder's export phase runs appstreamcli
+          # compose host-side, and asc-image loads the hicolor SVG icon through
+          # gdk-pixbuf — whose svg loader module ships in librsvg2-common, a
+          # recommends-only package that --no-install-recommends skips. Without
+          # it the compose dies 'E: file-read-error / Unrecognized image file
+          # format' and drops the component (runs 40026754260, 40035240398).
+          # Proof + mechanism:
+          # docs/loop/kill-reports/2026-10-23-flatpak-compose-svg-loader.md
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
 
       - name: Add Flathub + install 26.08 platform/SDK
         run: |
@@ -180,18 +188,14 @@ jobs:
 
       - name: Build the Flatpak
         run: |
-          # --disable-rofiles-fuse: the export-phase appstreamcli compose died
-          # reading the hicolor icon THROUGH the rofiles-fuse view (run
-          # 40026754260: E: file-read-error on org.umber.Umber, component
-          # dropped, E: filters-but-no-output). The exact inputs compose GREEN
-          # on a plain tree with the identical compose lib (noble
-          # appstream-compose 1.0.2-1build6); the only local mutation that
-          # reproduces the exact error pair is an unreadable icon — an absent
-          # icon raises a different tag, so the runner FOUND the SVG and
-          # failed reading it through the layer. flatpak-builder's own
-          # documented workaround, present in the runner's 1.4.2
-          # (builder-main.c:103). Evidence:
-          # docs/loop/kill-reports/2026-10-23-flatpak-compose-rofiles.md
+          # --disable-rofiles-fuse is runner hardening, NOT the compose fix: the
+          # 26.04-rotation image died in the bwrap/rofiles layer before the
+          # build could start (see the pin note above), and this workspace is
+          # disposable, so the rofiles read-only guard buys nothing. The export
+          # compose's 'E: file-read-error' was never the rofiles layer — the
+          # no-rofiles run 40035240398 failed identically; the real mechanism
+          # was the missing gdk-pixbuf svg loader, fixed one step above.
+          # Evidence: docs/loop/kill-reports/2026-10-23-flatpak-compose-svg-loader.md
           sudo flatpak-builder --disable-rofiles-fuse --force-clean --repo=repo build-dir flatpak/org.umber.Umber.json
 
       - name: Export single-file bundle
