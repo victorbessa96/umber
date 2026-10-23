@@ -40,20 +40,129 @@ pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
     extract_first_mesh(&data)
 }
 
-/// Loads a `.usdz` (package) file: its first layer's first Mesh prim.
+/// Loads a `.usdz` (package) file: the root layer's first Mesh prim,
+/// then — when the root authors none — its sublayer stack.
 ///
 /// The package is a zip; its root layer is the first `.usdc`/`.usda`/
 /// `.usd` entry (the USDZ spec's rule), opened through
 /// `openusd::usdz::Archive`. This used to call `usdc::read_file` on the
 /// zip itself — which reads a bare crate — so no valid `.usdz` had ever
 /// loaded (panic-hunt finding #8, `bug_usdz_valid_package_does_not_load`).
+///
+/// Beyond the first layer (the release checklist's
+/// `.usdz-beyond-first-layer` deferral, closed here): real packages
+/// compose — the root layer often sublayers the geometry while holding
+/// only materials or metadata. The walk keeps first-layer precedence (a
+/// root that authors a Mesh never reads a sublayer), then follows the
+/// root's `subLayers` in authored order (USD opinion strength),
+/// depth-first, resolving each path INSIDE the package. A sublayer the
+/// package does not carry, or that fails to open, is skipped — USD's
+/// own layer-registry tolerance (a missing sublayer must not abort the
+/// load; a later one may hold the mesh). The walk is cycle-guarded and
+/// depth-bounded: a sublayer graph is untrusted input. A nested
+/// `.usdz` entry composes one level deep through `Archive::read`'s own
+/// first-layer rule; a nested package's sublayers are not walked (the
+/// named boundary).
 pub fn load_usdz(path: &Path) -> Result<MeshData, ImportError> {
     let mut archive = openusd::usdz::Archive::open(path)
         .map_err(|e| ImportError::Usd(format!("usdz: open failed: {e}")))?;
-    let layer = archive
+    let root_layer = archive
         .read_first_layer()
         .map_err(|e| ImportError::Usd(format!("usdz: no readable root layer: {e}")))?;
-    extract_first_mesh(layer.as_ref())
+    let root = SdfPath::abs_root();
+    if let Some(mesh_path) = find_first_mesh(root_layer.as_ref(), &root) {
+        return build_mesh_from_spec(root_layer.as_ref(), &mesh_path);
+    }
+    let mut visited = vec![archive.first_layer_name().unwrap_or_default()];
+    for authored in sublayer_names(root_layer.as_ref(), &root)? {
+        if let Some(mesh) = walk_sublayers(&mut archive, &authored, &mut visited, 0)? {
+            return Ok(mesh);
+        }
+    }
+    Err(ImportError::Usd(
+        "usd: no Mesh prim in document".to_string(),
+    ))
+}
+
+/// The pseudo-root's `subLayers` list, authored order. The usda parser
+/// stores it as `Value::StringVec` (its own test pins
+/// `["./someAnimation.usd", ...]`); a crate layer that carries
+/// pseudo-root metadata may spell the same list as asset paths. A layer
+/// that authors none yields an empty vec — the walk simply ends.
+fn sublayer_names(data: &dyn AbstractData, root: &SdfPath) -> Result<Vec<String>, ImportError> {
+    match data.try_field(root, "subLayers") {
+        Ok(Some(v)) => match v.as_ref() {
+            Value::StringVec(names) => Ok(names.to_vec()),
+            Value::AssetPathVec(assets) => {
+                Ok(assets.iter().map(|a| a.as_str().to_string()).collect())
+            }
+            _ => Ok(Vec::new()),
+        },
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => Err(ImportError::Usd(format!(
+            "usd: subLayers decode failed: {e}"
+        ))),
+    }
+}
+
+/// Normalizes one authored sublayer ref to a package entry name:
+/// `@./geo.usda@` → `geo.usda`. USDZ entries are package-relative (the
+/// spec forbids escaping the package), so this is purely lexical:
+/// strip the `@…@` quoting and any leading `./` runs; a path that
+/// still climbs (`..`) or goes absolute names nothing inside the
+/// package and yields `None`.
+fn normalize_sublayer(authored: &str) -> Option<String> {
+    let mut name = authored.trim().trim_matches('@').trim();
+    while let Some(rest) = name.strip_prefix("./") {
+        name = rest.trim_start_matches('/');
+    }
+    if name.is_empty() || name.starts_with('/') || name.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Depth-first walk of one sublayer: open it inside the package, look
+/// for a Mesh, then recurse into its own sublayers. `visited` holds the
+/// normalized entry names already walked (the cycle guard — the root's
+/// own name seeds it); `depth` bounds the chain. A sublayer that is
+/// absent, unreadable, or self-escaping is skipped, not fatal — but a
+/// Mesh that IS found and malformed is a hard error: the document's
+/// first Mesh is broken, and the error contract says so.
+fn walk_sublayers(
+    archive: &mut openusd::usdz::Archive,
+    authored: &str,
+    visited: &mut Vec<String>,
+    depth: usize,
+) -> Result<Option<MeshData>, ImportError> {
+    const MAX_SUB_LAYER_DEPTH: usize = 16;
+    if depth >= MAX_SUB_LAYER_DEPTH {
+        return Ok(None);
+    }
+    let Some(name) = normalize_sublayer(authored) else {
+        return Ok(None);
+    };
+    if visited.iter().any(|v| v == &name) {
+        return Ok(None);
+    }
+    if !archive.contains(&name) {
+        return Ok(None);
+    }
+    let layer = match archive.read(&name) {
+        Ok(layer) => layer,
+        Err(_) => return Ok(None),
+    };
+    visited.push(name);
+    let root = SdfPath::abs_root();
+    if let Some(mesh_path) = find_first_mesh(layer.as_ref(), &root) {
+        return build_mesh_from_spec(layer.as_ref(), &mesh_path).map(Some);
+    }
+    for sub in sublayer_names(layer.as_ref(), &root)? {
+        if let Some(mesh) = walk_sublayers(archive, &sub, visited, depth + 1)? {
+            return Ok(Some(mesh));
+        }
+    }
+    Ok(None)
 }
 
 /// Depth-first, authoring-order walk: the first prim whose `typeName`
@@ -322,6 +431,8 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
 mod tests {
     use super::*;
 
+    use openusd::usdz::ArchiveWriter;
+
     /// A round-trip fixture built programmatically: a quad authored as
     /// .usda text, parsed by openusd's own parser, serialized to .usdc
     /// bytes with `CrateWriter::write` — never shipped as a binary.
@@ -436,5 +547,198 @@ def Mesh "Cube"
         }
         // UVs zero-filled (none authored).
         assert!(mesh.uvs.iter().all(|u| u[0] == 0.0 && u[1] == 0.0));
+    }
+
+    // --- .usdz packages: the sublayer walk (the release checklist's
+    // `.usdz-beyond-first-layer` deferral, closed). Fixtures are
+    // packages built programmatically through `usdz::ArchiveWriter` —
+    // raw .usda layer texts, stored entries, never shipped binaries.
+
+    /// A quad Mesh layer whose first corner is `first` — the tell that
+    /// distinguishes one quad from another in the precedence tests.
+    fn quad_mesh_body(first: &str) -> String {
+        format!("\ndef Mesh \"Mesh\"\n{{\n    float3[] points = [({first}), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]\n    int[] faceVertexCounts = [4]\n    int[] faceVertexIndices = [0, 1, 2, 3]\n}}\n")
+    }
+
+    fn quad_layer(first: &str) -> String {
+        format!("#usda 1.0\n{}", quad_mesh_body(first))
+    }
+
+    /// A layer that sublayers `names` (authored order) and optionally
+    /// carries its own quad Mesh.
+    fn sublayering_layer(names: &[&str], mesh_first_corner: Option<&str>) -> String {
+        let mut text = String::from("#usda 1.0\n(\n");
+        if !names.is_empty() {
+            let refs: Vec<String> = names.iter().map(|n| format!("@./{n}@")).collect();
+            text.push_str(&format!("    subLayers = [{}]\n", refs.join(", ")));
+        }
+        text.push_str(")\n");
+        if let Some(first) = mesh_first_corner {
+            text.push_str(&quad_mesh_body(first));
+        }
+        text
+    }
+
+    fn write_usdz(dir_name: &str, file_name: &str, layers: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file_name);
+        let mut zip = ArchiveWriter::new(std::fs::File::create(&path).unwrap());
+        for (name, text) in layers {
+            zip.add_layer(name, text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn usdz_root_mesh_precedes_sublayers() {
+        // First-layer precedence: the walk only fires when the root
+        // layer authors no Mesh. A root WITH a mesh never reads one.
+        let path = write_usdz(
+            "umber-usdz-tests",
+            "root_mesh.usdz",
+            &[
+                (
+                    "root.usda",
+                    &sublayering_layer(&["geo.usda"], Some("-1, -1, 0")),
+                ),
+                ("geo.usda", &quad_layer("9, 9, 9")),
+            ],
+        );
+        let mesh = load_usdz(&path).expect("root mesh loads");
+        assert_eq!(
+            mesh.positions[0],
+            [-1.0, -1.0, 0.0],
+            "the ROOT layer's mesh wins over the sublayer's"
+        );
+    }
+
+    #[test]
+    fn usdz_sublayer_mesh_loads() {
+        let path = write_usdz(
+            "umber-usdz-tests",
+            "sublayer.usdz",
+            &[
+                ("root.usda", &sublayering_layer(&["geo.usda"], None)),
+                ("geo.usda", &quad_layer("-1, -1, 0")),
+            ],
+        );
+        let mesh = load_usdz(&path).expect("the sublayer's mesh loads");
+        assert_eq!(mesh.indices.len(), 6, "the quad fans into 2 tris");
+        assert_eq!(mesh.positions[0], [-1.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn usdz_nested_sublayers_load() {
+        let path = write_usdz(
+            "umber-usdz-tests",
+            "nested.usdz",
+            &[
+                ("root.usda", &sublayering_layer(&["mid.usda"], None)),
+                ("mid.usda", &sublayering_layer(&["leaf.usda"], None)),
+                ("leaf.usda", &quad_layer("2, 2, 2")),
+            ],
+        );
+        let mesh = load_usdz(&path).expect("the leaf's mesh loads through the chain");
+        assert_eq!(mesh.positions[0], [2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn usdz_missing_sublayer_tolerated() {
+        // USD's tolerance rule: a sublayer the package does not carry is
+        // skipped; a later one still holds the mesh.
+        let path = write_usdz(
+            "umber-usdz-tests",
+            "missing_sub.usdz",
+            &[
+                (
+                    "root.usda",
+                    &sublayering_layer(&["gone.usda", "geo.usda"], None),
+                ),
+                ("geo.usda", &quad_layer("-1, -1, 0")),
+            ],
+        );
+        let mesh = load_usdz(&path).expect("the mesh behind the missing sublayer loads");
+        assert_eq!(mesh.positions[0], [-1.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn usdz_sublayer_cycle_terminates() {
+        // a -> b -> a with no Mesh anywhere: the cycle guard ends the
+        // walk instead of recursing forever.
+        let path = write_usdz(
+            "umber-usdz-tests",
+            "cycle.usdz",
+            &[
+                ("root.usda", &sublayering_layer(&["a.usda"], None)),
+                ("a.usda", &sublayering_layer(&["b.usda"], None)),
+                ("b.usda", &sublayering_layer(&["a.usda"], None)),
+            ],
+        );
+        let err = load_usdz(&path).expect_err("no mesh anywhere in the cycle");
+        assert!(
+            err.to_string().contains("no Mesh prim"),
+            "the walk terminates with the honest error: {err}"
+        );
+    }
+
+    #[test]
+    fn usdz_escaping_sublayer_rejected() {
+        // Package-relative only: `../outside.usda` and `/abs.usda`
+        // name nothing inside the package and are skipped.
+        let root = "#usda 1.0\n(\n    subLayers = [@../outside.usda@, @/abs.usda@]\n)\n";
+        let path = write_usdz("umber-usdz-tests", "escape.usdz", &[("root.usda", root)]);
+        let err = load_usdz(&path).expect_err("nothing inside the package to load");
+        assert!(err.to_string().contains("no Mesh prim"), "{err}");
+    }
+
+    #[test]
+    fn usdz_sublayer_depth_bound_enforced() {
+        // A 20-deep chain with the mesh only at the far end: the walk
+        // stops at MAX_SUB_LAYER_DEPTH (16) and reports no mesh —
+        // bounded, not overflowed.
+        let mut layers: Vec<(String, String)> = vec![(
+            "root.usda".to_string(),
+            sublayering_layer(&["l1.usda"], None),
+        )];
+        for i in 1..20 {
+            layers.push((
+                format!("l{i}.usda"),
+                sublayering_layer(&[&format!("l{}.usda", i + 1)], None),
+            ));
+        }
+        layers.push(("l20.usda".to_string(), quad_layer("3, 3, 3")));
+        let borrowed: Vec<(&str, &str)> = layers
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
+        let path = write_usdz("umber-usdz-tests", "deep.usdz", &borrowed);
+        let err = load_usdz(&path).expect_err("beyond the depth bound");
+        assert!(err.to_string().contains("no Mesh prim"), "{err}");
+    }
+
+    #[test]
+    fn usdz_sublayer_depth_bound_reachable() {
+        // The positive half: a 15-deep chain IS within the bound and
+        // loads — the bound bounds hostile chains, not real ones.
+        let mut layers: Vec<(String, String)> = vec![(
+            "root.usda".to_string(),
+            sublayering_layer(&["l1.usda"], None),
+        )];
+        for i in 1..15 {
+            layers.push((
+                format!("l{i}.usda"),
+                sublayering_layer(&[&format!("l{}.usda", i + 1)], None),
+            ));
+        }
+        layers.push(("l15.usda".to_string(), quad_layer("4, 4, 4")));
+        let borrowed: Vec<(&str, &str)> = layers
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
+        let path = write_usdz("umber-usdz-tests", "deep_ok.usdz", &borrowed);
+        let mesh = load_usdz(&path).expect("a 15-deep chain loads");
+        assert_eq!(mesh.positions[0], [4.0, 4.0, 4.0]);
     }
 }
