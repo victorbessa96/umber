@@ -37,6 +37,14 @@
 //! AO keeps its baked source. A channel nobody painted is not invented:
 //! outputs that need it are skipped and named, as before.
 //!
+//! Export-size fit (2026-10-19): the size picker above is independent of
+//! the paint target's size, so a set painted at 4K and exported at 1K used
+//! to drop ALL its paint (the readbacks declined any other size). Both
+//! readbacks now FIT a differently-sized target to the export size
+//! (`bake_sources::fit_channel_to_export`), so the paint survives. The fit
+//! is bilinear: a large minification aliases, and box-filter minification
+//! is the named deferral.
+//!
 //! Still synchronous: one AO bake + a handful of PNG writes at 512² is
 //! sub-second. The Bakes panel moved its bake onto a worker thread (wave 5,
 //! `bakes_panel.rs` module docs); giving Export the same `std::thread` +
@@ -223,9 +231,10 @@ pub struct ExportContext<'a> {
 /// What the badge shows before an export: the shared pick-fn priority
 /// over liveness probes (paint session present? graph output at the
 /// export size?), so the badge and the driver can never disagree. Pure
-/// logic — directly testable without a GPU. `painted_live` must already
-/// be size-gated ([`painted_at_size`]): the driver's painted bridge
-/// declines a target of another size, so the badge does too.
+/// logic — directly testable without a GPU. `painted_live` is the
+/// session-presence probe ([`painted_at_size`]): the painted readbacks
+/// now FIT any target size, so a live session always reads as Painted —
+/// the flat placeholder's size note is unreachable while one exists.
 pub fn prospective_base_source(
     painted_live: bool,
     graph: Option<&GraphPanel>,
@@ -242,13 +251,15 @@ pub fn prospective_base_source(
     bake_sources::pick_base_color_source(painted_live, probe)
 }
 
-/// Whether a paint session can feed Base Color at the export `size`: a
-/// live session whose targets are exactly `size`×`size` (the driver's
-/// painted bridge declines any other size —
-/// [`bake_sources::painted_base_color_tile`]). `None` = no session.
-/// Pure logic.
-pub fn painted_at_size(paint_target_size: Option<(u32, u32)>, size: u32) -> bool {
-    paint_target_size == Some((size, size))
+/// Whether paint can feed Base Color: now simply "a session exists". The
+/// painted readbacks FIT any target size to the export size
+/// ([`bake_sources::fit_channel_to_export`] through
+/// [`bake_sources::painted_base_color_tile`]), so a session painted at
+/// another size no longer declines and the target's size is irrelevant to
+/// the predicate. `None` = no session. Pure logic. (The `size` argument is
+/// gone with the decline it gated; the name is kept for path stability.)
+pub fn painted_at_size(paint_target_size: Option<(u32, u32)>) -> bool {
+    paint_target_size.is_some()
 }
 
 /// Which UDIM tiles an export writes, and which it skips: the paint
@@ -611,11 +622,11 @@ impl ExportDialog {
                 .map(|tiles| format!(" [{tiles}]"))
                 .unwrap_or_default();
             let paint_size = ctx.paint.map(PaintState::target_size);
-            match prospective_base_source(
-                painted_at_size(paint_size, self.size),
-                ctx.graph,
-                self.size,
-            ) {
+            // A live session is always Painted now (the painted readbacks
+            // fit any target size), so the flat placeholder's
+            // Some(paint_size) arm is unreachable while a session exists;
+            // it is kept (defensive if the pick ever re-gates on size).
+            match prospective_base_source(painted_at_size(paint_size), ctx.graph, self.size) {
                 BaseColorSource::Painted => {
                     let args = [("tiles", FluentValue::from(tiles_note))];
                     ui.label(tr_args("export.source-painted", args));
@@ -1227,6 +1238,17 @@ mod tests {
             prospective_base_source(false, Some(&fresh), 512),
             BaseColorSource::FlatPlaceholder
         );
+    }
+
+    #[test]
+    fn painted_at_size_is_now_just_session_presence() {
+        // RE-PINNED contract (2026-10-19): a session at ANY size reads as
+        // painted — the readbacks fit a differently-sized target to the
+        // export size — so the predicate is session PRESENCE, not a size
+        // match. Before the fix a 4096 target at size 512 was `false`.
+        assert!(painted_at_size(Some((512, 512))));
+        assert!(painted_at_size(Some((4096, 4096))));
+        assert!(!painted_at_size(None));
     }
 
     #[test]

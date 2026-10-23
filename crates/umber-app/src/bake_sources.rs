@@ -16,6 +16,18 @@
 //! paint-what-you-export. V1 scope is Base Color ONLY: normal/AO/etc.
 //! keep their baked sources (paint-per-channel compositing is a later
 //! slice).
+//!
+//! Export-size fit (2026-10-19): the Export dialog's size picker is
+//! independent of the paint target's size, so both painted readbacks
+//! ([`painted_base_color_tile`], [`painted_channel_tile`]) FIT a
+//! present-but-differently-sized target to `size×size` through
+//! [`fit_channel_to_export`] instead of declining — a set painted at 4K
+//! and exported at 1K keeps its paint instead of silently dropping it to
+//! flat/baked bytes. The fit is bilinear only
+//! (`umber_paint::material_layer::resample_image_rgba8`): a large
+//! minification (4K→1K) undersamples the source footprint and aliases;
+//! box-filter minification is the named deferral. Only a genuinely
+//! ABSENT target still reads as `None`.
 
 use anyhow::Context as _;
 
@@ -91,13 +103,13 @@ pub fn painted_base_color(
 }
 
 /// The per-tile painted source (UDIM slice 5): `tile`'s composite texture
-/// read back as RGBA8, via [`PaintState::tile_target`]. `None` when there
-/// is no session, nothing ever routed to `tile`, the target isn't
-/// `size`×`size` (no readback is paid for bytes the size gate would
-/// reject — up to 256 MiB at 8K), or the readback fails (logged) — the
-/// caller then falls back to the flat placeholder. Same-thread reasoning
-/// as [`painted_base_color`], and the same stage-4 one-frame-staleness
-/// note (the signature stays shared for the Export dialog).
+/// read back as RGBA8, via [`PaintState::tile_target`], then FIT to
+/// `size`×`size` ([`fit_channel_to_export`]) when the target was painted
+/// at another size. `None` only when there is no session, nothing ever
+/// routed to `tile`, or the readback fails (logged) — the caller then
+/// falls back to the flat placeholder. Same-thread reasoning as
+/// [`painted_base_color`], and the same stage-4 one-frame-staleness note
+/// (the signature stays shared for the Export dialog).
 pub fn painted_base_color_tile(
     paint: Option<&PaintState>,
     tile: u16,
@@ -106,10 +118,9 @@ pub fn painted_base_color_tile(
     queue: &umber_gpu::WgpuQueue,
 ) -> Option<Vec<u8>> {
     let target = paint?.tile_target(tile)?;
-    if target.dimensions() != (size, size) {
-        return None;
-    }
-    read_back(target, device, queue)
+    let dims = target.dimensions();
+    let bytes = read_back(target, device, queue)?;
+    Some(fit_channel_to_export(bytes, dims, size, "baseColor"))
 }
 
 /// Shared readback for both painted sources.
@@ -125,6 +136,37 @@ fn read_back(
             None
         }
     }
+}
+
+/// Fits a painted readback to the export size: byte-exact passthrough when
+/// `dims` already matches `size×size`, else a bilinear fit through
+/// `umber_paint::material_layer::resample_image_rgba8` (texel-centre
+/// aligned, edge-clamped). `channel` rides through so a `"normal"`
+/// readback renormalizes after the lerp. Pure — no GPU, directly testable.
+///
+/// This is the decision both painted readbacks ([`painted_base_color_tile`],
+/// [`painted_channel_tile`]) share: a present-but-differently-sized target
+/// is FIT, never declined; a genuinely ABSENT target still returns `None`
+/// from those readbacks.
+///
+/// Aliasing boundary: the fit is bilinear only, so a large minification
+/// (a 4K target exported at 1K) undersamples the source footprint and
+/// aliases. Box-filter minification is the named deferral — bilinear is
+/// the documented v1 behavior.
+pub fn fit_channel_to_export(
+    bytes: Vec<u8>,
+    dims: (u32, u32),
+    size: u32,
+    channel: &str,
+) -> Vec<u8> {
+    let (w, h) = dims;
+    if w == size && h == size {
+        // Identity: the caller's bytes pass through EXACTLY (no re-encode,
+        // no float round-trip) — the same contract `resample_image_rgba8`
+        // gives for equal sizes.
+        return bytes;
+    }
+    umber_paint::material_layer::resample_image_rgba8(&bytes, w, h, size, size, channel)
 }
 
 /// A flat opaque-white Base Color map — the placeholder the export
@@ -559,8 +601,11 @@ pub fn fill_unpainted_partners(
     filled
 }
 
-/// The GPU half: `channel`'s composite on `tile`, read back when it
-/// exists at exactly `size²` (reads never materialize a channel).
+/// The GPU half: `channel`'s composite on `tile`, read back and FIT to
+/// `size²` ([`fit_channel_to_export`]) when the target was painted at
+/// another size (`channel` rides through so a `"normal"` readback
+/// renormalizes). Reads never materialize a channel; only an absent
+/// channel yields `None`.
 pub fn painted_channel_tile(
     paint: Option<&PaintState>,
     tile: u16,
@@ -570,10 +615,9 @@ pub fn painted_channel_tile(
     queue: &umber_gpu::WgpuQueue,
 ) -> Option<Vec<u8>> {
     let target = paint?.channel_target(tile, channel)?;
-    if target.dimensions() != (size, size) {
-        return None;
-    }
-    read_back(target, device, queue)
+    let dims = target.dimensions();
+    let bytes = read_back(target, device, queue)?;
+    Some(fit_channel_to_export(bytes, dims, size, channel))
 }
 
 /// One tile's export-ready maps and which source fed its Base Color.
@@ -726,6 +770,74 @@ mod tests {
             get(umber_export::MapKind::AmbientOcclusion),
             Some(vec![9, 9, 9, 255])
         );
+    }
+
+    #[test]
+    fn fit_channel_identity_passes_bytes_through_byte_exact() {
+        // The identity arm returns the caller's bytes untouched: a
+        // same-size fit is a passthrough, never a resample/re-encode.
+        let src = vec![7, 200, 3, 255, 0, 128, 255, 12, 9, 40, 9, 9, 1, 2, 3, 4];
+        let out = fit_channel_to_export(src.clone(), (2, 2), 2, "baseColor");
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn fit_channel_keeps_a_constant_image_constant_on_upsample() {
+        // 2×2 constant opaque image fit to 4×4: the bilinear weights sum
+        // to 1 over equal corner samples, so every output texel is the
+        // SAME constant, and `f32_to_u8(v/255) = round(v)` round-trips it.
+        let v = 77u8;
+        let src = [v, v, v, 255].repeat(4);
+        let out = fit_channel_to_export(src, (2, 2), 4, "baseColor");
+        assert_eq!(out.len(), 4 * 4 * 4);
+        for texel in out.chunks_exact(4) {
+            assert_eq!(texel, [v, v, v, 255]);
+        }
+    }
+
+    #[test]
+    fn fit_channel_upsamples_a_ramp_to_the_hand_derived_bytes() {
+        // A 2×1 gray ramp [0, 255] (alpha 255) fit to size 4. The fit
+        // targets `size²` (4×4), and a 1-tall source clamps to row 0 for
+        // EVERY dst row, so each of the 4 rows is the derived 4×1 ramp.
+        // Lane value from `resample_image_rgba8`'s formula (src_w=2,
+        // dst_w=4; edge-clamped, texel-centre aligned):
+        //   dx=0: sx −0.25 → 0.0,  fx=0.0  → 0·1   + 255·0    = 0
+        //   dx=1: sx  0.25,        fx=0.25 → 0·0.75 + 255·0.25 = 63.75
+        //   dx=2: sx  0.75,        fx=0.75 → 0·0.25 + 255·0.75 = 191.25
+        //   dx=3: sx  1.25 → 1.0,  fx=0.0  → texel 1           = 255
+        // Quantized by `f32_to_u8`: round(63.75) = 64, round(191.25) = 191.
+        let row = [
+            0u8, 0, 0, 255, 64, 64, 64, 255, 191, 191, 191, 255, 255, 255, 255, 255,
+        ];
+        let src = vec![0, 0, 0, 255, 255, 255, 255, 255];
+        let out = fit_channel_to_export(src, (2, 1), 4, "baseColor");
+        let expected: Vec<u8> = row.repeat(4);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn fit_channel_renormalizes_the_normal_channel() {
+        // A flat tangent-space normal (128, 128, 255) decodes to an
+        // already-unit vector, so the normal arm returns it unchanged
+        // (2×2 → 4×4 is a true resample, not the identity early-return).
+        let flat = [128u8, 128, 255, 255].repeat(4);
+        let out = fit_channel_to_export(flat, (2, 2), 4, "normal");
+        assert_eq!(out.len(), 4 * 4 * 4);
+        for texel in out.chunks_exact(4) {
+            assert_eq!(texel, [128, 128, 255, 255]);
+        }
+
+        // And the arm really RUNS: (255, 255, 128) decodes to
+        // (1, 1, 0.0039), length 1.4142, renormalized to
+        // (0.7071, 0.7071, 0.0028) → (218, 218, 128) — while the same
+        // bytes through a non-normal channel pass through UNCHANGED. A fit
+        // that ignored `channel` would return (255, 255, 128) for both.
+        let tilted = [255u8, 255, 128, 255].repeat(4);
+        let normal_fit = fit_channel_to_export(tilted.clone(), (2, 2), 4, "normal");
+        assert_eq!(&normal_fit[..4], &[218, 218, 128, 255]);
+        let base_fit = fit_channel_to_export(tilted, (2, 2), 4, "baseColor");
+        assert_eq!(&base_fit[..4], &[255, 255, 128, 255]);
     }
 
     #[test]
@@ -1390,10 +1502,13 @@ mod tests {
     }
 
     #[test]
-    fn painted_tile_source_skips_a_target_of_another_size() {
-        // The export-size picker can ask for 8K while the paint target is
-        // 512: the bridge must decline (flat placeholder, honestly
-        // badged) instead of reading back bytes the size gate rejects.
+    fn painted_tile_source_fits_a_target_of_another_size() {
+        // The export-size picker can ask for a size other than the paint
+        // target's: the bridge must FIT the readback to the export size
+        // (bilinear) instead of declining. Same size is byte-exact
+        // passthrough; another size resamples to the export dims
+        // (here 512→256), so the old "decline any other size" contract
+        // is RE-PINNED — named behavior change, not a silent edit.
         let Some((device, queue)) = try_request_device() else {
             return;
         };
@@ -1402,7 +1517,9 @@ mod tests {
         assert_eq!(paint.target_size(), (512, 512));
         let at_512 = painted_base_color_tile(Some(&paint), 1001, 512, &device, &queue);
         assert_eq!(at_512.map(|b| b.len()), Some(512 * 512 * 4));
-        assert!(painted_base_color_tile(Some(&paint), 1001, 8192, &device, &queue).is_none());
+        let at_256 = painted_base_color_tile(Some(&paint), 1001, 256, &device, &queue)
+            .expect("another size is fit, not declined");
+        assert_eq!(at_256.len(), 256 * 256 * 4);
     }
 
     // --- Skew-correction bridge (§6:57) ---
