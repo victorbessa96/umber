@@ -17,6 +17,7 @@ pub mod polygon_fill;
 pub mod raycast;
 pub mod seam;
 pub mod seam_mirror;
+pub mod tangents;
 pub mod udim;
 pub mod usd;
 pub mod usdc;
