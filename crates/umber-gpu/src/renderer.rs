@@ -2174,6 +2174,14 @@ mod tests {
         // explicit import here (clippy would flag it unused).
         use super::super::*;
         use crate::ibl::{EnvFormat, EnvIrradiance};
+        // The sweep's Solo/Preview height arm's channel enum lives at
+        // the crate root's re-export; the golden tests reference it
+        // (ViewMode::Solo(SoloChannel::Height)) and the glob above
+        // does not carry it — caught by the CI's `--features gpu`
+        // leg on run 40017411324 (the authored-blind sweep never
+        // compiled the feature-on shape; E0433 at renderer.rs:4165
+        // + :4186).
+        use crate::SoloChannel;
 
         fn try_request_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
             let instance = wgpu::Instance::default();
