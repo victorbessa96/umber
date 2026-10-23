@@ -37,7 +37,10 @@
 //!    opacity yields 0) — and an evicted (transparent) tile would nuke the
 //!    composite instead of passing through. The kernel therefore gates by
 //!    coverage `cov = src_alpha × opacity`: `out = dst + (blend − dst) × cov`,
-//!    with `blend` from the reference arms. For opaque sources (`src_alpha = 1`)
+//!    with `blend` from the reference arms. Replace is the one exception:
+//!    the mode's contract bypasses opacity AND source-alpha grading
+//!    (`cov = mask × presence` — see `composite_pixel_masked`); every
+//!    other mode gates exactly as written. For opaque sources (`src_alpha = 1`)
 //!    the op order is bit-identical to `composite_channel`, so the oracle test
 //!    pins exact equality there; for transparent sources the layer is a no-op,
 //!    which is the only sane reading of "missing tile comes back transparent".
@@ -472,7 +475,7 @@ fn cs_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
         o = 0.0;
     }
     o = clamp(o, 0.0, 1.0);
-    let sa = clamp01(s.w);
+    var sa = clamp01(s.w);
     // The premultiplied-source gate (judgment 10): un-premultiply before
     // the blend — s = p / a clamped to 1 ("clamp p to a"); a == 0 zeroes
     // the channels, which coverage then ignores (cov == 0, a no-op).
@@ -494,6 +497,20 @@ fn cs_composite(@builtin(global_invocation_id) gid: vec3<u32>) {
     var m = 1.0;
     if (params.mask_enabled == 1u) {
         m = clamp01(textureLoad(mask_tex, xy - org, 0).r);
+    }
+    // Replace bypasses the layer opacity AND the source-alpha grading
+    // (the mode's contract; the CPU oracle and umber-core's primitive
+    // mirror this): a present texel (any alpha > 0) overwrites in full;
+    // a fully-transparent texel stays a no-op — the premultiplied arm
+    // above zeroes its channels and relies on cov == 0. The mask still
+    // clips.
+    if (params.mode == BLEND_REPLACE) {
+        o = 1.0;
+        if (sa > 0.0) {
+            sa = 1.0;
+        } else {
+            sa = 0.0;
+        }
     }
     let cov = sa * o * m;
     let dx = clamp01(d.x);
@@ -802,7 +819,18 @@ pub fn composite_pixel_masked(
     let base_g = clamp01(dst[1]);
     let base_b = clamp01(dst[2]);
     let base_a = clamp01(dst[3]);
-    let cov = src_a * clamped_opacity(opacity) * clamp01(mask);
+    // Replace bypasses the layer opacity AND the source-alpha grading
+    // (the variant doc's contract, mirrored by the WGSL gate and
+    // umber-core's primitive): a present texel (any alpha > 0)
+    // overwrites in full; a fully-transparent texel stays a no-op —
+    // callers rely on cov == 0 there. The mask still clips (it is
+    // coverage, not opacity).
+    let (sa_gate, o_gate) = if matches!(mode, BlendMode::Replace) {
+        (if src_a > 0.0 { 1.0 } else { 0.0 }, 1.0)
+    } else {
+        (src_a, clamped_opacity(opacity))
+    };
+    let cov = sa_gate * o_gate * clamp01(mask);
     // Alpha is straight-alpha-over (Porter-Duff), NOT a lerp: out_a must be
     // cov + base_a·(1−cov). The lerp (base_a + (src_a−base_a)·cov) coincides
     // with this when src is opaque (why the opaque-pins test passed) but
@@ -1900,6 +1928,39 @@ mod tests {
     }
 
     #[test]
+    fn replace_bypasses_opacity_and_alpha_grading() {
+        // The variant doc's contract: Replace ignores the layer opacity
+        // AND the source-alpha grading — a present texel overwrites in
+        // full; only a fully-transparent texel is a no-op. The mask
+        // still clips (it is coverage, not opacity).
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        // Opacity 0 does not mute a Replace layer.
+        assert_eq!(
+            composite_pixel([1.0, 0.0, 0.0, 1.0], blue, BlendMode::Replace, 0.0),
+            Some([1.0, 0.0, 0.0, 1.0]),
+            "opacity 0 must not mute a Replace layer"
+        );
+        // Partial source alpha overwrites in full (the grading bypass).
+        assert_eq!(
+            composite_pixel([1.0, 0.0, 0.0, 0.25], blue, BlendMode::Replace, 0.5),
+            Some([1.0, 0.0, 0.0, 1.0]),
+            "cov = presence × mask — alpha 0.25 still overwrites wholly"
+        );
+        // A fully-transparent texel is still a no-op.
+        assert_eq!(
+            composite_pixel([1.0, 0.0, 0.0, 0.0], blue, BlendMode::Replace, 1.0),
+            Some([0.0, 0.0, 1.0, 1.0]),
+            "alpha 0 never overwrites"
+        );
+        // The mask still clips a Replace layer.
+        assert_eq!(
+            composite_pixel_masked([1.0, 0.0, 0.0, 1.0], blue, BlendMode::Replace, 0.0, 0.5),
+            Some([0.5, 0.0, 0.5, 1.0]),
+            "the mask gate survives the bypass"
+        );
+    }
+
+    #[test]
     fn triplet_modes_pin_exact_rgb() {
         // One exact RGB anchor per triplet mode through composite_pixel
         // (opaque, full opacity): primaries round-trip exactly, and the
@@ -2054,8 +2115,18 @@ mod tests {
                             [naive, naive, naive],
                             "{mode:?} s={s} d={d} o={o}"
                         );
-                        // Alpha: da + (1 - da) * o, independent of mode.
-                        assert_eq!(got[3], 0.5 + (1.0 - 0.5) * o, "{mode:?} alpha o={o}");
+                        // Alpha: da + (1 - da) * o, independent of
+                        // mode — EXCEPT Replace, whose opacity bypass
+                        // replaces the pixel wholesale (alpha = the
+                        // source's sa; the blend-replace-opacity
+                        // kill's contract, pinned by
+                        // replace_bypasses_opacity_and_alpha_grading).
+                        let expected_a = if matches!(mode, BlendMode::Replace) {
+                            src[3]
+                        } else {
+                            0.5 + (1.0 - 0.5) * o
+                        };
+                        assert_eq!(got[3], expected_a, "{mode:?} alpha o={o}");
                     }
                 }
             }

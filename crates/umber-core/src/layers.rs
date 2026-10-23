@@ -259,14 +259,17 @@ pub enum BlendMode {
     /// below — a dispatch skip spelled as a pixel op (`dst` unchanged at
     /// any opacity, so [`BlendMode::composite_channel`] is already exact).
     Disable,
-    /// Painter's "Replace": overwrites the base with the source. At the
-    /// [`BlendMode::blend_channel`] level this is `src` (Normal's math);
-    /// what distinguishes Replace in Painter is ignoring the layer's
-    /// opacity and the source alpha — an opacity-bypass the compositor
-    /// does NOT implement yet (it gates every mode by coverage), so v1
-    /// Replace composites exactly like Normal and the bypass is a named
-    /// follow-up for the channel-routing work. See
-    /// [`BlendMode::NormalDetail`]'s docs for the family's v1 boundaries.
+    /// Painter's "Replace": overwrites the base with the source, and the
+    /// mode's distinction is its bypass — the layer's opacity AND the
+    /// source-alpha grading are ignored: a present texel (any alpha > 0)
+    /// overwrites in full, only a fully-transparent texel is a no-op,
+    /// and the mask still clips (it is coverage, not opacity).
+    /// Implemented at every coverage gate — the umber-gpu oracle and the
+    /// WGSL stack compositor mirror this; at the
+    /// [`BlendMode::blend_channel`] level this is `src` (Normal's math)
+    /// with [`BlendMode::composite_channel`] skipping the opacity mix.
+    /// See [`BlendMode::NormalDetail`]'s docs for the family's v1
+    /// boundaries.
     Replace,
     /// Painter's "Tint" (Hue): hue of the top, saturation and value of
     /// the bottom, via the HSV cylinder in linear working space (see
@@ -443,6 +446,16 @@ impl BlendMode {
     /// single-channel meaning — use [`BlendMode::blend_rgb`]).
     pub fn composite_channel(self, src: f32, dst: f32, opacity: f32) -> Option<f32> {
         let blend = self.blend_channel(src, dst)?;
+        // Replace bypasses the opacity mix (requirements row 39's named
+        // boundary, closed): the mode's contract is a wholesale
+        // overwrite, so the layer opacity never modulates it — even at
+        // opacity 0. The bypass is mode-level semantics: the umber-gpu
+        // oracle and the WGSL stack compositor mirror it at their
+        // coverage gates (which is also where the source-alpha half of
+        // the contract lives — this scalar primitive has no alpha).
+        if matches!(self, BlendMode::Replace) {
+            return Some(blend);
+        }
         let base = Self::clamp01(dst);
         let o = if opacity.is_finite() {
             opacity.clamp(0.0, 1.0)
@@ -2691,8 +2704,12 @@ mod tests {
                 "disable must show the base at opacity {opacity}"
             );
         }
-        // Replace overwrites with the source at the primitive level (the
-        // opacity-bypass delta is documented on the variant and deferred).
+        // Replace overwrites with the source at the primitive level; the
+        // bypass (requirements row 39's named boundary, closed) makes the
+        // overwrite TOTAL — the layer opacity never modulates it, even at
+        // opacity 0 (the "no effect at o=0" rule belongs to OPACITY, and
+        // Replace bypasses opacity). The source-alpha half of the
+        // contract is pinned at the umber-gpu coverage gate.
         assert_eq!(blend(BlendMode::Replace, 0.9, 0.2), 0.9);
         assert_eq!(
             BlendMode::Replace
@@ -2700,6 +2717,20 @@ mod tests {
                 .expect("separable op"),
             0.9,
             "replace at full opacity must be the source"
+        );
+        assert_eq!(
+            BlendMode::Replace
+                .composite_channel(0.9, 0.2, 0.5)
+                .expect("separable op"),
+            0.9,
+            "replace bypasses the opacity mix (row 39's boundary closed)"
+        );
+        assert_eq!(
+            BlendMode::Replace
+                .composite_channel(0.9, 0.2, 0.0)
+                .expect("separable op"),
+            0.9,
+            "even at opacity 0 the replace overwrite is total"
         );
     }
 

@@ -402,7 +402,15 @@ fn channel_rows(
                 egui::RichText::new(tr("layers.material-channel-opacity"))
                     .color(umber_gui::muted()),
             );
-            ui.add(
+            // Replace bypasses the channel opacity (the mode's
+            // contract, enforced at the composite's coverage gate): the
+            // field stays visible but inert for that mode — an enabled
+            // editor for a bypassed value would be a lie. The stored
+            // value rides along untouched for when the mode changes
+            // back. No new i18n string: the greying is the signal (the
+            // catalogs sit in a parked kill's lock).
+            ui.add_enabled(
+                next_blend != BlendMode::Replace,
                 umber_gui::ValueField::new(&mut next_opacity)
                     .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.0..=1.0),
