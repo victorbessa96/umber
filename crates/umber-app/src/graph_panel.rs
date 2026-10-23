@@ -81,13 +81,19 @@ use std::path::PathBuf;
 use fluent::FluentValue;
 use umber_gpu::{EvalBackend, GraphGpuEvaluator, TileSpec};
 use umber_graph::{
-    eval_graph_cached, AnchorRef, EvalCache, EvalContext, Graph, Node, NodeOutput, NodeRegistry,
+    eval_graph_cached, AnchorRef, EvalCache, EvalContext, Graph, NodeOutput, NodeRegistry,
     ParamValue,
 };
+
+use umber_core::undo::UndoStack;
 
 use crate::graph_canvas::CanvasState;
 use crate::i18n::{tr, tr_args};
 use crate::plugins::{self, PluginLoadReport};
+
+mod history;
+
+use history::GraphCommand;
 
 /// Default raster resolution (square) for a fresh panel.
 const DEFAULT_RESOLUTION: (u32, u32) = (512, 512);
@@ -169,6 +175,13 @@ pub struct GraphPanel {
     status_is_error: bool,
     output_node: Option<u64>,
     next_id: u64,
+    /// The graph edit journal (wave-procedural-history, kill 1): every
+    /// topology + param edit rides a [`GraphCommand`] through
+    /// [`Self::run_graph_command`]. Panel-local in this kill — the
+    /// Graph panel's own Undo/Redo buttons drive it; the unified
+    /// Ctrl+Z timeline + the History panel's rows are the named
+    /// follow-up kill.
+    history: UndoStack<GraphCommand>,
     /// Add-Node combo selection (a `node_def` name).
     add_def: String,
     /// Edge editor: the input name new edges attach to.
@@ -233,6 +246,7 @@ impl GraphPanel {
             status_is_error: false,
             output_node: None,
             next_id: 1,
+            history: UndoStack::new(history::HISTORY_MAX),
             add_def,
             edge_input: String::from("in"),
             edge_from: None,
@@ -432,47 +446,59 @@ impl GraphPanel {
     }
 
     /// Edits (or adds) one param on a node and marks it dirty. Returns
-    /// `false` when the node id is unknown.
+    /// `false` when the node id is unknown. Journaled
+    /// (wave-procedural-history: graph edits were the last
+    /// non-undoable edit class).
     pub fn set_param(&mut self, node_id: u64, name: &str, value: ParamValue) -> bool {
-        let Some(node) = self.graph.nodes.iter_mut().find(|n| n.id == node_id) else {
+        if !self.graph.nodes.iter().any(|n| n.id == node_id) {
             return false;
-        };
-        match node.params.iter_mut().find(|(n, _)| n == name) {
-            Some((_, v)) => *v = value,
-            None => node.params.push((name.to_string(), value)),
         }
-        self.dirty.insert(node_id);
+        self.run_graph_command(GraphCommand::SetParam {
+            node: node_id,
+            name: name.to_string(),
+            new: value,
+            old: None,
+        });
         true
     }
 
     /// Appends a node with a fresh unique id and starter params, marks
     /// it dirty, and adopts it as the output node when the graph had
-    /// none. Returns the new id.
+    /// none. Returns the new id. Journaled (wave-procedural-history):
+    /// the command captures the allocated id, so a redo restores the
+    /// exact same node.
     pub fn add_node(&mut self, node_def: &str) -> u64 {
-        while self.graph.nodes.iter().any(|n| n.id == self.next_id) {
-            self.next_id += 1;
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.graph.add_node(Node {
-            id,
-            node_def: node_def.to_string(),
-            params: default_params(node_def),
-            canvas: None,
+        self.run_graph_command(GraphCommand::AddNode {
+            def: node_def.to_string(),
+            pos: None,
+            id: None,
+            prior_output: None,
         });
-        self.dirty.insert(id);
-        if self.output_node.is_none() {
-            self.output_node = Some(id);
+        match self.history.peek_undo() {
+            Some(GraphCommand::AddNode { id: Some(id), .. }) => *id,
+            // `peek_undo` is `Some` exactly after a push and AddNode's
+            // apply always captures its id — the `Document::run`
+            // invariant comment's precedent.
+            _ => unreachable!("AddNode captures its id on apply"),
         }
-        id
     }
 
     /// [`Self::add_node`], placed at a graph-space canvas position (the
-    /// canvas creation menu's path).
+    /// canvas creation menu's path). The placement rides the journaled
+    /// command, so a redo restores the placed node exactly; moving an
+    /// EXISTING node stays unjournaled by the design's own
+    /// editor-only-data rule (position dirties nothing).
     pub fn add_node_at(&mut self, node_def: &str, pos: [f32; 2]) -> u64 {
-        let id = self.add_node(node_def);
-        self.set_node_canvas(id, pos);
-        id
+        self.run_graph_command(GraphCommand::AddNode {
+            def: node_def.to_string(),
+            pos: Some(pos),
+            id: None,
+            prior_output: None,
+        });
+        match self.history.peek_undo() {
+            Some(GraphCommand::AddNode { id: Some(id), .. }) => *id,
+            _ => unreachable!("AddNode captures its id on apply"),
+        }
     }
 
     /// Moves a node on the canvas. Position is editor-only data: nothing
@@ -488,79 +514,93 @@ impl GraphPanel {
     }
 
     /// The canvas connect: replaces whatever already feeds `to`'s
-    /// `input` (an input takes one edge), then wires `from` through
-    /// [`Self::add_edge`] — the v1 combo's add/dirty path. Self-loops and
-    /// unknown endpoints return `false` and change nothing.
+    /// `input` (an input takes one edge), then wires `from` in.
+    /// Self-loops and unknown endpoints return `false` and change
+    /// nothing. Journaled (wave-procedural-history): the replaced
+    /// edge's source is captured, so an undo rewires the prior feed.
     pub fn connect(&mut self, from: u64, to: u64, input: &str) -> bool {
         let known = |id: u64| self.graph.nodes.iter().any(|n| n.id == id);
         if from == to || !known(from) || !known(to) {
             return false;
         }
-        self.graph
-            .edges
-            .retain(|e| !(e.to == to && e.input == input));
-        self.add_edge(from, to, input)
+        self.run_graph_command(GraphCommand::Connect {
+            from,
+            to,
+            input: input.to_string(),
+            replaced_from: None,
+        });
+        true
     }
 
     /// Removes the edge feeding `to`'s `input` and marks `to` dirty.
-    /// Returns `false` when no such edge exists.
+    /// Returns `false` when no such edge exists. Journaled
+    /// (wave-procedural-history).
     pub fn remove_edge(&mut self, to: u64, input: &str) -> bool {
-        let before = self.graph.edges.len();
-        self.graph
+        if !self
+            .graph
             .edges
-            .retain(|e| !(e.to == to && e.input == input));
-        if self.graph.edges.len() == before {
+            .iter()
+            .any(|e| e.to == to && e.input == input)
+        {
             return false;
         }
-        self.dirty.insert(to);
+        self.run_graph_command(GraphCommand::RemoveEdge {
+            to,
+            input: input.to_string(),
+            old_from: None,
+        });
         true
     }
 
     /// Removes a node and every edge touching it. Returns `false` when
     /// the id is unknown. Structural edits invalidate the whole cache
     /// (downstream wiring changed), so everything still standing is
-    /// marked dirty.
+    /// marked dirty. Journaled (wave-procedural-history): the node,
+    /// its edges and the panel's prior output/selection are captured
+    /// for a full restore.
     pub fn remove_node(&mut self, node_id: u64) -> bool {
         if !self.graph.nodes.iter().any(|n| n.id == node_id) {
             return false;
         }
-        self.graph.nodes.retain(|n| n.id != node_id);
-        self.graph
-            .edges
-            .retain(|e| e.from != node_id && e.to != node_id);
-        if self.selected == Some(node_id) {
-            self.selected = None;
-        }
-        if self.output_node == Some(node_id) {
-            self.output_node = self.graph.nodes.iter().map(|n| n.id).max();
-        }
-        self.mark_all_dirty();
+        self.run_graph_command(GraphCommand::RemoveNode {
+            id: node_id,
+            removed: None,
+            prior_output: None,
+            prior_selected: None,
+        });
         true
     }
 
     /// Adds an edge (`from` output → `to`'s `input`) and marks the
     /// consumer dirty. Returns `false` when either endpoint is unknown.
+    /// Journaled (wave-procedural-history) — the list view's edge
+    /// editor reaches this directly, so the raw insert is a command of
+    /// its own, distinct from [`Self::connect`]'s replace semantics
+    /// (the pre-kill push behavior is preserved exactly).
     pub fn add_edge(&mut self, from: u64, to: u64, input: &str) -> bool {
         let known = |id: u64| self.graph.nodes.iter().any(|n| n.id == id);
         if !known(from) || !known(to) {
             return false;
         }
-        self.graph.edges.push(umber_graph::Edge {
+        self.run_graph_command(GraphCommand::AddEdge {
             from,
             to,
             input: input.to_string(),
         });
-        self.dirty.insert(to);
         true
     }
 
     /// Marks a node as the panel's output (displayed + exported).
-    /// Returns `false` when the id is unknown.
+    /// Returns `false` when the id is unknown. Journaled
+    /// (wave-procedural-history): the prior output is captured.
     pub fn set_output_node(&mut self, node_id: u64) -> bool {
         if !self.graph.nodes.iter().any(|n| n.id == node_id) {
             return false;
         }
-        self.output_node = Some(node_id);
+        self.run_graph_command(GraphCommand::SetOutput {
+            id: node_id,
+            old: None,
+        });
         true
     }
 
@@ -611,6 +651,10 @@ impl GraphPanel {
         self.canvas.drag = Default::default();
         self.canvas.selected_edge = None;
         self.canvas.menu = None;
+        // A loaded graph replaces the state the journal's entries
+        // describe — they die with the old graph (an undo across a
+        // load would resurrect nodes into a foreign graph).
+        self.history.clear();
         self.next_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
         self.output_node = graph.nodes.iter().map(|n| n.id).max();
         self.graph = graph;
@@ -926,6 +970,7 @@ impl GraphPanel {
             GraphView::List => self.node_list(ui),
         }
         self.add_remove_row(ui);
+        self.history_row(ui);
         if let Some(line) = self.plugin_status() {
             ui.weak(line);
         }

@@ -280,6 +280,8 @@ graph =
     .no-nodes = No nodes yet — add one below.
     .add-node = Add Node
     .remove-selected = Remove selected
+    .undo = Undo
+    .redo = Redo
     .select-node = Select a node to edit its params.
     .node-title = Node { $id }: { $def }
     .set-output = Set as output
@@ -939,3 +941,13 @@ overlays =
     .stencil-unsupported = not a supported PNG (8-bit RGB or RGBA).
     .stencil-n-hint = N toggles the stencil — paint passes through while it is ignored.
     .stencil-gate-live = Gate live ({ $width }×{ $height }, { $open }% open) — paint passes only where it opens.
+
+## Shared colour-picker row labels (picker-app-sites; channel letters are
+## the international convention — a locale may localize them)
+picker =
+    .r = R
+    .g = G
+    .b = B
+    .h = H
+    .s = S
+    .v = V

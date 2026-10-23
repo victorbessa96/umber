@@ -287,6 +287,8 @@ graph =
     .no-nodes = Nenhum nó ainda — adicione um abaixo.
     .add-node = Adicionar nó
     .remove-selected = Remover selecionado
+    .undo = Desfazer
+    .redo = Refazer
     .select-node = Selecione um nó para editar seus parâmetros.
     .node-title = Nó { $id }: { $def }
     .set-output = Definir como saída
@@ -958,3 +960,13 @@ overlays =
     .stencil-unsupported = não é um PNG suportado (RGB ou RGBA de 8 bits).
     .stencil-n-hint = N alterna o estêncil — a tinta passa livre enquanto ele é ignorado.
     .stencil-gate-live = Máscara ativa ({ $width }×{ $height }, { $open }% aberta) — a tinta passa apenas onde ela abre.
+
+## Rótulos compartilhados da linha do seletor de cores (picker-app-sites;
+## letras de canal são a convenção internacional — uma localização pode traduzi-las)
+picker =
+    .r = R
+    .g = G
+    .b = B
+    .h = H
+    .s = S
+    .v = V
