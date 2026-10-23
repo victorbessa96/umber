@@ -8,11 +8,21 @@
 //! the rest: it calls `GetPointerInfo`/`GetPointerPenInfo` itself and maps
 //! the result onto the crate's backend-agnostic [`crate::TabletEvent`].
 //!
+//! The tip messages (`WM_POINTERDOWN`/`UP`) are fetched with
+//! `GetPointerPenInfo` too, and their `penFlags` word is routed through a
+//! [`PenFlagTracker`]: an inverted/eraser tip is reported as
+//! [`crate::TabletEvent::Eraser`] INSTEAD of `Contact` (the vocabulary's
+//! rule, `lib.rs:38-45`), so the app holds the eraser tool for the
+//! stroke's duration. The tracker's barrel edge detector rides the same
+//! word; delivering its `Button` beside the message's own event needs a
+//! second event slot, which the live `WndProc` hook (a later kill, and
+//! the owner of the event queue) has and `decode` does not.
+//!
 //! Wave 1 scope (`docs/claw-artifacts/stylus/README.md`): skeleton decode +
 //! pressure normalization + event mapping, unit-tested without a live
 //! HWND. Live pointer-pump integration is Wave 2.
 
-use crate::TabletEvent;
+use crate::{PenFlagTracker, TabletEvent};
 use windows::Win32::UI::Input::Pointer::{
     GetPointerInfo, GetPointerPenInfo, POINTER_INFO, POINTER_PEN_INFO,
 };
@@ -35,6 +45,9 @@ const MAX_PRESSURE: f32 = 32767.0;
 #[derive(Debug, Default)]
 pub struct PenState {
     epoch_dw_time: Option<u32>,
+    /// The pen-flag memory: eraser-end mapping + barrel edges
+    /// ([`PenFlagTracker`]).
+    flags: PenFlagTracker,
 }
 
 impl PenState {
@@ -55,6 +68,13 @@ impl PenState {
     /// — rather than treating it as an error; see `LANDING_NOTES.md` for why
     /// that's an open question for the Wave 2 live-HWND integration rather
     /// than something this skeleton can resolve.
+    ///
+    /// The tip pair (`WM_POINTERDOWN`/`WM_POINTERUP`) also fetches
+    /// `GetPointerPenInfo`, because the eraser end is carried in
+    /// `penFlags` and nowhere else: a flagged tip comes back as
+    /// [`TabletEvent::Eraser`] INSTEAD of `Contact` (see the module docs).
+    /// A failed pen-info fetch keeps the contact edge with no flags — the
+    /// plain tip — so a missing flag word cannot cost a stroke.
     pub fn decode(&mut self, pointer_id: u32, msg: u32) -> Option<TabletEvent> {
         let mut info = POINTER_INFO::default();
         // SAFETY: `info` is a valid, zero-initialized out-param buffer of
@@ -74,7 +94,8 @@ impl PenState {
             unsafe { GetPointerPenInfo(pointer_id, &mut pen) }.ok()?;
             map_pen_message(msg, &pen, time_ns)
         } else {
-            map_simple_message(msg, time_ns)
+            let flags = pen_flags(pointer_id, msg);
+            map_simple_message(msg, flags, &mut self.flags, time_ns)
         }
     }
 
@@ -87,20 +108,44 @@ impl PenState {
     }
 }
 
+/// Fetches the `penFlags` word for a tip message, or `0` when there is
+/// none to fetch.
+///
+/// Only `WM_POINTERDOWN`/`WM_POINTERUP` carry tip state worth a second
+/// call; enter/leave are proximity only and report no flags. A failed
+/// fetch (`Err` — the pointer has no pen payload) is also `0`: the plain
+/// tip, never a dropped contact edge.
+fn pen_flags(pointer_id: u32, msg: u32) -> u32 {
+    if msg != WM_POINTERDOWN && msg != WM_POINTERUP {
+        return 0;
+    }
+    let mut pen = POINTER_PEN_INFO::default();
+    // SAFETY: `pen` is a valid, zero-initialized out-param of the exact
+    // type `GetPointerPenInfo` expects; `pointer_id` is opaque.
+    if unsafe { GetPointerPenInfo(pointer_id, &mut pen) }.is_ok() {
+        pen.penFlags
+    } else {
+        0
+    }
+}
+
 /// Maps the position-less `WM_POINTER*` messages (enter/leave/down/up) to
-/// their [`TabletEvent`] equivalents.
-fn map_simple_message(msg: u32, time_ns: u64) -> Option<TabletEvent> {
+/// their [`TabletEvent`] equivalents. The tip pair (`down`/`up`) goes
+/// through `tracker` with the sample's `flags` word (from `pen_flags`; `0`
+/// when there is none), so an inverted/eraser tip is reported as
+/// [`TabletEvent::Eraser`] INSTEAD of `Contact` — the vocabulary's rule
+/// (`lib.rs:38-45`), the same shape as XI2's `contact_or_eraser`.
+fn map_simple_message(
+    msg: u32,
+    flags: u32,
+    tracker: &mut PenFlagTracker,
+    time_ns: u64,
+) -> Option<TabletEvent> {
     match msg {
         WM_POINTERENTER => Some(TabletEvent::ProximityIn { time_ns }),
         WM_POINTERLEAVE => Some(TabletEvent::ProximityOut { time_ns }),
-        WM_POINTERDOWN => Some(TabletEvent::Contact {
-            down: true,
-            time_ns,
-        }),
-        WM_POINTERUP => Some(TabletEvent::Contact {
-            down: false,
-            time_ns,
-        }),
+        WM_POINTERDOWN => Some(tracker.contact(true, flags, time_ns)),
+        WM_POINTERUP => Some(tracker.contact(false, flags, time_ns)),
         _ => None,
     }
 }
@@ -201,29 +246,49 @@ mod tests {
 
     #[test]
     fn simple_messages_map_to_proximity_and_contact() {
+        let mut tracker = PenFlagTracker::new();
         assert_eq!(
-            map_simple_message(WM_POINTERENTER, 1),
+            map_simple_message(WM_POINTERENTER, 0, &mut tracker, 1),
             Some(TabletEvent::ProximityIn { time_ns: 1 })
         );
         assert_eq!(
-            map_simple_message(WM_POINTERLEAVE, 2),
+            map_simple_message(WM_POINTERLEAVE, 0, &mut tracker, 2),
             Some(TabletEvent::ProximityOut { time_ns: 2 })
         );
         assert_eq!(
-            map_simple_message(WM_POINTERDOWN, 3),
+            map_simple_message(WM_POINTERDOWN, 0, &mut tracker, 3),
             Some(TabletEvent::Contact {
                 down: true,
                 time_ns: 3
             })
         );
         assert_eq!(
-            map_simple_message(WM_POINTERUP, 4),
+            map_simple_message(WM_POINTERUP, 0, &mut tracker, 4),
             Some(TabletEvent::Contact {
                 down: false,
                 time_ns: 4
             })
         );
-        assert_eq!(map_simple_message(WM_POINTERUPDATE, 5), None);
+        assert_eq!(
+            map_simple_message(WM_POINTERUPDATE, 0, &mut tracker, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn an_eraser_flagged_tip_maps_to_eraser_through_the_tracker() {
+        // The wiring pin for this module's delta: the tip pair consults
+        // the tracker, so the eraser end reaches the app as `Eraser`
+        // instead of `Contact` (the tracker's own mapping is pinned in
+        // `pen_flags`, on every host).
+        let mut tracker = PenFlagTracker::new();
+        assert_eq!(
+            map_simple_message(WM_POINTERDOWN, crate::PEN_FLAG_INVERTED, &mut tracker, 6),
+            Some(TabletEvent::Eraser {
+                active: true,
+                time_ns: 6
+            })
+        );
     }
 
     #[test]

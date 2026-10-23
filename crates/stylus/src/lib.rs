@@ -10,14 +10,23 @@
 //! Wave 1 scope: the backend-agnostic event vocabulary + platform
 //! dispatch skeleton. Concrete backend code is feature-gated and lands
 //! incrementally (Windows Ink first per SPEC Wave 1).
+//!
+//! The platform-free pen-flag decode ([`PenFlagTracker`]) is shared: the
+//! Windows Ink backend feeds it the raw `penFlags` word, so the eraser
+//! end and the barrel button are mapped (and unit-tested) on hosts that
+//! cannot compile that backend.
 
 use std::fmt;
+
+mod pen_flags;
 
 #[cfg(all(windows, feature = "winink"))]
 pub mod winink;
 
 #[cfg(all(target_os = "linux", feature = "xi2"))]
 pub mod xi2;
+
+pub use pen_flags::{PenFlagTracker, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED};
 
 /// A raw tablet event, normalized across backends.
 #[derive(Debug, Clone, Copy, PartialEq)]
