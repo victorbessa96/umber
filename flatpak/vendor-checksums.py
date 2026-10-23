@@ -57,10 +57,15 @@ def lock_checksums() -> dict:
 
 
 def split_dirname(dirname: str):
-    """`<name>-<version>` -> (name, version). Versions always start
-    with a digit and never contain '-', so the last '-' is the seam."""
-    name, _, version = dirname.rpartition("-")
-    if not name or not version or not version[0].isdigit():
+    """`<name>-<version>` -> (name, version). The version is a TRAILING
+    semver — `\\d+.\\d+.\\d+` with optional prerelease/build segments
+    that may contain '-': the seam is found by the semver SHAPE, not by
+    a dash position (a crate NAME can contain dashes AND a prerelease
+    version contains them too — proven live: cranelift-assembler-x64
+    0.137.0-rc.1 died on the old last-dash rule, packaging run
+    40017442313)."""
+    m = re.search(r"-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$", dirname)
+    if not m:
         sys.exit(
             f"vendor-checksums: unparseable vendor dir {dirname!r} — every"
             " dir must be <crate>-<version>/ as cargo stages them. Flat"
@@ -69,7 +74,7 @@ def split_dirname(dirname: str):
             " every .crate source needs \"strip-components\": 0"
             " (flatpak-builder's archive default is 1)."
         )
-    return name, version
+    return dirname[: m.start()], m.group(1)
 
 
 def main() -> None:
