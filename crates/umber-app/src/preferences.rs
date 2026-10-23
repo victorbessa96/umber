@@ -1164,10 +1164,20 @@ mod swatches_tests {
     use super::*;
 
     /// Per-test directory (the parallel-tests lesson: two tests sharing
-    /// one fixed name race).
+    /// one fixed name race). The first draft keyed the name on `line!()`
+    /// — but `line!()` inside THIS body is the same constant for every
+    /// caller, so every swatches test shared one directory and raced
+    /// anyway (proven live 2026-10-23: the parallel lavapipe run failed
+    /// garbage_lines_are_skipped with an empty parse). An atomic
+    /// per-CALL counter is actually unique.
     fn unique_dir() -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("umber-swatches-{}-{}", std::process::id(), line!()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALL: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "umber-swatches-{}-{}",
+            std::process::id(),
+            CALL.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }
