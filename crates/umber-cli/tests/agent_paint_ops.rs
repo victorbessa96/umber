@@ -721,3 +721,99 @@ fn an_absolute_radius_paints_wider_and_persists() {
     assert_ok(&agent.call(&json!("quit")), "quit");
     assert!(agent.wait_exit().success());
 }
+
+/// `paint_snapshot`'s `out_dir` arm (2026-10-19 `snapshot-dir`, the
+/// harness-script report's own deferral): two snapshots into one
+/// directory land at `<out_dir>/<step:05>.png`, `step` being the 0-based
+/// index the SAME reply carries, and each file decodes to exactly the
+/// bytes its reply hashed. Relational pins only (the module's exactness
+/// rule): the filenames come from the replies' own `index` field, the
+/// hashes from the replies — never golden hex.
+#[test]
+fn out_dir_snapshots_use_step_names_and_match_their_replies() {
+    let dir = write_fixture_project("snap-dir");
+    let snaps = scratch("snap-dir-out");
+    let mut agent = Agent::spawn();
+    assert_ok(
+        &agent.call(&json!({ "project_open": { "dir": dir } })),
+        "project_open",
+    );
+
+    // Base is allocated when the paint half initializes, so an explicit
+    // non-composite read always has a plane to write. (`composite`
+    // absent would read the stack — same exists check, more parts.)
+    let first = agent.call(&json!({
+        "paint_snapshot": { "out_dir": &snaps, "composite": false }
+    }));
+    if is_gpu_skip(&first) {
+        eprintln!("skipping: {first}");
+        return;
+    }
+    assert_ok(&first, "paint_snapshot");
+    assert_eq!(first["exists"], true, "{first}");
+
+    // The step-named path, derived from the reply's own index: relational,
+    // never a hard-coded "00001.png".
+    let step_path = |reply: &Value| -> PathBuf {
+        let index = reply["index"].as_u64().expect("reply index") as usize;
+        snaps.join(format!("{index:05}.png"))
+    };
+    let first_path = step_path(&first);
+    assert_eq!(first["out"].as_str(), first_path.to_str(), "{first}");
+    assert!(first_path.is_file(), "step-named file exists: {first}");
+
+    let second = agent.call(&json!({
+        "paint_snapshot": { "out_dir": &snaps, "composite": false }
+    }));
+    assert_ok(&second, "paint_snapshot");
+    assert_eq!(second["exists"], true, "{second}");
+    let second_path = step_path(&second);
+    assert_ne!(first_path, second_path, "a new step gets its own name");
+    assert_eq!(second["out"].as_str(), second_path.to_str(), "{second}");
+    assert!(second_path.is_file(), "step-named file exists: {second}");
+
+    // Two snapshots, two files — the pair the steps named, nothing else.
+    let mut names: Vec<String> = std::fs::read_dir(&snaps)
+        .expect("snapshot dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    let mut expected = vec![
+        first_path
+            .file_name()
+            .expect("first file name")
+            .to_string_lossy()
+            .into_owned(),
+        second_path
+            .file_name()
+            .expect("second file name")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    expected.sort();
+    assert_eq!(names, expected, "two snapshots, two files");
+
+    // Each file decodes to exactly the bytes its reply hashed — the same
+    // decode the `out` arm's test uses (the sidecar's row-flipping
+    // decoder; blake3 covers the plane's GPU-order bytes).
+    for (reply, path) in [(&first, &first_path), (&second, &second_path)] {
+        let hash = reply["blake3"].as_str().expect("blake3 hex");
+        assert_eq!(hash.len(), 64, "{reply}");
+        let (w, h, bytes) =
+            umber_paint::persistence::decode_paint_png(path).expect("snapshot decodes");
+        assert_eq!((w, h), (512, 512), "{reply}");
+        assert_eq!(
+            blake3::hash(&bytes).to_hex().to_string(),
+            hash,
+            "file == hashed bytes"
+        );
+    }
+
+    assert_ok(&agent.call(&json!("quit")), "quit");
+    assert!(agent.wait_exit().success());
+}

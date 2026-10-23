@@ -141,6 +141,29 @@ hashed bytes, same state → same hash, a stroke changes it, undo restores
 it byte-for-byte. A per-platform golden set (one hash file per adapter
 class) is the follow-up if cross-machine pins are needed.
 
+### `out_dir` (2026-10-19, ROADMAP `snapshot-dir`) — the deferral tick
+
+The 2026-10-14 report deferred "a `snapshot_dir` convenience (auto-named
+files per step index)". It lands wire-shaped as `paint_snapshot`'s
+`out_dir`, the second destination arm:
+
+- `paint_snapshot { out | out_dir, layer?, composite?, tile?, channel? }`
+  takes EXACTLY ONE of `out` (the file, verbatim — the v1 behavior) and
+  `out_dir` (a directory). Both, or neither, is a typed refusal emitted
+  BEFORE `read_selected_plane`, so a malformed step requests no GPU
+  device and never reports a device/project error instead.
+- `out_dir` writes `<out_dir>/<step:05>.png`, where `step` is the
+  session's **0-based step index** — the same `index` every reply carries,
+  stored on `Session` by `reply` and read here (one counter, two readers;
+  no second one added). The rule is the pure `snapshot_out_path`, tested
+  directly. The reply's `out` is the resolved path, so a driver reads
+  where the file went without recomputing the name.
+- `out` became `Option<PathBuf>` (the pair is optional for exclusivity,
+  not a default: an absent one is the other arm). `deny_unknown_fields`
+  keeps every existing script valid — an absent `out_dir` changes nothing
+  — and `PROTOCOL_VERSION` stays 1: 0.1.0 is untagged, so the Beta-freeze
+  bump rule has not started (the 2026-10-14 ruling, restated).
+
 ## As written — deltas from the draft
 
 - `paint_read` gained `composite` (absent → composite iff `layer` is

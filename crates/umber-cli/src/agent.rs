@@ -55,7 +55,10 @@
 //! (their rows composite nothing here), no mask strokes, no pressure.
 //! `paint_stroke`'s optional `radius` sets the session brush's ABSOLUTE
 //! radius in target texels (state, not per-stroke — later strokes
-//! inherit it; see [`PaintStrokeStep`]).
+//! inherit it; see [`PaintStrokeStep`]). `paint_snapshot` writes the
+//! selected plane to `out` or, with `out_dir`, to
+//! `<out_dir>/<step:05>.png` (exactly one destination; both or neither
+//! is a typed refusal before any GPU work — see [`PaintSnapshotStep`]).
 //!
 //! Judgment calls (v1 boundaries): there is no `layer_rename` —
 //! [`LayerCommand`] carries no rename op and the journal has no name-only
@@ -290,18 +293,31 @@ struct PaintReadStep {
     texels: Vec<[u32; 2]>,
 }
 
-/// `paint_snapshot` — the WHOLE plane (or the stack composite) to a PNG
-/// at `out`, plus its blake3 content hash: the snapshot arm of a scripted
-/// session (ROADMAP `wave-harness-script`). A script paints through the
-/// wire steps, then snapshots after each step and compares the hash to a
+/// `paint_snapshot` — the WHOLE plane (or the stack composite) to a PNG,
+/// plus its blake3 content hash: the snapshot arm of a scripted session
+/// (ROADMAP `wave-harness-script`). A script paints through the wire
+/// steps, then snapshots after each step and compares the hash to a
 /// golden — visual regression over driven state, without 64 MiB of texels
 /// on a JSONL line. The plane selection is `paint_read`'s exactly
 /// (`layer` / `composite`, same defaults, same typed refusals). The PNG is
 /// written raw (linear transfer): the hash covers the plane's own bytes.
+///
+/// Destination: EXACTLY ONE of `out` | `out_dir` (both or neither is a
+/// typed refusal before any GPU work — see `paint_snapshot`). `out` names
+/// the file verbatim; `out_dir` writes `<out_dir>/<step:05>.png`, `step`
+/// being the session's 0-based step index (the `index` every reply
+/// carries), so a script's snapshots sort in session order without the
+/// script inventing names. Both fields are optional for that exclusivity:
+/// an absent one is not a default, it is the other arm.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaintSnapshotStep {
-    out: PathBuf,
+    /// The file to write (one of `out` | `out_dir`).
+    #[serde(default)]
+    out: Option<PathBuf>,
+    /// The directory to name per step (one of `out` | `out_dir`).
+    #[serde(default)]
+    out_dir: Option<PathBuf>,
     #[serde(default)]
     layer: Option<u64>,
     #[serde(default)]
@@ -327,6 +343,15 @@ fn default_paint_tile() -> u16 {
 /// The `paint_read` channel when absent: Base Color.
 fn default_paint_channel() -> String {
     umber_paint::paint_state::BASE_COLOR_CHANNEL.to_string()
+}
+
+/// The file `paint_snapshot`'s `out_dir` arm writes for session step
+/// `step`: the index zero-padded to five digits, so a snapshot directory
+/// sorts lexically in session order (`00007.png`). Past 99999 the name
+/// grows instead of truncating — a session that long never overwrites an
+/// earlier snapshot.
+fn snapshot_out_path(out_dir: &Path, step: usize) -> PathBuf {
+    out_dir.join(format!("{step:05}.png"))
 }
 
 /// The `paint_read` sample cap (see [`PaintReadStep`]).
@@ -534,6 +559,12 @@ struct Session {
     loaded: Option<Loaded>,
     bake: Option<BakeJob>,
     project: Option<ProjectSession>,
+    /// The current step's 0-based index (the `index` every reply carries):
+    /// `paint_snapshot`'s `out_dir` arm names its files from it. `reply`
+    /// stores it before dispatch, so this is the SAME counter the protocol
+    /// reports, never a second one. It lives here rather than as a `run`
+    /// parameter so no step method's signature moves for one caller.
+    index: usize,
 }
 
 /// One channel in the project census: the model's channel plus its
@@ -1605,10 +1636,28 @@ impl Session {
         ))
     }
 
-    /// `paint_snapshot`: the selected plane, whole, to a PNG at `out` +
-    /// its blake3 hash (see [`PaintSnapshotStep`]). A never-written plane
-    /// writes nothing and reports `exists: false`.
+    /// `paint_snapshot`: the selected plane, whole, to a PNG at `out` (or
+    /// `<out_dir>/<step:05>.png`) + its blake3 hash (see
+    /// [`PaintSnapshotStep`]). A never-written plane writes nothing and
+    /// reports `exists: false`.
     fn paint_snapshot(&mut self, s: PaintSnapshotStep) -> Result<Fields> {
+        // The destination is resolved and validated BEFORE the plane is
+        // read: a bad step costs no GPU device, and the message is the
+        // protocol's, not a device error. Exactly one arm is required.
+        let out = match (&s.out, &s.out_dir) {
+            (Some(out), None) => out.clone(),
+            (None, Some(dir)) => snapshot_out_path(dir, self.index),
+            (Some(_), Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "paint_snapshot: exactly one of `out` and `out_dir` — not both"
+                ))
+            }
+            (None, None) => {
+                return Err(anyhow::anyhow!(
+                    "paint_snapshot: exactly one of `out` and `out_dir` — neither given"
+                ))
+            }
+        };
         let (composite, image) =
             self.read_selected_plane("paint_snapshot", s.layer, s.composite, s.tile, &s.channel)?;
         let Some(image) = image else {
@@ -1619,13 +1668,13 @@ impl Session {
             }));
         };
         umber_export::png::write_png(
-            &s.out,
+            &out,
             image.width,
             image.height,
             &image.data,
             umber_export::png::Transfer::Linear,
         )
-        .map_err(|e| anyhow::anyhow!("paint_snapshot: writing {}: {e}", s.out.display()))?;
+        .map_err(|e| anyhow::anyhow!("paint_snapshot: writing {}: {e}", out.display()))?;
         fields(serde_json::json!({
             "exists": true,
             "composite": composite,
@@ -1633,7 +1682,7 @@ impl Session {
             "channel": s.channel,
             "width": image.width,
             "height": image.height,
-            "out": s.out,
+            "out": out,
             "blake3": blake3::hash(&image.data).to_hex().to_string(),
         }))
     }
@@ -1838,6 +1887,9 @@ impl Session {
     /// The reply line for input line `line` (step `index`), and whether
     /// the session should end.
     fn reply(&mut self, index: usize, line: &str) -> (Value, bool) {
+        // The step index the reply will carry; `paint_snapshot`'s
+        // `out_dir` arm names its file from it (one counter, two readers).
+        self.index = index;
         let (name, step) = parse_line(line);
         let (outcome, quit) = match step {
             Ok(AgentStep::Quit(NoFields {})) => {
@@ -2006,6 +2058,33 @@ mod tests {
                 r["error"].as_str().unwrap().contains("no mesh loaded"),
                 "{r}"
             );
+        }
+    }
+
+    /// The `out_dir` naming rule, hit directly (the pure fn behind the
+    /// arm): five-digit zero-padded session step, then `.png`.
+    #[test]
+    fn out_dir_snapshot_names_are_the_zero_padded_step_index() {
+        let dir = Path::new("snaps");
+        assert_eq!(snapshot_out_path(dir, 7), dir.join("00007.png"));
+        assert_eq!(snapshot_out_path(dir, 0), dir.join("00000.png"));
+    }
+
+    /// The destination check is the FIRST thing `paint_snapshot` does.
+    /// With NO project open these replies would otherwise be "no project
+    /// open"; the destination message proves the refusal precedes the
+    /// project read (and so every GPU path) for both bad shapes.
+    #[test]
+    fn snapshot_needs_exactly_one_destination_before_any_work() {
+        for line in [
+            "{\"paint_snapshot\": {\"out\": \"a.png\", \"out_dir\": \"d\"}}",
+            "{\"paint_snapshot\": {}}",
+        ] {
+            let replies = session(&format!("{line}\n"));
+            assert_eq!(replies.len(), 1, "{replies:?}");
+            assert_eq!(replies[0]["ok"], false, "{}", replies[0]);
+            let msg = replies[0]["error"].as_str().unwrap_or_default();
+            assert!(msg.contains("exactly one of `out` and `out_dir`"), "{msg}");
         }
     }
 
