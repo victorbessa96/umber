@@ -36,8 +36,8 @@ pub use theme::{
     MOTION_SECS,
 };
 pub use widgets::{
-    dialog_buttons, platform_order, ButtonRole, ColorPicker, ColorState, ContextKind, ContextRail,
-    ContextRailCtx, ContextRailOutcome, Curve, CurveEdit, CurveError, DialogButton, Notice,
-    NoticeLevel, Notices, ParamGroup, PropertyRows, Ramp, RampEdit, RecentColors, SwatchGrid, Tool,
-    ToolRow, TypeAhead, ValueField,
+    color_button_with, dialog_buttons, platform_order, ButtonRole, ColorPicker, ColorState,
+    ContextKind, ContextRail, ContextRailCtx, ContextRailOutcome, Curve, CurveEdit, CurveError,
+    DialogButton, Notice, NoticeLevel, Notices, ParamGroup, PickerLabels, PropertyRows, Ramp,
+    RampEdit, RecentColors, SwatchGrid, Tool, ToolRow, TypeAhead, ValueField,
 };

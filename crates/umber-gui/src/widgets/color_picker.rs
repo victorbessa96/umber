@@ -14,17 +14,27 @@
 //!   egui context.
 //! - [`ColorPicker`] draws it: an SV square and a hue strip as `egui::Mesh`
 //!   vertex grids (no texture upload per drag), the current/previous swatch
-//!   pair (click previous to revert), and a hex field. Ctrl/Cmd-drag on the
-//!   hue strip snaps to 30°.
+//!   pair (click previous to revert), a hex field, and HSV + RGB slider rows
+//!   under it whose tracks are tinted across their own channel range (also
+//!   meshes, no texture). Ctrl/Cmd-drag on the hue strip snaps to 30°.
+//! - [`color_button_with`] is the popup form that also remembers recent
+//!   colours in a [`RecentColors`] list — pushed once when the popup CLOSES,
+//!   never per drag frame — and shows its [`SwatchGrid`] so one click
+//!   restores a recent colour. umber-gui has no i18n: the caller passes
+//!   [`PickerLabels`]. [`color_button`] stays the stock drop-in (English
+//!   glyph labels, no recents).
 //!
 //! The umber-gui layer rule (egui only) holds: no colour-management crate.
 //! The sRGB transfer functions here are the IEC 61966-2-1 piecewise curve,
 //! the same one egui's `Rgba` ↔ `Color32` conversion uses.
 
 use egui::{
-    Color32, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
-    WidgetType,
+    Align2, Color32, FontId, Id, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui,
+    Vec2, WidgetInfo, WidgetType,
 };
+
+use super::swatch_grid::{RecentColors, SwatchGrid};
+use crate::theme;
 
 /// sRGB-encoded → linear, IEC 61966-2-1.
 pub fn srgb_to_linear(c: f32) -> f32 {
@@ -39,7 +49,16 @@ pub fn srgb_to_linear(c: f32) -> f32 {
 /// Linear → sRGB-encoded, IEC 61966-2-1.
 pub fn linear_to_srgb(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
-    if c <= 0.003_130_8 {
+    // Boundary-exact top: the curve's endpoint is EXACTLY 1.0, but the
+    // f32 rational loses a half-ULP there (f32(1.055) - f32(0.055) =
+    // 0.99999994), which first surfaced as the kept-HSV pin on a
+    // full-bright construction (the battery's first run of these
+    // bytes, 2026-10-22: `setting_the_three_components_to_a_grey_
+    // keeps_the_hue` saw v 0.99999994). The bottom endpoint is already
+    // exact (12.92 * 0 = 0); nothing below the top changes.
+    if c >= 1.0 {
+        1.0
+    } else if c <= 0.003_130_8 {
         c * 12.92
     } else {
         1.055 * c.powf(1.0 / 2.4) - 0.055
@@ -167,6 +186,20 @@ impl ColorState {
         }
     }
 
+    /// Sets one sRGB-encoded component (`i`: 0 = R, 1 = G, 2 = B; each
+    /// `0..=1`, clamped), keeping the other two. Goes through
+    /// [`Self::set_linear`], so a grey (s = 0) keeps the hue exactly as a
+    /// typed hex grey does. An out-of-range `i` or a non-finite `v` changes
+    /// nothing.
+    pub fn set_srgb_component(&mut self, i: usize, v: f32) {
+        if i >= 3 || !v.is_finite() {
+            return;
+        }
+        let mut srgb = self.srgb();
+        srgb[i] = v.clamp(0.0, 1.0);
+        self.set_linear(srgb.map(srgb_to_linear));
+    }
+
     /// Back to the colour the picker opened with.
     pub fn revert(&mut self) {
         let previous = self.previous;
@@ -237,22 +270,63 @@ const SV_CELLS: usize = 16;
 /// Hue strip segments (six would be exact for linear HSV; more keeps the
 /// gamma-space vertex interpolation close).
 const HUE_CELLS: usize = 36;
+/// Channel-row label column, points. Callers pass short glyphs (R/G/B,
+/// H/S/V); the stock default labels are exactly that.
+const CHANNEL_LABEL_WIDTH: f32 = 16.0;
+/// Channel-row numeric readout column, points.
+const CHANNEL_VALUE_WIDTH: f32 = 34.0;
+/// Channel-row height, points.
+const CHANNEL_ROW_HEIGHT: f32 = 15.0;
+/// Channel track height, points.
+const CHANNEL_TRACK_HEIGHT: f32 = 9.0;
+/// Gradient segments per channel track: one per ~3pt at the stock width,
+/// smooth enough that the tint reads as continuous.
+const CHANNEL_CELLS: usize = 32;
+/// Two linear colours closer than this are "the same" for the recents
+/// push: the picker's HSV round-trip error is ~1e-7, so this only absorbs
+/// float noise, never a deliberate edit.
+const SAME_COLOUR_EPS: f32 = 1e-6;
 
 fn color32(srgb: [f32; 3]) -> Color32 {
     let [r, g, b] = srgb.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
     Color32::from_rgb(r, g, b)
 }
 
+/// Row labels for the picker's slider rows. umber-gui has no `tr()`; the
+/// caller (umber-app) translates them. [`Default`] is the English glyph
+/// set the stock [`color_button`] uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerLabels {
+    /// R, G, B row labels: sRGB-encoded `0..255`, matching the hex field.
+    pub rgb: [String; 3],
+    /// H, S, V row labels: the kept HSV (`0..=1` internally).
+    pub hsv: [String; 3],
+}
+
+impl Default for PickerLabels {
+    fn default() -> Self {
+        Self {
+            rgb: ["R".to_owned(), "G".to_owned(), "B".to_owned()],
+            hsv: ["H".to_owned(), "S".to_owned(), "V".to_owned()],
+        }
+    }
+}
+
 /// The picker widget over a [`ColorState`] (see the module docs).
 pub struct ColorPicker<'a> {
     state: &'a mut ColorState,
     size: f32,
+    labels: Option<&'a PickerLabels>,
 }
 
 impl<'a> ColorPicker<'a> {
     /// A picker editing `state`, SV square `size` points wide.
     pub fn new(state: &'a mut ColorState) -> Self {
-        Self { state, size: 160.0 }
+        Self {
+            state,
+            size: 160.0,
+            labels: None,
+        }
     }
 
     /// The SV square's side, in points.
@@ -261,9 +335,19 @@ impl<'a> ColorPicker<'a> {
         self
     }
 
+    /// Row labels for the RGB/HSV slider rows (default: English glyphs).
+    pub fn labels(mut self, labels: &'a PickerLabels) -> Self {
+        self.labels = Some(labels);
+        self
+    }
+
     /// Draws the picker; the response is `changed()` when the colour moved.
     pub fn show(self, ui: &mut Ui) -> Response {
-        let Self { state, size } = self;
+        let Self {
+            state,
+            size,
+            labels,
+        } = self;
         let before = *state;
         let mut response = sv_square(ui, state, size);
         response |= hue_strip(ui, state, size);
@@ -283,11 +367,180 @@ impl<'a> ColorPicker<'a> {
                 state.set_hex(&text);
             }
         });
+        let default_labels;
+        let labels = match labels {
+            Some(labels) => labels,
+            None => {
+                default_labels = PickerLabels::default();
+                &default_labels
+            }
+        };
+        channel_rows(ui, state, labels, size);
         if *state != before {
             response.mark_changed();
         }
         response
     }
+}
+
+/// The colour a channel row's track shows at fraction `t`: the current
+/// sRGB colour with component `i` swept across `0..=1`.
+fn rgb_channel_tint(srgb: [f32; 3], i: usize, t: f32) -> Color32 {
+    let mut c = srgb;
+    if let Some(slot) = c.get_mut(i) {
+        *slot = t.clamp(0.0, 1.0);
+    }
+    color32(c)
+}
+
+/// The colour a HSV row's track shows at fraction `t`: the kept HSV with
+/// component `i` swept across `0..=1`, so the row reads at the current
+/// saturation/value the way the SV square does.
+fn hsv_channel_tint(hsv: [f32; 3], i: usize, t: f32) -> Color32 {
+    let mut c = hsv;
+    if let Some(slot) = c.get_mut(i) {
+        *slot = t.clamp(0.0, 1.0);
+    }
+    color32(hsv_to_rgb(c))
+}
+
+/// The HSV + RGB slider rows under the hex field (g4 spec). RGB rows edit
+/// sRGB-encoded `0..255` (the hex field's space); HSV rows edit the kept
+/// HSV, so hue survives greys through [`ColorState::set_hue`] /
+/// [`ColorState::set_sv`].
+fn channel_rows(ui: &mut Ui, state: &mut ColorState, labels: &PickerLabels, width: f32) {
+    let width = width.max(CHANNEL_LABEL_WIDTH + CHANNEL_VALUE_WIDTH + 24.0);
+    ui.add_space(2.0);
+    let srgb = state.srgb();
+    for (i, label) in labels.rgb.iter().enumerate() {
+        let byte = (srgb[i] * 255.0).round() as i32;
+        let readout = byte.to_string();
+        if let Some(t) = channel_row(
+            ui,
+            width,
+            label,
+            srgb[i],
+            &readout,
+            ui.id().with(("color-picker-rgb", i)),
+            |t| rgb_channel_tint(srgb, i, t),
+        ) {
+            state.set_srgb_component(i, t);
+        }
+    }
+    // Re-read: the RGB rows may have changed the HSV this same frame.
+    let hsv = state.hsv();
+    for (i, label) in labels.hsv.iter().enumerate() {
+        let readout = if i == 0 {
+            // 0..360, numbers only: umber-gui has no i18n, so no unit glyphs.
+            let degrees = hsv[0] * 360.0;
+            format!("{degrees:.0}")
+        } else {
+            let percent = hsv[i] * 100.0;
+            format!("{percent:.0}")
+        };
+        if let Some(t) = channel_row(
+            ui,
+            width,
+            label,
+            hsv[i],
+            &readout,
+            ui.id().with(("color-picker-hsv", i)),
+            |t| hsv_channel_tint(hsv, i, t),
+        ) {
+            match i {
+                0 => state.set_hue(t),
+                1 => state.set_sv(t, hsv[2]),
+                _ => state.set_sv(hsv[1], t),
+            }
+        }
+    }
+}
+
+/// One tinted channel slider row: label, gradient track (a [`Mesh`] grid —
+/// the SV square's precedent, no texture), the handle at `t`, and a numeric
+/// readout. Returns the new fraction when clicked or dragged.
+fn channel_row(
+    ui: &mut Ui,
+    width: f32,
+    label: &str,
+    t: f32,
+    readout: &str,
+    id: Id,
+    tint: impl Fn(f32) -> Color32,
+) -> Option<f32> {
+    let (row, _) = ui.allocate_exact_size(Vec2::new(width, CHANNEL_ROW_HEIGHT), Sense::hover());
+    let track = Rect::from_min_max(
+        Pos2::new(
+            row.left() + CHANNEL_LABEL_WIDTH,
+            row.center().y - CHANNEL_TRACK_HEIGHT / 2.0,
+        ),
+        Pos2::new(
+            row.right() - CHANNEL_VALUE_WIDTH,
+            row.center().y + CHANNEL_TRACK_HEIGHT / 2.0,
+        ),
+    );
+    let response = ui.interact(
+        Rect::from_min_max(
+            Pos2::new(track.left(), row.top()),
+            Pos2::new(track.right(), row.bottom()),
+        ),
+        id,
+        Sense::click_and_drag(),
+    );
+    // g7-accesskit-sweep: the picker's channel slider rows.
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Slider, true, label));
+    let new_t = response
+        .interact_pointer_pos()
+        .filter(|_| response.dragged() || response.clicked())
+        .map(|pos| ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0));
+    if ui.is_rect_visible(row) {
+        let mut mesh = Mesh::default();
+        for i in 0..=CHANNEL_CELLS {
+            let s = i as f32 / CHANNEL_CELLS as f32;
+            let x = track.left() + track.width() * s;
+            let c = tint(s);
+            mesh.colored_vertex(Pos2::new(x, track.top()), c);
+            mesh.colored_vertex(Pos2::new(x, track.bottom()), c);
+        }
+        for i in 0..CHANNEL_CELLS as u32 {
+            let b = i * 2;
+            mesh.add_triangle(b, b + 1, b + 3);
+            mesh.add_triangle(b, b + 3, b + 2);
+        }
+        let painter = ui.painter();
+        painter.add(Shape::mesh(mesh));
+        painter.rect_stroke(
+            track,
+            2.0,
+            Stroke::new(1.0, theme::faint()),
+            StrokeKind::Inside,
+        );
+        let x = track.left() + track.width() * t.clamp(0.0, 1.0);
+        painter.rect_stroke(
+            Rect::from_center_size(
+                Pos2::new(x, track.center().y),
+                Vec2::new(3.0, track.height() + 2.0),
+            ),
+            1.0,
+            Stroke::new(1.5, Color32::WHITE),
+            StrokeKind::Outside,
+        );
+        painter.text(
+            Pos2::new(row.left(), row.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(11.0),
+            theme::muted(),
+        );
+        painter.text(
+            Pos2::new(row.right(), row.center().y),
+            Align2::RIGHT_CENTER,
+            readout,
+            FontId::monospace(10.0),
+            theme::muted(),
+        );
+    }
+    new_t
 }
 
 fn sv_square(ui: &mut Ui, state: &mut ColorState, size: f32) -> Response {
@@ -455,6 +708,108 @@ pub fn color_button(ui: &mut Ui, linear: &mut [f32; 3]) -> Response {
                 .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()));
         if clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(popup_id, open));
+    response
+}
+
+fn colours_differ(a: [f32; 3], b: [f32; 3]) -> bool {
+    a.iter()
+        .zip(b)
+        .any(|(x, y)| (x - y).abs() > SAME_COLOUR_EPS)
+}
+
+/// [`color_button`] plus recent colours and caller-supplied row labels: the
+/// app-facing form (C2-12's open half). The popup is the same [`ColorPicker`]
+/// over the same in-memory [`ColorState`], with a [`SwatchGrid`] of
+/// `recents` below it; clicking a swatch sets the colour.
+///
+/// A colour enters `recents` exactly once, when the popup CLOSES, and only
+/// if the final colour differs from the one the popup opened with
+/// ([`ColorState::previous`]) — never per drag frame, and never for an
+/// untouched colour. umber-gui has no i18n, so `labels` comes from the
+/// caller; [`color_button`] stays the stock drop-in with English glyphs and
+/// no recents.
+pub fn color_button_with(
+    ui: &mut Ui,
+    linear: &mut [f32; 3],
+    labels: &PickerLabels,
+    recents: &mut RecentColors,
+) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(Vec2::new(40.0, 18.0), Sense::click());
+    // g7-accesskit-sweep: the inline colour swatch (opens the picker).
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, "colour"));
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, 3.0, color32(linear.map(linear_to_srgb)));
+        ui.painter().rect_stroke(
+            rect,
+            3.0,
+            ui.visuals().widgets.inactive.bg_stroke,
+            StrokeKind::Inside,
+        );
+    }
+    let popup_id = response.id.with("color-popup");
+    let state_id = response.id.with("color-state");
+    let mut open: bool = ui.ctx().data(|d| d.get_temp(popup_id)).unwrap_or(false);
+    let was_open = open;
+    if response.clicked() {
+        open = !open;
+        if open {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(state_id, ColorState::new(*linear)));
+        }
+    }
+    let state: Option<ColorState> = ui.ctx().data(|d| d.get_temp(state_id));
+    if open {
+        let mut state = state.unwrap_or_else(|| ColorState::new(*linear));
+        let area = egui::Area::new(popup_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_bottom() + Vec2::new(0.0, 4.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let mut picked = ColorPicker::new(&mut state)
+                        .size(150.0)
+                        .labels(labels)
+                        .show(ui);
+                    if !recents.colors().is_empty() {
+                        // A gap, not `ui.separator()`: an Area's first-frame
+                        // available width is the 600pt default area size, and
+                        // a separator would stretch the popup to it.
+                        ui.add_space(4.0);
+                        if let Some(color) = SwatchGrid::new(recents.colors()).columns(8).show(ui) {
+                            *linear = [color.r(), color.g(), color.b()]
+                                .map(|c| srgb_to_linear(c as f32 / 255.0));
+                            state.set_linear(*linear);
+                            picked.mark_changed();
+                        }
+                    }
+                    picked
+                })
+            });
+        let picked = area.inner.inner;
+        if picked.changed() {
+            *linear = state.linear();
+            response.mark_changed();
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
+        // A click outside both the swatch and the popup closes it.
+        let clicked_elsewhere = ui.input(|i| i.pointer.any_click())
+            && !response.clicked()
+            && !area
+                .response
+                .rect
+                .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()));
+        if clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+    }
+    if was_open && !open {
+        if let Some(state) = state {
+            if colours_differ(*linear, state.previous()) {
+                recents.push(color32(state.srgb()));
+            }
         }
     }
     ui.ctx().data_mut(|d| d.insert_temp(popup_id, open));
@@ -703,5 +1058,300 @@ mod tests {
         );
         harness.run();
         let _ = harness.get_by_role_and_label(egui::accesskit::Role::Button, "colour");
+    }
+
+    fn click_at<S>(harness: &mut egui_kittest::Harness<'_, S>, pos: Pos2) {
+        harness.event(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run();
+        }
+    }
+
+    #[test]
+    fn an_srgb_component_round_trips_128() {
+        // 128 / 255 is the encoded value; `set_srgb_component` stores the
+        // linear form and `srgb()` comes back to the same byte.
+        let encoded = 128.0 / 255.0;
+        let mut state = ColorState::new([0.0, 0.0, 0.0]);
+        state.set_srgb_component(0, encoded);
+        assert!(
+            (state.srgb()[0] - encoded).abs() < 1e-5,
+            "round-trip: {}",
+            state.srgb()[0]
+        );
+        assert_eq!((state.srgb()[0] * 255.0).round() as u8, 128);
+        assert_eq!(state.hex(), "#800000");
+        // The stored linear value is the IEC curve's, not byte / 255.
+        let linear = srgb_to_linear(encoded);
+        assert!((state.linear()[0] - linear).abs() < 1e-5);
+        assert!(
+            (linear - encoded).abs() > 0.2,
+            "sRGB is not a byte/255 linear map"
+        );
+        assert_eq!(state.srgb()[1], 0.0, "the other components are untouched");
+        assert_eq!(state.srgb()[2], 0.0);
+    }
+
+    #[test]
+    fn setting_the_three_components_to_a_grey_keeps_the_hue() {
+        let mut state = ColorState::new([1.0, 0.0, 0.0]); // red
+        assert_eq!(state.hsv(), [0.0, 1.0, 1.0]);
+        // Red's own channel last: the G and B edits stay red-hued, and the
+        // final edit makes the grey, where `set_linear` keeps the hue.
+        state.set_srgb_component(1, 0.5);
+        state.set_srgb_component(2, 0.5);
+        state.set_srgb_component(0, 0.5);
+        assert!(close(state.srgb(), [0.5, 0.5, 0.5], 1e-5));
+        assert_eq!(state.hsv()[0], 0.0, "the grey kept the hue");
+        assert_eq!(state.hsv()[1], 0.0, "a grey has no saturation");
+        // Saturation back restores the red the hue remembered.
+        state.set_sv(1.0, 1.0);
+        assert!(
+            close(state.linear(), [1.0, 0.0, 0.0], 1e-5),
+            "S back restores red: {:?}",
+            state.linear()
+        );
+    }
+
+    #[test]
+    fn the_channel_tracks_are_tinted_across_their_range() {
+        // Pins the mesh vertex tints at 0 %, 50 % and 100 %.
+        // sRGB (0.2, 0.4, 0.6): 0.2*255 = 51, 0.4*255 = 102,
+        // 0.6*255 = 153; 0.5*255 = 127.5 rounds to 128.
+        let srgb = [0.2, 0.4, 0.6];
+        let r = [0.0, 0.5, 1.0].map(|t| rgb_channel_tint(srgb, 0, t));
+        assert_eq!(
+            r,
+            [
+                Color32::from_rgb(0, 102, 153),
+                Color32::from_rgb(128, 102, 153),
+                Color32::from_rgb(255, 102, 153),
+            ]
+        );
+        // The hue row at full saturation/value: red, cyan, red (1 is the
+        // same hue as 0).
+        let hue = [0.0, 0.5, 1.0].map(|t| hsv_channel_tint([0.0, 1.0, 1.0], 0, t));
+        assert_eq!(
+            hue,
+            [
+                Color32::from_rgb(255, 0, 0),
+                Color32::from_rgb(0, 255, 255),
+                Color32::from_rgb(255, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn dragging_a_channel_slider_changes_the_colour() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            color: ColorState,
+        }
+        let labels = PickerLabels::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(400.0, 400.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    ColorPicker::new(&mut s.color)
+                        .size(160.0)
+                        .labels(&labels)
+                        .show(ui);
+                },
+                S {
+                    color: ColorState::new([srgb_to_linear(0.5); 3]),
+                },
+            );
+        harness.run();
+        let track = harness
+            .get_by_role_and_label(egui::accesskit::Role::Slider, "G")
+            .rect();
+        assert!(track.is_positive(), "the G row was laid out");
+        let start = Pos2::new(track.left() + track.width() * 0.25, track.center().y);
+        let end = Pos2::new(track.left() + track.width() * 0.75, track.center().y);
+        harness.hover_at(start);
+        harness.drag_at(start);
+        harness.run();
+        harness.event(egui::Event::PointerMoved(end));
+        harness.run();
+        harness.drop_at(end);
+        harness.run();
+        let srgb = harness.state().color.srgb();
+        assert!(
+            (srgb[1] - 0.75).abs() < 0.02,
+            "G follows the drag: {srgb:?}"
+        );
+        assert!(
+            (srgb[0] - 0.5).abs() < 0.02 && (srgb[2] - 0.5).abs() < 0.02,
+            "R/B stay put: {srgb:?}"
+        );
+    }
+
+    #[test]
+    fn a_channel_slider_reports_a_slider_role_to_accesskit() {
+        use egui_kittest::kittest::Queryable;
+        let labels = PickerLabels::default();
+        let mut color = ColorState::new([1.0, 0.0, 0.0]);
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            ColorPicker::new(&mut color)
+                .size(160.0)
+                .labels(&labels)
+                .show(ui);
+        });
+        harness.run();
+        for label in ["R", "G", "B", "H", "S", "V"] {
+            let _ = harness.get_by_role_and_label(egui::accesskit::Role::Slider, label);
+        }
+    }
+
+    #[test]
+    fn recents_are_pushed_once_when_the_popup_closes() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            color: [f32; 3],
+            recents: RecentColors,
+            changed: bool,
+            swatch: Rect,
+        }
+        let labels = PickerLabels::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(600.0, 900.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let r = color_button_with(ui, &mut s.color, &labels, &mut s.recents);
+                    s.changed |= r.changed();
+                    s.swatch = r.rect;
+                },
+                S {
+                    color: [1.0, 0.0, 0.0],
+                    recents: RecentColors::default(),
+                    changed: false,
+                    swatch: Rect::NOTHING,
+                },
+            );
+        harness.run();
+        let swatch = harness.state().swatch;
+        click_at(&mut harness, swatch.center());
+        let square = harness
+            .get_by_role_and_label(egui::accesskit::Role::Slider, "saturation / value")
+            .rect();
+        assert!(square.is_positive(), "the popup's SV square was laid out");
+        // Three drag frames inside the square: the colour moves, recents
+        // must not.
+        let path = [
+            square.left_top() + Vec2::new(20.0, 20.0),
+            square.left_top() + Vec2::new(30.0, 40.0),
+            square.left_top() + Vec2::new(40.0, 60.0),
+            square.left_top() + Vec2::new(50.0, 80.0),
+        ];
+        harness.hover_at(path[0]);
+        harness.drag_at(path[0]);
+        harness.run();
+        for pos in &path[1..] {
+            harness.event(egui::Event::PointerMoved(*pos));
+            harness.run();
+        }
+        harness.drop_at(path[3]);
+        harness.run();
+        assert!(
+            harness.state().recents.colors().is_empty(),
+            "no recents push while the popup is open"
+        );
+        assert!(harness.state().changed, "the drag changed the colour");
+        click_at(&mut harness, swatch.center());
+        let s = harness.state();
+        assert_eq!(s.recents.colors().len(), 1, "one entry on close");
+        let recorded = s.recents.colors()[0];
+        assert_ne!(
+            recorded,
+            Color32::from_rgb(255, 0, 0),
+            "not the opening red"
+        );
+        let expected = s.color.map(linear_to_srgb);
+        assert!(
+            (recorded.r() as f32 - expected[0] * 255.0).abs() <= 1.5
+                && (recorded.g() as f32 - expected[1] * 255.0).abs() <= 1.5
+                && (recorded.b() as f32 - expected[2] * 255.0).abs() <= 1.5,
+            "the final colour was recorded: {recorded:?} vs {expected:?}"
+        );
+    }
+
+    #[test]
+    fn closing_without_a_change_records_nothing() {
+        struct S {
+            color: [f32; 3],
+            recents: RecentColors,
+            swatch: Rect,
+        }
+        let labels = PickerLabels::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(600.0, 900.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let r = color_button_with(ui, &mut s.color, &labels, &mut s.recents);
+                    s.swatch = r.rect;
+                },
+                S {
+                    color: [0.2, 0.4, 0.6],
+                    recents: RecentColors::default(),
+                    swatch: Rect::NOTHING,
+                },
+            );
+        harness.run();
+        let swatch = harness.state().swatch;
+        click_at(&mut harness, swatch.center());
+        click_at(&mut harness, swatch.center());
+        assert!(
+            harness.state().recents.colors().is_empty(),
+            "an untouched popup records nothing"
+        );
+    }
+
+    #[test]
+    fn clicking_a_recent_swatch_sets_the_colour() {
+        use egui_kittest::kittest::Queryable;
+        struct S {
+            color: [f32; 3],
+            recents: RecentColors,
+            changed: bool,
+            swatch: Rect,
+        }
+        let labels = PickerLabels::default();
+        let mut recents = RecentColors::default();
+        recents.push(Color32::from_rgb(0, 255, 0));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(600.0, 900.0))
+            .build_ui_state(
+                |ui, s: &mut S| {
+                    let r = color_button_with(ui, &mut s.color, &labels, &mut s.recents);
+                    s.changed |= r.changed();
+                    s.swatch = r.rect;
+                },
+                S {
+                    color: [1.0, 0.0, 0.0],
+                    recents,
+                    changed: false,
+                    swatch: Rect::NOTHING,
+                },
+            );
+        harness.run();
+        let swatch = harness.state().swatch;
+        click_at(&mut harness, swatch.center());
+        let grid = harness.get_by_label("colour palette").rect();
+        assert!(grid.is_positive(), "the recents grid is in the popup");
+        // The first cell: 16pt swatch, centred 8pt into the grid's min.
+        click_at(&mut harness, grid.min + Vec2::new(8.0, 8.0));
+        let s = harness.state();
+        assert!(s.changed, "the recent pick reports a change");
+        assert!(
+            close(s.color, [0.0, 1.0, 0.0], 1e-3),
+            "the recent green was applied: {:?}",
+            s.color
+        );
     }
 }

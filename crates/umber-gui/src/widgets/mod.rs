@@ -1,8 +1,9 @@
 //! The four foundational widgets (docs/specs/gui-audit-and-roadmap.md §3
 //! Phase 0a), plus the notice stack (docs/specs/gui-plan-2026-10-15.md
 //! g0-notices), the colour ramp (g4-gradient-ramp), the curve editor
-//! (g4-curve-widget), the colour picker (g4-color-picker) and the
-//! Properties context rail (g2-properties-context).
+//! (g4-curve-widget), the colour picker (g4-color-picker, with its RGB/HSV
+//! slider rows and recent-swatch popup) and the Properties context rail
+//! (g2-properties-context).
 
 pub mod color_picker;
 pub mod context_rail;
@@ -17,7 +18,7 @@ pub mod tool_row;
 pub mod type_ahead;
 pub mod value_field;
 
-pub use color_picker::{ColorPicker, ColorState};
+pub use color_picker::{color_button_with, ColorPicker, ColorState, PickerLabels};
 pub use context_rail::{
     ContextKind, ContextRail, ContextRailCtx, ContextRailOutcome, PropertyRows,
 };

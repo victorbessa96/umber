@@ -5,8 +5,11 @@
 //! v1: [`RecentColors`] (most-recent-first, deduped, capped), the
 //! clickable [`SwatchGrid`], and [`sv_hue_placeholder`]. The placeholder
 //! is a NON-interactive preview of the SV square and hue strip for one
-//! hue. The interactive picker (drag handles, hex/rgb/hsv rows,
-//! eyedropper) is Phase 2's `widgets/color_picker.rs`.
+//! hue. The interactive picker is `widgets/color_picker.rs`; its
+//! `color_button_with` popup consumes [`RecentColors`] (one push when the
+//! popup closes, never per drag frame) and draws [`SwatchGrid`], so one
+//! click restores a recent colour. Persisting the list to a file is a
+//! later kill; the widget stays file-agnostic.
 
 use egui::epaint::Mesh;
 use egui::{
