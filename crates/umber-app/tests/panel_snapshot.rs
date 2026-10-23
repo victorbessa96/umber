@@ -103,3 +103,94 @@ fn psd_import_section_snapshot() {
     harness.run_ok();
     harness.snapshot("psd_import_section");
 }
+
+// A2 snapshot-breadth (the W-C3a plan's lane A2): the History panel the
+// module doc has claimed since v1 — an empty session, then after two
+// journalled layer ops — plus the toolbar (placeholder glyphs through
+// the headless-proven `IconAtlas::empty()`, the main.rs test
+// precedent) and the rich tooltip. The four PNG baselines cannot be
+// produced host-free: they are generated on the build host with
+// UPDATE_SNAPSHOTS=1 BEFORE the wave battery (the close script's
+// pre-battery step), then compared from then on.
+
+#[test]
+fn history_panel_empty_snapshot() {
+    ensure_i18n();
+    let mut doc = umber_app::document::Document::default();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(240.0, 320.0))
+        .build_ui(|ui| {
+            umber_app::history_panel::history_ui(ui, &mut doc, None);
+        });
+    harness.run_ok();
+    harness.snapshot("history_panel_empty");
+}
+
+#[test]
+fn history_panel_ops_snapshot() {
+    ensure_i18n();
+    use umber_core::layers::{LayerCommand, LayerKind};
+    let mut doc = umber_app::document::Document::default();
+    doc.run(LayerCommand::Add {
+        name: "ops-a".into(),
+        kind: LayerKind::Paint,
+        id: None,
+    });
+    doc.run(LayerCommand::Add {
+        name: "ops-b".into(),
+        kind: LayerKind::Fill,
+        id: None,
+    });
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(240.0, 320.0))
+        .build_ui(|ui| {
+            umber_app::history_panel::history_ui(ui, &mut doc, None);
+        });
+    harness.run_ok();
+    harness.snapshot("history_panel_ops");
+}
+
+#[test]
+fn toolbar_snapshot() {
+    ensure_i18n();
+    use umber_app::toolbar::{ToolKind, ToolbarView, ViewToggles};
+    let view = ToolbarView {
+        tool: ToolKind::Paint,
+        can_undo: true,
+        can_redo: false,
+        view: ViewToggles {
+            wireframe: false,
+            grid: true,
+            view_mode: umber_gpu::ViewMode::default(),
+        },
+        paint_available: false,
+        mask_editing: false,
+    };
+    let atlas = umber_gui::IconAtlas::empty();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(360.0, 48.0))
+        .build_ui(|ui| {
+            umber_app::toolbar::show(ui, &view, &atlas);
+        });
+    harness.run_ok();
+    harness.snapshot("toolbar");
+}
+
+#[test]
+fn rich_tooltip_snapshot() {
+    ensure_i18n();
+    use umber_app::rich_tooltip::TooltipParts;
+    let parts = TooltipParts {
+        title: "Snapshot tooltip".into(),
+        description: Some("The rich tooltip's snapshot fixture.".into()),
+        shortcut: Some("Ctrl+Shift+T".into()),
+        unavailable: None,
+    };
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(260.0, 90.0))
+        .build_ui(|ui| {
+            umber_app::rich_tooltip::draw(ui, &parts);
+        });
+    harness.run_ok();
+    harness.snapshot("rich_tooltip");
+}
