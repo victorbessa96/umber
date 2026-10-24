@@ -27,7 +27,16 @@ jobs:
     # forever (zero runners registered: every nightly 10-13..15 sat queued
     # then cancelled). The 3070 runner opts in through the repo variable
     # PERF_RUNNER=self-hosted once it is online; until then the gate runs.
-    runs-on: ${{ vars.PERF_RUNNER || 'ubuntu-latest' }}
+    # The hosted default is PINNED to 24.04 (2026-10-24): ubuntu-latest
+    # rotated to 26.04 on 2026-10-21 and every nightly since dies with the
+    # panic_hunt suite hanging + restarting on the new image's adapter
+    # stack — the same rotation class the ci.yml pin (c697bab) already
+    # proved: the pinned 24.04 leg green on every run after it (CI run
+    # 40020097585's full matrix). Evidence: three consecutive reds
+    # (10-21 aac1c4a2 unchanged-tip, 10-22, 10-23 96edd1e4) all on
+    # "Image: ubuntu-26.04". Revisit when 26.04's stack stabilizes
+    # upstream, same revisit clause as the CI pin.
+    runs-on: ${{ vars.PERF_RUNNER || 'ubuntu-24.04' }}
     # Gate 1 is 3 harness passes; a red adds the 2-pass canary leg —
     # 90 min holds build + soak + five passes + two compares with margin.
     timeout-minutes: 90
