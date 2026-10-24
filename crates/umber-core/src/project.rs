@@ -193,6 +193,71 @@ pub struct ProjectSettings {
     /// (identity) chain — the same rule as `display` above.
     #[serde(default)]
     pub postfx: PostFxCarry,
+    /// The tool symmetry (mirror + radial) as of the last save — the
+    /// session's brush settings carried in the project (the
+    /// symmetry-persistence kill, 2026-10-24). Additive carry: the
+    /// `serde(default)` loads pre-symmetry files with symmetry OFF
+    /// (the same rule as `display`/`postfx`). A core-owned serde
+    /// MIRROR of `umber_brush::symmetry::SymmetrySettings`, because
+    /// umber-core stays GPU-free (a direct dep would drag umber-brush
+    /// → umber-gpu into the headless crate); the app converts at the
+    /// boundary ([`crate::project::ProjectSymmetry`]'s From impls
+    /// live in umber-app).
+    #[serde(default)]
+    pub symmetry: ProjectSymmetry,
+}
+
+/// The core-owned serde mirror of the brush's symmetry settings
+/// (see [`ProjectSettings::symmetry`]'s doc for the layering call:
+/// the field shapes match `umber_brush::symmetry`'s own, the axis
+/// serializes as `"x"`/`"y"`, the app owns the conversions). Not
+/// `Copy` (the axis String) — the carry clones at the boundary,
+/// once per save/load.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSymmetry {
+    /// Mirror symmetry (the mirror line: axis + offset in tile-local
+    /// UV, 0.5 = the center line).
+    pub mirror: ProjectMirror,
+    /// Radial symmetry (rotated copies about the center; the
+    /// kaleidoscope flags reflect copies in U/V).
+    pub radial: ProjectRadial,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMirror {
+    pub enabled: bool,
+    /// `"x"` or `"y"` (anything else loads as `"x"` — the hand-edited
+    /// file's mercy).
+    pub axis: String,
+    /// The mirror line's tile-local UV offset.
+    pub offset: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProjectRadial {
+    pub enabled: bool,
+    /// Copies including the original.
+    pub count: u32,
+    pub flip_u: bool,
+    pub flip_v: bool,
+}
+
+impl Default for ProjectSymmetry {
+    fn default() -> Self {
+        Self {
+            mirror: ProjectMirror {
+                enabled: false,
+                axis: "x".to_owned(),
+                offset: 0.5,
+            },
+            radial: ProjectRadial {
+                enabled: false,
+                count: 4,
+                flip_u: false,
+                flip_v: false,
+            },
+        }
+    }
 }
 
 /// One texture set's layer stack, as stored in a [`ProjectModel`].
@@ -1042,6 +1107,62 @@ mod tests {
         for dir in [dir_a, dir_b, dir_c, dir_d] {
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn pre_symmetry_project_json_loads_default() {
+        // Old files have no "symmetry" key in settings: serde(default)
+        // yields symmetry OFF at the center line — the additive rule,
+        // same as display/postfx.
+        let dir = unique_temp_dir("pre-symmetry");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("project.json"),
+            br#"{"version":1,"texture_sets":[{"name":"Body","resolution":2048,"channels":[]}],"layer_sets":[{"texture_set":"Body","layer_ids":[],"next_layer_id":0}],"settings":{"active_texture_set":"Body"}}"#,
+        )
+        .unwrap();
+
+        let loaded = load_from_dir(&dir).expect("pre-symmetry file must load");
+        assert_eq!(loaded.settings.symmetry, ProjectSymmetry::default());
+        assert!(!loaded.settings.symmetry.mirror.enabled);
+        assert!(!loaded.settings.symmetry.radial.enabled);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symmetry_carry_round_trip_exact() {
+        // Mirror on at axis Y offset 0.25 + radial on with both flips:
+        // save -> load is exact, and the wire names pin (the axis
+        // serializes as the "y" string; a hand-edited "Y" loads the
+        // same — the app's mercy rule).
+        let dir = unique_temp_dir("symmetry-rt");
+        fs::create_dir_all(&dir).unwrap();
+        let mut model = fixture_model();
+        model.settings.symmetry = ProjectSymmetry {
+            mirror: ProjectMirror {
+                enabled: true,
+                axis: "y".to_owned(),
+                offset: 0.25,
+            },
+            radial: ProjectRadial {
+                enabled: true,
+                count: 6,
+                flip_u: true,
+                flip_v: true,
+            },
+        };
+        save_to_dir(&model, &dir).expect("save writes");
+        let loaded = load_from_dir(&dir).expect("load reads");
+        assert!(loaded.settings.symmetry.mirror.enabled);
+        assert_eq!(loaded.settings.symmetry.mirror.axis, "y");
+        assert_eq!(loaded.settings.symmetry.mirror.offset, 0.25);
+        assert!(loaded.settings.symmetry.radial.enabled);
+        assert_eq!(loaded.settings.symmetry.radial.count, 6);
+        assert!(loaded.settings.symmetry.radial.flip_u);
+        assert!(loaded.settings.symmetry.radial.flip_v);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

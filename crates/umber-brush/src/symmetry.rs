@@ -100,10 +100,12 @@ impl Default for RadialSettings {
     }
 }
 
-/// The symmetry settings. Session state in v1 (the brush panel owns it,
-/// the paint session adopts it between strokes); not in the `.umber`
-/// project nor the `.umberbrush` preset — persistence is a named
-/// follow-up.
+/// The symmetry settings. The `.umber` project CARRIES these since the
+/// 2026-10-24 persistence kill (core's `ProjectSymmetry` mirror + the
+/// app's boundary conversions); the `.umberbrush` preset deliberately
+/// does NOT (a preset is a brush shape, not a tool state — Painter's
+/// own symmetry is tool-level). The paint session adopts the settings
+/// between strokes (`sync_symmetry`).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct SymmetrySettings {
     pub mirror: MirrorSettings,

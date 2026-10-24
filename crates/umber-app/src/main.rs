@@ -2970,6 +2970,7 @@ impl UmberApp {
                 active_texture_set: Some(set_name.clone()),
                 display: self.state.display.clone(),
                 postfx: postfx_panel::carry_from_chain(&self.state.postfx),
+                symmetry: symmetry_carry_from(&self.brush_panel.symmetry),
             },
         )
         .with_graphs_mtlx(graphs_mtlx)
@@ -3209,6 +3210,10 @@ impl UmberApp {
                 // reads the chain every frame and `PostStack` builds a
                 // newly-seen kind on first use (params ride uniforms).
                 self.state.postfx = postfx_panel::chain_from_carry(&model.settings.postfx);
+                // The carried symmetry (the mirror + radial settings
+                // adopt into the brush panel; the paint session syncs
+                // on the next stroke through its own adoption path).
+                self.brush_panel.symmetry = symmetry_from_carry(&model.settings.symmetry);
                 // The painted pixels (or a clear to transparent when the
                 // project predates the sidecar — never the previous
                 // document's paint). The session lifecycle (§6.3 [M10])
@@ -4948,6 +4953,56 @@ fn compose_mask_flow(
             }
             Err(e) => log::warn!("smart mask '{}': {e}", mask.name),
         }
+    }
+}
+
+/// The symmetry carry conversions (the symmetry-persistence kill,
+/// 2026-10-24): free fns, not From impls — the orphan rule bars the
+/// app from impling a trait between two foreign crates' types, and
+/// umber-core stays GPU-free (it owns the serde MIRROR; the app owns
+/// the mapping — the `postfx_panel::carry_from_chain` precedent).
+fn symmetry_carry_from(
+    s: &umber_brush::symmetry::SymmetrySettings,
+) -> umber_core::project::ProjectSymmetry {
+    use umber_brush::symmetry::MirrorAxis;
+    umber_core::project::ProjectSymmetry {
+        mirror: umber_core::project::ProjectMirror {
+            enabled: s.mirror.enabled,
+            axis: match s.mirror.axis {
+                MirrorAxis::X => "x".to_owned(),
+                MirrorAxis::Y => "y".to_owned(),
+            },
+            offset: s.mirror.offset,
+        },
+        radial: umber_core::project::ProjectRadial {
+            enabled: s.radial.enabled,
+            count: s.radial.count,
+            flip_u: s.radial.flip_u,
+            flip_v: s.radial.flip_v,
+        },
+    }
+}
+
+fn symmetry_from_carry(
+    c: &umber_core::project::ProjectSymmetry,
+) -> umber_brush::symmetry::SymmetrySettings {
+    use umber_brush::symmetry::{MirrorAxis, MirrorSettings, RadialSettings, SymmetrySettings};
+    SymmetrySettings {
+        mirror: MirrorSettings {
+            enabled: c.mirror.enabled,
+            axis: if c.mirror.axis.eq_ignore_ascii_case("y") {
+                MirrorAxis::Y
+            } else {
+                MirrorAxis::X
+            },
+            offset: c.mirror.offset,
+        },
+        radial: RadialSettings {
+            enabled: c.radial.enabled,
+            count: c.radial.count,
+            flip_u: c.radial.flip_u,
+            flip_v: c.radial.flip_v,
+        },
     }
 }
 
