@@ -2,7 +2,6 @@
     "app-id": "org.umber.Umber",
     "runtime": "org.freedesktop.Platform",
     "runtime-version": "26.08",
-    "appstream-compose": false,
     "sdk": "org.freedesktop.Sdk",
     "command": "umber",
     "finish-args": [
