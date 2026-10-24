@@ -221,3 +221,26 @@ Tests added: 2 (`height_stroke_perturbs_the_lit_normal`,
 helpers that exist only to support them (`textured_quad_mesh`,
 `height_ramp_target`, `mikkelsen_perturbed_normal`,
 `expected_height_perturbed_byte`).
+
+---
+
+## Closing amendment (2026-10-24, the tangent-wiring kill)
+
+This report's central judgment — the deliberate choice of
+Mikkelsen's screen-space derivative surface gradient because "no
+tangent attribute required," with true per-vertex tangents named as
+the follow-up — is REVERSED as of the tangent-wiring kill
+(`acc3efb`, report `2026-10-24-tangent-wiring.md`). The mesh pass now
+uploads per-vertex mikkTSpace frames (`vertex_tangent_frames`, the
+d7eea57 foundation) and `height_perturbed_normal` consumes the TBN
+frame; the derivative form's per-facet correctness was the boundary
+this report shipped under, and the curved-surface golden
+(`height_curved_surface_uses_the_vertex_tangent_frame`) pins the two
+forms genuinely diverging where the boundary said they would: TBN
+bytes [76, 73, 77] vs the derivative frame's [110, 109, 119] at the
+probe pixel. The judgment was correct for its day (the frame
+attribute did not exist yet); the follow-up it named is now the
+implementation. The flat-quad goldens this report added survive
+re-derived: the two forms agree in direction on the flat fixture,
+differing only by the UV-to-world scale the old chain rule folded
+in — see the wiring report's derivation correction.
