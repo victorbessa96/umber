@@ -2556,6 +2556,65 @@ impl PaintState {
         Ok(id)
     }
 
+    /// Pre-warm the ID bake cache at ID-mask tool entry (the W-C4 L3
+    /// kill): the first click currently pays the full-frame bake plus
+    /// readback — 16M texels and ~64 MB at the 4K default for a
+    /// whole-mesh (single-tile) mesh, today's every mesh — the
+    /// entry-latency hitch. This bakes the same bytes the click would,
+    /// with the same key and the same flavor, and inserts the entry
+    /// so the click's hit test finds it.
+    ///
+    /// WHOLE-MESH ONLY, by design: the cache holds ONE entry, and a
+    /// multi-tile mesh's click tile is unknown at entry — warming one
+    /// guessed tile would half-fix the hitch and smell wrong. The
+    /// per-tile bakes are already cheap; the multi-entry cache for a
+    /// true multi-tile pre-warm is the named L3b follow-up.
+    ///
+    /// Opportunistic everywhere: a stroke in flight is a no-op (the
+    /// tool switch happens between strokes anyway; the guard mirrors
+    /// the click's refusal discipline), a bake error leaves the cache
+    /// exactly as it was (insert only on success — the same discipline
+    /// the click's replace-after-success pins), and the caller may
+    /// ignore the Result.
+    pub fn prewarm_id_bake_cache(
+        &mut self,
+        mesh: &umber_mesh::MeshData,
+    ) -> Result<(), IdSelectError> {
+        if self.stroking {
+            return Ok(());
+        }
+        // The exact branch whose bake is the hitch — the click's own
+        // whole-mesh gate, verbatim (multi-tile takes the cheap per-tile
+        // path at click time and is NOT pre-warmed).
+        if umber_mesh::present_tiles(mesh) != [FIRST_TILE] {
+            return Ok(());
+        }
+        let (width, height) = self.tile_size(FIRST_TILE);
+        let key = id_bake_key(mesh, IdFlavor::Triangle);
+        let bytes = bake_id_mesh(
+            &self.device,
+            &self.queue,
+            mesh,
+            &IdBakeParams {
+                flavor: IdFlavor::Triangle,
+                width,
+                height,
+            },
+        )?;
+        #[cfg(test)]
+        {
+            self.id_bakes += 1;
+        }
+        self.id_bake_cache = Some(CachedIdBake {
+            key,
+            tile: FIRST_TILE,
+            width,
+            height,
+            bytes,
+        });
+        Ok(())
+    }
+
     /// Reverts the last stroke (paint or retouch — one entry per stroke);
     /// `false` when there is none.
     pub fn undo_stroke(&mut self) -> bool {
@@ -10038,6 +10097,68 @@ mod tests {
             state.quick_mask().coverage(FIRST_TILE).is_some(),
             "the tile-1001 click selected on tile 1001"
         );
+    }
+
+    /// The L3 pre-warm (the ID-mask bake-on-tool-entry): a whole-mesh
+    /// (single-tile) mesh's entry-time bake fills the cache, so the
+    /// first click HITS — no second bake, no entry-latency hitch — and
+    /// selects the same region a cold click would. Multi-tile meshes
+    /// no-op by design (the one-entry cache cannot warm an unknown
+    /// click tile; the named L3b follow-up), and a stroke in flight
+    /// no-ops (the opportunistic guard).
+    #[test]
+    fn idmask_prewarm_fills_the_cache_and_the_first_click_hits() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mesh = single_island_quad();
+        let mut state =
+            PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
+        assert_eq!(state.id_bakes_run(), 0);
+        state
+            .prewarm_id_bake_cache(&mesh)
+            .expect("the whole-mesh pre-warm bakes");
+        assert_eq!(state.id_bakes_run(), 1, "the pre-warm baked once");
+        // The first click HITS: no second bake, and the selection is the
+        // id the cold path would have produced.
+        let first = state
+            .bake_and_select_id(&mesh, [0.25, 0.5])
+            .expect("the pre-warmed click selects");
+        assert_eq!(
+            state.id_bakes_run(),
+            1,
+            "the click hit the cache — no re-bake"
+        );
+        // The same uv again (the quad's two triangles are two regions —
+        // a different uv selects a different id, correctly): the hit
+        // RESTORES the entry, so the repeat selects the same region.
+        let repeat = state
+            .bake_and_select_id(&mesh, [0.25, 0.5])
+            .expect("the repeat click selects (the entry is restored on a hit)");
+        assert_eq!(first, repeat, "the same uv selects the same region id");
+    }
+
+    #[test]
+    fn idmask_prewarm_noops_multi_tile_and_mid_stroke() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // Multi-tile: the one-entry cache cannot know the click tile —
+        // no bake, no entry, the click path is exactly as before.
+        let multi = two_tile_strip();
+        let mut state =
+            PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
+        state
+            .prewarm_id_bake_cache(&multi)
+            .expect("the multi-tile pre-warm is a clean no-op");
+        assert_eq!(state.id_bakes_run(), 0, "nothing baked");
+        // Mid-stroke: the opportunistic guard mirrors the click's refusal.
+        let single = single_island_quad();
+        state.stroking = true;
+        state
+            .prewarm_id_bake_cache(&single)
+            .expect("the mid-stroke pre-warm is a clean no-op");
+        assert_eq!(state.id_bakes_run(), 0, "nothing baked mid-stroke");
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---

@@ -78,6 +78,17 @@ that moment (the bake the first click currently pays), so the click
 selects without the entry-latency hitch. P1's parked cache is the
 target; its report names the cache seams.
 
+**CLOSED 2026-10-24 (the L3 kill, brief
+`docs/loop/briefs/2026-10-24-l3-idmask-prewarm.md`, report
+`docs/loop/kill-reports/2026-10-24-idmask-prewarm.md`):
+`PaintState::prewarm_id_bake_cache` bakes the whole-mesh branch's
+full-frame hitch (16M texels at 4K) at the armed frame, the first
+click hits; multi-tile no-ops by design (the one-entry cache cannot
+know the click tile — the multi-entry cache is the named L3b
+follow-up), mid-stroke no-ops (the click's own refusal discipline).
+Both pins green through the real adapter; `bake_and_select_id`
+untouched.**
+
 ### L4. Winink live hook — stylus + one eframe seam (RESEARCH DONE)
 
 The vendoring precondition is landed (the two companion artifacts).

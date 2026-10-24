@@ -538,6 +538,17 @@ impl TabViewer for PanelViewer<'_> {
                 // and leave the mask alone.
                 let idmask_armed = self.brush.strip == toolbar::ToolKind::IdMask;
                 self.viewport.set_idmask_armed(idmask_armed);
+                // The W-C4 L3 kill: pre-warm the ID bake cache at tool
+                // entry — the first click's full-frame bake (the
+                // 16M-texel hitch) happens HERE, on the armed frame,
+                // so the click selects without the entry-latency
+                // hitch. Opportunistic: no stroke in flight, a
+                // missing mesh, and a bake error all no-op cleanly.
+                if idmask_armed {
+                    if let (Some(p), Some(mesh)) = (self.paint.as_deref_mut(), self.mesh.as_ref()) {
+                        let _ = p.prewarm_id_bake_cache(mesh);
+                    }
+                }
                 let home = self.home_recent.as_deref_mut().zip(self.home_recovery).map(
                     |(recent, recovery)| crate::empty_state::HomeCardInput {
                         recent,
