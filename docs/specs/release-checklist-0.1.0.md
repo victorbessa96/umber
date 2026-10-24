@@ -154,16 +154,21 @@ protocol had no number to freeze). After 0.1.0, any step change bumps it.
   only). An OV certificate ($150–300/yr) is the fallback; EV no longer
   bypasses SmartScreen since 2024.
 
-- .usdz read beyond the first layer — still true and tracked
-  (`umber-mesh/src/usdc.rs:43` loads the package's first layer's first
-  Mesh prim); non-blocking. (Sweep note 2026-10-19, kill
-  `release-checklist-truth`: PSD import LANDED — `mod psd` lives in
-  umber-app + umber-export, queue row 18 `a4bf81a`; the full-32 blend
-  set LANDED — `d861482`, all 32 variants live in `layers.rs`'s
-  `BlendMode` (counted); the OCIO config panel LANDED — `9a1a808`,
-  ocio wired in `display_panel.rs`; the path tools LANDED —
-  `path_tool.rs` + the parity row's smudge/clone/symmetry/path/polygon
-  ✓; the post-effects stack LANDED — requirements row 84: built
-  `86e77ff`+`a523647`+`112b378` and persisted `f35cf48`. All five
-  removed from this list.) (Review-audit note: nothing P0 hides here — the
-  P0 holes all live in the census's code-vs-reachable split now.)
+(Sweep history, preserved as the list shrinks — the known-deferred is
+down to Windows signing alone. The 2026-10-19 pass, kill
+`release-checklist-truth`, removed five: PSD import LANDED `a4bf81a`
+(`mod psd` in umber-app + umber-export, queue row 18); the full-32
+blend set LANDED `d861482` (all 32 variants in `layers.rs`'s
+`BlendMode`, counted); the OCIO config panel LANDED `9a1a808` (wired
+in `display_panel.rs`); the path tools LANDED (`path_tool.rs` + the
+parity row's smudge/clone/symmetry/path/polygon ✓); the post-effects
+stack LANDED (requirements row 84: built `86e77ff`+`a523647`+`112b378`,
+persisted `f35cf48`). The 2026-10-24 pass, M1 pass 4, removed the
+last: .usdz read beyond the first layer LANDED `d36cfb1` — load_usdz
+walks the sublayer stack (root precedence, authored order,
+depth-first, resolved inside the package; cycle-guarded + depth-bounded;
+escaping paths rejected; found-but-malformed Mesh = hard error; 8
+pinned tests + the python port 12/12) — the checklist's own named
+deferral, closed by the W-C3b sweep. Review-audit note: nothing P0
+hides here — the P0 holes all live in the census's code-vs-reachable
+split now.)

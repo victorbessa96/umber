@@ -11,68 +11,42 @@
 
 ## Status line
 
-Current phase: **THE W-C3a FLEET CLOSED THROUGH THE LOCAL PORT + THE
-RUNNER-ROTATION REDS PINNED (2026-10-23) — eleven rows pushed
-e610ed7..96edd1e (02:52 local), on top of the 28-commit doc/tooling tail
-pushed 02:00 on Bessa's explicit order (aac1c4a..e610ed7).** Local
-battery GREEN, 1,304 tests / 6 crates, under the slow envelope (one
-cargo stack machine-wide, -j3/nice-19, the 8G/2G oomd scope shield —
-nine fires, two reboots, five scope kills to land; the G1
-sRGB-endpoint ULP red fixed production-side mid-close). The pushed
-tip's CI 39908194347: windows + change classifier green; the ubuntu
-leg red = the runner-image SIGSEGV (ubuntu-latest rotated 24.04→26.04
-on 10-21 — root-caused, the check matrix pinned to ubuntu-24.04,
-`c697bab`, rides the W-C3b push); the layering gate red = the fleet's
-stale scorecard (README regenerated 2,100+→2,200+ this pass); the
-flatpak dispatch red = the same rotation at the bwrap/rofiles layer
-(the packaging job pinned this pass). The host stays unreachable,
-checking STOOD DOWN; the W-C3b close runs LOCALLY via
-scripts/w-c3b-local-close.sh (the port authored 10-23).
-The morning closed the freeze-3 fleet (push `ff9ac02..0955ac8`, CI
-39263817670 GREEN both platforms; one clippy fix-forward, two
-recovery-script defects fixed live — addenda 1+2 in the script's
-report); the afternoon completed the stencil engine's whole chain
-on top: the gate_plane paint hook (`3a8b4cb`, Amendment A), the app
-wiring (`6c95e26`), the viewport shell path + the N toggle
-(`2bb8c60`), the set-switch re-stage (`dcc5e89`), the cross-tile
-observer (`45ad4e4` — coded by the opencode claw on
-deepseek-v4.1-flash, host battery 822 tests green), and the design
-doc's closure tick (`450b3e1`) — the lane's step-4 CLOSED, soft
-edges answered by design, the mid-stroke window BY DESIGN. The
-flatpak kill's verdict gate: fixed same-day by the
-flatpak-archive-type kill (archive-type: tar-gzip per source) — the
-post-push re-dispatch is the verdict gate. The perf instrument was
-rebuilt the same day: the four-leg bisect CONVICTED THE RUNNER
-FLEET, not the code (the baseline's own tip reads 89.29 today vs
-45.54 on 10-16; every commit reads 78-91 on today's fleet — the
-full leg log in docs/perf/protocol.md), the baseline reseeded to
-today's fleet era (`c53a08d`+`b1d3660`), the nightly drift-hardened
-(`dc4b355`: median-of-3 + the same-tip canary — no single sample
-carries a verdict), and C2-16 closed with the §12 budgets' first
-real-hardware record (`dc0c599`: the RTX 3070 at 82x/2x/zero-drop
-margins) — the C2-13..19 honest-claims row is ALL SEVEN CLOSED.
+Current phase: **THE W-C3b SWEEP CLOSED + THE FLATPAK FIVE-WALL CHAIN
+GREEN END TO END (2026-10-23) — origin `3f1f307`.** The parked sweep
+four landed through the local port battery-green (usdz-sublayer-walk
+`d36cfb1`, blend-replace-opacity `b5a60b1`, solo-height `230d730`,
+tangent-frame `d7eea57`, plus `f9a4f7a` the swatches tempdir-race fix
+and `07bcd2b` the gpu-golden import fix; 1,272 tests / 4 crates —
+mesh 145 + core 126 + gpu 151 + app 850, the two mid-close
+fix-forwards solo-verified first). The packaging lane then went
+GREEN through five walls, each root-caused from its own red dispatch:
+vendor parser `01f69a6` → runtime 26.08 `e3ae21d` → install trio
+`e76be0c` → rofiles hardening `334af5b` (its compose-fix attribution
+falsified by the no-rofiles run 40035240398 and withdrawn — the flag
+stays as orthogonal hardening) → svg pixbuf loader `3f1f307`.
+Verdict run 40040567126 on `3f1f307`: SUCCESS — the compose
+completes, Umber.flatpak (12,635,392 bytes) uploads as the artifact,
+the lane's first real bundle. CI green at every chain tip from
+`07bcd2b` (40020097585 onward): the `c697bab` ubuntu-24.04 pin
+held, the runner-image segv is gone. The docs remnant landed 10-24
+(M1 pass 4): the release-checklist .usdz deferral closed, the ledger
+sweep→LANDED with the chain rows run-id-cited — the W-C3b docs pass
+is done. The host stays unreachable, checking STOOD DOWN.
 
-**Next:** the W-C3b close — `scripts/w-c3b-local-close.sh` (the local
-port, same shape as the W-C3a one): the W-C3B claim, four sweep rows
-(usdz-sublayer-walk, blend-replace-opacity, solo-height, tangent-frame)
-+ the docs row, local throttled battery (umber-mesh umber-core
-umber-gpu umber-app), the post-rows scorecard verify, ONE push carrying
-`c697bab` + the flatpak pin + the scorecard + this docs pass, explicit
-run-id ci-watch, then the post-push packaging re-dispatch (the flatpak
-verdict gate, now on the pinned runner). Launch gated on the
-kitten-voicesweep bake finishing — heavy jobs serialize one at a time
-(the 10-22/23 reboot lesson). After the close: the W-C3b docs pass
-(consume the four manifests + the sentinel-c3b, the
-release-checklist/requirements rows 39/79/111, ledger sweep→LANDED, M1
-pass), then the briefed runway (tangent wiring → L1 → L2 → L3 → L5-L7 +
-K1, one dispatch each from docs/loop/briefs/), then the perf-nightly
-red hunt (opening hypothesis: the 10-21 drift-gate flip is the same
-ubuntu rotation — pin vs re-baseline is that hunt's call).
-centralhost: HOST_BACK 2026-10-21 ~13:32, unreachable since — FRAGILE,
-memtest86+ owed at Bessa's next physical access (boot straight into it,
-skip the OS), checking STOOD DOWN by his order. The release lane stays
-Bessa-gated: SPEC ratification (SPEC.md still DRAFT), the dogfood
-asset, Windows signing, the alpha tag.
+**Next:** the briefed runway — tangent wiring → L1 → L2 → L3 → L5-L7 +
+K1, one dispatch each from docs/loop/briefs/ (the tangent brief is
+docs/loop/briefs/2026-10-20-tangent-wiring.md; kill locks + the
+two-gate wave shape as usual), then the perf-nightly red hunt (still
+RED since 10-21, latest run 39923126737 on `96edd1e`; opening
+hypothesis: the drift-gate flip is the same ubuntu rotation —
+perf-nightly.yml:30 rides ubuntu-latest; pin vs re-baseline is that
+hunt's call). The desktop-checks Result lines ×4 stay honestly open
+(they need the live desktop). centralhost: HOST_BACK 2026-10-21
+~13:32, unreachable since — FRAGILE, memtest86+ owed at Bessa's next
+physical access (boot straight into it, skip the OS), checking STOOD
+DOWN by his order. The release lane stays Bessa-gated: SPEC
+ratification (SPEC.md still DRAFT), the dogfood asset, Windows
+signing, the alpha tag.
 
 ## The core-loop queue (the ONLY active hunt)
 
@@ -141,11 +115,12 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
   time. The W-C3a close ran fully LOCAL; the W-C3b close does the same.
 - Windows Ink: winink stays default-off and hook-less (C2-30 closed);
   the pen-flags half (S1) LANDED with the W-C3a fleet (`8d7bf8a`).
-- Flatpak bundle build: the chain has never been green end to end — the
-  offline-deps + archive-type + strip-components fixes all landed; the
-  10-23 dispatch died at the runner's bwrap/rofiles layer (the
-  ubuntu-26.04 rotation), the job now pinned to ubuntu-24.04; the
-  W-C3b push's post-push re-dispatch is the verdict gate.
+- Flatpak bundle build: GREEN END TO END (2026-10-23, verdict run
+  40040567126 on `3f1f307`) — the five-wall chain closed (vendor
+  parser, runtime 26.08, install trio, rofiles hardening, svg
+  loader); Umber.flatpak (12,635,392 bytes) uploads as the CI
+  artifact; the job stays pinned to ubuntu-24.04 (`f62d112`) against
+  the runner rotation.
 - Perf-nightly: RED since 10-21 (the drift gate flipped on an unchanged
   tip) — its own hunt; the segv hunt's evidence names the opening
   hypothesis (perf-nightly.yml:30 rides ubuntu-latest — the same

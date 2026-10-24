@@ -4,6 +4,35 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## The W-C3b sweep closed + the flatpak chain went green end to end (2026-10-23, the sweep four + the five walls)
+
+- **Added — the parked W-C3b sweep, all four kills:** the .usdz
+  sublayer walk (`d36cfb1` — root precedence, cycle-guarded,
+  depth-bounded, escaping paths rejected), Replace's opacity bypass
+  (`b5a60b1` — the mode's documented contract at every coverage
+  gate; the panel's channel-opacity greys for Replace rows), the
+  Solo/Preview height arm reading the bound height tile (`230d730`),
+  and per-vertex mikkTSpace tangent frames (`d7eea57` — the UV-seam
+  weld rule, handedness-encoded bitangents, untrusted-input-safe) —
+  plus the close tooling (`82975df` + `089b1a4`), the swatches
+  tempdir-race fix (`f9a4f7a`), and the gpu-golden import fix
+  (`07bcd2b`, the E0433 the close push's feature leg caught).
+- **Fixed — the flatpak chain, five walls to green:** the vendor
+  parser reads the semver shape (`01f69a6`), the runtime bumped to
+  26.08 for the deliberate wasmtime-rc pin's rustc-1.97 demand
+  (`e3ae21d`), the job installs the matching platform/SDK trio
+  (`e76be0c`), `--disable-rofiles-fuse` kept as orthogonal hardening
+  with its compose-fix attribution withdrawn after the no-rofiles run
+  falsified it (`3824b41` + `334af5b`), and librsvg2-common installed
+  so the compose can read the SVG icon (`3f1f307`) — verdict run
+  40040567126: SUCCESS, the first real Umber.flatpak bundle
+  (12,635,392 bytes) from CI.
+- **Fixed — the runner rotation, both pins' verdicts:** the check
+  matrix's ubuntu-24.04 pin (`c697bab`) held green from `07bcd2b`
+  onward (run 40020097585 and every chain tip after) — the wandering
+  segv is gone; the packaging job's own pin (`f62d112`) carried the
+  chain past the bwrap/rofiles sandbox death.
+
 ## The W-C3a fleet closed through the local port + the runner-rotation reds pinned (2026-10-23, eleven rows at push + the pins behind)
 
 - **Added — the parked W-C3a fleet, all nine kills:** the painted
