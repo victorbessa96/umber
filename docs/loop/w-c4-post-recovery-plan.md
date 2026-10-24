@@ -35,6 +35,18 @@ resize staging) into a lib fn (umber-app module or paint_state
 helper) so C2-9's check gains a headless test — today D1's smoke is
 the only instrument. Unlocks L5's per-set scope glue.
 
+**CLOSED 2026-10-24 (the L1 kill, `crates/umber-app/src/set_switch.rs`):
+`switch_active_set` + `reconcile_pending_resize` extracted to a lib
+module with `restage_stencil` (moved from the bin's viewport, name and
+signature unchanged) and `PendingResize` (fields pub for the headless
+half); the panel calls both, behavior bit-identical. The headless test
+(`crates/umber-app/tests/set_switch.rs`) pins all five contracts
+through the real adapter: the gate-follows-the-tile re-stage on a
+size-changing switch, the same-set no-op, the inactive and imageless
+no-restage guards, and the stale-pending clear. The stencil session
+module moved bin→lib (crate-root re-exported, every existing
+`crate::stencil::` path resolving unchanged).**
+
 ### L2. Per-channel dab density — ONE kill, both seams (b10+P1-gated)
 
 `texels_per_uv_for` (crates/umber-paint/src/paint_state.rs:1653 —

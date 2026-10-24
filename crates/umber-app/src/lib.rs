@@ -66,6 +66,15 @@ pub mod layers_panel;
 pub mod palette;
 pub mod psd_import;
 pub mod rich_tooltip;
+/// The set-switch glue (the W-C4 L1 extraction): the texture-sets
+/// panel's two non-UI cores, lib-reachable for the headless variant
+/// (C2-9's named gap) and the headless test beside `gate0_journey.rs`.
+pub mod set_switch;
+/// The stencil engine's session half (moved from the bin so the
+/// set-switch glue — and the headless test — can reach it; the bin
+/// re-exports it at its crate root, so every existing
+/// `crate::stencil::` path in the shell resolves unchanged).
+pub mod stencil;
 pub mod toolbar;
 
 /// Dynamic material layers: the headless eval driver, now in

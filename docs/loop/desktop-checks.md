@@ -70,6 +70,12 @@ A headless variant of this check needs the set-switch glue extracted
 from `main.rs` into a lib fn (the W-C3a plan's §5 tail item 4); until
 then this page is the instrument.
 
+**2026-10-24: the headless half LANDED (the W-C4 L1 kill) —
+`umber_app::set_switch` with the five-contract test
+(`crates/umber-app/tests/set_switch.rs`, green through the real
+adapter). This page KEEPS its Result line: the desktop smoke stays the
+end-to-end instrument; the headless test is the other half.**
+
 ## Check 4 — Windows real-pen flags (S1's leg; runs only AFTER the parked fleet lands)
 
 Requires the `winink-pen-flags` kill committed (parked, HOST_BACK-gated)

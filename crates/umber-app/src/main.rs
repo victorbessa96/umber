@@ -162,13 +162,20 @@ use umber_paint::snapshot::build_composite_snapshot;
 mod size_presets;
 mod spp_import;
 mod status_bar;
-mod stencil;
 mod stylus_input;
 mod thumbnails;
 mod tile_selection;
 mod toolbar;
 mod uv_view;
 mod viewport;
+
+// The lib now owns the stencil session module (the set-switch L1
+// extraction): the bin re-exports it at the crate root so every
+// existing `crate::stencil::` / `stencil::` path in the shell keeps
+// resolving unchanged, and the glue module likewise.
+use set_switch::PendingResize;
+pub use umber_app::set_switch;
+pub use umber_app::stencil;
 
 use bakes_panel::{BakesContext, BakesPanel};
 use brush_panel::BrushPanel;
@@ -2489,15 +2496,6 @@ fn properties_row_labels(kind: umber_gui::ContextKind) -> Vec<String> {
 /// override and rebuilds at the set's size. The same intentional-clear
 /// contract as the set resize (that channel's canvas plus the session
 /// stroke-undo history) — the hint string below names it.
-/// A texture-set resize armed by the size combo, waiting for its confirm
-/// (the resize clears the set's canvas and stroke history).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingResize {
-    set: String,
-    from: (u32, u32),
-    to: u32,
-}
-
 fn texture_sets_panel_ui(
     ui: &mut Ui,
     paint: Option<&mut paint_state::PaintState>,
@@ -2527,21 +2525,10 @@ fn texture_sets_panel_ui(
             );
         }
     });
-    if active != paint.active_set() {
-        paint.set_active_set(&active);
-        // Amendment A point 4 (the per-set scope): the stencil gate
-        // stages at the ACTIVE tile's quick-mask plane size, so this
-        // paint-side set switch must re-stage — its tile's now-resolved
-        // set can carry a differently-sized quick mask, and the new tile
-        // would otherwise paint stencil-ungated. Guarded to a live
-        // stencil (an inactive or imageless one already holds no gate;
-        // re-staging it would only clear paint's gate for nothing).
-        if let Some(s) = stencil {
-            if s.active && s.image.is_some() {
-                crate::viewport::restage_stencil(s, Some(&mut *paint));
-            }
-        }
-    }
+    // The set-switch glue (W-C4 L1): the switch + Amendment A point 4's
+    // guarded re-stage now live in the lib fn — the guard inside, so
+    // the headless test exercises it (see `set_switch`'s module docs).
+    set_switch::switch_active_set(paint, stencil, &active);
     let (width, height) = paint.size_of_set(&active);
     let mut size = width;
     ui.horizontal(|ui| {
@@ -2561,10 +2548,12 @@ fn texture_sets_panel_ui(
             to: size,
         });
     }
+    // The stale-pending clear (the W-C4 L1 extraction): a pending armed
+    // for a different set dies with the switch — the glue fn owns the
+    // rule now.
+    set_switch::reconcile_pending_resize(pending, &active);
     if let Some(p) = pending.clone() {
-        if p.set != active {
-            *pending = None;
-        } else {
+        {
             ui.group(|ui| {
                 ui.label(
                     egui::RichText::new(crate::i18n::tr_args(

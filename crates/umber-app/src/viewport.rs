@@ -190,7 +190,8 @@ use umber_mesh::tile_of_uv;
 
 use crate::i18n::tr;
 use crate::paint_state::PaintState;
-use crate::stencil::{quick_mask_gate_bytes, StencilState};
+use crate::set_switch::restage_stencil;
+use crate::stencil::StencilState;
 
 /// Background shown when there is no mesh loaded (and behind the mesh
 /// otherwise, since the shared egui render pass has no clear op of its
@@ -1760,32 +1761,6 @@ fn stencil_overlay_rgba(image: &StencilImage) -> ([usize; 2], Vec<u8>) {
 /// stages at the ACTIVE tile's quick-mask plane, so a set switch must
 /// re-stage at the newly-resolved plane or the new tile paints
 /// stencil-ungated.
-pub(crate) fn restage_stencil(stencil: &mut StencilState, paint: Option<&mut PaintState>) {
-    if let Some(p) = paint {
-        let tile = p.active_tile();
-        let mask = p.quick_mask_for_tile(tile);
-        let (w, h) = mask.dimensions();
-        let target = Some((w, h));
-        let quick = quick_mask_gate_bytes(mask, tile);
-        stencil.stage_gate(target, quick.as_deref());
-        // The observer's record follows the HOOK, not the label: only an
-        // ADOPTED hand-off proves paint's gate matches this tile + these
-        // dims. `set_stencil_gate` refuses mid-stroke (and no-ops on a
-        // same value), and the label above still stages on a refusal — so
-        // recording on anything but `true` would make the observer read
-        // the label's dims as a match and never retry, leaving the stale
-        // gate in place forever. An adopted CLEAR (a deactivation hands
-        // off `None`) records `None`: there are no bytes staged to claim.
-        let gate = stencil.hook_gate(target);
-        let has_gate = gate.is_some();
-        if p.set_stencil_gate(gate) {
-            stencil.staged_for = if has_gate { Some((tile, w, h)) } else { None };
-        }
-    } else {
-        stencil.stage_gate(None, None);
-    }
-}
-
 /// The Overlays popover's stencil rows: step 2's
 /// `display_panel::stencil_rows` with `view` (this viewport's size) as
 /// the fit for a load and for Reset — `stencil::panel_section`'s adapter
