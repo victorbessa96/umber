@@ -57,11 +57,19 @@ pub struct Vertex {
     /// Paint UV, in the mesh's own uv space (global UDIM uvs for a
     /// multi-tile mesh — the `PaintParams` tile select reduces them).
     pub uv: [f32; 2],
+    /// Per-vertex tangent frame, packed at upload from
+    /// [`umber_mesh::tangents::vertex_tangent_frames`] as
+    /// `[t.x, t.y, t.z, handedness]` — the mikkTSpace frames the
+    /// height-gradient perturbation consumes (`B = handedness ·
+    /// cross(N, T)` in the shader). The attribute rides location 3 of
+    /// the mesh pipelines' shared vertex buffer.
+    pub tangent: [f32; 4],
 }
 
 const _: () = assert!(
-    size_of::<Vertex>() == 32,
-    "Vertex must stay position + normal + uv (32 bytes)"
+    size_of::<Vertex>() == 48,
+    "Vertex must stay position + normal + uv + tangent frame (48 bytes: \
+     12 + 12 + 8 + 16, each field padded to its alignment)"
 );
 
 /// The mesh pass's base-color + height paint uniform (`MESH_SHADER`
@@ -827,7 +835,7 @@ impl GpuContext {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4],
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
@@ -1396,15 +1404,35 @@ impl MeshBuffers {
             Cow::Owned(vec![[0.0; 2]; mesh.positions.len()])
         };
 
+        // Per-vertex mikkTSpace tangent frames from the resolved
+        // normals/uvs (the tangent-wiring kill): the frames come from
+        // the same inputs the vertices pack, so the upload stays the
+        // single source of the mesh pass's vertex state. Degenerate
+        // UVs (the zero-uvs arm above) get the module's fallback
+        // frame, never a panic.
+        let frames = umber_mesh::tangents::vertex_tangent_frames(
+            &mesh.positions,
+            &normals,
+            &uvs,
+            &mesh.indices,
+        );
+
         let vertices: Vec<Vertex> = mesh
             .positions
             .iter()
             .zip(normals.iter())
             .zip(uvs.iter())
-            .map(|((p, n), uv)| Vertex {
+            .zip(frames.iter())
+            .map(|(((p, n), uv), frame)| Vertex {
                 position: *p,
                 normal: *n,
                 uv: *uv,
+                tangent: [
+                    frame.tangent[0],
+                    frame.tangent[1],
+                    frame.tangent[2],
+                    frame.handedness,
+                ],
             })
             .collect();
 
@@ -2123,10 +2151,11 @@ mod tests {
     }
 
     #[test]
-    fn vertex_stays_32_bytes_and_paint_params_match_the_wgsl_layout() {
-        // The uv replaced the old `_pad` in place: stride is unchanged,
-        // so the OpenPBR pipeline (locations 0–1) needs no update.
-        assert_eq!(size_of::<Vertex>(), 32);
+    fn vertex_layout_matches_the_wgsl_stride_and_paint_params() {
+        // Vertex grew 32→48 for the tangent frame (the tangent-wiring
+        // kill, location 3); the OpenPBR pipeline keeps locations 0–1
+        // (stride covers the buffer, unused attributes are legal).
+        assert_eq!(size_of::<Vertex>(), 48);
         // PaintParams grew 32→48 for `height_strength` (worklist #12,
         // binding 12); the WGSL block and the assert at the struct's
         // definition carry the same number.
@@ -3977,51 +4006,60 @@ mod tests {
             target
         }
 
-        /// Mirrors `shaders::MESH_SHADER`'s `height_perturbed_normal`
-        /// (the Mikkelsen screen-space surface-gradient formula) so the
-        /// golden test below pins bytes derived from the SAME
-        /// arithmetic the GPU runs — not hand-expanded decimals (the
-        /// `expected_procedural_byte` family's style, extended).
-        /// `f32::signum` (never 0) stands in for WGSL's `sign` (which
-        /// can return 0): the test's `det` is always nonzero, so the
-        /// two never diverge here.
-        fn mikkelsen_perturbed_normal(
-            n: glam::Vec3,
-            dpos_dx: glam::Vec3,
-            dpos_dy: glam::Vec3,
-            dhdx: f32,
-            dhdy: f32,
-        ) -> glam::Vec3 {
-            let r1 = dpos_dy.cross(n);
-            let r2 = n.cross(dpos_dx);
-            let det = dpos_dx.dot(r1);
-            let surf_grad = det.signum() * (dhdx * r1 + dhdy * r2);
-            (det.abs() * n - surf_grad).normalize()
+        /// The TBN perturbation mirror of `MESH_SHADER`'s
+        /// `height_perturbed_normal` (the tangent-wiring kill): the
+        /// flat-quad fixtures' known frame is T = +X, handedness +1
+        /// (B = +Y), so the CPU side needs no frame plumbing — the
+        /// fixture IS the frame. The WGSL re-orthogonalizes the
+        /// interpolated tangent against the interpolated normal; on
+        /// the flat quad both are constant and already orthogonal, so
+        /// the mirror may skip that step bit-for-bit.
+        fn tbn_perturbed_normal(dhdu: f32, dhdv: f32) -> glam::Vec3 {
+            let n = glam::Vec3::new(0.0, 0.0, 1.0);
+            let t = glam::Vec3::new(1.0, 0.0, 0.0);
+            let b = glam::Vec3::new(0.0, 1.0, 0.0);
+            let surf_grad = dhdu * t + dhdv * b;
+            (n - surf_grad).normalize()
         }
 
-        /// Closed-form expected byte for a height-perturbed normal
-        /// under a light with x, y, AND z components — unlike the
-        /// family's usual `NEG_Y` (`to_light = +Y`, which reads only
-        /// `n.y` and would hide a pure-x, "+u ramp" perturbation
-        /// entirely). `to_light = normalize(1, 1, 1)`.
-        ///
-        /// `dhdx`/`dhdy` are the already-strength-scaled screen-space
-        /// height derivatives (see `height_stroke_perturbs_the_lit_normal`'s
-        /// doc for how they're derived from the bound ramp); `(0.0,
-        /// 0.0)` is the unperturbed/flat case.
-        fn expected_height_perturbed_byte(dhdx: f32, dhdy: f32) -> [u8; 4] {
+        /// The GENERAL TBN perturbation mirror of `MESH_SHADER`'s
+        /// `height_perturbed_normal` (the tangent-wiring kill): the
+        /// interpolated-frame form — normalize the interpolated normal
+        /// first, re-orthogonalize the raw tangent against it, rebuild
+        /// the bitangent from the handedness sign, then
+        /// `normalize(n - (dhdu * t_hat + dhdv * b))`. The flat-frame
+        /// `tbn_perturbed_normal` above is the `textured_quad_mesh` special
+        /// case (T = +X, handedness +1, dh = the known ramp values); the
+        /// curved-surface golden feeds this general form the barycentric
+        /// blend of a curved sliver's frames.
+        fn tbn_perturbed_general(
+            n: glam::Vec3,
+            t_raw: glam::Vec3,
+            handedness: f32,
+            dhdu: f32,
+            dhdv: f32,
+        ) -> glam::Vec3 {
+            let n_hat = n.normalize();
+            let t_hat = (t_raw - n_hat * n_hat.dot(t_raw)).normalize();
+            let b = n_hat.cross(t_hat) * handedness;
+            let surf_grad = t_hat * dhdu + b * dhdv;
+            (n_hat - surf_grad).normalize()
+        }
+
+        /// The shared byte tail for the height-perturbed-normal goldens
+        /// (the tangent-wiring kill's factorization): the byte chain
+        /// both the flat family and the curved golden pin against —
+        /// GROUND/SKY/BASE/SUN, the `to_light = normalize(1, 1, 1)`
+        /// diffuse (a light with x, y, AND z components, unlike the
+        /// family's usual `NEG_Y`, which reads only `n.y` and would
+        /// hide a pure-x "+u ramp" tilt entirely), the env blend on
+        /// `n.y`, the `albedo · (env + diffuse · SUN · 0.55)` product,
+        /// `floor(px * 255 + 0.5)`.
+        fn expected_height_perturbed_byte_for(n: glam::Vec3) -> [u8; 4] {
             const GROUND: [f32; 3] = [0.30, 0.27, 0.24];
             const SKY: [f32; 3] = [0.45, 0.55, 0.78];
             const BASE: [f32; 3] = [0.72, 0.72, 0.75];
             const SUN: [f32; 3] = [1.0, 0.96, 0.90];
-            // Identity view_proj: world_pos IS the vertex position, so
-            // its screen-space derivative is the per-pixel NDC step
-            // (2/W, -2/H — the y flip is wgpu's NDC-to-framebuffer
-            // convention) at W=H=4.
-            let n0 = glam::Vec3::new(0.0, 0.0, 1.0);
-            let dpos_dx = glam::Vec3::new(0.5, 0.0, 0.0);
-            let dpos_dy = glam::Vec3::new(0.0, -0.5, 0.0);
-            let n = mikkelsen_perturbed_normal(n0, dpos_dx, dpos_dy, dhdx, dhdy);
             let to_light = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
             let diffuse = n.dot(to_light).max(0.0);
             let t = (n.y * 0.5 + 0.5).clamp(0.0, 1.0);
@@ -4041,6 +4079,66 @@ mod tests {
                 (px[2] * 255.0 + 0.5).floor() as u8,
                 255,
             ]
+        }
+
+        /// The flat-quad golden's wrapper: the UV-space derivatives
+        /// through the fixture's hardcoded frame (the quad IS its own
+        /// tangent frame), then the shared byte tail.
+        fn expected_height_perturbed_byte(dhdu: f32, dhdv: f32) -> [u8; 4] {
+            expected_height_perturbed_byte_for(tbn_perturbed_normal(dhdu, dhdv))
+        }
+
+        /// The OLD (pre-tangent-wiring) derivative-frame mirror of the
+        /// shader's former `height_perturbed_normal` — Mikkelsen 2010's
+        /// screen-space surface gradient (`r1 = cross(dpos_dy, n)`,
+        /// `r2 = cross(n, dpos_dx)`, `det = dot(dpos_dx, r1)`,
+        /// `normalize(abs(det) * n - sign(det) * (dhdx * r1 + dhdy * r2))`).
+        /// Test-local oracle for the curved-surface divergence proof: the
+        /// wiring kill REPLACED this in the shader with the TBN frame, and
+        /// the curved golden must now show the two disagreeing on a curved
+        /// surface (the per-facet vs per-vertex distinction the derivative
+        /// frame cannot cross).
+        fn mikkelsen_perturbed_normal(
+            n: glam::Vec3,
+            dpos_dx: glam::Vec3,
+            dpos_dy: glam::Vec3,
+            dhdx: f32,
+            dhdy: f32,
+        ) -> glam::Vec3 {
+            let r1 = dpos_dy.cross(n);
+            let r2 = n.cross(dpos_dx);
+            let det = dpos_dx.dot(r1);
+            let mut surf_grad = r1 * dhdx;
+            surf_grad = surf_grad + r2 * dhdy;
+            let signed = surf_grad * det.signum();
+            (n * det.abs() - signed).normalize()
+        }
+
+        /// Barycentric weights (w0, w1, w2) of a world point in the
+        /// curved cylinder-segment sliver (`v0 = (1,-1,0)`,
+        /// `v1 = (cos(PI/4),-1,sin(PI/4))`, `v2 = (1,1,0)` — the tangent-wiring
+        /// kill's curved golden fixture) — the linear-interpolation kernel
+        /// the GPU's barycentric vertex-attribute interpolation must
+        /// reproduce for the interpolated normal / tangent / uv.
+        fn barycentric_weights(
+            p0: glam::Vec3,
+            p1: glam::Vec3,
+            p2: glam::Vec3,
+            p: glam::Vec3,
+        ) -> (f32, f32, f32) {
+            let v0 = p1 - p0;
+            let v1 = p2 - p0;
+            let v2 = p - p0;
+            let d00 = v0.dot(v0);
+            let d01 = v0.dot(v1);
+            let d11 = v1.dot(v1);
+            let d20 = v2.dot(v0);
+            let d21 = v2.dot(v1);
+            let den = d00 * d11 - d01 * d01;
+            let w1 = (d11 * d20 - d01 * d21) / den;
+            let w2 = (d00 * d21 - d01 * d20) / den;
+            let w0 = 1.0 - w1 - w2;
+            (w0, w1, w2)
         }
 
         /// THE CAN-FAIL END-TO-END for the height→normal live kill
@@ -4065,12 +4163,20 @@ mod tests {
         /// column-only: at texel (1, 2), h0 = 85/255, h(u+1) = 170/255,
         /// h(v+1) = 85/255 (row-independent, same as h0) → dhdv = 0.
         /// At strength 0.75: dhdu = (170-85)/255 * 4 * 0.75 = 1.0
-        /// exactly, so dhdx = dhdu*0.25 = 0.25, dhdy = -dhdv*0.25 = 0.
+        /// exactly, dhdv = 0. The TBN form (the tangent-wiring kill)
+        /// consumes these UV-space derivatives DIRECTLY — the
+        /// fixture's frame is T = +X, handedness +1 (B = +Y; the
+        /// quad's uvs grow with world x and y), so the +u ramp tilts
+        /// the normal toward -X exactly as the screen-space form did
+        /// (both forms agree in DIRECTION on the flat quad; the
+        /// magnitudes differ by the fixture's UV-to-world scale,
+        /// which the screen-space chain rule used to fold in).
         ///
         /// A "+v" ramp is row-only: at texel (1, 2), h0 = 170/255,
         /// h(u+1) = 170/255 (column-independent, same as h0) → dhdu =
-        /// 0; h(v+1) = 255/255, so dhdv = (255-170)/255*4*0.75 = 1.0,
-        /// dhdy = -0.25, dhdx = 0.
+        /// 0; h(v+1) = 255/255, so dhdv = (255-170)/255*4*0.75 = 1.0.
+        /// The +v tilt is toward -Y (away from the height growth
+        /// along +v = +Y).
         #[test]
         fn height_stroke_perturbs_the_lit_normal() {
             let Some((adapter, device, queue)) = try_request_device() else {
@@ -4107,7 +4213,7 @@ mod tests {
             let u_ramp = height_ramp_target(&gpu, true);
             buffers.set_height_texture(&gpu, &u_ramp, PaintParams::height(strength));
             let u_bytes = render_mesh_mode_with_camera(&gpu, &buffers, ViewMode::Lit, 4, 4, camera);
-            let u_expected = expected_height_perturbed_byte(0.25, 0.0);
+            let u_expected = expected_height_perturbed_byte(1.0, 0.0);
             let u_px = &u_bytes[OFFSET..OFFSET + 4];
             for c in 0..4 {
                 assert!(
@@ -4119,7 +4225,7 @@ mod tests {
             let v_ramp = height_ramp_target(&gpu, false);
             buffers.set_height_texture(&gpu, &v_ramp, PaintParams::height(strength));
             let v_bytes = render_mesh_mode_with_camera(&gpu, &buffers, ViewMode::Lit, 4, 4, camera);
-            let v_expected = expected_height_perturbed_byte(0.0, -0.25);
+            let v_expected = expected_height_perturbed_byte(0.0, 1.0);
             let v_px = &v_bytes[OFFSET..OFFSET + 4];
             for c in 0..4 {
                 assert!(
@@ -4137,6 +4243,182 @@ mod tests {
                 "a bound +v height ramp must change the flat baseline"
             );
             assert_ne!(u_px, v_px, "a +u ramp must differ from a +v ramp");
+        }
+
+        /// THE CURVED-SURFACE golden of the tangent-wiring kill (the
+        /// closing evidence of the height→normal re-pin): a curved
+        /// surface — the cylinder-segment sliver around the Y axis
+        /// (radius 1, theta in [0, pi/4], height y in [-1, 1]) — bound
+        /// through the REAL `MeshBuffers::upload` vertex-frame plumbing
+        /// and perturbed by a bound height ramp must consume the
+        /// interpolated PER-VERTEX TBN frame, not the old per-facet
+        /// screen-space derivative frame.
+        ///
+        /// # Derivation (pixel: row 3, col 3 of the 4x4 readback — the
+        /// one strictly-inside covered pixel)
+        ///
+        /// Probe discipline: the requested pixel (row=1, col=3 → NDC
+        /// (0.75, 0.25) → world (0.75, 0.25, 0.604)) has barycentric
+        /// weights (w0, w1, w2) = (-0.479, 0.854, 0.625) — w0 < 0, NOT
+        /// strictly inside — so the nearest strictly-inside covered pixel
+        /// was probed instead: (row=3, col=3 → NDC (0.75, -0.75) → world
+        /// (0.75, -0.75, 0.604)) with weights (0.0214, 0.8536, 0.125).
+        ///
+        /// At that pixel the frame flows through the REAL
+        /// `umber_mesh::tangents::vertex_tangent_frames` (per-vertex
+        /// frames welded per corner attribute tuple: slot tangents
+        /// (0,0,1) / (-0.707,0,0.707) / (0,0,1), handedness -1 each) and
+        /// the barycentric blend gives the interpolated tangent raw
+        /// `t_raw = (-0.604, 0, 0.728)`, `t_hat = (-0.971, 0, 0.236)`, and
+        /// the interpolated normal `n = normalize(w0*n0 + w1*n1 + w2*n2) =
+        /// (0.750, 0, 0.604)`. The bound +v height ramp (the +u arm is
+        /// clamped into the top texel at the sliver's interpolated u =
+        /// 0.854, so its finite difference is 0) gives dhdu = 0, dhdv = 1.
+        ///
+        /// Expected bytes: barycentric weights → interpolated normal
+        /// (normalized) → interpolated tangent raw (via the REAL
+        /// `vertex_tangent_frames` above) → handedness = the `.w` of the
+        /// interpolated vec4 → `tbn_perturbed_general` → the SAME byte
+        /// tail as `expected_height_perturbed_byte` (factored into
+        /// `expected_height_perturbed_byte_for` — GROUND/SKY/BASE/SUN, the
+        /// `to_light = normalize(1,1,1)` diffuse, the env blend, the
+        /// albedo·(env + diffuse·SUN·0.55) product, floor(px*255+0.5)).
+        /// Tolerance: abs_diff <= 1 like the family. The OLD derivative
+        /// frame is re-derived at the same pixel through
+        /// `mikkelsen_perturbed_normal` (dpos_dx = (0.5,0,0), dpos_dy =
+        /// (0,-0.5,0); duv/dscreen from the triangle's uv-vs-position
+        /// barycentric mapping → dhdx = 0, dhdy = -0.25) and the got bytes
+        /// must diverge from it by MORE than the tolerance — that assert
+        /// is the test's point.
+        #[test]
+        fn height_curved_surface_uses_the_vertex_tangent_frame() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping height_curved_surface_uses_the_vertex_tangent_frame: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let mesh = umber_mesh::MeshData {
+                positions: vec![
+                    [1.0, -1.0, 0.0],
+                    [0.70710678, -1.0, 0.70710678],
+                    [1.0, 1.0, 0.0],
+                ],
+                normals: vec![
+                    [1.0, 0.0, 0.0],
+                    [0.70710678, 0.0, 0.70710678],
+                    [1.0, 0.0, 0.0],
+                ],
+                uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                // [0, 2, 1] — the CCW face for the mesh pass's
+                // `cull_mode: Back` + default CCW front face: the
+                // claw's first [0,1,2] order projected CW in NDC-xy
+                // (cross_z < 0) and the whole sliver got culled
+                // (the probe pixel read back the clear black). The
+                // frames all re-derive at runtime through the real
+                // vertex_tangent_frames on this same index list, so
+                // the winding fix propagates everywhere by itself.
+                indices: vec![0, 2, 1],
+                material_names: vec![],
+                triangle_materials: Vec::new(),
+            };
+            let camera =
+                CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::new(-1.0, -1.0, -1.0));
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            // The bound height ramp: 4x4, steps 0/85/170/255, strength 0.75.
+            // At the probe pixel the interpolated v = w2 = 0.125 gives
+            // dhdv = (h(1) - h(0)) * dims * strength = (85/255 - 0) * 4 * 0.75
+            // = 1.0 (the +u arm is 0: the interpolated u = w1 = 0.854 lands
+            // in the ramp's top texel, so its finite difference clamps).
+            let ramp = height_ramp_target(&gpu, false);
+            buffers.set_height_texture(&gpu, &ramp, PaintParams::height(0.75));
+            let bytes = render_mesh_mode_with_camera(&gpu, &buffers, ViewMode::Lit, 4, 4, camera);
+            // Pixel (row=3, col=3) → byte offset (3*4 + 3) * 4 = 60.
+            const OFFSET: usize = 60;
+            let got = &bytes[OFFSET..OFFSET + 4];
+
+            // Barycentric strict-inside verification of the probe pixel.
+            let (w0, w1, w2) = barycentric_weights(
+                glam::Vec3::new(1.0, -1.0, 0.0),
+                glam::Vec3::new(0.70710678, -1.0, 0.70710678),
+                glam::Vec3::new(1.0, 1.0, 0.0),
+                glam::Vec3::new(0.75, -0.75, 0.60355339),
+            );
+            assert!(
+                w0 > 0.0 && w1 > 0.0 && w2 > 0.0,
+                "the probe pixel must be strictly inside the curved sliver, got ({w0}, {w1}, {w2})"
+            );
+
+            // The interpolated normal: the barycentric blend of the
+            // three analytic cylinder normals — all y = 0, so the
+            // blend's y is 0 exactly (the claw's first draft carried
+            // `w1 * 0.707` in the y slot, which fed the mirror a
+            // normal that never existed on the sliver).
+            let n = glam::Vec3::new(w0 * 1.0 + w1 * 0.70710678 + w2 * 1.0, 0.0, w1 * 0.70710678)
+                .normalize();
+            let frames = umber_mesh::tangents::vertex_tangent_frames(
+                &mesh.positions,
+                &mesh.normals,
+                &mesh.uvs,
+                &mesh.indices,
+            );
+            let t0 = glam::Vec3::new(
+                frames[0].tangent[0],
+                frames[0].tangent[1],
+                frames[0].tangent[2],
+            );
+            let t1 = glam::Vec3::new(
+                frames[1].tangent[0],
+                frames[1].tangent[1],
+                frames[1].tangent[2],
+            );
+            let t2 = glam::Vec3::new(
+                frames[2].tangent[0],
+                frames[2].tangent[1],
+                frames[2].tangent[2],
+            );
+            let t_raw = t0 * w0 + t1 * w1 + t2 * w2;
+            let handedness =
+                w0 * frames[0].handedness + w1 * frames[1].handedness + w2 * frames[2].handedness;
+            let dhdu = 0.0;
+            let dhdv = 1.0;
+
+            let n_tbn = tbn_perturbed_general(n, t_raw, handedness, dhdu, dhdv);
+            let expected = expected_height_perturbed_byte_for(n_tbn);
+            for c in 0..4 {
+                assert!(
+                    got[c].abs_diff(expected[c]) <= 1,
+                    "curved pixel ch{c}: got {got:?}, want {expected:?}"
+                );
+            }
+
+            let dpos_dx = glam::Vec3::new(0.5, 0.0, 0.0);
+            let dpos_dy = glam::Vec3::new(0.0, -0.5, 0.0);
+            // duv/dscreen from the triangle's uv-vs-position barycentric
+            // mapping (p = v0 + u*e1 + v*e2, e1 = v1 - v0, e2 = v2 - v0): the
+            // screen-x step (0.5 world units at the 4x4 identity camera) gives
+            // duv_dx = (-0.25, 0); the screen-y step (wgpu's NDC row flip) gives
+            // duv_dy = (0, -0.25). dhdx/dhdy chain the ramp's dh into world
+            // space: dhdx = dhdu*duv_dx.x + dhdv*duv_dx.y, dhdy = dhdu*duv_dy.x
+            // + dhdv*duv_dy.y — with dhdu = 0, dhdv = 1 the probe gets
+            // (dhdx, dhdy) = (0, -0.25).
+            let dhdx = dhdu * -0.25 + dhdv * 0.0;
+            let dhdy = dhdu * 0.0 + dhdv * -0.25;
+            let n_mik = mikkelsen_perturbed_normal(n, dpos_dx, dpos_dy, dhdx, dhdy);
+            let mik_expected = expected_height_perturbed_byte_for(n_mik);
+            for c in 0..3 {
+                assert!(
+                    got[c].abs_diff(mik_expected[c]) > 1,
+                    "curved pixel must diverge from the derivative frame by more than the tolerance: ch{c} got {got:?}, mikkelsen want {mik_expected:?}"
+                );
+            }
         }
 
         /// The solo HEIGHT view reads the bound height tile (the

@@ -165,6 +165,11 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    // Tangent frame, packed at upload as xyz + handedness-in-w
+    // (`umber_mesh::tangents::vertex_tangent_frames` — the
+    // per-vertex mikkTSpace frames, the consumer half of the
+    // tangent-frame kill; `B = handedness · cross(N, T)` here).
+    @location(3) tangent: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -176,6 +181,11 @@ struct VertexOutput {
     // Interpolated paint UV (the mesh's own uvs, uploaded verbatim —
     // see `renderer::Vertex`).
     @location(2) uv: vec2<f32>,
+    // Interpolated tangent frame (xyz + handedness). Interpolation
+    // degrades both orthogonality and handedness-convexity; the
+    // fragment re-orthogonalizes against the interpolated normal
+    // before use (`height_perturbed_normal`).
+    @location(3) tangent: vec4<f32>,
 };
 
 @vertex
@@ -185,6 +195,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.world_normal = in.normal;
     out.world_pos = in.position;
     out.uv = in.uv;
+    out.tangent = in.tangent;
     return out;
 }
 
@@ -231,18 +242,25 @@ fn paint_albedo(uv: vec2<f32>) -> vec3<f32> {
 /// bytes against it. Edge texels clamp (no neighbor past the last
 /// row/column) rather than wrap.
 ///
-/// # v1 boundary
+/// # v1 boundary — CLOSED by the tangent-wiring kill (2026-10-24)
 ///
 /// `dpdx`/`dpdy` are per-primitive, screen-space derivatives: correct
 /// within one triangle's flat facet, but with no notion of a curved
 /// surface's true tangent frame across triangles — a heavily
 /// triangulated or curved mesh gets a perturbation that's only exact
-/// per-facet. True per-vertex tangents (uploaded alongside normals,
-/// the bake pipeline's own `TRANSFER_BAKE_SHADER::transfer_tbn`
-/// convention) are the named follow-up once the mesh pass carries
-/// them — see this module's top doc and the kill report
-/// (`docs/loop/kill-reports/2026-10-12-height-normal.md`).
-fn height_perturbed_normal(n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+/// per-facet. That was this fn's v1 boundary as shipped by the
+/// 2026-10-12 heightnormal kill (a deliberate choice: "no tangent
+/// attribute required"); the tangent-wiring kill REVERSED it per
+/// requirements row 79's named follow-up — the mesh pass now carries
+/// per-vertex mikkTSpace frames
+/// (`umber_mesh::tangents::vertex_tangent_frames`, the same
+/// convention as the bake pipeline's `TRANSFER_BAKE_SHADER::transfer_tbn`),
+/// and the TBN form below replaces the derivative form. The
+/// closing amendment rides the 2026-10-12 report's judgment; the
+/// curved-surface golden (`height_curved_surface_uses_the_vertex_tangent_frame`)
+/// is the evidence the two forms genuinely differ where the boundary
+/// said they would.
+fn height_perturbed_normal(n: vec3<f32>, uv: vec2<f32>, tangent: vec4<f32>) -> vec3<f32> {
     let tile_uv = paint_tile_uv(uv);
     let dims = textureDimensions(height_tex);
     let dims_f = vec2<f32>(dims);
@@ -257,23 +275,24 @@ fn height_perturbed_normal(n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) ->
     let dhdu = (hu - h0) * dims_f.x * paint_params.height_strength;
     let dhdv = (hv - h0) * dims_f.y * paint_params.height_strength;
 
-    // Chain-rule into screen space via the uv's own screen-space
-    // derivative, so the result doesn't assume uv axes line up with
-    // world axes.
-    let duv_dx = dpdx(tile_uv);
-    let duv_dy = dpdy(tile_uv);
-    let dhdx = dhdu * duv_dx.x + dhdv * duv_dx.y;
-    let dhdy = dhdu * duv_dy.x + dhdv * duv_dy.y;
+    // The per-vertex tangent frame (the tangent-wiring kill, the
+    // reversal of the 2026-10-12 derivative-frame choice: the
+    // dpdx/dpdy surface gradient is correct per-facet, not across a
+    // curved mesh). Re-orthogonalize the interpolated tangent
+    // against the interpolated normal — interpolation degrades both
+    // — then rebuild the bitangent from the handedness sign:
+    // `B = handedness · cross(n, T̂)` is unit and perpendicular by
+    // construction when T̂ is.
+    let t_raw = tangent.xyz;
+    let t_hat = normalize(t_raw - n * dot(n, t_raw));
+    let handedness = tangent.w;
+    let b = handedness * cross(n, t_hat);
 
-    // Mikkelsen's surface gradient: a local frame from the position's
-    // own screen-space derivatives, no tangent attribute required.
-    let dpos_dx = dpdx(world_pos);
-    let dpos_dy = dpdy(world_pos);
-    let r1 = cross(dpos_dy, n);
-    let r2 = cross(n, dpos_dx);
-    let det = dot(dpos_dx, r1);
-    let surf_grad = sign(det) * (dhdx * r1 + dhdy * r2);
-    return normalize(abs(det) * n - surf_grad);
+    // Surface gradient in world space: the UV-space height gradient
+    // carried by the frame. The perturbed normal tilts AWAY from the
+    // height growth direction.
+    let surf_grad = dhdu * t_hat + dhdv * b;
+    return normalize(n - surf_grad);
 }
 
 /// Hemispherical environment irradiance: the bound convolved map when
@@ -435,14 +454,14 @@ fn apply_view_mode(mode: u32, channel: u32, lit: vec3<f32>, n: vec3<f32>, world_
 /// direct path, LUT applied here) and `fs_scene_linear` (the post-effects
 /// path, scene-linear out; `crate::postfx_viewport`'s composite applies
 /// the LUT after the chain).
-fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>, tangent: vec4<f32>) -> vec3<f32> {
     var n = normalize(world_normal);
     // Height → normal, live (audit worklist #12): uniform control
     // flow on a buffer-sourced flag, the same gate `paint_albedo`
     // uses for its texture — the unbound path (flag 0) never calls
     // `height_perturbed_normal`, so it's pixel-identical to today.
     if ((paint_params.flags & PAINT_HAS_HEIGHT_TEXTURE) != 0u) {
-        n = height_perturbed_normal(n, world_pos, uv);
+        n = height_perturbed_normal(n, uv, tangent);
     }
     let to_light = normalize(-camera.light_dir.xyz);
     let diffuse = max(dot(n, to_light), 0.0);
@@ -475,7 +494,7 @@ fn shade(world_normal: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>) -> vec3<f
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let color = shade(in.world_normal, in.world_pos, in.uv);
+    let color = shade(in.world_normal, in.world_pos, in.uv, in.tangent);
     // Data modes bypass the display LUT below (the §9 rule — the CPU
     // side binds the identity table for those modes, so the early
     // return agrees with the bound table; the branch additionally
@@ -496,7 +515,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// alpha through, and the composite blends on it.
 @fragment
 fn fs_scene_linear(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(shade(in.world_normal, in.world_pos, in.uv), 1.0);
+    return vec4<f32>(shade(in.world_normal, in.world_pos, in.uv, in.tangent), 1.0);
 }
 "#;
 

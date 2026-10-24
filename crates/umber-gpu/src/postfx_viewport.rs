@@ -806,7 +806,7 @@ mod tests {
             );
             // The shared helper call, uv included (core-loop kill 1
             // threads the paint uv through `shade`).
-            let shared = "shade(in.world_normal, in.world_pos, in.uv)";
+            let shared = "shade(in.world_normal, in.world_pos, in.uv, in.tangent)";
             assert!(body.contains(shared), "{body}");
         }
         assert!(
