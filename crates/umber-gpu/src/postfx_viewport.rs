@@ -366,9 +366,14 @@ impl PostFxViewport {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    // Same three attributes as the direct pipeline
-                    // (renderer.rs): position + normal + paint uv.
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                    // Same four attributes as the direct pipeline
+                    // (renderer.rs): position + normal + paint uv +
+                    // the tangent frame (the tangent-wiring kill's
+                    // location 3 — the shared vs_main's VertexInput
+                    // requires it; this layout was the CI's named
+                    // wall, run 40067286918: 'Location[3] Float32x4
+                    // ... Input is not provided by the earlier stage').
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4],
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
