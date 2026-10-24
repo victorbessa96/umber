@@ -1710,6 +1710,53 @@ impl PaintState {
         let tiles = tile_of_triangle(mesh);
         self.multi_tile = tiles.windows(2).any(|w| w[0] != w[1]);
         self.stroke_near_seam = false;
+        // The §4/§5 auto-mapping (the W-C4 L5c kill): a multi-material
+        // mesh's sets own the tiles their triangles occupy, so the
+        // composite's per-set rows line up without manual assignment.
+        // One pass at load; assign_tile_to_set's move/register
+        // semantics are the tool. Unmapped meshes no-op (today's
+        // behavior byte-identical — the v1 no-regression contract).
+        self.auto_assign_tiles_by_material(mesh);
+    }
+
+    /// The paint-tiles half of the per-set masked bakes (the W-C4 L5c
+    /// kill): for each tile a multi-material mesh presents, the
+    /// MAJORITY material's set claims the tile — most triangles wins,
+    /// ties break to the LOWEST material index (deterministic) —
+    /// through [`Self::assign_tile_to_set`], which registers the set
+    /// first and steers the tile's future `ensure_tile` sizes and
+    /// mask gating.
+    ///
+    /// A mesh with EMPTY `triangle_materials` (USD, legacy files) is
+    /// an honest no-op: every tile stays in the session set, exactly
+    /// as before this kill. Index-less triangles (impossible under
+    /// the landed all-or-nothing importer attach, but defended) count
+    /// for no material.
+    pub fn auto_assign_tiles_by_material(&mut self, mesh: &umber_mesh::MeshData) {
+        if mesh.triangle_materials.is_empty() {
+            return;
+        }
+        for tile in umber_mesh::present_tiles(mesh) {
+            // The majority material among this tile's triangles. The
+            // key is (count, MAX - material): the higher count wins,
+            // and a tie breaks to the LOWER material index.
+            let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
+            for tri in umber_mesh::udim::triangles_for_tile(mesh, tile) {
+                if let Some(mat) = mesh.triangle_materials.get(tri as usize) {
+                    *counts.entry(*mat).or_insert(0) += 1;
+                }
+            }
+            let Some((&best, _)) = counts
+                .iter()
+                .max_by_key(|(&mat, &count)| (count, u16::MAX - mat))
+            else {
+                continue;
+            };
+            let Some(name) = mesh.material_names.get(best as usize) else {
+                continue;
+            };
+            self.assign_tile_to_set(tile, name);
+        }
     }
 
     /// Whether a stroke is currently active.
@@ -10159,6 +10206,126 @@ mod tests {
             .prewarm_id_bake_cache(&single)
             .expect("the mid-stroke pre-warm is a clean no-op");
         assert_eq!(state.id_bakes_run(), 0, "nothing baked mid-stroke");
+    }
+
+    /// The §4/§5 auto-mapping (the W-C4 L5c kill): a multi-material
+    /// mesh's sets own the tiles their triangles occupy — the
+    /// majority material per tile, ties to the lowest index, unmapped
+    /// meshes untouched.
+    #[test]
+    fn set_mesh_auto_assigns_tiles_by_material() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device.clone(), queue.clone(), 32)
+            .expect("paint state builds");
+        // Two materials, two tiles: Body's two triangles live in 1001
+        // (UVs 0..1), Hilt's two in 1002 (UVs 1..2).
+        let mesh = umber_mesh::MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs: vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.0, 0.0],
+                [2.0, 0.0],
+                [2.0, 1.0],
+                [1.0, 1.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec!["Body".to_string(), "Hilt".to_string()],
+            triangle_materials: vec![0, 0, 1, 1],
+        };
+        state.set_mesh(&mesh);
+        // The registry is the store (tiles_of_set shows only
+        // MATERIALIZED tiles; tile 1002 has no target yet).
+        assert_eq!(
+            state.set_of_tile(1001),
+            "Body",
+            "Body's triangles own tile 1001"
+        );
+        assert_eq!(
+            state.set_of_tile(1002),
+            "Hilt",
+            "Hilt's triangles own tile 1002"
+        );
+        // The MAJORITY rule on a shared tile: 3 Body triangles vs 1
+        // Hilt in 1001 -> Body claims it; 1002 stays Hilt's.
+        let shared = umber_mesh::MeshData {
+            positions: mesh.positions.clone(),
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs: vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.25, 0.0],
+                [1.75, 0.0],
+                [1.75, 1.0],
+                [1.25, 1.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3, 0, 2, 3, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec!["Body".to_string(), "Hilt".to_string()],
+            triangle_materials: vec![0, 0, 0, 1, 1, 1],
+        };
+        let mut fresh = PaintState::with_target_size(device.clone(), queue.clone(), 32)
+            .expect("fresh state builds");
+        fresh.set_mesh(&shared);
+        assert_eq!(
+            fresh.set_of_tile(1001),
+            "Body",
+            "the 3-vs-1 majority claims the shared tile for Body"
+        );
+        assert_eq!(fresh.set_of_tile(1002), "Hilt", "Hilt keeps its own tile");
+        // The TIE breaks to the lowest index: 1 vs 1 in 1001 -> Body.
+        let tie = umber_mesh::MeshData {
+            positions: mesh.positions.clone(),
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs: vec![
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [1.25, 0.0],
+                [1.75, 0.0],
+                [1.75, 1.0],
+                [1.25, 1.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec!["Body".to_string(), "Hilt".to_string()],
+            triangle_materials: vec![0, 1, 1, 1],
+        };
+        let mut tie_state = PaintState::with_target_size(device.clone(), queue.clone(), 32)
+            .expect("tie state builds");
+        tie_state.set_mesh(&tie);
+        assert_eq!(
+            tie_state.set_of_tile(1001),
+            "Body",
+            "the 1-vs-1 tie claims the shared tile for the lowest index"
+        );
+        assert_eq!(tie_state.set_of_tile(1002), "Hilt");
+        // UNMAPPED: an empty triangle_materials mesh keeps every tile
+        // in the session set — today's behavior byte-identical.
+        let mut plain = PaintState::with_target_size(device.clone(), queue.clone(), 32)
+            .expect("plain state builds");
+        let before = plain.set_names();
+        plain.set_mesh(&single_island_quad());
+        assert_eq!(
+            plain.set_names(),
+            before,
+            "an unmapped mesh assigns nothing — no new sets"
+        );
     }
 
     // --- Per-tile routing tests (UDIM slice 4) ---

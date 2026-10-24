@@ -161,3 +161,16 @@ recovery lands, so this slice is double-gated, (c) §5's auto-
 mapping. None of these are staleness; all three are named, ordered
 follow-ups — the doc's contract with the future is honest as of
 this date.
+
+**2026-10-24 census amendment (the L5c kill's derivation,
+live-tree truth):** (a) LANDED as `0955ac8` ("the masked-bakes ray
+half" — `OccluderScope` grep-verified at umber-bake/src/lib.rs:53;
+the tail above predates it). (b) the ENUM landed with (a); the
+panel row + i18n keys remain (the `.ftl` catalog lock state
+unverified — check before that slice). (c) LANDED 2026-10-24 (the
+L5c kill, report
+`docs/loop/kill-reports/2026-10-24-auto-assign.md`):
+`PaintState::auto_assign_tiles_by_material` at `set_mesh`'s tail —
+the majority material's set claims each tile, ties to the lowest
+index, unmapped meshes no-op; the pin green through the real
+adapter.

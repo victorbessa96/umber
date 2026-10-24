@@ -125,6 +125,15 @@ plugs into (bake_sources.rs is A1's parked file — the lane waits for
 the recovery). 5 host-gated kills were pre-estimated in the note;
 re-estimate after L1 lands.
 
+**2026-10-24 census (live-tree truth, the L5c derivation):** the
+ray half LANDED (`0955ac8` + `OccluderScope` in umber-bake), §5's
+auto-mapping LANDED (the L5c kill: `auto_assign_tiles_by_material`
+at `set_mesh`'s tail, the majority rule, report
+`docs/loop/kill-reports/2026-10-24-auto-assign.md`). REMAINING: the
+OccluderScope PANEL row + i18n keys (the `.ftl` lock state
+unverified — check before deriving). L4 GATED (winink bytes absent);
+L6 open (history.rs in-tree); L7 G1-gated.**
+
 ### L6. Unified timeline (graph-history kill 2; GH-gated)
 
 graph_panel/history.rs (parked, row 6) carries the per-node
