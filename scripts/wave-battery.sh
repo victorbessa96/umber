@@ -42,6 +42,10 @@ LOGDIR=$(mktemp -d /tmp/wave-battery.XXXXXX)
 trap '[ "$FAIL" = 0 ] && rm -rf "$LOGDIR"' EXIT
 FAIL=0
 
+GPU_CRATES=" umber-gpu umber-paint umber-app umber-bake umber-cli umber-gui "
+GPU_TEST_THREADS="${UMBER_GPU_TEST_THREADS:-1}"
+SUITE_TIMEOUT="${UMBER_SUITE_TIMEOUT:-3000}"
+
 echo "=== layers ==="
 if python3 scripts/check-layers.py; then
     echo "PASS layers"
@@ -81,9 +85,27 @@ if [[ " ${CRATES[*]} " == *" umber-gpu "* ]]; then
     else
         echo "FAIL check umber-gpu --features gpu ($(grep -cE '^error' "$LOG") errors — $LOG)"; FAIL=1
     fi
+    # The 3b76811 wall (CI run 40067286918): the default-features test
+    # legs below never RUN the gpu-gated tests, so a runtime failure
+    # (the postfx pipeline's vertex-layout validation) passed a GREEN
+    # battery. The feature-on suite runs too — single-threaded like
+    # every GPU crate (the NVIDIA driver deadlock rule) and bounded
+    # by the suite timeout like every other leg.
+    LOG="$LOGDIR/test-umber-gpu-features.log"
+    flock /tmp/umber-cargo.lock timeout "$SUITE_TIMEOUT" cargo test -p umber-gpu --features gpu -- --test-threads="$GPU_TEST_THREADS" >"$LOG" 2>&1
+    STATUS=$?
+    R=$(grep -cE 'test result: .* FAILED\.' "$LOG")
+    LINES=$(grep -cE '^test result:' "$LOG")
+    if [ "$STATUS" -eq 124 ]; then
+        echo "FAIL test umber-gpu --features gpu (TIMEOUT after ${SUITE_TIMEOUT}s — $LOG)"; FAIL=1
+    elif [ "$STATUS" -eq 0 ] && [ "$R" -eq 0 ] && [ "$LINES" -gt 0 ]; then
+        T=$(grep -E '^test result: ok' "$LOG" | awk '{s+=$4} END {print s+0}')
+        echo "PASS test umber-gpu --features gpu (${T:-?} tests)"
+    else
+        echo "FAIL test umber-gpu --features gpu (cargo exit $STATUS, $LINES result lines, $R failed lines — $LOG)"; FAIL=1
+    fi
 fi
 
-echo "=== test suites ==="
 # GPU-heavy suites deadlock inside the NVIDIA driver when several test
 # threads each hold a wgpu device at once (2026-10-15, RTX 3070, NVIDIA
 # 615.71, 16-thread host): umber-paint's lib suite hangs at the default 16
@@ -95,9 +117,7 @@ echo "=== test suites ==="
 # UMBER_TEST_THREADS (default: libtest's own); every suite is bounded by a
 # timeout so a hang is a loud FAIL with a cause, never a battery that never
 # returns.
-GPU_CRATES=" umber-gpu umber-paint umber-app umber-bake umber-cli umber-gui "
-GPU_TEST_THREADS="${UMBER_GPU_TEST_THREADS:-1}"
-SUITE_TIMEOUT="${UMBER_SUITE_TIMEOUT:-3000}"
+echo "=== test suites ==="
 for c in "${CRATES[@]}"; do
     LOG="$LOGDIR/test-$c.log"
     THREADS_ARG=()
