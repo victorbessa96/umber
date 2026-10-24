@@ -114,6 +114,7 @@
 //!   set-size rule applied to channels).
 
 mod actions;
+mod assets_panel;
 mod axis_gizmo;
 mod bake_sources;
 mod bakes_panel;
@@ -372,6 +373,8 @@ struct PanelViewer<'a> {
     /// dock: the viewer cannot dispatch on the app itself).
     home_actions: Vec<crate::empty_state::HomeCardAction>,
     bakes: &'a mut BakesPanel,
+    /// The Assets panel's session state (R-C1's library browser).
+    assets: &'a mut assets_panel::AssetsPanel,
     export: &'a mut ExportDialog,
     graph: &'a mut GraphPanel,
     mesh: Option<&'a umber_mesh::MeshData>,
@@ -791,91 +794,7 @@ impl TabViewer for PanelViewer<'_> {
                 // are linearized first (vector maps are already linear).
                 if let Some((layer, mask)) = &outcome.smart_mask_applied {
                     if let Some(paint) = self.paint.as_deref_mut() {
-                        let active_set = paint.active_set().to_string();
-                        let tiles: Vec<u16> = paint
-                            .tiles_present()
-                            .into_iter()
-                            .filter(|t| paint.set_of_tile(*t) == active_set)
-                            .collect();
-                        // Anchor stages resolve by layer NAME in the active
-                        // set's stack (the preset's template-local names).
-                        let by_name: std::collections::HashMap<String, u64> = self
-                            .doc
-                            .layers()
-                            .iter()
-                            .map(|l| (l.name.clone(), l.id))
-                            .collect();
-                        for tile in tiles {
-                            let (w, h) = paint.tile_size(tile);
-                            // Anchors read the named layer's OWN plane
-                            // (premultiplied linear bytes); read up front so
-                            // the compose closures borrow nothing mutably.
-                            let mut anchor_reads: AnchorReads = std::collections::HashMap::new();
-                            for stage in &mask.ops {
-                                if let umber_core::smart::MaskSource::Anchor { layer, channel } =
-                                    &stage.source
-                                {
-                                    let key = (layer.clone(), channel.clone());
-                                    if anchor_reads.contains_key(&key) {
-                                        continue;
-                                    }
-                                    let read = by_name.get(layer).and_then(|id| {
-                                        paint
-                                            .read_plane(
-                                                paint_state::PlaneOwner::Layer(*id),
-                                                tile,
-                                                channel,
-                                            )
-                                            .map(|b| (b.width, b.height, b.data))
-                                    });
-                                    anchor_reads.insert(key, read);
-                                }
-                            }
-                            let composed = document::compose_smart_mask(
-                                mask,
-                                w,
-                                h,
-                                |name| {
-                                    let path = self.bakes.latest_map(name)?;
-                                    let (mw, mh, mut rgba) =
-                                        umber_export::png::read_png_rgba8(path).ok()?;
-                                    let linear = matches!(
-                                        name.to_ascii_lowercase().as_str(),
-                                        "normal"
-                                            | "normal_base"
-                                            | "world_normal"
-                                            | "world_space_normal"
-                                            | "bent_normal"
-                                            | "height"
-                                    );
-                                    if !linear {
-                                        paint_state::curvature_png_to_linear(&mut rgba);
-                                    }
-                                    Some((mw, mh, rgba))
-                                },
-                                |layer, channel| {
-                                    anchor_reads
-                                        .get(&(layer.to_string(), channel.to_string()))
-                                        .cloned()
-                                        .flatten()
-                                },
-                            );
-                            match composed {
-                                Ok((plane, missing)) => {
-                                    if !missing.is_empty() {
-                                        log::info!(
-                                            "smart mask '{}': {} missing at {w}x{h} (unbaked maps read mid-grey, missing layers open)",
-                                            mask.name,
-                                            missing.join(", ")
-                                        );
-                                    }
-                                    if !paint.publish_layer_mask(*layer, tile, plane) {
-                                        log::warn!("smart mask: tile {tile} refused the plane");
-                                    }
-                                }
-                                Err(e) => log::warn!("smart mask '{}': {e}", mask.name),
-                            }
-                        }
+                        compose_mask_flow(paint, self.doc, self.bakes, *layer, mask);
                     }
                 }
                 // Duplicate with content (C2-8): the document made the copy's
@@ -1139,7 +1058,59 @@ impl TabViewer for PanelViewer<'_> {
                 // follow-up, see the module docs.)
             }
             Panel::Assets => {
-                ui.label(tr("shell.assets-placeholder"));
+                // R-C1's library browser: the searchable face over the
+                // three existing libraries (the brief's discoverability
+                // layer). The import sections stay below.
+                let selected = self.layer_gestures.selection.primary();
+                let outcome = assets_panel::library_ui(ui, self.assets, self.brush, selected);
+                if let Some(name) = outcome.brush {
+                    if !self.brush.select_preset_by_name(&name) {
+                        log::warn!("assets: brush '{name}' left the shelf (a stale row)");
+                    }
+                }
+                if let Some(material) = &outcome.material {
+                    // The shelf's own three-step: apply, bind the
+                    // generators to the newest bakes, select the top.
+                    let ids = document::apply_smart_material(self.doc, material);
+                    let missing =
+                        document::bind_smart_generators(self.doc, material, &ids, |name| {
+                            let path = self.bakes.latest_map(name)?;
+                            match umber_export::png::read_png_rgba8(path) {
+                                Ok(image) => Some(image),
+                                Err(e) => {
+                                    log::warn!("smart material: {}: {e}", path.display());
+                                    None
+                                }
+                            }
+                        });
+                    if !missing.is_empty() {
+                        log::info!(
+                            "smart material '{}': bake {} in the Bakes panel, then apply again to bind them",
+                            material.name,
+                            missing.join(", ")
+                        );
+                    }
+                    if let Some(top) = ids.last() {
+                        let target = paint_state::PlaneOwner::Layer(*top);
+                        if let Some(paint) = self.paint.as_deref_mut() {
+                            paint.set_active_target(target);
+                        }
+                        sync_gesture_selection(&mut *self.layer_gestures, target);
+                    }
+                }
+                if let Some((target, mask)) = &outcome.mask {
+                    // The Layers panel's own mask path: the journal binds
+                    // the mask to the layer by name, THEN the shared compose
+                    // flow publishes the pixels (the extraction both arms
+                    // call).
+                    self.doc.run(umber_core::layers::LayerCommand::attach_mask(
+                        *target,
+                        mask.name.clone(),
+                    ));
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        compose_mask_flow(paint, self.doc, self.bakes, *target, mask);
+                    }
+                }
                 ui.separator();
                 self.mesh_import.show(
                     ui,
@@ -1334,6 +1305,10 @@ pub struct AppState {
     /// The last frame's composite snapshot (the retire census + `Full`
     /// diff baseline, §4.2/§5.4).
     pub prev_snapshot: Option<paint_state::CompositeSnapshot>,
+    /// The Assets panel's library-browser state (R-C1: the search
+    /// field; the lists cache in egui memory, the smart shelf's own
+    /// precedent).
+    pub assets_panel: assets_panel::AssetsPanel,
     /// Fill layers blocked by the plane budget: layer id → badge line
     /// (the Layers rows render these — fills have no `material_badges`
     /// slot).
@@ -4122,6 +4097,7 @@ impl eframe::App for UmberApp {
                 let mut viewer = PanelViewer {
                     ctx: ui.ctx().clone(),
                     tab_font: tab_font.clone(),
+                    assets: &mut self.state.assets_panel,
                     viewport: &mut self.state.viewport,
                     uv_view: &mut self.state.uv_view,
                     home_recent,
@@ -4883,6 +4859,98 @@ enum LayerSessionOp {
 /// which is exactly what a select-then-paint gesture wants). A same-layer
 /// target is a no-op for the edit either way. A solo change has no
 /// session step (no render path reads it yet).
+/// The smart-mask compose flow (C2-10), extracted for BOTH panel arms:
+/// the Layers panel's mask section and the Assets browser's mask rows
+/// (R-C1) run the SAME path — the mask composed over the newest bakes
+/// on every tile of the active set at the set's size, the anchors read
+/// the named layers' own planes, the bakes' sRGB PNGs linearized first
+/// (vector maps are already linear).
+fn compose_mask_flow(
+    paint: &mut paint_state::PaintState,
+    doc: &document::Document,
+    bakes: &BakesPanel,
+    layer: u64,
+    mask: &umber_core::smart::SmartMask,
+) {
+    let active_set = paint.active_set().to_string();
+    let tiles: Vec<u16> = paint
+        .tiles_present()
+        .into_iter()
+        .filter(|t| paint.set_of_tile(*t) == active_set)
+        .collect();
+    // Anchor stages resolve by layer NAME in the active set's stack
+    // (the preset's template-local names).
+    let by_name: std::collections::HashMap<String, u64> = doc
+        .layers()
+        .iter()
+        .map(|l| (l.name.clone(), l.id))
+        .collect();
+    for tile in tiles {
+        let (w, h) = paint.tile_size(tile);
+        // Anchors read the named layer's OWN plane (premultiplied
+        // linear bytes); read up front so the compose closures borrow
+        // nothing mutably.
+        let mut anchor_reads: AnchorReads = std::collections::HashMap::new();
+        for stage in &mask.ops {
+            if let umber_core::smart::MaskSource::Anchor { layer, channel } = &stage.source {
+                let key = (layer.clone(), channel.clone());
+                if anchor_reads.contains_key(&key) {
+                    continue;
+                }
+                let read = by_name.get(layer).and_then(|id| {
+                    paint
+                        .read_plane(paint_state::PlaneOwner::Layer(*id), tile, channel)
+                        .map(|b| (b.width, b.height, b.data))
+                });
+                anchor_reads.insert(key, read);
+            }
+        }
+        let composed = document::compose_smart_mask(
+            mask,
+            w,
+            h,
+            |name| {
+                let path = bakes.latest_map(name)?;
+                let (mw, mh, mut rgba) = umber_export::png::read_png_rgba8(path).ok()?;
+                let linear = matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "normal"
+                        | "normal_base"
+                        | "world_normal"
+                        | "world_space_normal"
+                        | "bent_normal"
+                        | "height"
+                );
+                if !linear {
+                    paint_state::curvature_png_to_linear(&mut rgba);
+                }
+                Some((mw, mh, rgba))
+            },
+            |layer, channel| {
+                anchor_reads
+                    .get(&(layer.to_string(), channel.to_string()))
+                    .cloned()
+                    .flatten()
+            },
+        );
+        match composed {
+            Ok((plane, missing)) => {
+                if !missing.is_empty() {
+                    log::info!(
+                        "smart mask '{}': {} missing at {w}x{h} (unbaked maps read mid-grey, missing layers open)",
+                        mask.name,
+                        missing.join(", ")
+                    );
+                }
+                if !paint.publish_layer_mask(layer, tile, plane) {
+                    log::warn!("smart mask: tile {tile} refused the plane");
+                }
+            }
+            Err(e) => log::warn!("smart mask '{}': {e}", mask.name),
+        }
+    }
+}
+
 fn layer_session_ops(outcome: &layers_panel::gestures::GestureOutcome) -> Vec<LayerSessionOp> {
     let mut ops: Vec<LayerSessionOp> = outcome
         .duplicated

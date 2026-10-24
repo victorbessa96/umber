@@ -953,3 +953,11 @@ picker =
     .h = H
     .s = S
     .v = V
+
+## The Assets panel's library browser (R-C1)
+
+assets =
+    .search = Search
+    .brushes = Brushes
+    .materials = Smart materials
+    .empty = Nothing here yet.

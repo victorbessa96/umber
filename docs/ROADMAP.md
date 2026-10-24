@@ -114,6 +114,7 @@ bin→lib with zero path churn (the W-C4 L1).
 | L3: ID-mask bake-on-tool-entry | 6430374 — prewarm_id_bake_cache; the first click hits |
 | L5c: paint tiles auto-map by material | 0ec64bd — auto_assign_tiles_by_material at set_mesh's tail |
 | R-B1: the selected-layers flatten (the census P0) | 2026-10-24: bake_layers + the panel button + the shell handler; battery GREEN 179+851; report in kill-reports |
+| R-C1 v1: the Assets panel's library browser (the census's bigger P0) | 2026-10-24: the search + three categories over the existing engines + the compose-flow extraction; battery GREEN 851; report in kill-reports |
 
 ### The per-set masked bakes (the spec's stages — all landed)
 
@@ -147,7 +148,7 @@ freeze-recovery close scripts; the loop restart machinery
 | Quick mask persistence | the session-only mask (quick_mask.rs:122-360) saves + undos | lens A's gap 1: the ftl's own string admits "not saved and not undoable" — Substance persists both |
 | Symmetry persistence | SymmetrySettings not in .umber/.umberbrush | lens A's gap 2: named in-module at symmetry.rs:103-106 |
 | wave-a11y-first-pass | keyboard navigation + focus states | G7's core; Substance's UI is fully keyboard-driven, ours isn't yet |
-| **The Assets panel (R-C1, P0)** | libraries of brushes/smart materials/masks/filters/meshes + drag-to-layer-stack | the SPP census's biggest UX gap — capability exists, discoverability does not (the "empty tool" problem) |
+| **The Assets panel (R-C1, P0)** | **LANDED 2026-10-24 (the v1 discoverability layer)**: the library browser (search + Brushes/Materials/Masks) over the existing engines; the `select_preset_by_name` seam; the smart-mask compose flow extracted (one path, two doors); the placeholder dead; report `docs/loop/kill-reports/2026-10-24-rc1-assets-panel.md`. The named follow-ups: drag-to-stack, thumbnails, saved searches, custom dirs, the filter/mesh/env categories. |
 | **Layer-stack flatten (R-B1, P0)** | ~~group → baked fill layer~~ → LANDED 2026-10-24 as the SELECTED-LAYERS flatten: `bake_layers` (the isolated fold) + the Layers panel button + the shell's handler; fully undoable (tombstones + journal reverts); report `docs/loop/kill-reports/2026-10-24-rb1-flatten.md`. The folder kind + the compound one-step = the named follow-ups. |
 | Material picker (R-A10) | pick all channels at cursor → fill layer | small; rides per-layer pixel readback |
 | Projection fill (R-A2) | screen-space material projection | the decal workflow's other half; pairs with the landed stencil; rides the pwys design |

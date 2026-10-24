@@ -452,6 +452,33 @@ impl BrushPanel {
         std::mem::take(&mut self.preset_changed)
     }
 
+    /// R-C1's Assets-panel seam: select a preset by NAME (the library
+    /// browser's row click — the shelf combo's own pick path minus the
+    /// combo). Arms `preset_changed` so the session sync takes it;
+    /// `false` = the name is not on the shelf (a stale row).
+    pub fn select_preset_by_name(&mut self, name: &str) -> bool {
+        let found = self
+            .library
+            .entries
+            .iter()
+            .position(|e| e.preset.name == name);
+        if let Some(i) = found {
+            if self.active != Some(i) {
+                self.active = Some(i);
+                self.preset_changed = true;
+                self.dirty = false;
+                self.save_error = None;
+                // Prefill Save-As with the selected name for "duplicate
+                // then rename" flows (the combo's own prefill).
+                self.save_as_name = self
+                    .active
+                    .and_then(|i| self.library.entries.get(i))
+                    .map_or_else(String::new, |e| e.preset.name.clone());
+            }
+        }
+        found.is_some()
+    }
+
     pub fn active_preset(&self) -> Option<&BrushPreset> {
         self.active
             .and_then(|i| self.library.entries.get(i))
