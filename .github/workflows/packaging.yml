@@ -43,6 +43,9 @@ jobs:
       - name: Flatpak manifest parses as JSON
         run: python3 -m json.tool flatpak/org.umber.Umber.json > /dev/null
 
+      - name: Manifest/runtime coupling assert
+        run: python3 flatpak/check-runtime-coupling.py
+
       # The manifest is GENERATED (gen-cargo-sources.py renders it from
       # Cargo.lock + the .in template). A Cargo.lock change without a
       # regenerated manifest fails here — the drift gate.

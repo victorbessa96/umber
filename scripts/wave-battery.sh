@@ -16,6 +16,17 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
+# Machine-fit defaults (2026-10-23, proven across the W-C3a/W-C3b closes):
+# debug info in test binaries multiplies the codegen+link memory peaks —
+# five oomd scope deaths this arc traced to exactly that, and the
+# debug-stripped profile is what finally let the battery fit the 15GB
+# tower under the live desktop. Verdicts are unaffected (debug info
+# changes backtraces, never results). A session may still set its own
+# values; the defaults just stop requiring every caller to know the
+# lesson.
+export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
+export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
+
 # The default scope is a real array (one element per crate). The old
 # "${@:-a b c}" form made ONE element holding every name, so a bare
 # `wave-battery.sh` handed cargo the package "umber-core umber-color ..."
@@ -56,6 +67,22 @@ for c in "${CRATES[@]}"; do
     fi
 done
 
+echo "=== feature-on compile (the CI matrix's --features gpu leg) ==="
+# The default-features battery never compiles feature-gated code paths
+# CI does; a sweep authored under a cargo ban lands them unverified
+# (proven: E0433 SoloChannel in the gpu-feature golden module, caught
+# only by CI run 40017411324). The check-compile is minutes warm and
+# catches the class BEFORE the push. --all-targets reaches the
+# cfg(test)-gated golden module.
+if [[ " ${CRATES[*]} " == *" umber-gpu "* ]]; then
+    LOG="$LOGDIR/check-umber-gpu-features.log"
+    if flock /tmp/umber-cargo.lock cargo check -p umber-gpu --features gpu --all-targets >"$LOG" 2>&1; then
+        echo "PASS check umber-gpu --features gpu"
+    else
+        echo "FAIL check umber-gpu --features gpu ($(grep -cE '^error' "$LOG") errors — $LOG)"; FAIL=1
+    fi
+fi
+
 echo "=== test suites ==="
 # GPU-heavy suites deadlock inside the NVIDIA driver when several test
 # threads each hold a wgpu device at once (2026-10-15, RTX 3070, NVIDIA
@@ -70,7 +97,7 @@ echo "=== test suites ==="
 # returns.
 GPU_CRATES=" umber-gpu umber-paint umber-app umber-bake umber-cli umber-gui "
 GPU_TEST_THREADS="${UMBER_GPU_TEST_THREADS:-1}"
-SUITE_TIMEOUT="${UMBER_SUITE_TIMEOUT:-1200}"
+SUITE_TIMEOUT="${UMBER_SUITE_TIMEOUT:-3000}"
 for c in "${CRATES[@]}"; do
     LOG="$LOGDIR/test-$c.log"
     THREADS_ARG=()
