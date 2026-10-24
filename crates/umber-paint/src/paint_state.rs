@@ -156,10 +156,12 @@
 //!   canvas, so [`Self::size_of_channel`] short-circuits it to the set
 //!   size and [`Self::resize_channel`] on it delegates to
 //!   [`Self::resize_set`] (one size cannot both lead and follow).
-//!   Strokes still condition at the SET's texel density
-//!   ([`Self::texels_per_uv_for`]) whatever channel they land in —
-//!   per-channel dab density is the named follow-up, so painting a
-//!   smaller channel today lands set-scale dabs on fewer texels. The
+//!   Strokes condition at the ACTIVE CHANNEL's texel density
+//!   ([`Self::texels_per_uv_for_channel`] — the L2 kill) and the brush
+//!   ring reads the same fn, so a smaller channel lands channel-scale
+//!   dabs and the ring agrees; the four same-class arms (symmetry
+//!   snapshot, clone offset, fill raster, seam mirror radius) stay
+//!   set-scale as the named L2b follow-up. The
 //!   quick mask stays per-SET (it gates baseColor's thread only) and
 //!   layer-mask planes stay set-sized: neither follows a channel resize.
 //!   Deferred beside the sizing: 8K-per-channel VRAM guidance (the set
@@ -188,9 +190,9 @@
 //!   `umber-brush`'s `QuickMask` (single-size) is untouched — one instance
 //!   per set at the set's size. [`Self::quick_mask`] returns the ACTIVE
 //!   set's mask (every existing caller stays source-compatible).
-//! * `texels_per_uv` is the ACTIVE set's density (single-set sessions read
-//!   it exactly as v1 did); per-tile sites (routing, seam radius, clone
-//!   offset, fill replay) use [`Self::texels_per_uv_for`]. The symmetry
+//! * Per-tile sites (routing, seam radius, clone offset, fill replay)
+//!   use [`Self::texels_per_uv_for`]; the dab conversion and the brush
+//!   ring use the per-channel form above. The symmetry
 //!   snapshot is taken at the stroke-START tile's density: a stroke
 //!   crossing into a different-sized tile applies the start tile's
 //!   transforms there (slightly off-center siblings — named follow-up).
@@ -1176,10 +1178,6 @@ pub struct PaintState {
     conditioner: StrokeConditioner,
     /// Set on pointer-down inside the UV square; cleared on pointer-up.
     stroking: bool,
-    /// UV→texel scale (target texels per UV unit) of the ACTIVE set (see
-    /// [`Self::texels_per_uv_for`] for the per-tile form the routing
-    /// sites use).
-    texels_per_uv: f32,
     last_stats: FrameStats,
     /// Seam topology of the loaded mesh (`None` until [`Self::set_mesh`]).
     seam_graph: Option<SeamGraph>,
@@ -1461,7 +1459,6 @@ impl PaintState {
                 5.0,
             )?,
             stroking: false,
-            texels_per_uv: size as f32,
             last_stats: FrameStats::default(),
             seam_graph: None,
             stroke_near_seam: false,
@@ -1549,7 +1546,6 @@ impl PaintState {
     pub fn set_active_set(&mut self, name: &str) {
         self.ensure_set(name);
         self.active_set = name.to_string();
-        self.texels_per_uv = self.size_of_set(name).0 as f32;
     }
 
     /// The active texture set's name.
@@ -1650,8 +1646,31 @@ impl PaintState {
 
     /// The UV→texel density of `tile`'s set (the per-tile form of
     /// `texels_per_uv`, which tracks the active set).
+    ///
+    /// Set-scale BY DESIGN for the quick mask and the four same-class
+    /// arms named in the L2 kill report (the symmetry snapshot, the
+    /// clone offset, the fill raster, the seam mirror radius — the
+    /// L2b follow-up); the DAB SPACING and the brush ring read
+    /// [`Self::texels_per_uv_for_channel`] instead, so they track the
+    /// painted channel's own density and can never disagree with it
+    /// under a channel override.
     pub fn texels_per_uv_for(&self, tile: u16) -> f32 {
         self.tile_size(tile).0 as f32
+    }
+
+    /// The UV→texel density of `channel`'s canvas on `tile` (the
+    /// per-tile, per-channel form — the L2 kill): the channel's own
+    /// size through [`Self::size_of_channel`] (the inherit rule and
+    /// the baseColor-always-set rule come along free), so a channel
+    /// override diverging from its set's size (a 256-channel under a
+    /// 512 set) spaces dabs and shows the ring at the CHANNEL's true
+    /// density. The dab conversion (the conditioner's texel space)
+    /// and the ring's probe twin BOTH read this — the §5 item 1 risk
+    /// (the ring disagreeing with the dabs when channel density
+    /// diverges) dies only if both arms move together.
+    pub fn texels_per_uv_for_channel(&self, tile: u16, channel: &str) -> f32 {
+        let set = self.set_of_tile(tile).to_string();
+        self.size_of_channel(&set, channel).0 as f32
     }
 
     /// The tiles currently assigned to `set`, ascending.
@@ -4440,9 +4459,6 @@ impl PaintState {
     pub fn resize_set(&mut self, set: &str, width: u32, height: u32) {
         self.ensure_set(set);
         self.set_sizes.insert(set.to_string(), (width, height));
-        if self.active_set == set {
-            self.texels_per_uv = width as f32;
-        }
         // Snapshots recorded at the old size no longer fit the targets.
         self.retouch_history.clear();
         // Nor do their History-window rows (which the per-frame drain
@@ -4865,7 +4881,17 @@ impl PaintState {
             }
             tile
         };
-        let texel = local_texel([uv.x, uv.y], tile, self.texels_per_uv_for(tile));
+        // The L2 kill: the conversion feeds the conditioner (the dab
+        // spacing operates in texel space after this line), so it reads
+        // the ACTIVE CHANNEL's density — a channel override diverging
+        // from the set's size must space dabs at the channel's own
+        // density, and the ring's probe twin (cursor_radius_px) reads
+        // the same fn, so the two arms can never disagree.
+        let texel = local_texel(
+            [uv.x, uv.y],
+            tile,
+            self.texels_per_uv_for_channel(tile, &self.active_channel),
+        );
         // Synthetic event clock (see EVENT_STEP_NS): every event — original
         // or mirror — advances time so the conditioner actually progresses.
         self.event_seq += 1;
@@ -10742,6 +10768,42 @@ mod tests {
             state.size_of_channel(DEFAULT_TEXTURE_SET, "roughness"),
             (4096, 4096)
         );
+    }
+
+    /// `texels_per_uv_for_channel` (the L2 kill): the channel's own
+    /// density under an override, baseColor always the set's, inherit
+    /// for the unoverridden — and the old set-scale form unchanged
+    /// beside it. The dab conversion and the ring's probe twin BOTH
+    /// read this fn (pinned by construction — one fn, both arms, no
+    /// disagreement possible), so a 256-channel under a 512 set spaces
+    /// its dabs and shows its ring at 256.
+    #[test]
+    fn texels_per_uv_for_channel_tracks_the_override() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let tile = state.active_tile();
+        let set = state.active_set().to_string();
+        // Inherit: an unoverridden channel reads the set's density.
+        assert_eq!(state.texels_per_uv_for_channel(tile, "roughness"), 512.0);
+        // baseColor: always the set's canvas, never overridden.
+        assert_eq!(
+            state.texels_per_uv_for_channel(tile, BASE_COLOR_CHANNEL),
+            512.0
+        );
+        // The override diverges the channel from its set.
+        state.resize_channel(&set, "roughness", 256, 256);
+        assert_eq!(state.texels_per_uv_for_channel(tile, "roughness"), 256.0);
+        // baseColor stays set-scale beside the override.
+        assert_eq!(
+            state.texels_per_uv_for_channel(tile, BASE_COLOR_CHANNEL),
+            512.0
+        );
+        // The old set-scale form is unchanged (the quick mask + the
+        // four L2b arms read it — the kill report names them).
+        assert_eq!(state.texels_per_uv_for(tile), 512.0);
     }
 
     /// `resize_channel` rebuilds ONLY that channel's targets: baseColor

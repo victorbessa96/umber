@@ -58,6 +58,17 @@ disagreeing with the dabs when channel density diverges. One kill
 touches both arms so they can never disagree; the quick mask stays
 set-scale by design (paint_state.rs:163-164, the plan's own note).
 
+**CLOSED 2026-10-24 (the L2 kill, brief
+`docs/loop/briefs/2026-10-24-l2-channel-density.md`, report
+`docs/loop/kill-reports/2026-10-24-channel-density.md`):
+`texels_per_uv_for_channel(tile, channel)` via `size_of_channel` —
+both arms migrated together (the dab conversion's `local_texel` +
+the ring's probe), the write-only `texels_per_uv` field found dead by
+derivation and deleted. L2b named as the follow-up: the four
+same-class arms (symmetry snapshot, clone offset, fill raster, seam
+mirror radius) stay set-scale this kill, mapped in the report for the
+next strike.**
+
 ### L3. ID-mask bake-on-tool-entry — main.rs:532 (b10+P1-gated)
 
 The IdMask arm already computes `idmask_armed` and calls

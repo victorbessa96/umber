@@ -1421,7 +1421,11 @@ impl Viewport {
     ) -> Option<f32> {
         use crate::brush_cursor;
         let uv = self.pick_uv(rect, mesh, pos)?;
-        let texels_per_uv = paint.texels_per_uv_for(tile_of_uv(uv));
+        // The L2 kill: the ring reads the ACTIVE CHANNEL's density —
+        // the same fn the dab conversion (push_event_styled's
+        // local_texel) reads, so the ring and the dabs agree even
+        // under a channel override that diverges from the set's size.
+        let texels_per_uv = paint.texels_per_uv_for_channel(tile_of_uv(uv), paint.active_channel());
         let probe = |dir: f32| {
             let at = pos + egui::vec2(dir * brush_cursor::PROBE_PX, 0.0);
             let uv_b = self.pick_uv(rect, mesh, at)?;
