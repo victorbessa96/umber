@@ -1,329 +1,239 @@
 # Umber Long-Horizon Roadmap — the Substance-Parity March and Beyond
 
-Version: 2026-10-14 (the per-layer pool era). Supersedes the wave column in
-requirements.md as the PLAN of record; requirements.md stays the CONTRACT of
-record (each kill's Doc-delta updates its rows, this roadmap orders the work).
-Wave numbering here is the ROADMAP's thematic march; the loop's wave counter
-(the two-gate model) is separate — a loop wave batches 3-5 of these kills.
+Version: 2026-10-24 (the consolidation era). Supersedes the
+2026-10-14 edition. requirements.md stays the CONTRACT of record
+(each kill's Doc-delta updates its rows); this roadmap ORDERS the
+work. The 2026-10-24 full-project audit
+(`docs/loop/audit-2026-10-24-full-project.md` + its six lens
+reports beside it) is the census this refresh draws from — every
+row here re-verified against the live tree, not carried from
+older docs.
 
-Method: full census of all 12 requirements sections, every row classified
-done / partial-with-named-boundary / open, every open item dependency-ordered
-into waves. Parity target: Substance Painter's feature set (the [01]
-inventory), exceeded where [04] (next-gen bar) points.
+Method: the audit's finding first — the project has crossed from
+feature-march to consolidation. The core painter's path closed
+10-15; the depth week since was quality on already-ticked rows.
+The open risk is no longer "can a painter finish an asset" but
+"what does the release gate need, and what stays gated on the
+partner."
 
 ---
 
+## Where we stand (2026-10-24)
 
-> **2026-10-15: the C2 gap audit** (`docs/loop/audit-2026-10-15-c2.md`) is the active worklist. Its headline at audit time was that a painter could not finish a real PBR asset in the GUI (paint reached Base Color only, export wrote Base Color only from paint, no quit guard or pixel autosave, two undo timelines, one layer stack per document). **All five closed the same day** (waves W-C2a..f, every CI green): every channel paints and exports (C2-5/6), a quit guard and silent Ctrl+S (C2-1/4), pixel autosave + recovery (C2-3), one undo timeline with row travel (C2-7), a stack + undo + channel list per texture set (C2-9). Open from the audit: the release decisions (C2-16, 22, 23-25, 30) and per-set masked bakes (`docs/specs/per-set-masked-bakes.md`).
+**186,170 LOC across 16 crates, 2,251 test functions** (12.1/kLOC,
+no crate below 7). The core loop is Gate-0-proven end to end:
+mesh → 4K pressured paint → compositor → undo/redo → save/reopen →
+export, both CI platforms, verified as recently as the 10-24 green
+battery runs (umber-paint 178 + umber-app 851). The perf nightly is
+GREEN on the pinned 24.04 image (run 40075780768, 10-24 08:51Z —
+the stale-baseline class is dead, killed by `ec7ccb8`'s pin). The
+requirements contract: 90 of 100 rows ticked, stable since 10-17.
+The scorecard generator's `--check` passes.
 
-> **2026-10-17: the full-project audit**
-> (`docs/loop/audit-2026-10-17-full-project.md`) supersedes the C2
-> worklist as the active queue source. Census: 166.5k LOC, 2,061
-> tests (12.4/kLOC, no crate below 7), 100 requirement rows with 90
-> ticked, SECURITY.md current (10 rows, 0 stale). Gaps concentrated:
-> 13 uncompiled W-GUI-2 kills (host outage; runbook in queue.md), the
-> stale-baseline perf-nightly red (closes at the wave push — the
-> reseed commit is local), five named no-test files, the five
-> shell-halves queue, the fully corpus-gated .spp v2 lane.
-> Improvements: the reseed-push rule refinement (Bessa's ruling
-> queued), an automated recovery-close script, same-kill registration
-> for new modules, the brief-template verification ladder, the
-> two-green-nightlies baseline reseed.
+The night of 10-23/24 landed the W-C4 runway's first four kills
+(all battery-green + CI-green on the full matrix): the set-switch
+glue (C2-9's headless half), the per-channel dab density (both
+arms), the ID-mask pre-warm (the first-click hitch), and the
+paint-tiles auto-map by material (the composite's per-set rows
+line up at load). The stencil lane is fully closed (W-C3a/C3b +
+FREEZE-4). The flatpak chain landed with the honest appstream-
+compose revert. The two-gate wave model runs the march; the
+battery's machine-fit defaults + the feature-on RUN leg hardened
+it this same week.
 
-## Where we stand (2026-10-15)
+## ✅ LANDED — the completed archive (2026-10-10 → 2026-10-24)
 
-The core loop is Gate-0-proven end to end: mesh → 4K pressured paint →
-compositor → undo/redo → save/reopen → export, both CI platforms. The
-per-layer pool arc is complete (every layer owns its pixel planes;
-stages 1a-5, 2026-10-14). The paint engine is a headless crate
-(`umber-paint`, PR #8), so the JSONL agent session paints through the
-same engine and persistence the GUI uses — `paint_stroke`, `paint_read`,
-`paint_snapshot`, undo/redo, and a `version` step for protocol pinning.
+Every closed row of the march, consolidated. Proof cites the
+commit or the live tree; details live in each era's kill reports
+under `docs/loop/kill-reports/`.
 
-2026-10-14/15 also landed: MaterialX import Kill A + the stdlib
-verification (Kill S); the photocraft + Blender absorption pass (the
-ledger is `docs/research/absorption-2026-10-14-photocraft-blender.md`):
-falloff curves, front-face falloff, the Adjacent Faces bake margin, a
-crash-safe GPU startup with backend fallback, save-format completeness by
-exhaustive destructuring, the crate layering gate and the docs-only CI
-path filter; and the mesh-importer panic hunt + hardening (24 findings,
-23 closed; `.usdz` import works for the first time). The two-gate wave
-model (local battery per kill, one CI run per wave) runs the march.
+### The engine core (the march's waves 1-3 + the pool arc)
 
-## Waves 1-3 of the march — LANDED (2026-10-13/14)
-
-| Kill | State | Proof |
-|---|---|---|
-| wave-masks (per-layer paintable masks) | ✓ landed | 770162f + 21e1290; compositor gate both paths |
-| wave-blends (the 32-mode census) | ✓ landed | d861482 + the HSV/normal-map family goldens |
-| wave-history (click-to-time-travel) | ✓ landed | the History panel's journey rows |
-| wave-dist (Flatpak + AppImage) | ✓ packaging proven | the shell+PS+CI stack; images published per release |
-| wave-postfx-persist | ✓ landed | f35cf48 (project persistence + panel round-trip) |
-| wave-ocio-panel | ✓ landed | 9a1a808 (ACES configs selectable; OCIO adoption) |
-| wave-perchan-res | ✓ landed | f4e7524 (per-channel sizing end to end) |
-| wave-icons-boot | ✓ landed | the icon-first toolbar (40c755f) + the boot atlas |
-| wave-perf-baseline | ✓ landed | fd49627 + the nightly's fixed invocation (17:08 fix) |
-| wave-spp-import | ✓ landed | 30b966e + 0a5c20d; the corpus harness arms on real files |
-| wave-psd-import | ✓ landed | a4bf81a (flatten-on-import, every deviation reported) |
-| wave-dynamic-materials | ✓ LANDED END TO END | 83aa242 → review → 7ecea60 → Kill A f85cb0a → Kill B 2c6497e |
-| wave-camera-ortho | ✓ LANDED (`40f3e5d`) | see the post-pool row below |
-| wave-stylus-win32 | OPEN (wave 5 now) | Wintab32 dual-path |
-| wave-8k-export | ✓ built earlier (`cd668a3`, 2026-10-10) | the 8K presets + bake→export→decode proof at 8192²; roadmap row was stale |
-
-## The per-layer pool arc — THE CURRENT WAVE (2026-10-14, in flight)
-
-The pool redesign that closes the four v1 boundary warts (order not
-preserved, re-eval compounds, nothing un-publishes, anchors self-feedback)
-and gives every layer its own pixels — the architectural heart Substance
-users know as "real layers". Design r2 hostile-reviewed READY TO IMPLEMENT
-(docs/specs/per-layer-pool-design.md).
-
-| Stage | State | Proof |
-|---|---|---|
-| 1a compositor premultiplied mode | ✓ landed | b1ceb2c (byte-identical, flag off) |
-| 1b plane storage + budgets | ✓ landed | f2aff9f |
-| 2 save v2 (layers/<id>/ round-trip) | ✓ landed | f2aff9f (24 persistence tests byte-identical) |
-| 3 selection + stroke gate | ✓ landed | ed64a58 (explicit, typed refusals, the Base row) |
-| 4 per-layer pixels (Kill-B-class) | ✓ landed (2026-10-14) | strokes/fills/materials/imports on own planes, dormancy + v2 header [B2], the composite-on-read flush [M7]; the perf gate [M8] re-measures in the wave-5 perf row |
-| 5 anchors + instances | ✓ landed (2026-10-14) | `ec6d552`: downward CPU prefix flatten, typed Self/ForwardAnchor, instances render |
-
-Post-pool probe kills (the r2's open verifications): eframe 0.36's GPU
-error-handler behavior; wgpu 30's error-scope API shape; PaintCompositor
-Arc threading; un-premultiply exactness on GPU vendors.
-
-## Wave 5 — the pull-users + depth wave (post-pool)
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-camera-ortho | §5 the named camera gap | ✓ landed (40f3e5d); follow-up: ortho-aware DoF |
-| wave-stylus-win32 | §10 the Windows dual-path | Wintab32 polling beside Windows Ink |
-| wave-8k-export | §2/§6 the 8K export path | ✓ already built (`cd668a3`); requirements row 99 carries it. Open remainder: none named |
-| wave-materialx-roundtrip | MaterialX import (export ✓ built) | research ✓ (bf4718e); Kill A ✓ (bb287cd, parse + report); next S (stdlib verification) → B → C |
-| wave-agent-paint-ops | the agent protocol's wire paint steps | strokes/fills over the JSONL session (v0's named seam); pairs with the --script snapshot arm — ✓ LANDED (`77118f0` + `216018e`; `paint_snapshot` `3e003ec`, exact wire strokes `1ff0921`) |
-| wave-harness-script | the snapshot harness's --script arm | ✓ landed 2026-10-14: `paint_snapshot` (whole plane → PNG + blake3) — a script is a JSONL file piped into `umber-cli agent`. **Found:** a 2-point wire stroke can paint nothing (the live conditioner swallows it) — follow-up row `wave-agent-stroke-conditioning` |
-| wave-fbx-uv-fixture | the FBX test asset has no UVs — ✓ LANDED 2026-10-15 (C2-17: `cube_uv_ascii7400.fbx` from `scripts/gen-fbx-uv-cube.py`; Gate 0 asserts the unwrap) | `cube_b7400.fbx` (ufbx's Blender 2.72 cube) carries NO UV layer — every UV loads as [0,0] (pinned in `fbx.rs` 2026-10-15). Gate 0's FBX leg paints by UV directly so it never noticed; any bake/paint-by-mesh test on it is vacuous. Add a UV-unwrapped FBX fixture (e.g. ufbx's corpus has UV'd cubes) and point Gate 0 + the margin CLI test at it |
-| wave-agent-stroke-conditioning | agent strokes that paint exactly what was sent | ✓ landed 2026-10-15: wire strokes run the conditioner in EXACT mode (no one-euro / lazy-mouse; spacing kept). Root cause: 1 Hz one-euro at synthetic 8 ms steps moves the cursor ~10%/event, so a 2-point stroke never travelled one dab spacing. Open: path replays still smoothed (UX call) |
-| wave-svg-import | §7 SVG (later) | vector assets as fill/procedural sources |
-
-## Wave 6 — the differentiators (P1s that Substance lacks or does worse)
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-abr | .abr brush preset import (§1 optional) | the one Adobe format that is legal |
-| wave-wasm-shaders | §5 custom user shaders = WGSL plugins (P2) | umber-wasm runtime ✓ built; the shader-replacement host hook is the kill |
-| wave-tessellation | §5 displacement/tessellation preview (P2) | the height channel exists (tilepool); the preview pass + the displacement budget |
-| wave-hdr-surface | §5 HDR output (eframe upgrade gate) | tracks eframe 0.36→next; the capability model + probe ✓ built |
-| wave-ray-query | §3 wgpu ray-query acceleration | tracks wgpu stability; the compute-shader path ✓ built |
-
-## Wave 8 — the ecosystem + quality horizon (suggested 2026-10-14, dragon-authored)
-
-The march's plan of record had no rows for these; each closes a real gap
-between "feature-complete" and "a tool a studio trusts".
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-perf-protocol | the perf discipline as a standing gate | docs/perf/protocol.md gains the regression-triage flow: every nightly red names its owning wave; the baseline becomes a release artifact, not a CI afterthought |
-| wave-plugin-sdk-docs | the WASM plugin SDK's author docs | ✓ LANDED 2026-10-15 (`b0c1aa0`): `docs/plugins/authoring-guide.md` — build, contract, limits, consent install, testing, and the v1 ABI stability contract (frozen: exports, MBER/MDEF, TLV kinds, error codes, no imports) |
-| wave-fuzz-corpus | the panic-hunt's structured corpus | ◐ (a) mesh importers ✓ (`crates/umber-mesh/tests/panic_hunt_mesh.rs`: noise + mutated FBX / glTF / USDA / USDC / USDZ / OBJ; it surfaced the openusd aborts closed in `5b5b0ba`); (b) mutated-valid replays ✓ for mtlx (3 real fixtures), presets, smart templates, PNG and the agent wire (C2-20, `1468f66`). Open: coverage-guided fuzzing (cargo-fuzz, nightly + a corpus budget) |
-| wave-a11y-first-pass | keyboard navigation + focus states | the icon toolbar + panels need tab order, focus rings, shortcut discoverability — Substance's UI is dense but fully keyboard-driven; ours isn't yet |
-| wave-i18n-audit | the pt-BR completeness beyond the test | the completeness test pins key parity; a native-speaker review pass (Bessa's call who) for the strings' actual quality |
-| wave-crash-reporter | the never-crash doctrine's last mile | ✓ CORE DONE 2026-10-16 (battery-verified): the panic hook + report file + next-launch sticky notice (C2-2) and the last-10-operations ring (`crash::note_op`, fixed English labels at every session event; battery GREEN `ddb59e0`). Frame state = the named remainder (per-frame tool/panel state, `main.rs` wiring) |
-| wave-benchmark-public | the public benchmark story | ✓ LANDED 2026-10-16 (battery-verified): `umber-cli bench` — a 49k-tri generated cube, six bakers + encodes timed, one JSON line (static-verified + GREEN in the wave battery; GPU + lavapipe timing lines still owed to `docs/perf/protocol.md`, recorded in its kill report) |
-
-## Wave 8b — absorbed from photocraft + Blender (2026-10-14)
-
-Every row verified against Umber's code first; the ledger with sources,
-the already-have list and the declines is
-[`docs/research/absorption-2026-10-14-photocraft-blender.md`](research/absorption-2026-10-14-photocraft-blender.md).
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-bake-margin-adjacent | bake/export margin that stays continuous across UV seams | ✓ LANDED end to end (engine `3818da0`; CLI `bca634f` + agent step `c237e4f`; Bakes panel `741ec47`) |
-| wave-brush-falloff-curves | brush profile beyond one `hardness` scalar | Blender's presets (Smooth, Sphere, Root, Sharp, Linear, Constant, Inverse Square) + a custom curve; saved in `.umberbrush` with `#[serde(default)]` so old presets keep loading — ✓ landed `d0309e1` + panel combo `9a47fa0` |
-| wave-brush-dynamics-angle-jitter | per-dab jitter + angle | ✓ LANDED with bitmap stamps (C2-11): stamp texture in the dab shader `47d8fed`, stamped brushes + `StampAngle` (fixed / follow-stroke / random) `487fd49`, size/opacity/position jitter `90ec048`, the Brush panel rows + stamp picker. The earlier "angle is blocked" note (no stamp binding in `PAINT_COMPUTE_SHADER`) was what C2-11 removed |
-| wave-front-face-falloff | stretched paint on grazing faces | attenuate dab strength by the view-to-normal angle past a threshold (Blender's Normal Falloff) — ✓ landed `cabe283` + panel control `9a47fa0` |
-| wave-stroke-methods | the missing stroke idioms | ✓ LANDED end to end (engine `ee2dce5`; wiring, picker and `.umberbrush` persistence `51d9047`) |
-| wave-stencil | paint-through screen stencil | ✓ LANDED end to end (engine + app in the wave `0955ac8`; the paint hook `3a8b4cb`; the panel wiring `6c95e26`; the viewport shell + N `2bb8c60`; the set-switch re-stage `dcc5e89`; the cross-tile observer `45ad4e4` — all battery-green, riding the wave push) |
-| wave-brush-cavity-mask | edge-wear without building a mask layer | ✓ LANDED end to end (module `405e0e2`; gate composition + Brush-panel Cavity section `4bebc72`) |
-| wave-gpu-safe-start | a driver crash at device creation repeating every launch | photocraft's startup marker: write before device creation, clear after the first frames; an uncleared marker steps the backend down next launch; `--safe-gpu` override — ✓ landed `a221a85` |
-| wave-save-completeness | a new document field silently not saved | destructure every doc struct in the save converters with no `..`: a new field fails to compile until the save path handles it — ✓ landed `17900df` (project save/load) |
-| wave-scorecard | handwritten headline numbers drifting | generate README/STATE counts (crates, tests, rows) from the tree; `--check` in the battery + CI (this pass found 4 drifted docs) |
-| wave-ci-path-filter | Windows CI time on docs-only PRs | a `platforms` job: the Windows leg runs when platform-sensitive paths change or a `full-ci` label is set; master always runs both — ✓ landed `908135e` |
-| wave-release-phases | integrators broken by late protocol changes | alpha → beta (agent protocol + file format frozen) → RC, written into the 0.1.0 release checklist — ✓ landed `2c19dcd` (+ the agent `version` step) |
-
-## Next waves (2026-10-15 — the plan of record for the next stretch)
-
-Every open item from the 2026-10-14/15 kills, ordered. The live checklist
-is the session to-do; each row here names its blocker or its file surface.
-
-### Wave 6a — finish what is half-built (engine landed, wiring owed)
-
-| Kill | Closes | Surface |
-|---|---|---|
-| wave-openusd-0.8 | the last importer crash: openusd 0.7.0's multi-TB allocation ABORT (#19) | bump `openusd` 0.7.0 → 0.8.0 (fixes all six openusd findings upstream, PR mxpv/openusd#138; `docs/upstream/openusd-0.7.0.md`); adapt `umber-mesh/src/usdc.rs` to the `CrateData::open(impl Into<AssetBuffer>)` change; un-ignore `bug_usdc_huge_count_allocation_aborts` — ✓ LANDED (`5b5b0ba`) |
-| wave-stroke-methods-wiring | stroke methods reach the brush | ✓ LANDED 2026-10-15 (`51d9047`): the preset's brush finally reaches the stroke; method picker + size in presets; Drag Dot's release dab flushes into the same undo step |
-| wave-cavity-wiring | the cavity mask paints | ✓ LANDED 2026-10-15 (`4bebc72`): one composed gate over quick mask × curvature; Brush-panel Cavity section |
-| wave-margin-ui | Adjacent Faces from the app | ✓ agent `bake` step `margin` + `MarginType` folded into `BakeFlags` LANDED 2026-10-15; the Bakes panel Margin type combo LANDED 2026-10-15 (g2-bakes-margin-ui; whole-mesh + per-tile AO seam graphs) |
-| wave-fbx-uv-fixture | a UV'd FBX test asset | see its row below |
-| wave-valuefield-log | the last raw sliders | `ValueField` log mode; migrate DoF focus + fill_layer (6), path_tool (4), bakes (3), display (2), layers (1) — ✓ LANDED (`7c21424` log mode + DoF; `66b805d` the last 11 raw sliders) |
-
-### Wave 6b — the GUI plan
-
-`docs/specs/gui-plan-2026-10-15.md` (research index
-`docs/research/gui-research-2026-10-15.md` over three slices: Painter,
-Blender, photocraft; brief `docs/research/gui-plan-prompt-2026-10-15.md`).
-It supersedes phases 1-3 of `docs/specs/gui-audit-and-roadmap.md`, whose
-Phase 0 is built. Eight waves, ~45 kills, each with its file surface and
-its test:
-
-| Wave | Theme | Kills |
-|---|---|---|
-| G0 | foundations | action registry, focus-aware dispatch, kittest harness, toasts, both-branch style |
-| G1 | the first five minutes | brush cursor, Ctrl+RMB size/hardness drag, status-bar tool hints, straight-line preview, Painter/Blender navigation presets, axis gizmo |
-| G2 | panels | layer thumbnails + gestures, history panel, texture-set list, context Properties + search, raw-slider sweep, bakes margin UI, stroke-method/cavity UI |
-| G3 | find anything | command palette, preferences, keymap editor, rich tooltips |
-| G4 | flagship widgets | colour picker, curve, gradient ramp, field grammar, property context menu |
-| G5 | shell | menu completion, workspaces, Hide UI, home screen, first-run setup, tab overflow |
-| G6 | viewport depth | overlays popover, contextual toolbar, display-mode keys, UV-view parity, stencil overlay |
-| G7 | accessibility + polish | AccessKit sweep, keyboard-only, UI scale/density, polish batch |
-
-### Wave 6c — new capability
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-stencil | paint-through screen stencil | 8b row |
-| wave-bitmap-stamps | stamp textures | ✓ LANDED 2026-10-15: engine (`47d8fed`), brush angle modes (`487fd49`), jitter quartet (`90ec048`), panel + stamp picker. Open: stamp images persisted with presets |
-| wave-scorecard | generated headline counts | 8b row |
-| wave-stylus-win32 | the Windows tablet dual-path | wave 5 row |
-| wave-replay-exact | path replays paint exactly | a UX call (replays may want smoothing); default-off until decided |
-
-### Release track
-
-The 0.1.0 gates (`docs/specs/release-checklist-0.1.0.md`): perf
-re-baseline at the stage-5 frame path, the SPEC v1.1 ratification packet,
-the checklist walkthrough. Upstream bug drafts (`docs/upstream/`) wait on
-the owner's go-ahead to file.
-
-## Wave 9 — the far horizon (suggested 2026-10-14 — the differentiators beyond parity)
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-procedural-history | node-graph edits as first-class undo | the graph panel's param edits ride Document::run today; the GRAPH TOPOLOGY edits (add/remove/rewire nodes) need their own journaled command family — the last non-undoable edit class |
-| wave-smart-material-params | exposed parameter UI for materials | the dynmat design's cut §6 row: per-layer param editors driven by the definition's declared exposed params — Substance's "instance parameters" |
-| wave-bake-farm | distributed bake jobs | the bake is async + headless already (the agent session drives it); a job-queue shape over the protocol = multi-machine bake on a LAN |
-| wave-texture-inpainting | the healing-brush class | inpainting (patch-match based fill from the sampled region) — the one retouch tool class the engine lacks; rides the composite-sample seam stage 4 builds |
-| wave-live-mesh-edit | re-topo / live mesh reload | today a mesh reload resets the session; a UV-stable reload (matching by UV islands) keeps paint across topology edits — the deepest engineering row here |
-| wave-community-templates | the .umber template library | ship 10 curated material templates (weathered steel, leather, sci-fi panel — built with the own engine) as first-class File > New options; the fastest way to show what the tool does
-
-## Wave 10 — the SPP-parity census kills (2026-10-16; post-0.1.0 line)
-
-From the full-spectrum parity census
-(`docs/research/spp-parity-census-2026-10-16.md`, every gap grepped
-against the tree) and the .spp import audit
-(`docs/research/spp-import-audit-2026-10-16.md`). Slotted AFTER the
-0.1.0 gates by ruling (the plan of record keeps priority); Tier 2/3
-rows live in the census doc until their wave is cut.
-
-| Kill | Closes | Notes |
-|---|---|---|
-| wave-spp-chunk-index | every chunked .spp dataset decoding, not just chunk 0 | ✓ LANDED 2026-10-16 (the import audit's own fix): the b-tree keys chunks by ELEMENT OFFSET, the odometer counted indices — every real file imported only its first 64 KiB. Fix + regression + the corpus content gate (nonzero floors, material names, no truncation notes); battery GREEN |
-| wave-layer-flatten | R-B1: group → baked fill layer per channel, optional smart-material save | P0, small: the pool owns per-layer planes; the compositor bakes the prefix |
-| wave-assets-panel | R-C1: the Assets window — libraries (brushes/smart materials/masks/filters/meshes/envs), filters, drag-to-stack, import dialog | the census's biggest UX gap; the brush shelf generalizes |
-| wave-stencil | R-A1 + g6-stencil-overlay: paint-through screen mask with transform chords | 8b/6c row, now census-verified as absent |
-| wave-projection-fill | R-A2: screen-space projection fill (pwys-buffer ride) | pairs with stencil; the decal workflow |
-| wave-filled-path | R-A3: filled path tool | stroke-class reuse over the path engine |
-| wave-geometry-masks | R-B2: per-mesh/per-UDIM-tile include/exclude on layers/effects | rides UDIM + the paint gate |
-| wave-material-picker | R-A10: pick all channels at cursor → fill layer | small; per-layer pixel readback |
-| wave-baker-sync | R-D1: linked bake groups + settings copy/paste across texture sets | small; bake-request fan-out |
-| wave-cli-new | R-G4: `umber-cli new <mesh> --maps <dir>` headless project creation | the app flow, headless |
-| wave-channel-manage | R-B4: channel add/remove/rename in Texture Set settings | the model routes user channels already |
-| wave-spp-precision | .spp audit R1: full-precision channel import (f16 → plane formats) | normals stop being 8-bit-clamped |
-| wave-spp-assbin-mesh | .spp audit R2: the scene's own mesh from paint/scene.assbin | an .spp drop loads with its geometry |
-| wave-spp-resources | .spp audit R3: Alg::ResourceImage decode → bitmap layers | QDataStream reader generalizes from the cache |
-| wave-spp-hbo-stack | .spp audit R4: the HBO layer-stack schema → Umber layers (the flagship; staged a-d with the fidelity report) | the v1 flattened import stays the fallback, never silent partial |
-
-
-## Wave 7 — the moonshots (P2, 2+ years, from [04])
-
-| Kill | Closes |
+| Kill | Proof |
 |---|---|
-| wave-upstream-stylus | the stylus crate → winit upstream (the [03] survey's gap) |
-| wave-community-nodes | the node-graph community marketplace (plugin-sdk ✓ built) |
-| wave-collab | merge-story → live session merge (per-layer files are the substrate) |
+| Per-layer paintable masks | 770162f + 21e1290 |
+| The 32-mode blend census | d861482 + the HSV/normal-map family goldens |
+| History panel + click-to-time-travel | the History panel's journey rows |
+| Postfx persistence | f35cf48 |
+| OCIO panel + ACES configs | 9a1a808 |
+| Per-channel resolution end to end | f4e7524 |
+| Icon-first toolbar + boot atlas | 40c754f |
+| Perf baseline + the nightly's fixed invocation | fd49627 |
+| .spp import (chunk-index fixed 10-16) | 30b966e + 0a5c20d + the b-tree fix; corpus-armed |
+| PSD import (flatten-on-import) | a4bf81a |
+| Dynamic materials end to end | 83aa242 → 7ecea60 → Kill A f85cb0a → Kill B 2c6497e |
+| Ortho camera | 40f3e5d |
+| 8K export | cd668a3 |
+| The per-layer pool arc (stages 1a-5) | b1ceb2c, f2aff9f, ed64a58, dd6e1cd, ec6d552 |
+| Distribution (Flatpak + AppImage proven) | the shell+PS+CI stack |
 
-## Standing debts (ride every wave, not wave-gated)
+### The C2 close — the painter's path (2026-10-15, W-C2a..f)
 
-- The perf nightly's invocation was FIXED (2026-10-13 17:08); the
-  baseline artifact seeds the compare gate — the pool's stage-4 perf
-  gate re-measures under the new frame path.
-- ✓ AssetStore GC LANDED (2026-10-16): `AssetStore::collect_garbage` (umber-core/src/assets.rs) — report-only by default, `prune` opt-in; v1 boundary held (sidecars never touched; absent store → zero). Caller (the shell's post-save report) queued on the main.rs lock. Kill report: docs/loop/kill-reports/2026-10-16-assetstore-gc.md.
-- Split-redo under merged undo entries (#5's named follow-up).
-- Merge below the top undo entry (#5's deferred arm).
-- Cached ID-mask bake (multi-ID, cross-tile — the #11 follow-ups).
-- The winink live-HWND integration question (its module doc's open item).
-- DPI re-raster (2× atlas baked; runtime DPI change = named follow-up).
+Every channel paints and exports (C2-5/6); a quit guard + silent
+Ctrl+S (C2-1/4); pixel autosave + recovery (C2-3); one undo
+timeline with row travel (C2-7); a stack + undo + History +
+channel list per texture set (C2-9). All same-day, all CI green.
 
-## Never (hard walls — requirements.md's guardrails, restated)
+### The depth arcs (2026-10-14 → 10-16)
 
-- .spp WRITING — undocumented HDF5 + Adobe's format. IMPORT is RATIFIED (Bessa, 2026-10-12 ruling 1 in docs/loop/decisions.md) and landed in wave 3 (`30b966e` + `0a5c20d`): reading user-provided .spp files is interoperability. The .umber directory format stays the kill-shot.
-- .sbsar execution — Adobe Additional Terms, no FOSS license. The original
-  node graph + MaterialX interchange is the legal answer, fully built.
-- Fake interchange: MaterialX exports declared custom nodedefs; consuming
-  DCCs evaluate what they support. No full-fidelity claim is ever made.
-
-## The parity scoreboard (updated per landing; Substance → Umber)
-
-| Substance capability | Umber state |
+| Kill | Proof |
 |---|---|
-| Painting core (stamps, flow, spacing, falloff curves) | ✓ complete — **angle / alignment / jitter NOT built** (the old "✓ complete" covered them falsely; corrected 2026-10-15, row `wave-brush-dynamics-angle-jitter`) |
-| MyPaint-style input curves + stabilizer | ✓ complete |
-| Smudge/clone/symmetry/path/polygon/quick mask | ✓ complete |
-| Seam-aware stamping + 3D-space strokes | ✓ complete |
-| Texture sets + channel stacks + UDIM | ✓ + per-channel pool (2026-10-12) + a layer stack, undo, History and channel list per texture set (C2-9, 2026-10-15) |
-| Layers: types, instancing, anchors, smart materials | ✓ complete; smart materials bind their mesh-map generators to the newest bakes and `.umbermask` presets compose onto masks (C2-10, 2026-10-15) |
-| Blend modes | ✓ 32-mode census landed (d861482) |
-| Masks (paintable per-layer) | ✓ landed (770162f); per-plane masks ride the pool |
-| Dynamic materials | ✓ LANDED end to end (Kill A + Kill B, 2026-10-14); per-layer pixels ✓ (the pool arc, stages 4 `dd6e1cd` + 5 `ec6d552`) |
-| Agent/automation | ✓ JSONL protocol (`PROTOCOL_VERSION` 1): projects, layers, undo, paint strokes/reads/undo, `paint_snapshot` (whole plane → PNG + blake3); wire strokes paint exactly (no pointer smoothing) |
-| Headless testing | ✓ offscreen panel snapshots; the never-crash fuzz over mtlx/PSD/.spp/projects AND the mesh importers (5,400+ cases, 2026-10-14/15); scripted sessions via `paint_snapshot` |
-| Importers (.spp/PSD) | ✓ both landed; the corpus harness arms on real .spp files |
-| Baking (all 8 maps, cage, skew, auto-rebake) | ✓ complete; + Adjacent Faces margin (cross-seam fill, `3818da0`) on the CLI, the agent and the Bakes panel (`741ec47`) |
-| Node graph + MaterialX | ✓ complete (original engine) |
-| Viewport (OpenPBR, IBL, view modes, postfx) | ✓ + height→normal live (2026-10-12); postfx persistence = wave 2 |
-| Color management (OCIO, ACES, LUT) | ✓ bundled build + LUT; panel selection = wave 2 |
-| Export (templates, packing, presets, EXR, PSD, USD, MaterialX) | ✓ PSD-out complete; PSD-in = wave 3 |
-| Import (FBX, USD, images, mesh maps) | ✓ FBX/glTF/OBJ/USDA/USDC/**USDZ** (usdz never loaded until `6c68ce7`); importers hardened against the panic hunt's 24 findings (all 24 closed: the last, an openusd allocation abort, by the 0.8.0 bump `5b5b0ba`) |
-| Stylus (pressure/tilt/proximity) | ✓ Linux XI2 + raw pressure; win32 dual-path = wave 3 |
-| History panel | ✓ panel; time-travel = wave 1 |
-| Distribution | ✓ shell+PS proven + CI; Flatpak/AppImage = wave 1 |
-| Performance floor | ✓ reseeded 2026-10-16 from authentic CI numbers (run 38957356307, head `5e0d89e`): the x15 nightly red was the iGPU/GL-seed vs lavapipe hardware-class mismatch the seed's own note prescribed reseeding away; the nightly's compare is now apples-to-apples, and the two completed runs also show the host-return wave HALVED lavapipe viewport mean (84.07 → 45.54ms) — triage record in docs/perf/protocol.md |
-| Paint-what-you-see buffer | live-raycast ✓; the pwys stroke buffer stays a design-first wave-5 candidate |
-| Ortho camera | ✓ landed (40f3e5d) |
-| 8K export | ✓ built (`cd668a3`) |
-| Per-layer pixel planes | ✓ the pool arc complete (stages 1a-5, 2026-10-14) |
-| Custom user shaders | runtime ✓; host hook = wave 6 |
-| Rename layers | ✓ LayerCommand::Rename + the wire step (2026-10-14) |
-| Dirty-check confirm | ✓ the File > New gate (2026-10-14) |
+| Bake margin: Adjacent Faces across seams | engine 3818da0; CLI bca634f + agent c237e4f; Bakes panel 741ec47 |
+| Brush falloff curves + custom | d0309e1 + panel 9a47fa0 |
+| Bitmap stamps + angle modes + jitter | 47d8fed + 487fd49 + 90ec048 (C2-11) |
+| Front-face falloff | cabe283 + 9a47fa0 |
+| Stroke methods end to end | ee2dce5 + 51d9047 |
+| Stencil: paint-through screen mask | the full lane below |
+| Brush cavity mask | 405e0e2 + 4bebc72 |
+| GPU safe-start + backend fallback | a221a85 |
+| Save completeness by exhaustive destructuring | 17900df |
+| Release phases (alpha/beta/RC) + the agent `version` step | 2c19dcd |
+| openusd 0.8 (the last importer abort) | 5b5b0ba |
+| The mesh-importer panic hunt | 24 findings, 23→24 closed |
+| Crash reporter core + last-10-ops ring | ddb59e0 (C2-2) |
+| `umber-cli bench` public benchmark | landed 10-16 (the GPU/lavapipe timing lines owed to protocol.md) |
+| The WASM plugin SDK authoring docs | b0c1aa0 |
+| The procedural history panel k1 (wave-procedural-history's first half) | 2a84fb8 (10-23): graph_panel/history.rs, 651 lines + the .ftl keys + the kill report |
+| The kittest harness + the panel snapshots | the G0 foundation |
 
-## The wave protocol (standing, REVISED 2026-10-14 — the two-gate model)
+### The stencil lane (W-C3a/C3b + FREEZE-4 — fully closed)
 
-Bessa's ruling: big development waves, tests+CI after. Per-push CI is
-retired. Gate 1 = scripts/wave-battery.sh per kill (fmt + clippy -D
-warnings + full suites, local, the flock at /tmp/umber-cargo.lock).
-Gate 2 = ONE push per wave + ONE CI run (scripts/ci-watch.sh backgrounded
-with a notify pattern — verdicts ping between turns, nothing foreground-
-sleeps). Kills batch as unpushed commits between gates. The 2026-10-12
-per-kill-worktree variant is retired; the MAIN-tree kill-locks pattern
-(claw dispatches on locked surfaces) replaced it. The old protocol's
-steps, kept where still true:
+Engine + app 0955ac8; paint hook 3a8b4cb; panel wiring 6c95e26;
+viewport shell + N 2bb8c60; set-switch re-stage dcc5e89; cross-tile
+observer 45ad4e4; the tangent-wiring third site + its postfx wall
+(CI-green); the C2-9/M-C3a panel seats; the 2026-10-12
+heightnormal amendment (480ad62). The stencil session module moved
+bin→lib with zero path churn (the W-C4 L1).
 
-1. Dispatch: claws on MAIN-tree locked surfaces (kill-locks.sh), staggered
-   launches (60s+ apart — the opencode DB lock), briefs written fresh from
-   live anchors. NO cargo of any kind for claws.
-2. Consume: the dragon reads each kill's artifacts at exit (the report, the
-   full diff, verify-kill) and runs Gate 1's battery; the dragon fixes what
-   breaks.
-3. Land: kills commit as they pass Gate 1; the wave's push + ONE CI run is
-   Gate 2 (ci-watch.sh pings the verdict).
-4. Roll: the next wave's briefs get written at landing (anchors shift);
-   this roadmap's rows update their status in the same commit.
+### The W-C4 runway's first kills (the night of 10-23/24)
+
+| Kill | Proof |
+|---|---|
+| L1: the set-switch glue (C2-9's headless half) | b79f0c6 — umber_app::set_switch, the five-pin headless test |
+| L2: per-channel dab density (both arms) | 306a502 — texels_per_uv_for_channel; the write-only field deleted |
+| L3: ID-mask bake-on-tool-entry | 6430374 — prewarm_id_bake_cache; the first click hits |
+| L5c: paint tiles auto-map by material | 0ec64bd — auto_assign_tiles_by_material at set_mesh's tail |
+
+### The per-set masked bakes (the spec's stages — all landed)
+
+§1+§2 triangle_materials + all three importers (a23bcac + the
+gltf/fbx/obj attach); §3 raster half (the per-set submesh bakes,
+bakes_panel.rs:638/1781); §3 ray half — the with_occluder split +
+`OccluderScope` (0955ac8); §4 the per-set fan-out; §5 the
+auto-mapping (0ec64bd). Remaining: only the OccluderScope PANEL
+row + i18n keys (see the open waves).
+
+### The tooling + machinery (the loop's own hardening)
+
+wave-battery.sh (machine-fit defaults + the feature-on RUN leg);
+ci-watch.sh; scorecard.py (+`--check`); the perf-nightly image pin
+(ec7ccb8); pre-push.sh; verify-kill.sh + land-kill.sh; the kill
+locks + the main-tree pattern; the brief-template; the
+freeze-recovery close scripts; the loop restart machinery
+(2026-10-24 04:05).
+
+## The OPEN waves (dependency-ordered; each row names its gate)
+
+### Ungated — the runway continues (the next kills)
+
+| Kill | Closes | Notes |
+|---|---|---|
+| L6: the unified timeline | graph_panel/history.rs LANDED (2a84fb8, 10-23: the per-node procedural history panel k1, 651 lines + its .ftl keys) → the merge with the paint journal into one view | the graph-history kill 2; builds on the landed k1 |
+| The OccluderScope panel row + i18n keys | L5(b): the enum landed with the ray half; the PANEL row + its keys remain | UNGATED 2026-10-24: the .ftl lock is LIFTED (the freeze-3 recovery landed; post-recovery commits add keys — 2a84fb8 added 12+12) |
+| The AssetStore GC shell caller | the 10-16 engine's missing consumer | a small kill: the post-save report's call into collect_garbage (report-only first) |
+| L2b: the four same-class density arms | the symmetry snapshot (:1753), clone offset (:1812), fill raster (:4199), seam mirror radius (:4769) | mapped in the L2 report; each migrates to texels_per_uv_for_channel |
+| L3b: the multi-entry ID cache | the multi-tile pre-warm | the L3 report's named follow-up |
+| Quick mask persistence | the session-only mask (quick_mask.rs:122-360) saves + undos | lens A's gap 1: the ftl's own string admits "not saved and not undoable" — Substance persists both |
+| Symmetry persistence | SymmetrySettings not in .umber/.umberbrush | lens A's gap 2: named in-module at symmetry.rs:103-106 |
+| wave-a11y-first-pass | keyboard navigation + focus states | G7's core; Substance's UI is fully keyboard-driven, ours isn't yet |
+| **The Assets panel (R-C1, P0)** | libraries of brushes/smart materials/masks/filters/meshes + drag-to-layer-stack | the SPP census's biggest UX gap — capability exists, discoverability does not (the "empty tool" problem) |
+| **Layer-stack flatten (R-B1, P0)** | group → baked fill layer per channel, optional smart-material save | the destructive-when-wanted workflow every Substance user reaches for; pool-native, small |
+| Material picker (R-A10) | pick all channels at cursor → fill layer | small; rides per-layer pixel readback |
+| Projection fill (R-A2) | screen-space material projection | the decal workflow's other half; pairs with the landed stencil; rides the pwys design |
+| Geometry masks (R-B2) | per-mesh/per-tile include/exclude on layers/effects | rides UDIM |
+| Baker sync (R-D1) + channel manage (R-B4's tail) + the four post nodes (R-E5) | the power-user tail | each small; census-verified open |
+| wave-fuzz-corpus (b) | coverage-guided fuzzing | cargo-fuzz + nightly + a corpus budget |
+| wave-abr | .abr brush preset import | the one legal Adobe format |
+| wave-svg-import | SVG vector assets | the wave-5 row, still open |
+| wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) |
+| Split-redo + merge-below-top | the undo journal's two named follow-ups | retouch.rs:21's debts |
+| wave-procedural-history | graph topology edits as undoable commands | Wave 9 |
+| wave-smart-material-params | exposed parameter UI | Wave 9 |
+| wave-community-templates | 10 curated .umber templates | Wave 9 — the fastest show-off |
+
+### Gated — named walls, no derivation until the gate opens
+
+| Lane | The gate |
+|---|---|
+| L4: winink live hook | S1's parked bytes (winink.rs) are NOT in the tree — the lane cannot derive until they land |
+| L7: the color_button delegate conversion | G1-gated |
+| wave-stylus-win32 | the Windows dual-path; real-pen verification = D1's Windows leg (partner-gated) |
+| wave-wasm-shaders / tessellation / hdr / ray-query | the eframe/wgpu upgrade postures (the probes built) |
+| The .spp staged import R1-R4 | the fidelity report's staged lanes (the formats lens reports which are landed) |
+
+### Partner-gated — his calls, queued and named
+
+The release decisions (C2-16, 22, 23-25, 30); the SPEC v1.1
+ratification packet; the release checklist walkthrough; the
+upstream bug drafts (docs/upstream/); the i18n native-speaker
+pass; the .ftl lock lift (if it stands).
+
+## Standing debts (refreshed 2026-10-24, live-verified)
+
+- ~~The cached ID-mask bake~~ **LANDED SILENTLY** — the P1 tile
+  cache + the L3 pre-warm; this row was stale for a week.
+- Split-redo under merged undo entries — OPEN.
+- Merge below the top undo entry — OPEN.
+- The winink live-HWND question — OPEN, now deeper-gated (the
+  bytes are absent).
+- DPI runtime re-raster — OPEN (the manual ui_scale exists;
+  the runtime-change re-raster does not).
+- The AssetStore GC's shell caller — OPEN (engine landed 10-16,
+  caller still queued).
+- Stamp images persisted with presets — OPEN (the 6c row).
+
+## Never (hard walls — restated)
+
+- .spp WRITING (import is ratified + landed; the .umber directory
+  format is the kill-shot).
+- .sbsar execution (Adobe Additional Terms; the node graph +
+  MaterialX interchange is the legal answer, fully built).
+- Fake interchange: MaterialX exports declared custom nodedefs;
+  no full-fidelity claim is ever made.
+
+## The parity scoreboard (2026-10-24 — from the SPP lens, live-verified)
+
+| SPP family | Verdict |
+|---|---|
+| Painting core (stamps/flow/spacing/falloff/jitter/angle/methods/stabilizers) | PARITY |
+| Stencil/projection | PARITY on stencil (the lane closed); projection fill GAP (R-A2) |
+| Retouch + masks (quick/cavity/ID) | PARITY (persistence gaps on quick mask + symmetry) |
+| Path tools | PARITY (paint-along + filled + polygon + straight-line); ribbon GAP |
+| Fill/material layers + anchors + instances | PARITY (materials composite-only by design) |
+| Texture sets / channels / UDIM | PARITY (the auto-assign landed; channel add/remove/rename open) |
+| Baking | PARITY (per-set masked bakes closed; D1-D5 power rows open) |
+| Viewport | PARITY (four post nodes + displacement preview open) |
+| Color management | PARITY |
+| Export/Import | PARITY (the .spp v2 staged lanes; text unsupported) |
+| History/undo | PARITY (the unified timeline = L6) |
+| UI/UX density | PARTIAL (36/43 GUI kills; the color picker + keyboard-only are the felt gaps) |
+| Assets/ecosystem | **GAP — the moat** (the Assets panel + starter content) |
+| Scripting/automation | **EXCEEDS** (headless-first, versioned JSONL) + the client-library gap |
+| Interchange (MaterialX, diffable format) | **EXCEEDS** |
+| Community/local-first/no-telemetry/never-crash | **EXCEEDS** |
+
+The census-delta arithmetic: Tier-1's 10 rows — 2 closed this week
+(stencil, filled path); 8 remain, led by the two P0s above. The
+full comparison: `docs/loop/audit-2026-10-24-lens-spp.md`.
+
+## The wave protocol (standing, the two-gate model)
+
+Bessa's ruling: big development waves, tests+CI after. Gate 1 =
+scripts/wave-battery.sh per kill (fmt + clippy -D warnings + full
+suites, local, the flock at /tmp/umber-cargo.lock, the machine-fit
+defaults). Gate 2 = ONE push per wave + ONE CI run
+(scripts/ci-watch.sh backgrounded — verdicts ping between turns,
+nothing foreground-sleeps). Kills batch as unpushed commits between
+gates. Briefs are written fresh from live anchors at dispatch
+time; kill reports + the touched docs' rows update in the same
+commit as the kill.
