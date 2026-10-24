@@ -664,6 +664,26 @@ pub fn layers_ui(
                 outcome.select = Some(PlaneOwner::Layer(top.id));
             }
         }
+        // The R-B1 flatten button: enabled only when the multi-selection
+        // holds two or more distinct rows (the engine's own floor). The
+        // heavy half — bake + publish + removes — is the shell's, on
+        // the gesture outcome's `flatten` field.
+        let selected: Vec<u64> = gestures.selection.ids();
+        let flatten_enabled = {
+            let mut ids = selected.clone();
+            ids.sort_unstable();
+            ids.dedup();
+            ids.len() >= 2
+        };
+        if ui
+            .add_enabled(flatten_enabled, egui::Button::new(tr("layers.flatten")))
+            .on_disabled_hover_text(tr("layers.flatten-needs-two"))
+            .clicked()
+        {
+            outcome
+                .gestures
+                .push(LayerGesture::Flatten { ids: selected });
+        }
     });
     // The smart-material shelf (C2-10), collapsed by default so the layer
     // list keeps the space. Its header reuses the material-layer add key.

@@ -552,6 +552,15 @@ pub mod gestures {
         Duplicate,
         /// Group the selection under a new folder.
         Group,
+        /// Flatten the selection: the layers bake into ONE new paint
+        /// layer (the R-B1 kill). The SHELL owns the heavy half — the
+        /// bake reads the paint session's planes, the publish writes
+        /// the new layer's own, the removes ride the journal — so the
+        /// panel only validates and hands the ids up.
+        Flatten {
+            /// The layers to flatten (the gesture selection).
+            ids: Vec<u64>,
+        },
         /// Remove these layers (through the confirm gate per `source`).
         Delete {
             /// The layers to remove.
@@ -585,6 +594,11 @@ pub mod gestures {
         pub removed: Vec<u64>,
         /// The mask solo changed (re-read [`MaskSolo::layer`]).
         pub solo_changed: bool,
+        /// The selection to flatten (the R-B1 kill): the SHELL bakes
+        /// these layers into one new paint layer (paint + journal +
+        /// publish), because the panel sees neither the paint session
+        /// nor the composite snapshot. Empty = no flatten asked.
+        pub flatten: Vec<u64>,
     }
 
     /// The drag-and-drop payload a row's handle carries.
@@ -945,6 +959,19 @@ pub mod gestures {
                     if let Some(folder) = self.group_selected(doc) {
                         self.selection.set_single(folder);
                         out.select = Some(folder);
+                    }
+                }
+                LayerGesture::Flatten { ids } => {
+                    // Validate exactly as the engine will: existing
+                    // rows, two or more DISTINCT ids (one id is a
+                    // duplicate, not a flatten). The shell refuses
+                    // with a status line if the bake fails.
+                    let mut ids: Vec<u64> =
+                        ids.into_iter().filter(|id| order.contains(id)).collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    if ids.len() >= 2 {
+                        out.flatten = ids;
                     }
                 }
                 LayerGesture::Delete { ids, source } => {

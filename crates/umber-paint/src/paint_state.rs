@@ -873,7 +873,24 @@ pub struct SnapshotMaterialChannel {
     pub opacity: f32,
 }
 
-/// One stack row's composite metadata, bottom-to-top.
+/// One baked plane from [`PaintState::bake_layers`] (the R-B1
+/// flatten's read half): the selection's isolated composite for one
+/// `(tile, channel)`, sized and ready to publish as the new layer's
+/// own pixels through [`PaintState::publish_plane`].
+#[derive(Debug, Clone)]
+pub struct BakedPlane {
+    /// The tile the plane belongs to.
+    pub tile: u16,
+    /// The plane channel (the stack's channel names).
+    pub channel: String,
+    /// The channel's size (the size-checked publish target).
+    pub width: u32,
+    pub height: u32,
+    /// The folded bytes (premultiplied, the CPU oracle's output).
+    pub data: Vec<u8>,
+}
+
+/// One layer stack row's composite metadata, bottom-to-top.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotLayer {
     /// Whose plane this row composites. For an instance row, its SOURCE
@@ -3910,7 +3927,9 @@ impl PaintState {
     /// frame); tests that publish planes always flush with a real
     /// snapshot first. Order past a reorder is approximate (id order) —
     /// the fallback composites every plane exactly once, never double.
-    fn synthesized_snapshot(&self) -> CompositeSnapshot {
+    /// `pub` for the shell's flatten handler (the R-B1 kill's bake
+    /// base — the same seam class as the Gate-0 exports).
+    pub fn synthesized_snapshot(&self) -> CompositeSnapshot {
         let mut layers = vec![SnapshotLayer {
             owner: PlaneOwner::Base,
             layer_id: None,
@@ -4093,6 +4112,140 @@ impl PaintState {
                 None
             }
         }
+    }
+
+    /// The R-B1 flatten's read half (the W-C4-era census P0, the brief
+    /// `docs/loop/briefs/2026-10-24-rb1-flatten.md`): the SELECTED
+    /// layers' ISOLATED composite — the selection's own rows folded
+    /// over TRANSPARENT, never the whole stack — per (tile, channel)
+    /// where any selected layer holds a plane. The recipe is
+    /// [`Self::read_anchor_prefix`]'s own (the CPU oracle [m11]: every
+    /// plane `read_plane`d, folded through `composite_stack_cpu`, so
+    /// the bytes are bit-exact across machines and GPUs) with the
+    /// subset filter where the prefix has its cutoff.
+    ///
+    /// Semantics: unselected layers below/above contribute NOTHING
+    /// (the flatten replaces the selection with its own contribution;
+    /// layers below stay visible beneath the baked layer). Instance
+    /// rows resolve through their source (the row's `layer_id` is the
+    /// selection's member; the pixels read are the source's, exactly
+    /// as they composite today). A (tile, channel) where NO selected
+    /// layer holds a plane is skipped — the baked layer owns no plane
+    /// there, the honest "nothing to bake".
+    ///
+    /// `None` = refused: fewer than two distinct ids (a one-layer
+    /// flatten is a duplicate, not a flatten), or an id absent from
+    /// the stack's rows. A read or fold failure logs and skips the
+    /// (tile, channel), never silently substituting transparent.
+    pub fn bake_layers(
+        &mut self,
+        snapshot: &CompositeSnapshot,
+        ids: &[u64],
+    ) -> Option<Vec<BakedPlane>> {
+        use umber_gpu::compositor::{composite_stack_cpu, CpuStackLayer};
+        // Dedup, then the two-distinct-layers floor: a single id
+        // "flattens" to a duplicate of itself — refuse (the brief).
+        let mut sorted: Vec<u64> = ids.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() < 2 {
+            return None;
+        }
+        // Every id must be a stack row (a stale selection id refuses
+        // the whole bake — a partial flatten would lie).
+        let set_rows: std::collections::BTreeSet<u64> =
+            snapshot.all_rows().filter_map(|row| row.layer_id).collect();
+        if sorted.iter().any(|id| !set_rows.contains(id)) {
+            return None;
+        }
+        let selected: std::collections::BTreeSet<u64> = sorted.iter().copied().collect();
+        let mut baked: Vec<BakedPlane> = Vec::new();
+        let tiles: Vec<u16> = self.targets.keys().copied().collect();
+        for tile in tiles {
+            let set = self.set_of_tile(tile).to_string();
+            // The base color lives on the tile's own thread, never in
+            // `channels` (the lazy-materialization contract: BASE_COLOR
+            // defers to `ensure_tile` and no `channels` entry is ever
+            // allocated for it) — the walk adds it explicitly.
+            let mut channels = self.channels_present(tile);
+            channels.push(BASE_COLOR_CHANNEL.to_string());
+            for channel in channels {
+                let (width, height) = self.tile_channel_size(tile, &channel);
+                let (set_w, set_h) = self.tile_size(tile);
+                let mut owned_masks: Vec<Vec<u8>> = Vec::new();
+                let mut resolved: Vec<ResolvedEntry> = Vec::new();
+                for row in snapshot.rows_for(&set) {
+                    // The subset filter: only the selection's rows.
+                    if row.layer_id.is_none_or(|id| !selected.contains(&id)) {
+                        continue;
+                    }
+                    if let Some(entry) = self.resolve_row(
+                        row,
+                        tile,
+                        &channel,
+                        width,
+                        height,
+                        set_w,
+                        set_h,
+                        &mut owned_masks,
+                    ) {
+                        resolved.push(entry);
+                    }
+                }
+                if resolved.is_empty() {
+                    continue;
+                }
+                let mut planes: Vec<Vec<u8>> = Vec::with_capacity(resolved.len());
+                let mut failed = false;
+                for entry in &resolved {
+                    match self.read_plane(entry.owner, tile, &channel) {
+                        Some(plane) if (plane.width, plane.height) == (width, height) => {
+                            planes.push(plane.data);
+                        }
+                        other => {
+                            let (w, h) = other.map(|p| (p.width, p.height)).unwrap_or((0, 0));
+                            log::warn!(
+                                "bake: {:?}/{tile}/{channel} is {}x{} (or absent), \
+                                 expected {width}x{height}; skipping the pair",
+                                entry.owner,
+                                w,
+                                h
+                            );
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                if failed {
+                    continue;
+                }
+                let layers: Vec<CpuStackLayer<'_>> = resolved
+                    .iter()
+                    .zip(&planes)
+                    .map(|(entry, bytes)| CpuStackLayer {
+                        blend_mode: entry.blend,
+                        opacity: entry.opacity,
+                        visible: entry.visible,
+                        rgba: Some(bytes.as_slice()),
+                        mask: entry.mask_index.map(|i| owned_masks[i].as_slice()),
+                        premultiplied: true,
+                    })
+                    .collect();
+                match composite_stack_cpu(&layers, width, height) {
+                    Ok(data) => baked.push(BakedPlane {
+                        tile,
+                        channel,
+                        width,
+                        height,
+                        data,
+                    }),
+                    Err(err) => {
+                        log::warn!("bake: composite {tile}/{channel} failed: {err}");
+                    }
+                }
+            }
+        }
+        Some(baked)
     }
 
     /// Latches the advisory-budget warn (§1.3): crossing
@@ -7653,6 +7806,111 @@ mod tests {
             full.data[0]
         );
         assert_ne!(full.data[0], l1.data[0], "the prefix must exclude M");
+    }
+
+    /// The R-B1 flatten's read half (`bake_layers`): the SELECTED
+    /// rows' isolated composite over transparent — the prefix test's
+    /// own stack (200 / 100@0.5 / 37) re-used as the fixture. The
+    /// arithmetic is the anchor test's own oracle: L0=200, then
+    /// L1=100@0.5 folds 200 + (100−200)·0.5 = 150; L2=37 sits above
+    /// and must NOT reach the [L0,L1] bake. The refusal pins: a
+    /// single id, and a stale id absent from the stack.
+    #[test]
+    fn bake_layers_folds_the_selection_over_transparent() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        // The lazy-materialization contract: the tile's target (and the
+        // base-color thread) appear on first ensure — the app's frame
+        // path does this; the test must do it explicitly.
+        assert!(state.ensure_tile(1001), "the tile's target materializes");
+        let flat = |v: u8| {
+            let mut bytes = Vec::with_capacity(512 * 512 * 4);
+            for _ in 0..512 * 512 {
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+            bytes
+        };
+        for (id, v) in [(20u64, 200u8), (21, 100), (22, 37)] {
+            state
+                .publish_plane(
+                    PlaneOwner::Layer(id),
+                    1001,
+                    BASE_COLOR_CHANNEL,
+                    512,
+                    512,
+                    flat(v),
+                )
+                .expect("plane publishes");
+        }
+        let paint_row = |id: u64, opacity: f32| SnapshotLayer {
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        };
+        let snapshot = CompositeSnapshot {
+            layers: vec![
+                SnapshotLayer {
+                    owner: PlaneOwner::Base,
+                    layer_id: None,
+                    kind: SnapshotLayerKind::Paint,
+                    blend: BlendMode::Normal,
+                    opacity: 1.0,
+                    visible: true,
+                    mask_enabled: false,
+                    material_channels: None,
+                },
+                paint_row(20, 1.0),
+                paint_row(21, 0.5),
+                paint_row(22, 1.0),
+            ],
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
+        };
+        // The two-layer bake: 200 then 100@0.5 over transparent = 150
+        // everywhere, and L22's 37 never reaches it (the isolation).
+        let baked = state
+            .bake_layers(&snapshot, &[21, 20])
+            .expect("the two-layer bake resolves");
+        assert_eq!(baked.len(), 1, "one (tile, channel) pair baked");
+        let plane = &baked[0];
+        assert_eq!(
+            (plane.tile, plane.channel.as_str()),
+            (1001, BASE_COLOR_CHANNEL)
+        );
+        assert_eq!((plane.width, plane.height), (512, 512));
+        for texel in plane.data.chunks_exact(4) {
+            assert_eq!(
+                texel,
+                &[150, 150, 150, 255],
+                "the isolated fold is bit-exact"
+            );
+        }
+        // The three-layer bake folds 37 last: the whole selection
+        // composites to 37 (the order pin — bottom-to-top).
+        let baked_all = state
+            .bake_layers(&snapshot, &[20, 21, 22])
+            .expect("the three-layer bake resolves");
+        let texel: [u8; 4] = baked_all[0].data[..4].try_into().unwrap();
+        assert_eq!(texel, [37, 37, 37, 255], "the fold order is bottom-to-top");
+        // The refusals: a single id (a duplicate, not a flatten) and a
+        // stale id absent from the stack.
+        assert!(
+            state.bake_layers(&snapshot, &[20]).is_none(),
+            "one id refuses"
+        );
+        assert!(
+            state.bake_layers(&snapshot, &[20, 99]).is_none(),
+            "a stale id refuses the whole bake"
+        );
     }
 
     #[test]

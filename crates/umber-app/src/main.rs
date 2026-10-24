@@ -703,6 +703,62 @@ impl TabViewer for PanelViewer<'_> {
                         // consumer, so a repaint is the whole refresh.
                         ui.ctx().request_repaint();
                     }
+                    // The R-B1 flatten (the gesture outcome's heavy half,
+                    // owned by the shell): the selection's isolated bake
+                    // becomes ONE new paint layer's own planes; the
+                    // sources remove through the journal. Fully undoable —
+                    // the sources' planes tombstone (§5.4), the journal's
+                    // reverts restore both halves. No confirm gate: undo
+                    // IS the safety net (the named follow-up may add one).
+                    if !applied.flatten.is_empty() {
+                        let ids = applied.flatten.clone();
+                        if let Some(paint) = self.paint.as_deref_mut() {
+                            let snapshot = paint.synthesized_snapshot();
+                            if let Some(baked) = paint.bake_layers(&snapshot, &ids) {
+                                let n = self.doc.layers().len() + 1;
+                                let name = crate::i18n::tr_args(
+                                    "layers.default-paint-name",
+                                    [("n", fluent::FluentValue::from(n))],
+                                );
+                                self.doc.run(umber_core::layers::LayerCommand::add(
+                                    name,
+                                    umber_core::layers::LayerKind::Paint,
+                                ));
+                                let Some(new_id) = self.doc.layers().last().map(|l| l.id) else {
+                                    continue;
+                                };
+                                for plane in &baked {
+                                    let _ = paint.publish_plane(
+                                        paint_state::PlaneOwner::Layer(new_id),
+                                        plane.tile,
+                                        &plane.channel,
+                                        plane.width,
+                                        plane.height,
+                                        plane.data.clone(),
+                                    );
+                                }
+                                for id in &ids {
+                                    self.doc.run(umber_core::layers::LayerCommand::remove(*id));
+                                }
+                                // The baked layer becomes the selection,
+                                // the paint target, and — if a source was
+                                // being mask-edited — the mask edit closes.
+                                self.layer_gestures.selection.set_single(new_id);
+                                paint.set_active_target(paint_state::PlaneOwner::Layer(new_id));
+                                if paint.mask_edit_layer().is_some_and(|m| ids.contains(&m)) {
+                                    paint.set_mask_edit_layer(None);
+                                }
+                            } else {
+                                // The engine refused (a stale selection, a
+                                // one-id floor): log it, the same surface
+                                // the duplicate-refusal uses.
+                                log::warn!(
+                                    "flatten: the bake refused for {ids:?} — the selection \
+                                     must hold two or more live rows"
+                                );
+                            }
+                        }
+                    }
                     if let Some(paint) = self.paint.as_deref_mut() {
                         apply_layer_session_ops(paint, &layer_session_ops(&applied));
                     }
