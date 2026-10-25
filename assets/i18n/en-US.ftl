@@ -730,6 +730,7 @@ uv =
     .no-mesh = no mesh loaded
     .mask-mode = MASK MODE (X to exit)
     .isolate = Channel
+    .pick-applied = Picked { $color } into the fill layer
 
 ## Paint path tools (§2 P1 row)
 

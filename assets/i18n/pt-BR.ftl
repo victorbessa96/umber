@@ -749,6 +749,7 @@ uv =
     .no-mesh = nenhuma malha carregada
     .mask-mode = MODO MÁSCARA (X para sair)
     .isolate = Canal
+    .pick-applied = Amostrada { $color } para a camada de preenchimento
 
 ## Ferramentas de caminho de pintura (§2 P1)
 
