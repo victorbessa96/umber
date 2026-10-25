@@ -26,7 +26,7 @@ own rows, cross-checked against the tree)
 | G1 first five minutes | 6 | 6 ✓ | tails: the OS-bitmap cursor path, the flow/angle chords, zoom-to-cursor + F-frame, UV-view axes |
 | G2 panels | 8 | 8 ✓ | tails: mask thumbnails, per-entry history thumbs, per-set visibility |
 | G3 find anything | 4 | 4 ✓ | — |
-| G4 flagship widgets | 5 | 3 ✓ + 1 ◐ | **g4-color-picker (OPEN — egui's stock picker is still in use: no color_picker/colorbutton symbol in brush_panel.rs or layers_panel.rs)**; **g4-curve-widget (OPEN — the pressure-curve plot is not yet promoted)**; g4-property-context-menu's Assign Shortcut + per-field defaults tail |
+| G4 flagship widgets | 5 | 3 ✓ + 1 ◐ | **g4-color-picker: CLOSED 2026-10-25 by verification, not code — the lens's check grepped for `color_picker/colorbutton` but the real symbol is `picker_button`; the custom picker (perceptual SV square, hue-strip mesh, HSV/RGB, persisted recents) is wired at EVERY color-editing site: preferences:319, fill_layer (Solid + Gradient A/B, :1192/:1206-class), brush_panel:594; layers_panel has NO color site to migrate (RichText/thumbnail paints only). The in-canvas pick half = the material picker v1 (74034c0, Ctrl+Alt+click)**; **g4-curve-widget (OPEN — the pressure-curve plot is not yet promoted)**; g4-property-context-menu's Assign Shortcut + per-field defaults tail |
 | G5 shell | 6 | 5 ✓ + 1 ◐ | g5-workspaces' F1-F4 viewport presets + layout persistence |
 | G6 viewport depth | 5 | 5 ✓ | — |
 | G7 a11y + polish | 4 | 3 ✓ | **g7-keyboard-only (OPEN — the tab order/focus-ring/Esc/number-menu journeys)** |

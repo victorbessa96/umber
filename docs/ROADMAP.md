@@ -218,7 +218,7 @@ pass; the .ftl lock lift (if it stands).
 | Color management | PARITY |
 | Export/Import | PARITY (the .spp v2 staged lanes; text unsupported) |
 | History/undo | PARITY (the unified timeline = L6) |
-| UI/UX density | PARTIAL (36/43 GUI kills; the color picker + keyboard-only are the felt gaps) |
+| UI/UX density | PARTIAL (36/43 GUI kills; keyboard-only is the felt gap — the color picker CLOSED 2026-10-25 by verification: the custom picker sits at every color site, the lens's grep used the wrong symbol) |
 | Assets/ecosystem | **GAP — the moat** (the Assets panel + starter content) |
 | Scripting/automation | **EXCEEDS** (headless-first, versioned JSONL) + the client-library gap |
 | Interchange (MaterialX, diffable format) | **EXCEEDS** |
