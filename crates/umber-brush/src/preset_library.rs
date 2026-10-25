@@ -268,6 +268,7 @@ mod tests {
                 alpha,
                 hardness: 0.25,
                 pressure_gamma: 1.0,
+                pressure_curve: Default::default(),
                 wash_mode: crate::WashMode::BuildUp,
                 falloff: crate::FalloffCurve::Smooth,
                 falloff_custom: Default::default(),

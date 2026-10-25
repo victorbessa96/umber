@@ -415,6 +415,7 @@ mod tests {
                 alpha: 0.33,
                 hardness: 0.77,
                 pressure_gamma: 2.2,
+                pressure_curve: ControlCurve::identity(),
                 wash_mode: WashMode::Wash,
                 falloff: FalloffCurve::Sphere,
                 falloff_custom: ControlCurve::try_new(&[

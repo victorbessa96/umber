@@ -185,6 +185,14 @@ pub struct BrushParams {
     /// Nonlinear response applied to the pressure multiplier
     /// (1.0 = linear; >1 favors light pressure falloff).
     pub pressure_gamma: f32,
+    /// The user-drawn pressure response curve (x = the gamma-shaped
+    /// pressure multiplier in 0..=1, y = the final multiplier). Evaluated
+    /// AFTER `pressure_gamma` (the scalar stays the legacy shortcut;
+    /// the curve is the full control). `#[serde(default)]` = the
+    /// identity curve, so pre-curve `.umberbrush` files load unchanged
+    /// and identity evaluates byte-identically to today.
+    #[serde(default)]
+    pub pressure_curve: ControlCurve,
     /// How the stroke's overlapping stamps accumulate. Defaults to
     /// [`WashMode::BuildUp`] (the `#[serde(default)]` keeps pre-mode
     /// `.umberbrush` files loading with historical behavior).
@@ -224,6 +232,7 @@ impl Default for BrushParams {
             alpha: 0.8,
             hardness: 0.5,
             pressure_gamma: 1.0,
+            pressure_curve: ControlCurve::identity(),
             wash_mode: WashMode::BuildUp,
             falloff: FalloffCurve::Smooth,
             falloff_custom: ControlCurve::identity(),
@@ -361,7 +370,9 @@ impl DabAdapter {
         let mut out = Vec::with_capacity(stamps.len());
         let mut prev = None;
         for stamp in stamps {
-            let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
+            let shaped = params
+                .pressure_curve
+                .evaluate(stamp.alpha_multiplier.powf(params.pressure_gamma));
             let alpha = (params.alpha * shaped).clamp(0.0, 1.0);
             out.push(dab_for(stamp, prev, radius_px, params, alpha));
             prev = Some(stamp.pos);
@@ -392,7 +403,9 @@ impl DabAdapter {
         let mut out = Vec::with_capacity(stamps.len());
         let mut prev = None;
         for stamp in stamps {
-            let shaped = stamp.alpha_multiplier.powf(params.pressure_gamma);
+            let shaped = params
+                .pressure_curve
+                .evaluate(stamp.alpha_multiplier.powf(params.pressure_gamma));
             let alpha = (base * shaped).clamp(0.0, 1.0);
             out.push(dab_for(stamp, prev, radius_px, params, alpha));
             prev = Some(stamp.pos);
@@ -597,6 +610,42 @@ mod tests {
             },
         );
         assert!((dabs[0].alpha - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn identity_pressure_curve_is_gamma_alone() {
+        // The g4 promotion's back-compat pin: the identity curve
+        // (the serde default every pre-curve `.umberbrush` loads)
+        // evaluates byte-identically to the gamma-only shaping.
+        let params = BrushParams {
+            alpha: 0.8,
+            pressure_gamma: 2.0,
+            pressure_curve: ControlCurve::identity(),
+            ..BrushParams::default()
+        };
+        let dabs = DabAdapter::stamps_to_dabs(&[stamp([0.0, 0.0], 0.5)], 8.0, &params);
+        let expected = 0.8 * 0.5f32.powf(2.0);
+        assert!((dabs[0].alpha - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shaped_pressure_curve_reweights_the_dab() {
+        // A lifted mid (0.9 across the middle third) turns a half-press
+        // (0.5, in the flat span) into 0.9 of full flow.
+        let params = BrushParams {
+            alpha: 0.8,
+            pressure_gamma: 1.0,
+            pressure_curve: ControlCurve::try_new(&[
+                (0.0, 0.0),
+                (1.0 / 3.0, 0.9),
+                (2.0 / 3.0, 0.9),
+                (1.0, 1.0),
+            ])
+            .expect("lifted curve"),
+            ..BrushParams::default()
+        };
+        let dabs = DabAdapter::stamps_to_dabs(&[stamp([0.0, 0.0], 0.5)], 8.0, &params);
+        assert!((dabs[0].alpha - 0.8 * 0.9).abs() < 1e-6);
     }
 
     #[test]

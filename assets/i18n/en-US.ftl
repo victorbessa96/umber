@@ -440,6 +440,7 @@ brush =
     .alpha = Alpha
     .hardness = Hardness
     .pressure-gamma = Pressure gamma
+    .pressure-curve = Pressure curve
     .stabilizer = Stabilizer (one-euro)
     .min-cutoff = Min cutoff
     .beta = Beta

@@ -459,6 +459,7 @@ brush =
     .alpha = Opacidade
     .hardness = Dureza
     .pressure-gamma = Gama da pressão
+    .pressure-curve = Curva de pressão
     .stabilizer = Estabilizador (one-euro)
     .min-cutoff = Corte mínimo
     .beta = Beta

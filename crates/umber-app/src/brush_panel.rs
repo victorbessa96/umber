@@ -626,6 +626,15 @@ impl BrushPanel {
                 .step(0.05),
         )
         .changed();
+        // The pressure response curve (g4's promotion: the falloff
+        // editor's own widget + helpers over the same ControlCurve
+        // class): x = the gamma-shaped multiplier, y = the final
+        // multiplier. The identity default = today's behavior; the
+        // first drag replaces it.
+        ui.horizontal(|ui| {
+            ui.label(tr("brush.pressure-curve"));
+            changed |= pressure_curve_editor(ui, &mut preset.params.pressure_curve);
+        });
 
         // Opacity accumulation: build-up lets overlapping stamps pile
         // past the stroke opacity; wash normalizes the overlap to it
@@ -1106,6 +1115,7 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "brush.alpha",
     "brush.hardness",
     "brush.pressure-gamma",
+    "brush.pressure-curve",
     "brush.stabilizer",
     "brush.min-cutoff",
     "brush.beta",
@@ -2237,6 +2247,23 @@ fn falloff_custom_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
     response.changed() && apply_falloff_edit(curve, &model)
 }
 
+/// The pressure response curve's editor (the g4 promotion): the falloff
+/// editor's own widget + helpers over the same [`ControlCurve`] class.
+/// x = the gamma-shaped pressure multiplier, y = the final multiplier;
+/// the identity default evaluates byte-identically to the gamma alone.
+fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
+    let mut model = falloff_edit_model(curve);
+    let response = ui
+        .push_id("brush_pressure_curve", |ui| {
+            umber_gui::CurveEdit::new(&mut model)
+                .size(120.0)
+                .fixed_count(true)
+                .show(ui)
+        })
+        .inner;
+    response.changed() && apply_falloff_edit(curve, &model)
+}
+
 /// The editor model for `curve`, rebuilt every frame (the preset is the
 /// state). [`umber_gui::Curve`] is stricter than [`ControlCurve`] (points
 /// inside `[0, 1]²`, x gaps of at least `MIN_GAP`, from
@@ -2285,11 +2312,11 @@ mod row_label_tests {
         let drawn = drawn_source(src, "ROW_LABEL_KEYS").expect("list");
         let labels = row_labels();
         assert_row_label_keys(ROW_LABEL_KEYS, &labels, &drawn);
-        // 58 labelled rows after the preset-editor i18n kill; the ends pin
-        // the draw order: the tool section first, the spacing group's
+        // 59 labelled rows after the g4 pressure-curve promotion; the ends
+        // pin the draw order: the tool section first, the spacing group's
         // dabs-per-radius last (the preset editor draws after the method
         // rows).
-        assert_eq!(labels.len(), 58);
+        assert_eq!(labels.len(), 59);
         assert_eq!(labels.first().map(String::as_str), Some("Tool"));
         assert_eq!(labels.last().map(String::as_str), Some("Dabs per radius"));
     }
@@ -2511,6 +2538,7 @@ mod tests {
                 alpha,
                 hardness: 0.25,
                 pressure_gamma: 1.0,
+                pressure_curve: ControlCurve::identity(),
                 wash_mode: umber_brush::WashMode::BuildUp,
                 falloff: Default::default(),
                 falloff_custom: ControlCurve::identity(),
