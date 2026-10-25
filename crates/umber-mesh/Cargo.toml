@@ -15,3 +15,6 @@ bytemuck = { workspace = true }
 gltf = { workspace = true, features = ["names"] }
 tobj = { workspace = true }
 ufbx = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

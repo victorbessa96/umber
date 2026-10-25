@@ -167,6 +167,21 @@ pub struct FillParams {
     /// landed (no such key) still load — as unmasked fills.
     #[serde(default)]
     pub mask: Option<FillMask>,
+    /// The TARGET channel the fill stages into (the fill's channel-map
+    /// kill, 2026-10-24): the raster itself is channel-blind (one RGBA
+    /// whatever the target), only the publish target moves. A channel
+    /// the set lacks stages nothing (the zero-size guard), so a
+    /// renamed-channel project degrades to a no-op fill, never a
+    /// crash. `#[serde(default)]` = `baseColor`, the pre-target
+    /// behavior every existing project carries.
+    #[serde(default = "default_fill_channel")]
+    pub channel: String,
+}
+
+/// The default fill target: the base-color channel (the pre-channel-map
+/// behavior — every existing project's fills load unchanged).
+pub fn default_fill_channel() -> String {
+    "baseColor".to_owned()
 }
 
 impl FillParams {
@@ -707,6 +722,42 @@ mod tests {
 
     const EPS: f32 = 1e-5;
 
+    /// The channel-target's additive rule (the channel-map kill): a
+    /// params JSON saved before the field existed carries no "channel"
+    /// key and must load as `baseColor` — every existing project's
+    /// fills keep their pre-target behavior. The file is REAL: a
+    /// serialized params with the key stripped, never a hand-guessed
+    /// JSON shape.
+    #[test]
+    fn pre_channel_fill_json_loads_base_color() {
+        let mut targeted = FillParams {
+            source: FillSource::Solid {
+                color: [1.0, 0.0, 0.0, 1.0],
+            },
+            projection: FillProjection::Uv,
+            mask: None,
+            channel: "height".to_owned(),
+        };
+        // The explicit target round-trips through a real serialize.
+        let json = serde_json::to_string(&targeted).expect("serializes");
+        let back: FillParams = serde_json::from_str(&json).expect("parses back");
+        assert_eq!(back.channel, "height");
+
+        // The pre-channel file: the same params with the key stripped.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&json).expect("a params maps to JSON");
+        value
+            .as_object_mut()
+            .expect("params serializes to an object")
+            .remove("channel");
+        let stripped = serde_json::to_string(&value).expect("re-serializes");
+        let plain: FillParams = serde_json::from_str(&stripped).expect("loads without the key");
+        assert_eq!(plain.channel, "baseColor");
+        assert_eq!(plain.source, targeted.source);
+        targeted.channel = plain.channel.clone();
+        assert_eq!(plain, targeted);
+    }
+
     fn near(a: f32, b: f32) -> bool {
         (a - b).abs() < EPS
     }
@@ -852,6 +903,7 @@ mod tests {
             source: FillSource::Solid { color },
             projection: FillProjection::Uv,
             mask: None,
+            channel: "baseColor".into(),
         }
     }
 
@@ -964,6 +1016,7 @@ mod tests {
                 scale: 1.0,
             },
             mask: None,
+            channel: "baseColor".into(),
         };
         let size = 32u32;
         let tile = evaluate_fill_tile(&unit_cube(), &params, 1001, size, size);
@@ -1165,6 +1218,7 @@ mod tests {
             },
             projection: FillProjection::Uv,
             mask: Some(lasso),
+            channel: "baseColor".into(),
         };
         let tile = evaluate_fill_tile(&full_uv_quad(), &params, 1001, 16, 16);
         for y in 0..16 {
@@ -1200,6 +1254,7 @@ mod tests {
             },
             projection: FillProjection::Uv,
             mask: Some(FillMask::triangle(0)),
+            channel: "baseColor".into(),
         };
         let mesh = full_uv_quad();
         let tile = evaluate_fill_tile(&mesh, &params, 1001, 8, 8);
@@ -1236,6 +1291,7 @@ mod tests {
             // the whole quad — full coverage, planar-sampled.
             projection: FillProjection::Planar { axis: ProjAxis::X },
             mask: Some(chunk),
+            channel: "baseColor".into(),
         };
         let tile = evaluate_fill_tile(&mesh, &masked, 1001, 8, 8);
         assert!(tile.coverage.iter().all(|&c| c == 1.0));

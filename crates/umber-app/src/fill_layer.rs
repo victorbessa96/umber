@@ -176,6 +176,12 @@ impl FillLayerState {
         }
     }
 
+    /// The fill's publish target (the channel-map kill): read up front so
+    /// the staging loop borrows nothing while evaluating.
+    pub fn channel(&self) -> &str {
+        &self.params.channel
+    }
+
     /// Adopts the document layer's current params (panel edits, undo, redo,
     /// journal replay all land in `Layer::fill` first). A change — or a
     /// layer that lost its params — marks the cache dirty. Unknown layers
@@ -378,11 +384,15 @@ pub fn refresh_fill_layer(
     tiles: &[u16],
     symmetry: &SymmetrySettings,
 ) -> Vec<u16> {
-    use crate::paint_state::{PlaneOwner, BASE_COLOR_CHANNEL};
+    use crate::paint_state::PlaneOwner;
     let layer_id = state.layer_id();
     let mut staged = Vec::new();
+    // The fill's publish target (the channel-map kill): the raster is
+    // channel-blind, only this target moves. A channel the set lacks
+    // falls to the zero-size guard below and stages nothing.
+    let channel = state.channel().to_owned();
     for &tile in tiles {
-        let (width, height) = paint.tile_channel_size(tile, BASE_COLOR_CHANNEL);
+        let (width, height) = paint.tile_channel_size(tile, &channel);
         if width == 0 || height == 0 {
             continue;
         }
@@ -402,7 +412,7 @@ pub fn refresh_fill_layer(
         match paint.publish_plane(
             PlaneOwner::Layer(layer_id),
             tile,
-            BASE_COLOR_CHANNEL,
+            &channel,
             width,
             height,
             plane,
@@ -969,6 +979,7 @@ pub fn fill_section_ui(
     doc: &mut Document,
     mesh: Option<&MeshData>,
     tool: &mut PolygonFillTool,
+    channels: &[String],
 ) {
     ui.add_space(8.0);
     ui.separator();
@@ -990,6 +1001,23 @@ pub fn fill_section_ui(
                 let mut edited = params;
                 let mut changed = false;
                 projection_rows(ui, id, &mut edited.projection, &mut changed);
+                ui.separator();
+                // The fill's publish target (the channel-map kill): the
+                // combo over the session set's channels; a target the set
+                // lacks (a renamed project) keeps the row but stages
+                // nothing — the refresh's zero-size guard.
+                let mut picked = edited.channel.clone();
+                egui::ComboBox::from_id_salt(format!("fill-channel-{id}"))
+                    .selected_text(picked.clone())
+                    .show_ui(ui, |ui| {
+                        for name in channels {
+                            ui.selectable_value(&mut picked, name.clone(), name);
+                        }
+                    });
+                if picked != edited.channel {
+                    edited.channel = picked;
+                    changed = true;
+                }
                 ui.separator();
                 source_rows(ui, id, &mut edited.source, &mut changed);
                 if changed {
@@ -1301,6 +1329,7 @@ mod tests {
             source: FillSource::Solid { color },
             projection: FillProjection::Uv,
             mask: None,
+            channel: "baseColor".into(),
         }
     }
 
@@ -1421,6 +1450,7 @@ mod tests {
                 },
                 projection: FillProjection::Uv,
                 mask: None,
+                channel: "baseColor".into(),
             },
         );
         tracked.sync_from_layer(stack.layer(id).unwrap());
@@ -1561,6 +1591,7 @@ mod tests {
             },
             projection: FillProjection::Uv,
             mask: Some(lasso),
+            channel: "baseColor".into(),
         };
         let raw = evaluate_fill_tile(&mesh, &params, 1001, 16, 16);
         // Sanity: the masked raw fill is the top-left quadrant only
@@ -1748,6 +1779,7 @@ mod tests {
                 },
                 projection: FillProjection::Uv,
                 mask: None,
+                channel: "baseColor".into(),
             },
         );
         let params_of =
@@ -1788,6 +1820,7 @@ mod tests {
                 },
                 projection: FillProjection::Uv,
                 mask: None,
+                channel: "baseColor".into(),
             },
         );
         states.ensure(id, &params_of(&stack), blend, opacity);

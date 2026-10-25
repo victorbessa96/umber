@@ -1004,6 +1004,13 @@ impl TabViewer for PanelViewer<'_> {
                                 self.doc,
                                 self.mesh,
                                 &mut *self.polygon_fill,
+                                &self
+                                    .mesh_import
+                                    .session_set
+                                    .channels
+                                    .iter()
+                                    .map(|c| c.name.clone())
+                                    .collect::<Vec<String>>(),
                             );
                             // The paint-path tool rows (editable polyline →
                             // replayed stroke / closed-path fill through the

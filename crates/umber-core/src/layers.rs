@@ -2041,6 +2041,7 @@ mod tests {
             },
             projection: FillProjection::Uv,
             mask: None,
+            channel: "baseColor".into(),
         };
         let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
         undo.push(LayerCommand::set_fill(id, red.clone()), &mut stack);
@@ -2052,6 +2053,7 @@ mod tests {
                 axis: umber_mesh::ProjAxis::X,
             },
             mask: None,
+            channel: "baseColor".into(),
         };
         undo.push(LayerCommand::set_fill(id, planar.clone()), &mut stack);
         assert_eq!(stack.layer(id).unwrap().fill, Some(planar.clone()));
