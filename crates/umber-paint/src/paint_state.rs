@@ -1833,7 +1833,7 @@ impl PaintState {
         // stroke opens — it takes the same transforms), at the
         // stroke-start tile's density (a cross-size-tile stroke applies
         // these to its other tiles too — the module docs' boundary).
-        let start_tpv = self.texels_per_uv_for(self.route_tile(uv));
+        let start_tpv = self.texels_per_uv_for_channel(self.route_tile(uv), &self.active_channel);
         self.stroke_symmetry = self
             .symmetry
             .is_active()
@@ -1892,7 +1892,7 @@ impl PaintState {
         }
         if let BrushTool::Clone(params) = self.tool {
             let tile = self.route_tile(uv);
-            let tpv = self.texels_per_uv_for(tile);
+            let tpv = self.texels_per_uv_for_channel(tile, &self.active_channel);
             let start = local_texel([uv.x, uv.y], tile, tpv);
             let offset = clone_offset_texels(params.source_offset, tpv);
             stroke.begin_clone(tile, start, offset, params.follow);
@@ -4474,7 +4474,7 @@ impl PaintState {
         if width == 0 || height == 0 {
             return false;
         }
-        let tpv = self.texels_per_uv_for(tile);
+        let tpv = self.texels_per_uv_for_channel(tile, &self.active_channel);
         let mask = rasterize_polygon_mask(&path.loop_uv(), tile, width, height);
         let runs = fill_runs(&mask, width as usize, height as usize);
         if runs.is_empty() {
@@ -5041,7 +5041,7 @@ impl PaintState {
     /// distance (`BRUSH_RADIUS_TEXELS / texels_per_uv`, plus
     /// [`SEAM_MIRROR_MARGIN`).
     fn seam_radius_uv_for(&self, tile: u16) -> f32 {
-        mirror_radius_uv(self.texels_per_uv_for(tile))
+        mirror_radius_uv(self.texels_per_uv_for_channel(tile, &self.active_channel))
     }
 
     /// UV-space seam proximity gate: true iff `uv` lies within `radius_uv`
@@ -6313,6 +6313,7 @@ mod tests {
             alpha: 0.4,
             hardness: 0.9,
             pressure_gamma: 2.0,
+            pressure_curve: Default::default(),
             wash_mode: WashMode::BuildUp,
             falloff: umber_brush::FalloffCurve::Sharp,
             falloff_custom: Default::default(),
