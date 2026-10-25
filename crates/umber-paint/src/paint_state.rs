@@ -500,17 +500,18 @@ pub enum IdSelectError {
     StrokeInFlight,
 }
 
-/// A single-entry cache of the last click-time ID bake
-/// ([`PaintState::bake_and_select_id`]): the bytes plus the content key,
-/// tile and frame that produced them.
+/// A bounded multi-entry cache of click-time ID bakes
+/// ([`PaintState::bake_and_select_id`]): each entry holds the bytes plus
+/// the content key, tile and frame that produced them.
 ///
-/// Judgment call — one entry, no LRU: the artist re-clicks one tile far
-/// more often than they alternate tiles, and that repeat is the case worth
-/// caching; a mesh spanning N tiles pays one re-bake per tile switch, which
-/// the router already makes uncommon. The resident cost is whatever one
-/// entry's `bytes` hold (~64 MB at the 4K default) until the next bake
-/// replaces it — see the cost note on
-/// [`PaintState::bake_and_select_id`].
+/// Judgment call (L3b, revising the one-entry original) — a small FIFO
+/// ring, no LRU: the artist re-clicks one tile far more often than they
+/// alternate, but a two-tile mesh alternating A↔B re-baked EVERY click —
+/// the thrash the one-entry judgment accepted. Three entries kill the
+/// A↔B thrash and hold one spare at the resident cost of ~3× the bytes
+/// (~192 MB worst case at the 4K default; the per-tile bakes of a
+/// multi-tile mesh are cheap, the whole-mesh bake is the expensive half
+/// — see the cost note on [`PaintState::bake_and_select_id`]).
 #[derive(Debug)]
 struct CachedIdBake {
     /// Content key of the baked mesh (see [`id_bake_key`]); subsumes the
@@ -526,6 +527,11 @@ struct CachedIdBake {
     /// The bake's `width * height * 4` RGBA8 bytes, row-major.
     bytes: Vec<u8>,
 }
+
+/// The ID bake cache's entry cap (the L3b multi-entry ring): enough to
+/// hold an alternating two-tile pair plus one spare, bounded so the
+/// resident bytes stay within a known worst case.
+const ID_BAKE_CACHE_CAP: usize = 3;
 
 /// Default paint-target edge length in texels: 4096 (CORE-LOOP CRITICAL 2,
 /// the 2026-10-12 strategy review's directive — the live target is 4K, not
@@ -1278,7 +1284,7 @@ pub struct PaintState {
     /// bake again. `None` until the first click; replaced on every miss
     /// and left untouched on any error path. See [`CachedIdBake`] for the
     /// one-entry judgment call.
-    id_bake_cache: Option<CachedIdBake>,
+    id_bake_cache: Vec<CachedIdBake>,
     /// The live stroke paints the mask (mask mode at `begin_stroke`).
     stroke_mask_edit: bool,
     /// The live stroke is gated by the mask (gating at `begin_stroke`).
@@ -1499,7 +1505,7 @@ impl PaintState {
             stroke_symmetry: None,
             masks: BTreeMap::from([(default_set, QuickMask::new(size, size))]),
             mask_synced: BTreeSet::new(),
-            id_bake_cache: None,
+            id_bake_cache: Vec::new(),
             stroke_mask_edit: false,
             stroke_mask_gate: false,
             cavity: None,
@@ -2566,16 +2572,18 @@ impl PaintState {
         // `select_id_mask` can borrow `self` mutably; the entry (content
         // unchanged) goes straight back whether the selection succeeds or
         // not.
-        let hit = self.id_bake_cache.as_ref().is_some_and(|cached| {
+        let hit = self.id_bake_cache.iter().position(|cached| {
             cached.key == key
                 && cached.tile == tile
                 && cached.width == width
                 && cached.height == height
         });
-        let taken = if hit { self.id_bake_cache.take() } else { None };
+        let taken = hit.map(|i| self.id_bake_cache.swap_remove(i));
         if let Some(cached) = taken {
             let id = self.select_id_mask(tile, &cached.bytes, width, height, local_uv);
-            self.id_bake_cache = Some(cached);
+            // Restore the entry (content unchanged) whether the selection
+            // succeeded or not; back to the ring's tail (the MRU slot).
+            self.id_bake_cache.push(cached);
             return id;
         }
 
@@ -2610,7 +2618,7 @@ impl PaintState {
         // Replace the entry only after the selection succeeded: an error
         // path leaves the previous entry untouched.
         let id = self.select_id_mask(tile, &bytes, width, height, local_uv)?;
-        self.id_bake_cache = Some(CachedIdBake {
+        self.push_id_bake(CachedIdBake {
             key,
             tile,
             width,
@@ -2618,6 +2626,15 @@ impl PaintState {
             bytes,
         });
         Ok(id)
+    }
+
+    /// Insert an ID bake entry, evicting the oldest (FIFO head) when the
+    /// ring is at cap — the multi-entry cache's bounded resident cost.
+    fn push_id_bake(&mut self, entry: CachedIdBake) {
+        if self.id_bake_cache.len() >= ID_BAKE_CACHE_CAP {
+            self.id_bake_cache.remove(0);
+        }
+        self.id_bake_cache.push(entry);
     }
 
     /// Pre-warm the ID bake cache at ID-mask tool entry (the W-C4 L3
@@ -2628,11 +2645,11 @@ impl PaintState {
     /// with the same key and the same flavor, and inserts the entry
     /// so the click's hit test finds it.
     ///
-    /// WHOLE-MESH ONLY, by design: the cache holds ONE entry, and a
-    /// multi-tile mesh's click tile is unknown at entry — warming one
-    /// guessed tile would half-fix the hitch and smell wrong. The
-    /// per-tile bakes are already cheap; the multi-entry cache for a
-    /// true multi-tile pre-warm is the named L3b follow-up.
+    /// WHOLE-MESH ONLY, by design: the click tile of a multi-tile mesh is
+    /// unknown at entry — warming one guessed tile would half-fix the hitch
+    /// and smell wrong. The per-tile bakes are already cheap; the
+    /// multi-entry ring (L3b, landed) kills the tile-switch thrash at
+    /// click time instead.
     ///
     /// Opportunistic everywhere: a stroke in flight is a no-op (the
     /// tool switch happens between strokes anyway; the guard mirrors
@@ -2669,7 +2686,7 @@ impl PaintState {
         {
             self.id_bakes += 1;
         }
-        self.id_bake_cache = Some(CachedIdBake {
+        self.push_id_bake(CachedIdBake {
             key,
             tile: FIRST_TILE,
             width,
@@ -10449,8 +10466,9 @@ mod tests {
         let Some((device, queue)) = try_request_device() else {
             return;
         };
-        // Multi-tile: the one-entry cache cannot know the click tile —
-        // no bake, no entry, the click path is exactly as before.
+        // Multi-tile: the pre-warm cannot know the click tile — no bake,
+        // no entry, the click path is exactly as before (the multi-ENTRY
+        // cache kills the tile-switch thrash at click time instead).
         let multi = two_tile_strip();
         let mut state =
             PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
@@ -10465,6 +10483,38 @@ mod tests {
             .prewarm_id_bake_cache(&single)
             .expect("the mid-stroke pre-warm is a clean no-op");
         assert_eq!(state.id_bakes_run(), 0, "nothing baked mid-stroke");
+    }
+
+    #[test]
+    fn idmask_multi_tile_alternating_clicks_both_hit_the_ring() {
+        // The L3b pin: a two-tile mesh alternating A→B→A re-baked every
+        // click under the one-entry cache. The ring holds both tiles, so
+        // the third click HITS — the counter proves no third bake.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let multi = two_tile_strip();
+        let mut state =
+            PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
+        // Click tile A (uv inside 1001's frame).
+        state
+            .bake_and_select_id(&multi, [0.25, 0.5])
+            .expect("tile A's click selects");
+        assert_eq!(state.id_bakes_run(), 1, "the first click baked once");
+        // Click tile B (uv inside 1002's frame: +1 on u).
+        state
+            .bake_and_select_id(&multi, [1.25, 0.5])
+            .expect("tile B's click selects");
+        assert_eq!(state.id_bakes_run(), 2, "the tile switch baked once");
+        // Click tile A again: the RING still holds it — no third bake.
+        state
+            .bake_and_select_id(&multi, [0.25, 0.5])
+            .expect("tile A's repeat click selects (the ring held it)");
+        assert_eq!(
+            state.id_bakes_run(),
+            2,
+            "the A↔B thrash is dead — the repeat hit the ring"
+        );
     }
 
     /// The §4/§5 auto-mapping (the W-C4 L5c kill): a multi-material
