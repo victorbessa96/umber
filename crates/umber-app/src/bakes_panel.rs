@@ -389,6 +389,8 @@ pub enum BakeSettingId {
     Dilation,
     /// Skew edge-protection threshold.
     SkewThreshold,
+    /// The occluder scope (L5b): whole-mesh vs the set's own triangles.
+    OccluderScope,
     /// Cage visualization toggle.
     Cage,
 }
@@ -626,6 +628,11 @@ struct BakeRequest {
     /// Square bake resolution in texels.
     size: u32,
     rays: u32,
+    /// The occluder scope row (L5b): `true` = only the baked set's own
+    /// triangles occlude (Marmoset's Ignore Groups) — the occluder mesh
+    /// resolves per-job to the set's own RASTER submesh; `false` (the
+    /// default) = the whole mesh, today's behavior byte for byte.
+    occluder_own_set: bool,
     dilation_iterations: u32,
     /// The margin fill strategy ahead of the dilation post-pass
     /// ([`pad_map`]).
@@ -727,6 +734,11 @@ pub struct BakesPanel {
     /// Skew edge-protection threshold in degrees (the guard + the log's
     /// warnings column).
     skew_threshold_deg: f32,
+    /// The occluder scope (L5b): `false` = the whole mesh occludes
+    /// (today's behavior, byte for byte); `true` = the baked set's own
+    /// triangles only (Marmoset's Ignore Groups). Applies to AO,
+    /// thickness and bent normals.
+    occluder_own_set: bool,
     /// Auto-rebake on parameter change (§6:58; default off — background
     /// bakes are opt-in).
     auto_rebake: bool,
@@ -742,6 +754,7 @@ pub struct BakesPanel {
     applied_dilation: u32,
     applied_margin: MarginType,
     applied_skew_threshold_deg: f32,
+    applied_occluder_own_set: bool,
     /// The per-set checklist (§6:59), synced from the mesh each frame.
     sets: Vec<SetCheck>,
     /// Whether the cage wireframe overlay shows (synced to the viewport
@@ -849,6 +862,9 @@ impl BakesPanel {
             dilation_iterations: DEFAULT_DILATION_ITERATIONS,
             margin: MarginType::Extend,
             skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            // The occluder scope row (L5b): `false` = the whole mesh
+            // occludes — today's behavior, byte for byte.
+            occluder_own_set: false,
             auto_rebake: false,
             auto_state: umber_bake::skew::AutoRebake::new(),
             affected_tiles: umber_core::AffectedRegion::new(),
@@ -857,6 +873,7 @@ impl BakesPanel {
             applied_dilation: DEFAULT_DILATION_ITERATIONS,
             applied_margin: MarginType::Extend,
             applied_skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
+            applied_occluder_own_set: false,
             sets: Vec::new(),
             show_cage: false,
             highlighted_setting: None,
@@ -1172,6 +1189,12 @@ impl BakesPanel {
             changed.push(umber_bake::skew::BakeParam::RayLength);
             self.applied_rays = self.rays;
         }
+        // The occluder scope narrows what the rays SEE — the same dirty
+        // class as a ray-length change (every AO-class output changes).
+        if self.occluder_own_set != self.applied_occluder_own_set {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_occluder_own_set = self.occluder_own_set;
+        }
         if self.dilation_iterations != self.applied_dilation {
             changed.push(umber_bake::skew::BakeParam::Dilation);
             self.applied_dilation = self.dilation_iterations;
@@ -1395,6 +1418,23 @@ impl BakesPanel {
                         .decimals(1)
                         .unit("°"),
                 );
+            });
+
+            // The occluder scope row (L5b): what the rays see — the whole
+            // mesh (today's behavior) or the baked set's own triangles
+            // (Marmoset's Ignore Groups). Applies to AO, thickness and
+            // bent normals.
+            let scope_label = self.row_label(BakeSettingId::OccluderScope, tr("bakes.occluder"));
+            group.row(scope_label.as_str(), |ui| {
+                let whole = tr("bakes.occluder-whole");
+                let own = tr("bakes.occluder-own");
+                let selected = if self.occluder_own_set { &own } else { &whole };
+                egui::ComboBox::from_id_salt("bakes-occluder-scope")
+                    .selected_text(selected.as_str())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.occluder_own_set, false, whole);
+                        ui.selectable_value(&mut self.occluder_own_set, true, own);
+                    });
             });
 
             group
@@ -1832,6 +1872,7 @@ impl BakesPanel {
             mesh: dispatch.mesh.clone(),
             size: self.resolution,
             rays: self.rays,
+            occluder_own_set: self.occluder_own_set,
             dilation_iterations: self.dilation_iterations,
             margin: self.margin,
             skew_threshold_deg: self.skew_threshold_deg,
@@ -1999,6 +2040,7 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         mesh,
         size,
         rays,
+        occluder_own_set,
         dilation_iterations,
         margin,
         skew_threshold_deg,
@@ -2007,6 +2049,11 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
         transfer,
     } = request;
     let (device, queue, mesh) = (&device, &queue, &mesh);
+    // The occluder scope row (L5b): `true` = the baked set's own RASTER
+    // submesh occludes (Marmoset's Ignore Groups); `false` = the whole
+    // mesh, today's behavior byte for byte. Resolved inline at each
+    // `_with_occluder` call site (the submesh is the job's own; the
+    // closure shape mixes the two borrows' lifetimes).
     let dilate = umber_bake::DilateParams::new(dilation_iterations);
     let pad = Padding {
         margin,
@@ -2109,14 +2156,20 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                     let raw = match (job.source, raster_is_submesh) {
                         // Per-set masked bakes §3, the ray half: a mapped
                         // set rasters its own submesh (tile-filtered for
-                        // tile jobs) against the WHOLE-mesh occluder —
-                        // rays cross materials, coverage is the set's.
+                        // tile jobs) against the occluder the SCOPE row
+                        // picks (L5b: whole-mesh by default, the set's
+                        // own triangles when OwnSet) — rays cross
+                        // materials, coverage is the set's.
                         (BakeSource::WholeMesh, true) => {
                             crate::bake_sources::bake_ao_with_occluder(
                                 device,
                                 queue,
                                 raster_source,
-                                mesh,
+                                if occluder_own_set {
+                                    raster_source
+                                } else {
+                                    mesh
+                                },
                                 size,
                                 rays,
                             )?
@@ -2129,7 +2182,11 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                                 device,
                                 queue,
                                 raster_source,
-                                mesh,
+                                if occluder_own_set {
+                                    raster_source
+                                } else {
+                                    mesh
+                                },
                                 size,
                                 rays,
                                 job.tile,
@@ -2224,13 +2281,18 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                         ..umber_bake::ThicknessParams::default()
                     };
                     // Per-set masked bakes §3, the ray half: a mapped set
-                    // rasters its submesh against the WHOLE-mesh occluder.
+                    // rasters its submesh against the occluder the SCOPE
+                    // row picks (L5b).
                     let raw = if raster_is_submesh {
                         umber_bake::thickness::bake_thickness_mesh_with_occluder(
                             device,
                             queue,
                             raster_source,
-                            mesh,
+                            if occluder_own_set {
+                                raster_source
+                            } else {
+                                mesh
+                            },
                             size,
                             size,
                             &params,
@@ -2302,7 +2364,19 @@ fn run_bake(request: BakeRequest) -> BakeOutcome {
                                 | BakeSelection::BentNormal
                         );
                     let raw = if mapped {
-                        bake_extra_map(device, queue, raster_source, size, rays, other, Some(mesh))?
+                        bake_extra_map(
+                            device,
+                            queue,
+                            raster_source,
+                            size,
+                            rays,
+                            other,
+                            Some(if occluder_own_set {
+                                raster_source
+                            } else {
+                                mesh
+                            }),
+                        )?
                     } else {
                         bake_extra_map(device, queue, mesh, size, rays, other, None)?
                     };
