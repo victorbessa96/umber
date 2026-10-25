@@ -815,6 +815,8 @@ hint =
     .undo = desfazer
     .sample-color = amostrar a cor
     .select-region = selecionar a região
+    .ctrl-alt-lmb = Ctrl+Alt+Esq
+    .material-pick = amostrar material para a camada de preenchimento
 
 ## Avisos toast (integração G0)
 

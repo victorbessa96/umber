@@ -796,6 +796,8 @@ hint =
     .undo = undo
     .sample-color = sample the color
     .select-region = select the region
+    .ctrl-alt-lmb = Ctrl+Alt+LMB
+    .material-pick = pick material into fill layer
 
 ## Toast notices (GUI plan G0 integration)
 

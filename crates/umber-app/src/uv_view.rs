@@ -67,6 +67,11 @@ pub struct UvView {
     inspect: Option<InspectBuf>,
     /// The footer's inspector line, rendered right-aligned.
     inspect_readout: Option<String>,
+    /// The material pick (R-A10 v1, Ctrl+Alt+click): the tile-local
+    /// UV the pick gesture sampled, handed to the shell ONCE — the
+    /// shell owns the read + the apply (the take_hover_uv
+    /// convention). `None` until the gesture fires.
+    pick_requested: Option<(u16, [f32; 2])>,
 }
 
 /// The inspector's cached tile readback (see [`UvView::inspect`]).
@@ -94,6 +99,13 @@ impl UvView {
     /// per frame before the dock, which re-records it if the tab draws).
     pub fn take_hover_uv(&mut self) -> Option<[f32; 2]> {
         self.hover_uv.take()
+    }
+
+    /// Takes the pending material pick (R-A10 v1): `(tile, tile-local
+    /// UV)` once per Ctrl+Alt+click — the shell reads the composite and
+    /// applies the value to the selected fill layer.
+    pub fn take_pick(&mut self) -> Option<(u16, [f32; 2])> {
+        self.pick_requested.take()
     }
 
     /// Draws the UV wireframe for `mesh` (or a hint when none is loaded)
@@ -321,6 +333,23 @@ impl UvView {
             let pointer_down = !handle_active
                 && !path_point_active
                 && (interact.dragged_by(egui::PointerButton::Primary) || interact.clicked());
+            // The material pick (R-A10 v1, Ctrl+Alt+click): a bare click
+            // with both modifiers records the pick for the shell (which
+            // owns the read + the apply) and never starts a stroke — the
+            // same exclusion the clone source's Alt-drag carries. Distinct
+            // from the inspector's Shift-hover (a read-only readback) and
+            // the clone's plain Alt-drag (a source set).
+            if interact.clicked() {
+                let ctrl = ui.input(|i| i.modifiers.ctrl);
+                let alt_now = ui.input(|i| i.modifiers.alt);
+                if alt_now && ctrl {
+                    if let Some(pos) = interact.interact_pointer_pos() {
+                        if let Some(uv) = uv_from_pointer(square, pos) {
+                            self.pick_requested = Some((paint.active_tile(), [uv.x, uv.y]));
+                        }
+                    }
+                }
+            }
             // The clone tool's source affordance: Alt + press sets the
             // clone source and never paints — no stroke starts while Alt
             // is held. Re-set every frame the button is down, so the last

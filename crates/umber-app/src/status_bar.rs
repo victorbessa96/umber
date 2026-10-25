@@ -123,6 +123,7 @@ impl HintContext {
                 ("hint.lmb-drag", "hint.paint-stroke"),
                 ("hint.rmb-drag", "hint.resize"),
                 ("hint.ctrl-z", "hint.undo"),
+                ("hint.ctrl-alt-lmb", "hint.material-pick"),
             ],
             // Shift alone binds nothing the bar should claim under the
             // Painter / Blender presets; the preset's own chords (which

@@ -614,15 +614,60 @@ impl TabViewer for PanelViewer<'_> {
                     }
                 }
             }
-            Panel::UvView => self.uv_view.ui(
-                ui,
-                self.mesh,
-                self.gpu,
-                self.paint.as_deref_mut(),
-                self.display_lut,
-                Some(&mut *self.polygon_fill),
-                Some(&mut *self.path_tool),
-            ),
+            Panel::UvView => {
+                self.uv_view.ui(
+                    ui,
+                    self.mesh,
+                    self.gpu,
+                    self.paint.as_deref_mut(),
+                    self.display_lut,
+                    Some(&mut *self.polygon_fill),
+                    Some(&mut *self.path_tool),
+                );
+                // The material pick (R-A10 v1): Ctrl+Alt+click handed the
+                // shell (tile, UV) — read the ACTIVE channel's composite at
+                // that texel and apply it to the selected fill layer's
+                // Solid (keeping its channel target + projection + mask,
+                // through the same journalable SetFill the panel uses).
+                if let Some((tile, uv)) = self.uv_view.take_pick() {
+                    let picked = self.paint.as_deref_mut().and_then(|paint| {
+                        let channel = paint.active_channel().to_owned();
+                        let buf = paint.read_composite(tile, &channel)?;
+                        let x = (uv[0].clamp(0.0, 1.0) * buf.width as f32) as u32;
+                        let y = (uv[1].clamp(0.0, 1.0) * buf.height as f32) as u32;
+                        let x = x.min(buf.width.saturating_sub(1));
+                        let y = y.min(buf.height.saturating_sub(1));
+                        // The buffer's row 0 is the texture's TOP row; UV y
+                        // grows upward — sample the mirrored row (the
+                        // inspector's own convention).
+                        let t = buf.texel(x, buf.height - 1 - y);
+                        Some([
+                            t[0] as f32 / 255.0,
+                            t[1] as f32 / 255.0,
+                            t[2] as f32 / 255.0,
+                            t[3] as f32 / 255.0,
+                        ])
+                    });
+                    if let (Some(color), Some(id)) =
+                        (picked, self.layer_gestures.selection.primary())
+                    {
+                        let current = self
+                            .doc
+                            .layers()
+                            .iter()
+                            .find(|l| l.id == id)
+                            .filter(|l| l.kind == umber_core::LayerKind::Fill)
+                            .and_then(|l| l.fill.clone());
+                        if let Some(mut edited) = current {
+                            edited.source = umber_mesh::FillSource::Solid { color };
+                            self.doc.run(umber_core::LayerCommand::set_fill(id, edited));
+                            log::info!("material pick: layer {id} <- {color:?}");
+                        } else {
+                            log::info!("material pick ignored: layer {id} is not a fill layer");
+                        }
+                    }
+                }
+            }
             Panel::LayerStack => {
                 let mats = layers_panel::MaterialPanelContext {
                     defs: &*self.material_defs,
