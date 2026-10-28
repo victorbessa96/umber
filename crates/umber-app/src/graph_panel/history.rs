@@ -30,20 +30,77 @@
 //! case. That shape is forbidden by this module's contract and must
 //! not be introduced by the follow-up unified-timeline kill.
 //!
-//! Kill 1 is panel-local: the Graph panel's own Undo/Redo buttons
-//! drive the journal. The unified timeline (Ctrl+Z, the History
-//! panel's rows, click-to-time-travel) is the named follow-up kill —
-//! it needs `main.rs` (the key dispatch) and `history_panel.rs`, both
-//! outside this kill's surface.
+//! Kill 1 was panel-local: the Graph panel's own Undo/Redo buttons drive
+//! the journal. L6 (2026-10-27) wires it into the app's unified timeline:
+//! [`GraphPanel::run_graph_command`] now also queues a
+//! [`GraphCommit`](crate::history_panel::GraphCommit) on the panel's
+//! [`GraphQueue`] (cursor = journal length before the push, depth = after,
+//! kind from the bin-side mapping), the shell's per-frame drain feeds those
+//! into the History log's third arm, and `GraphPanel` implements
+//! [`GraphJournal`](crate::history_panel::GraphJournal) so unified
+//! undo/redo and click-to-time-travel drive the same journal the panel's
+//! buttons do. The two entry points stay: the panel's buttons are a
+//! local convenience, the timeline is the session-wide truth.
+//!
+//! A graph LOAD is one timeline row, not N: [`GraphPanel::load_graph`]
+//! bumps the queue's epoch (dropping every pending commit — they describe
+//! the journal the load just cleared) and queues a single
+//! [`HistoryKind::GraphLoad`](crate::history_panel::HistoryKind::GraphLoad)
+//! commit at depth 0.
 
 use umber_core::undo::{Command, UndoStack};
 use umber_graph::{Edge, Node, ParamValue};
+
+use crate::history_panel::GraphCommit;
 
 use super::GraphPanel;
 
 /// Journal capacity, the `Document` precedent's size. Graph commands
 /// hold small scalars only, so the byte budget never binds.
 pub(crate) const HISTORY_MAX: usize = 256;
+
+/// The panel's pending [`GraphCommit`]s plus the graph generation they
+/// were recorded against — the `StrokeCommit` queue's shape, with the epoch
+/// held HERE rather than on the commit type (the lib's `GraphCommit` stays
+/// the journal's `(cursor, depth)` pair plus a kind; the lib never learns
+/// the panel exists).
+///
+/// A graph load clears the journal wholesale, so every pending commit
+/// describes a command that no longer exists: [`Self::bump_epoch`] drops
+/// them and moves the generation forward, and the History log's drain
+/// adopts the new epoch, dropping the graph rows recorded against the dead
+/// journal (the stroke epoch's rule).
+#[derive(Debug, Default)]
+pub(crate) struct GraphQueue {
+    epoch: u64,
+    pending: Vec<GraphCommit>,
+}
+
+impl GraphQueue {
+    /// The generation the pending commits belong to.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Queues one recorded command.
+    pub(crate) fn push(&mut self, commit: GraphCommit) {
+        self.pending.push(commit);
+    }
+
+    /// Takes the commits queued since the last drain (usually zero or a
+    /// handful — the app drains every frame).
+    pub(crate) fn take(&mut self) -> Vec<GraphCommit> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// The load epoch bump: drops every pending commit and returns the new
+    /// generation.
+    pub(crate) fn bump_epoch(&mut self) -> u64 {
+        self.epoch += 1;
+        self.pending.clear();
+        self.epoch
+    }
+}
 
 /// One reversible graph edit. Variants hold intent; `apply` captures
 /// the before-state for `revert` (the `LayerCommand` pattern).
@@ -379,18 +436,34 @@ impl Command for GraphCommand {
 }
 
 impl GraphPanel {
-    /// Runs one journaled graph command (apply + record for undo).
-    /// The `mem::replace` dance splits the `self.history` / `self`
-    /// double borrow: the journal lives on the panel, and the
-    /// command's `Doc` is the panel itself.
+    /// Runs one journaled graph command (apply + record for undo), and
+    /// queues its History-window row (L6). The `mem::replace` dance splits
+    /// the `self.history` / `self` double borrow: the journal lives on the
+    /// panel, and the command's `Doc` is the panel itself.
+    ///
+    /// The queued pair mirrors `Document::run`: `cursor` is the journal
+    /// length BEFORE the push (the dead-redo truncation point — the push
+    /// clears the redo stack), `depth` the length after (the row's jump
+    /// target). At the 256-entry cap the oldest command evicts and
+    /// `depth == cursor == 256`, so the row shares its predecessor's depth
+    /// — the merged-entry semantics, and the saturation the History log
+    /// documents for every capped journal.
     pub(crate) fn run_graph_command(&mut self, cmd: GraphCommand) {
+        let kind = super::graph_kind(&cmd);
         let mut history = std::mem::replace(&mut self.history, UndoStack::new(HISTORY_MAX));
+        let cursor = history.len();
         history.push(cmd, self);
+        let depth = history.len();
         self.history = history;
+        self.graph_queue.push(GraphCommit {
+            kind,
+            cursor,
+            depth,
+        });
     }
 
-    /// One panel-local graph undo (the Graph panel's Undo button).
-    /// The unified Ctrl+Z timeline is the named follow-up kill.
+    /// One panel-local graph undo (the Graph panel's Undo button, and the
+    /// unified timeline's `GraphJournal::graph_undo`).
     pub fn undo_graph(&mut self) -> bool {
         let mut history = std::mem::replace(&mut self.history, UndoStack::new(HISTORY_MAX));
         let done = history.undo(self);
@@ -398,12 +471,56 @@ impl GraphPanel {
         done
     }
 
-    /// One panel-local graph redo (the Graph panel's Redo button).
+    /// One panel-local graph redo (the Graph panel's Redo button, and the
+    /// unified timeline's `GraphJournal::graph_redo`).
     pub fn redo_graph(&mut self) -> bool {
         let mut history = std::mem::replace(&mut self.history, UndoStack::new(HISTORY_MAX));
         let done = history.redo(self);
         self.history = history;
         done
+    }
+
+    /// The graph journal's undo depth (the History window's graph cursor:
+    /// graph rows jump here; the `stroke_len` twin).
+    pub fn graph_history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Click-to-time-travel for graph commands: drives the single-step
+    /// [`Self::undo_graph`]/[`Self::redo_graph`] to `target` depth — the
+    /// `PaintState::jump_to_stroke_depth` twin, and deliberately the same
+    /// shape: a loop of single steps, never a truncate-to-depth shortcut,
+    /// so every intermediate edit passes through the real `revert`/`apply`.
+    /// Saturates at the journal's bottom and at the top of its redo stack.
+    /// Returns how many steps were actually taken.
+    pub fn jump_to_graph_depth(&mut self, target: usize) -> usize {
+        let mut steps = 0;
+        while self.history.len() > target {
+            if !self.undo_graph() {
+                break;
+            }
+            steps += 1;
+        }
+        while self.history.len() < target {
+            if !self.redo_graph() {
+                break;
+            }
+            steps += 1;
+        }
+        steps
+    }
+
+    /// The generation the panel's pending graph commits belong to (bumped
+    /// by every graph load; the History log adopts it and drops stale
+    /// graph rows).
+    pub fn graph_epoch(&self) -> u64 {
+        self.graph_queue.epoch()
+    }
+
+    /// Takes the graph commits queued since the last drain (the shell's
+    /// per-frame History drain).
+    pub fn take_graph_commits(&mut self) -> Vec<GraphCommit> {
+        self.graph_queue.take()
     }
 
     /// Whether the graph journal holds an undo entry.

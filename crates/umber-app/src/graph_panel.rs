@@ -88,12 +88,13 @@ use umber_graph::{
 use umber_core::undo::UndoStack;
 
 use crate::graph_canvas::CanvasState;
+use crate::history_panel::{GraphCommit, GraphJournal, HistoryKind};
 use crate::i18n::{tr, tr_args};
 use crate::plugins::{self, PluginLoadReport};
 
 mod history;
 
-use history::GraphCommand;
+use history::{GraphCommand, GraphQueue};
 
 /// Default raster resolution (square) for a fresh panel.
 const DEFAULT_RESOLUTION: (u32, u32) = (512, 512);
@@ -157,6 +158,28 @@ fn full_registry() -> NodeRegistry {
     umber_graph::full_registry()
 }
 
+/// The History window's kind for one journaled graph command (L6). The
+/// mapping lives BIN-SIDE, beside the panel, because `history_panel`
+/// compiles in the lib target too and cannot name [`GraphCommand`] — so it
+/// is this free function rather than a `From` impl there.
+///
+/// The two edge inserters share [`HistoryKind::GraphConnect`]: the canvas
+/// connect (`Connect`, which replaces the input's existing feed) and the
+/// list editor's raw insert (`AddEdge`) are one user-meaningful action —
+/// "wire this node into that input" — and the row would name the same act
+/// twice. Every other command has its own kind; `GraphLoad` is queued by
+/// [`GraphPanel::load_graph`], not by this mapping.
+fn graph_kind(command: &GraphCommand) -> HistoryKind {
+    match command {
+        GraphCommand::AddNode { .. } => HistoryKind::GraphAddNode,
+        GraphCommand::RemoveNode { .. } => HistoryKind::GraphRemoveNode,
+        GraphCommand::Connect { .. } | GraphCommand::AddEdge { .. } => HistoryKind::GraphConnect,
+        GraphCommand::RemoveEdge { .. } => HistoryKind::GraphDisconnect,
+        GraphCommand::SetParam { .. } => HistoryKind::GraphSetParam,
+        GraphCommand::SetOutput { .. } => HistoryKind::GraphSetOutput,
+    }
+}
+
 /// The Graph panel state: the editable graph, its eval cache, and the
 /// egui session around them.
 ///
@@ -177,11 +200,14 @@ pub struct GraphPanel {
     next_id: u64,
     /// The graph edit journal (wave-procedural-history, kill 1): every
     /// topology + param edit rides a [`GraphCommand`] through
-    /// [`Self::run_graph_command`]. Panel-local in this kill — the
-    /// Graph panel's own Undo/Redo buttons drive it; the unified
-    /// Ctrl+Z timeline + the History panel's rows are the named
-    /// follow-up kill.
+    /// [`Self::run_graph_command`]. L6 wires it into the unified timeline
+    /// as the History panel's third arm (the panel's own Undo/Redo buttons
+    /// stay a local convenience).
     history: UndoStack<GraphCommand>,
+    /// The History rows this journal still owes the shell, plus the graph
+    /// generation they belong to (a load bumps it and drops them — see
+    /// [`GraphQueue`]). Drained by the app's per-frame History drain.
+    graph_queue: GraphQueue,
     /// Add-Node combo selection (a `node_def` name).
     add_def: String,
     /// Edge editor: the input name new edges attach to.
@@ -247,6 +273,7 @@ impl GraphPanel {
             output_node: None,
             next_id: 1,
             history: UndoStack::new(history::HISTORY_MAX),
+            graph_queue: GraphQueue::default(),
             add_def,
             edge_input: String::from("in"),
             edge_from: None,
@@ -653,8 +680,21 @@ impl GraphPanel {
         self.canvas.menu = None;
         // A loaded graph replaces the state the journal's entries
         // describe — they die with the old graph (an undo across a
-        // load would resurrect nodes into a foreign graph).
+        // load would resurrect nodes into a foreign graph). The epoch
+        // bump is the timeline's half of the same rule: pending commits
+        // and the History rows recorded against the dead journal go, so a
+        // re-load after undo cannot resurrect stale rows (L6).
         self.history.clear();
+        self.graph_queue.bump_epoch();
+        // ONE timeline row for the whole load, not one per node: depth 0
+        // is the fresh journal's bottom — a real position (clicking it
+        // undoes everything the load's successors added) that is never an
+        // undo target, because the load itself is a replacement.
+        self.graph_queue.push(GraphCommit {
+            kind: HistoryKind::GraphLoad,
+            cursor: 0,
+            depth: 0,
+        });
         self.next_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
         self.output_node = graph.nodes.iter().map(|n| n.id).max();
         self.graph = graph;
@@ -1230,6 +1270,34 @@ impl GraphPanel {
 impl Default for GraphPanel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The unified timeline's view of the graph journal (L6). `history_panel`
+/// compiles in the lib target and cannot name this bin-only panel, so the
+/// bridge is the trait: `graph_depth` / `graph_undo` / `graph_redo` /
+/// `graph_jump_to_depth` are the four things the History window and Ctrl+Z
+/// need, and every one of them drives the SAME journal the panel's own
+/// buttons do (no second history).
+impl GraphJournal for GraphPanel {
+    fn graph_depth(&self) -> Option<usize> {
+        // `Some`, always: the panel owns a journal for its whole life, so
+        // the `None` arm ("no journal to drive") never applies here — and
+        // returning `None` at length 0 would strand the redo after undoing
+        // the first command (see the trait doc).
+        Some(self.graph_history_len())
+    }
+
+    fn graph_undo(&mut self) -> bool {
+        self.undo_graph()
+    }
+
+    fn graph_redo(&mut self) -> bool {
+        self.redo_graph()
+    }
+
+    fn graph_jump_to_depth(&mut self, depth: usize) {
+        self.jump_to_graph_depth(depth);
     }
 }
 
@@ -2425,5 +2493,211 @@ mod tests {
         };
         assert!(rows("levels"), "levels keeps the raw rows");
         assert!(!rows("curves"), "curves draws the editor instead");
+    }
+
+    /// A panel with the catalogs installed: `GraphPanel::new` and every
+    /// edit path resolve `tr` keys, so the L6 tests need the same install
+    /// the `history` child module's helper does. (A `panel()` in a child
+    /// module's test block is private to that block, not visible here.)
+    fn panel() -> GraphPanel {
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        GraphPanel::new()
+    }
+
+    #[test]
+    fn graph_kind_maps_every_command() {
+        // Total over `GraphCommand`: every variant has a History kind, and
+        // the two edge inserters share the one user action ("connect").
+        let cases = [
+            (
+                GraphCommand::AddNode {
+                    def: "passthrough".to_string(),
+                    pos: None,
+                    id: None,
+                    prior_output: None,
+                },
+                HistoryKind::GraphAddNode,
+            ),
+            (
+                GraphCommand::RemoveNode {
+                    id: 7,
+                    removed: None,
+                    prior_output: None,
+                    prior_selected: None,
+                },
+                HistoryKind::GraphRemoveNode,
+            ),
+            (
+                GraphCommand::Connect {
+                    from: 1,
+                    to: 2,
+                    input: "in".to_string(),
+                    replaced_from: None,
+                },
+                HistoryKind::GraphConnect,
+            ),
+            (
+                GraphCommand::AddEdge {
+                    from: 1,
+                    to: 2,
+                    input: "in".to_string(),
+                },
+                HistoryKind::GraphConnect,
+            ),
+            (
+                GraphCommand::RemoveEdge {
+                    to: 2,
+                    input: "in".to_string(),
+                    old_from: None,
+                },
+                HistoryKind::GraphDisconnect,
+            ),
+            (
+                GraphCommand::SetParam {
+                    node: 1,
+                    name: "scale".to_string(),
+                    new: ParamValue::Float(2.0),
+                    old: None,
+                },
+                HistoryKind::GraphSetParam,
+            ),
+            (
+                GraphCommand::SetOutput { id: 1, old: None },
+                HistoryKind::GraphSetOutput,
+            ),
+        ];
+        for (command, kind) in cases {
+            assert_eq!(graph_kind(&command), kind);
+        }
+    }
+
+    #[test]
+    fn the_graph_queue_pins_the_cursor_and_depth_pair() {
+        let mut p = panel();
+        assert!(
+            p.take_graph_commits().is_empty(),
+            "a fresh panel owes no rows"
+        );
+        p.add_node("passthrough"); // journal 0 -> 1
+        let first = p.take_graph_commits();
+        assert_eq!(
+            first,
+            vec![GraphCommit {
+                kind: HistoryKind::GraphAddNode,
+                cursor: 0,
+                depth: 1,
+            }],
+            "cursor = length before the push, depth = after"
+        );
+        p.add_node("noise_perlin"); // journal 1 -> 2
+        let second = p.take_graph_commits();
+        assert_eq!(
+            second,
+            vec![GraphCommit {
+                kind: HistoryKind::GraphAddNode,
+                cursor: 1,
+                depth: 2,
+            }]
+        );
+
+        // The drain's truncation, end to end: two rows in the log, then an
+        // undo + a fresh push — the new commit's cursor is the post-undo
+        // length (1), so the dead depth-2 row goes and the new one takes
+        // its place (the `Document::run` pair's semantics).
+        let mut doc = crate::document::Document::default();
+        // Two drains, one epoch: the log accumulates both rows (the app's
+        // per-frame drain applies whatever the frame carried).
+        crate::history_panel::apply_graph_commits(&mut doc, p.graph_epoch(), first);
+        crate::history_panel::apply_graph_commits(&mut doc, p.graph_epoch(), second);
+        assert_eq!(
+            doc.session_history
+                .entries()
+                .iter()
+                .map(|e| (e.graph_target(), e.op_id))
+                .collect::<Vec<_>>(),
+            vec![(Some(1), 0), (Some(2), 1)]
+        );
+        assert!(p.undo_graph(), "journal 2 -> 1");
+        p.add_node("blur"); // journal 1 -> 2 again
+        let fresh = p.take_graph_commits();
+        assert_eq!(
+            fresh,
+            vec![GraphCommit {
+                kind: HistoryKind::GraphAddNode,
+                cursor: 1,
+                depth: 2,
+            }]
+        );
+        crate::history_panel::apply_graph_commits(&mut doc, p.graph_epoch(), fresh);
+        assert_eq!(
+            doc.session_history
+                .entries()
+                .iter()
+                .map(|e| (e.kind, e.graph_target(), e.op_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (HistoryKind::GraphAddNode, Some(1), 0),
+                // The depth-2 row is the fresh command (op 2): the old one
+                // (op 1) was the cleared redo future and is gone.
+                (HistoryKind::GraphAddNode, Some(2), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_graph_queues_one_row_and_bumps_the_epoch() {
+        let mut p = panel();
+        assert_eq!(p.graph_epoch(), 0, "a fresh panel's generation");
+        p.add_node("passthrough");
+        assert_eq!(p.take_graph_commits().len(), 1);
+        p.load_graph(umber_graph::Graph::new());
+        assert_eq!(p.graph_epoch(), 1, "the load's generation bump");
+        assert_eq!(
+            p.take_graph_commits(),
+            vec![GraphCommit {
+                kind: HistoryKind::GraphLoad,
+                cursor: 0,
+                depth: 0,
+            }],
+            "ONE row for the whole load; the pending add died with the journal"
+        );
+        assert_eq!(p.graph_history_len(), 0);
+        // A second load bumps again: the first load's row must not survive
+        // as a position in a journal it no longer describes.
+        p.load_graph(umber_graph::Graph::new());
+        assert_eq!(p.graph_epoch(), 2);
+    }
+
+    #[test]
+    fn the_trait_view_is_the_same_journal_as_the_buttons() {
+        let mut p = panel();
+        // `Some(0)`, not `None`: redo after undoing the first command needs
+        // the length (the stroke arm's presence semantics).
+        assert_eq!(p.graph_depth(), Some(0));
+        let a = p.add_node("noise_perlin");
+        let b = p.add_node("passthrough");
+        let c = p.add_node("mix");
+        assert_eq!(p.graph_depth(), Some(3));
+        p.graph_jump_to_depth(1);
+        assert_eq!((p.graph_history_len(), p.graph.nodes.len()), (1, 1));
+        assert_eq!(p.graph.nodes[0].id, a);
+        p.graph_jump_to_depth(3);
+        assert_eq!((p.graph_history_len(), p.graph.nodes.len()), (3, 3));
+        // Undo everything, then replay through the trait: the same journal
+        // the panel's own buttons drive.
+        p.graph_jump_to_depth(0);
+        assert_eq!(p.graph_depth(), Some(0));
+        assert_eq!(p.graph.nodes.len(), 0);
+        assert!(p.graph_redo());
+        assert!(p.graph_redo());
+        assert!(p.graph_redo());
+        assert_eq!(
+            p.graph.nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![a, b, c],
+            "redo restores the exact ids"
+        );
+        assert!(!p.graph_redo(), "nothing left to replay");
+        assert!(p.graph_undo());
+        assert_eq!(p.graph_history_len(), 2);
     }
 }

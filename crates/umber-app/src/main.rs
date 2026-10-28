@@ -1193,7 +1193,16 @@ impl TabViewer for PanelViewer<'_> {
                 spp_import::show_section(ui, self.spp_import);
             }
             Panel::History => {
-                history_panel::history_ui(ui, self.doc, self.paint.as_deref_mut());
+                // L6: the graph journal is the timeline's third arm. The
+                // viewer may name the panel directly (bin-side), so the
+                // dyn bridge is built here, at the one call site that has
+                // all three journals in hand.
+                history_panel::history_ui_with_graph(
+                    ui,
+                    self.doc,
+                    self.paint.as_deref_mut(),
+                    Some(&mut *self.graph as &mut dyn history_panel::GraphJournal),
+                );
                 // Single-step stroke buttons below the session log: the
                 // log's stroke rows above jump whole depths on the same
                 // journal; these step one entry at a time.
@@ -2217,10 +2226,23 @@ impl UmberApp {
     }
 
     /// The registry's view of the shell this frame (`actions::availability`).
+    ///
+    /// Undo/Redo availability is the TIMELINE's, not the layer journal's
+    /// (L6): the three-arm dispatch below undoes the newest applied row of
+    /// ANY journal, so gating Ctrl+Z on `doc.history` alone refused it in a
+    /// graph-only (or stroke-only) session — the very sessions this kill
+    /// makes undoable. These are the same two targets the History panel
+    /// computes for its buttons, so the menu, the key and the button agree.
     fn shell_state(&self) -> actions::ShellState {
+        let entries = self.state.doc.session_history.entries();
+        let layer_len = self.state.doc.history.len();
+        let stroke_len = self.state.paint.as_ref().map(|p| p.stroke_len());
+        let graph_len = Some(self.state.graph.graph_history_len());
+        let undo = history_panel::unified_undo_target(entries, layer_len, stroke_len, graph_len);
+        let redo = history_panel::unified_redo_target(entries, layer_len, stroke_len, graph_len);
         actions::ShellState {
-            can_undo: self.state.doc.history.can_undo(),
-            can_redo: self.state.doc.history.can_redo(),
+            can_undo: undo.is_some(),
+            can_redo: redo.is_some(),
             paint_available: self.state.paint.is_some(),
             mask_editing: self
                 .state
@@ -2228,6 +2250,16 @@ impl UmberApp {
                 .as_ref()
                 .is_some_and(|p| p.quick_mask().is_editing()),
         }
+    }
+
+    /// Drains the Graph panel's queued commits into the session history —
+    /// the `drain_stroke_commits` twin (L6). Main-side (bin), so it may name
+    /// `GraphPanel` directly and needs no trait here; the lib-side
+    /// [`history_panel::apply_graph_commits`] does the row math.
+    fn drain_graph_commits(&mut self) {
+        let epoch = self.state.graph.graph_epoch();
+        let commits = self.state.graph.take_graph_commits();
+        history_panel::apply_graph_commits(&mut self.state.doc, epoch, commits);
     }
 
     fn dispatch(&mut self, action: toolbar::ShellAction) {
@@ -2249,13 +2281,26 @@ impl UmberApp {
             ShellAction::OpenProject => self.open_project(),
             ShellAction::SaveProject => self.save_project(),
             ShellAction::SaveProjectAs => self.save_project_as(),
-            // One timeline (C2-7): Ctrl+Z steps whichever journal holds the
-            // newest applied edit, a layer op or a stroke.
+            // One timeline (C2-7; three arms since L6): Ctrl+Z steps
+            // whichever journal holds the newest applied edit — a layer op,
+            // a stroke, or a graph command.
             ShellAction::Undo => {
-                let _ = history_panel::unified_undo(&mut self.state.doc, self.state.paint.as_mut());
+                // The palette dispatches after the dock, where a graph edit
+                // may have queued this frame: drain before choosing.
+                self.drain_graph_commits();
+                let _ = history_panel::unified_undo(
+                    &mut self.state.doc,
+                    self.state.paint.as_mut(),
+                    Some(&mut self.state.graph as &mut dyn history_panel::GraphJournal),
+                );
             }
             ShellAction::Redo => {
-                let _ = history_panel::unified_redo(&mut self.state.doc, self.state.paint.as_mut());
+                self.drain_graph_commits();
+                let _ = history_panel::unified_redo(
+                    &mut self.state.doc,
+                    self.state.paint.as_mut(),
+                    Some(&mut self.state.graph as &mut dyn history_panel::GraphJournal),
+                );
             }
             // Quick mask (§2's P1 row): needs a paint session; I inverts
             // only while the mask is being edited (outside it, nothing).
@@ -3543,6 +3588,14 @@ impl eframe::App for UmberApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         profiling::scope!("frame");
+        // Graph-commit drain (L6): a finished graph command queues its
+        // History-window row on the panel (which owns the graph journal)
+        // and the rows live on the document. Drained at the TOP of the
+        // frame — before any menu/toolbar/key dispatch below — so a Ctrl+Z
+        // this frame sees the row it should undo; the stroke drain's rule
+        // (later in this fn), moved earlier because the lib-side unified undo
+        // cannot reach the bin-only panel to drain it itself.
+        self.drain_graph_commits();
         // Crash-safe GPU startup: the 3rd frame confirms the backend.
         gpu_startup::note_frame();
         // The Umber style on BOTH OS-theme branches, once (GUI plan G0
