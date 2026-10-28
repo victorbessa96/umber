@@ -11,38 +11,34 @@
 
 ## Status line
 
-Current phase: **THE W-C3b SWEEP CLOSED + THE FLATPAK FIVE-WALL CHAIN
-GREEN END TO END (2026-10-23) — origin `3f1f307`.** The parked sweep
-four landed through the local port battery-green (usdz-sublayer-walk
-`d36cfb1`, blend-replace-opacity `b5a60b1`, solo-height `230d730`,
-tangent-frame `d7eea57`, plus `f9a4f7a` the swatches tempdir-race fix
-and `07bcd2b` the gpu-golden import fix; 1,272 tests / 4 crates —
-mesh 145 + core 126 + gpu 151 + app 850, the two mid-close
-fix-forwards solo-verified first). The packaging lane then went
-GREEN through five walls, each root-caused from its own red dispatch:
-vendor parser `01f69a6` → runtime 26.08 `e3ae21d` → install trio
-`e76be0c` → rofiles hardening `334af5b` (its compose-fix attribution
-falsified by the no-rofiles run 40035240398 and withdrawn — the flag
-stays as orthogonal hardening) → svg pixbuf loader `3f1f307`.
-Verdict run 40040567126 on `3f1f307`: SUCCESS — the compose
-completes, Umber.flatpak (12,635,392 bytes) uploads as the artifact,
-the lane's first real bundle. CI green at every chain tip from
-`07bcd2b` (40020097585 onward): the `c697bab` ubuntu-24.04 pin
-held, the runner-image segv is gone. The docs remnant landed 10-24
-(M1 pass 4): the release-checklist .usdz deferral closed, the ledger
-sweep→LANDED with the chain rows run-id-cited — the W-C3b docs pass
-is done. The host stays unreachable, checking STOOD DOWN.
+Current phase: **THE FRESH CHARTER CYCLE — L6 THE UNIFIED TIMELINE
+LANDED (2026-10-27, `75c9594`).** Bessa's launch word opened the
+cycle ("continue working autonomously... all the claws"); the W-C4
+runway's L6 — the graph journal joining the History window as the
+timeline's third arm (layers + strokes + graph, interleaved by
+op_id, one Ctrl+Z across all three) — landed through the opencode
+claw (deepseek-v4.1-flash-free; the claude lane is auth-dead pending
+Bessa's re-login), dragon-reviewed across three fix-forward rounds
+(the `&mut dyn` elided-object-lifetime trap; the queue test's
+fixture lie), battery GREEN: umber-app 873 tests + clippy + the gpu
+leg. The 10-24/25 storm before it — the six-lens audit + ROADMAP
+refresh, R-B1 flatten, R-C1 Assets browser v1, symmetry persistence,
+the fill channel target, the material picker v1, the OccluderScope
+row, the pressure curve, L2b, the L3b ring, the pick's toast — all
+both-gates-green (the coordination body + kill reports carry the
+ledger). The W-C3b sweep and the flatpak five-wall chain stay closed
+(history: the 10-23 status era + CHANGELOG).
 
-**Next:** the briefed runway — tangent wiring → L1 → L2 → L3 → L5-L7 +
-K1, one dispatch each from docs/loop/briefs/ (the tangent brief is
-docs/loop/briefs/2026-10-20-tangent-wiring.md; kill locks + the
-two-gate wave shape as usual), then the perf-nightly red hunt (still
-RED since 10-21, latest run 39923126737 on `96edd1e`; opening
-hypothesis: the drift-gate flip is the same ubuntu rotation —
-perf-nightly.yml:30 rides ubuntu-latest; pin vs re-baseline is that
-hunt's call). The desktop-checks Result lines ×4 stay honestly open
-(they need the live desktop). centralhost: HOST_BACK 2026-10-21
-~13:32, unreachable since — FRAGILE, memtest86+ owed at Bessa's next
+**Next:** the open tail — g5-workspaces · g7-keyboard-only · the
+quick-mask design question · the follow-up queue (the flatten's
+compound one-step; the browser's drag-drop + thumbnails) · the
+desktop-checks Result lines x4 (need the live desktop) · queue.md's
+push-log row for this wave (rides the next docs pass) · the
+CLAUDE.md trap-line addition (the `&mut dyn` object-lifetime trap —
+a protected-file write, Bessa's hands) · the different-family
+cross-review debt if the pi attempts stay dead (the claude lane's
+revival takes it). centralhost: HOST_BACK 2026-10-21 ~13:32,
+unreachable since — FRAGILE, memtest86+ owed at Bessa's next
 physical access (boot straight into it, skip the OS), checking STOOD
 DOWN by his order. The release lane stays Bessa-gated: SPEC
 ratification (SPEC.md still DRAFT), the dogfood asset, Windows
@@ -154,9 +150,10 @@ pre-approved allowlists. Vendor the dep sources and pass --allowedTools.
    cross-cutting invariant (every stroke = one history entry), grep the
    test suite for every consumer of the OLD invariant before marking done.
 5. Kill-locks before dispatch (scripts/kill-locks.sh add|check|remove|list)
-   — no live locks (the locks dir was emptied 10-22 01:47 with no
-   owner; re-add per-kill locks at close time); zero claws running at
-   the pass-3 sweep. Dragon-loop wake
+   — locks live per-kill again (the L6 lock held 18:22 to
+   commit-time on 10-27); claw lanes 10-27: opencode live
+   (deepseek-v4.1-flash-free pinned by canary), pi live (glm-5.3),
+   claude AUTH-DEAD pending Bessa's re-login. Dragon-loop wake
    and leisure sessions write into the shared main tree too: a hold set
    in a live session (e.g. "no cargo") must be written into any queued
    hunt's goal, or a wake session will not see it.
