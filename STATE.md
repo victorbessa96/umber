@@ -29,7 +29,17 @@ both-gates-green (the coordination body + kill reports carry the
 ledger). The W-C3b sweep and the flatpak five-wall chain stay closed
 (history: the 10-23 status era + CHANGELOG).
 
-**Next:** the open tail — g5-workspaces · g7-keyboard-only · the
+**2026-10-29 wave (local-4e9bde4c, `ad6f44b`):** g5-viewport-presets —
+the g5-workspaces open tail, F1/F2/F4/F5 registry actions over the 3D/2D
+views, applied to the active workspace's live dock and persisted — plus
+l6-low-followups (the pi review's two LOWs: the History-arm same-frame
+graph drain; the load test's undrained-pending pin). One commit for both
+kills (they share main.rs). Battery GREEN: umber-app 879 tests 0 failed
++ clippy + fmt + layers. Desktop checks 1-3 deferred — Bessa at the
+desktop, no screenshots per his word.
+
+**Next:** the open tail — g5-workspaces CLOSED 10-29 (`ad6f44b`) ·
+g7-keyboard-only · the
 quick-mask design question · the follow-up queue (the flatten's
 compound one-step; the browser's drag-drop + thumbnails) · the
 desktop-checks Result lines x4 (need the live desktop) · queue.md's

@@ -18,6 +18,14 @@ Launch umber from a terminal on the desktop build so the PID is known
 every Result line is filled, tick the queue rows in the same docs pass
 that records the observations.
 
+**2026-10-29 (local-4e9bde4c):** checks 1-3 attempted — the 2026-10-28
+00:04 debug binary launched on :0 (editor up; a fresh empty project
+created via the empty-state New project button), then the drive was
+aborted on Bessa's out-of-band word (desktop occupied — no screenshots)
+and the process killed cleanly under a scratch XDG_CONFIG_HOME. No
+Result lines filled; the checks stay open for the next free-desktop
+session.
+
 ## Check 1 — quit guard, dirty close (closes C2-1's smoke)
 
 1. Launch umber; open or create any project; paint one dab (the
