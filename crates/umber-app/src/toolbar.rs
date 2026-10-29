@@ -141,6 +141,16 @@ pub enum ShellAction {
     /// Preview the next / previous baked mesh map. B / Shift+B.
     NextMeshMap,
     PrevMeshMap,
+    /// Viewport preset: 3D + 2D both docked (GUI plan g5-workspaces'
+    /// F1-F4 row). F1.
+    ViewportPresetBoth,
+    /// Viewport preset: the 3D viewport alone. F2.
+    ViewportPreset3d,
+    /// Viewport preset: the 2D UV view alone. F4 (F3 keeps the command
+    /// palette; the keymap editor can rebind it).
+    ViewportPreset2d,
+    /// Viewport preset: swap the 3D and 2D views' places. F5.
+    ViewportPresetSwap,
 }
 
 /// The brush tool without its params: the tool strip's slot id.
@@ -217,7 +227,7 @@ impl ToolKind {
 /// The keys the shell polls each frame (the letter keys + the chord keys).
 /// Pinned against [`crate::actions::BINDINGS`] by
 /// `shortcut_keys_are_exactly_the_bound_keys`.
-pub const SHORTCUT_KEYS: [Key; 21] = [
+pub const SHORTCUT_KEYS: [Key; 25] = [
     Key::W,
     Key::G,
     Key::V,
@@ -230,7 +240,11 @@ pub const SHORTCUT_KEYS: [Key; 21] = [
     Key::OpenBracket,
     Key::CloseBracket,
     Key::P,
+    Key::F1,
+    Key::F2,
     Key::F3,
+    Key::F4,
+    Key::F5,
     Key::Comma,
     Key::Tab,
     Key::Space,
@@ -925,9 +939,9 @@ mod tests {
                 || resolve_shortcut(key, cmd_shift()).is_some();
             assert!(bound, "{key:?} is polled but unbound");
         }
-        // Twenty-four bindings. Thirteen keys resolve bare (the six
-        // letters, [ ], F3, Tab, M, C, B; Shift+C / Shift+B are counted by
-        // the shift table test) + ten chords (Z, Shift+Z, Shift+P, S,
+        // Twenty-eight bindings. Seventeen keys resolve bare (the six
+        // letters, [ ], F1-F5, Tab, M, C, B; Shift+C / Shift+B are counted
+        // by the shift table test) + ten chords (Z, Shift+Z, Shift+P, S,
         // Shift+S, O, Comma, Space, PgUp, PgDn).
         let bare = SHORTCUT_KEYS
             .iter()
@@ -941,7 +955,7 @@ mod tests {
                 .iter()
                 .filter(|k| resolve_shortcut(**k, cmd_shift()).is_some())
                 .count();
-        assert_eq!((bare, chords), (13, 10));
+        assert_eq!((bare, chords), (17, 10));
     }
 
     /// One headless frame: `keys` pressed (with `mods`), the poll first

@@ -288,6 +288,95 @@ fn de_null_infinities(value: &mut serde_json::Value) {
     }
 }
 
+/// A viewport preset (GUI plan g5-workspaces' F1-F4 row): which of the two
+/// views — the 3D [`Panel::Viewport`] and the 2D [`Panel::UvView`] — is
+/// docked, and where. Applied to the active workspace's live layout, so the
+/// workspaces machinery (switch-away storage, save_layouts) carries it like
+/// any other layout edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportPreset {
+    /// 3D + 2D both docked.
+    Both,
+    /// The 3D viewport alone (the 2D view undocked).
+    View3d,
+    /// The 2D UV view alone (the 3D viewport undocked).
+    View2d,
+    /// Exchange the two views' places; with only one of them docked, switch
+    /// to the other.
+    Swap,
+}
+
+/// Applies `preset` to `dock` in place.
+pub fn apply_viewport_preset(dock: &mut DockState<Panel>, preset: ViewportPreset) {
+    use Panel::{UvView, Viewport};
+
+    fn ensure_docked(dock: &mut DockState<Panel>, panel: Panel) {
+        if dock.find_tab(&panel).is_some() {
+            return;
+        }
+        if dock.focused_leaf().is_some() {
+            dock.push_to_focused_leaf(panel);
+        } else {
+            dock.push_to_first_leaf(panel);
+        }
+    }
+
+    fn undock(dock: &mut DockState<Panel>, panel: Panel) {
+        if let Some(path) = dock.find_tab(&panel) {
+            dock.remove_tab(path);
+        }
+    }
+
+    fn activate(dock: &mut DockState<Panel>, panel: Panel) {
+        if let Some(path) = dock.find_tab(&panel) {
+            let _ = dock.set_active_tab(path);
+        }
+    }
+
+    match preset {
+        ViewportPreset::Both => {
+            ensure_docked(dock, Viewport);
+            ensure_docked(dock, UvView);
+        }
+        ViewportPreset::View3d => {
+            undock(dock, UvView);
+            ensure_docked(dock, Viewport);
+            activate(dock, Viewport);
+        }
+        ViewportPreset::View2d => {
+            undock(dock, Viewport);
+            ensure_docked(dock, UvView);
+            activate(dock, UvView);
+        }
+        ViewportPreset::Swap => match (dock.find_tab(&Viewport), dock.find_tab(&UvView)) {
+            (Some(a), Some(b)) => {
+                if a.node_path() == b.node_path() {
+                    // Same leaf: exchange the two tabs' slots and flip the
+                    // active tab to whichever now sits in the other's place.
+                    let leaf = dock.leaf_mut(a.node_path()).expect("tab's leaf");
+                    leaf.tabs.swap(a.tab.0, b.tab.0);
+                    if leaf.active == a.tab {
+                        leaf.active = b.tab;
+                    } else if leaf.active == b.tab {
+                        leaf.active = a.tab;
+                    }
+                } else {
+                    // Different leaves: exchange the tabs across the nodes.
+                    let (na, ia) = (a.node_path(), a.tab);
+                    let (nb, ib) = (b.node_path(), b.tab);
+                    let vp = dock[na].remove_tab(ia).expect("tab present");
+                    let uv = dock[nb].remove_tab(ib).expect("tab present");
+                    dock[nb].insert_tab(ib, vp);
+                    dock[na].insert_tab(ia, uv);
+                }
+            }
+            (Some(_), None) => apply_viewport_preset(dock, ViewportPreset::View2d),
+            (None, Some(_)) => apply_viewport_preset(dock, ViewportPreset::View3d),
+            (None, None) => apply_viewport_preset(dock, ViewportPreset::Both),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -402,6 +491,7 @@ mod tests {
 
     use super::*;
     use crate::shell_menu::{toggle_panel, ALL_PANELS};
+    use egui_dock::TabIndex;
 
     fn docked(dock: &DockState<Panel>) -> Vec<Panel> {
         let mut tabs: Vec<Panel> = dock.iter_all_tabs().map(|(_, t)| t.clone()).collect();
@@ -478,5 +568,100 @@ mod tests {
                 assert!(i18n.has_key(locale, w.label_key()), "{locale} {w:?}");
             }
         }
+    }
+
+    /// The active tab of the leaf that currently docks `panel`.
+    fn active_of(dock: &DockState<Panel>, panel: Panel) -> Option<Panel> {
+        let path = dock.find_tab(&panel)?;
+        dock.main_surface()[path.node]
+            .get_leaf()
+            .and_then(|leaf| leaf.tabs.get(leaf.active.0).cloned())
+    }
+
+    #[test]
+    fn viewport_preset_view3d_undocks_2d_and_activates_3d() {
+        let mut dock = preset(Workspace::Paint); // root = [Viewport, UvView]
+        apply_viewport_preset(&mut dock, ViewportPreset::View3d);
+        assert!(dock.find_tab(&Panel::UvView).is_none(), "2D undocked");
+        assert!(dock.find_tab(&Panel::Viewport).is_some());
+        assert_eq!(active_of(&dock, Panel::Viewport), Some(Panel::Viewport));
+        // idempotent
+        apply_viewport_preset(&mut dock, ViewportPreset::View3d);
+        assert!(dock.find_tab(&Panel::UvView).is_none());
+    }
+
+    #[test]
+    fn viewport_preset_view2d_undocks_3d_and_activates_2d() {
+        let mut dock = preset(Workspace::Paint);
+        apply_viewport_preset(&mut dock, ViewportPreset::View2d);
+        assert!(dock.find_tab(&Panel::Viewport).is_none(), "3D undocked");
+        assert!(dock.find_tab(&Panel::UvView).is_some());
+        assert_eq!(active_of(&dock, Panel::UvView), Some(Panel::UvView));
+    }
+
+    #[test]
+    fn viewport_preset_both_redocks_a_missing_view() {
+        let mut dock = preset(Workspace::Paint);
+        apply_viewport_preset(&mut dock, ViewportPreset::View3d);
+        apply_viewport_preset(&mut dock, ViewportPreset::Both);
+        assert!(dock.find_tab(&Panel::Viewport).is_some());
+        assert!(dock.find_tab(&Panel::UvView).is_some());
+        assert_eq!(docked(&dock), ALL_PANELS.to_vec(), "no panel lost");
+    }
+
+    #[test]
+    fn viewport_preset_swap_in_one_leaf_exchanges_tabs_and_flips_active() {
+        let mut dock = preset(Workspace::Paint); // root = [Viewport, UvView], active Viewport
+        apply_viewport_preset(&mut dock, ViewportPreset::Swap);
+        // root is a SPLIT node in the Paint preset (the views live in its
+        // second child), so look the leaf up through the tab's path.
+        let vp = dock.find_tab(&Panel::Viewport).expect("3D docked");
+        let leaf = dock.main_surface()[vp.node].get_leaf().unwrap();
+        assert_eq!(leaf.tabs, vec![Panel::UvView, Panel::Viewport]);
+        assert_eq!(leaf.active, TabIndex(1), "active flipped to the other view");
+    }
+
+    #[test]
+    fn viewport_preset_swap_across_leaves_exchanges_the_tabs() {
+        let mut dock = DockState::new(vec![Panel::Viewport]);
+        let [left, right] =
+            dock.main_surface_mut()
+                .split_right(NodeIndex::root(), 0.5, vec![Panel::UvView]);
+        apply_viewport_preset(&mut dock, ViewportPreset::Swap);
+        let leaf_tabs = |idx: NodeIndex| dock.main_surface()[idx].get_leaf().unwrap().tabs.clone();
+        assert_eq!(
+            leaf_tabs(left),
+            vec![Panel::UvView],
+            "2D moved into the root leaf"
+        );
+        assert_eq!(
+            leaf_tabs(right),
+            vec![Panel::Viewport],
+            "3D moved to the right leaf"
+        );
+    }
+
+    #[test]
+    fn viewport_preset_swap_with_one_view_docked_switches_to_the_other() {
+        let mut dock = preset(Workspace::Paint);
+        apply_viewport_preset(&mut dock, ViewportPreset::View3d);
+        apply_viewport_preset(&mut dock, ViewportPreset::Swap);
+        assert!(dock.find_tab(&Panel::Viewport).is_none());
+        assert!(dock.find_tab(&Panel::UvView).is_some());
+        assert_eq!(active_of(&dock, Panel::UvView), Some(Panel::UvView));
+    }
+
+    #[test]
+    fn viewport_preset_survives_a_workspace_switch() {
+        let mut ws = Workspaces::default();
+        let mut dock = preset(Workspace::Paint);
+        apply_viewport_preset(&mut dock, ViewportPreset::View3d);
+        ws.switch(Workspace::Bake, &mut dock);
+        ws.switch(Workspace::Paint, &mut dock);
+        assert!(
+            dock.find_tab(&Panel::UvView).is_none(),
+            "Paint's preset edit survived the round trip"
+        );
+        assert!(dock.find_tab(&Panel::Viewport).is_some());
     }
 }

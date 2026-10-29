@@ -2649,7 +2649,9 @@ mod tests {
         let mut p = panel();
         assert_eq!(p.graph_epoch(), 0, "a fresh panel's generation");
         p.add_node("passthrough");
-        assert_eq!(p.take_graph_commits().len(), 1);
+        // LOW (pi review): the pending add is deliberately NOT drained
+        // before the load — bump_epoch's clear-pending must kill it, so
+        // the take below returns ONLY the load row.
         p.load_graph(umber_graph::Graph::new());
         assert_eq!(p.graph_epoch(), 1, "the load's generation bump");
         assert_eq!(

@@ -143,7 +143,8 @@ const fn bind(key: Key, chord: Chord) -> Binding {
 /// The bindings: nine chords (incl. Ctrl+Shift+P the palette,
 /// Ctrl+, Preferences, Ctrl+Space maximize, Ctrl+PgUp/PgDn workspaces) +
 /// six letter keys + the `[` /
-/// `]` brush size steps + F3 + Tab (Hide UI). Ctrl+N stays unbound in v1
+/// `]` brush size steps + F1/F2/F4/F5 (the viewport presets; F3 keeps the
+/// palette) + Tab (Hide UI). Ctrl+N stays unbound in v1
 /// (the toolbar module's judgment call), so `NewProject` has no row.
 pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::Z, Chord::CmdShift), ShellAction::Redo),
@@ -179,6 +180,10 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
         ShellAction::BrushLarger,
     ),
     (bind(Key::F3, Chord::Bare), ShellAction::CommandPalette),
+    (bind(Key::F1, Chord::Bare), ShellAction::ViewportPresetBoth),
+    (bind(Key::F2, Chord::Bare), ShellAction::ViewportPreset3d),
+    (bind(Key::F4, Chord::Bare), ShellAction::ViewportPreset2d),
+    (bind(Key::F5, Chord::Bare), ShellAction::ViewportPresetSwap),
     (bind(Key::Tab, Chord::Bare), ShellAction::ToggleHideUi),
     (bind(Key::M, Chord::Bare), ShellAction::ViewMaterial),
     (bind(Key::C, Chord::Bare), ShellAction::NextChannel),
@@ -269,6 +274,10 @@ pub const ALL_ACTIONS: &[ShellAction] = &[
     ShellAction::ToggleMaximize,
     ShellAction::NextWorkspace,
     ShellAction::PrevWorkspace,
+    ShellAction::ViewportPresetBoth,
+    ShellAction::ViewportPreset3d,
+    ShellAction::ViewportPreset2d,
+    ShellAction::ViewportPresetSwap,
 ];
 
 /// The persisted name of `action`: the variant's Debug spelling
@@ -688,6 +697,10 @@ fn reference_text(action: ShellAction) -> &'static str {
         ShellAction::PrevChannel => "Previous channel view",
         ShellAction::NextMeshMap => "Next mesh-map view",
         ShellAction::PrevMeshMap => "Previous mesh-map view",
+        ShellAction::ViewportPresetBoth => "Viewport preset: 3D + 2D both docked",
+        ShellAction::ViewportPreset3d => "Viewport preset: 3D viewport only",
+        ShellAction::ViewportPreset2d => "Viewport preset: 2D UV view only",
+        ShellAction::ViewportPresetSwap => "Swap the 3D and 2D views",
         _ => "",
     }
 }
@@ -1073,6 +1086,10 @@ mod tests {
                     | ShellAction::ToggleMaximize
                     | ShellAction::NextWorkspace
                     | ShellAction::PrevWorkspace
+                    | ShellAction::ViewportPresetBoth
+                    | ShellAction::ViewportPreset3d
+                    | ShellAction::ViewportPreset2d
+                    | ShellAction::ViewportPresetSwap
             );
             assert_eq!(through_text, expected, "{action:?} through a text field");
         }
@@ -1159,10 +1176,14 @@ mod tests {
             | ShellAction::NextChannel
             | ShellAction::PrevChannel
             | ShellAction::NextMeshMap
-            | ShellAction::PrevMeshMap => {}
+            | ShellAction::PrevMeshMap
+            | ShellAction::ViewportPresetBoth
+            | ShellAction::ViewportPreset3d
+            | ShellAction::ViewportPreset2d
+            | ShellAction::ViewportPresetSwap => {}
         };
         ALL_ACTIONS.iter().copied().for_each(guard);
-        assert_eq!(ALL_ACTIONS.len(), 25 + ToolKind::ALL.len());
+        assert_eq!(ALL_ACTIONS.len(), 29 + ToolKind::ALL.len());
         for kind in ToolKind::ALL {
             assert!(
                 ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),

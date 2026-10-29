@@ -31,6 +31,10 @@ shell, and Ctrl+Z undoes the typing, not the document.
 | `[` | `[` | Brush smaller | not while typing in a field |
 | `]` | `]` | Brush larger | not while typing in a field |
 | `F3` | `F3` | Command palette | everywhere, even while typing |
+| `F1` | `F1` | Viewport preset: 3D + 2D both docked | everywhere, even while typing |
+| `F2` | `F2` | Viewport preset: 3D viewport only | everywhere, even while typing |
+| `F4` | `F4` | Viewport preset: 2D UV view only | everywhere, even while typing |
+| `F5` | `F5` | Swap the 3D and 2D views | everywhere, even while typing |
 | `Tab` | `Tab` | Hide / show the UI | nothing focused |
 | `M` | `M` | Material view | not while typing in a field |
 | `C` | `C` | Next channel view | not while typing in a field |

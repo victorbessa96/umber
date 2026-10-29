@@ -1193,6 +1193,15 @@ impl TabViewer for PanelViewer<'_> {
                 spp_import::show_section(ui, self.spp_import);
             }
             Panel::History => {
+                // The pi review's LOW: a graph command queued earlier in
+                // this frame's dock pass (the Graph panel drew first) must
+                // reach the timeline before the Undo/Redo buttons decide —
+                // drain here, in the viewer, the one place both journals
+                // are in hand. The frame-top drain already ran; this take
+                // is the between-panels remainder.
+                let epoch = self.graph.graph_epoch();
+                let commits = self.graph.take_graph_commits();
+                history_panel::apply_graph_commits(self.doc, epoch, commits);
                 // L6: the graph journal is the timeline's third arm. The
                 // viewer may name the panel directly (bin-side), so the
                 // dyn bridge is built here, at the one call site that has
@@ -2353,6 +2362,23 @@ impl UmberApp {
                     .active()
                     .cycle(action == ShellAction::NextWorkspace);
                 self.switch_workspace(to);
+            }
+            ShellAction::ViewportPresetBoth
+            | ShellAction::ViewportPreset3d
+            | ShellAction::ViewportPreset2d
+            | ShellAction::ViewportPresetSwap => {
+                // A preset is a layout edit on the active workspace: leave
+                // any focus mode first so the real layout is what changes
+                // (the switch_workspace rule), then apply and persist.
+                let preset = match action {
+                    ShellAction::ViewportPresetBoth => workspaces::ViewportPreset::Both,
+                    ShellAction::ViewportPreset3d => workspaces::ViewportPreset::View3d,
+                    ShellAction::ViewportPreset2d => workspaces::ViewportPreset::View2d,
+                    _ => workspaces::ViewportPreset::Swap,
+                };
+                self.focus.restore(&mut self.dock);
+                workspaces::apply_viewport_preset(&mut self.dock, preset);
+                self.save_layouts();
             }
             ShellAction::ToggleMaximize => {
                 let keep = shell_menu::maximize_target(&mut self.dock);

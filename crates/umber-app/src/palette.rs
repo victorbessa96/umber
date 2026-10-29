@@ -108,6 +108,26 @@ pub const CATALOG: &[Entry] = &[
     e(ShellAction::ToggleMaximize, "shell.maximize", "menu.window"),
     e(ShellAction::NextWorkspace, "workspace.next", "menu.window"),
     e(ShellAction::PrevWorkspace, "workspace.prev", "menu.window"),
+    e(
+        ShellAction::ViewportPresetBoth,
+        "viewkeys.preset-both",
+        "menu.view",
+    ),
+    e(
+        ShellAction::ViewportPreset3d,
+        "viewkeys.preset-3d",
+        "menu.view",
+    ),
+    e(
+        ShellAction::ViewportPreset2d,
+        "viewkeys.preset-2d",
+        "menu.view",
+    ),
+    e(
+        ShellAction::ViewportPresetSwap,
+        "viewkeys.preset-swap",
+        "menu.view",
+    ),
     e(ShellAction::ViewMaterial, "viewkeys.material", "menu.view"),
     e(
         ShellAction::NextChannel,

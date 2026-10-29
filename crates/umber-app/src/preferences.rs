@@ -1003,24 +1003,25 @@ mod tests {
         let out = apply_capture(&mut o, grid, 0, Capture::Assign(b(Key::Z, Chord::Cmd)));
         assert_eq!(out, CaptureOutcome::Conflict(ShellAction::Undo));
         assert!(o.is_empty());
-        // A free key: the primary slot takes it.
-        let f5 = b(Key::F5, Chord::Bare);
+        // A free key: the primary slot takes it (F5 is bound to
+        // ViewportPresetSwap since g5-viewport-presets, so F7).
+        let f7 = b(Key::F7, Chord::Bare);
         assert_eq!(
-            apply_capture(&mut o, grid, 0, Capture::Assign(f5)),
+            apply_capture(&mut o, grid, 0, Capture::Assign(f7)),
             CaptureOutcome::Done
         );
-        assert_eq!(o.get(grid), Some(&[f5][..]));
+        assert_eq!(o.get(grid), Some(&[f7][..]));
         // The alternate slot appends.
         let f6 = b(Key::F6, Chord::Bare);
         apply_capture(&mut o, grid, 1, Capture::Assign(f6));
-        assert_eq!(o.bindings(grid), vec![f5, f6]);
-        // Now F5 conflicts for anyone else, and is fine for the owner.
+        assert_eq!(o.bindings(grid), vec![f7, f6]);
+        // Now F7 conflicts for anyone else, and is fine for the owner.
         assert_eq!(
-            apply_capture(&mut o, ShellAction::Undo, 1, Capture::Assign(f5)),
+            apply_capture(&mut o, ShellAction::Undo, 1, Capture::Assign(f7)),
             CaptureOutcome::Conflict(grid)
         );
         assert_eq!(
-            apply_capture(&mut o, grid, 0, Capture::Assign(f5)),
+            apply_capture(&mut o, grid, 0, Capture::Assign(f7)),
             CaptureOutcome::Done
         );
         // Esc and unexpressible shapes change nothing.

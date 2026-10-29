@@ -69,6 +69,10 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::PrevChannel => ("viewkeys.prev-channel", None),
         ShellAction::NextMeshMap => ("viewkeys.next-map", None),
         ShellAction::PrevMeshMap => ("viewkeys.prev-map", None),
+        ShellAction::ViewportPresetBoth => ("viewkeys.preset-both", None),
+        ShellAction::ViewportPreset3d => ("viewkeys.preset-3d", None),
+        ShellAction::ViewportPreset2d => ("viewkeys.preset-2d", None),
+        ShellAction::ViewportPresetSwap => ("viewkeys.preset-swap", None),
     }
 }
 
