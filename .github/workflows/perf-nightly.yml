@@ -16,7 +16,20 @@ name: perf-nightly
 on:
   schedule:
     - cron: "0 3 * * *" # 03:00 UTC nightly
-  workflow_dispatch: {} # manual runs for the baseline refresh
+  workflow_dispatch:
+    # Manual runs for the baseline refresh, and the SAME-TIP FLEET CANARY
+    # (docs/perf/protocol.md's named follow-up): `ref` pins the checkout to
+    # any commit SHA while the workflow file itself stays on the dispatched
+    # ref — so the canary at the baseline tip measures the fleet WITHOUT
+    # pushing a scratch ref (the partner-gated action) and compares
+    # against that tree's own perf/baseline.json (unchanged since the
+    # 2026-10-19 reseed). Usage:
+    #   gh workflow run perf-nightly.yml --ref master -f ref=<sha>
+    inputs:
+      ref:
+        description: "Commit SHA to canary (empty = the dispatched ref)"
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,6 +55,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The canary input pins the checkout to another commit; empty
+          # (nightly schedule, plain dispatch) keeps the dispatched ref.
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
