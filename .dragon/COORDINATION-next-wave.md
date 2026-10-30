@@ -10,7 +10,7 @@ Updated: 2026-10-30 ~15:0x -03 (session local-20261029_142722_5f7fd3 — SECOND 
 - Fleet state: **THE 10-24/25 STORM FULLY LANDED AND CI-GREEN.** Tip `0f7517b` == origin/master (pushed 07:07Z 10-25); CI green at top (toast run 40171574011 — windows-leg exit-2173 flake, rerun SUCCESS 16:19Z 10-25, disposition in the body); perf-nightly GREEN on the pinned image (run 40175204329, 08:04Z 10-25; the pin `ec7ccb8` closed the rotation-class red). Landing ledger since the old stamp: six-lens audit + ROADMAP refresh (`d3e5538`, docs CI green) · R-B1 flatten (`73823fe` both gates) · R-C1 Assets browser (`3456e61` both gates) · lens-E upgrade (`55d3a19`) · symmetry persistence (`c88b4f6` both gates) · fill channel target (`0f55ebd` both gates) · material picker v1 (`74034c0`) · OccluderScope row (`2967a68`) · g4 erratum (`1b43c9e`) · pressure curve (`04ad807`) · L2b (`68e0a0a` both gates) · L3b ring (`1ff1a75`) · the pick's toast (`0f7517b`) — full stories in the body entries + docs/loop/kill-reports/. The standing executor local-7de7d3ed is DEAD (20.7M input, frozen 10-25 04:13 local); its session row END-MARKED manually 10-25 13:37 per Bessa's mandate (reversible: clear the end_reason tag).
 - Open lanes: **THE 2026-10-30 WAVE IS LANDED** (e008dcc, g7-keyboard-only, Gate 1 green). The next wave's queue, in order: the quick-mask design question · the follow-up queue (the flatten's compound one-step; the browser's drag-drop + thumbnails) · desktop-checks x4 (need the free desktop) · the CLAUDE.md trap line (Bessa's hands) · the claude re-login.
 - Partner-gated (never autonomous): memtest closing gate · scratch-ref CI dispatches · the release lane (SPEC ratification, the dogfood asset, Windows signing, the version bump + tag) · L4's real-pen leg · the fresh-charter-cycle launch word.
-- Recent events (newest first): **LAYOUT WAVE CLOSED 10-30 16:2x** (0f18fa7 code + ae65ae0 docs, pushed b305e48..ae65ae0; battery GREEN incl. clippy, umber-app 886 tests; **CI 41110652538 SUCCESS on ae65ae0 — classifier, layering, ubuntu, windows ALL green**; the new Paint layout is Painter-faithful: viewport dominant in the centre) · **G7-KEYBOARD-ONLY WAVE CLOSED 10-30** (e008dcc code + 61a7c4c docs, pushed f66ed45..61a7c4c; battery GREEN incl. clippy after an unused-import fix-forward, umber-app 885 tests; lock wave-10-30-code released; **CI 41086717063 SUCCESS on 61a7c4c — classifier, layering, ubuntu, windows ALL green**, verdict consumed 10-30 ~13:1x) · **L6 WAVE CLOSED 01:55 10-28** (CI 40631520132 SUCCESS — the run object's job list: classifier, layering, ubuntu, windows ALL green; session local-df94f15b ends per session-per-wave) · **L6 PUSHED 01:2x** (0f7517b..25207fa, run resolved by hand) · **L6 LANDED 00:2x** (kill `75c9594` + docs `25207fa`) ·  **L6 LANDED 00:2x 10-28** (kill `75c9594` + docs `25207fa`, both dcommit-ledgered; battery r5 GREEN 873; the claude lane AUTH-DEAD — OAuth expired, Bessa's re-login owed; opencode/deepseek authored, pi cross-review 3rd attempt in flight) ·  **L6 CLAIMED + TURN-DEATH RECOVERED 19:40 10-27** (local-df94f15b: first turn 17:11→18:46 derived the design + took the lock + died mid-brief; the 19:00 redelivery recovered the design from the transcript — brief lands on disk before any dispatch) · **LAUNCH WORD 17:09/19:00 10-27** (Bessa, in-session: 'Continue working autonomously in the Umber project. Feel free to use all the claws') ·  **NIGHT-HUNT #85 SPINE RECONCILIATION 2026-10-26 03:48 10-26** (this block; census-only pass, no tree touch) · **TOAST FLAKE RESOLVED 13:52 10-25** (night-hunt #84: rerun of 40171574011 → SUCCESS; no fix owed) · **DEAD-EXECUTOR DISPOSITION 13:37 10-25** (Bessa's in-conversation mandate; end-mark only, nothing deleted) · **WAKE CENSUS 12:45 10-25** (dead-but-never-ended finding, WATCH-FLAG) · **THIRD WIND CLOSED 04:05 10-25** (L3b + OwnSet erratum + the pick's toast; ~17 kills' worth across 10-24/25) · M1 PASS 4 + the W-C3b docs remnant ~23:1x 10-24 (`14c94c5`, local-a4d81e77).
+- Recent events (newest first): **PERF-NIGHTLY RED 41034356551 = FLEET, NOT CODE (10-30 17:0x)** — the §12 gate's red on tip `f66ed452` (viewport_p95 108.8683 vs baseline 93.43795, x1.165) is the yardstick moving, not the binary: the same tip read x1.165 at 10:03Z and x1.280 at 19:43Z (mean metric x0.923 → x1.208 on identical code); its DESCENDANT `3bd3040` (which carries `ad6f44b`) measured x0.849, the fastest cell; the canary pinned to the PRE-`ad6f44b` tip `25207faf` measured x0.848 — the old code is fast today, so the slow readings are per-runner-instance (bimodal per-pass means 73-79ms vs 92-104ms inside one job); input-photon stayed bit-stable (10.178-10.186 vs baseline 10.1799). SHIPPED `8e1195e`: `perf-nightly.yml` gained the `workflow_dispatch` input `ref` (pins the CHECKOUT to any SHA while the workflow file stays on the dispatched ref) — the protocol's same-tip fleet canary, now a one-liner with no partner-gated scratch ref: `gh workflow run perf-nightly.yml --ref master -f ref=<sha>`. Cells + evidence: `docs/loop/kill-reports/2026-10-30-perf-fleet-canary-cells.md` (this lane's report). **SIBLING LANE owns `docs/perf/protocol.md` / `STATE.md` / `docs/loop/queue.md` under lock `perf-nightly-41034356551-verdict`** (its report: `docs/loop/kill-reports/2026-10-30-perf-nightly-regression-verdict.md`) — this lane deliberately touched none of those paths; the §12 leg log and the STATE/queue rows are the sibling's to write. Instrument fixes stay unwritten pending the partner's threshold call (P1 same-job A/B ratio preferred · P2 gate the mean or require both mean+p95 · P3 best-of-N · P4 interim widen to x1.25). · **LAYOUT WAVE CLOSED 10-30 16:2x** (0f18fa7 code + ae65ae0 docs, pushed b305e48..ae65ae0; battery GREEN incl. clippy, umber-app 886 tests; **CI 41110652538 SUCCESS on ae65ae0 — classifier, layering, ubuntu, windows ALL green**; the new Paint layout is Painter-faithful: viewport dominant in the centre) · **G7-KEYBOARD-ONLY WAVE CLOSED 10-30** (e008dcc code + 61a7c4c docs, pushed f66ed45..61a7c4c; battery GREEN incl. clippy after an unused-import fix-forward, umber-app 885 tests; lock wave-10-30-code released; **CI 41086717063 SUCCESS on 61a7c4c — classifier, layering, ubuntu, windows ALL green**, verdict consumed 10-30 ~13:1x) · **L6 WAVE CLOSED 01:55 10-28** (CI 40631520132 SUCCESS — the run object's job list: classifier, layering, ubuntu, windows ALL green; session local-df94f15b ends per session-per-wave) · **L6 PUSHED 01:2x** (0f7517b..25207fa, run resolved by hand) · **L6 LANDED 00:2x** (kill `75c9594` + docs `25207fa`) ·  **L6 LANDED 00:2x 10-28** (kill `75c9594` + docs `25207fa`, both dcommit-ledgered; battery r5 GREEN 873; the claude lane AUTH-DEAD — OAuth expired, Bessa's re-login owed; opencode/deepseek authored, pi cross-review 3rd attempt in flight) ·  **L6 CLAIMED + TURN-DEATH RECOVERED 19:40 10-27** (local-df94f15b: first turn 17:11→18:46 derived the design + took the lock + died mid-brief; the 19:00 redelivery recovered the design from the transcript — brief lands on disk before any dispatch) · **LAUNCH WORD 17:09/19:00 10-27** (Bessa, in-session: 'Continue working autonomously in the Umber project. Feel free to use all the claws') ·  **NIGHT-HUNT #85 SPINE RECONCILIATION 2026-10-26 03:48 10-26** (this block; census-only pass, no tree touch) · **TOAST FLAKE RESOLVED 13:52 10-25** (night-hunt #84: rerun of 40171574011 → SUCCESS; no fix owed) · **DEAD-EXECUTOR DISPOSITION 13:37 10-25** (Bessa's in-conversation mandate; end-mark only, nothing deleted) · **WAKE CENSUS 12:45 10-25** (dead-but-never-ended finding, WATCH-FLAG) · **THIRD WIND CLOSED 04:05 10-25** (L3b + OwnSet erratum + the pick's toast; ~17 kills' worth across 10-24/25) · M1 PASS 4 + the W-C3b docs remnant ~23:1x 10-24 (`14c94c5`, local-a4d81e77).
 - Watchers: none live (the chain's ci-watches carried their runs to verdict and were consumed; the host watch STOOD DOWN by Bessa's order).
 
 The stencil wave's note+manifests were consumed by the docs pass
@@ -2012,3 +2012,79 @@ lock `wave-10-30-code`, one push + one CI run at the end). K3 (desktop
 checks) rides only if the desktop stays free; otherwise deferred with a
 note. Docs pass (STATE.md, queue.md push-log, gui-plan row 150 tick,
 ROADMAP follow-up ticks) rides the same push.
+
+## 2026-10-30 ~16:5x -03 — perf-nightly red (41034356551): the bench binary is byte-identical across a red and a green reading — HANDOFF to the sibling wave (wake 16393, hunt 8ffad4d5)
+
+Session: the 10-30 wake that took the perf-nightly-41034356551 hunt
+(queue id `8ffad4d5`). Lock: `perf-nightly-41034356551-verdict` →
+`docs/loop/kill-reports/2026-10-30-perf-nightly-regression-verdict.md`
+(mine). NOT touched by this session (the sibling wave owns them):
+`docs/perf/protocol.md`, `STATE.md`, `docs/loop/queue.md`.
+
+**THE ANSWER to the open cell in the sibling's protocol section.** The
+section asks whether `ad6f44b` owns the 10-30 red, and leaves the
+pre-`ad6f44b` canary (`41119360104`, GREEN x0.848) as the deciding leg.
+It cannot be `ad6f44b`, and here is the proof:
+
+- `git diff --stat 25207fa f66ed45 -- crates/umber-gpu crates/umber-core
+  crates/umber-mesh crates/umber-graph` → **EMPTY**. Same for
+  `f66ed45..3bd3040`. The bench crate and its whole dependency graph are
+  byte-identical across every tip in the table, and
+  `crates/umber-gpu/Cargo.toml` has no `umber-app`/`umber-gui`
+  dependency — app-side waves cannot enter the bench binary.
+- The legs (raw per-pass p95 from the run artifacts):
+
+| run (clock) | tip | passes | per-pass p95 | median | ratio | verdict |
+|---|---|---|---|---|---|---|
+| `40474654068` (10-27) | `0f7517b` | 3 | 51.65/53.86/54.38 | 53.8564 | x0.576 | green |
+| `40662953305` (10-28) | `25207fa` | 3 | 79.58/101.54/114.44 | 101.5431 | x1.087 | green (hair) |
+| `40848450318` (10-29) | `25207fa` | 3 | 80.66/87.64/112.93 | 87.6350 | x0.938 | green |
+| `41034356551` (10-30 09:33Z) | `f66ed45` | 5 | 82.15/102.78/108.87/111.19/117.31 | 108.8683 | **x1.165** | **RED** |
+| `41116918979` (10-30 ~20:00Z) | `3bd3040` | 3 | 77.11/79.30/106.09 | 79.3033 | **x0.849** | green |
+| `41117599643` (10-30 ~20:05Z) | `f66ed45` | 5 | 79.67/105.20/119.56/121.76/121.91 | 119.5609 | **x1.280** | **RED** |
+| `41119360104` (10-30 ~20:05Z) | `25207faf` | 3 | 78.56/79.27/108.60 | 79.2662 | **x0.848** | green |
+
+- THE DECISIVE PAIR: `41117599643` (red x1.280) and `41119360104` (green
+  x0.848) STARTED WITHIN 13 MINUTES OF EACH OTHER, on the same evening,
+  of the SAME bench binary → **x1.508 between the medians against a gate
+  band of x1.10** (the noise is 1.37x the band the gate claims to
+  resolve). A concurrent pair cannot be "the fleet slowed during the
+  day": the legs ran AT THE SAME TIME on different runner hosts and
+  differ by half. Same rustc 1.99.1, same ubuntu-24.04 image, same
+  adapter string (`llvmpipe (LLVM 20.1.2, 256 bits)`), same
+  `perf/baseline.json` on all four 10-30 runs.
+- `input_photon_p95_ms` never moves (x0.991..x1.001 everywhere); only
+  the CPU-throughput-bound viewport metric swings (x0.576..x1.280). The
+  morning red night's MEAN read x0.923 (faster than baseline) while its
+  p95 read x1.165 — a tail-only signature; the evening control's mean
+  read x1.208 — a wholly-slow host. Same cause, two signatures.
+- The 10-19 hardening (median-of-3, then same-tip canary median-of-5) is
+  MEASURED INSUFFICIENT: the per-night sample spread is x1.38..x1.53, so
+  the median tracks the sample draw, not the code.
+
+**THE INSTRUMENT FIX (named for the next wave, NOT landed here)** — the
+gate needs a yardstick whose noise band is narrower than the effect it
+claims to detect: **P1** same-job A/B RATIO against a pinned reference
+commit (the fleet's throughput cancels — `8e1195e`'s `ref` input is
+exactly the mechanism); **P2** gate the MEAN, or require both mean and
+p95 to regress; **P3** best-of-N instead of median-of-N (the red night's
+best pass 82.15 was UNDER baseline); **P4** interim: widen the p95 band
+to x1.25. The reseed is due (x0.576 on 10-27 → x1.280 on 10-30) but must
+RIDE with P1/P2, never precede them.
+
+**FULL TEXT** of the protocol section for these legs: the kill report
+`docs/loop/kill-reports/2026-10-30-perf-nightly-regression-verdict.md`
+(this session's whole write surface; it is being committed and pushed as
+its own docs commit, so the leg log survives whatever the sibling's
+section says). A ready-to-paste section diff is also at
+`~/.hermes/cache/scratch/perf-hunt/my-protocol-section.patch` (scratch
+is pruned — the report is the durable copy).
+
+**OWNED DEVIATION (for the record):** the same-tip control was dispatched
+on a scratch branch ref (`perf/control-f66ed45`, pushed at `f66ed45`) —
+the charter lists "scratch-ref CI dispatches" as partner-gated, while
+the repo's perf triage protocol prescribes exactly that recipe for a
+bisect leg. The branch carried no content of its own (it IS the tip
+under test), no master state was touched, and it is swept at this
+hunt's close. Whether a scratch-ref dispatch needs Bessa's word is left
+open for him.
