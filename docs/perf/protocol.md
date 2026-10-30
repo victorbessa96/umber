@@ -459,3 +459,96 @@ The lavapipe CI gate stays the regression instrument (fleet-era
 baselined, drift-hardened by `perf_gate.sh`); this record is the
 honest-claims data point the C2-16 row wanted — the budgets hold on
 real hardware with 82x, 2x, and zero-drop margins.
+
+## Nightly verdict 2026-10-30 (run 41034356551) — FLEET, NOT CODE: the bench binary is byte-identical across a red and a green reading
+
+The 10-30 scheduled nightly (`41034356551`, tip `f66ed45`, ubuntu-24.04
++ lavapipe, adapter `llvmpipe (LLVM 20.1.2, 256 bits)`, rustc 1.99.1)
+read `REGRESSION viewport_p95_ms: 108.8683 vs baseline 93.43795
+(x1.165)` — gate 1 (median-of-3) red, the same-tip canary (median-of-5)
+red, job failed at 10:03Z. Seven legs land here (the leg log), all read
+from the CI artifacts, none re-benched locally (the build host is STOOD
+DOWN; local cargo is not authorised).
+
+### The leg log
+
+| run (clock) | tip | passes | per-pass viewport p95 (ms) | median p95 | x vs baseline | median mean | x vs baseline | i2p p95 x | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| `40474654068` (10-27 08:36Z) | `0f7517b` | 3 | 51.65 / 53.86 / 54.38 | 53.8564 | x0.576 | 44.6023 | x0.522 | x0.991 | green |
+| `40662953305` (10-28 09:16Z) | `25207fa` | 3 | 79.58 / 101.54 / 114.44 | 101.5431 | x1.087 | 79.0173 | x0.926 | x0.997 | green (by a hair) |
+| `40848450318` (10-29 09:17Z) | `25207fa` | 3 | 80.66 / 87.64 / 112.93 | 87.6350 | x0.938 | 76.5533 | x0.897 | x1.000 | green |
+| `41034356551` (10-30 09:33Z) | `f66ed45` | 5 | 82.15 / 102.78 / 108.87 / 111.19 / 117.31 | 108.8683 | **x1.165** | 78.8107 | x0.923 | x1.001 | **RED** |
+| `41116918979` (10-30 19:38Z) | `3bd3040` | 3 | 77.11 / 79.30 / 106.09 | 79.3033 | **x0.849** | 72.7332 | x0.852 | x0.997 | green |
+| `41117599643` (10-30 19:43Z) | `f66ed45` (same-tip control) | 5 | 79.67 / 105.20 / 119.56 / 121.76 / 121.91 | 119.5609 | **x1.280** | 103.1151 | x1.208 | x1.000 | **RED** |
+| `41119360104` (10-30 19:56Z) | `25207faf` (pre-`ad6f44b` canary) | 3 | 78.56 / 79.27 / 108.60 | 79.2662 | **x0.848** | 74.0174 | x0.867 | x1.000 | green |
+
+### What the log proves
+
+1. **The bench binary is byte-identical across every boundary.**
+   `git diff --stat 25207fa f66ed45 -- crates/umber-gpu crates/umber-core
+   crates/umber-mesh crates/umber-graph` → EMPTY; same for
+   `f66ed45..3bd3040`. The full diffs touch only `crates/umber-app/**`,
+   `crates/umber-gui/src/theme.rs`, `assets/i18n/**`, `docs/**`,
+   `STATE.md`. `crates/umber-gpu/Cargo.toml` carries no `umber-app` /
+   `umber-gui` dependency, so app-side waves cannot enter the bench
+   binary at all. `perf/baseline.json` and the workflow's compare step
+   are unchanged across the window.
+2. **Two runs of the SAME bench binary, started 13 minutes apart on the
+   same evening, read x1.280 and x0.848** (`41117599643` vs
+   `41119360104`): **x1.508 between the medians against a gate band of
+   x1.10** — the noise is 1.37x the band the gate claims to resolve. A
+   concurrent pair cannot be "the fleet slowed during the day": the legs
+   ran AT THE SAME TIME on different runner hosts and differ by half.
+   The same rustc, the same image, the same adapter string and the same
+   baseline file sit behind all four 10-30 runs; the only variable is
+   the physical host.
+3. **A GREEN night contains a pass higher than the red night's median.**
+   The 10-28 night (green at x1.087) contains p95 114.44 against the
+   red night's median 108.87 — the red/green line sits INSIDE the
+   per-pass scatter.
+4. **`input_photon_p95_ms` never moves** (x0.991..x1.001 across the
+   table): only the CPU-throughput-bound viewport metric swings
+   (x0.576..x1.280). A viewport-path regression would move the viewport
+   MEAN with the p95 — and the two signatures differ: the morning red
+   night's mean read x0.923 (faster than baseline, a tail-only event)
+   while the evening control's mean read x1.208 (a wholly-slow host).
+5. The hunt's two named suspects (`e008dcc` g7-keyboard-only, `0f18fa7`
+   the layout wave) were NOT in the red run at all: its head SHA is
+   `f66ed45` and both landed after the 09:33Z dispatch. `ad6f44b` is the
+   only code delta in the window and cannot reach the bench.
+
+### DECISION
+
+**Fleet. The code is innocent.** Third instance of this class (the 10-16
+hardware-class mismatch, the 10-19 fleet drift, now the 10-30 per-runner
+heterogeneity), and the first one where the bench binary is PROVEN
+identical between a red and a green reading. The 10-19 drift-hardening
+(median-of-3, then a same-tip canary median-of-5) is MEASURED
+INSUFFICIENT: it draws 3 (or 5) samples from a distribution whose
+per-night spread is x1.38..x1.53 and takes their median, so the verdict
+tracks the sample draw, not the code.
+
+### The instrument fix — named, not landed
+
+The gate needs a yardstick whose noise band is narrower than the effect
+it claims to detect: **P1** a same-job A/B RATIO against a pinned
+reference commit (the fleet's throughput cancels — `8e1195e`'s
+`workflow_dispatch` input `ref` is the mechanism); **P2** gate the MEAN,
+or require both mean and p95 to regress; **P3** best-of-N instead of
+median-of-N (the red night's best pass, 82.15, was UNDER baseline);
+**P4** interim: widen the p95 band to the measured fleet spread (x1.25).
+The reseed is due (the fleet era moved again: x0.576 on 10-27 → x1.280
+on 10-30) and this protocol's precedent requires the leg log as its
+written justification — but a reseed ALONE repeats the cycle; it must
+ride with P1/P2, never precede them. Queued as its own two-gate wave.
+
+### The full record
+
+- `docs/loop/kill-reports/2026-10-30-perf-nightly-regression-verdict.md`
+  (`55bcefa`) — the proof, the bench-crate diffs, the stand-down and the
+  owned scratch-ref deviation.
+- `docs/loop/kill-reports/2026-10-30-perf-fleet-canary-cells.md`
+  (`e9001d2`) — the three-cell canary dissection and `8e1195e`.
+
+The raw evidence (seven job logs + every run's scene JSONs) is staged in
+the vault at `projects/umber/assets/2026-10-30-perf-gate-noise/`.
