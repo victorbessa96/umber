@@ -23,26 +23,44 @@ pub const ALL_PANELS: [Panel; 11] = [
     Panel::Display,
 ];
 
-/// The boot layout: [left column | centre (3D + 2D UV tabs)] with the
-/// history docked right. `UmberApp::new` and Window ▸ Reset Layout both
+/// The boot layout, Painter-faithful (Adobe's interface docs: the
+/// viewport is the dominant centre, 3D view on the left / 2D UV view on
+/// the right, panels docked on the edges): [left rail | 3D view | 2D UV
+/// view | right rail]. `UmberApp::new` and Window ▸ Reset Layout both
 /// build it from here, so a reset is exactly the first-launch layout.
 pub fn default_dock() -> DockState<Panel> {
-    let mut dock = DockState::new(vec![Panel::Viewport, Panel::UvView]);
+    // Root starts as the 2D view; the centre split below MOVES the 3D
+    // view into a left leaf (split_* adds tabs, it does not move them).
+    let mut dock = DockState::new(vec![Panel::UvView]);
     let tree = dock.main_surface_mut();
-    let [left, _] = tree.split_left(
-        NodeIndex::root(),
-        0.25,
+    // Right rail: Properties on top, the workhorse panels tabbed below
+    // (Painter: properties upper right, layers/history lower right).
+    let [_, right] = tree.split_right(NodeIndex::root(), 0.24, vec![Panel::Properties]);
+    tree.split_below(
+        right,
+        0.62,
         vec![
             Panel::LayerStack,
-            Panel::TextureSets,
-            Panel::Bakes,
-            Panel::Export,
+            Panel::History,
             Panel::Graph,
             Panel::Display,
         ],
     );
-    let [_top, _bottom] = tree.split_below(left, 0.4, vec![Panel::Properties, Panel::Assets]);
-    tree.split_right(NodeIndex::root(), 0.2, vec![Panel::History]);
+    // Left rail: the project/asset panels.
+    tree.split_left(
+        NodeIndex::root(),
+        0.15,
+        vec![
+            Panel::TextureSets,
+            Panel::Assets,
+            Panel::Bakes,
+            Panel::Export,
+        ],
+    );
+    // The centre split: 3D viewport left (65%), 2D UV view right —
+    // Painter's default 3D/2D viewport mode. F2/F4 collapse it to one
+    // view, which then fills the whole centre.
+    tree.split_left(NodeIndex::root(), 0.65, vec![Panel::Viewport]);
     dock
 }
 

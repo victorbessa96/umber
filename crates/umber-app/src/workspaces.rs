@@ -113,13 +113,17 @@ pub fn preset(workspace: Workspace) -> DockState<Panel> {
     }
 }
 
-/// The viewport (3D + 2D) in the centre, `front` in a left column (its
-/// first tab active), `rest` tabbed on the right.
+/// The viewport in the dominant centre — 3D view left, 2D UV view right,
+/// the centre split of the Paint preset — with `front` in a left rail
+/// (its first tab active) and `rest` tabbed on the right.
 fn side_layout(front: Vec<Panel>, rest: Vec<Panel>) -> DockState<Panel> {
-    let mut dock = DockState::new(vec![Panel::Viewport, Panel::UvView]);
+    // Root starts as the 2D view; the centre split below adds the 3D
+    // view as its left leaf.
+    let mut dock = DockState::new(vec![Panel::UvView]);
     let tree = dock.main_surface_mut();
-    tree.split_left(NodeIndex::root(), 0.28, front);
-    tree.split_right(NodeIndex::root(), 0.22, rest);
+    tree.split_left(NodeIndex::root(), 0.18, front);
+    tree.split_right(NodeIndex::root(), 0.24, rest);
+    tree.split_left(NodeIndex::root(), 0.65, vec![Panel::Viewport]);
     dock
 }
 
@@ -208,7 +212,10 @@ impl Workspaces {
 
 /// The layouts file's schema version; another version is ignored (the
 /// presets load instead).
-pub const LAYOUTS_VERSION: u32 = 1;
+pub const LAYOUTS_VERSION: u32 = 2;
+// v2: the Painter-faithful default — viewport dominant in the centre
+// (3D left / 2D right), rails on the edges. v1 files (views tabbed in the
+// centre, rails 0.25/0.2) fall back to the presets on load.
 
 /// The persisted workspaces (`<state>/layouts.json`).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -611,14 +618,33 @@ mod tests {
 
     #[test]
     fn viewport_preset_swap_in_one_leaf_exchanges_tabs_and_flips_active() {
-        let mut dock = preset(Workspace::Paint); // root = [Viewport, UvView], active Viewport
+        // A user-merged leaf (both views tabbed together): Swap exchanges
+        // the tabs in place. (The Paint preset keeps the views in separate
+        // centre leaves — see paint_preset_splits_the_views_side_by_side.)
+        let mut dock = DockState::new(vec![Panel::Viewport, Panel::UvView]);
         apply_viewport_preset(&mut dock, ViewportPreset::Swap);
-        // root is a SPLIT node in the Paint preset (the views live in its
-        // second child), so look the leaf up through the tab's path.
         let vp = dock.find_tab(&Panel::Viewport).expect("3D docked");
         let leaf = dock.main_surface()[vp.node].get_leaf().unwrap();
         assert_eq!(leaf.tabs, vec![Panel::UvView, Panel::Viewport]);
         assert_eq!(leaf.active, TabIndex(1), "active flipped to the other view");
+    }
+
+    #[test]
+    fn paint_preset_splits_the_views_side_by_side_in_the_centre() {
+        // Painter's default viewport mode: 3D left, 2D right as SPLIT
+        // leaves (not tabs), with the rails holding only panels.
+        let dock = preset(Workspace::Paint);
+        let vp = dock.find_tab(&Panel::Viewport).expect("3D docked");
+        let uv = dock.find_tab(&Panel::UvView).expect("2D docked");
+        assert_ne!(
+            vp.node, uv.node,
+            "3D and 2D are side-by-side leaves, not tabs of one leaf"
+        );
+        assert_eq!(
+            docked(&dock),
+            ALL_PANELS.to_vec(),
+            "every panel docked once"
+        );
     }
 
     #[test]
