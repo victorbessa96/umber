@@ -25,6 +25,16 @@ use crate::paint_state::{PaintState, PlaneOwner};
 pub struct Document {
     pub stack: LayerStack,
     pub history: UndoStack<LayerCommand>,
+    /// Undo-group boundaries `(start, end)` into [`history`](Self::history):
+    /// the entries in `[start, end)` revert/reapply as ONE undo step (the
+    /// flatten's compound one-step). The cursor never rests strictly inside
+    /// a group: [`undo`](Self::undo) pops back to the group's start and
+    /// [`redo`](Self::redo) replays to its end.
+    undo_groups: Vec<(usize, usize)>,
+    /// `Some(base)` while a [`run_grouped`](Self::run_grouped) closure runs:
+    /// per-`run` history rows are suppressed so the group records exactly
+    /// one row at its end depth.
+    group_base: Option<usize>,
     /// The session history log (the History window's model): one row per
     /// [`run`](Self::run), mirroring the undo journal, plus context rows
     /// via [`record_session_event`](Self::record_session_event). RAM-only,
@@ -58,6 +68,7 @@ struct ParkedSet {
     stack: LayerStack,
     history: UndoStack<LayerCommand>,
     session_history: SessionHistory,
+    undo_groups: Vec<(usize, usize)>,
 }
 
 /// An attached journal plus the texture set this document's stack is.
@@ -76,6 +87,8 @@ impl Default for Document {
         Self {
             stack: LayerStack::default(),
             history: UndoStack::new(HISTORY_MAX_ENTRIES),
+            undo_groups: Vec::new(),
+            group_base: None,
             session_history: SessionHistory::new(),
             journal: None,
             journal_high_water: 0,
@@ -99,14 +112,21 @@ impl Document {
         // The cursor before the push: a push clears the redo stack, so any
         // history rows past this depth describe a future that no longer
         // exists and must go (context rows survive — see `truncate_future`).
+        // Groups whose entries sat past the cursor are invalidated the same
+        // way: their commands now live on the redo stack, not the undo one.
         let cursor = self.history.len();
+        self.undo_groups.retain(|&(_, end)| end <= cursor);
         self.history.push(command, &mut self.stack);
         self.session_history.truncate_future(cursor);
         let depth = self.history.len();
-        // `peek_undo` is `Some` exactly after a push; a `None` records no
-        // row (better a missing row than a mislabeled jumpable one).
-        if let Some(kind) = self.history.peek_undo().map(HistoryKind::from_command) {
-            self.session_history.record_undoable(kind, depth);
+        // Inside a `run_grouped` closure the group records ONE row at its
+        // end depth, so per-push rows are suppressed here. `peek_undo` is
+        // `Some` exactly after a push; a `None` records no row (better a
+        // missing row than a mislabeled jumpable one).
+        if self.group_base.is_none() {
+            if let Some(kind) = self.history.peek_undo().map(HistoryKind::from_command) {
+                self.session_history.record_undoable(kind, depth);
+            }
         }
         let op = self
             .history
@@ -115,10 +135,54 @@ impl Document {
         self.autosave(op);
     }
 
-    /// One-level undo; returns whether anything was undone. The
-    /// autosave journal gets the edit the undo performed (read before
+    /// Runs a multi-command op as ONE undo step (the flatten's compound
+    /// one-step): `f` pushes its commands through [`run`](Self::run) as
+    /// usual — each still autosaves and clears the redo future — but the
+    /// session history records a single row at the group's end depth, and
+    /// [`undo`](Self::undo)/[`redo`](Self::redo) cross the whole group in
+    /// one step. If `f` pushes nothing, no group and no row are recorded.
+    pub fn run_grouped(&mut self, kind: HistoryKind, f: impl FnOnce(&mut Self)) {
+        let base = self.history.len();
+        self.group_base = Some(base);
+        f(self);
+        self.group_base = None;
+        let end = self.history.len();
+        self.session_history.truncate_future(base);
+        if end > base {
+            self.undo_groups.push((base, end));
+            self.session_history.record_undoable(kind, end);
+        }
+    }
+
+    /// One undo step; returns whether anything was undone. When the cursor
+    /// sits at or inside an undo group, the WHOLE group reverts in this one
+    /// call (the flatten's compound one-step); otherwise a single command.
+    /// The autosave journal gets each edit the undo performed (read before
     /// the revert, which consumes the command's captured state).
     pub fn undo(&mut self) -> bool {
+        let target = self
+            .undo_groups
+            .iter()
+            .rev()
+            .find(|&&(start, end)| start < self.history.len() && self.history.len() <= end)
+            .map(|&(start, _)| start);
+        match target {
+            Some(start) => {
+                let mut any = false;
+                while self.history.len() > start {
+                    if !self.undo_step() {
+                        break;
+                    }
+                    any = true;
+                }
+                any
+            }
+            None => self.undo_step(),
+        }
+    }
+
+    /// One journal step: revert the newest command, autosave the revert.
+    fn undo_step(&mut self) -> bool {
         let op = self
             .history
             .peek_undo()
@@ -130,8 +194,32 @@ impl Document {
         true
     }
 
-    /// One-level redo; returns whether anything was redone.
+    /// One redo step; returns whether anything was redone.
     pub fn redo(&mut self) -> bool {
+        // Mirror of `undo`: when the cursor sits exactly at a group's start,
+        // the whole group replays in this one call.
+        let target = self
+            .undo_groups
+            .iter()
+            .find(|&&(start, end)| start == self.history.len() && end > start)
+            .map(|&(_, end)| end);
+        match target {
+            Some(end) => {
+                let mut any = false;
+                while self.history.len() < end {
+                    if !self.redo_step() {
+                        break;
+                    }
+                    any = true;
+                }
+                any
+            }
+            None => self.redo_step(),
+        }
+    }
+
+    /// One journal step: re-apply the newest undone command, autosave it.
+    fn redo_step(&mut self) -> bool {
         if !self.history.redo(&mut self.stack) {
             return false;
         }
@@ -272,6 +360,8 @@ impl Document {
     pub fn load_stack(&mut self, stack: LayerStack) {
         self.history.clear();
         self.session_history.clear();
+        self.undo_groups.clear();
+        self.group_base = None;
         self.journal = None;
         self.journal_high_water = 0;
         self.stack = stack;
@@ -307,6 +397,7 @@ impl Document {
                         stack,
                         history: UndoStack::new(HISTORY_MAX_ENTRIES),
                         session_history: SessionHistory::new(),
+                        undo_groups: Vec::new(),
                     },
                 );
             }
@@ -326,11 +417,13 @@ impl Document {
             stack: LayerStack::default(),
             history: UndoStack::new(HISTORY_MAX_ENTRIES),
             session_history: SessionHistory::new(),
+            undo_groups: Vec::new(),
         });
         let outgoing = ParkedSet {
             stack: std::mem::replace(&mut self.stack, incoming.stack),
             history: std::mem::replace(&mut self.history, incoming.history),
             session_history: std::mem::replace(&mut self.session_history, incoming.session_history),
+            undo_groups: std::mem::replace(&mut self.undo_groups, incoming.undo_groups),
         };
         let previous = std::mem::replace(&mut self.active_set, name.to_string());
         // The pre-set document (empty name) is adopted as `name`'s own
@@ -341,6 +434,7 @@ impl Document {
             self.stack = outgoing.stack;
             self.history = outgoing.history;
             self.session_history = outgoing.session_history;
+            self.undo_groups = outgoing.undo_groups;
         }
     }
 
@@ -2416,6 +2510,55 @@ mod tests {
 
         // Already there: no steps.
         assert_eq!(doc.jump_to_depth(3), 0);
+    }
+
+    /// The flatten's compound one-step: `run_grouped` records ONE session
+    /// row at the group's end depth, one `undo` reverts the whole group
+    /// (add + removes) back to the base depth, and one `redo` replays it.
+    #[test]
+    fn run_grouped_undoes_and_redoes_as_one_step() {
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("A", LayerKind::Paint));
+        doc.run(LayerCommand::add("B", LayerKind::Paint));
+        let base = doc.history.len();
+        assert_eq!(base, 2);
+        let ids: Vec<u64> = doc.layers().iter().map(|l| l.id).collect();
+
+        doc.run_grouped(HistoryKind::Flatten, |d| {
+            d.run(LayerCommand::add("baked", LayerKind::Paint));
+            for id in &ids {
+                d.run(LayerCommand::remove(*id));
+            }
+        });
+
+        // Three commands pushed, but ONE new history row at depth base+3.
+        assert_eq!(doc.history.len(), base + 3);
+        let rows = doc.session_history.entries();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].kind, HistoryKind::Flatten);
+        assert_eq!(rows[2].undo_depth, Some(base + 3));
+        assert_eq!(doc.layers().len(), 1);
+        assert_eq!(doc.layers()[0].name, "baked");
+
+        // ONE undo reverts the whole group.
+        assert!(doc.undo());
+        assert_eq!(doc.history.len(), base);
+        assert_eq!(doc.layers().len(), 2);
+
+        // ONE redo replays it.
+        assert!(doc.redo());
+        assert_eq!(doc.history.len(), base + 3);
+        assert_eq!(doc.layers().len(), 1);
+
+        // A fresh push after undoing the group invalidates it: undo goes
+        // back to single-step.
+        assert!(doc.undo());
+        assert_eq!(doc.history.len(), base);
+        doc.run(LayerCommand::add("C", LayerKind::Paint));
+        assert_eq!(doc.history.len(), base + 1);
+        assert!(doc.undo());
+        assert_eq!(doc.history.len(), base);
+        assert_eq!(doc.layers().len(), 2);
     }
 
     /// Rewinding n layer commands restores the exact stack state: the

@@ -780,16 +780,29 @@ impl TabViewer for PanelViewer<'_> {
                         if let Some(paint) = self.paint.as_deref_mut() {
                             let snapshot = paint.synthesized_snapshot();
                             if let Some(baked) = paint.bake_layers(&snapshot, &ids) {
-                                let n = self.doc.layers().len() + 1;
-                                let name = crate::i18n::tr_args(
-                                    "layers.default-paint-name",
-                                    [("n", fluent::FluentValue::from(n))],
-                                );
-                                self.doc.run(umber_core::layers::LayerCommand::add(
-                                    name,
-                                    umber_core::layers::LayerKind::Paint,
-                                ));
-                                let Some(new_id) = self.doc.layers().last().map(|l| l.id) else {
+                                // The journaled half (add + removes) as ONE
+                                // undo group — the compound one-step (the R-B1
+                                // report's named follow-up): one undo reverts
+                                // the whole flatten, and the History window
+                                // shows a single "Flatten layers" row.
+                                let mut new_id = None;
+                                self.doc
+                                    .run_grouped(history_panel::HistoryKind::Flatten, |doc| {
+                                        let n = doc.layers().len() + 1;
+                                        let name = crate::i18n::tr_args(
+                                            "layers.default-paint-name",
+                                            [("n", fluent::FluentValue::from(n))],
+                                        );
+                                        doc.run(umber_core::layers::LayerCommand::add(
+                                            name,
+                                            umber_core::layers::LayerKind::Paint,
+                                        ));
+                                        new_id = doc.layers().last().map(|l| l.id);
+                                        for id in &ids {
+                                            doc.run(umber_core::layers::LayerCommand::remove(*id));
+                                        }
+                                    });
+                                let Some(new_id) = new_id else {
                                     continue;
                                 };
                                 for plane in &baked {
@@ -801,9 +814,6 @@ impl TabViewer for PanelViewer<'_> {
                                         plane.height,
                                         plane.data.clone(),
                                     );
-                                }
-                                for id in &ids {
-                                    self.doc.run(umber_core::layers::LayerCommand::remove(*id));
                                 }
                                 // The baked layer becomes the selection,
                                 // the paint target, and — if a source was
@@ -2236,6 +2246,26 @@ impl UmberApp {
 
     /// The registry's view of the shell this frame (`actions::availability`).
     ///
+    /// g7-keyboard-only: Esc closes every app-owned overlay — the
+    /// Window-based dialogs and the pending confirms. egui menus/popups and
+    /// the command palette already close on Esc themselves (egui's popup
+    /// layer, palette.rs). The recovery window is deliberately NOT closed:
+    /// Esc there must not silently discard unsaved work.
+    fn close_overlays_on_esc(&mut self, ctx: &egui::Context) {
+        if !actions::esc_closes_overlays(ctx, self.palette.is_open()) {
+            return;
+        }
+        self.prefs_open = false;
+        self.about_open = false;
+        self.shortcuts_open = false;
+        self.pending_new = None;
+        self.pending_revert = false;
+        self.pending_quit = false;
+        if self.quick_setup.is_open() {
+            self.quick_setup.close();
+        }
+    }
+
     /// Undo/Redo availability is the TIMELINE's, not the layer journal's
     /// (L6): the three-arm dispatch below undoes the newest applied row of
     /// ANY journal, so gating Ctrl+Z on `doc.history` alone refused it in a
@@ -3887,6 +3917,9 @@ impl eframe::App for UmberApp {
             actions.push(toolbar::ShellAction::ToggleHideUi);
         }
         let hide_ui = self.focus.mode() == shell_menu::FocusMode::HideUi;
+        // g7-keyboard-only: one Esc pass closes the app-owned overlays
+        // (menus/popups/palette handle their own Esc; see the method).
+        self.close_overlays_on_esc(ui.ctx());
         // Top bar: MenuBar container (egui 0.36 API).
         MenuBar::new().ui(ui, |ui| {
             // Every action row prints its registry shortcut (GUI plan G0:
@@ -3894,12 +3927,18 @@ impl eframe::App for UmberApp {
             // registry's one enabled-check.
             let shell_state = self.shell_state();
             let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
-            let action_item = |ui: &mut Ui, label: String, action: toolbar::ShellAction| {
+            let action_item = |ui: &mut Ui,
+                               items: &mut Vec<toolbar::ShellAction>,
+                               label: String,
+                               action: toolbar::ShellAction| {
                 let mut button = egui::Button::new(label);
                 if let Some(shortcut) = actions::shortcut_label(action, is_mac) {
                     button = button.shortcut_text(shortcut);
                 }
                 let state = actions::availability(action, shell_state);
+                if state.is_ok() {
+                    items.push(action);
+                }
                 let response = ui.add_enabled(state.is_ok(), button);
                 let response = match state {
                     Err(reason) => response.on_disabled_hover_text(tr(reason)),
@@ -3908,14 +3947,26 @@ impl eframe::App for UmberApp {
                 response.clicked()
             };
             MenuButton::new(tr("menu.file")).ui(ui, |ui| {
-                if action_item(ui, tr("shell.new"), toolbar::ShellAction::NewProject) {
+                let mut items = Vec::new();
+                if action_item(
+                    ui,
+                    &mut items,
+                    tr("shell.new"),
+                    toolbar::ShellAction::NewProject,
+                ) {
                     actions.push(toolbar::ShellAction::NewProject);
                 }
-                if action_item(ui, tr("menu.open-mesh"), toolbar::ShellAction::OpenMesh) {
+                if action_item(
+                    ui,
+                    &mut items,
+                    tr("menu.open-mesh"),
+                    toolbar::ShellAction::OpenMesh,
+                ) {
                     actions.push(toolbar::ShellAction::OpenMesh);
                 }
                 if action_item(
                     ui,
+                    &mut items,
                     tr("menu.open-project"),
                     toolbar::ShellAction::OpenProject,
                 ) {
@@ -3927,6 +3978,7 @@ impl eframe::App for UmberApp {
                 }
                 if action_item(
                     ui,
+                    &mut items,
                     tr("menu.save-project"),
                     toolbar::ShellAction::SaveProject,
                 ) {
@@ -3934,6 +3986,7 @@ impl eframe::App for UmberApp {
                 }
                 if action_item(
                     ui,
+                    &mut items,
                     tr("button.save-as"),
                     toolbar::ShellAction::SaveProjectAs,
                 ) {
@@ -3969,18 +4022,26 @@ impl eframe::App for UmberApp {
                 if ui.button(tr("menu.load-environment")).clicked() {
                     self.load_environment();
                 }
+                toolbar::menu_digit_pick(ui, &items, &mut actions);
             });
             MenuButton::new(tr("menu.edit")).ui(ui, |ui| {
-                if action_item(ui, tr("shell.undo"), toolbar::ShellAction::Undo) {
+                let mut items = Vec::new();
+                if action_item(ui, &mut items, tr("shell.undo"), toolbar::ShellAction::Undo) {
                     actions.push(toolbar::ShellAction::Undo);
                 }
-                if action_item(ui, tr("shell.redo"), toolbar::ShellAction::Redo) {
+                if action_item(ui, &mut items, tr("shell.redo"), toolbar::ShellAction::Redo) {
                     actions.push(toolbar::ShellAction::Redo);
                 }
                 ui.separator();
-                if action_item(ui, tr("prefs.title"), toolbar::ShellAction::Preferences) {
+                if action_item(
+                    ui,
+                    &mut items,
+                    tr("prefs.title"),
+                    toolbar::ShellAction::Preferences,
+                ) {
                     actions.push(toolbar::ShellAction::Preferences);
                 }
+                toolbar::menu_digit_pick(ui, &items, &mut actions);
             });
             MenuButton::new(tr("menu.view")).ui(ui, |ui| {
                 #[cfg(feature = "perf")]
@@ -3994,11 +4055,18 @@ impl eframe::App for UmberApp {
                 viewport::view_mode_menu(ui, &mut self.view.view_mode);
             });
             MenuButton::new(tr("menu.window")).ui(ui, |ui| {
-                if action_item(ui, tr("shell.hide-ui"), toolbar::ShellAction::ToggleHideUi) {
+                let mut items = Vec::new();
+                if action_item(
+                    ui,
+                    &mut items,
+                    tr("shell.hide-ui"),
+                    toolbar::ShellAction::ToggleHideUi,
+                ) {
                     actions.push(toolbar::ShellAction::ToggleHideUi);
                 }
                 if action_item(
                     ui,
+                    &mut items,
                     tr("shell.maximize"),
                     toolbar::ShellAction::ToggleMaximize,
                 ) {
@@ -4024,6 +4092,7 @@ impl eframe::App for UmberApp {
                     self.dock = self.workspaces.reset_active();
                     ui.close();
                 }
+                toolbar::menu_digit_pick(ui, &items, &mut actions);
             });
             MenuButton::new(tr("menu.help")).ui(ui, |ui| {
                 if ui.button(tr("menu.shortcuts")).clicked() {

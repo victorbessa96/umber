@@ -201,6 +201,10 @@ pub enum HistoryKind {
     Bake,
     /// A finished texture export. Context-only, same reason as [`Self::Bake`].
     Export,
+    /// The R-B1 flatten as ONE compound undo step: the group's add + removes
+    /// recorded as a single row (via `Document::run_grouped`); `undo`/`redo`
+    /// cross the whole group in one step.
+    Flatten,
 }
 
 impl HistoryKind {
@@ -263,6 +267,7 @@ impl HistoryKind {
             Self::GraphLoad => tr("history.op-graph-load"),
             Self::Bake => tr("history.op-bake"),
             Self::Export => tr("history.op-export"),
+            Self::Flatten => tr("history.op-flatten"),
         }
     }
 
@@ -299,6 +304,7 @@ impl HistoryKind {
             Self::GraphLoad => "load graph",
             Self::Bake => "bake",
             Self::Export => "export",
+            Self::Flatten => "flatten layers",
         }
     }
 }

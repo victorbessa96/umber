@@ -698,6 +698,7 @@ history =
     .op-attach-mask = Anexar máscara
     .op-detach-mask = Remover máscara
     .op-set-mask-enabled = Alternar máscara
+    .op-flatten = Achatar camadas
     .op-brush-stroke = Traço de pincel
     .op-graph-add-node = Adicionar nó
     .op-graph-remove-node = Remover nó

@@ -644,6 +644,7 @@ history =
     .op-attach-mask = Attach mask
     .op-detach-mask = Detach mask
     .op-set-mask-enabled = Toggle mask
+    .op-flatten = Flatten layers
     .op-brush-stroke = Brush stroke
     .op-graph-add-node = Add graph node
     .op-graph-remove-node = Remove graph node

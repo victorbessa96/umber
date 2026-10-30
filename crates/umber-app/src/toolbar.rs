@@ -839,6 +839,34 @@ mod contextual_tests {
     }
 }
 
+/// g7-keyboard-only: number keys pick menu items. Called at the END of a
+/// menu's content closure (egui runs it only while the menu is open):
+/// Digit1..=Digit9 push the nth collected item's action and close the menu.
+/// The shell collects a menu's enabled items via `action_item(..., &mut
+/// items, …)`; plain buttons/checkboxes are Tab-reachable already.
+pub fn menu_digit_pick(ui: &mut Ui, items: &[ShellAction], actions: &mut Vec<ShellAction>) {
+    /// The number-row keys, in pick order.
+    const DIGITS: [Key; 9] = [
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+    ];
+    for (n, key) in DIGITS.iter().enumerate() {
+        if ui.ctx().input(|i| i.key_pressed(*key)) {
+            if let Some(action) = items.get(n) {
+                actions.push(*action);
+                ui.close();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

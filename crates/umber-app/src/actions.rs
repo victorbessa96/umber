@@ -791,6 +791,14 @@ pub fn keyboard_reference() -> String {
     out
 }
 
+/// g7-keyboard-only: whether Esc should close app-owned overlays this
+/// frame — the key is pressed, no text field holds the keyboard (a text
+/// edit keeps its own Esc), and the command palette is closed (it consumes
+/// Esc and closes itself). egui menus/popups close on Esc natively.
+pub fn esc_closes_overlays(ctx: &egui::Context, palette_open: bool) -> bool {
+    ctx.input(|i| i.key_pressed(Key::Escape)) && Focus::current(ctx) != Focus::Text && !palette_open
+}
+
 /// Who owns the keyboard this frame (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {

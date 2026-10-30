@@ -90,6 +90,11 @@ impl QuickSetup {
         self.open
     }
 
+    /// Closes the window without applying choices (Esc's path).
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
     /// Draws the Quick Setup window. `i18n` is the locale picker's own
     /// state (the shell's copy — the picker switches the thread
     /// locale, so the window's OWN labels re-localize the frame after

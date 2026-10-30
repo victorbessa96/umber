@@ -316,6 +316,12 @@ pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
     ctx.set_style_of(egui::Theme::Light, style);
 }
 
+/// The keyboard-focus ring width. egui 0.36 paints the `active` widget
+/// visuals for the widget holding keyboard focus, so the focus ring token
+/// IS `visuals.widgets.active.bg_stroke` — a 2px accent ring (hover/press
+/// share the state, which reads as the same emphasis).
+pub const FOCUS_RING_WIDTH: f32 = 2.0;
+
 /// The Umber visuals: stock dark as the base, every color re-authored.
 fn umber_visuals() -> egui::Visuals {
     use palette::*;
@@ -359,7 +365,7 @@ fn umber_visuals() -> egui::Visuals {
 
     w.active.bg_fill = HOVER;
     w.active.weak_bg_fill = HOVER;
-    w.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    w.active.bg_stroke = Stroke::new(FOCUS_RING_WIDTH, ACCENT);
     w.active.fg_stroke = Stroke::new(2.0, TEXT);
     w.active.corner_radius = radius;
 
@@ -454,6 +460,17 @@ mod tests {
         assert_eq!(s.visuals.panel_fill, palette::PANEL);
         assert_eq!(s.visuals.selection.stroke.color, palette::ACCENT);
         assert_eq!(s.animation_time, MOTION_SECS);
+    }
+
+    #[test]
+    fn focus_ring_token_is_the_active_widget_ring() {
+        // egui 0.36 renders the focused widget with the `active` visuals,
+        // so the focus ring is pinned here as a theme token.
+        let s = umber_style(Density::Comfortable);
+        assert_eq!(
+            s.visuals.widgets.active.bg_stroke,
+            Stroke::new(FOCUS_RING_WIDTH, palette::ACCENT)
+        );
     }
 
     #[test]
