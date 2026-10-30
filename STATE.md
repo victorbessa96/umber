@@ -39,7 +39,7 @@ kills (they share main.rs). Battery GREEN: umber-app 879 tests 0 failed
 desktop, no screenshots per his word.
 
 **Next:** the open tail — g5-workspaces CLOSED 10-29 (`ad6f44b`) ·
-g7-keyboard-only · the
+g7-keyboard-only CLOSED 10-30 (`e008dcc`) · the
 quick-mask design question · the follow-up queue (the flatten's
 compound one-step; the browser's drag-drop + thumbnails) · the
 desktop-checks Result lines x4 (need the live desktop) · queue.md's
