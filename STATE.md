@@ -40,6 +40,8 @@ desktop, no screenshots per his word.
 
 **Next:** the open tail — g5-workspaces CLOSED 10-29 (`ad6f44b`) ·
 g7-keyboard-only CLOSED 10-30 (`e008dcc`) · the
+Painter-faithful default layout CLOSED 10-30 (`0f18fa7`, the viewport
+dominates the centre; LAYOUTS_VERSION 2 resets saved v1 layouts) · the
 quick-mask design question · the follow-up queue (the flatten's
 compound one-step; the browser's drag-drop + thumbnails) · the
 desktop-checks Result lines x4 (need the live desktop) · queue.md's

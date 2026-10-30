@@ -156,6 +156,12 @@ The dialog writes PNG (8/16-bit), EXR (32-bit float), TIFF or JPEG files, and ca
 - The menu row's workspace tabs (**Paint / Bake / Export / Graph**) swap
   the whole dock layout; Ctrl+PgDn cycles them. Your edits to each layout
   are remembered between launches.
+- The **Paint** layout opens Painter-style: the **3D viewport fills the
+  centre** with the **2D UV view** beside it (F1 both / F2 3D only / F4 2D
+  only / F5 swap), the project and asset panels on the left rail, and
+  **Properties** over **Layers / History** on the right rail. Panels can
+  be dragged, split or floated; **Window ▸ Reset UI** restores this
+  default.
 
 ## 6b. Bring in a Substance Painter project
 
