@@ -585,6 +585,7 @@ impl UvView {
         }
         if let Some(symmetry) = symmetry {
             draw_symmetry_guides(&painter, square, &symmetry);
+            draw_uv_axes(&painter, square);
         }
         // The UDIM grid (G6): in multi-tile mode, every present tile
         // gets a cell, its number, and a click target (a click switches
@@ -772,6 +773,45 @@ fn mirror_offset_at(square: egui::Rect, axis: MirrorAxis, pos: egui::Pos2) -> f3
         MirrorAxis::Y => 1.0 - (pos.y - square.top()) / square.height(),
     };
     t.clamp(0.0, 1.0)
+}
+
+/// The U/V axes over the UV square (g6-uv-view-parity's open item):
+/// the U axis (red) at V=0.5, the V axis (green) at U=0.5, with small
+/// labels at their positive ends. Screen V is up, so V=0.5 is the
+/// square's vertical middle.
+fn draw_uv_axes(painter: &egui::Painter, square: egui::Rect) {
+    let u_stroke = Stroke::new(1.5, Color32::from_rgb(220, 80, 80));
+    let v_stroke = Stroke::new(1.5, Color32::from_rgb(90, 200, 90));
+    let mid_y = square.center().y;
+    let mid_x = square.center().x;
+    painter.line_segment(
+        [
+            egui::pos2(square.left(), mid_y),
+            egui::pos2(square.right(), mid_y),
+        ],
+        u_stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(mid_x, square.top()),
+            egui::pos2(mid_x, square.bottom()),
+        ],
+        v_stroke,
+    );
+    painter.text(
+        egui::pos2(square.right() - 4.0, mid_y + 3.0),
+        egui::Align2::RIGHT_TOP,
+        "U",
+        egui::FontId::proportional(11.0),
+        Color32::from_rgb(220, 80, 80),
+    );
+    painter.text(
+        egui::pos2(mid_x + 4.0, square.top() + 2.0),
+        egui::Align2::LEFT_TOP,
+        "V",
+        egui::FontId::proportional(11.0),
+        Color32::from_rgb(90, 200, 90),
+    );
 }
 
 /// The symmetry guides over the UV square: the mirror line, and the
