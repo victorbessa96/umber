@@ -47,6 +47,24 @@
    after a reset. Empty mask → no sidecar written (a fresh mask and a
    cleared one are the same thing, all 0.0).
 
+## Amendment (landed 2026-10-31, the implementation wave): `paint/quick_mask/`, hash-named, own manifest
+
+The brief sketched a top-level `quick_mask/` dir with a `quick_mask` key in
+`project.json`. The landed design is better and touches NO core schema: the
+masks ride the EXISTING `paint/` sidecar as `paint/quick_mask/<set-hash>.json`
++ `<set-hash>.bin` (the file stem is the blake3 hex of the set name, so an
+arbitrary set name is never a path component), committed by their own tiny
+manifest `paint/quick_mask/manifest.txt` (`# Umber quick-mask commit v1` +
+`<file> <blake3>` lines) with the same stage → manifest.pending (commit
+point) → apply → sweep → prune protocol — and with the paint commit's
+5-field codec untouched. The header envelope is `{set, mask: QuickMaskCarry}`
+in `umber-paint`'s persistence.rs; the carry itself lives in
+`umber-brush` (`QuickMask::carry` / `from_carry`, `is_persist_worthy`).
+Save/load wiring: `main.rs` right after `save_paint_tiles` /
+`load_paint_tiles_reported` (a second commit point; a crash between them
+keeps the old masks). The project.json `serde(default)` concern disappears:
+pre-decision projects simply have no `paint/quick_mask/` dir and load zero.
+
 ## Implementation brief (the next wave claims this)
 
 - **core** (`crates/umber-core/src/project.rs`): a `ProjectQuickMask`

@@ -49,7 +49,7 @@ P1..P4 plus the reseed is queued as its own two-gate wave; leg log in
 docs/perf/protocol.md) · the perf-gate instrument wave CLOSED 10-30
 (`0981d2f` — P1 landed: the nightly's verdict is now the same-job A/B
 RATIO current/reference, band x1.10, not the absolute band; the
-absolute compare is report-only) · the quick-mask design question DECIDED 10-31 (persist, 8-bit sidecar — brief in the 10-31 design kill report; undo = follow-up) · the follow-up
+absolute compare is report-only) · quick-mask persistence LANDED 10-31 (`73f8724`, the `paint/quick_mask/` 8-bit sidecar; undoable mask strokes = the named follow-up) · the follow-up
 queue (the flatten's compound one-step; the browser's drag-drop +
 thumbnails) · the desktop-checks Result lines x4 (need the live desktop) ·
 queue.md's push-log row for this wave (rides the next docs pass) · the
