@@ -46,7 +46,10 @@ the 10-30 perf-nightly red VERDICTED FLEET, not code (the bench binary
 is byte-identical across a red and a green reading; the §12 gate's
 measured noise band is x1.51 against a x1.10 band — the instrument fix
 P1..P4 plus the reseed is queued as its own two-gate wave; leg log in
-docs/perf/protocol.md) · the quick-mask design question · the follow-up
+docs/perf/protocol.md) · the perf-gate instrument wave CLOSED 10-30
+(`0981d2f` — P1 landed: the nightly's verdict is now the same-job A/B
+RATIO current/reference, band x1.10, not the absolute band; the
+absolute compare is report-only) · the quick-mask design question · the follow-up
 queue (the flatten's compound one-step; the browser's drag-drop +
 thumbnails) · the desktop-checks Result lines x4 (need the live desktop) ·
 queue.md's push-log row for this wave (rides the next docs pass) · the

@@ -552,3 +552,43 @@ ride with P1/P2, never precede them. Queued as its own two-gate wave.
 
 The raw evidence (seven job logs + every run's scene JSONs) is staged in
 the vault at `projects/umber/assets/2026-10-30-perf-gate-noise/`.
+
+## The instrument wave (2026-10-30 ~18:3xZ) — P1 lands: the same-job A/B ratio
+
+The 10-30 red's dissection (above, and the two kill reports of
+2026-10-30) measured the gate's noise band at **x1.51 on identical
+code** against its **x1.10 band** — the yardstick cannot resolve what
+it claims. The named fix P1 landed as `0981d2f`:
+
+- `scripts/perf_gate.sh` now fetches the pinned reference
+  `PERF_AB_REF` (default `0955ac8467ce7670b3fb7dd24d15c835dd013ffc`,
+  the tip `perf/baseline.json` was seeded from — move the pin with a
+  reseed), archives it to /tmp/ab-ref with its own target dir, builds
+  it, and runs its passes INTERLEAVED with the current tree's (pass i:
+  current, then reference) so time-correlated fleet drift hits both
+  legs equally.
+- The verdict is the RATIO current/reference per metric
+  (`scripts/perf_compare_ab.py`, band `PERF_AB_BAND` default x1.10),
+  still two-gated: median-of-3 pairs, canary median-of-5 on a red.
+  The fleet's throughput is a common factor and cancels; the ratio
+  carries the code delta only.
+- The absolute compare vs `perf/baseline.json` is now REPORT-ONLY in
+  both the gate and the workflow step (`|| echo ::warning::`), kept in
+  the log and the artifacts for this leg log.
+- Artifacts carry the `/tmp/ab-*.json` files; job timeout 90 -> 120
+  min for the second build.
+
+Gate 1 for the wave (tooling scope, no Rust changed): bash -n +
+py_compile + workflow YAML assertions + `perf_compare_ab.py` unit
+cases (absolute-2x-but-ratio-1.0 is green, proving report-only;
+ratio x1.20 fails; MISSING fails; reference-absent prints U; band
+argv override) + a stubbed-cargo end-to-end of `perf_gate.sh` in both
+directions (ratio 1.0 -> GATE 1 green exit 0; ratio ~1.95 -> gate 1
+red -> canary -> GATE 2 red exit 1). No local bench (centralhost stood
+down; the harness needs the CI lavapipe).
+
+**Open:** the ratio's own noise floor is re-derived from the first
+instrumented nightlies; if it also proves wider than x1.10, P2 (gate
+the mean / require both mean+p95) and P3 (best-of-N) remain. No reseed
+rides this wave — with the ratio gate the absolute baseline is
+report-only, so reseeding is no longer urgent.
