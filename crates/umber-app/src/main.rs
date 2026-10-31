@@ -114,6 +114,7 @@
 //!   set-size rule applied to channels).
 
 mod actions;
+mod asset_thumbs;
 mod assets_panel;
 mod axis_gizmo;
 mod bake_sources;

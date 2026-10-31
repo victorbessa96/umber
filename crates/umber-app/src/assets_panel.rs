@@ -46,6 +46,34 @@ use egui::Ui;
 pub struct AssetsPanel {
     /// The search filter (substring, case-insensitive; empty = all).
     pub search: String,
+    /// Content-keyed swatch cache: (kind, name, preset-JSON hash) →
+    /// texture. A changed preset file changes the key and regenerates.
+    thumbs: std::collections::HashMap<crate::asset_thumbs::ThumbKey, egui::TextureId>,
+}
+
+impl AssetsPanel {
+    /// The row's swatch texture, generating + caching on first sight.
+    fn thumb(
+        &mut self,
+        ctx: &egui::Context,
+        kind: u8,
+        name: &str,
+        preset_json: &str,
+        make: impl FnOnce() -> egui::ColorImage,
+    ) -> Option<egui::TextureId> {
+        let key = crate::asset_thumbs::thumb_key(kind, name, preset_json);
+        if let Some(tex) = self.thumbs.get(&key) {
+            return Some(*tex);
+        }
+        let img = make();
+        let tex = ctx.load_texture(
+            format!("asset-thumb-{kind}-{name}"),
+            img,
+            egui::TextureOptions::LINEAR,
+        );
+        self.thumbs.insert(key, tex.id());
+        Some(tex.id())
+    }
 }
 
 /// What the shell must apply after a library row's click.
@@ -129,6 +157,15 @@ pub fn library_ui(
             continue;
         }
         ui.horizontal(|ui| {
+            let json = serde_json::to_string(material).unwrap_or_default();
+            if let Some(tex) = state.thumb(ui.ctx(), 1, name, &json, || {
+                crate::asset_thumbs::material_preview(material, crate::asset_thumbs::THUMB_PX)
+            }) {
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    tex,
+                    egui::vec2(24.0, 24.0),
+                )));
+            }
             let label = ui
                 .add(egui::Label::new(name).sense(egui::Sense::drag()))
                 .on_hover_text(tr("assets.drag-to-layers"));
@@ -164,6 +201,16 @@ pub fn library_ui(
             continue;
         }
         ui.horizontal(|ui| {
+            let json = serde_json::to_string(mask).unwrap_or_default();
+            if let Some(tex) = state.thumb(ui.ctx(), 2, name, &json, || {
+                crate::asset_thumbs::mask_preview(mask, crate::asset_thumbs::THUMB_PX)
+                    .unwrap_or_else(|| egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT))
+            }) {
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    tex,
+                    egui::vec2(24.0, 24.0),
+                )));
+            }
             let label = ui
                 .add(egui::Label::new(name).sense(egui::Sense::drag()))
                 .on_hover_text(tr("assets.drag-to-layers"));
