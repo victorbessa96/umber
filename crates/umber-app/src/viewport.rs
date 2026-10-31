@@ -205,6 +205,16 @@ const ORBIT_SENSITIVITY: f32 = 0.01;
 const PAN_SENSITIVITY: f32 = 0.0015;
 /// Zoom step per wheel notch (multiplicative, see `OrbitCamera::zoom`).
 const ZOOM_SENSITIVITY: f32 = 0.08;
+
+/// The cursor's position in NDC (x right ∈ [-1,1], y UP ∈ [-1,1]) inside
+/// `rect` — the anchor for zoom-toward-cursor (egui's y is down, NDC's
+/// is up, hence the flip).
+fn cursor_ndc(rect: egui::Rect, pos: egui::Pos2) -> egui::Vec2 {
+    egui::vec2(
+        (pos.x - rect.center().x) / (rect.width() * 0.5),
+        (rect.center().y - pos.y) / (rect.height() * 0.5),
+    )
+}
 /// Dolly per pixel of a zoom DRAG (Painter's Alt+RMB), as a fraction of
 /// the distance: 200 px of drag ≈ the wheel's 8 % notch, twenty times over.
 const ZOOM_DRAG_SENSITIVITY: f32 = 0.004;
@@ -1588,7 +1598,18 @@ impl Viewport {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                self.camera.zoom(scroll.signum() * ZOOM_SENSITIVITY);
+                // g1-nav-presets' open item: wheel zoom TOWARD the cursor —
+                // the point under the wheel stays fixed on screen.
+                let aspect = response.rect.width() / response.rect.height().max(1.0);
+                let ndc = response
+                    .hover_pos()
+                    .map(|pos| cursor_ndc(response.rect, pos))
+                    .unwrap_or(egui::Vec2::ZERO);
+                self.camera.zoom_toward(
+                    glam::Vec2::new(ndc.x, ndc.y),
+                    scroll.signum() * ZOOM_SENSITIVITY,
+                    aspect,
+                );
             }
             // Projection toggle (P, mnemonic: Projection): free because the
             // shell's SHORTCUT_KEYS (toolbar.rs: W/G/V/X/I/E/Z/S/O) and the
@@ -2719,6 +2740,18 @@ mod tests {
         };
         let quad = screen_quad(&t, 4, 2);
         assert_eq!(quad, [[-4.0, -2.0], [4.0, -2.0], [4.0, 2.0], [-4.0, 2.0]]);
+    }
+
+    #[test]
+    fn cursor_ndc_maps_center_to_zero_and_corners_to_unit() {
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(200.0, 100.0));
+        let c = cursor_ndc(rect, rect.center());
+        assert!(c.x.abs() < 1e-6 && c.y.abs() < 1e-6);
+        // Top-right corner: NDC (+1, +1) — y flipped from egui's down.
+        let tr = cursor_ndc(rect, rect.right_top());
+        assert!((tr.x - 1.0).abs() < 1e-6 && (tr.y - 1.0).abs() < 1e-6);
+        let bl = cursor_ndc(rect, rect.left_bottom());
+        assert!((bl.x + 1.0).abs() < 1e-6 && (bl.y + 1.0).abs() < 1e-6);
     }
 
     #[test]
