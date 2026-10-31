@@ -4139,6 +4139,10 @@ impl eframe::App for UmberApp {
                 ui.checkbox(&mut self.view.wireframe, tr("menu.wireframe"));
                 ui.checkbox(&mut self.view.grid, tr("menu.grid"));
                 ui.checkbox(&mut self.show_gizmo, tr("menu.gizmo"));
+                if ui.button(tr("menu.frame-mesh")).clicked() {
+                    self.state.viewport.frame_mesh();
+                    ui.close();
+                }
                 ui.separator();
                 viewport::view_mode_menu(ui, &mut self.view.view_mode);
             });

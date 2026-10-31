@@ -37,6 +37,7 @@ menu =
     .wireframe = Show Wireframe (W)
     .grid = Show Grid (G)
     .gizmo = Show Axis Gizmo
+    .frame-mesh = Frame mesh (F)
     .about = About Umber
     .shortcuts = Keyboard Shortcuts
     .close-project = Close Project

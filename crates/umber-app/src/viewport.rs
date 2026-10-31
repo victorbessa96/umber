@@ -1490,6 +1490,21 @@ impl Viewport {
         self.wheel_invert = invert;
     }
 
+    /// F-frame: fits the camera on the loaded mesh's bounds
+    /// (g1-nav-presets' open item; the engine half is
+    /// [`OrbitCamera::frame`]). No mesh, no move.
+    pub fn frame_mesh(&mut self) {
+        let Some(mesh) = self.mesh_data.as_ref() else {
+            return;
+        };
+        let Some((min, max)) = mesh.bounds() else {
+            return;
+        };
+        let center = (min + max) * 0.5;
+        let radius = (max - min).length() * 0.5;
+        self.camera.frame(center, radius, 1.15);
+    }
+
     /// Whether the axis gizmo draws (GUI plan G1 `g1-axis-gizmo`): the
     /// View menu's toggle, synced by the shell each frame like the
     /// overlay toggles. The gizmo itself (`crate::axis_gizmo`) is
@@ -1660,6 +1675,11 @@ impl Viewport {
             // owned by another surface) — same as the drag/scroll inputs.
             if ui.input(|i| i.key_pressed(egui::Key::P)) {
                 self.camera.toggle_projection();
+            }
+            // F frames the loaded mesh (g1-nav-presets' F-frame; same
+            // hover-gated, modifier-free contract as the P toggle).
+            if ui.input(|i| i.key_pressed(egui::Key::F)) {
+                self.frame_mesh();
             }
         }
     }
@@ -2781,6 +2801,23 @@ mod tests {
         };
         let quad = screen_quad(&t, 4, 2);
         assert_eq!(quad, [[-4.0, -2.0], [4.0, -2.0], [4.0, 2.0], [-4.0, 2.0]]);
+    }
+
+    #[test]
+    fn frame_mesh_centers_the_camera_on_the_mesh_bounds() {
+        let mut vp = head_on_viewport();
+        vp.mesh_data = Some(quad()); // bounds (-1,-1,0)..(1,1,0)
+        vp.camera.distance = 500.0;
+        vp.frame_mesh();
+        let c = vp.camera.target;
+        assert!(c.x.abs() < 1e-4 && c.y.abs() < 1e-4 && c.z.abs() < 1e-4);
+        // Framed: the unit sphere at distance ~1.15/tan(fov/2) fits.
+        assert!(vp.camera.distance < 500.0);
+        // No mesh: the camera does not move.
+        let mut vp2 = head_on_viewport();
+        let d0 = vp2.camera.distance;
+        vp2.frame_mesh();
+        assert_eq!(vp2.camera.distance, d0);
     }
 
     #[test]

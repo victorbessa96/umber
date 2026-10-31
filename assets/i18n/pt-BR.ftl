@@ -38,6 +38,7 @@ menu =
     .wireframe = Mostrar wireframe (W)
     .grid = Mostrar grade (G)
     .gizmo = Mostrar gizmo de eixos
+    .frame-mesh = Enquadrar malha (F)
     .about = Sobre o Umber
     .shortcuts = Atalhos de Teclado
     .close-project = Fechar Projeto
