@@ -50,8 +50,11 @@ docs/perf/protocol.md) · the perf-gate instrument wave CLOSED 10-30
 (`0981d2f` — P1 landed: the nightly's verdict is now the same-job A/B
 RATIO current/reference, band x1.10, not the absolute band; the
 absolute compare is report-only) · quick-mask persistence LANDED 10-31 (`73f8724`, the `paint/quick_mask/` 8-bit sidecar; undoable mask strokes = the named follow-up) · the follow-up
-queue (the flatten's compound one-step; the browser's drag-drop +
-thumbnails) · the desktop-checks Result lines x4 (need the live desktop) ·
+queue (the browser's saved searches/custom dirs/import dialog/kittest +
+mask thumbnails LANDED 10-31; the flatten's compound one-step shipped
+earlier as `run_grouped` — queue line stale; remaining: per-entry history
+thumbs, OS-bitmap cursor, zoom-to-cursor, drag-out) · the desktop-checks
+Result lines x4 (need the live desktop) ·
 queue.md's push-log row for this wave (rides the next docs pass) · the
 CLAUDE.md trap-line addition (the `&mut dyn` object-lifetime trap —
 a protected-file write, Bessa's hands) · the different-family
