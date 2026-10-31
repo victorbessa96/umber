@@ -5011,6 +5011,8 @@ dependencies = [
  "log",
  "pollster 1.0.1",
  "profiling",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "umber-bake",
  "umber-brush",
