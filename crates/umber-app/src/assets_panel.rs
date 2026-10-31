@@ -271,6 +271,10 @@ pub fn library_ui(
             let label = ui
                 .add(egui::Label::new(name).sense(egui::Sense::drag()))
                 .on_hover_text(tr("assets.drag-to-layers"));
+            // g7-accesskit-sweep: the drag-only label still names itself.
+            label.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name.as_str())
+            });
             label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
                 crate::layers_panel::AssetDropRef::Material(name.clone()),
             ));
@@ -316,6 +320,9 @@ pub fn library_ui(
             let label = ui
                 .add(egui::Label::new(name).sense(egui::Sense::drag()))
                 .on_hover_text(tr("assets.drag-to-layers"));
+            label.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name.as_str())
+            });
             label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
                 crate::layers_panel::AssetDropRef::Mask(name.clone()),
             ));
@@ -331,6 +338,94 @@ pub fn library_ui(
     }
     persist_search(state, search_path);
     out
+}
+
+#[cfg(test)]
+mod kittest {
+    //! The browser kittest (the R-C1 named follow-up), bin-side: the
+    //! panel's state is headless-constructible, so the harness drives
+    //! `library_ui` directly. Lives here (not tests/) because
+    //! assets_panel is a bin module — moving it to the lib is the
+    //! larger dual-crate unification, named in the saved-search report.
+
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    struct AssetsHarness {
+        panel: AssetsPanel,
+        brush: crate::brush_panel::BrushPanel,
+        /// The first non-empty outcome (clicks land on one frame; the
+        /// next frame's outcome is empty again).
+        hit: Option<LibraryOutcome>,
+    }
+
+    fn harness() -> Harness<'static, AssetsHarness> {
+        crate::i18n::init();
+        Harness::<AssetsHarness>::builder()
+            .with_step_dt(1.0 / 60.0)
+            .with_size([480.0, 640.0])
+            .build_ui_state(
+                |ui, s: &mut AssetsHarness| {
+                    let o = library_ui(ui, &mut s.panel, &s.brush, None, None);
+                    if o.material.is_some() || o.mask.is_some() || o.brush.is_some() {
+                        s.hit = Some(o);
+                    }
+                },
+                AssetsHarness {
+                    panel: AssetsPanel::default(),
+                    brush: crate::brush_panel::BrushPanel::new(),
+                    hit: None,
+                },
+            )
+    }
+
+    #[test]
+    fn browser_lists_bundled_presets_and_applies_on_plus() {
+        let mut h = harness();
+        assert!(h.run_ok().is_some(), "the browser settles");
+        // The bundled library (assets/smart): two materials + one mask.
+        assert!(
+            h.query_by_label("Worn metal").is_some(),
+            "material row (display name)"
+        );
+        assert!(
+            h.query_by_label("Painted wood").is_some(),
+            "material row (display name)"
+        );
+        assert!(h.query_by_label("Edge wear").is_some(), "mask row");
+        // The first ＋ button is the first material row (the list is
+        // name-sorted): clicking it applies that material.
+        // Materials render before masks, and the list is name-sorted:
+        // the first ＋ is "Painted wood".
+        let plus = h.get_all_by_label("＋").next().expect("row buttons");
+        plus.click();
+        assert!(h.run_ok().is_some());
+        let out = h
+            .state_mut()
+            .hit
+            .take()
+            .expect("the ＋ click produced an outcome");
+        assert_eq!(
+            out.material.as_ref().map(|m| m.name.as_str()),
+            Some("Painted wood"),
+            "the first material row's ＋ applies that material"
+        );
+    }
+
+    #[test]
+    fn search_filters_the_library_rows() {
+        let mut h = harness();
+        assert!(h.run_ok().is_some());
+        h.state_mut().panel.search = "worn".into();
+        assert!(h.run_ok().is_some());
+        assert!(h.query_by_label("Worn metal").is_some());
+        assert!(h.query_by_label("Painted wood").is_none(), "filtered out");
+        assert!(
+            h.query_by_label("Edge wear").is_none(),
+            "mask filtered out too"
+        );
+    }
 }
 
 #[cfg(test)]
