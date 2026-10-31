@@ -719,6 +719,9 @@ impl BakeJobHandle {
 /// The egui drawing itself (`show`) is untested by construction; every
 /// other method is pure logic with no GPU or UI dependency.
 pub struct BakesPanel {
+    /// g0-notices' open tail: a failure toast queued for the app shell
+    /// (drained after the dock into the app's notice stack).
+    pub toast: Option<(umber_gui::NoticeLevel, String)>,
     resolution: u32,
     /// The checked maps (C2-29: eight selectable, so a set, not one bool
     /// per map).
@@ -855,6 +858,7 @@ impl BakesPanel {
     /// present tile).
     pub fn new(output_dir: PathBuf) -> Self {
         Self {
+            toast: None,
             resolution: DEFAULT_RESOLUTION,
             maps: BakeSelection::DEFAULT_ON.into_iter().collect(),
             bake_skew: false,
@@ -1916,6 +1920,7 @@ impl BakesPanel {
                 log::error!("bake worker failed to start: {err}");
                 let args = [("error", FluentValue::from(err.to_string()))];
                 self.status = tr_args("bakes.worker-failed", args);
+                self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
                 false
             }
         }
@@ -1986,6 +1991,7 @@ impl BakesPanel {
                 log::error!("bake failed: {err:#}");
                 let args = [("error", FluentValue::from(format!("{err:#}")))];
                 self.status = tr_args("bakes.failed", args);
+                self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
             }
         }
     }

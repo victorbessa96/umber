@@ -4482,6 +4482,19 @@ impl eframe::App for UmberApp {
         for text in pick_notices {
             self.notices.post(umber_gui::NoticeLevel::Info, text);
         }
+        // g0-notices' open tail: the import/export/bake panels' failure
+        // toasts (same rail — the panels cannot post on the app's notices
+        // themselves; their status lines stay in-panel too).
+        for toast in [
+            self.state.psd_import.toast.take(),
+            self.state.export.toast.take(),
+            self.state.bakes.toast.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.notices.post(toast.0, toast.1);
+        }
         // The status bar drew before the dock: one more frame when the
         // hover moved, so its readout catches up (converges — the next
         // frame records the same hover).

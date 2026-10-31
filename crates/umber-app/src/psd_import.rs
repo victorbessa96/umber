@@ -1084,6 +1084,9 @@ pub struct PsdImportState {
     /// session, queued for the per-frame publish drain (the shell takes
     /// the queue each frame — never held across frames by the shell).
     pub to_publish: Vec<PsdPublish>,
+    /// g0-notices' open tail: a failure toast queued for the app shell
+    /// (drained after the dock into the app's notice stack).
+    pub toast: Option<(umber_gui::NoticeLevel, String)>,
 }
 
 // Tuned default (a real set name, not empty): manual impl, not derivable.
@@ -1097,6 +1100,7 @@ impl Default for PsdImportState {
             last_report: None,
             status: String::new(),
             to_publish: Vec::new(),
+            toast: None,
         }
     }
 }
@@ -1281,6 +1285,7 @@ impl PsdImportState {
                 }
                 Err(err) => {
                     self.status = format!("psd import failed: {err}");
+                    self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
                 }
             }
         }

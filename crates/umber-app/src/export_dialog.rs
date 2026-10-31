@@ -430,6 +430,10 @@ pub struct ExportDialog {
     /// Material/Shader network binding the written textures to the
     /// OpenPBR surface (the preset's `usda` toggle, requirements §6 P1).
     usda: bool,
+    /// g0-notices' open tail: a failure toast queued for the app shell
+    /// (drained after the dock into the app's notice stack — the panel
+    /// cannot post on it itself). The status line stays in-panel.
+    pub toast: Option<(umber_gui::NoticeLevel, String)>,
 }
 
 impl ExportDialog {
@@ -447,6 +451,7 @@ impl ExportDialog {
             mesh_tiles: MeshTilesCache::default(),
             materialx: false,
             usda: false,
+            toast: None,
         }
     }
 
@@ -730,6 +735,7 @@ impl ExportDialog {
                 log::error!("export failed: {err:#}");
                 let args = [("error", FluentValue::from(format!("{err:#}")))];
                 self.status = tr_args("export.failed", args);
+                self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
             }
         }
     }
