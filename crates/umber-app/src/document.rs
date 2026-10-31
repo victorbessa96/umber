@@ -1084,7 +1084,70 @@ pub fn layers_ui(
 /// The shipped smart-material directory: the repo's `assets/smart`
 /// (dev builds and the source tree), or `smart/` beside the binary in an
 /// installed build: the same two-place rule as the i18n catalogs.
+/// The extra library folders' persisted file name, in the state dir
+/// beside the prefs file. One absolute path per line; blank lines and
+/// duplicates skipped on load.
+pub const SMART_EXTRA_DIRS_FILE: &str = "smart_dirs";
+
+/// The extra-dirs file path (the state dir `preferences::prefs_path` uses).
+pub fn extra_dirs_path() -> Option<std::path::PathBuf> {
+    umber_brush::preset_library::user_preset_dir()
+        .and_then(|p| p.parent().map(|d| d.join(SMART_EXTRA_DIRS_FILE)))
+}
+
+/// Loads the persisted extra library folders. Missing/unreadable file
+/// → empty; each line is trimmed, blanks dropped, duplicates removed
+/// (first wins), and only existing directories survive.
+pub fn load_extra_dirs(path: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let Some(path) = path else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let p = std::path::PathBuf::from(line);
+        if !p.is_dir() {
+            continue;
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Writes the extra library folders (one per line). Errors log; the
+/// session keeps the list either way.
+pub fn save_extra_dirs(dirs: &[std::path::PathBuf], path: Option<&std::path::Path>) {
+    let Some(path) = path else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text: String = dirs
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = if text.is_empty() { text } else { text + "\n" };
+    if let Err(e) = std::fs::write(path, text) {
+        log::warn!("smart dirs: could not save {}: {e}", path.display());
+    }
+}
+
+/// The smart-library search path: the built-in dirs (bundled
+/// `assets/smart`, then the exe-dir `smart`) plus the user's persisted
+/// extra folders (deduplicated, built-ins first so they win the
+/// same-name dedup in the listers).
 pub fn smart_dirs() -> Vec<std::path::PathBuf> {
+    smart_dirs_with(&load_extra_dirs(extra_dirs_path().as_deref()))
+}
+
+/// [`smart_dirs`] with explicit extras (the testable core).
+pub fn smart_dirs_with(extras: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     let mut dirs =
         vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/smart")];
     if let Some(exe_dir) = std::env::current_exe()
@@ -1092,6 +1155,11 @@ pub fn smart_dirs() -> Vec<std::path::PathBuf> {
         .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
     {
         dirs.push(exe_dir.join("smart"));
+    }
+    for e in extras {
+        if !dirs.contains(e) {
+            dirs.push(e.clone());
+        }
     }
     dirs
 }
@@ -2829,5 +2897,42 @@ mod tests {
             Err(InstanceError::PaintOnFill { layer: fill })
         );
         assert_eq!(sync.index, 0);
+    }
+
+    #[test]
+    fn extra_dirs_round_trip_and_filter() {
+        let dir = std::env::temp_dir().join(format!("umber-extra-dirs-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("smart_dirs");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let missing = dir.join("nope");
+        save_extra_dirs(
+            &[a.clone(), b.clone(), missing.clone(), a.clone()],
+            Some(&path),
+        );
+        let loaded = load_extra_dirs(Some(&path));
+        assert_eq!(
+            loaded,
+            vec![a.clone(), b.clone()],
+            "existing dirs only, deduped, order kept"
+        );
+        // Blank lines and junk survive the write but are dropped on load.
+        std::fs::write(&path, format!("\n{}\n\n{}\n", a.display(), b.display())).unwrap();
+        assert_eq!(load_extra_dirs(Some(&path)), vec![a, b]);
+        assert!(load_extra_dirs(None).is_empty());
+        assert!(load_extra_dirs(Some(&dir.join("absent"))).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn smart_dirs_with_appends_extras_after_builtins_deduped() {
+        let extra = std::path::PathBuf::from("/tmp/umber-extra-lib");
+        let dirs = smart_dirs_with(&[extra.clone(), extra.clone()]);
+        assert_eq!(dirs.last(), Some(&extra));
+        assert_eq!(dirs.iter().filter(|d| **d == extra).count(), 1);
+        assert!(dirs.len() >= 3, "two built-ins + the extra");
     }
 }

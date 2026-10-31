@@ -55,6 +55,11 @@ pub struct AssetsPanel {
     restored: bool,
     /// The last value written to disk (skip no-op writes).
     last_saved: String,
+    /// The "add folder" text field.
+    new_dir: String,
+    /// Bumped whenever the extra library folders change — the material /
+    /// mask list caches key on it, so a new folder rescans them.
+    scan_epoch: u64,
 }
 
 /// Restores the persisted search once per session (the `restored` flag).
@@ -142,6 +147,63 @@ pub fn library_ui(
     let needle = state.search.to_lowercase();
     let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
 
+    // Extra library folders (persisted in the state dir; the built-in
+    // dirs stay first and win same-name dedup). The list caches per
+    // scan epoch; adding/removing a folder bumps the epoch, which also
+    // rescans the material/mask lists below.
+    let dirs_path = document::extra_dirs_path();
+    let extra_id = egui::Id::new(("assets-extra-dirs", state.scan_epoch));
+    let mut extras: Vec<std::path::PathBuf> = ui.ctx().data(|d| {
+        d.get_temp::<Option<Vec<std::path::PathBuf>>>(extra_id)
+            .flatten()
+            .unwrap_or_default()
+    });
+    if extras.is_empty() {
+        extras = document::load_extra_dirs(dirs_path.as_deref());
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(extra_id, Some(extras.clone())));
+    }
+    let mut dir_changed = false;
+    egui::CollapsingHeader::new(tr("assets.extra-dirs"))
+        .id_salt("assets-extra-dirs-header")
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut state.new_dir);
+                if ui.small_button("＋").clicked() {
+                    let p = std::path::PathBuf::from(state.new_dir.trim());
+                    if p.is_dir() && !extras.contains(&p) {
+                        extras.push(p);
+                        dir_changed = true;
+                        state.new_dir.clear();
+                    }
+                }
+            });
+            let mut remove: Option<std::path::PathBuf> = None;
+            for d in &extras {
+                ui.horizontal(|ui| {
+                    if ui.small_button("✕").clicked() {
+                        remove = Some(d.clone());
+                    }
+                    ui.label(d.display().to_string())
+                        .on_hover_text(d.display().to_string());
+                });
+            }
+            if let Some(d) = remove {
+                extras.retain(|e| *e != d);
+                dir_changed = true;
+            }
+        });
+    if dir_changed {
+        document::save_extra_dirs(&extras, dirs_path.as_deref());
+        state.scan_epoch += 1;
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new(("assets-extra-dirs", state.scan_epoch)),
+                Some(extras),
+            )
+        });
+    }
+
     // Brushes: the brush panel's own loaded library (the shelf's
     // source of truth — the Assets browser never re-scans what the
     // brush session already holds).
@@ -175,7 +237,7 @@ pub fn library_ui(
         .inner
         .clicked();
     let _ = refresh; // The list re-scans each open; the ⟳ exists for the eye's rhythm.
-    let cache_id = egui::Id::new("assets-materials");
+    let cache_id = egui::Id::new(("assets-materials", state.scan_epoch));
     let materials: Vec<(String, umber_core::smart::SmartMaterial)> = ui.ctx().data(|d| {
         d.get_temp::<Option<Vec<(String, umber_core::smart::SmartMaterial)>>>(cache_id)
             .flatten()
@@ -219,7 +281,7 @@ pub fn library_ui(
     }
 
     // Smart masks: the same loader rules + the shell's compose flow.
-    let cache_id = egui::Id::new("assets-masks");
+    let cache_id = egui::Id::new(("assets-masks", state.scan_epoch));
     let masks: Vec<(String, umber_core::smart::SmartMask)> = ui.ctx().data(|d| {
         d.get_temp::<Option<Vec<(String, umber_core::smart::SmartMask)>>>(cache_id)
             .flatten()
