@@ -606,3 +606,11 @@ was FASTER than the reference (ratio x0.878). The old absolute gate
 would have failed this night on fleet noise; the ratio gate called it
 correctly. This is the first measured data point of the ratio's own
 noise floor — so far well inside the x1.10 band.
+
+### Second instrumented nightly (2026-10-31 09:15Z, run 41187950107, scheduled) — SUCCESS, GATE 1 green, no canary
+
+A/B ratios vs the pinned reference in the same job: viewport_mean
+x0.784, viewport_p95 x0.891 — every metric inside x1.10, exit 0. The
+REPORT-ONLY absolute compare read x0.729 / x0.858 (green this night,
+but the ratio stays the verdict). Ratio noise floor so far: x0.878
+(41170685606) and x0.891 (this run), both far inside the x1.10 band.
