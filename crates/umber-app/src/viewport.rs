@@ -206,6 +206,23 @@ const PAN_SENSITIVITY: f32 = 0.0015;
 /// Zoom step per wheel notch (multiplicative, see `OrbitCamera::zoom`).
 const ZOOM_SENSITIVITY: f32 = 0.08;
 
+/// One frame of the RMB-cancel bookkeeping (Painter: RMB cancels the
+/// running nav drag): arms on a held RMB beside a dragged non-RMB
+/// button, holds while the cancelled button stays down, clears on its
+/// release.
+fn rmb_cancel_step(
+    prev: Option<PointerButton>,
+    dragged: Option<PointerButton>,
+    rmb_down: bool,
+    cancelled_down: bool,
+) -> Option<PointerButton> {
+    match (rmb_down, dragged) {
+        (true, Some(b)) if b != PointerButton::Secondary => Some(b),
+        _ if cancelled_down => prev,
+        _ => None,
+    }
+}
+
 /// The cursor's position in NDC (x right ∈ [-1,1], y UP ∈ [-1,1]) inside
 /// `rect` — the anchor for zoom-toward-cursor (egui's y is down, NDC's
 /// is up, hence the flip).
@@ -341,6 +358,9 @@ pub struct Viewport {
     nav: crate::navigation::NavPreset,
     /// Wheel-zoom inversion (Preferences ▸ Navigation).
     wheel_invert: bool,
+    /// The nav drag button cancelled by a held RMB (Painter's
+    /// right-click-cancels), cleared when that button is released.
+    nav_cancel: Option<PointerButton>,
     /// A Ctrl+RMB brush-resize drag in flight: the brush size and
     /// hardness at its start and the pointer origin (GUI plan G1
     /// g1-brush-resize). The ring stays at the origin while it runs.
@@ -1579,14 +1599,26 @@ impl Viewport {
         // first held button whose (button, modifiers) chord the preset
         // binds drives the camera this frame.
         let mods = ui.input(|i| i.modifiers);
-        let op = [
+        // g1-nav-presets' open item: RMB cancels the running navigation
+        // drag (Painter feel). Sticky until the cancelled button is
+        // released, so re-pressing the same button does not resume.
+        let buttons = [
             PointerButton::Primary,
             PointerButton::Middle,
             PointerButton::Secondary,
-        ]
-        .into_iter()
-        .filter(|b| response.dragged_by(*b))
-        .find_map(|b| self.nav.camera_op(b, mods));
+        ];
+        let dragged = buttons.into_iter().find(|b| response.dragged_by(*b));
+        let rmb_down = ui.input(|i| i.pointer.secondary_down());
+        let cancelled_down = self
+            .nav_cancel
+            .map(|b| ui.input(|i| i.pointer.button_down(b)))
+            .unwrap_or(false);
+        self.nav_cancel = rmb_cancel_step(self.nav_cancel, dragged, rmb_down, cancelled_down);
+        let op = buttons
+            .into_iter()
+            .filter(|b| response.dragged_by(*b))
+            .filter(|b| Some(*b) != self.nav_cancel)
+            .find_map(|b| self.nav.camera_op(b, mods));
         if let Some(op) = op {
             let delta = response.drag_delta();
             match op {
@@ -2749,6 +2781,34 @@ mod tests {
         };
         let quad = screen_quad(&t, 4, 2);
         assert_eq!(quad, [[-4.0, -2.0], [4.0, -2.0], [4.0, 2.0], [-4.0, 2.0]]);
+    }
+
+    #[test]
+    fn rmb_cancel_arms_on_rmb_beside_drag_holds_until_release() {
+        use PointerButton::*;
+        // RMB beside an LMB drag cancels the LMB.
+        assert_eq!(
+            rmb_cancel_step(None, Some(Primary), true, false),
+            Some(Primary)
+        );
+        // RMB dragged alone cancels nothing.
+        assert_eq!(rmb_cancel_step(None, Some(Secondary), true, false), None);
+        // No RMB, LMB still held: a prior cancel holds.
+        assert_eq!(
+            rmb_cancel_step(Some(Primary), Some(Primary), false, true),
+            Some(Primary)
+        );
+        // Button released: the cancel clears.
+        assert_eq!(
+            rmb_cancel_step(Some(Primary), Some(Primary), false, false),
+            None
+        );
+        // RMB beside the RMB drag itself: prior cancel on a still-down
+        // LMB holds.
+        assert_eq!(
+            rmb_cancel_step(Some(Primary), Some(Secondary), true, true),
+            Some(Primary)
+        );
     }
 
     #[test]
