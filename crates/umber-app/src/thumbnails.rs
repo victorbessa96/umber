@@ -83,6 +83,9 @@ pub fn downsample(rgba: &[u8], width: usize, height: usize, out: usize) -> Vec<u
 #[derive(Default)]
 pub struct Thumbnails {
     cache: BTreeMap<u64, (u64, TextureHandle)>,
+    /// Mask swatches, same revision keying (mask writes bump the
+    /// layer's owner revision — see `layer_mask_event`).
+    mask_cache: BTreeMap<u64, (u64, TextureHandle)>,
 }
 
 impl Thumbnails {
@@ -133,9 +136,54 @@ impl Thumbnails {
         self.cache.get(&layer).map(|(_, t)| t.clone())
     }
 
+    /// The mask swatch for `layer` (white = open), rebuilt first if the
+    /// layer's mask changed. `None` when the layer has no mask plane.
+    /// Same budget + mid-stroke rules as [`Self::get`].
+    pub fn mask_get(
+        &mut self,
+        ctx: &egui::Context,
+        paint: &mut PaintState,
+        layer: u64,
+        budget: &mut usize,
+    ) -> Option<TextureHandle> {
+        let owner = PlaneOwner::Layer(layer);
+        let rev = paint.owner_revision(owner);
+        let stale = self.mask_cache.get(&layer).is_none_or(|(r, _)| *r != rev);
+        if stale && *budget > 0 && rev > 0 && !paint.is_stroking() {
+            *budget -= 1;
+            if let Some(mask) = paint.layer_mask(layer, THUMB_TILE) {
+                // Expand the 8-bit mask to RGBA (gray, opaque) and reuse
+                // the same box filter; row flip matches the layer thumb.
+                let (w, h) = paint.tile_size(THUMB_TILE);
+                let mut rgba = vec![0u8; mask.len().saturating_mul(4)];
+                for (i, &g) in mask.iter().enumerate() {
+                    rgba[i * 4..i * 4 + 4].copy_from_slice(&[g, g, g, 255]);
+                }
+                let bytes = downsample(&rgba, w as usize, h as usize, THUMB_PX);
+                let image = ColorImage::from_rgba_unmultiplied([THUMB_PX, THUMB_PX], &bytes);
+                match self.mask_cache.get_mut(&layer) {
+                    Some((r, tex)) => {
+                        tex.set(image, TextureOptions::LINEAR);
+                        *r = rev;
+                    }
+                    None => {
+                        let tex = ctx.load_texture(
+                            format!("umber-mask-thumb-{layer}"),
+                            image,
+                            TextureOptions::LINEAR,
+                        );
+                        self.mask_cache.insert(layer, (rev, tex));
+                    }
+                }
+            }
+        }
+        self.mask_cache.get(&layer).map(|(_, t)| t.clone())
+    }
+
     /// Drops thumbnails of layers that no longer exist.
     pub fn prune(&mut self, live: &[u64]) {
         self.cache.retain(|id, _| live.contains(id));
+        self.mask_cache.retain(|id, _| live.contains(id));
     }
 
     /// How many thumbnails are cached (tests).

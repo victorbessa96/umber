@@ -689,6 +689,20 @@ fn topmost_paintable(stack: &LayerStack) -> Option<(u64, usize)> {
 /// the soloed mask; the clicks themselves return through
 /// [`LayersUiOutcome::gestures`].
 #[allow(clippy::too_many_arguments)]
+/// The per-layer thumbnail textures the shell builds each frame
+/// (content-keyed in `thumbnails::Thumbnails`): the layer's own pixels
+/// and its mask swatch.
+#[derive(Default)]
+pub struct LayerThumbs {
+    pub layer: std::collections::HashMap<u64, egui::TextureHandle>,
+    pub mask: std::collections::HashMap<u64, egui::TextureHandle>,
+}
+
+// Eight args is the panel's shape (the row renderer takes the doc, the
+// material context, the view state, the thumbs, the gestures): bundling
+// them into a context struct would churn every kittest call site for no
+// behavior gain.
+#[allow(clippy::too_many_arguments)]
 pub fn layers_ui(
     ui: &mut egui::Ui,
     doc: &mut Document,
@@ -696,7 +710,7 @@ pub fn layers_ui(
     active: PlaneOwner,
     base_visible: bool,
     badges: &LayerRowBadges,
-    thumbs: &std::collections::HashMap<u64, egui::TextureHandle>,
+    thumbs: &LayerThumbs,
     gestures: &crate::layers_panel::gestures::GestureState,
 ) -> LayersUiOutcome {
     use crate::layers_panel::gestures::{self as lg, DeleteSource, LayerGesture};
@@ -895,7 +909,7 @@ pub fn layers_ui(
                 // a fixed-size slot so rows align whether or not a layer
                 // has pixels yet.
                 let slot = egui::vec2(28.0, 28.0);
-                match thumbs.get(&layer.id) {
+                match thumbs.layer.get(&layer.id) {
                     Some(tex) => {
                         ui.add(egui::Image::new((tex.id(), slot)).corner_radius(3));
                     }
@@ -914,7 +928,8 @@ pub fn layers_ui(
                 // mask texture exists yet, so the slot draws outlined.
                 if let Some(enabled) = layer.mask {
                     let soloed = gestures.mask_solo.layer() == Some(layer.id);
-                    if let Some(g) = lg::mask_thumb(ui, layer.id, None, enabled, soloed) {
+                    let tex = thumbs.mask.get(&layer.id);
+                    if let Some(g) = lg::mask_thumb(ui, layer.id, tex, enabled, soloed) {
                         outcome.gestures.push(g);
                     }
                 }
@@ -1957,7 +1972,7 @@ mod tests {
                         PlaneOwner::Base,
                         true,
                         &LayerRowBadges::default(),
-                        &std::collections::HashMap::new(),
+                        &LayerThumbs::default(),
                         &crate::layers_panel::gestures::GestureState::default(),
                     );
                 },
@@ -2040,7 +2055,7 @@ mod tests {
                         PlaneOwner::Base,
                         true,
                         &LayerRowBadges::default(),
-                        &std::collections::HashMap::new(),
+                        &LayerThumbs::default(),
                         &GestureState::default(),
                     );
                     s.gestures.extend(outcome.gestures);

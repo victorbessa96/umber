@@ -2403,6 +2403,7 @@ impl PaintState {
             return false;
         }
         self.layer_masks.insert((layer, tile), values);
+        self.bump_revision(PlaneOwner::Layer(layer));
         true
     }
 
@@ -2471,7 +2472,10 @@ impl PaintState {
             stamp_grayscale_mask(plane, width, height, &stamp, target_byte);
         }
         // The dirt half ([M6]): every `(tile, channel)` carrying this
-        // layer's planes recomposites with the edited mask.
+        // layer's planes recomposites with the edited mask. The layer's
+        // owner revision bumps too: the mask thumbnail cache keys on it
+        // (owner_revision's only consumer is the thumbnail cache).
+        self.bump_revision(PlaneOwner::Layer(layer));
         if let Some(rect) = stamped {
             let plane_owner = self
                 .last_snapshot
@@ -9972,6 +9976,22 @@ mod tests {
     /// Layer masks, routing half: a mask-edit stroke paints ONLY the
     /// selected layer's plane (the layer pixels stay byte-identical, the
     /// quick mask stays unallocated), and wins over quick-mask mode.
+    #[test]
+    fn mask_writes_bump_the_layer_revision_for_the_mask_thumbnail() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 512).expect("paint state builds");
+        let layer = PlaneOwner::Layer(7);
+        assert_eq!(s.owner_revision(layer), 0);
+        let size = s.tile_size(FIRST_TILE);
+        assert!(s.publish_layer_mask(7, FIRST_TILE, vec![128u8; (size.0 * size.1) as usize]));
+        assert!(
+            s.owner_revision(layer) > 0,
+            "publish bumps the revision the mask thumbnail keys on"
+        );
+    }
+
     #[test]
     fn layer_mask_stroke_paints_only_the_mask_plane() {
         let Some((device, queue)) = try_request_device() else {

@@ -218,7 +218,7 @@ fn the_row_eye_toggles_visibility_and_reports_itself() {
             let defs = std::collections::BTreeMap::<String, String>::new();
             let badges = std::collections::HashMap::<u64, String>::new();
             let mut states = umber_app::material_layer::MaterialLayerStates::default();
-            let thumbs = std::collections::HashMap::<u64, egui::TextureHandle>::new();
+            let thumbs = umber_app::document::LayerThumbs::default();
             let gestures = GestureState::default();
             let mats = umber_app::layers_panel::MaterialPanelContext {
                 defs: &defs,
@@ -292,7 +292,7 @@ fn layers_ui_closure(
         let defs = std::collections::BTreeMap::<String, String>::new();
         let badges = std::collections::HashMap::<u64, String>::new();
         let mut states = umber_app::material_layer::MaterialLayerStates::default();
-        let thumbs = std::collections::HashMap::<u64, egui::TextureHandle>::new();
+        let thumbs = umber_app::document::LayerThumbs::default();
         let gestures = GestureState::default();
         let mats = umber_app::layers_panel::MaterialPanelContext {
             defs: &defs,
@@ -414,7 +414,7 @@ fn the_blend_combo_sets_the_selected_layers_mode_and_undo_restores() {
                 let defs = std::collections::BTreeMap::<String, String>::new();
                 let badges = std::collections::HashMap::<u64, String>::new();
                 let mut states = umber_app::material_layer::MaterialLayerStates::default();
-                let thumbs = std::collections::HashMap::<u64, egui::TextureHandle>::new();
+                let thumbs = umber_app::document::LayerThumbs::default();
                 let gestures = GestureState::default();
                 let mats = umber_app::layers_panel::MaterialPanelContext {
                     defs: &defs,

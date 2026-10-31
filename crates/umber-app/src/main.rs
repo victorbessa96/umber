@@ -709,14 +709,27 @@ impl TabViewer for PanelViewer<'_> {
                 };
                 // Thumbnails first (they read the paint session), then the
                 // rows draw from the finished map. Rebuild-budgeted.
-                let mut thumbs = std::collections::HashMap::new();
+                let mut thumbs = document::LayerThumbs::default();
                 if let Some(paint) = self.paint.as_deref_mut() {
-                    let live: Vec<u64> = self.doc.layers().iter().map(|l| l.id).collect();
-                    self.thumbnails.prune(&live);
+                    let live: Vec<(u64, bool)> = self
+                        .doc
+                        .layers()
+                        .iter()
+                        .map(|l| (l.id, l.mask.is_some()))
+                        .collect();
+                    let live_ids: Vec<u64> = live.iter().map(|(id, _)| *id).collect();
+                    self.thumbnails.prune(&live_ids);
                     let mut budget = thumbnails::MAX_REBUILDS_PER_FRAME;
-                    for &id in &live {
+                    for &(id, has_mask) in &live {
                         if let Some(t) = self.thumbnails.get(ui.ctx(), paint, id, &mut budget) {
-                            thumbs.insert(id, t);
+                            thumbs.layer.insert(id, t);
+                        }
+                        if has_mask {
+                            if let Some(t) =
+                                self.thumbnails.mask_get(ui.ctx(), paint, id, &mut budget)
+                            {
+                                thumbs.mask.insert(id, t);
+                            }
                         }
                     }
                     // Budget spent = possibly more stale thumbnails: come
