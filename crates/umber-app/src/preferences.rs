@@ -129,6 +129,8 @@ pub struct Preferences {
     pub key_hints: bool,
     /// The viewport navigation preset.
     pub nav: NavPreset,
+    /// Wheel zoom inverted (wheel up zooms out).
+    pub nav_wheel_invert: bool,
     /// The user's keymap delta over the default bindings (the `keymap=`
     /// line; see the module docs).
     pub keymap_overrides: Overrides,
@@ -144,6 +146,7 @@ impl Default for Preferences {
             reduce_motion: false,
             key_hints: true,
             nav: NavPreset::default(),
+            nav_wheel_invert: false,
             keymap_overrides: Overrides::default(),
         }
     }
@@ -161,7 +164,7 @@ impl Preferences {
     /// The `key=value` text (stable key order).
     pub fn serialize(&self) -> String {
         format!(
-            "ui_scale={}\nui_scale_auto={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nkeymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
             self.splitter_hit_zone.as_str(),
@@ -169,6 +172,7 @@ impl Preferences {
             self.reduce_motion,
             self.key_hints,
             nav_name(self.nav),
+            self.nav_wheel_invert,
             self.keymap_overrides.serialize()
         )
     }
@@ -201,6 +205,7 @@ impl Preferences {
                 "reduce_motion" => p.reduce_motion = bool_of(v).unwrap_or(p.reduce_motion),
                 "key_hints" => p.key_hints = bool_of(v).unwrap_or(p.key_hints),
                 "nav" => p.nav = NavPreset::from_name(v).unwrap_or(p.nav),
+                "nav_wheel_invert" => p.nav_wheel_invert = bool_of(v).unwrap_or(p.nav_wheel_invert),
                 "keymap" => p.keymap_overrides = Overrides::parse(v),
                 _ => {}
             }
@@ -801,6 +806,12 @@ mod tests {
 
     #[test]
     fn round_trip_and_defaults() {
+        let p2 = Preferences {
+            nav_wheel_invert: true,
+            ..Default::default()
+        };
+        assert!(Preferences::parse(&p2.serialize()).nav_wheel_invert);
+
         let p = Preferences {
             ui_scale: 1.25,
             ui_scale_auto: false,
@@ -810,6 +821,7 @@ mod tests {
             key_hints: false,
             nav: NavPreset::Blender,
             keymap_overrides: actions::blender_overrides(),
+            nav_wheel_invert: false,
         };
         assert_eq!(Preferences::parse(&p.serialize()), p);
         assert_eq!(Preferences::parse(""), Preferences::default());

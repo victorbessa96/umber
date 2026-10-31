@@ -339,6 +339,8 @@ pub struct Viewport {
     /// The navigation scheme (`crate::navigation`): Painter's Alt+mouse by
     /// default, `UMBER_NAV` to choose until the preferences window lands.
     nav: crate::navigation::NavPreset,
+    /// Wheel-zoom inversion (Preferences ▸ Navigation).
+    wheel_invert: bool,
     /// A Ctrl+RMB brush-resize drag in flight: the brush size and
     /// hardness at its start and the pointer origin (GUI plan G1
     /// g1-brush-resize). The ring stays at the origin while it runs.
@@ -1462,6 +1464,12 @@ impl Viewport {
         self.nav = nav;
     }
 
+    /// Sets wheel-zoom inversion (Preferences ▸ Navigation): wheel up
+    /// zooms OUT when on.
+    pub fn set_wheel_invert(&mut self, invert: bool) {
+        self.wheel_invert = invert;
+    }
+
     /// Whether the axis gizmo draws (GUI plan G1 `g1-axis-gizmo`): the
     /// View menu's toggle, synced by the shell each frame like the
     /// overlay toggles. The gizmo itself (`crate::axis_gizmo`) is
@@ -1605,11 +1613,12 @@ impl Viewport {
                     .hover_pos()
                     .map(|pos| cursor_ndc(response.rect, pos))
                     .unwrap_or(egui::Vec2::ZERO);
-                self.camera.zoom_toward(
-                    glam::Vec2::new(ndc.x, ndc.y),
-                    scroll.signum() * ZOOM_SENSITIVITY,
-                    aspect,
-                );
+                let mut step = scroll.signum() * ZOOM_SENSITIVITY;
+                if self.wheel_invert {
+                    step = -step;
+                }
+                self.camera
+                    .zoom_toward(glam::Vec2::new(ndc.x, ndc.y), step, aspect);
             }
             // Projection toggle (P, mnemonic: Projection): free because the
             // shell's SHORTCUT_KEYS (toolbar.rs: W/G/V/X/I/E/Z/S/O) and the

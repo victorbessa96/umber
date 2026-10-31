@@ -2233,6 +2233,14 @@ impl UmberApp {
                                 ui.selectable_value(&mut p.nav, preset, tr(key));
                             }
                         });
+                        {
+                            let invert = tr("prefs.nav-wheel-invert");
+                            if preferences::row_matches(&q, &invert)
+                                || preferences::row_matches(&q, &navigation)
+                            {
+                                ui.checkbox(&mut p.nav_wheel_invert, &invert);
+                            }
+                        }
                         if std::env::var("UMBER_NAV").is_ok() {
                             ui.label(
                                 egui::RichText::new(tr("prefs.nav-env-override"))
@@ -2267,6 +2275,9 @@ impl UmberApp {
             self.state
                 .viewport
                 .set_nav_preset(self.prefs.effective_nav(env.as_deref()));
+            self.state
+                .viewport
+                .set_wheel_invert(self.prefs.nav_wheel_invert);
         }
         // The style sync: only what differs is written (photocraft #10).
         let style = ctx.global_style();
@@ -2567,6 +2578,9 @@ impl UmberApp {
         self.state
             .viewport
             .set_nav_preset(self.prefs.effective_nav(env.as_deref()));
+        self.state
+            .viewport
+            .set_wheel_invert(self.prefs.nav_wheel_invert);
     }
 
     /// File > Load Environment…: file dialog → decode → convolve →
@@ -4556,6 +4570,9 @@ impl eframe::App for UmberApp {
                     self.state
                         .viewport
                         .set_nav_preset(self.prefs.effective_nav(env.as_deref()));
+                    self.state
+                        .viewport
+                        .set_wheel_invert(self.prefs.nav_wheel_invert);
                 }
             }
         }

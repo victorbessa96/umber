@@ -856,6 +856,7 @@ prefs =
     .nav-painter = Painter (Alt + mouse)
     .nav-umber = Umber classic
     .nav-blender = Blender (middle mouse)
+    .nav-wheel-invert = Invert wheel zoom (up = zoom out)
     .nav-env-override = UMBER_NAV is set: it overrides this choice for this launch.
     .section-keymap = Keymap
     .keymap-preset = Preset

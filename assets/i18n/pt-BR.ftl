@@ -875,6 +875,7 @@ prefs =
     .nav-painter = Painter (Alt + mouse)
     .nav-umber = Umber clássico
     .nav-blender = Blender (botão do meio)
+    .nav-wheel-invert = Inverter zoom da roda (cima = afastar)
     .nav-env-override = UMBER_NAV está definido: ele substitui esta escolha nesta execução.
     .section-keymap = Atalhos de teclado
     .keymap-preset = Predefinição
