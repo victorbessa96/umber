@@ -980,5 +980,7 @@ assets =
     .brushes = Brushes
     .materials = Smart materials
     .empty = Nothing here yet.
+    .import = Import…
+    .import-title = Import
     .extra-dirs = Extra library folders
     .drag-to-layers = Drag onto the Layers panel: materials become a new layer, masks bind to the layer under the drop.

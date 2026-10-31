@@ -1240,17 +1240,28 @@ impl TabViewer for PanelViewer<'_> {
                         compose_mask_flow(paint, self.doc, self.bakes, *target, mask);
                     }
                 }
+                // The import dialog (the R-C1 brief: the three import
+                // sections MOVE out of the tab body into one Import…
+                // window).
                 ui.separator();
-                self.mesh_import.show(
-                    ui,
-                    self.doc,
-                    self.store,
-                    mesh_map_import::read_pending_from_disk,
-                );
-                ui.separator();
-                psd_import::show_section(ui, self.psd_import, self.doc);
-                ui.separator();
-                spp_import::show_section(ui, self.spp_import);
+                if ui.button(tr("assets.import")).clicked() {
+                    self.assets.import_open = true;
+                }
+                egui::Window::new(tr("assets.import-title"))
+                    .open(&mut self.assets.import_open)
+                    .collapsible(false)
+                    .show(ui.ctx(), |ui| {
+                        self.mesh_import.show(
+                            ui,
+                            self.doc,
+                            self.store,
+                            mesh_map_import::read_pending_from_disk,
+                        );
+                        ui.separator();
+                        psd_import::show_section(ui, self.psd_import, self.doc);
+                        ui.separator();
+                        spp_import::show_section(ui, self.spp_import);
+                    });
             }
             Panel::History => {
                 // The pi review's LOW: a graph command queued earlier in

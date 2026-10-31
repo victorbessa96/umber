@@ -57,6 +57,9 @@ pub struct AssetsPanel {
     last_saved: String,
     /// The "add folder" text field.
     new_dir: String,
+    /// Whether the Import… dialog window is open (the three import
+    /// sections moved into it per the R-C1 brief).
+    pub import_open: bool,
     /// Bumped whenever the extra library folders change — the material /
     /// mask list caches key on it, so a new folder rescans them.
     scan_epoch: u64,
