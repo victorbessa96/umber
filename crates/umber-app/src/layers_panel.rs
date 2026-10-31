@@ -412,6 +412,7 @@ fn channel_rows(
             ui.add_enabled(
                 next_blend != BlendMode::Replace,
                 umber_gui::ValueField::new(&mut next_opacity)
+                    .percent(true)
                     .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.0..=1.0),
             );

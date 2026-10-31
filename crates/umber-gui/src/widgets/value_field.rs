@@ -350,6 +350,9 @@ pub struct ValueField<'a, N: Numeric> {
     soft: Option<(f64, f64)>,
     default: Option<f64>,
     menu: Option<MenuLabels<'a>>,
+    /// Factor mode (g4-valuefield-grammar's open item): a 0..=1 value
+    /// shown and typed as 0-100 %. The stored value stays 0..=1.
+    percent: bool,
 }
 
 impl<'a, N: Numeric> ValueField<'a, N> {
@@ -372,6 +375,34 @@ impl<'a, N: Numeric> ValueField<'a, N> {
             soft: None,
             default: None,
             menu: None,
+            percent: false,
+        }
+    }
+
+    /// The value as displayed/entered (percent mode scales ×100).
+    fn shown(&self, v: f64) -> f64 {
+        if self.percent {
+            v * 100.0
+        } else {
+            v
+        }
+    }
+
+    /// A displayed/entered value back to the stored scale (÷100).
+    fn stored(&self, v: f64) -> f64 {
+        if self.percent {
+            v / 100.0
+        } else {
+            v
+        }
+    }
+
+    /// The unit suffix as displayed ("%" in percent mode).
+    fn shown_unit(&self) -> &'a str {
+        if self.percent {
+            "%"
+        } else {
+            self.unit
         }
     }
 
@@ -442,6 +473,12 @@ impl<'a, N: Numeric> ValueField<'a, N> {
         self
     }
 
+    /// Factor mode: display and parse the 0..=1 value as 0-100 %.
+    pub fn percent(mut self, on: bool) -> Self {
+        self.percent = on;
+        self
+    }
+
     /// Fixed width in points (default: 2× the interact width).
     pub fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
@@ -458,7 +495,9 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         // role, the value as the accesskit value; `unit` is its only
         // label source — the app's tr() strings name fields at the
         // panel layer, not here).
-        response.widget_info(|| WidgetInfo::slider(true, self.value.to_f64(), self.unit));
+        response.widget_info(|| {
+            WidgetInfo::slider(true, self.shown(self.value.to_f64()), self.shown_unit())
+        });
         let id: Id = response.id.with("scrub-raw");
         let edit_id: Id = response.id.with("edit-buf");
         let text_id: Id = response.id.with("edit-text");
@@ -471,7 +510,7 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
         // Typed entry: a click (no drag) or keyboard focus opens it.
         let mut editing: Option<String> = ui.ctx().data(|d| d.get_temp(edit_id));
         if editing.is_none() && (response.clicked() || response.gained_focus()) {
-            editing = Some(format_value(old, self.decimals, ""));
+            editing = Some(format_value(self.shown(old), self.decimals, ""));
             ui.ctx()
                 .data_mut(|d| d.insert_temp(text_id.with("fresh"), true));
         }
@@ -507,8 +546,8 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
             if text_response.lost_focus() {
                 let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if !cancelled {
-                    if let Some(typed) = eval_expr(&buffer, self.unit) {
-                        new = clamp(typed, hard.0, hard.1);
+                    if let Some(typed) = eval_expr(&buffer, self.shown_unit()) {
+                        new = clamp(self.stored(typed), hard.0, hard.1);
                     }
                 }
                 ui.ctx().data_mut(|d| d.remove::<String>(edit_id));
@@ -606,24 +645,26 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 (copy, paste, reset)
             });
             if copy {
-                let text = format_value(new, self.decimals, "");
+                let text = format_value(self.shown(new), self.decimals, "");
                 ui.ctx()
                     .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
                 ui.ctx().copy_text(text);
             }
-            if let Some(value) = paste.and_then(|text| eval_expr(&text, self.unit)) {
-                new = clamp(value, hard.0, hard.1);
+            if let Some(value) = paste.and_then(|text| eval_expr(&text, self.shown_unit())) {
+                new = clamp(self.stored(value), hard.0, hard.1);
             }
             if let (true, Some(default)) = (reset, self.default) {
                 new = clamp(default, hard.0, hard.1);
             }
         }
 
+        let percent = self.percent;
+        let decimals = self.decimals;
+        let shown_unit: &str = if percent { "%" } else { self.unit };
         match self.menu {
             // Right-click opens the property menu.
             Some(labels) => {
-                let decimals = self.decimals;
-                let unit = self.unit;
+                let unit = shown_unit;
                 let default = self.default;
                 let current = new;
                 let mut picked = None;
@@ -639,14 +680,29 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                         }
                     }
                     if ui.button(labels.copy.as_ref()).clicked() {
-                        let text = format_value(current, decimals, "");
+                        let text = format_value(
+                            if percent { current * 100.0 } else { current },
+                            decimals,
+                            "",
+                        );
                         ui.ctx()
                             .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
                         ui.ctx().copy_text(text);
                         ui.close();
                     }
                     let clip: Option<String> = ui.ctx().data(|d| d.get_temp(shared_clip_id()));
-                    let pasted = menu_paste(clip.as_deref(), unit, hard.0, hard.1);
+                    let (pmin, pmax) = if percent {
+                        (hard.0 * 100.0, hard.1 * 100.0)
+                    } else {
+                        hard
+                    };
+                    let pasted = menu_paste(clip.as_deref(), unit, pmin, pmax).map(|v| {
+                        if percent {
+                            v / 100.0
+                        } else {
+                            v
+                        }
+                    });
                     if ui
                         .add_enabled(pasted.is_some(), egui::Button::new(labels.paste.as_ref()))
                         .clicked()
@@ -663,7 +719,8 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
             // pastes into other fields.
             None => {
                 if response.secondary_clicked() {
-                    let text = format_value(new, self.decimals, "");
+                    let shown = if percent { new * 100.0 } else { new };
+                    let text = format_value(shown, decimals, "");
                     ui.ctx()
                         .data_mut(|d| d.insert_temp(shared_clip_id(), text.clone()));
                     ui.ctx().copy_text(text);
@@ -699,7 +756,8 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 painter.rect_filled(fill, 3.0, theme::accent().gamma_multiply(0.25));
             }
             let font = numeric_font(ui.style().text_styles[&egui::TextStyle::Monospace].size);
-            let number = format_value(new, self.decimals, "");
+            let shown = if percent { new * 100.0 } else { new };
+            let number = format_value(shown, decimals, "");
             let galley_w = painter
                 .text(
                     rect.center(),
@@ -709,11 +767,11 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                     theme::text(),
                 )
                 .width();
-            if !self.unit.is_empty() {
+            if !shown_unit.is_empty() {
                 painter.text(
                     rect.center() + Vec2::new(galley_w / 2.0 + 3.0, 0.0),
                     Align2::LEFT_CENTER,
-                    self.unit,
+                    shown_unit,
                     font,
                     theme::muted(),
                 );
@@ -1056,6 +1114,16 @@ mod tests {
 
     #[test]
     fn format_and_fill() {
+        // Percent mode: shown ×100 with a "%" unit, stored ÷100.
+        let mut v = 0.42f64;
+        let mut f = ValueField::new(&mut v).percent(true);
+        assert!((f.shown(0.42) - 42.0).abs() < 1e-9);
+        assert!((f.stored(42.0) - 0.42).abs() < 1e-9);
+        assert_eq!(f.shown_unit(), "%");
+        f.percent = false;
+        assert!((f.shown(0.42) - 0.42).abs() < 1e-9);
+        assert_eq!(f.shown_unit(), "");
+
         assert_eq!(format_value(12.345, 2, ""), "12.35");
         assert_eq!(format_value(64.0, 0, "px"), "64\u{2009}px");
         assert_eq!(fill_fraction(0.5, 0.0, 2.0), Some(0.25));

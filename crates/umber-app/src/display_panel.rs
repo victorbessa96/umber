@@ -250,6 +250,7 @@ pub fn overlay_rows(ui: &mut Ui, s: &mut OverlaySettings) -> bool {
             changed |= ui
                 .add(
                     ValueField::new(&mut s.wireframe_opacity)
+                        .percent(true)
                         .context_menu(crate::i18n::prop_menu_labels())
                         .default_value(OverlaySettings::DEFAULT_WIRE_OPACITY)
                         .range(0.0..=1.0)
@@ -355,6 +356,7 @@ pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
             // Opacity only feeds the overlay draw, which reads the field
             // itself: no response flag (nothing to re-stage).
             let field = ValueField::new(row.opacity)
+                .percent(true)
                 .context_menu(crate::i18n::prop_menu_labels())
                 .default_value(DEFAULT_STENCIL_OPACITY)
                 .range(0.0..=1.0)

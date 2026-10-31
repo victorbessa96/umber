@@ -444,6 +444,7 @@ pub fn path_tool_rows(
                 ui,
                 &tr("brush.smudge-strength"),
                 umber_gui::ValueField::new(&mut params.strength)
+                    .percent(true)
                     .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.0..=1.0),
             ) {
@@ -453,6 +454,7 @@ pub fn path_tool_rows(
                 ui,
                 &tr("brush.smudge-smear"),
                 umber_gui::ValueField::new(&mut params.smear)
+                    .percent(true)
                     .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.0..=1.0),
             ) {
@@ -500,6 +502,7 @@ pub fn path_tool_rows(
                 ui,
                 &tr("path.opacity"),
                 umber_gui::ValueField::new(&mut opacity)
+                    .percent(true)
                     .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.0..=1.0),
             ) {

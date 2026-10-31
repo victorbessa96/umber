@@ -564,7 +564,11 @@ pub fn contextual_strip(ui: &mut Ui, view: &mut ContextualView<'_>) -> Vec<Strip
         if let Some(preset) = view.preset.as_deref_mut() {
             ui.label(tr("strip.flow"));
             if ui
-                .add(ValueField::new(&mut preset.params.alpha).range(0.0..=1.0))
+                .add(
+                    ValueField::new(&mut preset.params.alpha)
+                        .range(0.0..=1.0)
+                        .percent(true),
+                )
                 .changed()
             {
                 // Flow and stroke opacity are the same field (BuildUp's

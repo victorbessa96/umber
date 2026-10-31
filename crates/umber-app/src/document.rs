@@ -1548,6 +1548,7 @@ pub(crate) fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u6
             let mut opacity = layer.opacity;
             let response = ui.add(
                 umber_gui::ValueField::new(&mut opacity)
+                    .percent(true)
                     .range(0.0..=1.0)
                     .default_value(1.0)
                     .context_menu(crate::i18n::prop_menu_labels()),
