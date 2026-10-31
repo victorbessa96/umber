@@ -1,15 +1,15 @@
 name: perf-nightly
 
 # The §12 protocol's regression gate (docs/perf/protocol.md): the nightly
-# job runs the perf harnesses headless and compares against
-# perf/baseline.json — a >10% regression on any budget fails the job, and
-# so does a tracked metric the run did not produce (perf_compare.py), and
-# so does a failing harness (the stroke soak's zero-drop assert).
-# Drift-hardened 2026-10-19: scripts/perf_gate.sh runs the metric
-# harnesses as median-of-3 (perf_median.py) and, on a red, a same-tip
-# canary leg (median-of-5) before the job may fail — the runner-fleet
-# CPU drift of 2026-10-19 read red on five commits in one day (image
-# identical) and a single sample can no longer carry a verdict.
+# job runs the perf harnesses headless and gates them — A/B-instrumented
+# since the 2026-10-30 instrument wave: scripts/perf_gate.sh benches the
+# pinned reference commit PERF_AB_REF in the SAME job on the SAME runner
+# and gates the RATIO current/reference (scripts/perf_compare_ab.py,
+# band x1.10), because the hosted lavapipe fleet's throughput moves
+# x1.16..x1.51 on identical code within a day and an absolute x1.10 band
+# cannot resolve that. The absolute compare vs perf/baseline.json below
+# is REPORT-ONLY. A harness failure (the stroke soak's zero-drop assert)
+# still fails the job outright.
 # NOT per-commit (the load directive): failures here don't block merges;
 # they surface the drift the protocol tracks.
 
@@ -50,9 +50,10 @@ jobs:
     # "Image: ubuntu-26.04". Revisit when 26.04's stack stabilizes
     # upstream, same revisit clause as the CI pin.
     runs-on: ${{ vars.PERF_RUNNER || 'ubuntu-24.04' }}
-    # Gate 1 is 3 harness passes; a red adds the 2-pass canary leg —
-    # 90 min holds build + soak + five passes + two compares with margin.
-    timeout-minutes: 90
+    # Gate 1 is 3 interleaved pass pairs (current + the pinned A/B
+    # reference); a red adds the 2-pair canary leg — 120 min holds both
+    # builds + the soak + five pairs + the compares with margin.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,16 +78,20 @@ jobs:
       - name: Build the perf harnesses
         run: cargo build --release -p umber-app -p umber-gpu --features perf
 
-      - name: Run the drift-hardened perf gate (median-of-3 + same-tip canary)
-        # perf_gate.sh owns the harness env vars, the N-pass medians, and
-        # the two-gate verdict; its stdout carries every per-pass number.
-        # A harness failure (the soak's zero-drop assert, a panicking
-        # bench) fails the job before any comparison, as before.
+      - name: Run the A/B-instrumented perf gate (median-of-3 pairs + canary, ratio verdict)
+        # perf_gate.sh owns the harness env vars, the interleaved A/B
+        # reference leg, the N-pass medians, and the two-gate RATIO
+        # verdict; its stdout carries every per-pass number. A harness
+        # failure (the soak's zero-drop assert, a panicking bench) fails
+        # the job before any comparison, as before.
         run: bash scripts/perf_gate.sh
 
-      - name: Compare against perf/baseline.json (>10% fails)
+      - name: Absolute compare vs perf/baseline.json (REPORT-ONLY)
+        # The A/B ratio gate above owns the pass/fail verdict; this
+        # absolute compare stays in the log for the §12 leg log and must
+        # never fail the job on its own.
         if: always()
-        run: python3 scripts/perf_compare.py /tmp/ref-scene.json /tmp/i2p.json perf/baseline.json
+        run: python3 scripts/perf_compare.py /tmp/ref-scene.json /tmp/i2p.json perf/baseline.json || echo "::warning::absolute compare red (report-only) — the A/B ratio verdict above is authoritative"
 
       - name: Upload the fresh numbers as the artifact
         if: always()
@@ -98,4 +103,8 @@ jobs:
             /tmp/i2p.json
             /tmp/ref-r*.json
             /tmp/i2p-r*.json
+            /tmp/ab-ref-scene.json
+            /tmp/ab-i2p.json
+            /tmp/ab-ref-r*.json
+            /tmp/ab-i2p-r*.json
           retention-days: 30
