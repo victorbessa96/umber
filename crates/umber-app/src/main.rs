@@ -1196,7 +1196,13 @@ impl TabViewer for PanelViewer<'_> {
                 // three existing libraries (the brief's discoverability
                 // layer). The import sections stay below.
                 let selected = self.layer_gestures.selection.primary();
-                let outcome = assets_panel::library_ui(ui, self.assets, self.brush, selected);
+                let outcome = assets_panel::library_ui(
+                    ui,
+                    self.assets,
+                    self.brush,
+                    selected,
+                    preferences::assets_search_path().as_deref(),
+                );
                 if let Some(name) = outcome.brush {
                     if !self.brush.select_preset_by_name(&name) {
                         log::warn!("assets: brush '{name}' left the shelf (a stale row)");

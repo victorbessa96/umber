@@ -45,10 +45,45 @@ use egui::Ui;
 #[derive(Debug, Default)]
 pub struct AssetsPanel {
     /// The search filter (substring, case-insensitive; empty = all).
+    /// Persisted to the state dir (the swatches-file precedent) so the
+    /// browser reopens on the last query.
     pub search: String,
     /// Content-keyed swatch cache: (kind, name, preset-JSON hash) →
     /// texture. A changed preset file changes the key and regenerates.
     thumbs: std::collections::HashMap<crate::asset_thumbs::ThumbKey, egui::TextureId>,
+    /// Whether `search` was restored from disk this session.
+    restored: bool,
+    /// The last value written to disk (skip no-op writes).
+    last_saved: String,
+}
+
+/// Restores the persisted search once per session (the `restored` flag).
+fn restore_search(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
+    if state.restored {
+        return;
+    }
+    state.restored = true;
+    state.search = path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.trim_end().replace('\n', " "))
+        .unwrap_or_default();
+    state.last_saved = state.search.clone();
+}
+
+/// Writes the search when it changed since the last save.
+fn persist_search(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
+    if !state.restored || state.search == state.last_saved {
+        return;
+    }
+    if let Some(p) = path {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(p, &state.search) {
+            log::warn!("assets: could not save search {}: {e}", p.display());
+        }
+    }
+    state.last_saved = state.search.clone();
 }
 
 impl AssetsPanel {
@@ -96,8 +131,10 @@ pub fn library_ui(
     state: &mut AssetsPanel,
     brush: &crate::brush_panel::BrushPanel,
     selected_layer: Option<u64>,
+    search_path: Option<&std::path::Path>,
 ) -> LibraryOutcome {
     let mut out = LibraryOutcome::default();
+    restore_search(state, search_path);
     ui.horizontal(|ui| {
         ui.label(tr("assets.search"));
         ui.text_edit_singleline(&mut state.search);
@@ -227,5 +264,37 @@ pub fn library_ui(
     if masks.is_empty() {
         ui.label(tr("assets.empty"));
     }
+    persist_search(state, search_path);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_persists_and_restores_through_a_file() {
+        let dir = std::env::temp_dir().join(format!("umber-assets-search-{}", std::process::id()));
+        let path = dir.join("assets_search");
+        let _ = std::fs::remove_file(&path);
+        let mut a = AssetsPanel::default();
+        restore_search(&mut a, Some(&path));
+        assert_eq!(a.search, "", "no file yet = empty");
+        a.search = "metal".into();
+        persist_search(&mut a, Some(&path));
+        assert!(path.exists(), "the change was written");
+        let mut b = AssetsPanel::default();
+        restore_search(&mut b, Some(&path));
+        assert_eq!(b.search, "metal", "the next session reopens on it");
+        // No change → no rewrite (mtime stable).
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        persist_search(&mut b, Some(&path));
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        // Newlines never survive into the single-line field.
+        std::fs::write(&path, "a\nb\n").unwrap();
+        let mut c = AssetsPanel::default();
+        restore_search(&mut c, Some(&path));
+        assert_eq!(c.search, "a b");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

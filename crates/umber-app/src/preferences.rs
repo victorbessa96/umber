@@ -255,6 +255,17 @@ use umber_gui::widgets::swatch_grid::RecentColors;
 /// preferences file itself uses.
 pub const SWATCHES_FILE: &str = "swatches";
 
+/// The Assets browser's persisted search string's file name, beside
+/// [`PREFS_FILE`]/[`SWATCHES_FILE`] in the same state dir. Plain text,
+/// one line (the search field is single-line; newlines stripped on load).
+pub const ASSETS_SEARCH_FILE: &str = "assets_search";
+
+/// The assets-search file path (the same state dir `prefs_path` uses).
+pub fn assets_search_path() -> Option<PathBuf> {
+    umber_brush::preset_library::user_preset_dir()
+        .and_then(|p| p.parent().map(|d| d.join(ASSETS_SEARCH_FILE)))
+}
+
 /// The swatch file path (the same state dir `prefs_path` uses).
 pub fn swatches_path() -> Option<PathBuf> {
     umber_brush::preset_library::user_preset_dir()
