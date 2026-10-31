@@ -592,3 +592,17 @@ instrumented nightlies; if it also proves wider than x1.10, P2 (gate
 the mean / require both mean+p95) and P3 (best-of-N) remain. No reseed
 rides this wave — with the ratio gate the absolute baseline is
 report-only, so reseeding is no longer urgent.
+
+### First instrumented nightly (2026-10-31 05:08Z, run 41170685606, tip `de194be`) — SUCCESS, and it proves the point
+
+The first run of the A/B gate on a real runner: reference leg benched
+`0955ac846` in the same job, interleaved. Result: **GATE 1 green** —
+ratios viewport_mean x0.728, viewport_p95 x0.878, input_photon_p95
+x1.000, p50 x1.025, all within x1.10, exit 0, job SUCCESS. And in the
+SAME job the REPORT-ONLY absolute compare read viewport_p95 x1.148
+(RED under the old gate) — because that minute's runner was slow
+(reference p95 122.14 vs the 93.44 baseline) while the current tree
+was FASTER than the reference (ratio x0.878). The old absolute gate
+would have failed this night on fleet noise; the ratio gate called it
+correctly. This is the first measured data point of the ratio's own
+noise floor — so far well inside the x1.10 band.
