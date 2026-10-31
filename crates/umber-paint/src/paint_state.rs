@@ -6207,7 +6207,7 @@ mod tests {
         snap.hidden_sets.insert("A".to_string());
         assert!(snap.rows_for("A").is_empty());
         assert!(snap.rows_for("B").is_empty()); // B: falls back to layers (also empty here)
-        let mut prev = CompositeSnapshot::default();
+        let prev = CompositeSnapshot::default();
         let mut next = CompositeSnapshot::default();
         next.hidden_sets.insert("A".to_string());
         assert_eq!(
