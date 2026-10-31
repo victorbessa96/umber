@@ -156,8 +156,9 @@ mod plugins;
 mod postfx_panel;
 mod psd_import;
 use umber_paint::persistence::{
-    dormancy_for, load_paint_tiles_reported, paint_manifest_path, paint_save_version,
-    parse_manifest_header, save_paint_tiles, LayerDormancy, OpenSeedRow,
+    dormancy_for, load_paint_tiles_reported, load_quick_masks, paint_manifest_path,
+    paint_save_version, parse_manifest_header, save_paint_tiles, save_quick_masks, LayerDormancy,
+    OpenSeedRow,
 };
 use umber_paint::snapshot::build_composite_snapshot;
 mod size_presets;
@@ -3191,6 +3192,14 @@ impl UmberApp {
                         .collect();
                     let tiles = save_paint_tiles(paint, dir, &live, &dormant);
                     log::info!("paint saved: {tiles} tile(s)");
+                    // The quick masks ride the same paint/ sidecar
+                    // (paint/quick_mask/, the 2026-10-31 persistence
+                    // kill): a second commit point right after the paint
+                    // one — a crash between them keeps the old masks.
+                    match save_quick_masks(paint, dir) {
+                        Ok(sets) => log::info!("quick masks saved: {sets} set(s)"),
+                        Err(e) => log::warn!("quick mask save not committed: {e:#}"),
+                    }
                 }
                 Ok(model.journal_seq)
             }
@@ -3417,6 +3426,11 @@ impl UmberApp {
                     // whatever the loaded stack no longer holds, so a
                     // previous document's masks never gate the new one.
                     paint.prune_layer_masks(&live);
+                    // The quick masks restore from the paint/ sidecar's
+                    // quick_mask/ subdir (2026-10-31 persistence kill);
+                    // projects saved before it simply restore zero.
+                    let masks = load_quick_masks(paint, &dir);
+                    log::info!("quick masks restored: {masks} set(s)");
                 }
                 // Session pixel state keyed by layer id dies with the
                 // document: queued import publishes (another document's

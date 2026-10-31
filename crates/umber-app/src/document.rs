@@ -2,9 +2,10 @@
 //! the egui panels that view/drive them (Layers + History).
 //!
 //! Deliberately NOT here: the quick mask (`umber_brush::quick_mask`, owned
-//! by `PaintState`). It is temporary session state, so it stays out of
-//! the layer journal, the autosave journal and the project file. Mask
-//! strokes, invert and clear are never undo entries.
+//! by `PaintState`). It persists with the project (the `paint/quick_mask/`
+//! sidecar, the 2026-10-31 persistence kill) but stays out of the layer
+//! journal and the autosave journal: mask strokes, invert and clear are
+//! never undo entries.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

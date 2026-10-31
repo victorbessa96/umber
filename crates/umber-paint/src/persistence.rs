@@ -18,6 +18,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// The paint sidecar directory inside a `.umber` project: one
 /// byte-exact `tile-<N>.png` per persisted paint tile (see the module
 /// docs for why a sidecar, not `project.json`).
@@ -1664,6 +1666,317 @@ pub fn parse_manifest_header(text: &str) -> (bool, Vec<u64>) {
         }
     }
     (is_v2, dormant)
+}
+
+// ====================================================================
+// The quick-mask sidecar: `paint/quick_mask/` (the 2026-10-31
+// persistence kill). One `<set-hash>.json` header + `<set-hash>.bin`
+// plane blob per texture set, committed by its own tiny manifest
+// (`manifest.txt`: `# Umber quick-mask commit v1` + `<file> <blake3>`
+// lines) with the same stage → manifest.pending (THE commit point) →
+// apply → sweep → prune protocol as the paint tiles. A separate
+// manifest keeps the paint commit's 5-field codec untouched; the mask
+// files ride the SAME `paint/` sidecar directory and the same
+// AssetStore blobs. The persisted planes are the brush carry's 8-bit
+// quantization — identical to the GPU mask upload — so the persisted
+// gate IS the GPU gate and save → load → save is byte-identical.
+// ====================================================================
+
+/// The quick-mask sidecar directory inside a `.umber` project.
+pub fn quick_mask_sidecar_dir(project_dir: &Path) -> PathBuf {
+    paint_sidecar_dir(project_dir).join("quick_mask")
+}
+
+/// The quick-mask commit manifest.
+pub fn quick_mask_manifest_path(project_dir: &Path) -> PathBuf {
+    quick_mask_sidecar_dir(project_dir).join("manifest.txt")
+}
+
+/// The staged manifest's name before the commit rename.
+fn quick_mask_pending_path(project_dir: &Path) -> PathBuf {
+    quick_mask_sidecar_dir(project_dir).join("manifest.pending")
+}
+
+/// A sidecar file's stem for a texture set: the blake3 hex of the set
+/// name. Hash-named so an arbitrary set name is NEVER a path component
+/// (the same trust-boundary rule as the paint names).
+fn quick_mask_stem(set: &str) -> String {
+    blake3::hash(set.as_bytes()).to_hex().to_string()
+}
+
+/// The `<set-hash>.json` envelope: the set name plus the brush carry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickMaskFile {
+    pub set: String,
+    pub mask: umber_brush::quick_mask::QuickMaskCarry,
+}
+
+/// Formats the quick-mask commit manifest.
+pub fn format_quick_mask_commit(entries: &[(String, blake3::Hash)]) -> String {
+    let mut out = String::from("# Umber quick-mask commit v1\n");
+    for (name, hash) in entries {
+        out.push_str(&format!("{name} {hash}\n"));
+    }
+    out
+}
+
+/// Parses [`format_quick_mask_commit`]'s output. `None` when ANY line is
+/// malformed — the manifest is renamed into place whole, so a bad line
+/// means tampering and applying half of it would be the torn state the
+/// protocol exists to prevent. A name must be `<64 hex>.json|.bin` with
+/// no separators; the hash is 64 hex.
+pub fn parse_quick_mask_commit(text: &str) -> Option<Vec<(String, blake3::Hash)>> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(' ').collect();
+        let [name, hash] = fields.as_slice() else {
+            return None;
+        };
+        let stem = name
+            .strip_suffix(".json")
+            .or_else(|| name.strip_suffix(".bin"))?;
+        if stem.len() != 64
+            || !stem.bytes().all(|b| b.is_ascii_hexdigit())
+            || name.contains(['/', '\\'])
+        {
+            return None;
+        }
+        let hash = blake3::Hash::from_hex(hash).ok()?;
+        entries.push((name.to_string(), hash));
+    }
+    Some(entries)
+}
+
+/// A staged temp's final name, when `name` IS a temp
+/// (`<final>.tmp.<pid>`); `None` otherwise.
+fn quick_mask_temp_base(name: &str) -> Option<&str> {
+    let at = name.find(".tmp.")?;
+    let base = &name[..at];
+    if base.ends_with(".json") || base.ends_with(".bin") || base == "manifest.pending" {
+        Some(base)
+    } else {
+        None
+    }
+}
+
+/// Lands an interrupted quick-mask save (or drops its orphans) before
+/// any new save stages and before any load reads.
+fn recover_quick_mask_sidecar(project_dir: &Path) {
+    let dir = quick_mask_sidecar_dir(project_dir);
+    let pending = quick_mask_pending_path(project_dir);
+    let committed_entries = if pending.is_file() {
+        std::fs::read_to_string(&pending)
+            .ok()
+            .and_then(|t| parse_quick_mask_commit(&t))
+    } else {
+        None
+    };
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "manifest.pending" {
+            if let Some(entries) = &committed_entries {
+                if entries
+                    .iter()
+                    .all(|(n, _)| n.ends_with(".json") || n.ends_with(".bin"))
+                {
+                    // Roll forward: temps first, then the manifest.
+                    let _ = std::fs::rename(&pending, quick_mask_manifest_path(project_dir));
+                }
+            } else {
+                let _ = std::fs::remove_file(&pending);
+            }
+            continue;
+        }
+        if let Some(base) = quick_mask_temp_base(&name) {
+            let roll = committed_entries
+                .as_ref()
+                .is_some_and(|entries| entries.iter().any(|(n, _)| n == base));
+            if roll {
+                if let Err(e) = std::fs::rename(&path, dir.join(base)) {
+                    log::warn!("quick mask: temp {name} not rolled forward: {e}");
+                }
+            } else if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("quick mask: orphan temp {name} not removed: {e}");
+            }
+        }
+    }
+}
+
+/// Removes every staged temp under the quick-mask sidecar.
+fn sweep_quick_mask_temps(dir: &Path) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if quick_mask_temp_base(&name).is_some() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("quick mask: orphan temp {name} not removed: {e}");
+            }
+        }
+    }
+}
+
+/// Removes every sidecar file the just-committed manifest does not list
+/// (a cleared mask, a renamed set) — after the commit point only.
+fn prune_quick_mask_files(dir: &Path, entries: &[(String, blake3::Hash)]) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "manifest.txt" || quick_mask_temp_base(&name).is_some() {
+            continue;
+        }
+        if !entries.iter().any(|(n, _)| *n == name) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("quick mask: stale file {name} not pruned: {e}");
+            }
+        }
+    }
+}
+
+/// Saves every persist-worthy quick mask of `paint` into the project's
+/// `paint/quick_mask/` sidecar; returns the number of sets written.
+/// Stage → commit (manifest.pending rename) → apply → sweep → prune;
+/// an `Err` means the commit point was never reached and the previous
+/// sidecar is intact.
+pub fn save_quick_masks(
+    paint: &crate::paint_state::PaintState,
+    project_dir: &Path,
+) -> std::io::Result<usize> {
+    let dir = quick_mask_sidecar_dir(project_dir);
+    std::fs::create_dir_all(&dir)?;
+    recover_quick_mask_sidecar(project_dir);
+    let store = umber_core::AssetStore::new(project_dir);
+    let pid = std::process::id();
+    let mut entries: Vec<(String, blake3::Hash)> = Vec::new();
+    let mut staged: Vec<(String, String)> = Vec::new();
+    for (set, mask) in paint.quick_masks() {
+        if !mask.is_persist_worthy() {
+            continue;
+        }
+        let stem = quick_mask_stem(set);
+        let (carry, blob) = mask.carry();
+        let file = QuickMaskFile {
+            set: set.clone(),
+            mask: carry,
+        };
+        let json = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+        for (ext, bytes) in [("json", json.as_slice()), ("bin", blob.as_slice())] {
+            let name = format!("{stem}.{ext}");
+            let temp = format!("{name}.tmp.{pid}");
+            let temp_path = dir.join(&temp);
+            std::fs::write(&temp_path, bytes)?;
+            sync_file(&temp_path)?;
+            let asset = store.store(bytes, ext).map_err(std::io::Error::other)?;
+            sync_file(&paint_asset_blob_path(project_dir, &asset))?;
+            staged.push((name.clone(), temp));
+            entries.push((name, blake3::hash(bytes)));
+        }
+    }
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    // THE commit point: manifest.pending.
+    let temp = dir.join(format!("manifest.pending.tmp.{pid}"));
+    std::fs::write(&temp, format_quick_mask_commit(&entries))?;
+    sync_file(&temp)?;
+    std::fs::rename(&temp, quick_mask_pending_path(project_dir))?;
+    if let Err(e) = sync_dir(&dir) {
+        log::warn!("quick mask save: committed, directory fsync failed: {e:#}");
+    }
+    // Apply: temps to finals, then the manifest itself.
+    for (name, tmp) in &staged {
+        std::fs::rename(dir.join(tmp), dir.join(name))?;
+    }
+    std::fs::rename(
+        quick_mask_pending_path(project_dir),
+        quick_mask_manifest_path(project_dir),
+    )?;
+    let _ = sync_dir(&dir);
+    sweep_quick_mask_temps(&dir);
+    prune_quick_mask_files(&dir, &entries);
+    Ok(entries.len() / 2)
+}
+
+/// Loads the persisted quick masks into `paint` (the open path);
+/// returns how many sets were restored. A missing sidecar (every
+/// pre-2026-10-31 project) restores zero; a hash-mismatched or
+/// header/blob-inconsistent file is skipped, never trusted.
+pub fn load_quick_masks(paint: &mut crate::paint_state::PaintState, project_dir: &Path) -> usize {
+    let dir = quick_mask_sidecar_dir(project_dir);
+    if !dir.is_dir() {
+        return 0;
+    }
+    recover_quick_mask_sidecar(project_dir);
+    let Ok(text) = std::fs::read_to_string(quick_mask_manifest_path(project_dir)) else {
+        return 0;
+    };
+    let Some(entries) = parse_quick_mask_commit(&text) else {
+        log::warn!("quick mask: malformed manifest, ignored");
+        return 0;
+    };
+    let read_checked = |name: &str, hash: &blake3::Hash| -> Option<Vec<u8>> {
+        let bytes = std::fs::read(dir.join(name)).ok()?;
+        (blake3::hash(&bytes) == *hash).then_some(bytes)
+    };
+    let mut restored = 0;
+    for (name, hash) in &entries {
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Some((bin_name, bin_hash)) = entries
+            .iter()
+            .find(|(n, _)| n == &format!("{stem}.bin"))
+            .map(|(n, h)| (n.clone(), *h))
+        else {
+            log::warn!("quick mask: {name} has no sibling .bin, skipped");
+            continue;
+        };
+        let (Some(json), Some(blob)) =
+            (read_checked(name, hash), read_checked(&bin_name, &bin_hash))
+        else {
+            log::warn!("quick mask: {name} failed its hash check, skipped");
+            continue;
+        };
+        let Ok(file) = serde_json::from_slice::<QuickMaskFile>(&json) else {
+            log::warn!("quick mask: {name} is not a mask header, skipped");
+            continue;
+        };
+        if file.set.is_empty() || file.set.chars().any(char::is_control) {
+            log::warn!("quick mask: {name} carries an unsafe set name, skipped");
+            continue;
+        }
+        match umber_brush::quick_mask::QuickMask::from_carry(&file.mask, &blob) {
+            Some(mask) => {
+                paint.restore_quick_mask(&file.set, mask);
+                restored += 1;
+            }
+            None => log::warn!(
+                "quick mask: set {:?} header disagrees with its blob, skipped",
+                file.set
+            ),
+        }
+    }
+    restored
 }
 
 /// Paint-sidecar persistence tests (CORE-LOOP CRITICAL 4): the filename
@@ -3486,6 +3799,129 @@ mod tests {
             "the same bytes hash to the same refs"
         );
         assert_eq!(sidecar_snapshot(&project), snapshot_of(&NEW_FILES));
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn quick_mask_commit_codec_round_trips_and_rejects_garbage() {
+        let h = blake3::hash(b"quick-mask-test");
+        let hex = h.to_hex().to_string();
+        let entries = vec![(format!("{hex}.json"), h), (format!("{hex}.bin"), h)];
+        let text = format_quick_mask_commit(&entries);
+        assert_eq!(parse_quick_mask_commit(&text), Some(entries.clone()));
+        // An empty manifest (a save with no persist-worthy mask) is valid.
+        assert_eq!(
+            parse_quick_mask_commit("# Umber quick-mask commit v1\n"),
+            Some(vec![])
+        );
+        for bad in [
+            "notahash\n",
+            &format!("../{hex}.json {hex}\n"),
+            &format!("{hex}.json zz\n"),
+            &format!("short.json {hex}\n"),
+            &format!("{hex}.txt {hex}\n"),
+            &format!("{hex}.json {hex} extra\n"),
+        ] {
+            assert!(
+                parse_quick_mask_commit(bad).is_none(),
+                "{bad:?} must reject"
+            );
+        }
+    }
+
+    #[test]
+    fn quick_mask_sidecar_round_trips_through_paint_state() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let project = unique_temp_dir("quick-mask-roundtrip");
+        let mut a =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("paint builds");
+        let mut mask = umber_brush::quick_mask::QuickMask::new(64, 64);
+        mask.set_active(true);
+        mask.ensure_plane(1001);
+        mask.stamp(
+            1001,
+            &umber_brush::retouch::RetouchDab {
+                pos: [16.0, 16.0],
+                radius: 8.0,
+                alpha: 1.0,
+                hardness: 1.0,
+            },
+        );
+        a.restore_quick_mask("body", mask);
+        let written = save_quick_masks(&a, &project).expect("saves");
+        assert_eq!(written, 1, "one persist-worthy set");
+        assert!(quick_mask_manifest_path(&project).is_file());
+
+        // A fresh session restores the mask; the gate matches within the
+        // quantization envelope (== the GPU gate).
+        let mut b =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("fresh builds");
+        assert_eq!(load_quick_masks(&mut b, &project), 1);
+        b.set_active_set("body");
+        let back = b.quick_mask();
+        let orig = a.quick_masks().get("body").expect("saved mask present");
+        assert!(back.is_active());
+        assert_eq!(back.dimensions(), (64, 64));
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let d = (orig.sample(1001, x, y) - back.sample(1001, x, y)).abs();
+                assert!(d <= 1.0 / 510.0 + 1e-6, "gate survives at ({x},{y}): {d}");
+            }
+        }
+
+        // save -> load -> save is byte-identical on the manifest.
+        let manifest1 = std::fs::read_to_string(quick_mask_manifest_path(&project)).unwrap();
+        assert_eq!(save_quick_masks(&b, &project).expect("re-saves"), 1);
+        let manifest2 = std::fs::read_to_string(quick_mask_manifest_path(&project)).unwrap();
+        assert_eq!(manifest1, manifest2);
+
+        // An empty project dir restores zero; a session with no
+        // persist-worthy mask writes only the (empty) manifest.
+        let empty = unique_temp_dir("quick-mask-empty");
+        let mut c = paint_state::PaintState::new(device, queue).expect("empty builds");
+        assert_eq!(load_quick_masks(&mut c, &empty), 0, "no sidecar -> zero");
+        assert_eq!(save_quick_masks(&c, &empty).expect("saves"), 0);
+        let left: Vec<_> = std::fs::read_dir(quick_mask_sidecar_dir(&empty))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(left.len(), 1, "only the empty manifest remains");
+        assert_eq!(left[0].file_name().to_string_lossy(), "manifest.txt");
+
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn quick_mask_sidecar_tampered_blob_is_skipped_not_trusted() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let project = unique_temp_dir("quick-mask-tamper");
+        let mut a =
+            paint_state::PaintState::new(device.clone(), queue.clone()).expect("paint builds");
+        let mut mask = umber_brush::quick_mask::QuickMask::new(16, 16);
+        mask.ensure_plane(1001);
+        a.restore_quick_mask("body", mask);
+        assert_eq!(save_quick_masks(&a, &project).expect("saves"), 1);
+        // Flip one byte of the .bin on disk: the hash check must skip it.
+        let dir = quick_mask_sidecar_dir(&project);
+        let bin = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+            .unwrap();
+        let mut bytes = std::fs::read(bin.path()).unwrap();
+        bytes[0] ^= 0xFF;
+        std::fs::write(bin.path(), bytes).unwrap();
+        let mut b = paint_state::PaintState::new(device, queue).expect("fresh builds");
+        assert_eq!(
+            load_quick_masks(&mut b, &project),
+            0,
+            "tampered blob restores nothing"
+        );
         let _ = std::fs::remove_dir_all(&project);
     }
 }

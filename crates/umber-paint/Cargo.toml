@@ -21,6 +21,8 @@ umber-export = { workspace = true }
 emath = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 # The per-layer-pool §6.2 clean-skip: each sidecar's content hash.
 blake3 = { workspace = true }
 profiling = { workspace = true }

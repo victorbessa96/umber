@@ -56,18 +56,25 @@
 //! (`symmetry::symmetrize_coverage`) is not gated yet, because no fill op
 //! exists to call it (follow-up with the fill layer).
 //!
-//! Not persisted, not undoable: the mask is temporary by definition. It is
-//! session state outside the project file, the document's layer journal
-//! (`umber-app`'s `document`), and the retouch stroke history. A mask
-//! stroke is not an undo entry, and undoing a gated paint stroke leaves
-//! the mask alone.
+//! Persisted as the project's `paint/quick_mask/` sidecar (the
+//! 2026-10-31 persistence kill): per texture set, one hash-named
+//! `<set>.json` header (dims, mode flags, tile table) plus one
+//! `<set>.bin` blob of 8-bit quantized planes — the same
+//! `round(v * 255)` the GPU copy uses, so the persisted gate IS the GPU
+//! gate and save → load → save is byte-identical on the quantized
+//! form. Not undoable: the mask stays outside the document's layer
+//! journal (`umber-app`'s `document`) and the retouch stroke history.
+//! A mask stroke is not an undo entry, and undoing a gated paint stroke
+//! leaves the mask alone.
 
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 use crate::retouch::{coverage, footprint, DirtyRect, RetouchDab};
 
 /// What a mask-mode stroke paints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum MaskPaint {
     /// White: toward `1.0`, paint allowed.
     #[default]
@@ -114,6 +121,38 @@ impl<'a> MaskView<'a> {
             0.0
         }
     }
+}
+
+/// The persisted form of a quick mask: the `<set>.json` header of the
+/// `paint/quick_mask/` sidecar (2026-10-31 persistence kill). The
+/// planes themselves ride the sibling `<set>.bin` blob; [`Self::tiles`]
+/// gives each tile's byte range in it. Serializes whole; the load path
+/// re-validates every range against the blob before trusting it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickMaskCarry {
+    /// Plane size, texels (the paint targets' size at save time).
+    pub width: u32,
+    pub height: u32,
+    /// Gating armed.
+    pub active: bool,
+    /// Invert parity (untouched planes read `1.0` while set).
+    pub inverted: bool,
+    /// Mask mode.
+    pub editing: bool,
+    /// What mask-mode strokes paint.
+    pub paint: MaskPaint,
+    /// One entry per touched tile, sorted by tile id.
+    pub tiles: Vec<QuickMaskTileCarry>,
+}
+
+/// One tile's slice of the `<set>.bin` blob in [`QuickMaskCarry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickMaskTileCarry {
+    pub tile: u16,
+    /// Byte offset of the plane's `width * height` quantized texels.
+    pub offset: u64,
+    /// Always `width * height`.
+    pub len: u64,
 }
 
 /// The session's quick mask: per-tile coverage planes plus the mode flags
@@ -370,6 +409,81 @@ impl QuickMask {
             .entry(tile)
             .or_insert_with(|| vec![empty; len])
     }
+
+    /// Whether anything worth persisting exists: a touched plane or any
+    /// mode flag. A fresh mask (and a cleared one) writes no sidecar.
+    pub fn is_persist_worthy(&self) -> bool {
+        !self.coverage.is_empty() || self.active || self.inverted || self.editing
+    }
+
+    /// The persisted pair: the `<set>.json` header and the `<set>.bin`
+    /// blob of 8-bit quantized planes (concatenated in tile order, each
+    /// `width * height` bytes, `round(v * 255)` — the GPU upload's own
+    /// quantization, so the persisted gate IS the GPU gate).
+    pub fn carry(&self) -> (QuickMaskCarry, Vec<u8>) {
+        let mut blob = Vec::new();
+        let mut tiles = Vec::with_capacity(self.coverage.len());
+        for (&tile, plane) in &self.coverage {
+            let offset = blob.len() as u64;
+            blob.reserve(plane.len());
+            for &v in plane {
+                blob.push((v.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+            tiles.push(QuickMaskTileCarry {
+                tile,
+                offset,
+                len: plane.len() as u64,
+            });
+        }
+        (
+            QuickMaskCarry {
+                width: self.width,
+                height: self.height,
+                active: self.active,
+                inverted: self.inverted,
+                editing: self.editing,
+                paint: self.paint,
+                tiles,
+            },
+            blob,
+        )
+    }
+
+    /// Rebuilds from a persisted pair. `None` when the header disagrees
+    /// with the blob (a torn write, a hand edit, a size change since
+    /// the save) — the caller keeps the session's mask in that case.
+    /// The generation starts at 1 so viewers redraw the overlay once.
+    pub fn from_carry(carry: &QuickMaskCarry, blob: &[u8]) -> Option<QuickMask> {
+        if carry.width == 0 || carry.height == 0 {
+            return None;
+        }
+        let plane_len = carry.width as usize * carry.height as usize;
+        let mut coverage = BTreeMap::new();
+        for t in &carry.tiles {
+            let start = usize::try_from(t.offset).ok()?;
+            let end = start.checked_add(usize::try_from(t.len).ok()?)?;
+            if t.len as usize != plane_len || end > blob.len() {
+                return None;
+            }
+            coverage.insert(
+                t.tile,
+                blob[start..end]
+                    .iter()
+                    .map(|&b| b as f32 / 255.0)
+                    .collect::<Vec<f32>>(),
+            );
+        }
+        Some(QuickMask {
+            width: carry.width,
+            height: carry.height,
+            coverage,
+            active: carry.active,
+            inverted: carry.inverted,
+            editing: carry.editing,
+            paint: carry.paint,
+            generation: 1,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -565,5 +679,85 @@ mod tests {
             mask.coverage(TILE).unwrap().iter().all(|&v| v == 1.0),
             "a refused write leaves the plane alone"
         );
+    }
+
+    #[test]
+    fn fresh_mask_is_not_persist_worthy_until_touched_or_flagged() {
+        let mut mask = QuickMask::new(SIZE, SIZE);
+        assert!(!mask.is_persist_worthy());
+        mask.set_active(true);
+        assert!(mask.is_persist_worthy(), "an armed empty mask persists");
+        let mut fresh = QuickMask::new(SIZE, SIZE);
+        fresh.stamp(TILE, &hard_dab([32.0, 32.0], 4.0));
+        assert!(fresh.is_persist_worthy(), "a touched plane persists");
+    }
+
+    #[test]
+    fn carry_round_trip_matches_within_quantization_and_is_byte_stable() {
+        let mut mask = QuickMask::new(SIZE, SIZE);
+        mask.set_active(true);
+        mask.set_paint(MaskPaint::Block);
+        mask.stamp(TILE, &hard_dab([16.0, 16.0], 6.0));
+        mask.stamp(
+            1002,
+            &RetouchDab {
+                alpha: 0.5,
+                ..hard_dab([8.0, 8.0], 4.0)
+            },
+        );
+
+        let (carry, blob) = mask.carry();
+        assert_eq!(carry.tiles.len(), 2);
+        assert_eq!(
+            blob.len() as u64,
+            carry.tiles.iter().map(|t| t.len).sum::<u64>()
+        );
+
+        // The quantization is exactly the GPU upload's: every byte equals
+        // gpu_bytes' byte for the same texel.
+        let full = DirtyRect {
+            x0: 0,
+            y0: 0,
+            x1: SIZE,
+            y1: SIZE,
+        };
+        let gpu = mask.gpu_bytes(TILE, full);
+        let t0 = &carry.tiles[0];
+        let plane = &blob[t0.offset as usize..(t0.offset + t0.len) as usize];
+        assert_eq!(plane, &gpu[..], "persisted bytes == GPU bytes");
+
+        let back = QuickMask::from_carry(&carry, &blob).expect("round trip");
+        assert_eq!(back.dimensions(), mask.dimensions());
+        assert!(back.is_active() && !back.is_inverted() && !back.is_editing());
+        assert_eq!(back.paint(), MaskPaint::Block);
+        for tile in [TILE, 1002] {
+            let a = mask.coverage(tile).unwrap();
+            let b = back.coverage(tile).unwrap();
+            for (&x, &y) in a.iter().zip(b.iter()) {
+                assert!(
+                    (x - y).abs() <= 1.0 / 510.0,
+                    "dequantized within the GPU envelope: {x} vs {y}"
+                );
+            }
+        }
+        // save -> load -> save is byte-identical on the quantized form.
+        let (carry2, blob2) = back.carry();
+        assert_eq!(carry, carry2);
+        assert_eq!(blob, blob2);
+    }
+
+    #[test]
+    fn from_carry_refuses_torn_or_mismatched_blobs() {
+        let mut mask = QuickMask::new(4, 4);
+        mask.stamp(TILE, &hard_dab([1.0, 1.0], 2.0));
+        let (carry, blob) = mask.carry();
+        assert!(QuickMask::from_carry(&carry, &blob[..blob.len() - 1]).is_none());
+        assert!(QuickMask::from_carry(&carry, &[]).is_none());
+        let mut bad = carry.clone();
+        bad.width = 0;
+        assert!(QuickMask::from_carry(&bad, &blob).is_none());
+        let mut bad = carry.clone();
+        bad.tiles[0].len = 3;
+        assert!(QuickMask::from_carry(&bad, &blob).is_none());
     }
 }

@@ -523,7 +523,7 @@ brush =
     .quick-mask-invert = Invert (I)
     .quick-mask-clear = Clear
     .quick-mask-inverted = inverted
-    .quick-mask-hint = Red marks blocked texels. The mask lasts for this session only: it is not saved and not undoable.
+    .quick-mask-hint = Red marks blocked texels. The mask is saved with the project (8-bit planes in the paint sidecar) but is not undoable.
 
 ## Layers panel
 

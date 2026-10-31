@@ -2161,6 +2161,23 @@ impl PaintState {
             .expect("a tile's set is always registered (assign_tile_to_set ensures it)")
     }
 
+    /// Every registered set's quick mask (the save path's census — the
+    /// 2026-10-31 persistence kill writes the persist-worthy ones to the
+    /// `paint/quick_mask/` sidecar).
+    pub fn quick_masks(&self) -> &BTreeMap<String, QuickMask> {
+        &self.masks
+    }
+
+    /// Restores a persisted mask for `set` (the open path's sidecar
+    /// load). Registers the set first; the GPU-sync marks clear — the
+    /// loaded mask is not on the GPU yet, the next gated stroke syncs
+    /// its plane.
+    pub fn restore_quick_mask(&mut self, set: &str, mask: QuickMask) {
+        self.ensure_set(set);
+        self.masks.insert(set.to_string(), mask);
+        self.mask_synced.clear();
+    }
+
     /// The active set's mask, mutably (the panel rows and shortcuts edit
     /// through here).
     fn active_mask_mut(&mut self) -> &mut QuickMask {

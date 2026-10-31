@@ -542,7 +542,7 @@ brush =
     .quick-mask-invert = Inverter (I)
     .quick-mask-clear = Limpar
     .quick-mask-inverted = invertida
-    .quick-mask-hint = O vermelho marca os texels bloqueados. A máscara dura só esta sessão: não é salva nem pode ser desfeita.
+    .quick-mask-hint = O vermelho marca os texels bloqueados. A máscara é salva com o projeto (planos de 8 bits no sidecar de pintura), mas não pode ser desfeita.
 
 ## Painel de camadas
 
