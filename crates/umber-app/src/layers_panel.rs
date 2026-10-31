@@ -430,6 +430,8 @@ fn channel_rows(
     }
 }
 
+pub use gestures::{drop_to_reorder, AssetDrag, AssetDropRef};
+
 pub mod gestures {
     //! Layer-stack gestures (GUI plan row `g2-layer-gestures`,
     //! `docs/specs/gui-plan-2026-10-15.md`; sources P:B1, B:B7, B:E10).
@@ -576,6 +578,16 @@ pub mod gestures {
             /// The gap it lands in.
             slot: usize,
         },
+        /// A library asset dragged onto the rows (drag-to-stack, the
+        /// Assets browser's follow-up): the panel cannot create the
+        /// layer (materials bind bakes), so — like Flatten — it hands
+        /// the ref and the drop slot up to the shell.
+        AssetDrop {
+            /// Which library asset was dragged.
+            asset: AssetDropRef,
+            /// The gap it lands in (display order, top-first).
+            slot: usize,
+        },
     }
 
     /// What the shell applies after a gesture: the paint session is not
@@ -599,11 +611,35 @@ pub mod gestures {
         /// publish), because the panel sees neither the paint session
         /// nor the composite snapshot. Empty = no flatten asked.
         pub flatten: Vec<u64>,
+        /// A library asset dropped on the rows (drag-to-stack):
+        /// `(asset ref, drop slot, resolved target layer)` — the target
+        /// is the row under the drop (masks bind there), else the
+        /// primary selection. The SHELL applies it (materials bind
+        /// bakes; masks compose). None = no asset drop.
+        pub asset_drop: Option<(AssetDropRef, usize, Option<u64>)>,
     }
 
     /// The drag-and-drop payload a row's handle carries.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct LayerDrag(pub u64);
+
+    /// The Eq-safe reference a dragged library row carries through the
+    /// gesture stream (drag-to-stack): kind + name. The shell resolves
+    /// the full definition by name from the same library scan on drop
+    /// (a drop is a rare event; the scan is the browser's own truth).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum AssetDropRef {
+        /// A smart material: becomes a new material layer.
+        Material(String),
+        /// A smart mask: binds to the layer under the drop.
+        Mask(String),
+    }
+
+    /// The egui drag payload a material/mask library row carries when
+    /// dragged toward the Layers panel. Brush presets are click-only —
+    /// a brush is not a layer.
+    #[derive(Debug, Clone)]
+    pub struct AssetDrag(pub AssetDropRef);
 
     /// A row click's mode from the held modifiers.
     pub fn click_mode(mods: Modifiers) -> ClickMode {
@@ -994,6 +1030,17 @@ pub mod gestures {
                         doc.run(LayerCommand::reorder(a, b));
                     }
                 }
+                LayerGesture::AssetDrop { asset, slot } => {
+                    // Hand up like Flatten: the shell owns creation
+                    // (materials bind the newest bakes, masks compose
+                    // pixels). Resolve the drop's target row here —
+                    // masks bind to the layer under the pointer.
+                    let target = order
+                        .get(slot.min(order.len().saturating_sub(1)))
+                        .copied()
+                        .or_else(|| self.selection.primary());
+                    out.asset_drop = Some((asset, slot, target));
+                }
             }
             out
         }
@@ -1203,11 +1250,18 @@ pub mod gestures {
             });
         }
 
-        /// While a [`LayerDrag`] is in flight over the rows, paints the bar
-        /// at the gap under the pointer; on release, returns the drop.
+        /// While a drag is in flight over the rows, paints the bar at the
+        /// gap under the pointer; on release, returns the drop. Accepts
+        /// BOTH payload kinds: a [`LayerDrag`] reorders; an
+        /// [`AssetDrag`] (a library asset from the
+        /// Assets browser, drag-to-stack) yields [`LayerGesture::AssetDrop`].
         pub fn finish(&self, ui: &egui::Ui) -> Option<LayerGesture> {
             let ctx = ui.ctx();
-            let drag = egui::DragAndDrop::payload::<LayerDrag>(ctx)?;
+            let layer_drag = egui::DragAndDrop::payload::<LayerDrag>(ctx);
+            let asset_drag = egui::DragAndDrop::payload::<AssetDrag>(ctx);
+            if layer_drag.is_none() && asset_drag.is_none() {
+                return None;
+            }
             let pos = ctx.pointer_hover_pos()?;
             let x = self.x?;
             let (first, last) = (self.spans.first()?, self.spans.last()?);
@@ -1226,7 +1280,15 @@ pub mod gestures {
             ui.painter().hline(x, y, stroke);
             if ctx.input(|i| i.pointer.any_released()) {
                 egui::DragAndDrop::clear_payload(ctx);
-                return Some(LayerGesture::Drop { id: drag.0, slot });
+                if let Some(drag) = layer_drag {
+                    return Some(LayerGesture::Drop { id: drag.0, slot });
+                }
+                if let Some(drag) = asset_drag {
+                    return Some(LayerGesture::AssetDrop {
+                        asset: drag.0.clone(),
+                        slot,
+                    });
+                }
             }
             None
         }
@@ -1357,6 +1419,43 @@ pub mod gestures {
             assert_eq!(drop_slot(11.0, &spans), 1);
             assert_eq!(drop_slot(35.0, &spans), 2);
             assert_eq!(drop_slot(99.0, &spans), 3);
+        }
+
+        #[test]
+        fn asset_drop_hands_up_ref_slot_and_resolved_target() {
+            // The panel cannot create the asset's layer (materials bind
+            // bakes), so AssetDrop hands the ref + slot + the row under
+            // the drop up to the shell and leaves the document alone.
+            let mut doc = Document::default();
+            doc.run(LayerCommand::add("A", LayerKind::Paint));
+            doc.run(LayerCommand::add("B", LayerKind::Paint));
+            let b = doc.layers().last().map(|l| l.id).expect("B is top");
+            let mut state = GestureState::default();
+            state.selection.set_single(b);
+            let out = state.apply(
+                &mut doc,
+                LayerGesture::AssetDrop {
+                    asset: AssetDropRef::Mask("grunge".to_owned()),
+                    slot: 0,
+                },
+            );
+            assert_eq!(
+                out.asset_drop,
+                Some((AssetDropRef::Mask("grunge".to_owned()), 0, Some(b))),
+                "slot 0 resolves to the first display row"
+            );
+            assert_eq!(doc.layers().len(), 2, "the panel changed nothing");
+            // A slot past the end clamps to the last row.
+            let out = state.apply(
+                &mut doc,
+                LayerGesture::AssetDrop {
+                    asset: AssetDropRef::Material("metal".to_owned()),
+                    slot: 99,
+                },
+            );
+            let (_, slot, target) = out.asset_drop.expect("asset drop handed up");
+            assert_eq!(slot, 99);
+            assert!(target.is_some(), "clamped to the last row");
         }
 
         #[test]

@@ -129,7 +129,12 @@ pub fn library_ui(
             continue;
         }
         ui.horizontal(|ui| {
-            ui.label(name);
+            let label = ui
+                .add(egui::Label::new(name).sense(egui::Sense::drag()))
+                .on_hover_text(tr("assets.drag-to-layers"));
+            label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
+                crate::layers_panel::AssetDropRef::Material(name.clone()),
+            ));
             if ui.small_button("＋").clicked() {
                 out.material = Some(material.clone());
             }
@@ -159,7 +164,12 @@ pub fn library_ui(
             continue;
         }
         ui.horizontal(|ui| {
-            ui.label(name);
+            let label = ui
+                .add(egui::Label::new(name).sense(egui::Sense::drag()))
+                .on_hover_text(tr("assets.drag-to-layers"));
+            label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
+                crate::layers_panel::AssetDropRef::Mask(name.clone()),
+            ));
             if ui.small_button("＋").clicked() {
                 if let Some(target) = selected_layer {
                     out.mask = Some((target, mask.clone()));

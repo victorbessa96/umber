@@ -838,6 +838,59 @@ impl TabViewer for PanelViewer<'_> {
                     if let Some(paint) = self.paint.as_deref_mut() {
                         apply_layer_session_ops(paint, &layer_session_ops(&applied));
                     }
+                    // Drag-to-stack: a library asset dropped on the rows
+                    // (the Assets browser's follow-up). The panel handed
+                    // up the ref + slot + resolved target; resolve the
+                    // full definition by name from the same scan and run
+                    // the SAME flows the ＋ buttons use.
+                    if let Some((asset, slot, target)) = applied.asset_drop.clone() {
+                        match asset {
+                            layers_panel::AssetDropRef::Material(name) => {
+                                let material =
+                                    document::list_smart_materials(&document::smart_dirs())
+                                        .into_iter()
+                                        .find(|(n, _)| *n == name)
+                                        .map(|(_, m)| m);
+                                let Some(material) = material else {
+                                    log::warn!(
+                                        "assets: material '{name}' left the library mid-drag"
+                                    );
+                                    continue;
+                                };
+                                if self.apply_library_material(&material).is_some() {
+                                    // Land the new layer at the drop slot,
+                                    // not always on top.
+                                    let len = self.doc.layers().len();
+                                    let from = len.saturating_sub(1);
+                                    if let Some((a, b)) =
+                                        layers_panel::drop_to_reorder(len, from, slot)
+                                    {
+                                        self.doc
+                                            .run(umber_core::layers::LayerCommand::reorder(a, b));
+                                    }
+                                }
+                            }
+                            layers_panel::AssetDropRef::Mask(name) => {
+                                let mask = document::list_smart_masks(&document::smart_dirs())
+                                    .into_iter()
+                                    .find(|(n, _)| *n == name)
+                                    .map(|(_, m)| m);
+                                let (Some(mask), Some(target)) = (mask, target) else {
+                                    log::warn!(
+                                        "assets: mask '{name}' dropped with no layer under it"
+                                    );
+                                    continue;
+                                };
+                                self.doc.run(umber_core::layers::LayerCommand::attach_mask(
+                                    target,
+                                    mask.name.clone(),
+                                ));
+                                if let Some(paint) = self.paint.as_deref_mut() {
+                                    compose_mask_flow(paint, self.doc, self.bakes, target, &mask);
+                                }
+                            }
+                        }
+                    }
                 }
                 // Smart material generators (C2-10): each fill's mesh map is
                 // the Bakes panel's newest bake of it, snapshotted now.
@@ -1151,32 +1204,8 @@ impl TabViewer for PanelViewer<'_> {
                 if let Some(material) = &outcome.material {
                     // The shelf's own three-step: apply, bind the
                     // generators to the newest bakes, select the top.
-                    let ids = document::apply_smart_material(self.doc, material);
-                    let missing =
-                        document::bind_smart_generators(self.doc, material, &ids, |name| {
-                            let path = self.bakes.latest_map(name)?;
-                            match umber_export::png::read_png_rgba8(path) {
-                                Ok(image) => Some(image),
-                                Err(e) => {
-                                    log::warn!("smart material: {}: {e}", path.display());
-                                    None
-                                }
-                            }
-                        });
-                    if !missing.is_empty() {
-                        log::info!(
-                            "smart material '{}': bake {} in the Bakes panel, then apply again to bind them",
-                            material.name,
-                            missing.join(", ")
-                        );
-                    }
-                    if let Some(top) = ids.last() {
-                        let target = paint_state::PlaneOwner::Layer(*top);
-                        if let Some(paint) = self.paint.as_deref_mut() {
-                            paint.set_active_target(target);
-                        }
-                        sync_gesture_selection(&mut *self.layer_gestures, target);
-                    }
+                    // Shared with the drag-to-stack drop.
+                    self.apply_library_material(material);
                 }
                 if let Some((target, mask)) = &outcome.mask {
                     // The Layers panel's own mask path: the journal binds
@@ -5103,6 +5132,45 @@ enum LayerSessionOp {
 /// which is exactly what a select-then-paint gesture wants). A same-layer
 /// target is a no-op for the edit either way. A solo change has no
 /// session step (no render path reads it yet).
+impl PanelViewer<'_> {
+    /// Applies a smart material from the library — the ＋ button's path
+    /// and the drag-to-stack drop's path are ONE flow: apply, bind the
+    /// generators to the newest bakes, select the top layer as the paint
+    /// target. Returns the new top layer id.
+    fn apply_library_material(
+        &mut self,
+        material: &umber_core::smart::SmartMaterial,
+    ) -> Option<u64> {
+        let ids = document::apply_smart_material(self.doc, material);
+        let missing = document::bind_smart_generators(self.doc, material, &ids, |name| {
+            let path = self.bakes.latest_map(name)?;
+            match umber_export::png::read_png_rgba8(path) {
+                Ok(image) => Some(image),
+                Err(e) => {
+                    log::warn!("smart material: {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+        if !missing.is_empty() {
+            log::info!(
+                "smart material '{}': bake {} in the Bakes panel, then apply again to bind them",
+                material.name,
+                missing.join(", ")
+            );
+        }
+        let top = ids.last().copied();
+        if let Some(top) = top {
+            let target = paint_state::PlaneOwner::Layer(top);
+            if let Some(paint) = self.paint.as_deref_mut() {
+                paint.set_active_target(target);
+            }
+            sync_gesture_selection(&mut *self.layer_gestures, target);
+        }
+        top
+    }
+}
+
 /// The smart-mask compose flow (C2-10), extracted for BOTH panel arms:
 /// the Layers panel's mask section and the Assets browser's mask rows
 /// (R-C1) run the SAME path — the mask composed over the newest bakes

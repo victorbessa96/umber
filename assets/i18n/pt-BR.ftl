@@ -999,3 +999,4 @@ assets =
     .brushes = Pincéis
     .materials = Materiais inteligentes
     .empty = Nada aqui ainda.
+    .drag-to-layers = Arraste para o painel de Camadas: materiais viram uma nova camada, máscaras se ligam à camada sob o drop.
