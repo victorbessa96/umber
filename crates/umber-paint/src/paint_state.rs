@@ -965,12 +965,29 @@ pub struct CompositeSnapshot {
     /// one uses [`Self::layers`]. Empty (the default, and every
     /// single-stack caller) is exactly the pre-per-set behavior.
     pub set_layers: BTreeMap<String, Vec<SnapshotLayer>>,
+    /// Sets hidden from the composite (the set list's eye): `rows_for`
+    /// returns no rows for them, so their tiles composite empty.
+    pub hidden_sets: std::collections::BTreeSet<String>,
 }
 
 impl CompositeSnapshot {
     /// The rows a tile of `set` composites (see [`Self::set_layers`]).
     pub fn rows_for(&self, set: &str) -> &[SnapshotLayer] {
+        if self.hidden_sets.contains(set) {
+            return &[];
+        }
         self.set_layers.get(set).map_or(&self.layers, Vec::as_slice)
+    }
+
+    /// The sets whose hidden flag flipped between two snapshots (the
+    /// shell marks their tiles `Full`).
+    pub fn hidden_flips(prev: &Self, next: &Self) -> Vec<String> {
+        prev.hidden_sets
+            .iter()
+            .chain(next.hidden_sets.iter())
+            .filter(|s| prev.hidden_sets.contains(*s) != next.hidden_sets.contains(*s))
+            .cloned()
+            .collect()
     }
 
     /// Every row across every set (the base rows, then each set's): the
@@ -1177,6 +1194,9 @@ pub struct PaintState {
     /// records the active set at creation, and the project open path
     /// re-derives the map from the sidecar.
     tile_sets: BTreeMap<u16, String>,
+    /// Sets hidden from the composite (g2-texture-set-list's open item:
+    /// the eye per set). Absent = visible.
+    hidden_sets: std::collections::BTreeSet<String>,
     /// The set new tiles join and the Texture Sets panel edits. Always a
     /// key of `set_sizes` (see [`Self::set_active_set`]).
     active_set: String,
@@ -1470,6 +1490,7 @@ impl PaintState {
             set_sizes: BTreeMap::from([(default_set.clone(), (size, size))]),
             channel_sizes: BTreeMap::new(),
             tile_sets: BTreeMap::from([(FIRST_TILE, default_set.clone())]),
+            hidden_sets: Default::default(),
             active_set: default_set.clone(),
             multi_tile: false,
             brush: BrushParams::default(),
@@ -1594,6 +1615,41 @@ impl PaintState {
     }
 
     /// Every known texture-set name, ascending.
+    /// Hides or shows `set` in the composite (the set list's eye).
+    pub fn set_set_hidden(&mut self, set: &str, hidden: bool) {
+        if hidden {
+            self.hidden_sets.insert(set.to_string());
+        } else {
+            self.hidden_sets.remove(set);
+        }
+    }
+
+    /// Whether `set` is hidden from the composite (default: visible).
+    pub fn set_hidden(&self, set: &str) -> bool {
+        self.hidden_sets.contains(set)
+    }
+
+    /// The hidden set names (the composite snapshot carries them).
+    pub fn hidden_sets(&self) -> &std::collections::BTreeSet<String> {
+        &self.hidden_sets
+    }
+
+    /// Marks every `(tile, channel)` of `set` `Full` — a visibility flip
+    /// re-composites the set's tiles (§4.2's rule, set granularity).
+    pub fn mark_set_full(&mut self, set: &str) {
+        for tile in self.tiles_of_set(set) {
+            if let Some(targets) = self.targets.get(&tile) {
+                let keys: Vec<(u16, String)> =
+                    std::iter::once((tile, BASE_COLOR_CHANNEL.to_string()))
+                        .chain(targets.channels.keys().map(|c| (tile, c.clone())))
+                        .collect();
+                for key in keys {
+                    self.cache_dirty.insert(key, DirtyRegion::Full);
+                }
+            }
+        }
+    }
+
     pub fn set_names(&self) -> Vec<String> {
         self.set_sizes.keys().cloned().collect()
     }
@@ -4006,6 +4062,7 @@ impl PaintState {
             base_visible: true,
             displayed: Vec::new(),
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         }
     }
 
@@ -6144,6 +6201,24 @@ mod tests {
     use umber_mesh::seam_mirror::mirror_positions;
 
     #[test]
+    fn hidden_set_composites_no_rows_and_flips_are_detected() {
+        let mut snap = CompositeSnapshot::default();
+        snap.set_layers.insert("A".to_string(), vec![]);
+        snap.hidden_sets.insert("A".to_string());
+        assert!(snap.rows_for("A").is_empty());
+        assert!(snap.rows_for("B").is_empty()); // B: falls back to layers (also empty here)
+        let mut prev = CompositeSnapshot::default();
+        let mut next = CompositeSnapshot::default();
+        next.hidden_sets.insert("A".to_string());
+        assert_eq!(
+            CompositeSnapshot::hidden_flips(&prev, &next),
+            vec!["A".to_string()]
+        );
+        assert!(CompositeSnapshot::hidden_flips(&next, &prev).contains(&"A".to_string()));
+        assert!(CompositeSnapshot::hidden_flips(&prev, &prev).is_empty());
+    }
+
+    #[test]
     fn clone_offset_texels_matches_local_texel_deltas() {
         // The tracker's texel offset must land exactly where local_texel
         // maps the alt-clicked source (V flip included).
@@ -7133,6 +7208,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(tile, channel.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         }
     }
 
@@ -7199,6 +7275,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         }
     }
 
@@ -7266,6 +7343,7 @@ mod tests {
                 ("A".to_string(), vec![base_row(), row(20)]),
                 ("B".to_string(), vec![base_row(), row(21)]),
             ]),
+            hidden_sets: Default::default(),
         };
         state.flush_composite(&snapshot);
         let centre = |state: &mut PaintState, tile: u16| {
@@ -7477,6 +7555,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         state.flush_composite(&snapshot);
         let cache = state
@@ -7814,6 +7893,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         let l0 = state
             .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(20))
@@ -7913,6 +7993,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         // The two-layer bake: 200 then 100@0.5 over transparent = 150
         // everywhere, and L22's 37 never reaches it (the isolation).
@@ -7996,6 +8077,7 @@ mod tests {
             base_visible: true,
             displayed: Vec::new(),
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         let prefix = state
             .read_anchor_prefix(&snapshot, 1001, BASE_COLOR_CHANNEL, PlaneOwner::Layer(31))
@@ -8058,6 +8140,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         let mut with = without.clone();
         with.layers.push(row(41, 42, 0.5));
@@ -8470,6 +8553,7 @@ mod tests {
             base_visible: true,
             displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         // Three planes on L1 (amortization needs 3 frames).
         let pat_a: Vec<u8> = (0..512 * 512).flat_map(|_| [10, 20, 30, 255]).collect();
@@ -8631,6 +8715,7 @@ mod tests {
                 (1001, "metallic".to_string()),
             ],
             set_layers: Default::default(),
+            hidden_sets: Default::default(),
         };
         // Publish dirt flushes away first (the mask stroke must leave
         // `Rects`, not ride a stale `Full`).

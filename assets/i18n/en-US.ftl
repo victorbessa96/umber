@@ -174,6 +174,10 @@ home =
 
 texturesets =
     .set = Texture set
+    .toggle-visible = Toggle this set visibility
+    .show-all = Show all
+    .hide-all = Hide all
+    .invert = Invert
     .resize-confirm = Resize { $set } from { $from } to { $to }? This clears the set's canvas and the stroke undo history.
     .resize-apply = Resize
     .resize-cancel = Cancel

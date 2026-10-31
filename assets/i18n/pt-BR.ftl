@@ -178,6 +178,10 @@ home =
 
 texturesets =
     .set = Conjunto de texturas
+    .toggle-visible = Alternar visibilidade deste conjunto
+    .show-all = Mostrar todos
+    .hide-all = Ocultar todos
+    .invert = Inverter
     .resize-confirm = Redimensionar { $set } de { $from } para { $to }? Isso apaga a tela do conjunto e o histórico de desfazer dos traços.
     .resize-apply = Redimensionar
     .resize-cancel = Cancelar

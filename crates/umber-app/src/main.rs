@@ -2805,11 +2805,39 @@ fn texture_sets_panel_ui(
         for name in &sets {
             let (width, height) = paint.size_of_set(name);
             let tiles = paint.tiles_of_set(name).len();
+            // The eye per set (g2-texture-set-list's open tail): hides
+            // the set's tiles from the composite without switching.
+            let hidden = paint.set_hidden(name);
+            if ui
+                .selectable_label(!hidden, if hidden { "·" } else { "👁" })
+                .on_hover_text(tr("texturesets.toggle-visible"))
+                .clicked()
+            {
+                paint.set_set_hidden(name, !hidden);
+            }
             ui.selectable_value(
                 &mut active,
                 name.clone(),
                 format!("{name} ({width}×{height}, {tiles})"),
             );
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.button(tr("texturesets.show-all")).clicked() {
+            for name in &sets {
+                paint.set_set_hidden(name, false);
+            }
+        }
+        if ui.button(tr("texturesets.hide-all")).clicked() {
+            for name in &sets {
+                paint.set_set_hidden(name, true);
+            }
+        }
+        if ui.button(tr("texturesets.invert")).clicked() {
+            for name in &sets {
+                let hidden = paint.set_hidden(name);
+                paint.set_set_hidden(name, !hidden);
+            }
         }
     });
     // The set-switch glue (W-C4 L1): the switch + Amendment A point 4's
@@ -4911,6 +4939,7 @@ impl eframe::App for UmberApp {
                 self.state.base_visible,
                 displayed,
             );
+            snapshot.hidden_sets = paint.hidden_sets().clone();
             // Per-set rows (C2-9): with more than one set, each tile
             // composites its own set's stack, and the inactive sets keep
             // their planes (the retire census reads the union).
@@ -4937,6 +4966,11 @@ impl eframe::App for UmberApp {
                 }
                 paint
                     .note_removed_layers(&paint_state::CompositeSnapshot::removed(prev, &snapshot));
+                // A set's eye flip re-composites that set's tiles (§4.2 at
+                // set granularity): rows_for returns no rows while hidden.
+                for set in paint_state::CompositeSnapshot::hidden_flips(prev, &snapshot) {
+                    paint.mark_set_full(&set);
+                }
             }
             self.state.prev_snapshot = Some(snapshot.clone());
             // §5.6 import-as-producer: every applied import publishes its
