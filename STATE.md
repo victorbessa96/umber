@@ -52,8 +52,8 @@ RATIO current/reference, band x1.10, not the absolute band; the
 absolute compare is report-only) · quick-mask persistence LANDED 10-31 (`73f8724`, the `paint/quick_mask/` 8-bit sidecar; undoable mask strokes = the named follow-up) · the follow-up
 queue (the browser's saved searches/custom dirs/import dialog/kittest +
 mask thumbnails LANDED 10-31; the flatten's compound one-step shipped
-earlier as `run_grouped` — queue line stale; remaining: per-entry history
-thumbs, OS-bitmap cursor, drag-out; zoom-to-cursor LANDED `1730125`) · the g1 Ctrl+LMB flow chord LANDED 10-31 (`9d70bbc`, local unpushed, rides the next wave push; angle chord open) · the desktop-checks
+earlier as `run_grouped` — queue line stale; remaining: OS-bitmap cursor,
+drag-out; per-entry history thumbs LANDED 10-31 (local unpushed, rides the next wave push); zoom-to-cursor LANDED `1730125`) · the g1 Ctrl+LMB flow chord LANDED 10-31 (`9d70bbc`, local unpushed, rides the next wave push; angle chord open) · the desktop-checks
 Result lines x4 (need the live desktop) ·
 queue.md's push-log row for this wave (rides the next docs pass) · the
 CLAUDE.md trap-line addition (the `&mut dyn` object-lifetime trap —
