@@ -127,13 +127,20 @@ fn decode_image(r: &mut Reader<'_>, what: &'static str) -> Result<ImageBuffer, W
 
 /// The params that cross the wire: everything except
 /// [`ParamValue::NodeRef`] (references are wiring — the engine resolves
-/// them to inputs before dispatch) and [`ParamValue::Anchor`] (layer
+/// them to inputs before dispatch), [`ParamValue::Anchor`] (layer
 /// bindings are host-side too — resolved to inputs before dispatch, so
-/// they never reach the guest; the SDK `Param` enum is unchanged).
+/// they never reach the guest; the SDK `Param` enum is unchanged), and
+/// [`ParamValue::Stops`] (ramp stops — host-only in v1; only built-in
+/// nodes carry them, and built-ins never run as guests).
 pub fn wire_params(params: &[(String, ParamValue)]) -> Vec<&(String, ParamValue)> {
     params
         .iter()
-        .filter(|(_, v)| !matches!(v, ParamValue::NodeRef(_) | ParamValue::Anchor(_)))
+        .filter(|(_, v)| {
+            !matches!(
+                v,
+                ParamValue::NodeRef(_) | ParamValue::Anchor(_) | ParamValue::Stops(_)
+            )
+        })
         .collect()
 }
 
@@ -174,6 +181,7 @@ fn encode_value(out: &mut Vec<u8>, v: &ParamValue) -> Result<u32, WireError> {
         }
         ParamValue::NodeRef(_) => return Err(WireError::Invalid("param kind (NodeRef)")),
         ParamValue::Anchor(_) => return Err(WireError::Invalid("param kind (Anchor)")),
+        ParamValue::Stops(_) => return Err(WireError::Invalid("param kind (Stops, host-only)")),
     })
 }
 

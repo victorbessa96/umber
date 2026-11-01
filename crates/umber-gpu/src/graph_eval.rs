@@ -279,6 +279,9 @@ impl GpuRoute {
             }
             "levels" => Self::Gpu(GpuOp::Levels),
             "curves" => Self::Gpu(GpuOp::Curves),
+            // Luminance→ramp needs the `Stops` param, which is host-only;
+            // the whole image is the input, so a global CPU pass.
+            "gradient_map" => Self::Cpu(CpuPath::GlobalPass),
             "invert" => Self::Gpu(GpuOp::Invert),
             "mix" => Self::Gpu(GpuOp::Mix),
             "color_correct" => Self::Gpu(GpuOp::ColorCorrect),

@@ -396,6 +396,9 @@ pub fn to_mtlx(graph: &Graph, custom_nodedefs: &[NodedefDecl]) -> String {
                     a.layer_id,
                     esc(&a.channel)
                 )),
+                // No MaterialX equivalent for a ramp — host-only param,
+                // dropped on mtlx export (the in-app graph keeps it).
+                ParamValue::Stops(_) => {}
                 ParamValue::NodeRef(_) => {} // emitted as a connection above.
             }
         }

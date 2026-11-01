@@ -40,6 +40,7 @@ fn as_sdk(v: &ParamValue) -> Param<'_> {
         ParamValue::Asset(s) => Param::Asset(s),
         ParamValue::NodeRef(_) => unreachable!("never on the wire"),
         ParamValue::Anchor(_) => unreachable!("never on the wire"),
+        ParamValue::Stops(_) => unreachable!("host-only param, never on the wire"),
     }
 }
 

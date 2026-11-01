@@ -143,6 +143,15 @@ fn default_params(node_def: &str) -> Vec<(String, ParamValue)> {
             .zip(CURVE_IDENTITY)
             .map(|(name, point)| ((*name).to_string(), ParamValue::Vec2(point)))
             .collect(),
+        // Black→white ramp, so a menu-added node evaluates and shows the
+        // ramp editor (which keys on the `stops` param).
+        "gradient_map" => vec![(
+            "stops".into(),
+            ParamValue::Stops(vec![
+                (0.0, [0.0, 0.0, 0.0, 1.0]),
+                (1.0, [1.0, 1.0, 1.0, 1.0]),
+            ]),
+        )],
         _ => Vec::new(),
     }
 }
@@ -1147,6 +1156,8 @@ impl GraphPanel {
         // param keeps its row.
         let curve = curve_points(&def, &params);
         let mut curve_drawn = false;
+        let ramp = ramp_stops(&def, &params);
+        let mut ramp_drawn = false;
         for (name, value) in &params {
             if curve.is_some() && CURVE_PARAMS.contains(&name.as_str()) {
                 if let (false, Some(stored)) = (curve_drawn, curve.as_ref()) {
@@ -1155,6 +1166,15 @@ impl GraphPanel {
                         for (point_name, point) in CURVE_PARAMS.iter().zip(next) {
                             self.set_param(id, point_name, ParamValue::Vec2(point));
                         }
+                    }
+                }
+                continue;
+            }
+            if ramp.is_some() && name == "stops" {
+                if let (false, Some(stored)) = (ramp_drawn, ramp.as_ref()) {
+                    ramp_drawn = true;
+                    if let Some(next) = ramp_editor(ui, id, stored) {
+                        self.set_param(id, "stops", ParamValue::Stops(next));
                     }
                 }
                 continue;
@@ -1419,6 +1439,14 @@ fn param_editor(
             });
             result
         }
+        // Edited by the ramp-editor special case in `editor_section` when
+        // the node is `gradient_map`; any other carrier gets a read-only row.
+        ParamValue::Stops(_) => {
+            ui.horizontal(|ui| {
+                ui.weak(name);
+            });
+            None
+        }
     }
 }
 
@@ -1473,6 +1501,60 @@ fn curves_editor(ui: &mut egui::Ui, id: u64, stored: &[[f32; 2]; 4]) -> Option<[
         return None;
     }
     curve_write_back(stored, &shown, fallback, &model)
+}
+
+/// The `gradient_map` node's stops, when the node carries a well-typed
+/// `stops` param (the ramp editor keys on `def == "gradient_map"`).
+fn ramp_stops(def: &str, params: &[(String, ParamValue)]) -> Option<Vec<(f32, [f32; 4])>> {
+    if def != "gradient_map" {
+        return None;
+    }
+    match params.iter().find(|(n, _)| n == "stops") {
+        Some((_, ParamValue::Stops(s))) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The `gradient_map` node's editor: [`umber_gui::RampEdit`] over the
+/// stops, under a per-node id. Returns the new stops only when an edit
+/// changed them (the node params are the state, rebuilt every frame).
+fn ramp_editor(
+    ui: &mut egui::Ui,
+    id: u64,
+    stored: &[(f32, [f32; 4])],
+) -> Option<Vec<(f32, [f32; 4])>> {
+    fn to_ramp(stops: &[(f32, [f32; 4])]) -> umber_gui::Ramp {
+        umber_gui::Ramp::new(
+            stops
+                .iter()
+                .map(|(p, c)| umber_gui::widgets::ramp::Stop {
+                    position: *p,
+                    color: egui::Rgba::from_rgba_linear(c[0], c[1], c[2], c[3]),
+                })
+                .collect(),
+        )
+    }
+    let mut model = to_ramp(stored);
+    let response = ui
+        .push_id(("graph_gradient_map_ramp", id), |ui| {
+            umber_gui::RampEdit::new(&mut model).show(ui)
+        })
+        .inner;
+    if !response.changed() {
+        return None;
+    }
+    Some(
+        model
+            .stops()
+            .iter()
+            .map(|s| {
+                (
+                    s.position,
+                    [s.color.r(), s.color.g(), s.color.b(), s.color.a()],
+                )
+            })
+            .collect(),
+    )
 }
 
 /// The editor model for `stored`, rebuilt every frame (the node params
@@ -1965,10 +2047,10 @@ mod tests {
     fn registry_listing_covers_all_merged_families() {
         // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c + 1 anchor
         // + 1 synth (post-v1) + 1 material_output (the dynmat channel
-        // contract, Kill A) = 27.
+        // contract, Kill A) = 27; +gradient_map (2026-11-01) = 28.
         let panel = GraphPanel::new();
         let defs = panel.registry().node_defs();
-        assert_eq!(defs.len(), 27, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 28, "unexpected registry size: {defs:?}");
         for expected in [
             "uniform",
             "image_asset",
@@ -1977,6 +2059,7 @@ mod tests {
             "noise_value",
             "noise_worley",
             "gradient",
+            "gradient_map",
             "checkerboard",
             "dots",
             "brick_pattern",

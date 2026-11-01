@@ -92,6 +92,46 @@ pub enum ParamValue {
     /// the same texture set; the eval resolves it to the layer's
     /// composited channel at eval time (see [`anchor`]).
     Anchor(anchor::AnchorRef),
+    /// Color-ramp stops: `(position, linear RGBA)` pairs, positions in
+    /// `[0, 1]`. Host-side only — never crosses the plugin wire (built-in
+    /// nodes read it in-process, like `NodeRef`/`Anchor`). Evaluated by
+    /// [`eval_ramp`].
+    Stops(Vec<(f32, [f32; 4])>),
+}
+
+/// Evaluates a [`ParamValue::Stops`] ramp at `t` (clamped to `[0, 1]`):
+/// stops sort by position, the surrounding segment lerps each channel
+/// linearly in linear-light RGBA (matching `umber_gui`'s ramp widget),
+/// and outside the ends the nearest stop's color holds. An empty ramp
+/// evaluates to opaque mid gray.
+pub fn eval_ramp(stops: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
+    if stops.is_empty() {
+        return [0.5, 0.5, 0.5, 1.0];
+    }
+    let mut sorted: Vec<(f32, [f32; 4])> = stops.to_vec();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
+    if t <= sorted[0].0 {
+        return sorted[0].1;
+    }
+    let last = sorted.len() - 1;
+    if t >= sorted[last].0 {
+        return sorted[last].1;
+    }
+    for w in sorted.windows(2) {
+        if t <= w[1].0 {
+            let (p0, c0) = w[0];
+            let (p1, c1) = w[1];
+            let span = p1 - p0;
+            let f = if span > 0.0 { (t - p0) / span } else { 0.0 };
+            let mut out = [0.0; 4];
+            for (i, out) in out.iter_mut().enumerate() {
+                *out = c0[i] + (c1[i] - c0[i]) * f;
+            }
+            return out;
+        }
+    }
+    sorted[last].1
 }
 
 #[cfg(test)]

@@ -40,7 +40,7 @@ pub use filter::{
     register_filter_nodes, BlurNode, CurvesNode, InvertNode, LevelsNode, SharpenNode,
 };
 
-pub use gradient::{register_gradient_nodes, GradientNode};
+pub use gradient::{register_gradient_nodes, GradientMapNode, GradientNode};
 pub use mask::{register_mask_nodes, EdgeDetectNode, FloodFillNode, HistogramMatchNode};
 pub use noise::{build_perm, register_noise_nodes, PerlinNode, ValueNode, WorleyNode};
 pub use pattern::{

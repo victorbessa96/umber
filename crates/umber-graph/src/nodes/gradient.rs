@@ -173,9 +173,72 @@ impl NodeImpl for GradientNode {
     }
 }
 
-/// Registers `gradient`.
+/// Registers `gradient` and `gradient_map`.
 pub fn register_gradient_nodes(registry: &mut crate::NodeRegistry) {
     registry.register("gradient", Arc::new(GradientNode));
+    registry.register("gradient_map", Arc::new(GradientMapNode));
+}
+
+/// The default `gradient_map` ramp: opaque black → white.
+const DEFAULT_STOPS: [(f32, [f32; 4]); 2] =
+    [(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])];
+
+/// `gradient_map`: maps the input image's luminance through a color ramp
+/// (`stops: Stops`, default black→white). Rec.709 luma of the RGB bytes;
+/// alpha passes through untouched. Output: `Image`, input size.
+pub struct GradientMapNode;
+
+impl NodeImpl for GradientMapNode {
+    fn eval(
+        &self,
+        inputs: Vec<(String, NodeOutput)>,
+        params: &[(String, ParamValue)],
+        _ctx: &EvalContext,
+    ) -> Result<NodeOutput, EvalError> {
+        let stops: &[(f32, [f32; 4])] = match find_param(params, "stops") {
+            None => &DEFAULT_STOPS[..],
+            Some(ParamValue::Stops(s)) => s,
+            Some(_) => {
+                return Err(EvalError::BadParam {
+                    node: 0,
+                    param: "stops".into(),
+                });
+            }
+        };
+        let src = match inputs
+            .iter()
+            .find(|(n, _)| n == "in")
+            .or_else(|| inputs.first())
+        {
+            Some((_, NodeOutput::Image(buf))) => buf,
+            Some((_, other)) => {
+                return Err(EvalError::TypeMismatch {
+                    node: 0,
+                    expected: "Image".into(),
+                    got: other.kind().into(),
+                });
+            }
+            None => {
+                return Err(EvalError::MissingInput {
+                    node: 0,
+                    input: "in".into(),
+                });
+            }
+        };
+        let (w, h) = (src.width(), src.height());
+        let mut out = Vec::with_capacity(src.data().len());
+        for px in src.data().chunks_exact(4) {
+            let luma = 0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32;
+            let c = crate::eval_ramp(stops, luma / 255.0);
+            out.extend_from_slice(&[
+                (c[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                (c[1].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                (c[2].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                px[3],
+            ]);
+        }
+        Ok(NodeOutput::Image(ImageBuffer::new(w, h, out)?))
+    }
 }
 
 #[cfg(test)]
