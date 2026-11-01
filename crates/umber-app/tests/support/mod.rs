@@ -16,6 +16,10 @@
 //! - **AccessKit helpers** ([`click_label`], [`has_label`]): tests find
 //!   widgets the way a screen reader does, by role and label, never by
 //!   pixel position.
+//! - **The fonts gate** ([`fonts_gate`], run by [`settle`]): the Umber
+//!   fonts (Inter, JetBrains Mono) are installed on the harness context and
+//!   one frame stepped so the atlas is realized before any font-bearing
+//!   snapshot compares.
 //!
 //! Not every helper is used by every test file (each file is its own
 //! crate), so the module allows dead code.
@@ -31,6 +35,9 @@ pub const STEP_DT: f32 = 1.0 / 60.0;
 pub const SIZE: [f32; 2] = [480.0, 640.0];
 /// Frames [`settle`] allows before calling the UI unsettled.
 pub const MAX_SETTLE_FRAMES: usize = 120;
+
+/// The Umber font keys the gate checks (first in their families).
+pub const UMBER_FONT_KEYS: [&str; 2] = [umber_gui::fonts::INTER_KEY, umber_gui::fonts::MONO_KEY];
 
 /// Installs the i18n catalogs once per test binary.
 pub fn ensure_i18n() {
@@ -61,9 +68,40 @@ pub fn harness_state<'a, S>(
     builder::<S>().build_ui_state(app, state)
 }
 
+/// The fonts gate (gui-plan `g0-kittest-harness`): installs the Umber font
+/// definitions on the harness context unless they are already there, steps
+/// one frame so the atlas pass runs, then asserts every key in `keys` is
+/// registered in the definitions and first in its family. Font-bearing
+/// snapshots must not compare before this.
+pub fn fonts_gate<S>(harness: &mut Harness<'_, S>, keys: &[&str]) {
+    let installed = harness
+        .ctx
+        .fonts(|f| f.definitions().font_data.contains_key(UMBER_FONT_KEYS[0]));
+    if !installed {
+        harness.ctx.set_fonts(umber_gui::umber_fonts());
+        harness.step();
+    }
+    let ready = harness.ctx.fonts(|f| {
+        let defs = f.definitions();
+        keys.iter().all(|k| {
+            defs.font_data.contains_key(*k)
+                && defs
+                    .families
+                    .values()
+                    .any(|v| v.first().is_some_and(|n| n == k))
+        })
+    });
+    assert!(
+        ready,
+        "fonts gate: {keys:?} not registered first in their families"
+    );
+}
+
 /// Steps until the UI is settled (kittest's `run_ok`), and fails the test
-/// with the frame budget if it never settles.
+/// with the frame budget if it never settles. Runs the [`fonts_gate`] first
+/// so every settled harness has the Umber fonts realized.
 pub fn settle<S>(harness: &mut Harness<'_, S>) {
+    fonts_gate(harness, &UMBER_FONT_KEYS);
     assert!(
         harness.run_ok().is_some(),
         "the UI did not settle within egui_kittest's step budget"
