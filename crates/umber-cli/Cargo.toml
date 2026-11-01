@@ -31,6 +31,10 @@ pollster = { workspace = true }
 emath = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Token generation for the serve control channel (absorbed 2026-11-01
+# from storytold/texturecraft security.rs; getrandom 0.3.4 already in
+# Cargo.lock). Promote to [workspace.dependencies] at the next wave close.
+getrandom = "0.3"
 # paint_snapshot's content hash (the same hash the paint sidecar's
 # clean-skip uses).
 blake3 = { workspace = true }

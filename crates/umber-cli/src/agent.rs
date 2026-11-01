@@ -555,7 +555,7 @@ struct ProjectSession {
 
 /// A session's state between steps.
 #[derive(Default)]
-struct Session {
+pub(crate) struct Session {
     loaded: Option<Loaded>,
     bake: Option<BakeJob>,
     project: Option<ProjectSession>,
@@ -1886,7 +1886,7 @@ impl Session {
 
     /// The reply line for input line `line` (step `index`), and whether
     /// the session should end.
-    fn reply(&mut self, index: usize, line: &str) -> (Value, bool) {
+    pub(crate) fn reply(&mut self, index: usize, line: &str) -> (Value, bool) {
         // The step index the reply will carry; `paint_snapshot`'s
         // `out_dir` arm names its file from it (one counter, two readers).
         self.index = index;

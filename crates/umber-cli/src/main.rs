@@ -13,7 +13,11 @@
 mod agent;
 mod batch;
 mod bench;
+mod mcp;
+mod security;
+mod serve;
 mod spp_extract;
+mod workspace;
 
 use std::path::{Path, PathBuf};
 
@@ -31,10 +35,12 @@ fn main() -> Result<()> {
         Some("export") => export_cmd(&args[1..]),
         Some("batch") => batch::batch_cmd(&args[1..]),
         Some("agent") => agent::agent_cmd(&args[1..]),
+        Some("mcp") => mcp::mcp_cmd(&args[1..]),
+        Some("serve") => serve::serve_cmd(&args[1..]),
         Some("extract-spp") => spp_extract::extract_spp_cmd(&args[1..]),
         Some("bench") => bench::bench_cmd(&args[1..]),
         Some(other) => Err(anyhow::anyhow!(
-            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|extract-spp|bench> ..."
+            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|mcp|serve|extract-spp|bench> ..."
         )),
         None => {
             println!("umber-cli v{} (wave-6)", env!("CARGO_PKG_VERSION"));
@@ -44,6 +50,8 @@ fn main() -> Result<()> {
             println!("          export <mesh-file> <out-dir> --preset <gltf|unreal|unity|blender> [--size N] [--rays N] [--tile UDIM]... [--usda]");
             println!("          batch <recipe.json>");
             println!("          agent   (JSONL steps on stdin, one JSON result line each on stdout)");
+            println!("          mcp     [--read-root DIR] [--write-root DIR]   (MCP server on stdio, tools over the agent session)");
+            println!("          serve   --port N [--read-root DIR] [--write-root DIR]   (token-auth loopback JSONL, one session per connection)");
             println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
             println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
             Ok(())

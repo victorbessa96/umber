@@ -83,3 +83,28 @@ upstream.
 
 - Adobe .sbsar / Materials SDK — closed terms, no FOSS path
 - Autodesk FBX SDK — proprietary, non-redistributable (ufbx is the route)
+
+## Absorbed source files (in-tree code from permissive upstreams)
+
+Code copied into the tree (not just referenced). Each file keeps the
+upstream copyright + license header; GPL-3.0-or-later accepts MIT OR
+Apache-2.0 code with notices retained. Trademark/brand assets are NEVER
+absorbed (upstream requires forks to remove them too).
+
+| Absorbed | Upstream | Landed as | License |
+|---|---|---|---|
+| 2026-11-01 | storytold/texturecraft @ `e01dac2` — `crates/texel/src/dilate.rs` | `crates/umber-core/src/uv_dilation.rs` (edition-2021 adaptation noted in the header) | MIT OR Apache-2.0, (c) 2026 ArtCraft Team and the TextureCraft contributors |
+| 2026-11-01 | storytold/texturecraft @ `e01dac2` — `crates/automation/src/{security,workspace,rpc,server}.rs` + `docs/control-protocol.md` patterns | `crates/umber-cli/src/{security,workspace,mcp,serve}.rs` (hand-rolled MCP wire instead of rmcp; std-only confinement instead of cap-std; umber step vocabulary instead of engine commands) | MIT OR Apache-2.0, (c) 2026 ArtCraft Team and the TextureCraft contributors |
+
+New dependency edge from the absorption: `getrandom 0.3` in
+`crates/umber-cli/Cargo.toml` — MIT OR Apache-2.0, already in
+Cargo.lock (0.3.4), no new package enters the lock. Promote to
+`[workspace.dependencies]` at the next wave close.
+
+NOT absorbed from texturecraft (deliberately): ArtCraft brand assets
+(trademark), the `craft-libs` git dependency pins, the storytold
+egui/winit `[patch.crates-io]` forks, the vendored egui-phosphor fork
+(targets egui 0.37; umber runs 0.36), rmcp/schemars/tokio (hand-rolled
+MCP wire instead — queued as a battery-verified upgrade), and the
+`.tcraft` zip+lz4 project container (umber's `.umber` dir + hash-named
+sidecars are the crash-safe format of record).
