@@ -266,6 +266,9 @@ pub struct MenuLabels<'a> {
     pub copy: std::borrow::Cow<'a, str>,
     /// "Paste".
     pub paste: std::borrow::Cow<'a, str>,
+    /// "Set as Default" — offered only when the field also has a
+    /// [`ValueField::with_default_cb`] callback ([`None`] = not bindable).
+    pub set_default: Option<std::borrow::Cow<'a, str>>,
 }
 
 /// The clipboard every field shares within one egui context (temp data
@@ -350,6 +353,7 @@ pub struct ValueField<'a, N: Numeric> {
     soft: Option<(f64, f64)>,
     default: Option<f64>,
     menu: Option<MenuLabels<'a>>,
+    default_cb: Option<std::rc::Rc<dyn Fn(f64) + 'a>>,
     /// Factor mode (g4-valuefield-grammar's open item): a 0..=1 value
     /// shown and typed as 0-100 %. The stored value stays 0..=1.
     percent: bool,
@@ -375,6 +379,7 @@ impl<'a, N: Numeric> ValueField<'a, N> {
             soft: None,
             default: None,
             menu: None,
+            default_cb: None,
             percent: false,
         }
     }
@@ -424,6 +429,15 @@ impl<'a, N: Numeric> ValueField<'a, N> {
     /// The value hover + Backspace resets to.
     pub fn default_value(mut self, value: N) -> Self {
         self.default = Some(value.to_f64());
+        self
+    }
+
+    /// A "Set as Default" menu item (label via [`MenuLabels::set_default`]):
+    /// when clicked, `cb` receives the field's current STORED value so the
+    /// caller can persist it as this field's default (g4-property-context-
+    /// menu's per-field defaults).
+    pub fn with_default_cb(mut self, cb: impl Fn(f64) + 'a) -> Self {
+        self.default_cb = Some(std::rc::Rc::new(cb));
         self
     }
 
@@ -667,6 +681,7 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 let unit = shown_unit;
                 let default = self.default;
                 let current = new;
+                let default_cb = self.default_cb.clone();
                 let mut picked = None;
                 response.context_menu(|ui| {
                     if let Some(d) = default {
@@ -709,6 +724,12 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                     {
                         picked = pasted;
                         ui.close();
+                    }
+                    if let (Some(label), Some(cb)) = (&labels.set_default, &default_cb) {
+                        if ui.button(label.as_ref()).clicked() {
+                            cb(current);
+                            ui.close();
+                        }
                     }
                 });
                 if let Some(v) = picked {
@@ -1052,6 +1073,7 @@ mod tests {
         egui_kittest::Harness::new_ui_state(
             |ui, f: &mut Fields| {
                 let labels = MenuLabels {
+                    set_default: None,
                     reset: "Reset".into(),
                     copy: "Copy".into(),
                     paste: "Paste".into(),

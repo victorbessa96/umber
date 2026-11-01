@@ -935,6 +935,7 @@ propmenu =
     .reset = Reset to Default
     .copy = Copy Value
     .paste = Paste Value
+    .set-default = Set as Default
 
 ## Contextual toolbar strip (GUI plan g6-contextual-toolbar)
 

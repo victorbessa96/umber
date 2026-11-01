@@ -954,6 +954,7 @@ propmenu =
     .reset = Restaurar o padrão
     .copy = Copiar valor
     .paste = Colar valor
+    .set-default = Definir como padrão
 
 ## Faixa de contexto sobre o viewport (plano de GUI g6-contextual-toolbar)
 

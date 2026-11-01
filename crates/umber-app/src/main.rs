@@ -2209,11 +2209,34 @@ impl UmberApp {
                                 // g7-density-scale: Auto = native scale; the
                                 // manual value survives a toggle back.
                                 ui.checkbox(&mut p.ui_scale_auto, auto_scale.as_str());
+                                // g4-property-context-menu per-field
+                                // defaults: the menu's "Set as Default"
+                                // reports the value through ctx data (the
+                                // field itself borrows p.ui_scale), applied
+                                // to the persisted default right below;
+                                // Reset now restores that persisted default.
+                                let scale_default = p.ui_scale_default;
+                                let cb_ctx = ui.ctx().clone();
                                 let field = umber_gui::ValueField::new(&mut p.ui_scale)
                                     .context_menu(crate::i18n::prop_menu_labels())
+                                    .default_value(scale_default)
+                                    .with_default_cb(move |v| {
+                                        cb_ctx.data_mut(|d| {
+                                            d.insert_temp(
+                                                egui::Id::new("umber-set-scale-default"),
+                                                v,
+                                            );
+                                        });
+                                    })
                                     .range(preferences::SCALE_MIN..=preferences::SCALE_MAX)
                                     .step(0.05);
                                 let response = ui.add(field);
+                                let default_id = egui::Id::new("umber-set-scale-default");
+                                if let Some(v) = ui.ctx().data(|d| d.get_temp::<f64>(default_id)) {
+                                    p.ui_scale_default = (v as f32)
+                                        .clamp(preferences::SCALE_MIN, preferences::SCALE_MAX);
+                                    ui.ctx().data_mut(|d| d.remove::<f64>(default_id));
+                                }
                                 // Writing a number IS leaving Auto (the
                                 // pinned contract: the re-pinned
                                 // `style_delta_is_empty...` test encodes

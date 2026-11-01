@@ -116,6 +116,10 @@ pub struct Preferences {
     /// `ui_scale` value is kept but ignored while this is on, so a
     /// manual value survives a toggle back).
     pub ui_scale_auto: bool,
+    /// g4-property-context-menu per-field defaults: the UI scale's persisted
+    /// default (the prop menu's "Set as Default" writes it; Reset restores
+    /// it). 1.0 = the OS's own scale.
+    pub ui_scale_default: f32,
     /// g7-density-scale: how grabbable the dock separators are
     /// (`egui_dock::SeparatorStyle::extra_interact_width` — 4 pt
     /// standard, 8 pt for stylus sessions). Persisted as its string
@@ -141,6 +145,7 @@ impl Default for Preferences {
         Self {
             ui_scale: 1.0,
             ui_scale_auto: true,
+            ui_scale_default: 1.0,
             splitter_hit_zone: HitZoneName::Standard,
             tooltips: true,
             reduce_motion: false,
@@ -164,9 +169,10 @@ impl Preferences {
     /// The `key=value` text (stable key order).
     pub fn serialize(&self) -> String {
         format!(
-            "ui_scale={}\nui_scale_auto={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
+            self.ui_scale_default,
             self.splitter_hit_zone.as_str(),
             self.tooltips,
             self.reduce_motion,
@@ -200,6 +206,13 @@ impl Preferences {
                     }
                 }
                 "ui_scale_auto" => p.ui_scale_auto = bool_of(v).unwrap_or(p.ui_scale_auto),
+                "ui_scale_default" => {
+                    if let Ok(s) = v.parse::<f32>() {
+                        if s.is_finite() {
+                            p.ui_scale_default = s.clamp(SCALE_MIN, SCALE_MAX);
+                        }
+                    }
+                }
                 "splitter_hit_zone" => p.splitter_hit_zone = HitZoneName::from_str(v),
                 "tooltips" => p.tooltips = bool_of(v).unwrap_or(p.tooltips),
                 "reduce_motion" => p.reduce_motion = bool_of(v).unwrap_or(p.reduce_motion),
