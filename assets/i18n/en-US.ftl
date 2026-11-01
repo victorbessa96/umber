@@ -795,6 +795,7 @@ hint =
     .hud-size = Size
     .hud-hardness = Hardness
     .hud-flow = Flow
+    .hud-angle = Angle
     .alt-lmb = Alt+LMB
     .alt-mmb = Alt+MMB
     .alt-rmb = Alt+RMB

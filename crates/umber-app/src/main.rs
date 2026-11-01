@@ -392,6 +392,7 @@ struct PanelViewer<'a> {
     /// The shell's stashed Ctrl+LMB flow alpha, adopted into the active
     /// preset at the brush sync (g1 flow chord).
     pending_flow_alpha: &'a mut Option<f32>,
+    pending_stamp_angle: &'a mut Option<f32>,
     /// The Properties context rail's state (the Properties panel draws
     /// it; deciding apparatus itself is `properties_kinds`).
     properties_rail: &'a mut umber_gui::ContextRail,
@@ -1038,6 +1039,9 @@ impl TabViewer for PanelViewer<'_> {
                         if let Some(alpha) = self.pending_flow_alpha.take() {
                             self.brush.adopt_live_alpha(alpha);
                         }
+                        if let Some(deg) = self.pending_stamp_angle.take() {
+                            self.brush.adopt_live_angle(deg);
+                        }
                     }
                     let preset_changed = self.brush.take_preset_changed();
                     if let Some(preset) = self.brush.active_preset() {
@@ -1535,6 +1539,7 @@ pub struct AppState {
     /// The Ctrl+LMB flow chord's alpha, drained after the dock and
     /// adopted into the active preset at the brush sync.
     pub pending_flow_alpha: Option<f32>,
+    pub pending_stamp_angle: Option<f32>,
     /// The .spp import state (ruling 1: import-only; the reader crate's
     /// report is the artifact this presents).
     pub spp_import: spp_import::SppImportState,
@@ -1581,6 +1586,7 @@ impl AppState {
         self.parked_texture_sets.clear();
         self.psd_import = psd_import::PsdImportState::default();
         self.pending_flow_alpha = None;
+        self.pending_stamp_angle = None;
         self.spp_import = spp_import::SppImportState::default();
         self.display = umber_color::DisplaySettings::default();
         self.display_lut.mark_display_lut_dirty();
@@ -4552,9 +4558,10 @@ impl eframe::App for UmberApp {
         } else {
             None
         };
-        let (home_actions, pick_notices, flow_alpha): (
+        let (home_actions, pick_notices, flow_alpha, stamp_angle): (
             Vec<crate::empty_state::HomeCardAction>,
             Vec<String>,
+            Option<f32>,
             Option<f32>,
         ) = CentralPanel::default()
             .show(ui, |ui| {
@@ -4590,6 +4597,7 @@ impl eframe::App for UmberApp {
                     doc: &mut self.state.doc,
                     brush: &mut self.brush_panel,
                     pending_flow_alpha: &mut self.state.pending_flow_alpha,
+                    pending_stamp_angle: &mut self.state.pending_stamp_angle,
                     properties_rail: &mut self.properties_rail,
                     icons: &self.icons,
                     polygon_fill: &mut self.state.polygon_fill,
@@ -4641,7 +4649,8 @@ impl eframe::App for UmberApp {
                     viewer.home_actions.drain(..).collect();
                 let notices: Vec<String> = viewer.pick_notices.drain(..).collect();
                 let flow_alpha = viewer.viewport.live_flow_alpha.take();
-                (actions, notices, flow_alpha)
+                let stamp_angle = viewer.viewport.live_stamp_angle.take();
+                (actions, notices, flow_alpha, stamp_angle)
             })
             .inner;
         // The material pick's toasts (the home_actions rail's pattern):
@@ -4649,9 +4658,10 @@ impl eframe::App for UmberApp {
         for text in pick_notices {
             self.notices.post(umber_gui::NoticeLevel::Info, text);
         }
-        // The Ctrl+LMB flow chord's alpha: stashed here, adopted into the
+        // The Ctrl+LMB chord's live values: stashed here, adopted into the
         // active preset at the brush sync above (next frame at latest).
         self.state.pending_flow_alpha = flow_alpha;
+        self.state.pending_stamp_angle = stamp_angle;
         // g0-notices' open tail: the import/export/bake panels' failure
         // toasts (same rail — the panels cannot post on the app's notices
         // themselves; their status lines stay in-panel too).

@@ -446,6 +446,27 @@ impl BrushPanel {
         }
     }
 
+    /// The angle chord's live stamp angle (Ctrl+LMB vertical drag): written
+    /// into the active preset as a Fixed angle, clamped to the editor's
+    /// -180..=180 deg range.
+    pub fn adopt_live_angle(&mut self, degrees: f32) {
+        let Some(idx) = self.active else {
+            return;
+        };
+        let Some(entry) = self.library.entries.get_mut(idx) else {
+            return;
+        };
+        let d = degrees.clamp(-180.0, 180.0);
+        let cur = match &entry.preset.params.stamp_angle {
+            umber_brush::StampAngle::Fixed { degrees } => Some(*degrees),
+            _ => None,
+        };
+        if cur != Some(d) {
+            entry.preset.params.stamp_angle = umber_brush::StampAngle::Fixed { degrees: d };
+            self.dirty = true;
+        }
+    }
+
     pub fn adopt_live_size(&mut self, size: f32, hardness: f32) {
         let Some(idx) = self.active else {
             return;

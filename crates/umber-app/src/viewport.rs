@@ -231,11 +231,20 @@ fn bracket_size_step(current: f32, grow: bool) -> f32 {
 
 /// Pixels of horizontal drag per alpha doubling (Ctrl+LMB flow chord).
 const FLOW_PX_PER_DOUBLING: f32 = 200.0;
+/// The angle chord's sweep: one full -180..=180 deg turn per this many px
+/// of vertical drag.
+const ANGLE_PX_PER_FULL_SWEEP: f32 = 400.0;
 
 /// The flow chord's alpha: `alpha0 * 2^(dx / FLOW_PX_PER_DOUBLING)`,
 /// clamped to 0.01..=1 (matches the preset editor's alpha field).
 fn flow_alpha_step(alpha0: f32, dx_px: f32) -> f32 {
     (alpha0 * 2f32.powf(dx_px / FLOW_PX_PER_DOUBLING)).clamp(0.01, 1.0)
+}
+
+/// The angle chord's degrees: linear in the vertical drag, clamped to the
+/// preset editor's -180..=180 deg range.
+fn angle_step(angle0_deg: f32, dy_px: f32) -> f32 {
+    (angle0_deg + dy_px * 360.0 / ANGLE_PX_PER_FULL_SWEEP).clamp(-180.0, 180.0)
 }
 
 /// The cursor's position in NDC (x right ∈ [-1,1], y UP ∈ [-1,1]) inside
@@ -379,9 +388,11 @@ pub struct Viewport {
     /// The Ctrl+LMB flow chord's live alpha handed up to the shell this
     /// frame (the preset owns alpha; the viewport owns no brush state).
     pub live_flow_alpha: Option<f32>,
+    /// Live stamp angle (deg) from the Ctrl+LMB chord's vertical drag.
+    pub live_stamp_angle: Option<f32>,
     /// The in-flight Ctrl+LMB flow drag: the pointer origin and the alpha
     /// at press.
-    flow_drag: Option<(egui::Pos2, f32)>,
+    flow_drag: Option<(egui::Pos2, f32, f32)>,
     /// A Ctrl+RMB brush-resize drag in flight: the brush size and
     /// hardness at its start and the pointer origin (GUI plan G1
     /// g1-brush-resize). The ring stays at the origin while it runs.
@@ -867,9 +878,10 @@ impl Viewport {
         }
 
         // Ctrl+LMB drag sets the flow/alpha (Painter's chord): horizontal
-        // delta scales alpha exponentially (angle awaits the angle param).
-        // Handed up to the shell — the preset owns alpha. Same never-nav
-        // rule as the resize chord (LMB binds only with Alt).
+        // delta scales alpha exponentially; vertical delta sweeps the stamp
+        // angle linearly. Both are handed up to the shell — the preset owns
+        // them. Same never-nav rule as the resize chord (LMB binds only
+        // with Alt).
         let flow_chord = !stencil_owns
             && ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
             && response.dragged_by(PointerButton::Primary);
@@ -879,17 +891,26 @@ impl Viewport {
                     .input(|i| i.pointer.press_origin())
                     .or_else(|| response.interact_pointer_pos())
                     .unwrap_or(rect.center());
-                self.flow_drag = Some((
-                    origin,
-                    paint
-                        .as_ref()
-                        .map(|p| p.brush_params().alpha)
-                        .unwrap_or(1.0),
-                ));
+                let (alpha0, angle0) = paint
+                    .as_ref()
+                    .map(|p| {
+                        let params = p.brush_params();
+                        let angle = match &params.stamp_angle {
+                            umber_brush::StampAngle::Fixed { degrees } => *degrees,
+                            umber_brush::StampAngle::FollowStroke { offset_degrees } => {
+                                *offset_degrees
+                            }
+                            _ => 0.0,
+                        };
+                        (params.alpha, angle)
+                    })
+                    .unwrap_or((1.0, 0.0));
+                self.flow_drag = Some((origin, alpha0, angle0));
             }
-            if let Some((origin, alpha0)) = self.flow_drag {
+            if let Some((origin, alpha0, angle0)) = self.flow_drag {
                 let now = response.interact_pointer_pos().unwrap_or(rect.center());
                 self.live_flow_alpha = Some(flow_alpha_step(alpha0, now.x - origin.x));
+                self.live_stamp_angle = Some(angle_step(angle0, now.y - origin.y));
             }
         } else {
             self.flow_drag = None;
@@ -1506,14 +1527,21 @@ impl Viewport {
         }
         // A flow drag in flight: the same contract as the resize chord,
         // the ring stays at the drag origin with a numeric HUD beside it.
-        if let Some((origin, alpha0)) = self.flow_drag {
+        if let Some((origin, alpha0, angle0)) = self.flow_drag {
             let radius = self.cursor_radius_px(rect, mesh, paint, origin);
             let shape = brush_cursor::shape(radius, paint.brush_hardness());
             Self::set_brush_cursor(ui.ctx(), &painter, origin, shape);
             let alpha = self
                 .live_flow_alpha
                 .unwrap_or_else(|| flow_alpha_step(alpha0, 0.0));
-            let hud = format!("{} {:.0}%", tr("hint.hud-flow"), alpha * 100.0);
+            let angle = self.live_stamp_angle.unwrap_or(angle0);
+            let hud = format!(
+                "{} {:.0}%   {} {:.0}°",
+                tr("hint.hud-flow"),
+                alpha * 100.0,
+                tr("hint.hud-angle"),
+                angle
+            );
             let r = radius.unwrap_or(0.0);
             painter.text(
                 origin + egui::vec2(r + 10.0, -r.min(40.0)),
@@ -2926,6 +2954,16 @@ mod tests {
     }
 
     #[test]
+    fn angle_chord_sweeps_linearly_and_clamps() {
+        assert!((angle_step(0.0, 0.0) - 0.0).abs() < 1e-6);
+        // 100 px up = +90 deg (400 px per full sweep), down = -90.
+        assert!((angle_step(0.0, -100.0) - 90.0).abs() < 1e-4);
+        assert!((angle_step(0.0, 100.0) + 90.0).abs() < 1e-4);
+        // Clamps at the editor's range.
+        assert_eq!(angle_step(170.0, -100.0), 180.0);
+        assert_eq!(angle_step(-170.0, 100.0), -180.0);
+    }
+
     fn flow_chord_scales_alpha_exponentially_and_clamps() {
         assert!((flow_alpha_step(0.5, 0.0) - 0.5).abs() < 1e-6);
         // +200 px doubles.

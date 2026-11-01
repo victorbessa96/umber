@@ -814,6 +814,7 @@ hint =
     .hud-size = Tamanho
     .hud-hardness = Dureza
     .hud-flow = Fluxo
+    .hud-angle = Ângulo
     .alt-lmb = Alt+Esq
     .alt-mmb = Alt+Meio
     .alt-rmb = Alt+Dir
