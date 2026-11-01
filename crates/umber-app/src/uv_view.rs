@@ -586,6 +586,20 @@ impl UvView {
         if let Some(symmetry) = symmetry {
             draw_symmetry_guides(&painter, square, &symmetry);
             draw_uv_axes(&painter, square);
+            // g1-axis-gizmo's UV-view axes: the 2D orientation cue
+            // bottom-right of the square (+U red right, +V green up).
+            // The UV view has no camera, so the tips are passive.
+            let gizmo_centre = square.right_bottom()
+                - egui::vec2(
+                    crate::axis_gizmo::MARGIN + crate::axis_gizmo::RADIUS,
+                    crate::axis_gizmo::MARGIN + crate::axis_gizmo::RADIUS,
+                );
+            crate::axis_gizmo::paint(
+                &painter,
+                gizmo_centre,
+                &crate::axis_gizmo::project_axes_2d(crate::axis_gizmo::RADIUS),
+                None,
+            );
         }
         // The UDIM grid (G6): in multi-tile mode, every present tile
         // gets a cell, its number, and a click target (a click switches

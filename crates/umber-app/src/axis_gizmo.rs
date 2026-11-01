@@ -140,6 +140,37 @@ pub fn project_axes(yaw: f32, pitch: f32, radius: f32) -> Vec<Tip> {
     tips
 }
 
+/// The 2D (UV view) axes: +U right (red, X), +V up (green, Y), and their
+/// negatives — a passive orientation cue (the UV square has no camera to
+/// snap, so no click chain). Positives draw on top (depth 1), negatives
+/// behind (-1); sorted back to front like [`project_axes`].
+pub fn project_axes_2d(radius: f32) -> Vec<Tip> {
+    let mut tips = vec![
+        Tip {
+            axis: Axis::PosX,
+            offset: Vec2::new(radius, 0.0),
+            depth: 1.0,
+        },
+        Tip {
+            axis: Axis::NegX,
+            offset: Vec2::new(-radius, 0.0),
+            depth: -1.0,
+        },
+        Tip {
+            axis: Axis::PosY,
+            offset: Vec2::new(0.0, -radius),
+            depth: 1.0,
+        },
+        Tip {
+            axis: Axis::NegY,
+            offset: Vec2::new(0.0, radius),
+            depth: -1.0,
+        },
+    ];
+    tips.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+    tips
+}
+
 /// The axis whose tip is under `pointer_offset` (relative to the gizmo
 /// centre), preferring the nearest-to-viewer tip when two overlap.
 pub fn hit(tips: &[Tip], pointer_offset: Vec2) -> Option<Axis> {
@@ -233,6 +264,17 @@ mod tests {
         // Sorted back to front: -Z (away) first, +Z (towards) last.
         assert_eq!(tips.first().unwrap().axis, Axis::NegZ);
         assert_eq!(tips.last().unwrap().axis, Axis::PosZ);
+    }
+
+    #[test]
+    fn uv_axes_are_u_right_v_up_with_positives_on_top() {
+        let tips = project_axes_2d(10.0);
+        assert_eq!(tips.len(), 4);
+        assert!((tip(&tips, Axis::PosX).offset - Vec2::new(10.0, 0.0)).length() < 1e-4);
+        assert!((tip(&tips, Axis::PosY).offset - Vec2::new(0.0, -10.0)).length() < 1e-4);
+        assert!(tip(&tips, Axis::PosX).depth > 0.0 && tip(&tips, Axis::NegX).depth < 0.0);
+        // Sorted back to front: the negatives first.
+        assert!(tips[..2].iter().all(|t| t.depth < 0.0));
     }
 
     #[test]
