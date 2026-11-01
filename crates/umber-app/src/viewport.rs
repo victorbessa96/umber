@@ -223,6 +223,12 @@ fn rmb_cancel_step(
     }
 }
 
+/// One [ / ] brush-size step: x1.25 to grow, x0.8 to shrink (the clamp
+/// rides `set_brush_size`'s `sanitize_size`).
+fn bracket_size_step(current: f32, grow: bool) -> f32 {
+    current * if grow { 1.25 } else { 0.8 }
+}
+
 /// The cursor's position in NDC (x right ∈ [-1,1], y UP ∈ [-1,1]) inside
 /// `rect` — the anchor for zoom-toward-cursor (egui's y is down, NDC's
 /// is up, hence the flip).
@@ -843,6 +849,22 @@ impl Viewport {
                 p.set_brush_hardness(hardness);
             }
             _ => self.resize = None,
+        }
+
+        // [ / ] step the brush size (Painter's chord; hover-gated like the
+        // P/F keys, so it never fires while typing in a panel). One step is
+        // x1.25 / x0.8 of the current multiplier; set_brush_size clamps.
+        let bracket = ui.input(|i| {
+            if i.key_pressed(egui::Key::CloseBracket) {
+                Some(true)
+            } else if i.key_pressed(egui::Key::OpenBracket) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        if let (Some(grow), Some(p)) = (bracket, paint.as_mut()) {
+            p.set_brush_size(bracket_size_step(p.brush_size(), grow));
         }
 
         // Straight line (Painter C1): Shift held previews a dotted line from
@@ -2818,6 +2840,14 @@ mod tests {
         let d0 = vp2.camera.distance;
         vp2.frame_mesh();
         assert_eq!(vp2.camera.distance, d0);
+    }
+
+    #[test]
+    fn bracket_steps_grow_and_shrink_the_size() {
+        assert!((bracket_size_step(1.0, true) - 1.25).abs() < 1e-6);
+        assert!((bracket_size_step(1.0, false) - 0.8).abs() < 1e-6);
+        // Growing past the sanitize clamp saturates, not overflows.
+        assert!(bracket_size_step(8.0, true) > 8.0); // clamped by the caller
     }
 
     #[test]
