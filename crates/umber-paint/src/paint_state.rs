@@ -1108,6 +1108,10 @@ pub struct StrokeCommit {
     /// `retouch_history` length after the stroke recorded: the row's jump
     /// target.
     pub depth: usize,
+    /// The layer the committed stroke painted — the History row's per-entry
+    /// thumbnail target. `None` when the active target is not a layer (the
+    /// Base fallback), i.e. the row gets no snapshot.
+    pub layer: Option<u64>,
 }
 
 /// The paint session: one GPU target per UDIM tile plus the live stroke
@@ -2326,6 +2330,15 @@ impl PaintState {
     /// The target new strokes paint (per-layer-pool design §2.1, [M3]).
     pub fn active_target(&self) -> PlaneOwner {
         self.active_target
+    }
+
+    /// The layer a committed stroke painted — [`StrokeCommit::layer`]'s
+    /// source. `None` when the active target is not a layer.
+    pub fn stroke_layer(&self) -> Option<u64> {
+        match self.active_target() {
+            PlaneOwner::Layer(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// Whether the user chose [`Self::active_target`] explicitly ([M12]).
@@ -4433,6 +4446,7 @@ impl PaintState {
                 self.pending_commits.push(StrokeCommit {
                     cursor,
                     depth: self.retouch_history.len(),
+                    layer: self.stroke_layer(),
                 });
             }
         }
@@ -4442,6 +4456,7 @@ impl PaintState {
                 self.pending_commits.push(StrokeCommit {
                     cursor,
                     depth: self.retouch_history.len(),
+                    layer: self.stroke_layer(),
                 });
             }
         }
@@ -9574,10 +9589,12 @@ mod tests {
                 StrokeCommit {
                     cursor: 0,
                     depth: 1
+                    layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
                     depth: 2
+                    layer: None,
                 },
             ]
         );
@@ -9627,14 +9644,17 @@ mod tests {
                 StrokeCommit {
                     cursor: 0,
                     depth: 1
+                    layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
                     depth: 2
+                    layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
                     depth: 2
+                    layer: None,
                 },
             ]
         );
@@ -9674,6 +9694,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 0,
                 depth: 1
+                layer: None,
             }]
         );
     }

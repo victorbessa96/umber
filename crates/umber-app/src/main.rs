@@ -1288,6 +1288,7 @@ impl TabViewer for PanelViewer<'_> {
                     self.doc,
                     self.paint.as_deref_mut(),
                     Some(&mut *self.graph as &mut dyn history_panel::GraphJournal),
+                    self.thumbnails,
                 );
                 // Single-step stroke buttons below the session log: the
                 // log's stroke rows above jump whole depths on the same
@@ -4330,6 +4331,31 @@ impl eframe::App for UmberApp {
         // hidden still get rows.
         if let Some(paint) = self.state.paint.as_mut() {
             history_panel::drain_stroke_commits(&mut self.state.doc, paint);
+            // g2-history-panel entry thumbs: capture each new row's snapshot
+            // in its record frame (entry thumbs freeze on capture, so a later
+            // undo/paint must not rewrite a row's past), and drop snapshots
+            // whose rows a truncation or clear removed.
+            let live_ops: Vec<u64> = self
+                .state
+                .doc
+                .session_history
+                .entries()
+                .iter()
+                .map(|e| e.op_id)
+                .collect();
+            self.state.thumbnails.prune_entries(&live_ops);
+            let mut thumb_budget = thumbnails::MAX_REBUILDS_PER_FRAME;
+            for entry in self.state.doc.session_history.entries() {
+                if let Some(layer) = entry.target_layer {
+                    let _ = self.state.thumbnails.entry_get(
+                        ui.ctx(),
+                        paint,
+                        entry.op_id,
+                        layer,
+                        &mut thumb_budget,
+                    );
+                }
+            }
         }
 
         // Stylus (XI2) poll, once per frame BEFORE the paint arm reads

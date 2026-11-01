@@ -132,6 +132,7 @@ use umber_gui::ParamGroup;
 use crate::document::Document;
 use crate::i18n::{tr, tr_args};
 use crate::paint_state::{PaintState, StrokeCommit};
+use crate::thumbnails::{Thumbnails, HISTORY_THUMB_PX};
 
 /// What one history row describes: every undoable [`LayerCommand`] shape
 /// plus the non-undoable session events recorded for context.
@@ -319,6 +320,10 @@ pub struct HistoryEntry {
     /// `seq` (no-op edits still take an op id here while journaling no
     /// line there).
     pub op_id: u64,
+    /// The layer whose pixels this row changed, when the op names exactly
+    /// one — the per-entry thumbnail's target (g2-history-panel). `None`
+    /// for graph rows, context rows and grouped ops.
+    pub target_layer: Option<u64>,
     /// The layer-journal depth to jump to when this row is clicked: the
     /// undo-stack length just after its op was pushed. `None` for stroke
     /// rows and context-only events, which never drive the layer journal.
@@ -432,13 +437,15 @@ impl SessionHistory {
     /// just after its push). Called from the same chokepoint that pushed
     /// the command. Never carries a stroke target: a layer push leaves the
     /// stroke journal (and its redo future) alone.
-    pub fn record_undoable(&mut self, kind: HistoryKind, depth: usize) {
+    pub fn record_undoable(&mut self, kind: HistoryKind, depth: usize, target_layer: Option<u64>) {
         self.entries.push(HistoryEntry {
             kind,
             op_id: self.next_op_id,
+            target_layer,
             undo_depth: Some(depth),
             stroke_depth: None,
             graph_depth: None,
+            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -448,13 +455,15 @@ impl SessionHistory {
     /// commit depth). Called only from
     /// [`apply_stroke_commits`](apply_stroke_commits), never directly from
     /// the stroke path. Never carries a layer target.
-    pub fn record_stroke(&mut self, depth: usize) {
+    pub fn record_stroke(&mut self, depth: usize, layer: Option<u64>) {
         self.entries.push(HistoryEntry {
             kind: HistoryKind::BrushStroke,
             op_id: self.next_op_id,
+            target_layer: layer,
             undo_depth: None,
             stroke_depth: Some(depth),
             graph_depth: None,
+            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -471,6 +480,8 @@ impl SessionHistory {
             undo_depth: None,
             stroke_depth: None,
             graph_depth: Some(depth),
+            target_layer: None,
+            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -486,6 +497,8 @@ impl SessionHistory {
             undo_depth: None,
             stroke_depth: None,
             graph_depth: None,
+            target_layer: None,
+            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -858,7 +871,8 @@ pub fn apply_stroke_commits(doc: &mut Document, epoch: u64, commits: Vec<StrokeC
     }
     for commit in commits {
         doc.session_history.truncate_stroke_future(commit.cursor);
-        doc.session_history.record_stroke(commit.depth);
+        doc.session_history
+            .record_stroke(commit.depth, commit.layer);
     }
 }
 
@@ -895,7 +909,10 @@ pub fn apply_graph_commits(doc: &mut Document, epoch: u64, commits: Vec<GraphCom
 // panel_snapshot.rs — four sites through `umber_app::history_panel`).
 #[allow(dead_code)]
 pub fn history_ui(ui: &mut egui::Ui, doc: &mut Document, paint: Option<&mut PaintState>) {
-    history_ui_with_graph(ui, doc, paint, None);
+    // The kittest shape has no persistent thumbnail cache: a per-call
+    // default captures what the single rendered frame can show.
+    let mut thumbs = Thumbnails::default();
+    history_ui_with_graph(ui, doc, paint, None, &mut thumbs);
 }
 
 /// Draws the History panel: an undo/redo + journal-size group, then the
@@ -916,6 +933,7 @@ pub fn history_ui_with_graph(
     doc: &mut Document,
     mut paint: Option<&mut PaintState>,
     mut graph: Option<&mut dyn GraphJournal>,
+    thumbs: &mut Thumbnails,
 ) {
     let controls_title = tr("history.section-controls");
     // Collect-then-act (the toast kill's pattern): the dispatches run AFTER
@@ -982,6 +1000,7 @@ pub fn history_ui_with_graph(
             struct Row {
                 text: String,
                 op_id: u64,
+                thumb_layer: Option<u64>,
                 layer_target: Option<usize>,
                 stroke_target: Option<usize>,
                 graph_target: Option<usize>,
@@ -1006,6 +1025,7 @@ pub fn history_ui_with_graph(
                         (Some(target), None, None) => Row {
                             text: format!("{target} · {}", entry.kind.label()),
                             op_id: entry.op_id,
+                            thumb_layer: entry.target_layer,
                             layer_target: Some(target),
                             stroke_target: None,
                             graph_target: None,
@@ -1017,6 +1037,7 @@ pub fn history_ui_with_graph(
                         (None, Some(target), None) if paint.is_some() => Row {
                             text: format!("{target} · {}", entry.kind.label()),
                             op_id: entry.op_id,
+                            thumb_layer: entry.target_layer,
                             layer_target: None,
                             stroke_target: Some(target),
                             graph_target: None,
@@ -1028,6 +1049,7 @@ pub fn history_ui_with_graph(
                         (None, None, Some(target)) if graph.is_some() => Row {
                             text: format!("{target} · {}", entry.kind.label()),
                             op_id: entry.op_id,
+                            thumb_layer: entry.target_layer,
                             layer_target: None,
                             stroke_target: None,
                             graph_target: Some(target),
@@ -1037,6 +1059,7 @@ pub fn history_ui_with_graph(
                         _ => Row {
                             text: format!("· {}", entry.kind.label()),
                             op_id: entry.op_id,
+                            thumb_layer: entry.target_layer,
                             layer_target: None,
                             stroke_target: None,
                             graph_target: None,
@@ -1046,6 +1069,7 @@ pub fn history_ui_with_graph(
                     }
                 })
                 .collect();
+            let mut thumb_budget = crate::thumbnails::MAX_REBUILDS_PER_FRAME;
             for row in &rows {
                 // The current row carries a dot; undone (future) rows are
                 // greyed: a new edit would discard them.
@@ -1059,19 +1083,36 @@ pub fn history_ui_with_graph(
                         _ => egui::RichText::new(text),
                     }
                 };
-                // Coordinated travel (C2-7; three arms since L6): a click
-                // puts the WHOLE timeline at this row, every journal at
-                // once.
-                if row.layer_target.is_some()
-                    || row.stroke_target.is_some()
-                    || row.graph_target.is_some()
-                {
-                    if ui.selectable_label(row.current, label(row)).clicked() {
-                        travel = Some(row.op_id);
+                ui.horizontal(|ui| {
+                    // Per-entry snapshot (g2-history-panel): frozen at
+                    // record time by the frame-loop capture; drawn here when
+                    // captured.
+                    if let Some(layer) = row.thumb_layer {
+                        let tex = paint.as_deref_mut().and_then(|p| {
+                            thumbs.entry_get(ui.ctx(), p, row.op_id, layer, &mut thumb_budget)
+                        });
+                        if let Some(tex) = tex {
+                            let s = HISTORY_THUMB_PX as f32;
+                            ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                tex,
+                                egui::vec2(s, s),
+                            )));
+                        }
                     }
-                } else {
-                    ui.label(egui::RichText::new(&row.text).weak());
-                }
+                    // Coordinated travel (C2-7; three arms since L6): a click
+                    // puts the WHOLE timeline at this row, every journal at
+                    // once.
+                    if row.layer_target.is_some()
+                        || row.stroke_target.is_some()
+                        || row.graph_target.is_some()
+                    {
+                        if ui.selectable_label(row.current, label(row)).clicked() {
+                            travel = Some(row.op_id);
+                        }
+                    } else {
+                        ui.label(egui::RichText::new(&row.text).weak());
+                    }
+                });
             }
         });
         // `history.travel-note` described the two-journal boundary that
@@ -1099,6 +1140,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 0,
                 depth: 1,
+                layer: None,
             }],
         );
         assert!(doc.is_dirty(), "a stroke is an unsaved edit");
@@ -1114,6 +1156,7 @@ mod tests {
             undo_depth: None,
             stroke_depth: None,
             graph_depth: None,
+            target_layer: None,
         });
         assert_eq!(
             travel_target(&log, 0),
@@ -1213,11 +1256,11 @@ mod tests {
         doc.run(LayerCommand::add("A", LayerKind::Paint)); // op 0: L1
         doc.session_history
             .record_graph(HistoryKind::GraphAddNode, 1); // op 1: G1
-        doc.session_history.record_stroke(1); // op 2: S1
+        doc.session_history.record_stroke(1, None); // op 2: S1
         doc.run(LayerCommand::add("B", LayerKind::Paint)); // op 3: L2
         doc.session_history
             .record_graph(HistoryKind::GraphSetParam, 2); // op 4: G2
-        doc.session_history.record_stroke(2); // op 5: S2
+        doc.session_history.record_stroke(2, None); // op 5: S2
         let mut graph = FakeGraph::with_depth(2);
         let g1 = doc.session_history.entries()[1].op_id;
         assert!(travel_to(
@@ -1369,6 +1412,7 @@ mod tests {
                     HistoryKind::BrushStroke
                 },
                 op_id: i as u64,
+                target_layer: None,
                 undo_depth: layer.then_some(*depth),
                 stroke_depth: (!layer).then_some(*depth),
                 graph_depth: None,
@@ -1381,12 +1425,12 @@ mod tests {
     /// depths come from the real bookkeeping.
     fn three_arm_log() -> SessionHistory {
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1); // op 0: L1
+        log.record_undoable(HistoryKind::AddPaint, 1, None); // op 0: L1
         log.record_graph(HistoryKind::GraphAddNode, 1); // op 1: G1
-        log.record_stroke(1); // op 2: S1
-        log.record_undoable(HistoryKind::AddPaint, 2); // op 3: L2
+        log.record_stroke(1, None); // op 2: S1
+        log.record_undoable(HistoryKind::AddPaint, 2, None); // op 3: L2
         log.record_graph(HistoryKind::GraphSetParam, 2); // op 4: G2
-        log.record_stroke(2); // op 5: S2
+        log.record_stroke(2, None); // op 5: S2
         log
     }
 
@@ -1533,6 +1577,7 @@ mod tests {
             undo_depth: None,
             stroke_depth: None,
             graph_depth: None,
+            target_layer: None,
         });
         // No paint session: only the layer row is undoable.
         assert_eq!(
@@ -1746,9 +1791,9 @@ mod tests {
     #[test]
     fn recording_order_assigns_monotonic_op_ids_and_depths() {
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
         log.record_context(HistoryKind::Bake);
-        log.record_undoable(HistoryKind::SetOpacity, 2);
+        log.record_undoable(HistoryKind::SetOpacity, 2, None);
 
         let entries = log.entries();
         assert_eq!(entries.len(), 3);
@@ -1786,10 +1831,10 @@ mod tests {
         // order, op ids monotonic — and a stroke row never drives the
         // layer journal, nor a layer row the stroke journal.
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
-        log.record_stroke(1);
-        log.record_stroke(1);
-        log.record_stroke(2);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
+        log.record_stroke(1, None);
+        log.record_stroke(1, None);
+        log.record_stroke(2, None);
 
         let entries = log.entries();
         assert_eq!(
@@ -1827,10 +1872,10 @@ mod tests {
         // past the cursor describe no command. Layer and context rows
         // survive — the stroke push leaves the layer journal alone.
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
-        log.record_stroke(1);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
+        log.record_stroke(1, None);
         log.record_context(HistoryKind::Bake);
-        log.record_stroke(2);
+        log.record_stroke(2, None);
 
         log.truncate_stroke_future(1);
         assert_eq!(
@@ -1857,10 +1902,10 @@ mod tests {
         // rows on the epoch change. Layer and context rows stay — the
         // layer journal is untouched by a resize.
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
-        log.record_stroke(1);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
+        log.record_stroke(1, None);
         log.record_context(HistoryKind::Export);
-        log.record_stroke(2);
+        log.record_stroke(2, None);
         assert_eq!(log.stroke_epoch(), 0);
 
         assert!(!log.adopt_stroke_epoch(0), "same epoch adopts nothing");
@@ -1872,16 +1917,16 @@ mod tests {
             vec![HistoryKind::AddPaint, HistoryKind::Export]
         );
         // New strokes record against the new epoch at depth 1 again.
-        log.record_stroke(1);
+        log.record_stroke(1, None);
         assert_eq!(log.entries()[2].stroke_target(), Some(1));
     }
 
     #[test]
     fn row_state_marks_current_past_future_and_context() {
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
-        log.record_undoable(HistoryKind::SetOpacity, 2);
-        log.record_stroke(1);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
+        log.record_undoable(HistoryKind::SetOpacity, 2, None);
+        log.record_stroke(1, None);
         log.record_context(HistoryKind::Bake);
         let e = log.entries();
         // Live: layers at 2, strokes at 1.
@@ -1911,8 +1956,8 @@ mod tests {
     #[test]
     fn entry_is_current_tracks_each_journal() {
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
-        log.record_stroke(1);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
+        log.record_stroke(1, None);
         log.record_context(HistoryKind::Bake);
         let entries = log.entries();
 
@@ -1953,10 +1998,12 @@ mod tests {
                 StrokeCommit {
                     cursor: 0,
                     depth: 1,
+                    layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
                     depth: 2,
+                    layer: None,
                 },
             ],
         );
@@ -1987,10 +2034,12 @@ mod tests {
                 StrokeCommit {
                     cursor: 0,
                     depth: 1,
+                    layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
                     depth: 2,
+                    layer: None,
                 },
             ],
         );
@@ -2003,6 +2052,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 2,
                 depth: 2,
+                layer: None,
             }],
         );
         assert_eq!(
@@ -2027,6 +2077,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 1,
                 depth: 2,
+                layer: None,
             }],
         );
         assert_eq!(
@@ -2054,6 +2105,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 0,
                 depth: 1,
+                layer: None,
             }],
         );
         assert_eq!(doc.session_history.len(), 2);
@@ -2067,6 +2119,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 0,
                 depth: 1,
+                layer: None,
             }],
         );
         assert_eq!(
@@ -2135,6 +2188,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 0,
                 depth: 1,
+                layer: None,
             }],
         );
         apply_graph_commits(
@@ -2195,6 +2249,7 @@ mod tests {
             vec![StrokeCommit {
                 cursor: 0,
                 depth: 1,
+                layer: None,
             }],
         );
         apply_graph_commits(
@@ -2260,10 +2315,10 @@ mod tests {
     #[test]
     fn truncate_future_drops_dead_redo_rows_and_keeps_context() {
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
-        log.record_undoable(HistoryKind::AddFill, 2);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
+        log.record_undoable(HistoryKind::AddFill, 2, None);
         log.record_context(HistoryKind::Bake);
-        log.record_undoable(HistoryKind::SetOpacity, 3);
+        log.record_undoable(HistoryKind::SetOpacity, 3, None);
 
         // Undone back to depth 1, then a fresh push: the depth-2..3 rows
         // describe commands the cleared redo stack no longer holds.
@@ -2287,12 +2342,12 @@ mod tests {
     #[test]
     fn clear_resets_entries_and_restarts_op_ids() {
         let mut log = SessionHistory::new();
-        log.record_undoable(HistoryKind::AddPaint, 1);
+        log.record_undoable(HistoryKind::AddPaint, 1, None);
         log.record_context(HistoryKind::Export);
         log.clear();
         assert!(log.is_empty());
         assert_eq!(log.len(), 0);
-        log.record_undoable(HistoryKind::Remove, 1);
+        log.record_undoable(HistoryKind::Remove, 1, None);
         assert_eq!(log.entries()[0].op_id, 0);
     }
 }

@@ -1614,6 +1614,30 @@ impl LayerCommand {
         }
     }
 
+    /// The layer whose pixels this command touches — the History window's
+    /// per-entry thumbnail target (g2-history-panel). `Add` reports its id
+    /// only after the first `apply` (it holds none before); `Reorder`
+    /// resolves through the stack's applied position.
+    pub fn target_layer(&self, stack: &LayerStack) -> Option<u64> {
+        match self {
+            Self::Add { id, .. } => *id,
+            Self::Reorder {
+                from, applied_to, ..
+            } => stack.layers.get(applied_to.unwrap_or(*from)).map(|l| l.id),
+            Self::Remove { id, .. }
+            | Self::SetOpacity { id, .. }
+            | Self::SetVisible { id, .. }
+            | Self::SetBlendMode { id, .. }
+            | Self::Rename { id, .. }
+            | Self::SetFill { id, .. }
+            | Self::SetMaterial { id, .. }
+            | Self::SetInstanceSource { id, .. }
+            | Self::AttachMask { id, .. }
+            | Self::DetachMask { id, .. }
+            | Self::SetMaskEnabled { id, .. } => Some(*id),
+        }
+    }
+
     /// Builds a [`SetOpacity`](LayerCommand::SetOpacity) command.
     pub fn set_opacity(id: u64, value: f32) -> Self {
         LayerCommand::SetOpacity {

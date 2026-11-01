@@ -125,8 +125,12 @@ impl Document {
         // `Some` exactly after a push; a `None` records no row (better a
         // missing row than a mislabeled jumpable one).
         if self.group_base.is_none() {
-            if let Some(kind) = self.history.peek_undo().map(HistoryKind::from_command) {
-                self.session_history.record_undoable(kind, depth);
+            if let Some(cmd) = self.history.peek_undo() {
+                let kind = HistoryKind::from_command(cmd);
+                // The row's thumbnail target (g2-history-panel): the layer
+                // this command touched, resolved against the applied stack.
+                let target = cmd.target_layer(&self.stack);
+                self.session_history.record_undoable(kind, depth, target);
             }
         }
         let op = self
@@ -151,7 +155,7 @@ impl Document {
         self.session_history.truncate_future(base);
         if end > base {
             self.undo_groups.push((base, end));
-            self.session_history.record_undoable(kind, end);
+            self.session_history.record_undoable(kind, end, None); // grouped ops span layers: no single thumbnail target
         }
     }
 
@@ -2696,7 +2700,7 @@ mod tests {
         doc.run(LayerCommand::add("A", LayerKind::Paint));
         doc.run(LayerCommand::add("B", LayerKind::Fill));
         // A stroke recorded between the layer ops (the drain's row).
-        doc.session_history.record_stroke(1);
+        doc.session_history.record_stroke(1, None);
         assert!(doc.undo());
 
         // Fresh layer push over the undone state: the depth-2 layer row

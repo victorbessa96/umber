@@ -28,6 +28,9 @@ pub const THUMB_PX: usize = 32;
 /// At most this many thumbnails rebuild per frame (each costs one plane
 /// readback).
 pub const MAX_REBUILDS_PER_FRAME: usize = 2;
+/// History-row snapshot edge, px (GUI plan G2 `g2-history-panel`:
+/// "snapshot thumbnails per entry (56 px)").
+pub const HISTORY_THUMB_PX: usize = 56;
 /// The tile thumbnails show.
 const THUMB_TILE: u16 = umber_mesh::FIRST_TILE;
 
@@ -86,6 +89,9 @@ pub struct Thumbnails {
     /// Mask swatches, same revision keying (mask writes bump the
     /// layer's owner revision — see `layer_mask_event`).
     mask_cache: BTreeMap<u64, (u64, TextureHandle)>,
+    /// Per-history-entry snapshots, keyed by the row's `op_id` — frozen at
+    /// first capture, never rebuilt (g2-history-panel).
+    entry_cache: BTreeMap<u64, TextureHandle>,
 }
 
 impl Thumbnails {
@@ -180,6 +186,60 @@ impl Thumbnails {
         self.mask_cache.get(&layer).map(|(_, t)| t.clone())
     }
 
+    /// The frozen per-entry snapshot for history row `op_id`
+    /// (g2-history-panel): captured ONCE — the app shell walks the log every
+    /// frame, so the capture lands in the row's record frame — and never
+    /// rebuilt after, so later edits to the layer cannot rewrite the row's
+    /// past. `None` while the frame's budget is spent, mid-stroke, or until
+    /// the layer has pixels (`owner_revision == 0`).
+    pub fn entry_get(
+        &mut self,
+        ctx: &egui::Context,
+        paint: &mut PaintState,
+        op_id: u64,
+        layer: u64,
+        budget: &mut usize,
+    ) -> Option<TextureHandle> {
+        if let Some(tex) = self.entry_cache.get(&op_id) {
+            return Some(tex.clone());
+        }
+        if *budget == 0 || paint.is_stroking() {
+            return None;
+        }
+        let owner = PlaneOwner::Layer(layer);
+        if paint.owner_revision(owner) == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let plane = paint.read_plane(owner, THUMB_TILE, BASE_COLOR_CHANNEL)?;
+        let bytes = downsample(
+            &plane.data,
+            plane.width as usize,
+            plane.height as usize,
+            HISTORY_THUMB_PX,
+        );
+        let image =
+            ColorImage::from_rgba_unmultiplied([HISTORY_THUMB_PX, HISTORY_THUMB_PX], &bytes);
+        let tex = ctx.load_texture(
+            format!("umber-history-thumb-{op_id}"),
+            image,
+            TextureOptions::LINEAR,
+        );
+        self.entry_cache.insert(op_id, tex.clone());
+        Some(tex)
+    }
+
+    /// Drops entry snapshots whose rows are gone (a truncated future or a
+    /// cleared log): the twin of [`Self::prune`].
+    pub fn prune_entries(&mut self, live_op_ids: &[u64]) {
+        self.entry_cache.retain(|id, _| live_op_ids.contains(id));
+    }
+
+    /// How many entry snapshots are cached (tests).
+    pub fn entry_len(&self) -> usize {
+        self.entry_cache.len()
+    }
+
     /// Drops thumbnails of layers that no longer exist.
     pub fn prune(&mut self, live: &[u64]) {
         self.cache.retain(|id, _| live.contains(id));
@@ -235,6 +295,22 @@ mod tests {
         assert_eq!(downsample(&[], 0, 0, 4), vec![0; 64]);
         assert_eq!(downsample(&[1, 2, 3], 4, 4, 2), vec![0; 16], "short buffer");
         assert!(downsample(&[0; 16], 2, 2, 0).is_empty());
+    }
+
+    #[test]
+    fn prune_entries_keeps_only_live_rows() {
+        let ctx = egui::Context::default();
+        let mut t = Thumbnails::default();
+        let img = ColorImage::new([1, 1], vec![egui::Color32::WHITE]);
+        for id in [10u64, 11, 12] {
+            let tex = ctx.load_texture(format!("h{id}"), img.clone(), TextureOptions::LINEAR);
+            t.entry_cache.insert(id, tex);
+        }
+        t.prune_entries(&[10, 12]);
+        assert_eq!(t.entry_len(), 2);
+        assert!(t.entry_cache.contains_key(&10));
+        assert!(!t.entry_cache.contains_key(&11));
+        assert!(t.entry_cache.contains_key(&12));
     }
 
     #[test]

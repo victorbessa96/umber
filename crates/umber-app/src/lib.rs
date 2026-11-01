@@ -75,6 +75,10 @@ pub mod set_switch;
 /// re-exports it at its crate root, so every existing
 /// `crate::stencil::` path in the shell resolves unchanged).
 pub mod stencil;
+/// The layer/mask/history-entry thumbnail caches (g2-layer-thumbnails +
+/// g2-history-panel's per-entry snapshots) — on the library surface so the
+/// dual-compiled `history_panel` can name it from both targets.
+pub mod thumbnails;
 pub mod toolbar;
 
 /// Dynamic material layers: the headless eval driver, now in
