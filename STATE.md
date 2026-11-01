@@ -53,7 +53,7 @@ absolute compare is report-only) · quick-mask persistence LANDED 10-31 (`73f872
 queue (the browser's saved searches/custom dirs/import dialog/kittest +
 mask thumbnails LANDED 10-31; the flatten's compound one-step shipped
 earlier as `run_grouped` — queue line stale; remaining: per-entry history
-thumbs, OS-bitmap cursor, zoom-to-cursor, drag-out) · the desktop-checks
+thumbs, OS-bitmap cursor, drag-out; zoom-to-cursor LANDED `1730125`) · the g1 Ctrl+LMB flow chord LANDED 10-31 (`9d70bbc`, local unpushed, rides the next wave push; angle chord open) · the desktop-checks
 Result lines x4 (need the live desktop) ·
 queue.md's push-log row for this wave (rides the next docs pass) · the
 CLAUDE.md trap-line addition (the `&mut dyn` object-lifetime trap —
