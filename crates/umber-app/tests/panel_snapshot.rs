@@ -17,14 +17,7 @@
 //! The gizmo lives in `umber-app`'s library surface (`axis_gizmo`)
 //! since the supplement wave put it there for this harness.
 
-use egui_kittest::Harness;
-
-/// The catalog must be installed before any `tr()` call renders.
-fn ensure_i18n() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(umber_app::i18n::init);
-}
+mod support;
 
 #[test]
 fn axis_gizmo_snapshot() {
@@ -42,12 +35,12 @@ fn axis_gizmo_snapshot() {
         egui::pos2(0.0, 0.0),
         egui::vec2(200.0, 200.0),
     ));
-    let mut harness = Harness::builder()
+    let mut harness = support::builder::<()>()
         .with_size(egui::vec2(200.0, 200.0))
         .build_ui(|ui| {
             umber_app::axis_gizmo::paint(ui.painter(), centre, &tips, None);
         });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("axis_gizmo");
 }
 
@@ -82,25 +75,23 @@ fn axis_gizmo_click_chain_snap_the_view() {
 
 #[test]
 fn display_panel_snapshot() {
-    ensure_i18n();
     let mut settings = umber_color::DisplaySettings::default();
     let mut lut = umber_app::display_panel::DisplayLutState::default();
-    let mut harness = Harness::builder().build_ui(|ui| {
+    let mut harness = support::harness(|ui| {
         umber_app::display_panel::show(ui, &mut settings, &mut lut);
     });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("display_panel");
 }
 
 #[test]
 fn psd_import_section_snapshot() {
-    ensure_i18n();
     let mut state = umber_app::psd_import::PsdImportState::default();
     let mut doc = umber_app::document::Document::default();
-    let mut harness = Harness::builder().build_ui(|ui| {
+    let mut harness = support::harness(|ui| {
         umber_app::psd_import::show_section(ui, &mut state, &mut doc);
     });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("psd_import_section");
 }
 
@@ -115,20 +106,18 @@ fn psd_import_section_snapshot() {
 
 #[test]
 fn history_panel_empty_snapshot() {
-    ensure_i18n();
     let mut doc = umber_app::document::Document::default();
-    let mut harness = Harness::builder()
+    let mut harness = support::builder::<()>()
         .with_size(egui::vec2(240.0, 320.0))
         .build_ui(|ui| {
             umber_app::history_panel::history_ui(ui, &mut doc, None);
         });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("history_panel_empty");
 }
 
 #[test]
 fn history_panel_ops_snapshot() {
-    ensure_i18n();
     use umber_core::layers::{LayerCommand, LayerKind};
     let mut doc = umber_app::document::Document::default();
     doc.run(LayerCommand::Add {
@@ -141,18 +130,17 @@ fn history_panel_ops_snapshot() {
         kind: LayerKind::Fill,
         id: None,
     });
-    let mut harness = Harness::builder()
+    let mut harness = support::builder::<()>()
         .with_size(egui::vec2(240.0, 320.0))
         .build_ui(|ui| {
             umber_app::history_panel::history_ui(ui, &mut doc, None);
         });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("history_panel_ops");
 }
 
 #[test]
 fn toolbar_snapshot() {
-    ensure_i18n();
     use umber_app::toolbar::{ToolKind, ToolbarView, ViewToggles};
     let view = ToolbarView {
         tool: ToolKind::Paint,
@@ -167,18 +155,17 @@ fn toolbar_snapshot() {
         mask_editing: false,
     };
     let atlas = umber_gui::IconAtlas::empty();
-    let mut harness = Harness::builder()
+    let mut harness = support::builder::<()>()
         .with_size(egui::vec2(360.0, 48.0))
         .build_ui(|ui| {
             umber_app::toolbar::show(ui, &view, &atlas);
         });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("toolbar");
 }
 
 #[test]
 fn rich_tooltip_snapshot() {
-    ensure_i18n();
     use umber_app::rich_tooltip::TooltipParts;
     let parts = TooltipParts {
         title: "Snapshot tooltip".into(),
@@ -186,11 +173,11 @@ fn rich_tooltip_snapshot() {
         shortcut: Some("Ctrl+Shift+T".into()),
         unavailable: None,
     };
-    let mut harness = Harness::builder()
+    let mut harness = support::builder::<()>()
         .with_size(egui::vec2(260.0, 90.0))
         .build_ui(|ui| {
             umber_app::rich_tooltip::draw(ui, &parts);
         });
-    harness.run_ok();
+    support::settle(&mut harness);
     harness.snapshot("rich_tooltip");
 }
