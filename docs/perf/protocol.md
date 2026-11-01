@@ -607,6 +607,15 @@ would have failed this night on fleet noise; the ratio gate called it
 correctly. This is the first measured data point of the ratio's own
 noise floor — so far well inside the x1.10 band.
 
+### Third instrumented nightly (2026-11-01 10:01Z, run 41295623399, scheduled, head 5c277df) — SUCCESS, GATE 1 green
+
+A/B ratios vs the pinned reference in the same job: viewport_mean x0.781,
+viewport_p95 x0.895 — inside x1.10, exit 0. Report-only absolute compare
+red again (fleet-slow minute), the ratio gate called it correctly a third
+time. Ratio noise floor across the three instrumented runs now:
+viewport_mean x0.728..x0.784, viewport_p95 x0.878..x0.895, zero reds since
+the ratio gate landed.
+
 ### Watch checkpoint (2026-11-01 04:5xZ, dragon local)
 
 No new instrumented nightly since 41187950107 (next scheduled 11-01
