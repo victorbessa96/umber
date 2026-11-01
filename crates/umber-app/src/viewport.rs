@@ -1698,6 +1698,42 @@ impl Viewport {
         self.pick(rect, mesh, pos).map(|(uv, _)| uv)
     }
 
+    /// The world-space hit point under screen `pos` — the pivot an orbit
+    /// re-targets to when it starts over the last stroke's end
+    /// (g1-nav-presets' orbit-around-last-stroke).
+    fn world_at(
+        &self,
+        rect: egui::Rect,
+        mesh: &umber_mesh::MeshData,
+        pos: egui::Pos2,
+    ) -> Option<glam::Vec3> {
+        let aspect = rect.width() / rect.height();
+        let ndc = cursor_ndc(rect, pos);
+        let inv = self.camera.view_proj(aspect).inverse();
+        let near = umber_gpu::world_from_ndc(inv, glam::Vec4::new(ndc.x, ndc.y, 0.0, 1.0));
+        let far = umber_gpu::world_from_ndc(inv, glam::Vec4::new(ndc.x, ndc.y, 1.0, 1.0));
+        let dir = far - near;
+        let origin = match self.camera.projection {
+            umber_gpu::camera::Projection::Perspective => self.camera.eye(),
+            umber_gpu::camera::Projection::Orthographic => near,
+        };
+        let hit = umber_mesh::ray_intersect(mesh, origin, dir)?;
+        let tri = mesh.indices.get(hit.triangle * 3..hit.triangle * 3 + 3)?;
+        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        let (p0, p1, p2) = (
+            mesh.positions.get(i0)?,
+            mesh.positions.get(i1)?,
+            mesh.positions.get(i2)?,
+        );
+        let (v0, v1, v2) = (
+            glam::Vec3::from_array(*p0),
+            glam::Vec3::from_array(*p1),
+            glam::Vec3::from_array(*p2),
+        );
+        let (b0, b1) = hit.bary;
+        Some(v0 * (1.0 - b0 - b1) + v1 * b0 + v2 * b1)
+    }
+
     /// [`Self::pick_uv`] plus the front-face weight at the hit:
     /// `|cos|` between the view ray and the hit face's normal, through
     /// [`umber_mesh::front_facing_weight`] at the current start angle.
@@ -1770,9 +1806,25 @@ impl Viewport {
         if let Some(op) = op {
             let delta = response.drag_delta();
             match op {
-                crate::navigation::CameraOp::Orbit => self
-                    .camera
-                    .orbit(delta.x * ORBIT_SENSITIVITY, -delta.y * ORBIT_SENSITIVITY),
+                crate::navigation::CameraOp::Orbit => {
+                    // g1-nav-presets' last open tail: an orbit that starts
+                    // over the last stroke's end pivots around that world
+                    // point, not the mesh centre — Painter orbits around
+                    // what was just painted.
+                    if let Some(b) = dragged {
+                        if response.drag_started_by(b) {
+                            let pivot = match (self.mesh_data.as_ref(), self.last_stroke_end) {
+                                (Some(mesh), Some(end)) => self.world_at(response.rect, mesh, end),
+                                _ => None,
+                            };
+                            if let Some(pivot) = pivot {
+                                self.camera.target = pivot;
+                            }
+                        }
+                    }
+                    self.camera
+                        .orbit(delta.x * ORBIT_SENSITIVITY, -delta.y * ORBIT_SENSITIVITY)
+                }
                 crate::navigation::CameraOp::Pan => self
                     .camera
                     .pan(-delta.x * PAN_SENSITIVITY, delta.y * PAN_SENSITIVITY),
@@ -2372,6 +2424,17 @@ mod tests {
 
     fn rect200() -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0))
+    }
+
+    #[test]
+    fn world_at_center_hits_quad_center() {
+        // The orbit pivot: the ray through the viewport center meets the
+        // quad at its world center (0, 0, 0).
+        let viewport = head_on_viewport();
+        let w = viewport
+            .world_at(rect200(), &quad(), egui::pos2(100.0, 100.0))
+            .expect("center ray must hit the quad");
+        assert!(w.distance(glam::Vec3::ZERO) < 1e-4, "got {w:?}");
     }
 
     #[test]
