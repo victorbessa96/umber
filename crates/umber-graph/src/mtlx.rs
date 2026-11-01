@@ -22,7 +22,8 @@
 //! * Params emit as `<input name type value />`. [`ParamValue`] mapping:
 //!   `Float → float`, `Int → integer`, `Vec2 → vector2`, `Vec3 → vector3`,
 //!   `Color → color3`, `Bool → boolean`, `Asset → string` (content-hash
-//!   path), `Anchor → anchor` (`{layer_id}:{channel}`). `NodeRef` is NOT a
+//!   path), `Anchor → anchor` (`{layer_id}:{channel}`),
+//!   `Stops → stops` (`pos,r,g,b,a; …` ramp stops). `NodeRef` is NOT a
 //!   value input — it is a connection (below).
 //! * Edges emit painter-idiomatically: the connected input carries
 //!   `output="N{from}"`, always typed `color3` (single-output nodes emit
@@ -296,6 +297,17 @@ pub(crate) fn fmt_vec(vs: &[f32]) -> String {
         .join(", ")
 }
 
+/// Encodes ramp stops for mtlx `type="stops"`: `pos,r,g,b,a; pos,r,g,b,a;
+/// …`. [`f32::to_string`] is shortest-round-trip, so parsing the parts back
+/// returns bit-identical stops.
+pub(crate) fn fmt_stops(stops: &[(f32, [f32; 4])]) -> String {
+    stops
+        .iter()
+        .map(|(p, c)| format!("{},{},{},{},{}", p, c[0], c[1], c[2], c[3]))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Serialize `graph` to a MaterialX 1.38 document string.
 ///
 /// `custom_nodedefs` are declared FIRST (before any `<node>`), per the
@@ -396,9 +408,13 @@ pub fn to_mtlx(graph: &Graph, custom_nodedefs: &[NodedefDecl]) -> String {
                     a.layer_id,
                     esc(&a.channel)
                 )),
-                // No MaterialX equivalent for a ramp — host-only param,
-                // dropped on mtlx export (the in-app graph keeps it).
-                ParamValue::Stops(_) => {}
+                // Ramp stops (host-only param, but the mtlx carry is now a
+                // first-class type — `pos,r,g,b,a; …`, round-trips exactly).
+                ParamValue::Stops(stops) => out.push_str(&format!(
+                    "    <input name=\"{}\" type=\"stops\" value=\"{}\" />\n",
+                    esc(name),
+                    esc(&fmt_stops(stops))
+                )),
                 ParamValue::NodeRef(_) => {} // emitted as a connection above.
             }
         }
@@ -783,6 +799,23 @@ fn value_from_typed(
             }),
         },
         "string" => Ok(ParamValue::Asset(value.into())),
+        // Ramp stops (see `to_mtlx`): `pos,r,g,b,a; pos,...`. An empty value
+        // is an empty ramp (eval_ramp reads that as opaque mid gray); a
+        // malformed stop is a parse error, not a silent fallback.
+        "stops" => {
+            if value.trim().is_empty() {
+                Ok(ParamValue::Stops(Vec::new()))
+            } else {
+                value
+                    .split(';')
+                    .map(|part| {
+                        let v = parse_floats(part.trim(), line, elem, 5)?;
+                        Ok((v[0], [v[1], v[2], v[3], v[4]]))
+                    })
+                    .collect::<Result<Vec<_>, MtlxError>>()
+                    .map(ParamValue::Stops)
+            }
+        }
         // Anchors (see `to_mtlx`): `{layer_id}:{channel}`. A missing `:` or
         // a non-numeric head is a parse error, not a silent Asset — an
         // anchor that loaded as a plain string would never resolve.
@@ -1216,6 +1249,45 @@ mod tests {
             from_mtlx(&bad).is_err(),
             "a colon-less anchor must fail to parse"
         );
+    }
+
+    #[test]
+    fn stops_params_round_trip_exactly() {
+        // A Stops param must survive the mtlx carry bit-identical: emit as
+        // `type="stops" value="pos,r,g,b,a; …"` (f32 shortest-round-trip),
+        // parse back to the same stops.
+        let stops = vec![
+            (0.0, [0.0, 0.0, 0.0, 1.0]),
+            (0.5, [1.0, 0.25, 0.5, 1.0]),
+            (1.0, [1.0, 1.0, 1.0, 1.0]),
+        ];
+        let mut g = sample_graph();
+        g.nodes.push(Node {
+            id: 9,
+            node_def: "gradient_map".into(),
+            params: vec![("stops".into(), ParamValue::Stops(stops.clone()))],
+            canvas: None,
+        });
+        let doc = to_mtlx(&g, &painter_nodedefs());
+        assert!(doc.contains(r#"type="stops""#), "stops spelling: {doc}");
+        assert!(
+            doc.contains(r#"value="0,0,0,0,1; 0.5,1,0.25,0.5,1; 1,1,1,1,1""#),
+            "shortest-round-trip spelling: {doc}"
+        );
+        let (back, _, _) = from_mtlx(&doc).expect("stops doc parses");
+        let node = back
+            .nodes
+            .iter()
+            .find(|n| n.id == 9)
+            .expect("node survives");
+        assert_eq!(
+            node.params,
+            vec![("stops".to_string(), ParamValue::Stops(stops))],
+            "stops must round-trip bit-identical"
+        );
+        // A malformed stop (four floats, not five) is a parse error.
+        let bad = doc.replace("0.5,1,0.25,0.5,1", "0.5,1,0.25,0.5");
+        assert!(from_mtlx(&bad).is_err(), "a short stop must fail to parse");
     }
 
     #[test]
