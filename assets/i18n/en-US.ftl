@@ -990,4 +990,6 @@ assets =
     .import = Import…
     .import-title = Import
     .extra-dirs = Extra library folders
-    .drag-to-layers = Drag onto the Layers panel: materials become a new layer, masks bind to the layer under the drop.
+    .drag-to-layers = Drag onto the Layers panel: materials become a new layer, masks bind to the layer under the drop. Release outside any panel to drag a copy out to disk.
+    .drag-out-saved = Drag-out saved a copy to { $path }.
+    .drag-out-failed = Drag-out failed

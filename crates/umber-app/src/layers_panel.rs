@@ -642,6 +642,15 @@ pub mod gestures {
     #[derive(Debug, Clone)]
     pub struct AssetDrag(pub AssetDropRef);
 
+    /// ctx.data ids for the drag-out detector (main.rs's
+    /// `poll_asset_drag_out`): the payload seen while an asset drag is in
+    /// flight, whether one is in flight this frame, and the flag the
+    /// Layers panel sets when it CONSUMES the payload (a drop, not a
+    /// drag-out).
+    pub const ASSET_DRAG_SEEN_ID: &str = "umber-asset-drag-seen";
+    pub const ASSET_DRAG_IN_FLIGHT_ID: &str = "umber-asset-drag-in-flight";
+    pub const ASSET_DROP_CONSUMED_ID: &str = "umber-asset-drop-consumed";
+
     /// A row click's mode from the held modifiers.
     pub fn click_mode(mods: Modifiers) -> ClickMode {
         let cmd = mods.command || mods.ctrl;
@@ -1285,6 +1294,9 @@ pub mod gestures {
                     return Some(LayerGesture::Drop { id: drag.0, slot });
                 }
                 if let Some(drag) = asset_drag {
+                    // Consumed here: mark it so the drag-out detector does
+                    // not mistake this drop for a release outside.
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new(ASSET_DROP_CONSUMED_ID), true));
                     return Some(LayerGesture::AssetDrop {
                         asset: drag.0.clone(),
                         slot,

@@ -2552,6 +2552,95 @@ impl UmberApp {
         }
     }
 
+    /// Drag-out (Painter's Assets window): releasing an asset drag outside
+    /// every drop target saves a byte-copy of the asset's library file to a
+    /// chosen path. egui/winit cannot hand OS file drags out of the window,
+    /// so the save dialog IS the drag-out surface. Runs at the END of the
+    /// frame (after the dock) and detects the payload's in-flight → gone
+    /// transition; a payload the Layers panel consumed is a drop, not a
+    /// drag-out.
+    fn poll_asset_drag_out(&mut self, ctx: &egui::Context) {
+        use crate::layers_panel::{
+            AssetDrag, AssetDropRef, ASSET_DRAG_IN_FLIGHT_ID, ASSET_DRAG_SEEN_ID,
+            ASSET_DROP_CONSUMED_ID,
+        };
+        let in_flight_id = egui::Id::new(ASSET_DRAG_IN_FLIGHT_ID);
+        let seen_id = egui::Id::new(ASSET_DRAG_SEEN_ID);
+        let consumed_id = egui::Id::new(ASSET_DROP_CONSUMED_ID);
+        let now = egui::DragAndDrop::payload::<AssetDrag>(ctx);
+        if let Some(drag) = now.as_ref() {
+            ctx.data_mut(|d| d.insert_temp(seen_id, drag.clone()));
+        }
+        let now = now.is_some();
+        let prev = ctx
+            .data_mut(|d| d.get_temp::<bool>(in_flight_id))
+            .unwrap_or(false);
+        ctx.data_mut(|d| d.insert_temp(in_flight_id, now));
+        if !(prev && !now) {
+            return;
+        }
+        let consumed = ctx
+            .data_mut(|d| d.get_temp::<bool>(consumed_id))
+            .unwrap_or(false);
+        let seen = ctx.data_mut(|d| d.get_temp::<AssetDrag>(seen_id));
+        ctx.data_mut(|d| {
+            d.remove_temp::<AssetDrag>(seen_id);
+            d.remove_temp::<bool>(consumed_id);
+        });
+        let Some(drag) = seen else { return };
+        if consumed {
+            return;
+        }
+        let (ext, name) = match &drag.0 {
+            AssetDropRef::Material(n) => ("umbersmart", n.clone()),
+            AssetDropRef::Mask(n) => ("umbermask", n.clone()),
+        };
+        let loader = |p: &std::path::Path| -> Option<String> {
+            if ext == "umbersmart" {
+                umber_core::smart::SmartMaterial::load_file(p)
+                    .ok()
+                    .map(|m| m.name)
+            } else {
+                umber_core::smart::SmartMask::load_file(p)
+                    .ok()
+                    .map(|m| m.name)
+            }
+        };
+        let Some(src) = document::smart_file_for(&document::smart_dirs(), ext, &name, loader)
+        else {
+            self.notify_error(
+                "assets.drag-out-failed",
+                &format!("asset '{name}' not found in the library"),
+            );
+            return;
+        };
+        let Some(dst) = rfd::FileDialog::new()
+            .set_file_name(
+                src.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| name.clone()),
+            )
+            .add_filter(ext, &[ext])
+            .save_file()
+        else {
+            return; // cancelled: no notice
+        };
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => {
+                self.notices.post(
+                    umber_gui::NoticeLevel::Info,
+                    crate::i18n::tr_args(
+                        "assets.drag-out-saved",
+                        [("path", fluent::FluentValue::from(dst.display().to_string()))],
+                    ),
+                );
+            }
+            Err(e) => {
+                self.notify_error("assets.drag-out-failed", &format!("{}: {e}", dst.display()));
+            }
+        }
+    }
+
     /// Mesh files dropped on the window this frame load as the mesh (the
     /// empty-state hero's promise; `empty_state` has the routing call).
     /// One mesh per session in v1: the first loads, the rest are logged.
@@ -5099,6 +5188,10 @@ impl eframe::App for UmberApp {
                 });
             }
         }
+        // After the dock: an asset drag that just ended outside every drop
+        // target is a drag-out (save a copy); one the Layers panel consumed
+        // is not.
+        self.poll_asset_drag_out(ui.ctx());
     }
 }
 

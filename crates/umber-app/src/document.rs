@@ -1251,6 +1251,42 @@ pub fn list_smart_masks(
     out
 }
 
+/// The on-disk file a library asset resolves to by NAME — drag-out copies
+/// the original file, bytes untouched. `ext` is the library extension
+/// ("umbersmart" / "umbermask"); `load_name` reads a file's asset name (the
+/// testable seam). First directory wins, files sorted — the same dedup
+/// rule as [`list_smart_materials`].
+pub fn smart_file_for(
+    dirs: &[std::path::PathBuf],
+    ext: &str,
+    name: &str,
+    load_name: impl Fn(&std::path::Path) -> Option<String>,
+) -> Option<std::path::PathBuf> {
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == ext))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !seen.insert(file) {
+                continue;
+            }
+            if load_name(&path).as_deref() == Some(name) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 /// Composes a smart mask into a `width × height` grayscale plane (C2-10),
 /// texel by texel through [`umber_core::smart::SmartMask::compose_scalar`].
 /// `map(map_name)` supplies each generator's baked map as `(w, h, rgba8)`
@@ -1875,6 +1911,31 @@ mod row_label_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smart_file_for_resolves_by_name_first_dir_wins() {
+        let tmp = std::env::temp_dir().join(format!("umber-sff-{}", std::process::id()));
+        let d1 = tmp.join("a");
+        let d2 = tmp.join("b");
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::create_dir_all(&d2).unwrap();
+        std::fs::write(d1.join("rock.umbersmart"), b"x").unwrap();
+        std::fs::write(d2.join("rock.umbersmart"), b"y").unwrap();
+        std::fs::write(d2.join("moss.umbersmart"), b"z").unwrap();
+        let loader = |p: &std::path::Path| p.file_stem().map(|s| s.to_string_lossy().into_owned());
+        let dirs = vec![d1.clone(), d2.clone()];
+        assert_eq!(
+            smart_file_for(&dirs, "umbersmart", "rock", loader),
+            Some(d1.join("rock.umbersmart")),
+            "first directory wins"
+        );
+        assert_eq!(
+            smart_file_for(&dirs, "umbersmart", "moss", loader),
+            Some(d2.join("moss.umbersmart"))
+        );
+        assert_eq!(smart_file_for(&dirs, "umbersmart", "nope", loader), None);
+        assert_eq!(smart_file_for(&dirs, "umbermask", "rock", loader), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn switching_sets_keeps_each_stack_and_its_own_undo() {

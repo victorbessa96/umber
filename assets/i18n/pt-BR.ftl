@@ -1009,4 +1009,6 @@ assets =
     .import = Importar…
     .import-title = Importar
     .extra-dirs = Pastas de biblioteca extras
-    .drag-to-layers = Arraste para o painel de Camadas: materiais viram uma nova camada, máscaras se ligam à camada sob o drop.
+    .drag-to-layers = Arraste para o painel de Camadas: materiais viram uma nova camada, máscaras se ligam à camada sob o drop. Solte fora de qualquer painel para arrastar uma cópia para o disco.
+    .drag-out-saved = Cópia arrastada para fora salva em { $path }.
+    .drag-out-failed = Falha ao arrastar para fora
