@@ -229,6 +229,15 @@ fn bracket_size_step(current: f32, grow: bool) -> f32 {
     current * if grow { 1.25 } else { 0.8 }
 }
 
+/// Pixels of horizontal drag per alpha doubling (Ctrl+LMB flow chord).
+const FLOW_PX_PER_DOUBLING: f32 = 200.0;
+
+/// The flow chord's alpha: `alpha0 * 2^(dx / FLOW_PX_PER_DOUBLING)`,
+/// clamped to 0.01..=1 (matches the preset editor's alpha field).
+fn flow_alpha_step(alpha0: f32, dx_px: f32) -> f32 {
+    (alpha0 * 2f32.powf(dx_px / FLOW_PX_PER_DOUBLING)).clamp(0.01, 1.0)
+}
+
 /// The cursor's position in NDC (x right ∈ [-1,1], y UP ∈ [-1,1]) inside
 /// `rect` — the anchor for zoom-toward-cursor (egui's y is down, NDC's
 /// is up, hence the flip).
@@ -367,6 +376,12 @@ pub struct Viewport {
     /// The nav drag button cancelled by a held RMB (Painter's
     /// right-click-cancels), cleared when that button is released.
     nav_cancel: Option<PointerButton>,
+    /// The Ctrl+LMB flow chord's live alpha handed up to the shell this
+    /// frame (the preset owns alpha; the viewport owns no brush state).
+    pub live_flow_alpha: Option<f32>,
+    /// The in-flight Ctrl+LMB flow drag: the pointer origin and the alpha
+    /// at press.
+    flow_drag: Option<(egui::Pos2, f32)>,
     /// A Ctrl+RMB brush-resize drag in flight: the brush size and
     /// hardness at its start and the pointer origin (GUI plan G1
     /// g1-brush-resize). The ring stays at the origin while it runs.
@@ -849,6 +864,35 @@ impl Viewport {
                 p.set_brush_hardness(hardness);
             }
             _ => self.resize = None,
+        }
+
+        // Ctrl+LMB drag sets the flow/alpha (Painter's chord): horizontal
+        // delta scales alpha exponentially (angle awaits the angle param).
+        // Handed up to the shell — the preset owns alpha. Same never-nav
+        // rule as the resize chord (LMB binds only with Alt).
+        let flow_chord = !stencil_owns
+            && ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && !i.modifiers.alt)
+            && response.dragged_by(PointerButton::Primary);
+        if flow_chord && paint.is_some() {
+            if response.drag_started_by(PointerButton::Primary) {
+                let origin = ui
+                    .input(|i| i.pointer.press_origin())
+                    .or_else(|| response.interact_pointer_pos())
+                    .unwrap_or(rect.center());
+                self.flow_drag = Some((
+                    origin,
+                    paint
+                        .as_ref()
+                        .map(|p| p.brush_params().alpha)
+                        .unwrap_or(1.0),
+                ));
+            }
+            if let Some((origin, alpha0)) = self.flow_drag {
+                let now = response.interact_pointer_pos().unwrap_or(rect.center());
+                self.live_flow_alpha = Some(flow_alpha_step(alpha0, now.x - origin.x));
+            }
+        } else {
+            self.flow_drag = None;
         }
 
         // [ / ] step the brush size (Painter's chord; hover-gated like the
@@ -1433,6 +1477,27 @@ impl Viewport {
             let r = radius.unwrap_or(0.0);
             painter.text(
                 drag.origin + egui::vec2(r + 10.0, -r.min(40.0)),
+                egui::Align2::LEFT_BOTTOM,
+                hud,
+                egui::FontId::proportional(13.0),
+                Color32::WHITE,
+            );
+            return;
+        }
+        // A flow drag in flight: the same contract as the resize chord,
+        // the ring stays at the drag origin with a numeric HUD beside it.
+        if let Some((origin, alpha0)) = self.flow_drag {
+            let radius = self.cursor_radius_px(rect, mesh, paint, origin);
+            let shape = brush_cursor::shape(radius, paint.brush_hardness());
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            brush_cursor::paint(&painter, origin, shape);
+            let alpha = self
+                .live_flow_alpha
+                .unwrap_or_else(|| flow_alpha_step(alpha0, 0.0));
+            let hud = format!("{} {:.0}%", tr("hint.hud-flow"), alpha * 100.0);
+            let r = radius.unwrap_or(0.0);
+            painter.text(
+                origin + egui::vec2(r + 10.0, -r.min(40.0)),
                 egui::Align2::LEFT_BOTTOM,
                 hud,
                 egui::FontId::proportional(13.0),
@@ -2840,6 +2905,17 @@ mod tests {
         let d0 = vp2.camera.distance;
         vp2.frame_mesh();
         assert_eq!(vp2.camera.distance, d0);
+    }
+
+    #[test]
+    fn flow_chord_scales_alpha_exponentially_and_clamps() {
+        assert!((flow_alpha_step(0.5, 0.0) - 0.5).abs() < 1e-6);
+        // +200 px doubles.
+        assert!((flow_alpha_step(0.5, 200.0) - 1.0).abs() < 1e-4);
+        // -200 px halves; the clamp holds at the floor.
+        assert!((flow_alpha_step(0.5, -200.0) - 0.25).abs() < 1e-6);
+        assert_eq!(flow_alpha_step(0.01, -10000.0), 0.01);
+        assert_eq!(flow_alpha_step(1.0, 10000.0), 1.0);
     }
 
     #[test]

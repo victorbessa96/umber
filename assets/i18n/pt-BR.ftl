@@ -813,6 +813,7 @@ hint =
     .size = tamanho do pincel
     .hud-size = Tamanho
     .hud-hardness = Dureza
+    .hud-flow = Fluxo
     .alt-lmb = Alt+Esq
     .alt-mmb = Alt+Meio
     .alt-rmb = Alt+Dir

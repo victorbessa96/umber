@@ -389,6 +389,9 @@ struct PanelViewer<'a> {
     paint: Option<&'a mut paint_state::PaintState>,
     doc: &'a mut document::Document,
     brush: &'a mut BrushPanel,
+    /// The shell's stashed Ctrl+LMB flow alpha, adopted into the active
+    /// preset at the brush sync (g1 flow chord).
+    pending_flow_alpha: &'a mut Option<f32>,
     /// The Properties context rail's state (the Properties panel draws
     /// it; deciding apparatus itself is `properties_kinds`).
     properties_rail: &'a mut umber_gui::ContextRail,
@@ -1032,6 +1035,9 @@ impl TabViewer for PanelViewer<'_> {
                     if !paint.is_stroking() {
                         self.brush
                             .adopt_live_size(paint.brush_size(), paint.brush_hardness());
+                        if let Some(alpha) = self.pending_flow_alpha.take() {
+                            self.brush.adopt_live_alpha(alpha);
+                        }
                     }
                     let preset_changed = self.brush.take_preset_changed();
                     if let Some(preset) = self.brush.active_preset() {
@@ -1525,6 +1531,9 @@ pub struct AppState {
     /// shape (composite-first; the honest rasterizer fallback reports
     /// every deviation). The panel section lives in the Assets tab.
     pub psd_import: psd_import::PsdImportState,
+    /// The Ctrl+LMB flow chord's alpha, drained after the dock and
+    /// adopted into the active preset at the brush sync.
+    pub pending_flow_alpha: Option<f32>,
     /// The .spp import state (ruling 1: import-only; the reader crate's
     /// report is the artifact this presents).
     pub spp_import: spp_import::SppImportState,
@@ -1570,6 +1579,7 @@ impl AppState {
         self.mesh_import = mesh_map_import::MeshMapImportState::default();
         self.parked_texture_sets.clear();
         self.psd_import = psd_import::PsdImportState::default();
+        self.pending_flow_alpha = None;
         self.spp_import = spp_import::SppImportState::default();
         self.display = umber_color::DisplaySettings::default();
         self.display_lut.mark_display_lut_dirty();
@@ -4422,98 +4432,106 @@ impl eframe::App for UmberApp {
         } else {
             None
         };
-        let (home_actions, pick_notices): (Vec<crate::empty_state::HomeCardAction>, Vec<String>) =
-            CentralPanel::default()
-                .show(ui, |ui| {
-                    let mut dock_style = Style::from_egui(ui.style());
-                    // g7-density-scale: the separators' grab width follows the
-                    // hit-zone preference (4 pt standard, 8 pt tablet). The
-                    // value only changes on a preference change, so this
-                    // per-frame write is exactly the apply-on-change pattern
-                    // the Preferences window's ruling pins.
-                    dock_style.separator.extra_interact_width = self
-                        .prefs
-                        .splitter_hit_zone
-                        .hit_zone()
-                        .extra_interact_width();
-                    let tab_font = egui::TextStyle::Button.resolve(ui.style());
-                    let mut viewer = PanelViewer {
-                        ctx: ui.ctx().clone(),
-                        tab_font: tab_font.clone(),
-                        assets: &mut self.state.assets_panel,
-                        viewport: &mut self.state.viewport,
-                        uv_view: &mut self.state.uv_view,
-                        home_recent,
-                        home_recovery,
-                        home_actions: Vec::new(),
-                        pick_notices: Vec::new(),
-                        bakes: &mut self.state.bakes,
-                        export: &mut self.state.export,
-                        graph: &mut self.state.graph,
-                        mesh: self.state.mesh.as_ref(),
-                        mesh_path: self.state.mesh_path.as_deref(),
-                        gpu: &self.gpu,
-                        paint: self.state.paint.as_mut(),
-                        doc: &mut self.state.doc,
-                        brush: &mut self.brush_panel,
-                        properties_rail: &mut self.properties_rail,
-                        icons: &self.icons,
-                        polygon_fill: &mut self.state.polygon_fill,
-                        path_tool: &mut self.state.path_tool,
-                        material_defs: &mut self.state.material_defs,
-                        material_badges: &self.state.material_badges,
-                        material_status: self.state.material_status.as_deref(),
-                        material_states: &mut self.state.material_states,
-                        display: &mut self.state.display,
-                        display_lut_state: &mut self.state.display_lut,
-                        #[cfg(feature = "ocio")]
-                        ocio_state: &mut self.state.ocio_state,
-                        display_lut: effective_lut,
-                        postfx: &mut self.state.postfx,
-                        postfx_panel: &mut self.state.postfx_panel,
-                        mesh_import: &mut self.state.mesh_import,
-                        parked_texture_sets: &mut self.state.parked_texture_sets,
-                        psd_import: &mut self.state.psd_import,
-                        spp_import: &mut self.state.spp_import,
-                        base_visible: &mut self.state.base_visible,
-                        thumbnails: &mut self.state.thumbnails,
-                        layer_gestures: &mut self.state.layer_gestures,
-                        pending_resize: &mut self.state.pending_resize,
-                        fill_badges: &self.state.fill_badges,
-                        import_badges: &self.state.import_badges,
-                        dormant: &self.state.dormant,
-                        stencil: &mut self.state.stencil,
-                        store: store.as_ref(),
-                        hdr_mode: &mut self.hdr_mode,
-                        stylus_pressure,
-                    };
-                    DockArea::new(&mut self.dock)
-                        .style(dock_style.clone())
-                        .show_inside(ui, &mut viewer);
-                    // The selected tab stays visible (g5-tab-overflow): a leaf
-                    // whose active tab changed this frame (a click, a panel
-                    // toggled in, a restored layout) scrolls it into the strip.
-                    if scroll_active_tabs_into_view(
-                        &mut self.dock,
-                        &mut self.tab_active_seen,
-                        ui.ctx(),
-                        &tab_font,
-                        &dock_style,
-                    ) {
-                        ui.ctx().request_repaint();
-                    }
+        let (home_actions, pick_notices, flow_alpha): (
+            Vec<crate::empty_state::HomeCardAction>,
+            Vec<String>,
+            Option<f32>,
+        ) = CentralPanel::default()
+            .show(ui, |ui| {
+                let mut dock_style = Style::from_egui(ui.style());
+                // g7-density-scale: the separators' grab width follows the
+                // hit-zone preference (4 pt standard, 8 pt tablet). The
+                // value only changes on a preference change, so this
+                // per-frame write is exactly the apply-on-change pattern
+                // the Preferences window's ruling pins.
+                dock_style.separator.extra_interact_width = self
+                    .prefs
+                    .splitter_hit_zone
+                    .hit_zone()
+                    .extra_interact_width();
+                let tab_font = egui::TextStyle::Button.resolve(ui.style());
+                let mut viewer = PanelViewer {
+                    ctx: ui.ctx().clone(),
+                    tab_font: tab_font.clone(),
+                    assets: &mut self.state.assets_panel,
+                    viewport: &mut self.state.viewport,
+                    uv_view: &mut self.state.uv_view,
+                    home_recent,
+                    home_recovery,
+                    home_actions: Vec::new(),
+                    pick_notices: Vec::new(),
+                    bakes: &mut self.state.bakes,
+                    export: &mut self.state.export,
+                    graph: &mut self.state.graph,
+                    mesh: self.state.mesh.as_ref(),
+                    mesh_path: self.state.mesh_path.as_deref(),
+                    gpu: &self.gpu,
+                    paint: self.state.paint.as_mut(),
+                    doc: &mut self.state.doc,
+                    brush: &mut self.brush_panel,
+                    pending_flow_alpha: &mut self.state.pending_flow_alpha,
+                    properties_rail: &mut self.properties_rail,
+                    icons: &self.icons,
+                    polygon_fill: &mut self.state.polygon_fill,
+                    path_tool: &mut self.state.path_tool,
+                    material_defs: &mut self.state.material_defs,
+                    material_badges: &self.state.material_badges,
+                    material_status: self.state.material_status.as_deref(),
+                    material_states: &mut self.state.material_states,
+                    display: &mut self.state.display,
+                    display_lut_state: &mut self.state.display_lut,
+                    #[cfg(feature = "ocio")]
+                    ocio_state: &mut self.state.ocio_state,
+                    display_lut: effective_lut,
+                    postfx: &mut self.state.postfx,
+                    postfx_panel: &mut self.state.postfx_panel,
+                    mesh_import: &mut self.state.mesh_import,
+                    parked_texture_sets: &mut self.state.parked_texture_sets,
+                    psd_import: &mut self.state.psd_import,
+                    spp_import: &mut self.state.spp_import,
+                    base_visible: &mut self.state.base_visible,
+                    thumbnails: &mut self.state.thumbnails,
+                    layer_gestures: &mut self.state.layer_gestures,
+                    pending_resize: &mut self.state.pending_resize,
+                    fill_badges: &self.state.fill_badges,
+                    import_badges: &self.state.import_badges,
+                    dormant: &self.state.dormant,
+                    stencil: &mut self.state.stencil,
+                    store: store.as_ref(),
+                    hdr_mode: &mut self.hdr_mode,
+                    stylus_pressure,
+                };
+                DockArea::new(&mut self.dock)
+                    .style(dock_style.clone())
+                    .show_inside(ui, &mut viewer);
+                // The selected tab stays visible (g5-tab-overflow): a leaf
+                // whose active tab changed this frame (a click, a panel
+                // toggled in, a restored layout) scrolls it into the strip.
+                if scroll_active_tabs_into_view(
+                    &mut self.dock,
+                    &mut self.tab_active_seen,
+                    ui.ctx(),
+                    &tab_font,
+                    &dock_style,
+                ) {
+                    ui.ctx().request_repaint();
+                }
 
-                    let actions: Vec<crate::empty_state::HomeCardAction> =
-                        viewer.home_actions.drain(..).collect();
-                    let notices: Vec<String> = viewer.pick_notices.drain(..).collect();
-                    (actions, notices)
-                })
-                .inner;
+                let actions: Vec<crate::empty_state::HomeCardAction> =
+                    viewer.home_actions.drain(..).collect();
+                let notices: Vec<String> = viewer.pick_notices.drain(..).collect();
+                let flow_alpha = viewer.viewport.live_flow_alpha.take();
+                (actions, notices, flow_alpha)
+            })
+            .inner;
         // The material pick's toasts (the home_actions rail's pattern):
         // returned by the dock closure, posted on the app's notices.
         for text in pick_notices {
             self.notices.post(umber_gui::NoticeLevel::Info, text);
         }
+        // The Ctrl+LMB flow chord's alpha: stashed here, adopted into the
+        // active preset at the brush sync above (next frame at latest).
+        self.state.pending_flow_alpha = flow_alpha;
         // g0-notices' open tail: the import/export/bake panels' failure
         // toasts (same rail — the panels cannot post on the app's notices
         // themselves; their status lines stay in-panel too).

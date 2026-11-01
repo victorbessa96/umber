@@ -794,6 +794,7 @@ hint =
     .size = brush size
     .hud-size = Size
     .hud-hardness = Hardness
+    .hud-flow = Flow
     .alt-lmb = Alt+LMB
     .alt-mmb = Alt+MMB
     .alt-rmb = Alt+RMB

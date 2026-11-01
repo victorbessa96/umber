@@ -430,6 +430,22 @@ impl BrushPanel {
     /// (`[` / `]`, Ctrl+RMB drag): written into the active preset so a Save
     /// keeps them, and marked dirty. A no-op when they already match, so
     /// the per-frame call costs nothing at rest.
+    /// The Ctrl+LMB flow chord's live alpha, adopted into the active
+    /// preset (the sync below would snap a viewport-side edit back).
+    pub fn adopt_live_alpha(&mut self, alpha: f32) {
+        let Some(idx) = self.active else {
+            return;
+        };
+        let Some(entry) = self.library.entries.get_mut(idx) else {
+            return;
+        };
+        let a = alpha.clamp(0.01, 1.0);
+        if (entry.preset.params.alpha - a).abs() > 1e-6 {
+            entry.preset.params.alpha = a;
+            self.dirty = true;
+        }
+    }
+
     pub fn adopt_live_size(&mut self, size: f32, hardness: f32) {
         let Some(idx) = self.active else {
             return;
