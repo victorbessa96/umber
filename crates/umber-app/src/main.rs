@@ -1915,6 +1915,14 @@ pub struct UmberApp {
     /// The style was installed on both OS-theme branches (once, first
     /// frame: `umber_gui::theme::apply`).
     style_installed: bool,
+    /// Debug-only live theme reload (g0-style): `UMBER_THEME_FILE`, polled
+    /// every 400 ms in `fn ui`.
+    #[cfg(debug_assertions)]
+    theme_file: Option<std::path::PathBuf>,
+    #[cfg(debug_assertions)]
+    theme_file_mtime: Option<std::time::SystemTime>,
+    #[cfg(debug_assertions)]
+    theme_last_poll: f64,
     dock: DockState<Panel>,
     /// Each dock leaf's active panel at the last scroll-into-view pass
     /// (g5-tab-overflow): a change scrolls that leaf's strip once.
@@ -2117,6 +2125,12 @@ impl UmberApp {
             },
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
+            #[cfg(debug_assertions)]
+            theme_file: std::env::var_os("UMBER_THEME_FILE").map(Into::into),
+            #[cfg(debug_assertions)]
+            theme_file_mtime: None,
+            #[cfg(debug_assertions)]
+            theme_last_poll: 0.0,
             #[cfg(feature = "perf")]
             last_frame_time: None,
             #[cfg(feature = "perf")]
@@ -3830,6 +3844,39 @@ impl eframe::App for UmberApp {
     /// egui's "focus the first widget". Taken out of the input here, before
     /// egui's focus logic runs on it; Tab inside a focused widget still
     /// moves focus as usual.
+    /// Debug-only live theme reload (g0-style, PC:#9): polls
+    /// `UMBER_THEME_FILE` at most every 400 ms; on an mtime change parses
+    /// the `name = #rrggbb` tokens, stores them on the context and
+    /// re-applies the style on both OS-theme branches. An unreadable file
+    /// (mid-write) is retried on the next poll.
+    #[cfg(debug_assertions)]
+    fn poll_theme_file(&mut self, ctx: &egui::Context, now: f64) {
+        if now - self.theme_last_poll < 0.4 {
+            return;
+        }
+        self.theme_last_poll = now;
+        let Some(path) = self.theme_file.clone() else {
+            return;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return;
+        };
+        if self.theme_file_mtime == Some(mtime) {
+            return;
+        }
+        self.theme_file_mtime = Some(mtime);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            umber_gui::theme::set_token_overrides(
+                ctx,
+                umber_gui::theme::parse_token_overrides(&text),
+            );
+            umber_gui::theme::apply(ctx, umber_gui::Density::Comfortable, 1.0);
+        }
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // Preferences ▸ Keymap capturing a binding owns the keyboard: the
         // press is taken before egui and the shortcut poll see it, so it
@@ -3888,6 +3935,11 @@ impl eframe::App for UmberApp {
             umber_gui::theme::apply(ui.ctx(), umber_gui::Density::Comfortable, 1.0);
             self.style_installed = true;
         }
+        // Debug-only live theme reload (g0-style): UMBER_THEME_FILE polled
+        // every 400 ms; an mtime change re-applies the style over the
+        // file's tokens.
+        #[cfg(debug_assertions)]
+        self.poll_theme_file(ui.ctx(), ui.input(|i| i.time));
         // Async bake (wave 5): drain a finished bake job here, not only in
         // the Bakes tab's `show` (egui_dock skips hidden tabs), and keep
         // frames coming while one runs — egui otherwise repaints only on

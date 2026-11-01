@@ -254,11 +254,25 @@ pub fn umber_style(density: Density) -> egui::Style {
 
 /// The Umber style with a user text scale (clamped to ±20%).
 pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
+    style_with_visuals(umber_visuals_compiled(), density, text_scale)
+}
+
+/// [`umber_style_scaled`] with the live [`TokenOverrides`] on `ctx`
+/// applied over the compiled palette.
+pub fn umber_style_scaled_with(
+    ctx: &egui::Context,
+    density: Density,
+    text_scale: f32,
+) -> egui::Style {
+    style_with_visuals(umber_visuals(ctx), density, text_scale)
+}
+
+fn style_with_visuals(visuals: egui::Visuals, density: Density, text_scale: f32) -> egui::Style {
     let scale = clamp_text_scale(text_scale);
     // Struct-update form (not field reassignment): clippy's
     // `field_reassign_with_default` fails the post-Default mutation pattern.
     let mut style = egui::Style {
-        visuals: umber_visuals(),
+        visuals,
         animation_time: MOTION_SECS,
         ..Default::default()
     };
@@ -310,8 +324,67 @@ pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
 /// over the Umber chrome mid-session. This writes the SAME style to both
 /// branches, and keeps `ThemePreference::System` so appearance events
 /// still arrive (photocraft `theme.rs`, PC:#9).
+/// Debug-only live-reload token overrides (GUI plan g0-style): a
+/// `UMBER_THEME_FILE` of `name = #rrggbb` lines, keyed by the lowercase
+/// [`palette::TOKENS`] names. Applied over the compiled palette by
+/// [`apply`], so a debug session can recolor without recompiling.
+pub type TokenOverrides = std::collections::HashMap<String, Color32>;
+
+fn overrides_id() -> egui::Id {
+    egui::Id::new("umber-theme-overrides")
+}
+
+/// Parses `name = #rrggbb` lines. Unknown token names and bad hex are
+/// skipped — a reload must never take the theme down. `#` starts a
+/// comment only at the start of a line.
+pub fn parse_token_overrides(text: &str) -> TokenOverrides {
+    let mut map = TokenOverrides::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, hex)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if !palette::TOKENS.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        if let Ok(c) = Color32::from_hex(hex.trim()) {
+            map.insert(name, c);
+        }
+    }
+    map
+}
+
+/// Stores `overrides` on `ctx` (persistent), replacing any previous set.
+pub fn set_token_overrides(ctx: &egui::Context, overrides: TokenOverrides) {
+    ctx.data_mut(|d| d.insert_persistent(overrides_id(), overrides));
+}
+
+/// The active overrides on `ctx`, if any.
+pub fn token_overrides(ctx: &egui::Context) -> TokenOverrides {
+    ctx.data(|d| d.get_persistent::<TokenOverrides>(overrides_id()))
+        .unwrap_or_default()
+}
+
+/// `name`'s color: the live override when present, else the compiled token.
+fn token(ov: Option<&TokenOverrides>, name: &str) -> Color32 {
+    if let Some(ov) = ov {
+        if let Some(c) = ov.get(name) {
+            return *c;
+        }
+    }
+    palette::TOKENS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
+        .unwrap_or(Color32::BLACK)
+}
+
 pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
-    let style = std::sync::Arc::new(umber_style_scaled(density, text_scale));
+    let style = std::sync::Arc::new(umber_style_scaled_with(ctx, density, text_scale));
     ctx.set_style_of(egui::Theme::Dark, style.clone());
     ctx.set_style_of(egui::Theme::Light, style);
 }
@@ -322,57 +395,74 @@ pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
 /// share the state, which reads as the same emphasis).
 pub const FOCUS_RING_WIDTH: f32 = 2.0;
 
+/// The Umber visuals with the live [`TokenOverrides`] on `ctx`.
+fn umber_visuals(ctx: &egui::Context) -> egui::Visuals {
+    umber_visuals_impl(Some(&token_overrides(ctx)))
+}
+
+fn umber_visuals_compiled() -> egui::Visuals {
+    umber_visuals_impl(None)
+}
+
 /// The Umber visuals: stock dark as the base, every color re-authored.
-fn umber_visuals() -> egui::Visuals {
-    use palette::*;
+/// `ov` (the live token overrides, debug-only) recolors the palette.
+fn umber_visuals_impl(ov: Option<&TokenOverrides>) -> egui::Visuals {
+    let c_bg = token(ov, "bg");
+    let c_panel = token(ov, "panel");
+    let c_raised = token(ov, "raised");
+    let c_hover = token(ov, "hover");
+    let c_text = token(ov, "text");
+    let c_accent = token(ov, "accent");
+    let c_warn = token(ov, "warn");
+    let c_error = token(ov, "error");
     let mut v = egui::Visuals::dark();
     v.dark_mode = true;
     v.override_text_color = None;
-    v.panel_fill = PANEL;
-    v.window_fill = PANEL;
-    v.window_stroke = Stroke::new(1.0, RAISED);
-    v.extreme_bg_color = BG;
-    v.faint_bg_color = RAISED;
-    v.code_bg_color = BG;
-    v.hyperlink_color = ACCENT;
-    v.warn_fg_color = WARN;
-    v.error_fg_color = ERROR;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.panel_fill = c_panel;
+    v.window_fill = c_panel;
+    v.window_stroke = Stroke::new(1.0, c_raised);
+    v.extreme_bg_color = c_bg;
+    v.faint_bg_color = c_raised;
+    v.code_bg_color = c_bg;
+    v.hyperlink_color = c_accent;
+    v.warn_fg_color = c_warn;
+    v.error_fg_color = c_error;
+    v.selection.bg_fill = c_accent.gamma_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0, c_accent);
     v.window_corner_radius = CornerRadius::same(6);
     v.menu_corner_radius = CornerRadius::same(4);
 
     let radius = CornerRadius::same(3);
     let w = &mut v.widgets;
 
-    w.noninteractive.bg_fill = PANEL;
-    w.noninteractive.weak_bg_fill = PANEL;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, RAISED);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.noninteractive.bg_fill = c_panel;
+    w.noninteractive.weak_bg_fill = c_panel;
+    w.noninteractive.bg_stroke = Stroke::new(1.0, c_raised);
+    w.noninteractive.fg_stroke = Stroke::new(1.0, c_text);
     w.noninteractive.corner_radius = radius;
 
-    w.inactive.bg_fill = RAISED;
-    w.inactive.weak_bg_fill = RAISED;
+    w.inactive.bg_fill = c_raised;
+    w.inactive.weak_bg_fill = c_raised;
     w.inactive.bg_stroke = Stroke::NONE;
-    w.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+    w.inactive.fg_stroke = Stroke::new(1.0, c_text);
     w.inactive.corner_radius = radius;
 
-    w.hovered.bg_fill = HOVER;
-    w.hovered.weak_bg_fill = HOVER;
-    w.hovered.bg_stroke = Stroke::new(1.0, HOVER);
-    w.hovered.fg_stroke = Stroke::new(1.5, TEXT);
+    w.hovered.bg_fill = c_hover;
+    w.hovered.weak_bg_fill = c_hover;
+    w.hovered.bg_stroke = Stroke::new(1.0, c_hover);
+    w.hovered.fg_stroke = Stroke::new(1.5, c_text);
     w.hovered.corner_radius = radius;
 
-    w.active.bg_fill = HOVER;
-    w.active.weak_bg_fill = HOVER;
-    w.active.bg_stroke = Stroke::new(FOCUS_RING_WIDTH, ACCENT);
-    w.active.fg_stroke = Stroke::new(2.0, TEXT);
+    w.active.bg_fill = c_hover;
+    w.active.weak_bg_fill = c_hover;
+    w.active.bg_stroke = Stroke::new(FOCUS_RING_WIDTH, c_accent);
+    w.active.fg_stroke = Stroke::new(2.0, c_text);
     w.active.corner_radius = radius;
 
-    w.open.bg_fill = RAISED;
-    w.open.weak_bg_fill = RAISED;
-    w.open.bg_stroke = Stroke::new(1.0, HOVER);
-    w.open.fg_stroke = Stroke::new(1.0, TEXT);
+    w.open.bg_fill = c_raised;
+    w.open.weak_bg_fill = c_raised;
+    w.open.bg_stroke = Stroke::new(1.0, c_hover);
+    w.open.fg_stroke = Stroke::new(1.0, c_text);
     w.open.corner_radius = radius;
 
     v
@@ -390,6 +480,31 @@ mod tests {
 
     fn rgb(c: Color32) -> (u8, u8, u8) {
         (c.r(), c.g(), c.b())
+    }
+
+    #[test]
+    fn token_overrides_parse_skips_junk() {
+        let ov = parse_token_overrides(
+            "# a comment\naccent = #00FF00\nbogus = #123456\npanel=#ABCDEF\nno-equals-line\nbad = nothex\n",
+        );
+        assert_eq!(ov.len(), 2);
+        assert_eq!(ov["accent"], Color32::from_rgb(0x00, 0xFF, 0x00));
+        assert_eq!(ov["panel"], Color32::from_rgb(0xAB, 0xCD, 0xEF));
+    }
+
+    #[test]
+    fn token_overrides_recolor_the_visuals() {
+        let ctx = egui::Context::default();
+        let mut ov = TokenOverrides::new();
+        ov.insert("panel".to_owned(), Color32::from_rgb(1, 2, 3));
+        set_token_overrides(&ctx, ov);
+        let v = umber_visuals(&ctx);
+        assert_eq!(v.panel_fill, Color32::from_rgb(1, 2, 3));
+        assert_eq!(v.window_fill, Color32::from_rgb(1, 2, 3));
+        // Untouched tokens stay compiled.
+        assert_eq!(v.extreme_bg_color, palette::BG);
+        // And the compiled path is unchanged without overrides.
+        assert_eq!(umber_visuals_compiled().panel_fill, palette::PANEL);
     }
 
     #[test]
