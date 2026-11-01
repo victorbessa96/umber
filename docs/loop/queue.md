@@ -517,3 +517,4 @@ extend CRATES when those kills pin + announce.
    scripts/ci-watch.sh.
 7. Green → wave closed; docs pass deletes the consumed coordination
    notes and manifests, ticks this section, STATE.md, CHANGELOG.md.
+148- 2026-11-01 wave (wakeup #7): gradient_map graph node — the g4-gradient-ramp widget's first consumer; LANDED LOCAL, unpushed (rides the next wave push) ParamValue::Stops (host-only, wire-excluded) + eval_ramp (umber-graph lib.rs), GradientMapNode luma→ramp CPU eval + registry entry, panel default black→white stops + RampEdit editor special case + read-only Stops arm, gpu routes Cpu(GlobalPass), mtlx export drops stops (named limit), registry test 27→28; rustfmt --edition 2021 clean x8 (syntax proven, no type check per envelope), eval_ramp python-mirror 9/9 edge cases; kill report 2026-11-01-g4-gradient-map.md; battery+clippy+pinned tests owed at wave push
