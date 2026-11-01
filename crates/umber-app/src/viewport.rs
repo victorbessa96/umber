@@ -1445,6 +1445,27 @@ impl Viewport {
         }
     }
 
+    /// Sets the brush cursor at `at`: the OS bitmap when the platform
+    /// allows it (photocraft #1 — no render lag behind the pointer),
+    /// else `CursorIcon::None` + the painted fallback ring. The shell
+    /// clears any cursor image at the start of every pass, so this only
+    /// sticks while the pointer is over the paintable surface.
+    fn set_brush_cursor(
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        at: egui::Pos2,
+        shape: brush_cursor::CursorShape,
+    ) {
+        use crate::brush_cursor;
+        let ppp = ctx.input(|i| i.pixels_per_point);
+        if let Some(img) = brush_cursor::bitmap(shape, ppp) {
+            ctx.set_cursor_image(Some(img));
+        } else {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            brush_cursor::paint(painter, at, shape);
+        }
+    }
+
     fn paint_brush_cursor(
         &self,
         ui: &Ui,
@@ -1465,8 +1486,7 @@ impl Viewport {
         if let Some(drag) = self.resize {
             let radius = self.cursor_radius_px(rect, mesh, paint, drag.origin);
             let shape = brush_cursor::shape(radius, paint.brush_hardness());
-            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-            brush_cursor::paint(&painter, drag.origin, shape);
+            Self::set_brush_cursor(ui.ctx(), &painter, drag.origin, shape);
             let hud = format!(
                 "{} ×{:.2}   {} {:.2}",
                 tr("hint.hud-size"),
@@ -1489,8 +1509,7 @@ impl Viewport {
         if let Some((origin, alpha0)) = self.flow_drag {
             let radius = self.cursor_radius_px(rect, mesh, paint, origin);
             let shape = brush_cursor::shape(radius, paint.brush_hardness());
-            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-            brush_cursor::paint(&painter, origin, shape);
+            Self::set_brush_cursor(ui.ctx(), &painter, origin, shape);
             let alpha = self
                 .live_flow_alpha
                 .unwrap_or_else(|| flow_alpha_step(alpha0, 0.0));
@@ -1524,8 +1543,7 @@ impl Viewport {
         }
         let radius = self.cursor_radius_px(rect, mesh, paint, pos);
         let shape = brush_cursor::shape(radius, paint.brush_hardness());
-        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-        brush_cursor::paint(&painter, pos, shape);
+        Self::set_brush_cursor(ui.ctx(), &painter, pos, shape);
     }
 
     /// The brush's on-screen radius at `pos` (`crate::brush_cursor`):

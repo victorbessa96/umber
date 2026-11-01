@@ -3770,6 +3770,11 @@ impl eframe::App for UmberApp {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // The on_begin_pass half of the OS-bitmap cursor lifecycle
+        // (photocraft #1's plugin): any widget may set a cursor image
+        // during the pass; clearing here first keeps the normal cursor
+        // everywhere except where the viewport sets the brush bitmap.
+        ui.ctx().set_cursor_image(None);
         profiling::scope!("frame");
         // Graph-commit drain (L6): a finished graph command queues its
         // History-window row on the panel (which owns the graph journal)

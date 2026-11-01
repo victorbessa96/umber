@@ -30,11 +30,14 @@
 //!
 //! # Judgment calls
 //!
-//! - **Painted ring, not an OS bitmap cursor.** photocraft hands a
-//!   rasterized outline to the OS so it never lags the pointer. That is
-//!   the planned follow-up (platform fallbacks needed: Wayland at
-//!   non-1x scale, web, oversize tips). The painted ring trails the
-//!   pointer by one frame, which Painter users accept today.
+//! - **OS bitmap cursor where the platform allows it** (photocraft #1):
+//!   [`bitmap`] rasterizes the ring into an egui `CustomCursorImage` handed
+//!   to the OS via `Context::set_cursor_image`, so the outline follows the
+//!   hardware pointer with no render lag. The painted ring ([`paint`]) is
+//!   the fallback where bitmaps fail: web, any scale != 1x (Wayland
+//!   fractional included — the hotspot would misplace), and tips larger
+//!   than [`MAX_BITMAP_SIDE_PX`]. The shell clears the image at the start
+//!   of every pass, so outside the viewport the normal cursor returns.
 //! - **Fixed contrast colours.** The ring is black-under-white (two
 //!   strokes), readable on any paint colour, and independent of the theme.
 //! - **Shown only while the pointer is over the mesh and a paint tool is
@@ -56,6 +59,12 @@ pub const SEAM_RATIO: f32 = 4.0;
 pub const MAX_RING_PX: f32 = 4096.0;
 /// Crosshair arm length, px.
 pub const CROSSHAIR_PX: f32 = 6.0;
+/// The largest bitmap side handed to the OS, px. Linux HW-cursor planes
+/// cap near 255; keep a margin. Oversize tips fall back to [`paint`].
+pub const MAX_BITMAP_SIDE_PX: u16 = 128;
+/// Transparent margin around the ring inside its bitmap, device px (the
+/// 3 px dark outline needs room).
+const BITMAP_MARGIN_PX: f32 = 4.0;
 
 /// One `[` / `]` press scales the brush size by this factor (Painter
 /// steps the size multiplicatively, so small brushes step finely).
@@ -193,9 +202,166 @@ pub fn paint(painter: &egui::Painter, at: Pos2, shape: CursorShape) {
     }
 }
 
+/// Whether the OS-bitmap cursor path is usable at this device scale. Web
+/// has no bitmap upload; a scale != 1x (Wayland fractional, HiDPI) would
+/// misplace the hotspot, so both fall back to the painted ring.
+/// Conservative on purpose.
+pub fn bitmap_supported(pixels_per_point: f32) -> bool {
+    !cfg!(target_arch = "wasm32") && pixels_per_point == 1.0
+}
+
+/// Rasterizes `shape` into an OS cursor bitmap at device scale
+/// `pixels_per_point`. `None` when the path is unsupported (web, scale
+/// != 1x) or the tip is too large for a cursor plane — the caller then
+/// paints the fallback ring. The hotspot is the bitmap centre (the dab
+/// position).
+pub fn bitmap(shape: CursorShape, pixels_per_point: f32) -> Option<egui::CustomCursorImage> {
+    if !bitmap_supported(pixels_per_point) {
+        return None;
+    }
+    let (side, rgba) = match shape {
+        CursorShape::Ring { radius_px, core_px } => {
+            rasterize_ring(radius_px, core_px, pixels_per_point)?
+        }
+        CursorShape::Crosshair => rasterize_crosshair(pixels_per_point),
+    };
+    let hot = side / 2;
+    Some(egui::CustomCursorImage {
+        rgba: std::sync::Arc::from(rgba.into_boxed_slice()),
+        size: [side, side],
+        hotspot: [hot, hot],
+    })
+}
+
+/// Pure rasterizer for the ring: the same two-pass look as [`paint`]
+/// (3 px dark outline, 1 px light line on the same radius, faint core
+/// ring, centre dot) over transparent, at device scale `scale`.
+/// Returns `(side, rgba bytes)`; `None` when the bitmap would exceed
+/// [`MAX_BITMAP_SIDE_PX`].
+fn rasterize_ring(radius_px: f32, core_px: Option<f32>, scale: f32) -> Option<(u16, Vec<u8>)> {
+    let r = radius_px * scale;
+    let side_f = 2.0 * (r + BITMAP_MARGIN_PX);
+    if !(side_f.is_finite()) || side_f > MAX_BITMAP_SIDE_PX as f32 {
+        return None;
+    }
+    let side = side_f.ceil().max(3.0) as u16;
+    let c = side as f32 / 2.0;
+    let mut rgba = vec![0u8; (side as usize) * (side as usize) * 4];
+    for y in 0..side as usize {
+        for x in 0..side as usize {
+            let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+            let i = (y * side as usize + x) * 4;
+            // Dark outline: |d - r| <= 1.5*scale.
+            if (d - r).abs() <= 1.5 * scale {
+                rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 160]);
+            }
+            // Faint core ring (50 % coverage): |d - core| <= 0.5*scale.
+            if let Some(core) = core_px {
+                if (d - core * scale).abs() <= 0.5 * scale {
+                    rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 90]);
+                }
+            }
+            // Light line on the rim: |d - r| <= 0.5*scale (over the dark).
+            if (d - r).abs() <= 0.5 * scale {
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 230]);
+            }
+            // Centre dot.
+            if d <= 1.5 * scale {
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 230]);
+            }
+        }
+    }
+    Some((side, rgba))
+}
+
+/// Pure rasterizer for the crosshair bitmap: fixed side, dark-under-light
+/// arms, transparent elsewhere. Hotspot = centre.
+fn rasterize_crosshair(scale: f32) -> (u16, Vec<u8>) {
+    let arm = (CROSSHAIR_PX * scale).ceil().max(1.0);
+    let side = (2.0 * arm + 3.0 * scale).ceil().max(7.0) as u16;
+    let c = side as f32 / 2.0;
+    let mut rgba = vec![0u8; (side as usize) * (side as usize) * 4];
+    for y in 0..side as usize {
+        for x in 0..side as usize {
+            let dx = (x as f32 + 0.5 - c).abs();
+            let dy = (y as f32 + 0.5 - c).abs();
+            let on_arm = dx <= arm && dy <= 1.5 * scale || dy <= arm && dx <= 1.5 * scale;
+            if !on_arm {
+                continue;
+            }
+            let i = (y * side as usize + x) * 4;
+            let on_core = dx <= arm && dy <= 0.5 * scale || dy <= arm && dx <= 0.5 * scale;
+            if on_core {
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 230]);
+            } else {
+                rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 160]);
+            }
+        }
+    }
+    (side, rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitmap_support_needs_scale_1x_and_native() {
+        assert!(bitmap_supported(1.0) != cfg!(target_arch = "wasm32"));
+        assert!(!bitmap_supported(2.0), "HiDPI/Wayland fractional: painted");
+        assert!(!bitmap_supported(1.5));
+    }
+
+    #[test]
+    fn ring_bitmap_caps_at_max_side_and_centres_the_hotspot() {
+        // Oversize tip: no bitmap, the painted fallback takes over.
+        assert!(rasterize_ring(200.0, None, 1.0).is_none());
+        assert!(bitmap(
+            CursorShape::Ring {
+                radius_px: 200.0,
+                core_px: None
+            },
+            1.0
+        )
+        .is_none());
+        let (side, rgba) = rasterize_ring(10.0, Some(5.0), 1.0).unwrap();
+        assert_eq!(side as f32, (2.0 * (10.0 + BITMAP_MARGIN_PX)).ceil());
+        assert_eq!(rgba.len(), (side as usize) * (side as usize) * 4);
+        let c = side as usize / 2;
+        // Centre dot is opaque; the corner is transparent.
+        assert_eq!(
+            &rgba[(c * side as usize + c) * 4..][..4],
+            &[255, 255, 255, 230]
+        );
+        assert_eq!(&rgba[..4], &[0, 0, 0, 0]);
+        // A pixel on the rim (d == r) is the light line.
+        let rim = ((c + 10) * side as usize + c) * 4;
+        assert_eq!(&rgba[rim..rim + 4], &[255, 255, 255, 230]);
+        let img = bitmap(
+            CursorShape::Ring {
+                radius_px: 10.0,
+                core_px: None,
+            },
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(img.size, [side, side]);
+        assert_eq!(img.hotspot, [side / 2, side / 2]);
+        // Scale 2x is unsupported -> painted fallback.
+        assert!(bitmap(CursorShape::Crosshair, 2.0).is_none());
+    }
+
+    #[test]
+    fn crosshair_bitmap_has_opaque_centre_and_transparent_corners() {
+        let (side, rgba) = rasterize_crosshair(1.0);
+        let c = side as usize / 2;
+        assert_eq!(
+            &rgba[(c * side as usize + c) * 4..][..4],
+            &[255, 255, 255, 230]
+        );
+        assert_eq!(&rgba[..4], &[0, 0, 0, 0]);
+        assert_eq!(&rgba[rgba.len() - 4..], &[0, 0, 0, 0]);
+    }
 
     #[test]
     fn size_steps_are_multiplicative_and_reversible() {
