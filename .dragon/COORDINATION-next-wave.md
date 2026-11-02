@@ -2129,3 +2129,28 @@ Census at write time: `20261101_125517_2ed98f` (autonomous umber loop, src=local
 - texturecraft ground truth (read-only): pure-Rust 3D texture painting app — layers, masks, smart materials, bakes, engine export, native + WASM. Same domain as umber, so absorption candidates are feature-level, not a fork. Crate analog map: bake↔umber-bake · paint↔umber-paint · core↔umber-core · formats↔umber-export · geom↔umber-mesh · render↔umber-gpu · ui-egui↔umber-gui · texel↔umber-core texel paths · compose↔umber-graph · engine↔umber-app · automation↔(no analog) · apps: texturecraft{,-cli,-web} ↔ umber-app/umber-cli/umber-wasm.
 
 Consume-by: when `local-146c891ab...` ends with its eval note landed in `.dragon/briefs/`, or when the loop session is quiet across 2 censuses and a successor claims the tree.
+
+---
+
+## WAVE STATE — 2026-11-01 ~11:3x -03 (session 20261101_155725_f9d173, tree owner)
+
+Landed LOCAL commit `484c409`: battery fix-forwards for the parked 10-31/11-01
+no-cargo kills (11 compile/test fixes incl. a real workspace.rs
+create_dir_all bug) + the g4-property-context-menu Assign Shortcut wiring
+(`with_shortcut`, `BrushPanel.field_ids`/`pending_focus`, end-of-frame focus
+delivery). Kill reports 2026-11-01-battery-fix-forward.md +
+2026-11-01-g4-prop-shortcuts.md; queue.md rows updated.
+
+Battery state: cargo check + clippy --workspace GREEN (0 errors, 5 pre-existing
+dead-code warnings); per-crate tests GREEN (core 133, brush 164, gpu, graph,
+gui, wasm, spp, sdk, mesh, bake, cli 74). umber-app suite NOT run to
+completion. rustfmt --edition 2021 clean on all touched files; ftl 834/834.
+
+ENVELOPE CHANGE 2026-11-01 ~11:1x (Bessa, in-session): "Absolutely no cargo or
+build right now, it's crashing the process" — supersedes the cargo-lifted state.
+From now until he lifts it: NO cargo/rustc in this tree (background test runs
+were getting SIGKILLed mid-build). Allowed: rustfmt (standalone binary),
+pure-python checks (ftl parity), docs/queue/coordination edits, dcommit
+ledger commits, reads. The parked local kills now compile-clean per the one
+battery that ran; the full umber-app battery + the wave PUSH wait for a
+battery-capable session and Bessa's push call (no remote).
