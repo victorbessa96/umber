@@ -1017,6 +1017,35 @@ fn export_mesh(
 
     let pairs: Vec<(u16, &umber_export::MapSet)> =
         tile_sets.iter().map(|(tile, set)| (*tile, set)).collect();
+    // UV-padding dilation (queue row 151): one DilationMap per tile from
+    // the whole mesh's UV layout (rasterize_uv_geometry rasterizes into
+    // the tile's own window), applied to every packed output via the hook.
+    let size = ask.flags.size;
+    let dilation_maps: std::collections::HashMap<u16, umber_core::DilationMap> = tiles
+        .iter()
+        .map(|&tile| {
+            let covered: Vec<bool> = umber_mesh::rasterize_uv_geometry(mesh, tile, size, size)
+                .iter()
+                .map(|g| g.is_some())
+                .collect();
+            (
+                tile,
+                umber_core::DilationMap::new(
+                    &covered,
+                    size,
+                    size,
+                    Some(umber_export::DEFAULT_PADDING_TEXELS),
+                ),
+            )
+        })
+        .collect();
+    let dilation_maps = std::cell::RefCell::new(dilation_maps);
+    let pad_hook = |packed: &mut [u8], _w: u32, _h: u32, tile: u16| {
+        if let Some(map) = dilation_maps.borrow().get(&tile) {
+            map.apply(packed, 4);
+        }
+    };
+    let pad_hook: umber_export::DilateHook<'_> = &pad_hook;
     // Full driver-side token sources, bound: the `.usda` side reuses them
     // to reference exactly the files this run writes.
     let sources = umber_export::TokenSources {
@@ -1026,7 +1055,8 @@ fn export_mesh(
         // Overridden per tile by the tiled driver.
         udim: umber_export::SINGLE_TILE_UDIM,
     };
-    let mut written = umber_export::run_preset_tiled(&preset, &pairs, &sources, out_dir)?;
+    let mut written =
+        umber_export::run_preset_tiled_dilated(&preset, &pairs, &sources, out_dir, Some(pad_hook))?;
     if preset.usda {
         // The `.usda` carries the whole mesh (per-tile splits stay a
         // bake-window concern); only its texture references are
