@@ -29,7 +29,7 @@ use super::{ImportError, MeshData};
 /// Loads a `.usdc` (binary crate) file: the first Mesh prim becomes a
 /// fan-triangulated [`MeshData`], mirroring [`super::usd::load_usda`].
 pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = crate::read_capped(path)?;
     if !bytes.starts_with(b"PXR-USDC") {
         return Err(ImportError::UsdBinary);
     }
@@ -64,6 +64,11 @@ pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
 /// first-layer rule; a nested package's sublayers are not walked (the
 /// named boundary).
 pub fn load_usdz(path: &Path) -> Result<MeshData, ImportError> {
+    // The zip is read whole by openusd before any entry is decompressed —
+    // a hostile package is an allocation abort, not a panic, so the size
+    // preflight runs before Archive::open (entry-level caps would need a
+    // forked openusd; named boundary in the 2026-11-02 sweep report).
+    crate::ensure_import_size(path)?;
     let mut archive = openusd::usdz::Archive::open(path)
         .map_err(|e| ImportError::Usd(format!("usdz: open failed: {e}")))?;
     let root_layer = archive

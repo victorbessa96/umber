@@ -58,7 +58,7 @@ const LIST_OPS: [&str; 5] = ["prepend", "append", "add", "delete", "reorder"];
 /// Mesh prim, or the Mesh topology is inconsistent; [`ImportError::UsdBinary`]
 /// for binary crate content; [`ImportError::Io`] when the file can't be read.
 pub fn load_usda(path: &Path) -> Result<MeshData, ImportError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = crate::read_capped(path)?;
     parse_usda_bytes(&bytes)
 }
 

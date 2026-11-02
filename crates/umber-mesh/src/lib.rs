@@ -156,6 +156,64 @@ pub enum ImportError {
     /// it: the file is malformed in a way a dependency does not handle.
     #[error("import failed on a malformed file ({0})")]
     Panicked(String),
+    /// The file exceeds [`MAX_IMPORT_BYTES`] — refused before any importer
+    /// reads it (decompression-bomb / allocation-abort preflight; the
+    /// catch_unwind boundary cannot catch an allocator abort).
+    #[error("import file is {size} bytes; the cap is {cap}")]
+    TooLarge {
+        /// Actual file size in bytes.
+        size: u64,
+        /// The cap ([`MAX_IMPORT_BYTES`]).
+        cap: u64,
+    },
+}
+
+/// Upper bound on any single imported mesh file, checked BEFORE an
+/// importer reads it. 1 GiB covers any paintable mesh; a larger "mesh"
+/// file is hostile input whose read would abort the process on
+/// allocation failure, not unwind.
+pub const MAX_IMPORT_BYTES: u64 = 1 << 30;
+
+/// Refuses files over [`MAX_IMPORT_BYTES`]. Called by [`load`] before
+/// dispatch (covers the crate-based importers gltf/ufbx/openusd, which
+/// read the file themselves) and by the byte-reading entry points.
+pub fn ensure_import_size(path: &std::path::Path) -> Result<(), ImportError> {
+    let len = std::fs::metadata(path)?.len();
+    if len > MAX_IMPORT_BYTES {
+        return Err(ImportError::TooLarge {
+            size: len,
+            cap: MAX_IMPORT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// `std::fs::read` bounded by a cap: metadata-checked first, then a
+/// `take(cap + 1)` read so a file that grew between the two is refused
+/// without reading it whole.
+pub fn read_capped_with(path: &std::path::Path, cap: u64) -> Result<Vec<u8>, ImportError> {
+    use std::io::Read;
+    let len = std::fs::metadata(path)?.len();
+    if len > cap {
+        return Err(ImportError::TooLarge { size: len, cap });
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?
+        .take(cap + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(ImportError::TooLarge {
+            size: buf.len() as u64,
+            cap,
+        });
+    }
+    Ok(buf)
+}
+
+/// [`read_capped_with`] at [`MAX_IMPORT_BYTES`], for the importers that
+/// read the whole file themselves (usda text, usdc crate).
+pub fn read_capped(path: &std::path::Path) -> Result<Vec<u8>, ImportError> {
+    read_capped_with(path, MAX_IMPORT_BYTES)
 }
 
 /// Detect the import format from a file extension.
@@ -210,6 +268,9 @@ pub enum Format {
 /// validates before it indexes; this boundary is for code it does not own.
 pub fn load(path: &std::path::Path) -> Result<MeshData, ImportError> {
     let format = detect_format(path)?;
+    // Size preflight FIRST: the catch_unwind boundary below cannot catch
+    // an allocation-failure abort from reading a hostile multi-GB file.
+    ensure_import_size(path)?;
     let dispatch = || match format {
         Format::Obj => load_obj(path),
         Format::Gltf => load_gltf(path),
@@ -239,6 +300,7 @@ pub fn load(path: &std::path::Path) -> Result<MeshData, ImportError> {
 /// `positions`); only the glTF/FBX loaders zero-fill. Returns
 /// [`ImportError::Obj`] when the file cannot be parsed.
 pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
+    ensure_import_size(path)?;
     let (models, materials) = tobj::load_obj(
         path,
         &tobj::LoadOptions {
@@ -415,5 +477,27 @@ mod tests {
         assert_eq!(min, Vec3::ZERO);
         assert_eq!(max, Vec3::new(1.0, 2.0, 3.0));
         assert!(MeshData::default().bounds().is_none());
+    }
+
+    #[test]
+    fn read_capped_refuses_over_cap_without_reading_whole_file() {
+        // Hostile-input preflight pin (2026-11-02 sweep): a file over the
+        // cap is refused via the metadata check; a file that grows past
+        // the cap between check and read is refused by the take(cap+1).
+        let dir = std::env::temp_dir().join(format!("umber-mesh-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.usda");
+        std::fs::write(&p, vec![b'x'; 16]).unwrap();
+        // Over cap: refused.
+        let err = read_capped_with(&p, 8).unwrap_err();
+        assert!(matches!(err, ImportError::TooLarge { size: 16, cap: 8 }));
+        // Under cap: read whole.
+        let bytes = read_capped_with(&p, 16).unwrap();
+        assert_eq!(bytes.len(), 16);
+        // Cap boundary is inclusive.
+        let bytes = read_capped_with(&p, 16).unwrap();
+        assert_eq!(bytes.len(), 16);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

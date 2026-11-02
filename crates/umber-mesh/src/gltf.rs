@@ -16,6 +16,7 @@ use super::{ImportError, MeshData};
 /// buffer view cannot be resolved, or when the document contains no position
 /// data at all.
 pub fn load_gltf(path: &Path) -> Result<MeshData, ImportError> {
+    crate::ensure_import_size(path)?;
     let (document, buffers, _) =
         gltf::import(path).map_err(|e| ImportError::Gltf(e.to_string()))?;
     validate_accessors(&document)?;

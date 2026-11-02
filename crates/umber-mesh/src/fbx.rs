@@ -19,6 +19,7 @@ use super::{ImportError, MeshData};
 /// the file cannot be parsed, when index data is internally inconsistent, or
 /// when the scene contains no mesh geometry at all.
 pub fn load_fbx(path: &Path) -> Result<MeshData, ImportError> {
+    crate::ensure_import_size(path)?;
     let path_str = path.to_string_lossy();
     let scene = ufbx::load_file(&path_str, ufbx::LoadOpts::default())
         .map_err(|e| ImportError::Fbx(format!("{e:?}")))?;

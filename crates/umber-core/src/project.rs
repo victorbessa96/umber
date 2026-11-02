@@ -54,6 +54,40 @@ pub const LAYER_PLANES_PROJECT_VERSION: u32 = 2;
 /// loader itself needs no version — legacy paths always land in Base).
 pub const MAX_SUPPORTED_PROJECT_VERSION: u32 = 2;
 
+/// Cap on `project.json` itself (8 MiB): the file is parsed into structs
+/// whose vec capacities derive from it, so capping the json bounds every
+/// derived allocation of a hostile project directory.
+pub const MAX_PROJECT_JSON_BYTES: u64 = 8 << 20;
+
+/// Cap on one layer file (64 MiB): layer json carries ops, not pixels —
+/// a larger file is hostile input.
+pub const MAX_LAYER_FILE_BYTES: u64 = 64 << 20;
+
+/// `fs::read` bounded by `cap` (metadata check, then `take(cap + 1)` so a
+/// file that grew between the two is refused unread). The `.umber`
+/// reader's decompression-bomb preflight: project files are read whole.
+fn read_project_file(path: &Path, cap: u64) -> Result<Vec<u8>, ProjectError> {
+    use std::io::Read;
+    let len = fs::metadata(path)?.len();
+    if len > cap {
+        return Err(ProjectError::OversizedFile {
+            path: path.display().to_string(),
+            size: len,
+            cap,
+        });
+    }
+    let mut buf = Vec::new();
+    fs::File::open(path)?.take(cap + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > cap {
+        return Err(ProjectError::OversizedFile {
+            path: path.display().to_string(),
+            size: buf.len() as u64,
+            cap,
+        });
+    }
+    Ok(buf)
+}
+
 /// Everything that can go wrong saving or loading a `.umber` project.
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -98,6 +132,18 @@ pub enum ProjectError {
         set: String,
         /// The id that has no corresponding file.
         id: u64,
+    },
+
+    /// A project file exceeded its cap ([`MAX_PROJECT_JSON_BYTES`] /
+    /// [`MAX_LAYER_FILE_BYTES`]) and was refused unread.
+    #[error("project file {path:?} is {size} bytes; the cap is {cap}")]
+    OversizedFile {
+        /// The offending file's display path.
+        path: String,
+        /// Actual size in bytes.
+        size: u64,
+        /// The cap that was exceeded.
+        cap: u64,
     },
 
     /// A layer file's own `id` field doesn't match the order entry that
@@ -649,7 +695,7 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
 
 /// Reads a project previously written by [`save_to_dir`].
 pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
-    let bytes = fs::read(dir.join("project.json"))?;
+    let bytes = read_project_file(&dir.join("project.json"), MAX_PROJECT_JSON_BYTES)?;
 
     // Check the version against a minimal schema before attempting to parse
     // the rest, so a future-version project.json fails with
@@ -694,9 +740,12 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
         for &id in &layer_set.layer_ids {
             let layer_path = set_dir.join(format!("{id}.json"));
             let layer_bytes =
-                fs::read(&layer_path).map_err(|_| ProjectError::MissingLayerFile {
-                    set: layer_set.texture_set.clone(),
-                    id,
+                read_project_file(&layer_path, MAX_LAYER_FILE_BYTES).map_err(|e| match e {
+                    ProjectError::Io(_) => ProjectError::MissingLayerFile {
+                        set: layer_set.texture_set.clone(),
+                        id,
+                    },
+                    other => other,
                 })?;
             let layer: Layer = serde_json::from_slice(&layer_bytes)?;
             if layer.id != id {
@@ -1504,5 +1553,27 @@ mod tests {
         walk(root, root, &mut out);
         out.sort();
         out
+    }
+
+    #[test]
+    fn project_files_over_cap_are_refused() {
+        // 2026-11-02 hostile-input sweep pin: read_project_file refuses
+        // over-cap files via the metadata check (cap is inclusive).
+        let dir = std::env::temp_dir().join(format!("umber-proj-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("layer.json");
+        std::fs::write(&p, vec![b' '; 32]).unwrap();
+        let err = read_project_file(&p, 8).unwrap_err();
+        assert!(matches!(
+            err,
+            ProjectError::OversizedFile {
+                size: 32,
+                cap: 8,
+                ..
+            }
+        ));
+        assert_eq!(read_project_file(&p, 32).unwrap().len(), 32);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
