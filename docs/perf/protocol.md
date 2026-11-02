@@ -632,3 +632,37 @@ x0.784, viewport_p95 x0.891 — every metric inside x1.10, exit 0. The
 REPORT-ONLY absolute compare read x0.729 / x0.858 (green this night,
 but the ratio stays the verdict). Ratio noise floor so far: x0.878
 (41170685606) and x0.891 (this run), both far inside the x1.10 band.
+
+### Fourth instrumented nightly + the noise-floor verdict (run 41429202701, SUCCESS, GATE 1 green) — the instrument wave's analysis leg CLOSES
+
+Fourth consecutive instrumented run, all GATE 1 green, zero canaries:
+41170685606, 41187950107, 41295623399, 41429202701. A/B ratios vs the
+pinned reference `0955ac8` (same job, same runner, interleaved):
+
+| run | input_photon_p50 | input_photon_p95 | viewport_mean | viewport_p95 |
+|---|---|---|---|---|
+| 41170685606 | x1.025 | x1.000 | x0.728 | x0.878 |
+| 41187950107 | x1.018 | x1.000 | x0.784 | x0.891 |
+| 41295623399 | x0.985 | x1.000 | x0.781 | x0.895 |
+| 41429202701 | x1.008 | x1.000 | x0.947 | x0.915 |
+
+Verdict on the open question ("re-derive the ratio's own noise floor;
+if wider than x1.10, P2/P3 remain"): the floor is NOT wider. On the
+code-insensitive input metrics the ratio is exact to within 2.5%
+(p95 x1.000 four runs running; p50 within x0.985..x1.025). The viewport
+ratios spread x0.728..x0.947, but that spread is dominated by genuine
+code deltas between the pinned reference and the evolving tips (the
+current tree is measurably faster than `0955ac8`), not by same-job
+noise — the same-job A/B design is doing exactly what it was built to
+do, cancelling the fleet's throughput. Every reading sits inside the
+x1.10 band; the pre-gate absolute gate's x1.51-on-identical-code failure
+mode has zero recurrence across four nights.
+
+Disposition: **P2 (gate the mean / require mean+p95) and P3 (best-of-N)
+are NOT needed** at the measured floor — keep the median-of-3-pairs
+ratio verdict with the x1.10 band and the median-of-5 canary. **No
+reseed**: with the ratio as the verdict the absolute baseline compare
+is report-only, so the fleet-era absolute drift (x0.576..x1.280) no
+longer gates anything. The instrument wave (hunt `b09ae253`) is CLOSED
+on this analysis; only a future ratio reading outside x1.10 on stable
+code would reopen P2/P3.
