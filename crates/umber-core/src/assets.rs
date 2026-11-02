@@ -37,7 +37,28 @@ pub enum AssetError {
     /// A hash string that doesn't fit the format this build writes.
     #[error("malformed asset hash {0:?} (expected 64 hex chars)")]
     MalformedHash(String),
+    /// The blob's on-disk size exceeds [`MAX_ASSET_BLOB_BYTES`] or
+    /// disagrees with the ref's recorded size (truncated/tampered file).
+    #[error("asset {hash} ({ext}) is {actual} bytes on disk; ref says {expected}, cap is {cap}")]
+    SizeMismatch {
+        /// The content hash that was looked up.
+        hash: String,
+        /// The expected file extension.
+        ext: String,
+        /// Actual on-disk size in bytes.
+        actual: u64,
+        /// The size recorded in the reference.
+        expected: u64,
+        /// The hard cap ([`MAX_ASSET_BLOB_BYTES`]).
+        cap: u64,
+    },
 }
+
+/// Hard cap on one stored blob (1 GiB; an 8K RGBA8 tile is 256 MiB).
+/// Project files are read whole, so an oversized blob in a hostile
+/// project directory would abort the process on allocation failure —
+/// which no panic boundary can catch — instead of returning an error.
+pub const MAX_ASSET_BLOB_BYTES: u64 = 1 << 30;
 
 /// A reference to a stored asset: content hash + extension. Serializes
 /// into project/layer JSON; never carries pixel bytes.
@@ -114,7 +135,11 @@ impl AssetStore {
     }
 
     /// Loads the blob a ref points at. Errors with
-    /// [`AssetError::Missing`] when the store doesn't hold it.
+    /// [`AssetError::Missing`] when the store doesn't hold it, and with
+    /// [`AssetError::SizeMismatch`] when the on-disk size disagrees with
+    /// the ref's recorded size or exceeds [`MAX_ASSET_BLOB_BYTES`] —
+    /// both checked from metadata BEFORE the read, so a hostile blob is
+    /// refused without allocating it.
     pub fn load(&self, reference: &AssetRef) -> Result<Vec<u8>, AssetError> {
         reference.validate()?;
         let path = self.path_for(&reference.hash, &reference.ext);
@@ -122,6 +147,16 @@ impl AssetStore {
             return Err(AssetError::Missing {
                 hash: reference.hash.clone(),
                 ext: reference.ext.clone(),
+            });
+        }
+        let actual = fs::metadata(&path)?.len();
+        if actual > MAX_ASSET_BLOB_BYTES || actual != reference.size {
+            return Err(AssetError::SizeMismatch {
+                hash: reference.hash.clone(),
+                ext: reference.ext.clone(),
+                actual,
+                expected: reference.size,
+                cap: MAX_ASSET_BLOB_BYTES,
             });
         }
         Ok(fs::read(&path)?)
@@ -320,6 +355,26 @@ mod tests {
         assert!(matches!(
             store.load(&bad),
             Err(AssetError::MalformedHash(_))
+        ));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tampered_blob_size_mismatch_refused_before_read() {
+        // 2026-11-02 hostile-input sweep pin: a blob whose on-disk size
+        // disagrees with the ref's recorded size (truncation/tamper) is
+        // refused from metadata, without reading the body.
+        let (store, dir) = tmp_store("tamper");
+        let reference = store.store(b"present", "png").unwrap();
+        let path = store.path_for(&reference.hash, &reference.ext);
+        fs::write(&path, b"present-and-longer").unwrap();
+        assert!(matches!(
+            store.load(&reference),
+            Err(AssetError::SizeMismatch {
+                actual: 18,
+                expected: 7,
+                ..
+            })
         ));
         fs::remove_dir_all(&dir).unwrap();
     }
