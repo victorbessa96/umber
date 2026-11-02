@@ -269,6 +269,10 @@ pub struct MenuLabels<'a> {
     /// "Set as Default" — offered only when the field also has a
     /// [`ValueField::with_default_cb`] callback ([`None`] = not bindable).
     pub set_default: Option<std::borrow::Cow<'a, str>>,
+    /// "Assign Shortcut" — offered only when the field also has a
+    /// [`ValueField::with_shortcut`] action + callback ([`None`] = not
+    /// bindable).
+    pub assign_shortcut: Option<std::borrow::Cow<'a, str>>,
 }
 
 /// The clipboard every field shares within one egui context (temp data
@@ -338,6 +342,9 @@ pub fn fill_fraction(value: f64, min: f64, max: f64) -> Option<f32> {
     Some(((value - min) / (max - min)).clamp(0.0, 1.0) as f32)
 }
 
+/// Callback fired by a bindable field's "Assign Shortcut" menu item.
+pub type ShortcutCb<'a> = std::rc::Rc<dyn Fn(&egui::Context) + 'a>;
+
 /// A numeric field over any egui `Numeric` (f32, f64, integers).
 #[must_use = "add it with `ui.add(...)`"]
 pub struct ValueField<'a, N: Numeric> {
@@ -354,6 +361,11 @@ pub struct ValueField<'a, N: Numeric> {
     default: Option<f64>,
     menu: Option<MenuLabels<'a>>,
     default_cb: Option<std::rc::Rc<dyn Fn(f64) + 'a>>,
+    /// The property action id this field is bindable as, plus the
+    /// callback the menu's "Assign Shortcut" item fires (the app enters
+    /// shortcut-capture for the id). See [`ValueField::with_shortcut`].
+    action: Option<&'static str>,
+    shortcut_cb: Option<ShortcutCb<'a>>,
     /// Factor mode (g4-valuefield-grammar's open item): a 0..=1 value
     /// shown and typed as 0-100 %. The stored value stays 0..=1.
     percent: bool,
@@ -380,6 +392,8 @@ impl<'a, N: Numeric> ValueField<'a, N> {
             default: None,
             menu: None,
             default_cb: None,
+            action: None,
+            shortcut_cb: None,
             percent: false,
         }
     }
@@ -438,6 +452,17 @@ impl<'a, N: Numeric> ValueField<'a, N> {
     /// menu's per-field defaults).
     pub fn with_default_cb(mut self, cb: impl Fn(f64) + 'a) -> Self {
         self.default_cb = Some(std::rc::Rc::new(cb));
+        self
+    }
+
+    /// Marks the field bindable as property action `id`: when the menu
+    /// labels carry an "Assign Shortcut" entry, the item appears and
+    /// clicking it calls `cb` with the egui context (the app parks `id`
+    /// in temp memory to start shortcut capture next frame).
+    /// g4-property-context-menu's per-property shortcuts.
+    pub fn with_shortcut(mut self, id: &'static str, cb: impl Fn(&egui::Context) + 'a) -> Self {
+        self.action = Some(id);
+        self.shortcut_cb = Some(std::rc::Rc::new(cb));
         self
     }
 
@@ -682,6 +707,8 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 let default = self.default;
                 let current = new;
                 let default_cb = self.default_cb.clone();
+                let action = self.action;
+                let shortcut_cb = self.shortcut_cb.clone();
                 let mut picked = None;
                 response.context_menu(|ui| {
                     if let Some(d) = default {
@@ -728,6 +755,14 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                     if let (Some(label), Some(cb)) = (&labels.set_default, &default_cb) {
                         if ui.button(label.as_ref()).clicked() {
                             cb(current);
+                            ui.close();
+                        }
+                    }
+                    if let (Some(label), Some(_), Some(cb)) =
+                        (&labels.assign_shortcut, action, &shortcut_cb)
+                    {
+                        if ui.button(label.as_ref()).clicked() {
+                            cb(ui.ctx());
                             ui.close();
                         }
                     }
@@ -1074,6 +1109,7 @@ mod tests {
             |ui, f: &mut Fields| {
                 let labels = MenuLabels {
                     set_default: None,
+                    assign_shortcut: None,
                     reset: "Reset".into(),
                     copy: "Copy".into(),
                     paste: "Paste".into(),

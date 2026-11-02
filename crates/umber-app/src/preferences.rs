@@ -138,6 +138,9 @@ pub struct Preferences {
     /// The user's keymap delta over the default bindings (the `keymap=`
     /// line; see the module docs).
     pub keymap_overrides: Overrides,
+    /// The per-property shortcut bindings (the `prop_keymap=` line; the
+    /// g4-property-context-menu "Assign Shortcut" surface).
+    pub prop_keymap: actions::PropKeymap,
 }
 
 impl Default for Preferences {
@@ -153,6 +156,7 @@ impl Default for Preferences {
             nav: NavPreset::default(),
             nav_wheel_invert: false,
             keymap_overrides: Overrides::default(),
+            prop_keymap: actions::PropKeymap::default(),
         }
     }
 }
@@ -169,7 +173,7 @@ impl Preferences {
     /// The `key=value` text (stable key order).
     pub fn serialize(&self) -> String {
         format!(
-            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nprop_keymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
             self.ui_scale_default,
@@ -179,7 +183,8 @@ impl Preferences {
             self.key_hints,
             nav_name(self.nav),
             self.nav_wheel_invert,
-            self.keymap_overrides.serialize()
+            self.keymap_overrides.serialize(),
+            self.prop_keymap.serialize()
         )
     }
 
@@ -220,6 +225,7 @@ impl Preferences {
                 "nav" => p.nav = NavPreset::from_name(v).unwrap_or(p.nav),
                 "nav_wheel_invert" => p.nav_wheel_invert = bool_of(v).unwrap_or(p.nav_wheel_invert),
                 "keymap" => p.keymap_overrides = Overrides::parse(v),
+                "prop_keymap" => p.prop_keymap = actions::PropKeymap::parse(v),
                 _ => {}
             }
         }
@@ -828,12 +834,14 @@ mod tests {
         let p = Preferences {
             ui_scale: 1.25,
             ui_scale_auto: false,
+            ui_scale_default: 1.0,
             splitter_hit_zone: HitZoneName::Tablet,
             tooltips: false,
             reduce_motion: true,
             key_hints: false,
             nav: NavPreset::Blender,
             keymap_overrides: actions::blender_overrides(),
+            prop_keymap: actions::PropKeymap::default(),
             nav_wheel_invert: false,
         };
         assert_eq!(Preferences::parse(&p.serialize()), p);

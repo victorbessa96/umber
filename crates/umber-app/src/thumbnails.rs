@@ -250,6 +250,11 @@ impl Thumbnails {
     pub fn len(&self) -> usize {
         self.cache.len()
     }
+
+    /// True when no thumbnails are cached.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
 }
 
 #[cfg(test)]

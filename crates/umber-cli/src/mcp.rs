@@ -99,11 +99,10 @@ fn handle_message(
 ) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-    if id.is_none() {
+    let Some(id) = id else {
         // Notifications (notifications/initialized, notifications/cancelled, …): no response.
         return None;
-    }
-    let id = id.unwrap_or(Value::Null);
+    };
     match method {
         "initialize" => Some(result_response(
             id,

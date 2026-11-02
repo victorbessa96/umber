@@ -1475,7 +1475,7 @@ impl Viewport {
         ctx: &egui::Context,
         painter: &egui::Painter,
         at: egui::Pos2,
-        shape: brush_cursor::CursorShape,
+        shape: crate::brush_cursor::CursorShape,
     ) {
         use crate::brush_cursor;
         let ppp = ctx.input(|i| i.pixels_per_point);

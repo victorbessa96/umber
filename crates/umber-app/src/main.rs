@@ -1906,6 +1906,13 @@ pub struct UmberApp {
     /// The Preferences ▸ Keymap page's capture / search / paste state
     /// (GUI plan g3-keymap-editor).
     keymap_editor: preferences::KeymapEditor,
+    /// A property's "Assign Shortcut" menu click parks its action id in
+    /// egui temp memory; the next frame starts capturing a binding for it
+    /// (g4-property-context-menu's per-property shortcuts).
+    prop_shortcut_capture: Option<&'static str>,
+    /// A fired property shortcut: the owning panel opens and focuses the
+    /// field (delivered after the panels draw, at the end of `ui`).
+    prop_focus_request: Option<&'static str>,
     /// The Quick Setup window (g5-first-run): opens on the very first
     /// launch (no preferences file yet) and from Help.
     quick_setup: first_run::QuickSetup,
@@ -2116,6 +2123,8 @@ impl UmberApp {
             prefs_open: false,
             prefs_query: String::new(),
             keymap_editor: preferences::KeymapEditor::default(),
+            prop_shortcut_capture: None,
+            prop_focus_request: None,
             quick_setup: {
                 let mut s = first_run::QuickSetup::default();
                 if first_run::should_show() {
@@ -2155,6 +2164,39 @@ impl UmberApp {
 
 /// App-level actions (kept out of the App impl to keep that block small).
 impl UmberApp {
+    /// Debug-only live theme reload (g0-style, PC:#9): polls
+    /// `UMBER_THEME_FILE` at most every 400 ms; on an mtime change parses
+    /// the `name = #rrggbb` tokens, stores them on the context and
+    /// re-applies the style on both OS-theme branches. An unreadable file
+    /// (mid-write) is retried on the next poll.
+    #[cfg(debug_assertions)]
+    fn poll_theme_file(&mut self, ctx: &egui::Context, now: f64) {
+        if now - self.theme_last_poll < 0.4 {
+            return;
+        }
+        self.theme_last_poll = now;
+        let Some(path) = self.theme_file.clone() else {
+            return;
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return;
+        };
+        if self.theme_file_mtime == Some(mtime) {
+            return;
+        }
+        self.theme_file_mtime = Some(mtime);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            umber_gui::theme::set_token_overrides(
+                ctx,
+                umber_gui::theme::parse_token_overrides(&text),
+            );
+            umber_gui::theme::apply(ctx, umber_gui::Density::Comfortable, 1.0);
+        }
+    }
+
     /// The one place a [`toolbar::ShellAction`] takes effect: the toolbar
     /// buttons and the shell shortcuts both land here, so a button and its
     /// key cannot drift (see `toolbar`'s module docs for the key table and
@@ -2627,8 +2669,8 @@ impl UmberApp {
             .unwrap_or(false);
         let seen = ctx.data_mut(|d| d.get_temp::<AssetDrag>(seen_id));
         ctx.data_mut(|d| {
-            d.remove_temp::<AssetDrag>(seen_id);
-            d.remove_temp::<bool>(consumed_id);
+            d.remove::<AssetDrag>(seen_id);
+            d.remove::<bool>(consumed_id);
         });
         let Some(drag) = seen else { return };
         if consumed {
@@ -3867,39 +3909,6 @@ impl eframe::App for UmberApp {
     /// egui's "focus the first widget". Taken out of the input here, before
     /// egui's focus logic runs on it; Tab inside a focused widget still
     /// moves focus as usual.
-    /// Debug-only live theme reload (g0-style, PC:#9): polls
-    /// `UMBER_THEME_FILE` at most every 400 ms; on an mtime change parses
-    /// the `name = #rrggbb` tokens, stores them on the context and
-    /// re-applies the style on both OS-theme branches. An unreadable file
-    /// (mid-write) is retried on the next poll.
-    #[cfg(debug_assertions)]
-    fn poll_theme_file(&mut self, ctx: &egui::Context, now: f64) {
-        if now - self.theme_last_poll < 0.4 {
-            return;
-        }
-        self.theme_last_poll = now;
-        let Some(path) = self.theme_file.clone() else {
-            return;
-        };
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return;
-        };
-        let Ok(mtime) = meta.modified() else {
-            return;
-        };
-        if self.theme_file_mtime == Some(mtime) {
-            return;
-        }
-        self.theme_file_mtime = Some(mtime);
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            umber_gui::theme::set_token_overrides(
-                ctx,
-                umber_gui::theme::parse_token_overrides(&text),
-            );
-            umber_gui::theme::apply(ctx, umber_gui::Density::Comfortable, 1.0);
-        }
-    }
-
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // Preferences ▸ Keymap capturing a binding owns the keyboard: the
         // press is taken before egui and the shortcut poll see it, so it
@@ -4215,6 +4224,93 @@ impl eframe::App for UmberApp {
             ui.ctx(),
             &toolbar::SHORTCUT_KEYS,
         ));
+        // Per-property shortcuts (g4-property-context-menu's Assign
+        // Shortcut): a field's menu click parks its action id in temp
+        // memory — start capturing; otherwise poll the persisted
+        // prop_keymap and route a hit as a focus request to the owning
+        // panel (delivered after the panels draw, near the end of `ui`).
+        if let Some(id) = ui
+            .ctx()
+            .data(|d| d.get_temp::<&'static str>(crate::actions::prop_capture_id()))
+        {
+            ui.ctx()
+                .data_mut(|d| d.remove::<&'static str>(crate::actions::prop_capture_id()));
+            self.prop_shortcut_capture = Some(id);
+            let label = crate::actions::prop_action(id).map_or(id, |a| a.label);
+            self.notices.post(
+                umber_gui::NoticeLevel::Info,
+                crate::i18n::tr_args("propmenu.capture-hint", [("label", label.into())]),
+            );
+        }
+        if let Some(id) = self.prop_shortcut_capture {
+            let mut done: Option<Option<Vec<crate::actions::Binding>>> = None;
+            ui.ctx().input_mut(|i| {
+                i.events.retain(|event| {
+                    let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } = event
+                    else {
+                        return true;
+                    };
+                    match crate::actions::capture_shape(*key, *modifiers) {
+                        crate::actions::Capture::Assign(b) => done = Some(Some(vec![b])),
+                        crate::actions::Capture::Clear => done = Some(Some(Vec::new())),
+                        crate::actions::Capture::Cancel => done = Some(None),
+                        crate::actions::Capture::Ignore => return true,
+                    }
+                    false
+                });
+            });
+            if let Some(result) = done {
+                let action = crate::actions::prop_action(id).expect("capture id registered");
+                match result {
+                    Some(bindings) => {
+                        let specs: Vec<String> = bindings
+                            .iter()
+                            .map(|b| crate::actions::binding_spec(*b))
+                            .collect();
+                        self.prefs.prop_keymap.set(action, bindings);
+                        self.prefs.save(None);
+                        let text = if specs.is_empty() {
+                            crate::i18n::tr_args(
+                                "propmenu.unbound",
+                                [("label", action.label.into())],
+                            )
+                        } else {
+                            crate::i18n::tr_args(
+                                "propmenu.bound",
+                                [
+                                    ("label", action.label.into()),
+                                    ("key", specs.join(", ").into()),
+                                ],
+                            )
+                        };
+                        self.notices.post(umber_gui::NoticeLevel::Info, text);
+                    }
+                    None => {
+                        self.notices.post(
+                            umber_gui::NoticeLevel::Info,
+                            tr("propmenu.capture-cancelled"),
+                        );
+                    }
+                }
+                self.prop_shortcut_capture = None;
+            }
+        } else if let Some(action) =
+            crate::actions::poll_prop_shortcuts(ui.ctx(), &self.prefs.prop_keymap)
+        {
+            self.prop_focus_request = Some(action.id);
+            // Open the owning panel now so the field renders this frame
+            // and can take focus below.
+            if matches!(action.id, "brush.size" | "brush.alpha") {
+                self.properties_rail.select(umber_gui::ContextKind::Brush);
+                self.brush_panel.pending_focus = Some(action.id);
+            }
+        }
         if std::mem::take(&mut self.tab_hide_pending) {
             actions.push(toolbar::ShellAction::ToggleHideUi);
         }
@@ -4780,6 +4876,18 @@ impl eframe::App for UmberApp {
 
         if self.state.uv_view.hover_uv() != hover_before {
             ui.ctx().request_repaint();
+        }
+
+        // A property shortcut fired this frame: if its panel has rendered
+        // the field (id recorded last frame or this one), focus it and
+        // clear the request. A closed panel opened above renders next
+        // frame; the request survives until then.
+        if let Some(id) = self.brush_panel.pending_focus {
+            if let Some(field_id) = self.brush_panel.field_ids.get(id) {
+                ui.ctx().memory_mut(|m| m.request_focus(*field_id));
+                self.brush_panel.pending_focus = None;
+                self.prop_focus_request = None;
+            }
         }
 
         // The toast stack, drawn after the dock (GUI plan G0): everything

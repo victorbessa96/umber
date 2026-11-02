@@ -955,6 +955,11 @@ propmenu =
     .copy = Copiar valor
     .paste = Colar valor
     .set-default = Definir como padrão
+    .assign-shortcut = Atribuir Atalho
+    .capture-hint = Pressione uma tecla para { $label } — Esc cancela, Backspace limpa
+    .bound = { $label } vinculado a { $key }
+    .unbound = { $label } sem atalho
+    .capture-cancelled = Captura de atalho cancelada
 
 ## Faixa de contexto sobre o viewport (plano de GUI g6-contextual-toolbar)
 

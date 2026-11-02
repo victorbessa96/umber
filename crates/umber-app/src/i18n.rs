@@ -367,6 +367,7 @@ pub fn prop_menu_labels() -> umber_gui::widgets::value_field::MenuLabels<'static
         copy: tr("propmenu.copy").into(),
         paste: tr("propmenu.paste").into(),
         set_default: Some(tr("propmenu.set-default").into()),
+        assign_shortcut: Some(tr("propmenu.assign-shortcut").into()),
     }
 }
 

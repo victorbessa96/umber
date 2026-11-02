@@ -101,8 +101,35 @@ impl AuthorizedWorkspace {
 
     /// Create a directory (and its parents) below the write root.
     pub fn create_dir_all(&self, path: &str) -> Result<()> {
-        let target = self.confine(path, Access::Write)?;
-        std::fs::create_dir_all(&target).map_err(|e| file_error("create", path, e))
+        let rel = relative_path(path)?;
+        let Some(root) = self.write.as_ref() else {
+            return Err(anyhow!(
+                "file access is not granted: no write root (start the server with --write-root <dir>)"
+            ));
+        };
+        let root = root
+            .canonicalize()
+            .map_err(|e| file_error("create", path, e))?;
+        // Walk down one component at a time: every existing prefix is
+        // canonicalized so a symlink escape anywhere in the chain is caught
+        // before anything is created below it.
+        let mut cur = root.clone();
+        for comp in rel.components() {
+            let next = cur.join(comp.as_os_str());
+            if next.exists() {
+                let c = next
+                    .canonicalize()
+                    .map_err(|e| file_error("create", path, e))?;
+                if !c.starts_with(&root) {
+                    return Err(escape(path));
+                }
+                cur = c;
+            } else {
+                std::fs::create_dir(&next).map_err(|e| file_error("create", path, e))?;
+                cur = next;
+            }
+        }
+        Ok(())
     }
 
     /// The entry names of one directory below the read root.

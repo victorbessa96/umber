@@ -23,7 +23,7 @@
 //! `--write-root` roots ([`crate::workspace`]); without roots there is
 //! no file access.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 

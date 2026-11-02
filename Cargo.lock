@@ -4893,6 +4893,7 @@ dependencies = [
  "blake3",
  "emath",
  "env_logger",
+ "getrandom 0.3.4",
  "log",
  "pollster 1.0.1",
  "serde",

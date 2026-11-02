@@ -360,12 +360,12 @@ pub fn parse_token_overrides(text: &str) -> TokenOverrides {
 
 /// Stores `overrides` on `ctx` (persistent), replacing any previous set.
 pub fn set_token_overrides(ctx: &egui::Context, overrides: TokenOverrides) {
-    ctx.data_mut(|d| d.insert_persistent(overrides_id(), overrides));
+    ctx.data_mut(|d| d.insert_persisted(overrides_id(), overrides));
 }
 
 /// The active overrides on `ctx`, if any.
 pub fn token_overrides(ctx: &egui::Context) -> TokenOverrides {
-    ctx.data(|d| d.get_persistent::<TokenOverrides>(overrides_id()))
+    ctx.data_mut(|d| d.get_persisted::<TokenOverrides>(overrides_id()))
         .unwrap_or_default()
 }
 
@@ -383,6 +383,9 @@ fn token(ov: Option<&TokenOverrides>, name: &str) -> Color32 {
         .unwrap_or(Color32::BLACK)
 }
 
+/// Applies the themed style to both OS themes (dark and light) at the
+/// given density and text scale; stores any active token overrides so
+/// they re-apply on every subsequent `apply`.
 pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
     let style = std::sync::Arc::new(umber_style_scaled_with(ctx, density, text_scale));
     ctx.set_style_of(egui::Theme::Dark, style.clone());

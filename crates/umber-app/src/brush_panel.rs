@@ -199,6 +199,13 @@ pub struct BrushPanel {
     /// stay editable) and the viewport suppresses painting
     /// (`Viewport::set_pick_armed` / `set_idmask_armed`) — neither strokes.
     pub strip: crate::toolbar::ToolKind,
+    /// Widget ids of the bindable property fields rendered last frame,
+    /// by action id (`brush.size`, `brush.alpha`) — a fired property
+    /// shortcut focuses the field through these (g4-property-context-
+    /// menu's Assign Shortcut; `main.rs` delivers the request).
+    pub field_ids: std::collections::HashMap<&'static str, egui::Id>,
+    /// A property-shortcut focus request waiting for the field to render.
+    pub pending_focus: Option<&'static str>,
     /// The last-edited params of each retouch tool, kept while another
     /// tool is selected so switching back restores them.
     smudge: SmudgeParams,
@@ -278,6 +285,8 @@ impl BrushPanel {
             loaded_stamp: None,
             picked_stamp: None,
             strip: crate::toolbar::ToolKind::Paint,
+            field_ids: std::collections::HashMap::new(),
+            pending_focus: None,
             save_as_name: String::new(),
             tool: BrushTool::Paint,
             smudge: SmudgeParams::default(),
@@ -636,14 +645,20 @@ impl BrushPanel {
             }
         });
 
-        changed |= value_row(
+        let alpha_resp = value_row(
             ui,
             &tr("brush.alpha"),
             ValueField::new(&mut preset.params.alpha)
                 .context_menu(crate::i18n::prop_menu_labels())
-                .range(0.0..=1.0),
-        )
-        .changed();
+                .range(0.0..=1.0)
+                .with_shortcut("brush.alpha", |ctx| {
+                    ctx.data_mut(|d| {
+                        d.insert_temp(crate::actions::prop_capture_id(), "brush.alpha")
+                    });
+                }),
+        );
+        self.field_ids.insert("brush.alpha", alpha_resp.id);
+        changed |= alpha_resp.changed();
         changed |= value_row(
             ui,
             &tr("brush.hardness"),
@@ -724,15 +739,21 @@ impl BrushPanel {
             }
         });
 
-        changed |= value_row(
+        let size_resp = value_row(
             ui,
             &tr("brush.size"),
             ValueField::new(&mut preset.size)
                 .context_menu(crate::i18n::prop_menu_labels())
                 .range(0.05..=8.0)
-                .step(0.01),
-        )
-        .changed();
+                .step(0.01)
+                .with_shortcut("brush.size", |ctx| {
+                    ctx.data_mut(|d| {
+                        d.insert_temp(crate::actions::prop_capture_id(), "brush.size")
+                    });
+                }),
+        );
+        self.field_ids.insert("brush.size", size_resp.id);
+        changed |= size_resp.changed();
         changed |= stroke_method_rows(ui, &mut preset.stroke_method);
 
         ui.add_space(4.0);

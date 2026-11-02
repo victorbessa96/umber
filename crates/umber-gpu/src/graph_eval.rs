@@ -2026,7 +2026,7 @@ mod tests {
     fn routing_covers_every_registered_node_def() {
         let registry = full_registry();
         let defs = registry.node_defs();
-        assert_eq!(defs.len(), 25, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 26, "unexpected registry size: {defs:?}");
         for def in defs {
             let route = GpuRoute::route(def, &[]);
             assert!(

@@ -936,6 +936,11 @@ propmenu =
     .copy = Copy Value
     .paste = Paste Value
     .set-default = Set as Default
+    .assign-shortcut = Assign Shortcut
+    .capture-hint = Press a key for { $label } — Esc cancels, Backspace clears
+    .bound = { $label } bound to { $key }
+    .unbound = { $label } unbound
+    .capture-cancelled = Shortcut capture cancelled
 
 ## Contextual toolbar strip (GUI plan g6-contextual-toolbar)
 

@@ -9588,12 +9588,12 @@ mod tests {
             vec![
                 StrokeCommit {
                     cursor: 0,
-                    depth: 1
+                    depth: 1,
                     layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
-                    depth: 2
+                    depth: 2,
                     layer: None,
                 },
             ]
@@ -9643,17 +9643,17 @@ mod tests {
             vec![
                 StrokeCommit {
                     cursor: 0,
-                    depth: 1
+                    depth: 1,
                     layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
-                    depth: 2
+                    depth: 2,
                     layer: None,
                 },
                 StrokeCommit {
                     cursor: 1,
-                    depth: 2
+                    depth: 2,
                     layer: None,
                 },
             ]
@@ -9693,7 +9693,7 @@ mod tests {
             state.take_stroke_commits(),
             vec![StrokeCommit {
                 cursor: 0,
-                depth: 1
+                depth: 1,
                 layer: None,
             }]
         );

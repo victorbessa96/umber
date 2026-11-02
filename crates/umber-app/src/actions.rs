@@ -799,6 +799,162 @@ pub fn esc_closes_overlays(ctx: &egui::Context, palette_open: bool) -> bool {
     ctx.input(|i| i.key_pressed(Key::Escape)) && Focus::current(ctx) != Focus::Text && !palette_open
 }
 
+// ---------------------------------------------------------------------------
+// Per-property shortcuts (GUI plan g4-property-context-menu's "Assign
+// Shortcut"): a property carrying an action id can be bound from its own
+// context menu. The bindings persist as a `prop_keymap=id:spec,spec;…`
+// line in the prefs file, in [`PROP_ACTIONS`] order. Firing a property
+// shortcut asks the owning panel to open and focus the field (the app
+// routes it as a focus request — see `main.rs`).
+
+/// One bindable property: a stable action id and its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropAction {
+    /// The persisted id (`brush.size`).
+    pub id: &'static str,
+    /// The human label.
+    pub label: &'static str,
+}
+
+/// The bindable properties, in persisted-line order.
+pub const PROP_ACTIONS: &[PropAction] = &[
+    PropAction {
+        id: "brush.size",
+        label: "Brush size",
+    },
+    PropAction {
+        id: "brush.alpha",
+        label: "Brush opacity",
+    },
+];
+
+/// `id`'s [`PropAction`], if registered.
+pub fn prop_action(id: &str) -> Option<PropAction> {
+    PROP_ACTIONS.iter().copied().find(|a| a.id == id)
+}
+
+/// The egui temp-memory id under which a field's "Assign Shortcut" click
+/// parks its action id for the app's capture pass.
+pub fn prop_capture_id() -> egui::Id {
+    egui::Id::new("umber-prop-shortcut-capture")
+}
+
+/// The per-property shortcut map (the `prop_keymap=` prefs line).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PropKeymap {
+    entries: Vec<(PropAction, Vec<Binding>)>,
+}
+
+impl PropKeymap {
+    /// `action`'s bindings, if bound.
+    pub fn get(&self, action: PropAction) -> Option<&[Binding]> {
+        self.entries
+            .iter()
+            .find(|(a, _)| *a == action)
+            .map(|(_, b)| b.as_slice())
+    }
+
+    /// Binds `action` to exactly `bindings` (duplicates dropped, capped at
+    /// [`MAX_BINDINGS`]); an empty list unbinds the action.
+    pub fn set(&mut self, action: PropAction, bindings: Vec<Binding>) {
+        self.entries.retain(|(a, _)| *a != action);
+        let mut list: Vec<Binding> = Vec::with_capacity(MAX_BINDINGS);
+        for b in bindings {
+            if !list.contains(&b) && list.len() < MAX_BINDINGS {
+                list.push(b);
+            }
+        }
+        if list.is_empty() {
+            return;
+        }
+        let rank = |a: PropAction| {
+            PROP_ACTIONS
+                .iter()
+                .position(|p| *p == a)
+                .unwrap_or(usize::MAX)
+        };
+        let at = self
+            .entries
+            .iter()
+            .position(|(a, _)| rank(*a) > rank(action))
+            .unwrap_or(self.entries.len());
+        self.entries.insert(at, (action, list));
+    }
+
+    /// The first entry whose binding matches `key` + `mods`.
+    pub fn resolve(&self, key: Key, mods: Modifiers) -> Option<(PropAction, Binding)> {
+        self.entries.iter().find_map(|(action, bindings)| {
+            bindings
+                .iter()
+                .find(|b| b.key == key && b.chord.matches(mods))
+                .map(|b| (*action, *b))
+        })
+    }
+
+    /// The `prop_keymap=` line text: `id:spec,spec;…` in [`PROP_ACTIONS`]
+    /// order.
+    pub fn serialize(&self) -> String {
+        self.entries
+            .iter()
+            .map(|(action, bindings)| {
+                let specs: Vec<String> = bindings.iter().map(|b| binding_spec(*b)).collect();
+                format!("{}:{}", action.id, specs.join(","))
+            })
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// Lenient parse of [`PropKeymap::serialize`]: unknown ids and unknown
+    /// specs are dropped, so a typo never binds garbage.
+    pub fn parse(text: &str) -> Self {
+        let mut map = PropKeymap::default();
+        for entry in text.split(';') {
+            let Some((id, specs)) = entry.split_once(':') else {
+                continue;
+            };
+            let Some(action) = prop_action(id.trim()) else {
+                continue;
+            };
+            let bindings: Vec<Binding> = specs.split(',').filter_map(parse_binding_spec).collect();
+            map.set(action, bindings);
+        }
+        map
+    }
+}
+
+/// Polls the input for a per-property binding in `map`: the first match
+/// fires and its key event is consumed (the same contract as
+/// `toolbar::poll_shortcuts`). Respects [`Focus`]: a text edit swallows
+/// everything but function keys and Ctrl/Cmd chords, like the shell table.
+pub fn poll_prop_shortcuts(ctx: &egui::Context, map: &PropKeymap) -> Option<PropAction> {
+    if map.entries.is_empty() {
+        return None;
+    }
+    let focus = Focus::current(ctx);
+    let mut fired = None;
+    ctx.input_mut(|i| {
+        i.events.retain(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            match map.resolve(*key, *modifiers) {
+                Some((action, binding)) if fired.is_none() && focus.allows(binding) => {
+                    fired = Some(action);
+                    false
+                }
+                _ => true,
+            }
+        });
+    });
+    fired
+}
+
 /// Who owns the keyboard this frame (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -1209,6 +1365,63 @@ mod tests {
             action_name(ShellAction::SelectTool(ToolKind::Erase)),
             "SelectTool(Erase)"
         );
+    }
+
+    #[test]
+    fn prop_keymap_round_trips_and_resolves() {
+        let size = prop_action("brush.size").unwrap();
+        let mut map = PropKeymap::default();
+        map.set(
+            size,
+            vec![Binding {
+                key: Key::B,
+                chord: Chord::Cmd,
+            }],
+        );
+        let text = map.serialize();
+        assert_eq!(text, "brush.size:ctrl+b");
+        let back = PropKeymap::parse(&text);
+        assert_eq!(back, map);
+        assert_eq!(
+            back.resolve(Key::B, Modifiers::COMMAND),
+            Some((
+                size,
+                Binding {
+                    key: Key::B,
+                    chord: Chord::Cmd
+                }
+            ))
+        );
+        assert_eq!(back.resolve(Key::B, Modifiers::NONE), None);
+    }
+
+    #[test]
+    fn prop_keymap_parse_drops_unknowns_and_empty_unbinds() {
+        // Unknown id dropped; unknown spec dropped, the valid one kept.
+        let map = PropKeymap::parse("nope:ctrl+b;brush.alpha:bogus,shift+b");
+        let alpha = prop_action("brush.alpha").unwrap();
+        assert_eq!(
+            map.get(alpha),
+            Some(
+                &[Binding {
+                    key: Key::B,
+                    chord: Chord::Shift
+                }][..]
+            )
+        );
+        assert!(map.get(prop_action("brush.size").unwrap()).is_none());
+        // An empty binding list unbinds rather than storing an empty row.
+        let mut map = PropKeymap::default();
+        map.set(
+            alpha,
+            vec![Binding {
+                key: Key::B,
+                chord: Chord::Shift,
+            }],
+        );
+        map.set(alpha, vec![]);
+        assert!(map.get(alpha).is_none());
+        assert_eq!(map.serialize(), "");
     }
 
     #[test]

@@ -431,7 +431,10 @@ fn channel_rows(
     }
 }
 
-pub use gestures::{drop_to_reorder, AssetDrag, AssetDropRef};
+pub use gestures::{
+    drop_to_reorder, AssetDrag, AssetDropRef, ASSET_DRAG_IN_FLIGHT_ID, ASSET_DRAG_SEEN_ID,
+    ASSET_DROP_CONSUMED_ID,
+};
 
 pub mod gestures {
     //! Layer-stack gestures (GUI plan row `g2-layer-gestures`,

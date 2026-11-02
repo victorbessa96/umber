@@ -1529,7 +1529,7 @@ fn ramp_editor(
                 .iter()
                 .map(|(p, c)| umber_gui::widgets::ramp::Stop {
                     position: *p,
-                    color: egui::Rgba::from_rgba_linear(c[0], c[1], c[2], c[3]),
+                    color: egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
                 })
                 .collect(),
         )

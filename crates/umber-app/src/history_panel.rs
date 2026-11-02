@@ -445,7 +445,6 @@ impl SessionHistory {
             undo_depth: Some(depth),
             stroke_depth: None,
             graph_depth: None,
-            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -463,7 +462,6 @@ impl SessionHistory {
             undo_depth: None,
             stroke_depth: Some(depth),
             graph_depth: None,
-            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -481,7 +479,6 @@ impl SessionHistory {
             stroke_depth: None,
             graph_depth: Some(depth),
             target_layer: None,
-            target_layer: None,
         });
         self.next_op_id += 1;
     }
@@ -497,7 +494,6 @@ impl SessionHistory {
             undo_depth: None,
             stroke_depth: None,
             graph_depth: None,
-            target_layer: None,
             target_layer: None,
         });
         self.next_op_id += 1;
@@ -1094,7 +1090,7 @@ pub fn history_ui_with_graph(
                         if let Some(tex) = tex {
                             let s = HISTORY_THUMB_PX as f32;
                             ui.add(egui::Image::new(egui::load::SizedTexture::new(
-                                tex,
+                                tex.id(),
                                 egui::vec2(s, s),
                             )));
                         }
