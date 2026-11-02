@@ -8,11 +8,13 @@
 //! `if let`), error type is std-only, API otherwise unchanged.
 //!
 //! Umber's consumer: export padding. `umber-export`'s channel packing
-//! currently pads missing inputs to transparent black "before dilation
-//! lands" (crates/umber-export/src/presets.rs) — a [`DilationMap`]
-//! computed from the UV layout's covered texels (umber-mesh's
-//! `polygon_fill` over the UV islands) is the dilation that fills it.
-//! Queue row: wire into the export driver's padding step.
+//! pads missing inputs to transparent black (crates/umber-export/src/presets.rs);
+//! the UV-coverage dilation that fills uncovered texels of EXISTING maps
+//! lands in the driver as a caller-supplied `DilateHook`
+//! (crates/umber-export/src/driver.rs, queue row 151 — the layering gate
+//! keeps umber-export core-free, so the app builds this map from the UV
+//! islands via `umber_mesh::fill::rasterize_uv_geometry` and closes over
+//! it). Wired 2026-11-02.
 
 /// No source texel.
 pub const NONE: u32 = u32::MAX;

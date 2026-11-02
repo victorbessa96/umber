@@ -390,13 +390,17 @@ impl ExportPreset {
 /// The `inputs` slice is parallel to the spec's `maps` list (same
 /// order); each input is one RGBA8 texel from that map. When fewer
 /// inputs than maps are provided the missing ones read as
-/// transparent black (the padding rule before dilation lands).
+/// transparent black (the missing-MAP rule; UV padding of uncovered
+/// texels is the driver's `DilateHook`, applied to the packed map
+/// in `driver::write_outputs` after this fn).
 pub fn pack_texel(spec: &OutputSpec, inputs: &[Texel]) -> [u8; 4] {
     let mut out = [0u8; 4];
     for (i, wiring) in spec.channels.iter().enumerate() {
         // Channel i reads (map index, slot) — the map is NAMED per
         // channel, not implied by position. Missing maps read as
-        // transparent black (the pre-dilation padding rule).
+        // transparent black (missing maps stay transparent black even
+        // with dilation on: dilation pads uncovered TEXELS of maps that
+        // exist, it cannot invent a map the set never carried).
         let texel = inputs.get(wiring.map).copied().unwrap_or_default();
         out[i] = wiring.slot.sample(texel.rgba);
     }

@@ -9,6 +9,12 @@
 //! the filename template with the §6 tokens, and writes through the
 //! format writers. The driver is pure CPU — callable from the CLI, the
 //! app, or tests.
+//!
+//! UV padding (queue row 151): a caller holding the mesh passes a
+//! [`DilateHook`] to the `run_preset_*_dilated*` entry points; every
+//! packed output map is then padded — uncovered texels take the nearest
+//! covered texel's value. Without a hook the outputs are byte-identical
+//! to the pre-dilation behavior (the no-mesh CLI default).
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +30,22 @@ use crate::presets::{
     NormalConvention, OutputFormat, OutputSpec, Texel,
 };
 use crate::{exr, formats};
+
+/// Padding distance (Chebyshev texels) applied to exported maps when the
+/// caller supplies a [`DilateHook`]: uncovered texels within this distance
+/// of a covered texel take that texel's packed value; texels farther out
+/// keep their packed bytes (transparent black for untouched maps).
+pub const DEFAULT_PADDING_TEXELS: u32 = 32;
+
+/// UV-padding hook applied to every packed output map before encoding:
+/// `(packed RGBA8 bytes row-major, width, height, tile)`. Callers holding
+/// the mesh build a `umber_core::uv_dilation::DilationMap` from the UV
+/// islands (`umber_mesh::fill::rasterize_uv_geometry` -> covered[]) and
+/// close over it; this crate stays mesh-free and core-free per the
+/// layering gate (scripts/check-layers.py: umber-export is L1 and
+/// same-layer edges are not allowed). Absorbed 2026-11-01 from
+/// storytold/texturecraft; wired 2026-11-02 (queue row 151).
+pub type DilateHook<'a> = &'a dyn Fn(&mut [u8], u32, u32, u16);
 
 /// Whether a map kind is color-managed (sRGB transfer at export) or
 /// data (linear passthrough) — requirements §9: "baseColor yes;
@@ -364,10 +386,58 @@ pub fn run_preset_with_surface(
     out_dir: &Path,
     surface: &SurfaceParams,
 ) -> Result<Vec<PathBuf>, ExportError> {
+    run_preset_dilated_with_surface(preset, set, sources, out_dir, surface, None)
+}
+
+/// [`run_preset`] with an optional UV-padding [`DilateHook`] applied to
+/// every packed output map before encoding (queue row 151).
+///
+/// # Errors
+///
+/// As [`run_preset`].
+pub fn run_preset_dilated(
+    preset: &ExportPreset,
+    set: &MapSet,
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+    dilation: Option<DilateHook<'_>>,
+) -> Result<Vec<PathBuf>, ExportError> {
+    run_preset_dilated_with_surface(
+        preset,
+        set,
+        sources,
+        out_dir,
+        &SurfaceParams::default(),
+        dilation,
+    )
+}
+
+/// [`run_preset_with_surface`] with an optional UV-padding [`DilateHook`].
+///
+/// # Errors
+///
+/// As [`run_preset`].
+pub fn run_preset_dilated_with_surface(
+    preset: &ExportPreset,
+    set: &MapSet,
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+    surface: &SurfaceParams,
+    dilation: Option<DilateHook<'_>>,
+) -> Result<Vec<PathBuf>, ExportError> {
     std::fs::create_dir_all(out_dir).map_err(|e| ExportError::Write(e.to_string()))?;
     validate_set(preset, set)?;
     let mut written = Vec::new();
-    write_outputs(preset, set, sources, out_dir, false, &mut written)?;
+    write_outputs(
+        preset,
+        set,
+        sources,
+        out_dir,
+        false,
+        FIRST_TILE,
+        dilation,
+        &mut written,
+    )?;
     if preset.materialx {
         // The same expansion write_outputs used: the document names the
         // exact files just written.
@@ -426,6 +496,47 @@ pub fn run_preset_tiled_with_surface(
     out_dir: &Path,
     surface: &SurfaceParams,
 ) -> Result<Vec<PathBuf>, ExportError> {
+    run_preset_tiled_dilated_with_surface(preset, tiles, sources, out_dir, surface, None)
+}
+
+/// [`run_preset_tiled`] with an optional UV-padding [`DilateHook`]; the
+/// hook receives each output's tile so per-tile `DilationMap`s
+/// (umber_core::uv_dilation) can be built and cached caller-side.
+///
+/// # Errors
+///
+/// As [`run_preset_tiled`].
+pub fn run_preset_tiled_dilated(
+    preset: &ExportPreset,
+    tiles: &[(u16, &MapSet)],
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+    dilation: Option<DilateHook<'_>>,
+) -> Result<Vec<PathBuf>, ExportError> {
+    run_preset_tiled_dilated_with_surface(
+        preset,
+        tiles,
+        sources,
+        out_dir,
+        &SurfaceParams::default(),
+        dilation,
+    )
+}
+
+/// [`run_preset_tiled_with_surface`] with an optional UV-padding
+/// [`DilateHook`].
+///
+/// # Errors
+///
+/// As [`run_preset_tiled`].
+pub fn run_preset_tiled_dilated_with_surface(
+    preset: &ExportPreset,
+    tiles: &[(u16, &MapSet)],
+    sources: &TokenSources<'_>,
+    out_dir: &Path,
+    surface: &SurfaceParams,
+    dilation: Option<DilateHook<'_>>,
+) -> Result<Vec<PathBuf>, ExportError> {
     for (i, (tile, _)) in tiles.iter().enumerate() {
         if tiles[..i].iter().any(|(seen, _)| seen == tile) {
             return Err(ExportError::DuplicateTile(*tile));
@@ -449,6 +560,8 @@ pub fn run_preset_tiled_with_surface(
             &tile_sources,
             out_dir,
             tile_names,
+            *tile,
+            dilation,
             &mut written,
         )?;
     }
@@ -604,8 +717,10 @@ fn validate_set(preset: &ExportPreset, set: &MapSet) -> Result<(), ExportError> 
 }
 
 /// Pass 2 — packs and writes every output of `preset` from `set`
-/// (already validated by [`validate_set`]), appending the paths to
-/// `written`. `tile_names` routes each filename through
+/// (already validated by [`validate_set`]), applying `dilation` to each
+/// packed map before encoding when supplied, appending the paths to
+/// `written`. `tile` is the UDIM tile the run is writing (1001 for a
+/// single-set run); `tile_names` routes each filename through
 /// [`tiled_template`] before token expansion.
 fn write_outputs(
     preset: &ExportPreset,
@@ -613,6 +728,8 @@ fn write_outputs(
     sources: &TokenSources<'_>,
     out_dir: &Path,
     tile_names: bool,
+    tile: u16,
+    dilation: Option<DilateHook<'_>>,
     written: &mut Vec<PathBuf>,
 ) -> Result<(), ExportError> {
     let size = set.size;
@@ -648,6 +765,14 @@ fn write_outputs(
                     convert_normal(texel, WORKING_NORMAL_CONVENTION, output.normal_convention).rgba;
             }
             packed[t * 4..t * 4 + 4].copy_from_slice(&out);
+        }
+
+        // UV padding (queue row 151; texturecraft absorption 2026-11-01):
+        // with a caller-supplied hook, uncovered texels take their nearest
+        // covered texel's packed value up to the padding distance. Without
+        // a hook the packed bytes stand as-is (the no-mesh default).
+        if let Some(hook) = dilation {
+            hook(&mut packed, size, size, tile);
         }
 
         // Expand the filename's §6 tokens from the driver-side
@@ -1575,5 +1700,170 @@ mod tests {
         assert!(doc.contains("value=\"T_rough.tif\" colorspace=\"srgb_texture\""));
         assert!(doc.contains("value=\"T_base.exr\" colorspace=\"lin_rec709\""));
         std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn dilation_hook_fires_once_per_output_with_dims_and_tile() {
+        // The hook contract: one call per output per tile, args
+        // (packed RGBA8 buffer, width, height, tile); the hook's mutation
+        // lands in the written file (read back through the png writer's
+        // inverse here: just assert the buffer was handed over mutably).
+        let size = 4;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 200));
+        set.set(MapKind::Metallic, solid(size, 255));
+        set.set(MapKind::Roughness, solid(size, 64));
+        set.set(MapKind::Normal, solid(size, 128));
+
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-dilate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+
+        let calls = std::cell::RefCell::new(Vec::new());
+        let hook = |packed: &mut [u8], w: u32, h: u32, tile: u16| {
+            calls.borrow_mut().push((packed.len(), w, h, tile));
+            for b in packed.iter_mut() {
+                *b = 7;
+            }
+        };
+        let dilation: Option<DilateHook<'_>> = Some(&hook);
+        let written = run_preset_dilated(
+            &ExportPreset::gltf_metal_rough(),
+            &set,
+            &TokenSources::new("D"),
+            &out,
+            dilation,
+        )
+        .unwrap();
+        // gltf_metal_rough has exactly 3 outputs.
+        assert_eq!(written.len(), 3);
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 3, "one hook call per output");
+        for &(len, w, h, tile) in calls.iter() {
+            assert_eq!(len, (size * size * 4) as usize);
+            assert_eq!((w, h, tile), (size, size, FIRST_TILE));
+        }
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn tiled_dilation_hook_receives_each_tiles_number() {
+        let size = 2;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::BaseColor, solid(size, 200));
+        let mut other = MapSet::new(size);
+        other.set(MapKind::BaseColor, solid(size, 10));
+        // A single-output passthrough preset keeps the call count == tiles.
+        let preset = ExportPreset {
+            name: "one".into(),
+            outputs: vec![crate::presets::OutputSpec {
+                filename: "$textureSet_$udim.png".into(),
+                maps: vec![(MapKind::BaseColor, vec![])],
+                channels: [
+                    ChannelWiring::new(0, ChannelSlot::R),
+                    ChannelWiring::new(0, ChannelSlot::G),
+                    ChannelWiring::new(0, ChannelSlot::B),
+                    ChannelWiring::new(0, ChannelSlot::A),
+                ],
+                normal_convention: NormalConvention::Opengl,
+                format: OutputFormat::Png8,
+            }],
+            materialx: false,
+            usda: false,
+        };
+        let tiles: Vec<(u16, &MapSet)> = vec![(1001, &set), (1002, &other)];
+        let out = std::env::temp_dir().join(format!(
+            "umber-export-drv-dilate-tiled-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&out);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let hook = |_packed: &mut [u8], w: u32, h: u32, tile: u16| {
+            calls.borrow_mut().push((w, h, tile));
+        };
+        let written =
+            run_preset_tiled_dilated(&preset, &tiles, &TokenSources::new("T"), &out, Some(&hook))
+                .unwrap();
+        assert_eq!(written.len(), 2);
+        let mut seen = calls.borrow().clone();
+        seen.sort();
+        assert_eq!(seen, vec![(size, size, 1001), (size, size, 1002)]);
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn dilation_hook_mutation_lands_in_the_written_png() {
+        // The hook's writes reach the file: a data map (Roughness =
+        // linear passthrough, so the PNG bytes read back exactly) with
+        // the hook forcing R=7 reads back as 7 at every texel.
+        let size = 2;
+        let mut set = MapSet::new(size);
+        set.set(MapKind::Roughness, solid(size, 200));
+        let preset = ExportPreset {
+            name: "dil write".into(),
+            materialx: false,
+            usda: false,
+            outputs: vec![passthrough_output("$textureSet_r.png", MapKind::Roughness)],
+        };
+        let out =
+            std::env::temp_dir().join(format!("umber-export-drv-dilwrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let hook = |packed: &mut [u8], _w: u32, _h: u32, _tile: u16| {
+            for px in packed.chunks_exact_mut(4) {
+                px[0] = 7;
+            }
+        };
+        let hook_ref: DilateHook<'_> = &hook;
+        let written =
+            run_preset_dilated(&preset, &set, &TokenSources::new("D"), &out, Some(hook_ref))
+                .unwrap();
+        let (_, _, bytes) = crate::png::read_png_rgba8(&written[0]).unwrap();
+        assert!(
+            bytes.chunks_exact(4).all(|px| px[0] == 7),
+            "hook-set R=7 must land in the written file"
+        );
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn no_hook_and_none_hook_write_identical_bytes() {
+        // The CLI default is unchanged: run_preset and
+        // run_preset_dilated(.., None) write byte-identical files.
+        let size = 2;
+        let make_set = || {
+            let mut s = MapSet::new(size);
+            s.set(MapKind::Roughness, solid(size, 200));
+            s
+        };
+        let preset = ExportPreset {
+            name: "dil none".into(),
+            materialx: false,
+            usda: false,
+            outputs: vec![passthrough_output("$textureSet_r.png", MapKind::Roughness)],
+        };
+        let base =
+            std::env::temp_dir().join(format!("umber-export-drv-dilnone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = run_preset(
+            &preset,
+            &make_set(),
+            &TokenSources::new("D"),
+            &base.join("a"),
+        )
+        .unwrap();
+        let b = run_preset_dilated(
+            &preset,
+            &make_set(),
+            &TokenSources::new("D"),
+            &base.join("b"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&a[0]).unwrap(),
+            std::fs::read(&b[0]).unwrap(),
+            "no-hook runs must be byte-identical"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

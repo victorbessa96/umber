@@ -408,6 +408,28 @@ struct ExportOutcome {
 /// The Export panel state: preset choice, output directory, and the
 /// last export's status.
 ///
+/// One tile's UV-coverage dilation map for export padding (queue row
+/// 151): `covered[]` comes from the mesh's own UV layout via
+/// [`umber_mesh::rasterize_uv_geometry`]; padding is capped at
+/// [`umber_export::DEFAULT_PADDING_TEXELS`] Chebyshev texels so texels
+/// farther out keep their packed bytes instead of smearing across gaps.
+pub fn dilation_map_for_tile(
+    mesh: &umber_mesh::MeshData,
+    tile: u16,
+    size: u32,
+) -> umber_core::DilationMap {
+    let covered: Vec<bool> = umber_mesh::rasterize_uv_geometry(mesh, tile, size, size)
+        .iter()
+        .map(|g| g.is_some())
+        .collect();
+    umber_core::DilationMap::new(
+        &covered,
+        size,
+        size,
+        Some(umber_export::DEFAULT_PADDING_TEXELS),
+    )
+}
+
 /// The egui drawing itself (`show`) is untested by construction; every
 /// other method is pure logic or a `Result`-typed driver with no UI
 /// dependency.
@@ -883,6 +905,20 @@ impl ExportDialog {
         let groups = tile_set_groups(&tiles, |tile| {
             paint.map(|p| p.set_of_tile(tile).to_string())
         });
+        // UV-padding dilation (queue row 151): one DilationMap per
+        // exported tile, built from the mesh's UV layout; the driver
+        // hook applies it to every packed output map before encoding.
+        let dilation_maps: std::collections::HashMap<u16, umber_core::DilationMap> = tiles
+            .iter()
+            .map(|&tile| (tile, dilation_map_for_tile(mesh, tile, size)))
+            .collect();
+        let dilation_maps = std::cell::RefCell::new(dilation_maps);
+        let pad_hook = |packed: &mut [u8], _w: u32, _h: u32, tile: u16| {
+            if let Some(map) = dilation_maps.borrow().get(&tile) {
+                map.apply(packed, 4);
+            }
+        };
+        let pad_hook: umber_export::DilateHook<'_> = &pad_hook;
         let mut written = Vec::new();
         for (set_name, group_tiles) in &groups {
             let pairs: Vec<(u16, &umber_export::MapSet)> = tile_sets
@@ -895,8 +931,14 @@ impl ExportDialog {
                 ..sources
             };
             written.extend(
-                umber_export::run_preset_tiled(&filtered, &pairs, &group_sources, &self.output_dir)
-                    .with_context(|| format!("run_preset_tiled ({})", group_sources.texture_set))?,
+                umber_export::run_preset_tiled_dilated(
+                    &filtered,
+                    &pairs,
+                    &group_sources,
+                    &self.output_dir,
+                    Some(pad_hook),
+                )
+                .with_context(|| format!("run_preset_tiled ({})", group_sources.texture_set))?,
             );
         }
         if filtered.usda {
@@ -1433,5 +1475,32 @@ mod tests {
             sources.expand_static("$textureSet_baseColor.png"),
             "Blade_baseColor.png"
         );
+    }
+
+    #[test]
+    fn dilation_map_for_tile_covers_the_uv_footprint() {
+        // One triangle with UVs (0,0),(1,0),(0,1) rasterized at 4x4
+        // (texel (x,y) reads uv (x/w, 1 - y/h)): texel (0,3) ->
+        // (0, 0.25) is inside the footprint and is its own source;
+        // texel (3,0) -> (0.75, 1.0) is outside and takes a padded
+        // source within the DEFAULT_PADDING_TEXELS cap.
+        let mesh = umber_mesh::MeshData {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2],
+            material_names: vec![],
+            triangle_materials: vec![],
+        };
+        let map = dilation_map_for_tile(&mesh, 1001, 4);
+        assert_eq!((map.width, map.height), (4, 4));
+        assert_eq!(map.src.len(), 16);
+        assert_eq!(
+            map.source(0, 3),
+            Some((0, 3)),
+            "covered texel is its own source"
+        );
+        let s = map.source(3, 0).expect("padded within the distance cap");
+        assert_ne!(s, (3, 0), "uncovered texel takes another texel's value");
     }
 }
