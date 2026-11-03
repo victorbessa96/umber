@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod assets;
+pub mod control;
 pub mod journal;
 pub mod layers;
 pub mod project;

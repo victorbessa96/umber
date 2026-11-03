@@ -121,6 +121,7 @@ mod bake_sources;
 mod bakes_panel;
 mod brush_cursor;
 mod brush_panel;
+mod control;
 mod crash;
 mod display_keys;
 mod display_panel;
@@ -2006,6 +2007,10 @@ pub struct UmberApp {
     /// computed fresh each frame rather than stored, since `gpu.hdr_probe`
     /// never changes within a session.
     hdr_mode: umber_gpu::HdrMode,
+    /// The `--control <port>` loopback channel (queue row 153), when started.
+    /// v1 answers in the listener thread; the field keeps the server alive
+    /// for the app's lifetime.
+    control: Option<control::ControlServer>,
 }
 
 impl UmberApp {
@@ -2158,6 +2163,7 @@ impl UmberApp {
             focus: shell_menu::FocusState::default(),
             workspaces,
             tab_hide_pending: false,
+            control: None,
         })
     }
 }
@@ -5489,6 +5495,30 @@ fn main() -> eframe::Result<()> {
     // previous launch's marker (or WGPU_BACKEND / --safe-gpu), and write the
     // marker before eframe touches the driver.
     let safe_gpu = std::env::args().skip(1).any(|a| a == "--safe-gpu");
+    // `--control <port>`: the app-side loopback control channel (queue row
+    // 153). Bare port only — `control::parse_control_arg` refuses anything
+    // with an interface; the channel is loopback-only, ever.
+    let mut control_port: Option<u16> = None;
+    {
+        let mut args = std::env::args().skip(1);
+        while let Some(a) = args.next() {
+            if a == "--control" {
+                match args.next().as_deref() {
+                    Some(v) => match control::parse_control_arg(v) {
+                        Ok(p) => control_port = Some(p),
+                        Err(e) => {
+                            eprintln!("umber: {e}");
+                            std::process::exit(2);
+                        }
+                    },
+                    None => {
+                        eprintln!("umber: --control needs a port number");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        }
+    }
     let gpu_decision = gpu_startup::prepare(safe_gpu);
     let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(ref mut create_new) = wgpu_options.wgpu_setup {
@@ -5522,11 +5552,30 @@ fn main() -> eframe::Result<()> {
     let result = eframe::run_native(
         "Umber",
         native,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // The device exists: a death from here is not a driver crash.
             gpu_startup::note_device();
             match UmberApp::new(cc) {
                 Ok(mut app) => {
+                    if let Some(port) = control_port {
+                        match control::start(port) {
+                            Ok(server) => {
+                                let where_token = match &server.token_file {
+                                    Some(p) => format!("token file {}", p.display()),
+                                    None => format!("token from ${}", control::TOKEN_ENV),
+                                };
+                                eprintln!(
+                                    "umber: control channel on 127.0.0.1:{} ({where_token})",
+                                    server.port
+                                );
+                                app.control = Some(server);
+                            }
+                            Err(e) => {
+                                eprintln!("umber: --control {port} failed to start: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
                     app.load_default_env();
                     Ok(Box::new(app) as Box<dyn eframe::App>)
                 }
