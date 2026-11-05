@@ -584,6 +584,9 @@ pub(crate) const CONTROL_PORT_ENV: &str = "UMBER_CONTROL_PORT";
 /// Env var naming the file the app wrote its control token to (the
 /// app's `--control` writes `<tmp>/umber-app-control-<port>.token`).
 pub(crate) const CONTROL_TOKEN_FILE_ENV: &str = "UMBER_CONTROL_TOKEN_FILE";
+/// Direct-token alternative to the token file (the app's bridge passes
+/// this when its own token came from the env and no file was written).
+pub(crate) const CONTROL_TOKEN_ENV: &str = "UMBER_CONTROL_TOKEN";
 
 /// The live app's loopback `--control` endpoint: the port plus the
 /// token the app accepts. Read from the env at [`Session`] construction
@@ -610,11 +613,13 @@ impl ControlEndpoint {
                 return None;
             }
         };
-        let token_file = std::env::var(CONTROL_TOKEN_FILE_ENV).ok()?;
-        let token = std::fs::read_to_string(&token_file)
-            .ok()?
-            .trim()
-            .to_string();
+        let token = match std::env::var(CONTROL_TOKEN_FILE_ENV) {
+            Ok(token_file) => std::fs::read_to_string(&token_file)
+                .ok()?
+                .trim()
+                .to_string(),
+            Err(_) => std::env::var(CONTROL_TOKEN_ENV).ok()?.trim().to_string(),
+        };
         if token.is_empty() {
             return None;
         }

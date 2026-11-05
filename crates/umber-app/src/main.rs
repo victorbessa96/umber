@@ -5578,9 +5578,15 @@ fn main() -> eframe::Result<()> {
             let egui_ctx = cc.egui_ctx.clone();
             match UmberApp::new(cc) {
                 Ok(mut app) => {
+                    let mut bridge_control = None;
                     if let Some(port) = control_port {
                         match control::start(port, egui_ctx) {
                             Ok(server) => {
+                                bridge_control = Some(control::BridgeControl {
+                                    port: server.port,
+                                    token_file: server.token_file.clone(),
+                                    token: server.token.clone(),
+                                });
                                 let where_token = match &server.token_file {
                                     Some(p) => format!("token file {}", p.display()),
                                     None => format!("token from ${}", control::TOKEN_ENV),
@@ -5598,7 +5604,7 @@ fn main() -> eframe::Result<()> {
                         }
                     }
                     if let Some(port) = bridge_port {
-                        match control::start_bridge(port) {
+                        match control::start_bridge(port, bridge_control) {
                             Ok(server) => {
                                 let where_token = match &server.token_file {
                                     Some(p) => format!("token file {}", p.display()),

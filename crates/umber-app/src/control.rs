@@ -388,14 +388,29 @@ pub struct BridgeServer {
     _thread: JoinHandle<()>,
 }
 
+/// The app's own `--control` endpoint, handed to the bridge so the
+/// spawned `umber-cli mcp` child can reach it (`UMBER_CONTROL_PORT` +
+/// `UMBER_CONTROL_TOKEN_FILE`, or `UMBER_CONTROL_TOKEN` when the app's
+/// token came from the env and no file was written).
+#[derive(Debug, Clone)]
+pub struct BridgeControl {
+    pub port: u16,
+    pub token_file: Option<PathBuf>,
+    pub token: String,
+}
+
 /// Start the bridge listener on 127.0.0.1:`port` (0 = ephemeral, tests).
-/// The `umber-cli mcp` child spawns lazily on the first authed client.
-pub fn start_bridge(port: u16) -> std::io::Result<BridgeServer> {
+/// The `umber-cli mcp` child spawns lazily on the first authed client;
+/// `control` wires that child to the app's `--control` channel.
+pub fn start_bridge(port: u16, control: Option<BridgeControl>) -> std::io::Result<BridgeServer> {
     let listener = control::bind_loopback(port)?;
     let port = listener.local_addr()?.port();
     let (token, token_file) =
         control::server_token("umber-app-bridge", port).map_err(std::io::Error::other)?;
-    let state = Arc::new(Mutex::new(BridgeState::default()));
+    let state = Arc::new(Mutex::new(BridgeState {
+        control,
+        ..BridgeState::default()
+    }));
     let token_loop = token.clone();
     let thread = std::thread::Builder::new()
         .name("umber-bridge".into())
@@ -410,6 +425,10 @@ pub fn start_bridge(port: u16) -> std::io::Result<BridgeServer> {
 
 #[derive(Default)]
 struct BridgeState {
+    /// The app's `--control` endpoint for the MCP child, when the app
+    /// runs with `--control` (None = the child gets no channel and the
+    /// `command_*` tools answer their typed error).
+    control: Option<BridgeControl>,
     /// The spawned `umber-cli mcp` child, when a client owns the bridge.
     child: Option<std::process::Child>,
     /// The live client connection the child's stdout pumps into.
@@ -451,16 +470,36 @@ fn mcp_child_program() -> PathBuf {
     PathBuf::from("umber-cli")
 }
 
-fn spawn_mcp_child() -> std::io::Result<std::process::Child> {
-    std::process::Command::new(mcp_child_program())
-        .arg("mcp")
+/// Build the `umber-cli mcp` child command, wiring the app's `--control`
+/// endpoint into its env so the `command_*` tools reach the live app.
+/// Split from `spawn_mcp_child` so tests can assert the env without
+/// spawning.
+fn mcp_child_command(control: Option<&BridgeControl>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(mcp_child_program());
+    cmd.arg("mcp")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    if let Some(control) = control {
+        cmd.env("UMBER_CONTROL_PORT", control.port.to_string());
+        match &control.token_file {
+            Some(path) => {
+                cmd.env("UMBER_CONTROL_TOKEN_FILE", path);
+            }
+            None => {
+                cmd.env(TOKEN_ENV, &control.token);
+            }
+        }
+    }
+    cmd
+}
+
+fn spawn_mcp_child(control: Option<&BridgeControl>) -> std::io::Result<std::process::Child> {
+    mcp_child_command(control).spawn()
 }
 
 fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
+    let state_control = state.lock().unwrap().control.clone();
     let _ = stream.set_nodelay(true);
     let mut reader = match stream.try_clone() {
         Ok(s) => BufReader::new(s),
@@ -482,7 +521,7 @@ fn bridge_conn(stream: TcpStream, token: &str, state: Arc<Mutex<BridgeState>>) {
         return;
     }
     if guard.child.is_none() {
-        match spawn_mcp_child() {
+        match spawn_mcp_child(state_control.as_ref()) {
             Ok(child) => guard.child = Some(child),
             Err(e) => {
                 drop(guard);
@@ -751,7 +790,8 @@ mod tests {
 
     #[test]
     fn bridge_requires_auth() {
-        let bridge = start_bridge(0).unwrap();
+        let bridge = start_bridge(0, None).unwrap();
+
         let replies = roundtrip(
             bridge.port,
             &bridge.token,
@@ -762,5 +802,39 @@ mod tests {
         );
         assert_eq!(replies[0]["ok"], false);
         assert_eq!(replies[0]["error"], "unauthorized");
+    }
+
+    #[test]
+    fn mcp_child_env_carries_the_control_endpoint() {
+        let with_file = BridgeControl {
+            port: 8391,
+            token_file: Some(PathBuf::from("/tmp/umber-app-control-8391.token")),
+            token: "secret".into(),
+        };
+        let cmd = mcp_child_command(Some(&with_file));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&("UMBER_CONTROL_PORT".as_ref(), Some("8391".as_ref()))));
+        assert!(envs.contains(&(
+            "UMBER_CONTROL_TOKEN_FILE".as_ref(),
+            Some("/tmp/umber-app-control-8391.token".as_ref())
+        )));
+        assert!(!envs.contains(&("UMBER_CONTROL_TOKEN".as_ref(), Some("secret".as_ref()))));
+
+        // Token from env (no file): the child gets the direct-token var.
+        let no_file = BridgeControl {
+            port: 8391,
+            token_file: None,
+            token: "secret".into(),
+        };
+        let cmd = mcp_child_command(Some(&no_file));
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&("UMBER_CONTROL_TOKEN".as_ref(), Some("secret".as_ref()))));
+
+        // No control server: no channel env at all (tools fail closed typed).
+        let cmd = mcp_child_command(None);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(!envs
+            .iter()
+            .any(|(k, _)| *k == std::ffi::OsStr::new("UMBER_CONTROL_PORT")));
     }
 }
