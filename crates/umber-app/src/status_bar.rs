@@ -63,6 +63,31 @@ pub struct StatusSnapshot {
     /// The navigation preset: its orbit / pan / zoom chords follow the
     /// paint hint in the [`HintContext::Paint`] context.
     pub nav: crate::navigation::NavPreset,
+    /// Show the frame-rate readout (Preferences ▸ Interface, off by
+    /// default).
+    pub show_fps: bool,
+}
+
+/// Which readout groups the bar draws (U2-5): the UV / tile pair only
+/// once a paint session exists (before that they read "-" and say
+/// nothing), the pen only once a pen has reported, the frame rate only
+/// when asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Readouts {
+    pub uv_tile: bool,
+    pub pen: bool,
+    pub fps: bool,
+}
+
+impl StatusSnapshot {
+    /// The groups this snapshot draws.
+    pub fn readouts(&self) -> Readouts {
+        Readouts {
+            uv_tile: self.tile.is_some(),
+            pen: self.pen.is_some(),
+            fps: self.show_fps,
+        }
+    }
 }
 
 /// The viewport's mouse/key hint set for the left of the bar (GUI plan G1
@@ -219,25 +244,57 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
             ui.label(label(tr(action)));
             ui.add_space(6.0);
         }
-        ui.separator();
-        ui.label(label(tr("status.uv")));
-        ui.label(value(format_uv(status.cursor_uv)));
-        ui.separator();
-        ui.label(label(tr("status.tile")));
-        ui.label(value(format_tile(status.tile)));
-        ui.separator();
-        ui.label(label(tr("status.pen")));
-        ui.label(value(format_pen(status.pen)));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(label(tr("status.fps")));
-            ui.label(value(format_fps(status.frame_dt)));
-        });
+        let readouts = status.readouts();
+        if readouts.uv_tile {
+            ui.separator();
+            ui.label(label(tr("status.uv")));
+            ui.label(value(format_uv(status.cursor_uv)));
+            ui.separator();
+            ui.label(label(tr("status.tile")));
+            ui.label(value(format_tile(status.tile)));
+        }
+        if readouts.pen {
+            ui.separator();
+            ui.label(label(tr("status.pen")));
+            ui.label(value(format_pen(status.pen)));
+        }
+        if readouts.fps {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(label(tr("status.fps")));
+                ui.label(value(format_fps(status.frame_dt)));
+            });
+        }
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readouts_hide_what_has_nothing_to_say() {
+        let mut s = StatusSnapshot {
+            cursor_uv: None,
+            tile: None,
+            pen: None,
+            frame_dt: 0.016,
+            hints: HintContext::NoMesh,
+            nav: crate::navigation::NavPreset::Painter,
+            show_fps: false,
+        };
+        assert_eq!(
+            s.readouts(),
+            Readouts {
+                uv_tile: false,
+                pen: false,
+                fps: false
+            }
+        );
+        s.tile = Some(1001);
+        s.show_fps = true;
+        let r = s.readouts();
+        assert!(r.uv_tile && r.fps && !r.pen);
+    }
 
     #[test]
     fn tile_origins_follow_the_udim_formula() {

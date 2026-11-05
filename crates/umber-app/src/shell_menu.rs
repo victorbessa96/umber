@@ -92,6 +92,56 @@ pub fn toggle_panel(dock: &mut DockState<Panel>, panel: &Panel) -> bool {
     }
 }
 
+/// A pick in a leaf's panel-group menu (g5-tab-overflow part 3, UI/UX
+/// pass U2-3): the menu lists the leaf's own tabs (pick = activate,
+/// the way to reach a tab scrolled out of an overflowing strip) and,
+/// under a separator, every panel docked nowhere (pick = dock it HERE,
+/// a closer route than Window ▸ Panels, which uses the focused leaf).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupPick {
+    /// Activate the leaf's tab at this index.
+    Activate(egui_dock::NodePath, usize),
+    /// Dock a closed panel into this leaf, active.
+    Dock(egui_dock::NodePath, Panel),
+}
+
+/// The panels docked nowhere, in [`ALL_PANELS`] order (the group
+/// menu's second list).
+pub fn closed_panels(dock: &DockState<Panel>) -> Vec<Panel> {
+    ALL_PANELS
+        .iter()
+        .filter(|p| dock.find_tab(p).is_none())
+        .cloned()
+        .collect()
+}
+
+/// Applies a [`GroupPick`]. Returns whether the dock changed. A stale
+/// pick (the leaf is gone, the index is past its end, the panel docked
+/// meanwhile) is a no-op, never a panic.
+pub fn apply_group_pick(dock: &mut DockState<Panel>, pick: GroupPick) -> bool {
+    match pick {
+        GroupPick::Activate(path, index) => match dock.leaf_mut(path) {
+            Ok(leaf) if index < leaf.tabs.len() && leaf.active.0 != index => {
+                leaf.active = egui_dock::TabIndex(index);
+                true
+            }
+            _ => false,
+        },
+        GroupPick::Dock(path, panel) => {
+            if dock.find_tab(&panel).is_some() {
+                return false;
+            }
+            match dock.leaf_mut(path) {
+                Ok(leaf) => {
+                    leaf.append_tab(panel);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    }
+}
+
 /// Whether `panel` is docked anywhere.
 pub fn is_open(dock: &DockState<Panel>, panel: &Panel) -> bool {
     dock.find_tab(panel).is_some()
@@ -231,6 +281,51 @@ mod tests {
         let mut tabs: Vec<Panel> = dock.iter_all_tabs().map(|(_, t)| t.clone()).collect();
         tabs.sort_by_key(|p| ALL_PANELS.iter().position(|q| q == p));
         tabs
+    }
+
+    #[test]
+    fn the_group_menu_activates_its_own_tabs_and_docks_closed_panels_here() {
+        let mut dock = default_dock();
+        // The right column's Layers leaf holds History second.
+        let (path, leaf) = dock
+            .iter_leaves()
+            .find(|(_, l)| l.tabs.contains(&Panel::LayerStack))
+            .map(|(p, l)| (p, l.tabs.clone()))
+            .unwrap();
+        let history = leaf.iter().position(|p| *p == Panel::History).unwrap();
+        assert!(apply_group_pick(
+            &mut dock,
+            GroupPick::Activate(path, history)
+        ));
+        let active = dock.leaf(path).map(|l| l.tabs[l.active.0].clone()).unwrap();
+        assert_eq!(active, Panel::History);
+        // Re-picking the active tab, or an index past the end, is a no-op.
+        assert!(!apply_group_pick(
+            &mut dock,
+            GroupPick::Activate(path, history)
+        ));
+        assert!(!apply_group_pick(&mut dock, GroupPick::Activate(path, 99)));
+
+        // Close Export, then dock it into THIS leaf from the menu.
+        assert!(!toggle_panel(&mut dock, &Panel::Export));
+        assert_eq!(closed_panels(&dock), vec![Panel::Export]);
+        assert!(apply_group_pick(
+            &mut dock,
+            GroupPick::Dock(path, Panel::Export)
+        ));
+        let leaf = dock.leaf(path).unwrap();
+        assert_eq!(
+            leaf.tabs[leaf.active.0],
+            Panel::Export,
+            "docked here, active"
+        );
+        assert!(closed_panels(&dock).is_empty());
+        // Docking an already-open panel never duplicates it.
+        assert!(!apply_group_pick(
+            &mut dock,
+            GroupPick::Dock(path, Panel::Export)
+        ));
+        assert_eq!(docked(&dock), ALL_PANELS.to_vec());
     }
 
     #[test]

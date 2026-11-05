@@ -555,8 +555,9 @@ brush =
 layers =
     .duplicate = Duplicar camada
     .set-header = Conjunto de texturas: { $set }
-    .add-paint = + Adicionar camada de pintura
-    .add-fill = + Adicionar camada de preenchimento
+    .add-paint = + Camada de pintura
+    .add-menu = + ▼
+    .add-menu-hint = Adicionar camada de preenchimento, pasta ou material
     .masks-section = Máscaras
     .mask-add = + Máscara
     .mask-default-name = Máscara para { $layer }
@@ -879,6 +880,7 @@ prefs =
     .tooltips = Mostrar dicas
     .reduce-motion = Reduzir movimento
     .key-hints = Dicas de teclas na barra de status
+    .show-fps = Taxa de quadros na barra de status
     .section-navigation = Navegação
     .nav-preset = Navegação com o mouse
     .nav-painter = Painter (Alt + mouse)
@@ -1054,3 +1056,7 @@ cmd-window-command-palette = Paleta de comandos
 cmd-window-preferences = Preferências
 cmd-window-next-workspace = Próximo espaço de trabalho
 cmd-window-prev-workspace = Espaço de trabalho anterior
+
+## The panel-group menu under each tab bar's end button (UI/UX U2-3).
+dock =
+    .group-closed = Painéis fechados

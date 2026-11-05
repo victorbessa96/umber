@@ -276,11 +276,11 @@ fn dock_tab_widths(text: &[f32], spacing: f32, minimum: Option<f32>, close: f32)
 }
 
 /// The visible width of a leaf's tab strip: the leaf's width less the
-/// tab bar's horizontal inner margin and the two buttons the shell's
-/// `DockArea` shows at the bar's end (close-all and collapse; no add
-/// button) — egui_dock 0.21.1 `tab_bar`'s `available_width`.
+/// tab bar's horizontal inner margin and the three buttons the shell's
+/// `DockArea` shows at the bar's end (the panel-group menu, close-all
+/// and collapse) — egui_dock 0.21.1 `tab_bar`'s `available_width`.
 fn dock_bar_width(leaf_width: f32, margin_x: f32) -> f32 {
-    (leaf_width - margin_x - 2.0 * DOCK_BUTTON_SIZE).max(0.0)
+    (leaf_width - margin_x - 3.0 * DOCK_BUTTON_SIZE).max(0.0)
 }
 
 /// Scrolls every leaf whose active tab changed since the last call so
@@ -479,6 +479,13 @@ struct PanelViewer<'a> {
     dormant: &'a std::collections::HashSet<u64>,
     /// The session stencil (the Display panel's stencil section edits it).
     stencil: &'a mut stencil::StencilState,
+    /// Each leaf's tab list and the closed panels, snapshotted before the
+    /// dock draws: `add_popup` gets only a `NodePath` and the viewer
+    /// cannot borrow the dock the `DockArea` is drawing (U2-3).
+    group_tabs: std::collections::HashMap<NodePath, Vec<Panel>>,
+    closed_panels: Vec<Panel>,
+    /// The group menu's pick this frame, applied after the dock.
+    group_pick: Option<shell_menu::GroupPick>,
 }
 
 impl TabViewer for PanelViewer<'_> {
@@ -490,6 +497,32 @@ impl TabViewer for PanelViewer<'_> {
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
         tab_title_text(&self.ctx, &panel_title(tab), self.tab_font.clone())
+    }
+
+    /// The panel-group menu under each tab bar's end button
+    /// (g5-tab-overflow part 3, U2-3): this leaf's tabs (pick = show it,
+    /// the route to a tab scrolled out of an overflowing strip), then the
+    /// panels docked nowhere (pick = dock it in this group).
+    fn add_popup(&mut self, ui: &mut egui::Ui, path: NodePath) {
+        ui.set_min_width(180.0);
+        if let Some(tabs) = self.group_tabs.get(&path) {
+            for (i, panel) in tabs.iter().enumerate() {
+                if ui.button(panel_title(panel)).clicked() {
+                    self.group_pick = Some(shell_menu::GroupPick::Activate(path, i));
+                    ui.close();
+                }
+            }
+        }
+        if !self.closed_panels.is_empty() {
+            ui.separator();
+            ui.weak(tr("dock.group-closed"));
+            for panel in &self.closed_panels {
+                if ui.button(format!("+ {}", panel_title(panel))).clicked() {
+                    self.group_pick = Some(shell_menu::GroupPick::Dock(path, panel.clone()));
+                    ui.close();
+                }
+            }
+        }
     }
 
     fn on_tab_button(&mut self, tab: &mut Self::Tab, response: &egui::Response) {
@@ -2259,6 +2292,7 @@ impl UmberApp {
                     let tips = tr("prefs.tooltips");
                     let motion = tr("prefs.reduce-motion");
                     let hints = tr("prefs.key-hints");
+                    let show_fps = tr("prefs.show-fps");
                     let navigation = tr("prefs.section-navigation");
                     let nav = tr("prefs.nav-preset");
                     let any =
@@ -2339,6 +2373,7 @@ impl UmberApp {
                             (&tips, &mut p.tooltips),
                             (&motion, &mut p.reduce_motion),
                             (&hints, &mut p.key_hints),
+                            (&show_fps, &mut p.show_fps),
                         ] {
                             if preferences::row_matches(&q, label)
                                 || preferences::row_matches(&q, &interface)
@@ -4734,6 +4769,7 @@ impl eframe::App for UmberApp {
                 status_bar::HintContext::Hidden
             },
             nav: self.state.viewport.nav_preset(),
+            show_fps: self.prefs.show_fps,
         };
         if hide_ui {
             // The visible way back (P:A4): a corner button over the
@@ -4874,6 +4910,13 @@ impl eframe::App for UmberApp {
                     store: store.as_ref(),
                     hdr_mode: &mut self.hdr_mode,
                     stylus_pressure,
+                    group_tabs: self
+                        .dock
+                        .iter_leaves()
+                        .map(|(path, leaf)| (path, leaf.tabs.clone()))
+                        .collect(),
+                    closed_panels: shell_menu::closed_panels(&self.dock),
+                    group_pick: None,
                 };
                 // R-LAYOUT-1: no leaf narrower than its panel's floor while
                 // the window can hold them (egui_dock lays splits out from
@@ -4885,7 +4928,16 @@ impl eframe::App for UmberApp {
                 );
                 DockArea::new(&mut self.dock)
                     .style(dock_style.clone())
+                    // The panel-group menu (U2-3): the dock's add button,
+                    // whose popup is `PanelViewer::add_popup`.
+                    .show_add_buttons(true)
+                    .show_add_popup(true)
                     .show_inside(ui, &mut viewer);
+                if let Some(pick) = viewer.group_pick.take() {
+                    if shell_menu::apply_group_pick(&mut self.dock, pick) {
+                        ui.ctx().request_repaint();
+                    }
+                }
                 // The selected tab stays visible (g5-tab-overflow): a leaf
                 // whose active tab changed this frame (a click, a panel
                 // toggled in, a restored layout) scrolls it into the strip.
@@ -6925,8 +6977,9 @@ mod tab_overflow_dock_tests {
             [80.0, 116.0]
         );
         assert!(dock_tab_widths(&[], 2.0, None, 24.0).is_empty());
-        // The bar loses the margin and the close-all + collapse buttons.
-        assert_eq!(dock_bar_width(300.0, 4.0), 248.0);
+        // The bar loses the margin and the group-menu + close-all +
+        // collapse buttons (U2-3 added the group menu: 300 - 4 - 3·24).
+        assert_eq!(dock_bar_width(300.0, 4.0), 224.0);
         assert_eq!(dock_bar_width(30.0, 0.0), 0.0);
     }
 

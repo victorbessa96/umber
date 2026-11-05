@@ -536,8 +536,9 @@ brush =
 layers =
     .duplicate = Duplicate layer
     .set-header = Texture set: { $set }
-    .add-paint = + Add paint layer
-    .add-fill = + Add fill layer
+    .add-paint = + Paint layer
+    .add-menu = + ▼
+    .add-menu-hint = Add a fill, folder or material layer
     .masks-section = Masks
     .mask-add = + Mask
     .mask-default-name = Mask for { $layer }
@@ -860,6 +861,7 @@ prefs =
     .tooltips = Show tooltips
     .reduce-motion = Reduce motion
     .key-hints = Status-bar key hints
+    .show-fps = Frame-rate readout in the status bar
     .section-navigation = Navigation
     .nav-preset = Mouse navigation
     .nav-painter = Painter (Alt + mouse)
@@ -1035,3 +1037,7 @@ cmd-window-command-palette = Command Palette
 cmd-window-preferences = Preferences
 cmd-window-next-workspace = Next Workspace
 cmd-window-prev-workspace = Previous Workspace
+
+## The panel-group menu under each tab bar's end button (UI/UX U2-3).
+dock =
+    .group-closed = Closed panels

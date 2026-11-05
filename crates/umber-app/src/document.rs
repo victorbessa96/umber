@@ -22,6 +22,48 @@ use crate::paint_state::{PaintState, PlaneOwner};
 /// The layer row's duplicate button label (a glyph Inter carries).
 pub const DUPLICATE_GLYPH: &str = "⊕";
 
+/// The kinds the layer panel's creation row adds (U2-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewLayer {
+    Paint,
+    Fill,
+    Folder,
+    Material,
+}
+
+impl NewLayer {
+    /// The engine kind the add command creates.
+    pub fn kind(self) -> LayerKind {
+        match self {
+            NewLayer::Paint => LayerKind::Paint,
+            NewLayer::Fill => LayerKind::Fill,
+            NewLayer::Folder => LayerKind::Folder { passthrough: false },
+            NewLayer::Material => LayerKind::Material,
+        }
+    }
+
+    /// The "+" menu row (the full op name, the History panel's wording).
+    pub fn menu_label(self) -> String {
+        tr(match self {
+            NewLayer::Paint => "history.op-add-paint",
+            NewLayer::Fill => "history.op-add-fill",
+            NewLayer::Folder => "history.op-add-folder",
+            NewLayer::Material => "history.op-add-material",
+        })
+    }
+
+    /// The new layer's default name, numbered by the stack size.
+    pub fn default_name(self, n: usize) -> String {
+        let key = match self {
+            NewLayer::Paint => "layers.default-paint-name",
+            NewLayer::Fill => "layers.default-fill-name",
+            NewLayer::Material => "layers.default-material-name",
+            NewLayer::Folder => return format!("{} {n}", tr("layers.kind-folder")),
+        };
+        tr_args(key, [("n", FluentValue::from(n))])
+    }
+}
+
 /// The open document: layer stack + undo history + autosave journal.
 ///
 /// Wave 2 scope: one texture-set layer stack; multi-set documents and
@@ -736,50 +778,29 @@ pub fn layers_ui(
             .strong(),
         );
     }
-    ui.horizontal_wrapped(|ui| {
-        if ui.button(tr("layers.add-paint")).clicked() {
-            let n = doc.layers().len() + 1;
-            let name = tr_args("layers.default-paint-name", [("n", FluentValue::from(n))]);
-            doc.run(LayerCommand::add(name, LayerKind::Paint));
-            // Add-then-paint (Painter): the new layer is the stack top
-            // after the run, and it is selected explicitly.
-            if let Some(top) = doc.layers().last() {
-                outcome.select = Some(PlaneOwner::Layer(top.id));
-            }
-        }
-        if ui.button(tr("layers.add-fill")).clicked() {
-            let n = doc.layers().len() + 1;
-            let name = tr_args("layers.default-fill-name", [("n", FluentValue::from(n))]);
-            doc.run(LayerCommand::add(name, LayerKind::Fill));
-            if let Some(top) = doc.layers().last() {
-                outcome.select = Some(PlaneOwner::Layer(top.id));
-            }
-        }
+    // The creation row (UI/UX pass U2-2, Painter's layer-stack header):
+    // the common add is one compact button, the rest sit in one "+"
+    // menu, and Flatten stays beside them. Four full-width buttons used
+    // to fill the panel head before the stack started.
+    let mut add: Option<NewLayer> = None;
+    ui.horizontal(|ui| {
         if ui
-            .button(format!("+ {}", tr("history.op-add-folder")))
+            .button(tr("layers.add-paint"))
+            .on_hover_text(tr("history.op-add-paint"))
             .clicked()
         {
-            let n = doc.layers().len() + 1;
-            let name = format!("{} {n}", tr("layers.kind-folder"));
-            doc.run(LayerCommand::add(
-                name,
-                LayerKind::Folder { passthrough: false },
-            ));
-            if let Some(top) = doc.layers().last() {
-                outcome.select = Some(PlaneOwner::Layer(top.id));
-            }
+            add = Some(NewLayer::Paint);
         }
-        if ui.button(tr("layers.add-material")).clicked() {
-            let n = doc.layers().len() + 1;
-            let name = tr_args(
-                "layers.default-material-name",
-                [("n", FluentValue::from(n))],
-            );
-            doc.run(LayerCommand::add(name, LayerKind::Material));
-            if let Some(top) = doc.layers().last() {
-                outcome.select = Some(PlaneOwner::Layer(top.id));
+        ui.menu_button(tr("layers.add-menu"), |ui| {
+            for kind in [NewLayer::Fill, NewLayer::Folder, NewLayer::Material] {
+                if ui.button(kind.menu_label()).clicked() {
+                    add = Some(kind);
+                    ui.close();
+                }
             }
-        }
+        })
+        .response
+        .on_hover_text(tr("layers.add-menu-hint"));
         // The R-B1 flatten button: enabled only when the multi-selection
         // holds two or more distinct rows (the engine's own floor). The
         // heavy half — bake + publish + removes — is the shell's, on
@@ -801,6 +822,15 @@ pub fn layers_ui(
                 .push(LayerGesture::Flatten { ids: selected });
         }
     });
+    if let Some(kind) = add {
+        let n = doc.layers().len() + 1;
+        doc.run(LayerCommand::add(kind.default_name(n), kind.kind()));
+        // Add-then-paint (Painter): the new layer is the stack top after
+        // the run, and it is selected explicitly.
+        if let Some(top) = doc.layers().last() {
+            outcome.select = Some(PlaneOwner::Layer(top.id));
+        }
+    }
     // The smart-material shelf (C2-10), collapsed by default so the layer
     // list keeps the space. Its header reuses the material-layer add key.
     egui::CollapsingHeader::new(format!("{} ▸ .umbersmart", tr("layers.add-material")))
@@ -2018,6 +2048,34 @@ mod tests {
     /// raise the bottom layer with its ▲, and both land in the stack and
     /// in history.
     #[test]
+    fn the_creation_row_maps_every_kind_and_names_it() {
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let all = [
+            NewLayer::Paint,
+            NewLayer::Fill,
+            NewLayer::Folder,
+            NewLayer::Material,
+        ];
+        for kind in all {
+            let mut doc = Document::default();
+            doc.run(LayerCommand::add(kind.default_name(1), kind.kind()));
+            let made = &doc.layers()[0];
+            assert_eq!(
+                std::mem::discriminant(&made.kind),
+                std::mem::discriminant(&kind.kind()),
+                "{kind:?}"
+            );
+            assert!(made.name.ends_with('1'), "{kind:?} -> {}", made.name);
+            assert!(!kind.menu_label().is_empty());
+        }
+        // Folders never start passthrough (the blend combo opts in).
+        assert_eq!(
+            NewLayer::Folder.kind(),
+            LayerKind::Folder { passthrough: false }
+        );
+    }
+
+    #[test]
     fn layers_panel_buttons_add_and_reorder_through_history() {
         use egui_kittest::kittest::Queryable;
         crate::i18n::install(crate::i18n::I18n::builtin());
@@ -2060,9 +2118,9 @@ mod tests {
             );
         harness.run();
         let before = harness.state().doc.history.len();
-        harness
-            .get_by_label(&format!("+ {}", tr("history.op-add-folder")))
-            .click();
+        harness.get_by_label(&tr("layers.add-menu")).click();
+        harness.run();
+        harness.get_by_label(&tr("history.op-add-folder")).click();
         harness.run();
         let names: Vec<String> = harness
             .state()
