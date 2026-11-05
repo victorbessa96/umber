@@ -6,12 +6,13 @@
 //! `crates/automation` (server.rs + control-protocol.md — MIT OR
 //! Apache-2.0, Copyright (c) 2026 ArtCraft Team and the TextureCraft
 //! contributors; see THIRD_PARTY.md "Absorbed source files").
-//! Upstream speaks MCP through the `rmcp` SDK; umber hand-rolls the
-//! wire so the agent surface adds ZERO new protocol dependencies beyond
-//! serde_json (rmcp + schemars + tokio stay a queued upgrade for a
-//! battery-verified wave). MCP stdio transport = one JSON-RPC 2.0
-//! message per line on stdin/stdout; stdout carries only protocol
-//! messages, logs go to stderr.
+//! Upstream serves MCP through the `rmcp` SDK; queue row 155 moved umber
+//! onto the same SDK: the stdio server is an `rmcp` [`ServerHandler`]
+//! served on a tokio runtime (`transport-io`), and the exposed tool
+//! catalog is pinned byte-identical by the tests at the bottom of this
+//! file. MCP stdio transport = one JSON-RPC 2.0 message per line on
+//! stdin/stdout; stdout carries only protocol messages, logs go to
+//! stderr.
 //!
 //! Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`.
 //! Notifications get no response. File access is confined to the
@@ -22,45 +23,47 @@
 //! (`UMBER_CONTROL_PORT` + `UMBER_CONTROL_TOKEN_FILE` in the env) and
 //! answer a typed error when it does not (see [`crate::agent`]).
 
-use std::io::{BufRead, Write};
+use std::borrow::Cow;
+use std::future::Future;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
+use rmcp::handler::server::ServerHandler;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+    Tool, ToolsCapability,
+};
+use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
+use rmcp::{ErrorData as McpError, ServiceExt};
+
 use crate::agent::Session;
 use crate::workspace::{Access, AuthorizedWorkspace};
 
-/// The MCP protocol revision this server speaks.
+/// The MCP protocol revision this server speaks (pinned: the
+/// `supported_protocol_versions` list holds exactly this one).
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The one protocol revision this server negotiates.
+static SUPPORTED_PROTOCOL_VERSIONS: [ProtocolVersion; 1] = [ProtocolVersion::V_2025_06_18];
 
 pub(crate) fn mcp_cmd(args: &[String]) -> Result<()> {
     let (read_root, write_root) = parse_roots(args)?;
     let ws = AuthorizedWorkspace::new(read_root.as_deref(), write_root.as_deref())?;
-    let mut sess = Session::default();
-    let mut index = 0usize;
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let resp = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle_message(&mut sess, &ws, &msg, &mut index),
-            Err(e) => Some(error_response(
-                Value::Null,
-                -32700,
-                &format!("parse error: {e}"),
-            )),
-        };
-        if let Some(r) = resp {
-            writeln!(out, "{r}")?;
-            out.flush()?;
-        }
-    }
-    Ok(())
+    let server = McpServer::new(ws);
+    // One stdio client at a time; a current-thread runtime is enough
+    // because tool dispatch is synchronous behind the state mutex.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let service = server.serve(rmcp::transport::stdio()).await?;
+        service.waiting().await?;
+        Ok(())
+    })
 }
 
 fn parse_roots(args: &[String]) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
@@ -94,80 +97,107 @@ fn parse_roots(args: &[String]) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
     Ok((read_root, write_root))
 }
 
-/// Handle one JSON-RPC message. Returns `None` for notifications.
-fn handle_message(
-    sess: &mut Session,
-    ws: &AuthorizedWorkspace,
-    msg: &Value,
-    index: &mut usize,
-) -> Option<Value> {
-    let id = msg.get("id").cloned();
-    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-    let Some(id) = id else {
-        // Notifications (notifications/initialized, notifications/cancelled, …): no response.
-        return None;
-    };
-    match method {
-        "initialize" => Some(result_response(
-            id,
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "umber-cli", "version": env!("CARGO_PKG_VERSION") },
-            }),
-        )),
-        "ping" => Some(result_response(id, json!({}))),
-        "tools/list" => Some(result_response(id, json!({ "tools": tools_catalog() }))),
-        "tools/call" => {
-            let params = msg.get("params").cloned().unwrap_or(Value::Null);
-            Some(call_tool(sess, ws, id, params, index))
+/// The rmcp server: the confined workspace plus the mutable session
+/// state (session + step index) behind one mutex — `ServerHandler` is
+/// `&self`, and a poisoned mutex degrades to the inner value, never a
+/// panic.
+struct McpServer {
+    ws: AuthorizedWorkspace,
+    state: Mutex<(SendableSession, usize)>,
+}
+
+/// `Session` is `!Send` only because the paint undo stack carries a
+/// `Box<dyn FnMut>` callback. The MCP server touches the session solely
+/// through `McpServer::state`'s mutex, and the stdio service runs on a
+/// current-thread tokio runtime, so the guard never crosses threads in
+/// practice; the wrapper makes that explicit for the `ServerHandler:
+/// Send + Sync` bound.
+struct SendableSession(Session);
+// SAFETY: all access goes through the `state` mutex; the runtime is
+// single-threaded, so no `&Session` is ever shared across threads.
+unsafe impl Send for SendableSession {}
+
+impl McpServer {
+    fn new(ws: AuthorizedWorkspace) -> Self {
+        Self {
+            ws,
+            state: Mutex::new((SendableSession(Session::default()), 0)),
         }
-        _ => Some(error_response(
-            id,
-            -32601,
-            &format!("method not found: {method}"),
-        )),
+    }
+
+    #[cfg(test)]
+    fn with_session(ws: AuthorizedWorkspace, sess: Session) -> Self {
+        Self {
+            ws,
+            state: Mutex::new((SendableSession(sess), 0)),
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, (SendableSession, usize)> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
-fn result_response(id: Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> ServerConfig {
+        // `{"tools": {"listChanged": false}}` — the same capabilities
+        // object the hand-rolled server sent.
+        let mut tools = ToolsCapability::default();
+        tools.list_changed = Some(false);
+        let mut caps = ServerCapabilities::default();
+        caps.tools = Some(tools);
+        ServerConfig::new(caps)
+            .with_protocol_version(ProtocolVersion::V_2025_06_18)
+            .with_server_info(Implementation::new("umber-cli", env!("CARGO_PKG_VERSION")))
+    }
 
-fn error_response(id: Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-}
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        debug_assert_eq!(
+            SUPPORTED_PROTOCOL_VERSIONS[0].as_str(),
+            MCP_PROTOCOL_VERSION
+        );
+        Cow::Borrowed(&SUPPORTED_PROTOCOL_VERSIONS)
+    }
 
-/// An MCP `tools/call` result.
-fn tool_result(id: Value, ok: bool, text: String) -> Value {
-    result_response(
-        id,
-        json!({
-            "content": [{ "type": "text", "text": text }],
-            "isError": !ok,
-        }),
-    )
-}
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, McpError>> + MaybeSendFuture + '_ {
+        std::future::ready(Ok(ListToolsResult::with_all_items(tools_catalog())))
+    }
 
-fn call_tool(
-    sess: &mut Session,
-    ws: &AuthorizedWorkspace,
-    id: Value,
-    params: Value,
-    index: &mut usize,
-) -> Value {
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    match run_tool(sess, ws, name, &arguments, index) {
-        Ok(reply) => tool_result(
-            id,
-            reply["ok"].as_bool().unwrap_or(false),
-            serde_json::to_string(&reply).unwrap_or_default(),
-        ),
-        Err(e) => tool_result(id, false, format!("{e:#}")),
+    fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<CallToolResponse, McpError>> + MaybeSendFuture + '_ {
+        let name = request.name.into_owned();
+        let arguments = request
+            .arguments
+            .map(Value::Object)
+            .unwrap_or_else(|| json!({}));
+        // Tool-level failures (unknown tool, step error, missing roots,
+        // no control channel) are `isError` results, not JSON-RPC
+        // errors — the same shape the hand-rolled server replied with.
+        let response = {
+            let mut state = self.lock_state();
+            let (sess, index) = &mut *state;
+            match run_tool(&mut sess.0, &self.ws, &name, &arguments, index) {
+                Ok(reply) => {
+                    let ok = reply["ok"].as_bool().unwrap_or(false);
+                    let text = serde_json::to_string(&reply).unwrap_or_default();
+                    let content = vec![ContentBlock::text(text)];
+                    if ok {
+                        CallToolResult::success(content)
+                    } else {
+                        CallToolResult::error(content)
+                    }
+                }
+                Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
+            }
+        };
+        std::future::ready(Ok(CallToolResponse::from(response)))
     }
 }
 
@@ -296,8 +326,10 @@ fn step_mode(step: &Value) -> Access {
     }
 }
 
-/// The static tool catalog (inputSchema hand-written; no schemars dep).
-fn tools_catalog() -> Value {
+/// The static tool catalog as the exact JSON the pre-rmcp server sent
+/// on `tools/list` (row 155 pin: names, descriptions, and inputSchema
+/// shapes are byte-identical to that wire array).
+fn catalog_json() -> Value {
     json!([
         { "name": "version", "description": "Protocol and build versions: {\"protocol_version\", \"umber_version\"}.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "session_inspect", "description": "The session as JSON: the open project's census (sets, layers, journal seq) or the held mesh summary.", "inputSchema": { "type": "object", "properties": {} } },
@@ -322,197 +354,331 @@ fn tools_catalog() -> Value {
     ])
 }
 
+/// The catalog as rmcp `Tool`s. Every optional `Tool` field stays
+/// `None`, so each tool serializes as exactly
+/// `{"name": ..., "description": ..., "inputSchema": {...}}` — the
+/// pre-rmcp wire shape (pinned by the tests).
+fn tools_catalog() -> Vec<Tool> {
+    catalog_json()
+        .as_array()
+        .expect("catalog_json is an array")
+        .iter()
+        .map(|entry| {
+            let name = entry["name"].as_str().expect("tool name").to_string();
+            let description = entry["description"]
+                .as_str()
+                .expect("tool description")
+                .to_string();
+            let input_schema = entry["inputSchema"]
+                .as_object()
+                .expect("tool inputSchema")
+                .clone();
+            Tool::new(name, description, Arc::new(input_schema))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
-    fn make() -> (Session, AuthorizedWorkspace, usize) {
-        (Session::default(), AuthorizedWorkspace::default(), 0)
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
-    #[test]
-    fn initialize_and_ping_and_unknown_method() {
-        let (mut sess, ws, mut idx) = make();
-        let init = handle_message(
-            &mut sess,
-            &ws,
-            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            &mut idx,
-        )
-        .unwrap();
+    /// The client end of the wire: the server is served over a tokio
+    /// duplex pair, so tests speak real newline-delimited JSON-RPC.
+    struct Wire {
+        rd: BufReader<tokio::io::ReadHalf<DuplexStream>>,
+        wr: tokio::io::WriteHalf<DuplexStream>,
+    }
+
+    impl Wire {
+        async fn send(&mut self, msg: Value) {
+            let mut line = serde_json::to_string(&msg).unwrap();
+            line.push('\n');
+            self.wr.write_all(line.as_bytes()).await.unwrap();
+            self.wr.flush().await.unwrap();
+        }
+
+        async fn recv(&mut self) -> Value {
+            let mut line = String::new();
+            let n = self.rd.read_line(&mut line).await.unwrap();
+            assert!(n > 0, "server closed the wire");
+            serde_json::from_str(&line).unwrap()
+        }
+
+        async fn call(&mut self, id: i64, method: &str, params: Value) -> Value {
+            self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+                .await;
+            self.recv().await
+        }
+    }
+
+    /// Serve one server on a duplex pair; returns the client wire. The
+    /// spawned task runs `serve` (which waits for `initialize`) and then
+    /// the message loop until the client end drops.
+    async fn start(ws: AuthorizedWorkspace, sess: Session) -> Wire {
+        let (client, server_io) = tokio::io::duplex(1 << 16);
+        let (rd, wr) = tokio::io::split(client);
+        let server = McpServer::with_session(ws, sess);
+        tokio::spawn(async move {
+            let svc = server.serve(server_io).await.expect("serve");
+            let _ = svc.waiting().await;
+        });
+        Wire {
+            rd: BufReader::new(rd),
+            wr,
+        }
+    }
+
+    fn default_ws() -> AuthorizedWorkspace {
+        AuthorizedWorkspace::default()
+    }
+
+    fn no_control() -> Session {
+        Session::with_control(None)
+    }
+
+    /// initialize + notifications/initialized, asserting the pinned
+    /// handshake fields.
+    async fn handshake(w: &mut Wire) {
+        let init = w
+            .call(
+                1,
+                "initialize",
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": { "name": "test-client", "version": "0.0.0" },
+                }),
+            )
+            .await;
         assert_eq!(init["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(init["result"]["serverInfo"]["name"], "umber-cli");
-        let ping = handle_message(
-            &mut sess,
-            &ws,
-            &json!({"jsonrpc":"2.0","id":2,"method":"ping"}),
-            &mut idx,
+        assert_eq!(
+            init["result"]["capabilities"],
+            json!({ "tools": { "listChanged": false } })
+        );
+        // Notifications get no response: the next reply is the ping's.
+        w.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .await;
+    }
+
+    fn call_tool<'a>(
+        w: &'a mut Wire,
+        id: i64,
+        name: &'a str,
+        arguments: Value,
+    ) -> impl Future<Output = Value> + 'a {
+        w.call(
+            id,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
         )
-        .unwrap();
-        assert_eq!(ping["result"], json!({}));
-        let bad = handle_message(
-            &mut sess,
-            &ws,
-            &json!({"jsonrpc":"2.0","id":3,"method":"nope"}),
-            &mut idx,
-        )
-        .unwrap();
-        assert_eq!(bad["error"]["code"], -32601);
-        // Notifications get no response.
-        assert!(handle_message(
-            &mut sess,
-            &ws,
-            &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            &mut idx
-        )
-        .is_none());
+    }
+
+    fn result_text(r: &Value) -> (bool, Value) {
+        let is_error = r["result"]["isError"].as_bool().unwrap();
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        let reply: Value = serde_json::from_str(text).unwrap_or(Value::String(text.to_string()));
+        (is_error, reply)
     }
 
     #[test]
-    fn tools_list_carries_the_catalog() {
-        let (mut sess, ws, mut idx) = make();
-        let r = handle_message(
-            &mut sess,
-            &ws,
-            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
-            &mut idx,
-        )
-        .unwrap();
-        let names: Vec<&str> = r["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-        for want in [
-            "version",
-            "run_step",
-            "run_steps",
-            "load_mesh",
-            "project_open",
-            "bake",
-            "export",
-            "paint_stroke",
-        ] {
-            assert!(names.contains(&want), "missing tool {want}: {names:?}");
-        }
+    fn catalog_pin_is_byte_identical_to_the_pre_rmcp_wire_array() {
+        let tools = tools_catalog();
+        // Count pin: 20 tools (the 18 pre-row154-w5 plus
+        // command_list / command_run).
+        assert_eq!(tools.len(), 20, "{tools:?}");
+        // Value equality per tool (name, description, inputSchema).
+        let wire = serde_json::to_value(&tools).unwrap();
+        assert_eq!(wire, catalog_json());
+        // Byte equality of the canonical (sorted-key) serialization: the
+        // pre-rmcp server put the catalog on the wire as a
+        // serde_json::Value (BTreeMap, keys sorted); rmcp serializes the
+        // Tool structs in field order. Same JSON, same bytes once
+        // canonicalized — that is the byte-identical pin.
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&catalog_json()).unwrap()
+        );
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert!(names.contains(&"command_list"), "{names:?}");
+        assert!(names.contains(&"command_run"), "{names:?}");
+        let run = tools.iter().find(|t| t.name == "command_run").unwrap();
+        assert_eq!(run.input_schema["required"], json!(["id"]));
+    }
+
+    #[test]
+    fn initialize_and_ping_and_unknown_method_over_the_wire() {
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let ping = w.call(2, "ping", json!({})).await;
+            assert_eq!(ping["result"], json!({}));
+            let bad = w.call(3, "nope", json!({})).await;
+            assert_eq!(bad["error"]["code"], -32601);
+        });
+    }
+
+    #[test]
+    fn tools_list_over_the_wire_matches_the_pinned_catalog() {
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = w.call(4, "tools/list", json!({})).await;
+            let tools = r["result"]["tools"].clone();
+            assert_eq!(tools.as_array().unwrap().len(), 20, "{tools}");
+            // Canonical (sorted-key) byte pin against the pre-rmcp wire
+            // array — see the catalog_pin test for why canonicalized.
+            assert_eq!(
+                serde_json::to_string(&tools).unwrap(),
+                serde_json::to_string(&catalog_json()).unwrap()
+            );
+        });
     }
 
     #[test]
     fn tools_call_version_needs_no_roots_and_no_mesh() {
-        let (mut sess, ws, mut idx) = make();
-        let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"version","arguments":{}}}), &mut idx).unwrap();
-        assert_eq!(r["result"]["isError"], false);
-        let text = r["result"]["content"][0]["text"].as_str().unwrap();
-        let reply: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply["step"], "version");
-        assert_eq!(reply["protocol_version"], 1);
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(&mut w, 5, "version", json!({})).await;
+            let (is_error, reply) = result_text(&r);
+            assert!(!is_error);
+            assert_eq!(reply["ok"], true);
+            assert_eq!(reply["step"], "version");
+            assert_eq!(reply["protocol_version"], 1);
+        });
     }
 
     #[test]
     fn file_tools_fail_closed_without_roots() {
-        let (mut sess, ws, mut idx) = make();
-        for name in ["load_mesh", "project_open", "project_save"] {
-            let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{"path":"x"}}}), &mut idx).unwrap();
-            assert_eq!(r["result"]["isError"], true, "{name}");
-            assert!(
-                r["result"]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("root"),
-                "{name}: {:?}",
-                r["result"]["content"][0]["text"]
-            );
-        }
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            for name in ["load_mesh", "project_open", "project_save"] {
+                let r = call_tool(&mut w, 6, name, json!({"path": "x"})).await;
+                let (is_error, reply) = result_text(&r);
+                assert!(is_error, "{name}");
+                let text = serde_json::to_string(&reply).unwrap();
+                assert!(text.contains("root"), "{name}: {text}");
+            }
+        });
     }
 
     #[test]
     fn run_steps_stops_at_the_first_error() {
-        let (mut sess, ws, mut idx) = make();
-        let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_steps","arguments":{"steps":[{"version":{}},{"state":{}}]}}}), &mut idx).unwrap();
-        let text = r["result"]["content"][0]["text"].as_str().unwrap();
-        let reply: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(reply["ok"], false);
-        assert_eq!(reply["completed"], 1);
-        assert_eq!(reply["failed"]["index"], 1);
-        // `state` without a mesh is the honest error, not a crash.
-        assert!(reply["failed"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("no mesh loaded"));
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(
+                &mut w,
+                7,
+                "run_steps",
+                json!({"steps": [{"version": {}}, {"state": {}}]}),
+            )
+            .await;
+            let (is_error, reply) = result_text(&r);
+            assert!(is_error);
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["completed"], 1);
+            assert_eq!(reply["failed"]["index"], 1);
+            // `state` without a mesh is the honest error, not a crash.
+            assert!(reply["failed"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("no mesh loaded"));
+        });
     }
 
     #[test]
     fn paths_are_confined_even_inside_run_step() {
-        let base = std::env::temp_dir().join(format!("umber-mcp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let ws = AuthorizedWorkspace::new(Some(&base), Some(&base)).unwrap();
-        let (mut sess, _, mut idx) = (Session::default(), (), 0usize);
-        let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_step","arguments":{"step":{"load":{"mesh":"../../etc/passwd"}}}}}), &mut idx).unwrap();
-        assert_eq!(r["result"]["isError"], true);
-        assert!(r["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("rejected"));
-        let _ = std::fs::remove_dir_all(&base);
+        runtime().block_on(async {
+            let base = std::env::temp_dir().join(format!("umber-mcp-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let ws = AuthorizedWorkspace::new(Some(&base), Some(&base)).unwrap();
+            let mut w = start(ws, no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(
+                &mut w,
+                8,
+                "run_step",
+                json!({"step": {"load": {"mesh": "../../etc/passwd"}}}),
+            )
+            .await;
+            let (is_error, reply) = result_text(&r);
+            assert!(is_error);
+            assert!(
+                serde_json::to_string(&reply).unwrap().contains("rejected"),
+                "{reply}"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        });
     }
 
     #[test]
-    fn command_tools_are_in_the_catalog_and_pin_the_count() {
-        let (mut sess, ws, mut idx) = make();
-        let r = handle_message(
-            &mut sess,
-            &ws,
-            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
-            &mut idx,
-        )
-        .unwrap();
-        let tools = r["result"]["tools"].as_array().unwrap();
-        // Catalog pin: 20 tools (the 18 pre-row154-w5 plus
-        // command_list / command_run).
-        assert_eq!(tools.len(), 20, "{tools:?}");
-        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert!(names.contains(&"command_list"), "{names:?}");
-        assert!(names.contains(&"command_run"), "{names:?}");
-        let run = tools.iter().find(|t| t["name"] == "command_run").unwrap();
-        assert_eq!(run["inputSchema"]["required"], json!(["id"]));
+    fn unknown_tool_is_a_tool_level_error_not_a_protocol_error() {
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(&mut w, 9, "nope", json!({})).await;
+            assert!(r.get("error").is_none(), "{r}");
+            let (is_error, reply) = result_text(&r);
+            assert!(is_error);
+            assert!(
+                serde_json::to_string(&reply)
+                    .unwrap()
+                    .contains("unknown tool: nope"),
+                "{reply}"
+            );
+        });
     }
 
     #[test]
     fn command_run_requires_an_id_argument() {
-        let (_sess, ws, mut idx) = make();
-        let mut sess = Session::with_control(None);
-        let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"command_run","arguments":{}}}), &mut idx).unwrap();
-        assert_eq!(r["result"]["isError"], true);
-        assert!(r["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("`id`"));
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(&mut w, 10, "command_run", json!({})).await;
+            let (is_error, reply) = result_text(&r);
+            assert!(is_error);
+            assert!(
+                serde_json::to_string(&reply).unwrap().contains("`id`"),
+                "{reply}"
+            );
+        });
     }
 
     #[test]
     fn command_tools_fail_closed_without_a_control_channel() {
-        let (_sess, ws, mut idx) = make();
-        // Pin the endpoint off: the env may name a channel in some
-        // environments, this test must not depend on it.
-        let mut sess = Session::with_control(None);
-        for (name, arguments) in [
-            ("command_list", json!({})),
-            ("command_run", json!({"id": "view.toggle_grid"})),
-        ] {
-            let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}), &mut idx).unwrap();
-            assert_eq!(r["result"]["isError"], true, "{name}");
-            let text = r["result"]["content"][0]["text"].as_str().unwrap();
-            let reply: Value = serde_json::from_str(text).unwrap();
-            assert_eq!(reply["ok"], false, "{name}: {reply}");
-            assert!(
-                reply["error"].as_str().unwrap().contains(
-                    "no live app control channel (set UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE)"
-                ),
-                "{name}: {reply}"
-            );
-        }
+        runtime().block_on(async {
+            // Pin the endpoint off: the env may name a channel in some
+            // environments, this test must not depend on it.
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            for (name, arguments) in [
+                ("command_list", json!({})),
+                ("command_run", json!({"id": "view.toggle_grid"})),
+            ] {
+                let r = call_tool(&mut w, 11, name, arguments).await;
+                let (is_error, reply) = result_text(&r);
+                assert!(is_error, "{name}");
+                assert_eq!(reply["ok"], false, "{name}: {reply}");
+                assert!(
+                    reply["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("no live app control channel (set UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE)"),
+                    "{name}: {reply}"
+                );
+            }
+        });
     }
 }
