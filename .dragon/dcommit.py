@@ -31,6 +31,12 @@ Usage:
                   ledger (also detected when given inside the tail).
   --path-limited  run the path-limited form `git commit <args> -- <locks>`
                   (commits only the lock paths even with a dirty index).
+  --kill-lock N   repeatable; kill-lock names (scripts/kill-locks.sh) this
+                  caller owns. A changed, kill-locked file the commit would
+                  take refuses the commit unless it is named EXACTLY as a
+                  --lock path or its kill-lock is listed here
+                  (added 2026-11-05 after a directory --lock swept another
+                  session's locked dirty files twice).
 
 Exit codes: 0 = committed + ledgered; 2 = refused (tree untouched);
 other = git's own exit code.
@@ -50,6 +56,66 @@ from pathlib import Path
 from typing import NoReturn
 
 LEDGER_NAME = os.path.join(".dragon", "commit-ledger.jsonl")
+KILL_LOCK_DIR = os.environ.get("UMBER_KILL_LOCK_DIR", "/tmp/umber-kill-locks")
+
+
+def kill_lock_holders(root):
+    """Map repo-relative path -> kill-lock name, from scripts/kill-locks.sh's
+    registry. Unreadable entries are skipped (the registry is advisory input
+    to a fail-closed check: a path we cannot read a holder for is unheld)."""
+    holders = {}
+    d = Path(KILL_LOCK_DIR)
+    if not d.is_dir():
+        return holders
+    for lock in sorted(d.glob("*.lock")):
+        try:
+            lines = lock.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            p = line.strip()
+            if not p:
+                continue
+            rel = os.path.relpath(os.path.join(root, p), root) if os.path.isabs(p) else os.path.normpath(p)
+            holders.setdefault(rel, lock.stem)
+    return holders
+
+
+def check_kill_locks(root, paths, owned, explicit):
+    """Refuse when a path this commit would take is held by a kill-lock and
+    the caller neither owns that lock (--kill-lock) nor named the file
+    EXACTLY as a --lock path. The 2026-11-05 double sweep: a directory
+    --lock (`crates/umber-mesh`) committed another session's dirty,
+    kill-locked files twice. Exact-file claims keep working unchanged."""
+    holders = kill_lock_holders(root)
+    foreign = sorted(
+        f"{p} (held by {holders[p]})"
+        for p in paths
+        if p in holders and holders[p] not in owned and p not in explicit
+    )
+    if foreign:
+        refuse(
+            "commit would take files held by another kill-lock; pass "
+            "--kill-lock <name> if the lock is yours, else leave them: "
+            + ", ".join(foreign)
+        )
+
+
+def changed_under(root, locks):
+    """Repo-relative paths with work-tree or index changes under the locks."""
+    out = git_or_refuse(
+        root, "status", "--porcelain", "--untracked-files=all", "--", *locks,
+        what="changed-path read",
+    )
+    paths = []
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        p = line[3:]
+        if " -> " in p:
+            p = p.split(" -> ", 1)[1]
+        paths.append(p.strip('"'))
+    return paths
 
 
 def refuse(msg) -> NoReturn:
@@ -179,6 +245,13 @@ def main():
         help="commit only the lock paths (git commit <args> -- <locks>)",
     )
     ap.add_argument(
+        "--kill-lock",
+        action="append",
+        default=[],
+        help="kill-lock name(s) this caller owns (scripts/kill-locks.sh); files "
+        "held by any OTHER kill-lock refuse the commit",
+    )
+    ap.add_argument(
         "tail", nargs=argparse.REMAINDER, help="git commit args after a bare --"
     )
     argv = sys.argv[1:]
@@ -231,6 +304,7 @@ def main():
                     f"lock path {rel!r} matches neither the work tree nor the "
                     "index (typo?)"
                 )
+        check_kill_locks(root, changed_under(root, locks), set(args.kill_lock), set(locks))
         commit_cmd = ["commit"] + amend_args + tail + ["--"] + locks
         mode = "path-limited"
         committed_paths = locks
@@ -248,6 +322,7 @@ def main():
                 "staged set escapes the declared lock paths — unstage them or "
                 "declare locks for them: " + ", ".join(escapees)
             )
+        check_kill_locks(root, staged, set(args.kill_lock), set(locks))
         for lock in locks:
             if not any(covered(s, [lock]) for s in staged):
                 print(f"dcommit: note: lock path {lock!r} matched nothing staged", file=sys.stderr)
