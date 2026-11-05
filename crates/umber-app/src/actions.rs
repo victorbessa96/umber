@@ -195,6 +195,14 @@ pub fn resolve(key: Key, mods: Modifiers) -> Option<ShellAction> {
     resolve_binding(key, mods).map(|(_, action)| action)
 }
 
+/// Wave 2b-ii: same resolution, returned as the command's dotted id — the
+/// form menus-by-id, the persisted bindings v2 and the agent channel all
+/// key on. `None` when unbound.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn resolve_id(key: Key, mods: Modifiers) -> Option<&'static str> {
+    resolve(key, mods).map(|action| action.id())
+}
+
 /// The first binding for `action` in the effective table (overrides
 /// applied, see the module docs), if it has one.
 pub fn binding_of(action: ShellAction) -> Option<Binding> {
@@ -1268,10 +1276,17 @@ mod tests {
     fn shift_rows_resolve_and_stay_out_of_text_fields() {
         let shift = Modifiers::SHIFT;
         assert_eq!(resolve(Key::C, shift), Some(ShellAction::PrevChannel));
+        assert_eq!(resolve_id(Key::C, shift), Some("view.prev_channel"));
         assert_eq!(resolve(Key::B, shift), Some(ShellAction::PrevMeshMap));
+        assert_eq!(resolve_id(Key::B, shift), Some("view.prev_mesh_map"));
+        assert_eq!(resolve_id(Key::Z, Modifiers::COMMAND), Some("edit.undo"));
         assert_eq!(
             resolve(Key::C, Modifiers::NONE),
             Some(ShellAction::NextChannel)
+        );
+        assert_eq!(
+            resolve_id(Key::C, Modifiers::NONE),
+            Some("view.next_channel")
         );
         // Shift+Alt is not the Shift chord: it falls through to the bare
         // row, which ignores Shift and Alt by contract (module docs).
