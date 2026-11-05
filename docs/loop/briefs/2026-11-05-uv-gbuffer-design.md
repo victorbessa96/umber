@@ -1,6 +1,14 @@
 # Design brief — UV G-buffer single source of truth (queue row 156, sub-item B), 2026-11-05
 
-Status: DESIGN ONLY. No code written, no cargo run (design-only envelope).
+Status: IN PROGRESS (2026-11-05 ~17:xx). Kills 1, 2, 3, 4, 5 (ID half),
+6 (CPU half) LANDED, plus a WGSL eps pin and a GPU-vs-CPU parity golden
+(queue rows 172-178). Remaining: 5b (position bake subsumed by / reading
+the G-buffer, rebinding AO/curvature/thickness), 6 GPU half (padding
+coverage from the G-buffer when a device exists), 7 (app fill pick), 8
+(4K ref-scene parity + the §12 perf gate). Parity result that changes §2b:
+triangle ids are bit-exact on lavapipe but barycentrics are NOT 0 ULP
+(worst 1.8e-7 abs); the bound is absolute (`UV_BARY_EPS`), see row 176.
+Original design text below is unchanged.
 Row 156 names "UV G-buffer (texel->barycentrics, single source of truth for
 paint/composite/masks/bake/padding)". Row 156-A (hostile-input sweep) is
 CLOSED (`2548e11`, queue row 166), so the mesh lane is free for this kill.
