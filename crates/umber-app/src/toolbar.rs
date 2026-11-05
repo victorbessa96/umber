@@ -153,6 +153,90 @@ pub enum ShellAction {
     ViewportPresetSwap,
 }
 
+impl ShellAction {
+    /// The stable dotted command id (queue row 154): one id per variant,
+    /// grouped by what the variant docs say it does (`file.*` / `edit.*`
+    /// / `view.*` / `paint.*` / `tool.*` / `window.*`). Payload variants
+    /// get a fixed id — the payload is runtime data, not part of the id.
+    /// Nothing persists these yet (wave 2 keys the registry off them).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn id(&self) -> &'static str {
+        use ShellAction::*;
+        match self {
+            NewProject => "file.new_project",
+            OpenMesh => "file.open_mesh",
+            OpenProject => "file.open_project",
+            SaveProject => "file.save_project",
+            SaveProjectAs => "file.save_project_as",
+            Undo => "edit.undo",
+            Redo => "edit.redo",
+            ToggleWireframe => "view.toggle_wireframe",
+            ToggleGrid => "view.toggle_grid",
+            CycleViewMode => "view.cycle_view_mode",
+            ToggleMaskMode => "paint.toggle_mask_mode",
+            InvertMask => "paint.invert_mask",
+            SelectTool(_) => "tool.select",
+            BrushSmaller => "tool.brush_smaller",
+            BrushLarger => "tool.brush_larger",
+            ToggleHideUi => "window.toggle_hide_ui",
+            ToggleMaximize => "window.toggle_maximize",
+            CommandPalette => "window.command_palette",
+            Preferences => "window.preferences",
+            NextWorkspace => "window.next_workspace",
+            PrevWorkspace => "window.prev_workspace",
+            ViewMaterial => "view.view_material",
+            NextChannel => "view.next_channel",
+            PrevChannel => "view.prev_channel",
+            NextMeshMap => "view.next_mesh_map",
+            PrevMeshMap => "view.prev_mesh_map",
+            ViewportPresetBoth => "view.viewport_preset_both",
+            ViewportPreset3d => "view.viewport_preset_3d",
+            ViewportPreset2d => "view.viewport_preset_2d",
+            ViewportPresetSwap => "view.viewport_preset_swap",
+        }
+    }
+
+    /// The reverse of [`ShellAction::id`] for payload-less variants;
+    /// payload variants (`tool.select`) and unknown ids return `None`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn from_id(id: &str) -> Option<ShellAction> {
+        use ShellAction::*;
+        match id {
+            "file.new_project" => Some(NewProject),
+            "file.open_mesh" => Some(OpenMesh),
+            "file.open_project" => Some(OpenProject),
+            "file.save_project" => Some(SaveProject),
+            "file.save_project_as" => Some(SaveProjectAs),
+            "edit.undo" => Some(Undo),
+            "edit.redo" => Some(Redo),
+            "view.toggle_wireframe" => Some(ToggleWireframe),
+            "view.toggle_grid" => Some(ToggleGrid),
+            "view.cycle_view_mode" => Some(CycleViewMode),
+            "paint.toggle_mask_mode" => Some(ToggleMaskMode),
+            "paint.invert_mask" => Some(InvertMask),
+            "tool.brush_smaller" => Some(BrushSmaller),
+            "tool.brush_larger" => Some(BrushLarger),
+            "window.toggle_hide_ui" => Some(ToggleHideUi),
+            "window.toggle_maximize" => Some(ToggleMaximize),
+            "window.command_palette" => Some(CommandPalette),
+            "window.preferences" => Some(Preferences),
+            "window.next_workspace" => Some(NextWorkspace),
+            "window.prev_workspace" => Some(PrevWorkspace),
+            "view.view_material" => Some(ViewMaterial),
+            "view.next_channel" => Some(NextChannel),
+            "view.prev_channel" => Some(PrevChannel),
+            "view.next_mesh_map" => Some(NextMeshMap),
+            "view.prev_mesh_map" => Some(PrevMeshMap),
+            "view.viewport_preset_both" => Some(ViewportPresetBoth),
+            "view.viewport_preset_3d" => Some(ViewportPreset3d),
+            "view.viewport_preset_2d" => Some(ViewportPreset2d),
+            "view.viewport_preset_swap" => Some(ViewportPresetSwap),
+            // "tool.select" carries a ToolKind payload: no fixed action.
+            _ => None,
+        }
+    }
+}
+
 /// The brush tool without its params: the tool strip's slot id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolKind {
@@ -875,6 +959,55 @@ pub fn menu_digit_pick(ui: &mut Ui, items: &[ShellAction], actions: &mut Vec<She
 mod tests {
     use super::*;
     use umber_brush::retouch::{CloneParams, EraseParams, SmudgeParams};
+
+    #[test]
+    fn ids_are_unique_dotted_and_round_trip() {
+        let all = [
+            ShellAction::NewProject,
+            ShellAction::OpenMesh,
+            ShellAction::OpenProject,
+            ShellAction::SaveProject,
+            ShellAction::SaveProjectAs,
+            ShellAction::Undo,
+            ShellAction::Redo,
+            ShellAction::ToggleWireframe,
+            ShellAction::ToggleGrid,
+            ShellAction::CycleViewMode,
+            ShellAction::ToggleMaskMode,
+            ShellAction::InvertMask,
+            ShellAction::SelectTool(ToolKind::Paint),
+            ShellAction::BrushSmaller,
+            ShellAction::BrushLarger,
+            ShellAction::ToggleHideUi,
+            ShellAction::ToggleMaximize,
+            ShellAction::CommandPalette,
+            ShellAction::Preferences,
+            ShellAction::NextWorkspace,
+            ShellAction::PrevWorkspace,
+            ShellAction::ViewMaterial,
+            ShellAction::NextChannel,
+            ShellAction::PrevChannel,
+            ShellAction::NextMeshMap,
+            ShellAction::PrevMeshMap,
+            ShellAction::ViewportPresetBoth,
+            ShellAction::ViewportPreset3d,
+            ShellAction::ViewportPreset2d,
+            ShellAction::ViewportPresetSwap,
+        ];
+        let mut ids = std::collections::HashSet::new();
+        for action in all {
+            let id = action.id();
+            assert!(id.contains('.'), "id not dotted: {id}");
+            assert!(ids.insert(id), "duplicate id: {id}");
+            if let ShellAction::SelectTool(_) = action {
+                // Payload variant: fixed id, no fixed action.
+                assert_eq!(ShellAction::from_id(id), None);
+            } else {
+                assert_eq!(ShellAction::from_id(id), Some(action), "{id}");
+            }
+        }
+        assert_eq!(ShellAction::from_id("no.such.command"), None);
+    }
 
     fn bare() -> Modifiers {
         Modifiers::default()

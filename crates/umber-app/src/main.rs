@@ -121,6 +121,7 @@ mod bake_sources;
 mod bakes_panel;
 mod brush_cursor;
 mod brush_panel;
+mod commands;
 mod control;
 mod crash;
 mod display_keys;
@@ -2578,130 +2579,7 @@ impl UmberApp {
     }
 
     fn dispatch(&mut self, action: toolbar::ShellAction) {
-        use toolbar::ShellAction;
-        // The registry's one enabled-check (GUI plan G0): a shortcut on an
-        // action that cannot run says why instead of doing nothing
-        // (photocraft's disabled-reason rule). Menu rows and toolbar
-        // buttons are already greyed, so only keys reach this arm.
-        if let Err(reason) = actions::availability(action, self.shell_state()) {
-            self.notices.post(umber_gui::NoticeLevel::Info, tr(reason));
-            return;
-        }
-        if self.view.apply(action) {
-            return;
-        }
-        match action {
-            ShellAction::NewProject => self.new_project(),
-            ShellAction::OpenMesh => self.open_mesh(),
-            ShellAction::OpenProject => self.open_project(),
-            ShellAction::SaveProject => self.save_project(),
-            ShellAction::SaveProjectAs => self.save_project_as(),
-            // One timeline (C2-7; three arms since L6): Ctrl+Z steps
-            // whichever journal holds the newest applied edit — a layer op,
-            // a stroke, or a graph command.
-            ShellAction::Undo => {
-                // The palette dispatches after the dock, where a graph edit
-                // may have queued this frame: drain before choosing.
-                self.drain_graph_commits();
-                let _ = history_panel::unified_undo(
-                    &mut self.state.doc,
-                    self.state.paint.as_mut(),
-                    Some(&mut self.state.graph as &mut dyn history_panel::GraphJournal),
-                );
-            }
-            ShellAction::Redo => {
-                self.drain_graph_commits();
-                let _ = history_panel::unified_redo(
-                    &mut self.state.doc,
-                    self.state.paint.as_mut(),
-                    Some(&mut self.state.graph as &mut dyn history_panel::GraphJournal),
-                );
-            }
-            // Quick mask (§2's P1 row): needs a paint session; I inverts
-            // only while the mask is being edited (outside it, nothing).
-            ShellAction::ToggleMaskMode => {
-                if let Some(paint) = self.state.paint.as_mut() {
-                    paint.toggle_mask_mode();
-                }
-            }
-            ShellAction::InvertMask => {
-                if let Some(paint) = self.state.paint.as_mut() {
-                    if paint.quick_mask().is_editing() {
-                        paint.invert_mask();
-                    }
-                }
-            }
-            ShellAction::SelectTool(kind) => self.brush_panel.select_tool(kind),
-            // `[` / `]` (Painter's size steps): one notch of the shared
-            // multiplicative step, so ten presses span ~2.6x.
-            ShellAction::CommandPalette => self.palette.open(),
-            ShellAction::Preferences => self.prefs_open = true,
-            ShellAction::ToggleHideUi => {
-                self.focus.toggle(
-                    shell_menu::FocusMode::HideUi,
-                    &mut self.dock,
-                    Panel::Viewport,
-                );
-            }
-            ShellAction::ViewMaterial
-            | ShellAction::NextChannel
-            | ShellAction::PrevChannel
-            | ShellAction::NextMeshMap
-            | ShellAction::PrevMeshMap => {
-                let mode = self.view.view_mode;
-                self.view.view_mode = match action {
-                    ShellAction::NextChannel => display_keys::cycle_channel(mode, true),
-                    ShellAction::PrevChannel => display_keys::cycle_channel(mode, false),
-                    ShellAction::NextMeshMap => display_keys::cycle_mesh_map(mode, true),
-                    ShellAction::PrevMeshMap => display_keys::cycle_mesh_map(mode, false),
-                    _ => umber_gpu::ViewMode::Lit,
-                };
-                // The soloed name, so the user sees what the viewport shows.
-                self.notices.post(
-                    umber_gui::NoticeLevel::Info,
-                    display_keys::mode_name(self.view.view_mode, tr),
-                );
-            }
-            ShellAction::NextWorkspace | ShellAction::PrevWorkspace => {
-                let to = self
-                    .workspaces
-                    .active()
-                    .cycle(action == ShellAction::NextWorkspace);
-                self.switch_workspace(to);
-            }
-            ShellAction::ViewportPresetBoth
-            | ShellAction::ViewportPreset3d
-            | ShellAction::ViewportPreset2d
-            | ShellAction::ViewportPresetSwap => {
-                // A preset is a layout edit on the active workspace: leave
-                // any focus mode first so the real layout is what changes
-                // (the switch_workspace rule), then apply and persist.
-                let preset = match action {
-                    ShellAction::ViewportPresetBoth => workspaces::ViewportPreset::Both,
-                    ShellAction::ViewportPreset3d => workspaces::ViewportPreset::View3d,
-                    ShellAction::ViewportPreset2d => workspaces::ViewportPreset::View2d,
-                    _ => workspaces::ViewportPreset::Swap,
-                };
-                self.focus.restore(&mut self.dock);
-                workspaces::apply_viewport_preset(&mut self.dock, preset);
-                self.save_layouts();
-            }
-            ShellAction::ToggleMaximize => {
-                let keep = shell_menu::maximize_target(&mut self.dock);
-                self.focus
-                    .toggle(shell_menu::FocusMode::Maximized, &mut self.dock, keep);
-            }
-            ShellAction::BrushSmaller | ShellAction::BrushLarger => {
-                if let Some(paint) = self.state.paint.as_mut() {
-                    let grow = action == ShellAction::BrushLarger;
-                    let next = brush_cursor::step_size(paint.brush_size(), grow);
-                    paint.set_brush_size(next);
-                }
-            }
-            // Applied by `ViewToggles::apply` above.
-            ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {
-            }
-        }
+        commands::run_command(self, action);
     }
 
     /// File > Open Mesh / the toolbar button: picker → [`Self::load_mesh_path`].
