@@ -2023,13 +2023,101 @@ fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 }
 "#;
 
+/// The UV G-buffer pass (queue row 156-B kill 4): per texel of one UDIM
+/// tile, the covering triangle index and its barycentrics, the GPU mirror
+/// of the CPU authority `umber_mesh::UvGBuffer`.
+///
+/// # Contract (identical to the CPU side)
+///
+/// - Texel center UV: `u = tu + (x + 0.5) / w`, `v = tv + 1 - (y + 0.5) / h`
+///   (`tu`, `tv` = the tile's integer offset, carried in `params.tile_off`).
+/// - Edge functions and weights `b_i = -e_i / area`, written out term for
+///   term in the CPU's order; the signed `area` is computed ONCE on the CPU
+///   and uploaded (`uv2.z`) so both sides divide by the same bits.
+/// - Inside = every `b_i >= -UV_BARY_EPS` (edge-inclusive, winding-free);
+///   degenerate, malformed and non-finite triangles arrive as all-zero
+///   records (`area = 0`) and never claim a texel.
+/// - Overlap: last in index order wins.
+///
+/// # Outputs
+///
+/// - `bary_tex` (`Rgba32Float`): `(b0, b1, b2, coverage)`, coverage 1.0 or 0.0.
+/// - `prim_tex` (`R32Uint`): triangle index, `0xFFFFFFFF` = uncovered.
+///
+/// One invocation per texel, brute force over the triangle list (the
+/// `MAX_TRIS_PER_BAKE` budget the other bake passes share). Not for the
+/// paint hot path.
+pub const UV_GBUFFER_SHADER: &str = r#"
+struct GbTri {
+    uv01: vec4<f32>, // x=uv0.x y=uv0.y z=uv1.x w=uv1.y
+    uv2: vec4<f32>,  // x=uv2.x y=uv2.y z=signed UV area (0 = skip) w unused
+};
+
+struct GbParams {
+    dims: vec2<u32>,
+    tri_count: u32,
+    _pad: u32,
+    tile_off: vec2<f32>,
+    _pad2: vec2<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> tris: array<GbTri>;
+@group(0) @binding(1) var bary_tex: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(2) var prim_tex: texture_storage_2d<r32uint, write>;
+@group(0) @binding(3) var<uniform> params: GbParams;
+
+const UV_DET_EPS: f32 = 1e-10;
+const UV_BARY_EPS: f32 = 1e-6;
+const NO_PRIM: u32 = 0xFFFFFFFFu;
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.dims.x || gid.y >= params.dims.y) {
+        return;
+    }
+    let w = f32(params.dims.x);
+    let h = f32(params.dims.y);
+    let p = vec2<f32>(
+        params.tile_off.x + (f32(gid.x) + 0.5) / w,
+        params.tile_off.y + 1.0 - (f32(gid.y) + 0.5) / h,
+    );
+    var best: u32 = NO_PRIM;
+    var bb = vec3<f32>(0.0, 0.0, 0.0);
+    for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+        let tri = tris[t];
+        let area = tri.uv2.z;
+        if (abs(area) < UV_DET_EPS) {
+            continue;
+        }
+        let uv0 = tri.uv01.xy;
+        let uv1 = tri.uv01.zw;
+        let uv2 = tri.uv2.xy;
+        let e0 = (p.x - uv1.x) * (uv2.y - uv1.y) - (p.y - uv1.y) * (uv2.x - uv1.x);
+        let e1 = (p.x - uv2.x) * (uv0.y - uv2.y) - (p.y - uv2.y) * (uv0.x - uv2.x);
+        let e2 = (p.x - uv0.x) * (uv1.y - uv0.y) - (p.y - uv0.y) * (uv1.x - uv0.x);
+        let b = vec3<f32>(-e0 / area, -e1 / area, -e2 / area);
+        if (b.x >= -UV_BARY_EPS && b.y >= -UV_BARY_EPS && b.z >= -UV_BARY_EPS) {
+            best = t;
+            bb = b;
+        }
+    }
+    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+    if (best == NO_PRIM) {
+        textureStore(bary_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+    } else {
+        textureStore(bary_tex, coord, vec4<f32>(bb, 1.0));
+    }
+    textureStore(prim_tex, coord, vec4<u32>(best, 0u, 0u, 0u));
+}
+"#;
+
 #[cfg(test)]
 mod uv_eps_parity {
     //! Row 156-B: the WGSL UV solves must quote the same epsilon pair as
     //! the CPU authority `umber_mesh::uv_gbuffer`, so a texel the CPU fill
     //! covers is a texel the GPU bakes cover. A drift fails here, not in
     //! a golden three crates away.
-    use super::{ID_BAKE_SHADER, POSITION_BAKE_SHADER};
+    use super::{ID_BAKE_SHADER, POSITION_BAKE_SHADER, UV_GBUFFER_SHADER};
 
     fn wgsl_const(src: &str, name: &str) -> f32 {
         let needle = format!("const {name}: f32 = ");
@@ -2046,6 +2134,7 @@ mod uv_eps_parity {
         for (src, det, bary) in [
             (POSITION_BAKE_SHADER, "DET_EPS", "BARY_EPS"),
             (ID_BAKE_SHADER, "ID_DET_EPS", "ID_BARY_EPS"),
+            (UV_GBUFFER_SHADER, "UV_DET_EPS", "UV_BARY_EPS"),
         ] {
             assert_eq!(wgsl_const(src, det), umber_mesh::UV_DET_EPS, "{det}");
             assert_eq!(wgsl_const(src, bary), umber_mesh::UV_BARY_EPS, "{bary}");

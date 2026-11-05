@@ -8,6 +8,7 @@
 pub mod ao;
 pub mod curvature;
 pub mod dilation;
+pub mod gbuffer;
 pub mod id;
 pub mod margin;
 pub mod normal_map;
@@ -23,6 +24,7 @@ pub use ao::{
 };
 pub use curvature::{CurvatureBakeError, CurvatureParams};
 pub use dilation::{DilateError, DilateParams};
+pub use gbuffer::{bake_uv_gbuffer, UvGBufferError, UvGBufferGpu};
 pub use id::{IdBakeError, IdBakeParams, IdFlavor};
 pub use normal_map::{TangentNormalBakeError, TangentNormalParams};
 pub use skew::{
