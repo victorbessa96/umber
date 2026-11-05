@@ -543,5 +543,170 @@ mod tests {
             m.indices.extend_from_slice(&[0, 1, 99]);
             assert_parity(&m, 1001, 16, 16, umber_mesh::UV_BARY_EPS);
         }
+
+        /// Brief kill 8: prefer a CPU (lavapipe-class) adapter when the
+        /// host has one — the 0-ULP bary lane holds only there (same IEEE
+        /// f32 ops, no FMA contraction); otherwise the default adapter
+        /// runs the <=2-ULP lane.
+        fn device_preferring_cpu() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+            let instance = wgpu::Instance::default();
+            let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+            let adapter = adapters
+                .iter()
+                .find(|a| a.get_info().device_type == wgpu::DeviceType::Cpu)
+                .cloned()
+                .or_else(|| adapters.into_iter().next())
+                .or_else(|| {
+                    pollster::block_on(
+                        instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+                    )
+                    .ok()
+                })?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                    .ok()?;
+            Some((adapter, device, queue))
+        }
+
+        /// One ULP at magnitude `a` (2^(exp-23) for normals); the denormal
+        /// ULP below the normal range.
+        fn ulp_at(a: f32) -> f32 {
+            if a < f32::MIN_POSITIVE {
+                return f32::from_bits(1);
+            }
+            2f32.powi(((a.to_bits() >> 23) & 0xff) as i32 - 150)
+        }
+
+        /// Brief kill 8 bary tolerance. On a CPU adapter the WGSL runs the
+        /// same IEEE f32 operations as `UvTri::bary` with no FMA
+        /// contraction, so weights must be bit-identical (0 ULP). On real
+        /// GPUs FMA contraction may shift a weight by ~2 ULP at its own
+        /// magnitude plus an absolute floor of 2*EPSILON: the edge
+        /// functions are O(area), so a near-zero weight can round to the
+        /// opposite sign (queue row 176 measured such a flip as 8.5e8 raw
+        /// bit-ULPs on the live adapter — hence an absolute floor, not a
+        /// raw ULP cap).
+        fn bary_within_tolerance(g: f32, c: f32, cpu_adapter: bool) -> bool {
+            if g.to_bits() == c.to_bits() {
+                return true;
+            }
+            if cpu_adapter {
+                return false;
+            }
+            (g - c).abs() <= 2.0 * ulp_at(c.abs()) + 2.0 * f32::EPSILON
+        }
+
+        /// Per-tile CPU-vs-GPU parity with the kill-8 tolerance ladder:
+        /// prim (triangle index + coverage) EXACT on every texel on every
+        /// adapter; bary bit-for-bit on a CPU adapter, <=2 ULP elsewhere.
+        fn assert_parity_kill8(mesh: &MeshData, tile: u16, w: u32, h: u32) {
+            let Some((adapter, device, queue)) = device_preferring_cpu() else {
+                eprintln!("skipping: no wgpu adapter available");
+                return;
+            };
+            let info = adapter.get_info();
+            let cpu_adapter = info.device_type == wgpu::DeviceType::Cpu;
+            let gpu = bake_uv_gbuffer(&device, &queue, mesh, tile, w, h)
+                .expect("bake")
+                .read_back(&device, &queue)
+                .expect("readback");
+            let cpu = UvGBuffer::build(mesh, tile, w, h);
+            assert_eq!(gpu.hits.len(), cpu.hits.len(), "texel count");
+            let mut prim_bad = 0usize;
+            let mut worst_abs = 0.0f32;
+            let mut worst_ulp = 0.0f32;
+            for (i, (g, c)) in gpu.hits.iter().zip(&cpu.hits).enumerate() {
+                match (g, c) {
+                    (Some(g), Some(c)) => {
+                        assert_eq!(g.triangle, c.triangle, "prim mismatch at texel {i}");
+                        for k in 0..3 {
+                            let d = (g.bary[k] - c.bary[k]).abs();
+                            worst_abs = worst_abs.max(d);
+                            worst_ulp = worst_ulp.max(d / ulp_at(c.bary[k].abs()));
+                            assert!(
+                                bary_within_tolerance(g.bary[k], c.bary[k], cpu_adapter),
+                                "tile {tile} texel {i} bary[{k}]: gpu {:e} cpu {:e} \
+                                 (cpu_adapter={cpu_adapter}, diff {d:e})",
+                                g.bary[k],
+                                c.bary[k]
+                            );
+                        }
+                    }
+                    (None, None) => {}
+                    _ => {
+                        prim_bad += 1;
+                        if prim_bad == 1 {
+                            eprintln!("first coverage mismatch at {i}: gpu {g:?} cpu {c:?}");
+                        }
+                    }
+                }
+            }
+            assert_eq!(prim_bad, 0, "tile {tile} {w}x{h}: coverage/prim mismatches");
+            eprintln!(
+                "kill8 parity tile {tile} {w}x{h} on {} ({:?}, {:?}): prim exact, \
+                 bary worst abs {worst_abs:e} = {worst_ulp:.2} ulp, cpu_adapter={cpu_adapter}",
+                info.name, info.device_type, info.backend
+            );
+        }
+
+        /// A subdivided unit quad: `2*n*n` triangles over [0,1]^2, shared
+        /// diagonal edges, no overlaps — the multi-triangle shape kill 8
+        /// wants beyond the 2-3 triangle fixtures.
+        fn grid_mesh(n: u32) -> MeshData {
+            let row = n + 1;
+            let verts = (row * row) as usize;
+            let mut mesh = MeshData {
+                positions: Vec::with_capacity(verts),
+                normals: vec![[0.0, 0.0, 1.0]; verts],
+                uvs: Vec::with_capacity(verts),
+                indices: Vec::with_capacity(6 * (n * n) as usize),
+                ..Default::default()
+            };
+            for j in 0..row {
+                for i in 0..row {
+                    let (s, t) = (i as f32 / n as f32, j as f32 / n as f32);
+                    mesh.positions.push([s, t, 0.0]);
+                    mesh.uvs.push([s, t]);
+                }
+            }
+            for j in 0..n {
+                for i in 0..n {
+                    let a = j * row + i;
+                    let b = a + 1;
+                    let c = a + 1 + row;
+                    let d = a + row;
+                    mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+                }
+            }
+            mesh
+        }
+
+        /// Kill 8, single-tile scene: overlapped quad at two sizes.
+        #[test]
+        fn kill8_parity_single_tile_prim_exact_bary_tiered() {
+            assert_parity_kill8(&overlapped_quad(), 1001, 64, 64);
+            assert_parity_kill8(&overlapped_quad(), 1001, 24, 40);
+        }
+
+        /// Kill 8, multi-triangle mesh: a 32x32 grid = 2048 triangles.
+        #[test]
+        fn kill8_parity_grid_mesh_128x128() {
+            assert_parity_kill8(&grid_mesh(32), 1001, 128, 128);
+        }
+
+        /// Kill 8, 2-tile UDIM scene: quad in 1001 plus a skewed triangle
+        /// in 1012 (offset (1,1)); empty tile 1002 must read back fully
+        /// uncovered on both sides.
+        #[test]
+        fn kill8_parity_udim_tiles_prim_exact_bary_tiered() {
+            let mut m = quad();
+            m.uvs
+                .extend_from_slice(&[[1.1, 1.05], [1.9, 1.2], [1.3, 1.95]]);
+            m.positions.extend_from_slice(&[[0.0; 3]; 3]);
+            m.indices.extend_from_slice(&[4, 5, 6]);
+            assert_parity_kill8(&m, 1001, 64, 64);
+            assert_parity_kill8(&m, 1012, 64, 64);
+            assert_parity_kill8(&m, 1002, 32, 32);
+        }
     }
 }
