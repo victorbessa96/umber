@@ -696,5 +696,60 @@ mod tests {
             let err = bake_id_mesh(&device, &queue, &split_halves_mesh(), &params).unwrap_err();
             assert!(matches!(err, IdBakeError::MaterialAssignmentUnsupported));
         }
+
+        /// Row 156-B parity pin (kill 4 groundwork): at EVERY texel the GPU
+        /// ID bake's coverage and winning triangle equal the CPU authority
+        /// `umber_mesh::UvGBuffer`. Fixture: a unit quad (shared diagonal,
+        /// last-in-index-order wins) plus an overlapping third triangle, so
+        /// both the edge-inclusive rule and the overlap rule are exercised.
+        /// Two sizes, one non-square, catch a texel-center convention drift.
+        #[test]
+        fn gpu_id_bake_matches_cpu_uv_gbuffer_texel_for_texel() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mesh = MeshData {
+                positions: vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.25, 0.25, 0.5],
+                ],
+                normals: vec![[0.0, 0.0, 1.0]; 5],
+                uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.25, 0.25]],
+                indices: vec![0, 1, 2, 0, 2, 3, 4, 1, 2],
+                material_names: vec!["m".into()],
+                triangle_materials: Vec::new(),
+            };
+            for (w, h) in [(32u32, 32u32), (24, 40)] {
+                let params = IdBakeParams {
+                    flavor: IdFlavor::Triangle,
+                    width: w,
+                    height: h,
+                };
+                let bytes = bake_id_mesh(&device, &queue, &mesh, &params).expect("bake");
+                let cpu = umber_mesh::UvGBuffer::build(&mesh, umber_mesh::FIRST_TILE, w, h);
+                let mut mismatches = Vec::new();
+                for y in 0..h {
+                    for x in 0..w {
+                        let gpu = texel(&bytes, w, x, y);
+                        let want = cpu
+                            .at(x, y)
+                            .map(|hit| super::fnv1a_triangle(hit.triangle as u32))
+                            .unwrap_or([0, 0, 0, 0]);
+                        if gpu != want {
+                            mismatches.push((x, y, gpu, want));
+                        }
+                    }
+                }
+                assert!(
+                    mismatches.is_empty(),
+                    "{w}x{h}: {} texels differ GPU vs CPU, first: {:?}",
+                    mismatches.len(),
+                    mismatches.first()
+                );
+            }
+        }
     }
 }
