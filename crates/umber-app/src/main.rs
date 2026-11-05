@@ -479,6 +479,8 @@ struct PanelViewer<'a> {
     dormant: &'a std::collections::HashSet<u64>,
     /// The session stencil (the Display panel's stencil section edits it).
     stencil: &'a mut stencil::StencilState,
+    /// Preferences ▸ Interface ▸ brush shelf (U3).
+    show_brush_shelf: &'a bool,
     /// Each leaf's tab list and the closed panels, snapshotted before the
     /// dock draws: `add_popup` gets only a `NodePath` and the viewer
     /// cannot borrow the dock the `DockArea` is drawing (U2-3).
@@ -543,6 +545,24 @@ impl TabViewer for PanelViewer<'_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
         match tab {
             Panel::Viewport => {
+                // The brush asset shelf (UI/UX pass U3): a swatch strip
+                // along the viewport's bottom while a paint session is
+                // up and the shelf preference is on. Drawn first so the
+                // viewport takes the rest of the rect.
+                if self.paint.is_some() && *self.show_brush_shelf {
+                    let picked = egui::Panel::bottom(egui::Id::new("umber-brush-shelf-strip"))
+                        .resizable(false)
+                        .show_separator_line(true)
+                        .show(ui, |ui| {
+                            assets_panel::brush_shelf_ui(ui, self.assets, self.brush)
+                        })
+                        .inner;
+                    if let Some(name) = picked {
+                        if !self.brush.select_preset_by_name(&name) {
+                            log::warn!("shelf: brush '{name}' left the library (a stale swatch)");
+                        }
+                    }
+                }
                 // The contextual strip (GUI plan g6-contextual-toolbar):
                 // the active tool's key params over the viewport, same
                 // values the Brush panel edits. The strip edits the
@@ -2293,6 +2313,7 @@ impl UmberApp {
                     let motion = tr("prefs.reduce-motion");
                     let hints = tr("prefs.key-hints");
                     let show_fps = tr("prefs.show-fps");
+                    let brush_shelf = tr("prefs.brush-shelf");
                     let navigation = tr("prefs.section-navigation");
                     let nav = tr("prefs.nav-preset");
                     let any =
@@ -2374,6 +2395,7 @@ impl UmberApp {
                             (&motion, &mut p.reduce_motion),
                             (&hints, &mut p.key_hints),
                             (&show_fps, &mut p.show_fps),
+                            (&brush_shelf, &mut p.brush_shelf),
                         ] {
                             if preferences::row_matches(&q, label)
                                 || preferences::row_matches(&q, &interface)
@@ -4917,6 +4939,7 @@ impl eframe::App for UmberApp {
                         .collect(),
                     closed_panels: shell_menu::closed_panels(&self.dock),
                     group_pick: None,
+                    show_brush_shelf: &self.prefs.brush_shelf,
                 };
                 // R-LAYOUT-1: no leaf narrower than its panel's floor while
                 // the window can hold them (egui_dock lays splits out from

@@ -145,4 +145,5 @@ Verification per kill: rustfmt, clippy `-D warnings`, the touched crates' tests,
 - 2026-11-05: audit, requirements and plan written.
 - 2026-11-05: **Wave U1 LANDED** (U1-1..U1-7 as planned, plus U1-8: the 2D UV view had drawn nothing since 2026-10-19 and its first real draw aborted on a depth-format mismatch; both fixed). U2-1 (empty-viewport backdrop) landed with it. Report: `docs/loop/kill-reports/2026-11-05-uiux-u1.md`, queue row 182.
 - 2026-11-05: **U2-2, U2-3, U2-5 LANDED** (queue row 183). U2-4 parked to U5 (egui_dock's leaf collapse already ships; a real icon rail needs the docking migration).
-- Next: U3 brush asset shelf (Blender 4.3 pattern), then U4 themes.
+- 2026-11-05: **U3 part 1 LANDED** (queue row 184): brush swatches + asset shelf under the 3D view; Assets swatch-cache texture-lifetime bug fixed.
+- Next: U3 part 2 (Shift+Space brush popup, catalogs, per-property pressure curves), then U4 themes.

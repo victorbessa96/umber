@@ -881,6 +881,7 @@ prefs =
     .reduce-motion = Reduzir movimento
     .key-hints = Dicas de teclas na barra de status
     .show-fps = Taxa de quadros na barra de status
+    .brush-shelf = Prateleira de pincéis sob a vista 3D
     .section-navigation = Navegação
     .nav-preset = Navegação com o mouse
     .nav-painter = Painter (Alt + mouse)

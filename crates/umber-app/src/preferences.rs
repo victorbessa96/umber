@@ -137,6 +137,9 @@ pub struct Preferences {
     /// The status bar's frame-rate readout (off by default: a debug
     /// readout, not user chrome; UI/UX pass U2-5).
     pub show_fps: bool,
+    /// The brush asset shelf along the viewport's bottom (UI/UX pass
+    /// U3; on by default).
+    pub brush_shelf: bool,
     /// The viewport navigation preset.
     pub nav: NavPreset,
     /// Wheel zoom inverted (wheel up zooms out).
@@ -161,6 +164,7 @@ impl Default for Preferences {
             reduce_motion: false,
             key_hints: true,
             show_fps: false,
+            brush_shelf: true,
             nav: NavPreset::default(),
             nav_wheel_invert: false,
             keymap_overrides: Overrides::default(),
@@ -189,7 +193,7 @@ impl Preferences {
             serde_json::to_string(&bindings_v2::serialize_overrides_v2(&self.keymap_overrides))
                 .unwrap_or_else(|_| "{}".to_string());
         format!(
-            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nshow_fps={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nshow_fps={}\nbrush_shelf={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
             self.ui_scale_default,
@@ -198,6 +202,7 @@ impl Preferences {
             self.reduce_motion,
             self.key_hints,
             self.show_fps,
+            self.brush_shelf,
             nav_name(self.nav),
             self.nav_wheel_invert,
             self.keymap_overrides.serialize(),
@@ -247,6 +252,7 @@ impl Preferences {
                 "reduce_motion" => p.reduce_motion = bool_of(v).unwrap_or(p.reduce_motion),
                 "key_hints" => p.key_hints = bool_of(v).unwrap_or(p.key_hints),
                 "show_fps" => p.show_fps = bool_of(v).unwrap_or(p.show_fps),
+                "brush_shelf" => p.brush_shelf = bool_of(v).unwrap_or(p.brush_shelf),
                 "nav" => p.nav = NavPreset::from_name(v).unwrap_or(p.nav),
                 "nav_wheel_invert" => p.nav_wheel_invert = bool_of(v).unwrap_or(p.nav_wheel_invert),
                 "keymap" => keymap_v1_line = Some(v),
@@ -874,6 +880,7 @@ mod tests {
             reduce_motion: true,
             key_hints: false,
             show_fps: true,
+            brush_shelf: false,
             nav: NavPreset::Blender,
             keymap_overrides: actions::blender_overrides(),
             prop_keymap: actions::PropKeymap::default(),

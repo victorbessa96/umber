@@ -172,6 +172,104 @@ pub fn material_preview(material: &SmartMaterial, size: u32) -> ColorImage {
     ColorImage::from_rgba_unmultiplied([size, size], &px)
 }
 
+/// Renders a brush preset's swatch (UI/UX pass U3, the Blender 4.3
+/// asset-shelf pattern: every brush shows what it paints): one S-shaped
+/// stroke of the preset's own dabs over a dark card. Each dab is the
+/// preset's falloff at its hardness, in its color, at its alpha, with
+/// the stroke tapering at both ends the way a pressure stroke does.
+/// Pure CPU, deterministic, `size` x `size` px.
+pub fn brush_preview(preset: &umber_brush::preset::BrushPreset, size: u32) -> ColorImage {
+    let size = size.max(1) as usize;
+    let params = &preset.params;
+    let [cr, cg, cb, ca] = params.color;
+    // An eraser preset carries a zero colour: draw what it does (a cut
+    // through a light checker, the "removed" convention), not black ink.
+    let eraser = ca <= 1e-4;
+    let to_srgb = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    // Premultiplied stroke colour; un-premultiply for the over-blend.
+    let ink = if eraser {
+        [0.0; 3]
+    } else {
+        [to_srgb(cr / ca), to_srgb(cg / ca), to_srgb(cb / ca)]
+    };
+    let mut acc = vec![0f32; size * size];
+    let n = size as f32;
+    // Sparse spacing shows as separate dabs, dense as a smooth stroke:
+    // the dab count follows the preset's dabs-per-radius.
+    let dabs = (preset.spacing.dabs_per_radius * 4.0).clamp(10.0, 64.0) as usize;
+    let max_r = n * 0.16;
+    for k in 0..dabs {
+        let t = k as f32 / (dabs - 1) as f32;
+        let cx = n * (0.14 + 0.72 * t);
+        let cy = n * (0.5 + 0.18 * (t * std::f32::consts::TAU).sin());
+        // Pressure taper in, taper out.
+        let pressure = (t * std::f32::consts::PI).sin().max(0.15);
+        let r = (max_r * (0.45 + 0.55 * pressure)).max(1.0);
+        // Per-dab alpha scaled so dense and sparse presets reach a
+        // comparable stroke opacity.
+        let dab_alpha = ((params.alpha * pressure).clamp(0.0, 1.0) * 12.0 / dabs as f32).min(1.0);
+        let (x0, x1) = (
+            ((cx - r).floor().max(0.0)) as usize,
+            ((cx + r).ceil().min(n - 1.0)) as usize,
+        );
+        let (y0, y1) = (
+            ((cy - r).floor().max(0.0)) as usize,
+            ((cy + r).ceil().min(n - 1.0)) as usize,
+        );
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let dx = x as f32 + 0.5 - cx;
+                let dy = y as f32 + 0.5 - cy;
+                let d = (dx * dx + dy * dy).sqrt() / r;
+                if d >= 1.0 {
+                    continue;
+                }
+                let f = params
+                    .falloff
+                    .eval_with(d, params.hardness, &params.falloff_custom)
+                    .clamp(0.0, 1.0);
+                let a = &mut acc[y * size + x];
+                // Build-up accumulation (over), capped at 1.
+                *a = *a + (1.0 - *a) * f * dab_alpha;
+            }
+        }
+    }
+    let card = |x: usize, y: usize| -> f32 {
+        if eraser {
+            // A light checker the stroke cuts through.
+            let cell = (size / 8).max(1);
+            if ((x / cell) + (y / cell)).is_multiple_of(2) {
+                0.78
+            } else {
+                0.62
+            }
+        } else {
+            0.16
+        }
+    };
+    let mut px = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let i = y * size + x;
+            let a = acc[i].clamp(0.0, 1.0);
+            let base = card(x, y);
+            for c in 0..3 {
+                let target = if eraser { 0.16 } else { ink[c] };
+                px[i * 4 + c] = ((base + (target - base) * a) * 255.0).round() as u8;
+            }
+            px[i * 4 + 3] = 255;
+        }
+    }
+    ColorImage::from_rgba_unmultiplied([size, size], &px)
+}
+
 /// The panel-side cache key: kind byte + preset name + content hash of
 /// the preset's own JSON (a changed file changes the swatch).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -195,6 +293,75 @@ pub fn thumb_key(kind: u8, name: &str, preset_json: &str) -> ThumbKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn brush(name: &str) -> umber_brush::preset::BrushPreset {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/brushes")
+            .join(format!("{name}.umberbrush"));
+        umber_brush::preset::BrushPreset::from_json(&std::fs::read_to_string(path).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn eraser_previews_cut_through_a_light_card() {
+        let img = brush_preview(&brush("eraser-hard"), 48);
+        let mean: f32 =
+            img.pixels.iter().map(|p| p.r() as f32).sum::<f32>() / img.pixels.len() as f32;
+        assert!(
+            mean > 100.0,
+            "an eraser swatch reads light, not as black ink: {mean}"
+        );
+    }
+
+    fn coverage(img: &ColorImage) -> usize {
+        // Pixels lifted off the card colour (0.16 * 255 = 41).
+        img.pixels
+            .iter()
+            .filter(|p| p.r().abs_diff(41) > 8 || p.g().abs_diff(41) > 8 || p.b().abs_diff(41) > 8)
+            .count()
+    }
+
+    #[test]
+    fn brush_previews_are_deterministic_and_show_the_stroke() {
+        let p = brush("hard-round");
+        let a = brush_preview(&p, 64);
+        assert_eq!(a.size, [64, 64]);
+        assert_eq!(a.pixels, brush_preview(&p, 64).pixels, "deterministic");
+        let painted = coverage(&a);
+        assert!(painted > 64 * 64 / 20, "a visible stroke: {painted} px");
+        assert!(
+            painted < 64 * 64 * 3 / 4,
+            "the card still shows: {painted} px"
+        );
+    }
+
+    #[test]
+    fn brush_previews_tell_presets_apart() {
+        // Every shipped preset renders, and no two shipped presets share
+        // a swatch (the shelf's whole point).
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/brushes");
+        let mut seen: Vec<(String, Vec<egui::Color32>)> = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("umberbrush") {
+                continue;
+            }
+            let p = umber_brush::preset::BrushPreset::from_json(
+                &std::fs::read_to_string(&path).unwrap(),
+            )
+            .unwrap();
+            let img = brush_preview(&p, 48);
+            for (other, px) in &seen {
+                assert_ne!(
+                    *px, img.pixels,
+                    "{} and {other} draw the same swatch",
+                    p.name
+                );
+            }
+            seen.push((p.name.clone(), img.pixels));
+        }
+        assert!(seen.len() >= 10, "{} presets", seen.len());
+    }
     use umber_core::smart::{MaskOp, MaskOpKind, MaskOpParams, SmartLayerTemplate};
 
     fn const_mask(v: f32) -> SmartMask {

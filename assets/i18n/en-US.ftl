@@ -862,6 +862,7 @@ prefs =
     .reduce-motion = Reduce motion
     .key-hints = Status-bar key hints
     .show-fps = Frame-rate readout in the status bar
+    .brush-shelf = Brush shelf under the 3D view
     .section-navigation = Navigation
     .nav-preset = Mouse navigation
     .nav-painter = Painter (Alt + mouse)

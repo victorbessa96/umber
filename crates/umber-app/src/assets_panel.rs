@@ -42,7 +42,7 @@ use egui::Ui;
 /// dirty flag. The lists themselves cache in egui memory per
 /// frame-group (the smart shelf's own `smart-shelf-cache` precedent:
 /// the scan is disk I/O, refreshed by the user's ↻).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AssetsPanel {
     /// The search filter (substring, case-insensitive; empty = all).
     /// Persisted to the state dir (the swatches-file precedent) so the
@@ -50,7 +50,10 @@ pub struct AssetsPanel {
     pub search: String,
     /// Content-keyed swatch cache: (kind, name, preset-JSON hash) →
     /// texture. A changed preset file changes the key and regenerates.
-    thumbs: std::collections::HashMap<crate::asset_thumbs::ThumbKey, egui::TextureId>,
+    /// The HANDLE is cached, not just its id: dropping a `TextureHandle`
+    /// frees the texture, so an id-only cache pointed at freed textures
+    /// from the first frame (UI/UX pass U3 caught it).
+    thumbs: std::collections::HashMap<crate::asset_thumbs::ThumbKey, egui::TextureHandle>,
     /// Whether `search` was restored from disk this session.
     restored: bool,
     /// The last value written to disk (skip no-op writes).
@@ -63,6 +66,17 @@ pub struct AssetsPanel {
     /// Bumped whenever the extra library folders change — the material /
     /// mask list caches key on it, so a new folder rescans them.
     scan_epoch: u64,
+}
+
+impl std::fmt::Debug for AssetsPanel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssetsPanel")
+            .field("search", &self.search)
+            .field("thumbs", &self.thumbs.len())
+            .field("import_open", &self.import_open)
+            .field("scan_epoch", &self.scan_epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Restores the persisted search once per session (the `restored` flag).
@@ -96,7 +110,7 @@ fn persist_search(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
 
 impl AssetsPanel {
     /// The row's swatch texture, generating + caching on first sight.
-    fn thumb(
+    pub(crate) fn thumb(
         &mut self,
         ctx: &egui::Context,
         kind: u8,
@@ -106,7 +120,7 @@ impl AssetsPanel {
     ) -> Option<egui::TextureId> {
         let key = crate::asset_thumbs::thumb_key(kind, name, preset_json);
         if let Some(tex) = self.thumbs.get(&key) {
-            return Some(*tex);
+            return Some(tex.id());
         }
         let img = make();
         let tex = ctx.load_texture(
@@ -114,8 +128,9 @@ impl AssetsPanel {
             img,
             egui::TextureOptions::LINEAR,
         );
-        self.thumbs.insert(key, tex.id());
-        Some(tex.id())
+        let id = tex.id();
+        self.thumbs.insert(key, tex);
+        Some(id)
     }
 }
 
@@ -130,6 +145,86 @@ pub struct LibraryOutcome {
     /// `smart_mask_applied` flow — the SAME compose path the Layers
     /// panel's mask section uses).
     pub mask: Option<(u64, umber_core::smart::SmartMask)>,
+}
+
+/// The brush shelf's swatch edge, points (UI/UX pass U3).
+pub const SHELF_SWATCH: f32 = 40.0;
+
+/// The brush asset shelf (UI/UX pass U3, Blender 4.3's asset shelf in
+/// paint modes): one horizontal, scrollable strip of preset swatches
+/// along the 3D viewport's bottom edge. A click selects the preset
+/// (the caller routes it through `BrushPanel::select_preset_by_name`,
+/// the same seam the Assets browser rows use); the active preset is
+/// framed in the accent; the name rides the hover.
+pub fn brush_shelf_ui(
+    ui: &mut Ui,
+    state: &mut AssetsPanel,
+    brush: &crate::brush_panel::BrushPanel,
+) -> Option<String> {
+    let mut picked = None;
+    egui::ScrollArea::horizontal()
+        .id_salt("umber-brush-shelf")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (i, entry) in brush.library.entries.iter().enumerate() {
+                    let json = entry.preset.to_json().unwrap_or_default();
+                    let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
+                        crate::asset_thumbs::brush_preview(
+                            &entry.preset,
+                            crate::asset_thumbs::THUMB_PX * 2,
+                        )
+                    }) else {
+                        continue;
+                    };
+                    let active = brush.active == Some(i);
+                    let image = egui::Image::new(egui::load::SizedTexture::new(
+                        tex,
+                        egui::vec2(SHELF_SWATCH, SHELF_SWATCH),
+                    ))
+                    .corner_radius(4.0);
+                    let button = egui::Button::image(image)
+                        .selected(active)
+                        .stroke(if active {
+                            egui::Stroke::new(2.0, umber_gui::theme::accent())
+                        } else {
+                            egui::Stroke::NONE
+                        });
+                    let response = ui
+                        .vertical(|ui| {
+                            ui.set_width(SHELF_SWATCH + 8.0);
+                            let r = ui.add(button);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&entry.preset.name)
+                                        .size(umber_gui::theme::TEXT_STATUS)
+                                        .color(if active {
+                                            umber_gui::theme::accent()
+                                        } else {
+                                            umber_gui::theme::muted()
+                                        }),
+                                )
+                                .truncate(),
+                            );
+                            r
+                        })
+                        .inner
+                        .on_hover_text(&entry.preset.name);
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Button,
+                            true,
+                            active,
+                            &entry.preset.name,
+                        )
+                    });
+                    if response.clicked() && !active {
+                        picked = Some(entry.preset.name.clone());
+                    }
+                }
+            });
+        });
+    picked
 }
 
 /// Draws the library section (search + three categories + rows).
@@ -219,6 +314,15 @@ pub fn library_ui(
                 continue;
             }
             ui.horizontal(|ui| {
+                let json = entry.preset.to_json().unwrap_or_default();
+                if let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
+                    crate::asset_thumbs::brush_preview(&entry.preset, crate::asset_thumbs::THUMB_PX)
+                }) {
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                        tex,
+                        egui::vec2(24.0, 24.0),
+                    )));
+                }
                 ui.label(&entry.preset.name)
                     .on_hover_text(entry.source_path.display().to_string());
                 if ui.small_button("▸").clicked() {
@@ -378,6 +482,75 @@ mod kittest {
                     hit: None,
                 },
             )
+    }
+
+    /// U3: the shelf draws one swatch per library preset, a click hands
+    /// back that preset's name, and the active one is the selected one.
+    #[test]
+    fn the_brush_shelf_picks_presets_by_swatch() {
+        struct Shelf {
+            panel: AssetsPanel,
+            brush: crate::brush_panel::BrushPanel,
+            picked: Option<String>,
+        }
+        crate::i18n::init();
+        let mut h = Harness::<Shelf>::builder()
+            .with_size([900.0, 80.0])
+            .build_ui_state(
+                |ui, s: &mut Shelf| {
+                    if let Some(name) = brush_shelf_ui(ui, &mut s.panel, &s.brush) {
+                        s.brush.select_preset_by_name(&name);
+                        s.picked = Some(name);
+                    }
+                },
+                Shelf {
+                    panel: AssetsPanel::default(),
+                    brush: {
+                        // The repo's bundled presets (the test exe's dir
+                        // has none; the brush_panel tests' own seam).
+                        let mut b = crate::brush_panel::BrushPanel::new();
+                        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../assets/brushes");
+                        b.library = umber_brush::Library::load_from_dirs(&[dir]);
+                        b.active = None;
+                        b
+                    },
+                    picked: None,
+                },
+            );
+        h.run();
+        let names: Vec<String> = h
+            .state()
+            .brush
+            .library
+            .entries
+            .iter()
+            .map(|e| e.preset.name.clone())
+            .collect();
+        assert!(names.len() >= 10, "the bundled library: {names:?}");
+        let buttons = |h: &Harness<'_, Shelf>, name: &str| {
+            h.query_all_by_role_and_label(egui::accesskit::Role::Button, name)
+                .count()
+        };
+        for name in &names {
+            assert_eq!(buttons(&h, name), 1, "one swatch button for {name}");
+        }
+        assert_eq!(
+            h.state().panel.thumbs.len(),
+            names.len(),
+            "one cached swatch each"
+        );
+        let target = names.last().unwrap().clone();
+        h.get_by_role_and_label(egui::accesskit::Role::Button, &target)
+            .click();
+        h.run();
+        assert_eq!(h.state().picked.as_deref(), Some(target.as_str()));
+        let active = h.state().brush.active.map(|i| names[i].clone());
+        assert_eq!(
+            active.as_deref(),
+            Some(target.as_str()),
+            "the pick became active"
+        );
     }
 
     #[test]
