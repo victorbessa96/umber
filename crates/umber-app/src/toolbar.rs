@@ -559,15 +559,16 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         ui.label(RichText::new(view.tool.label()).color(theme::muted()));
         ui.separator();
 
-        // View toggles (the View menu's checkboxes, W / G / V). The eye
-        // glyph carries all three — active-tinted for the toggles, the
-        // cycle button keeps the mode's name as its tooltip.
-        let wireframe = icons::icon_button(ui, atlas, "eye", icon_size, view.view.wireframe)
+        // View toggles (the View menu's checkboxes, W / G / V), one
+        // distinct glyph each (UI/UX pass U1-3): box = wireframe, grid =
+        // grid, sun = lit view. Active-tinted for the toggles; the cycle
+        // button keeps the mode's name as its tooltip.
+        let wireframe = icons::icon_button(ui, atlas, "box", icon_size, view.view.wireframe)
             .action_tip(ShellAction::ToggleWireframe, state);
         if wireframe.clicked() {
             actions.push(ShellAction::ToggleWireframe);
         }
-        let grid = icons::icon_button(ui, atlas, "eye", icon_size, view.view.grid)
+        let grid = icons::icon_button(ui, atlas, "grid-3x3", icon_size, view.view.grid)
             .action_tip(ShellAction::ToggleGrid, state);
         if grid.clicked() {
             actions.push(ShellAction::ToggleGrid);
@@ -580,7 +581,7 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         };
         // The cycle button's tooltip leads with the CURRENT mode (it is
         // the button's state), then what V does, from the registry.
-        let cycle = icons::icon_button(ui, atlas, "eye", icon_size, lit).on_hover_ui(|ui| {
+        let cycle = icons::icon_button(ui, atlas, "sun", icon_size, lit).on_hover_ui(|ui| {
             ui.label(egui::RichText::new(&mode).color(theme::accent()));
             let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
             crate::rich_tooltip::draw(
@@ -1345,7 +1346,7 @@ mod tests {
     /// census catches it before CI's screenshot would.
     #[test]
     fn panel_icon_buttons_have_baked_glyphs() {
-        for name in ["folder-open", "save", "undo-2", "redo-2", "eye", "pencil"] {
+        for name in TOP_STRIP_GLYPHS {
             assert!(
                 umber_gui::icons::PANEL_ICONS.contains(&name),
                 "{name} missing from PANEL_ICONS"
@@ -1362,11 +1363,53 @@ mod tests {
         let order = manifest["panel"]["order"]
             .as_array()
             .expect("the manifest has a panel order");
-        for name in ["folder-open", "save", "undo-2", "redo-2", "eye", "pencil"] {
+        for name in TOP_STRIP_GLYPHS {
             assert!(
                 order.iter().any(|v| v.as_str() == Some(name)),
                 "{name} missing from the baked panel atlas"
             );
+        }
+    }
+
+    /// Every glyph the top strip paints.
+    const TOP_STRIP_GLYPHS: [&str; 8] = [
+        "folder-open",
+        "save",
+        "undo-2",
+        "redo-2",
+        "box",
+        "grid-3x3",
+        "sun",
+        "pencil",
+    ];
+
+    /// R-GLYPH-1 end to end: the atlas the APP loads (both families,
+    /// merged) resolves every glyph the toolbar, the tool row and the
+    /// Properties rail paint. The manifest census above passed while the
+    /// app loaded only the Tool family and drew five placeholder boxes;
+    /// this loads the real atlas through the real loader.
+    #[test]
+    fn the_loaded_atlas_resolves_every_painted_glyph() {
+        let ctx = egui::Context::default();
+        let dir = umber_gui::icons::atlas_dir();
+        if !dir.join(umber_gui::icons::MANIFEST_FILE).exists() {
+            return;
+        }
+        for hidpi in [false, true] {
+            let atlas = umber_gui::icons::load_baked_atlas_merged_from(&ctx, hidpi, &dir)
+                .expect("the merged atlas loads");
+            let rail = umber_gui::ContextKind::ALL.map(|k| k.icon());
+            let tools = umber_gui::icons::TOOL_ICONS;
+            for name in TOP_STRIP_GLYPHS
+                .iter()
+                .chain(rail.iter())
+                .chain(tools.iter())
+            {
+                assert!(
+                    atlas.uv(name).is_some(),
+                    "{name} unresolved (hidpi {hidpi})"
+                );
+            }
         }
     }
 }

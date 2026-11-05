@@ -117,13 +117,13 @@ pub fn preset(workspace: Workspace) -> DockState<Panel> {
 /// the centre split of the Paint preset — with `front` in a left rail
 /// (its first tab active) and `rest` tabbed on the right.
 fn side_layout(front: Vec<Panel>, rest: Vec<Panel>) -> DockState<Panel> {
-    // Root starts as the 2D view; the centre split below adds the 3D
-    // view as its left leaf.
-    let mut dock = DockState::new(vec![Panel::UvView]);
+    // Split the leaf each step divides (see `shell_menu::default_dock`:
+    // re-splitting the root wraps the whole tree).
+    let mut dock = DockState::new(vec![Panel::Viewport]);
     let tree = dock.main_surface_mut();
-    tree.split_left(NodeIndex::root(), 0.18, front);
-    tree.split_right(NodeIndex::root(), 0.24, rest);
-    tree.split_left(NodeIndex::root(), 0.65, vec![Panel::Viewport]);
+    let [others, _] = tree.split_left(NodeIndex::root(), 0.19, front);
+    let [centre, _] = tree.split_right(others, 0.72, rest);
+    tree.split_right(centre, 0.62, vec![Panel::UvView]);
     dock
 }
 
@@ -645,6 +645,30 @@ mod tests {
             ALL_PANELS.to_vec(),
             "every panel docked once"
         );
+    }
+
+    /// R-LAYOUT-2 for every preset: at 1400 x 900 each one already clears
+    /// every leaf floor, and the side-rail presets put the 2D view
+    /// directly right of the 3D view.
+    #[test]
+    fn every_preset_fits_its_floors_and_keeps_3d_beside_2d() {
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        for ws in Workspace::ALL {
+            let mut dock = preset(ws);
+            assert!(
+                !crate::dock_floor::apply_floors(&mut dock, area, Panel::min_size),
+                "{ws:?} needed clamping at 1400 x 900: {:?}",
+                crate::dock_floor::leaf_sizes(&dock, area)
+            );
+            if ws != Workspace::Graph {
+                let order: Vec<Panel> = crate::dock_floor::leaf_sizes(&dock, area)
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect();
+                let vp = order.iter().position(|p| *p == Panel::Viewport).unwrap();
+                assert_eq!(order.get(vp + 1), Some(&Panel::UvView), "{ws:?} {order:?}");
+            }
+        }
     }
 
     #[test]

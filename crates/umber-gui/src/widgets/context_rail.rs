@@ -38,7 +38,7 @@ pub const DIM_ALPHA: f32 = 0.35;
 pub const BREADCRUMB_SEP: &str = " ▸ ";
 
 /// Width of the search field, points.
-pub const SEARCH_WIDTH: f32 = 160.0;
+pub const SEARCH_WIDTH: f32 = 240.0;
 
 /// One Properties context. The declaration order is the rail's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -438,7 +438,7 @@ impl ContextRail {
         let edit = TextEdit::singleline(&mut self.query)
             .id(self.id_salt.with("search"))
             .hint_text(ctx.search_hint.to_owned())
-            .desired_width(SEARCH_WIDTH)
+            .desired_width(ui.available_width().min(SEARCH_WIDTH))
             .show(ui);
         let response = edit.response.response;
         if response.changed() {
@@ -535,14 +535,10 @@ mod tests {
             assert_eq!(kind.index(), i, "{kind:?}");
             assert!(!format!("{kind:?}").contains('('), "kinds carry no payload");
         }
-        // Brush / Fill / Mask reuse declared atlas ids; Layer and
-        // TextureSet name lucide ids the atlas does not carry yet. When a
-        // raster pass adds them this pin flips on purpose.
-        for kind in [Brush, Fill, Mask] {
+        // Every kind's glyph is a declared atlas id (UI/UX pass U1-3
+        // added `layers` and `layout-grid` to the Panel family).
+        for kind in ContextKind::ALL {
             assert!(kind.in_atlas(), "{kind:?} → {}", kind.icon());
-        }
-        for kind in [Layer, TextureSet] {
-            assert!(!kind.in_atlas(), "{kind:?} → {}", kind.icon());
         }
     }
 

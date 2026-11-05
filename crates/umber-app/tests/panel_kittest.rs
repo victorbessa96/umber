@@ -313,7 +313,7 @@ fn layers_ui_closure(
     }
 }
 
-/// The ⧉ row button duplicates the layer: a same-kind "copy" above the
+/// The duplicate (`⊕`) row button duplicates the layer: a same-kind "copy" above the
 /// source, settings carried (C2-8's duplicate; the undoable-command
 /// path is the History panel's own test).
 #[test]
@@ -332,7 +332,7 @@ fn the_duplicate_button_copies_the_layer_row() {
     // The glyph button's accessible label is its text (the duplicate
     // row deliberately carries no tooltip: its catalog key waits on
     // the stencil wave's i18n lock — see document.rs's row comment).
-    harness.get_by_label("⧉").click();
+    harness.get_by_label("⊕").click();
     support::settle(&mut harness);
     let doc = harness.state();
     assert_eq!(doc.layers().len(), 2, "the duplicate landed");
@@ -402,7 +402,7 @@ fn the_properties_rows_render_for_the_selected_layer_only() {
 fn the_blend_combo_sets_the_selected_layers_mode_and_undo_restores() {
     use umber_core::layers::{LayerCommand, LayerKind};
     // Layers + History in ONE draw: the combo lives in the layers
-    // properties rows, the ↶ Undo button in the history panel, and the
+    // properties rows, the ↺ Undo button in the history panel, and the
     // undo must reach the SAME document through the panel a user would
     // click. (The battery's first run caught the layers-only closure:
     // no history node, so the undo query panicked at support's

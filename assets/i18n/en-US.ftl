@@ -184,6 +184,7 @@ texturesets =
     .size = Paint target size
     .resize-clears = Changing the selected set's size clears that set's canvas and the stroke undo history, and resets its quick mask. This is intentional.
     .inherit = Inherit document resolution
+    .inherit-short = Inherit
     .per-channel = Per-channel sizes
     .channel-resize-clears = Resizing a channel clears its tiles
     .no-paint = No paint session — the GPU target is unavailable.
@@ -533,11 +534,12 @@ brush =
 ## Layers panel
 
 layers =
+    .duplicate = Duplicate layer
     .set-header = Texture set: { $set }
-    .add-paint = ＋ Add paint layer
-    .add-fill = ＋ Add fill layer
+    .add-paint = + Add paint layer
+    .add-fill = + Add fill layer
     .masks-section = Masks
-    .mask-add = ＋ Mask
+    .mask-add = + Mask
     .mask-default-name = Mask for { $layer }
     .mask-remove = Remove mask
     .mask-done = Done
@@ -549,11 +551,11 @@ layers =
     .kind-folder = folder
     .kind-material = material
     .kind-instance = instance
-    .instance-this = ⧉ Instance
+    .instance-this = ⊗ Instance
     .instance-of = instance of { $source }
     .instance-name = { $source } (instance)
     .instance-paint-hint = Paint the source, not the instance.
-    .add-material = ＋ Add material layer
+    .add-material = + Add material layer
     .default-material-name = Material { $n }
     .flatten = Flatten selection
     .flatten-needs-two = Select two or more layers to flatten.
@@ -625,8 +627,8 @@ fill =
 history =
     .section-controls = Undo / redo
     .section-log = Session log
-    .undo = ↶ Undo
-    .redo = ↷ Redo
+    .undo = ↺ Undo
+    .redo = ↻ Redo
     .journal = { $count ->
         [one] { $count } entry in journal
        *[other] { $count } entries in journal
@@ -661,8 +663,8 @@ history =
     .op-bake = Bake
     .op-export = Export
     .strokes = Smudge / clone / eraser strokes
-    .undo-stroke = ↶ Undo stroke
-    .redo-stroke = ↷ Redo stroke
+    .undo-stroke = ↺ Undo stroke
+    .redo-stroke = ↻ Redo stroke
     .travel-note = Layer rows rewind layers, stroke rows rewind paint — each travels on its own.
 
 ## UDIM tile selector (Bakes + Export)
@@ -990,6 +992,7 @@ picker =
 ## The Assets panel's library browser (R-C1)
 
 assets =
+    .refresh = Refresh the list
     .search = Search
     .brushes = Brushes
     .materials = Smart materials

@@ -94,8 +94,8 @@ pub fn platform_order(
 /// DECLARED index of the clicked button (stable across platforms), or
 /// `None` if no button was clicked this frame.
 ///
-/// The Default role renders with egui's `Button`'s strong styling;
-/// Cancel and Plain render plain. Tab follows the drawn order, which
+/// The Default role renders as [`primary_button`] (accent fill, UI/UX
+/// pass U1-6); Cancel and Plain render plain. Tab follows the drawn order, which
 /// IS the platform reading order.
 pub fn dialog_buttons(
     ui: &mut Ui,
@@ -114,7 +114,7 @@ pub fn dialog_buttons(
             let b = &buttons[i];
             let label = egui::RichText::new(&b.label);
             let rendered = if b.role == ButtonRole::Default {
-                Button::new(label.strong())
+                primary_button(&b.label)
             } else {
                 Button::new(label)
             };
@@ -126,9 +126,40 @@ pub fn dialog_buttons(
     clicked
 }
 
+/// The house primary action: accent fill, dark strong label (the one
+/// button per dialog that reads as "do it"). Hover keeps the hue
+/// ([`crate::theme::accent_hover`] is applied by egui's hover expansion
+/// over the fill; the fill itself stays the accent).
+pub fn primary_button(label: &str) -> Button<'static> {
+    Button::new(
+        egui::RichText::new(label.to_owned())
+            .strong()
+            .color(crate::theme::palette::BG),
+    )
+    .fill(crate::theme::accent())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_primary_button_carries_the_accent_fill() {
+        // Laid out through a real pass: the fill shows up as the button's
+        // frame color in the painted shapes.
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(primary_button("Finish"));
+        });
+        // The pass uploads the font atlas; drop that delta deliberately.
+        out.textures_delta.clear();
+        let accent = crate::theme::accent();
+        let filled = out.shapes.iter().any(|clipped| match &clipped.shape {
+            egui::Shape::Rect(r) => r.fill == accent,
+            _ => false,
+        });
+        assert!(filled, "no accent-filled rect painted");
+    }
 
     /// Save (Default), Cancel (Cancel), and an extra (Plain), declared
     /// in the order a dialog naturally declares them.

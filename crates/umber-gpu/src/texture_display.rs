@@ -210,6 +210,10 @@ pub struct UvPresent {
 /// Built once per `GpuContext`; per-frame work is only the callback.
 pub struct TextureDisplay {
     pipeline: wgpu::RenderPipeline,
+    /// The same pipeline without a depth state, for offscreen passes
+    /// that carry no depth attachment (the gpu-feature goldens).
+    #[cfg_attr(not(all(test, feature = "gpu")), allow(dead_code))]
+    pipeline_plain: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     identity_lut: crate::display_lut::DisplayLut,
@@ -222,6 +226,7 @@ impl TextureDisplay {
     pub(crate) fn new(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
+        depth_format: Option<wgpu::TextureFormat>,
         lut_layout: &wgpu::BindGroupLayout,
         identity_lut: crate::display_lut::DisplayLut,
     ) -> Self {
@@ -271,49 +276,68 @@ impl TextureDisplay {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("umber_texture_display_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<TexturedVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
+        let build = |depth_stencil: Option<wgpu::DepthStencilState>, label: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<TexturedVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 8,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // The egui surface pass carries the app's depth attachment
+        // (`NativeOptions::depth_buffer`), and wgpu refuses a pipeline
+        // whose depth state does not match the pass. The surface pipeline
+        // therefore declares that format (Always, no write: the 2D view
+        // never depth-tests); offscreen passes without depth (the golden)
+        // use the plain one. A depth-less surface pipeline was latent from
+        // the depth-buffer change until UI/UX pass U1-8 gave the UV canvas
+        // a non-zero size and the first real draw aborted.
+        let surface_depth = depth_format.map(|format| wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
         });
+        let pipeline = build(surface_depth, "umber_texture_display_pipeline");
+        let pipeline_plain = build(None, "umber_texture_display_pipeline_plain");
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("umber_texture_display_sampler"),
@@ -328,6 +352,7 @@ impl TextureDisplay {
 
         Self {
             pipeline,
+            pipeline_plain,
             layout,
             sampler,
             identity_lut,
@@ -349,14 +374,27 @@ impl TextureDisplay {
         lut: Option<&crate::display_lut::DisplayLut>,
         present: UvPresent,
     ) -> TextureDisplayCallback {
-        self.callback_for_view(device, target.view(), rect, lut, present)
+        self.callback_with(&self.pipeline, device, target.view(), rect, lut, present)
     }
 
     /// [`Self::callback`] over any filterable 2D view — the golden test
     /// presents a plain `Rgba8Unorm` texture (a `PaintTarget` needs the
     /// storage-texture feature some test adapters lack).
+    #[cfg_attr(not(all(test, feature = "gpu")), allow(dead_code))]
     pub(crate) fn callback_for_view(
         &self,
+        device: &wgpu::Device,
+        source: &wgpu::TextureView,
+        rect: epaint::emath::Rect,
+        lut: Option<&crate::display_lut::DisplayLut>,
+        present: UvPresent,
+    ) -> TextureDisplayCallback {
+        self.callback_with(&self.pipeline_plain, device, source, rect, lut, present)
+    }
+
+    fn callback_with(
+        &self,
+        pipeline: &wgpu::RenderPipeline,
         device: &wgpu::Device,
         source: &wgpu::TextureView,
         rect: epaint::emath::Rect,
@@ -406,7 +444,7 @@ impl TextureDisplay {
             usage: wgpu::BufferUsages::VERTEX,
         });
         TextureDisplayCallback {
-            pipeline: self.pipeline.clone(),
+            pipeline: pipeline.clone(),
             bind_group,
             lut_bind_group,
             vertex_buffer,
@@ -755,6 +793,101 @@ mod tests {
             target
                 .read_back(&gpu.device, &gpu.queue)
                 .expect("golden readback")
+        }
+
+        /// UI/UX pass U1-8: the APP's callback (`callback`, the surface
+        /// pipeline) draws inside a pass that carries the context's depth
+        /// attachment, as egui's surface pass does. Before the fix the
+        /// pipeline declared no depth state and wgpu aborted the process
+        /// on the first UV-view draw ("Incompatible depth-stencil
+        /// attachment format").
+        #[test]
+        fn the_surface_callback_draws_in_a_depth_carrying_pass() {
+            let Some(gpu) = context() else {
+                eprintln!(
+                    "skipping the_surface_callback_draws_in_a_depth_carrying_pass: no wgpu adapter"
+                );
+                return;
+            };
+            let Some(depth_format) = gpu.depth_format() else {
+                return;
+            };
+            let source = source_bytes();
+            let view = source_view(&gpu, &source);
+            let expected = pre_lut_expected(&source);
+            let target =
+                RenderTarget::with_format(&gpu.device, SIDE, SIDE, wgpu::TextureFormat::Rgba8Unorm);
+            let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("umber_texture_display_test_depth"),
+                size: wgpu::Extent3d {
+                    width: SIDE,
+                    height: SIDE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: depth_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+            let rect = epaint::emath::Rect::from_min_size(
+                epaint::emath::Pos2::ZERO,
+                epaint::emath::vec2(SIDE as f32, SIDE as f32),
+            );
+            let td = gpu.texture_display();
+            let callback = td.callback_with(
+                &td.pipeline,
+                &gpu.device,
+                &view,
+                rect,
+                None,
+                UvPresent::default(),
+            );
+            callback.write_uniform(
+                &gpu.queue,
+                &egui_wgpu::ScreenDescriptor {
+                    size_in_pixels: [SIDE, SIDE],
+                    pixels_per_point: 1.0,
+                },
+            );
+            let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("umber_texture_display_depth_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target.view(),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                callback.draw(&mut pass);
+            }
+            gpu.queue.submit(Some(encoder.finish()));
+            let err = pollster::block_on(scope.pop());
+            assert!(err.is_none(), "validation error: {err:?}");
+            let bytes = target.read_back(&gpu.device, &gpu.queue).expect("readback");
+            compare_rgba8(&bytes, &expected, 0)
+                .expect("identity presentation through the depth pass");
         }
 
         /// THE GOLDEN (the design's test 3): the UV view's display is

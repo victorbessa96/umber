@@ -90,7 +90,7 @@
 //! - No hand-rolled colors exist in this file (no `RichText::color`, no
 //!   custom strokes), so scope item (3) changes nothing; the groups and
 //!   fields paint from `umber-gui`'s theme tokens internally. The `▶`
-//!   jump glyph stays hardcoded (the history panel's `↶`/`↷` precedent,
+//!   jump glyph stays hardcoded (the history panel's `↺`/`↻` precedent,
 //!   already documented on [`BakesPanel::row_label`]).
 //! - No `umber_style`/fonts call at panel level (the `brush_panel.rs`
 //!   rationale): `main.rs` applies no Umber style today, and a
@@ -1273,7 +1273,7 @@ impl BakesPanel {
     }
 
     /// Prefixes the highlighted settings row with the jump marker (the
-    /// `▶` glyph is hardcoded, like the history panel's `↶`/`↷`).
+    /// `▶` glyph is hardcoded, like the history panel's `↺`/`↻`).
     pub fn row_label(&self, id: BakeSettingId, text: String) -> String {
         if self.highlighted_setting == Some(id) {
             format!("▶ {text}")

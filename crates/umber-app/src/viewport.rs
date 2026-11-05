@@ -1064,7 +1064,11 @@ impl Viewport {
             }
         }
 
-        ui.painter().rect_filled(rect, 0.0, EMPTY_VIEWPORT_COLOR);
+        if self.mesh.is_none() {
+            crate::empty_state::paint_backdrop(ui.painter(), rect);
+        } else {
+            ui.painter().rect_filled(rect, 0.0, EMPTY_VIEWPORT_COLOR);
+        }
         // The empty state (Phase 0b, GUI plan g5-home-screen): the home
         // card until a mesh loads, lit while a file drag hovers the
         // window. Its widgets are added after the viewport's own response,

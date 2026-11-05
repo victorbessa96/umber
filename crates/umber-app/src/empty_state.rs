@@ -147,6 +147,60 @@ enum RecentEdit {
     Clear,
 }
 
+/// Spacing of the empty viewport's dot grid, points (R-VISUAL-1).
+pub const BACKDROP_DOT_SPACING: f32 = 24.0;
+/// Dot radius, points.
+const BACKDROP_DOT_RADIUS: f32 = 1.0;
+
+/// The empty viewport's backdrop (UI/UX pass U2-1, R-VISUAL-1): the
+/// viewport colour, a soft centre glow that lifts the home card, and a
+/// faint dot grid (photocraft's `canvas_dot` token idea; Painter and
+/// Blender show a ground grid where Umber showed a flat colour). Painted
+/// from theme tokens only. Dots fade toward the edges so the frame stays
+/// calm; the count is bounded by the rect area / spacing^2.
+pub fn paint_backdrop(painter: &egui::Painter, rect: Rect) {
+    if !rect.is_positive() || !rect.is_finite() {
+        return;
+    }
+    painter.rect_filled(rect, 0.0, theme::viewport_bg());
+    // Centre glow: concentric translucent discs of the panel colour,
+    // largest first (a cheap radial gradient without a mesh).
+    let centre = rect.center();
+    let reach = rect.size().min_elem() * 0.75;
+    let [r, g, b, _] = theme::raised().to_array();
+    const RINGS: usize = 6;
+    for i in 0..RINGS {
+        let t = 1.0 - i as f32 / RINGS as f32;
+        let alpha = (10.0 * (1.0 - t) + 4.0) as u8;
+        painter.circle_filled(
+            centre,
+            reach * t,
+            Color32::from_rgba_unmultiplied(r, g, b, alpha),
+        );
+    }
+    // Dot grid, anchored at the rect centre so it stays put on resize.
+    let [fr, fg, fb, _] = theme::faint().to_array();
+    let s = BACKDROP_DOT_SPACING;
+    let half = rect.size() * 0.5;
+    let nx = (half.x / s).floor() as i32;
+    let ny = (half.y / s).floor() as i32;
+    let max_d = half.length().max(1.0);
+    for iy in -ny..=ny {
+        for ix in -nx..=nx {
+            let p = centre + egui::vec2(ix as f32 * s, iy as f32 * s);
+            let fade = 1.0 - ((p - centre).length() / max_d).min(1.0);
+            let alpha = (70.0 * fade) as u8;
+            if alpha > 2 {
+                painter.circle_filled(
+                    p,
+                    BACKDROP_DOT_RADIUS,
+                    Color32::from_rgba_unmultiplied(fr, fg, fb, alpha),
+                );
+            }
+        }
+    }
+}
+
 /// Whether `path` is a mesh the loader reads (case-insensitive extension).
 pub fn is_mesh_file(path: &Path) -> bool {
     umber_mesh::detect_format(path).is_ok()
@@ -475,6 +529,21 @@ pub fn home_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_backdrop_paints_bounded_shapes_and_skips_degenerate_rects() {
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 600.0));
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_backdrop(ui.painter(), rect);
+            paint_backdrop(ui.painter(), Rect::NOTHING);
+        });
+        out.textures_delta.clear();
+        let shapes = out.shapes.len();
+        // fill + 6 rings + at most (2*20+1) x (2*12+1) dots.
+        assert!(shapes > 7, "{shapes}");
+        assert!(shapes <= 1 + 6 + 41 * 25, "{shapes}");
+    }
 
     #[test]
     fn every_listed_extension_is_one_the_loader_reads() {

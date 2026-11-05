@@ -18,7 +18,7 @@
 //! by the search, the name + source-dir shown (the starter-vs-user
 //! distinction the census names; the tooltip carries the full
 //! path), a reload button per category (the smart shelf's own
-//! `⟳` precedent), and apply-on-click:
+//! `↻` precedent), and apply-on-click:
 //!
 //! - a brush row: [`BrushPanel::select_preset_by_name`] (the new
 //!   seam) loads the preset into the brush session;
@@ -41,7 +41,7 @@ use egui::Ui;
 /// The panel's session state: the search field + the cached lists'
 /// dirty flag. The lists themselves cache in egui memory per
 /// frame-group (the smart shelf's own `smart-shelf-cache` precedent:
-/// the scan is disk I/O, refreshed by the user's ⟳).
+/// the scan is disk I/O, refreshed by the user's ↻).
 #[derive(Debug, Default)]
 pub struct AssetsPanel {
     /// The search filter (substring, case-insensitive; empty = all).
@@ -172,7 +172,7 @@ pub fn library_ui(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut state.new_dir);
-                if ui.small_button("＋").clicked() {
+                if ui.small_button("+").clicked() {
                     let p = std::path::PathBuf::from(state.new_dir.trim());
                     if p.is_dir() && !extras.contains(&p) {
                         extras.push(p);
@@ -235,11 +235,11 @@ pub fn library_ui(
     let refresh = ui
         .horizontal(|ui| {
             ui.strong(tr("assets.materials"));
-            ui.small_button("⟳")
+            ui.small_button("↻").on_hover_text(tr("assets.refresh"))
         })
         .inner
         .clicked();
-    let _ = refresh; // The list re-scans each open; the ⟳ exists for the eye's rhythm.
+    let _ = refresh; // The list re-scans each open; the ↻ exists for the eye's rhythm.
     let cache_id = egui::Id::new(("assets-materials", state.scan_epoch));
     let materials: Vec<(String, umber_core::smart::SmartMaterial)> = ui.ctx().data(|d| {
         d.get_temp::<Option<Vec<(String, umber_core::smart::SmartMaterial)>>>(cache_id)
@@ -278,7 +278,7 @@ pub fn library_ui(
             label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
                 crate::layers_panel::AssetDropRef::Material(name.clone()),
             ));
-            if ui.small_button("＋").clicked() {
+            if ui.small_button("+").clicked() {
                 out.material = Some(material.clone());
             }
         });
@@ -326,7 +326,7 @@ pub fn library_ui(
             label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
                 crate::layers_panel::AssetDropRef::Mask(name.clone()),
             ));
-            if ui.small_button("＋").clicked() {
+            if ui.small_button("+").clicked() {
                 if let Some(target) = selected_layer {
                     out.mask = Some((target, mask.clone()));
                 }
@@ -394,22 +394,22 @@ mod kittest {
             "material row (display name)"
         );
         assert!(h.query_by_label("Edge wear").is_some(), "mask row");
-        // The first ＋ button is the first material row (the list is
+        // The first + button is the first material row (the list is
         // name-sorted): clicking it applies that material.
         // Materials render before masks, and the list is name-sorted:
-        // the first ＋ is "Painted wood".
-        let plus = h.get_all_by_label("＋").next().expect("row buttons");
+        // the first + is "Painted wood".
+        let plus = h.get_all_by_label("+").next().expect("row buttons");
         plus.click();
         assert!(h.run_ok().is_some());
         let out = h
             .state_mut()
             .hit
             .take()
-            .expect("the ＋ click produced an outcome");
+            .expect("the + click produced an outcome");
         assert_eq!(
             out.material.as_ref().map(|m| m.name.as_str()),
             Some("Painted wood"),
-            "the first material row's ＋ applies that material"
+            "the first material row's + applies that material"
         );
     }
 

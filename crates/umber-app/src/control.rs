@@ -43,6 +43,8 @@ pub const METHODS: &[&str] = &[
     "viewport.screenshot",
     "command.list",
     "command.run",
+    "mesh.load",
+    "project.open",
 ];
 
 /// How long a connection thread waits for the UI thread to answer a queued
@@ -72,6 +74,39 @@ pub enum ControlRequest {
         id: String,
         reply: Sender<Result<Value, String>>,
     },
+    /// Load a mesh by path (UI/UX pass U1-7, R-AGENT-1): the agent's way
+    /// past the empty state. `file.open_mesh` would open a native dialog
+    /// on the UI thread, which no remote caller can answer.
+    LoadMesh {
+        path: PathBuf,
+        reply: Sender<Result<Value, String>>,
+    },
+    /// Open a project folder by path (same reason as [`Self::LoadMesh`]).
+    OpenProject {
+        path: PathBuf,
+        reply: Sender<Result<Value, String>>,
+    },
+}
+
+/// Commands that open a native file dialog on the UI thread. Over the
+/// control channel they would block the UI thread until a human answered
+/// it, and every later request would time out; they refuse with
+/// [`dialog_refusal`] instead (R-AGENT-1).
+pub const DIALOG_COMMANDS: &[&str] = &[
+    "file.open_mesh",
+    "file.open_project",
+    "file.save_project_as",
+];
+
+/// The wire error for a [`DIALOG_COMMANDS`] id: names the path-taking
+/// method to use instead.
+pub fn dialog_refusal(id: &str) -> String {
+    let instead = match id {
+        "file.open_mesh" => "mesh.load {path}",
+        "file.open_project" => "project.open {path}",
+        _ => "a path-taking method",
+    };
+    format!("command opens a native dialog (blocked over control): {id}; use {instead}")
 }
 
 /// A running control listener. Dropping it does NOT stop the thread (the
@@ -275,11 +310,48 @@ fn handle_conn(
                     }
                 }
             }
+            "mesh.load" | "project.open" => {
+                let path = req
+                    .pointer("/params/path")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from);
+                let Some(path) = path else {
+                    let _ = control::write_json_line(
+                        &mut writer,
+                        &json!({"id": id, "ok": false, "error": "missing params.path"}),
+                    );
+                    continue;
+                };
+                let mesh = method == "mesh.load";
+                match forward_ui(requests, repaint, |reply| {
+                    if mesh {
+                        ControlRequest::LoadMesh { path, reply }
+                    } else {
+                        ControlRequest::OpenProject { path, reply }
+                    }
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = control::write_json_line(
+                            &mut writer,
+                            &json!({"id": id, "ok": false, "error": e}),
+                        );
+                        continue;
+                    }
+                }
+            }
             "command.run" => {
                 let cmd_id = req
                     .pointer("/params/id")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                if let Some(cmd) = cmd_id.as_deref().filter(|c| DIALOG_COMMANDS.contains(c)) {
+                    let _ = control::write_json_line(
+                        &mut writer,
+                        &json!({"id": id, "ok": false, "error": dialog_refusal(cmd)}),
+                    );
+                    continue;
+                }
                 match cmd_id {
                     Some(cmd_id) => {
                         match forward_ui(requests, repaint, |reply| ControlRequest::RunCommand {
@@ -729,6 +801,12 @@ mod tests {
                     ControlRequest::RunCommand { id, reply } => {
                         let _ = reply.send(Ok(json!({"ran": id})));
                     }
+                    ControlRequest::LoadMesh { path, reply } => {
+                        let _ = reply.send(Ok(json!({"loaded": path.display().to_string()})));
+                    }
+                    ControlRequest::OpenProject { path, reply } => {
+                        let _ = reply.send(Ok(json!({"opened": path.display().to_string()})));
+                    }
                 }
             }
         });
@@ -743,8 +821,21 @@ mod tests {
                 json!({"id": 4, "method": "command.run", "params": {"id": "view.toggle_grid"}})
                     .to_string(),
                 json!({"id": 5, "method": "command.run"}).to_string(),
+                json!({"id": 6, "method": "command.run", "params": {"id": "file.open_mesh"}})
+                    .to_string(),
+                json!({"id": 7, "method": "mesh.load", "params": {"path": "/m/a.glb"}}).to_string(),
+                json!({"id": 8, "method": "mesh.load"}).to_string(),
+                json!({"id": 9, "method": "project.open", "params": {"path": "/p"}}).to_string(),
             ],
         );
+        // R-AGENT-1: a dialog command refuses instead of hanging the UI
+        // thread, and names the path-taking method.
+        assert_eq!(replies[6]["ok"], false);
+        assert!(replies[6]["error"].as_str().unwrap().contains("mesh.load"));
+        assert_eq!(replies[7]["ok"], true);
+        assert_eq!(replies[7]["result"]["loaded"], "/m/a.glb");
+        assert_eq!(replies[8]["error"], "missing params.path");
+        assert_eq!(replies[9]["result"]["opened"], "/p");
         assert_eq!(replies[1]["ok"], true);
         assert_eq!(replies[1]["result"]["inspected"], true);
         assert_eq!(replies[2]["ok"], true);

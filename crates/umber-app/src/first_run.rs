@@ -118,6 +118,9 @@ impl QuickSetup {
             .collapsible(false)
             .resizable(false)
             .min_width(320.0)
+            // R-ONBOARD-1: centred, so it never lands on the empty-state
+            // card's headline at egui's default top-left spot.
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.label(tr("setup.intro"));
@@ -217,7 +220,10 @@ impl QuickSetup {
                 ui.add_space(12.0);
 
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(tr("setup.finish")).clicked() {
+                    if ui
+                        .add(umber_gui::widgets::primary_button(&tr("setup.finish")))
+                        .clicked()
+                    {
                         finished = Some(FinishedSetup {
                             theme: self.theme,
                             nav: self.nav,

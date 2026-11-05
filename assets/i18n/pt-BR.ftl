@@ -188,6 +188,7 @@ texturesets =
     .size = Tamanho do alvo de pintura
     .resize-clears = Mudar o tamanho do conjunto selecionado limpa a tela dele e o histórico de traços, e redefine sua máscara rápida. Isso é intencional.
     .inherit = Herdar a resolução do documento
+    .inherit-short = Herdar
     .per-channel = Tamanhos por canal
     .channel-resize-clears = Redimensionar um canal limpa os tiles dele
     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
@@ -552,11 +553,12 @@ brush =
 ## Painel de camadas
 
 layers =
+    .duplicate = Duplicar camada
     .set-header = Conjunto de texturas: { $set }
-    .add-paint = ＋ Adicionar camada de pintura
-    .add-fill = ＋ Adicionar camada de preenchimento
+    .add-paint = + Adicionar camada de pintura
+    .add-fill = + Adicionar camada de preenchimento
     .masks-section = Máscaras
-    .mask-add = ＋ Máscara
+    .mask-add = + Máscara
     .mask-default-name = Máscara para { $layer }
     .mask-remove = Remover máscara
     .mask-done = Concluir
@@ -568,11 +570,11 @@ layers =
     .kind-folder = pasta
     .kind-material = material
     .kind-instance = instância
-    .instance-this = ⧉ Instância
+    .instance-this = ⊗ Instância
     .instance-of = instância de { $source }
     .instance-name = { $source } (instância)
     .instance-paint-hint = Pinte a origem, não a instância.
-    .add-material = ＋ Adicionar camada de material
+    .add-material = + Adicionar camada de material
     .default-material-name = Material { $n }
     .flatten = Achatar seleção
     .flatten-needs-two = Selecione duas ou mais camadas para achatar.
@@ -679,8 +681,8 @@ fill =
 history =
     .section-controls = Desfazer / refazer
     .section-log = Registro da sessão
-    .undo = ↶ Desfazer
-    .redo = ↷ Refazer
+    .undo = ↺ Desfazer
+    .redo = ↻ Refazer
     .journal = { $count ->
         [one] { $count } entrada no histórico
        *[other] { $count } entradas no histórico
@@ -715,8 +717,8 @@ history =
     .op-bake = Bake
     .op-export = Exportação
     .strokes = Traços de borrar / clonar / borracha
-    .undo-stroke = ↶ Desfazer traço
-    .redo-stroke = ↷ Refazer traço
+    .undo-stroke = ↺ Desfazer traço
+    .redo-stroke = ↻ Refazer traço
     .travel-note = Linhas de camada rebobinam camadas, linhas de traço rebobinam a pintura — cada uma por si.
 
 ## Seletor de tiles UDIM (Bakes + Exportação)
@@ -1009,6 +1011,7 @@ picker =
 ## The Assets panel's library browser (R-C1)
 
 assets =
+    .refresh = Atualizar a lista
     .search = Buscar
     .brushes = Pincéis
     .materials = Materiais inteligentes

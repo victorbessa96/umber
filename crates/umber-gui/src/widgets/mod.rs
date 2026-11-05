@@ -23,7 +23,9 @@ pub use context_rail::{
     ContextKind, ContextRail, ContextRailCtx, ContextRailOutcome, PropertyRows,
 };
 pub use curve::{Curve, CurveEdit, CurveError};
-pub use dialog_buttons::{dialog_buttons, platform_order, ButtonRole, DialogButton};
+pub use dialog_buttons::{
+    dialog_buttons, platform_order, primary_button, ButtonRole, DialogButton,
+};
 pub use notices::{Notice, NoticeLevel, Notices};
 pub use param_group::{ParamGroup, ParamGroupUi};
 pub use ramp::{Interpolation, Ramp, RampEdit, Stop};

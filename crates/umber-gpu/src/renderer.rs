@@ -871,6 +871,7 @@ impl GpuContext {
         let texture_display = crate::texture_display::TextureDisplay::new(
             &device,
             color_format,
+            depth_format,
             &display_lut_layout,
             identity_lut.clone(),
         );

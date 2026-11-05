@@ -29,27 +29,23 @@ pub const ALL_PANELS: [Panel; 11] = [
 /// view | right rail]. `UmberApp::new` and Window ▸ Reset Layout both
 /// build it from here, so a reset is exactly the first-launch layout.
 pub fn default_dock() -> DockState<Panel> {
-    // Root starts as the 2D view; the centre split below MOVES the 3D
-    // view into a left leaf (split_* adds tabs, it does not move them).
-    let mut dock = DockState::new(vec![Panel::UvView]);
+    // Painter's default (UI/UX pass U1-2, R-LAYOUT-2):
+    // [project column | 3D view | 2D UV view | Layers over Properties].
+    //
+    // egui_dock 0.21.1's `split_*` replaces the node at the index with a
+    // split and pushes the old content one level down, and the split's
+    // `fraction` is the FIRST (left/top) child's share. Splitting the
+    // root a second time therefore wraps the whole tree (the pre-U1 bug
+    // that put the project column between the 3D and 2D views), so each
+    // split below targets the leaf it divides, by the index the previous
+    // split returned: `[old, new]`, where `split_left`'s new leaf is the
+    // LEFT child. `default_dock_order_and_widths` pins the result.
+    let mut dock = DockState::new(vec![Panel::Viewport]);
     let tree = dock.main_surface_mut();
-    // Right rail: Properties on top, the workhorse panels tabbed below
-    // (Painter: properties upper right, layers/history lower right).
-    let [_, right] = tree.split_right(NodeIndex::root(), 0.24, vec![Panel::Properties]);
-    tree.split_below(
-        right,
-        0.62,
-        vec![
-            Panel::LayerStack,
-            Panel::History,
-            Panel::Graph,
-            Panel::Display,
-        ],
-    );
-    // Left rail: the project/asset panels.
-    tree.split_left(
+    // Project column (left, 19%) | everything else.
+    let [rest, _] = tree.split_left(
         NodeIndex::root(),
-        0.15,
+        0.19,
         vec![
             Panel::TextureSets,
             Panel::Assets,
@@ -57,10 +53,22 @@ pub fn default_dock() -> DockState<Panel> {
             Panel::Export,
         ],
     );
-    // The centre split: 3D viewport left (65%), 2D UV view right —
-    // Painter's default 3D/2D viewport mode. F2/F4 collapse it to one
+    // Centre (73% of the rest) | right column (Layers tab group).
+    let [centre, right] = tree.split_right(
+        rest,
+        0.73,
+        vec![
+            Panel::LayerStack,
+            Panel::History,
+            Panel::Graph,
+            Panel::Display,
+        ],
+    );
+    // Layers on top (45%), Properties below.
+    tree.split_below(right, 0.45, vec![Panel::Properties]);
+    // The centre: 3D view (62%) | 2D UV view. F2/F4 collapse it to one
     // view, which then fills the whole centre.
-    tree.split_left(NodeIndex::root(), 0.65, vec![Panel::Viewport]);
+    tree.split_right(centre, 0.62, vec![Panel::UvView]);
     dock
 }
 
@@ -228,6 +236,48 @@ mod tests {
     #[test]
     fn default_dock_holds_every_panel_once() {
         assert_eq!(docked(&default_dock()), ALL_PANELS.to_vec());
+    }
+
+    /// R-LAYOUT-2: at 1400 x 900 the Paint preset reads left to right as
+    /// project column | 3D view | 2D view | Layers over Properties, the 3D
+    /// view is the largest leaf, the 2D view is a usable view, and every
+    /// leaf already clears its floor without the per-frame clamp.
+    #[test]
+    fn default_dock_order_and_widths() {
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        let dock = default_dock();
+        let sizes = crate::dock_floor::leaf_sizes(&dock, area);
+        let order: Vec<Panel> = sizes.iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(
+            order,
+            vec![
+                Panel::TextureSets,
+                Panel::Viewport,
+                Panel::UvView,
+                Panel::LayerStack,
+                Panel::Properties,
+            ],
+            "{sizes:?}"
+        );
+        let w = |p: Panel| sizes.iter().find(|(x, _)| *x == p).unwrap().1;
+        let viewport = w(Panel::Viewport);
+        for (p, s) in &sizes {
+            assert!(
+                s.x >= p.min_size().x && s.y >= p.min_size().y,
+                "{p:?} {s:?}"
+            );
+            if *p != Panel::Viewport {
+                assert!(
+                    viewport.x * viewport.y > s.x * s.y,
+                    "{p:?} outsizes the 3D view"
+                );
+            }
+        }
+        let mut floored = dock.clone();
+        assert!(
+            !crate::dock_floor::apply_floors(&mut floored, area, Panel::min_size),
+            "the preset fits its floors at 1400 x 900 without clamping"
+        );
     }
 
     #[test]

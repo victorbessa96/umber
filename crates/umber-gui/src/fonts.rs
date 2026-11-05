@@ -169,6 +169,59 @@ pub fn numeric_font(size: f32) -> FontId {
 
 #[cfg(test)]
 mod tests {
+
+    /// R-GLYPH-3 (UI/UX pass U1-4): every character any shipped catalog
+    /// can print is covered by the installed font stack (Inter / JetBrains
+    /// Mono first, egui's bundled fallbacks behind). A miss renders tofu:
+    /// `＋`, `⧉` and `⟳` were in no bundled font, and `↶`/`↷` only in the
+    /// monospace fallback, so all five drew empty boxes in UI text.
+    #[test]
+    fn every_catalog_character_has_a_glyph() {
+        let Ok(bytes) = load_font_bytes() else {
+            return; // a tree without the TTFs (the font-assets contract)
+        };
+        // A bare epaint font set (no Context: no texture deltas to drain).
+        let mut fonts = egui::epaint::text::Fonts::new(
+            egui::epaint::text::TextOptions::default(),
+            build_font_definitions(bytes),
+        );
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/i18n");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("assets/i18n exists") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ftl") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("catalog reads");
+            let mut missing: Vec<char> = Vec::new();
+            {
+                let font = egui::FontId::proportional(13.0);
+                for line in text.lines() {
+                    let line = line.trim_start();
+                    if line.starts_with('#') {
+                        continue;
+                    }
+                    let value = match line.split_once('=') {
+                        Some((_, v)) => v,
+                        None => line,
+                    };
+                    for c in value.chars().filter(|c| !c.is_control()) {
+                        if !fonts.has_glyph(&font, c) && !missing.contains(&c) {
+                            missing.push(c);
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+            assert!(
+                missing.is_empty(),
+                "{}: no glyph for {missing:?}",
+                path.display()
+            );
+        }
+        assert!(checked > 1000, "the catalogs were read ({checked} chars)");
+    }
+
     use super::*;
 
     #[test]

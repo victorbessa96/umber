@@ -133,7 +133,7 @@ impl UvView {
             egui::pos2(rect.left(), rect.bottom() - FOOTER_H),
             egui::pos2(rect.right(), rect.bottom()),
         );
-        let canvas = egui::Rect::from_min_max(rect.min, footer.min);
+        let canvas = canvas_above_footer(rect);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
 
         // The tiles the mesh actually has (UDIM G6): single-tile meshes
@@ -792,6 +792,18 @@ fn mirror_offset_at(square: egui::Rect, axis: MirrorAxis, pos: egui::Pos2) -> f3
 /// The U/V axes over the UV square (g6-uv-view-parity's open item):
 /// the U axis (red) at V=0.5, the V axis (green) at U=0.5, with small
 /// labels at their positive ends. Screen V is up, so V=0.5 is the
+/// The UV canvas: the panel rect minus the footer strip along its
+/// bottom. Full width. (The 2026-10-19 footer split built it as
+/// `from_min_max(rect.min, footer.min)`; `footer.min.x` is the rect's
+/// LEFT edge, so the canvas had zero width and the whole 2D view drew
+/// nothing until UI/UX pass U1-8 caught it on a live screenshot.)
+fn canvas_above_footer(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), (rect.bottom() - FOOTER_H).max(rect.top())),
+    )
+}
+
 /// square's vertical middle.
 fn draw_uv_axes(painter: &egui::Painter, square: egui::Rect) {
     let u_stroke = Stroke::new(1.5, Color32::from_rgb(220, 80, 80));
@@ -989,6 +1001,22 @@ mod tests {
         assert_eq!(view.isolate, ChannelIsolate::All);
         assert!(view.inspect.is_none());
         assert!(view.inspect_readout.is_none());
+    }
+
+    #[test]
+    fn the_canvas_keeps_the_full_width_above_the_footer() {
+        let rect = egui::Rect::from_min_size(egui::pos2(531.0, 70.0), egui::vec2(202.0, 439.0));
+        let canvas = canvas_above_footer(rect);
+        assert_eq!(canvas.width(), rect.width(), "the canvas spans the panel");
+        assert_eq!(canvas.bottom(), rect.bottom() - FOOTER_H);
+        assert!(
+            canvas.width().min(canvas.height()) > 100.0,
+            "a usable UV square"
+        );
+        // A panel shorter than the footer degrades to an empty canvas,
+        // never an inverted rect.
+        let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 10.0));
+        assert!(canvas_above_footer(short).height() >= 0.0);
     }
 
     #[test]

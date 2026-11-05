@@ -87,8 +87,10 @@ pub const TOOL_ICONS: [&str; 10] = [
 ];
 
 /// Lucide ids of the top-strip family (file / edit / undo / redo / view /
-/// panel toggles).
-pub const PANEL_ICONS: [&str; 8] = [
+/// panel toggles) plus the Properties context rail's own glyphs
+/// (`layers`, `layout-grid`) and distinct view-toggle glyphs
+/// (`grid-3x3` grid, `box` wireframe, `sun` lit view; UI/UX pass U1-3).
+pub const PANEL_ICONS: [&str; 13] = [
     "file",
     "folder-open",
     "save",
@@ -97,6 +99,11 @@ pub const PANEL_ICONS: [&str; 8] = [
     "redo-2",
     "eye",
     "panel-left",
+    "layers",
+    "layout-grid",
+    "grid-3x3",
+    "box",
+    "sun",
 ];
 
 /// One icon's pixel rect inside the atlas.
@@ -543,6 +550,19 @@ pub fn assemble_baked_atlas(
     png_bytes: &[u8],
     file: &str,
 ) -> Result<IconAtlas, AtlasLoadError> {
+    let mut builder = AtlasBuilder::new();
+    push_baked_family(&mut builder, family, png_bytes, file)?;
+    Ok(builder.build(ctx, name))
+}
+
+/// Decode one family's PNG, check it against its manifest section, and
+/// push every cell (manifest order) into `builder`.
+fn push_baked_family(
+    builder: &mut AtlasBuilder,
+    family: &BakedFamily,
+    png_bytes: &[u8],
+    file: &str,
+) -> Result<(), AtlasLoadError> {
     let (w, h, rgba) = decode_atlas_png(png_bytes)?;
     if [w, h] != family.atlas {
         return Err(AtlasLoadError::DimensionMismatch {
@@ -551,7 +571,6 @@ pub fn assemble_baked_atlas(
             decoded: [w, h],
         });
     }
-    let mut builder = AtlasBuilder::new();
     for icon_name in &family.order {
         let rect = family
             .icons
@@ -576,7 +595,7 @@ pub fn assemble_baked_atlas(
             crop_cell(&rgba, w, *rect),
         );
     }
-    Ok(builder.build(ctx, name))
+    Ok(())
 }
 
 /// Load one baked family from `dir` (manifest + PNG) and upload it.
@@ -609,6 +628,47 @@ pub fn load_baked_atlas(
     hidpi: bool,
 ) -> Result<IconAtlas, AtlasLoadError> {
     load_baked_atlas_from(ctx, family, hidpi, &atlas_dir())
+}
+
+/// Load EVERY baked family from `dir` into ONE atlas (UI/UX pass U1-3).
+///
+/// The app hands one [`IconAtlas`] to every painter-drawn icon site, and
+/// those sites ask for ids from both families (the toolbar's file / undo
+/// / view glyphs are Panel ids beside the Tool row). Loading only the Tool
+/// family made every Panel id miss and draw the placeholder box. Cells are
+/// repacked at the largest family's edge; a smaller glyph sits in the
+/// cell's top-left corner and its rect keeps its own size, so `uv()` still
+/// crops exactly that glyph.
+pub fn load_baked_atlas_merged_from(
+    ctx: &egui::Context,
+    hidpi: bool,
+    dir: &Path,
+) -> Result<IconAtlas, AtlasLoadError> {
+    let manifest = load_baked_manifest_from(dir)?;
+    let mut builder = AtlasBuilder::new();
+    for family in [IconFamily::Tool, IconFamily::Panel] {
+        let file = atlas_file_name(family, hidpi);
+        let path = dir.join(file);
+        let bytes = std::fs::read(&path).map_err(|e| AtlasLoadError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        push_baked_family(&mut builder, manifest.section(family, hidpi), &bytes, file)?;
+    }
+    let name = if hidpi {
+        "umber-icons@2x"
+    } else {
+        "umber-icons"
+    };
+    Ok(builder.build(ctx, name))
+}
+
+/// [`load_baked_atlas_merged_from`] over [`atlas_dir`].
+pub fn load_baked_atlas_merged(
+    ctx: &egui::Context,
+    hidpi: bool,
+) -> Result<IconAtlas, AtlasLoadError> {
+    load_baked_atlas_merged_from(ctx, hidpi, &atlas_dir())
 }
 
 /// Load one baked family from the binary-embedded atlas (the
@@ -802,6 +862,23 @@ mod tests {
             writer.write_image_data(rgba).expect("pixels encode");
         }
         out
+    }
+
+    #[test]
+    fn merged_loader_keeps_each_family_glyph_at_its_own_size() {
+        let dir = atlas_dir();
+        if !dir.join(MANIFEST_FILE).exists() {
+            return;
+        }
+        let ctx = egui::Context::default();
+        let atlas = load_baked_atlas_merged_from(&ctx, false, &dir).expect("merged atlas");
+        let tool = atlas.rect(TOOL_ICONS[0]).expect("a tool glyph");
+        let panel = atlas.rect(PANEL_ICONS[0]).expect("a panel glyph");
+        assert_eq!([tool.w, tool.h], [20, 20]);
+        assert_eq!([panel.w, panel.h], [16, 16]);
+        for name in TOOL_ICONS.iter().chain(PANEL_ICONS.iter()) {
+            assert!(atlas.contains(name), "{name}");
+        }
     }
 
     #[test]
@@ -1059,9 +1136,12 @@ mod tests {
         // change — update them DELIBERATELY when the family grows again.
         assert_eq!(manifest.tool.atlas, [80, 60]);
         assert_eq!(manifest.tool2x.atlas, [160, 120]);
-        assert_eq!(manifest.panel.atlas, [48, 48]);
-        assert_eq!(manifest.panel2x.atlas, [96, 96]);
+        // UI/UX pass U1-3 grew the panel family 8 -> 13 (rail + view
+        // glyphs): pack_grid(13, 16) = 4 cols x 4 rows = 64x64.
+        assert_eq!(manifest.panel.atlas, [64, 64]);
+        assert_eq!(manifest.panel2x.atlas, [128, 128]);
         assert_eq!(manifest.tool.order.len(), 10, "the tool family census");
+        assert_eq!(manifest.panel.order.len(), 13, "the panel family census");
         assert!(manifest.missing.is_empty());
     }
 

@@ -126,6 +126,7 @@ mod control;
 mod crash;
 mod display_keys;
 mod display_panel;
+mod dock_floor;
 mod document;
 mod empty_state;
 mod env;
@@ -352,6 +353,20 @@ pub enum Panel {
     Export,
     Graph,
     Display,
+}
+
+impl Panel {
+    /// The smallest size the panel stays readable at (R-LAYOUT-1,
+    /// `dock_floor`): the 3D view needs room to navigate, the 2D view a
+    /// usable square, every side panel one readable column of rows.
+    pub fn min_size(&self) -> egui::Vec2 {
+        match self {
+            Panel::Viewport => egui::vec2(360.0, 240.0),
+            Panel::UvView => egui::vec2(240.0, 200.0),
+            Panel::Graph => egui::vec2(260.0, 160.0),
+            _ => egui::vec2(260.0, 140.0),
+        }
+    }
 }
 
 /// Implements the egui_dock tab interface. Built fresh each frame, borrowing
@@ -2089,17 +2104,16 @@ impl UmberApp {
         // input BEFORE app creation, wgpu_integration.rs:246-252). Any
         // load failure keeps the empty atlas: every lookup misses cleanly
         // and callers keep their text placeholders (icons.rs' contract) —
-        // a missing atlas is never a startup error. Only the Tool family
-        // has consumers today (the toolbar's ToolRow); the Panel family's
-        // consumers arrive with the panel-icon wave, and its loader call
-        // lands with them.
+        // a missing atlas is never a startup error.
         let hidpi = cc.egui_ctx.input(|input| input.pixels_per_point) >= 1.75;
+        // BOTH families in one atlas (UI/UX pass U1-3): the toolbar paints
+        // Panel ids (file / undo / view glyphs) beside the Tool row, and
+        // the Properties rail its own Panel ids, all through this atlas.
         let icons =
-            umber_gui::icons::load_baked_atlas(&cc.egui_ctx, umber_gui::IconFamily::Tool, hidpi)
-                .unwrap_or_else(|err| {
-                    log::warn!("icon atlas unavailable ({err}); falling back to empty");
-                    umber_gui::IconAtlas::empty()
-                });
+            umber_gui::icons::load_baked_atlas_merged(&cc.egui_ctx, hidpi).unwrap_or_else(|err| {
+                log::warn!("icon atlas unavailable ({err}); falling back to empty");
+                umber_gui::IconAtlas::empty()
+            });
 
         Ok(Self {
             state: AppState {
@@ -2523,6 +2537,33 @@ impl UmberApp {
                         .map_err(|e| e.to_string());
                     let _ = reply.send(result);
                 }
+                control::ControlRequest::LoadMesh { path, reply } => {
+                    let result = if path.is_file() {
+                        self.load_mesh_path(path.clone());
+                        match &self.state.mesh_path {
+                            Some(loaded) if *loaded == path => Ok(serde_json::json!({
+                                "loaded": path.display().to_string(),
+                                "vertices": self.state.mesh.as_ref().map(|m| m.vertex_count()),
+                            })),
+                            _ => Err(format!(
+                                "mesh failed to load: {} (see the log)",
+                                path.display()
+                            )),
+                        }
+                    } else {
+                        Err(format!("no such file: {}", path.display()))
+                    };
+                    let _ = reply.send(result);
+                }
+                control::ControlRequest::OpenProject { path, reply } => {
+                    let result = if path.is_dir() {
+                        self.open_project_at(path.clone());
+                        Ok(serde_json::json!({ "opened": path.display().to_string() }))
+                    } else {
+                        Err(format!("no such folder: {}", path.display()))
+                    };
+                    let _ = reply.send(result);
+                }
             }
         }
     }
@@ -2875,7 +2916,17 @@ impl ChannelSizeChoice {
         }
     }
 
-    /// The combo's selected text for this state.
+    /// The combo's selected text (R-COPY-2): "Inherit" instead of the
+    /// full "Inherit document resolution", which no side panel fits; the
+    /// open list keeps the long form.
+    fn short_label(self) -> String {
+        match self {
+            Self::Inherit => tr("texturesets.inherit-short"),
+            other => other.label(),
+        }
+    }
+
+    /// The combo's list text for this state.
     fn label(self) -> String {
         match self {
             Self::Inherit => tr("texturesets.inherit"),
@@ -3034,7 +3085,12 @@ fn texture_sets_panel_ui(
     ui.horizontal(|ui| {
         ui.label(tr("texturesets.size"));
         size_presets::size_combo(ui, "", &mut size);
-    });
+    })
+    // R-COPY-1 (UI/UX pass U1-5): the destructive-resize note rides the
+    // control that triggers it (and the confirm below), not an always-on
+    // paragraph.
+    .response
+    .on_hover_text(tr("texturesets.resize-clears"));
     // A resize clears the set's canvas and the stroke undo history (Painter
     // B4 warns that a resolution change triggers long recomputation). The
     // combo pick only ARMS it; the change runs on an explicit confirm, so
@@ -3078,7 +3134,6 @@ fn texture_sets_panel_ui(
             });
         }
     }
-    ui.label(tr("texturesets.resize-clears"));
     // Per-channel rows for the SELECTED set: the document's channels plus
     // any materialized-but-unlisted one (an override outliving its import
     // still edits — dropping it from the panel would strand it).
@@ -3095,7 +3150,8 @@ fn texture_sets_panel_ui(
     if rows.is_empty() {
         return;
     }
-    ui.label(tr("texturesets.per-channel"));
+    ui.label(tr("texturesets.per-channel"))
+        .on_hover_text(tr("texturesets.channel-resize-clears"));
     for channel in &rows {
         let current = paint.channel_override(&active, channel);
         let initial = ChannelSizeChoice::from_override(current);
@@ -3103,7 +3159,7 @@ fn texture_sets_panel_ui(
         ui.horizontal(|ui| {
             ui.label(channel.as_str());
             egui::ComboBox::from_id_salt(format!("channel-size:{active}/{channel}"))
-                .selected_text(picked.label())
+                .selected_text(picked.short_label())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut picked,
@@ -3118,7 +3174,9 @@ fn texture_sets_panel_ui(
                         );
                     }
                 });
-        });
+        })
+        .response
+        .on_hover_text(tr("texturesets.channel-resize-clears"));
         if picked != initial {
             match picked {
                 ChannelSizeChoice::Inherit => paint.clear_channel_size(&active, channel),
@@ -3131,7 +3189,6 @@ fn texture_sets_panel_ui(
             }
         }
     }
-    ui.label(tr("texturesets.channel-resize-clears"));
 }
 
 /// The catalog keys of [`texture_sets_panel_ui`]'s labelled rows, in draw
@@ -4818,6 +4875,14 @@ impl eframe::App for UmberApp {
                     hdr_mode: &mut self.hdr_mode,
                     stylus_pressure,
                 };
+                // R-LAYOUT-1: no leaf narrower than its panel's floor while
+                // the window can hold them (egui_dock lays splits out from
+                // fractions alone). A fitting layout is left untouched.
+                dock_floor::apply_floors(
+                    &mut self.dock,
+                    ui.available_rect_before_wrap(),
+                    Panel::min_size,
+                );
                 DockArea::new(&mut self.dock)
                     .style(dock_style.clone())
                     .show_inside(ui, &mut viewer);
@@ -5512,9 +5577,16 @@ fn main() -> eframe::Result<()> {
     // with an interface; the channel is loopback-only, ever.
     let mut control_port: Option<u16> = None;
     let mut bridge_port: Option<u16> = None;
+    // `umber <mesh>` (R-AGENT-1): a positional mesh path opens at startup,
+    // the way every DCC opens a file from the shell or a file manager.
+    let mut open_mesh: Option<PathBuf> = None;
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
+            if !a.starts_with("--") && open_mesh.is_none() {
+                open_mesh = Some(PathBuf::from(a));
+                continue;
+            }
             if a == "--control" || a == "--bridge" {
                 let flag = a;
                 match args.next().as_deref() {
@@ -5623,6 +5695,17 @@ fn main() -> eframe::Result<()> {
                         }
                     }
                     app.load_default_env();
+                    if let Some(path) = open_mesh {
+                        if empty_state::is_mesh_file(&path) && path.is_file() {
+                            app.load_mesh_path(path);
+                        } else {
+                            eprintln!(
+                                "umber: {} is not a mesh file this build reads ({})",
+                                path.display(),
+                                empty_state::formats_line()
+                            );
+                        }
+                    }
                     Ok(Box::new(app) as Box<dyn eframe::App>)
                 }
                 Err(err) => Err(format!("{err:#}").into()),

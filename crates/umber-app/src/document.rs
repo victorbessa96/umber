@@ -19,6 +19,9 @@ use crate::history_panel::{HistoryKind, SessionHistory};
 use crate::i18n::{tr, tr_args};
 use crate::paint_state::{PaintState, PlaneOwner};
 
+/// The layer row's duplicate button label (a glyph Inter carries).
+pub const DUPLICATE_GLYPH: &str = "⊕";
+
 /// The open document: layer stack + undo history + autosave journal.
 ///
 /// Wave 2 scope: one texture-set layer stack; multi-set documents and
@@ -672,7 +675,7 @@ fn topmost_paintable(stack: &LayerStack) -> Option<(u64, usize)> {
 /// ([`LayerStack::check_paintable`](umber_core::LayerStack::check_paintable) —
 /// an instance row exists exactly when painting it is refused), and the
 /// row carries the "paint the source" hint. Every paintable layer offers
-/// a ⧉ button that instances it on top (undoable, through the journal).
+/// a duplicate (`⊕`) button that instances it on top (undoable, through the journal).
 ///
 /// Selection (per-layer-pool design §2.2): every row's name is a
 /// `selectable_label` against `active`, and the Base pseudo-row
@@ -753,7 +756,7 @@ pub fn layers_ui(
             }
         }
         if ui
-            .button(format!("＋ {}", tr("history.op-add-folder")))
+            .button(format!("+ {}", tr("history.op-add-folder")))
             .clicked()
         {
             let n = doc.layers().len() + 1;
@@ -816,7 +819,7 @@ pub fn layers_ui(
                 for (name, mask) in list_smart_masks(&smart_dirs()) {
                     ui.horizontal(|ui| {
                         ui.label(format!("{name} ▸ .umbermask"));
-                        if ui.button("＋").clicked() {
+                        if ui.button("+").clicked() {
                             doc.run(LayerCommand::attach_mask(target, name.clone()));
                             outcome.smart_mask_applied = Some((target, mask));
                         }
@@ -977,10 +980,13 @@ pub fn layers_ui(
                     }
                     // Duplicate (C2-8): a same-kind copy with the row's
                     // properties, added through the undoable commands.
-                    // No catalog key yet for "Duplicate" (the catalogs sit
-                    // under a sibling lock): the glyph alone, no tooltip
-                    // rather than a wrong one.
-                    if ui.small_button("⧉").clicked() {
+                    // `⊕` is in Inter (the old `⧉` was in no bundled font
+                    // and drew tofu; UI/UX pass U1-4).
+                    if ui
+                        .small_button(DUPLICATE_GLYPH)
+                        .on_hover_text(tr("layers.duplicate"))
+                        .clicked()
+                    {
                         duplicate_id = Some(layer.id);
                     }
                     // Move: the panel lists top-first, so "up" raises the
@@ -1495,7 +1501,10 @@ pub fn smart_shelf_ui(
     // list in egui memory per frame-group, refreshed by the user.
     let cache_id = egui::Id::new("smart-shelf-cache");
     let mut names: Option<Vec<String>> = ui.ctx().data(|d| d.get_temp(cache_id));
-    let refresh = ui.small_button("⟳").clicked();
+    let refresh = ui
+        .small_button("↻")
+        .on_hover_text(tr("assets.refresh"))
+        .clicked();
     if names.is_none() || refresh {
         let list: Vec<String> = list_smart_materials(&smart_dirs())
             .into_iter()
@@ -1508,7 +1517,7 @@ pub fn smart_shelf_ui(
     for name in names.unwrap_or_default() {
         ui.horizontal(|ui| {
             ui.label(&name);
-            if ui.button("＋").clicked() {
+            if ui.button("+").clicked() {
                 if let Some((_, material)) = list_smart_materials(&smart_dirs())
                     .into_iter()
                     .find(|(n, _)| *n == name)
@@ -2052,7 +2061,7 @@ mod tests {
         harness.run();
         let before = harness.state().doc.history.len();
         harness
-            .get_by_label(&format!("＋ {}", tr("history.op-add-folder")))
+            .get_by_label(&format!("+ {}", tr("history.op-add-folder")))
             .click();
         harness.run();
         let names: Vec<String> = harness
