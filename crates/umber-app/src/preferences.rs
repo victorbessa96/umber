@@ -28,8 +28,11 @@
 //! The **Keymap** section edits [`Preferences::keymap_overrides`], an
 //! [`actions::Overrides`] delta over the default `actions::BINDINGS`
 //! table (the override model is documented in `actions.rs`). It persists
-//! as one `keymap=Action:spec,spec;Action:spec` line (empty = none), and
-//! `main.rs` installs it with `actions::set_overrides` at startup and on
+//! as two lines: the id-keyed v2 JSON `keymap_v2=` line
+//! ([`actions::bindings_v2`], read first on load) and the legacy
+//! name-keyed `keymap=Action:spec,spec;Action:spec` line (empty = none;
+//! older builds and the clipboard copy/paste read only it, so both are
+//! written), and `main.rs` installs it with `actions::set_overrides` at startup and on
 //! every change, so menus, tooltips, status hints, the Help ▸ Keyboard
 //! window and the shortcut poll all follow it.
 //!
@@ -49,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 use fluent::FluentValue;
 
-use crate::actions::{self, Binding, Capture, KeymapPreset, Overrides};
+use crate::actions::{self, bindings_v2, Binding, Capture, KeymapPreset, Overrides};
 use crate::i18n::{tr, tr_args};
 use crate::navigation::NavPreset;
 use crate::toolbar::ShellAction;
@@ -135,8 +138,9 @@ pub struct Preferences {
     pub nav: NavPreset,
     /// Wheel zoom inverted (wheel up zooms out).
     pub nav_wheel_invert: bool,
-    /// The user's keymap delta over the default bindings (the `keymap=`
-    /// line; see the module docs).
+    /// The user's keymap delta over the default bindings (the `keymap_v2=`
+    /// id-keyed v2 line, with the legacy `keymap=` line as fallback; see
+    /// the module docs).
     pub keymap_overrides: Overrides,
     /// The per-property shortcut bindings (the `prop_keymap=` line; the
     /// g4-property-context-menu "Assign Shortcut" surface).
@@ -172,8 +176,16 @@ fn nav_name(n: NavPreset) -> &'static str {
 impl Preferences {
     /// The `key=value` text (stable key order).
     pub fn serialize(&self) -> String {
+        // The keymap delta is written twice: the id-keyed v2 JSON
+        // `keymap_v2=` line (what load reads first) and the legacy
+        // name-keyed `keymap=` line — older builds and the clipboard
+        // copy/paste read only the latter, so dropping it would lose
+        // the delta for them; writing both costs one line.
+        let keymap_v2 =
+            serde_json::to_string(&bindings_v2::serialize_overrides_v2(&self.keymap_overrides))
+                .unwrap_or_else(|_| "{}".to_string());
         format!(
-            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nprop_keymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
             self.ui_scale_default,
@@ -184,6 +196,7 @@ impl Preferences {
             nav_name(self.nav),
             self.nav_wheel_invert,
             self.keymap_overrides.serialize(),
+            keymap_v2,
             self.prop_keymap.serialize()
         )
     }
@@ -192,6 +205,12 @@ impl Preferences {
     /// a bad value keeps that field's default, the scale is clamped.
     pub fn parse(text: &str) -> Self {
         let mut p = Self::default();
+        // The two keymap lines are resolved after the loop: a `keymap_v2=`
+        // line that parses (v2 JSON via bindings_v2) wins; a corrupt or
+        // unknown-id v2 line falls back to the legacy `keymap=` line —
+        // never a panic, never an error surfaced.
+        let mut keymap_v2_line: Option<&str> = None;
+        let mut keymap_v1_line: Option<&str> = None;
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else {
                 continue;
@@ -224,11 +243,20 @@ impl Preferences {
                 "key_hints" => p.key_hints = bool_of(v).unwrap_or(p.key_hints),
                 "nav" => p.nav = NavPreset::from_name(v).unwrap_or(p.nav),
                 "nav_wheel_invert" => p.nav_wheel_invert = bool_of(v).unwrap_or(p.nav_wheel_invert),
-                "keymap" => p.keymap_overrides = Overrides::parse(v),
+                "keymap" => keymap_v1_line = Some(v),
+                "keymap_v2" => keymap_v2_line = Some(v),
                 "prop_keymap" => p.prop_keymap = actions::PropKeymap::parse(v),
                 _ => {}
             }
         }
+        let v1_overrides = || keymap_v1_line.map(Overrides::parse).unwrap_or_default();
+        p.keymap_overrides = match keymap_v2_line {
+            Some(line) => serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|doc| bindings_v2::parse_overrides(&doc).ok())
+                .unwrap_or_else(v1_overrides),
+            None => v1_overrides(),
+        };
         p
     }
 
@@ -1036,6 +1064,154 @@ mod tests {
         assert_eq!(
             junk.keymap_overrides.get(ShellAction::Undo),
             Some(&[b(Key::U, Chord::Cmd)][..])
+        );
+    }
+
+    // --- keymap_v2= persistence (row 154 w4: v2 save + v1 fallback) ---
+
+    #[test]
+    fn keymap_v2_save_load_round_trips_exactly() {
+        let mut o = Overrides::default();
+        o.set(
+            ShellAction::Undo,
+            vec![b(Key::U, Chord::Cmd), b(Key::F9, Chord::Bare)],
+        );
+        o.set(ShellAction::ToggleGrid, Vec::new()); // unbound
+        let p = Preferences {
+            keymap_overrides: o.clone(),
+            ..Preferences::default()
+        };
+        let text = p.serialize();
+        // Both lines are written: the id-keyed v2 JSON and the legacy
+        // name-keyed v1 line (older builds / clipboard read only v1).
+        let v2_line = text
+            .lines()
+            .find(|l| l.starts_with("keymap_v2="))
+            .expect("keymap_v2= line present");
+        let v2_json: serde_json::Value =
+            serde_json::from_str(v2_line.strip_prefix("keymap_v2=").unwrap()).unwrap();
+        assert_eq!(v2_json["version"], 2);
+        assert!(v2_json["bindings"].get("edit.undo").is_some(), "{v2_line}");
+        assert!(
+            v2_json["bindings"].get("view.toggle_grid").is_some(),
+            "{v2_line}"
+        );
+        assert!(
+            text.contains("\nkeymap=Undo:ctrl+u,f9;ToggleGrid:\n"),
+            "{text}"
+        );
+        // Load: the v2 line wins and preserves the delta exactly.
+        let back = Preferences::parse(&text);
+        assert_eq!(back, p);
+        assert_eq!(back.keymap_overrides, o);
+        assert_eq!(back.serialize(), text, "exact serialize round trip");
+        // Through a real file too (save -> load).
+        let dir =
+            std::env::temp_dir().join(format!("umber-prefs-v2-{}-{}", std::process::id(), line!()));
+        let path = dir.join(PREFS_FILE);
+        p.save(Some(&path));
+        assert_eq!(Preferences::load(Some(&path)), p);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_v1_only_file_loads_unchanged_via_the_keymap_fallback() {
+        // A pre-v2 prefs file (no keymap_v2= line): the legacy line is
+        // what loads, untouched.
+        let text = concat!(
+            "ui_scale=1.5\n",
+            "keymap=Undo:ctrl+u;ToggleGrid:shift+g,f5;InvertMask:\n",
+            "tooltips=false\n"
+        );
+        let p = Preferences::parse(text);
+        assert_eq!(p.ui_scale, 1.5);
+        assert!(!p.tooltips);
+        assert_eq!(
+            p.keymap_overrides.get(ShellAction::Undo),
+            Some(&[b(Key::U, Chord::Cmd)][..])
+        );
+        assert_eq!(
+            p.keymap_overrides.get(ShellAction::ToggleGrid),
+            Some(&[b(Key::G, Chord::Shift), b(Key::F5, Chord::Bare)][..])
+        );
+        assert!(
+            matches!(p.keymap_overrides.get(ShellAction::InvertMask), Some(l) if l.is_empty()),
+            "unbound stays unbound"
+        );
+        // Re-saving writes both lines and loads back to the same prefs.
+        assert!(p.serialize().contains("\nkeymap_v2="));
+        assert_eq!(Preferences::parse(&p.serialize()), p);
+    }
+
+    #[test]
+    fn a_corrupt_keymap_v2_line_falls_back_to_v1_never_panics() {
+        let good_v1 = "Undo:ctrl+u;ToggleGrid:shift+g";
+        for bad_v2 in [
+            "not json at all",
+            "{\"version\":3,\"bindings\":{}}", // future version
+            "{\"bindings\":{\"no.such.command\":[]}}", // unknown id
+            "42",
+            "{\"bindings\":{\"edit.undo\":{\"id\":\"edit.redo\",\"binding\":[]}}}",
+            "{\"bindings\":{\"edit.undo\":{\"binding\":[{\"key\":\"z\",\"chord\":\"alt\"}]}}}",
+        ] {
+            let text = format!("keymap={good_v1}\nkeymap_v2={bad_v2}\n");
+            let p = Preferences::parse(&text);
+            assert_eq!(
+                p.keymap_overrides.get(ShellAction::Undo),
+                Some(&[b(Key::U, Chord::Cmd)][..]),
+                "v1 fallback for keymap_v2={bad_v2}"
+            );
+            assert_eq!(
+                p.keymap_overrides.get(ShellAction::ToggleGrid),
+                Some(&[b(Key::G, Chord::Shift)][..]),
+                "v1 fallback for keymap_v2={bad_v2}"
+            );
+        }
+        // A corrupt v2 line with NO v1 line loads the defaults, no panic.
+        let p = Preferences::parse("keymap_v2={oops\nui_scale=1.5\n");
+        assert!(p.keymap_overrides.is_empty());
+        assert_eq!(p.ui_scale, 1.5, "the rest of the file still parses");
+    }
+
+    #[test]
+    fn v2_with_an_unknown_action_id_is_skipped_without_error() {
+        // parse_overrides is strict per record (a newer build's record
+        // must not vanish silently), so a v2 line naming an unknown id
+        // is rejected as a whole; at the persistence layer that means
+        // the record is skipped and the load still succeeds — via the
+        // v1 line when present, else the defaults. Never a panic.
+        let text =
+            "keymap_v2={\"version\":2,\"bindings\":{\"future.command\":[{\"key\":\"z\",\"chord\":\"cmd\"}]}}\n";
+        let p = Preferences::parse(text);
+        assert!(
+            p.keymap_overrides.is_empty(),
+            "unknown id skipped, no error"
+        );
+        // With a valid v1 line beside it, the v1 delta is what loads.
+        let text = concat!(
+            "keymap=Undo:ctrl+u\n",
+            "keymap_v2={\"version\":2,\"bindings\":{\"future.command\":[]}}\n"
+        );
+        let p = Preferences::parse(text);
+        assert_eq!(
+            p.keymap_overrides.get(ShellAction::Undo),
+            Some(&[b(Key::U, Chord::Cmd)][..])
+        );
+    }
+
+    #[test]
+    fn a_valid_v2_line_wins_over_a_different_v1_line() {
+        // Precedence pin: when both lines are present and v2 parses, v2
+        // is authoritative (the v1 line is only the fallback).
+        let text = concat!(
+            "keymap=Undo:ctrl+u\n",
+            "keymap_v2={\"version\":2,\"bindings\":{\"edit.undo\":{\"id\":\"edit.undo\",\"binding\":[{\"key\":\"u\",\"chord\":\"cmdshift\"}]}}}\n"
+        );
+        let p = Preferences::parse(text);
+        assert_eq!(
+            p.keymap_overrides.get(ShellAction::Undo),
+            Some(&[b(Key::U, Chord::CmdShift)][..]),
+            "v2 wins over v1"
         );
     }
 

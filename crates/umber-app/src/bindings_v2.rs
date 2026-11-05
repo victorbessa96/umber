@@ -1,8 +1,9 @@
 //! Persisted keymap bindings, format v2 — queue row 154, wave 4 prep
 //! (`docs/loop/briefs/2026-11-02-commandspec-unification-design.md`,
 //! migration wave 4: "the persisted format must migrate or be
-//! namespaced v2"). Self-contained and NOT yet wired into
-//! `preferences.rs`; this module is the format plus the v1 bridge.
+//! namespaced v2"). Wired into `preferences.rs` (row 154 w4): saved as
+//! the `keymap_v2=` line, read first on load with the v1 `keymap=` line
+//! as fallback; this module is the format plus the v1 bridge.
 //!
 //! # v1 (what `preferences.rs` persists today)
 //!
@@ -48,8 +49,8 @@
 //!   defaults is dropped on parse, so the delta stays minimal and
 //!   serialize/parse round-trips exactly.
 
-// Nothing outside the tests consumes this module yet (wiring into
-// preferences.rs is a later wave), so the bin target would flag it dead.
+// Wired into preferences.rs (row 154 w4); `name_to_id` is still only
+// consumed by the tests, so the bin target would flag it dead.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use serde_json::{json, Value};

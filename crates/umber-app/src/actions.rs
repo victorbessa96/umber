@@ -85,9 +85,9 @@ use egui::{Key, KeyboardShortcut, ModifierNames, Modifiers};
 use crate::toolbar::{ShellAction, ToolKind};
 
 /// Persisted bindings, format v2 (id-keyed records with the v1 name-keyed
-/// fallback) — queue row 154 wave 4 prep. Declared here rather than in
-/// `lib.rs`/`main.rs` so this wave touches only `actions.rs` +
-/// `bindings_v2.rs`; not yet wired into `preferences.rs`.
+/// fallback) — queue row 154 wave 4. Declared here rather than in
+/// `lib.rs`/`main.rs` so the wave touches only `actions.rs` +
+/// `bindings_v2.rs`; wired into `preferences.rs` as the `keymap_v2=` line.
 #[path = "bindings_v2.rs"]
 pub mod bindings_v2;
 
