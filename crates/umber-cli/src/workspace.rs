@@ -4,26 +4,33 @@
 //! `crates/automation/src/workspace.rs` — MIT OR Apache-2.0, Copyright
 //! (c) 2026 ArtCraft Team and the TextureCraft contributors (see
 //! THIRD_PARTY.md "Absorbed source files"). Upstream confines with
-//! cap-std `Dir` handles; umber's loaders are path-based
-//! (`umber_mesh::load(path)`, `umber_core::load_from_dir`), so this
-//! port confines with std only: every EXISTING path component is fully
-//! canonicalized (symlinks resolved) before a prefix test against the
-//! canonicalized root, so `..`, absolute paths, drive prefixes, device
-//! names and symlink/junction escapes all fail. Writes canonicalize the
-//! parent and go through a create-new temp file + fsync + rename. The
-//! residual TOCTOU window between check and use is accepted: the
-//! surfaces are loopback-only and token-authenticated local tools, not
-//! a sandbox against a hostile local user (that is what the cap-std
-//! upgrade row is for).
+//! cap-std `Dir` handles; the 2026-11-01 port used std canonicalize +
+//! prefix checks with an accepted TOCTOU window. Queue row 155 restores
+//! the cap-std confinement: every filesystem touch below a root goes
+//! through a cap-std `Dir` handle, so resolution happens with
+//! openat-style semantics and a symlink that escapes the root is refused
+//! by the capability itself, not by a prefix test raced against the
+//! filesystem.
+//!
+//! The public API is unchanged: [`AuthorizedWorkspace::host_read_path`] /
+//! [`AuthorizedWorkspace::host_write_path`] still mint HOST paths, because
+//! umber's loaders are path-based (`umber_mesh::load(path)`,
+//! `umber_core::load_from_dir`). The host path is minted only after the
+//! cap-std handle has resolved the same relative path inside the sandbox;
+//! the residual window is the loader's own path-based open (the surfaces
+//! are loopback-only and token-authenticated local tools, not a sandbox
+//! against a hostile local user).
 //!
 //! Roots are trusted launch-time configuration (`--read-root`,
 //! `--write-root`); request paths are untrusted forward-slash relative
 //! paths. A missing authority fails closed: no root, no file access.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use cap_std::fs::{Dir, OpenOptions};
 use serde_json::Value;
 
 /// Largest file read through automation (the mesh importer's own limit still applies downstream).
@@ -33,9 +40,14 @@ pub const MAX_READ_BYTES: u64 = 512 << 20;
 /// Separate read and write root capabilities. A missing authority fails closed.
 #[derive(Clone, Debug, Default)]
 pub struct AuthorizedWorkspace {
-    /// Canonicalized roots (symlinks resolved once, at open).
-    read: Option<PathBuf>,
-    write: Option<PathBuf>,
+    /// The cap-std directory handles: all confined I/O goes through these.
+    read: Option<Arc<Dir>>,
+    write: Option<Arc<Dir>>,
+    /// Canonicalized host roots (symlinks resolved once, at open), used
+    /// only to mint host paths for the path-based loaders after the `Dir`
+    /// has resolved the same relative path inside the sandbox.
+    read_root: Option<PathBuf>,
+    write_root: Option<PathBuf>,
 }
 
 /// Which side of the workspace a path-carrying step touches.
@@ -47,17 +59,39 @@ pub enum Access {
 
 impl AuthorizedWorkspace {
     pub fn new(read_root: Option<&Path>, write_root: Option<&Path>) -> Result<Self> {
+        let read = open_root(read_root, "read")?;
+        let write = open_root(write_root, "write")?;
         Ok(Self {
-            read: open_root(read_root, "read")?,
-            write: open_root(write_root, "write")?,
+            read: read.as_ref().map(|(dir, _)| dir.clone()),
+            write: write.as_ref().map(|(dir, _)| dir.clone()),
+            read_root: read.map(|(_, root)| root),
+            write_root: write.map(|(_, root)| root),
         })
+    }
+
+    /// The cap-std handle + canonical host root for one side, or the
+    /// fail-closed "no root" error.
+    fn handle(&self, access: Access) -> Result<(&Arc<Dir>, &Path)> {
+        let (dir, root, what) = match access {
+            Access::Read => (self.read.as_ref(), self.read_root.as_ref(), "read"),
+            Access::Write => (self.write.as_ref(), self.write_root.as_ref(), "write"),
+        };
+        match (dir, root) {
+            (Some(d), Some(r)) => Ok((d, r)),
+            _ => Err(anyhow!(
+                "file access is not granted: no {what} root (start the server with --{what}-root <dir>)"
+            )),
+        }
     }
 
     /// Read one regular file below the read root.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
-        let target = self.confine(path, Access::Read)?;
-        let meta = std::fs::metadata(&target).map_err(|e| file_error("read", path, e))?;
+        let rel = relative_path(path)?;
+        let (dir, _) = self.handle(Access::Read)?;
+        let meta = dir
+            .metadata(&rel)
+            .map_err(|e| file_error("read", path, e))?;
         if !meta.is_file() {
             return Err(anyhow!("not a regular file: `{path}`"));
         }
@@ -68,7 +102,7 @@ impl AuthorizedWorkspace {
             ));
         }
         let mut bytes = Vec::new();
-        std::fs::File::open(&target)
+        dir.open(&rel)
             .map_err(|e| file_error("read", path, e))?
             .take(MAX_READ_BYTES)
             .read_to_end(&mut bytes)
@@ -77,26 +111,26 @@ impl AuthorizedWorkspace {
     }
 
     /// Create or replace one file below the write root: a temporary file beside the target,
-    /// synced and renamed over it. The parent directory must exist.
+    /// synced and renamed over it, all through the cap-std handle. The parent directory must exist.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        let target = self.confine(path, Access::Write)?;
-        let leaf = target
+        let rel = relative_path(path)?;
+        let (dir, _) = self.handle(Access::Write)?;
+        self.check_write(&rel, path, dir)?;
+        let leaf = rel
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let tmp = target.with_file_name(format!(".{leaf}.{}.tmp", std::process::id()));
-        let res = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
+        let tmp = rel.with_file_name(format!(".{leaf}.{}.tmp", std::process::id()));
+        let res = dir
+            .open_with(&tmp, OpenOptions::new().write(true).create_new(true))
             .and_then(|mut f| {
                 std::io::Write::write_all(&mut f, bytes)?;
                 f.sync_all()
             })
-            .and_then(|()| std::fs::rename(&tmp, &target));
+            .and_then(|()| dir.rename(&tmp, dir, &rel));
         if let Err(e) = res {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = dir.remove_file(&tmp);
             return Err(file_error("write", path, e));
         }
         Ok(())
@@ -106,42 +140,24 @@ impl AuthorizedWorkspace {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn create_dir_all(&self, path: &str) -> Result<()> {
         let rel = relative_path(path)?;
-        let Some(root) = self.write.as_ref() else {
-            return Err(anyhow!(
-                "file access is not granted: no write root (start the server with --write-root <dir>)"
-            ));
-        };
-        let root = root
-            .canonicalize()
-            .map_err(|e| file_error("create", path, e))?;
-        // Walk down one component at a time: every existing prefix is
-        // canonicalized so a symlink escape anywhere in the chain is caught
-        // before anything is created below it.
-        let mut cur = root.clone();
-        for comp in rel.components() {
-            let next = cur.join(comp.as_os_str());
-            if next.exists() {
-                let c = next
-                    .canonicalize()
-                    .map_err(|e| file_error("create", path, e))?;
-                if !c.starts_with(&root) {
-                    return Err(escape(path));
-                }
-                cur = c;
-            } else {
-                std::fs::create_dir(&next).map_err(|e| file_error("create", path, e))?;
-                cur = next;
-            }
-        }
-        Ok(())
+        let (dir, _) = self.handle(Access::Write)?;
+        // cap-std's create_dir_all resolves every existing component
+        // inside the sandbox, so a symlink escape anywhere in the chain
+        // fails here, at the capability, not at a later prefix test.
+        dir.create_dir_all(&rel)
+            .map_err(|e| file_error("create", path, e))
     }
 
     /// The entry names of one directory below the read root.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn list_dir(&self, path: &str) -> Result<Vec<String>> {
-        let target = self.confine(path, Access::Read)?;
+        let rel = relative_path(path)?;
+        let (dir, _) = self.handle(Access::Read)?;
         let mut names = Vec::new();
-        for entry in std::fs::read_dir(&target).map_err(|e| file_error("list", path, e))? {
+        for entry in dir
+            .read_dir(&rel)
+            .map_err(|e| file_error("list", path, e))?
+        {
             let entry = entry.map_err(|e| file_error("list", path, e))?;
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
@@ -200,64 +216,81 @@ impl AuthorizedWorkspace {
         Ok(())
     }
 
-    /// Resolve one untrusted path below the given root: validate the shape
-    /// ([`relative_path`]), then canonicalize and prefix-test.
+    /// Verify a write target stays inside the sandbox through the `Dir`
+    /// handle: the parent chain must resolve inside (cap-std errors on an
+    /// escaping symlink), and an existing leaf must resolve inside too.
+    fn check_write(&self, rel: &Path, raw: &str, dir: &Dir) -> Result<()> {
+        let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+        if !parent.as_os_str().is_empty() {
+            let cp = dir
+                .canonicalize(parent)
+                .map_err(|e| file_error("write", raw, e))?;
+            if escapes(&cp) {
+                return Err(escape(raw));
+            }
+        }
+        if dir.symlink_metadata(rel).is_ok() {
+            let c = dir
+                .canonicalize(rel)
+                .map_err(|e| file_error("write", raw, e))?;
+            if escapes(&c) {
+                return Err(escape(raw));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve one untrusted path below the given root and mint its
+    /// confined HOST path: validate the shape ([`relative_path`]), then
+    /// resolve through the cap-std `Dir` (openat-style; symlink escapes
+    /// are refused by the capability) and join onto the canonical root.
     fn confine(&self, raw: &str, access: Access) -> Result<PathBuf> {
         let rel = relative_path(raw)?;
-        let (root, what) = match access {
-            Access::Read => (self.read.as_ref(), "read"),
-            Access::Write => (self.write.as_ref(), "write"),
-        };
-        let Some(root) = root else {
-            return Err(anyhow!("file access is not granted: no {what} root (start the server with --{what}-root <dir>)"));
+        let (dir, root) = self.handle(access)?;
+        let what = match access {
+            Access::Read => "read",
+            Access::Write => "write",
         };
         match access {
             Access::Read => {
-                // Must exist: canonicalize resolves every component, symlinks included.
-                let c = root
-                    .join(&rel)
-                    .canonicalize()
+                // Must exist: the sandbox canonicalize resolves every
+                // component, symlinks included, and errors on escape.
+                let c = dir
+                    .canonicalize(&rel)
                     .map_err(|e| file_error(what, raw, e))?;
-                if !c.starts_with(root) {
+                if escapes(&c) {
                     return Err(escape(raw));
                 }
-                Ok(c)
+                // cap-std canonicalize returns a sandbox-RELATIVE path;
+                // the host path is the canonical root joined with it.
+                Ok(root.join(c))
             }
             Access::Write => {
                 // The leaf is created new; the parent chain must exist and stay inside.
-                let parent = rel.parent().unwrap_or_else(|| Path::new(""));
-                let canon_parent = if parent.as_os_str().is_empty() {
-                    root.clone()
-                } else {
-                    let cp = root
-                        .join(parent)
-                        .canonicalize()
-                        .map_err(|e| file_error(what, raw, e))?;
-                    if !cp.starts_with(root) {
-                        return Err(escape(raw));
-                    }
-                    cp
-                };
-                let leaf = rel
-                    .file_name()
-                    .ok_or_else(|| anyhow!("path rejected (no leaf): `{raw}`"))?;
-                let target = canon_parent.join(leaf);
-                // An existing target must itself resolve inside the root (not a symlink out).
-                if target.symlink_metadata().is_ok() {
-                    let c = target
-                        .canonicalize()
-                        .map_err(|e| file_error(what, raw, e))?;
-                    if !c.starts_with(root) {
-                        return Err(escape(raw));
-                    }
+                self.check_write(&rel, raw, dir)?;
+                if rel.file_name().is_none() {
+                    return Err(anyhow!("path rejected (no leaf): `{raw}`"));
                 }
-                Ok(target)
+                Ok(root.join(&rel))
             }
         }
     }
 }
 
-fn open_root(path: Option<&Path>, authority: &str) -> Result<Option<PathBuf>> {
+/// A sandbox-relative canonical path that nonetheless escaped (absolute
+/// or carrying `..`): cap-std already refused it; this is the belt-and-
+/// braces guard that keeps the typed escape error.
+fn escapes(canonical: &Path) -> bool {
+    canonical.is_absolute()
+        || canonical.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+}
+
+fn open_root(path: Option<&Path>, authority: &str) -> Result<Option<(Arc<Dir>, PathBuf)>> {
     let Some(path) = path else { return Ok(None) };
     if path.as_os_str().is_empty() {
         return Err(anyhow!("the automation {authority} root is empty"));
@@ -271,7 +304,12 @@ fn open_root(path: Option<&Path>, authority: &str) -> Result<Option<PathBuf>> {
             path.display()
         ));
     }
-    Ok(Some(c))
+    // The root itself is trusted launch-time configuration, so ambient
+    // open is correct here; everything BELOW the root goes through the
+    // returned confined handle.
+    let dir = Dir::open_ambient_dir(&c, cap_std::ambient_authority())
+        .map_err(|e| anyhow!("cannot open {authority} root `{}`: {e}", path.display()))?;
+    Ok(Some((Arc::new(dir), c)))
 }
 
 /// Validate an untrusted path before any I/O (shape check; confinement happens after).
@@ -401,9 +439,27 @@ mod tests {
         let (inside, outside, ws) = roots("symlink");
         std::fs::write(outside.join("secret.txt"), b"s").unwrap();
         std::os::unix::fs::symlink(&outside, inside.join("link")).unwrap();
+        // Row 155 pin: a symlink in the scratch workspace pointing outside
+        // is refused on EVERY surface — the cap-std handle refuses the
+        // escape at resolution time.
         assert!(ws.read("link/secret.txt").is_err());
         assert!(ws.write("link/new.txt", b"x").is_err());
+        assert!(ws.host_read_path("link/secret.txt").is_err());
+        assert!(ws.host_write_path("link/new.txt").is_err());
+        assert!(ws.list_dir("link").is_err());
+        assert!(ws.create_dir_all("link/deeper").is_err());
         assert!(!outside.join("new.txt").exists());
+        assert!(!outside.join("deeper").exists());
+        // A symlink that stays INSIDE the root still works (unchanged).
+        std::fs::write(inside.join("real.txt"), b"r").unwrap();
+        std::os::unix::fs::symlink("real.txt", inside.join("alias.txt")).unwrap();
+        assert_eq!(ws.read("alias.txt").unwrap(), b"r");
+        let host = ws.host_read_path("alias.txt").unwrap();
+        assert!(
+            host.starts_with(&*inside.canonicalize().unwrap()),
+            "{host:?}"
+        );
+        assert!(host.ends_with("real.txt"), "resolved inside: {host:?}");
     }
 
     #[test]
