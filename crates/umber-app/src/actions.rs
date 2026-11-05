@@ -84,6 +84,13 @@ use egui::{Key, KeyboardShortcut, ModifierNames, Modifiers};
 
 use crate::toolbar::{ShellAction, ToolKind};
 
+/// Persisted bindings, format v2 (id-keyed records with the v1 name-keyed
+/// fallback) — queue row 154 wave 4 prep. Declared here rather than in
+/// `lib.rs`/`main.rs` so this wave touches only `actions.rs` +
+/// `bindings_v2.rs`; not yet wired into `preferences.rs`.
+#[path = "bindings_v2.rs"]
+pub mod bindings_v2;
+
 /// The modifier shape a binding needs (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chord {
