@@ -108,3 +108,10 @@ params destructured). Menus iterate the table filtered by `menu` + `enabled`.
 - No app-side `--control` channel (row 153, separate) — though its
   `ui.inspect` tool should eventually read from `command.list`'s schema.
 - No GUI redesign; menus keep their current layout.
+
+## Landing log (2026-11-05)
+
+- w1 `7ee9d8a`: dispatch match extracted verbatim into `commands.rs::run_command`; `ShellAction::id()`/`from_id()` added (claw-built, dragon cross-review + battery).
+- w2a `b79710d`: `run_command_id` + `CommandError` (UnknownCommand/NeedsParams/Disabled) + `COMMAND_IDS`; round-trip unit tests.
+- w2c `2532dc2`: `command.list` / `command.run` on the app's `--control` channel (UI-thread queue; drain collects before dispatch), `commands::command_list_json`, `scripts/control_call.py` client. The GUI is now agent-drivable by id over loopback.
+- Remaining for w2b: `actions.rs::resolve` returns ids (Binding rows reference command ids), `cmd.*` label keys in BOTH ftl catalogs (parity gate), persisted-shortcut migration story, then agent.rs/mcp.rs `command_list`/`command_run` adapters over the bridge.
