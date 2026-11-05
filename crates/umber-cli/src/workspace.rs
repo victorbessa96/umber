@@ -27,6 +27,7 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 /// Largest file read through automation (the mesh importer's own limit still applies downstream).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_READ_BYTES: u64 = 512 << 20;
 
 /// Separate read and write root capabilities. A missing authority fails closed.
@@ -53,6 +54,7 @@ impl AuthorizedWorkspace {
     }
 
     /// Read one regular file below the read root.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn read(&self, path: &str) -> Result<Vec<u8>> {
         let target = self.confine(path, Access::Read)?;
         let meta = std::fs::metadata(&target).map_err(|e| file_error("read", path, e))?;
@@ -76,6 +78,7 @@ impl AuthorizedWorkspace {
 
     /// Create or replace one file below the write root: a temporary file beside the target,
     /// synced and renamed over it. The parent directory must exist.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let target = self.confine(path, Access::Write)?;
         let leaf = target
@@ -100,6 +103,7 @@ impl AuthorizedWorkspace {
     }
 
     /// Create a directory (and its parents) below the write root.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn create_dir_all(&self, path: &str) -> Result<()> {
         let rel = relative_path(path)?;
         let Some(root) = self.write.as_ref() else {
@@ -133,6 +137,7 @@ impl AuthorizedWorkspace {
     }
 
     /// The entry names of one directory below the read root.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn list_dir(&self, path: &str) -> Result<Vec<String>> {
         let target = self.confine(path, Access::Read)?;
         let mut names = Vec::new();

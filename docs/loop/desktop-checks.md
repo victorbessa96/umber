@@ -97,6 +97,25 @@ and a real Windows pen on the Windows build.
 
 Result: ____________________
 
+## Check 5 — control channel + bridge live smoke (row 153's end-to-end instrument)
+
+Headless half is unit-tested in `control.rs`; this is the live desktop pass.
+
+1. Launch the debug binary from a desktop terminal:
+   `target/debug/umber --control 8377 --bridge 8378`. Note the token files
+   (`<tmp>/umber-app-control-8377.token`, `<tmp>/umber-app-bridge-8378.token`,
+   mode 0600) or set `UMBER_CONTROL_TOKEN`.
+2. Wrong/missing token: send `{"id":1,"method":"auth","token":"nope"}` to
+   127.0.0.1:8377 — expect `{"id":1,"ok":false,...}` then the connection
+   closes. (python3 socket one-liner if `nc` is absent.)
+3. Authed on 8377: `auth` ok, then `ping`, `methods`, `ui.inspect` (JSON with
+   `panels`/`layers`/`tool`), and `viewport.screenshot` — reply carries
+   base64 PNG; decode and check the PNG magic bytes + dims match the window.
+4. Bridge on 8378: `auth` ok, then one MCP `initialize` JSON-RPC line; expect
+   the spawned `umber-cli mcp` child's `initialize` result relayed verbatim.
+
+Result: ____________________
+
 ## Verification of this document
 
 - Labels grep-verified against `assets/i18n/en-US.ftl` on 2026-10-20:

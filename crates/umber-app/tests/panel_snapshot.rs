@@ -41,7 +41,7 @@ fn axis_gizmo_snapshot() {
             umber_app::axis_gizmo::paint(ui.painter(), centre, &tips, None);
         });
     support::settle(&mut harness);
-    harness.snapshot("axis_gizmo");
+    support::snapshot(&mut harness, "axis_gizmo");
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn display_panel_snapshot() {
         umber_app::display_panel::show(ui, &mut settings, &mut lut);
     });
     support::settle(&mut harness);
-    harness.snapshot("display_panel");
+    support::snapshot(&mut harness, "display_panel");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn psd_import_section_snapshot() {
         umber_app::psd_import::show_section(ui, &mut state, &mut doc);
     });
     support::settle(&mut harness);
-    harness.snapshot("psd_import_section");
+    support::snapshot(&mut harness, "psd_import_section");
 }
 
 // A2 snapshot-breadth (the W-C3a plan's lane A2): the History panel the
@@ -113,7 +113,7 @@ fn history_panel_empty_snapshot() {
             umber_app::history_panel::history_ui(ui, &mut doc, None);
         });
     support::settle(&mut harness);
-    harness.snapshot("history_panel_empty");
+    support::snapshot(&mut harness, "history_panel_empty");
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn history_panel_ops_snapshot() {
             umber_app::history_panel::history_ui(ui, &mut doc, None);
         });
     support::settle(&mut harness);
-    harness.snapshot("history_panel_ops");
+    support::snapshot(&mut harness, "history_panel_ops");
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn toolbar_snapshot() {
             umber_app::toolbar::show(ui, &view, &atlas);
         });
     support::settle(&mut harness);
-    harness.snapshot("toolbar");
+    support::snapshot(&mut harness, "toolbar");
 }
 
 #[test]
@@ -179,5 +179,5 @@ fn rich_tooltip_snapshot() {
             umber_app::rich_tooltip::draw(ui, &parts);
         });
     support::settle(&mut harness);
-    harness.snapshot("rich_tooltip");
+    support::snapshot(&mut harness, "rich_tooltip");
 }

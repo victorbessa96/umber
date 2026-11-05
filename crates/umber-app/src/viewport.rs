@@ -244,7 +244,9 @@ fn flow_alpha_step(alpha0: f32, dx_px: f32) -> f32 {
 /// The angle chord's degrees: linear in the vertical drag, clamped to the
 /// preset editor's -180..=180 deg range.
 fn angle_step(angle0_deg: f32, dy_px: f32) -> f32 {
-    (angle0_deg + dy_px * 360.0 / ANGLE_PX_PER_FULL_SWEEP).clamp(-180.0, 180.0)
+    // egui's dy is screen-down-positive; dragging UP (negative dy) sweeps the
+    // stamp angle positive, matching the chord's test contract.
+    (angle0_deg - dy_px * 360.0 / ANGLE_PX_PER_FULL_SWEEP).clamp(-180.0, 180.0)
 }
 
 /// The cursor's position in NDC (x right ∈ [-1,1], y UP ∈ [-1,1]) inside
@@ -3027,6 +3029,7 @@ mod tests {
         assert_eq!(angle_step(-170.0, 100.0), -180.0);
     }
 
+    #[test]
     fn flow_chord_scales_alpha_exponentially_and_clamps() {
         assert!((flow_alpha_step(0.5, 0.0) - 0.5).abs() < 1e-6);
         // +200 px doubles.

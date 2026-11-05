@@ -36,6 +36,9 @@ thiserror = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
 rfd = "0.15"
+# base64 for the control channel's viewport.screenshot reply (queue row 153
+# step 3). Version already locked in Cargo.lock — no new packages.
+base64 = "0.22"
 # PSD import (flatten-on-import): the same ag-psd reader the export path
 # uses (umber-export's `psd.rs`). Version already locked in Cargo.lock —
 # no lock churn. The `mod psd_import;` + menu wiring lands at the

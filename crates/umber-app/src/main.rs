@@ -2008,9 +2008,17 @@ pub struct UmberApp {
     /// never changes within a session.
     hdr_mode: umber_gpu::HdrMode,
     /// The `--control <port>` loopback channel (queue row 153), when started.
-    /// v1 answers in the listener thread; the field keeps the server alive
-    /// for the app's lifetime.
+    /// v2: `ui.inspect`/`viewport.screenshot` execute on the UI thread — the
+    /// app drains `server.requests` at the top of `fn ui` (`drain_control`).
+    /// The field keeps the server alive for the app's lifetime.
     control: Option<control::ControlServer>,
+    /// The `--bridge <port>` loopback MCP relay (queue row 153 step 5), when
+    /// started. Same lifetime rule as `control`.
+    bridge: Option<control::BridgeServer>,
+    /// A `viewport.screenshot` request in flight: the viewport command was
+    /// sent, the reply lands as `egui::Event::Screenshot` on a later frame
+    /// (handled at the top of `fn ui`, right after `drain_control`).
+    pending_screenshot: Option<std::sync::mpsc::Sender<Result<serde_json::Value, String>>>,
 }
 
 impl UmberApp {
@@ -2164,6 +2172,8 @@ impl UmberApp {
             workspaces,
             tab_hide_pending: false,
             control: None,
+            bridge: None,
+            pending_screenshot: None,
         })
     }
 }
@@ -2473,6 +2483,98 @@ impl UmberApp {
         let epoch = self.state.graph.graph_epoch();
         let commits = self.state.graph.take_graph_commits();
         history_panel::apply_graph_commits(&mut self.state.doc, epoch, commits);
+    }
+
+    /// Queue row 153 steps 3-4: drain the `--control` channel's UI-thread
+    /// request queue. `ui.inspect` answers from app state; `viewport.screenshot`
+    /// asks egui for the last painted frame — the callback fires on the UI
+    /// thread, so no pixels cross a thread boundary by hand.
+    fn drain_control(&mut self, ctx: &egui::Context) {
+        let Some(server) = &self.control else { return };
+        while let Ok(req) = server.requests.try_recv() {
+            match req {
+                control::ControlRequest::Inspect { reply } => {
+                    let _ = reply.send(Ok(self.inspect_json()));
+                }
+                control::ControlRequest::Screenshot { reply } => {
+                    // egui 0.36 has no callback API: send the viewport
+                    // command and stash the reply; `fn ui` completes it when
+                    // `egui::Event::Screenshot` arrives on a later frame.
+                    if let Some(old) = self.pending_screenshot.replace(reply) {
+                        let _ = old.send(Err("screenshot already in flight".into()));
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
+    /// `ui.inspect`'s payload: the dock's panels (each leaf's tabs, active
+    /// tab and rect), the active tool + brush params, the active set's
+    /// layer census, and the document's dirty/mesh flags. Read-only.
+    fn inspect_json(&self) -> serde_json::Value {
+        let panels: Vec<serde_json::Value> = self
+            .dock
+            .iter_leaves()
+            .map(|(path, leaf)| {
+                serde_json::json!({
+                    "leaf": format!("{path:?}"),
+                    "rect": [leaf.rect.min.x, leaf.rect.min.y, leaf.rect.max.x, leaf.rect.max.y],
+                    "tabs": leaf.tabs.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>(),
+                    "active": leaf.tabs.get(leaf.active.0).map(|p| format!("{p:?}")),
+                })
+            })
+            .collect();
+        let brush = self.state.paint.as_ref().map(|p| {
+            let b = p.brush_params();
+            serde_json::json!({
+                "size": p.brush_size(),
+                "hardness": p.brush_hardness(),
+                "alpha": b.alpha,
+                "color": b.color,
+                "active_channel": p.active_channel(),
+            })
+        });
+        let preset = self
+            .brush_panel
+            .active
+            .and_then(|i| self.brush_panel.library.entries.get(i))
+            .map(|e| e.preset.name.clone());
+        let layers: Vec<serde_json::Value> = self
+            .state
+            .doc
+            .layers()
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "id": l.id,
+                    "name": l.name,
+                    "kind": format!("{:?}", l.kind),
+                    "visible": l.visible,
+                    "opacity": l.opacity,
+                    "blend": format!("{:?}", l.blend_mode),
+                    "masked": l.mask.is_some(),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "app": "umber-app",
+            "version": env!("CARGO_PKG_VERSION"),
+            "panels": panels,
+            "tool": format!("{:?}", self.brush_panel.tool),
+            "strip": format!("{:?}", self.brush_panel.strip),
+            "preset": preset,
+            "brush": brush,
+            "active_set": self.state.doc.active_set(),
+            "sets": self.state.doc.all_sets().iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>(),
+            "layers": layers,
+            "dirty": self.state.doc.is_dirty(),
+            "mesh": self.state.mesh_path.as_ref().map(|p| p.display().to_string()),
+            "paint_available": self.state.paint.is_some(),
+        })
     }
 
     fn dispatch(&mut self, action: toolbar::ShellAction) {
@@ -3964,6 +4066,24 @@ impl eframe::App for UmberApp {
         // (later in this fn), moved earlier because the lib-side unified undo
         // cannot reach the bin-only panel to drain it itself.
         self.drain_graph_commits();
+        // Control channel (queue row 153 steps 3-4): drain the UI-thread
+        // request queue at the top of the frame — the UMBER_THEME_FILE
+        // poll's pattern. Inspect reads app state; screenshot sends
+        // ViewportCommand::Screenshot and stashes the reply sender.
+        self.drain_control(ui.ctx());
+        // The `viewport.screenshot` reply arrives as an input event on a
+        // later frame; complete the stashed reply here (still the UI thread).
+        let shot = ui.ctx().input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot {
+            if let Some(reply) = self.pending_screenshot.take() {
+                let _ = reply.send(control::screenshot_reply(&img));
+            }
+        }
         // Crash-safe GPU startup: the 3rd frame confirms the backend.
         gpu_startup::note_frame();
         // The Umber style on BOTH OS-theme branches, once (GUI plan G0
@@ -5499,20 +5619,28 @@ fn main() -> eframe::Result<()> {
     // 153). Bare port only — `control::parse_control_arg` refuses anything
     // with an interface; the channel is loopback-only, ever.
     let mut control_port: Option<u16> = None;
+    let mut bridge_port: Option<u16> = None;
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
-            if a == "--control" {
+            if a == "--control" || a == "--bridge" {
+                let flag = a;
                 match args.next().as_deref() {
                     Some(v) => match control::parse_control_arg(v) {
-                        Ok(p) => control_port = Some(p),
+                        Ok(p) => {
+                            if flag == "--control" {
+                                control_port = Some(p);
+                            } else {
+                                bridge_port = Some(p);
+                            }
+                        }
                         Err(e) => {
-                            eprintln!("umber: {e}");
+                            eprintln!("umber: {flag} {e}");
                             std::process::exit(2);
                         }
                     },
                     None => {
-                        eprintln!("umber: --control needs a port number");
+                        eprintln!("umber: {flag} needs a port number");
                         std::process::exit(2);
                     }
                 }
@@ -5572,6 +5700,25 @@ fn main() -> eframe::Result<()> {
                             }
                             Err(e) => {
                                 eprintln!("umber: --control {port} failed to start: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    if let Some(port) = bridge_port {
+                        match control::start_bridge(port) {
+                            Ok(server) => {
+                                let where_token = match &server.token_file {
+                                    Some(p) => format!("token file {}", p.display()),
+                                    None => format!("token from ${}", control::TOKEN_ENV),
+                                };
+                                eprintln!(
+                                    "umber: bridge on 127.0.0.1:{} ({where_token})",
+                                    server.port
+                                );
+                                app.bridge = Some(server);
+                            }
+                            Err(e) => {
+                                eprintln!("umber: --bridge {port} failed to start: {e}");
                                 std::process::exit(1);
                             }
                         }

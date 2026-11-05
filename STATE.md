@@ -65,6 +65,29 @@ DOWN by his order. The release lane stays Bessa-gated: SPEC
 ratification (SPEC.md still DRAFT), the dogfood asset, Windows
 signing, the alpha tag.
 
+## 2026-11-05 (local-27c7e3d1...) — row 153 completed under a lifted cargo envelope
+
+Bessa authorized local cargo build/test in-session; the 2026-11-02 no-cargo
+envelope is lifted for this session only. Row 153 (app control channel) is now
+COMPLETE: steps 3-5 of the 2026-11-02 design brief — `viewport.screenshot`
+(egui 0.36 `ViewportCommand::Screenshot` → `Event::Screenshot` on the UI
+thread, PNG via new in-memory `umber_export::png::encode_png`, base64 reply),
+`ui.inspect` (drained top-of-frame), and `--bridge <port>` (lazy `umber-cli
+mcp` child, verbatim relay, reaped on all paths). The first battery-capable
+run since 2026-11-01 also flushed the parked kills' latent breakage: the row
+151 `pub use` gap in umber-export (umber-cli/umber-app did not compile; CI
+clippy red since 11-02), windows-only umber-core clippy lints, the
+`angle_step` drag-sign bug, the brush-ring rim band, dead-code allows, and a
+kittest fonts gate that now tolerates absent TTFs (snapshot pixel comparison
+skips loudly; `font-assets` follow-up stays open — canonical OFL fonts fetched
+to ~/.local/share/umber-fonts this session, NOT committed). Gates: battery
+GREEN on 8 crates (core/color/graph/spp/export/cli/gpu/app), workspace
+clippy --all-targets GREEN, cargo test --workspace --no-fail-fast green modulo
+font-gated snapshot skips. Kill report 2026-11-05-app-control-v2.md. As-is
+census: 196,691 LOC, 16 crates, 2,366 test fns, requirements 90 ✓ + split
+rows (docs/specs/requirements.md). Next: row 152 (hermes mcp add after a
+fresh release build), desktop-checks check 5, then row 154 CommandSpec wave.
+
 ## The core-loop queue (the ONLY active hunt)
 
 The strategy review (docs/specs/2026-10-12-strategy-review.md, accepted in

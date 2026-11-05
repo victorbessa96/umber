@@ -2157,3 +2157,25 @@ pure-python checks (ftl parity), docs/queue/coordination edits, dcommit
 ledger commits, reads. The parked local kills now compile-clean per the one
 battery that ran; the full umber-app battery + the wave PUSH wait for a
 battery-capable session and Bessa's push call (no remote).
+
+---
+
+## WAVE STATE — 2026-11-05 (session local-27c7e3d1cd45c392f8dde6c551fb2af65ae2044e1566296b7f45f5084a56a3d1)
+
+Bessa lifted the no-cargo envelope in-session ("cargo build and test approved
+locally"). Row 153 COMPLETE: app control v2 (`ui.inspect`, `viewport.screenshot`
+via egui 0.36 ViewportCommand::Screenshot event, in-memory `encode_png` +
+base64) and `--bridge` (lazy `umber-cli mcp` relay). First battery-capable run
+since 2026-11-01 flushed parked-kill breakage: row-151 `pub use` gap
+(umber-cli/umber-app compile break — CI clippy red since 11-02), windows-only
+umber-core clippy lints, `angle_step` sign bug, brush-ring rim band,
+dead-code allows, kittest fonts gate now tolerant of absent TTFs (snapshot
+compares skip loudly; `font-assets` follow-up open; OFL fonts fetched to
+~/.local/share/umber-fonts, NOT committed). Gates: battery GREEN on 8 crates,
+workspace clippy --all-targets GREEN, cargo test --workspace --no-fail-fast
+green modulo font-gated snapshot skips. Kill report
+2026-11-05-app-control-v2.md; queue row 153 updated; desktop-checks check 5
+added; STATE.md + ROADMAP.md updated. Kill-lock: app-control-v2 (21 files).
+Next: row 152 (`hermes mcp add` after a fresh release build of umber-cli),
+then row 154 (CommandSpec design wave — brief
+2026-11-02-commandspec-unification-design.md already landed).

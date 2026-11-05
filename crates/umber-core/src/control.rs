@@ -12,7 +12,9 @@
 //! via umber-cli (see THIRD_PARTY.md "Absorbed source files"), lifted here
 //! 2026-11-03 so the app-side channel shares one implementation.
 
-use std::io::{BufRead, Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::{BufRead, Write};
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -73,7 +75,9 @@ pub fn generate_token() -> Result<String> {
         hasher.update(&nanos.to_le_bytes());
         hasher.update(&std::process::id().to_le_bytes());
         hasher.update(&COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
-        hasher.update(&(generate_token as usize).to_le_bytes());
+        // fn-pointer cast, not a fn-item cast (clippy::fn_to_numeric_cast).
+        let gen: fn() -> Result<String> = generate_token;
+        hasher.update(&(gen as usize).to_le_bytes());
         Ok(hasher.finalize().to_hex().to_string())
     }
 }
@@ -248,7 +252,7 @@ mod tests {
         let path = path.with_file_name(format!(
             "umber-test-control-{}-{}.token",
             std::process::id(),
-            token[..8].to_string()
+            &token[..8]
         ));
         write_token_file(&path, &token).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), token);

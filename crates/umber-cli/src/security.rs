@@ -22,8 +22,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 pub use umber_core::control::{
-    ConnectionLimiter, LineRead, Permit, MAX_BATCH_STEPS, MAX_CONNECTIONS, MAX_REQUEST_BYTES,
-    TOKEN_ENV,
+    ConnectionLimiter, LineRead, MAX_BATCH_STEPS, MAX_CONNECTIONS, MAX_REQUEST_BYTES, TOKEN_ENV,
 };
 
 /// The token file `serve --port` writes when the environment gives no token.
@@ -32,11 +31,15 @@ pub fn token_file(port: u16) -> PathBuf {
 }
 
 /// A fresh 256-bit token as 64 hex digits, from the OS random generator.
+// Client-side helper exercised by the security tests; the app bridge reads
+// the token via umber_core::control::client_token directly.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn generate_token() -> Result<String> {
     Ok(umber_core::control::generate_token()?)
 }
 
 /// Token for a client of `port`: explicit, else `UMBER_CONTROL_TOKEN`, else the token file.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn client_token(port: u16, supplied: Option<String>) -> Result<String> {
     Ok(umber_core::control::client_token(
         "umber-control",

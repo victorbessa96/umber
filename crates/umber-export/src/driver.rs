@@ -722,6 +722,9 @@ fn validate_set(preset: &ExportPreset, set: &MapSet) -> Result<(), ExportError> 
 /// `written`. `tile` is the UDIM tile the run is writing (1001 for a
 /// single-set run); `tile_names` routes each filename through
 /// [`tiled_template`] before token expansion.
+// 8 args predates the battery's -D warnings gate (umber-export was not in
+// the gated crate list); bundling them is a refactor for its own kill.
+#[allow(clippy::too_many_arguments)]
 fn write_outputs(
     preset: &ExportPreset,
     set: &MapSet,

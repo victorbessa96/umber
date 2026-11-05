@@ -847,6 +847,8 @@ pub struct PropKeymap {
 
 impl PropKeymap {
     /// `action`'s bindings, if bound.
+    // Used by the keymap tests; the UI reads overrides through `bindings`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn get(&self, action: PropAction) -> Option<&[Binding]> {
         self.entries
             .iter()

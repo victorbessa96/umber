@@ -220,7 +220,7 @@ pass; the .ftl lock lift (if it stands).
 | History/undo | PARITY (the unified timeline LANDED — L6, `75c9594`, 2026-10-27) |
 | UI/UX density | PARTIAL (36/43 GUI kills; keyboard-only is the felt gap — the color picker CLOSED 2026-10-25 by verification: the custom picker sits at every color site, the lens's grep used the wrong symbol) |
 | Assets/ecosystem | **GAP — the moat** (the Assets panel + starter content) |
-| Scripting/automation | **EXCEEDS** (headless-first, versioned JSONL) + MCP stdio server + token-auth loopback control landed 2026-11-01 `3331bcb` (unpushed; Hermes registration = queue row 152) + the client-library gap |
+| Scripting/automation | **EXCEEDS** (headless-first, versioned JSONL) + MCP stdio server + token-auth loopback control landed 2026-11-01 `3331bcb` (Hermes registration = queue row 152) + app-side control v2 (`ui.inspect`, `viewport.screenshot`) and `--bridge` MCP relay 2026-11-05 (queue row 153) + the client-library gap |
 | Interchange (MaterialX, diffable format) | **EXCEEDS** |
 | Community/local-first/no-telemetry/never-crash | **EXCEEDS** |
 

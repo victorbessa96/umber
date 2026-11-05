@@ -261,8 +261,10 @@ fn rasterize_ring(radius_px: f32, core_px: Option<f32>, scale: f32) -> Option<(u
                     rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 90]);
                 }
             }
-            // Light line on the rim: |d - r| <= 0.5*scale (over the dark).
-            if (d - r).abs() <= 0.5 * scale {
+            // Light line on the rim: |d - r| <= 0.75*scale (over the dark).
+            // 0.75 not 0.5 so the pixel just outside r (d = r + 0.51 for
+            // even-side bitmaps) still lands on the light line.
+            if (d - r).abs() <= 0.75 * scale {
                 rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 230]);
             }
             // Centre dot.

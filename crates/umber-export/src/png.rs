@@ -13,7 +13,7 @@
 //!   encoding for basecolor-class maps.
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write as _};
 use std::path::Path;
 
 /// Errors from encoding or writing a PNG.
@@ -67,6 +67,33 @@ pub fn write_png(
     rgba: &[u8],
     transfer: Transfer,
 ) -> Result<(), PngError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let bytes = encode_png(width, height, rgba, transfer)?;
+    let file = File::create(path)?;
+    let mut w = BufWriter::new(file);
+    w.write_all(&bytes)?;
+    Ok(())
+}
+
+/// Encodes `rgba` (width×height×4, row-major) into PNG bytes in memory —
+/// the same encode path as [`write_png`], without touching the filesystem
+/// (the app-side control channel's `viewport.screenshot` reply encodes
+/// the frame's pixels this way; queue row 153 step 3).
+///
+/// # Errors
+/// [`PngError::SizeMismatch`] when the buffer doesn't match the
+/// dimensions; [`PngError::Encode`] on encoder failure.
+pub fn encode_png(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    transfer: Transfer,
+) -> Result<Vec<u8>, PngError> {
     let expected = width as usize * height as usize * 4;
     if rgba.len() != expected {
         return Err(PngError::SizeMismatch {
@@ -77,44 +104,38 @@ pub fn write_png(
         });
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        if transfer == Transfer::Srgb {
+            // Tag the chunk so viewers decode as sRGB; the pixel values
+            // themselves are encoded below.
+            encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
         }
-    }
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| PngError::Encode(e.to_string()))?;
 
-    let file = File::create(path)?;
-    let w = BufWriter::new(file);
-
-    let mut encoder = png::Encoder::new(w, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    if transfer == Transfer::Srgb {
-        // Tag the chunk so viewers decode as sRGB; the pixel values
-        // themselves are encoded below.
-        encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-    }
-    let mut writer = encoder
-        .write_header()
-        .map_err(|e| PngError::Encode(e.to_string()))?;
-
-    let data: Vec<u8> = match transfer {
-        Transfer::Linear => rgba.to_vec(),
-        Transfer::Srgb => {
-            let mut out = rgba.to_vec();
-            for px in out.chunks_exact_mut(4) {
-                px[0] = linear_to_srgb_u8(px[0]);
-                px[1] = linear_to_srgb_u8(px[1]);
-                px[2] = linear_to_srgb_u8(px[2]);
-                // alpha untouched
+        let data: Vec<u8> = match transfer {
+            Transfer::Linear => rgba.to_vec(),
+            Transfer::Srgb => {
+                let mut out = rgba.to_vec();
+                for px in out.chunks_exact_mut(4) {
+                    px[0] = linear_to_srgb_u8(px[0]);
+                    px[1] = linear_to_srgb_u8(px[1]);
+                    px[2] = linear_to_srgb_u8(px[2]);
+                    // alpha untouched
+                }
+                out
             }
-            out
-        }
-    };
-    writer
-        .write_image_data(&data)
-        .map_err(|e| PngError::Encode(e.to_string()))?;
-    Ok(())
+        };
+        writer
+            .write_image_data(&data)
+            .map_err(|e| PngError::Encode(e.to_string()))?;
+    }
+    Ok(out)
 }
 
 /// The decoder's allocation ceiling for [`read_png_rgba8`]: 1 GiB, room
@@ -294,6 +315,24 @@ mod tests {
 
     fn temp_png(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("umber-export-test-{name}.png"))
+    }
+
+    #[test]
+    fn encode_png_in_memory_roundtrips_and_checks_size() {
+        let rgba: Vec<u8> = (0..2 * 2 * 4).map(|i| (i * 37 % 251) as u8).collect();
+        let bytes = encode_png(2, 2, &rgba, Transfer::Linear).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(matches!(
+            encode_png(2, 2, &rgba[..7], Transfer::Linear),
+            Err(PngError::SizeMismatch { .. })
+        ));
+        let decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+        let mut reader = decoder.read_info().unwrap();
+        assert_eq!(reader.info().width, 2);
+        assert_eq!(reader.info().height, 2);
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let _ = reader.next_frame(&mut buf).unwrap();
+        assert_eq!(&buf[..rgba.len()], &rgba[..]);
     }
 
     #[test]
