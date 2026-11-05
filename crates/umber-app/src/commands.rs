@@ -275,6 +275,14 @@ mod tests {
             // cmd-* key in both locales (i18n parity test enforces it).
             let want = format!("cmd-{}", id.replace(['.', '_'], "-"));
             assert_eq!(action.label_key(), want);
+            // The label key must resolve in the catalogs, not fall back to
+            // the key itself (regression pin for the dash/underscore mismatch).
+            crate::i18n::init();
+            assert_ne!(
+                crate::i18n::tr_en(action.label_key()),
+                action.label_key(),
+                "cmd key missing from en-US catalog"
+            );
         }
     }
 
