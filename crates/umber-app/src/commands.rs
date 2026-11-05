@@ -138,3 +138,109 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
         ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {}
     }
 }
+
+/// Typed failure for dispatch-by-id (queue row 154, wave 2a): the agent/MCP
+/// surface reports these, never panics.
+// Wave-2 public API surface; wired into actions.rs/agent.rs by the next kills.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandError {
+    /// The id is not in the registry.
+    UnknownCommand(String),
+    /// The command exists but carries a runtime payload (`tool.select`
+    /// needs a `ToolKind`); id-only dispatch cannot express it yet.
+    NeedsParams(String),
+    /// The availability guard refused; the `&'static str` is the i18n key
+    /// `actions::availability` returned.
+    Disabled(&'static str),
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommandError::UnknownCommand(id) => write!(f, "unknown command: {id}"),
+            CommandError::NeedsParams(id) => write!(f, "command needs params: {id}"),
+            CommandError::Disabled(why) => write!(f, "command disabled: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+/// Every registered command id, dotted and stable (wave 2 registry surface;
+/// `command.list` will serialize this with labels/menus/shortcuts).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const COMMAND_IDS: &[&str] = &[
+    "file.new_project",
+    "file.open_mesh",
+    "file.open_project",
+    "file.save_project",
+    "file.save_project_as",
+    "edit.undo",
+    "edit.redo",
+    "view.toggle_wireframe",
+    "view.toggle_grid",
+    "view.cycle_view_mode",
+    "view.view_material",
+    "view.next_channel",
+    "view.prev_channel",
+    "view.next_mesh_map",
+    "view.prev_mesh_map",
+    "view.viewport_preset_both",
+    "view.viewport_preset_3d",
+    "view.viewport_preset_2d",
+    "view.viewport_preset_swap",
+    "paint.toggle_mask_mode",
+    "paint.invert_mask",
+    "tool.brush_smaller",
+    "tool.brush_larger",
+    "tool.select",
+    "window.toggle_hide_ui",
+    "window.toggle_maximize",
+    "window.command_palette",
+    "window.preferences",
+    "window.next_workspace",
+    "window.prev_workspace",
+];
+
+/// Dispatch by dotted id — the path menus, shortcuts, the agent protocol
+/// and the MCP tools all converge on (wave 2+). Payload-less commands run
+/// through the exact same [`run_command`] as a menu click.
+// Wave-2 public API surface; wired into actions.rs/agent.rs by the next kills.
+#[allow(dead_code)]
+pub fn run_command_id(app: &mut UmberApp, id: &str) -> Result<(), CommandError> {
+    let Some(action) = toolbar::ShellAction::from_id(id) else {
+        if id == "tool.select" {
+            return Err(CommandError::NeedsParams(id.to_string()));
+        }
+        return Err(CommandError::UnknownCommand(id.to_string()));
+    };
+    if let Err(why) = actions::availability(action, app.shell_state()) {
+        return Err(CommandError::Disabled(why));
+    }
+    run_command(app, action);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toolbar::ShellAction;
+
+    #[test]
+    fn every_payloadless_id_round_trips() {
+        for id in COMMAND_IDS {
+            if *id == "tool.select" {
+                assert!(ShellAction::from_id(id).is_none());
+                continue;
+            }
+            let action = ShellAction::from_id(id).expect("registered id must resolve");
+            assert_eq!(action.id(), *id, "id() must be the inverse of from_id()");
+        }
+    }
+
+    #[test]
+    fn unknown_ids_are_typed_errors() {
+        assert_eq!(ShellAction::from_id("nope.not_a_command"), None);
+    }
+}
