@@ -5575,10 +5575,11 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             // The device exists: a death from here is not a driver crash.
             gpu_startup::note_device();
+            let egui_ctx = cc.egui_ctx.clone();
             match UmberApp::new(cc) {
                 Ok(mut app) => {
                     if let Some(port) = control_port {
-                        match control::start(port) {
+                        match control::start(port, egui_ctx) {
                             Ok(server) => {
                                 let where_token = match &server.token_file {
                                     Some(p) => format!("token file {}", p.display()),

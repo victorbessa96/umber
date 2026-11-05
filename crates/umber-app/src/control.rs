@@ -101,7 +101,7 @@ pub fn parse_control_arg(v: &str) -> Result<u16, String> {
 }
 
 /// Start the control listener on 127.0.0.1:`port` (0 = ephemeral, for tests).
-pub fn start(port: u16) -> std::io::Result<ControlServer> {
+pub fn start(port: u16, repaint: egui::Context) -> std::io::Result<ControlServer> {
     let listener = control::bind_loopback(port)?;
     let port = listener.local_addr()?.port();
     let (token, token_file) =
@@ -110,7 +110,7 @@ pub fn start(port: u16) -> std::io::Result<ControlServer> {
     let token_loop = token.clone();
     let thread = std::thread::Builder::new()
         .name("umber-control".into())
-        .spawn(move || accept_loop(listener, port, token_loop, tx))?;
+        .spawn(move || accept_loop(listener, port, token_loop, tx, repaint))?;
     Ok(ControlServer {
         port,
         token,
@@ -120,7 +120,13 @@ pub fn start(port: u16) -> std::io::Result<ControlServer> {
     })
 }
 
-fn accept_loop(listener: TcpListener, port: u16, token: String, requests: Sender<ControlRequest>) {
+fn accept_loop(
+    listener: TcpListener,
+    port: u16,
+    token: String,
+    requests: Sender<ControlRequest>,
+    repaint: egui::Context,
+) {
     let limiter = ConnectionLimiter::default();
     for stream in listener.incoming() {
         match stream {
@@ -128,11 +134,12 @@ fn accept_loop(listener: TcpListener, port: u16, token: String, requests: Sender
                 if let Some(permit) = limiter.try_acquire(control::MAX_CONNECTIONS) {
                     let token = token.clone();
                     let requests = requests.clone();
+                    let repaint = repaint.clone();
                     let _ = std::thread::Builder::new()
                         .name("umber-control-conn".into())
                         .spawn(move || {
                             let _permit = permit;
-                            handle_conn(s, port, &token, &requests);
+                            handle_conn(s, port, &token, &requests, &repaint);
                         });
                 }
             }
@@ -182,7 +189,13 @@ fn auth_first(reader: &mut BufReader<TcpStream>, writer: &mut TcpStream, token: 
     true
 }
 
-fn handle_conn(stream: TcpStream, port: u16, token: &str, requests: &Sender<ControlRequest>) {
+fn handle_conn(
+    stream: TcpStream,
+    port: u16,
+    token: &str,
+    requests: &Sender<ControlRequest>,
+    repaint: &egui::Context,
+) {
     let _ = stream.set_nodelay(true);
     let mut reader = match stream.try_clone() {
         Ok(s) => BufReader::new(s),
@@ -222,18 +235,22 @@ fn handle_conn(stream: TcpStream, port: u16, token: &str, requests: &Sender<Cont
             "ping" => json!({"pong": true, "port": port}),
             "version" => json!({"app": "umber-app", "version": env!("CARGO_PKG_VERSION")}),
             "methods" => json!({"methods": METHODS}),
-            "ui.inspect" => match forward_ui(requests, |reply| ControlRequest::Inspect { reply }) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = control::write_json_line(
-                        &mut writer,
-                        &json!({"id": id, "ok": false, "error": e}),
-                    );
-                    continue;
+            "ui.inspect" => {
+                match forward_ui(requests, repaint, |reply| ControlRequest::Inspect { reply }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = control::write_json_line(
+                            &mut writer,
+                            &json!({"id": id, "ok": false, "error": e}),
+                        );
+                        continue;
+                    }
                 }
-            },
+            }
             "viewport.screenshot" => {
-                match forward_ui(requests, |reply| ControlRequest::Screenshot { reply }) {
+                match forward_ui(requests, repaint, |reply| ControlRequest::Screenshot {
+                    reply,
+                }) {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = control::write_json_line(
@@ -245,7 +262,9 @@ fn handle_conn(stream: TcpStream, port: u16, token: &str, requests: &Sender<Cont
                 }
             }
             "command.list" => {
-                match forward_ui(requests, |reply| ControlRequest::ListCommands { reply }) {
+                match forward_ui(requests, repaint, |reply| ControlRequest::ListCommands {
+                    reply,
+                }) {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = control::write_json_line(
@@ -263,7 +282,7 @@ fn handle_conn(stream: TcpStream, port: u16, token: &str, requests: &Sender<Cont
                     .map(str::to_string);
                 match cmd_id {
                     Some(cmd_id) => {
-                        match forward_ui(requests, |reply| ControlRequest::RunCommand {
+                        match forward_ui(requests, repaint, |reply| ControlRequest::RunCommand {
                             id: cmd_id,
                             reply,
                         }) {
@@ -304,12 +323,17 @@ fn handle_conn(stream: TcpStream, port: u16, token: &str, requests: &Sender<Cont
 /// Forward a request to the UI thread's queue and wait for the reply.
 fn forward_ui(
     requests: &Sender<ControlRequest>,
+    repaint: &egui::Context,
     make: impl FnOnce(Sender<Result<Value, String>>) -> ControlRequest,
 ) -> Result<Value, String> {
     let (tx, rx) = mpsc::channel();
     requests
         .send(make(tx))
         .map_err(|_| "control queue closed (app is shutting down)".to_string())?;
+    // The UI thread drains the queue only on frames; on an idle window no
+    // frame is coming, so wake it explicitly or every UI-forwarded method
+    // dies on ui_timeout (found by the 2026-11-05 headless smoke).
+    repaint.request_repaint();
     match rx.recv_timeout(UI_REPLY_TIMEOUT) {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(e),
@@ -584,7 +608,7 @@ mod tests {
 
     #[test]
     fn bad_token_is_rejected_and_closes() {
-        let server = start(0).unwrap();
+        let server = start(0, egui::Context::default()).unwrap();
         let replies = roundtrip(
             server.port,
             &server.token,
@@ -610,7 +634,7 @@ mod tests {
 
     #[test]
     fn auth_then_ping_version_methods() {
-        let server = start(0).unwrap();
+        let server = start(0, egui::Context::default()).unwrap();
         let token = server.token.clone();
         let replies = roundtrip(
             server.port,
@@ -643,7 +667,8 @@ mod tests {
 
     #[test]
     fn ui_requests_forward_to_the_drain_thread() {
-        let server = start(0).unwrap();
+        let ctx = egui::Context::default();
+        let server = start(0, ctx.clone()).unwrap();
         let port = server.port;
         let token = server.token.clone();
         // A stand-in UI thread: drains the queue and answers canned results.
@@ -691,12 +716,15 @@ mod tests {
         assert_eq!(replies[4]["result"]["ran"], "view.toggle_grid");
         assert_eq!(replies[5]["ok"], false);
         assert_eq!(replies[5]["error"], "missing params.id (dotted command id)");
+        // The accept thread must wake the UI thread on every queued request,
+        // or an idle window never drains the queue (2026-11-05 headless smoke).
+        assert!(ctx.has_requested_repaint());
         drop(drain);
     }
 
     #[test]
     fn first_request_must_be_auth() {
-        let server = start(0).unwrap();
+        let server = start(0, egui::Context::default()).unwrap();
         let token = server.token.clone();
         let replies = roundtrip(
             server.port,
