@@ -2491,8 +2491,13 @@ impl UmberApp {
     /// asks egui for the last painted frame — the callback fires on the UI
     /// thread, so no pixels cross a thread boundary by hand.
     fn drain_control(&mut self, ctx: &egui::Context) {
-        let Some(server) = &self.control else { return };
-        while let Ok(req) = server.requests.try_recv() {
+        // Collect first: the `&self.control` borrow must end before any
+        // arm takes `&mut self` (command.run dispatches into the app).
+        let reqs: Vec<control::ControlRequest> = {
+            let Some(server) = &self.control else { return };
+            server.requests.try_iter().collect()
+        };
+        for req in reqs {
             match req {
                 control::ControlRequest::Inspect { reply } => {
                     let _ = reply.send(Ok(self.inspect_json()));
@@ -2508,6 +2513,15 @@ impl UmberApp {
                         egui::UserData::default(),
                     ));
                     ctx.request_repaint();
+                }
+                control::ControlRequest::ListCommands { reply } => {
+                    let _ = reply.send(Ok(commands::command_list_json(self)));
+                }
+                control::ControlRequest::RunCommand { id, reply } => {
+                    let result = commands::run_command_id(self, &id)
+                        .map(|_| serde_json::json!({ "ran": id }))
+                        .map_err(|e| e.to_string());
+                    let _ = reply.send(result);
                 }
             }
         }

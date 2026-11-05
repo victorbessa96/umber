@@ -41,6 +41,8 @@ pub const METHODS: &[&str] = &[
     "methods",
     "ui.inspect",
     "viewport.screenshot",
+    "command.list",
+    "command.run",
 ];
 
 /// How long a connection thread waits for the UI thread to answer a queued
@@ -57,6 +59,17 @@ pub enum ControlRequest {
     },
     /// Capture the last painted frame as PNG (base64) + dims.
     Screenshot {
+        reply: Sender<Result<Value, String>>,
+    },
+    /// List the command registry (queue row 154 wave 2c): id + enabled per
+    /// command, evaluated on the UI thread.
+    ListCommands {
+        reply: Sender<Result<Value, String>>,
+    },
+    /// Run one command by dotted id through the same dispatch as a menu
+    /// click; typed `CommandError` on the wire, never a panic.
+    RunCommand {
+        id: String,
         reply: Sender<Result<Value, String>>,
     },
 }
@@ -226,6 +239,48 @@ fn handle_conn(stream: TcpStream, port: u16, token: &str, requests: &Sender<Cont
                         let _ = control::write_json_line(
                             &mut writer,
                             &json!({"id": id, "ok": false, "error": e}),
+                        );
+                        continue;
+                    }
+                }
+            }
+            "command.list" => {
+                match forward_ui(requests, |reply| ControlRequest::ListCommands { reply }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = control::write_json_line(
+                            &mut writer,
+                            &json!({"id": id, "ok": false, "error": e}),
+                        );
+                        continue;
+                    }
+                }
+            }
+            "command.run" => {
+                let cmd_id = req
+                    .pointer("/params/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                match cmd_id {
+                    Some(cmd_id) => {
+                        match forward_ui(requests, |reply| ControlRequest::RunCommand {
+                            id: cmd_id,
+                            reply,
+                        }) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let _ = control::write_json_line(
+                                    &mut writer,
+                                    &json!({"id": id, "ok": false, "error": e}),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        let _ = control::write_json_line(
+                            &mut writer,
+                            &json!({"id": id, "ok": false, "error": "missing params.id (dotted command id)"}),
                         );
                         continue;
                     }
@@ -604,6 +659,12 @@ mod tests {
                             json!({"width": 1, "height": 1, "format": "png", "png_base64": ""}),
                         ));
                     }
+                    ControlRequest::ListCommands { reply } => {
+                        let _ = reply.send(Ok(json!({"commands": [], "count": 0})));
+                    }
+                    ControlRequest::RunCommand { id, reply } => {
+                        let _ = reply.send(Ok(json!({"ran": id})));
+                    }
                 }
             }
         });
@@ -614,12 +675,22 @@ mod tests {
                 json!({"id": 0, "method": "auth", "params": {"token": token}}).to_string(),
                 json!({"id": 1, "method": "ui.inspect"}).to_string(),
                 json!({"id": 2, "method": "viewport.screenshot"}).to_string(),
+                json!({"id": 3, "method": "command.list"}).to_string(),
+                json!({"id": 4, "method": "command.run", "params": {"id": "view.toggle_grid"}})
+                    .to_string(),
+                json!({"id": 5, "method": "command.run"}).to_string(),
             ],
         );
         assert_eq!(replies[1]["ok"], true);
         assert_eq!(replies[1]["result"]["inspected"], true);
         assert_eq!(replies[2]["ok"], true);
         assert_eq!(replies[2]["result"]["width"], 1);
+        assert_eq!(replies[3]["ok"], true);
+        assert_eq!(replies[3]["result"]["count"], 0);
+        assert_eq!(replies[4]["ok"], true);
+        assert_eq!(replies[4]["result"]["ran"], "view.toggle_grid");
+        assert_eq!(replies[5]["ok"], false);
+        assert_eq!(replies[5]["error"], "missing params.id (dotted command id)");
         drop(drain);
     }
 

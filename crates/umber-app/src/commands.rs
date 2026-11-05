@@ -141,8 +141,6 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
 
 /// Typed failure for dispatch-by-id (queue row 154, wave 2a): the agent/MCP
 /// surface reports these, never panics.
-// Wave-2 public API surface; wired into actions.rs/agent.rs by the next kills.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
     /// The id is not in the registry.
@@ -206,8 +204,6 @@ pub const COMMAND_IDS: &[&str] = &[
 /// Dispatch by dotted id — the path menus, shortcuts, the agent protocol
 /// and the MCP tools all converge on (wave 2+). Payload-less commands run
 /// through the exact same [`run_command`] as a menu click.
-// Wave-2 public API surface; wired into actions.rs/agent.rs by the next kills.
-#[allow(dead_code)]
 pub fn run_command_id(app: &mut UmberApp, id: &str) -> Result<(), CommandError> {
     let Some(action) = toolbar::ShellAction::from_id(id) else {
         if id == "tool.select" {
@@ -220,6 +216,36 @@ pub fn run_command_id(app: &mut UmberApp, id: &str) -> Result<(), CommandError> 
     }
     run_command(app, action);
     Ok(())
+}
+
+/// The `command.list` wire payload (control channel, row 154 wave 2c): one
+/// row per registered id with the live availability verdict. Labels/shortcuts
+/// join in wave 2b when the i18n `cmd.*` namespace lands.
+pub fn command_list_json(app: &UmberApp) -> serde_json::Value {
+    let state = app.shell_state();
+    let rows: Vec<serde_json::Value> = COMMAND_IDS
+        .iter()
+        .map(|id| {
+            let (enabled, reason) = if *id == "tool.select" {
+                // Payload command: enabled iff a mesh/paint surface exists.
+                (state.paint_available, None)
+            } else {
+                match toolbar::ShellAction::from_id(id) {
+                    Some(action) => match actions::availability(action, state) {
+                        Ok(()) => (true, None),
+                        Err(why) => (false, Some(why)),
+                    },
+                    None => (false, None),
+                }
+            };
+            serde_json::json!({
+                "id": id,
+                "enabled": enabled,
+                "disabled_reason": reason,
+            })
+        })
+        .collect();
+    serde_json::json!({ "commands": rows, "count": rows.len() })
 }
 
 #[cfg(test)]
