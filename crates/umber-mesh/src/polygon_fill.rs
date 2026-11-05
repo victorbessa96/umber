@@ -440,44 +440,7 @@ pub fn flood_uv_island(mesh: &MeshData, seed: usize) -> Vec<usize> {
 /// pick agrees with what the fill would rasterize there. Malformed,
 /// UV-degenerate and non-finite triangles are skipped, never panics.
 pub fn uv_triangle_at(mesh: &MeshData, uv: [f32; 2]) -> Option<usize> {
-    if !uv[0].is_finite() || !uv[1].is_finite() {
-        return None;
-    }
-    let mut found = None;
-    for (k, tri) in mesh.indices.chunks_exact(3).enumerate() {
-        let (Some(&i0), Some(&i1), Some(&i2)) = (tri.first(), tri.get(1), tri.get(2)) else {
-            continue;
-        };
-        let (Some(&uv0), Some(&uv1), Some(&uv2)) = (
-            mesh.uvs.get(i0 as usize),
-            mesh.uvs.get(i1 as usize),
-            mesh.uvs.get(i2 as usize),
-        ) else {
-            continue;
-        };
-        if ![uv0, uv1, uv2]
-            .iter()
-            .all(|t| t[0].is_finite() && t[1].is_finite())
-        {
-            continue;
-        }
-        let area = (uv1[0] - uv0[0]) * (uv2[1] - uv0[1]) - (uv2[0] - uv0[0]) * (uv1[1] - uv0[1]);
-        if !area.is_finite() || area.abs() < 1e-12 {
-            continue;
-        }
-        // Same correction as `rasterize_uv_geometry` (see its comment):
-        // `E_ab(v_opp) = -area` in both windings, so the true weights are
-        // `-e_i / area` and the inside test is one branch.
-        let e0 = (uv[0] - uv1[0]) * (uv2[1] - uv1[1]) - (uv[1] - uv1[1]) * (uv2[0] - uv1[0]);
-        let e1 = (uv[0] - uv2[0]) * (uv0[1] - uv2[1]) - (uv[1] - uv2[1]) * (uv0[0] - uv2[0]);
-        let e2 = (uv[0] - uv0[0]) * (uv1[1] - uv0[1]) - (uv[1] - uv0[1]) * (uv1[0] - uv0[0]);
-        let (b0, b1, b2) = (-e0 / area, -e1 / area, -e2 / area);
-        let inside = b0 >= -1e-6 && b1 >= -1e-6 && b2 >= -1e-6;
-        if inside {
-            found = Some(k);
-        }
-    }
-    found
+    crate::uv_gbuffer::uv_to_barycentric(mesh, uv).map(|hit| hit.triangle)
 }
 
 /// The lasso→mesh-intersection path for 3D-viewport picks: casts `ray`

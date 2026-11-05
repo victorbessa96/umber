@@ -525,9 +525,10 @@ pub fn rasterize_uv_geometry(
         return Vec::new();
     }
     // UDIM integer offsets (the `local_texel` inverse: u = tu + x / tpv,
-    // v = tv + 1 - y / tpv).
-    let index = tile.saturating_sub(crate::FIRST_TILE);
-    let (tu, tv) = (f32::from(index % 10), f32::from(index / 10));
+    // v = tv + 1 - y / tpv). The containment + barycentric solve is the
+    // shared `uv_gbuffer` primitive (row 156-B): one formula, one epsilon
+    // pair, for CPU fill, UV pick, export padding and the GPU bakes.
+    let (tu, tv) = crate::uv_gbuffer::tile_offset(tile);
     let mut out: Vec<Option<TexelGeom>> = vec![None; w * h];
     for (tri_idx, tri) in mesh.indices.chunks_exact(3).enumerate() {
         let (Some(&i0), Some(&i1), Some(&i2)) = (tri.first(), tri.get(1), tri.get(2)) else {
@@ -540,21 +541,14 @@ pub fn rasterize_uv_geometry(
         ) else {
             continue;
         };
-        let (Some(&uv0), Some(&uv1), Some(&uv2)) = (
-            mesh.uvs.get(i0 as usize),
-            mesh.uvs.get(i1 as usize),
-            mesh.uvs.get(i2 as usize),
-        ) else {
+        if !pos_finite([p0, p1, p2]) {
+            continue;
+        }
+        // Malformed UV indices, non-finite UVs and degenerate footprints
+        // (|area| < UV_DET_EPS) cover nothing.
+        let Some(footprint) = crate::uv_gbuffer::UvTri::of(mesh, tri_idx) else {
             continue;
         };
-        if !uv_finite([uv0, uv1, uv2]) || !pos_finite([p0, p1, p2]) {
-            continue;
-        }
-        // Signed UV-space area; degenerate footprints cover nothing.
-        let area = (uv1[0] - uv0[0]) * (uv2[1] - uv0[1]) - (uv2[0] - uv0[0]) * (uv1[1] - uv0[1]);
-        if !area.is_finite() || area.abs() < 1e-12 {
-            continue;
-        }
         // Face normal from positions (see `TexelGeom::normal`).
         let ax = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
         let bx = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
@@ -569,61 +563,24 @@ pub fn rasterize_uv_geometry(
         } else {
             [0.0, 0.0, 0.0]
         };
-        // UV bbox → tile-local texel range (expanded by one texel so
+        // UV bbox -> tile-local texel range (expanded by one texel so
         // texel-center coverage at footprint edges is exact, then clamped).
-        let (min_u, max_u) = (
-            uv0[0].min(uv1[0]).min(uv2[0]),
-            uv0[0].max(uv1[0]).max(uv2[0]),
-        );
-        let (min_v, max_v) = (
-            uv0[1].min(uv1[1]).min(uv2[1]),
-            uv0[1].max(uv1[1]).max(uv2[1]),
-        );
-        let x0 = (((min_u - tu) * width as f32 - 1.0).floor() as i64).max(0) as usize;
-        let x1 = ((((max_u - tu) * width as f32 + 1.0).ceil() as i64).min(width as i64 - 1)).max(0)
-            as usize;
-        let y0 = ((((tv + 1.0 - max_v) * height as f32 - 1.0).floor() as i64).max(0)) as usize;
-        let y1 = (((((tv + 1.0 - min_v) * height as f32 + 1.0).ceil() as i64)
-            .min(height as i64 - 1))
-        .max(0)) as usize;
-        if x0 > x1 || y0 > y1 {
+        let Some((x0, x1, y0, y1)) =
+            crate::uv_gbuffer::texel_window(&footprint, tu, tv, width, height)
+        else {
             continue;
-        }
+        };
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let uv = [
-                    tu + (x as f32 + 0.5) / width as f32,
-                    tv + 1.0 - (y as f32 + 0.5) / height as f32,
-                ];
-                // Barycentrics via edge functions over the signed area.
-                // CORRECTION (polygon-fill investigation): the divisors
-                // below are `-area`, not `area`. Expanding the cross
-                // products shows `E_ab(v_opp) = -area` identically in both
-                // windings, so the TRUE barycentric weights are `-e_i /
-                // area`: dividing by `+area` negates them (weights summing
-                // to -1, positions mirrored through the origin, and the old
-                // `area > 0` inside branch — which then needs a sum ≥ -3e-6
-                // from weights summing to -1 — accepting NOTHING, so every
-                // CCW triangle rasterized empty). Over the true weights the
-                // inside test is one branch, winding-agnostic by
-                // construction.
-                let e0 =
-                    (uv[0] - uv1[0]) * (uv2[1] - uv1[1]) - (uv[1] - uv1[1]) * (uv2[0] - uv1[0]);
-                let e1 =
-                    (uv[0] - uv2[0]) * (uv0[1] - uv2[1]) - (uv[1] - uv2[1]) * (uv0[0] - uv2[0]);
-                let e2 =
-                    (uv[0] - uv0[0]) * (uv1[1] - uv0[1]) - (uv[1] - uv0[1]) * (uv1[0] - uv0[0]);
-                let (b0, b1, b2) = (-e0 / area, -e1 / area, -e2 / area);
-                let inside = b0 >= -1e-6 && b1 >= -1e-6 && b2 >= -1e-6;
-                if !inside {
+                let uv =
+                    crate::uv_gbuffer::texel_center_uv(tu, tv, x as u32, y as u32, width, height);
+                // True barycentrics `-e_i / area`, winding-agnostic inside
+                // test (the derivation lives in `uv_gbuffer`).
+                let Some(b) = footprint.bary(uv) else {
                     continue;
-                }
+                };
                 out[y * w + x] = Some(TexelGeom {
-                    pos: [
-                        p0[0] * b0 + p1[0] * b1 + p2[0] * b2,
-                        p0[1] * b0 + p1[1] * b1 + p2[1] * b2,
-                        p0[2] * b0 + p1[2] * b1 + p2[2] * b2,
-                    ],
+                    pos: crate::uv_gbuffer::lerp3(p0, p1, p2, b),
                     normal,
                     uv,
                     triangle: tri_idx,
@@ -632,10 +589,6 @@ pub fn rasterize_uv_geometry(
         }
     }
     out
-}
-
-fn uv_finite(uvs: [[f32; 2]; 3]) -> bool {
-    uvs.iter().all(|uv| uv[0].is_finite() && uv[1].is_finite())
 }
 
 fn pos_finite(ps: [[f32; 3]; 3]) -> bool {
