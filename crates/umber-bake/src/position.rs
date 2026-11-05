@@ -110,21 +110,6 @@ const _: () = assert!(
     "GpuPosTri must match POSITION_BAKE_SHADER's WGSL PosTri layout"
 );
 
-/// GPU-side params uniform, byte-identical to `POSITION_BAKE_SHADER`'s
-/// WGSL `PositionParams` struct.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct PositionUniform {
-    dims: [u32; 2],
-    tri_count: u32,
-    _pad: u32,
-}
-
-const _: () = assert!(
-    size_of::<PositionUniform>() == 16,
-    "PositionUniform must match POSITION_BAKE_SHADER's WGSL PositionParams layout"
-);
-
 /// Checks [`bake_position_map`]'s inputs independently of any GPU call —
 /// factored out so these are unit-testable without a device, matching
 /// `ao::validate`'s convention.
@@ -249,16 +234,17 @@ pub(crate) fn bake_position_and_normal(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
-    let uniform = PositionUniform {
-        dims: [width, height],
-        tri_count: triangles.len() as u32,
-        _pad: 0,
-    };
-    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("umber_bake_position_params"),
-        contents: bytemuck::cast_slice(&[uniform]),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
+    // Row 156-B kill 5b: coverage + winner + barycentrics come from the
+    // UV G-buffer (tile 1001, the position map's historical UV window).
+    let gbuffer =
+        crate::gbuffer::bake_uv_gbuffer(device, queue, mesh, umber_mesh::FIRST_TILE, width, height)
+            .map_err(|e| PositionMapError::Readback(e.to_string()))?;
+    let prim_view = gbuffer
+        .prim_texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let bary_view = gbuffer
+        .bary_texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
 
     // Rgba32Float write-only storage is core WebGPU (no device feature
     // needed) — empirically confirmed on this sandbox's adapter before
@@ -332,10 +318,20 @@ pub(crate) fn bake_position_and_normal(
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<PositionUniform>() as u64),
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
                 count: None,
             },
@@ -379,11 +375,11 @@ pub(crate) fn bake_position_and_normal(
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniform_buffer,
-                    offset: 0,
-                    size: None,
-                }),
+                resource: wgpu::BindingResource::TextureView(&prim_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&bary_view),
             },
         ],
     });
@@ -615,11 +611,6 @@ mod tests {
     #[test]
     fn gpu_pos_tri_layout_matches_wgsl_struct_size() {
         assert_eq!(size_of::<GpuPosTri>(), 80);
-    }
-
-    #[test]
-    fn position_uniform_layout_matches_wgsl_struct_size() {
-        assert_eq!(size_of::<PositionUniform>(), 16);
     }
 
     #[test]

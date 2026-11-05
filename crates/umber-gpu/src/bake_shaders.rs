@@ -396,199 +396,65 @@ fn cs_main_from_position(
 }
 "#;
 
-/// UV→world-position rasterization: one compute pass that turns a mesh's
-/// own UV layout into a world-space position map, the input the AO pass
-/// (and every other mesh-map baker) ultimately needs instead of a
-/// stand-in parameter plane. See `umber_bake::position`'s module doc for
-/// the driver side (`PositionMapParams`, `bake_position_map`, the
-/// `MAX_TRIS_PER_BAKE` mesh-size ceiling).
+/// UV→world-position map: per texel, the world position and face normal
+/// of the covering triangle, the input every mesh-map baker (AO,
+/// curvature, thickness, normal) consumes. See `umber_bake::position` for
+/// the driver side.
 ///
-/// # Rasterization model
+/// # Row 156-B kill 5b: a gather over the UV G-buffer
 ///
-/// One workgroup per `8x8` texel tile (`@workgroup_size(8, 8, 1)`,
-/// `dispatch_workgroups(ceil(width/8), ceil(height/8), 1)`); each
-/// invocation owns exactly one texel (`global_invocation_id.xy`). For every
-/// triangle, each invocation independently tests whether its own texel's
-/// UV falls inside that triangle's UV footprint (a 2D analog of
-/// `AO_BAKE_SHADER::hits_triangle`'s Möller–Trumbore inversion: the same
-/// edge-vector/cross-product/`1/det` structure, collapsed from a 3D
-/// ray-plane intersection to a 2D point-in-triangle barycentric solve —
-/// see `cross2`/`cs_main`'s inner loop). A texel's UV is its texel-center
-/// position remapped through `(1 - v)` on the v axis to match
-/// `umber_app::paint_state`'s `texel = [u * texels_per_uv, (1 - v) *
-/// texels_per_uv]` convention — without this flip, a mesh baked here and
-/// painted there would disagree about which texture row is "up".
+/// Coverage, the winning triangle and its barycentrics are READ from the
+/// UV G-buffer ([`UV_GBUFFER_SHADER`]'s `prim_tex` + `bary_tex`), the GPU
+/// mirror of `umber_mesh::UvGBuffer`. This shader used to carry its own
+/// chunked point-in-triangle solve (the last private copy); it now only
+/// does the per-covered-texel work: `pos = v0*b0 + v1*b1 + v2*b2` and the
+/// triangle's face normal.
 ///
-/// # No depth test — last-writer-wins on overlapping UV islands
+/// # Layout contracts
 ///
-/// This pass has no notion of "which UV island is on top": if two
-/// triangles' UV footprints overlap the same texel (a seam/charting defect,
-/// or deliberately overlapping islands), whichever triangle has the higher
-/// index in the mesh's triangle list wins — not the nearest in any
-/// meaningful sense, just last-tested. Fine for well-charted meshes (no UV
-/// overlap by construction); produces silently-wrong results for
-/// overlapping ones. A real fix needs either per-island depth/priority
-/// metadata or non-overlapping UV charts guaranteed upstream — out of scope
-/// for this slice (Wave-3+ seam/overlap work per the task brief).
-///
-/// # Shared-memory triangle batching — why not one array of `MAX_TRIS_PER_BAKE`
-///
-/// The task sketch asked for "the full triangle list, loaded once into
-/// workgroup-shared memory, sized by `MAX_TRIS_PER_BAKE = 4096`." Checked
-/// against this repo's actual GPU (see `umber-bake`'s landing notes for the
-/// measured numbers): a plain `wgpu::DeviceDescriptor::default()` device —
-/// the same one every other GPU test in this crate requests, and the only
-/// kind of device umber-gpu's architecture rule lets a caller hand in
-/// (`eframe`'s `wgpu_render_state`, not something this crate can raise
-/// limits on after the fact) — reports `max_compute_workgroup_storage_size
-/// = 16384` bytes. Even a minimal 32-byte-per-triangle UV-only record
-/// (`ChunkEntry` below) at `4096` entries is `131072` bytes, 8x over
-/// budget; a full per-triangle record with positions would be worse. So
-/// this shader stages the triangle list through shared memory in
-/// `TRI_CHUNK`-sized batches instead of one static array: `TRI_CHUNK = 256`
-/// entries of `ChunkEntry` (`32` bytes each) is `8192` bytes, half the
-/// measured budget, with headroom to spare. `MAX_TRIS_PER_BAKE` survives as
-/// the Rust-side mesh-size ceiling (`position::validate` rejects anything
-/// larger before it reaches the GPU at all) — it just isn't a shared-memory
-/// array size anymore. The chunking loop (load a batch cooperatively →
-/// barrier → every invocation tests its own texel against that batch →
-/// barrier → next batch) still delivers the brief's actual goal (each
-/// triangle's UV data is read from the global storage buffer once per
-/// *workgroup*, not once per *invocation* — a 64x reduction in global
-/// memory traffic for the containment test), just chunked to fit real
-/// hardware instead of assuming an unbounded shared-memory budget.
-///
-/// World positions are deliberately kept *out* of the shared-memory batch
-/// (`ChunkEntry` carries UVs only): a texel only needs a triangle's full
-/// vertex positions once, for the single triangle that ends up winning it
-/// (last-writer-wins, see above) — re-fetching that from the read-only
-/// global `tris` buffer at the very end (one extra read per *covered*
-/// texel, not per triangle-candidate) is cheaper than paying shared-memory
-/// budget for data most candidates never need.
+/// - `PosTri` matches `umber_bake::position::GpuPosTri` (80 bytes: three
+///   world positions with UV x in `w`, UV y in `uv_y`, the face normal).
+///   UVs are unused here; the layout stays shared with the transfer and
+///   AO triangle builders.
+/// - Outputs `pos_tex` / `normal_tex`: `Rgba32Float`, `w` = coverage
+///   (1.0 covered, 0.0 with xyz = 0 uncovered), the alpha convention every
+///   downstream pass gates on (`<= 0.5` = uncovered).
+/// - `@workgroup_size(8, 8)`, dispatched `ceil(w/8) x ceil(h/8)`.
 pub const POSITION_BAKE_SHADER: &str = r#"
 struct PosTri {
-    v0: vec4<f32>,    // xyz = world position of vertex 0, w = uv0.x
-    v1: vec4<f32>,    // xyz = world position of vertex 1, w = uv1.x
-    v2: vec4<f32>,    // xyz = world position of vertex 2, w = uv2.x
-    uv_y: vec4<f32>,  // x = uv0.y, y = uv1.y, z = uv2.y, w unused
-    normal: vec4<f32>, // xyz = face normal (consumed by cs_main_from_position), w unused
-};
-
-struct ChunkEntry {
-    uv01: vec4<f32>, // x=uv0.x, y=uv0.y, z=uv1.x, w=uv1.y
-    uv2: vec4<f32>,   // x=uv2.x, y=uv2.y, z/w unused
-};
-
-struct PositionParams {
-    dims: vec2<u32>,
-    tri_count: u32,
-    _pad: u32,
+    v0: vec4<f32>,
+    v1: vec4<f32>,
+    v2: vec4<f32>,
+    uv_y: vec4<f32>,
+    normal: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> tris: array<PosTri>;
 @group(0) @binding(1) var pos_tex: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(2) var normal_tex: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(3) var<uniform> params: PositionParams;
+@group(0) @binding(3) var prim_tex: texture_2d<u32>;
+@group(0) @binding(4) var bary_tex: texture_2d<f32>;
 
-const TILE: u32 = 8u;
-const TILE_AREA: u32 = 64u;
-const TRI_CHUNK: u32 = 256u;
-const DET_EPS: f32 = 1e-10;
-const BARY_EPS: f32 = 1e-6;
+const NO_PRIM: u32 = 0xFFFFFFFFu;
 
-var<workgroup> chunk: array<ChunkEntry, TRI_CHUNK>;
-
-/// 2D cross product (the scalar "perp-dot"): `a.x*b.y - a.y*b.x`.
-fn cross2(a: vec2<f32>, b: vec2<f32>) -> f32 {
-    return a.x * b.y - a.y * b.x;
-}
-
-@compute @workgroup_size(TILE, TILE, 1)
-fn cs_main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_index) local_index: u32,
-) {
-    let in_bounds = gid.x < params.dims.x && gid.y < params.dims.y;
-    // Texel-center UV, v-flipped to match umber_app::paint_state's
-    // `(1 - v) * texels_per_uv` convention (see this shader's doc comment).
-    // Computed unconditionally (not gated on `in_bounds`) because every
-    // invocation in the tile must stay in lock-step through the
-    // `workgroupBarrier()`s below regardless of whether its own texel is
-    // inside the target — barriers require uniform control flow across the
-    // whole workgroup, so only the final `textureStore` is guarded.
-    let dims_f = vec2<f32>(params.dims);
-    let texel_uv = vec2<f32>(
-        (f32(gid.x) + 0.5) / max(dims_f.x, 1.0),
-        1.0 - (f32(gid.y) + 0.5) / max(dims_f.y, 1.0),
-    );
-
-    var best_tri: i32 = -1;
-    var best_w: f32 = 0.0;
-    var best_u: f32 = 0.0;
-    var best_v: f32 = 0.0;
-
-    for (var base: u32 = 0u; base < params.tri_count; base = base + TRI_CHUNK) {
-        let count = min(params.tri_count - base, TRI_CHUNK);
-
-        // Cooperative load: the TILE_AREA invocations in this workgroup
-        // split up to `count` triangles between them, so each triangle's
-        // UV data is read from `tris` once per workgroup, not once per
-        // invocation (see this shader's "shared-memory triangle batching"
-        // doc comment).
-        for (var i: u32 = local_index; i < count; i = i + TILE_AREA) {
-            let t = tris[base + i];
-            chunk[i] = ChunkEntry(
-                vec4<f32>(t.v0.w, t.uv_y.x, t.v1.w, t.uv_y.y),
-                vec4<f32>(t.v2.w, t.uv_y.z, 0.0, 0.0),
-            );
-        }
-        workgroupBarrier();
-
-        for (var k: u32 = 0u; k < count; k = k + 1u) {
-            let e = chunk[k];
-            let uv0 = e.uv01.xy;
-            let uv1 = e.uv01.zw;
-            let uv2 = e.uv2.xy;
-            let e1 = uv1 - uv0;
-            let e2 = uv2 - uv0;
-            let denom = cross2(e1, e2);
-            // Degenerate (zero-UV-area) triangle: never claims a texel.
-            // `ao::bake_ao_mesh`'s GPU test relies on this to keep an
-            // occluder triangle (added to the mesh purely for AO raycasting,
-            // with all-identical UVs) out of the position map entirely.
-            if (abs(denom) >= DET_EPS) {
-                let inv_denom = 1.0 / denom;
-                let s = texel_uv - uv0;
-                let bu = cross2(s, e2) * inv_denom;
-                let bv = cross2(e1, s) * inv_denom;
-                let bw = 1.0 - bu - bv;
-                // Inclusive bounds (not strict >= 0): texels exactly on a
-                // shared edge between two adjoining triangles (e.g. the
-                // unit quad's diagonal) must be claimed by at least one of
-                // them, not fall through a seam gap.
-                if (bu >= -BARY_EPS && bv >= -BARY_EPS && bw >= -BARY_EPS) {
-                    best_tri = i32(base + k);
-                    best_w = bw;
-                    best_u = bu;
-                    best_v = bv;
-                }
-            }
-        }
-        workgroupBarrier();
+@compute @workgroup_size(8, 8, 1)
+fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(pos_tex);
+    if (gid.x >= dims.x || gid.y >= dims.y) {
+        return;
     }
-
-    if (in_bounds) {
-        let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-        if (best_tri >= 0) {
-            let tri = tris[u32(best_tri)];
-            let pos = tri.v0.xyz * best_w + tri.v1.xyz * best_u + tri.v2.xyz * best_v;
-            textureStore(pos_tex, coord, vec4<f32>(pos, 1.0));
-            textureStore(normal_tex, coord, vec4<f32>(normalize(tri.normal.xyz), 1.0));
-        } else {
-            textureStore(pos_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-            textureStore(normal_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-        }
+    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+    let prim = textureLoad(prim_tex, coord, 0).x;
+    if (prim == NO_PRIM) {
+        textureStore(pos_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        textureStore(normal_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
     }
+    let b = textureLoad(bary_tex, coord, 0).xyz;
+    let tri = tris[prim];
+    let pos = tri.v0.xyz * b.x + tri.v1.xyz * b.y + tri.v2.xyz * b.z;
+    textureStore(pos_tex, coord, vec4<f32>(pos, 1.0));
+    textureStore(normal_tex, coord, vec4<f32>(normalize(tri.normal.xyz), 1.0));
 }
 "#;
 
@@ -1948,8 +1814,10 @@ fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 /// - `bary_tex` (`Rgba32Float`): `(b0, b1, b2, coverage)`, coverage 1.0 or 0.0.
 /// - `prim_tex` (`R32Uint`): triangle index, `0xFFFFFFFF` = uncovered.
 ///
-/// One invocation per texel, brute force over the triangle list (the
-/// `MAX_TRIS_PER_BAKE` budget the other bake passes share). Not for the
+/// One invocation per texel over the triangle list, staged through
+/// workgroup memory in `TRI_CHUNK` batches (each triangle read from global
+/// memory once per 8x8 workgroup, the scheme `POSITION_BAKE_SHADER` used
+/// before it became a gather). Budget: `MAX_TRIS_PER_BAKE`. Not for the
 /// paint hot path.
 pub const UV_GBUFFER_SHADER: &str = r#"
 struct GbTri {
@@ -1973,45 +1841,64 @@ struct GbParams {
 const UV_DET_EPS: f32 = 1e-10;
 const UV_BARY_EPS: f32 = 1e-6;
 const NO_PRIM: u32 = 0xFFFFFFFFu;
+const TILE_AREA: u32 = 64u;
+// 256 x 32 B = 8 KiB of workgroup storage: half the 16 KiB a default
+// device guarantees (the budget POSITION_BAKE_SHADER's doc measures).
+const TRI_CHUNK: u32 = 256u;
+
+var<workgroup> chunk: array<GbTri, TRI_CHUNK>;
 
 @compute @workgroup_size(8, 8, 1)
-fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.dims.x || gid.y >= params.dims.y) {
-        return;
-    }
-    let w = f32(params.dims.x);
-    let h = f32(params.dims.y);
+fn cs_main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    // Every invocation stays in the loop (barriers need uniform control
+    // flow); only the final stores are bounds-guarded.
+    let in_bounds = gid.x < params.dims.x && gid.y < params.dims.y;
+    let w = f32(max(params.dims.x, 1u));
+    let h = f32(max(params.dims.y, 1u));
     let p = vec2<f32>(
         params.tile_off.x + (f32(gid.x) + 0.5) / w,
         params.tile_off.y + 1.0 - (f32(gid.y) + 0.5) / h,
     );
     var best: u32 = NO_PRIM;
     var bb = vec3<f32>(0.0, 0.0, 0.0);
-    for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
-        let tri = tris[t];
-        let area = tri.uv2.z;
-        if (abs(area) < UV_DET_EPS) {
-            continue;
+    for (var base: u32 = 0u; base < params.tri_count; base = base + TRI_CHUNK) {
+        let count = min(params.tri_count - base, TRI_CHUNK);
+        for (var i: u32 = local_index; i < count; i = i + TILE_AREA) {
+            chunk[i] = tris[base + i];
         }
-        let uv0 = tri.uv01.xy;
-        let uv1 = tri.uv01.zw;
-        let uv2 = tri.uv2.xy;
-        let e0 = (p.x - uv1.x) * (uv2.y - uv1.y) - (p.y - uv1.y) * (uv2.x - uv1.x);
-        let e1 = (p.x - uv2.x) * (uv0.y - uv2.y) - (p.y - uv2.y) * (uv0.x - uv2.x);
-        let e2 = (p.x - uv0.x) * (uv1.y - uv0.y) - (p.y - uv0.y) * (uv1.x - uv0.x);
-        let b = vec3<f32>(-e0 / area, -e1 / area, -e2 / area);
-        if (b.x >= -UV_BARY_EPS && b.y >= -UV_BARY_EPS && b.z >= -UV_BARY_EPS) {
-            best = t;
-            bb = b;
+        workgroupBarrier();
+        for (var k: u32 = 0u; k < count; k = k + 1u) {
+            let tri = chunk[k];
+            let area = tri.uv2.z;
+            if (abs(area) < UV_DET_EPS) {
+                continue;
+            }
+            let uv0 = tri.uv01.xy;
+            let uv1 = tri.uv01.zw;
+            let uv2 = tri.uv2.xy;
+            let e0 = (p.x - uv1.x) * (uv2.y - uv1.y) - (p.y - uv1.y) * (uv2.x - uv1.x);
+            let e1 = (p.x - uv2.x) * (uv0.y - uv2.y) - (p.y - uv2.y) * (uv0.x - uv2.x);
+            let e2 = (p.x - uv0.x) * (uv1.y - uv0.y) - (p.y - uv0.y) * (uv1.x - uv0.x);
+            let b = vec3<f32>(-e0 / area, -e1 / area, -e2 / area);
+            if (b.x >= -UV_BARY_EPS && b.y >= -UV_BARY_EPS && b.z >= -UV_BARY_EPS) {
+                best = base + k;
+                bb = b;
+            }
         }
+        workgroupBarrier();
     }
-    let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-    if (best == NO_PRIM) {
-        textureStore(bary_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-    } else {
-        textureStore(bary_tex, coord, vec4<f32>(bb, 1.0));
+    if (in_bounds) {
+        let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+        if (best == NO_PRIM) {
+            textureStore(bary_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        } else {
+            textureStore(bary_tex, coord, vec4<f32>(bb, 1.0));
+        }
+        textureStore(prim_tex, coord, vec4<u32>(best, 0u, 0u, 0u));
     }
-    textureStore(prim_tex, coord, vec4<u32>(best, 0u, 0u, 0u));
 }
 "#;
 
@@ -2041,14 +1928,19 @@ mod uv_eps_parity {
         assert!(ID_BAKE_SHADER.contains("prim_tex"));
     }
 
+    /// Kill 5b: the position bake is a gather too; the G-buffer shader is
+    /// now the ONLY WGSL UV solve.
+    #[test]
+    fn position_bake_has_no_private_uv_solve() {
+        assert!(!POSITION_BAKE_SHADER.contains("EPS"));
+        assert!(POSITION_BAKE_SHADER.contains("prim_tex"));
+        assert!(POSITION_BAKE_SHADER.contains("bary_tex"));
+    }
+
     #[test]
     fn bake_shader_eps_match_the_cpu_uv_gbuffer() {
-        for (src, det, bary) in [
-            (POSITION_BAKE_SHADER, "DET_EPS", "BARY_EPS"),
-            (UV_GBUFFER_SHADER, "UV_DET_EPS", "UV_BARY_EPS"),
-        ] {
-            assert_eq!(wgsl_const(src, det), umber_mesh::UV_DET_EPS, "{det}");
-            assert_eq!(wgsl_const(src, bary), umber_mesh::UV_BARY_EPS, "{bary}");
-        }
+        let src = UV_GBUFFER_SHADER;
+        assert_eq!(wgsl_const(src, "UV_DET_EPS"), umber_mesh::UV_DET_EPS);
+        assert_eq!(wgsl_const(src, "UV_BARY_EPS"), umber_mesh::UV_BARY_EPS);
     }
 }
