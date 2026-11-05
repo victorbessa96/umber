@@ -52,6 +52,10 @@ pub fn ensure_i18n() {
 pub fn builder<S>() -> HarnessBuilder<S> {
     ensure_i18n();
     Harness::<S>::builder()
+        // kittest's default max_steps is 4, which is too tight once the Umber
+        // fonts realize: the font atlas rebuilds over a few frames and layout
+        // keeps requesting repaints while metrics converge.
+        .with_max_steps(64)
         .with_step_dt(STEP_DT)
         .with_size(SIZE)
 }
@@ -122,7 +126,12 @@ pub fn fonts_gate<S>(harness: &mut Harness<'_, S>, keys: &[&str]) {
             return;
         }
         harness.ctx.set_fonts(umber_gui::umber_fonts());
-        harness.step();
+        // A few frames, not one: the new font atlas rebuilds over the first
+        // passes and text metrics shift, so give layout a chance to converge
+        // before run_ok's settle budget starts counting.
+        for _ in 0..5 {
+            harness.step();
+        }
     }
     FONTS_REALIZED.store(true, Ordering::Relaxed);
     let ready = harness.ctx.fonts(|f| {
@@ -146,9 +155,11 @@ pub fn fonts_gate<S>(harness: &mut Harness<'_, S>, keys: &[&str]) {
 /// so every settled harness has the Umber fonts realized.
 pub fn settle<S>(harness: &mut Harness<'_, S>) {
     fonts_gate(harness, &UMBER_FONT_KEYS);
+    let res = harness.try_run();
     assert!(
-        harness.run_ok().is_some(),
-        "the UI did not settle within egui_kittest's step budget"
+        res.is_ok(),
+        "the UI did not settle within egui_kittest's step budget: {}",
+        res.err().map(|e| e.to_string()).unwrap_or_default()
     );
 }
 
