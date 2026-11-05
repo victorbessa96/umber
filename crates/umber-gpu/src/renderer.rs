@@ -4109,7 +4109,7 @@ mod tests {
             let r2 = n.cross(dpos_dx);
             let det = dpos_dx.dot(r1);
             let mut surf_grad = r1 * dhdx;
-            surf_grad = surf_grad + r2 * dhdy;
+            surf_grad += r2 * dhdy;
             let signed = surf_grad * det.signum();
             (n * det.abs() - signed).normalize()
         }
@@ -4308,12 +4308,20 @@ mod tests {
             let mesh = umber_mesh::MeshData {
                 positions: vec![
                     [1.0, -1.0, 0.0],
-                    [0.70710678, -1.0, 0.70710678],
+                    [
+                        std::f32::consts::FRAC_1_SQRT_2,
+                        -1.0,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                    ],
                     [1.0, 1.0, 0.0],
                 ],
                 normals: vec![
                     [1.0, 0.0, 0.0],
-                    [0.70710678, 0.0, 0.70710678],
+                    [
+                        std::f32::consts::FRAC_1_SQRT_2,
+                        0.0,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                    ],
                     [1.0, 0.0, 0.0],
                 ],
                 uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
@@ -4347,9 +4355,13 @@ mod tests {
             // Barycentric strict-inside verification of the probe pixel.
             let (w0, w1, w2) = barycentric_weights(
                 glam::Vec3::new(1.0, -1.0, 0.0),
-                glam::Vec3::new(0.70710678, -1.0, 0.70710678),
+                glam::Vec3::new(
+                    std::f32::consts::FRAC_1_SQRT_2,
+                    -1.0,
+                    std::f32::consts::FRAC_1_SQRT_2,
+                ),
                 glam::Vec3::new(1.0, 1.0, 0.0),
-                glam::Vec3::new(0.75, -0.75, 0.60355339),
+                glam::Vec3::new(0.75, -0.75, 0.603_553_4),
             );
             assert!(
                 w0 > 0.0 && w1 > 0.0 && w2 > 0.0,
@@ -4361,8 +4373,12 @@ mod tests {
             // blend's y is 0 exactly (the claw's first draft carried
             // `w1 * 0.707` in the y slot, which fed the mirror a
             // normal that never existed on the sliver).
-            let n = glam::Vec3::new(w0 * 1.0 + w1 * 0.70710678 + w2 * 1.0, 0.0, w1 * 0.70710678)
-                .normalize();
+            let n = glam::Vec3::new(
+                w0 * 1.0 + w1 * std::f32::consts::FRAC_1_SQRT_2 + w2 * 1.0,
+                0.0,
+                w1 * std::f32::consts::FRAC_1_SQRT_2,
+            )
+            .normalize();
             let frames = umber_mesh::tangents::vertex_tangent_frames(
                 &mesh.positions,
                 &mesh.normals,
