@@ -641,7 +641,8 @@ mod kittest {
     fn browser_lists_bundled_presets_and_applies_on_plus() {
         let mut h = harness();
         assert!(h.run_ok().is_some(), "the browser settles");
-        // The bundled library (assets/smart): two materials + one mask.
+        // The bundled library (assets/smart) includes the original pair
+        // of materials and the edge-wear mask.
         assert!(
             h.query_by_label("Worn metal").is_some(),
             "material row (display name)"
@@ -651,10 +652,15 @@ mod kittest {
             "material row (display name)"
         );
         assert!(h.query_by_label("Edge wear").is_some(), "mask row");
-        // The first + button is the first material row (the list is
-        // name-sorted): clicking it applies that material.
-        // Materials render before masks, and the list is name-sorted:
-        // the first + is "Painted wood".
+        // The first + button is the first material row. Materials render
+        // before masks in the scan's own order; the expected name comes
+        // from that scan, so growing the starter library (K7-K9 added ten
+        // materials ahead of "Painted wood") never breaks this pin.
+        let first = document::list_smart_materials(&document::smart_dirs())
+            .into_iter()
+            .next()
+            .map(|(_, m)| m.name)
+            .expect("the bundled library has materials");
         let plus = h.get_all_by_label("+").next().expect("row buttons");
         plus.click();
         assert!(h.run_ok().is_some());
@@ -665,7 +671,7 @@ mod kittest {
             .expect("the + click produced an outcome");
         assert_eq!(
             out.material.as_ref().map(|m| m.name.as_str()),
-            Some("Painted wood"),
+            Some(first.as_str()),
             "the first material row's + applies that material"
         );
     }
