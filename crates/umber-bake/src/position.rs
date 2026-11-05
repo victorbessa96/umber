@@ -1004,5 +1004,60 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, PositionMapError::TooManyTriangles { .. }));
         }
+
+        /// Row 156-B kill 5b pre-pin: the position bake (still running its
+        /// own chunked WGSL solve, S6) agrees with the CPU UV G-buffer on
+        /// coverage at EVERY texel, and its world position is the CPU's
+        /// barycentric lerp to within 1e-5. When S6 is subsumed by the
+        /// G-buffer this pin is what proves the swap changed nothing.
+        #[test]
+        fn position_bake_coverage_and_lerp_match_cpu_uv_gbuffer() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let mut mesh = full_uv_quad();
+            // An overlapping third triangle exercises last-in-order wins.
+            mesh.positions.push([0.0, 0.0, 0.5]);
+            mesh.normals.push([0.0, 0.0, 1.0]);
+            mesh.uvs.push([0.25, 0.25]);
+            mesh.indices.extend_from_slice(&[4, 1, 2]);
+            for (w, h) in [(32u32, 32u32), (24, 40)] {
+                let map = bake_position_map(
+                    &device,
+                    &queue,
+                    &mesh,
+                    &PositionMapParams {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .expect("bake");
+                let cpu = umber_mesh::UvGBuffer::build(&mesh, umber_mesh::FIRST_TILE, w, h);
+                let mut worst = 0.0f32;
+                for y in 0..h {
+                    for x in 0..w {
+                        let t = texel(&map, w, x, y);
+                        match cpu.at(x, y) {
+                            None => assert_eq!(t[3], 0.0, "{w}x{h} ({x},{y}) GPU covered, CPU not"),
+                            Some(hit) => {
+                                assert_eq!(t[3], 1.0, "{w}x{h} ({x},{y}) CPU covered, GPU not");
+                                let i = &mesh.indices[hit.triangle * 3..hit.triangle * 3 + 3];
+                                let want = umber_mesh::lerp3(
+                                    mesh.positions[i[0] as usize],
+                                    mesh.positions[i[1] as usize],
+                                    mesh.positions[i[2] as usize],
+                                    hit.bary,
+                                );
+                                for k in 0..3 {
+                                    worst = worst.max((t[k] - want[k]).abs());
+                                }
+                            }
+                        }
+                    }
+                }
+                assert!(worst < 1e-5, "{w}x{h}: position differs by {worst:e}");
+                eprintln!("position parity {w}x{h}: coverage exact, pos worst {worst:e}");
+            }
+        }
     }
 }
