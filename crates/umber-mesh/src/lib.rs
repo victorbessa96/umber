@@ -47,7 +47,9 @@ pub use udim::{
     FIRST_TILE,
 };
 pub use usd::load_usda;
-pub use uv_gbuffer::{lerp3, uv_to_barycentric, UvGBuffer, UvHit, UvTri, UV_BARY_EPS, UV_DET_EPS};
+pub use uv_gbuffer::{
+    lerp2, lerp3, uv_to_barycentric, UvGBuffer, UvHit, UvTri, UV_BARY_EPS, UV_DET_EPS,
+};
 
 /// Interleaved mesh data as imported, before any GPU upload.
 #[derive(Debug, Clone, Default, PartialEq)]

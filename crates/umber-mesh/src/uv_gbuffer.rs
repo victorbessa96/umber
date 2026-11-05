@@ -128,6 +128,15 @@ pub fn lerp3(a: [f32; 3], b: [f32; 3], c: [f32; 3], w: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// [`lerp3`] for two-component values (UVs).
+#[inline]
+pub fn lerp2(a: [f32; 2], b: [f32; 2], c: [f32; 2], w: [f32; 3]) -> [f32; 2] {
+    [
+        a[0] * w[0] + b[0] * w[1] + c[0] * w[2],
+        a[1] * w[0] + b[1] * w[1] + c[1] * w[2],
+    ]
+}
+
 /// The UDIM tile's integer UV offset `(tu, tv)` (tile 1001 = (0, 0),
 /// ten tiles per row). Tiles below 1001 clamp to 1001.
 pub fn tile_offset(tile: u16) -> (f32, f32) {

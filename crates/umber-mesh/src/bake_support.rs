@@ -68,11 +68,9 @@ impl Cage {
             *self.offsets.get(i1)?,
             *self.offsets.get(i2)?,
         );
-        Some([
-            w * o0[0] + u * o1[0] + v * o2[0],
-            w * o0[1] + u * o1[1] + v * o2[1],
-            w * o0[2] + u * o1[2] + v * o2[2],
-        ])
+        // The shared barycentric lerp (row 156-B kill 3); IEEE `*` is
+        // commutative and the sum order is unchanged, so bit-identical.
+        Some(crate::uv_gbuffer::lerp3(o0, o1, o2, [w, u, v]))
     }
 }
 

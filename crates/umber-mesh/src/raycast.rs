@@ -138,11 +138,7 @@ pub fn front_facing_weight(facing: f32, start_deg: f32) -> f32 {
 pub fn uv_at(mesh: &MeshData, hit: RayHit) -> Option<[f32; 2]> {
     let tri = mesh.indices.chunks_exact(3).nth(hit.triangle)?;
     interpolate_attr(tri, &mesh.uvs, hit, |a, b, c, u, v| {
-        let w = 1.0 - u - v;
-        [
-            a[0] * w + b[0] * u + c[0] * v,
-            a[1] * w + b[1] * u + c[1] * v,
-        ]
+        crate::uv_gbuffer::lerp2(a, b, c, [1.0 - u - v, u, v])
     })
 }
 

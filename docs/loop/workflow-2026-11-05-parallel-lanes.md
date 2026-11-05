@@ -22,6 +22,10 @@ crates, the push, and dragon review of every claw commit before it rides a push.
 
 ## Battery discipline
 
+- One-stack rule LIFTED (Bessa, 2026-11-05): Umber cargo no longer waits on
+  other territories' cargo. `flock /tmp/umber-cargo.lock` still serializes
+  Umber's own cargo runs (they share `target/`). Check `df -h /tmp` before a
+  battery: /tmp is a 7.8G RAM tmpfs and filled to 100% on 2026-11-05.
 - Claws: targeted crate battery only (fast feedback).
 - Wave close (dragon): full multi-crate battery (the 8-crate pattern), fmt --check,
   layers gate, then ONE push for the wave (2026-10-14 alignment).

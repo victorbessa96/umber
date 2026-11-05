@@ -2022,3 +2022,33 @@ fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
     }
 }
 "#;
+
+#[cfg(test)]
+mod uv_eps_parity {
+    //! Row 156-B: the WGSL UV solves must quote the same epsilon pair as
+    //! the CPU authority `umber_mesh::uv_gbuffer`, so a texel the CPU fill
+    //! covers is a texel the GPU bakes cover. A drift fails here, not in
+    //! a golden three crates away.
+    use super::{ID_BAKE_SHADER, POSITION_BAKE_SHADER};
+
+    fn wgsl_const(src: &str, name: &str) -> f32 {
+        let needle = format!("const {name}: f32 = ");
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{name} missing"))
+            + needle.len();
+        let end = start + src[start..].find(';').expect("terminated const");
+        src[start..end].trim().parse().expect("f32 literal")
+    }
+
+    #[test]
+    fn bake_shader_eps_match_the_cpu_uv_gbuffer() {
+        for (src, det, bary) in [
+            (POSITION_BAKE_SHADER, "DET_EPS", "BARY_EPS"),
+            (ID_BAKE_SHADER, "ID_DET_EPS", "ID_BARY_EPS"),
+        ] {
+            assert_eq!(wgsl_const(src, det), umber_mesh::UV_DET_EPS, "{det}");
+            assert_eq!(wgsl_const(src, bary), umber_mesh::UV_BARY_EPS, "{bary}");
+        }
+    }
+}
