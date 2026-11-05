@@ -130,6 +130,18 @@ fn validate_accessors(document: &gltf::Document) -> Result<(), ImportError> {
     Ok(())
 }
 
+/// Refuses NaN/Inf in a geometry attribute (row 156-A hostile input): a
+/// non-finite component poisons every downstream consumer (bounds,
+/// raycast, bake), so it is a typed error, not a silent pass-through.
+fn ensure_finite<const N: usize>(values: &[[f32; N]], role: &str) -> Result<(), ImportError> {
+    if values.iter().flatten().any(|c| !c.is_finite()) {
+        return Err(ImportError::Gltf(format!(
+            "{role} has a non-finite (NaN/Inf) component"
+        )));
+    }
+    Ok(())
+}
+
 /// Append one glTF primitive to the accumulated [`MeshData`], offsetting its
 /// indices by the current vertex base.
 ///
@@ -150,6 +162,7 @@ fn append_primitive(
     if positions.is_empty() {
         return Ok(());
     }
+    ensure_finite(&positions, "POSITION")?;
     let indices_before = data.indices.len();
     let base = u32::try_from(data.positions.len())
         .map_err(|_| ImportError::Gltf("more than u32::MAX vertices".into()))?;
@@ -158,14 +171,22 @@ fn append_primitive(
     data.positions.extend(positions.iter().copied());
 
     match reader.read_normals() {
-        Some(normals) => data.normals.extend(normals),
+        Some(normals) => {
+            let normals: Vec<[f32; 3]> = normals.collect();
+            ensure_finite(&normals, "NORMAL")?;
+            data.normals.extend(normals);
+        }
         None => data
             .normals
             .extend(std::iter::repeat_n([0.0; 3], positions.len())),
     }
 
     match reader.read_tex_coords(0) {
-        Some(tex_coords) => data.uvs.extend(tex_coords.into_f32()),
+        Some(tex_coords) => {
+            let uvs: Vec<[f32; 2]> = tex_coords.into_f32().collect();
+            ensure_finite(&uvs, "TEXCOORD_0")?;
+            data.uvs.extend(uvs);
+        }
         None => data
             .uvs
             .extend(std::iter::repeat_n([0.0; 2], positions.len())),

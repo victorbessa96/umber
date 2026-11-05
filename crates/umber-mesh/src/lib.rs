@@ -174,6 +174,13 @@ pub enum ImportError {
 /// allocation failure, not unwind.
 pub const MAX_IMPORT_BYTES: u64 = 1 << 30;
 
+/// Upper bound on any single record count an importer accepts — points,
+/// faces, corners, primvar elements. Far past any paintable mesh
+/// (2^28 ≈ 268M) and far below where a hostile count could drive an
+/// allocation abort: the parsers refuse past it with a typed error
+/// (queue row 156-A record-count caps).
+pub const MAX_MESH_RECORDS: usize = 1 << 28;
+
 /// Refuses files over [`MAX_IMPORT_BYTES`]. Called by [`load`] before
 /// dispatch (covers the crate-based importers gltf/ufbx/openusd, which
 /// read the file themselves) and by the byte-reading entry points.
@@ -363,6 +370,13 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
     }
     if complete && pending_triangle_materials.len() == data.triangle_count() {
         data.triangle_materials = pending_triangle_materials;
+    }
+    // tobj silently ignores lines it does not recognize, so a non-OBJ
+    // text file "loads" as zero models. Refuse it like the other
+    // importers do (row 156-A: hostile input is a typed Err, never a
+    // silent empty Ok).
+    if data.positions.is_empty() {
+        return Err(ImportError::Obj("no mesh geometry found".into()));
     }
     Ok(data)
 }

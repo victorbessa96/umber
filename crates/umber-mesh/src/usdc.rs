@@ -26,6 +26,176 @@ use openusd::sdf::{AbstractData, Path as SdfPath, SpecType, Value};
 use openusd::usdc;
 
 use super::{ImportError, MeshData};
+
+/// Upper bound on a `.usdz` package's declared uncompressed content,
+/// checked against the zip CENTRAL DIRECTORY before any entry is
+/// extracted (row 156-A decompression cap). 1 GiB matches
+/// [`crate::MAX_IMPORT_BYTES`]: any paintable scene's package fits, and
+/// a package declaring more is a bomb — a ~130-byte zip whose directory
+/// claims 4–10 GiB is refused here, before openusd ever extracts.
+pub const MAX_USDZ_UNCOMPRESSED_BYTES: u64 = 1 << 30;
+
+/// The most central-directory entries one package may declare. Real
+/// .usdz packages hold a handful of layers; a directory claiming more
+/// is hostile and refused before it is walked.
+const MAX_USDZ_ENTRIES: u64 = 4096;
+
+fn u16le(b: &[u8], o: usize) -> Option<u16> {
+    Some(u16::from_le_bytes([*b.get(o)?, *b.get(o + 1)?]))
+}
+fn u32le(b: &[u8], o: usize) -> Option<u32> {
+    Some(u32::from_le_bytes([
+        *b.get(o)?,
+        *b.get(o + 1)?,
+        *b.get(o + 2)?,
+        *b.get(o + 3)?,
+    ]))
+}
+fn u64le(b: &[u8], o: usize) -> Option<u64> {
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(b.get(o..o + 8)?);
+    Some(u64::from_le_bytes(buf))
+}
+
+/// Preflights a `.usdz` package's bytes: walks the zip central directory
+/// (EOCD, ZIP64-aware) and refuses the package when any entry's declared
+/// uncompressed size — or the declared total — exceeds
+/// [`MAX_USDZ_UNCOMPRESSED_BYTES`]. This runs BEFORE
+/// [`openusd::usdz::Archive`] extracts anything, so a decompression bomb
+/// fails fast with a typed error instead of driving an inflate or a
+/// huge reservation. Every read is bounds-checked: a truncated or
+/// lying directory is a typed error, never a panic.
+fn usdz_preflight(bytes: &[u8]) -> Result<(), ImportError> {
+    const EOCD_SIG: u32 = 0x0605_4b50;
+    const ZIP64_EOCD_SIG: u32 = 0x0606_4b50;
+    const ZIP64_LOC_SIG: u32 = 0x0706_4b50;
+    const CENTRAL_SIG: u32 = 0x0201_4b50;
+    let malformed = || ImportError::Usd("usdz: malformed zip central directory".to_string());
+
+    // The EOCD record sits at the end, followed by a comment of at most
+    // 65_535 bytes; scan back for its signature.
+    let scan = bytes.len().min(22 + 65_535);
+    let mut eocd = None;
+    let mut back = 4;
+    while back <= scan && back <= bytes.len() {
+        let pos = bytes.len() - back;
+        if u32le(bytes, pos) == Some(EOCD_SIG) {
+            eocd = Some(pos);
+            break;
+        }
+        back += 1;
+    }
+    let eocd = eocd.ok_or_else(|| {
+        ImportError::Usd(
+            "usdz: no zip end-of-central-directory record (not a .usdz package)".into(),
+        )
+    })?;
+    let mut entries = u64::from(u16le(bytes, eocd + 10).ok_or_else(malformed)?);
+    let mut cd_size = u64::from(u32le(bytes, eocd + 12).ok_or_else(malformed)?);
+    let mut cd_offset = u64::from(u32le(bytes, eocd + 16).ok_or_else(malformed)?);
+    // ZIP64: sentinel (0xFFFF / 0xFFFFFFFF) fields redirect through the
+    // locator (immediately before the EOCD) to the 64-bit EOCD record.
+    if (entries == 0xFFFF || cd_size == u64::from(u32::MAX) || cd_offset == u64::from(u32::MAX))
+        && eocd >= 20
+    {
+        let loc = eocd - 20;
+        if u32le(bytes, loc) == Some(ZIP64_LOC_SIG) {
+            let z64 = u64le(bytes, loc + 8).ok_or_else(malformed)?;
+            let z64 = usize::try_from(z64).map_err(|_| malformed())?;
+            if u32le(bytes, z64) == Some(ZIP64_EOCD_SIG) {
+                if entries == 0xFFFF {
+                    entries = u64le(bytes, z64 + 32).ok_or_else(malformed)?;
+                }
+                if cd_size == u64::from(u32::MAX) {
+                    cd_size = u64le(bytes, z64 + 40).ok_or_else(malformed)?;
+                }
+                if cd_offset == u64::from(u32::MAX) {
+                    cd_offset = u64le(bytes, z64 + 48).ok_or_else(malformed)?;
+                }
+            }
+        }
+    }
+    if entries > MAX_USDZ_ENTRIES {
+        return Err(ImportError::Usd(format!(
+            "usdz: central directory declares {entries} entries; the cap is {MAX_USDZ_ENTRIES}"
+        )));
+    }
+    let mut pos = usize::try_from(cd_offset).map_err(|_| malformed())?;
+    let _ = cd_size; // only the offset is walked; the size is advisory
+    let mut total: u64 = 0;
+    for _ in 0..entries {
+        if u32le(bytes, pos) != Some(CENTRAL_SIG) {
+            return Err(malformed());
+        }
+        let mut comp = u64::from(u32le(bytes, pos + 20).ok_or_else(malformed)?);
+        let mut uncomp = u64::from(u32le(bytes, pos + 24).ok_or_else(malformed)?);
+        let name_len = usize::from(u16le(bytes, pos + 28).ok_or_else(malformed)?);
+        let extra_len = usize::from(u16le(bytes, pos + 30).ok_or_else(malformed)?);
+        let comment_len = usize::from(u16le(bytes, pos + 32).ok_or_else(malformed)?);
+        let disk_start = u16le(bytes, pos + 34).ok_or_else(malformed)?;
+        let local_off = u32le(bytes, pos + 42).ok_or_else(malformed)?;
+        let name = bytes
+            .get(pos + 46..pos + 46 + name_len)
+            .ok_or_else(malformed)?;
+        let extra = bytes
+            .get(pos + 46 + name_len..pos + 46 + name_len + extra_len)
+            .ok_or_else(malformed)?;
+        // ZIP64 extra field (tag 0x0001) carries the real 64-bit values for
+        // sentinel fields, in this order: uncompressed, compressed,
+        // local-header offset, disk start.
+        if uncomp == u64::from(u32::MAX)
+            || comp == u64::from(u32::MAX)
+            || local_off == u32::MAX
+            || disk_start == 0xFFFF
+        {
+            let mut e = 0;
+            while e + 4 <= extra.len() {
+                let tag = u16le(extra, e).ok_or_else(malformed)?;
+                let size = usize::from(u16le(extra, e + 2).ok_or_else(malformed)?);
+                let data = extra.get(e + 4..e + 4 + size).ok_or_else(malformed)?;
+                if tag == 0x0001 {
+                    let mut d = 0;
+                    if uncomp == u64::from(u32::MAX) {
+                        uncomp = u64le(data, d).ok_or_else(malformed)?;
+                        d += 8;
+                    }
+                    if comp == u64::from(u32::MAX) {
+                        comp = u64le(data, d).ok_or_else(malformed)?;
+                        d += 8;
+                    }
+                    if local_off == u32::MAX {
+                        let _ = u64le(data, d).ok_or_else(malformed)?;
+                        d += 8;
+                    }
+                    if disk_start == 0xFFFF {
+                        let _ = u32le(data, d).ok_or_else(malformed)?;
+                    }
+                }
+                e += 4 + size;
+            }
+        }
+        let name_str = String::from_utf8_lossy(name);
+        if uncomp > MAX_USDZ_UNCOMPRESSED_BYTES {
+            return Err(ImportError::Usd(format!(
+                "usdz: entry '{name_str}' declares {uncomp} uncompressed bytes; the cap is {MAX_USDZ_UNCOMPRESSED_BYTES} — refused before extraction"
+            )));
+        }
+        total = total.checked_add(uncomp).ok_or_else(|| {
+            ImportError::Usd(format!(
+                "usdz: declared uncompressed total overflows u64; the cap is {MAX_USDZ_UNCOMPRESSED_BYTES}"
+            ))
+        })?;
+        if total > MAX_USDZ_UNCOMPRESSED_BYTES {
+            return Err(ImportError::Usd(format!(
+                "usdz: entries declare {total} uncompressed bytes in total; the cap is {MAX_USDZ_UNCOMPRESSED_BYTES} — refused before extraction"
+            )));
+        }
+        pos = pos
+            .checked_add(46 + name_len + extra_len + comment_len)
+            .ok_or_else(malformed)?;
+    }
+    Ok(())
+}
 /// Loads a `.usdc` (binary crate) file: the first Mesh prim becomes a
 /// fan-triangulated [`MeshData`], mirroring [`super::usd::load_usda`].
 pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
@@ -64,12 +234,17 @@ pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
 /// first-layer rule; a nested package's sublayers are not walked (the
 /// named boundary).
 pub fn load_usdz(path: &Path) -> Result<MeshData, ImportError> {
-    // The zip is read whole by openusd before any entry is decompressed —
-    // a hostile package is an allocation abort, not a panic, so the size
-    // preflight runs before Archive::open (entry-level caps would need a
-    // forked openusd; named boundary in the 2026-11-02 sweep report).
-    crate::ensure_import_size(path)?;
-    let mut archive = openusd::usdz::Archive::open(path)
+    // The package bytes are read under the same cap as every importer
+    // (a multi-GB "package" would be an allocation abort, not a panic),
+    // then the zip central directory is preflighted for declared
+    // uncompressed sizes BEFORE any entry is extracted (row 156-A
+    // decompression cap — a ~130-byte package declaring 4–10 GiB fails
+    // fast here). The archive then serves entry views of these
+    // in-memory bytes, so no extraction path can reserve a declared but
+    // absent size.
+    let bytes = crate::read_capped(path)?;
+    usdz_preflight(&bytes)?;
+    let mut archive = openusd::usdz::Archive::from_bytes(bytes)
         .map_err(|e| ImportError::Usd(format!("usdz: open failed: {e}")))?;
     let root_layer = archive
         .read_first_layer()
@@ -286,6 +461,32 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
             )))
         }
     };
+    // Record-count caps and the finite check (row 156-A): refuse absurd
+    // counts and NaN/Inf components before any indexing or allocation
+    // below scales with them.
+    if !points.len().is_multiple_of(3) {
+        return Err(ImportError::Usd(format!(
+            "usd: {path}: points has {} floats, not a multiple of 3",
+            points.len()
+        )));
+    }
+    for (what, len) in [
+        ("points", points.len() / 3),
+        ("faceVertexCounts", counts.len()),
+        ("faceVertexIndices", indices.len()),
+    ] {
+        if len > crate::MAX_MESH_RECORDS {
+            return Err(ImportError::Usd(format!(
+                "usd: {path}: '{what}' has {len} entries; the cap is {}",
+                crate::MAX_MESH_RECORDS
+            )));
+        }
+    }
+    if points.iter().any(|c| !c.is_finite()) {
+        return Err(ImportError::Usd(format!(
+            "usd: {path}: points has a non-finite (NaN/Inf) component"
+        )));
+    }
     // Validate the topology ONCE, up front, before any closure indexes
     // `points`: every count >= 3 (a negative count once passed the sum
     // check and sliced out of bounds), every index in `0..point_count` (a
@@ -308,6 +509,12 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
         }
     }
     let total: i64 = counts.iter().map(|&c| c as i64).sum();
+    if total > crate::MAX_MESH_RECORDS as i64 {
+        return Err(ImportError::Usd(format!(
+            "usd: {path}: faceVertexCounts total {total} exceeds the cap {}",
+            crate::MAX_MESH_RECORDS
+        )));
+    }
     if indices.len() as i64 != total {
         return Err(ImportError::Usd(format!(
             "usd: {path}: faceVertexIndices ({}) does not match faceVertexCounts total ({total})",
@@ -344,6 +551,13 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
             _ => continue,
         }
     }
+    if let Some(n) = normals.as_ref() {
+        if n.iter().any(|c| !c.is_finite()) {
+            return Err(ImportError::Usd(format!(
+                "usd: {path}: normals has a non-finite (NaN/Inf) component"
+            )));
+        }
+    }
 
     // --- UVs: primvars:st; typed-vector aware (`texCoord2f[]` parses to
     // Vec2fVec); zero-filled when absent (the .usda rule) ---
@@ -352,6 +566,11 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
         Some(Value::Vec2fVec(v)) => v.into_iter().flat_map(<[f32; 2]>::from).collect(),
         _ => Vec::new(),
     };
+    if uvs.iter().any(|c| !c.is_finite()) {
+        return Err(ImportError::Usd(format!(
+            "usd: {path}: primvars:st has a non-finite (NaN/Inf) component"
+        )));
+    }
 
     // --- the fan triangulation + per-corner expansion (the .usda rules).
     // MeshData's attribute vecs are per-vertex ([f32;3] / [f32;2] entries),
@@ -361,30 +580,61 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
     let mut out_normals: Vec<[f32; 3]> = Vec::new();
     let mut out_uvs: Vec<[f32; 2]> = Vec::new();
 
-    let newell = |face: &[i32]| -> [f32; 3] {
+    // Newell normal with CHECKED point access (row 156-A): every index
+    // was validated above, but the closure still goes through `.get()`
+    // so no input-derived index can ever panic.
+    let newell = |face: &[i32]| -> Result<[f32; 3], ImportError> {
         let mut n = [0f32; 3];
+        let point = |vi: i32| -> Result<&[f32], ImportError> {
+            let base = usize::try_from(vi)
+                .ok()
+                .and_then(|v| v.checked_mul(3))
+                .ok_or_else(|| {
+                    ImportError::Usd(format!(
+                        "usd: {path}: negative vertex index in Newell normal"
+                    ))
+                })?;
+            points.get(base..base + 3).ok_or_else(|| {
+                ImportError::Usd(format!(
+                    "usd: {path}: point {vi} out of range in Newell normal ({} points)",
+                    points.len() / 3
+                ))
+            })
+        };
         for i in 0..face.len() {
-            let a = face[i] as usize * 3;
-            let b = face[(i + 1) % face.len()] as usize * 3;
-            n[0] += (points[a + 1] - points[b + 1]) * (points[a + 2] + points[b + 2]);
-            n[1] += (points[a + 2] - points[b + 2]) * (points[a] + points[b]);
-            n[2] += (points[a] - points[b]) * (points[a + 1] + points[b + 1]);
+            let a = point(face[i])?;
+            let b = point(face[(i + 1) % face.len()])?;
+            n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            n[2] += (a[0] - b[0]) * (a[1] + b[1]);
         }
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        if len > 0.0 {
+        Ok(if len > 0.0 {
             [n[0] / len, n[1] / len, n[2] / len]
         } else {
             [0.0, 0.0, 1.0]
-        }
+        })
     };
 
     let mut corner: usize = 0;
     for &count in &counts {
-        // Counts are >= 3 and sum to indices.len() (validated above), so
-        // this slice is in bounds.
-        let face: Vec<i32> = indices[corner..corner + count as usize].to_vec();
-        corner += count as usize;
-        let flat = newell(&face);
+        // Counts are >= 3 and sum to indices.len() (validated above); the
+        // slice still goes through `.get()` so no input-derived count can
+        // panic here.
+        let end = corner.checked_add(count as usize).ok_or_else(|| {
+            ImportError::Usd(format!("usd: {path}: face corner offset overflows"))
+        })?;
+        let face: Vec<i32> = indices
+            .get(corner..end)
+            .ok_or_else(|| {
+                ImportError::Usd(format!(
+                    "usd: {path}: face slice {corner}..{end} out of range ({} indices)",
+                    indices.len()
+                ))
+            })?
+            .to_vec();
+        corner = end;
+        let flat = newell(&face)?;
 
         for t in 0..(count - 2) {
             let t = t as usize;
@@ -396,25 +646,41 @@ fn build_mesh_from_spec(data: &dyn AbstractData, path: &SdfPath) -> Result<MeshD
             for &vi in &tri {
                 let vi = usize::try_from(vi)
                     .map_err(|_| ImportError::Usd(format!("usd: {path}: negative vertex index")))?;
-                if vi * 3 + 3 > points.len() {
-                    return Err(ImportError::Usd(format!(
-                        "usd: {path}: vertex index {vi} out of range ({} points)",
-                        points.len() / 3
-                    )));
-                }
-                let p: [f32; 3] = [points[vi * 3], points[vi * 3 + 1], points[vi * 3 + 2]];
+                // All access below goes through `.get()` — no
+                // input-derived index can panic (row 156-A).
+                let base = vi.checked_mul(3).ok_or_else(|| {
+                    ImportError::Usd(format!("usd: {path}: vertex index {vi} overflows"))
+                })?;
+                let p: [f32; 3] = points
+                    .get(base..base + 3)
+                    .map(|s| [s[0], s[1], s[2]])
+                    .ok_or_else(|| {
+                        ImportError::Usd(format!(
+                            "usd: {path}: vertex index {vi} out of range ({} points)",
+                            points.len() / 3
+                        ))
+                    })?;
                 positions.push(p);
-                match &normals {
-                    Some(n) if vi * 3 + 3 <= n.len() => {
-                        out_normals.push([n[vi * 3], n[vi * 3 + 1], n[vi * 3 + 2]])
-                    }
-                    _ => out_normals.push(flat),
-                }
-                if !uvs.is_empty() && vi * 2 + 2 <= uvs.len() {
-                    out_uvs.push([uvs[vi * 2], uvs[vi * 2 + 1]]);
+                let normal = match &normals {
+                    Some(n) => match n.get(base..base + 3) {
+                        Some(s) => [s[0], s[1], s[2]],
+                        None => flat,
+                    },
+                    None => flat,
+                };
+                out_normals.push(normal);
+                let uv_base = vi.checked_mul(2).ok_or_else(|| {
+                    ImportError::Usd(format!("usd: {path}: vertex index {vi} overflows"))
+                })?;
+                let uv = if uvs.is_empty() {
+                    [0.0, 0.0]
                 } else {
-                    out_uvs.push([0.0, 0.0]);
-                }
+                    match uvs.get(uv_base..uv_base + 2) {
+                        Some(s) => [s[0], s[1]],
+                        None => [0.0, 0.0],
+                    }
+                };
+                out_uvs.push(uv);
                 out_indices.push(out_indices.len() as u32);
             }
         }

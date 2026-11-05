@@ -350,6 +350,14 @@ struct Parser {
 /// far below the overflow — MaterialX's `MAX_ELEM_DEPTH` is the same cap.
 const MAX_NESTING: usize = 256;
 
+/// The most items one value list may hold. The file itself is capped at
+/// [`crate::MAX_IMPORT_BYTES`], but a 1 GiB text file can still spell
+/// ~500M list items — a `Vec<Value>` that large aborts on allocation,
+/// which no `catch_unwind` can catch. Refused here, at parse time, with
+/// a typed error (row 156-A record-count cap; a paintable mesh's lists
+/// are orders of magnitude below 2^24).
+const MAX_SEQUENCE_ITEMS: usize = 1 << 24;
+
 impl Parser {
     fn peek_punct(&mut self, c: char) -> bool {
         matches!(self.tokens.peek(), Some(Token { tok: Tok::Punct(p), .. }) if *p == c)
@@ -649,6 +657,12 @@ impl Parser {
             if self.eat_punct(close) {
                 break;
             }
+            if items.len() >= MAX_SEQUENCE_ITEMS {
+                return Err(usd_error(
+                    self.last_line,
+                    format!("a list exceeds {MAX_SEQUENCE_ITEMS} items (hostile input?)"),
+                ));
+            }
             items.push(self.parse_value()?);
             if !self.eat_punct(',') {
                 self.expect_punct(close, "to close the list (or ',' between elements)")?;
@@ -785,6 +799,16 @@ fn tuples<const N: usize>(
                 let Value::Num(n) = component else {
                     return Err(bad());
                 };
+                // NaN/Inf components are hostile input (row 156-A): a
+                // NaN position poisons every downstream consumer, so the
+                // tuple is refused here with a typed error, not passed
+                // through.
+                if !n.is_finite() {
+                    return Err(usd_error(
+                        prop.line,
+                        format!("'{name}' has a non-finite (NaN/Inf) component"),
+                    ));
+                }
                 *slot = *n as f32;
             }
             Ok(out)
@@ -966,6 +990,26 @@ fn build_mesh(raw: &RawMesh) -> Result<MeshData, ImportError> {
     let face_indices = ints("faceVertexIndices", indices_prop)?
         .ok_or_else(|| unauthored("faceVertexIndices", indices_prop))?;
 
+    // Record-count caps (row 156-A): no geometry list may exceed
+    // MAX_MESH_RECORDS entries. The parse-time list cap bounds the raw
+    // vectors, but the mesh-build allocations below scale with these
+    // counts, so they are refused here with a typed error first.
+    for (what, len, prop) in [
+        ("points", points.len(), points_prop),
+        ("faceVertexCounts", counts.len(), counts_prop),
+        ("faceVertexIndices", face_indices.len(), indices_prop),
+    ] {
+        if len > crate::MAX_MESH_RECORDS {
+            return Err(usd_error(
+                prop.line,
+                format!(
+                    "'{what}' has {len} entries; the cap is {}",
+                    crate::MAX_MESH_RECORDS
+                ),
+            ));
+        }
+    }
+
     if let Some(holes_prop) = raw.prop("holeIndices") {
         if ints("holeIndices", holes_prop)?.is_some_and(|h| !h.is_empty()) {
             return Err(usd_error(
@@ -1099,7 +1143,11 @@ fn build_mesh(raw: &RawMesh) -> Result<MeshData, ImportError> {
             }
         }
         if normals.is_none() {
-            let mut n = face_normal(&data.positions[base as usize..]);
+            let face_slice = data
+                .positions
+                .get(base as usize..)
+                .ok_or_else(|| ImportError::Usd(format!("face {face} slice out of range")))?;
+            let mut n = face_normal(face_slice);
             if left_handed {
                 n = [-n[0], -n[1], -n[2]];
             }

@@ -94,7 +94,9 @@ fn append_mesh(data: &mut MeshData, mesh: &ufbx::Mesh) -> Result<(), ImportError
     for (face_id, face) in mesh.faces.iter().enumerate() {
         corners.clear();
         ufbx::triangulate_face_vec(&mut corners, mesh, *face);
-        let face_material_slot = face_material[face_id];
+        let face_material_slot = *face_material.get(face_id).ok_or_else(|| {
+            ImportError::Fbx(format!("face {face_id} has no material slot (internal)"))
+        })?;
         for corner in &corners {
             let corner = *corner as usize;
             let position_index =
@@ -134,7 +136,10 @@ fn append_mesh(data: &mut MeshData, mesh: &ufbx::Mesh) -> Result<(), ImportError
                 data.normals.push([0.0; 3]);
             }
 
-            data.indices.push(data.positions.len() as u32 - 1);
+            data.indices
+                .push(u32::try_from(data.positions.len() - 1).map_err(|_| {
+                    ImportError::Fbx("more than u32::MAX vertices after corner expansion".into())
+                })?);
         }
         // One material per emitted triangle: `corners.len() / 3`
         // triangles came out of this face (a quad yields two).
