@@ -27,7 +27,7 @@ pub use fbx::load_fbx;
 pub use fill::{
     cylindrical_coords, evaluate_fill_tile, projection_sample_2d, rasterize_uv_geometry,
     sample_source, sample_triplanar, spherical_coords, triplanar_planar_uvs, triplanar_weights,
-    wrap01, FillParams, FillProjection, FillSource, FillTile, ProjAxis, TexelGeom,
+    uv_coverage, wrap01, FillParams, FillProjection, FillSource, FillTile, ProjAxis, TexelGeom,
 };
 pub use gltf::load_gltf;
 pub use mesh_maps::{

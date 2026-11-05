@@ -410,7 +410,7 @@ struct ExportOutcome {
 ///
 /// One tile's UV-coverage dilation map for export padding (queue row
 /// 151): `covered[]` comes from the mesh's own UV layout via
-/// [`umber_mesh::rasterize_uv_geometry`]; padding is capped at
+/// [`umber_mesh::uv_coverage`]; padding is capped at
 /// [`umber_export::DEFAULT_PADDING_TEXELS`] Chebyshev texels so texels
 /// farther out keep their packed bytes instead of smearing across gaps.
 pub fn dilation_map_for_tile(
@@ -418,10 +418,7 @@ pub fn dilation_map_for_tile(
     tile: u16,
     size: u32,
 ) -> umber_core::DilationMap {
-    let covered: Vec<bool> = umber_mesh::rasterize_uv_geometry(mesh, tile, size, size)
-        .iter()
-        .map(|g| g.is_some())
-        .collect();
+    let covered: Vec<bool> = umber_mesh::uv_coverage(mesh, tile, size, size);
     umber_core::DilationMap::new(
         &covered,
         size,

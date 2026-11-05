@@ -591,6 +591,39 @@ pub fn rasterize_uv_geometry(
     out
 }
 
+/// The coverage mask of [`rasterize_uv_geometry`] (`true` where it would
+/// return `Some`), without assembling positions or normals: what export
+/// padding's dilation consumes. Same triangle filter (malformed indices,
+/// non-finite positions or UVs, degenerate footprints cover nothing), same
+/// texel walk (`uv_gbuffer`), so the mask is identical by construction —
+/// pinned by `uv_coverage_equals_rasterized_coverage`.
+pub fn uv_coverage(mesh: &MeshData, tile: u16, width: u32, height: u32) -> Vec<bool> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![false; w * h];
+    crate::uv_gbuffer::for_each_covered_texel_filtered(
+        mesh,
+        tile,
+        width,
+        height,
+        |tri| {
+            let idx = &mesh.indices[tri * 3..tri * 3 + 3];
+            match (
+                mesh.positions.get(idx[0] as usize),
+                mesh.positions.get(idx[1] as usize),
+                mesh.positions.get(idx[2] as usize),
+            ) {
+                (Some(&p0), Some(&p1), Some(&p2)) => pos_finite([p0, p1, p2]),
+                _ => false,
+            }
+        },
+        |_, x, y, _| out[y * w + x] = true,
+    );
+    out
+}
+
 fn pos_finite(ps: [[f32; 3]; 3]) -> bool {
     ps.iter()
         .all(|p| p[0].is_finite() && p[1].is_finite() && p[2].is_finite())
@@ -1271,6 +1304,32 @@ mod tests {
         }
         .memory_bytes();
         assert!(masked > plain, "{masked} vs {plain}");
+    }
+
+    /// `uv_coverage` is exactly `rasterize_uv_geometry(..).is_some()`, also
+    /// on meshes whose positions are bad (the filter both share).
+    #[test]
+    fn uv_coverage_equals_rasterized_coverage() {
+        let mut bad = full_uv_quad();
+        bad.positions[0] = [f32::NAN, 0.0, 0.0];
+        let mut short = unit_cube();
+        short.positions.truncate(3);
+        for (mesh, tile, w, h) in [
+            (unit_cube(), 1001u16, 32u32, 32u32),
+            (unit_cube(), 1001, 17, 9),
+            (full_uv_quad(), 1001, 8, 8),
+            (full_uv_quad(), 1002, 8, 8),
+            (bad, 1001, 8, 8),
+            (short, 1001, 16, 16),
+            (MeshData::default(), 1001, 4, 4),
+        ] {
+            let want: Vec<bool> = rasterize_uv_geometry(&mesh, tile, w, h)
+                .iter()
+                .map(Option::is_some)
+                .collect();
+            assert_eq!(uv_coverage(&mesh, tile, w, h), want, "tile {tile} {w}x{h}");
+        }
+        assert!(uv_coverage(&full_uv_quad(), 1001, 0, 8).is_empty());
     }
 
     /// Malformed meshes degrade to uncovered texels, never panics — the

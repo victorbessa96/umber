@@ -1018,16 +1018,13 @@ fn export_mesh(
     let pairs: Vec<(u16, &umber_export::MapSet)> =
         tile_sets.iter().map(|(tile, set)| (*tile, set)).collect();
     // UV-padding dilation (queue row 151): one DilationMap per tile from
-    // the whole mesh's UV layout (rasterize_uv_geometry rasterizes into
+    // the whole mesh's UV layout (uv_coverage rasterizes into
     // the tile's own window), applied to every packed output via the hook.
     let size = ask.flags.size;
     let dilation_maps: std::collections::HashMap<u16, umber_core::DilationMap> = tiles
         .iter()
         .map(|&tile| {
-            let covered: Vec<bool> = umber_mesh::rasterize_uv_geometry(mesh, tile, size, size)
-                .iter()
-                .map(|g| g.is_some())
-                .collect();
+            let covered: Vec<bool> = umber_mesh::uv_coverage(mesh, tile, size, size);
             (
                 tile,
                 umber_core::DilationMap::new(
