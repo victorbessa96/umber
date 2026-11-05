@@ -81,6 +81,16 @@
 //! runs the same bake functions the batch `bake` step uses
 //! ([`bake_context`], [`bake_mesh_maps`]). The panel's worker stays on
 //! the app side.
+//!
+//! Command steps (queue row 154 wave 5): `command_list` and
+//! `command_run { id }` forward to a LIVE umber-app's `--control`
+//! channel when the session has one ([`ControlEndpoint`], read from
+//! `UMBER_CONTROL_PORT` + `UMBER_CONTROL_TOKEN_FILE` at construction;
+//! bridge mode may set them): a loopback TCP JSONL connection, the
+//! auth line first, then `command.list` / `command.run {"id": ...}`.
+//! The app's reply becomes the step reply (`ok` plus the result
+//! fields; a wire `ok: false` is the step's typed error). No endpoint
+//! is a typed error, and a wire failure never panics.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -144,6 +154,8 @@ enum AgentStep {
     PaintSnapshot(PaintSnapshotStep),
     PaintUndo(NoFields),
     PaintRedo(NoFields),
+    CommandList(NoFields),
+    CommandRun(CommandRunStep),
     Version(NoFields),
     Quit(NoFields),
 }
@@ -154,6 +166,10 @@ enum AgentStep {
 /// client asks once at session start and refuses a version it does not
 /// know. 1 = the protocol as of the paint ops (2026-10-14) + the
 /// `paint_stroke.radius` field (2026-10-18; pre-tag, so no bump yet).
+/// `command_list` / `command_run` (2026-11-05, row 154 w5) are ADDITIVE
+/// step variants — an old client never sends them and the reply
+/// envelope is unchanged — so they land WITHOUT a bump: adding a step
+/// is backwards compatible, only renaming/reshaping one is not.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The body of a step that takes no fields (`{}`; `null` and the bare
@@ -459,6 +475,16 @@ fn default_material_channel_enabled() -> bool {
     true
 }
 
+/// `command_run` — run one GUI command by its dotted id
+/// (`"view.toggle_grid"`) on the LIVE app's `--control` channel (see
+/// the module docs). The app dispatches it through the same path as a
+/// menu click; an unknown/disabled id comes back as its typed error.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandRunStep {
+    id: String,
+}
+
 /// The async bake's state, as `bake_status` reports it
 /// (`{"status": "pending" | "running" | "done" | "failed", ...}`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -553,18 +579,96 @@ struct ProjectSession {
     prev_snapshot: Option<CompositeSnapshot>,
 }
 
+/// Env var naming the live app's `--control` port (see the module docs).
+pub(crate) const CONTROL_PORT_ENV: &str = "UMBER_CONTROL_PORT";
+/// Env var naming the file the app wrote its control token to (the
+/// app's `--control` writes `<tmp>/umber-app-control-<port>.token`).
+pub(crate) const CONTROL_TOKEN_FILE_ENV: &str = "UMBER_CONTROL_TOKEN_FILE";
+
+/// The live app's loopback `--control` endpoint: the port plus the
+/// token the app accepts. Read from the env at [`Session`] construction
+/// (`UMBER_CONTROL_PORT` + `UMBER_CONTROL_TOKEN_FILE`); the app's
+/// bridge mode may set them for a spawned `umber-cli mcp` child.
+#[derive(Debug, Clone)]
+pub(crate) struct ControlEndpoint {
+    pub(crate) port: u16,
+    pub(crate) token: String,
+}
+
+impl ControlEndpoint {
+    /// The endpoint from the env, or `None` when either var is unset,
+    /// the port does not parse, or the token file is unreadable/empty
+    /// (a misconfiguration is a missing endpoint, never a panic).
+    fn from_env() -> Option<ControlEndpoint> {
+        let port_raw = std::env::var(CONTROL_PORT_ENV).ok()?;
+        let port = match port_raw.trim().parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                eprintln!(
+                    "agent: {CONTROL_PORT_ENV}={port_raw:?} is not a port number; no control channel"
+                );
+                return None;
+            }
+        };
+        let token_file = std::env::var(CONTROL_TOKEN_FILE_ENV).ok()?;
+        let token = std::fs::read_to_string(&token_file)
+            .ok()?
+            .trim()
+            .to_string();
+        if token.is_empty() {
+            return None;
+        }
+        Some(ControlEndpoint { port, token })
+    }
+}
+
+/// The typed error the `command_*` steps answer with when the session
+/// has no live app control channel.
+fn no_control_endpoint() -> anyhow::Error {
+    anyhow::anyhow!("no live app control channel (set UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE)")
+}
+
 /// A session's state between steps.
-#[derive(Default)]
 pub(crate) struct Session {
     loaded: Option<Loaded>,
     bake: Option<BakeJob>,
     project: Option<ProjectSession>,
+    /// The live app's `--control` channel, when the env names one (see
+    /// [`ControlEndpoint::from_env`]). `pub(crate)` so mcp/serve tests
+    /// can pin it off deterministically.
+    pub(crate) control: Option<ControlEndpoint>,
     /// The current step's 0-based index (the `index` every reply carries):
     /// `paint_snapshot`'s `out_dir` arm names its files from it. `reply`
     /// stores it before dispatch, so this is the SAME counter the protocol
     /// reports, never a second one. It lives here rather than as a `run`
     /// parameter so no step method's signature moves for one caller.
     index: usize,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Session {
+            loaded: None,
+            bake: None,
+            project: None,
+            control: ControlEndpoint::from_env(),
+            index: 0,
+        }
+    }
+}
+
+impl Session {
+    /// A session with the control endpoint pinned explicitly. Tests use
+    /// this so the process env never decides whether a channel exists
+    /// (the fields are private to this module, so the struct-update
+    /// syntax cannot reach across).
+    #[cfg(test)]
+    pub(crate) fn with_control(control: Option<ControlEndpoint>) -> Self {
+        Session {
+            control,
+            ..Session::default()
+        }
+    }
 }
 
 /// One channel in the project census: the model's channel plus its
@@ -1037,6 +1141,8 @@ impl Session {
             AgentStep::PaintSnapshot(s) => self.paint_snapshot(s),
             AgentStep::PaintUndo(NoFields {}) => self.paint_history(true),
             AgentStep::PaintRedo(NoFields {}) => self.paint_history(false),
+            AgentStep::CommandList(NoFields {}) => self.command_list(),
+            AgentStep::CommandRun(s) => self.command_run(s),
             AgentStep::Quit(NoFields {}) => unreachable!("quit is answered by Session::reply"),
         }
     }
@@ -1811,6 +1917,23 @@ impl Session {
         }))
     }
 
+    /// `command_list`: the live app's command registry over its
+    /// `--control` channel (see the module docs). No endpoint is the
+    /// typed error; a wire failure is a typed error too — never a panic.
+    fn command_list(&self) -> Result<Fields> {
+        let endpoint = self.control.as_ref().ok_or_else(no_control_endpoint)?;
+        control_call(endpoint, "command.list", &serde_json::json!({}))
+    }
+
+    /// `command_run { id }`: dispatch one GUI command by dotted id on
+    /// the live app — the same dispatch a menu click takes. The app's
+    /// typed errors (unknown/disabled id, bad params) ride back as
+    /// this step's error.
+    fn command_run(&self, s: CommandRunStep) -> Result<Fields> {
+        let endpoint = self.control.as_ref().ok_or_else(no_control_endpoint)?;
+        control_call(endpoint, "command.run", &serde_json::json!({ "id": s.id }))
+    }
+
     /// `bake`: validates the request synchronously (held mesh, no bake in
     /// flight, tiles), then starts the bake thread and replies
     /// `{"status": "started"}`.
@@ -1939,6 +2062,94 @@ fn envelope(index: usize, step: Option<String>, outcome: Result<Fields>) -> Valu
         }
     }
     Value::Object(map)
+}
+
+/// One request over the live app's `--control` channel: connect to the
+/// loopback endpoint, send the auth line, read its reply, then send the
+/// request and read its reply. The app's `{"ok": true, "result": ...}`
+/// becomes the step's result fields; `{"ok": false, "error": ...}`
+/// becomes the step's typed error. Every wire failure (refused, EOF,
+/// timeout, malformed JSON) is a typed error — this never panics.
+fn control_call(endpoint: &ControlEndpoint, method: &str, params: &Value) -> Result<Fields> {
+    use std::net::{Ipv4Addr, TcpStream};
+    use std::time::Duration;
+    let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port)).map_err(|e| {
+        anyhow::anyhow!(
+            "control channel 127.0.0.1:{} unreachable: {e}",
+            endpoint.port
+        )
+    })?;
+    // The app's UI-thread queue can take up to its 30 s reply timeout;
+    // bound the wait the same way, so a hung app is a typed error.
+    let timeout = Duration::from_secs(30);
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|e| anyhow::anyhow!("control channel setup: {e}"))?;
+    let mut reader = std::io::BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| anyhow::anyhow!("control channel: {e}"))?,
+    );
+    let mut writer = stream;
+    control_write_line(
+        &mut writer,
+        &serde_json::json!({"id": 0, "method": "auth", "params": {"token": endpoint.token}}),
+    )?;
+    let auth = control_read_line(&mut reader)?;
+    if !auth.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let err = auth
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unauthorized");
+        return Err(anyhow::anyhow!("control channel auth failed: {err}"));
+    }
+    control_write_line(
+        &mut writer,
+        &serde_json::json!({"id": 1, "method": method, "params": params}),
+    )?;
+    let reply = control_read_line(&mut reader)?;
+    if reply.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return match reply.get("result") {
+            Some(Value::Object(map)) => Ok(map.clone()),
+            Some(other) => {
+                let mut fields = Fields::new();
+                fields.insert("result".into(), other.clone());
+                Ok(fields)
+            }
+            None => Ok(Fields::new()),
+        };
+    }
+    let err = reply
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    Err(anyhow::anyhow!("control channel `{method}` failed: {err}"))
+}
+
+/// Write one JSON value as a single line and flush (the control
+/// channel's framing, one object per line each way).
+fn control_write_line(writer: &mut impl Write, value: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *writer, value)
+        .map_err(|e| anyhow::anyhow!("control channel write: {e}"))?;
+    writer
+        .write_all(b"\n")
+        .and_then(|()| writer.flush())
+        .map_err(|e| anyhow::anyhow!("control channel write: {e}"))
+}
+
+/// Read one reply line and parse it. EOF before a full line, a read
+/// error (timeout included) and malformed JSON are all typed errors.
+fn control_read_line(reader: &mut impl BufRead) -> Result<Value> {
+    let mut line = String::new();
+    let n = reader
+        .read_line(&mut line)
+        .map_err(|e| anyhow::anyhow!("control channel read: {e}"))?;
+    if n == 0 {
+        return Err(anyhow::anyhow!("control channel closed before replying"));
+    }
+    serde_json::from_str(&line)
+        .map_err(|e| anyhow::anyhow!("control channel sent a non-JSON line: {e}"))
 }
 
 /// Bakes the held mesh: the whole mesh when `tiles` is empty (the batch
@@ -2553,5 +2764,161 @@ mod tests {
                 "{r}"
             );
         }
+    }
+
+    /// A mock app `--control` channel on 127.0.0.1:0, speaking the wire
+    /// protocol the real app does (umber-app control.rs): first line
+    /// must be the auth request, then one request per line, one reply
+    /// per line. The observed request goes to the returned channel so
+    /// the test can pin what the CLI sent. Style mirrors the app's
+    /// control.rs roundtrip tests.
+    fn mock_control_server(
+        token: &str,
+        respond: impl FnOnce(&Value) -> Value + Send + 'static,
+    ) -> (u16, std::sync::mpsc::Receiver<Value>, JoinHandle<()>) {
+        use std::io::BufReader;
+        use std::net::{Ipv4Addr, TcpListener};
+        use std::time::Duration;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = token.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let auth: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(auth["method"], "auth", "first line must be auth: {auth}");
+            assert_eq!(auth["params"]["token"], token, "token on the wire");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"id": auth["id"], "ok": true, "result": {"app": "mock-umber-app"}})
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let _ = tx.send(req.clone());
+            let reply = respond(&req);
+            writeln!(stream, "{reply}").unwrap();
+            stream.flush().unwrap();
+        });
+        (port, rx, server)
+    }
+
+    fn session_with_control(port: u16, token: &str) -> Session {
+        Session::with_control(Some(ControlEndpoint {
+            port,
+            token: token.to_string(),
+        }))
+    }
+
+    #[test]
+    fn command_run_forwards_to_the_live_app_control_channel() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let (port, rx, server) = mock_control_server(token, |req| {
+            assert_eq!(req["method"], "command.run", "{req}");
+            serde_json::json!({
+                "id": req["id"],
+                "ok": true,
+                "result": {"ran": req["params"]["id"], "enabled": true}
+            })
+        });
+        let mut sess = session_with_control(port, token);
+        let (reply, quit) = sess.reply(0, r#"{"command_run": {"id": "view.toggle_grid"}}"#);
+        assert!(!quit);
+        server.join().unwrap();
+        let req = rx.recv().unwrap();
+        assert_eq!(req["params"]["id"], "view.toggle_grid", "{req}");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["step"], "command_run", "{reply}");
+        assert_eq!(reply["ran"], "view.toggle_grid", "{reply}");
+        assert_eq!(reply["enabled"], true, "{reply}");
+    }
+
+    #[test]
+    fn command_list_forwards_and_merges_the_registry_result() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let (port, rx, server) = mock_control_server(token, |req| {
+            assert_eq!(req["method"], "command.list", "{req}");
+            serde_json::json!({
+                "id": req["id"],
+                "ok": true,
+                "result": {"count": 1, "commands": [{"id": "view.toggle_grid", "enabled": true}]}
+            })
+        });
+        let mut sess = session_with_control(port, token);
+        let (reply, _) = sess.reply(0, "\"command_list\"");
+        server.join().unwrap();
+        let req = rx.recv().unwrap();
+        assert_eq!(req["method"], "command.list", "{req}");
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["step"], "command_list", "{reply}");
+        assert_eq!(reply["count"], 1, "{reply}");
+        assert_eq!(reply["commands"][0]["id"], "view.toggle_grid", "{reply}");
+    }
+
+    #[test]
+    fn command_run_propagates_the_app_unknown_id_error() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let (port, _rx, server) = mock_control_server(token, |req| {
+            serde_json::json!({
+                "id": req["id"],
+                "ok": false,
+                "error": "unknown command \"nope.such\" (see command.list)"
+            })
+        });
+        let mut sess = session_with_control(port, token);
+        let (reply, _) = sess.reply(0, r#"{"command_run": {"id": "nope.such"}}"#);
+        server.join().unwrap();
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["step"], "command_run", "{reply}");
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown command \"nope.such\""),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn command_steps_without_a_control_channel_are_a_typed_error() {
+        let mut sess = Session::with_control(None);
+        for (i, line) in ["\"command_list\"", r#"{"command_run": {"id": "x.y"}}"#]
+            .iter()
+            .enumerate()
+        {
+            let (reply, quit) = sess.reply(i, line);
+            assert!(!quit);
+            assert_eq!(reply["ok"], false, "{reply}");
+            assert_eq!(
+                reply["error"].as_str().unwrap(),
+                "no live app control channel (set UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE)",
+                "{reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_step_against_a_dead_channel_is_a_typed_error_not_a_panic() {
+        use std::net::{Ipv4Addr, TcpListener};
+        // Bind, learn the port, drop: nothing listens there anymore.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut sess = session_with_control(port, "0123456789abcdef0123456789abcdef");
+        let (reply, _) = sess.reply(0, "\"command_list\"");
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert!(
+            reply["error"].as_str().unwrap().contains("unreachable"),
+            "{reply}"
+        );
     }
 }

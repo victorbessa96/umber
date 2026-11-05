@@ -16,7 +16,11 @@
 //! Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`.
 //! Notifications get no response. File access is confined to the
 //! `--read-root` / `--write-root` roots ([`crate::workspace`]); without
-//! roots there is no file access.
+//! roots there is no file access. The `command_list` / `command_run`
+//! tools are different: they carry no paths, they forward to a LIVE
+//! umber-app's `--control` channel when the session has one
+//! (`UMBER_CONTROL_PORT` + `UMBER_CONTROL_TOKEN_FILE` in the env) and
+//! answer a typed error when it does not (see [`crate::agent`]).
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -255,6 +259,13 @@ fn run_tool(
                 .ok_or_else(|| anyhow!("internal: step body lost"))?
         }
         "bake_status" => json!({ "bake_status": {} }),
+        "command_list" => json!({ "command_list": {} }),
+        "command_run" => {
+            let id = args.get("id").and_then(Value::as_str).ok_or_else(|| {
+                anyhow!("`id` (dotted command id, e.g. \"view.toggle_grid\") is required")
+            })?;
+            json!({ "command_run": { "id": id } })
+        }
         "undo" => json!({ "undo": {} }),
         "redo" => json!({ "redo": {} }),
         "paint_undo" => json!({ "paint_undo": {} }),
@@ -305,7 +316,9 @@ fn tools_catalog() -> Value {
         { "name": "undo", "description": "Undo one project edit.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "redo", "description": "Redo one project edit.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "paint_undo", "description": "Undo one paint stroke.", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "paint_redo", "description": "Redo one paint stroke.", "inputSchema": { "type": "object", "properties": {} } }
+        { "name": "paint_redo", "description": "Redo one paint stroke.", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "command_list", "description": "List the live app's command registry (id, label, menu, shortcut, params, enabled) over its --control channel. Typed error when no channel is configured (UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE).", "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "command_run", "description": "Run one GUI command by dotted id on the live app's --control channel (same dispatch as a menu click): {id}. Unknown/disabled ids are the app's typed errors.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }
     ])
 }
 
@@ -444,5 +457,62 @@ mod tests {
             .unwrap()
             .contains("rejected"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn command_tools_are_in_the_catalog_and_pin_the_count() {
+        let (mut sess, ws, mut idx) = make();
+        let r = handle_message(
+            &mut sess,
+            &ws,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            &mut idx,
+        )
+        .unwrap();
+        let tools = r["result"]["tools"].as_array().unwrap();
+        // Catalog pin: 20 tools (the 18 pre-row154-w5 plus
+        // command_list / command_run).
+        assert_eq!(tools.len(), 20, "{tools:?}");
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"command_list"), "{names:?}");
+        assert!(names.contains(&"command_run"), "{names:?}");
+        let run = tools.iter().find(|t| t["name"] == "command_run").unwrap();
+        assert_eq!(run["inputSchema"]["required"], json!(["id"]));
+    }
+
+    #[test]
+    fn command_run_requires_an_id_argument() {
+        let (_sess, ws, mut idx) = make();
+        let mut sess = Session::with_control(None);
+        let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"command_run","arguments":{}}}), &mut idx).unwrap();
+        assert_eq!(r["result"]["isError"], true);
+        assert!(r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("`id`"));
+    }
+
+    #[test]
+    fn command_tools_fail_closed_without_a_control_channel() {
+        let (_sess, ws, mut idx) = make();
+        // Pin the endpoint off: the env may name a channel in some
+        // environments, this test must not depend on it.
+        let mut sess = Session::with_control(None);
+        for (name, arguments) in [
+            ("command_list", json!({})),
+            ("command_run", json!({"id": "view.toggle_grid"})),
+        ] {
+            let r = handle_message(&mut sess, &ws, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}), &mut idx).unwrap();
+            assert_eq!(r["result"]["isError"], true, "{name}");
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            let reply: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(reply["ok"], false, "{name}: {reply}");
+            assert!(
+                reply["error"].as_str().unwrap().contains(
+                    "no live app control channel (set UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE)"
+                ),
+                "{name}: {reply}"
+            );
+        }
     }
 }
