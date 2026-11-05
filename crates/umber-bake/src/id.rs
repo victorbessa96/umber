@@ -30,17 +30,12 @@
 //!
 //! # How the triangle index reaches the shader
 //!
-//! The position pass emits world-pos + coverage only (see
-//! [`crate::position::bake_position_and_normal`]): there is no
-//! triangle-index channel to read. This pass therefore re-binds the mesh's
-//! triangle buffer (the same [`crate::position`] `GpuPosTri` layout, built by
-//! the same builder) and re-runs the *identical* point-in-triangle
-//! containment test in `umber_gpu::bake_shaders::ID_BAKE_SHADER` — same
-//! epsilons, same edge-inclusive bounds, same last-writer-wins — to recover
-//! the winning index deterministically. Coverage stays the position map's
-//! alpha (`<= 0.5` means uncovered), so this pass never disagrees with the
-//! position pass about *whether* a texel is covered. See that shader's doc
-//! comment for the full layout/dispatch contract.
+//! The winning triangle index is gathered from the UV G-buffer's `prim`
+//! texture ([`crate::gbuffer`], row 156-B kill 5), the one GPU mirror of
+//! `umber_mesh::UvGBuffer`. Earlier versions re-ran a private copy of the
+//! point-in-triangle solve over the position pass's triangle buffer; that
+//! copy is gone. See `umber_gpu::bake_shaders::ID_BAKE_SHADER` for the
+//! layout/dispatch contract.
 //!
 //! # Output encoding
 //!
@@ -51,18 +46,13 @@
 //! alpha alone — the same alpha convention `ao::bake_ao_mesh` uses.
 
 use std::borrow::Cow;
-use std::mem::size_of;
-use std::num::NonZeroU64;
-
-use wgpu::util::DeviceExt as _;
 
 use umber_gpu::bake_shaders::ID_BAKE_SHADER;
 use umber_mesh::MeshData;
 
 use crate::ao::{AoBakeError, BakeTarget};
-use crate::position::{
-    bake_position_and_normal, build_pos_triangles, GpuPosTri, PositionMapError, MAX_TRIS_PER_BAKE,
-};
+use crate::gbuffer::{bake_uv_gbuffer, UvGBufferError};
+use crate::position::{build_pos_triangles, PositionMapError, MAX_TRIS_PER_BAKE};
 
 /// Which identity [`bake_id_mesh`] hashes into each texel's color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,23 +118,6 @@ pub enum IdBakeError {
     Readback(String),
 }
 
-/// GPU-side params uniform, byte-identical to `ID_BAKE_SHADER`'s WGSL
-/// `IdParams` struct (`dims`, `tri_count`, one `u32` pad — 16 bytes, already
-/// a multiple of WGSL's 16-byte uniform-struct alignment, so no further
-/// padding is needed).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct IdUniform {
-    dims: [u32; 2],
-    tri_count: u32,
-    _pad: u32,
-}
-
-const _: () = assert!(
-    size_of::<IdUniform>() == 16,
-    "IdUniform must match ID_BAKE_SHADER's WGSL IdParams layout"
-);
-
 /// Checks [`bake_id_mesh`]'s inputs independently of any GPU call, so the
 /// validation itself is unit-testable without a device — matching
 /// `ao::validate`'s convention.
@@ -177,35 +150,27 @@ fn validate(mesh: &MeshData, params: &IdBakeParams) -> Result<(), IdBakeError> {
     Ok(())
 }
 
-/// Bakes `mesh`'s per-texel region IDs: first rasterizes `mesh`'s own UV
-/// layout into a world-position + coverage map (see
-/// [`crate::position::bake_position_and_normal`]), then hashes each covered
-/// texel's winning triangle index with FNV-1a — the same two-pass
-/// composition [`crate::curvature::bake_curvature_mesh`] uses, with the
-/// curvature estimator swapped for the ID hash (see
-/// `umber_gpu::bake_shaders::ID_BAKE_SHADER`'s doc comment for the encoding
-/// and why the triangle index is re-derived in-shader).
+/// Bakes `mesh`'s per-texel region IDs: runs the UV G-buffer pass
+/// ([`crate::gbuffer::bake_uv_gbuffer`], tile 1001) and hashes each covered
+/// texel's winning triangle index with FNV-1a (see
+/// `umber_gpu::bake_shaders::ID_BAKE_SHADER` for the encoding). Coverage
+/// and the winner are the G-buffer's, so they match `umber_mesh::UvGBuffer`
+/// texel for texel (pinned by `gpu_id_bake_matches_cpu_uv_gbuffer_texel_for_texel`).
 ///
 /// Returns the full `width * height * 4` RGBA8 bytes in row-major order:
 /// `rgb` is the FNV-1a hash bytes (`[h & 0xFF, (h >> 8) & 0xFF,
-/// (h >> 16) & 0xFF]` — the color IS the hash, deterministic by
-/// construction), and alpha is coverage (`0` means the position pass found
-/// no UV triangle covering that texel, `255` means the texel carries a real
-/// triangle's hash).
+/// (h >> 16) & 0xFF]`), alpha is coverage (`0` uncovered, `255` covered).
 ///
-/// Builds a fresh compute pipeline on every call rather than caching one
-/// across bakes — reasonable for this slice's one-shot entry point, the
-/// same tradeoff `ao::run` documents.
+/// Builds fresh pipelines on every call (one-shot entry point, the same
+/// tradeoff `ao::run` documents).
 ///
 /// # Errors
 ///
-/// Returns [`IdBakeError::MaterialAssignmentUnsupported`] if
-/// `params.flavor` is [`IdFlavor::Material`],
-/// [`IdBakeError::EmptyTarget`] if `params.width`/`params.height` is zero,
+/// [`IdBakeError::MaterialAssignmentUnsupported`] for
+/// [`IdFlavor::Material`], [`IdBakeError::EmptyTarget`],
 /// [`IdBakeError::EmptyMesh`]/[`IdBakeError::TooManyTriangles`] on the
-/// mesh budget, [`IdBakeError::PositionMap`] wrapping whatever
-/// [`crate::position::bake_position_and_normal`] rejected, or
-/// [`IdBakeError::Readback`] if the GPU readback fails.
+/// mesh budget, [`IdBakeError::PositionMap`] for a malformed mesh (index
+/// past positions/uvs), or [`IdBakeError::Readback`].
 pub fn bake_id_mesh(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -217,33 +182,22 @@ pub fn bake_id_mesh(
     let width = params.width;
     let height = params.height;
 
-    let position_map = bake_position_and_normal(device, queue, mesh, width, height)?;
-
-    // The same triangle buffer the position pass consumed: the ID shader
-    // re-runs the identical containment test over these UVs to recover the
-    // winning triangle index per texel (see ID_BAKE_SHADER's doc comment).
-    let triangles = build_pos_triangles(mesh)?;
-    let triangle_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("umber_bake_id_triangles"),
-        contents: bytemuck::cast_slice(&triangles),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-
-    let uniform = IdUniform {
-        dims: [width, height],
-        tri_count: triangles.len() as u32,
-        _pad: 0,
-    };
-    let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("umber_bake_id_params"),
-        contents: bytemuck::cast_slice(&[uniform]),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
+    // Row 156-B kill 5: the winning triangle per texel comes from the UV
+    // G-buffer (the one GPU mirror of `umber_mesh::UvGBuffer`), not from a
+    // private re-solve. Malformed meshes keep their typed error from the
+    // position-pass validator.
+    build_pos_triangles(mesh)?;
+    let gbuffer = bake_uv_gbuffer(device, queue, mesh, umber_mesh::FIRST_TILE, width, height)
+        .map_err(|e| match e {
+            UvGBufferError::Readback(msg) => IdBakeError::Readback(msg),
+            other => IdBakeError::Readback(other.to_string()),
+        })?;
+    let prim_view = gbuffer
+        .prim_texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
 
     // Reuses `ao::BakeTarget`'s `Rgba8Unorm` texture/view/readback
-    // machinery (including the 256-byte-row-pitch de-padding) rather than
-    // re-inventing a second storage-texture type — the same reuse `curvature`
-    // itself makes over `umber_gpu::PaintTarget`.
+    // machinery (including the 256-byte-row-pitch de-padding).
     let target = BakeTarget::new(device, width, height);
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -251,22 +205,16 @@ pub fn bake_id_mesh(
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(ID_BAKE_SHADER)),
     });
 
-    // `ID_BAKE_SHADER`'s binding set mirrors `bake_curvature_mesh`'s shape —
-    // write-only output texture, params uniform, two read-only inputs —
-    // with the curvature pass's normal texture swapped for this pass's
-    // triangle storage buffer (uniform moves to binding 2 to keep the
-    // texture inputs adjacent, matching the position pass's numbering habit
-    // of grouping like bindings).
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("umber_bake_id_bind_group_layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<GpuPosTri>() as u64),
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
                 count: None,
             },
@@ -277,26 +225,6 @@ pub fn bake_id_mesh(
                     access: wgpu::StorageTextureAccess::WriteOnly,
                     format: wgpu::TextureFormat::Rgba8Unorm,
                     view_dimension: wgpu::TextureViewDimension::D2,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(size_of::<IdUniform>() as u64),
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
                 },
                 count: None,
             },
@@ -324,27 +252,11 @@ pub fn bake_id_mesh(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &triangle_buffer,
-                    offset: 0,
-                    size: None,
-                }),
+                resource: wgpu::BindingResource::TextureView(&prim_view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(target.view()),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &params_buffer,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(&position_map.position_view),
             },
         ],
     });
@@ -359,10 +271,8 @@ pub fn bake_id_mesh(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        // One workgroup per texel, matching `cs_main_from_position`'s
-        // dispatch convention (`ID_BAKE_SHADER` runs `@workgroup_size(1)`,
-        // so `workgroup_id.xy` is directly the texel coordinate).
-        pass.dispatch_workgroups(width, height, 1);
+        // `ID_BAKE_SHADER` runs `@workgroup_size(8, 8)`.
+        pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
     }
     queue.submit(Some(encoder.finish()));
 
@@ -418,11 +328,6 @@ mod tests {
             material_names: vec!["m".into()],
             triangle_materials: Vec::new(),
         }
-    }
-
-    #[test]
-    fn id_uniform_layout_matches_wgsl_struct_size() {
-        assert_eq!(size_of::<IdUniform>(), 16);
     }
 
     #[test]
