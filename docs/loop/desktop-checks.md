@@ -127,3 +127,5 @@ Result: ____________________
   keys under window id "quit-guard".
 - The fixture exists: `crates/umber-mesh/tests/assets/cube_2mat_ascii7400.fbx`.
 - Doc-only, battery-exempt; no code touched.
+
+- 2026-11-05: check 5 PARTIAL headless — the app runs on the live Wayland session with XDG redirected; control_call.py smoke of methods/command.list/command.run/viewport.screenshot all PASS after `5f3e33f` (repaint waker). SIGTERM exits 143 (no handler) — check 1's quit-guard evidence on this box. Checks 1-4 (real desktop input) still owed on Bessa's desktop.
