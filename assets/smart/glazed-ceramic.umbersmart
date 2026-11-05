@@ -1,0 +1,44 @@
+{
+  "name": "Glazed ceramic",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Ceramic folder",
+      "kind": "folder"
+    },
+    {
+      "name": "Clay body",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Glaze coat",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.5,
+      "generator": {
+        "node_def": "noise_perlin",
+        "map_name": "",
+        "channel": "roughness"
+      }
+    },
+    {
+      "name": "Speckle",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.3,
+      "mask": "Speckle mask",
+      "generator": {
+        "node_def": "noise_value",
+        "map_name": "",
+        "channel": "baseColor"
+      }
+    }
+  ]
+}

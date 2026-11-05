@@ -1,0 +1,27 @@
+{
+  "name": "Height ridges",
+  "version": 1,
+  "ops": [
+    {
+      "source": {
+        "type": "generator",
+        "node_def": "mesh_map_generator",
+        "map_name": "height"
+      },
+      "op": "multiply",
+      "params": {}
+    },
+    {
+      "source": {
+        "type": "constant",
+        "value": 0.0
+      },
+      "op": "levels",
+      "params": {
+        "low": 0.55,
+        "high": 1.0,
+        "gamma": 1.2
+      }
+    }
+  ]
+}

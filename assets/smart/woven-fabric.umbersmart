@@ -1,0 +1,44 @@
+{
+  "name": "Woven fabric",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Fabric folder",
+      "kind": "folder"
+    },
+    {
+      "name": "Weave base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "height",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Threads",
+      "kind": "fill",
+      "blend_mode": "Overlay",
+      "opacity": 0.55,
+      "generator": {
+        "node_def": "noise_perlin",
+        "map_name": "",
+        "channel": "normal"
+      }
+    },
+    {
+      "name": "Wear",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.45,
+      "mask": "Wear mask",
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    }
+  ]
+}
