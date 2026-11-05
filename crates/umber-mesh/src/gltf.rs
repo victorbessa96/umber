@@ -6,6 +6,7 @@
 //! with zeros so the attribute vectors always stay parallel to `positions`.
 //! Non-indexed primitives are treated as sequential triangle lists.
 
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use super::{ImportError, MeshData};
@@ -17,6 +18,70 @@ use super::{ImportError, MeshData};
 /// data at all.
 pub fn load_gltf(path: &Path) -> Result<MeshData, ImportError> {
     crate::ensure_import_size(path)?;
+    validate_glb_container(path)?;
+    // The `gltf`/`gltf-json` crates panic on shapes a crafted file can
+    // declare — gltf-json's primitive validation hook indexes
+    // `root.accessors[position_index]` with no bounds check (row 156-A
+    // fuzz battery: "index out of bounds: the len is 0 but the index is
+    // 0"), and the GLB reader's chunk math overflows on lying lengths.
+    // Those sites live in the dependency, so the unwind boundary sits at
+    // this crate's edge: any panic from the gltf stack becomes a typed
+    // error here instead of taking down the caller.
+    std::panic::catch_unwind(AssertUnwindSafe(|| load_gltf_inner(path))).unwrap_or_else(|payload| {
+        let detail = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        Err(ImportError::Gltf(format!(
+            "gltf parser panicked on malformed input: {detail}"
+        )))
+    })
+}
+
+/// Pre-validates the GLB container before the `gltf` crate's reader sees it.
+/// `gltf::binary::Glb::from_reader` computes `header.length - 12` with plain
+/// subtraction (panics when a crafted header declares a total length below
+/// the 12-byte header) and then allocates `header.length - 12` bytes BEFORE
+/// checking the file is actually that long — a small file declaring
+/// `u32::MAX` allocates ~4 GiB, and `catch_unwind` cannot catch an allocator
+/// abort, so this preflight must run first. Both shapes are refused here
+/// with a typed error.
+fn validate_glb_container(path: &Path) -> Result<(), ImportError> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() || &magic != b"glTF" {
+        // Not a GLB container; the JSON path is covered by the catch_unwind
+        // boundary in `load_gltf`.
+        return Ok(());
+    }
+    let mut header_rest = [0u8; 8];
+    if file.read_exact(&mut header_rest).is_err() {
+        // Truncated header: gltf's reader returns an Io error, no panic.
+        return Ok(());
+    }
+    let declared = u32::from_le_bytes([
+        header_rest[4],
+        header_rest[5],
+        header_rest[6],
+        header_rest[7],
+    ]);
+    let file_len = std::fs::metadata(path)?.len();
+    if declared < 12 {
+        return Err(ImportError::Gltf(format!(
+            "GLB header declares total length {declared}, below the 12-byte header"
+        )));
+    }
+    if u64::from(declared) > file_len {
+        return Err(ImportError::Gltf(format!(
+            "GLB header declares total length {declared} but the file is only {file_len} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn load_gltf_inner(path: &Path) -> Result<MeshData, ImportError> {
     let (document, buffers, _) =
         gltf::import(path).map_err(|e| ImportError::Gltf(e.to_string()))?;
     validate_accessors(&document)?;

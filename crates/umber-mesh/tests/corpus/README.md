@@ -14,7 +14,11 @@ Layout, one subdir per format:
   unterminated string, non-UTF-8 bytes.
 - `gltf/` — truncated/bad/lying GLB headers, accessor count 0 and
   count > 2^28, out-of-range indices, NaN positions, bufferView past
-  the buffer's EOF.
+  the buffer's EOF, plus the kill-2 fuzz-battery mutants:
+  `oob_position_index_iter*` (POSITION attribute pointing past the
+  `accessors` array — gltf-json's validation hook indexes it unchecked)
+  and `glb_len_underflow_iter*` (GLB header declaring total length 0 —
+  gltf's `header.length - 12` underflows).
 - `fbx/` — truncated magic, garbage bytes, truncated ASCII FBX.
 - `usdc/` — bad magic, truncated magic, magic + garbage.
 - `usdz/` — decompression bombs (stored/deflate/ZIP64 entries declaring
