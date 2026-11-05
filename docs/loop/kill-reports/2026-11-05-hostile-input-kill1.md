@@ -23,3 +23,12 @@ fmt clean; `clippy -p umber-mesh --all-targets -D warnings` clean; `cargo test -
 ## Owed next
 `cargo test -p umber-mesh -- --ignored hostile_fuzz` at 200k iters in a battery session;
 any finding becomes a corpus file + fix in the same kill.
+
+## Kill 2 (2026-11-05, `2548e11`) — fuzz battery
+
+200k-iter `hostile_fuzz` run (log: `~/.hermes/cache/scratch/hostile-fuzz-200k-2026-11-05.log`)
+found two gltf parser bug classes: GLB declared-length underflow and out-of-range
+position indices. Each became a regression corpus file (6 new) + typed-error fix in
+`gltf.rs`. Re-run at 200k on fixed code: 0 findings, 51.39s
+(`hostile-fuzz-200k-2026-11-05-rerun.log`). 50k smoke after: clean.
+Battery green: fmt, clippy -D warnings, 115 lib + 2 hostile_corpus + 32 panic_hunt.
