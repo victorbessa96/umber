@@ -221,6 +221,12 @@ pub fn run_command_id(app: &mut UmberApp, id: &str) -> Result<(), CommandError> 
 /// The `command.list` wire payload (control channel, row 154 wave 2c): one
 /// row per registered id with the live availability verdict. Labels/shortcuts
 /// join in wave 2b when the i18n `cmd.*` namespace lands.
+fn action_label_key(id: &str) -> &'static str {
+    toolbar::ShellAction::from_id(id)
+        .map(|a| a.label_key())
+        .unwrap_or("cmd-tool-select")
+}
+
 pub fn command_list_json(app: &UmberApp) -> serde_json::Value {
     let state = app.shell_state();
     let rows: Vec<serde_json::Value> = COMMAND_IDS
@@ -240,6 +246,8 @@ pub fn command_list_json(app: &UmberApp) -> serde_json::Value {
             };
             serde_json::json!({
                 "id": id,
+                "label_key": action_label_key(id),
+                "label": tr(action_label_key(id)),
                 "enabled": enabled,
                 "disabled_reason": reason,
             })
@@ -258,10 +266,15 @@ mod tests {
         for id in COMMAND_IDS {
             if *id == "tool.select" {
                 assert!(ShellAction::from_id(id).is_none());
+                assert_eq!(action_label_key(id), "cmd-tool-select");
                 continue;
             }
             let action = ShellAction::from_id(id).expect("registered id must resolve");
             assert_eq!(action.id(), *id, "id() must be the inverse of from_id()");
+            // label_key is the cmd.* form of the id; the catalogs carry every
+            // cmd-* key in both locales (i18n parity test enforces it).
+            let want = format!("cmd-{}", id.replace(['.', '_'], "-"));
+            assert_eq!(action.label_key(), want);
         }
     }
 

@@ -196,6 +196,45 @@ impl ShellAction {
         }
     }
 
+    /// The i18n label key for this command: `cmd-` + the dotted id with
+    /// dashes (wave 2b-i; keys live in assets/i18n/{en-US,pt-BR}.ftl, parity-
+    /// gated). `command.list` resolves it per locale via [`crate::i18n::tr`].
+    pub fn label_key(&self) -> &'static str {
+        use ShellAction::*;
+        match self {
+            NewProject => "cmd-file-new-project",
+            OpenMesh => "cmd-file-open-mesh",
+            OpenProject => "cmd-file-open-project",
+            SaveProject => "cmd-file-save-project",
+            SaveProjectAs => "cmd-file-save-project-as",
+            Undo => "cmd-edit-undo",
+            Redo => "cmd-edit-redo",
+            ToggleWireframe => "cmd-view-toggle-wireframe",
+            ToggleGrid => "cmd-view-toggle-grid",
+            CycleViewMode => "cmd-view-cycle-view-mode",
+            ToggleMaskMode => "cmd-paint-toggle-mask-mode",
+            InvertMask => "cmd-paint-invert-mask",
+            SelectTool(_) => "cmd-tool-select",
+            BrushSmaller => "cmd-tool-brush-smaller",
+            BrushLarger => "cmd-tool-brush-larger",
+            ToggleHideUi => "cmd-window-toggle-hide-ui",
+            ToggleMaximize => "cmd-window-toggle-maximize",
+            CommandPalette => "cmd-window-command-palette",
+            Preferences => "cmd-window-preferences",
+            NextWorkspace => "cmd-window-next-workspace",
+            PrevWorkspace => "cmd-window-prev-workspace",
+            ViewMaterial => "cmd-view-view-material",
+            NextChannel => "cmd-view-next-channel",
+            PrevChannel => "cmd-view-prev-channel",
+            NextMeshMap => "cmd-view-next-mesh-map",
+            PrevMeshMap => "cmd-view-prev-mesh-map",
+            ViewportPresetBoth => "cmd-view-viewport-preset-both",
+            ViewportPreset3d => "cmd-view-viewport-preset-3d",
+            ViewportPreset2d => "cmd-view-viewport-preset-2d",
+            ViewportPresetSwap => "cmd-view-viewport-preset-swap",
+        }
+    }
+
     /// The reverse of [`ShellAction::id`] for payload-less variants;
     /// payload variants (`tool.select`) and unknown ids return `None`.
     #[cfg_attr(not(test), allow(dead_code))]
