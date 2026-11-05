@@ -925,6 +925,7 @@ tip =
     .invert-mask = Inverter a máscara rápida.
     .palette-title = Paleta de comandos
     .palette = Encontrar e executar qualquer comando pelo nome.
+    .brush-popup = Escolha um pincel pela amostra, no cursor.
 
 ## Espaços de trabalho (plano de GUI g5-workspaces)
 
@@ -1050,6 +1051,7 @@ cmd-paint-toggle-mask-mode = Alternar máscara rápida
 cmd-paint-invert-mask = Inverter máscara
 cmd-tool-brush-smaller = Pincel menor
 cmd-tool-brush-larger = Pincel maior
+cmd-tool-brush-popup = Seletor de pincéis
 cmd-tool-select = Selecionar ferramenta
 cmd-window-toggle-hide-ui = Alternar ocultar interface
 cmd-window-toggle-maximize = Alternar maximizar

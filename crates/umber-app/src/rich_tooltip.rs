@@ -58,6 +58,7 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::SelectTool(T::IdMask) => ("brush.tool-id-mask", None),
         ShellAction::BrushSmaller => ("palette.brush-smaller", None),
         ShellAction::BrushLarger => ("palette.brush-larger", None),
+        ShellAction::BrushPopup => ("cmd-tool-brush-popup", Some("tip.brush-popup")),
         ShellAction::CommandPalette => ("tip.palette-title", Some("tip.palette")),
         ShellAction::Preferences => ("prefs.title", None),
         ShellAction::ToggleHideUi => ("shell.hide-ui", Some("tip.hide-ui")),

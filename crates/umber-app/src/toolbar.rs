@@ -119,6 +119,9 @@ pub enum ShellAction {
     BrushSmaller,
     /// Grow the brush one step. `]`.
     BrushLarger,
+    /// The brush popup at the cursor (UI/UX pass U3, Blender 4.3's
+    /// brush selector on Shift+Space): the asset shelf's swatches.
+    BrushPopup,
     /// Hide UI (GUI plan g5-focus-modes): the docks and toolbar go, the
     /// viewport fills the window. Tab, when nothing has keyboard focus.
     ToggleHideUi,
@@ -178,6 +181,7 @@ impl ShellAction {
             SelectTool(_) => "tool.select",
             BrushSmaller => "tool.brush_smaller",
             BrushLarger => "tool.brush_larger",
+            BrushPopup => "tool.brush_popup",
             ToggleHideUi => "window.toggle_hide_ui",
             ToggleMaximize => "window.toggle_maximize",
             CommandPalette => "window.command_palette",
@@ -217,6 +221,7 @@ impl ShellAction {
             SelectTool(_) => "cmd-tool-select",
             BrushSmaller => "cmd-tool-brush-smaller",
             BrushLarger => "cmd-tool-brush-larger",
+            BrushPopup => "cmd-tool-brush-popup",
             ToggleHideUi => "cmd-window-toggle-hide-ui",
             ToggleMaximize => "cmd-window-toggle-maximize",
             CommandPalette => "cmd-window-command-palette",
@@ -255,6 +260,7 @@ impl ShellAction {
             "paint.invert_mask" => Some(InvertMask),
             "tool.brush_smaller" => Some(BrushSmaller),
             "tool.brush_larger" => Some(BrushLarger),
+            "tool.brush_popup" => Some(BrushPopup),
             "window.toggle_hide_ui" => Some(ToggleHideUi),
             "window.toggle_maximize" => Some(ToggleMaximize),
             "window.command_palette" => Some(CommandPalette),
@@ -817,7 +823,12 @@ pub fn poll_temp_keys(
                 _ => continue,
             };
             if *pressed {
-                if modifiers.command || modifiers.ctrl {
+                // Shift+Space is the brush popup (the registry's bind);
+                // only a bare Space holds the pan tool.
+                if modifiers.command
+                    || modifiers.ctrl
+                    || (temp_key == TempKey::Pan && modifiers.shift)
+                {
                     continue;
                 }
                 if let Some(kind) = temp.press(temp_key, current, focus) {
@@ -934,6 +945,48 @@ mod contextual_tests {
         assert!(!t.panning());
         // The erase release still restores.
         assert_eq!(t.release(TempKey::Erase), Some(ToolKind::Paint));
+    }
+
+    /// U3: Shift+Space is the brush popup, never a pan hold; bare Space
+    /// still holds the pan; the registry resolves the chord and its id.
+    #[test]
+    fn shift_space_opens_the_brush_popup_and_never_pans() {
+        let ctx = egui::Context::default();
+        let space = |shift: bool| egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        };
+        for (shift, pans) in [(true, false), (false, true)] {
+            let mut temp = TempTools::default();
+            let input = egui::RawInput {
+                events: vec![space(shift)],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let _ = poll_temp_keys(ui.ctx(), &mut temp, ToolKind::Paint);
+            });
+            out.textures_delta.clear();
+            assert_eq!(temp.panning(), pans, "shift {shift}");
+        }
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::actions::resolve(egui::Key::Space, shift),
+            Some(ShellAction::BrushPopup)
+        );
+        assert_eq!(
+            ShellAction::from_id("tool.brush_popup"),
+            Some(ShellAction::BrushPopup)
+        );
+        assert_eq!(ShellAction::BrushPopup.id(), "tool.brush_popup");
     }
 
     #[test]

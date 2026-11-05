@@ -906,6 +906,7 @@ tip =
     .invert-mask = Invert the quick mask.
     .palette-title = Command palette
     .palette = Find and run any command by name.
+    .brush-popup = Pick a brush from its swatch, at the cursor.
 
 ## Workspaces (GUI plan g5-workspaces)
 
@@ -1031,6 +1032,7 @@ cmd-paint-toggle-mask-mode = Toggle Quick Mask
 cmd-paint-invert-mask = Invert Mask
 cmd-tool-brush-smaller = Smaller Brush
 cmd-tool-brush-larger = Larger Brush
+cmd-tool-brush-popup = Brush Popup
 cmd-tool-select = Select Tool
 cmd-window-toggle-hide-ui = Toggle Hide UI
 cmd-window-toggle-maximize = Toggle Maximize

@@ -71,6 +71,9 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
         // `[` / `]` (Painter's size steps): one notch of the shared
         // multiplicative step, so ten presses span ~2.6x.
         ShellAction::CommandPalette => app.palette.open(),
+        // The brush popup opens at the pointer (or the window centre
+        // when the pointer is outside), toggling like Blender's.
+        ShellAction::BrushPopup => app.toggle_brush_popup(),
         ShellAction::Preferences => app.prefs_open = true,
         ShellAction::ToggleHideUi => {
             app.focus.toggle(
@@ -192,6 +195,7 @@ pub const COMMAND_IDS: &[&str] = &[
     "paint.invert_mask",
     "tool.brush_smaller",
     "tool.brush_larger",
+    "tool.brush_popup",
     "tool.select",
     "window.toggle_hide_ui",
     "window.toggle_maximize",

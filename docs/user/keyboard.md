@@ -18,6 +18,7 @@ shell, and Ctrl+Z undoes the typing, not the document.
 | `Ctrl+O` | `⌘O` | Open project | everywhere, even while typing |
 | `Ctrl+,` | `⌘,` | Preferences | everywhere, even while typing |
 | `Ctrl+Space` | `⌘Space` | Maximize the hovered area | everywhere, even while typing |
+| `Shift+Space` | `⇧Space` | Brush popup at the cursor (pick a preset by swatch) | not while typing in a field |
 | `Ctrl+PageDown` | `⌘PageDown` | Next workspace | everywhere, even while typing |
 | `Ctrl+PageUp` | `⌘PageUp` | Previous workspace | everywhere, even while typing |
 | `Shift+C` | `⇧C` | Previous channel view | not while typing in a field |

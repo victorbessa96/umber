@@ -1965,6 +1965,11 @@ pub struct UmberApp {
     notices: umber_gui::Notices,
     /// The command palette (GUI plan G3).
     palette: palette::Palette,
+    /// Where the Shift+Space brush popup is open (U3), `None` = closed.
+    brush_popup: Option<egui::Pos2>,
+    /// The pointer position as of the last frame (the popup's anchor:
+    /// `dispatch` runs without a `Ui`).
+    last_pointer: Option<egui::Pos2>,
     /// Preferences (GUI plan G3): the values, whether the window is open,
     /// and its search query.
     prefs: preferences::Preferences,
@@ -2191,6 +2196,8 @@ impl UmberApp {
             show_perf_hud: false,
             notices: pending_crash_notices(),
             palette: palette::Palette::default(),
+            brush_popup: None,
+            last_pointer: None,
             prefs: {
                 // The saved keymap overrides become the effective table
                 // before the first frame polls a key (g3-keymap-editor).
@@ -3697,6 +3704,15 @@ impl UmberApp {
         }
     }
 
+    /// Shift+Space (U3): opens the brush popup at the last pointer
+    /// position, or closes it when open.
+    fn toggle_brush_popup(&mut self) {
+        self.brush_popup = match self.brush_popup {
+            Some(_) => None,
+            None => Some(self.last_pointer.unwrap_or(egui::pos2(480.0, 360.0))),
+        };
+    }
+
     fn open_project(&mut self) {
         let Some(dir) = rfd::FileDialog::new().pick_folder() else {
             return;
@@ -5110,6 +5126,40 @@ impl eframe::App for UmberApp {
                 }
             }
         }
+        // The brush popup (Shift+Space, U3): the asset shelf's swatches in
+        // a floating card at the pointer. A pick selects and closes; Esc
+        // or a click outside closes.
+        self.last_pointer = ui.ctx().input(|i| i.pointer.hover_pos());
+        if let Some(at) = self.brush_popup {
+            let area = egui::Area::new(Id::new("umber-brush-popup"))
+                .order(egui::Order::Foreground)
+                .pivot(egui::Align2::CENTER_BOTTOM)
+                .fixed_pos(at)
+                .constrain(true)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style())
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(tr("cmd-tool-brush-popup")).strong());
+                            ui.separator();
+                            assets_panel::brush_grid_ui(
+                                ui,
+                                &mut self.state.assets_panel,
+                                &self.brush_panel,
+                            )
+                        })
+                        .inner
+                });
+            let escape = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+            let clicked_out =
+                ui.ctx().input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer();
+            if let Some(name) = area.inner {
+                self.brush_panel.select_preset_by_name(&name);
+                self.brush_popup = None;
+            } else if escape || clicked_out {
+                self.brush_popup = None;
+            }
+        }
+
         // The command palette overlay (Ctrl+Shift+P / F3), drawn last so it
         // sits over everything; a chosen action runs through the same
         // dispatch as every key and menu row.

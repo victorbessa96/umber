@@ -162,6 +162,7 @@ pub const BINDINGS: &[(Binding, ShellAction)] = &[
     (bind(Key::O, Chord::Cmd), ShellAction::OpenProject),
     (bind(Key::Comma, Chord::Cmd), ShellAction::Preferences),
     (bind(Key::Space, Chord::Cmd), ShellAction::ToggleMaximize),
+    (bind(Key::Space, Chord::Shift), ShellAction::BrushPopup),
     (bind(Key::PageDown, Chord::Cmd), ShellAction::NextWorkspace),
     (bind(Key::PageUp, Chord::Cmd), ShellAction::PrevWorkspace),
     // The display-mode Shift rows (GUI plan g6-display-mode-keys) sit
@@ -285,6 +286,7 @@ pub const ALL_ACTIONS: &[ShellAction] = &[
     ShellAction::SelectTool(ToolKind::IdMask),
     ShellAction::BrushSmaller,
     ShellAction::BrushLarger,
+    ShellAction::BrushPopup,
     ShellAction::ToggleHideUi,
     ShellAction::ToggleMaximize,
     ShellAction::NextWorkspace,
@@ -696,6 +698,7 @@ fn reference_text(action: ShellAction) -> &'static str {
         ShellAction::CommandPalette => "Command palette",
         ShellAction::Preferences => "Preferences",
         ShellAction::ToggleMaximize => "Maximize the hovered area",
+        ShellAction::BrushPopup => "Brush popup at the cursor (pick a preset by swatch)",
         ShellAction::NextWorkspace => "Next workspace",
         ShellAction::PrevWorkspace => "Previous workspace",
         ShellAction::ToggleWireframe => "Toggle wireframe",
@@ -1354,6 +1357,7 @@ mod tests {
             | ShellAction::SelectTool(_)
             | ShellAction::BrushSmaller
             | ShellAction::BrushLarger
+            | ShellAction::BrushPopup
             | ShellAction::ToggleHideUi
             | ShellAction::ToggleMaximize
             | ShellAction::CommandPalette
@@ -1371,7 +1375,7 @@ mod tests {
             | ShellAction::ViewportPresetSwap => {}
         };
         ALL_ACTIONS.iter().copied().for_each(guard);
-        assert_eq!(ALL_ACTIONS.len(), 29 + ToolKind::ALL.len());
+        assert_eq!(ALL_ACTIONS.len(), 30 + ToolKind::ALL.len());
         for kind in ToolKind::ALL {
             assert!(
                 ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),

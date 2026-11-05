@@ -155,7 +155,7 @@ pub const SHELF_SWATCH: f32 = 40.0;
 /// along the 3D viewport's bottom edge. A click selects the preset
 /// (the caller routes it through `BrushPanel::select_preset_by_name`,
 /// the same seam the Assets browser rows use); the active preset is
-/// framed in the accent; the name rides the hover.
+/// framed in the accent; the name rides the caption and the hover.
 pub fn brush_shelf_ui(
     ui: &mut Ui,
     state: &mut AssetsPanel,
@@ -166,64 +166,94 @@ pub fn brush_shelf_ui(
         .id_salt("umber-brush-shelf")
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (i, entry) in brush.library.entries.iter().enumerate() {
-                    let json = entry.preset.to_json().unwrap_or_default();
-                    let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
-                        crate::asset_thumbs::brush_preview(
-                            &entry.preset,
-                            crate::asset_thumbs::THUMB_PX * 2,
-                        )
-                    }) else {
-                        continue;
-                    };
-                    let active = brush.active == Some(i);
-                    let image = egui::Image::new(egui::load::SizedTexture::new(
-                        tex,
-                        egui::vec2(SHELF_SWATCH, SHELF_SWATCH),
-                    ))
-                    .corner_radius(4.0);
-                    let button = egui::Button::image(image)
-                        .selected(active)
-                        .stroke(if active {
-                            egui::Stroke::new(2.0, umber_gui::theme::accent())
-                        } else {
-                            egui::Stroke::NONE
-                        });
-                    let response = ui
-                        .vertical(|ui| {
-                            ui.set_width(SHELF_SWATCH + 8.0);
-                            let r = ui.add(button);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&entry.preset.name)
-                                        .size(umber_gui::theme::TEXT_STATUS)
-                                        .color(if active {
-                                            umber_gui::theme::accent()
-                                        } else {
-                                            umber_gui::theme::muted()
-                                        }),
-                                )
-                                .truncate(),
-                            );
-                            r
-                        })
-                        .inner
-                        .on_hover_text(&entry.preset.name);
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::WidgetType::Button,
-                            true,
-                            active,
-                            &entry.preset.name,
-                        )
-                    });
-                    if response.clicked() && !active {
-                        picked = Some(entry.preset.name.clone());
-                    }
-                }
-            });
+            ui.horizontal(|ui| picked = brush_swatches(ui, state, brush, 0..usize::MAX));
         });
+    picked
+}
+
+/// Swatches per row in the brush popup.
+pub const POPUP_COLUMNS: usize = 6;
+
+/// The brush popup's body (Shift+Space): the same swatches as the shelf,
+/// in rows of [`POPUP_COLUMNS`] so every preset shows without scrolling
+/// however large the library grows.
+pub fn brush_grid_ui(
+    ui: &mut Ui,
+    state: &mut AssetsPanel,
+    brush: &crate::brush_panel::BrushPanel,
+) -> Option<String> {
+    let mut picked = None;
+    let n = brush.library.entries.len();
+    for start in (0..n).step_by(POPUP_COLUMNS) {
+        let row = start..(start + POPUP_COLUMNS).min(n);
+        if let Some(name) = ui
+            .horizontal(|ui| brush_swatches(ui, state, brush, row))
+            .inner
+        {
+            picked = Some(name);
+        }
+    }
+    picked
+}
+
+/// One swatch button + caption per library preset; the clicked one's name.
+fn brush_swatches(
+    ui: &mut Ui,
+    state: &mut AssetsPanel,
+    brush: &crate::brush_panel::BrushPanel,
+    range: std::ops::Range<usize>,
+) -> Option<String> {
+    let mut picked = None;
+    for (i, entry) in brush.library.entries.iter().enumerate() {
+        if !range.contains(&i) {
+            continue;
+        }
+        let json = entry.preset.to_json().unwrap_or_default();
+        let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
+            crate::asset_thumbs::brush_preview(&entry.preset, crate::asset_thumbs::THUMB_PX * 2)
+        }) else {
+            continue;
+        };
+        let active = brush.active == Some(i);
+        let image = egui::Image::new(egui::load::SizedTexture::new(
+            tex,
+            egui::vec2(SHELF_SWATCH, SHELF_SWATCH),
+        ))
+        .corner_radius(4.0);
+        let button = egui::Button::image(image)
+            .selected(active)
+            .stroke(if active {
+                egui::Stroke::new(2.0, umber_gui::theme::accent())
+            } else {
+                egui::Stroke::NONE
+            });
+        let response = ui
+            .vertical(|ui| {
+                ui.set_width(SHELF_SWATCH + 8.0);
+                let r = ui.add(button);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&entry.preset.name)
+                            .size(umber_gui::theme::TEXT_STATUS)
+                            .color(if active {
+                                umber_gui::theme::accent()
+                            } else {
+                                umber_gui::theme::muted()
+                            }),
+                    )
+                    .truncate(),
+                );
+                r
+            })
+            .inner
+            .on_hover_text(&entry.preset.name);
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, &entry.preset.name)
+        });
+        if response.clicked() && !active {
+            picked = Some(entry.preset.name.clone());
+        }
+    }
     picked
 }
 
@@ -551,6 +581,60 @@ mod kittest {
             Some(target.as_str()),
             "the pick became active"
         );
+    }
+
+    /// The popup grid lays the library out in rows of POPUP_COLUMNS: the
+    /// swatch buttons fall on ceil(n / columns) distinct rows, and every
+    /// row but the last holds exactly POPUP_COLUMNS.
+    #[test]
+    fn the_brush_popup_grid_wraps_into_fixed_columns() {
+        struct Grid {
+            panel: AssetsPanel,
+            brush: crate::brush_panel::BrushPanel,
+        }
+        crate::i18n::init();
+        let mut brush = crate::brush_panel::BrushPanel::new();
+        brush.library = umber_brush::Library::load_from_dirs(&[std::path::Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        ))
+        .join("../../assets/brushes")]);
+        let names: Vec<String> = brush
+            .library
+            .entries
+            .iter()
+            .map(|e| e.preset.name.clone())
+            .collect();
+        let mut h = Harness::<Grid>::builder()
+            .with_size([900.0, 600.0])
+            .build_ui_state(
+                |ui, s: &mut Grid| {
+                    let _ = brush_grid_ui(ui, &mut s.panel, &s.brush);
+                },
+                Grid {
+                    panel: AssetsPanel::default(),
+                    brush,
+                },
+            );
+        h.run();
+        let mut rows: Vec<i32> = Vec::new();
+        let mut per_row: std::collections::BTreeMap<i32, usize> = Default::default();
+        for name in &names {
+            let node = h.get_by_role_and_label(egui::accesskit::Role::Button, name);
+            let y = node.rect().min.y.round() as i32;
+            if !rows.contains(&y) {
+                rows.push(y);
+            }
+            *per_row.entry(y).or_default() += 1;
+        }
+        assert_eq!(
+            rows.len(),
+            names.len().div_ceil(POPUP_COLUMNS),
+            "{per_row:?}"
+        );
+        let counts: Vec<usize> = per_row.values().copied().collect();
+        for c in &counts[..counts.len() - 1] {
+            assert_eq!(*c, POPUP_COLUMNS, "{per_row:?}");
+        }
     }
 
     #[test]
