@@ -196,6 +196,12 @@ pass; the .ftl lock lift (if it stands).
 
 ## Standing debts (refreshed 2026-10-24, live-verified)
 
+- **Added 2026-11-06 (charter-v2 T1-T3, `5af3c84`):** the Export panel
+  button path lacks `flush_for_export` (export.run has it); `job.status`
+  keeps stale paths after a failed job; export > 30 s times out over
+  `--control` (`UI_REPLY_TIMEOUT`). CLOSED the same day: audit A2-4's
+  bake/export-by-id tail, the e2e smoke in CI, the push guard.
+
 - ~~The cached ID-mask bake~~ **LANDED SILENTLY** — the P1 tile
   cache + the L3 pre-warm; this row was stale for a week.
 - Split-redo under merged undo entries — OPEN.

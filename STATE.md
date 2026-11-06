@@ -11,8 +11,11 @@
 
 ## Status line
 
-Current phase (2026-11-05): **the UI/UX pass, waves U1-U4 LANDED; U5
-parked on egui_dock** (see the 2026-11-05 local-8dc7062e section below).
+Current phase (2026-11-06): **charter-v2 T1-T3 LANDED (`5af3c84`, pushed
+through the new `scripts/safe-push.py`)**: bake/export by command id +
+`job.status`, the e2e smoke in CI, the push guard (see the 2026-11-06
+local-3230b69f section below). Before it (2026-11-05): the UI/UX pass, waves
+U1-U4 LANDED; U5 parked on egui_dock.
 The status paragraph that follows is the 10-27 to 11-01 picture, kept for
 its open tails.
 
@@ -69,6 +72,34 @@ physical access (boot straight into it, skip the OS), checking STOOD
 DOWN by his order. The release lane stays Bessa-gated: SPEC
 ratification (SPEC.md still DRAFT), the dogfood asset, Windows
 signing, the alpha tag.
+
+## 2026-11-06 (local-3230b69f, Razul) — charter-v2 T1-T3: bake/export by id, e2e smoke, safe-push
+
+- **T1, `bake.run` / `export.run`** (audit A2-4's open tail): command ids that
+  run the Bakes / Export panels' own button paths with their current
+  settings, disabled with the button's own reason. Read-only control method
+  `job.status` reports both jobs (monotonic completed counters, absolute
+  output paths): read it, `command.run`, wait for the counter to grow.
+- **Two user-visible bugs found by the smoke, fixed at the root.**
+  `FillParams` derived `Default`, so every fill built in code (Layers > Add
+  fill, `layer.add_fill`, the agent) targeted channel `""` and composited
+  onto nothing; only projects loaded from disk got `baseColor`. And a fresh
+  session's tile 1001 stayed in the placeholder set, so the first mesh's set
+  owned no tile (`PaintState::adopt_placeholder_tiles`).
+- **T2, `scripts/e2e-smoke.py`**: release GUI over `--control`, cube + fill
+  + bake + export, asserts files, non-black base colour and a bright 3D
+  viewport crop. CI runs it on Linux under xvfb-run. Mutation-proven: with
+  the derived Default restored it fails.
+- **T3, `scripts/safe-push.py`**: the only push path (ledger by session with
+  patch-id for rebases, fast-forward, fmt/scorecard/layers on the pushed
+  commit's tree, pushes the checked SHA). 12 scratch-repo tests.
+- Open: the Export panel's own BUTTON path does not call
+  `flush_for_export` yet (only `export.run` does; a fill added and exported
+  in the same frame could export stale); `job.status` keeps the previous
+  paths after a failed job; an export longer than 30 s times out over the
+  control channel although it finishes. Spec §8's A2-4 row still says open:
+  the spec file was under a sibling lock (u7-spec) at landing time.
+- Evidence and the kill table: `docs/loop/kill-reports/2026-11-06-charter-v2-t1-t3.md`, queue row 229.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
