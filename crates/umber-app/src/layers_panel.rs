@@ -388,7 +388,7 @@ fn channel_rows(
             let name_text = if next_enabled {
                 egui::RichText::new(name.as_str())
             } else {
-                egui::RichText::new(name.as_str()).color(egui::Color32::from_gray(140))
+                egui::RichText::new(name.as_str()).color(umber_gui::theme::muted())
             };
             ui.checkbox(&mut next_enabled, name_text);
             egui::ComboBox::from_id_salt(combo_id)
@@ -1209,7 +1209,7 @@ pub mod gestures {
         let outline = if soloed {
             ui.visuals().selection.stroke
         } else {
-            egui::Stroke::new(1.0, egui::Color32::from_gray(70))
+            egui::Stroke::new(1.0, umber_gui::theme::hover())
         };
         painter.rect_stroke(rect, 3.0, outline, egui::StrokeKind::Inside);
         if !enabled {

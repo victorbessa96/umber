@@ -1997,6 +1997,9 @@ pub struct UmberApp {
     /// The style was installed on both OS-theme branches (once, first
     /// frame: `umber_gui::theme::apply`).
     style_installed: bool,
+    /// The theme the installed style was built for (U4): a preference
+    /// change or an OS appearance flip under Follow OS re-applies.
+    applied_theme: Option<umber_gui::Theme>,
     /// Debug-only live theme reload (g0-style): `UMBER_THEME_FILE`, polled
     /// every 400 ms in `fn ui`.
     #[cfg(debug_assertions)]
@@ -2222,6 +2225,7 @@ impl UmberApp {
             },
             curvature_feed: CurvatureFeed::default(),
             style_installed: false,
+            applied_theme: None,
             #[cfg(debug_assertions)]
             theme_file: std::env::var_os("UMBER_THEME_FILE").map(Into::into),
             #[cfg(debug_assertions)]
@@ -2321,6 +2325,7 @@ impl UmberApp {
                     let hints = tr("prefs.key-hints");
                     let show_fps = tr("prefs.show-fps");
                     let brush_shelf = tr("prefs.brush-shelf");
+                    let theme_label = tr("prefs.theme");
                     let navigation = tr("prefs.section-navigation");
                     let nav = tr("prefs.nav-preset");
                     let any =
@@ -2333,8 +2338,38 @@ impl UmberApp {
                         &tips,
                         &motion,
                         &hints,
+                        &theme_label,
                     ]) {
                         ui.strong(&interface);
+                        // U4: the theme (Follow OS / Dark / Light / High
+                        // Contrast); the frame's theme check applies it.
+                        if preferences::row_matches(&q, &theme_label)
+                            || preferences::row_matches(&q, &interface)
+                        {
+                            let name = |t: Option<umber_gui::Theme>| match t {
+                                None => tr("setup.theme-follow-os"),
+                                Some(umber_gui::Theme::Dark) => tr("setup.theme-dark"),
+                                Some(umber_gui::Theme::Light) => tr("setup.theme-light"),
+                                Some(umber_gui::Theme::HighContrast) => {
+                                    tr("setup.theme-high-contrast")
+                                }
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(&theme_label);
+                                egui::ComboBox::from_id_salt("prefs-theme")
+                                    .selected_text(name(p.theme))
+                                    .show_ui(ui, |ui| {
+                                        for t in [
+                                            None,
+                                            Some(umber_gui::Theme::Dark),
+                                            Some(umber_gui::Theme::Light),
+                                            Some(umber_gui::Theme::HighContrast),
+                                        ] {
+                                            ui.selectable_value(&mut p.theme, t, name(t));
+                                        }
+                                    });
+                            });
+                        }
                         if preferences::row_matches(&q, &scale)
                             || preferences::row_matches(&q, &auto_scale)
                             || preferences::row_matches(&q, &interface)
@@ -2493,6 +2528,14 @@ impl UmberApp {
                 }
                 if let Some(a) = delta.animation_time {
                     s.animation_time = a;
+                    // Smooth scrolling is its own animation in egui
+                    // (not keyed on animation_time): Reduce Motion
+                    // jumps scroll areas too (U4 audit).
+                    s.scroll_animation = if a == 0.0 {
+                        egui::style::ScrollAnimation::none()
+                    } else {
+                        egui::style::ScrollAnimation::default()
+                    };
                 }
             });
         }
@@ -3184,7 +3227,7 @@ fn texture_sets_panel_ui(
                             ("to", fluent::FluentValue::from(p.to.to_string())),
                         ],
                     ))
-                    .color(umber_gui::theme::palette::WARN),
+                    .color(umber_gui::theme::warn()),
                 );
                 ui.horizontal(|ui| {
                     if ui.button(tr("texturesets.resize-apply")).clicked() {
@@ -4073,6 +4116,14 @@ impl eframe::App for UmberApp {
         }
     }
 
+    /// The window clear: the theme's app background (U4). eframe's
+    /// default is a fixed near-black, and the menu bar draws on the root
+    /// `Ui` with no panel fill of its own, so under Light the top bar
+    /// stayed black.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.extreme_bg_color.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         // The on_begin_pass half of the OS-bitmap cursor lifecycle
         // (photocraft #1's plugin): any widget may set a cursor image
@@ -4111,8 +4162,13 @@ impl eframe::App for UmberApp {
         // The Umber style on BOTH OS-theme branches, once (GUI plan G0
         // g0-style: an OS light/dark flip can no longer swap egui's stock
         // palette in). Chrome panels still apply their own density.
-        if !self.style_installed {
-            umber_gui::theme::apply(ui.ctx(), umber_gui::Density::Comfortable, 1.0);
+        // U4: the resolved theme (the preference, or the OS appearance
+        // under Follow OS) re-applies whenever it changes.
+        let os_dark = ui.ctx().system_theme() != Some(egui::Theme::Light);
+        let want = preferences::resolve_theme(self.prefs.theme, os_dark);
+        if !self.style_installed || self.applied_theme != Some(want) {
+            umber_gui::theme::apply_theme(ui.ctx(), want, umber_gui::Density::Comfortable, 1.0);
+            self.applied_theme = Some(want);
             self.style_installed = true;
         }
         // Debug-only live theme reload (g0-style): UMBER_THEME_FILE polled
@@ -5110,8 +5166,11 @@ impl eframe::App for UmberApp {
                 self.prefs.keymap_overrides = keymap_overrides;
                 actions::set_overrides(&self.prefs.keymap_overrides);
                 self.prefs.save(preferences::prefs_path().as_deref());
-                if let Some(theme) = done.theme.egui_theme() {
-                    ui.ctx().set_theme(theme);
+                // The theme is a preference now (U4): the frame's theme
+                // check applies it.
+                if self.prefs.theme != done.theme.theme_pref() {
+                    self.prefs.theme = done.theme.theme_pref();
+                    self.prefs.save(preferences::prefs_path().as_deref());
                 }
                 // A nav change adopts immediately (the same call the
                 // Preferences window's combo makes).

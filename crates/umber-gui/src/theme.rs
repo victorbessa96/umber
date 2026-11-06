@@ -53,9 +53,215 @@ pub mod palette {
     ];
 }
 
+/// The UI theme (UI/UX pass U4, photocraft's `Tokens`-per-theme
+/// pattern): every theme is one [`Tokens`] set over the same token names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Theme {
+    /// Umber Dark: the warm-neutral dark chrome ([`palette`]).
+    #[default]
+    Dark,
+    /// Umber Light: the same ember accent, deepened for light surfaces.
+    Light,
+    /// High Contrast: black chrome, white text, a bright accent; every
+    /// text token clears WCAG AAA (7:1) on the panel.
+    HighContrast,
+}
+
+impl Theme {
+    /// Every theme, in menu order.
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::HighContrast];
+
+    /// The persisted name (`theme=` in the preferences file).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::HighContrast => "high-contrast",
+        }
+    }
+
+    /// The theme a persisted name names, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.name() == name.trim())
+    }
+
+    /// The theme's tokens.
+    pub fn tokens(self) -> Tokens {
+        match self {
+            Self::Dark => Tokens::DARK,
+            Self::Light => Tokens::LIGHT,
+            Self::HighContrast => Tokens::HIGH_CONTRAST,
+        }
+    }
+
+    /// Whether the theme's surfaces are dark (egui's `dark_mode`).
+    pub fn is_dark(self) -> bool {
+        !matches!(self, Self::Light)
+    }
+}
+
+/// One theme's color tokens: the same names as [`palette::TOKENS`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tokens {
+    /// App background.
+    pub bg: Color32,
+    /// Panel fill.
+    pub panel: Color32,
+    /// Raised surfaces.
+    pub raised: Color32,
+    /// Hovered surfaces.
+    pub hover: Color32,
+    /// Primary text.
+    pub text: Color32,
+    /// Muted text.
+    pub text_muted: Color32,
+    /// Faint text.
+    pub text_faint: Color32,
+    /// The accent.
+    pub accent: Color32,
+    /// Semantic success.
+    pub success: Color32,
+    /// Semantic warning.
+    pub warn: Color32,
+    /// Semantic error.
+    pub error: Color32,
+    /// Viewport chrome.
+    pub viewport: Color32,
+}
+
+impl Tokens {
+    /// Umber Dark: exactly [`palette`] (the pinned roadmap values).
+    pub const DARK: Self = Self {
+        bg: palette::BG,
+        panel: palette::PANEL,
+        raised: palette::RAISED,
+        hover: palette::HOVER,
+        text: palette::TEXT,
+        text_muted: palette::TEXT_MUTED,
+        text_faint: palette::TEXT_FAINT,
+        accent: palette::ACCENT,
+        success: palette::SUCCESS,
+        warn: palette::WARN,
+        error: palette::ERROR,
+        viewport: palette::VIEWPORT,
+    };
+
+    /// Umber Light: warm off-white surfaces, near-black text, the ember
+    /// accent deepened so it holds 3:1 against the panel (WCAG non-text).
+    /// The viewport stays a mid-dark neutral: texture work is judged on
+    /// a neutral backdrop, not a white one (Substance / Blender keep the
+    /// 3D view dark under a light UI too).
+    pub const LIGHT: Self = Self {
+        bg: Color32::from_rgb(0xE4, 0xE2, 0xDE),
+        panel: Color32::from_rgb(0xF2, 0xF0, 0xEC),
+        raised: Color32::from_rgb(0xE6, 0xE3, 0xDD),
+        hover: Color32::from_rgb(0xD8, 0xD4, 0xCC),
+        text: Color32::from_rgb(0x1C, 0x1D, 0x21),
+        text_muted: Color32::from_rgb(0x50, 0x53, 0x5B),
+        text_faint: Color32::from_rgb(0x76, 0x78, 0x7F),
+        accent: Color32::from_rgb(0xC4, 0x55, 0x00),
+        success: Color32::from_rgb(0x1E, 0x7A, 0x45),
+        warn: Color32::from_rgb(0x8F, 0x5A, 0x00),
+        error: Color32::from_rgb(0xB8, 0x2E, 0x26),
+        viewport: Color32::from_rgb(0x3A, 0x3C, 0x40),
+    };
+
+    /// High Contrast: pure black chrome, white text, and every text
+    /// token at 7:1 or better on the panel.
+    pub const HIGH_CONTRAST: Self = Self {
+        bg: Color32::from_rgb(0x00, 0x00, 0x00),
+        panel: Color32::from_rgb(0x00, 0x00, 0x00),
+        raised: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+        hover: Color32::from_rgb(0x33, 0x33, 0x33),
+        text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        text_muted: Color32::from_rgb(0xE0, 0xE0, 0xE0),
+        text_faint: Color32::from_rgb(0xB8, 0xB8, 0xB8),
+        accent: Color32::from_rgb(0xFF, 0xB0, 0x40),
+        success: Color32::from_rgb(0x5C, 0xF0, 0x96),
+        warn: Color32::from_rgb(0xFF, 0xD2, 0x4D),
+        error: Color32::from_rgb(0xFF, 0x80, 0x78),
+        viewport: Color32::from_rgb(0x00, 0x00, 0x00),
+    };
+
+    /// `name`'s color (the [`palette::TOKENS`] names).
+    pub fn get(&self, name: &str) -> Option<Color32> {
+        Some(match name {
+            "bg" => self.bg,
+            "panel" => self.panel,
+            "raised" => self.raised,
+            "hover" => self.hover,
+            "text" => self.text,
+            "text_muted" => self.text_muted,
+            "text_faint" => self.text_faint,
+            "accent" => self.accent,
+            "success" => self.success,
+            "warn" => self.warn,
+            "error" => self.error,
+            "viewport" => self.viewport,
+            _ => return None,
+        })
+    }
+}
+
+/// The active theme, process-wide: the no-argument helpers ([`accent`],
+/// [`text`] …) are called from painters with no `Context` in reach, so
+/// the theme they read lives here; [`apply_theme`] sets it.
+static ACTIVE_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The active theme ([`apply_theme`] sets it; Dark until then).
+pub fn active_theme() -> Theme {
+    match ACTIVE_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Theme::Light,
+        2 => Theme::HighContrast,
+        _ => Theme::Dark,
+    }
+}
+
+fn set_active_theme(theme: Theme) {
+    let v = match theme {
+        Theme::Dark => 0,
+        Theme::Light => 1,
+        Theme::HighContrast => 2,
+    };
+    ACTIVE_THEME.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The active theme's tokens.
+pub fn tokens() -> Tokens {
+    active_theme().tokens()
+}
+
+/// WCAG 2.x relative luminance of an sRGB color.
+pub fn relative_luminance(c: Color32) -> f32 {
+    let lin = |u: u8| {
+        let v = u as f32 / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG 2.x contrast ratio between two colors (1..=21).
+pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 /// The house motion curve duration (§2.4: 120ms ease-out). Pass to
 /// `animate_value_with_time` / `animate_bool_with_time`.
 pub const MOTION_SECS: f32 = 0.12;
+
+/// The motion duration to animate with: the style's `animation_time`
+/// (the house [`MOTION_SECS`], or 0 under Reduce Motion, which the app
+/// writes there). Widgets that pass a fixed duration to
+/// `animate_value_with_time` bypass Reduce Motion; read it here instead.
+pub fn motion_secs(ui: &egui::Ui) -> f32 {
+    ui.style().animation_time
+}
 
 /// Seconds the pointer rests before a tooltip shows (GUI plan G0,
 /// photocraft `theme.rs`: 0.35 s). egui's default is 0, so tooltips flash
@@ -199,52 +405,67 @@ pub fn deepen(color: Color32, factor: f32) -> Color32 {
 
 /// The accent (selection / active / values).
 pub fn accent() -> Color32 {
-    palette::ACCENT
+    tokens().accent
 }
 
 /// The accent on hover: deepened, same hue.
 pub fn accent_hover() -> Color32 {
-    deepen(palette::ACCENT, ACCENT_HOVER_FACTOR)
+    deepen(accent(), ACCENT_HOVER_FACTOR)
+}
+
+/// Semantic success (the active theme's).
+pub fn success() -> Color32 {
+    tokens().success
+}
+
+/// Semantic warning (the active theme's).
+pub fn warn() -> Color32 {
+    tokens().warn
+}
+
+/// Semantic error (the active theme's).
+pub fn error() -> Color32 {
+    tokens().error
 }
 
 /// The panel fill.
 pub fn panel_bg() -> Color32 {
-    palette::PANEL
+    tokens().panel
 }
 
 /// The app background.
 pub fn app_bg() -> Color32 {
-    palette::BG
+    tokens().bg
 }
 
 /// Raised-surface fill.
 pub fn raised() -> Color32 {
-    palette::RAISED
+    tokens().raised
 }
 
 /// Hovered-surface fill.
 pub fn hover() -> Color32 {
-    palette::HOVER
+    tokens().hover
 }
 
 /// Primary text.
 pub fn text() -> Color32 {
-    palette::TEXT
+    tokens().text
 }
 
 /// Muted text (labels, units).
 pub fn muted() -> Color32 {
-    palette::TEXT_MUTED
+    tokens().text_muted
 }
 
 /// Faint text (disabled, placeholders).
 pub fn faint() -> Color32 {
-    palette::TEXT_FAINT
+    tokens().text_faint
 }
 
 /// The viewport chrome fill.
 pub fn viewport_bg() -> Color32 {
-    palette::VIEWPORT
+    tokens().viewport
 }
 
 /// The Umber style at the default text scale.
@@ -255,6 +476,12 @@ pub fn umber_style(density: Density) -> egui::Style {
 /// The Umber style with a user text scale (clamped to ±20%).
 pub fn umber_style_scaled(density: Density, text_scale: f32) -> egui::Style {
     style_with_visuals(umber_visuals_compiled(), density, text_scale)
+}
+
+/// The style for `theme` (no live overrides): the per-theme builder the
+/// tests and [`apply_theme`] share.
+pub fn themed_style(theme: Theme, density: Density, text_scale: f32) -> egui::Style {
+    style_with_visuals(visuals_for(theme, None), density, text_scale)
 }
 
 /// [`umber_style_scaled`] with the live [`TokenOverrides`] on `ctx`
@@ -369,18 +596,15 @@ pub fn token_overrides(ctx: &egui::Context) -> TokenOverrides {
         .unwrap_or_default()
 }
 
-/// `name`'s color: the live override when present, else the compiled token.
-fn token(ov: Option<&TokenOverrides>, name: &str) -> Color32 {
+/// `name`'s color in `theme`: the live override when present, else the
+/// theme's token.
+fn token(theme: Theme, ov: Option<&TokenOverrides>, name: &str) -> Color32 {
     if let Some(ov) = ov {
         if let Some(c) = ov.get(name) {
             return *c;
         }
     }
-    palette::TOKENS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, c)| *c)
-        .unwrap_or(Color32::BLACK)
+    theme.tokens().get(name).unwrap_or(Color32::BLACK)
 }
 
 /// Applies the themed style to both OS themes (dark and light) at the
@@ -392,6 +616,13 @@ pub fn apply(ctx: &egui::Context, density: Density, text_scale: f32) {
     ctx.set_style_of(egui::Theme::Light, style);
 }
 
+/// Makes `theme` the active theme (the token helpers read it) and
+/// installs its style on both OS-theme branches, as [`apply`] does.
+pub fn apply_theme(ctx: &egui::Context, theme: Theme, density: Density, text_scale: f32) {
+    set_active_theme(theme);
+    apply(ctx, density, text_scale);
+}
+
 /// The keyboard-focus ring width. egui 0.36 paints the `active` widget
 /// visuals for the widget holding keyboard focus, so the focus ring token
 /// IS `visuals.widgets.active.bg_stroke` — a 2px accent ring (hover/press
@@ -400,26 +631,32 @@ pub const FOCUS_RING_WIDTH: f32 = 2.0;
 
 /// The Umber visuals with the live [`TokenOverrides`] on `ctx`.
 fn umber_visuals(ctx: &egui::Context) -> egui::Visuals {
-    umber_visuals_impl(Some(&token_overrides(ctx)))
+    visuals_for(active_theme(), Some(&token_overrides(ctx)))
 }
 
 fn umber_visuals_compiled() -> egui::Visuals {
-    umber_visuals_impl(None)
+    visuals_for(active_theme(), None)
 }
 
-/// The Umber visuals: stock dark as the base, every color re-authored.
-/// `ov` (the live token overrides, debug-only) recolors the palette.
-fn umber_visuals_impl(ov: Option<&TokenOverrides>) -> egui::Visuals {
-    let c_bg = token(ov, "bg");
-    let c_panel = token(ov, "panel");
-    let c_raised = token(ov, "raised");
-    let c_hover = token(ov, "hover");
-    let c_text = token(ov, "text");
-    let c_accent = token(ov, "accent");
-    let c_warn = token(ov, "warn");
-    let c_error = token(ov, "error");
-    let mut v = egui::Visuals::dark();
-    v.dark_mode = true;
+/// The Umber visuals for `theme`: egui's stock dark or light as the base
+/// (per [`Theme::is_dark`]), every color re-authored from the theme's
+/// tokens. `ov` (the live token overrides, debug-only) recolors them.
+fn visuals_for(theme: Theme, ov: Option<&TokenOverrides>) -> egui::Visuals {
+    let c_bg = token(theme, ov, "bg");
+    let c_panel = token(theme, ov, "panel");
+    let c_raised = token(theme, ov, "raised");
+    let c_hover = token(theme, ov, "hover");
+    let c_text = token(theme, ov, "text");
+    let c_accent = token(theme, ov, "accent");
+    let c_warn = token(theme, ov, "warn");
+    let c_error = token(theme, ov, "error");
+    let dark = theme.is_dark();
+    let mut v = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    v.dark_mode = dark;
     v.override_text_color = None;
     v.panel_fill = c_panel;
     v.window_fill = c_panel;
@@ -467,6 +704,14 @@ fn umber_visuals_impl(ov: Option<&TokenOverrides>) -> egui::Visuals {
     w.open.bg_stroke = Stroke::new(1.0, c_hover);
     w.open.fg_stroke = Stroke::new(1.0, c_text);
     w.open.corner_radius = radius;
+
+    if theme == Theme::HighContrast {
+        // Every interactive edge drawn: no fill-only affordances.
+        let edge = Stroke::new(1.0, token(theme, ov, "text_faint"));
+        w.inactive.bg_stroke = edge;
+        w.noninteractive.bg_stroke = edge;
+        v.window_stroke = edge;
+    }
 
     v
 }
@@ -625,6 +870,72 @@ mod tests {
             s.text_styles[&TextStyle::Body].size,
             TEXT_UI * TEXT_SCALE_MAX
         );
+    }
+
+    /// U4: Dark IS the pinned palette; the names round-trip; every
+    /// theme's text tokens clear their contrast floor on the panel
+    /// (WCAG AA 4.5:1 for text and muted, 3:1 for faint and the accent;
+    /// High Contrast holds AAA 7:1 on every text token).
+    #[test]
+    fn themes_round_trip_and_clear_their_contrast_floors() {
+        for (name, color) in palette::TOKENS {
+            assert_eq!(Tokens::DARK.get(name), Some(color), "{name}");
+        }
+        for t in Theme::ALL {
+            assert_eq!(Theme::from_name(t.name()), Some(t));
+            let k = t.tokens();
+            for (name, _) in palette::TOKENS {
+                assert!(k.get(name).is_some(), "{t:?} carries {name}");
+            }
+            let on = |c: Color32| contrast_ratio(c, k.panel);
+            assert!(on(k.text) >= 4.5, "{t:?} text {}", on(k.text));
+            assert!(on(k.text_muted) >= 4.5, "{t:?} muted {}", on(k.text_muted));
+            assert!(on(k.text_faint) >= 3.0, "{t:?} faint {}", on(k.text_faint));
+            assert!(on(k.accent) >= 3.0, "{t:?} accent {}", on(k.accent));
+            for sem in [k.warn, k.error, k.success] {
+                assert!(on(sem) >= 3.0, "{t:?} semantic {}", on(sem));
+            }
+        }
+        let hc = Tokens::HIGH_CONTRAST;
+        for c in [hc.text, hc.text_muted, hc.text_faint, hc.accent] {
+            assert!(contrast_ratio(c, hc.panel) >= 7.0);
+        }
+        assert_eq!(Theme::from_name("bogus"), None);
+        assert!((contrast_ratio(Color32::WHITE, Color32::BLACK) - 21.0).abs() < 0.01);
+    }
+
+    /// U4: each theme's visuals carry its own tokens and egui base.
+    #[test]
+    fn themed_styles_carry_their_tokens() {
+        for t in Theme::ALL {
+            let s = themed_style(t, Density::Comfortable, 1.0);
+            let k = t.tokens();
+            assert_eq!(s.visuals.panel_fill, k.panel, "{t:?}");
+            assert_eq!(s.visuals.dark_mode, t.is_dark(), "{t:?}");
+            assert_eq!(s.visuals.widgets.active.bg_stroke.color, k.accent);
+            assert_eq!(s.visuals.widgets.inactive.fg_stroke.color, k.text);
+        }
+        // Dark is today's style exactly. Compared on the visuals (the
+        // part the theme owns): a whole `egui::Style` never equals
+        // itself, it carries a NaN (identical Debug text, unequal).
+        assert_eq!(
+            themed_style(Theme::Dark, Density::Comfortable, 1.0).visuals,
+            umber_style(Density::Comfortable).visuals
+        );
+    }
+
+    /// U4: `motion_secs` follows the style, so Reduce Motion's 0 reaches
+    /// every widget that asks for it.
+    #[test]
+    fn motion_secs_follows_the_style_animation_time() {
+        let ctx = egui::Context::default();
+        let mut seen = Vec::new();
+        for anim in [MOTION_SECS, 0.0] {
+            ctx.all_styles_mut(|s| s.animation_time = anim);
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| seen.push(motion_secs(ui)));
+            out.textures_delta.clear();
+        }
+        assert_eq!(seen, vec![MOTION_SECS, 0.0]);
     }
 
     #[test]

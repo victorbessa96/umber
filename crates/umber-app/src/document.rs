@@ -955,7 +955,7 @@ pub fn layers_ui(
                         ui.painter().rect_stroke(
                             rect,
                             3.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(70)),
+                            egui::Stroke::new(1.0, umber_gui::theme::hover()),
                             egui::StrokeKind::Inside,
                         );
                     }
@@ -989,13 +989,13 @@ pub fn layers_ui(
                     ui.label(
                         egui::RichText::new(layer.kind.as_str())
                             .small()
-                            .color(egui::Color32::from_gray(140)),
+                            .color(umber_gui::theme::muted()),
                     );
                     if let Some(of) = &layer.instance_of {
                         ui.label(
                             egui::RichText::new(of.as_str())
                                 .small()
-                                .color(egui::Color32::from_gray(140)),
+                                .color(umber_gui::theme::muted()),
                         );
                     } else if ui.small_button(tr("layers.instance-this")).clicked() {
                         instance_source_id = Some(layer.id);
@@ -1061,7 +1061,7 @@ pub fn layers_ui(
                 ui.label(
                     egui::RichText::new(tr("layers.dormant-badge"))
                         .small()
-                        .color(egui::Color32::from_gray(140)),
+                        .color(umber_gui::theme::muted()),
                 );
             }
             if let Some(line) = badges.fill_budget.get(&layer.id) {
@@ -1839,7 +1839,7 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
                         ui.label(
                             egui::RichText::new(mask_name.as_str())
                                 .small()
-                                .color(egui::Color32::from_gray(140)),
+                                .color(umber_gui::theme::muted()),
                         );
                     }
                 },

@@ -57,8 +57,8 @@ impl NoticeLevel {
     pub fn stroke_color(self) -> Color32 {
         match self {
             NoticeLevel::Info => theme::hover(),
-            NoticeLevel::Warning => theme::palette::WARN,
-            NoticeLevel::Error => theme::palette::ERROR,
+            NoticeLevel::Warning => theme::warn(),
+            NoticeLevel::Error => theme::error(),
         }
     }
 }
@@ -393,8 +393,8 @@ mod tests {
 
     #[test]
     fn levels_use_theme_tokens() {
-        assert_eq!(NoticeLevel::Warning.stroke_color(), theme::palette::WARN);
-        assert_eq!(NoticeLevel::Error.stroke_color(), theme::palette::ERROR);
+        assert_eq!(NoticeLevel::Warning.stroke_color(), theme::warn());
+        assert_eq!(NoticeLevel::Error.stroke_color(), theme::error());
         assert_eq!(NoticeLevel::Info.stroke_color(), theme::hover());
     }
 

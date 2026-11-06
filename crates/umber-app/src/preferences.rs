@@ -140,6 +140,10 @@ pub struct Preferences {
     /// The brush asset shelf along the viewport's bottom (UI/UX pass
     /// U3; on by default).
     pub brush_shelf: bool,
+    /// The UI theme (UI/UX pass U4): Dark (default), Light, High
+    /// Contrast. `None` = follow the OS appearance (Quick Setup's
+    /// "Follow OS"), resolved to Dark / Light per frame.
+    pub theme: Option<umber_gui::Theme>,
     /// The viewport navigation preset.
     pub nav: NavPreset,
     /// Wheel zoom inverted (wheel up zooms out).
@@ -165,6 +169,7 @@ impl Default for Preferences {
             key_hints: true,
             show_fps: false,
             brush_shelf: true,
+            theme: Some(umber_gui::Theme::Dark),
             nav: NavPreset::default(),
             nav_wheel_invert: false,
             keymap_overrides: Overrides::default(),
@@ -193,7 +198,7 @@ impl Preferences {
             serde_json::to_string(&bindings_v2::serialize_overrides_v2(&self.keymap_overrides))
                 .unwrap_or_else(|_| "{}".to_string());
         format!(
-            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nshow_fps={}\nbrush_shelf={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
+            "ui_scale={}\nui_scale_auto={}\nui_scale_default={}\nsplitter_hit_zone={}\ntooltips={}\nreduce_motion={}\nkey_hints={}\nshow_fps={}\nbrush_shelf={}\ntheme={}\nnav={}\nnav_wheel_invert={}\nkeymap={}\nkeymap_v2={}\nprop_keymap={}\n",
             self.ui_scale,
             self.ui_scale_auto,
             self.ui_scale_default,
@@ -203,6 +208,7 @@ impl Preferences {
             self.key_hints,
             self.show_fps,
             self.brush_shelf,
+            self.theme.map_or("follow-os", umber_gui::Theme::name),
             nav_name(self.nav),
             self.nav_wheel_invert,
             self.keymap_overrides.serialize(),
@@ -253,6 +259,13 @@ impl Preferences {
                 "key_hints" => p.key_hints = bool_of(v).unwrap_or(p.key_hints),
                 "show_fps" => p.show_fps = bool_of(v).unwrap_or(p.show_fps),
                 "brush_shelf" => p.brush_shelf = bool_of(v).unwrap_or(p.brush_shelf),
+                "theme" => {
+                    if v == "follow-os" {
+                        p.theme = None;
+                    } else if let Some(t) = umber_gui::Theme::from_name(v) {
+                        p.theme = Some(t);
+                    }
+                }
                 "nav" => p.nav = NavPreset::from_name(v).unwrap_or(p.nav),
                 "nav_wheel_invert" => p.nav_wheel_invert = bool_of(v).unwrap_or(p.nav_wheel_invert),
                 "keymap" => keymap_v1_line = Some(v),
@@ -455,6 +468,16 @@ pub fn style_delta(
         tooltip_delay: differs(tooltip_delay, want_tooltip).then_some(want_tooltip),
         animation_time: differs(animation_time, want_anim).then_some(want_anim),
     }
+}
+
+/// The theme to paint with: the preference, or (Follow OS) the OS
+/// appearance mapped to Dark / Light.
+pub fn resolve_theme(pref: Option<umber_gui::Theme>, os_dark: bool) -> umber_gui::Theme {
+    pref.unwrap_or(if os_dark {
+        umber_gui::Theme::Dark
+    } else {
+        umber_gui::Theme::Light
+    })
 }
 
 /// Whether a row labelled `label` shows under the search `query`
@@ -881,6 +904,7 @@ mod tests {
             key_hints: false,
             show_fps: true,
             brush_shelf: false,
+            theme: Some(umber_gui::Theme::HighContrast),
             nav: NavPreset::Blender,
             keymap_overrides: actions::blender_overrides(),
             prop_keymap: actions::PropKeymap::default(),
@@ -888,6 +912,32 @@ mod tests {
         };
         assert_eq!(Preferences::parse(&p.serialize()), p);
         assert_eq!(Preferences::parse(""), Preferences::default());
+    }
+
+    /// U4: every theme value round-trips, follow-os included; junk keeps
+    /// the default.
+    #[test]
+    fn theme_round_trips_and_junk_keeps_the_default() {
+        let mut p = Preferences::default();
+        for t in [
+            None,
+            Some(umber_gui::Theme::Dark),
+            Some(umber_gui::Theme::Light),
+            Some(umber_gui::Theme::HighContrast),
+        ] {
+            p.theme = t;
+            assert_eq!(Preferences::parse(&p.serialize()).theme, t);
+        }
+        assert_eq!(
+            Preferences::parse("theme=neon\n").theme,
+            Preferences::default().theme
+        );
+        assert_eq!(resolve_theme(None, true), umber_gui::Theme::Dark);
+        assert_eq!(resolve_theme(None, false), umber_gui::Theme::Light);
+        assert_eq!(
+            resolve_theme(Some(umber_gui::Theme::HighContrast), false),
+            umber_gui::Theme::HighContrast
+        );
     }
 
     #[test]

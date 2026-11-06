@@ -2161,10 +2161,12 @@ fn curve_editor(ui: &mut egui::Ui, curve: &mut ControlCurve) -> bool {
         }
         point_state[i] = (response.dragged(), response.hovered());
 
+        // Reduce Motion (the style's animation_time = 0) snaps the
+        // tween too (U4 audit): the min keeps the curve's own pace.
         let anim_time = if response.dragged() {
             0.0
         } else {
-            CURVE_MOTION_SECS
+            CURVE_MOTION_SECS.min(ui.style().animation_time)
         };
         let ctx = ui.ctx();
         let ax = ctx.animate_value_with_time(point_id.with("x"), curve.points[i].0, anim_time);

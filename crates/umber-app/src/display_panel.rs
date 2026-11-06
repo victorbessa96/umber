@@ -586,7 +586,7 @@ fn ocio_section(
         if let Some(err) = ocio_state.error.clone() {
             group
                 .ui
-                .label(egui::RichText::new(err).color(egui::Color32::from_rgb(200, 90, 90)));
+                .label(egui::RichText::new(err).color(umber_gui::theme::error()));
         }
     });
     if changed {

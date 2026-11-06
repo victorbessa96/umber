@@ -149,4 +149,5 @@ Verification per kill: rustfmt, clippy `-D warnings`, the touched crates' tests,
 - 2026-11-05: **U3-3 Shift+Space brush popup LANDED** (queue row 186).
 - 2026-11-05: **U3-4 catalogs LANDED** (queue row 189). Found U3-5: the preset alpha/radius pressure curves are dead controls (never read by the paint path).
 - 2026-11-05: **U3-5 LANDED** (queue row 191): the preset pressure curves drive flow and size. **Wave U3 complete.**
-- Next: U4 themes.
+- 2026-11-05: **Wave U4 LANDED** (queue row 192): Dark / Light / High Contrast themes, the real theme preference (Quick Setup's Light was a no-op), Reduce Motion honoured everywhere.
+- Next: U5 (egui 0.37 / docking migration) stays parked until egui_dock ships for egui 0.37. Follow-ups: theme the UV-view constants and the picker internals.

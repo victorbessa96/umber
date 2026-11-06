@@ -128,7 +128,8 @@ impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
             let x = ui.ctx().animate_value_with_time(
                 self.id_salt.with("underline"),
                 target,
-                theme::MOTION_SECS,
+                // Reduce Motion writes 0 here (U4 audit).
+                theme::motion_secs(ui),
             );
             let line = Rect::from_min_size(
                 Pos2::new(x, row_rect.bottom() - UNDERLINE_HEIGHT),

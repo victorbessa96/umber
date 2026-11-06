@@ -134,7 +134,7 @@ pub fn primary_button(label: &str) -> Button<'static> {
     Button::new(
         egui::RichText::new(label.to_owned())
             .strong()
-            .color(crate::theme::palette::BG),
+            .color(crate::theme::app_bg()),
     )
     .fill(crate::theme::accent())
 }

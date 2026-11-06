@@ -32,7 +32,7 @@ pub use icons::{
 };
 pub use theme::apply;
 pub use theme::{
-    accent, accent_hover, hover, muted, panel_bg, umber_style, umber_style_scaled, Density,
+    accent, accent_hover, hover, muted, panel_bg, umber_style, umber_style_scaled, Density, Theme,
     MOTION_SECS,
 };
 pub use widgets::{

@@ -46,18 +46,36 @@ pub enum SetupTheme {
     Light,
     /// Force the dark palette.
     Dark,
+    /// The high-contrast palette (UI/UX pass U4).
+    HighContrast,
 }
 
 impl SetupTheme {
     /// Every variant in combo order.
-    pub const ALL: [Self; 3] = [Self::FollowOs, Self::Light, Self::Dark];
+    pub const ALL: [Self; 4] = [Self::FollowOs, Self::Light, Self::Dark, Self::HighContrast];
 
-    /// The egui theme this choice maps to (`None` = follow the OS).
-    pub fn egui_theme(self) -> Option<egui::ThemePreference> {
+    /// The `Preferences::theme` this choice writes (`None` = follow the
+    /// OS). Before U4 the choice set egui's own light/dark preference,
+    /// which the Umber style overrides on both branches, so Light did
+    /// nothing; it now selects a real Umber theme.
+    pub fn theme_pref(self) -> Option<umber_gui::Theme> {
         match self {
             Self::FollowOs => None,
-            Self::Light => Some(egui::ThemePreference::Light),
-            Self::Dark => Some(egui::ThemePreference::Dark),
+            Self::Light => Some(umber_gui::Theme::Light),
+            Self::Dark => Some(umber_gui::Theme::Dark),
+            Self::HighContrast => Some(umber_gui::Theme::HighContrast),
+        }
+    }
+}
+
+impl SetupTheme {
+    /// The choice that writes `pref` back (Skip keeps the current theme).
+    pub fn of(pref: Option<umber_gui::Theme>) -> Self {
+        match pref {
+            None => Self::FollowOs,
+            Some(umber_gui::Theme::Light) => Self::Light,
+            Some(umber_gui::Theme::Dark) => Self::Dark,
+            Some(umber_gui::Theme::HighContrast) => Self::HighContrast,
         }
     }
 }
@@ -152,6 +170,7 @@ impl QuickSetup {
                     SetupTheme::FollowOs => tr("setup.theme-follow-os"),
                     SetupTheme::Light => tr("setup.theme-light"),
                     SetupTheme::Dark => tr("setup.theme-dark"),
+                    SetupTheme::HighContrast => tr("setup.theme-high-contrast"),
                 };
                 ComboBox::from_id_salt("setup-theme")
                     .selected_text(theme_label(self.theme))
@@ -208,9 +227,7 @@ impl QuickSetup {
                 let pen = stylus.hovering();
                 let pressure = stylus.pressure_for_frame();
                 if pen {
-                    ui.label(
-                        egui::RichText::new(tr("setup.tablet-live")).color(theme::palette::SUCCESS),
-                    );
+                    ui.label(egui::RichText::new(tr("setup.tablet-live")).color(theme::success()));
                     if let Some(p) = pressure {
                         ui.label(format!("{} {:.0}%", tr("setup.tablet-pressure"), p * 100.0));
                     }
@@ -235,7 +252,7 @@ impl QuickSetup {
                         // Skip: keep the defaults, but still write the
                         // prefs file so the window does not return.
                         finished = Some(FinishedSetup {
-                            theme: SetupTheme::FollowOs,
+                            theme: SetupTheme::of(current_prefs.theme),
                             nav: current_prefs.nav,
                             keymap_blender: false,
                         });
@@ -282,15 +299,14 @@ mod tests {
     }
 
     #[test]
-    fn theme_choices_map_to_egui_preferences() {
-        assert_eq!(SetupTheme::FollowOs.egui_theme(), None);
+    fn theme_choices_map_to_umber_themes() {
+        for t in SetupTheme::ALL {
+            assert_eq!(SetupTheme::of(t.theme_pref()), t);
+        }
+        assert_eq!(SetupTheme::FollowOs.theme_pref(), None);
         assert_eq!(
-            SetupTheme::Light.egui_theme(),
-            Some(egui::ThemePreference::Light)
-        );
-        assert_eq!(
-            SetupTheme::Dark.egui_theme(),
-            Some(egui::ThemePreference::Dark)
+            SetupTheme::Light.theme_pref(),
+            Some(umber_gui::Theme::Light)
         );
     }
 

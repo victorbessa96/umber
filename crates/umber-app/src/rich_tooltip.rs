@@ -110,7 +110,7 @@ pub fn draw(ui: &mut egui::Ui, parts: &TooltipParts) {
         ui.label(d);
     }
     if let Some(r) = &parts.unavailable {
-        ui.label(egui::RichText::new(r).color(umber_gui::theme::palette::WARN));
+        ui.label(egui::RichText::new(r).color(umber_gui::theme::warn()));
     }
 }
 
