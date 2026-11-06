@@ -529,9 +529,8 @@ mod tests {
     #[test]
     fn catalog_pin_is_byte_identical_to_the_pre_rmcp_wire_array() {
         let tools = tools_catalog();
-        // Count pin: 20 tools (the 18 pre-row154-w5 plus
-        // command_list / command_run).
-        assert_eq!(tools.len(), 20, "{tools:?}");
+        // Count pin: 21 tools (the 20 pre-K6 pins plus library_list).
+        assert_eq!(tools.len(), 21, "{tools:?}");
         // Value equality per tool (name, description, inputSchema).
         let wire = serde_json::to_value(&tools).unwrap();
         assert_eq!(wire, catalog_json());
@@ -544,11 +543,48 @@ mod tests {
             serde_json::to_string(&wire).unwrap(),
             serde_json::to_string(&catalog_json()).unwrap()
         );
+        // Name order pin: the pre-K6 20 stay byte-identical in their
+        // positions; K6's ONE intentional addition is library_list last.
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-        assert!(names.contains(&"command_list"), "{names:?}");
-        assert!(names.contains(&"command_run"), "{names:?}");
+        assert_eq!(
+            names,
+            vec![
+                "version",
+                "session_inspect",
+                "run_step",
+                "run_steps",
+                "load_mesh",
+                "project_open",
+                "project_save",
+                "bake",
+                "bake_status",
+                "export",
+                "paint_stroke",
+                "paint_read",
+                "paint_snapshot",
+                "set_active",
+                "undo",
+                "redo",
+                "paint_undo",
+                "paint_redo",
+                "command_list",
+                "command_run",
+                "library_list",
+            ],
+            "{names:?}"
+        );
         let run = tools.iter().find(|t| t.name == "command_run").unwrap();
         assert_eq!(run.input_schema["required"], json!(["id"]));
+        // The one addition, pinned explicitly: name + schema.
+        let list = tools.iter().find(|t| t.name == "library_list").unwrap();
+        assert_eq!(
+            list.description.as_deref(),
+            Some("List the asset libraries headless — the bundled starter assets/ plus the per-user library dirs (state-dir smart/, brushes/, env/) — with the assets panel's own scan rules. Replies rows {path, kind, name, bytes, source: starter|user} for smart materials, smart masks, brushes and env maps. No arguments; no control channel needed.")
+        );
+        assert_eq!(
+            serde_json::to_value(&list.input_schema).unwrap(),
+            json!({ "type": "object", "properties": {} })
+        );
     }
 
     #[test]
@@ -570,7 +606,7 @@ mod tests {
             handshake(&mut w).await;
             let r = w.call(4, "tools/list", json!({})).await;
             let tools = r["result"]["tools"].clone();
-            assert_eq!(tools.as_array().unwrap().len(), 20, "{tools}");
+            assert_eq!(tools.as_array().unwrap().len(), 21, "{tools}");
             // Canonical (sorted-key) byte pin against the pre-rmcp wire
             // array — see the catalog_pin test for why canonicalized.
             assert_eq!(
@@ -716,6 +752,157 @@ mod tests {
                     "{name}: {reply}"
                 );
             }
+        });
+    }
+
+    /// A fresh per-test scratch dir under the system temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "umber-mcp-library-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn library_list_over_the_wire_populated_then_empty_scratch_library() {
+        // UMBER_ASSETS_DIR points the starter root at scratch trees; the
+        // lock (shared with agent.rs's env-sensitive test) keeps the
+        // parallel tests from racing the process-global env.
+        let _guard = crate::agent::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let old = std::env::var_os(crate::agent::ASSETS_DIR_ENV);
+        runtime().block_on(async {
+            // Populated scratch starter: one row per kind, .txt skipped.
+            let assets = scratch("populated");
+            for sub in ["smart", "brushes", "env"] {
+                std::fs::create_dir_all(assets.join(sub)).unwrap();
+            }
+            std::fs::write(assets.join("smart/mat.umbersmart"), b"{}").unwrap();
+            std::fs::write(assets.join("smart/mask.umbermask"), b"{}").unwrap();
+            std::fs::write(assets.join("brushes/b.umberbrush"), b"{}").unwrap();
+            std::fs::write(assets.join("env/studio.png"), b"12345").unwrap();
+            std::fs::write(assets.join("env/skip.txt"), b"no").unwrap();
+            std::env::set_var(crate::agent::ASSETS_DIR_ENV, &assets);
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(&mut w, 12, "library_list", json!({})).await;
+            let (is_error, reply) = result_text(&r);
+            assert!(!is_error, "{reply}");
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["step"], "library_list", "{reply}");
+            let rows = reply["rows"].as_array().unwrap();
+            assert_eq!(reply["count"], 4, "{reply}");
+            assert_eq!(rows.len(), 4, "{reply}");
+            let mut kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+            kinds.sort();
+            assert_eq!(kinds, ["brush", "env", "smart-material", "smart-mask"], "{reply}");
+            for row in rows {
+                assert_eq!(row["source"], "starter", "{row}");
+                assert!(
+                    row["path"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(assets.to_str().unwrap()),
+                    "{row}"
+                );
+                assert!(row["name"].is_string() && row["bytes"].is_u64(), "{row}");
+            }
+            let env_row = rows.iter().find(|r| r["kind"] == "env").unwrap();
+            assert_eq!(env_row["name"], "studio", "{env_row}");
+            assert_eq!(env_row["bytes"], 5, "{env_row}");
+            // Empty scratch library: zero rows, still ok — never an error.
+            let empty = scratch("empty");
+            std::env::set_var(crate::agent::ASSETS_DIR_ENV, &empty);
+            let r = call_tool(&mut w, 13, "library_list", json!({})).await;
+            let (is_error, reply) = result_text(&r);
+            assert!(!is_error, "{reply}");
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["rows"], json!([]), "{reply}");
+            assert_eq!(reply["count"], 0, "{reply}");
+        });
+        match old {
+            Some(v) => std::env::set_var(crate::agent::ASSETS_DIR_ENV, v),
+            None => std::env::remove_var(crate::agent::ASSETS_DIR_ENV),
+        }
+    }
+
+    #[test]
+    fn import_asset_via_run_step_is_confined_and_delegates_to_k5() {
+        runtime().block_on(async {
+            let base = scratch("import");
+            let read = base.join("read");
+            let write = base.join("write");
+            std::fs::create_dir_all(&read).unwrap();
+            std::fs::create_dir_all(&write).unwrap();
+            // A valid brush inside the read root (a committed repo asset).
+            let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/brushes/hard-round.umberbrush");
+            std::fs::copy(&src, read.join("hard-round.umberbrush")).unwrap();
+            let ws = AuthorizedWorkspace::new(Some(&read), Some(&write)).unwrap();
+            let mut w = start(ws, no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(
+                &mut w,
+                14,
+                "run_step",
+                json!({"step": {"import_asset": {
+                    "file": "hard-round.umberbrush", "kind": "brush", "library": "lib"
+                }}}),
+            )
+            .await;
+            let (is_error, reply) = result_text(&r);
+            assert!(!is_error, "{reply}");
+            assert_eq!(reply["ok"], true, "{reply}");
+            assert_eq!(reply["step"], "import_asset", "{reply}");
+            assert_eq!(reply["kind"], "brush", "{reply}");
+            let target = write.join("lib/hard-round.umberbrush");
+            assert_eq!(reply["target"], target.display().to_string(), "{reply}");
+            assert_eq!(reply["bytes"], std::fs::metadata(&src).unwrap().len(), "{reply}");
+            assert!(target.is_file(), "the bytes landed inside the write root");
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                std::fs::read(&src).unwrap()
+            );
+            // An escape out of the read root is rejected.
+            let r = call_tool(
+                &mut w,
+                15,
+                "run_step",
+                json!({"step": {"import_asset": {"file": "../../etc/passwd", "kind": "env"}}}),
+            )
+            .await;
+            let (is_error, reply) = result_text(&r);
+            assert!(is_error, "{reply}");
+            assert!(
+                serde_json::to_string(&reply).unwrap().contains("rejected"),
+                "{reply}"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        });
+    }
+
+    #[test]
+    fn import_asset_via_run_step_fails_closed_without_roots() {
+        runtime().block_on(async {
+            let mut w = start(default_ws(), no_control()).await;
+            handshake(&mut w).await;
+            let r = call_tool(
+                &mut w,
+                16,
+                "run_step",
+                json!({"step": {"import_asset": {"file": "x.png", "kind": "env"}}}),
+            )
+            .await;
+            let (is_error, reply) = result_text(&r);
+            assert!(is_error, "{reply}");
+            assert!(
+                serde_json::to_string(&reply).unwrap().contains("root"),
+                "{reply}"
+            );
         });
     }
 }
