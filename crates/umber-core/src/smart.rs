@@ -1750,4 +1750,274 @@ mod tests {
     fn starter_inverted_wear_umbermask_roundtrip_byte_identical() {
         roundtrip_pin("inverted-wear.umbermask", SmartMask::load_file);
     }
+
+    // ---- SmartFilter::apply reference battery -----------------------------
+    //
+    // Goldens below are computed by independent reference code in the test
+    // (naive windowed blur, plain integer posterize) or by hand, never by
+    // calling the production LUT / prefix-sum helpers.
+
+    fn one_op(op: FilterOp) -> SmartFilter {
+        SmartFilter {
+            name: "ref".into(),
+            version: 1,
+            ops: vec![op],
+        }
+    }
+
+    fn lcg_rgba(w: usize, h: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed;
+        (0..w * h * 4)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn reference_ops() -> Vec<FilterOp> {
+        vec![
+            FilterOp::Blur { radius: 2 },
+            FilterOp::Levels {
+                low: 0.1,
+                high: 0.8,
+                gamma: 0.7,
+            },
+            FilterOp::Curves {
+                points: vec![(0.2, 0.1), (0.5, 0.7), (0.9, 0.95)],
+            },
+            FilterOp::Posterize { levels: 3 },
+        ]
+    }
+
+    #[test]
+    fn every_op_is_deterministic_on_a_seeded_64x64_buffer() {
+        let src = lcg_rgba(64, 64, 0xC0FF_EE11);
+        for op in reference_ops() {
+            let f = one_op(op.clone());
+            let mut a = src.clone();
+            let mut b = src.clone();
+            f.apply(&mut a, 64, 64).unwrap();
+            f.apply(&mut b, 64, 64).unwrap();
+            assert_eq!(a, b, "{op:?} must be byte-identical across runs");
+            assert_ne!(a, src, "{op:?} actually changed the buffer");
+            for (o, s) in a.chunks_exact(4).zip(src.chunks_exact(4)) {
+                assert_eq!(o[3], s[3], "{op:?} preserves alpha");
+            }
+        }
+    }
+
+    #[test]
+    fn blur_and_posterize_match_independent_reference_on_4x4() {
+        let src = lcg_rgba(4, 4, 7);
+        let (w, h) = (4usize, 4usize);
+        // Naive separable box blur, radius 1, border-replicated (window
+        // clipped to the image), truncating integer mean per pass.
+        let r = 1usize;
+        let mut tmp = src.clone();
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let lo = x.saturating_sub(r);
+                    let hi = (x + r).min(w - 1);
+                    let sum: u32 = (lo..=hi).map(|xx| src[(y * w + xx) * 4 + c] as u32).sum();
+                    tmp[(y * w + x) * 4 + c] = (sum / (hi - lo + 1) as u32) as u8;
+                }
+            }
+        }
+        let mut want = tmp.clone();
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let lo = y.saturating_sub(r);
+                    let hi = (y + r).min(h - 1);
+                    let sum: u32 = (lo..=hi).map(|yy| tmp[(yy * w + x) * 4 + c] as u32).sum();
+                    want[(y * w + x) * 4 + c] = (sum / (hi - lo + 1) as u32) as u8;
+                }
+            }
+        }
+        let mut got = src.clone();
+        one_op(FilterOp::Blur { radius: 1 })
+            .apply(&mut got, w, h)
+            .unwrap();
+        assert_eq!(got, want, "blur r=1 vs naive reference");
+
+        // Posterize: band = v*L/256 (capped), out = round(band*255/(L-1)).
+        for levels in [2u32, 3, 5, 256] {
+            let mut want = src.clone();
+            for px in want.chunks_exact_mut(4) {
+                for c in &mut px[..3] {
+                    let band = (*c as u32 * levels / 256).min(levels - 1);
+                    let num = band * 255 * 2 + (levels - 1);
+                    *c = (num / (2 * (levels - 1))) as u8;
+                }
+            }
+            let mut got = src.clone();
+            one_op(FilterOp::Posterize { levels })
+                .apply(&mut got, w, h)
+                .unwrap();
+            assert_eq!(got, want, "posterize levels={levels} vs reference");
+        }
+        // levels=256 is the identity.
+        let mut id = src.clone();
+        one_op(FilterOp::Posterize { levels: 256 })
+            .apply(&mut id, w, h)
+            .unwrap();
+        assert_eq!(id, src);
+    }
+
+    #[test]
+    fn levels_and_curves_pin_hand_computed_values() {
+        // One gray channel value per pixel (R=G=B), alpha 255.
+        let gray = |vals: &[u8]| -> Vec<u8> { vals.iter().flat_map(|&v| [v, v, v, 255]).collect() };
+        let run = |op: FilterOp, vals: &[u8]| -> Vec<u8> {
+            let mut buf = gray(vals);
+            one_op(op).apply(&mut buf, vals.len(), 1).unwrap();
+            buf.chunks_exact(4).map(|p| p[0]).collect()
+        };
+        // low=0, high=0.5, gamma=1: out = min(1, 2v/255)*255.
+        // 51 -> 0.4 -> 102; 100 -> 200/255 -> 200; 128 -> >1 -> 255.
+        let lv = FilterOp::Levels {
+            low: 0.0,
+            high: 0.5,
+            gamma: 1.0,
+        };
+        assert_eq!(
+            run(lv, &[0, 51, 100, 128, 255]),
+            vec![0, 102, 200, 255, 255]
+        );
+        // gamma=2 on the full range: 51 -> 0.2^2*255 = 10.2 -> 10.
+        let g2 = FilterOp::Levels {
+            low: 0.0,
+            high: 1.0,
+            gamma: 2.0,
+        };
+        assert_eq!(run(g2, &[0, 51, 255]), vec![0, 10, 255]);
+        // Curves (0.25,0.2)-(0.75,0.8): flat endpoints at 51 / 204;
+        // 128 -> t = (128/255 - 0.25)/0.5 ~= 0.5039 -> 0.2 + 0.6t ~= 0.5024
+        // -> 128.1 -> 128.
+        let cv = FilterOp::Curves {
+            points: vec![(0.25, 0.2), (0.75, 0.8)],
+        };
+        assert_eq!(
+            run(cv, &[0, 10, 128, 250, 255]),
+            vec![51, 51, 128, 204, 204]
+        );
+        // Empty curve = identity.
+        let vals: Vec<u8> = (0..=255u8).step_by(17).collect();
+        assert_eq!(run(FilterOp::Curves { points: vec![] }, &vals), vals);
+    }
+
+    #[test]
+    fn filter_edge_semantics_are_pinned() {
+        // 1x1: every op succeeds; blur on a single pixel is the identity.
+        for op in reference_ops() {
+            let mut px = [37u8, 140, 222, 9];
+            one_op(op.clone()).apply(&mut px, 1, 1).unwrap();
+            assert_eq!(px[3], 9, "{op:?} 1x1 alpha");
+        }
+        let mut px = [37u8, 140, 222, 9];
+        one_op(FilterOp::Blur { radius: 5 })
+            .apply(&mut px, 1, 1)
+            .unwrap();
+        assert_eq!(px, [37, 140, 222, 9]);
+
+        // Alpha-0 pin: apply is straight (non-premultiplied) — RGB under
+        // alpha 0 is still filtered, and alpha stays exactly 0.
+        let mut clear = [0u8, 64, 128, 0, 255, 200, 100, 0];
+        one_op(FilterOp::Posterize { levels: 2 })
+            .apply(&mut clear, 2, 1)
+            .unwrap();
+        assert_eq!(clear, [0, 0, 255, 0, 255, 255, 0, 0]);
+        let mut clear = [0u8, 0, 0, 0, 90, 90, 90, 0];
+        one_op(FilterOp::Blur { radius: 1 })
+            .apply(&mut clear, 2, 1)
+            .unwrap();
+        assert_eq!(clear, [45, 45, 45, 0, 45, 45, 45, 0]);
+
+        // Zero-size: a 0xN / Nx0 image with an empty buffer is a valid
+        // no-op Ok; any non-empty buffer against zero dims is BadBuffer.
+        for (w, h) in [(0usize, 0usize), (0, 5), (5, 0)] {
+            for op in reference_ops() {
+                let mut empty: [u8; 0] = [];
+                assert!(one_op(op).apply(&mut empty, w, h).is_ok());
+            }
+            let mut stray = [1u8; 4];
+            assert!(matches!(
+                one_op(FilterOp::Blur { radius: 1 }).apply(&mut stray, w, h),
+                Err(SmartError::BadBuffer {
+                    expected: 0,
+                    actual: 4
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn hand_built_out_of_range_params_clamp_at_apply() {
+        // apply() re-clamps params a hand-built struct can put out of
+        // range: each extreme must equal its clamped twin byte-for-byte.
+        let src = lcg_rgba(16, 16, 99);
+        let pairs = [
+            (
+                FilterOp::Posterize { levels: 0 },
+                FilterOp::Posterize { levels: 2 },
+            ),
+            (
+                FilterOp::Posterize { levels: u32::MAX },
+                FilterOp::Posterize {
+                    levels: MAX_POSTERIZE_LEVELS,
+                },
+            ),
+            (
+                FilterOp::Blur { radius: u32::MAX },
+                FilterOp::Blur {
+                    radius: MAX_BLUR_RADIUS,
+                },
+            ),
+            (
+                FilterOp::Levels {
+                    low: -3.0,
+                    high: 7.0,
+                    gamma: 1e9,
+                },
+                FilterOp::Levels {
+                    low: 0.0,
+                    high: 1.0,
+                    gamma: MAX_GAMMA,
+                },
+            ),
+            (
+                FilterOp::Levels {
+                    low: 0.0,
+                    high: 1.0,
+                    gamma: 0.0,
+                },
+                FilterOp::Levels {
+                    low: 0.0,
+                    high: 1.0,
+                    gamma: MIN_GAMMA,
+                },
+            ),
+            (
+                FilterOp::Levels {
+                    low: f32::NAN,
+                    high: f32::INFINITY,
+                    gamma: f32::NAN,
+                },
+                FilterOp::Levels {
+                    low: 0.0,
+                    high: 1.0,
+                    gamma: 1.0,
+                },
+            ),
+        ];
+        for (wild, tame) in pairs {
+            let mut a = src.clone();
+            let mut b = src.clone();
+            one_op(wild.clone()).apply(&mut a, 16, 16).unwrap();
+            one_op(tame).apply(&mut b, 16, 16).unwrap();
+            assert_eq!(a, b, "{wild:?} must clamp at apply");
+        }
+    }
 }
