@@ -68,6 +68,12 @@
 //!   returns to auto instead of retrying a backend that cannot work.
 //! * A persisted fallback is never upgraded automatically; deleting
 //!   `gpu-backend` in the state dir resets it. No UI for that in v1.
+//! * A launch with NO display (headless: no `WAYLAND_DISPLAY`,
+//!   `WAYLAND_SOCKET` or `DISPLAY`) never persists its backend. The
+//!   adapter wgpu picks with no display present is usually software GL,
+//!   which says nothing about a real desktop; persisting it poisoned
+//!   later launches into GL permanently (installers gap #5, queue row
+//!   249). See [`Decision::persist_on_success_in`] and [`has_display`].
 //! * State dir: the parent of the brushes dir (`$XDG_DATA_HOME/umber`,
 //!   `~/.local/share/umber`, `%APPDATA%\umber`), the same root the plugins
 //!   dir uses; `temp_dir()/umber` when no home is discoverable.
@@ -439,6 +445,17 @@ impl Decision {
         matches!(self.reason, Reason::FellBack { .. }).then_some(self.backend)
     }
 
+    /// [`persist_on_success`] gated on whether this launch has a display:
+    /// a headless launch never persists (installers gap #5 — a software
+    /// GL pick made with no display must not poison the remembered
+    /// backend for real desktop launches).
+    pub fn persist_on_success_in(&self, has_display: bool) -> Option<Backend> {
+        if !has_display {
+            return None;
+        }
+        self.persist_on_success()
+    }
+
     /// What this launch's marker records as its plan.
     pub fn planned(&self) -> Planned {
         match self.reason {
@@ -632,6 +649,13 @@ pub fn state_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("umber"))
 }
 
+/// Whether this launch has a display to present to (Wayland or X11).
+pub fn has_display() -> bool {
+    ["WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+}
+
 /// One launch's marker bookkeeping (behind [`SESSION`] in the app; a
 /// plain value in tests).
 #[derive(Debug)]
@@ -652,7 +676,7 @@ impl Session {
             dir,
             guard,
             marker: Marker::new(decision.planned()),
-            persist: decision.persist_on_success(),
+            persist: decision.persist_on_success_in(has_display()),
             frames: 0,
             fallback: matches!(
                 decision.reason,
@@ -1058,6 +1082,53 @@ mod tests {
         assert_eq!(d.persist_on_success(), None, "already persisted");
         let d = decide_backend(None, Some(Backend::Dx12), None, false, Platform::Windows);
         assert_eq!((d.backend, d.reason), (Backend::Dx12, Reason::Persisted));
+    }
+
+    #[test]
+    fn a_headless_launch_never_persists_its_fallback() {
+        // Installers gap #5: with no display, wgpu usually picks software
+        // GL; persisting that choice poisoned later desktop launches into
+        // GL permanently.
+        let d = fell_back(Backend::Vulkan, Backend::Gl, None);
+        assert_eq!(d.persist_on_success_in(false), None, "headless: no poison");
+        assert_eq!(d.persist_on_success_in(true), Some(Backend::Gl));
+        let d = decide_backend(None, None, None, false, Platform::Unix);
+        assert_eq!(d.persist_on_success_in(false), None);
+        assert_eq!(d.persist_on_success_in(true), None, "not a fallback anyway");
+    }
+
+    #[test]
+    fn confirmation_writes_gpu_backend_only_when_the_session_carries_a_persist() {
+        // The confirm path itself is unchanged; the headless gate only
+        // decides whether `persist` is set (Session::new).
+        let dir = fresh_dir("confirm-persist");
+        let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
+        let d = fell_back(Backend::Vulkan, Backend::Gl, None);
+        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        s.persist = Some(Backend::Gl); // as a display-ful launch would have
+        for _ in 0..FRAMES_TO_CONFIRM - 1 {
+            assert!(!s.note_frame().expect("frame"));
+        }
+        assert!(s.note_frame().expect("confirming frame"));
+        assert_eq!(read_persisted(&dir).expect("read"), Some(Backend::Gl));
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = fresh_dir("confirm-no-persist");
+        let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
+        let d = fell_back(Backend::Vulkan, Backend::Gl, None);
+        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        s.persist = None; // what a headless launch now gets
+        for _ in 0..FRAMES_TO_CONFIRM {
+            let _ = s.note_frame().expect("frame");
+        }
+        assert_eq!(
+            read_persisted(&dir).expect("read"),
+            None,
+            "nothing persisted"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

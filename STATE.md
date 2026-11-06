@@ -125,6 +125,15 @@ signing, the alpha tag.
 - Next: installers gap #5 (no-display launch poisons GPU fallback to GL),
   gap #2 (exe-relative runtime assets, sibling lane), row 242 split-redo
   wiring; v0.1.0 tag stays partner-gated.
+- **Row 249 (installers gap #5) in flight, lock `razul-headless-persist`:**
+  gpu_startup.rs — headless launches (no WAYLAND_DISPLAY/WAYLAND_SOCKET/
+  DISPLAY) never persist the backend (`Decision::persist_on_success_in` +
+  `has_display()`; `Session::new` gates `persist`). Pins
+  `a_headless_launch_never_persists_its_fallback` +
+  `confirmation_writes_gpu_backend_only_when_the_session_carries_a_persist`.
+  main.rs untouched (sibling-locked); prepare() signature unchanged.
+  Battery log /tmp/umber-headless-battery.log. Queue row + COORDINATION
+  line deferred until `razul-bundled-assets` releases.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
