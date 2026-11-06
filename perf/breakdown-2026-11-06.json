@@ -1,0 +1,745 @@
+{
+  "date": "2026-11-06",
+  "commit": "0a28f02f5ee3598a992d83b1830c9b94fd3af2a0",
+  "gpu": "Intel(R) HD Graphics 530 (SKL GT2) \u2014 Intel open-source Mesa driver, Mesa 26.2.6-arch1.1 | real GPU (IntegratedGpu, Vulkan backend) | adapter census: Vulkan/IntegratedGpu",
+  "mode": "breakdown",
+  "instrumentation_scan": {
+    "gpu_timestamp_queries": "none \u2014 every render pass in crates/umber-gpu sets timestamp_writes: None",
+    "stage_timers": "none in the live render path \u2014 Instant::now appears only in bench harnesses (umber-gpu/src/ref_scene.rs, umber-cli/src/bench.rs)",
+    "method": "read-only control-channel sampling over one app session: per-config frame-time histograms (consecutive viewport.screenshot replies) and input->photon samples (command.run send -> screenshot reply wall ms)"
+  },
+  "mesh_tris": 1002252,
+  "resolutions": [
+    4096,
+    2048,
+    1024
+  ],
+  "samples_per_config": 200,
+  "warmup_per_config": 3,
+  "configs": [
+    {
+      "resolution": 4096,
+      "view_mode": "lit",
+      "input_class": "view_op",
+      "input_command": "view.toggle_grid",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 107.9571,
+        "p95": 166.52,
+        "mean": 116.6059,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 108.1858,
+        "p95": 171.6225,
+        "mean": 116.6529,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          59,
+          97,
+          33,
+          6,
+          4,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 4096,
+      "view_mode": "lit",
+      "input_class": "paint_op",
+      "input_command": "paint.toggle_mask_mode",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 102.5006,
+        "p95": 135.0565,
+        "mean": 109.946,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 103.379,
+        "p95": 135.7755,
+        "mean": 109.9993,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          3,
+          58,
+          119,
+          19,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 4096,
+      "view_mode": "solo",
+      "input_class": "view_op",
+      "input_command": "view.toggle_grid",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 106.4322,
+        "p95": 140.2562,
+        "mean": 109.0774,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 106.4342,
+        "p95": 141.0278,
+        "mean": 109.0069,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          69,
+          114,
+          16,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 4096,
+      "view_mode": "solo",
+      "input_class": "paint_op",
+      "input_command": "paint.toggle_mask_mode",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 101.6361,
+        "p95": 139.9408,
+        "mean": 189.4972,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 101.6414,
+        "p95": 144.0968,
+        "mean": 189.9416,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          2,
+          60,
+          121,
+          14,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "resolution": 2048,
+      "view_mode": "lit",
+      "input_class": "view_op",
+      "input_command": "view.toggle_grid",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 104.6728,
+        "p95": 124.3516,
+        "mean": 105.4982,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 104.6975,
+        "p95": 124.4604,
+        "mean": 105.475,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          77,
+          116,
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 2048,
+      "view_mode": "lit",
+      "input_class": "paint_op",
+      "input_command": "paint.toggle_mask_mode",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 100.3626,
+        "p95": 123.3629,
+        "mean": 104.8336,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 100.3653,
+        "p95": 130.2718,
+        "mean": 104.8536,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          2,
+          78,
+          111,
+          8,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 2048,
+      "view_mode": "solo",
+      "input_class": "view_op",
+      "input_command": "view.toggle_grid",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 107.5343,
+        "p95": 145.7425,
+        "mean": 112.65,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 107.5368,
+        "p95": 145.8313,
+        "mean": 112.6137,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          54,
+          116,
+          26,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 2048,
+      "view_mode": "solo",
+      "input_class": "paint_op",
+      "input_command": "paint.toggle_mask_mode",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 100.0849,
+        "p95": 118.6437,
+        "mean": 100.8482,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 100.0921,
+        "p95": 118.7168,
+        "mean": 100.8556,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          11,
+          85,
+          102,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 1024,
+      "view_mode": "lit",
+      "input_class": "view_op",
+      "input_command": "view.toggle_grid",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 103.6345,
+        "p95": 123.9482,
+        "mean": 102.8175,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 104.0448,
+        "p95": 124.0653,
+        "mean": 102.8172,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          91,
+          106,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 1024,
+      "view_mode": "lit",
+      "input_class": "paint_op",
+      "input_command": "paint.toggle_mask_mode",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 99.2081,
+        "p95": 117.3868,
+        "mean": 96.1199,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 99.2106,
+        "p95": 117.5157,
+        "mean": 96.1053,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          28,
+          90,
+          80,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 1024,
+      "view_mode": "solo",
+      "input_class": "view_op",
+      "input_command": "view.toggle_grid",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 100.2347,
+        "p95": 123.4296,
+        "mean": 102.202,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 100.2371,
+        "p95": 123.585,
+        "mean": 102.1866,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          99,
+          97,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "resolution": 1024,
+      "view_mode": "solo",
+      "input_class": "paint_op",
+      "input_command": "paint.toggle_mask_mode",
+      "samples": 200,
+      "input_photon_ms": {
+        "p50": 98.9882,
+        "p95": 117.458,
+        "mean": 97.2995,
+        "n": 200
+      },
+      "frame_ms": {
+        "p50": 99.0398,
+        "p95": 117.6553,
+        "mean": 97.2947,
+        "n": 199
+      },
+      "frame_histogram": {
+        "labels": [
+          "<= 16.7 ms",
+          "<= 33.3 ms",
+          "<= 50 ms",
+          "<= 66.7 ms",
+          "<= 83.3 ms",
+          "<= 100 ms",
+          "<= 133.3 ms",
+          "<= 166.7 ms",
+          "<= 200 ms",
+          "<= 250 ms",
+          "<= 300 ms",
+          "<= 400 ms",
+          "<= 500 ms",
+          "<= 750 ms",
+          "<= 1000 ms",
+          "> 1000 ms"
+        ],
+        "counts": [
+          0,
+          0,
+          0,
+          0,
+          20,
+          97,
+          82,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    }
+  ],
+  "hot_stage_ranking": [
+    {
+      "rank": 1,
+      "stage": "mesh raster + base composite floor (frame p50 @ 1024, lit, view_op)",
+      "derived_ms_p50": 104.0448,
+      "basis": "absolute residual at the smallest texture resolution"
+    },
+    {
+      "rank": 2,
+      "stage": "texture-resolution-dependent stage (frame p50 1024 -> 4096, lit, view_op)",
+      "derived_ms_p50": 4.141,
+      "basis": "delta of frame p50 across texture resolutions (paint composite / texture sampling / upload)"
+    },
+    {
+      "rank": 3,
+      "stage": "lit PBR + display-LUT postfx (lit - solo @ 4096, view_op)",
+      "derived_ms_p50": 1.7516,
+      "basis": "delta of frame p50 between Lit and Solo(BaseColor) view modes"
+    },
+    {
+      "rank": 4,
+      "stage": "input dispatch overhead (i2p p50 - frame p50 @ 4096, lit, view_op)",
+      "derived_ms_p50": -0.2287,
+      "basis": "delta of input->photon p50 over raw frame p50 (command dispatch + queue + PNG encode in the photon leg)"
+    },
+    {
+      "rank": 5,
+      "stage": "per-input paint/mask recompute (paint_op - view_op @ 4096, lit)",
+      "derived_ms_p50": -4.8068,
+      "basis": "delta of frame p50 between a paint.* input and a view.* input"
+    }
+  ],
+  "hot_stage": "mesh raster + base composite floor (frame p50 @ 1024, lit, view_op)",
+  "sanity": {
+    "baseline_input_photon_p50_ms": 121.7853,
+    "baseline_input_photon_p95_ms": 183.1327,
+    "breakdown_top_lit_view_op_input_photon_p50_ms": 107.9571,
+    "breakdown_top_lit_view_op_input_photon_p95_ms": 166.52
+  },
+  "note": "--breakdown run on the 4096-default paint path: 200 input->photon samples per config over the app's --control JSONL channel, across resolutions [4096, 2048, 1024] x view modes [lit, solo] x input classes [view_op, paint_op] (12 configs). No per-stage GPU timers exist in the app (all timestamp_writes: None), so attribution is per-config p50 deltas, not direct stage timers; the photon leg includes PNG encode and the present proxy is post-present (same honesty note as input_photon.rs). Mesh = cube_grid(289) GLB (1002252 tris) under scratch; per-resolution scratch projects pin texture set 'ReferenceMaterial' (project.json + paint/target_sizes.txt). window.toggle_hide_ui stays on for the whole session (256 MiB max_buffer_size adapters fatal on the 1M-tri 2D wireframe egui index buffer)."
+}

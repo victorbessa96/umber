@@ -33,8 +33,30 @@ Usage:
   python3 scripts/perf_rebaseline.py [--binary PATH] [--samples N]
       [--warmup N] [--scratch-root DIR] [--cache-dir DIR] [--keep]
       [--out perf/baseline.json] [--dry-run]
+  python3 scripts/perf_rebaseline.py --breakdown [--resolutions 4096,2048,1024]
+      [--binary PATH] [--samples N] [--warmup N] [--scratch-root DIR]
+      [--cache-dir DIR] [--keep] [--out perf/breakdown-<date>.json] [--dry-run]
 
 --dry-run prints the plan and launches nothing. Exit 0 on a written baseline.
+
+--breakdown mode (hot-stage hunt): the app has NO per-stage instrumentation
+to drive — every render pass in crates/umber-gpu sets `timestamp_writes:
+None` (no GPU timestamp queries) and the only `Instant::now` timers live in
+bench harnesses (umber-gpu ref_scene.rs, umber-cli bench.rs), not the live
+render path. So the breakdown is read-only control-channel sampling over one
+app session: for each texture resolution in --resolutions (scratch project
+pins the set's resolution via project.json + paint/target_sizes.txt) x view
+mode [lit, solo] (switched headless via command.run view.view_material /
+view.next_channel — display_keys::cycle_channel) x input class
+[view_op, paint_op] (command.run of an enabled view.*/tool.* command vs an
+enabled paint.* command, the only paint-affecting inputs the control channel
+can dispatch), it records N input->photon samples (command.run send ->
+viewport.screenshot reply) and the frame-time histogram (consecutive
+screenshot-reply intervals), then derives a hot-stage ranking from the p50
+deltas across configs (resolution stage, lit-vs-solo postfx, per-input paint
+recompute, dispatch overhead, and the residual mesh-raster floor). Output is
+perf/breakdown-<date>.json with per-config p50/p95/mean + histograms + the
+ranking.
 
 Note on adapters with a 256 MiB max_buffer_size (e.g. Intel HD Graphics 530,
 Vulkan and GL): the 2D UV-view wireframe of a 1M-tri mesh tessellates into a
@@ -242,15 +264,15 @@ class Launch:
 # scratch project + deterministic 1M-tri GLB fixture (scratch only)
 # ---------------------------------------------------------------------------
 
-def make_project(dirpath):
-    """Minimal v1 .umber project with the fixture's set at resolution 4096,
-    plus paint/target_sizes.txt pinning the per-set paint size at 4096."""
+def make_project(dirpath, resolution=RESOLUTION):
+    """Minimal v1 .umber project with the fixture's set at `resolution`,
+    plus paint/target_sizes.txt pinning the per-set paint size."""
     dirpath.mkdir(parents=True, exist_ok=True)
     channels = [{"name": "baseColor", "kind": "Color"}]
     doc = {
         "version": 1,
         "texture_sets": [
-            {"name": SET_NAME, "resolution": RESOLUTION, "channels": channels, "tiles": {}}
+            {"name": SET_NAME, "resolution": resolution, "channels": channels, "tiles": {}}
         ],
         "layer_sets": [
             {"texture_set": SET_NAME, "layer_ids": [], "next_layer_id": 1}
@@ -260,7 +282,7 @@ def make_project(dirpath):
     (dirpath / "project.json").write_text(json.dumps(doc, indent=2))
     paint = dirpath / "paint"
     paint.mkdir(exist_ok=True)
-    (paint / "target_sizes.txt").write_text(f"{SET_NAME}={RESOLUTION}x{RESOLUTION}\n")
+    (paint / "target_sizes.txt").write_text(f"{SET_NAME}={resolution}x{resolution}\n")
     return dirpath / "project.json"
 
 
@@ -549,6 +571,262 @@ def run(binary, samples, warmup, scratch_root, keep, out, cache_dir):
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# --breakdown mode: per-config control-channel sampling + hot-stage ranking
+# ---------------------------------------------------------------------------
+
+# Frame-time histogram buckets (ms, upper bounds); <=16.7 ms is the 60 fps
+# line the requirements.md §5 mid-range floor is about.
+HIST_EDGES_MS = [16.7, 33.3, 50.0, 66.7, 83.3, 100.0, 133.3, 166.7, 200.0,
+                 250.0, 300.0, 400.0, 500.0, 750.0, 1000.0]
+
+# Input commands per class, first enabled wins (command.list verdicts).
+PAINT_INPUT_CANDIDATES = ["paint.toggle_mask_mode", "paint.invert_mask"]
+VIEW_INPUT_CANDIDATES = ["view.toggle_grid", "view.toggle_wireframe", "tool.brush_smaller"]
+# Headless view-mode switches (commands.rs): view.view_material -> Lit,
+# view.next_channel from Lit -> Solo(SoloChannel::BaseColor).
+MODE_COMMANDS = {"lit": "view.view_material", "solo": "view.next_channel"}
+
+
+def histogram(samples, edges=HIST_EDGES_MS):
+    counts = [0] * (len(edges) + 1)
+    for v in samples:
+        for i, e in enumerate(edges):
+            if v <= e:
+                counts[i] += 1
+                break
+        else:
+            counts[-1] += 1
+    labels = [f"<= {e:g} ms" for e in edges] + [f"> {edges[-1]:g} ms"]
+    return {"labels": labels, "counts": counts}
+
+
+def round_stats(st):
+    return {k: (v if k == "n" else round(v, 4)) for k, v in st.items()}
+
+
+def breakdown_plan_lines(binary, samples, warmup, resolutions, out):
+    return [
+        f"PLAN [dry-run breakdown]: binary={binary}",
+        f"  1. mkdtemp scratch; XDG_CONFIG/DATA/STATE/CACHE_HOME + TMPDIR redirected into it; per-run UMBER_CONTROL_TOKEN",
+        f"  2. generate deterministic cube_grid({SUBDIVISIONS}) GLB fixture under scratch "
+        f"(6x{row_str()}^2 verts, 12*{SUBDIVISIONS}^2 = 1,002,252 tris)",
+        f"  3. launch {binary} --control <free port>, log to scratch app.log; poll ui.inspect until the first frame paints (cold shader compile)",
+        f"  4. for each resolution in {list(resolutions)}: scratch .umber project pinning texture set "
+        f"'{SET_NAME}' at that resolution (project.json + paint/target_sizes.txt), project.open; the FIRST "
+        f"project opens before window.toggle_hide_ui + mesh.load (avoids the >256MiB egui index-buffer "
+        f"fatal on the 1M-tri 2D wireframe on 256MiB-max_buffer_size adapters like HD 530)",
+        f"  5. per config (resolution x view_mode[lit,solo] x input_class[view_op,paint_op]): switch view "
+        f"mode via command.run ({MODE_COMMANDS}), {warmup} warmup viewport.screenshot frames, then "
+        f"{samples} x [command.run(input) -> viewport.screenshot]; frame_ms = consecutive screenshot-reply "
+        f"intervals (frame-time histogram), i2p_ms = command.run send -> screenshot reply (input->photon)",
+        f"  6. per-config p50/p95/mean (nearest-rank) + frame histogram; hot-stage ranking derived from "
+        f"frame-p50 deltas: resolution stage, lit-vs-solo postfx, per-input paint recompute, dispatch "
+        f"overhead (i2p - frame), residual mesh-raster floor",
+        f"  7. write {out}; SIGTERM the app, reap, remove scratch (unless --keep)",
+        "DRY-RUN: no processes launched, no scratch dir created, no file written.",
+    ]
+
+
+def run_breakdown(binary, samples, warmup, scratch_root, keep, out, cache_dir, resolutions):
+    if not binary.is_file():
+        print(f"FAIL: binary not found: {binary}")
+        return 1
+    if scratch_root:
+        scratch = Path(scratch_root)
+        scratch.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="rebaseline-breakdown-", dir=scratch))
+    else:
+        scratch = Path(tempfile.mkdtemp(prefix="umber-rebaseline-breakdown-"))
+    print(f"# scratch: {scratch}  binary: {binary}")
+    launch = Launch(binary, scratch, "run", control=True, cache_dir=cache_dir)
+    try:
+        c = launch.wait_control()
+        print("# control channel up:", c.call("methods"))
+        launch.wait_ui_frame(c)
+        print("# first UI frame painted")
+
+        fixture = scratch / "fixture" / f"cube_grid_{SUBDIVISIONS}.glb"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        nverts, tris = gen_cube_grid_glb(fixture)
+        print(f"# fixture: {fixture} ({fixture.stat().st_size} bytes, {nverts} verts, {tris} tris)")
+
+        # First (largest) resolution first, mirroring perf/baseline.json;
+        # hide UI before mesh.load (256 MiB max_buffer_size adapters).
+        proj = make_project(scratch / f"project-{resolutions[0]}", resolutions[0])
+        print("# project.open:", c.call("project.open", {"path": str(proj.parent)}))
+        c.call("command.run", {"id": "window.toggle_hide_ui"})
+        print("# hide_ui done")
+        print("# mesh.load:", c.call("mesh.load", {"path": str(fixture)}))
+
+        def wait_ready(tag):
+            ins = None
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                ins = c.call("ui.inspect")
+                if ins.get("mesh") and ins.get("paint_available"):
+                    return ins
+                time.sleep(1.0)
+            print(f"FAIL: app not ready after {tag}; log:", launch.log_text(800))
+            raise RuntimeError(f"not ready after {tag}")
+
+        ins = wait_ready("mesh.load")
+        print(f"# inspect: paint_available={ins['paint_available']} mesh={ins['mesh']} "
+              f"active_set={ins.get('active_set')} sets={ins.get('sets')}")
+
+        enabled = {r["id"] for r in c.call("command.list")["commands"] if r.get("enabled")}
+        paint_cmd = next((x for x in PAINT_INPUT_CANDIDATES if x in enabled), None)
+        view_cmd = next((x for x in VIEW_INPUT_CANDIDATES if x in enabled), None)
+        missing_modes = [m for m, cmd in MODE_COMMANDS.items() if cmd not in enabled]
+        if paint_cmd is None or view_cmd is None or missing_modes:
+            print("FAIL: needed commands not enabled; paint_cmd:", paint_cmd,
+                  "view_cmd:", view_cmd, "missing mode cmds:", missing_modes,
+                  "command.list:", c.call("command.list"))
+            return 1
+        print("# input commands: view_op =", view_cmd, " paint_op =", paint_cmd,
+              " mode cmds =", MODE_COMMANDS)
+
+        configs = []
+        current_mode = "lit"
+        for res in resolutions:
+            if res != resolutions[0]:
+                proj = make_project(scratch / f"project-{res}", res)
+                print(f"# project.open ({res}):", c.call("project.open", {"path": str(proj.parent)}))
+                wait_ready(f"project.open {res}")
+                if not c.call("ui.inspect").get("mesh"):
+                    print("# mesh dropped on project.open; reloading:",
+                          c.call("mesh.load", {"path": str(fixture)}))
+                    wait_ready(f"mesh.reload {res}")
+            for mode in ("lit", "solo"):
+                if mode != current_mode:
+                    c.call("command.run", {"id": MODE_COMMANDS[mode]})
+                    current_mode = mode
+                for cls, cmd in (("view_op", view_cmd), ("paint_op", paint_cmd)):
+                    for _ in range(warmup):
+                        c.call("viewport.screenshot")
+                    i2p_ms = []
+                    frame_ms = []
+                    prev = None
+                    for i in range(samples):
+                        t_send = time.perf_counter()
+                        c.call("command.run", {"id": cmd})
+                        c.call("viewport.screenshot")
+                        t_now = time.perf_counter()
+                        i2p_ms.append((t_now - t_send) * 1000.0)
+                        if prev is not None:
+                            frame_ms.append((t_now - prev) * 1000.0)
+                        prev = t_now
+                        if (i + 1) % 50 == 0:
+                            print(f"# [{res}/{mode}/{cls}] sample {i + 1}/{samples} "
+                                  f"(last i2p {i2p_ms[-1]:.2f} ms)", flush=True)
+                    entry = {
+                        "resolution": res,
+                        "view_mode": mode,
+                        "input_class": cls,
+                        "input_command": cmd,
+                        "samples": len(i2p_ms),
+                        "input_photon_ms": round_stats(stats(i2p_ms)),
+                        "frame_ms": round_stats(stats(frame_ms)),
+                        "frame_histogram": histogram(frame_ms),
+                    }
+                    configs.append(entry)
+                    print(f"# [{res}/{mode}/{cls}] i2p p50={entry['input_photon_ms']['p50']} "
+                          f"p95={entry['input_photon_ms']['p95']} | frame p50={entry['frame_ms']['p50']} "
+                          f"p95={entry['frame_ms']['p95']} mean={entry['frame_ms']['mean']}", flush=True)
+
+        def find(res, mode, cls):
+            return next(e for e in configs
+                        if e["resolution"] == res and e["view_mode"] == mode
+                        and e["input_class"] == cls)
+
+        top, low = resolutions[0], min(resolutions)
+        f = lambda res, mode, cls: find(res, mode, cls)["frame_ms"]["p50"]
+        ip = lambda res, mode, cls: find(res, mode, cls)["input_photon_ms"]["p50"]
+        base = f(low, "lit", "view_op")
+        deltas = [
+            (f"mesh raster + base composite floor (frame p50 @ {low}, lit, view_op)", base,
+             "absolute residual at the smallest texture resolution"),
+            (f"texture-resolution-dependent stage (frame p50 {low} -> {top}, lit, view_op)",
+             f(top, "lit", "view_op") - base,
+             "delta of frame p50 across texture resolutions (paint composite / texture sampling / upload)"),
+            (f"lit PBR + display-LUT postfx (lit - solo @ {top}, view_op)",
+             f(top, "lit", "view_op") - f(top, "solo", "view_op"),
+             "delta of frame p50 between Lit and Solo(BaseColor) view modes"),
+            (f"per-input paint/mask recompute (paint_op - view_op @ {top}, lit)",
+             f(top, "lit", "paint_op") - f(top, "lit", "view_op"),
+             "delta of frame p50 between a paint.* input and a view.* input"),
+            (f"input dispatch overhead (i2p p50 - frame p50 @ {top}, lit, view_op)",
+             ip(top, "lit", "view_op") - f(top, "lit", "view_op"),
+             "delta of input->photon p50 over raw frame p50 (command dispatch + queue + PNG encode in the photon leg)"),
+        ]
+        ranking = sorted(deltas, key=lambda d: d[1], reverse=True)
+
+        gpu = gpu_string_from_log(launch.log_text(200000))
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
+                                capture_output=True, text=True).stdout.strip()
+        date = subprocess.run(["date", "-u", "+%F"], capture_output=True, text=True).stdout.strip()
+        baseline_path = REPO / "perf" / "baseline.json"
+        baseline = json.loads(baseline_path.read_text()) if baseline_path.is_file() else None
+
+        doc = {
+            "date": date,
+            "commit": commit,
+            "gpu": gpu,
+            "mode": "breakdown",
+            "instrumentation_scan": {
+                "gpu_timestamp_queries": ("none — every render pass in crates/umber-gpu sets "
+                                          "timestamp_writes: None"),
+                "stage_timers": ("none in the live render path — Instant::now appears only in "
+                                 "bench harnesses (umber-gpu/src/ref_scene.rs, umber-cli/src/bench.rs)"),
+                "method": ("read-only control-channel sampling over one app session: per-config "
+                           "frame-time histograms (consecutive viewport.screenshot replies) and "
+                           "input->photon samples (command.run send -> screenshot reply wall ms)"),
+            },
+            "mesh_tris": tris,
+            "resolutions": list(resolutions),
+            "samples_per_config": samples,
+            "warmup_per_config": warmup,
+            "configs": configs,
+            "hot_stage_ranking": [
+                {"rank": i + 1, "stage": name, "derived_ms_p50": round(v, 4), "basis": basis}
+                for i, (name, v, basis) in enumerate(ranking)
+            ],
+            "hot_stage": ranking[0][0],
+            "sanity": {
+                "baseline_input_photon_p50_ms": baseline.get("input_photon_p50_ms") if baseline else None,
+                "baseline_input_photon_p95_ms": baseline.get("input_photon_p95_ms") if baseline else None,
+                "breakdown_top_lit_view_op_input_photon_p50_ms": ip(top, "lit", "view_op"),
+                "breakdown_top_lit_view_op_input_photon_p95_ms": find(top, "lit", "view_op")["input_photon_ms"]["p95"],
+            },
+            "note": (
+                f"--breakdown run on the {top}-default paint path: {samples} input->photon samples "
+                f"per config over the app's --control JSONL channel, across resolutions "
+                f"{list(resolutions)} x view modes [lit, solo] x input classes [view_op, paint_op] "
+                f"({len(configs)} configs). No per-stage GPU timers exist in the app (all "
+                f"timestamp_writes: None), so attribution is per-config p50 deltas, not direct stage "
+                f"timers; the photon leg includes PNG encode and the present proxy is post-present "
+                f"(same honesty note as input_photon.rs). Mesh = cube_grid({SUBDIVISIONS}) GLB "
+                f"({tris} tris) under scratch; per-resolution scratch projects pin texture set "
+                f"'{SET_NAME}' (project.json + paint/target_sizes.txt). window.toggle_hide_ui stays "
+                f"on for the whole session (256 MiB max_buffer_size adapters fatal on the 1M-tri "
+                f"2D wireframe egui index buffer)."
+            ),
+        }
+        out = Path(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, indent=2) + "\n")
+        json.loads(out.read_text())  # parse check
+        print("# breakdown written:", out)
+        print(json.dumps({k: doc[k] for k in ("hot_stage", "hot_stage_ranking", "sanity")}, indent=2))
+        return 0
+    finally:
+        launch.close()
+        if keep:
+            print(f"# scratch kept: {scratch}")
+        else:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("--binary", default=str(DEFAULT_BINARY))
@@ -559,17 +837,42 @@ def main():
     ap.add_argument("--scratch-root", default=None,
                     help="parent dir for the scratch dir (default: mkdtemp under TMPDIR)")
     ap.add_argument("--keep", action="store_true", help="keep the scratch dir")
-    ap.add_argument("--out", default=str(DEFAULT_OUT),
-                    help="baseline path (default: %(default)s)")
+    ap.add_argument("--out", default=None,
+                    help="output path (default: perf/baseline.json, or "
+                         "perf/breakdown-<utc-date>.json with --breakdown)")
     ap.add_argument("--cache-dir", default=None,
                     help="persistent XDG_CACHE_HOME for the app (warm shader cache; "
                          "default: per-run scratch)")
+    ap.add_argument("--breakdown", action="store_true",
+                    help="per-config breakdown mode: frame-time histograms + input->photon "
+                         "p50/p95 across resolutions x view modes x input classes, plus a "
+                         "derived hot-stage ranking")
+    ap.add_argument("--resolutions", default="4096,2048,1024",
+                    help="comma-separated texture resolutions for --breakdown "
+                         "(default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, launch nothing")
     args = ap.parse_args()
+    if args.out is None:
+        if args.breakdown:
+            date = subprocess.run(["date", "-u", "+%F"], capture_output=True,
+                                  text=True).stdout.strip()
+            args.out = str(REPO / "perf" / f"breakdown-{date}.json")
+        else:
+            args.out = str(DEFAULT_OUT)
     if args.dry_run:
-        for line in plan_lines(Path(args.binary), args.samples, args.warmup, args.out):
-            print(line)
+        if args.breakdown:
+            resolutions = [int(x) for x in args.resolutions.split(",")]
+            for line in breakdown_plan_lines(Path(args.binary), args.samples, args.warmup,
+                                             resolutions, args.out):
+                print(line)
+        else:
+            for line in plan_lines(Path(args.binary), args.samples, args.warmup, args.out):
+                print(line)
         return 0
+    if args.breakdown:
+        resolutions = [int(x) for x in args.resolutions.split(",")]
+        return run_breakdown(Path(args.binary), args.samples, args.warmup, args.scratch_root,
+                             args.keep, args.out, args.cache_dir, resolutions)
     return run(Path(args.binary), args.samples, args.warmup, args.scratch_root,
                args.keep, args.out, args.cache_dir)
 
