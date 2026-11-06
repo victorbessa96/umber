@@ -206,6 +206,11 @@ pub enum HistoryKind {
     /// recorded as a single row (via `Document::run_grouped`); `undo`/`redo`
     /// cross the whole group in one step.
     Flatten,
+    /// A whole-layer smart-filter apply (the Assets panel's Filters
+    /// category). Context row: the pixel revert lives on the shell's own
+    /// plane-op stack (`filter_apply::FilterUndoStack`), which the
+    /// Undo/Redo arms step when this row is the newest.
+    FilterApply,
 }
 
 impl HistoryKind {
@@ -269,6 +274,7 @@ impl HistoryKind {
             Self::Bake => tr("history.op-bake"),
             Self::Export => tr("history.op-export"),
             Self::Flatten => tr("history.op-flatten"),
+            Self::FilterApply => tr("history.op-filter-apply"),
         }
     }
 
@@ -306,6 +312,7 @@ impl HistoryKind {
             Self::Bake => "bake",
             Self::Export => "export",
             Self::Flatten => "flatten layers",
+            Self::FilterApply => "filter apply",
         }
     }
 }
@@ -497,6 +504,21 @@ impl SessionHistory {
             target_layer: None,
         });
         self.next_op_id += 1;
+    }
+
+    /// The next op id the log will assign. The filter-undo redo arm's
+    /// ordering check (`FilterUndoStack::redo_is_next`): op ids are
+    /// monotone and never reused.
+    pub fn next_op_id(&self) -> u64 {
+        self.next_op_id
+    }
+
+    /// Pops the newest row. Used by the Undo arm's filter step: its
+    /// context row dies with the undone op (the op itself reverts on the
+    /// shell's `FilterUndoStack`). Never called on a row another journal
+    /// owns — callers gate on [`HistoryKind::FilterApply`] first.
+    pub fn pop_last(&mut self) -> Option<HistoryEntry> {
+        self.entries.pop()
     }
 
     /// Drops the dead layer future after a fresh push over undone state: a
@@ -1690,6 +1712,8 @@ mod tests {
             GraphLoad,
             Bake,
             Export,
+            Flatten,
+            FilterApply,
         ];
         let labels: Vec<&str> = all.iter().map(|k| k.crash_label()).collect();
         let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();

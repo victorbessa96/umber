@@ -39,19 +39,51 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
             // The palette dispatches after the dock, where a graph edit
             // may have queued this frame: drain before choosing.
             app.drain_graph_commits();
-            let _ = history_panel::unified_undo(
-                &mut app.state.doc,
-                app.state.paint.as_mut(),
-                Some(&mut app.state.graph as &mut dyn history_panel::GraphJournal),
-            );
+            // A whole-layer filter apply (the Assets panel's Filters
+            // category) is one undo step on the shell's own plane-op
+            // stack; when its history row is the newest, it steps first.
+            let newest = app.state.doc.session_history.entries().last().cloned();
+            if app.state.filter_undos.newest_is_ours(newest.as_ref()) {
+                if let Some(paint) = app.state.paint.as_mut() {
+                    app.state.filter_undos.undo(paint);
+                }
+                app.state.doc.session_history.pop_last();
+            } else {
+                let _ = history_panel::unified_undo(
+                    &mut app.state.doc,
+                    app.state.paint.as_mut(),
+                    Some(&mut app.state.graph as &mut dyn history_panel::GraphJournal),
+                );
+            }
         }
         ShellAction::Redo => {
             app.drain_graph_commits();
-            let _ = history_panel::unified_redo(
-                &mut app.state.doc,
-                app.state.paint.as_mut(),
-                Some(&mut app.state.graph as &mut dyn history_panel::GraphJournal),
-            );
+            // The filter stack's redo twin: when the undone filter row's
+            // id is exactly the next one the log would assign, the filter
+            // steps first; otherwise the journals' unified redo runs.
+            let next = app.state.doc.session_history.next_op_id();
+            if app.state.filter_undos.redo_is_next(next) {
+                app.state
+                    .doc
+                    .session_history
+                    .record_context(history_panel::HistoryKind::FilterApply);
+                let id = app
+                    .state
+                    .doc
+                    .session_history
+                    .entries()
+                    .last()
+                    .map_or(next, |e| e.op_id);
+                if let Some(paint) = app.state.paint.as_mut() {
+                    app.state.filter_undos.redo(paint, id);
+                }
+            } else {
+                let _ = history_panel::unified_redo(
+                    &mut app.state.doc,
+                    app.state.paint.as_mut(),
+                    Some(&mut app.state.graph as &mut dyn history_panel::GraphJournal),
+                );
+            }
         }
         // Quick mask (§2's P1 row): needs a paint session; I inverts
         // only while the mask is being edited (outside it, nothing).

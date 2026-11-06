@@ -132,6 +132,7 @@ mod empty_state;
 mod env;
 mod export_dialog;
 mod fill_layer;
+mod filter_apply;
 mod first_run;
 mod gpu_startup;
 mod graph_canvas;
@@ -370,13 +371,14 @@ impl Panel {
 }
 
 /// What the dock closure hands back to the app to drain after the dock:
-/// the home_actions / pick_notices / env_loads rails plus the Ctrl+LMB
-/// chord's live values (kept as one tuple so `UmberApp::ui` drains them
-/// in a single destructuring).
+/// the home_actions / pick_notices / env_loads / filter_loads rails plus
+/// the Ctrl+LMB chord's live values (kept as one tuple so
+/// `UmberApp::ui` drains them in a single destructuring).
 type DockDrain = (
     Vec<crate::empty_state::HomeCardAction>,
     Vec<String>,
     Vec<std::path::PathBuf>,
+    Vec<(std::path::PathBuf, u64)>,
     Option<f32>,
     Option<f32>,
 );
@@ -407,10 +409,14 @@ struct PanelViewer<'a> {
     /// after the dock, the home_actions rail's own pattern: the viewer
     /// cannot post on the app's notices itself).
     pick_notices: Vec<String>,
-    /// The Assets browser's env-map row clicks this frame (drained by
-    /// the app after the dock and applied through the exact File▸Load
+    /// The Assets browser's env-map row clicks this frame (drained by the
+    /// app after the dock and applied through the exact File▸Load
     /// Environment… path, `UmberApp::apply_env_file`).
     env_loads: Vec<std::path::PathBuf>,
+    /// The Assets browser's filter row clicks this frame as
+    /// `(path, active layer)` (drained by the app after the dock and
+    /// applied through `UmberApp::apply_filter_file` — one undo step).
+    filter_loads: Vec<(std::path::PathBuf, u64)>,
     bakes: &'a mut BakesPanel,
     /// The Assets panel's session state (R-C1's library browser).
     assets: &'a mut assets_panel::AssetsPanel,
@@ -1343,6 +1349,19 @@ impl TabViewer for PanelViewer<'_> {
                     // Environment… path (`apply_env_file`).
                     self.env_loads.push(path.clone());
                 }
+                if let Some(path) = &outcome.filter {
+                    // The filter row forwards the click with the active
+                    // layer; the shell applies it after the dock (the
+                    // env_loads rail's pattern) as ONE undo step.
+                    if let Some(target) = selected {
+                        self.filter_loads.push((path.clone(), target));
+                    } else {
+                        log::warn!(
+                            "assets: filter '{}' clicked with no active layer",
+                            path.display()
+                        );
+                    }
+                }
                 // The import dialog (the R-C1 brief: the three import
                 // sections MOVE out of the tab body into one Import…
                 // window).
@@ -1519,6 +1538,11 @@ pub struct AppState {
     pub paint: Option<paint_state::PaintState>,
     /// The open document: layers + undo journal.
     pub doc: document::Document,
+    /// Whole-layer smart-filter applies (the Assets panel's Filters
+    /// category), one undo step each — the stroke journal cannot carry a
+    /// plane publish, so the shell keeps its own plane-op stack here and
+    /// the Undo/Redo arms interleave it via the history row's op id.
+    pub filter_undos: filter_apply::FilterUndoStack,
     /// The polygon-fill lasso tool: the armed click-path capture feeding
     /// pixel masks into fill layers (session state, never serialized).
     pub polygon_fill: fill_layer::PolygonFillTool,
@@ -2972,6 +2996,60 @@ impl UmberApp {
             Err(err) => {
                 log::error!("environment load failed: {err:#}");
                 self.notify_error("notice.environment-failed", &format!("{err:#}"));
+            }
+        }
+    }
+
+    /// Applies an `.umberfilter` file to `layer` as ONE undo step (the
+    /// Assets panel's Filters category): builds the plane op through
+    /// [`filter_apply::build_filter_op`] (read + CPU filter, no publish),
+    /// publishes it via the op's own `Command::apply` inside the shell's
+    /// filter undo stack, and records one context row on the session
+    /// history so the Undo/Redo arms interleave it newest-first.
+    fn apply_filter_file(&mut self, path: &std::path::Path, layer: u64) {
+        let filter = match umber_core::smart::SmartFilter::load_file(path) {
+            Ok(f) => f,
+            Err(err) => {
+                log::error!("filter load failed: {err:#}");
+                self.notify_error("notice.filter-failed", &format!("{err:#}"));
+                return;
+            }
+        };
+        let built = match self.state.paint.as_mut() {
+            Some(paint) => filter_apply::build_filter_op(paint, layer, &filter),
+            None => {
+                log::warn!("filter '{}': no paint session", path.display());
+                return;
+            }
+        };
+        match built {
+            Ok(Some(op)) => {
+                let name = op.filter_name.clone();
+                self.state
+                    .doc
+                    .session_history
+                    .record_context(history_panel::HistoryKind::FilterApply);
+                let op_id = self
+                    .state
+                    .doc
+                    .session_history
+                    .entries()
+                    .last()
+                    .map_or(0, |e| e.op_id);
+                if let Some(paint) = self.state.paint.as_mut() {
+                    self.state.filter_undos.push(op_id, op, paint);
+                }
+                log::info!("applied filter '{name}' to layer {layer} ({op_id})");
+            }
+            Ok(None) => {
+                log::warn!(
+                    "filter '{}': layer {layer} has no pixels to filter",
+                    filter.name
+                );
+            }
+            Err(err) => {
+                log::error!("filter '{}' apply failed: {err:#}", filter.name);
+                self.notify_error("notice.filter-failed", &format!("{err:#}"));
             }
         }
     }
@@ -4974,7 +5052,7 @@ impl eframe::App for UmberApp {
         } else {
             None
         };
-        let (home_actions, pick_notices, env_loads, flow_alpha, stamp_angle): DockDrain =
+        let (home_actions, pick_notices, env_loads, filter_loads, flow_alpha, stamp_angle): DockDrain =
             CentralPanel::default()
                 .show(ui, |ui| {
                     let mut dock_style = Style::from_egui(ui.style());
@@ -5000,6 +5078,7 @@ impl eframe::App for UmberApp {
                         home_actions: Vec::new(),
                         pick_notices: Vec::new(),
                         env_loads: Vec::new(),
+                        filter_loads: Vec::new(),
                         bakes: &mut self.state.bakes,
                         export: &mut self.state.export,
                         graph: &mut self.state.graph,
@@ -5093,9 +5172,11 @@ impl eframe::App for UmberApp {
                         viewer.home_actions.drain(..).collect();
                     let notices: Vec<String> = viewer.pick_notices.drain(..).collect();
                     let env_loads: Vec<std::path::PathBuf> = viewer.env_loads.drain(..).collect();
+                    let filter_loads: Vec<(std::path::PathBuf, u64)> =
+                        viewer.filter_loads.drain(..).collect();
                     let flow_alpha = viewer.viewport.live_flow_alpha.take();
                     let stamp_angle = viewer.viewport.live_stamp_angle.take();
-                    (actions, notices, env_loads, flow_alpha, stamp_angle)
+                    (actions, notices, env_loads, filter_loads, flow_alpha, stamp_angle)
                 })
                 .inner;
         // The material pick's toasts (the home_actions rail's pattern):
@@ -5107,6 +5188,11 @@ impl eframe::App for UmberApp {
         // File▸Load Environment… path (K1).
         for path in env_loads {
             self.apply_env_file(&path);
+        }
+        // The Assets browser's filter rows: applied to the layer that was
+        // active at the click, each as ONE undo step (`apply_filter_file`).
+        for (path, layer) in filter_loads {
+            self.apply_filter_file(&path, layer);
         }
         // The Ctrl+LMB chord's live values: stashed here, adopted into the
         // active preset at the brush sync above (next frame at latest).

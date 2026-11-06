@@ -1287,6 +1287,43 @@ pub fn list_smart_masks(
     out
 }
 
+/// Every loadable `.umberfilter` in `dirs`, as `(display name, path)`,
+/// sorted by name (the [`list_smart_materials`] rules: first directory
+/// wins the same-name dedup, a bad file is skipped with a log line). The
+/// Assets panel's Filters category lists these; a row click hands the
+/// PATH back (the shell loads + applies it to the active layer).
+pub fn list_smart_filters(dirs: &[std::path::PathBuf]) -> Vec<(String, std::path::PathBuf)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|x| x == umber_core::smart::SMART_FILTER_EXT)
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !seen.insert(file) {
+                continue;
+            }
+            match umber_core::smart::SmartFilter::load_file(&path) {
+                Ok(filter) => out.push((filter.name.clone(), path)),
+                Err(e) => log::warn!("smart filter {} skipped: {e}", path.display()),
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// The on-disk file a library asset resolves to by NAME — drag-out copies
 /// the original file, bytes untouched. `ext` is the library extension
 /// ("umbersmart" / "umbermask"); `load_name` reads a file's asset name (the
@@ -2434,6 +2471,28 @@ mod tests {
         assert_eq!(names, ["Ok"]);
         // A second dir with the same file name does not duplicate it.
         assert_eq!(list_smart_materials(&[dir.clone(), dir.clone()]).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_smart_filters_dedups_and_skips_broken() {
+        let dir = std::env::temp_dir().join(format!("umber-filters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("broken.umberfilter"), "{ not json").unwrap();
+        std::fs::write(
+            dir.join("crunch.umberfilter"),
+            r#"{"name":"Crunch","version":1,"ops":[{"type":"levels","low":0.1,"high":0.9,"gamma":0.8}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        let list = list_smart_filters(std::slice::from_ref(&dir));
+        let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Crunch"]);
+        // The path rides along (the shell applies from it, not by name).
+        assert_eq!(list[0].1, dir.join("crunch.umberfilter"));
+        // A second dir with the same file name does not duplicate it.
+        assert_eq!(list_smart_filters(&[dir.clone(), dir.clone()]).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

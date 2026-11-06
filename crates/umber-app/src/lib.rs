@@ -57,6 +57,7 @@ pub mod crash;
 /// headless; i18n::init() must run first — the tests call it).
 pub mod display_panel;
 pub mod document;
+pub mod filter_apply;
 pub mod history_panel;
 /// The i18n catalog (the snapshot tests init it before rendering).
 pub mod i18n;

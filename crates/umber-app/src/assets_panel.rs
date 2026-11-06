@@ -299,6 +299,9 @@ pub struct LibraryOutcome {
     /// File▸Load path (`env::load_environment_file` →
     /// `viewport.set_environment`).
     pub env: Option<std::path::PathBuf>,
+    /// A smart filter file to apply to the ACTIVE layer as one undo step
+    /// (the shell's `apply_filter_file` → `filter_apply` plane-op stack).
+    pub filter: Option<std::path::PathBuf>,
 }
 
 /// The brush shelf's swatch edge, points (UI/UX pass U3).
@@ -999,6 +1002,65 @@ pub fn library_ui(
                 ui.label(tr("assets.no-matches"));
             }
         });
+
+    // Filters: the fifth category (the landed SmartFilter's
+    // `.umberfilter` files), DEFAULT CLOSED so the resting panel (and the
+    // snapshot pins) don't move; the disk scan runs only while open,
+    // cached per scan epoch like the lists above. A row click yields
+    // `LibraryOutcome.filter` and the shell applies it to the active
+    // layer as ONE undo step.
+    egui::CollapsingHeader::new(tr("assets.filters"))
+        .id_salt("assets-filters")
+        .default_open(false)
+        .show(ui, |ui| {
+            let cache_id = egui::Id::new(("assets-filters", state.scan_epoch));
+            let filters: Vec<(String, std::path::PathBuf)> = ui.ctx().data(|d| {
+                d.get_temp::<Option<Vec<(String, std::path::PathBuf)>>>(cache_id)
+                    .flatten()
+                    .unwrap_or_default()
+            });
+            let filters = if filters.is_empty() {
+                let scanned = document::list_smart_filters(&document::smart_dirs());
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(cache_id, Some(scanned.clone())));
+                scanned
+            } else {
+                filters
+            };
+            let mut shown = 0usize;
+            for (name, path) in &filters {
+                if !matches(name) {
+                    continue;
+                }
+                shown += 1;
+                ui.horizontal(|ui| {
+                    let row = ui
+                        .add(egui::Label::new(name).sense(egui::Sense::click()))
+                        .on_hover_text(format!(
+                            "{}\n{}",
+                            path.display(),
+                            tr("assets.filter-apply-tip")
+                        ));
+                    row.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name.as_str())
+                    });
+                    if row.clicked() {
+                        out.filter = Some(path.clone());
+                    }
+                });
+            }
+            warn_empty_without_starter(
+                &mut state.starter_warns,
+                "filters",
+                filters.len(),
+                "assets/smart",
+            );
+            if filters.is_empty() {
+                ui.label(tr("assets.empty"));
+            } else if shown == 0 {
+                ui.label(tr("assets.no-matches"));
+            }
+        });
     persist_saved(state, saved_path);
     persist_search(state, search_path);
     out
@@ -1058,6 +1120,7 @@ mod kittest {
                         || o.mask.is_some()
                         || o.brush.is_some()
                         || o.env.is_some()
+                        || o.filter.is_some()
                     {
                         s.hit = Some(o);
                     }
@@ -1360,6 +1423,53 @@ mod kittest {
         );
     }
 
+    /// The fifth category draws its header but is DEFAULT CLOSED (the
+    /// resting panel — and the snapshot pins — don't move); opened, it
+    /// lists the scanned `.umberfilter` files, and clicking a row yields
+    /// its PATH in the outcome's `filter` (the shell applies it to the
+    /// active layer). The scan dir here is the test exe's own `smart/`
+    /// sidecar (a `.umberfilter` touches only the filters lister, so no
+    /// other test's scan sees it).
+    #[test]
+    fn the_filters_category_is_closed_by_default_and_yields_the_path_on_click() {
+        let exe_smart = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("smart");
+        std::fs::create_dir_all(&exe_smart).unwrap();
+        let filter_path = exe_smart.join("kittest-crunch.umberfilter");
+        std::fs::write(
+            &filter_path,
+            r#"{"name":"Kittest crunch","version":1,"ops":[{"type":"posterize","levels":3}]}"#,
+        )
+        .unwrap();
+        let mut h = harness_full(seeded_brushes(), None, None, [480.0, 1600.0]);
+        assert!(h.run_ok().is_some());
+        let header = tr("assets.filters");
+        assert!(h.query_by_label(&header).is_some(), "the header draws");
+        assert!(
+            h.query_by_label("Kittest crunch").is_none(),
+            "closed by default: no filter rows in the resting panel"
+        );
+        h.get_by_label(&header).click();
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("Kittest crunch").is_some(),
+            "opened: the scanned .umberfilter lists"
+        );
+        h.get_by_label("Kittest crunch").click();
+        assert!(h.run_ok().is_some());
+        let out = h
+            .state_mut()
+            .hit
+            .take()
+            .expect("the row click produced an outcome");
+        let path = out.filter.expect("the filter outcome carries the path");
+        assert_eq!(path, filter_path, "the clicked row's file");
+        let _ = std::fs::remove_file(&filter_path);
+    }
+
     /// K2: a search that empties a non-empty list shows the distinct
     /// no-matches label (once per emptied category); an empty library
     /// would still show assets.empty, which stays absent here.
@@ -1568,6 +1678,8 @@ mod kittest {
         assert_eq!(pt.set_locale("pt-BR"), "pt-BR");
         for key in [
             "assets.env-maps",
+            "assets.filters",
+            "assets.filter-apply-tip",
             "assets.no-matches",
             "assets.saved-searches",
             "assets.save-current",
