@@ -56,6 +56,9 @@ pub mod crash;
 /// for the kittest snapshot harness (tests/panel_snapshot.rs renders both
 /// headless; i18n::init() must run first — the tests call it).
 pub mod display_panel;
+/// Collapsible side columns (UI/UX U7): the dock-tree half of the icon
+/// rail, generic over the tab type so its tests need no shell.
+pub mod dock_rail;
 pub mod document;
 pub mod filter_apply;
 pub mod history_panel;

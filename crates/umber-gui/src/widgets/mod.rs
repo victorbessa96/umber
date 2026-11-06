@@ -9,6 +9,7 @@ pub mod color_picker;
 pub mod context_rail;
 pub mod curve;
 pub mod dialog_buttons;
+pub mod icon_rail;
 pub mod notices;
 pub mod param_group;
 pub mod ramp;
@@ -26,6 +27,7 @@ pub use curve::{Curve, CurveEdit, CurveError};
 pub use dialog_buttons::{
     dialog_buttons, platform_order, primary_button, ButtonRole, DialogButton,
 };
+pub use icon_rail::{toggle_flyout, IconRail, IconRailOutcome, RailItem, RAIL_WIDTH};
 pub use notices::{Notice, NoticeLevel, Notices};
 pub use param_group::{ParamGroup, ParamGroupUi};
 pub use ramp::{Interpolation, Ramp, RampEdit, Stop};

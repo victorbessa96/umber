@@ -189,3 +189,25 @@ Not counted as findings: the axis gizmo overlapping content (Blender and Painter
 ### 8.3 Suggested next wave (U6)
 
 A2-2 and A2-3 first (the first impression on a fresh mesh and on a laptop screen), then A2-4 (palette coverage), then the P2 polish. U5 stays parked on egui_dock.
+
+## 9. Wave U7: collapsible columns and the icon rail on egui 0.36
+
+U5 bundled the icon rail with the docking migration, which waits on egui_dock for egui 0.37 (still 0.21.1 requiring `^0.36` on 2026-11-06). The rail does not need the migration. egui_dock 0.21.1 already exposes everything the dock-tree half needs (`find_tab`, `remove_tab`, `split_left/right/below`, `SplitNode::fraction`), so U7 builds the rail now and U5 shrinks to the egui upgrade itself.
+
+### 9.1 Requirements
+
+- **R-RAIL-1.** Each side column (the project column on the left, the Layers/Properties stack on the right) folds into a narrow icon rail and unfolds back to the same tabs, active tabs, leaf heights and width share.
+- **R-RAIL-2.** The 3D and 2D views are never folded or moved.
+- **R-RAIL-3.** A folded column's panels stay one click away: a rail icon opens that panel as a flyout over the canvas; a second click (or Escape) closes it.
+- **R-RAIL-4.** Folding is reachable by a header button on the column, by the command palette and the control channel (`window.fold_left`, `window.fold_right`), and persists with the workspace layout.
+- **R-RAIL-5.** Below the Paint row's floor width, the boot default folds the right column to a rail before it tabs the 2D view (A2-3's stopgap becomes the second fallback).
+
+### 9.2 Design
+
+- `crates/umber-app/src/dock_rail.rs` (library, generic over the tab type, no UI): `side_column`, `collapse` and `restore` on a `DockState`, and the serializable `RailColumn { side, width, leaves[{tabs, active, height}] }`. A restored width is clamped to 10-45% of the window. A tab docked elsewhere while folded is not restored twice.
+- `umber_gui::IconRail` (widget): the expand button, a divider, one icon per folded panel, active while its flyout is open. It reports clicks in `IconRailOutcome` and the shell acts after the frame (the `ContextRail` split).
+- Shell wiring (`main.rs`): an `egui::Panel::left/right` of `RAIL_WIDTH` per folded side outside the dock area, the flyout as an `egui::Area` anchored beside the rail drawing the panel through the existing `PanelViewer`, the folded columns saved beside the layout.
+
+### 9.3 Status
+
+- 2026-11-06: model (`dock_rail.rs`, 8 tests) and widget (`icon_rail.rs`, 3 kittests) landed. The shell wiring waits on `main.rs`, which the T1 lane holds.
