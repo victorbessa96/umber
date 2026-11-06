@@ -2031,6 +2031,10 @@ pub struct UmberApp {
     #[cfg(debug_assertions)]
     theme_last_poll: f64,
     dock: DockState<Panel>,
+    /// The boot default or a Reset Layout waits for the first frame's
+    /// dock width to fit itself (UI/UX audit A2-3,
+    /// [`workspaces::compact_for_width`]).
+    compact_layout_pending: bool,
     /// Each dock leaf's active panel at the last scroll-into-view pass
     /// (g5-tab-overflow): a change scrolls that leaf's strip once.
     tab_active_seen: std::collections::HashMap<NodePath, Panel>,
@@ -2148,7 +2152,10 @@ impl UmberApp {
         // Layout: the last session's workspaces (`<state>/layouts.json`),
         // else the boot shape (`shell_menu::default_dock`, which Window ▸
         // Reset Layout rebuilds).
-        let (workspaces, dock) = workspaces::load_layouts(&layouts_path())
+        let saved = workspaces::load_layouts(&layouts_path());
+        // A2-3: the boot default fits itself to the first frame's width.
+        let compact_layout_pending = saved.is_none();
+        let (workspaces, dock) = saved
             .map(workspaces::Workspaces::restore)
             .unwrap_or_else(|| {
                 (
@@ -2208,6 +2215,7 @@ impl UmberApp {
                 ..AppState::default()
             },
             dock,
+            compact_layout_pending,
             tab_active_seen: std::collections::HashMap::new(),
             gpu,
             display_lut,
@@ -4726,6 +4734,7 @@ impl eframe::App for UmberApp {
                 if ui.button(tr("menu.reset-layout")).clicked() {
                     self.focus.restore(&mut self.dock);
                     self.dock = self.workspaces.reset_active();
+                    self.compact_layout_pending = true;
                     ui.close();
                 }
                 toolbar::menu_digit_pick(ui, &items, &mut actions);
@@ -5043,6 +5052,12 @@ impl eframe::App for UmberApp {
                     // R-LAYOUT-1: no leaf narrower than its panel's floor while
                     // the window can hold them (egui_dock lays splits out from
                     // fractions alone). A fitting layout is left untouched.
+                    if std::mem::take(&mut self.compact_layout_pending) {
+                        workspaces::compact_for_width(
+                            &mut self.dock,
+                            ui.available_rect_before_wrap().width(),
+                        );
+                    }
                     dock_floor::apply_floors(
                         &mut self.dock,
                         ui.available_rect_before_wrap(),

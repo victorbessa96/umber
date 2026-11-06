@@ -439,6 +439,46 @@ pub fn apply_viewport_preset(dock: &mut DockState<Panel>, preset: ViewportPreset
     }
 }
 
+/// The width-aware first layout (UI/UX audit A2-3). The Paint preset
+/// lays the 3D and 2D views side by side between the two rails; its
+/// horizontal floor (rail + 3D + 2D + rail, about 1120 logical px) does
+/// not fit a 1366 x 768 laptop at 125%, and below the floor
+/// `dock_floor` scales every leaf down, so every panel clips. When the
+/// row cannot hold its floor in `width`, the 2D view moves into the 3D
+/// view's leaf as a tab (the 3D stays active), which brings the row to
+/// about 880 px. View > Both splits it back out on demand. Only the
+/// boot default and Reset Layout call this: a user's own layout is
+/// never rearranged. Returns whether it changed the dock.
+pub fn compact_for_width(dock: &mut DockState<Panel>, width: f32) -> bool {
+    let tree = dock.main_surface();
+    if tree.is_empty() || !width.is_finite() {
+        return false;
+    }
+    let need = crate::dock_floor::subtree_floor(tree, NodeIndex::root(), &Panel::min_size).x;
+    if need <= width {
+        return false;
+    }
+    let (Some(vp), Some(uv)) = (
+        dock.find_tab(&Panel::Viewport),
+        dock.find_tab(&Panel::UvView),
+    ) else {
+        return false;
+    };
+    if vp.node_path() == uv.node_path() {
+        return false;
+    }
+    dock.remove_tab(uv);
+    let Some(vp) = dock.find_tab(&Panel::Viewport) else {
+        return false;
+    };
+    let Ok(leaf) = dock.leaf_mut(vp.node_path()) else {
+        return false;
+    };
+    leaf.append_tab(Panel::UvView);
+    leaf.active = vp.tab;
+    true
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -744,6 +784,42 @@ mod tests {
             solo(&pair, Panel::Viewport) && solo(&pair, Panel::UvView),
             "pair split"
         );
+    }
+
+    /// A2-3: below the Paint row's floor the 2D view tabs behind the 3D
+    /// (3D active), every panel stays docked, and the row then fits; at
+    /// a wide window nothing moves; it is idempotent; View > Both splits
+    /// the views back out.
+    #[test]
+    fn compact_for_width_tabs_the_2d_view_only_when_the_row_cannot_fit() {
+        let floor = |d: &DockState<Panel>| {
+            crate::dock_floor::subtree_floor(d.main_surface(), NodeIndex::root(), &Panel::min_size)
+                .x
+        };
+        let wide = preset(Workspace::Paint);
+        let need = floor(&wide);
+        assert!(need > 1000.0, "the Paint row's floor: {need}");
+
+        let mut dock = preset(Workspace::Paint);
+        assert!(!compact_for_width(&mut dock, need + 1.0), "fits: untouched");
+
+        assert!(compact_for_width(&mut dock, 960.0));
+        let vp = dock.find_tab(&Panel::Viewport).unwrap();
+        let uv = dock.find_tab(&Panel::UvView).unwrap();
+        assert_eq!(vp.node, uv.node, "2D tabbed with the 3D");
+        assert_eq!(active_of(&dock, Panel::Viewport), Some(Panel::Viewport));
+        assert!(
+            floor(&dock) <= 960.0,
+            "the compact row fits: {}",
+            floor(&dock)
+        );
+        assert_eq!(docked(&dock), ALL_PANELS.to_vec(), "no panel lost");
+        assert!(!compact_for_width(&mut dock, 960.0), "idempotent");
+
+        apply_viewport_preset(&mut dock, ViewportPreset::Both);
+        let vp = dock.find_tab(&Panel::Viewport).unwrap();
+        let uv = dock.find_tab(&Panel::UvView).unwrap();
+        assert_ne!(vp.node, uv.node, "Both splits them back out");
     }
 
     #[test]
