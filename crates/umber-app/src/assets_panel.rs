@@ -13,12 +13,15 @@
 //! writes (the brief's non-goals).
 //!
 //! The v1 slice's shape: a search field (substring,
-//! case-insensitive) + three collapsible categories (Brushes, Smart
-//! materials, Masks), each listing its library, the rows filtered
-//! by the search, the name + source-dir shown (the starter-vs-user
-//! distinction the census names; the tooltip carries the full
-//! path), a reload button per category (the smart shelf's own
-//! `↻` precedent), and apply-on-click:
+//! case-insensitive) + the collapsible categories (Brushes, Smart
+//! materials, Masks, and — K1 — Environment maps as the fourth,
+//! DEFAULT CLOSED so the resting panel shape doesn't move), each
+//! listing its library, the rows filtered by the search (a search
+//! that empties a non-empty list shows `assets.no-matches`; an empty
+//! library still shows `assets.empty`), the name + source-dir shown
+//! (the starter-vs-user distinction the census names; the tooltip
+//! carries the full path), a reload button per category (the smart
+//! shelf's own `↻` precedent), and apply-on-click:
 //!
 //! - a brush row: [`BrushPanel::select_preset_by_name`] (the new
 //!   seam) loads the preset into the brush session;
@@ -136,6 +139,35 @@ impl AssetsPanel {
     }
 }
 
+/// ThumbKey kind bytes for the [`AssetsPanel::thumb`] cache.
+pub const THUMB_KIND_BRUSH: u8 = 0;
+pub const THUMB_KIND_MATERIAL: u8 = 1;
+pub const THUMB_KIND_MASK: u8 = 2;
+/// K1: an env-map row's downsampled equirect swatch.
+pub const THUMB_KIND_ENV: u8 = 3;
+/// K2: a brush row's `<stem>.stamp.png` sidecar swatch.
+pub const THUMB_KIND_STAMP: u8 = 4;
+
+/// A file's content-ish key for the [`crate::asset_thumbs::ThumbKey`]
+/// cache: path + length + mtime, so a re-exported env map or stamp tip
+/// regenerates its swatch without hashing whole files (EXRs can be huge).
+fn file_content_key(path: &std::path::Path) -> String {
+    let (len, mtime) = std::fs::metadata(path)
+        .ok()
+        .map(|m| {
+            (
+                m.len(),
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+    format!("file|{}|{}|{}", path.display(), len, mtime)
+}
+
 /// What the shell must apply after a library row's click.
 #[derive(Debug, Default)]
 pub struct LibraryOutcome {
@@ -147,6 +179,10 @@ pub struct LibraryOutcome {
     /// `smart_mask_applied` flow — the SAME compose path the Layers
     /// panel's mask section uses).
     pub mask: Option<(u64, umber_core::smart::SmartMask)>,
+    /// K1: an environment map file to load — the shell reuses the exact
+    /// File▸Load path (`env::load_environment_file` →
+    /// `viewport.set_environment`).
+    pub env: Option<std::path::PathBuf>,
 }
 
 /// The brush shelf's swatch edge, points (UI/UX pass U3).
@@ -309,13 +345,19 @@ fn brush_swatches(
         };
         let (card, salt) = swatch_card();
         let json = format!("{salt}{}", entry.preset.to_json().unwrap_or_default());
-        let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
-            crate::asset_thumbs::brush_preview_on(
-                &entry.preset,
-                crate::asset_thumbs::THUMB_PX * 2,
-                card,
-            )
-        }) else {
+        let Some(tex) = state.thumb(
+            ui.ctx(),
+            THUMB_KIND_BRUSH,
+            &entry.preset.name,
+            &json,
+            || {
+                crate::asset_thumbs::brush_preview_on(
+                    &entry.preset,
+                    crate::asset_thumbs::THUMB_PX * 2,
+                    card,
+                )
+            },
+        ) else {
             continue;
         };
         let active = brush.active == Some(i);
@@ -431,7 +473,7 @@ pub fn library_ui(
         ui.ctx().data_mut(|d| {
             d.insert_temp(
                 egui::Id::new(("assets-extra-dirs", state.scan_epoch)),
-                Some(extras),
+                Some(extras.clone()),
             )
         });
     }
@@ -443,20 +485,49 @@ pub fn library_ui(
         .id_salt("assets-brushes")
         .default_open(true);
     brushes.show(ui, |ui| {
+        let mut shown = 0usize;
         for entry in &brush.library.entries {
             if !matches(&entry.preset.name) {
                 continue;
             }
+            shown += 1;
             ui.horizontal(|ui| {
                 let (card, salt) = swatch_card();
-                let json = format!("{salt}{}", entry.preset.to_json().unwrap_or_default());
-                if let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
-                    crate::asset_thumbs::brush_preview_on(
-                        &entry.preset,
-                        crate::asset_thumbs::THUMB_PX,
-                        card,
+                // K2: a stamped preset's `<stem>.stamp.png` sidecar is
+                // its honest swatch, keyed by the file's own stamp so a
+                // re-exported tip regenerates; without a sidecar the
+                // procedural stroke swatch (U3) is used.
+                let stamp = entry.source_path.with_extension("stamp.png");
+                let tex = if stamp.is_file() {
+                    let key = file_content_key(&stamp);
+                    let p = stamp.clone();
+                    state.thumb(ui.ctx(), THUMB_KIND_STAMP, &entry.preset.name, &key, || {
+                        crate::asset_thumbs::png_file_preview(&p, crate::asset_thumbs::THUMB_PX)
+                            .unwrap_or_else(|| {
+                                crate::asset_thumbs::brush_preview_on(
+                                    &entry.preset,
+                                    crate::asset_thumbs::THUMB_PX,
+                                    card,
+                                )
+                            })
+                    })
+                } else {
+                    let json = format!("{salt}{}", entry.preset.to_json().unwrap_or_default());
+                    state.thumb(
+                        ui.ctx(),
+                        THUMB_KIND_BRUSH,
+                        &entry.preset.name,
+                        &json,
+                        || {
+                            crate::asset_thumbs::brush_preview_on(
+                                &entry.preset,
+                                crate::asset_thumbs::THUMB_PX,
+                                card,
+                            )
+                        },
                     )
-                }) {
+                };
+                if let Some(tex) = tex {
                     ui.add(egui::Image::new(egui::load::SizedTexture::new(
                         tex,
                         egui::vec2(24.0, 24.0),
@@ -471,6 +542,8 @@ pub fn library_ui(
         }
         if brush.library.entries.is_empty() {
             ui.label(tr("assets.empty"));
+        } else if shown == 0 {
+            ui.label(tr("assets.no-matches"));
         }
     });
 
@@ -497,13 +570,15 @@ pub fn library_ui(
     } else {
         materials
     };
+    let mut shown = 0usize;
     for (name, material) in &materials {
         if !matches(name) {
             continue;
         }
+        shown += 1;
         ui.horizontal(|ui| {
             let json = serde_json::to_string(material).unwrap_or_default();
-            if let Some(tex) = state.thumb(ui.ctx(), 1, name, &json, || {
+            if let Some(tex) = state.thumb(ui.ctx(), THUMB_KIND_MATERIAL, name, &json, || {
                 crate::asset_thumbs::material_preview(material, crate::asset_thumbs::THUMB_PX)
             }) {
                 ui.add(egui::Image::new(egui::load::SizedTexture::new(
@@ -528,6 +603,8 @@ pub fn library_ui(
     }
     if materials.is_empty() {
         ui.label(tr("assets.empty"));
+    } else if shown == 0 {
+        ui.label(tr("assets.no-matches"));
     }
 
     // Smart masks: the same loader rules + the shell's compose flow.
@@ -545,13 +622,15 @@ pub fn library_ui(
     } else {
         masks
     };
+    let mut shown = 0usize;
     for (name, mask) in &masks {
         if !matches(name) {
             continue;
         }
+        shown += 1;
         ui.horizontal(|ui| {
             let json = serde_json::to_string(mask).unwrap_or_default();
-            if let Some(tex) = state.thumb(ui.ctx(), 2, name, &json, || {
+            if let Some(tex) = state.thumb(ui.ctx(), THUMB_KIND_MASK, name, &json, || {
                 crate::asset_thumbs::mask_preview(mask, crate::asset_thumbs::THUMB_PX)
                     .unwrap_or_else(|| egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT))
             }) {
@@ -578,7 +657,72 @@ pub fn library_ui(
     }
     if masks.is_empty() {
         ui.label(tr("assets.empty"));
+    } else if shown == 0 {
+        ui.label(tr("assets.no-matches"));
     }
+
+    // K1 — Environment maps: the fourth category, DEFAULT CLOSED so the
+    // resting panel (and the snapshot pins) don't move; the disk scan
+    // runs only while open, cached per scan epoch like the lists above.
+    // A row click yields `LibraryOutcome.env` and the shell applies it
+    // through the exact File▸Load Environment… path.
+    egui::CollapsingHeader::new(tr("assets.env-maps"))
+        .id_salt("assets-env-maps")
+        .default_open(false)
+        .show(ui, |ui| {
+            let cache_id = egui::Id::new(("assets-env-maps", state.scan_epoch));
+            let envs: Vec<(String, std::path::PathBuf)> = ui.ctx().data(|d| {
+                d.get_temp::<Option<Vec<(String, std::path::PathBuf)>>>(cache_id)
+                    .flatten()
+                    .unwrap_or_default()
+            });
+            let envs = if envs.is_empty() {
+                let scanned = crate::env::list_env_maps(&crate::env::env_dirs());
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(cache_id, Some(scanned.clone())));
+                scanned
+            } else {
+                envs
+            };
+            let mut shown = 0usize;
+            for (name, path) in &envs {
+                if !matches(name) {
+                    continue;
+                }
+                shown += 1;
+                ui.horizontal(|ui| {
+                    let key = file_content_key(path);
+                    if let Some(tex) = state.thumb(ui.ctx(), THUMB_KIND_ENV, name, &key, || {
+                        crate::asset_thumbs::env_preview(path, crate::asset_thumbs::THUMB_PX)
+                            .unwrap_or_else(|| {
+                                egui::ColorImage::filled(
+                                    [crate::asset_thumbs::THUMB_PX as usize; 2],
+                                    egui::Color32::TRANSPARENT,
+                                )
+                            })
+                    }) {
+                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                            tex,
+                            egui::vec2(24.0, 24.0),
+                        )));
+                    }
+                    let row = ui
+                        .add(egui::Label::new(name).sense(egui::Sense::click()))
+                        .on_hover_text(path.display().to_string());
+                    row.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name.as_str())
+                    });
+                    if row.clicked() {
+                        out.env = Some(path.clone());
+                    }
+                });
+            }
+            if envs.is_empty() {
+                ui.label(tr("assets.empty"));
+            } else if shown == 0 {
+                ui.label(tr("assets.no-matches"));
+            }
+        });
     persist_search(state, search_path);
     out
 }
@@ -604,6 +748,10 @@ mod kittest {
     }
 
     fn harness() -> Harness<'static, AssetsHarness> {
+        harness_with(crate::brush_panel::BrushPanel::new())
+    }
+
+    fn harness_with(brush: crate::brush_panel::BrushPanel) -> Harness<'static, AssetsHarness> {
         crate::i18n::init();
         Harness::<AssetsHarness>::builder()
             .with_step_dt(1.0 / 60.0)
@@ -611,13 +759,17 @@ mod kittest {
             .build_ui_state(
                 |ui, s: &mut AssetsHarness| {
                     let o = library_ui(ui, &mut s.panel, &s.brush, None, None);
-                    if o.material.is_some() || o.mask.is_some() || o.brush.is_some() {
+                    if o.material.is_some()
+                        || o.mask.is_some()
+                        || o.brush.is_some()
+                        || o.env.is_some()
+                    {
                         s.hit = Some(o);
                     }
                 },
                 AssetsHarness {
                     panel: AssetsPanel::default(),
-                    brush: crate::brush_panel::BrushPanel::new(),
+                    brush,
                     hit: None,
                 },
             )
@@ -875,6 +1027,138 @@ mod kittest {
             h.query_by_label("Edge wear").is_none(),
             "mask filtered out too"
         );
+    }
+
+    /// K1: the fourth category draws its header but is DEFAULT CLOSED
+    /// (no env rows in the resting panel); opening it lists the bundled
+    /// studio maps, and clicking a row yields its path in the outcome.
+    #[test]
+    fn the_env_maps_category_is_closed_by_default_and_applies_on_click() {
+        let mut h = harness();
+        assert!(h.run_ok().is_some());
+        let header = tr("assets.env-maps");
+        assert!(h.query_by_label(&header).is_some(), "the header draws");
+        assert!(
+            h.query_by_label("studio-neutral").is_none(),
+            "closed by default: no env rows in the resting panel"
+        );
+        h.get_by_label(&header).click();
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label("studio-neutral").is_some(),
+            "opened: the bundled studio maps list"
+        );
+        h.get_by_label("studio-neutral").click();
+        assert!(h.run_ok().is_some());
+        let out = h
+            .state_mut()
+            .hit
+            .take()
+            .expect("the row click produced an outcome");
+        let path = out.env.expect("the env outcome carries the path");
+        assert!(
+            path.ends_with("studio-neutral.png"),
+            "the clicked row's file: {}",
+            path.display()
+        );
+    }
+
+    /// K2: a search that empties a non-empty list shows the distinct
+    /// no-matches label (once per emptied category); an empty library
+    /// would still show assets.empty, which stays absent here.
+    #[test]
+    fn search_with_no_matches_shows_no_matches_not_empty() {
+        let mut h = harness_with(seeded_brushes());
+        assert!(h.run_ok().is_some());
+        assert!(
+            h.query_by_label(&tr("assets.no-matches")).is_none(),
+            "empty search: the lists are full"
+        );
+        h.state_mut().panel.search = "zzz-no-such-asset".into();
+        assert!(h.run_ok().is_some());
+        let nm = tr("assets.no-matches");
+        // Brushes + materials + masks are all non-empty and fully
+        // filtered out → one no-matches label each; the env category is
+        // closed, so it draws none.
+        let count = h.query_all_by_label(&nm).count();
+        assert_eq!(
+            count, 3,
+            "one no-matches per non-empty emptied list: {count}"
+        );
+        assert!(
+            h.query_by_label(&tr("assets.empty")).is_none(),
+            "no empty-library label while the lists hold rows"
+        );
+        assert!(h.query_by_label("Worn metal").is_none());
+    }
+
+    /// K2: a brush row with a `<stem>.stamp.png` sidecar keys its swatch
+    /// by the stamp file (THUMB_KIND_STAMP); the bundled shelf has no
+    /// sidecars, so it keys only the procedural swatch.
+    #[test]
+    fn brush_rows_key_stamp_sidecar_swatches_through_the_thumb_cache() {
+        crate::i18n::init();
+        let dir = std::env::temp_dir().join(format!("umber-stamp-swatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        std::fs::copy(
+            repo.join("assets/brushes/hard-round.umberbrush"),
+            dir.join("hard-round.umberbrush"),
+        )
+        .unwrap();
+        // A real PNG as the tip (the committed studio map stands in).
+        std::fs::copy(
+            repo.join("assets/env/studio-neutral.png"),
+            dir.join("hard-round.stamp.png"),
+        )
+        .unwrap();
+        let mut brush = crate::brush_panel::BrushPanel::new();
+        brush.library = umber_brush::Library::load_from_dirs(std::slice::from_ref(&dir));
+        brush.active = None;
+        let name = brush.library.entries[0].preset.name.clone();
+        let mut h = harness_with(brush);
+        assert!(h.run_ok().is_some());
+        let keys: Vec<_> = h.state().panel.thumbs.keys().cloned().collect();
+        assert!(
+            keys.iter()
+                .any(|k| k.kind == THUMB_KIND_STAMP && k.name == name),
+            "the stamp sidecar keyed its own swatch: {keys:?}"
+        );
+        assert!(
+            !keys
+                .iter()
+                .any(|k| k.kind == THUMB_KIND_BRUSH && k.name == name),
+            "the procedural key is not used when the sidecar exists"
+        );
+        let mut h2 = harness_with(seeded_brushes());
+        assert!(h2.run_ok().is_some());
+        assert!(
+            h2.state()
+                .panel
+                .thumbs
+                .keys()
+                .all(|k| k.kind != THUMB_KIND_STAMP),
+            "no sidecars in the bundled shelf → no stamp-keyed swatches"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The K1/K2 key pins: the new assets keys resolve — and actually
+    /// translate — in BOTH shipped catalogs; the empty-library label is
+    /// unchanged by K2.
+    #[test]
+    fn the_new_assets_keys_resolve_in_both_shipped_catalogs() {
+        crate::i18n::init();
+        let mut pt = crate::i18n::I18n::builtin();
+        assert_eq!(pt.set_locale("pt-BR"), "pt-BR");
+        for key in ["assets.env-maps", "assets.no-matches"] {
+            let en = crate::i18n::tr_en(key);
+            assert_ne!(en, key, "en-US defines {key}");
+            let pt_s = pt.lookup(key, None);
+            assert_ne!(pt_s, key, "pt-BR defines {key}");
+            assert_ne!(pt_s, en, "pt-BR translates {key}");
+        }
+        assert_eq!(crate::i18n::tr_en("assets.empty"), "Nothing here yet.");
     }
 }
 

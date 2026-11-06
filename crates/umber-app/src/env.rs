@@ -96,6 +96,91 @@ pub fn load_default_environment(gpu: &GpuContext) -> Option<EnvIrradiance> {
     None
 }
 
+/// The env-map library search path: the bundled `assets/env`, then the
+/// exe-dir `env/` (installed builds), then the persisted extra library
+/// folders — the same first-wins order as [`crate::document::smart_dirs`].
+pub fn env_dirs() -> Vec<PathBuf> {
+    env_dirs_with(&crate::document::load_extra_dirs(
+        crate::document::extra_dirs_path().as_deref(),
+    ))
+}
+
+/// [`env_dirs`] with explicit extras (the testable core, mirroring
+/// [`crate::document::smart_dirs_with`]).
+pub fn env_dirs_with(extras: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env")];
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
+        dirs.push(exe_dir.join("env"));
+    }
+    for e in extras {
+        if !dirs.contains(e) {
+            dirs.push(e.clone());
+        }
+    }
+    dirs
+}
+
+/// A cheap magic-byte gate — the listers' skip-bad-file rule without a
+/// full decode (EXR files can be huge): `.png` must start with the PNG
+/// signature, `.exr` with the EXR magic `0x762f3101`.
+fn has_env_magic(path: &Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 8];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let n = f.read(&mut buf).unwrap_or(0);
+    match format_for_path(path) {
+        Some(EnvFormat::Rgba8Unorm) => {
+            n >= 8 && buf[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        }
+        Some(EnvFormat::Rgba32Float) => n >= 4 && buf[..4] == [0x76, 0x2F, 0x31, 0x01],
+        None => false,
+    }
+}
+
+/// Every loadable environment map in `dirs` — `.png` / `.exr` equirects —
+/// as `(display name, path)`, sorted by name, deduplicated by file name
+/// (first directory wins), bad files skipped with a log line: the
+/// [`crate::document::list_smart_materials`] rules. The display name is
+/// the file stem (`studio-neutral.png` → `studio-neutral`).
+pub fn list_env_maps(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && format_for_path(p).is_some())
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !seen.insert(file.clone()) {
+                continue;
+            }
+            if !has_env_magic(&path) {
+                log::warn!("env map {} skipped: wrong magic bytes", path.display());
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or(file);
+            out.push((name, path));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +272,72 @@ mod tests {
         )
         .expect("studio default must convolve");
         assert_eq!(env.dimensions(), (32, 16));
+    }
+
+    const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    const EXR_MAGIC: &[u8] = &[0x76, 0x2F, 0x31, 0x01];
+
+    fn write_env(dir: &Path, name: &str, magic: &[u8]) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, magic).unwrap();
+        p
+    }
+
+    #[test]
+    fn env_dirs_with_puts_bundled_first_then_extras_deduped() {
+        let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env");
+        let extra = std::env::temp_dir().join("umber-env-dirs-extra");
+        let dirs = env_dirs_with(&[bundled.clone(), extra.clone(), extra.clone()]);
+        assert_eq!(dirs[0], bundled, "bundled assets/env first (wins dedup)");
+        assert_eq!(
+            dirs.iter().filter(|d| **d == extra).count(),
+            1,
+            "extras deduped: {dirs:?}"
+        );
+        assert!(dirs.len() <= 3, "bundled + exe-dir + one extra: {dirs:?}");
+    }
+
+    #[test]
+    fn list_env_maps_gates_formats_dedups_first_wins_and_skips_bad_files() {
+        let root = std::env::temp_dir().join(format!("umber-env-list-{}", std::process::id()));
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        write_env(&a, "studio-neutral.png", PNG_MAGIC);
+        write_env(&a, "probe.exr", EXR_MAGIC);
+        write_env(&a, "notes.txt", b"not an env map");
+        write_env(&a, "fake.png", b"no magic at all");
+        // Same file name in b: the first dir must win.
+        write_env(&b, "studio-neutral.png", EXR_MAGIC);
+        write_env(&b, "extra.exr", EXR_MAGIC);
+        let listed = list_env_maps(&[a.clone(), b.clone()]);
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["extra", "probe", "studio-neutral"],
+            "sorted by name; .txt and bad-magic skipped: {names:?}"
+        );
+        let neutral = listed.iter().find(|(n, _)| n == "studio-neutral").unwrap();
+        assert!(
+            neutral.1.starts_with(&a),
+            "first dir wins the same-name dedup: {}",
+            neutral.1.display()
+        );
+        // A missing dir is not an error.
+        let with_missing = list_env_maps(&[root.join("nope"), a.clone()]);
+        assert_eq!(with_missing.len(), 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_bundled_env_dir_lists_the_committed_studio_maps() {
+        let listed = list_env_maps(&env_dirs_with(&[]));
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"studio-neutral"),
+            "the committed default lists: {names:?}"
+        );
+        assert!(names.len() >= 3, "three studio maps ship: {names:?}");
     }
 }

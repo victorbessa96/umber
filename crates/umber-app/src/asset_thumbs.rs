@@ -15,6 +15,7 @@
 //! preset's JSON) — a changed preset file regenerates its swatch.
 
 use egui::ColorImage;
+use std::path::Path;
 use umber_core::smart::{MaskSource, SmartMask, SmartMaterial};
 
 /// Swatch edge in pixels (matches the layer thumbnails' 32 px chips).
@@ -307,6 +308,69 @@ pub fn thumb_key(kind: u8, name: &str, preset_json: &str) -> ThumbKey {
     }
 }
 
+/// Box-averages an RGBA8 image down to `size` x `size` (the swatch edge):
+/// each output pixel is the mean of its source block.
+fn downsample_rgba8(px: &[u8], w: u32, h: u32, size: u32) -> ColorImage {
+    let size = size.max(1) as usize;
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let mut out = vec![0u8; size * size * 4];
+    for y in 0..size {
+        for x in 0..size {
+            let x0 = x * w / size;
+            let x1 = (((x + 1) * w / size).max(x0 + 1)).min(w);
+            let y0 = y * h / size;
+            let y1 = (((y + 1) * h / size).max(y0 + 1)).min(h);
+            let mut acc = [0u32; 4];
+            let mut n = 0u32;
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let i = (sy * w + sx) * 4;
+                    for (c, a) in acc.iter_mut().enumerate() {
+                        *a += px[i + c] as u32;
+                    }
+                    n += 1;
+                }
+            }
+            let i = (y * size + x) * 4;
+            for c in 0..4 {
+                out[i + c] = (acc[c] / n.max(1)) as u8;
+            }
+        }
+    }
+    ColorImage::from_rgba_unmultiplied([size, size], &out)
+}
+
+/// A PNG file's downsampled swatch (K2) — the brush presets'
+/// `<stem>.stamp.png` tips, shown in the Assets browser's brush rows when
+/// the sidecar exists.
+pub fn png_file_preview(path: &Path, size: u32) -> Option<ColorImage> {
+    let (w, h, rgba) = umber_export::png::read_png_rgba8(path).ok()?;
+    Some(downsample_rgba8(&rgba, w, h, size))
+}
+
+/// An environment map's downsampled equirect swatch (K1). LDR PNGs
+/// average straight; HDR EXRs get a per-channel Reinhard tone map plus
+/// gamma first — the swatch is a hint, not a render, the same honesty
+/// rule as the mask/material swatches.
+pub fn env_preview(path: &Path, size: u32) -> Option<ColorImage> {
+    match crate::env::format_for_path(path)? {
+        umber_gpu::EnvFormat::Rgba8Unorm => png_file_preview(path, size),
+        umber_gpu::EnvFormat::Rgba32Float => {
+            let (w, h, floats) = umber_export::exr::read_exr_rgba_f32(path).ok()?;
+            let mut rgba = vec![0u8; floats.len()];
+            for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+                for c in 0..3 {
+                    let v = floats[i * 4 + c].max(0.0);
+                    let t = v / (1.0 + v); // Reinhard
+                    px[c] = (t.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+                }
+                px[3] = 255;
+            }
+            Some(downsample_rgba8(&rgba, w, h, size))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +565,48 @@ mod tests {
         let k3 = thumb_key(2, "metal", "{\"a\":1}");
         assert_ne!(k1, k2);
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn downsample_box_averages_blocks() {
+        // 4x4 -> 2x2: each output pixel is the mean of its 2x2 block.
+        let mut px = vec![0u8; 4 * 4 * 4];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let i = (y * 4 + x) * 4;
+                let v = ((y * 4 + x) * 16) as u8;
+                px[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let img = downsample_rgba8(&px, 4, 4, 2);
+        assert_eq!(img.size, [2, 2]);
+        // Top-left block: pixels 0, 1, 4, 5 -> (0+16+64+80)/4 = 40.
+        assert_eq!(img.pixels[0].r(), 40);
+        // Bottom-right block: 10, 11, 14, 15 -> (160+176+224+240)/4 = 200.
+        assert_eq!(img.pixels[3].r(), 200);
+    }
+
+    #[test]
+    fn png_file_preview_reads_and_downsamples_a_real_file() {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/env/studio-neutral.png");
+        let img = png_file_preview(&p, 16).expect("the committed studio map decodes");
+        assert_eq!(img.size, [16, 16]);
+        assert_eq!(
+            img.pixels,
+            png_file_preview(&p, 16).unwrap().pixels,
+            "deterministic"
+        );
+        assert!(png_file_preview(Path::new("/nonexistent/x.png"), 16).is_none());
+    }
+
+    #[test]
+    fn env_preview_gates_on_format_and_handles_ldr_pngs() {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/env/studio-neutral.png");
+        let img = env_preview(&p, 8).expect("LDR png env swatch");
+        assert_eq!(img.size, [8, 8]);
+        let txt = std::env::temp_dir().join(format!("umber-env-prev-{}.txt", std::process::id()));
+        std::fs::write(&txt, b"nope").unwrap();
+        assert!(env_preview(&txt, 8).is_none(), "non-env extension is None");
+        let _ = std::fs::remove_file(&txt);
     }
 }
