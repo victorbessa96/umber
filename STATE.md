@@ -11,7 +11,12 @@
 
 ## Status line
 
-Current phase: **THE FRESH CHARTER CYCLE — L6 THE UNIFIED TIMELINE
+Current phase (2026-11-05): **the UI/UX pass, waves U1-U4 LANDED; U5
+parked on egui_dock** (see the 2026-11-05 local-8dc7062e section below).
+The status paragraph that follows is the 10-27 to 11-01 picture, kept for
+its open tails.
+
+Earlier phase: **THE FRESH CHARTER CYCLE — L6 THE UNIFIED TIMELINE
 LANDED (2026-10-27, `75c9594`).** Bessa's launch word opened the
 cycle ("continue working autonomously... all the claws"); the W-C4
 runway's L6 — the graph journal joining the History window as the
@@ -64,6 +69,39 @@ physical access (boot straight into it, skip the OS), checking STOOD
 DOWN by his order. The release lane stays Bessa-gated: SPEC
 ratification (SPEC.md still DRAFT), the dogfood asset, Windows
 signing, the alpha tag.
+
+## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
+
+**Row 156-B (the UV G-buffer single source of truth) CLOSED.** One
+texel->barycentric primitive (`umber_mesh::uv_gbuffer`) feeds paint,
+composite, masks, export padding (`uv_coverage`) and the bakes; on the GPU
+`UV_GBUFFER_SHADER` is the only UV point-in-triangle solve left (the ID and
+position bakes gather from its prim/bary textures). Pinned by CPU-vs-GPU
+parity goldens (rows 172-180, `386e149`).
+
+**The UI/UX pass** (spec `docs/specs/uiux-2026-11-05-audit-requirements-plan.md`,
+kill report `docs/loop/kill-reports/2026-11-05-uiux-u1.md`; Blender 4.x,
+photocraft and craft-ui as references; every change live-checked on the
+release binary through `--control` screenshots):
+
+- U1 first-launch correctness + U2 part 1 (rows 182-183): empty-viewport
+  backdrop, compact layer-creation row, panel-group menu on every tab bar,
+  status-bar readouts.
+- U3 brush assets (rows 184-191): the brush shelf under the 3D view
+  (swatches render each preset's own dabs), the Shift+Space brush popup,
+  catalogs (Basic/Detail/Texture/Erase/Utility), and the preset pressure
+  curves wired into the dab engine (they were saved but never read).
+- U4 themes (rows 192, 196): Dark / Light / High Contrast with WCAG floors
+  pinned by test, the real theme preference (Quick Setup's Light had been
+  a no-op), Reduce Motion honoured by every animation, the UV canvas and
+  brush swatch cards themed.
+- `dcommit.py` now refuses a commit that adds a duplicate queue row number
+  (five sibling collisions in one day, `3f855a1`).
+
+**Parked:** U5 = the egui 0.37 migration plus the icon rail and collapsible
+columns. egui 0.37.0 is out but egui_dock 0.21.1 still requires egui 0.36
+(crates.io, checked 2026-11-05). **Desktop checks 1-4** still need Bessa's
+desktop. CI: `9c7c4b4`, `a72e44a`, `3f855a1` green; `b474395` (a sibling's docs-only row) went red on one Windows WARP timing flake, `bake_now_runs_on_a_worker_and_writes_the_map` past its 60 s deadline, green on the runs either side; its deadline is now 600 s like the high-poly transfer test.
 
 ## 2026-11-05 (local-27c7e3d1...) — row 153 completed under a lifted cargo envelope
 

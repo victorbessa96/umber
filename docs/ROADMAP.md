@@ -18,6 +18,20 @@ partner."
 
 ---
 
+## Delta since 2026-10-24 (as of 2026-11-05)
+
+- Row 156-B CLOSED: the UV G-buffer is the single texel->barycentric
+  source for paint, composite, masks, export padding and every bake
+  (CPU-vs-GPU parity goldens pin it).
+- Row 154 command registry (dispatch by id, `command.list`/`command.run`
+  on the control channel and MCP), row 155 rmcp 3.5 MCP server + cap-std
+  workspace confinement, row 156-A hostile-input corpus + 200k-iteration
+  fuzz (two glTF bug classes found and fixed).
+- The UI/UX pass U1-U4 (spec `docs/specs/uiux-2026-11-05-audit-requirements-plan.md`):
+  first-launch correctness, layer row + panel-group menus, brush asset
+  shelf / popup / catalogs / pressure curves, themes + Reduce Motion.
+  U5 (egui 0.37 + icon rail) waits on egui_dock.
+
 ## Where we stand (2026-10-24)
 
 **186,170 LOC across 16 crates, 2,251 test functions** (12.1/kLOC,
@@ -218,8 +232,8 @@ pass; the .ftl lock lift (if it stands).
 | Color management | PARITY |
 | Export/Import | PARITY (the .spp v2 staged lanes; text unsupported) |
 | History/undo | PARITY (the unified timeline LANDED — L6, `75c9594`, 2026-10-27) |
-| UI/UX density | PARTIAL (36/43 GUI kills; keyboard-only is the felt gap — the color picker CLOSED 2026-10-25 by verification: the custom picker sits at every color site, the lens's grep used the wrong symbol) |
-| Assets/ecosystem | **GAP — the moat** (the Assets panel + starter content) |
+| UI/UX density | PARTIAL → closing (36/43 GUI kills by 10-24; the 2026-11-05 UI/UX pass landed U1-U4: brush shelf + Shift+Space popup + catalogs, Dark/Light/High Contrast themes with WCAG floors, Reduce Motion; open: U5 icon rail + collapsible columns, parked with the egui 0.37 migration until egui_dock supports it) |
+| Assets/ecosystem | **GAP → narrowing** (the Assets panel + brush shelf landed; starter content waves K5-K9 landing 2026-11-05: import-asset CLI, ten materials, studio environments) |
 | Scripting/automation | **EXCEEDS** (headless-first, versioned JSONL) + MCP stdio server + token-auth loopback control landed 2026-11-01 `3331bcb` (Hermes registration = queue row 152) + app-side control v2 (`ui.inspect`, `viewport.screenshot`) and `--bridge` MCP relay 2026-11-05 (queue row 153) + the client-library gap |
 | Interchange (MaterialX, diffable format) | **EXCEEDS** |
 | Community/local-first/no-telemetry/never-crash | **EXCEEDS** |

@@ -3405,7 +3405,10 @@ mod tests {
         // worker already finished — a synchronous bake_now fails here.
         assert!(p.is_baking());
         assert!(p.last_records().is_empty());
-        await_job_within(&mut p, 60);
+        // WARP (Windows CI) ran this 512² AO bake past 60 s once (run on
+        // b474395, a docs-only commit; green on the runs either side):
+        // the same software-adapter deadline as the high-poly transfer.
+        await_job_within(&mut p, 600);
         assert!(p.status().starts_with("Baked 1 map"), "{}", p.status());
         let written = &p.last_records()[0].path;
         assert_eq!(written, &dir.join("Quad_ambient_occlusion.png"));
