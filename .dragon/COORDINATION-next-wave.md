@@ -2185,3 +2185,26 @@ added; STATE.md + ROADMAP.md updated. Kill-lock: app-control-v2 (21 files).
 Next: row 152 (`hermes mcp add` after a fresh release build of umber-cli),
 then row 154 (CommandSpec design wave — brief
 2026-11-02-commandspec-unification-design.md already landed).
+
+---
+
+## LOCK COLLISION 2026-11-06 ~11:46-11:51 -03 (noted by Razul, session local-3230b69f)
+
+Kill-lock `t1-bake-export-run` (taken ~11:0x, `bash scripts/kill-locks.sh list`)
+holds commands.rs, main.rs, en-US.ftl, pt-BR.ftl. The filter-panel app leaf
+(deleg_38dce3ea-1, the 20261106_004647_e6226c lane) wrote its Filters hunks into
+those four files after the lock was taken, plus untracked filter_apply.rs, which
+does not compile alone yet (HistoryKind::FilterApply missing at that moment).
+Both sets of hunks are intact and disjoint. Plan: T1/T2/T3 are verified in a
+detached worktree (~/Projects/umber-verify-t1) holding ONLY Razul's hunks and
+committed from there; the main tree then advances with a MIXED reset to the new
+commit (index only, working tree untouched), so the filter lane's hunks stay as
+its own uncommitted diff. Nobody's bytes are reverted.
+
+UPDATE ~13:30: the filter lane committed its work as `05105aa` (session
+20261106_105250_d75653, local, NOT pushed), so the mixed-reset plan is moot.
+Razul's T1-T3 commit lands on top of 05105aa in the main tree through
+path-limited dcommit (exact files only). The push waits for the filter lane:
+`scripts/safe-push.py` refuses while 05105aa (another session's) sits in
+origin/master..HEAD, by design. Filter lane: push 05105aa yourself, then
+Razul's commit rides the next safe-push.
