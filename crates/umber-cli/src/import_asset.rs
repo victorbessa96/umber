@@ -649,7 +649,13 @@ mod tests {
 
     #[test]
     fn kind_names_round_trip() {
-        for name in ["smart-material", "smart-mask", "smart-filter", "brush", "env"] {
+        for name in [
+            "smart-material",
+            "smart-mask",
+            "smart-filter",
+            "brush",
+            "env",
+        ] {
             let kind = AssetKind::from_name(name).unwrap();
             assert_eq!(kind.name(), name);
             assert_eq!(kind.to_string(), name);

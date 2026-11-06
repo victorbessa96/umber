@@ -3269,8 +3269,14 @@ mod tests {
             for row in rows {
                 assert!(row["path"].is_string(), "{row}");
                 assert!(
-                    ["smart-material", "smart-mask", "smart-filter", "brush", "env"]
-                        .contains(&row["kind"].as_str().unwrap()),
+                    [
+                        "smart-material",
+                        "smart-mask",
+                        "smart-filter",
+                        "brush",
+                        "env"
+                    ]
+                    .contains(&row["kind"].as_str().unwrap()),
                     "{row}"
                 );
                 assert!(row["name"].is_string() && row["bytes"].is_u64(), "{row}");

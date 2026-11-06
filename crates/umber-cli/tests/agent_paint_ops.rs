@@ -769,8 +769,14 @@ fn radius_texels_sets_the_session_brush_through_the_texel_seam() {
         let px = &after["texels"][i];
         assert_eq!(px[0], 0, "R stays 0 under green ({which}): {after}");
         assert_eq!(px[2], 0, "B stays 0 under green ({which}): {after}");
-        assert!(px[1].as_u64().unwrap_or(0) > 0, "{which} G painted: {after}");
-        assert!(px[3].as_u64().unwrap_or(0) > 0, "{which} A painted: {after}");
+        assert!(
+            px[1].as_u64().unwrap_or(0) > 0,
+            "{which} G painted: {after}"
+        );
+        assert!(
+            px[3].as_u64().unwrap_or(0) > 0,
+            "{which} A painted: {after}"
+        );
     }
     assert_eq!(
         after["texels"][1],

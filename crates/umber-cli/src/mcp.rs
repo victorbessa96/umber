@@ -800,7 +800,13 @@ mod tests {
             kinds.sort();
             assert_eq!(
                 kinds,
-                ["brush", "env", "smart-filter", "smart-mask", "smart-material"],
+                [
+                    "brush",
+                    "env",
+                    "smart-filter",
+                    "smart-mask",
+                    "smart-material"
+                ],
                 "{reply}"
             );
             for row in rows {
