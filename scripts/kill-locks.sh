@@ -23,8 +23,16 @@ add)
   for f in "$@"; do
     bash "$0" check "$f" || exit 1
   done
-  : > "$DIR/$name.lock"
-  for f in "$@"; do echo "$f" >> "$DIR/$name.lock"; done
+  # Write to a temp file and rename, refusing on ANY write error: a full
+  # /tmp (tmpfs, 2026-11-06) once left an EMPTY lock that still printed
+  # "locked", so the files it claimed were silently unprotected.
+  tmp="$DIR/.$name.lock.$$"
+  if ! printf '%s\n' "$@" > "$tmp" || [ "$(wc -l < "$tmp")" -ne $# ]; then
+    rm -f "$tmp"
+    echo "kill-locks: REFUSED: could not write the lock for $name (disk full? df -h $DIR)" >&2
+    exit 3
+  fi
+  mv -f "$tmp" "$DIR/$name.lock" || { rm -f "$tmp"; echo "kill-locks: REFUSED: rename failed" >&2; exit 3; }
   echo "locked: $name -> $(wc -l < "$DIR/$name.lock") files"
   ;;
 check)
