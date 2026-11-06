@@ -455,6 +455,12 @@ pub struct ExportDialog {
     pub toast: Option<(umber_gui::NoticeLevel, String)>,
     /// Finished exports (see [`Self::completed_exports`]).
     completed_exports: u64,
+    /// The Export button was clicked this frame. The panel only holds a
+    /// shared `&PaintState`, and the export must read a FLUSHED composite
+    /// (`PaintState::flush_for_export` needs `&mut`), so the click is a
+    /// request the host runs after `show` returns: flush, then the same
+    /// `export_current` that `export.run` uses (one export path).
+    run_requested: bool,
 }
 
 impl ExportDialog {
@@ -474,6 +480,7 @@ impl ExportDialog {
             usda: false,
             toast: None,
             completed_exports: 0,
+            run_requested: false,
         }
     }
 
@@ -728,11 +735,24 @@ impl ExportDialog {
             .add_enabled(enabled, egui::Button::new(tr("button.export")))
             .clicked()
         {
-            self.export_now(&ctx);
+            self.run_requested = true;
         }
 
         ui.separator();
         ui.label(self.status.clone());
+    }
+
+    /// Takes the Export button's pending click (see `run_requested`).
+    pub fn take_run_request(&mut self) -> bool {
+        std::mem::take(&mut self.run_requested)
+    }
+
+    /// Runs a button-requested export through [`Self::export_current`]; a
+    /// refusal lands on the status line as the greyed button's reason.
+    pub fn run_requested_export(&mut self, ctx: &ExportContext<'_>) {
+        if let Err(key) = self.export_current(ctx) {
+            self.status = tr(key);
+        }
     }
 
     /// Runs the export synchronously and records the outcome in
@@ -1146,6 +1166,29 @@ mod tests {
         // No GPU: refused before the driver runs, nothing counted.
         assert_eq!(d.export_current(&ctx), Err("export.no-gpu"));
         assert_eq!(d.completed_exports(), 0);
+    }
+
+    #[test]
+    fn the_button_click_is_a_one_shot_request_run_by_the_host() {
+        let mut d = dialog();
+        assert!(!d.take_run_request(), "no click, no request");
+        d.run_requested = true; // what the button's click sets
+        assert!(d.take_run_request());
+        assert!(!d.take_run_request(), "taken once");
+        // The host's run of a refused request reports the button's reason
+        // and counts nothing (no mesh: prepare_export refuses).
+        let ctx = ExportContext {
+            gpu: None,
+            mesh: None,
+            mesh_path: None,
+            paint: None,
+            doc: None,
+            graph: None,
+            baked_normal: None,
+        };
+        d.run_requested_export(&ctx);
+        assert_eq!(d.completed_exports(), 0);
+        assert!(!d.status.is_empty());
     }
 
     #[test]

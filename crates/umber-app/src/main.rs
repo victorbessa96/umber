@@ -1500,6 +1500,25 @@ impl TabViewer for PanelViewer<'_> {
                     baked_normal: self.bakes.baked_normal(),
                 };
                 self.export.show(ui, ctx);
+                // The button's click runs here, with `&mut` paint: flush the
+                // pending composites first (a fill added this frame would
+                // otherwise export stale), then the same path export.run
+                // takes (commands.rs run_export).
+                if self.export.take_run_request() {
+                    if let Some(paint) = self.paint.as_deref_mut() {
+                        paint.flush_for_export();
+                    }
+                    let ctx = ExportContext {
+                        gpu: Some(self.gpu),
+                        mesh: self.mesh,
+                        mesh_path: self.mesh_path,
+                        paint: self.paint.as_deref(),
+                        doc: Some(&*self.doc),
+                        graph: Some(&*self.graph),
+                        baked_normal: self.bakes.baked_normal(),
+                    };
+                    self.export.run_requested_export(&ctx);
+                }
             }
             Panel::Graph => {
                 // The anchor picker binds within the active texture set:

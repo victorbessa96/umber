@@ -399,6 +399,10 @@ pub fn job_status_json(app: &UmberApp) -> serde_json::Value {
         "bake": {
             "running": bakes.is_baking(),
             "completed": bakes.completed_jobs(),
+            // `outputs` stays the last SUCCESSFUL bake's maps (consumers
+            // read them); `failed` says the latest landed job did not
+            // produce them.
+            "failed": bakes.last_job_failed(),
             "status": bakes.status(),
             "outputs": outputs,
         },
