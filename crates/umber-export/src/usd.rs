@@ -90,6 +90,37 @@ impl<'a> UsdMeshView<'a> {
     }
 }
 
+/// Upper bound on any single exported `.usda` document. Checked as an
+/// upper-bound ESTIMATE inside [`to_usda_document`] before the document
+/// string is built (and re-checked on the finished string in
+/// [`write_usda`]), so a hostile mesh (hundreds of millions of vertices)
+/// or a huge asset name is refused with a typed
+/// [`ExportError::TooLarge`] instead of allocating a multi-GB file —
+/// the export-side mirror of the import side's `MAX_IMPORT_BYTES`
+/// preflight, which a `catch_unwind` boundary cannot cover once the
+/// allocation itself aborts. 256 MiB of `.usda` text is far past any
+/// paintable mesh (a 2M-vertex mesh serializes to ~100-200 MiB).
+pub const MAX_USDA_EXPORT_BYTES: u64 = 1 << 28;
+
+/// Upper bound on the byte length of the document [`to_usda_document`]
+/// will produce, used by the [`MAX_USDA_EXPORT_BYTES`] preflight.
+/// 64 bytes per `f32` covers the longest `Display` a finite `f32` can
+/// emit (smallest denormal), `u32` indices take at most 10 digits, and
+/// the sanitized prim segment appears a bounded number of times
+/// (header + prim path + one per texture connection/reader).
+fn doc_size_upper_bound(asset: &str, mesh: &UsdMeshView<'_>, textures: &[UsdTexture]) -> u64 {
+    let prim = prim_segment(asset).len() as u64;
+    // points + normals (3 floats each) + st (2): 8 floats + separators.
+    let per_vertex = 8 * 64 + 16;
+    let verts = mesh.positions.len() as u64;
+    let idx = mesh.indices.len() as u64;
+    let tex: u64 = textures
+        .iter()
+        .map(|t| 512 + 4 * prim + 3 * t.file.len() as u64)
+        .sum();
+    1024 + 8 * prim + verts * per_vertex + idx * 12 + (idx / 3) * 2 + tex
+}
+
 /// One textured OpenPBR input: which shader input it feeds, of which
 /// type, from which texture-reader output channel.
 #[derive(Debug, Clone, PartialEq)]
@@ -250,7 +281,8 @@ fn asset_path(file: &str) -> String {
 /// [`ExportError::Write`] when the mesh is ragged (no triangles, a
 /// non-multiple index count, an out-of-range or unrepresentable index,
 /// attribute vectors not parallel to positions) or a texture file string
-/// holds a newline.
+/// holds a newline; [`ExportError::TooLarge`] when the document would
+/// exceed [`MAX_USDA_EXPORT_BYTES`].
 pub fn to_usda_document(
     asset: &str,
     mesh: &UsdMeshView<'_>,
@@ -290,6 +322,16 @@ pub fn to_usda_document(
                 texture.file
             )));
         }
+    }
+    // Size-cap preflight on an upper bound, BEFORE the document string is
+    // built: a hostile mesh or asset name must not allocate a multi-GB
+    // document (an allocation abort is not unwindable).
+    let bound = doc_size_upper_bound(asset, mesh, textures);
+    if bound > MAX_USDA_EXPORT_BYTES {
+        return Err(ExportError::TooLarge {
+            size: bound,
+            cap: MAX_USDA_EXPORT_BYTES,
+        });
     }
 
     let prim = prim_segment(asset);
@@ -455,6 +497,15 @@ pub fn write_usda(
 ) -> Result<PathBuf, ExportError> {
     std::fs::create_dir_all(out_dir).map_err(|e| ExportError::Write(e.to_string()))?;
     let doc = to_usda_document(asset, mesh, textures)?;
+    // Defense in depth: the estimate in `to_usda_document` already
+    // bounds this, but re-check the finished string so a future formatter
+    // edit cannot silently write an over-cap file.
+    if doc.len() as u64 > MAX_USDA_EXPORT_BYTES {
+        return Err(ExportError::TooLarge {
+            size: doc.len() as u64,
+            cap: MAX_USDA_EXPORT_BYTES,
+        });
+    }
     let path = out_dir.join(format!("{asset}.usda"));
     std::fs::write(&path, doc).map_err(|e| ExportError::Write(e.to_string()))?;
     Ok(path)
@@ -732,6 +783,37 @@ mod tests {
             // A newline can never lex as an asset path.
             Err(ExportError::Write(_))
         ));
+    }
+
+    #[test]
+    fn over_cap_exports_are_typed_too_large_before_any_allocation() {
+        // 600k vertices bound the document at ~528 B/vertex > the cap, so
+        // the export is refused on the estimate, before the string exists.
+        let n = 600_000;
+        let positions = vec![[0.0f32; 3]; n];
+        let normals = vec![[0.0f32, 0.0, 1.0]; n];
+        let uvs = vec![[0.0f32, 0.0]; n];
+        let indices: Vec<u32> = (0..n as u32).collect();
+        let view = quad_view(&positions, &normals, &uvs, &indices);
+        let r = to_usda_document("bomb", &view, &[]);
+        assert!(
+            matches!(&r, Err(ExportError::TooLarge { cap, .. }) if *cap == MAX_USDA_EXPORT_BYTES),
+            "expected TooLarge, got {:?}",
+            r.as_ref().map(|s| s.len())
+        );
+        // A huge asset name drives the same bound (the prim segment rides
+        // in every path), so hostile metadata cannot produce a huge file.
+        let (p, n2, u, i) = quad();
+        let huge = "A".repeat(40_000_000);
+        let view = quad_view(&p, &n2, &u, &i);
+        let r = to_usda_document(&huge, &view, &[]);
+        assert!(
+            matches!(&r, Err(ExportError::TooLarge { .. })),
+            "huge name must be TooLarge"
+        );
+        // A long-but-sane name still exports: the cap is on the document.
+        let long = "a".repeat(4096);
+        assert!(to_usda_document(&long, &view, &[]).is_ok());
     }
 
     #[test]

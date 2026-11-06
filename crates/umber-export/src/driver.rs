@@ -80,6 +80,18 @@ pub enum ExportError {
     /// The underlying format writer failed.
     #[error("write failed: {0}")]
     Write(String),
+    /// The serialized export would exceed the export size cap
+    /// ([`crate::usd::MAX_USDA_EXPORT_BYTES`]); refused on an upper-bound
+    /// estimate BEFORE the output is built, so a hostile mesh or asset
+    /// name can never allocate a multi-GB document (the export-side
+    /// mirror of the import side's `MAX_IMPORT_BYTES` preflight).
+    #[error("export would be {size} bytes; the cap is {cap}")]
+    TooLarge {
+        /// Upper-bound size of the refused output, in bytes.
+        size: u64,
+        /// The cap that was exceeded.
+        cap: u64,
+    },
     /// A tiled run listed the same UDIM tile twice (its outputs would
     /// overwrite each other).
     #[error("tile {0} appears more than once in the tiled export")]
