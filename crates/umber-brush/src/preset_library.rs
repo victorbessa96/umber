@@ -286,6 +286,7 @@ mod tests {
             alpha_curve: crate::preset::ControlCurve::identity(),
             radius_curve: crate::preset::ControlCurve::identity(),
             stroke_method: Default::default(),
+            catalog: String::new(),
             size: 1.0,
         }
     }

@@ -66,6 +66,8 @@ pub struct AssetsPanel {
     /// Bumped whenever the extra library folders change — the material /
     /// mask list caches key on it, so a new folder rescans them.
     scan_epoch: u64,
+    /// The brush shelf's catalog tab (U3 catalogs): `None` = All.
+    pub shelf_catalog: Option<String>,
 }
 
 impl std::fmt::Debug for AssetsPanel {
@@ -150,23 +152,101 @@ pub struct LibraryOutcome {
 /// The brush shelf's swatch edge, points (UI/UX pass U3).
 pub const SHELF_SWATCH: f32 = 40.0;
 
+/// The catalog id a preset files under (its trimmed `catalog`);
+/// uncategorised presets share the `"Other"` catalog.
+fn catalog_of(preset: &umber_brush::preset::BrushPreset) -> String {
+    let c = preset.catalog.trim();
+    if c.is_empty() {
+        "Other".to_owned()
+    } else {
+        c.to_owned()
+    }
+}
+
+/// A catalog's display label: the shipped catalogs are localized
+/// (`assets.catalog-basic` …); a user's own catalog shows as written.
+pub fn catalog_label(id: &str) -> String {
+    let key = format!("assets.catalog-{}", id.to_lowercase());
+    let label = tr(&key);
+    if label == key {
+        id.to_owned()
+    } else {
+        label
+    }
+}
+
+/// The library's catalogs in display order (first appearance in the
+/// name-sorted library, so it is stable), each with its preset indices.
+pub fn brush_catalogs(brush: &crate::brush_panel::BrushPanel) -> Vec<(String, Vec<usize>)> {
+    let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, entry) in brush.library.entries.iter().enumerate() {
+        let name = catalog_of(&entry.preset);
+        match out.iter_mut().find(|(c, _)| *c == name) {
+            Some((_, v)) => v.push(i),
+            None => out.push((name, vec![i])),
+        }
+    }
+    out
+}
+
 /// The brush asset shelf (UI/UX pass U3, Blender 4.3's asset shelf in
-/// paint modes): one horizontal, scrollable strip of preset swatches
-/// along the 3D viewport's bottom edge. A click selects the preset
-/// (the caller routes it through `BrushPanel::select_preset_by_name`,
-/// the same seam the Assets browser rows use); the active preset is
-/// framed in the accent; the name rides the caption and the hover.
+/// paint modes): a row of catalog tabs (All + one per catalog) over one
+/// horizontal, scrollable strip of preset swatches along the 3D
+/// viewport's bottom edge. A click selects the preset (the caller routes
+/// it through `BrushPanel::select_preset_by_name`, the same seam the
+/// Assets browser rows use); the active preset is framed in the accent;
+/// the name rides the caption and the hover.
 pub fn brush_shelf_ui(
     ui: &mut Ui,
     state: &mut AssetsPanel,
     brush: &crate::brush_panel::BrushPanel,
 ) -> Option<String> {
+    let catalogs = brush_catalogs(brush);
+    // A catalog that vanished (library rescan) falls back to All.
+    if let Some(c) = &state.shelf_catalog {
+        if !catalogs.iter().any(|(n, _)| n == c) {
+            state.shelf_catalog = None;
+        }
+    }
     let mut picked = None;
+    // One tab row (All + a tab per catalog) above the swatch strip, the
+    // layout Blender 4.3's shelf header uses; a stacked column of tabs
+    // would make the strip taller than its swatches.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let tab = |ui: &mut Ui, sel: bool, label: &str| {
+            ui.add(egui::Button::selectable(
+                sel,
+                egui::RichText::new(label).size(umber_gui::theme::TEXT_STATUS),
+            ))
+            .clicked()
+        };
+        if tab(ui, state.shelf_catalog.is_none(), &tr("assets.catalog-all")) {
+            state.shelf_catalog = None;
+        }
+        for (name, _) in &catalogs {
+            if tab(
+                ui,
+                state.shelf_catalog.as_deref() == Some(name),
+                &catalog_label(name),
+            ) {
+                state.shelf_catalog = Some(name.clone());
+            }
+        }
+    });
+    let shown: Vec<usize> = match &state.shelf_catalog {
+        None => (0..brush.library.entries.len()).collect(),
+        Some(c) => catalogs
+            .iter()
+            .find(|(n, _)| n == c)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default(),
+    };
     egui::ScrollArea::horizontal()
         .id_salt("umber-brush-shelf")
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            ui.horizontal(|ui| picked = brush_swatches(ui, state, brush, 0..usize::MAX));
+            ui.horizontal(|ui| picked = brush_swatches(ui, state, brush, &shown));
         });
     picked
 }
@@ -175,22 +255,27 @@ pub fn brush_shelf_ui(
 pub const POPUP_COLUMNS: usize = 6;
 
 /// The brush popup's body (Shift+Space): the same swatches as the shelf,
-/// in rows of [`POPUP_COLUMNS`] so every preset shows without scrolling
-/// however large the library grows.
+/// one titled section per catalog, each in rows of [`POPUP_COLUMNS`], so
+/// every preset shows without scrolling however large the library grows.
 pub fn brush_grid_ui(
     ui: &mut Ui,
     state: &mut AssetsPanel,
     brush: &crate::brush_panel::BrushPanel,
 ) -> Option<String> {
     let mut picked = None;
-    let n = brush.library.entries.len();
-    for start in (0..n).step_by(POPUP_COLUMNS) {
-        let row = start..(start + POPUP_COLUMNS).min(n);
-        if let Some(name) = ui
-            .horizontal(|ui| brush_swatches(ui, state, brush, row))
-            .inner
-        {
-            picked = Some(name);
+    for (name, indices) in brush_catalogs(brush) {
+        ui.label(
+            egui::RichText::new(catalog_label(&name))
+                .size(umber_gui::theme::TEXT_STATUS)
+                .color(umber_gui::theme::muted()),
+        );
+        for row in indices.chunks(POPUP_COLUMNS) {
+            if let Some(n) = ui
+                .horizontal(|ui| brush_swatches(ui, state, brush, row))
+                .inner
+            {
+                picked = Some(n);
+            }
         }
     }
     picked
@@ -201,13 +286,13 @@ fn brush_swatches(
     ui: &mut Ui,
     state: &mut AssetsPanel,
     brush: &crate::brush_panel::BrushPanel,
-    range: std::ops::Range<usize>,
+    indices: &[usize],
 ) -> Option<String> {
     let mut picked = None;
-    for (i, entry) in brush.library.entries.iter().enumerate() {
-        if !range.contains(&i) {
+    for &i in indices {
+        let Some(entry) = brush.library.entries.get(i) else {
             continue;
-        }
+        };
         let json = entry.preset.to_json().unwrap_or_default();
         let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
             crate::asset_thumbs::brush_preview(&entry.preset, crate::asset_thumbs::THUMB_PX * 2)
@@ -583,21 +668,32 @@ mod kittest {
         );
     }
 
-    /// The popup grid lays the library out in rows of POPUP_COLUMNS: the
-    /// swatch buttons fall on ceil(n / columns) distinct rows, and every
-    /// row but the last holds exactly POPUP_COLUMNS.
-    #[test]
-    fn the_brush_popup_grid_wraps_into_fixed_columns() {
-        struct Grid {
-            panel: AssetsPanel,
-            brush: crate::brush_panel::BrushPanel,
-        }
-        crate::i18n::init();
+    fn seeded_brushes() -> crate::brush_panel::BrushPanel {
         let mut brush = crate::brush_panel::BrushPanel::new();
         brush.library = umber_brush::Library::load_from_dirs(&[std::path::Path::new(env!(
             "CARGO_MANIFEST_DIR"
         ))
         .join("../../assets/brushes")]);
+        brush.active = None;
+        brush
+    }
+
+    /// The popup groups by catalog: each catalog's swatches start a new
+    /// row and wrap at POPUP_COLUMNS, so the row count is the sum of
+    /// ceil(len / columns) over the catalogs.
+    #[test]
+    fn the_brush_popup_grid_rows_follow_the_catalogs() {
+        struct Grid {
+            panel: AssetsPanel,
+            brush: crate::brush_panel::BrushPanel,
+        }
+        crate::i18n::init();
+        let brush = seeded_brushes();
+        let catalogs = brush_catalogs(&brush);
+        assert!(
+            catalogs.len() > 1,
+            "the starter library files several catalogs"
+        );
         let names: Vec<String> = brush
             .library
             .entries
@@ -605,7 +701,7 @@ mod kittest {
             .map(|e| e.preset.name.clone())
             .collect();
         let mut h = Harness::<Grid>::builder()
-            .with_size([900.0, 600.0])
+            .with_size([900.0, 900.0])
             .build_ui_state(
                 |ui, s: &mut Grid| {
                     let _ = brush_grid_ui(ui, &mut s.panel, &s.brush);
@@ -617,24 +713,91 @@ mod kittest {
             );
         h.run();
         let mut rows: Vec<i32> = Vec::new();
-        let mut per_row: std::collections::BTreeMap<i32, usize> = Default::default();
         for name in &names {
             let node = h.get_by_role_and_label(egui::accesskit::Role::Button, name);
             let y = node.rect().min.y.round() as i32;
             if !rows.contains(&y) {
                 rows.push(y);
             }
-            *per_row.entry(y).or_default() += 1;
         }
-        assert_eq!(
-            rows.len(),
-            names.len().div_ceil(POPUP_COLUMNS),
-            "{per_row:?}"
-        );
-        let counts: Vec<usize> = per_row.values().copied().collect();
-        for c in &counts[..counts.len() - 1] {
-            assert_eq!(*c, POPUP_COLUMNS, "{per_row:?}");
+        let expected: usize = catalogs
+            .iter()
+            .map(|(_, v)| v.len().div_ceil(POPUP_COLUMNS))
+            .sum();
+        assert_eq!(rows.len(), expected);
+        for (id, _) in &catalogs {
+            assert!(
+                h.query_by_label(&catalog_label(id)).is_some(),
+                "header {id}"
+            );
         }
+    }
+
+    /// The shelf's catalog tabs filter the strip; All shows everything.
+    #[test]
+    fn the_shelf_catalog_tabs_filter_the_swatches() {
+        struct Shelf {
+            panel: AssetsPanel,
+            brush: crate::brush_panel::BrushPanel,
+        }
+        crate::i18n::init();
+        let brush = seeded_brushes();
+        let catalogs = brush_catalogs(&brush);
+        let (erase_id, erase_ix) = catalogs
+            .iter()
+            .find(|(c, _)| c == "Erase")
+            .cloned()
+            .expect("an Erase catalog ships");
+        let erase_names: Vec<String> = erase_ix
+            .iter()
+            .map(|&i| brush.library.entries[i].preset.name.clone())
+            .collect();
+        let all = brush.library.entries.len();
+        let mut h = Harness::<Shelf>::builder()
+            .with_size([1600.0, 140.0])
+            .build_ui_state(
+                |ui, s: &mut Shelf| {
+                    let _ = brush_shelf_ui(ui, &mut s.panel, &s.brush);
+                },
+                Shelf {
+                    panel: AssetsPanel::default(),
+                    brush,
+                },
+            );
+        h.run();
+        let swatches = |h: &Harness<'_, Shelf>| {
+            h.state()
+                .brush
+                .library
+                .entries
+                .iter()
+                .filter(|e| {
+                    h.query_by_role_and_label(egui::accesskit::Role::Button, &e.preset.name)
+                        .is_some()
+                })
+                .count()
+        };
+        assert_eq!(swatches(&h), all, "All shows every preset");
+        h.get_by_label(&catalog_label(&erase_id)).click();
+        h.run();
+        assert_eq!(h.state().panel.shelf_catalog.as_deref(), Some("Erase"));
+        assert_eq!(swatches(&h), erase_names.len());
+        for n in &erase_names {
+            assert!(h
+                .query_by_role_and_label(egui::accesskit::Role::Button, n)
+                .is_some());
+        }
+        h.get_by_label(&tr("assets.catalog-all")).click();
+        h.run();
+        assert_eq!(swatches(&h), all);
+    }
+
+    #[test]
+    fn catalog_labels_localize_shipped_ids_and_keep_user_ones() {
+        crate::i18n::init();
+        assert_eq!(catalog_label("Basic"), tr("assets.catalog-basic"));
+        assert_ne!(tr("assets.catalog-basic"), "assets.catalog-basic");
+        assert_eq!(catalog_label("My Inks"), "My Inks");
     }
 
     #[test]

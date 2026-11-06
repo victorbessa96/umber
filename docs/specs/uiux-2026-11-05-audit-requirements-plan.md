@@ -147,4 +147,5 @@ Verification per kill: rustfmt, clippy `-D warnings`, the touched crates' tests,
 - 2026-11-05: **U2-2, U2-3, U2-5 LANDED** (queue row 183). U2-4 parked to U5 (egui_dock's leaf collapse already ships; a real icon rail needs the docking migration).
 - 2026-11-05: **U3 part 1 LANDED** (queue row 184): brush swatches + asset shelf under the 3D view; Assets swatch-cache texture-lifetime bug fixed.
 - 2026-11-05: **U3-3 Shift+Space brush popup LANDED** (queue row 186).
-- Next: U3 catalogs + per-property pressure curves, then U4 themes.
+- 2026-11-05: **U3-4 catalogs LANDED** (queue row 189). Found U3-5: the preset alpha/radius pressure curves are dead controls (never read by the paint path).
+- Next: U3-5 wire the pressure curves into the dab engine, then U4 themes.

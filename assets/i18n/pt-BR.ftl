@@ -1015,6 +1015,13 @@ picker =
 ## The Assets panel's library browser (R-C1)
 
 assets =
+    .catalog-all = Todos
+    .catalog-basic = Básicos
+    .catalog-detail = Detalhe
+    .catalog-texture = Textura
+    .catalog-erase = Apagar
+    .catalog-utility = Utilitários
+    .catalog-other = Outros
     .refresh = Atualizar a lista
     .search = Buscar
     .brushes = Pincéis

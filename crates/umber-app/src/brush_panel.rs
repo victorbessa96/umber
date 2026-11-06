@@ -2614,6 +2614,7 @@ mod tests {
             alpha_curve: ControlCurve::identity(),
             radius_curve: ControlCurve::identity(),
             stroke_method: Default::default(),
+            catalog: String::new(),
             size: 1.0,
         }
     }

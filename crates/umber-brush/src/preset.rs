@@ -263,6 +263,12 @@ pub struct BrushPreset {
     /// drag write it). `#[serde(default = ...)]` keeps older files at 1.
     #[serde(default = "default_size")]
     pub size: f32,
+    /// The asset catalog this preset files under in the brush shelf and
+    /// popup (UI/UX pass U3, Blender 4.3's catalogs): a free-form label
+    /// such as `"Basic"` or `"Erase"`. Empty = uncategorised; an empty
+    /// value is not written, so pre-catalog files round-trip unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub catalog: String,
 }
 
 fn default_size() -> f32 {
@@ -445,6 +451,7 @@ mod tests {
                 .expect("valid test curve"),
             radius_curve: ControlCurve::try_new(&[(0.0, 0.5), (0.3, 0.6), (0.7, 0.9), (1.0, 1.0)])
                 .expect("valid test curve"),
+            catalog: "Texture".to_owned(),
             stroke_method: crate::StrokeMethod::Dash {
                 ratio: 0.5,
                 length_px: 20.0,
@@ -739,5 +746,28 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 12, "the starter library ships twelve presets");
+    }
+
+    /// U3 catalogs: an old file without `catalog` loads uncategorised and
+    /// re-serializes without the key; every shipped preset is filed.
+    #[test]
+    fn catalogs_default_empty_and_every_shipped_preset_is_filed() {
+        let mut old = non_default_preset();
+        old.catalog.clear();
+        let json = old.to_json().expect("serialize");
+        assert!(
+            !json.contains("\"catalog\""),
+            "empty catalog is not written"
+        );
+        let back = BrushPreset::from_json(&json).expect("parse");
+        assert_eq!(back.catalog, "");
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/brushes");
+        for entry in std::fs::read_dir(dir).expect("assets/brushes") {
+            let path = entry.expect("entry").path();
+            if path.extension().is_some_and(|e| e == "umberbrush") {
+                let p = BrushPreset::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                assert!(!p.catalog.is_empty(), "{} has a catalog", path.display());
+            }
+        }
     }
 }

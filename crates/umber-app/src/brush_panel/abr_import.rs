@@ -307,6 +307,7 @@ pub fn map_abr(brushes: &[ag_psd::abr::Brush], samples: &[SampleInfo]) -> AbrImp
             alpha_curve: umber_brush::preset::ControlCurve::default(),
             radius_curve: umber_brush::preset::ControlCurve::default(),
             stroke_method: umber_brush::StrokeMethod::default(),
+            catalog: String::new(),
             size: 1.0,
         };
         let mut stamp = None;
