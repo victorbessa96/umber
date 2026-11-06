@@ -3132,4 +3132,181 @@ mod tests {
             "{reply}"
         );
     }
+
+    /// A fresh per-test scratch dir under the system temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "umber-cli-agent-library-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A committed repo asset (the import_asset tests' trick).
+    fn repo_asset(rel: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../")
+            .join(rel)
+    }
+
+    #[test]
+    fn library_list_scan_applies_the_lister_gates_per_kind_and_source() {
+        let starter = scratch("starter");
+        let user = scratch("user");
+        std::fs::write(starter.join("b-material.umbersmart"), b"m").unwrap();
+        std::fs::write(starter.join("a-material.umbersmart"), b"mm").unwrap();
+        std::fs::write(starter.join("notes.txt"), b"not a library file").unwrap();
+        std::fs::write(user.join("mask.umbermask"), b"x").unwrap();
+        std::fs::write(user.join("studio.png"), b"12345").unwrap();
+        std::fs::write(user.join("probe.ExR"), b"").unwrap();
+        let mut rows = Vec::new();
+        // smart-material: .umbersmart only, sorted by file name, source tagged.
+        scan_library(AssetKind::SmartMaterial, Some(&starter), Some(&user), &mut rows);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].name, "a-material");
+        assert_eq!(rows[0].bytes, 2);
+        assert_eq!(rows[0].source, "starter");
+        assert_eq!(rows[0].kind, "smart-material");
+        assert_eq!(rows[0].path, starter.join("a-material.umbersmart"));
+        assert_eq!(rows[1].name, "b-material");
+        // env: the case-insensitive .png|.exr gate; a missing starter
+        // dir contributes no rows.
+        scan_library(AssetKind::Env, None, Some(&user), &mut rows);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[2].kind, "env");
+        assert_eq!(rows[2].name, "probe");
+        assert_eq!(rows[2].source, "user");
+        assert_eq!(rows[3].name, "studio");
+        assert_eq!(rows[3].bytes, 5);
+        // An empty pair of dirs scans to nothing — never an error.
+        let empty = scratch("empty");
+        let mut none = Vec::new();
+        scan_library(AssetKind::Brush, Some(&empty), Some(&empty), &mut none);
+        assert!(none.is_empty());
+        // A nonexistent dir is the same silent skip.
+        let mut none2 = Vec::new();
+        scan_library(
+            AssetKind::SmartMask,
+            Some(Path::new("/nonexistent/starter")),
+            None,
+            &mut none2,
+        );
+        assert!(none2.is_empty());
+    }
+
+    #[test]
+    fn library_list_step_replies_rows_over_the_real_dirs() {
+        // The bundled starter ships in-tree, so rows exist even with
+        // zero user state; the env lock keeps the scratch-pointing
+        // tests in mcp.rs from racing this read.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let replies = session("\"library_list\"\n{\"library_list\": null}\n");
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        for r in &replies {
+            assert_eq!(r["step"], "library_list", "{r}");
+            assert_eq!(r["ok"], true, "{r}");
+            let rows = r["rows"].as_array().unwrap();
+            assert_eq!(r["count"], rows.len(), "{r}");
+            for row in rows {
+                assert!(row["path"].is_string(), "{row}");
+                assert!(
+                    ["smart-material", "smart-mask", "brush", "env"]
+                        .contains(&row["kind"].as_str().unwrap()),
+                    "{row}"
+                );
+                assert!(row["name"].is_string() && row["bytes"].is_u64(), "{row}");
+                assert!(
+                    ["starter", "user"].contains(&row["source"].as_str().unwrap()),
+                    "{row}"
+                );
+                let meta = std::fs::metadata(row["path"].as_str().unwrap()).unwrap();
+                assert_eq!(row["bytes"], meta.len(), "{row}");
+            }
+        }
+        // 13 bundled brushes alone must list.
+        assert!(
+            replies[0]["rows"].as_array().unwrap().len() >= 13,
+            "the bundled assets/ starter must list: {}",
+            replies[0]
+        );
+    }
+
+    #[test]
+    fn import_asset_step_delegates_to_k5_and_refuses_typed() {
+        let lib = scratch("import-lib");
+        let brush = repo_asset("assets/brushes/hard-round.umberbrush");
+        let line = serde_json::json!({ "import_asset": {
+            "file": brush, "kind": "brush", "library": lib,
+        }})
+        .to_string();
+        let replies = session(&format!("{line}\n"));
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        let r = &replies[0];
+        assert_eq!(r["step"], "import_asset", "{r}");
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["kind"], "brush");
+        assert_eq!(r["dry_run"], false);
+        assert_eq!(
+            r["target"],
+            lib.join("hard-round.umberbrush").display().to_string(),
+            "{r}"
+        );
+        assert_eq!(r["bytes"], std::fs::metadata(&brush).unwrap().len(), "{r}");
+        assert_eq!(
+            std::fs::read(lib.join("hard-round.umberbrush")).unwrap(),
+            std::fs::read(&brush).unwrap(),
+            "bytes untouched"
+        );
+        // A second import: K5's TargetExists refusal rides the envelope.
+        let r = &session(&format!("{line}\n"))[0];
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("target already exists"),
+            "{r}"
+        );
+        // An unknown kind is a typed error.
+        let bad_kind = serde_json::json!({
+            "import_asset": {"file": brush, "kind": "smart-thing", "library": lib}
+        })
+        .to_string();
+        let r = &session(&format!("{bad_kind}\n"))[0];
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("unknown kind"), "{r}");
+        // An invalid file is a typed refusal — never a silent copy.
+        let bad_file = scratch("bad-src").join("bad.umbersmart");
+        std::fs::write(&bad_file, b"nope").unwrap();
+        let bad = serde_json::json!({
+            "import_asset": {"file": bad_file, "kind": "smart-material", "library": lib, "dry_run": true}
+        })
+        .to_string();
+        let r = &session(&format!("{bad}\n"))[0];
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("failed validation"),
+            "{r}"
+        );
+        assert!(!lib.join("bad.umbersmart").exists());
+    }
+
+    #[test]
+    fn import_asset_dry_run_resolves_the_target_and_copies_nothing() {
+        let lib = scratch("dry-lib");
+        let brush = repo_asset("assets/brushes/hard-round.umberbrush");
+        let line = serde_json::json!({ "import_asset": {
+            "file": brush, "kind": "brush", "library": lib, "dry_run": true,
+        }})
+        .to_string();
+        let r = &session(&format!("{line}\n"))[0];
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["dry_run"], true, "{r}");
+        assert_eq!(r["bytes"], 0, "{r}");
+        assert_eq!(
+            r["target"],
+            lib.join("hard-round.umberbrush").display().to_string(),
+            "{r}"
+        );
+        assert!(!lib.join("hard-round.umberbrush").exists());
+    }
 }
