@@ -1311,6 +1311,7 @@ impl TabViewer for PanelViewer<'_> {
                     self.brush,
                     selected,
                     preferences::assets_search_path().as_deref(),
+                    preferences::assets_saved_searches_path().as_deref(),
                 );
                 if let Some(name) = outcome.brush {
                     if !self.brush.select_preset_by_name(&name) {

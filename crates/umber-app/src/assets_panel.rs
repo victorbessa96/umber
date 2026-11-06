@@ -33,9 +33,10 @@
 //!   the per-tile compose with the anchor reads + bake sources.
 //!
 //! The named follow-ups (the brief): drag-to-layer-stack, the
-//! content-keyed thumbnails, saved searches, custom library
+//! content-keyed thumbnails, custom library
 //! locations, the filter/mesh/env categories, the import-dialog
-//! integration.
+//! integration. (Saved searches shipped as K3; the first-run
+//! empty-state wiring as K4.)
 
 use crate::document;
 use crate::i18n::tr;
@@ -71,6 +72,19 @@ pub struct AssetsPanel {
     scan_epoch: u64,
     /// The brush shelf's catalog tab (U3 catalogs): `None` = All.
     pub shelf_catalog: Option<String>,
+    /// K3: the saved searches, persisted to the state dir's
+    /// `assets_saved_searches.json` (the single-query file above stays
+    /// the last-used query, untouched).
+    pub saved: Vec<SavedSearch>,
+    /// Whether `saved` was restored from disk this session.
+    saved_restored: bool,
+    /// The last value written to disk (skip no-op writes).
+    saved_last: Vec<SavedSearch>,
+    /// The "save current" name field.
+    new_search_name: String,
+    /// K4: categories that already logged the empty-without-starter
+    /// warn this session (once each, not every frame).
+    starter_warns: std::collections::HashSet<&'static str>,
 }
 
 impl std::fmt::Debug for AssetsPanel {
@@ -111,6 +125,108 @@ fn persist_search(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
         }
     }
     state.last_saved = state.search.clone();
+}
+
+/// K3: one saved search — a name plus the query it restores.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedSearch {
+    pub name: String,
+    pub query: String,
+}
+
+/// Loads the saved searches from the state-dir JSON file. A missing,
+/// unreadable or invalid file reads as empty (the `load_extra_dirs`
+/// precedent — never a panic, never a broken panel); a parse failure
+/// logs a warn so a corrupted file is diagnosable.
+pub fn load_saved_searches(path: Option<&std::path::Path>) -> Vec<SavedSearch> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        log::warn!(
+            "assets: could not parse saved searches {}: {e}",
+            path.display()
+        );
+        Vec::new()
+    })
+}
+
+/// Writes the saved searches as JSON. Errors log; the session keeps the
+/// list either way (the `save_extra_dirs` precedent).
+pub fn save_saved_searches(list: &[SavedSearch], path: Option<&std::path::Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text = serde_json::to_string_pretty(list).unwrap_or_else(|_| "[]".to_owned());
+    if let Err(e) = std::fs::write(path, text) {
+        log::warn!("assets: could not save searches {}: {e}", path.display());
+    }
+}
+
+/// Restores the saved searches once per session (the `restored` flag,
+/// the single-query file's own pattern).
+fn restore_saved(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
+    if state.saved_restored {
+        return;
+    }
+    state.saved_restored = true;
+    state.saved = load_saved_searches(path);
+    state.saved_last = state.saved.clone();
+}
+
+/// Writes the saved searches when they changed since the last save.
+fn persist_saved(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
+    if !state.saved_restored || state.saved == state.saved_last {
+        return;
+    }
+    save_saved_searches(&state.saved, path);
+    state.saved_last = state.saved.clone();
+}
+
+/// K4: a category's bundled starter dir (repo `assets/<name>`), the
+/// manifest-relative path the listers scan first.
+fn starter_dir(rel: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../")
+        .join(rel)
+}
+
+/// K4: whether the starter dir was found on disk — the manifest join,
+/// or the CWD-relative one the brush library also scans.
+fn starter_found(rel: &str) -> bool {
+    std::path::Path::new(rel).is_dir() || starter_dir(rel).is_dir()
+}
+
+/// K4's pure predicate (the testable core): an empty list warns only
+/// when the bundled starter dir was not found either — a fresh state
+/// dir scans the starter dirs with zero user state, so both missing
+/// means the bundled library itself is gone.
+pub fn empty_without_starter_warns(list_len: usize, starter_found: bool) -> bool {
+    list_len == 0 && !starter_found
+}
+
+/// K4: logs the first-run warn once per category per session — an
+/// empty category AND no starter dir on disk (the env loader's
+/// skip-bad-file warn precedent: diagnosable, not silent).
+fn warn_empty_without_starter(
+    warned: &mut std::collections::HashSet<&'static str>,
+    category: &'static str,
+    list_len: usize,
+    starter_rel: &str,
+) {
+    if empty_without_starter_warns(list_len, starter_found(starter_rel)) && warned.insert(category)
+    {
+        log::warn!(
+            "assets: {category} library is empty and no starter dir was found ({})",
+            starter_dir(starter_rel).display()
+        );
+    }
 }
 
 impl AssetsPanel {
@@ -462,14 +578,17 @@ fn brush_swatches(
     picked
 }
 
-/// Draws the library section (search + three categories + rows).
-/// The caller (the Assets tab's arm) keeps the import sections below.
+/// Draws the library section (search + saved searches + the categories +
+/// rows). The caller (the Assets tab's arm) keeps the import sections
+/// below. `search_path` is the single-query file (restored once, written
+/// on change); `saved_path` is the K3 saved-searches JSON beside it.
 pub fn library_ui(
     ui: &mut Ui,
     state: &mut AssetsPanel,
     brush: &crate::brush_panel::BrushPanel,
     selected_layer: Option<u64>,
     search_path: Option<&std::path::Path>,
+    saved_path: Option<&std::path::Path>,
 ) -> LibraryOutcome {
     let mut out = LibraryOutcome::default();
     restore_search(state, search_path);
@@ -479,6 +598,78 @@ pub fn library_ui(
     });
     let needle = state.search.to_lowercase();
     let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
+
+    // K3 — Saved searches: named queries persisted in the state dir's
+    // `assets_saved_searches.json`, next to the single-query file above
+    // (which stays the last-used query, read-compatible). Collapsible,
+    // DEFAULT CLOSED so the resting panel shape doesn't move.
+    restore_saved(state, saved_path);
+    egui::CollapsingHeader::new(tr("assets.saved-searches"))
+        .id_salt("assets-saved-searches")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.new_search_name)
+                        .hint_text(tr("assets.saved-name-hint"))
+                        .desired_width(140.0),
+                );
+                if ui
+                    .button(tr("assets.save-current"))
+                    .on_hover_text(tr("assets.save-current-tip"))
+                    .clicked()
+                {
+                    let entered = state.new_search_name.trim().to_owned();
+                    // No name entered: the query itself names the search.
+                    let name = if entered.is_empty() {
+                        state.search.trim().to_owned()
+                    } else {
+                        entered
+                    };
+                    if !name.is_empty() {
+                        let query = state.search.clone();
+                        match state.saved.iter_mut().find(|s| s.name == name) {
+                            Some(s) => s.query = query,
+                            None => state.saved.push(SavedSearch { name, query }),
+                        }
+                        state.new_search_name.clear();
+                    }
+                }
+            });
+            let mut remove: Option<String> = None;
+            let mut apply: Option<String> = None;
+            for s in &state.saved {
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text(tr("assets.saved-delete-tip"))
+                        .clicked()
+                    {
+                        remove = Some(s.name.clone());
+                    }
+                    let row = ui
+                        .add(egui::Label::new(&s.name).sense(egui::Sense::click()))
+                        .on_hover_text(format!("{}: {}", tr("assets.saved-apply-tip"), s.query));
+                    row.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, s.name.as_str())
+                    });
+                    if row.clicked() {
+                        apply = Some(s.query.clone());
+                    }
+                    ui.label(
+                        egui::RichText::new(&s.query)
+                            .size(umber_gui::theme::TEXT_STATUS)
+                            .color(umber_gui::theme::muted()),
+                    );
+                });
+            }
+            if let Some(q) = apply {
+                state.search = q;
+            }
+            if let Some(n) = remove {
+                state.saved.retain(|s| s.name != n);
+            }
+        });
 
     // Extra library folders (persisted in the state dir; the built-in
     // dirs stay first and win same-name dedup). The list caches per
@@ -599,6 +790,14 @@ pub fn library_ui(
                 }
             });
         }
+        // K4: an empty brush list with no starter dir on disk logs a
+        // warn once (the first-run diagnostic half).
+        warn_empty_without_starter(
+            &mut state.starter_warns,
+            "brushes",
+            brush.library.entries.len(),
+            "assets/brushes",
+        );
         if brush.library.entries.is_empty() {
             ui.label(tr("assets.empty"));
         } else if shown == 0 {
@@ -660,6 +859,12 @@ pub fn library_ui(
             }
         });
     }
+    warn_empty_without_starter(
+        &mut state.starter_warns,
+        "materials",
+        materials.len(),
+        "assets/smart",
+    );
     if materials.is_empty() {
         ui.label(tr("assets.empty"));
     } else if shown == 0 {
@@ -714,6 +919,12 @@ pub fn library_ui(
             }
         });
     }
+    warn_empty_without_starter(
+        &mut state.starter_warns,
+        "masks",
+        masks.len(),
+        "assets/smart",
+    );
     if masks.is_empty() {
         ui.label(tr("assets.empty"));
     } else if shown == 0 {
@@ -776,12 +987,19 @@ pub fn library_ui(
                     }
                 });
             }
+            warn_empty_without_starter(
+                &mut state.starter_warns,
+                "env-maps",
+                envs.len(),
+                "assets/env",
+            );
             if envs.is_empty() {
                 ui.label(tr("assets.empty"));
             } else if shown == 0 {
                 ui.label(tr("assets.no-matches"));
             }
         });
+    persist_saved(state, saved_path);
     persist_search(state, search_path);
     out
 }
@@ -817,7 +1035,7 @@ mod kittest {
             .with_size([480.0, 640.0])
             .build_ui_state(
                 |ui, s: &mut AssetsHarness| {
-                    let o = library_ui(ui, &mut s.panel, &s.brush, None, None);
+                    let o = library_ui(ui, &mut s.panel, &s.brush, None, None, None);
                     if o.material.is_some()
                         || o.mask.is_some()
                         || o.brush.is_some()

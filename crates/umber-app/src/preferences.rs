@@ -343,6 +343,17 @@ pub fn assets_search_path() -> Option<PathBuf> {
         .and_then(|p| p.parent().map(|d| d.join(ASSETS_SEARCH_FILE)))
 }
 
+/// The Assets browser's saved searches' file name, beside
+/// [`ASSETS_SEARCH_FILE`]/[`SWATCHES_FILE`] in the same state dir. JSON:
+/// a list of `{ "name": …, "query": … }` (K3).
+pub const ASSETS_SAVED_SEARCHES_FILE: &str = "assets_saved_searches.json";
+
+/// The saved-searches file path (the same state dir `prefs_path` uses).
+pub fn assets_saved_searches_path() -> Option<PathBuf> {
+    umber_brush::preset_library::user_preset_dir()
+        .and_then(|p| p.parent().map(|d| d.join(ASSETS_SAVED_SEARCHES_FILE)))
+}
+
 /// The swatch file path (the same state dir `prefs_path` uses).
 pub fn swatches_path() -> Option<PathBuf> {
     umber_brush::preset_library::user_preset_dir()
