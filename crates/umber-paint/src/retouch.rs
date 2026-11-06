@@ -50,9 +50,28 @@
 //!   one tile must be shared; tiles on only one side carry over unchanged.
 //!   An entry keeps at most one region per tile (the merge preserves it).
 //! * Undo/redo granularity: a merged entry undoes AND redoes all of its
-//!   strokes as one unit — repainting the same spot N times is one undo
-//!   step. Accepted and named (the brief's call); split redo under merged
-//!   storage is the follow-up, not v1.
+//!   strokes as one unit by default — repainting the same spot N times
+//!   is one undo step.
+//! * Split redo (row 167's follow-up): a merged entry also keeps a
+//!   journal of its constituent strokes ([`StrokePart`]: each stroke's
+//!   own rect plus its end bytes there; the newest part's bytes are
+//!   derived from the merged after, so they are not stored twice). After
+//!   undoing the merged entry, [`split_redo`] rebuilds the strokes as
+//!   plain entries (part k's before = the merged before with parts
+//!   1..k-1's afters written over it, cut to part k's rect — byte-equal
+//!   to the unmerged record) and redoes only the first; every further
+//!   redo replays one stroke. Cost: the journal adds one after-rect per
+//!   older stroke to the entry's `memory_bytes`, so the merge saves less
+//!   than before (the 8-stroke soak: 12800 bytes vs 16384 unmerged, was
+//!   5632). Envelope: the parts go through the normal push, so the
+//!   journal grows by `parts - 1` entries and the usual oldest-first
+//!   eviction drops entries BELOW the split; a split whose parts alone
+//!   exceed 64 entries or 256 MiB is refused
+//!   ([`SplitOutcome::ExceedsEnvelope`]) so a part is never evicted. A
+//!   split with other undone entries above it is refused too (the push
+//!   would clear them). Deferred: the app-side History-panel wiring (a
+//!   "split" affordance on a merged row) — `PaintState::split_redo_stroke`
+//!   is the engine entry point it will call.
 //! * Redo replays the merged entry's after over all of `U`, including the
 //!   old rect's texels outside the new rect. Those equal the old entry's
 //!   after unless something outside the history wrote the tile between the
@@ -429,7 +448,47 @@ pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeComm
             after: t.end.region(t.rect),
         })
         .collect();
-    (!regions.is_empty()).then_some(PaintStrokeCommand { regions })
+    (!regions.is_empty()).then_some(PaintStrokeCommand {
+        regions,
+        parts: Vec::new(),
+    })
+}
+
+/// `rect` in the local coordinates of `origin` (which must contain it).
+fn local_rect(rect: DirtyRect, origin: DirtyRect) -> DirtyRect {
+    DirtyRect {
+        x0: rect.x0 - origin.x0,
+        y0: rect.y0 - origin.y0,
+        x1: rect.x1 - origin.x0,
+        y1: rect.y1 - origin.y0,
+    }
+}
+
+/// Whether `inner` lies inside `outer` (half-open).
+fn contains(outer: DirtyRect, inner: DirtyRect) -> bool {
+    outer.x0 <= inner.x0 && outer.y0 <= inner.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1
+}
+
+/// Fills `part`'s afters from `regions` (the entry it is the newest
+/// stroke of): its end bytes over its rect are the entry's after there.
+fn fill_afters(part: &mut StrokePart, regions: &[TileRegion]) {
+    for pr in &mut part.regions {
+        let Some(r) = regions
+            .iter()
+            .find(|r| r.owner == pr.owner && r.tile == pr.tile && r.channel == pr.channel)
+        else {
+            continue;
+        };
+        if !contains(r.rect, pr.rect) {
+            continue;
+        }
+        let after = RgbaBuffer {
+            width: r.rect.width(),
+            height: r.rect.height(),
+            data: r.after.clone(),
+        };
+        pr.after = after.region(local_rect(pr.rect, r.rect));
+    }
 }
 
 /// Whether `tiles` coalesce into `top` (the module docs' eligibility
@@ -465,8 +524,47 @@ fn can_merge(top: &PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> bool {
 /// [`can_merge`]): shared (owner, tile, channel) triples grow to the union
 /// with the oldest before and the newest after, the rest carry over.
 fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrokeCommand {
-    let mut regions: BTreeMap<(PlaneOwner, u16, String), TileRegion> = top
-        .regions
+    let PaintStrokeCommand {
+        regions: top_regions,
+        parts: top_parts,
+    } = top;
+    // The split-redo journal: an unmerged top becomes part 1; a merged
+    // top's newest part gets its afters filled from the entry's after
+    // (which equals that stroke's end over its rect); then the new
+    // stroke is appended as the newest part, afters left empty (derived
+    // from the merged after at split time).
+    let mut parts = if top_parts.is_empty() {
+        vec![StrokePart {
+            regions: top_regions
+                .iter()
+                .map(|r| PartRegion {
+                    owner: r.owner,
+                    tile: r.tile,
+                    channel: r.channel.clone(),
+                    rect: r.rect,
+                    after: Vec::new(),
+                })
+                .collect(),
+        }]
+    } else {
+        top_parts
+    };
+    if let Some(newest) = parts.last_mut() {
+        fill_afters(newest, &top_regions);
+    }
+    parts.push(StrokePart {
+        regions: tiles
+            .iter()
+            .map(|t| PartRegion {
+                owner: t.owner,
+                tile: t.tile,
+                channel: t.channel.clone(),
+                rect: t.rect,
+                after: Vec::new(),
+            })
+            .collect(),
+    });
+    let mut regions: BTreeMap<(PlaneOwner, u16, String), TileRegion> = top_regions
         .into_iter()
         .map(|r| ((r.owner, r.tile, r.channel.clone()), r))
         .collect();
@@ -481,13 +579,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
                     data: t.start.region(union),
                 };
                 // The old rect, in the union's local coordinates.
-                let local = DirtyRect {
-                    x0: old.rect.x0 - union.x0,
-                    y0: old.rect.y0 - union.y0,
-                    x1: old.rect.x1 - union.x0,
-                    y1: old.rect.y1 - union.y0,
-                };
-                before.write_region(local, &old.before);
+                before.write_region(local_rect(old.rect, union), &old.before);
                 TileRegion {
                     owner: t.owner,
                     tile: t.tile,
@@ -510,6 +602,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
     }
     PaintStrokeCommand {
         regions: regions.into_values().collect(),
+        parts,
     }
 }
 
@@ -538,6 +631,161 @@ pub(crate) fn record_stroke(
     true
 }
 
+/// The history envelope a split must fit (the `PaintState` caps): a
+/// split whose parts alone exceed either bound is refused, so the
+/// oldest-first eviction a split triggers only ever drops entries OLDER
+/// than the split entry, never one of its parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SplitEnvelope {
+    pub max_entries: usize,
+    pub max_bytes: usize,
+}
+
+/// What [`split_redo`] did. Every refusal leaves the journal and the
+/// document exactly as they were (no net writes queued).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitOutcome {
+    /// The merged entry was redone as its first part; the remaining
+    /// `parts - 1` sit on the redo stack, oldest next.
+    Split { parts: usize },
+    /// Nothing to redo.
+    Empty,
+    /// The next redo entry is a single stroke: there is nothing to split
+    /// (plain [`UndoStack::redo`] already replays it alone).
+    NotMerged,
+    /// More than one entry waits on the redo stack. The split pushes its
+    /// parts, and a push clears the redo stack, so splitting here would
+    /// drop the later undone strokes; refused instead (lifting this needs
+    /// a redo-top accessor in `umber_core::undo`, a named follow-up).
+    RedoPending,
+    /// The parts alone exceed the envelope (more parts than
+    /// `max_entries`, or more split bytes than `max_bytes`): the entry
+    /// stays merged and still redoes as one unit.
+    ExceedsEnvelope,
+}
+
+/// Rebuilds a merged entry's constituent strokes as plain entries, oldest
+/// first, with exact per-stroke bytes: each part's before is the merged
+/// before with every earlier part's after written over it, cut to the
+/// part's own rect. `None` for an unmerged entry or a malformed journal
+/// (a part rect outside its key's merged rect).
+pub(crate) fn split_parts(merged: &PaintStrokeCommand) -> Option<Vec<PaintStrokeCommand>> {
+    if merged.parts.len() < 2 {
+        return None;
+    }
+    // Per key: the running state over the merged rect, starting at before.
+    let mut running: BTreeMap<(PlaneOwner, u16, String), (DirtyRect, RgbaBuffer)> = merged
+        .regions
+        .iter()
+        .map(|r| {
+            let image = RgbaBuffer {
+                width: r.rect.width(),
+                height: r.rect.height(),
+                data: r.before.clone(),
+            };
+            ((r.owner, r.tile, r.channel.clone()), (r.rect, image))
+        })
+        .collect();
+    let last = merged.parts.len() - 1;
+    let mut out = Vec::with_capacity(merged.parts.len());
+    for (k, part) in merged.parts.iter().enumerate() {
+        let mut regions = Vec::with_capacity(part.regions.len());
+        for pr in &part.regions {
+            let key = (pr.owner, pr.tile, pr.channel.clone());
+            let (rect, state) = running.get_mut(&key)?;
+            if !contains(*rect, pr.rect) {
+                return None;
+            }
+            let local = local_rect(pr.rect, *rect);
+            let before = state.region(local);
+            // The newest part's after is the merged after over its rect.
+            let after = if k == last {
+                let region = merged.regions.iter().find(|r| {
+                    r.owner == pr.owner && r.tile == pr.tile && r.channel == pr.channel
+                })?;
+                RgbaBuffer {
+                    width: region.rect.width(),
+                    height: region.rect.height(),
+                    data: region.after.clone(),
+                }
+                .region(local)
+            } else {
+                pr.after.clone()
+            };
+            if after.len() != local.byte_len() {
+                return None;
+            }
+            state.write_region(local, &after);
+            regions.push(TileRegion {
+                owner: pr.owner,
+                tile: pr.tile,
+                channel: pr.channel.clone(),
+                rect: pr.rect,
+                before,
+                after,
+            });
+        }
+        out.push(PaintStrokeCommand {
+            regions,
+            parts: Vec::new(),
+        });
+    }
+    Some(out)
+}
+
+/// Split redo: replays the next redo entry, when it is a merged one, as
+/// its FIRST constituent stroke only, leaving the rest on the redo stack
+/// so each further [`UndoStack::redo`] replays one stroke. Must run right
+/// after undoing the merged entry (see [`SplitOutcome::RedoPending`]).
+///
+/// The parts are pushed in order, so the journal grows by `parts - 1`
+/// entries and by the unmerged byte cost; the push's usual oldest-first
+/// eviction applies to entries below the split (pinned by tests), and a
+/// split that would not fit `envelope` on its own is refused.
+pub(crate) fn split_redo(
+    history: &mut UndoStack<PaintStrokeCommand>,
+    writes: &mut PaintWrites,
+    envelope: SplitEnvelope,
+) -> SplitOutcome {
+    let mark = writes.writes.len();
+    if !history.redo(writes) {
+        return SplitOutcome::Empty;
+    }
+    let refusal = if history.can_redo() {
+        Some(SplitOutcome::RedoPending)
+    } else {
+        match history.peek_undo().and_then(split_parts) {
+            None => Some(SplitOutcome::NotMerged),
+            Some(parts)
+                if parts.len() > envelope.max_entries
+                    || parts.iter().map(Command::memory_bytes).sum::<usize>()
+                        > envelope.max_bytes =>
+            {
+                Some(SplitOutcome::ExceedsEnvelope)
+            }
+            Some(parts) => {
+                let _merged = history.take_top_unreverted();
+                let count = parts.len();
+                let mut first = parts[0].clone();
+                for part in parts {
+                    history.push(part, writes);
+                }
+                for _ in 1..count {
+                    history.undo(writes);
+                }
+                // Net effect on the (pre-redo) document: the first part's
+                // after over its rect; every other write cancels out.
+                writes.writes.truncate(mark);
+                first.apply(writes);
+                return SplitOutcome::Split { parts: count };
+            }
+        }
+    };
+    history.undo(writes);
+    writes.writes.truncate(mark);
+    refusal.unwrap_or(SplitOutcome::NotMerged)
+}
+
 /// One tile's slice of a stroke's undo record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TileRegion {
@@ -553,10 +801,33 @@ pub(crate) struct TileRegion {
     pub after: Vec<u8>,
 }
 
-/// One retouch stroke as an undoable edit (one entry per stroke).
+/// One region of a [`StrokePart`]: the constituent stroke's own rect on
+/// one plane and its stroke-end bytes there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PartRegion {
+    pub owner: PlaneOwner,
+    pub tile: u16,
+    pub channel: String,
+    pub rect: DirtyRect,
+    pub after: Vec<u8>,
+}
+
+/// One constituent stroke of a merged entry (the split-redo journal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StrokePart {
+    pub regions: Vec<PartRegion>,
+}
+
+/// One retouch stroke as an undoable edit (one entry per stroke, or one
+/// per run of overlapping strokes under the cumulative merge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PaintStrokeCommand {
     pub regions: Vec<TileRegion>,
+    /// The constituent strokes, oldest first, when this entry is a merge
+    /// (at least two); empty for an unmerged entry. Split redo
+    /// ([`split_top`], [`split_redo`]) rebuilds per-stroke entries from
+    /// `regions`' before plus these afters.
+    pub parts: Vec<StrokePart>,
 }
 
 /// The pending region writes undo/redo produce: the [`Command::Doc`] of
@@ -595,10 +866,18 @@ impl Command for PaintStrokeCommand {
     }
 
     fn memory_bytes(&self) -> usize {
-        self.regions
+        let regions: usize = self
+            .regions
             .iter()
             .map(|r| r.before.len() + r.after.len())
-            .sum()
+            .sum();
+        let parts: usize = self
+            .parts
+            .iter()
+            .flat_map(|p| &p.regions)
+            .map(|r| r.after.len())
+            .sum();
+        regions + parts
     }
 }
 
@@ -1389,8 +1668,10 @@ mod tests {
         let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
         let mut writes = PaintWrites::default();
         // After stroke k the entry's rect is the running union
-        // [8, 24+4k) × [8, 24): (16 + 4k) × 16 texels × 4 bytes × 2 sides.
-        let expected_bytes = [2048, 2560, 3072, 3584, 4096, 4608, 5120, 5632];
+        // [8, 24+4k) × [8, 24): (16 + 4k) × 16 texels × 4 bytes × 2 sides,
+        // plus the split-redo journal: each of the k older strokes keeps
+        // its own after (16·16·4 = 1024 bytes).
+        let expected_bytes = [2048, 3584, 5120, 6656, 8192, 9728, 11264, 12800];
         for k in 0..N {
             let r = rect(8 + 4 * k, 8, 24 + 4 * k, 24);
             record_fill(&mut history, &mut writes, &mut image, r, 10 * (k as u8 + 1));
@@ -1407,7 +1688,8 @@ mod tests {
         let painted = image.clone();
 
         // (d) The unmerged baseline: the same strokes as plain entries,
-        // 8 × (16·16·4·2 = 2048) = 16384 bytes; merged 44·16·4·2 = 5632.
+        // 8 × (16·16·4·2 = 2048) = 16384 bytes; merged 44·16·4·2 = 5632
+        // plus 7 × 1024 journal afters = 12800.
         let mut baseline: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
         let mut scratch = original.clone();
         for k in 0..N {
@@ -1427,7 +1709,7 @@ mod tests {
         writes.writes.clear();
         assert_eq!(baseline.len(), 8);
         assert_eq!(baseline.bytes_held(), 16384);
-        assert_eq!(baseline.bytes_held() - history.bytes_held(), 10752);
+        assert_eq!(baseline.bytes_held() - history.bytes_held(), 3584);
 
         // (b) One undo restores the ORIGINAL pre-first-stroke bytes over
         // the whole image (the union's corners included), and redo the
@@ -1562,7 +1844,8 @@ mod tests {
         assert!(record_stroke(&mut history, &mut writes, &tiles));
         assert_eq!(history.len(), 1);
         assert_eq!(history.peek_undo().unwrap().regions.len(), 2);
-        assert_eq!(history.bytes_held(), 3072 + 2048);
+        // + 1024: stroke 1's journal after (split redo).
+        assert_eq!(history.bytes_held(), 3072 + 2048 + 1024);
         let after_two = images.clone();
 
         // Stroke 3: TILE only, disjoint from the entry's TILE rect → stacks.
@@ -1578,7 +1861,7 @@ mod tests {
         }];
         assert!(record_stroke(&mut history, &mut writes, &tiles));
         assert_eq!(history.len(), 2);
-        assert_eq!(history.bytes_held(), 3072 + 2048 + 512);
+        assert_eq!(history.bytes_held(), 3072 + 2048 + 1024 + 512);
 
         assert!(history.undo(&mut writes));
         drain_tiles(&mut writes, &mut images);
@@ -1629,5 +1912,213 @@ mod tests {
         drain(&mut writes, &mut image);
         assert_eq!(image, original);
         assert!(!history.can_undo());
+    }
+
+    // --- Split redo (row 167 follow-up) ---
+
+    const BIG: SplitEnvelope = SplitEnvelope {
+        max_entries: 64,
+        max_bytes: 256 * 1024 * 1024,
+    };
+
+    /// The plain (unmerged) record of a fill, for byte comparison.
+    fn plain_fill(image: &mut RgbaBuffer, r: DirtyRect, value: u8) -> PaintStrokeCommand {
+        let (start, end) = fill_stroke(image, r, value);
+        stroke_command(&[StrokeTile {
+            owner: PlaneOwner::Base,
+            tile: TILE,
+            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+            rect: r,
+            start: &start,
+            end: &end,
+        }])
+        .expect("the fill writes")
+    }
+
+    /// The four overlapping soak rects (`[8+4k, 24+4k) × [8, 24)`).
+    fn soak_rects() -> Vec<DirtyRect> {
+        (0..4).map(|k| rect(8 + 4 * k, 8, 24 + 4 * k, 24)).collect()
+    }
+
+    /// Merged entry → undo → split → redo replays each stroke alone: the
+    /// rebuilt parts equal the unmerged per-stroke records byte for byte,
+    /// and each step lands the exact image the separate strokes produced.
+    #[test]
+    fn split_redo_replays_merged_parts_with_exact_bytes() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        let mut states = vec![image.clone()];
+        let mut scratch = original.clone();
+        let mut plain = Vec::new();
+        for (k, &r) in soak_rects().iter().enumerate() {
+            record_fill(&mut history, &mut writes, &mut image, r, 40 * (k as u8 + 1));
+            states.push(image.clone());
+            plain.push(plain_fill(&mut scratch, r, 40 * (k as u8 + 1)));
+        }
+        assert_eq!(history.len(), 1, "the four strokes merged");
+        let merged = history.peek_undo().unwrap().clone();
+        assert_eq!(merged.parts.len(), 4);
+        assert_eq!(split_parts(&merged).expect("merged"), plain);
+
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
+        assert_eq!(
+            split_redo(&mut history, &mut writes, BIG),
+            SplitOutcome::Split { parts: 4 }
+        );
+        drain(&mut writes, &mut image);
+        assert_eq!(image, states[1], "the split redoes stroke 1 only");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.bytes_held(), 4 * 2048, "plain parts' bytes");
+        for (k, state) in states.iter().enumerate().skip(2) {
+            assert!(history.redo(&mut writes));
+            drain(&mut writes, &mut image);
+            assert_eq!(&image, state, "redo replays stroke {k} alone");
+        }
+        assert!(!history.can_redo());
+        assert_eq!(history.len(), 4);
+        // And the parts undo one stroke at a time, back to the original.
+        for k in (0..4).rev() {
+            assert!(history.undo(&mut writes));
+            drain(&mut writes, &mut image);
+            assert_eq!(image, states[k], "undo of part {k}");
+        }
+        assert!(!history.can_undo());
+    }
+
+    /// A non-merged entry, an empty redo stack, and a pending later redo
+    /// are typed no-ops: the journal and the image stay exactly as they
+    /// were, and no net write is queued.
+    #[test]
+    fn split_redo_refusals_are_typed_no_ops() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        assert_eq!(
+            split_redo(&mut history, &mut writes, BIG),
+            SplitOutcome::Empty
+        );
+
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(0, 0, 16, 16),
+            77,
+        );
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        let held = history.bytes_held();
+        assert_eq!(
+            split_redo(&mut history, &mut writes, BIG),
+            SplitOutcome::NotMerged
+        );
+        assert!(writes.writes.is_empty());
+        assert_eq!(image, original);
+        assert_eq!((history.len(), history.can_redo()), (0, true));
+        assert_eq!(history.bytes_held(), held);
+        let single = plain_fill(&mut original.clone(), rect(0, 0, 4, 4), 1);
+        assert!(single.parts.is_empty());
+        assert!(
+            split_parts(&single).is_none(),
+            "an unmerged entry has no parts"
+        );
+
+        // A merged entry with a later entry undone above it: splitting
+        // would clear that redo, so it is refused.
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut image = original.clone();
+        for (k, &r) in soak_rects().iter().enumerate() {
+            record_fill(&mut history, &mut writes, &mut image, r, 30 + k as u8);
+        }
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(40, 40, 48, 48),
+            9,
+        );
+        assert_eq!(history.len(), 2);
+        assert!(history.undo(&mut writes) && history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, original);
+        assert_eq!(
+            split_redo(&mut history, &mut writes, BIG),
+            SplitOutcome::RedoPending
+        );
+        assert!(writes.writes.is_empty());
+        assert_eq!(history.len(), 0);
+        assert!(history.redo(&mut writes) && history.redo(&mut writes));
+        assert!(!history.can_redo(), "both redos survived the refusal");
+    }
+
+    /// The envelope: a split pushes `parts` entries through the normal
+    /// push, so oldest-first eviction drops entries BELOW the split (here
+    /// cap 4: 2 old + 3 parts → the oldest goes); a split whose parts
+    /// alone exceed the envelope is refused and the entry stays merged.
+    #[test]
+    fn split_redo_eviction_and_envelope_are_pinned() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(4);
+        let mut writes = PaintWrites::default();
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(40, 40, 48, 48),
+            1,
+        );
+        let after_a = image.clone();
+        record_fill(&mut history, &mut writes, &mut image, rect(40, 0, 48, 8), 2);
+        let before_merge = image.clone();
+        for (k, &r) in soak_rects().iter().take(3).enumerate() {
+            record_fill(&mut history, &mut writes, &mut image, r, 60 + k as u8);
+        }
+        assert_eq!(history.len(), 3);
+        assert!(history.undo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(image, before_merge);
+
+        // Refused: 3 parts > 2 entries, and 3 × 2048 > 4096 bytes.
+        for envelope in [
+            SplitEnvelope {
+                max_entries: 2,
+                ..BIG
+            },
+            SplitEnvelope {
+                max_entries: 64,
+                max_bytes: 4096,
+            },
+        ] {
+            assert_eq!(
+                split_redo(&mut history, &mut writes, envelope),
+                SplitOutcome::ExceedsEnvelope
+            );
+            assert!(writes.writes.is_empty());
+            assert_eq!((history.len(), history.can_redo()), (2, true));
+        }
+
+        let parts_bytes = 3 * 2048;
+        let below = 2 * 512;
+        assert_eq!(
+            split_redo(&mut history, &mut writes, BIG),
+            SplitOutcome::Split { parts: 3 }
+        );
+        drain(&mut writes, &mut image);
+        // 2 old + 3 parts = 5 > 4: the OLDEST (stroke a) was evicted.
+        assert_eq!(history.len(), 2, "b + part 1; parts 2..3 on redo");
+        assert_eq!(history.bytes_held(), parts_bytes + below - 512);
+        assert!(history.redo(&mut writes) && history.redo(&mut writes));
+        drain(&mut writes, &mut image);
+        assert_eq!(history.len(), 4);
+        // Undo bottoms out above the evicted stroke a.
+        while history.undo(&mut writes) {}
+        drain(&mut writes, &mut image);
+        assert_eq!(image, after_a, "stroke a was evicted, never a part");
     }
 }

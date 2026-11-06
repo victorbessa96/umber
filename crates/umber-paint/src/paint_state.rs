@@ -426,7 +426,10 @@ use umber_mesh::polygon_fill::rasterize_polygon_mask;
 use umber_mesh::seam::{build_seam_graph, SeamGraph};
 use umber_mesh::udim::{tile_of_triangle, tile_of_uv, FIRST_TILE};
 
-use crate::retouch::{record_stroke, PaintStrokeCommand, PaintWrites, RetouchStroke, StrokeTile};
+use crate::retouch::{
+    record_stroke, split_redo, PaintStrokeCommand, PaintWrites, RetouchStroke, SplitEnvelope,
+    SplitOutcome, StrokeTile,
+};
 
 /// Paint-what-you-see projection (§2's P1 row, Mari-style paint buffer).
 ///
@@ -2865,6 +2868,27 @@ impl PaintState {
         let redone = self.retouch_history.redo(&mut self.retouch_writes);
         self.flush_retouch_writes();
         redone
+    }
+
+    /// Split redo (row 167 follow-up): when the next redo entry is a
+    /// merged run of overlapping strokes, redoes only its FIRST stroke and
+    /// leaves the rest on the redo stack, so each further
+    /// [`Self::redo_stroke`] replays one stroke with its exact bytes. Any
+    /// refusal ([`SplitOutcome`]) leaves the journal and planes untouched.
+    /// The split grows the journal by `parts - 1` entries under the same
+    /// 64-entry / 256 MiB envelope (see `retouch::split_redo`). App-side
+    /// History-panel wiring is a deferred follow-up.
+    pub fn split_redo_stroke(&mut self) -> SplitOutcome {
+        let outcome = split_redo(
+            &mut self.retouch_history,
+            &mut self.retouch_writes,
+            SplitEnvelope {
+                max_entries: RETOUCH_HISTORY_MAX_ENTRIES,
+                max_bytes: RETOUCH_HISTORY_MAX_BYTES,
+            },
+        );
+        self.flush_retouch_writes();
+        outcome
     }
 
     /// Whether [`Self::undo_stroke`] would do anything.
