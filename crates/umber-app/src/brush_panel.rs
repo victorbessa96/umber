@@ -832,10 +832,14 @@ impl BrushPanel {
         });
 
         ui.add_space(4.0);
-        ui.strong("Pressure → alpha");
+        // The per-property pressure curves (U3-5, wired into the dab
+        // engine through `BrushPreset::engine_params`): flow re-maps the
+        // pressure-shaped alpha; size scales each dab's radius. Identity
+        // = off (size does not follow pressure).
+        ui.strong(tr("brush.pressure-flow"));
         changed |= curve_editor(ui, &mut preset.alpha_curve);
         ui.add_space(4.0);
-        ui.strong("Pressure → radius");
+        ui.strong(tr("brush.pressure-size"));
         changed |= curve_editor(ui, &mut preset.radius_curve);
 
         if changed {
@@ -2603,6 +2607,7 @@ mod tests {
                 stamped: false,
                 stamp_angle: Default::default(),
                 jitter: Default::default(),
+                pressure_maps: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 1.2,

@@ -1117,7 +1117,7 @@ impl TabViewer for PanelViewer<'_> {
                     if let Some(preset) = self.brush.active_preset() {
                         // An eyedropper pick overrides the preset's color
                         // until the preset itself changes.
-                        paint.sync_brush_params(&preset.params, !preset_changed);
+                        paint.sync_brush_params(&preset.engine_params(), !preset_changed);
                         paint.sync_stroke_method(preset.stroke_method);
                         if preset_changed {
                             paint.set_brush_size(preset.size);

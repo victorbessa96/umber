@@ -223,6 +223,52 @@ pub struct BrushParams {
     /// = none.
     #[serde(default)]
     pub jitter: Jitter,
+    /// The preset's per-property pressure curves (U3-5), carried into
+    /// the engine by [`crate::preset::BrushPreset::engine_params`]. Not
+    /// serialized: the preset file keeps them as `alpha_curve` /
+    /// `radius_curve`, one copy on disk.
+    #[serde(skip)]
+    pub pressure_maps: PressureMaps,
+}
+
+/// Per-property pressure response (Blender's per-property pressure
+/// curves): `flow` re-maps the alpha AFTER `pressure_curve`; `size`
+/// scales each dab's radius by `size(pressure)`. An identity curve is
+/// skipped exactly (no float re-evaluation), so a brush whose curves are
+/// identity paints bit-identically to before the maps existed, and an
+/// identity `size` curve means "size does not follow pressure".
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PressureMaps {
+    /// Pressure-shaped alpha → final alpha multiplier.
+    pub flow: ControlCurve,
+    /// Pressure → radius multiplier.
+    pub size: ControlCurve,
+}
+
+impl PressureMaps {
+    /// `curve(x)`, or `x` itself when the curve is the identity (exact).
+    fn apply(curve: &ControlCurve, x: f32) -> f32 {
+        if *curve == ControlCurve::identity() {
+            x
+        } else {
+            curve.evaluate(x)
+        }
+    }
+
+    /// The flow re-map of an already pressure-shaped multiplier.
+    pub fn flow(&self, shaped: f32) -> f32 {
+        Self::apply(&self.flow, shaped)
+    }
+
+    /// The radius multiplier at `pressure`: exactly 1 when size does not
+    /// follow pressure (identity curve).
+    pub fn size_scale(&self, pressure: f32) -> f32 {
+        if self.size == ControlCurve::identity() {
+            1.0
+        } else {
+            self.size.evaluate(pressure.clamp(0.0, 1.0)).max(0.0)
+        }
+    }
 }
 
 impl Default for BrushParams {
@@ -239,6 +285,7 @@ impl Default for BrushParams {
             stamped: false,
             stamp_angle: StampAngle::None,
             jitter: Jitter::default(),
+            pressure_maps: PressureMaps::default(),
         }
     }
 }
@@ -273,6 +320,7 @@ fn dab_for(
     } else {
         0.0
     };
+    let radius_px = radius_px * params.pressure_maps.size_scale(stamp.alpha_multiplier);
     let (mut pos, mut radius, mut alpha) = (stamp.pos, radius_px, alpha);
     if !params.jitter.is_none() {
         let j = params.jitter.clamped();
@@ -373,6 +421,7 @@ impl DabAdapter {
             let shaped = params
                 .pressure_curve
                 .evaluate(stamp.alpha_multiplier.powf(params.pressure_gamma));
+            let shaped = params.pressure_maps.flow(shaped);
             let alpha = (params.alpha * shaped).clamp(0.0, 1.0);
             out.push(dab_for(stamp, prev, radius_px, params, alpha));
             prev = Some(stamp.pos);
@@ -406,6 +455,7 @@ impl DabAdapter {
             let shaped = params
                 .pressure_curve
                 .evaluate(stamp.alpha_multiplier.powf(params.pressure_gamma));
+            let shaped = params.pressure_maps.flow(shaped);
             let alpha = (base * shaped).clamp(0.0, 1.0);
             out.push(dab_for(stamp, prev, radius_px, params, alpha));
             prev = Some(stamp.pos);
@@ -477,6 +527,7 @@ mod tests {
                 position: 1.0,
                 flow: 0.5,
             },
+            pressure_maps: Default::default(),
             stamped: true,
             ..base
         };
@@ -646,6 +697,65 @@ mod tests {
         };
         let dabs = DabAdapter::stamps_to_dabs(&[stamp([0.0, 0.0], 0.5)], 8.0, &params);
         assert!((dabs[0].alpha - 0.8 * 0.9).abs() < 1e-6);
+    }
+
+    /// U3-5: identity pressure maps leave every dab bit-identical (the
+    /// shipped presets with identity curves paint exactly as before).
+    #[test]
+    fn identity_pressure_maps_are_bit_identical() {
+        let stamps: Vec<_> = (0..9)
+            .map(|i| stamp([i as f32, 0.5 * i as f32], 0.05 + 0.11 * i as f32))
+            .collect();
+        let shaped = BrushParams {
+            pressure_gamma: 1.7,
+            ..BrushParams::default()
+        };
+        let mut explicit = shaped;
+        explicit.pressure_maps = PressureMaps {
+            flow: ControlCurve::identity(),
+            size: ControlCurve::identity(),
+        };
+        for (a, b) in DabAdapter::stamps_to_dabs(&stamps, 12.0, &shaped)
+            .iter()
+            .zip(DabAdapter::stamps_to_dabs(&stamps, 12.0, &explicit).iter())
+        {
+            assert_eq!(a.radius.to_bits(), b.radius.to_bits());
+            assert_eq!(a.alpha.to_bits(), b.alpha.to_bits());
+            assert_eq!(a.radius, 12.0, "identity size map = radius unchanged");
+        }
+    }
+
+    /// U3-5: a size curve scales each dab's radius by `size(pressure)`;
+    /// a flow curve re-maps the shaped alpha. Both paths (build-up and
+    /// wash) honour them.
+    #[test]
+    fn pressure_maps_drive_radius_and_flow() {
+        let size = ControlCurve::try_new(&[(0.0, 0.3), (0.5, 0.7), (0.75, 0.9), (1.0, 1.0)])
+            .expect("size curve");
+        let flow = ControlCurve::try_new(&[(0.0, 0.0), (0.25, 0.1), (0.75, 0.9), (1.0, 1.0)])
+            .expect("flow curve");
+        let params = BrushParams {
+            alpha: 1.0,
+            pressure_maps: PressureMaps { flow, size },
+            ..BrushParams::default()
+        };
+        let light = DabAdapter::stamps_to_dabs(&[stamp([0.0, 0.0], 0.5)], 10.0, &params);
+        assert!((light[0].radius - 7.0).abs() < 1e-5, "{}", light[0].radius);
+        assert!((light[0].alpha - flow.evaluate(0.5)).abs() < 1e-6);
+        let full = DabAdapter::stamps_to_dabs(&[stamp([0.0, 0.0], 1.0)], 10.0, &params);
+        assert!((full[0].radius - 10.0).abs() < 1e-5);
+        let washy = BrushParams {
+            alpha: 0.8,
+            ..params
+        };
+        let wash = DabAdapter::stamps_to_dabs_wash(&[stamp([0.0, 0.0], 0.5)], 10.0, &washy, 4.0);
+        assert!((wash[0].radius - 7.0).abs() < 1e-5);
+        let expected = opaque_linearize(0.8, 4.0) * flow.evaluate(0.5);
+        assert!(
+            (wash[0].alpha - expected).abs() < 1e-6,
+            "{} vs {expected}",
+            wash[0].alpha
+        );
     }
 
     #[test]

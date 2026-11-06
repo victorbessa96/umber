@@ -276,6 +276,20 @@ fn default_size() -> f32 {
 }
 
 impl BrushPreset {
+    /// The engine params this preset paints with: `params` plus the
+    /// preset's per-property pressure curves (U3-5): `alpha_curve` →
+    /// flow, `radius_curve` → size. Before this the two curves were
+    /// edited and saved but never reached the dab engine.
+    pub fn engine_params(&self) -> crate::BrushParams {
+        crate::BrushParams {
+            pressure_maps: crate::dab_adapter::PressureMaps {
+                flow: self.alpha_curve,
+                size: self.radius_curve,
+            },
+            ..self.params
+        }
+    }
+
     /// Serialize to the `.umberbrush` envelope
     /// (`format`/`version` header + preset fields, pretty-printed; key order
     /// follows struct field order, so equal structs produce byte-identical
@@ -434,6 +448,7 @@ mod tests {
                 stamped: false,
                 stamp_angle: Default::default(),
                 jitter: Default::default(),
+                pressure_maps: Default::default(),
             },
             one_euro: OneEuroParams {
                 min_cutoff: 2.5,
@@ -746,6 +761,31 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 12, "the starter library ships twelve presets");
+    }
+
+    /// U3-5: the preset's own curves reach the engine params, and the
+    /// shipped "Pressure Round" (the one shipped size curve) now thins
+    /// at light pressure.
+    #[test]
+    fn engine_params_carry_the_preset_pressure_curves() {
+        let p = non_default_preset();
+        let e = p.engine_params();
+        assert_eq!(e.pressure_maps.flow, p.alpha_curve);
+        assert_eq!(e.pressure_maps.size, p.radius_curve);
+        assert_eq!(
+            crate::BrushParams {
+                pressure_maps: Default::default(),
+                ..e
+            },
+            p.params
+        );
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/brushes/pressure-round.umberbrush"
+        );
+        let round = BrushPreset::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let scale = round.engine_params().pressure_maps.size_scale(0.25);
+        assert!(scale < 0.6, "light pressure thins Pressure Round: {scale}");
     }
 
     /// U3 catalogs: an old file without `catalog` loads uncategorised and

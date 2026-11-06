@@ -6448,6 +6448,7 @@ mod tests {
             stamped: false,
             stamp_angle: Default::default(),
             jitter: Default::default(),
+            pressure_maps: Default::default(),
         };
         s.sync_brush_params(&preset, false);
         assert_eq!(s.brush_params().alpha, 0.4);
