@@ -91,6 +91,19 @@
 //! The app's reply becomes the step reply (`ok` plus the result
 //! fields; a wire `ok: false` is the step's typed error). No endpoint
 //! is a typed error, and a wire failure never panics.
+//!
+//! Assets wave K6 (2026-11-05): `library_list` scans the bundled
+//! starter `assets/` plus the per-user library dirs (the state dir's
+//! `smart/` / `env/`, the user brush preset dir — K5's
+//! [`crate::import_asset::default_library_dir`] roots) with the assets
+//! panel's own lister rules and replies JSON rows
+//! `{path, kind, name, bytes, source: starter|user}` over smart
+//! materials, smart masks, brushes and env maps; `import_asset {
+//! file, kind, library?, dry_run? }` delegates to K5's
+//! [`crate::import_asset::import_asset`] — the GUI's own loaders
+//! validate, bytes copy untouched, and every refusal is a typed
+//! error, never a silent copy. Both are ADDITIVE step variants — no
+//! protocol bump.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -116,6 +129,7 @@ use umber_paint::snapshot::build_composite_snapshot;
 use crate::batch::{
     de_margin, default_margin, default_rays, default_size, BakeTransferStep, InspectStep,
 };
+use crate::import_asset::AssetKind;
 use crate::{
     bake_context, bake_mesh_maps, export_mesh, mesh_summary, select_tiles, BakeFlags, BakeMap,
     MeshSummary, UDIM_GRID,
@@ -156,6 +170,8 @@ enum AgentStep {
     PaintRedo(NoFields),
     CommandList(NoFields),
     CommandRun(CommandRunStep),
+    LibraryList(NoFields),
+    ImportAsset(ImportAssetStep),
     Version(NoFields),
     Quit(NoFields),
 }
@@ -170,6 +186,8 @@ enum AgentStep {
 /// step variants — an old client never sends them and the reply
 /// envelope is unchanged — so they land WITHOUT a bump: adding a step
 /// is backwards compatible, only renaming/reshaping one is not.
+/// `library_list` / `import_asset` (2026-11-05, assets wave K6) are
+/// additive the same way — no bump.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The body of a step that takes no fields (`{}`; `null` and the bare
@@ -484,6 +502,147 @@ fn default_material_channel_enabled() -> bool {
 struct CommandRunStep {
     id: String,
 }
+
+/// `import_asset` — K5's validated import as an agent step (assets
+/// wave K6): `{"import_asset": {"file": "...", "kind": "brush",
+/// "library": "...", "dry_run": true}}`. `kind` is the CLI's `--kind`
+/// vocabulary (`smart-material|smart-mask|brush|env`); `library` and
+/// `dry_run` are optional — an absent `library` resolves to the kind's
+/// per-user library dir ([`crate::import_asset::default_library_dir`]).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportAssetStep {
+    file: PathBuf,
+    kind: String,
+    #[serde(default)]
+    library: Option<PathBuf>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Env var overriding the bundled starter assets root (the
+/// `UMBER_FONTS_DIR` precedent, umber-gui/src/fonts.rs) — tests point
+/// it at a scratch tree.
+pub(crate) const ASSETS_DIR_ENV: &str = "UMBER_ASSETS_DIR";
+
+/// The bundled starter assets root: `$UMBER_ASSETS_DIR` when set,
+/// else the in-tree `assets/` from this crate's manifest dir (the
+/// `fonts_dir` / env.rs precedent), else the CWD-relative `assets/`
+/// (correct for `cargo run` from the repo root). `None` when none
+/// exists — a missing starter simply contributes no rows.
+fn starter_assets_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(ASSETS_DIR_ENV).filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    if manifest.is_dir() {
+        return Some(manifest);
+    }
+    let rel = PathBuf::from("assets");
+    if rel.is_dir() {
+        Some(rel)
+    } else {
+        None
+    }
+}
+
+/// One `library_list` row: a file in one of the library dirs.
+#[derive(Debug, Serialize)]
+struct LibraryRow {
+    path: PathBuf,
+    kind: &'static str,
+    /// The file stem (`rusted-iron.umbersmart` -> `rusted-iron`).
+    name: String,
+    bytes: u64,
+    /// `starter` (the bundled `assets/`) or `user` (the per-user
+    /// library dir).
+    source: &'static str,
+}
+
+/// The listers' extension gate for `kind` — the same rules as the
+/// GUI's scan fns: case-sensitive `umbersmart` / `umbermask` /
+/// `umberbrush` (`document::list_smart_*`, `preset_library`'s scan
+/// filter), case-insensitive `.png|.exr` for env (`env.rs`'s
+/// `format_for_path` gate).
+fn library_file_ok(kind: AssetKind, path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str());
+    match kind {
+        AssetKind::SmartMaterial => ext == Some("umbersmart"),
+        AssetKind::SmartMask => ext == Some("umbermask"),
+        AssetKind::Brush => ext == Some("umberbrush"),
+        AssetKind::Env => ext.is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "exr")),
+    }
+}
+
+/// The (starter, user) library dirs for `kind`: the bundled
+/// `assets/<sub>` dir and K5's per-user library dir
+/// ([`crate::import_asset::default_library_dir`] — the same roots the
+/// GUI reads: the state dir's `smart/` / `env/`, the user brush preset
+/// dir).
+fn library_dirs(kind: AssetKind) -> (Option<PathBuf>, Option<PathBuf>) {
+    let sub = match kind {
+        AssetKind::SmartMaterial | AssetKind::SmartMask => "smart",
+        AssetKind::Brush => "brushes",
+        AssetKind::Env => "env",
+    };
+    let starter = starter_assets_dir().map(|root| root.join(sub));
+    (starter, crate::import_asset::default_library_dir(kind))
+}
+
+/// Appends the rows of one library dir: direct-child files passing
+/// `kind`'s lister gate, sorted by file name in byte order (the
+/// `preset_library::sorted_preset_files` rule). A missing or
+/// unreadable dir contributes nothing — never an error.
+fn scan_library_dir(
+    kind: AssetKind,
+    dir: &Path,
+    source: &'static str,
+    rows: &mut Vec<LibraryRow>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && library_file_ok(kind, p))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let Some(name) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        rows.push(LibraryRow {
+            path,
+            kind: kind.name(),
+            name,
+            bytes,
+            source,
+        });
+    }
+}
+
+/// Every row for `kind` over the (starter, user) dirs — the minimal
+/// scan behind the assets panel's listers, without their per-file
+/// load (a row's file is validated on import, K5).
+fn scan_library(
+    kind: AssetKind,
+    starter: Option<&Path>,
+    user: Option<&Path>,
+    rows: &mut Vec<LibraryRow>,
+) {
+    if let Some(dir) = starter {
+        scan_library_dir(kind, dir, "starter", rows);
+    }
+    if let Some(dir) = user {
+        scan_library_dir(kind, dir, "user", rows);
+    }
+}
+
+/// Serializes the tests that point [`ASSETS_DIR_ENV`] at a scratch
+/// tree — env is process-global, so parallel tests would race.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The async bake's state, as `bake_status` reports it
 /// (`{"status": "pending" | "running" | "done" | "failed", ...}`).
@@ -1148,6 +1307,8 @@ impl Session {
             AgentStep::PaintRedo(NoFields {}) => self.paint_history(false),
             AgentStep::CommandList(NoFields {}) => self.command_list(),
             AgentStep::CommandRun(s) => self.command_run(s),
+            AgentStep::LibraryList(NoFields {}) => self.library_list(),
+            AgentStep::ImportAsset(s) => self.import_asset(s),
             AgentStep::Quit(NoFields {}) => unreachable!("quit is answered by Session::reply"),
         }
     }
@@ -1937,6 +2098,51 @@ impl Session {
     fn command_run(&self, s: CommandRunStep) -> Result<Fields> {
         let endpoint = self.control.as_ref().ok_or_else(no_control_endpoint)?;
         control_call(endpoint, "command.run", &serde_json::json!({ "id": s.id }))
+    }
+
+    /// `library_list` (assets wave K6): the starter + user libraries
+    /// headless. Rows are `{path, kind, name, bytes, source}` over the
+    /// four kinds; a missing dir contributes no rows, so an empty
+    /// library is `{"rows": [], "count": 0}`, never an error. No mesh,
+    /// project or control channel needed.
+    fn library_list(&self) -> Result<Fields> {
+        let mut rows = Vec::new();
+        for kind in [
+            AssetKind::SmartMaterial,
+            AssetKind::SmartMask,
+            AssetKind::Brush,
+            AssetKind::Env,
+        ] {
+            let (starter, user) = library_dirs(kind);
+            scan_library(kind, starter.as_deref(), user.as_deref(), &mut rows);
+        }
+        let count = rows.len();
+        fields(serde_json::json!({ "rows": rows, "count": count }))
+    }
+
+    /// `import_asset { file, kind, library?, dry_run? }`: K5's
+    /// [`crate::import_asset::import_asset`] verbatim — the GUI's own
+    /// loaders validate `file` for `kind`, the bytes copy untouched
+    /// into `library` (or the kind's per-user dir), and every refusal
+    /// (bad kind, wrong extension, loader rejection, existing target)
+    /// is this step's typed error. Nothing is ever silently copied.
+    fn import_asset(&self, s: ImportAssetStep) -> Result<Fields> {
+        let kind = AssetKind::from_name(&s.kind).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown kind {:?} (expected smart-material|smart-mask|brush|env)",
+                s.kind
+            )
+        })?;
+        let out =
+            crate::import_asset::import_asset(&s.file, kind, s.library.as_deref(), s.dry_run)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        fields(serde_json::json!({
+            "kind": out.kind.name(),
+            "source": out.source,
+            "target": out.target,
+            "dry_run": out.dry_run,
+            "bytes": out.bytes,
+        }))
     }
 
     /// `bake`: validates the request synchronously (held mesh, no bake in
