@@ -150,4 +150,41 @@ Verification per kill: rustfmt, clippy `-D warnings`, the touched crates' tests,
 - 2026-11-05: **U3-4 catalogs LANDED** (queue row 189). Found U3-5: the preset alpha/radius pressure curves are dead controls (never read by the paint path).
 - 2026-11-05: **U3-5 LANDED** (queue row 191): the preset pressure curves drive flow and size. **Wave U3 complete.**
 - 2026-11-05: **Wave U4 LANDED** (queue row 192): Dark / Light / High Contrast themes, the real theme preference (Quick Setup's Light was a no-op), Reduce Motion honoured everywhere.
-- Next: U5 (egui 0.37 / docking migration) stays parked until egui_dock ships for egui 0.37. Follow-ups: theme the UV-view constants and the picker internals.
+- 2026-11-05: U4 follow-up LANDED (queue row 196): UV canvas and brush swatch cards themed, High Contrast disabled text at 7:1.
+- 2026-11-05: **Second-round audit** (§8): requirements re-scored all met; seven new findings, A2-1 fixed (`42c9d93`, row 201). Next: wave U6 (§8.3). U5 stays parked until egui_dock ships for egui 0.37.
+
+## 8. Second-round audit (after U1-U4)
+
+Method: the release build driven through `--control` (`command.list`, `command.run`, `ui.inspect`, `viewport.screenshot`) on a fresh profile and on the scratch profile's saved layout, at a 1296 x 729 window (960 x 540 logical at scale 1.35); vision on region crops; requirement greps against the tree.
+
+### 8.1 Requirements re-scored
+
+| Requirement | State | Evidence |
+|---|---|---|
+| R-LAYOUT-1 floors | met (by design they scale below 1120 logical) | `dock_floor.rs`, 8 tests |
+| R-LAYOUT-2 default | met at 1400 x 900 | leaf-width test; live fresh profile 217 / 303 / 202 / 219 logical at 960 wide |
+| R-LAYOUT-3 search | met | `context_rail.rs` fills `available_width` up to 240 |
+| R-GLYPH-1/2/3 | met | atlas and font-coverage tests in `icons.rs`, `fonts.rs` |
+| R-COPY-1/2 | met | resize warnings are hover text on the triggering control |
+| R-ONBOARD-1 | met | Quick Setup anchored centre |
+| R-AGENT-1 | met | `mesh.load` / `project.open` on the control channel |
+| R-VISUAL-1 | met | empty-viewport backdrop from theme tokens |
+| U3, U4 (rows 184-196) | met | see §7 |
+
+### 8.2 New findings
+
+| # | Sev | Finding | State |
+|---|---|---|---|
+| A2-1 | P0 | View > 3D only then Both re-docked the 2D view as a tab in the focused side rail, so the views stopped being side by side, and the saved layout kept it (the scratch profile carried six tabs in its left rail). | FIXED `42c9d93` (queue row 201): Both splits the missing view beside the other and repairs such a saved layout. |
+| A2-2 | P0 | A freshly loaded mesh renders as a black silhouette: the base-colour canvas starts transparent black and the viewport shows it as black. Painter opens a new mesh on a neutral grey default material, so the shape reads before the first stroke. | OPEN. Display-only fix preferred (the viewport composites unpainted texels over a neutral 0.5 grey; export unchanged), so no golden moves. |
+| A2-3 | P1 | Below about 1120 logical px the floors scale every leaf down, and the default Paint preset clips: "Symmetr…", "Overlay…", "Flatten sel…", ".umbersm…", brush names, the third right-rail tab. A 1366 x 768 laptop at 125% is in that range. | OPEN. A width-aware first layout (2D view tabbed behind the 3D below the threshold) on egui 0.36; the icon rail (U5) is the full answer. |
+| A2-4 | P1 | The command registry has 31 commands (file, edit, view, mask, brush size/popup, window). Layer, texture-set, bake and export actions are not in it, so the command palette and the control channel cannot reach them. Blender's F3 searches every menu operator. | OPEN. Extend row 154's registry to the Layers/Bakes/Export panel actions. |
+| A2-5 | P2 | The brush shelf clips its last swatch at the strip edge with no scroll cue. | OPEN. A fade or arrow at the overflowing edge. |
+| A2-6 | P2 | The Layers panel's empty "Masks" section shows no hint of what goes there. | OPEN. One faint line of empty-state copy. |
+| A2-7 | P2 | High Contrast marks selected items by fill only (no outline). Contrast is well above 7:1, so it reads, but a 2 px accent outline on the selected state would match the "every edge drawn" rule. | OPEN. |
+
+Not counted as findings: the axis gizmo overlapping content (Blender and Painter do the same) and the dark viewport under Light (deliberate, §U4).
+
+### 8.3 Suggested next wave (U6)
+
+A2-2 and A2-3 first (the first impression on a fresh mesh and on a laptop screen), then A2-4 (palette coverage), then the P2 polish. U5 stays parked on egui_dock.
