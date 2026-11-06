@@ -47,6 +47,7 @@ steer 23:52); report: docs/loop/kill-reports/2026-10-20-dragon-commit-wrapper.md
 """
 
 import argparse
+import re
 import json
 import os
 import subprocess
@@ -226,6 +227,40 @@ def tail_has_message(tail):
     return False
 
 
+QUEUE = "docs/loop/queue.md"
+QUEUE_ROW = re.compile(r"^(\d+)- ", re.M)
+
+
+def check_queue_rows(root, committed):
+    """Refuse a commit whose docs/loop/queue.md ADDS a row number that
+    already exists (two sessions appending from a remembered "next row"
+    collided four times on 2026-11-05). Only added rows are judged, so
+    the historical duplicates already in the file never block."""
+    if QUEUE not in committed:
+        return
+    head = git(root, "show", f"HEAD:{QUEUE}")
+    before = head.stdout if head.returncode == 0 else ""
+    try:
+        after = Path(root, QUEUE).read_text(encoding="utf-8")
+    except OSError:
+        return
+    old_lines = set(before.splitlines())
+    added = [l for l in after.splitlines() if l not in old_lines and QUEUE_ROW.match(l)]
+    if not added:
+        return
+    counts = {}
+    for n in QUEUE_ROW.findall(after):
+        counts[int(n)] = counts.get(int(n), 0) + 1
+    clashes = sorted({int(QUEUE_ROW.match(l).group(1)) for l in added
+                      if counts[int(QUEUE_ROW.match(l).group(1))] > 1})
+    if clashes:
+        nxt = max(counts) + 1
+        refuse(
+            f"{QUEUE} adds row number(s) {clashes} that already exist; take "
+            f"max(existing)+1 read from the file right before writing (next free: {nxt})"
+        )
+
+
 def main():
     caller_cwd = os.getcwd()
     ap = argparse.ArgumentParser(
@@ -305,6 +340,7 @@ def main():
                     "index (typo?)"
                 )
         check_kill_locks(root, changed_under(root, locks), set(args.kill_lock), set(locks))
+        check_queue_rows(root, set(locks))
         commit_cmd = ["commit"] + amend_args + tail + ["--"] + locks
         mode = "path-limited"
         committed_paths = locks
@@ -326,6 +362,7 @@ def main():
         for lock in locks:
             if not any(covered(s, [lock]) for s in staged):
                 print(f"dcommit: note: lock path {lock!r} matched nothing staged", file=sys.stderr)
+        check_queue_rows(root, set(staged))
         commit_cmd = ["commit"] + amend_args + tail
         mode = "index"
         committed_paths = staged
