@@ -1393,10 +1393,7 @@ mod kittest {
     /// a separate, untouched path).
     #[test]
     fn saved_searches_save_apply_delete_and_persist() {
-        let dir = std::env::temp_dir().join(format!(
-            "umber-saved-searches-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("umber-saved-searches-{}", std::process::id()));
         let saved_path = dir.join("assets_saved_searches.json");
         let _ = std::fs::remove_file(&saved_path);
         let mut h = harness_full(seeded_brushes(), None, Some(saved_path.clone()));
@@ -1465,13 +1462,19 @@ mod kittest {
             assert!(h.query_by_label(name).is_some(), "brush row {name}");
         }
         assert!(h.query_by_label("Worn metal").is_some(), "starter material");
-        assert!(h.query_by_label("Painted wood").is_some(), "starter material");
+        assert!(
+            h.query_by_label("Painted wood").is_some(),
+            "starter material"
+        );
         assert!(h.query_by_label("Edge wear").is_some(), "starter mask");
         // Env maps: closed by default; opened, the bundled studio maps list.
         assert!(h.query_by_label("studio-neutral").is_none());
         h.get_by_label(&tr("assets.env-maps")).click();
         assert!(h.run_ok().is_some());
-        assert!(h.query_by_label("studio-neutral").is_some(), "starter env map");
+        assert!(
+            h.query_by_label("studio-neutral").is_some(),
+            "starter env map"
+        );
     }
 
     /// K2: a brush row with a `<stem>.stamp.png` sidecar keys its swatch
@@ -1587,10 +1590,7 @@ mod tests {
 
     #[test]
     fn saved_searches_persist_and_restore_through_a_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "umber-assets-saved-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("umber-assets-saved-{}", std::process::id()));
         let path = dir.join("assets_saved_searches.json");
         let _ = std::fs::remove_file(&path);
         let mut a = AssetsPanel::default();
