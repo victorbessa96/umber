@@ -193,31 +193,37 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
         }
         ShellAction::ShowLayers => {
             app.focus.restore(&mut app.dock);
+            app.rails.unfold_holding(&mut app.dock, &Panel::LayerStack);
             shell_menu::show_panel(&mut app.dock, &Panel::LayerStack);
             app.save_layouts();
         }
         ShellAction::ShowTextureSets => {
             app.focus.restore(&mut app.dock);
+            app.rails.unfold_holding(&mut app.dock, &Panel::TextureSets);
             shell_menu::show_panel(&mut app.dock, &Panel::TextureSets);
             app.save_layouts();
         }
         ShellAction::ShowAssets => {
             app.focus.restore(&mut app.dock);
+            app.rails.unfold_holding(&mut app.dock, &Panel::Assets);
             shell_menu::show_panel(&mut app.dock, &Panel::Assets);
             app.save_layouts();
         }
         ShellAction::ShowBakes => {
             app.focus.restore(&mut app.dock);
+            app.rails.unfold_holding(&mut app.dock, &Panel::Bakes);
             shell_menu::show_panel(&mut app.dock, &Panel::Bakes);
             app.save_layouts();
         }
         ShellAction::ShowExport => {
             app.focus.restore(&mut app.dock);
+            app.rails.unfold_holding(&mut app.dock, &Panel::Export);
             shell_menu::show_panel(&mut app.dock, &Panel::Export);
             app.save_layouts();
         }
         ShellAction::ShowHistory => {
             app.focus.restore(&mut app.dock);
+            app.rails.unfold_holding(&mut app.dock, &Panel::History);
             shell_menu::show_panel(&mut app.dock, &Panel::History);
             app.save_layouts();
         }
@@ -231,6 +237,8 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
                 app.notices.post(umber_gui::NoticeLevel::Info, tr(why));
             }
         }
+        ShellAction::FoldLeft => app.toggle_fold(crate::dock_rail::Side::Left),
+        ShellAction::FoldRight => app.toggle_fold(crate::dock_rail::Side::Right),
         // Applied by `ViewToggles::apply` above.
         ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {}
     }
@@ -341,6 +349,8 @@ pub const COMMAND_IDS: &[&str] = &[
     "window.show_history",
     "bake.run",
     "export.run",
+    "window.fold_left",
+    "window.fold_right",
 ];
 
 /// Dispatch by dotted id — the path menus, shortcuts, the agent protocol

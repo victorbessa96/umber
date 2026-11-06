@@ -306,6 +306,8 @@ pub const ALL_ACTIONS: &[ShellAction] = &[
     ShellAction::ShowHistory,
     ShellAction::RunBake,
     ShellAction::RunExport,
+    ShellAction::FoldLeft,
+    ShellAction::FoldRight,
 ];
 
 /// The persisted name of `action`: the variant's Debug spelling
@@ -1441,10 +1443,12 @@ mod tests {
             | ShellAction::ShowExport
             | ShellAction::ShowHistory
             | ShellAction::RunBake
-            | ShellAction::RunExport => {}
+            | ShellAction::RunExport
+            | ShellAction::FoldLeft
+            | ShellAction::FoldRight => {}
         };
         ALL_ACTIONS.iter().copied().for_each(guard);
-        assert_eq!(ALL_ACTIONS.len(), 41 + ToolKind::ALL.len());
+        assert_eq!(ALL_ACTIONS.len(), 43 + ToolKind::ALL.len());
         for kind in ToolKind::ALL {
             assert!(
                 ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),

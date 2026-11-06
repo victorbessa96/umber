@@ -85,6 +85,8 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::ShowHistory => ("cmd-window-show-history", None),
         ShellAction::RunBake => ("cmd-bake-run", None),
         ShellAction::RunExport => ("cmd-export-run", None),
+        ShellAction::FoldLeft => ("cmd-window-fold-left", None),
+        ShellAction::FoldRight => ("cmd-window-fold-right", None),
     }
 }
 

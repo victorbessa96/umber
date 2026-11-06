@@ -181,6 +181,7 @@ mod viewport;
 // existing `crate::stencil::` / `stencil::` path in the shell keeps
 // resolving unchanged, and the glue module likewise.
 use set_switch::PendingResize;
+pub use umber_app::dock_rail;
 pub use umber_app::set_switch;
 pub use umber_app::stencil;
 
@@ -357,6 +358,28 @@ pub enum Panel {
 }
 
 impl Panel {
+    /// The 3D and 2D views: never folded into a rail (U7 R-RAIL-2).
+    pub fn is_protected(&self) -> bool {
+        matches!(self, Panel::Viewport | Panel::UvView)
+    }
+
+    /// The rail glyph for a side panel (U7): reuses the baked panel
+    /// family so the rail needs no new atlas cells.
+    pub fn rail_icon(&self) -> &'static str {
+        match self {
+            Panel::LayerStack => "layers",
+            Panel::Properties => "pencil",
+            Panel::Assets => "folder-open",
+            Panel::History => "undo-2",
+            Panel::TextureSets => "layout-grid",
+            Panel::Bakes => "sun",
+            Panel::Export => "save",
+            Panel::Graph => "grid-3x3",
+            Panel::Display => "eye",
+            Panel::Viewport | Panel::UvView => "box",
+        }
+    }
+
     /// The smallest size the panel stays readable at (R-LAYOUT-1,
     /// `dock_floor`): the 3D view needs room to navigate, the 2D view a
     /// usable square, every side panel one readable column of rows.
@@ -2060,6 +2083,9 @@ pub struct UmberApp {
     /// dock width to fit itself (UI/UX audit A2-3,
     /// [`workspaces::compact_for_width`]).
     compact_layout_pending: bool,
+    /// Side columns folded into icon rails, and the open flyout (UI/UX
+    /// U7, [`dock_rail`]). Saved unfolded: a folded panel is never lost.
+    rails: dock_rail::Rails<Panel>,
     /// Each dock leaf's active panel at the last scroll-into-view pass
     /// (g5-tab-overflow): a change scrolls that leaf's strip once.
     tab_active_seen: std::collections::HashMap<NodePath, Panel>,
@@ -2241,6 +2267,7 @@ impl UmberApp {
             },
             dock,
             compact_layout_pending,
+            rails: dock_rail::Rails::default(),
             tab_active_seen: std::collections::HashMap::new(),
             gpu,
             display_lut,
@@ -2790,6 +2817,11 @@ impl UmberApp {
             "app": "umber-app",
             "version": env!("CARGO_PKG_VERSION"),
             "panels": panels,
+            "rails": self.rails.folded_sides().iter().map(|s| serde_json::json!({
+                "side": format!("{s:?}"),
+                "tabs": self.rails.column(*s).map(|c| c.tabs().map(|p| format!("{p:?}")).collect::<Vec<_>>()),
+            })).collect::<Vec<_>>(),
+            "flyout": self.rails.flyout_tab().map(|(s, p)| format!("{s:?}:{p:?}")),
             "tool": format!("{:?}", self.brush_panel.tool),
             "strip": format!("{:?}", self.brush_panel.strip),
             "preset": preset,
@@ -3865,6 +3897,7 @@ impl UmberApp {
     /// the outgoing workspace stores its real layout.
     fn switch_workspace(&mut self, to: workspaces::Workspace) {
         self.focus.restore(&mut self.dock);
+        self.rails.restore_all(&mut self.dock);
         if self.workspaces.switch(to, &mut self.dock) {
             self.save_layouts();
         }
@@ -3874,9 +3907,20 @@ impl UmberApp {
     /// out of any focus mode, so the one-tab stand-in is never what
     /// reopens. A failure only logs.
     fn save_layouts(&mut self) {
-        let saved = self.workspaces.snapshot(self.focus.real_layout(&self.dock));
+        let live = self.rails.unfolded(self.focus.real_layout(&self.dock));
+        let saved = self.workspaces.snapshot(&live);
         if let Err(e) = workspaces::save_layouts(&layouts_path(), &saved) {
             log::warn!("layouts not saved: {e}");
+        }
+    }
+
+    /// Folds the `side` column into an icon rail, or unfolds it (UI/UX
+    /// U7, Window ▸ Fold / `window.fold_left|right`). Leaves a focus mode
+    /// first, like every layout edit. No column on that side: a no-op.
+    pub fn toggle_fold(&mut self, side: dock_rail::Side) {
+        self.focus.restore(&mut self.dock);
+        if self.rails.toggle(&mut self.dock, side, Panel::is_protected) {
+            self.save_layouts();
         }
     }
 
@@ -4826,9 +4870,18 @@ impl eframe::App for UmberApp {
                         }
                     }
                 });
+                for (label, action) in [
+                    ("cmd-window-fold-left", toolbar::ShellAction::FoldLeft),
+                    ("cmd-window-fold-right", toolbar::ShellAction::FoldRight),
+                ] {
+                    if action_item(ui, &mut items, tr(label), action) {
+                        actions.push(action);
+                    }
+                }
                 if ui.button(tr("menu.reset-layout")).clicked() {
                     self.focus.restore(&mut self.dock);
                     self.dock = self.workspaces.reset_active();
+                    self.rails = dock_rail::Rails::default();
                     self.compact_layout_pending = true;
                     ui.close();
                 }
@@ -5068,6 +5121,55 @@ impl eframe::App for UmberApp {
         } else {
             None
         };
+        // U7 icon rails: a folded side column draws as a narrow strip
+        // outside the dock; its icons open the panel as a flyout. Clicks
+        // are collected here and applied after the frame's panels.
+        self.rails.prune(&self.dock);
+        let mut rail_clicks: Vec<(dock_rail::Side, umber_gui::IconRailOutcome)> = Vec::new();
+        if !hide_ui {
+            for side in [dock_rail::Side::Left, dock_rail::Side::Right] {
+                let Some(column) = self.rails.column(side) else {
+                    continue;
+                };
+                let titles: Vec<(&'static str, String)> = column
+                    .tabs()
+                    .map(|p| (p.rail_icon(), panel_title(p)))
+                    .collect();
+                let items: Vec<umber_gui::RailItem> = titles
+                    .iter()
+                    .map(|(icon, title)| umber_gui::RailItem {
+                        icon,
+                        tooltip: title.as_str(),
+                    })
+                    .collect();
+                let open = self
+                    .rails
+                    .flyout
+                    .and_then(|(s, i)| (s == side).then_some(i));
+                let expand = tr("rail-expand");
+                let id = match side {
+                    dock_rail::Side::Left => "umber-rail-left",
+                    dock_rail::Side::Right => "umber-rail-right",
+                };
+                let panel = match side {
+                    dock_rail::Side::Left => egui::Panel::left(id),
+                    dock_rail::Side::Right => egui::Panel::right(id),
+                };
+                let outcome = panel
+                    .resizable(false)
+                    .exact_size(umber_gui::widgets::RAIL_WIDTH)
+                    .show(ui, |ui| {
+                        umber_gui::IconRail::new(&items, "panel-left", &expand)
+                            .open(open)
+                            .ui(ui, &self.icons)
+                    })
+                    .inner;
+                if outcome != umber_gui::IconRailOutcome::default() {
+                    rail_clicks.push((side, outcome));
+                }
+            }
+        }
+        let flyout_panel = self.rails.flyout_tab().map(|(side, p)| (side, p.clone()));
         let (home_actions, pick_notices, env_loads, filter_loads, flow_alpha, stamp_angle): DockDrain =
             CentralPanel::default()
                 .show(ui, |ui| {
@@ -5166,6 +5268,32 @@ impl eframe::App for UmberApp {
                         .show_add_buttons(true)
                         .show_add_popup(true)
                         .show_inside(ui, &mut viewer);
+                    // U7 flyout: the folded panel drawn by the same viewer
+                    // over the canvas edge beside its rail. Escape or the
+                    // rail icon closes it.
+                    if let Some((side, mut panel)) = flyout_panel.clone() {
+                        let area = ui.max_rect();
+                        let width = (area.width() * 0.32).clamp(260.0, 420.0);
+                        let x = match side {
+                            dock_rail::Side::Left => area.left(),
+                            dock_rail::Side::Right => area.right() - width,
+                        };
+                        let frame = egui::Frame::popup(ui.style());
+                        egui::Area::new(Id::new("umber-rail-flyout"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(egui::pos2(x, area.top()))
+                            .show(ui.ctx(), |ui| {
+                                frame.show(ui, |ui| {
+                                    ui.set_width(width - 16.0);
+                                    ui.set_height(area.height() - 16.0);
+                                    ui.strong(panel_title(&panel));
+                                    ui.separator();
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        viewer.ui(ui, &mut panel);
+                                    });
+                                })
+                            });
+                    }
                     if let Some(pick) = viewer.group_pick.take() {
                         if shell_menu::apply_group_pick(&mut self.dock, pick) {
                             ui.ctx().request_repaint();
@@ -5195,6 +5323,21 @@ impl eframe::App for UmberApp {
                     (actions, notices, env_loads, filter_loads, flow_alpha, stamp_angle)
                 })
                 .inner;
+        // U7: the rail clicks and Escape, applied after the dock.
+        if flyout_panel.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.rails.flyout = None;
+        }
+        for (side, outcome) in rail_clicks {
+            if outcome.expand {
+                self.toggle_fold(side);
+            } else if let Some(i) = outcome.picked {
+                let open = self
+                    .rails
+                    .flyout
+                    .and_then(|(s, j)| (s == side).then_some(j));
+                self.rails.flyout = umber_gui::widgets::toggle_flyout(open, i).map(|i| (side, i));
+            }
+        }
         // The material pick's toasts (the home_actions rail's pattern):
         // returned by the dock closure, posted on the app's notices.
         for text in pick_notices {

@@ -1097,6 +1097,9 @@ cmd-window-show-export = Mostrar painel Exportação
 cmd-window-show-history = Mostrar painel Histórico
 cmd-bake-run = Fazer bake (configuração atual)
 cmd-export-run = Exportar (configuração atual)
+cmd-window-fold-left = Recolher coluna esquerda
+cmd-window-fold-right = Recolher coluna direita
+rail-expand = Expandir a coluna
 
 ## The panel-group menu under each tab bar's end button (UI/UX U2-3).
 dock =

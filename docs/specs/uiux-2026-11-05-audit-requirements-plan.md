@@ -210,4 +210,10 @@ U5 bundled the icon rail with the docking migration, which waits on egui_dock fo
 
 ### 9.3 Status
 
-- 2026-11-06: model (`dock_rail.rs`, 8 tests) and widget (`icon_rail.rs`, 3 kittests) landed. The shell wiring waits on `main.rs`, which the T1 lane holds.
+- 2026-11-06: model (`dock_rail.rs`, 8 tests) and widget (`icon_rail.rs`, 3 kittests) landed `1fc6ca1` (row 230).
+- 2026-11-06: shell wiring landed (row 234): `Rails` state (fold/unfold toggle, flyout, prune, save-unfolded; 4 more tests), the rail panels, the flyout, Window > Fold Left/Right and `window.fold_left` / `window.fold_right` (registry 43), Show commands unfold a folded panel's column, `ui.inspect` reports `rails` and `flyout`.
+
+Built differently from 9.1, on purpose:
+- R-RAIL-4: no fold button on the column header (egui_dock 0.21.1 has no header hook besides the add-popup); folding is in Window and the palette, unfolding is the rail's top button. **Fold state does not persist**: layouts save unfolded, so the layouts file schema is unchanged and a crash can never strand panels on a rail.
+- R-RAIL-5 (fold before tabbing the 2D view on narrow boots): not done; A2-3's tabbing still applies.
+- R-RAIL-3: the flyout closes by its rail icon or Escape, not by a click outside. It is not verified live: the control channel has no pointer method and this Wayland session has no input injector.

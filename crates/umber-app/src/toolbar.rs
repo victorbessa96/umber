@@ -175,6 +175,10 @@ pub enum ShellAction {
     /// Run the Export panel's Export button with its current settings
     /// (A2-4 tail): the same `export_now` path (synchronous).
     RunExport,
+    /// Fold the left / right side column into an icon rail, or unfold it
+    /// when it is already folded (UI/UX U7, `dock_rail`).
+    FoldLeft,
+    FoldRight,
 }
 
 impl ShellAction {
@@ -229,6 +233,8 @@ impl ShellAction {
             ShowHistory => "window.show_history",
             RunBake => "bake.run",
             RunExport => "export.run",
+            FoldLeft => "window.fold_left",
+            FoldRight => "window.fold_right",
         }
     }
 
@@ -280,6 +286,8 @@ impl ShellAction {
             ShowHistory => "cmd-window-show-history",
             RunBake => "cmd-bake-run",
             RunExport => "cmd-export-run",
+            FoldLeft => "cmd-window-fold-left",
+            FoldRight => "cmd-window-fold-right",
         }
     }
 
@@ -330,6 +338,8 @@ impl ShellAction {
             "window.show_history" => Some(ShowHistory),
             "bake.run" => Some(RunBake),
             "export.run" => Some(RunExport),
+            "window.fold_left" => Some(FoldLeft),
+            "window.fold_right" => Some(FoldRight),
             // "tool.select" carries a ToolKind payload: no fixed action.
             _ => None,
         }
@@ -1152,6 +1162,8 @@ mod tests {
             ShellAction::ShowHistory,
             ShellAction::RunBake,
             ShellAction::RunExport,
+            ShellAction::FoldLeft,
+            ShellAction::FoldRight,
         ];
         let mut ids = std::collections::HashSet::new();
         for action in all {

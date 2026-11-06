@@ -188,6 +188,12 @@ pub const CATALOG: &[Entry] = &[
     ),
     e(ShellAction::RunBake, "cmd-bake-run", "panel.bakes"),
     e(ShellAction::RunExport, "cmd-export-run", "panel.export"),
+    e(ShellAction::FoldLeft, "cmd-window-fold-left", "menu.window"),
+    e(
+        ShellAction::FoldRight,
+        "cmd-window-fold-right",
+        "menu.window",
+    ),
 ];
 
 /// Most results shown at once.

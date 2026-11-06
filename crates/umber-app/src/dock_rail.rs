@@ -241,6 +241,141 @@ pub fn restore<T: Clone + PartialEq>(dock: &mut DockState<T>, column: RailColumn
     true
 }
 
+/// The shell's fold state: at most one folded column per side, and the
+/// rail item whose flyout is open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rails<T> {
+    left: Option<RailColumn<T>>,
+    right: Option<RailColumn<T>>,
+    /// The open flyout: the side and the item index on that rail.
+    pub flyout: Option<(Side, usize)>,
+}
+
+impl<T> Default for Rails<T> {
+    fn default() -> Self {
+        Self {
+            left: None,
+            right: None,
+            flyout: None,
+        }
+    }
+}
+
+impl<T: Clone + PartialEq> Rails<T> {
+    fn slot(&mut self, side: Side) -> &mut Option<RailColumn<T>> {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+        }
+    }
+
+    /// The folded column on `side`, if any.
+    pub fn column(&self, side: Side) -> Option<&RailColumn<T>> {
+        match side {
+            Side::Left => self.left.as_ref(),
+            Side::Right => self.right.as_ref(),
+        }
+    }
+
+    /// The sides currently folded, left first (what the layouts file
+    /// records).
+    pub fn folded_sides(&self) -> Vec<Side> {
+        [Side::Left, Side::Right]
+            .into_iter()
+            .filter(|s| self.column(*s).is_some())
+            .collect()
+    }
+
+    /// Folds `side` when it is open, unfolds it when it is folded.
+    /// Returns whether the dock changed.
+    pub fn toggle(
+        &mut self,
+        dock: &mut DockState<T>,
+        side: Side,
+        protected: impl Fn(&T) -> bool,
+    ) -> bool {
+        if self.flyout.is_some_and(|(s, _)| s == side) {
+            self.flyout = None;
+        }
+        match self.slot(side).take() {
+            Some(column) => restore(dock, column),
+            None => match collapse(dock, side, protected) {
+                Some(column) => {
+                    *self.slot(side) = Some(column);
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
+    /// Unfolds the column holding `tab` (the Show-panel commands reveal a
+    /// folded panel by unfolding its column). Returns whether it did.
+    pub fn unfold_holding(&mut self, dock: &mut DockState<T>, tab: &T) -> bool {
+        for side in [Side::Left, Side::Right] {
+            if self
+                .column(side)
+                .is_some_and(|c| c.tabs().any(|t| t == tab))
+            {
+                self.flyout = None;
+                let column = self.slot(side).take().expect("checked");
+                return restore(dock, column);
+            }
+        }
+        false
+    }
+
+    /// Unfolds every column into `dock` (a workspace switch stores the
+    /// complete layout).
+    pub fn restore_all(&mut self, dock: &mut DockState<T>) {
+        self.flyout = None;
+        for side in [Side::Left, Side::Right] {
+            if let Some(column) = self.slot(side).take() {
+                restore(dock, column);
+            }
+        }
+    }
+
+    /// `dock` with every folded column put back, leaving `self` as is:
+    /// the layout a save writes, so a folded panel is never lost.
+    pub fn unfolded(&self, dock: &DockState<T>) -> DockState<T> {
+        let mut full = dock.clone();
+        for column in [&self.left, &self.right].into_iter().flatten() {
+            restore(&mut full, column.clone());
+        }
+        full
+    }
+
+    /// Drops rail items the user docked elsewhere (Window > Panels) and
+    /// a rail left empty; closes a flyout whose item went away.
+    pub fn prune(&mut self, dock: &DockState<T>) {
+        for side in [Side::Left, Side::Right] {
+            let slot = self.slot(side);
+            if let Some(column) = slot {
+                for leaf in &mut column.leaves {
+                    leaf.tabs.retain(|t| dock.find_tab(t).is_none());
+                    leaf.active = leaf.active.min(leaf.tabs.len().saturating_sub(1));
+                }
+                column.leaves.retain(|l| !l.tabs.is_empty());
+                if column.leaves.is_empty() {
+                    *slot = None;
+                }
+            }
+        }
+        if let Some((side, i)) = self.flyout {
+            if self.column(side).is_none_or(|c| i >= c.tabs().count()) {
+                self.flyout = None;
+            }
+        }
+    }
+
+    /// The tab behind the open flyout.
+    pub fn flyout_tab(&self) -> Option<(Side, &T)> {
+        let (side, i) = self.flyout?;
+        self.column(side)?.tabs().nth(i).map(|t| (side, t))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +511,59 @@ mod tests {
         restore(&mut dock, col);
         let (_, w) = side_column(&dock, Side::Left, protected).unwrap();
         assert!((w - WIDTH_SHARE.start()).abs() < 1e-6, "{w}");
+    }
+
+    #[test]
+    fn rails_toggle_folds_then_unfolds_and_closes_its_flyout() {
+        let mut dock = paint();
+        let before = all(&dock).len();
+        let mut rails = Rails::default();
+        assert!(rails.toggle(&mut dock, Side::Right, protected));
+        assert_eq!(rails.folded_sides(), vec![Side::Right]);
+        rails.flyout = Some((Side::Right, 1));
+        assert_eq!(rails.flyout_tab(), Some((Side::Right, &P::History)));
+        assert!(rails.toggle(&mut dock, Side::Right, protected));
+        assert!(rails.flyout.is_none());
+        assert!(rails.folded_sides().is_empty());
+        assert_eq!(all(&dock).len(), before);
+    }
+
+    #[test]
+    fn rails_unfolded_saves_every_panel_without_changing_the_fold() {
+        let mut dock = paint();
+        let before = all(&dock).len();
+        let mut rails = Rails::default();
+        rails.toggle(&mut dock, Side::Left, protected);
+        let full = rails.unfolded(&dock);
+        assert_eq!(all(&full).len(), before);
+        assert!(rails.column(Side::Left).is_some());
+        assert!(dock.find_tab(&P::Sets).is_none());
+    }
+
+    #[test]
+    fn rails_prune_drops_redocked_items_and_empty_rails() {
+        let mut dock = paint();
+        let mut rails = Rails::default();
+        rails.toggle(&mut dock, Side::Left, protected);
+        rails.flyout = Some((Side::Left, 2));
+        dock.main_surface_mut().push_to_first_leaf(P::Bakes);
+        rails.prune(&dock);
+        assert_eq!(rails.column(Side::Left).unwrap().tabs().count(), 2);
+        assert!(rails.flyout.is_none(), "the flyout's item left the rail");
+        dock.main_surface_mut().push_to_first_leaf(P::Sets);
+        dock.main_surface_mut().push_to_first_leaf(P::Assets);
+        rails.prune(&dock);
+        assert!(rails.column(Side::Left).is_none());
+    }
+
+    #[test]
+    fn rails_unfold_holding_reveals_a_folded_panel() {
+        let mut dock = paint();
+        let mut rails = Rails::default();
+        rails.toggle(&mut dock, Side::Right, protected);
+        assert!(rails.unfold_holding(&mut dock, &P::Props));
+        assert!(dock.find_tab(&P::Props).is_some());
+        assert!(!rails.unfold_holding(&mut dock, &P::Props));
     }
 
     #[test]
