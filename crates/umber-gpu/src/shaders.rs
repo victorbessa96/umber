@@ -204,6 +204,13 @@ const SKY_COLOR: vec3<f32> = vec3<f32>(0.45, 0.55, 0.78);
 const GROUND_COLOR: vec3<f32> = vec3<f32>(0.30, 0.27, 0.24);
 const BASE_COLOR: vec3<f32> = vec3<f32>(0.72, 0.72, 0.75);
 
+/// The grey an unpainted texel shows under bound paint (UI/UX audit
+/// A2-2): sRGB 0.5 mid grey (Painter's default base colour), exactly
+/// the linear byte 55/255 so a test can pin it against an opaque tile.
+/// Lower than `BASE_COLOR`: the paint is linear albedo under the full
+/// light rig, where 0.72 saturates to white in Lit.
+const UNPAINTED_GREY: vec3<f32> = vec3<f32>(55.0 / 255.0);
+
 /// Tile-space UV: the bound texture holds ONE tile's texels, so a
 /// global (possibly UDIM) uv is reduced to tile-local
 /// `(uv - offset) * scale` before sampling. The single-tile default
@@ -220,11 +227,19 @@ fn paint_tile_uv(uv: vec2<f32>) -> vec2<f32> {
 /// pixel-identical to the pre-texture shader. The flag branch is
 /// uniform control flow, so the unsampled texture cannot leak into the
 /// output (the `fallback_ignores_bound_map` family pins this).
+///
+/// The tile is premultiplied (the dab splat and the stack composite
+/// both accumulate over transparent black), so the display shows it
+/// OVER a neutral grey: `rgb + UNPAINTED_GREY * (1 - a)`. Unpainted
+/// texels read as mid grey instead of black (UI/UX audit A2-2: a fresh
+/// mesh rendered as a black silhouette); opaque texels are unchanged.
+/// Display only: the exported texture is the tile itself.
 fn paint_albedo(uv: vec2<f32>) -> vec3<f32> {
     if ((paint_params.flags & PAINT_HAS_TEXTURE) == 0u) {
         return BASE_COLOR;
     }
-    return textureSample(paint_tex, paint_sampler, paint_tile_uv(uv)).rgb;
+    let s = textureSample(paint_tex, paint_sampler, paint_tile_uv(uv));
+    return s.rgb + UNPAINTED_GREY * (1.0 - s.a);
 }
 
 /// Height → normal, live, per frame (audit worklist #12): a

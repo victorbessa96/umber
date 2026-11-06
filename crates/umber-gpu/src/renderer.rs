@@ -3906,6 +3906,64 @@ mod tests {
             }
         }
 
+        /// UI/UX audit A2-2: an unpainted (transparent) texel displays as
+        /// mid grey, not black: the shader shows the premultiplied tile
+        /// OVER `UNPAINTED_GREY` (the linear byte 55). A fully transparent
+        /// tile therefore renders the same bytes as an opaque tile of that
+        /// grey; an opaque texel is untouched (the rest of this family
+        /// pins that). Checked in Lit (the default) and Unlit.
+        #[test]
+        fn transparent_paint_displays_as_mid_grey() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!(
+                    "skipping transparent_paint_displays_as_mid_grey: no wgpu adapter available"
+                );
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            // A fresh target is zero-initialised: fully transparent.
+            let blank = crate::paint::PaintTarget::new(&gpu.device, 2, 2);
+            let grey = crate::paint::PaintTarget::new(&gpu.device, 2, 2);
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("umber_paint_test_grey_encoder"),
+                });
+            grey.write_region(
+                &gpu.device,
+                &mut encoder,
+                (0, 0),
+                (2, 2),
+                &[55, 55, 55, 255].repeat(4),
+            )
+            .expect("2x2 region fits the 2x2 target");
+            gpu.queue.submit(Some(encoder.finish()));
+            let mesh = fullscreen_textured_mesh([0.75, 0.75]);
+            // Lit's brightness depends on the test camera's light and
+            // facing (here the quad faces away from the sun and reads dark),
+            // so the bounds check runs in Unlit; equality holds in both.
+            for mode in [ViewMode::Lit, ViewMode::Unlit] {
+                let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+                buffers.set_base_color_texture(&gpu, &grey, PaintParams::identity());
+                let opaque_grey = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+                buffers.set_base_color_texture(&gpu, &blank, PaintParams::identity());
+                let unpainted = render_mesh_mode(&gpu, &buffers, mode, 4, 4);
+                assert_eq!(opaque_grey, unpainted, "{mode:?}: unpainted shows mid grey");
+                if mode == ViewMode::Unlit {
+                    assert!(
+                        unpainted.chunks(4).all(|p| p[0] > 40 && p[0] < 250),
+                        "neither black nor blown out: {unpainted:?}"
+                    );
+                }
+            }
+        }
+
         /// Clearing restores the fallback byte-for-byte: bind → clear
         /// renders IDENTICAL bytes to a mesh that never bound paint (the
         /// `fallback_ignores_bound_map` pattern for the paint set — the
