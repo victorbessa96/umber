@@ -157,7 +157,7 @@ impl Default for FillSource {
 /// Stored on `umber-core`'s `Layer` (`fill: Option<FillParams>`); `None`
 /// means "not a fill layer" and keeps [`crate::LayerKind::Fill`] a plain
 /// tag so the journal/project matches don't churn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FillParams {
     pub source: FillSource,
     pub projection: FillProjection,
@@ -182,6 +182,23 @@ pub struct FillParams {
 /// behavior — every existing project's fills load unchanged).
 pub fn default_fill_channel() -> String {
     "baseColor".to_owned()
+}
+
+/// Hand-written, never derived: a derived `Default` gives `channel` the
+/// empty string, a channel no set has, so every default-built fill
+/// (`layer.add_fill`, the agent's fill op, the panel's New Fill) staged
+/// nothing — the zero-size guard ate it and the export read Base only
+/// (the e2e smoke's black base colour, 2026-11-06). The serde default
+/// already said `baseColor`; this makes the in-code default agree.
+impl Default for FillParams {
+    fn default() -> Self {
+        Self {
+            source: FillSource::default(),
+            projection: FillProjection::default(),
+            mask: None,
+            channel: default_fill_channel(),
+        }
+    }
 }
 
 impl FillParams {
@@ -714,6 +731,14 @@ mod tests {
     /// fills keep their pre-target behavior. The file is REAL: a
     /// serialized params with the key stripped, never a hand-guessed
     /// JSON shape.
+    #[test]
+    fn default_fill_targets_base_color() {
+        // The in-code default and the serde default agree: a fill built
+        // with `FillParams::default()` stages into baseColor, never "".
+        assert_eq!(FillParams::default().channel, "baseColor");
+        assert_eq!(FillParams::default().channel, default_fill_channel());
+    }
+
     #[test]
     fn pre_channel_fill_json_loads_base_color() {
         let mut targeted = FillParams {

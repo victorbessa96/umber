@@ -157,3 +157,17 @@ jobs:
 
       - name: Build release smoke
         run: cargo build --release --workspace
+
+      # End-to-end smoke (T2, scripts/e2e-smoke.py): launches the release
+      # GUI under Xvfb on lavapipe with --control, loads the test cube,
+      # adds a fill layer, runs bake.run + export.run by command id, waits
+      # on job.status, and asserts the outputs exist, are nonzero, and the
+      # exported base colour and the viewport are not all black. Linux
+      # only: the Windows leg has no launch step to extend.
+      - name: E2E smoke (release GUI over --control, Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y xvfb
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg" && mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          unset WAYLAND_DISPLAY
+          xvfb-run -a -s "-screen 0 1600x1000x24" python3 scripts/e2e-smoke.py --timeout 900

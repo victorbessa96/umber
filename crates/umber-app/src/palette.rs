@@ -186,6 +186,8 @@ pub const CATALOG: &[Entry] = &[
         "cmd-window-show-history",
         "menu.window",
     ),
+    e(ShellAction::RunBake, "cmd-bake-run", "panel.bakes"),
+    e(ShellAction::RunExport, "cmd-export-run", "panel.export"),
 ];
 
 /// Most results shown at once.

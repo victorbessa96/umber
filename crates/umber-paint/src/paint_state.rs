@@ -1800,6 +1800,47 @@ impl PaintState {
         self.mask_synced.retain(|(_, t, _)| *t != tile);
     }
 
+    /// Moves every present tile still in the boot placeholder set
+    /// ([`DEFAULT_TEXTURE_SET`]) to `set`, and returns how many moved.
+    /// The placeholder only means "no set chosen yet": a fresh session's
+    /// tile 1001 sits in it until the first mesh names a real set. Without
+    /// the move the mesh's set owns no tiles, so everything that walks
+    /// [`Self::tiles_of_set`] for the active set (fill and material
+    /// refreshes, the Texture Sets panel's tile count) sees nothing.
+    /// Tiles a real set owns are never touched (the multi-set rule:
+    /// existing tiles keep their sets). A no-op when `set` is itself the
+    /// placeholder name.
+    pub fn adopt_placeholder_tiles(&mut self, set: &str) -> usize {
+        if set == DEFAULT_TEXTURE_SET {
+            return 0;
+        }
+        let tiles: Vec<u16> = self
+            .targets
+            .keys()
+            .copied()
+            .filter(|t| self.tile_sets.get(t).map(String::as_str) == Some(DEFAULT_TEXTURE_SET))
+            .collect();
+        if tiles.is_empty() {
+            return 0;
+        }
+        // A set that owns no tile yet was only registered (at the default
+        // size) by `set_active_set`: it takes the placeholder's size and
+        // mask over with the tiles, so `tile_size` keeps answering the
+        // size the adopted targets really have. A set that already owns
+        // tiles keeps its own size.
+        if self.tiles_of_set(set).is_empty() {
+            let size = self.size_of_set(DEFAULT_TEXTURE_SET);
+            self.set_sizes.insert(set.to_string(), size);
+            if let Some(mask) = self.masks.get(DEFAULT_TEXTURE_SET).cloned() {
+                self.masks.insert(set.to_string(), mask);
+            }
+        }
+        for tile in &tiles {
+            self.assign_tile_to_set(*tile, set);
+        }
+        tiles.len()
+    }
+
     /// Drops every tile→set assignment (the project open path re-derives
     /// the map from the sidecar, so a previous document's sets never steer
     /// the new one). Present tiles keep their targets; unassigned tiles
@@ -4148,6 +4189,23 @@ impl PaintState {
                 });
         if self.composite_dirty(tile, channel, dirt, &snapshot, &mut encoder) {
             self.queue.submit(Some(encoder.finish()));
+        }
+    }
+
+    /// Flush-first for a reader that holds only `&self` afterwards (the
+    /// Export dialog's per-tile readbacks go through
+    /// [`Self::tile_target`] / [`Self::channel_target`], which never
+    /// flush): composites every present tile's pending dirt on baseColor
+    /// and on each materialized channel, materializing a cache where a
+    /// layer plane wrote but no reader ever composited. Without it a
+    /// fill or material layer that no viewport read had composited yet
+    /// exports as the empty Base. Cheap when nothing is dirty.
+    pub fn flush_for_export(&mut self) {
+        for tile in self.tiles_present() {
+            self.ensure_composited(tile, BASE_COLOR_CHANNEL);
+            for channel in self.channels_present(tile) {
+                self.ensure_composited(tile, &channel);
+            }
         }
     }
 
@@ -8810,6 +8868,47 @@ mod tests {
         );
     }
 
+    /// The export path's read contract: a layer plane published but never
+    /// composited by a frame (`flush_composite` never ran, as for a fill
+    /// added and exported between two frames) must reach the composite
+    /// `tile_target` hands the Export dialog once `flush_for_export` ran.
+    #[test]
+    fn flush_for_export_composites_an_unread_layer_plane() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device.clone(), queue.clone(), 64).expect("builds");
+        let white: Vec<u8> = (0..64 * 64).flat_map(|_| [255, 255, 255, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                white,
+            )
+            .expect("publishes");
+        state.flush_for_export();
+        let bytes = state
+            .tile_target(1001)
+            .expect("tile 1001 present")
+            .read_back_rgba8(&device, &queue)
+            .expect("reads back");
+        let max_a = bytes.chunks_exact(4).map(|p| p[3]).max().unwrap_or(0);
+        let max_r = bytes.chunks_exact(4).map(|p| p[0]).max().unwrap_or(0);
+        assert_eq!(
+            (max_r, max_a),
+            (255, 255),
+            "the white layer reached the export read"
+        );
+    }
+
+    /// The app's exact export sequence (zz probe): the placeholder tile
+    /// adopted by the mesh set, a frame flush whose snapshot has the
+    /// Fill row in `set_layers` for both sets but does NOT display 1001,
+    /// then the fill plane published, then the export flush + read.
     #[test]
     fn mask_strokes_dirty_every_planed_channel() {
         // §8 T26 [M6]. A mask stroke on a 2-channel material with planes
@@ -11452,6 +11551,36 @@ mod tests {
     /// Each set owns its size: tiles are created at their set's size, the
     /// active set drives `target_size()`, and unknown sets read the
     /// default (never a panic, never zero).
+    /// A fresh session's tile 1001 sits in the boot placeholder set; the
+    /// first mesh's set adopts it (else the mesh's set owns no tiles and
+    /// every fill on a freshly loaded mesh stages nothing). A tile a real
+    /// set owns stays put.
+    #[test]
+    fn the_first_real_set_adopts_the_placeholder_tiles() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        state.set_active_set("Cube");
+        assert_eq!(state.tiles_of_set("Cube"), Vec::<u16>::new());
+        assert_eq!(state.set_of_tile(1001), DEFAULT_TEXTURE_SET);
+        assert_eq!(state.adopt_placeholder_tiles("Cube"), 1);
+        assert_eq!(state.tiles_of_set("Cube"), vec![1001]);
+        // The adopted set takes the placeholder's size (not the 4096
+        // default `set_active_set` registered it at): the target is 64².
+        assert_eq!(state.size_of_set("Cube"), (64, 64));
+        assert_eq!(state.tile_size(1001), (64, 64));
+        assert_eq!(state.target_size(), (64, 64));
+        // Idempotent, and the placeholder name itself is a no-op.
+        assert_eq!(state.adopt_placeholder_tiles("Cube"), 0);
+        assert_eq!(state.adopt_placeholder_tiles(DEFAULT_TEXTURE_SET), 0);
+        // A second mesh's set does not take tiles a real set owns.
+        state.set_active_set("Sword");
+        assert_eq!(state.adopt_placeholder_tiles("Sword"), 0);
+        assert_eq!(state.set_of_tile(1001), "Cube");
+    }
+
     #[test]
     fn tiles_are_created_at_their_own_sets_size() {
         let Some((device, queue)) = try_request_device() else {

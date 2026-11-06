@@ -2649,6 +2649,8 @@ impl UmberApp {
                 .paint
                 .as_ref()
                 .is_some_and(|p| p.quick_mask().is_editing()),
+            mesh_loaded: self.state.mesh.is_some(),
+            baking: self.state.bakes.is_baking(),
         }
     }
 
@@ -2692,6 +2694,12 @@ impl UmberApp {
                 }
                 control::ControlRequest::ListCommands { reply } => {
                     let _ = reply.send(Ok(commands::command_list_json(self)));
+                }
+                control::ControlRequest::JobStatus { reply } => {
+                    // Land a finished bake first, so the reply never lags
+                    // the frame loop's own poll.
+                    self.state.bakes.poll_job();
+                    let _ = reply.send(Ok(commands::job_status_json(self)));
                 }
                 control::ControlRequest::RunCommand { id, reply } => {
                     let result = commands::run_command_id(self, &id)
@@ -2822,6 +2830,10 @@ impl UmberApp {
                         self.state.mesh_import.retarget_set(&set_name);
                         if let Some(paint) = self.state.paint.as_mut() {
                             paint.set_active_set(&set_name);
+                            // The boot tile still sits in the placeholder
+                            // set: the first real set adopts it, or fills
+                            // on this mesh stage onto no tile.
+                            paint.adopt_placeholder_tiles(&set_name);
                         }
                         self.state.mesh = Some(mesh);
                         self.state.mesh_path = Some(path);
@@ -3656,6 +3668,10 @@ impl UmberApp {
         self.state.mesh_import.retarget_set(&set_name);
         if let Some(paint) = self.state.paint.as_mut() {
             paint.set_active_set(&set_name);
+            // File > New keeps the mesh but rebuilds the paint session with
+            // tile 1001 in the placeholder set: the saved set adopts it, or
+            // the save would persist 1001 -> placeholder (see load_mesh_path).
+            paint.adopt_placeholder_tiles(&set_name);
         }
         // The stack's live layer ids: the version decision's (§6.3) and
         // the sidecar save's (§6.4) shared orphan filter.

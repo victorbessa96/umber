@@ -304,6 +304,8 @@ pub const ALL_ACTIONS: &[ShellAction] = &[
     ShellAction::ShowBakes,
     ShellAction::ShowExport,
     ShellAction::ShowHistory,
+    ShellAction::RunBake,
+    ShellAction::RunExport,
 ];
 
 /// The persisted name of `action`: the variant's Debug spelling
@@ -1063,6 +1065,11 @@ pub struct ShellState {
     pub paint_available: bool,
     /// The quick mask is being edited.
     pub mask_editing: bool,
+    /// A mesh is loaded (bake/export need geometry, A2-4 tail).
+    pub mesh_loaded: bool,
+    /// A bake job is in flight (one bake at a time, like the panel's
+    /// greyed Bake button).
+    pub baking: bool,
 }
 
 /// Whether `action` can run in `state`: `Err(i18n key)` names why not.
@@ -1083,6 +1090,10 @@ pub fn availability(action: ShellAction, state: ShellState) -> Result<(), &'stat
         {
             Err("action.unavailable-no-mesh")
         }
+        ShellAction::RunBake | ShellAction::RunExport if !state.mesh_loaded => {
+            Err("action.unavailable-no-mesh")
+        }
+        ShellAction::RunBake if state.baking => Err("action.unavailable-bake-running"),
         _ => Ok(()),
     }
 }
@@ -1243,6 +1254,8 @@ mod tests {
             can_redo: true,
             paint_available: true,
             mask_editing: true,
+            mesh_loaded: true,
+            baking: false,
         };
         for action in [
             ShellAction::Undo,
@@ -1252,6 +1265,37 @@ mod tests {
         ] {
             assert_eq!(availability(action, all), Ok(()), "{action:?}");
         }
+    }
+
+    /// A2-4 tail: bake/export by id need a mesh; a second bake waits for
+    /// the first (the panel's button greys the same way).
+    #[test]
+    fn bake_and_export_availability_names_the_reason() {
+        let none = ShellState::default();
+        for action in [ShellAction::RunBake, ShellAction::RunExport] {
+            assert_eq!(
+                availability(action, none),
+                Err("action.unavailable-no-mesh"),
+                "{action:?}"
+            );
+        }
+        let ready = ShellState {
+            mesh_loaded: true,
+            ..none
+        };
+        assert_eq!(availability(ShellAction::RunBake, ready), Ok(()));
+        assert_eq!(availability(ShellAction::RunExport, ready), Ok(()));
+        let baking = ShellState {
+            baking: true,
+            ..ready
+        };
+        assert_eq!(
+            availability(ShellAction::RunBake, baking),
+            Err("action.unavailable-bake-running")
+        );
+        // Export is synchronous and reads finished bakes only: a running
+        // bake does not block it (the panel's Export button stays live).
+        assert_eq!(availability(ShellAction::RunExport, baking), Ok(()));
     }
 
     #[test]
@@ -1395,10 +1439,12 @@ mod tests {
             | ShellAction::ShowAssets
             | ShellAction::ShowBakes
             | ShellAction::ShowExport
-            | ShellAction::ShowHistory => {}
+            | ShellAction::ShowHistory
+            | ShellAction::RunBake
+            | ShellAction::RunExport => {}
         };
         ALL_ACTIONS.iter().copied().for_each(guard);
-        assert_eq!(ALL_ACTIONS.len(), 39 + ToolKind::ALL.len());
+        assert_eq!(ALL_ACTIONS.len(), 41 + ToolKind::ALL.len());
         for kind in ToolKind::ALL {
             assert!(
                 ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),

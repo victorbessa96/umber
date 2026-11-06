@@ -45,6 +45,7 @@ pub const METHODS: &[&str] = &[
     "command.run",
     "mesh.load",
     "project.open",
+    "job.status",
 ];
 
 /// How long a connection thread waits for the UI thread to answer a queued
@@ -84,6 +85,11 @@ pub enum ControlRequest {
     /// Open a project folder by path (same reason as [`Self::LoadMesh`]).
     OpenProject {
         path: PathBuf,
+        reply: Sender<Result<Value, String>>,
+    },
+    /// Read the bake/export job state (A2-4 tail): what a client polls
+    /// after `command.run bake.run` / `export.run`. Read-only.
+    JobStatus {
         reply: Sender<Result<Value, String>>,
     },
 }
@@ -284,6 +290,20 @@ fn handle_conn(
             }
             "viewport.screenshot" => {
                 match forward_ui(requests, repaint, |reply| ControlRequest::Screenshot {
+                    reply,
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = control::write_json_line(
+                            &mut writer,
+                            &json!({"id": id, "ok": false, "error": e}),
+                        );
+                        continue;
+                    }
+                }
+            }
+            "job.status" => {
+                match forward_ui(requests, repaint, |reply| ControlRequest::JobStatus {
                     reply,
                 }) {
                     Ok(v) => v,
@@ -807,6 +827,9 @@ mod tests {
                     ControlRequest::OpenProject { path, reply } => {
                         let _ = reply.send(Ok(json!({"opened": path.display().to_string()})));
                     }
+                    ControlRequest::JobStatus { reply } => {
+                        let _ = reply.send(Ok(json!({"bake": {"running": false}})));
+                    }
                 }
             }
         });
@@ -826,8 +849,11 @@ mod tests {
                 json!({"id": 7, "method": "mesh.load", "params": {"path": "/m/a.glb"}}).to_string(),
                 json!({"id": 8, "method": "mesh.load"}).to_string(),
                 json!({"id": 9, "method": "project.open", "params": {"path": "/p"}}).to_string(),
+                json!({"id": 10, "method": "job.status"}).to_string(),
             ],
         );
+        assert_eq!(replies[10]["ok"], true);
+        assert_eq!(replies[10]["result"]["bake"]["running"], false);
         // R-AGENT-1: a dialog command refuses instead of hanging the UI
         // thread, and names the path-taking method.
         assert_eq!(replies[6]["ok"], false);

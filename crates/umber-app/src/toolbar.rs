@@ -168,6 +168,13 @@ pub enum ShellAction {
     ShowBakes,
     ShowExport,
     ShowHistory,
+    /// Run the Bakes panel's Bake button with its current settings (A2-4
+    /// tail): the same `bake_now` path, a background job; the result
+    /// reads back through `job.status` / the panel's status line.
+    RunBake,
+    /// Run the Export panel's Export button with its current settings
+    /// (A2-4 tail): the same `export_now` path (synchronous).
+    RunExport,
 }
 
 impl ShellAction {
@@ -220,6 +227,8 @@ impl ShellAction {
             ShowBakes => "window.show_bakes",
             ShowExport => "window.show_export",
             ShowHistory => "window.show_history",
+            RunBake => "bake.run",
+            RunExport => "export.run",
         }
     }
 
@@ -269,6 +278,8 @@ impl ShellAction {
             ShowBakes => "cmd-window-show-bakes",
             ShowExport => "cmd-window-show-export",
             ShowHistory => "cmd-window-show-history",
+            RunBake => "cmd-bake-run",
+            RunExport => "cmd-export-run",
         }
     }
 
@@ -317,6 +328,8 @@ impl ShellAction {
             "window.show_bakes" => Some(ShowBakes),
             "window.show_export" => Some(ShowExport),
             "window.show_history" => Some(ShowHistory),
+            "bake.run" => Some(RunBake),
+            "export.run" => Some(RunExport),
             // "tool.select" carries a ToolKind payload: no fixed action.
             _ => None,
         }
@@ -539,6 +552,7 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         can_redo: view.can_redo,
         paint_available: view.paint_available,
         mask_editing: view.mask_editing,
+        ..Default::default()
     };
     ui.horizontal(|ui| {
         // File ops. The baked Panel family (icon-raster §11) draws the
@@ -1136,6 +1150,8 @@ mod tests {
             ShellAction::ShowBakes,
             ShellAction::ShowExport,
             ShellAction::ShowHistory,
+            ShellAction::RunBake,
+            ShellAction::RunExport,
         ];
         let mut ids = std::collections::HashSet::new();
         for action in all {

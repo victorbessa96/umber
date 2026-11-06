@@ -453,6 +453,8 @@ pub struct ExportDialog {
     /// (drained after the dock into the app's notice stack — the panel
     /// cannot post on it itself). The status line stays in-panel.
     pub toast: Option<(umber_gui::NoticeLevel, String)>,
+    /// Finished exports (see [`Self::completed_exports`]).
+    completed_exports: u64,
 }
 
 impl ExportDialog {
@@ -471,6 +473,7 @@ impl ExportDialog {
             materialx: false,
             usda: false,
             toast: None,
+            completed_exports: 0,
         }
     }
 
@@ -560,6 +563,48 @@ impl ExportDialog {
     /// baked maps).
     pub fn last_skipped(&self) -> &[SkippedOutput] {
         &self.last_skipped
+    }
+
+    /// How many exports have finished (success or failure) since the
+    /// dialog was built (`job.status`; see `BakesPanel::completed_jobs`).
+    pub fn completed_exports(&self) -> u64 {
+        self.completed_exports
+    }
+
+    /// The Export button's sync + gate for a caller that is not the drawn
+    /// panel (`export.run`, A2-4 tail): syncs the tile checklist from the
+    /// mesh and paint session exactly as [`Self::show`] does, then names
+    /// the first reason the button would be greyed, as an i18n key.
+    pub fn prepare_export(
+        &mut self,
+        mesh: Option<&umber_mesh::MeshData>,
+        paint: Option<&PaintState>,
+    ) -> Result<(), &'static str> {
+        let Some(mesh) = mesh else {
+            return Err("action.unavailable-no-mesh");
+        };
+        let (exportable, _) = plan_export_tiles(
+            paint.map(PaintState::tiles_present),
+            self.mesh_tiles.get(mesh),
+        );
+        self.tiles.sync(&exportable);
+        if self.tiles.nothing_selected() {
+            return Err("export.select-tile");
+        }
+        Ok(())
+    }
+
+    /// `export.run`: the Export button with the dialog's current settings
+    /// — [`Self::prepare_export`], then the same [`Self::export_now`] the
+    /// button calls (synchronous: the outcome is in `status` /
+    /// `last_written` when this returns).
+    pub fn export_current(&mut self, ctx: &ExportContext<'_>) -> Result<(), &'static str> {
+        self.prepare_export(ctx.mesh, ctx.paint)?;
+        if ctx.gpu.is_none() {
+            return Err("export.no-gpu");
+        }
+        self.export_now(ctx);
+        Ok(())
     }
 
     /// Whether the Export button is enabled: mesh + GPU present.
@@ -757,6 +802,7 @@ impl ExportDialog {
                 self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
             }
         }
+        self.completed_exports += 1;
     }
 
     /// The synchronous export driver: bakes one source `MapSet` per
@@ -1064,6 +1110,38 @@ mod tests {
         assert_eq!(d.preset(), PresetChoice::UnrealOrm);
         d.set_output_dir(PathBuf::from("/tmp/elsewhere"));
         assert_eq!(d.output_dir(), Path::new("/tmp/elsewhere"));
+    }
+
+    #[test]
+    fn prepare_export_needs_a_mesh_and_counts_nothing_until_run() {
+        // A2-4 tail: `export.run`'s gate, GPU-free.
+        let mut d = dialog();
+        assert_eq!(
+            d.prepare_export(None, None),
+            Err("action.unavailable-no-mesh")
+        );
+        let quad = umber_mesh::MeshData {
+            positions: vec![[0.0; 3]; 4],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        assert_eq!(d.prepare_export(Some(&quad), None), Ok(()));
+        assert_eq!(d.completed_exports(), 0);
+        let ctx = ExportContext {
+            gpu: None,
+            mesh: Some(&quad),
+            mesh_path: None,
+            paint: None,
+            doc: None,
+            graph: None,
+            baked_normal: None,
+        };
+        // No GPU: refused before the driver runs, nothing counted.
+        assert_eq!(d.export_current(&ctx), Err("export.no-gpu"));
+        assert_eq!(d.completed_exports(), 0);
     }
 
     #[test]

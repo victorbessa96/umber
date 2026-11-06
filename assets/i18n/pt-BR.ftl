@@ -809,6 +809,7 @@ action =
     .unavailable-nothing-to-redo = Nada para refazer
     .unavailable-no-mesh = Carregue uma malha primeiro
     .unavailable-not-editing-mask = Só ao editar a máscara rápida (X)
+    .unavailable-bake-running = Um bake já está em andamento
 
 ## Dicas de mouse/teclado da barra de status (plano G1 g1-status-hints)
 
@@ -1094,6 +1095,8 @@ cmd-window-show-assets = Mostrar painel Assets
 cmd-window-show-bakes = Mostrar painel Bakes
 cmd-window-show-export = Mostrar painel Exportação
 cmd-window-show-history = Mostrar painel Histórico
+cmd-bake-run = Fazer bake (configuração atual)
+cmd-export-run = Exportar (configuração atual)
 
 ## The panel-group menu under each tab bar's end button (UI/UX U2-3).
 dock =

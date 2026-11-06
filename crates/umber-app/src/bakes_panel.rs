@@ -776,6 +776,8 @@ pub struct BakesPanel {
     mesh_tiles: MeshTilesCache,
     /// The in-flight bake, if any (at most one at a time).
     job: Option<BakeJobHandle>,
+    /// Landed bake jobs (see [`Self::completed_jobs`]).
+    completed_jobs: u64,
     /// The high-to-low transfer source (C2-29): the picked HIGH mesh and
     /// its cage + map choices.
     high: HighPoly,
@@ -888,6 +890,7 @@ impl BakesPanel {
             tiles: TileSelection::new(),
             mesh_tiles: MeshTilesCache::default(),
             job: None,
+            completed_jobs: 0,
             high: HighPoly::default(),
             baked_normal: None,
             latest: std::collections::BTreeMap::new(),
@@ -1302,6 +1305,56 @@ impl BakesPanel {
         self.job.is_some()
     }
 
+    /// How many bake jobs have landed (success or failure) since the
+    /// panel was built. A control client reads it before `bake.run` and
+    /// waits for it to grow (`job.status`), so a fast bake that finished
+    /// between two polls is never missed and an old result never reads
+    /// as the new one.
+    pub fn completed_jobs(&self) -> u64 {
+        self.completed_jobs
+    }
+
+    /// The Bake button's sync + gate for a caller that is not the drawn
+    /// panel (`bake.run`, A2-4 tail): syncs the tile and set checklists
+    /// from `mesh` exactly as [`Self::show`] does each frame, then names
+    /// the first reason the button would be greyed, as an i18n key.
+    pub fn prepare_bake(
+        &mut self,
+        mesh: &umber_mesh::MeshData,
+        mesh_path: Option<&Path>,
+    ) -> Result<(), &'static str> {
+        self.tiles.sync(self.mesh_tiles.get(mesh));
+        self.sync_sets(&Self::set_names_for(mesh, mesh_path));
+        if self.is_baking() {
+            return Err("action.unavailable-bake-running");
+        }
+        if !self.any_selected() {
+            return Err("bakes.select-map");
+        }
+        if self.tiles.nothing_selected() {
+            return Err("bakes.select-tile");
+        }
+        if !self.sets.is_empty() && self.enabled_sets().is_empty() {
+            return Err("bakes.select-set");
+        }
+        Ok(())
+    }
+
+    /// `bake.run`: the Bake button with the panel's current settings —
+    /// [`Self::prepare_bake`], then the same [`Self::bake_now`] the button
+    /// calls (a background job; [`Self::poll_job`] lands it).
+    pub fn bake_current(
+        &mut self,
+        device: &umber_gpu::WgpuDevice,
+        queue: &umber_gpu::WgpuQueue,
+        mesh: &umber_mesh::MeshData,
+        mesh_path: Option<&Path>,
+    ) -> Result<(), &'static str> {
+        self.prepare_bake(mesh, mesh_path)?;
+        self.bake_now(device, queue, mesh, mesh_path);
+        Ok(())
+    }
+
     /// Drains a finished bake job into `status`/`last_records` (call once
     /// per frame). Returns whether a job is still in flight afterward —
     /// the caller keeps repainting while it is.
@@ -1318,6 +1371,7 @@ impl BakesPanel {
             .map(|job| (job.skipped, job.skipped_skew))
             .unwrap_or_default();
         self.apply_outcome(outcome, &skipped, &skipped_skew);
+        self.completed_jobs += 1;
         false
     }
 
@@ -3413,6 +3467,75 @@ mod tests {
         let written = &p.last_records()[0].path;
         assert_eq!(written, &dir.join("Quad_ambient_occlusion.png"));
         assert!(written.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A2-4 tail: `bake.run`'s gate names the same reasons the panel's
+    /// greyed Bake button shows, as i18n keys (no GPU needed).
+    #[test]
+    fn prepare_bake_names_the_greyed_button_reason() {
+        let quad = umber_mesh::MeshData {
+            positions: vec![[0.0; 3]; 4],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let mut p = BakesPanel::new(PathBuf::from("/tmp/umber-prepare-bake"));
+        assert_eq!(p.prepare_bake(&quad, None), Ok(()));
+        for selection in BakeSelection::ALL {
+            p.set_map_enabled(selection, false);
+        }
+        assert_eq!(p.prepare_bake(&quad, None), Err("bakes.select-map"));
+        assert_eq!(p.completed_jobs(), 0);
+    }
+
+    /// A2-4 tail: `bake.run` dispatches through the button's own
+    /// `bake_now` (a background job), and the landing bumps the counter
+    /// `job.status` reports. GPU-gated like the button test above.
+    #[test]
+    fn bake_current_starts_the_buttons_job_and_counts_the_landing() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let quad = umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        };
+        let dir = std::env::temp_dir().join(format!("umber-bake-run-{}", std::process::id()));
+        let mut p = BakesPanel::new(dir.clone());
+        assert!(p.set_resolution(512));
+        p.set_rays(MIN_RAYS);
+        for selection in [
+            BakeSelection::Curvature,
+            BakeSelection::Thickness,
+            BakeSelection::Position,
+            BakeSelection::Normal,
+        ] {
+            p.set_map_enabled(selection, false);
+        }
+        let mesh_path = Some(Path::new("Quad.obj"));
+        assert_eq!(p.bake_current(&device, &queue, &quad, mesh_path), Ok(()));
+        assert!(p.is_baking());
+        // A second run while the first is in flight is refused, not queued.
+        assert_eq!(
+            p.bake_current(&device, &queue, &quad, mesh_path),
+            Err("action.unavailable-bake-running")
+        );
+        await_job_within(&mut p, 600);
+        assert_eq!(p.completed_jobs(), 1);
+        assert!(p.status().starts_with("Baked 1 map"), "{}", p.status());
+        assert!(dir.join("Quad_ambient_occlusion.png").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

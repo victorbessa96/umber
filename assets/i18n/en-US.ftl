@@ -790,6 +790,7 @@ action =
     .unavailable-nothing-to-redo = Nothing to redo
     .unavailable-no-mesh = Load a mesh first
     .unavailable-not-editing-mask = Only while editing the quick mask (X)
+    .unavailable-bake-running = A bake is already running
 
 ## Status-bar mouse/key hints (GUI plan G1 g1-status-hints)
 
@@ -1075,6 +1076,8 @@ cmd-window-show-assets = Show Assets panel
 cmd-window-show-bakes = Show Bakes panel
 cmd-window-show-export = Show Export panel
 cmd-window-show-history = Show History panel
+cmd-bake-run = Bake (current settings)
+cmd-export-run = Export (current settings)
 
 ## The panel-group menu under each tab bar's end button (UI/UX U2-3).
 dock =

@@ -221,9 +221,52 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
             shell_menu::show_panel(&mut app.dock, &Panel::History);
             app.save_layouts();
         }
+        ShellAction::RunBake => {
+            if let Err(why) = run_bake(app) {
+                app.notices.post(umber_gui::NoticeLevel::Info, tr(why));
+            }
+        }
+        ShellAction::RunExport => {
+            if let Err(why) = run_export(app) {
+                app.notices.post(umber_gui::NoticeLevel::Info, tr(why));
+            }
+        }
         // Applied by `ViewToggles::apply` above.
         ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {}
     }
+}
+
+/// `bake.run` (A2-4 tail): the Bakes panel's Bake button with its current
+/// settings, through the panel's own `bake_current` -> `bake_now` (the
+/// one bake path; no second implementation). Starts a background job;
+/// `Err` is the i18n key of the reason the button would be greyed.
+fn run_bake(app: &mut UmberApp) -> Result<(), &'static str> {
+    let Some(mesh) = app.state.mesh.as_ref() else {
+        return Err("action.unavailable-no-mesh");
+    };
+    let mesh_path = app.state.mesh_path.as_deref();
+    app.state
+        .bakes
+        .bake_current(&app.gpu.device, &app.gpu.queue, mesh, mesh_path)
+}
+
+/// `export.run` (A2-4 tail): the Export panel's Export button with its
+/// current settings, through the dialog's own `export_current` ->
+/// `export_now`, fed the same [`ExportContext`] the drawn panel builds.
+fn run_export(app: &mut UmberApp) -> Result<(), &'static str> {
+    if let Some(paint) = app.state.paint.as_mut() {
+        paint.flush_for_export();
+    }
+    let ctx = crate::export_dialog::ExportContext {
+        gpu: Some(&app.gpu),
+        mesh: app.state.mesh.as_ref(),
+        mesh_path: app.state.mesh_path.as_deref(),
+        paint: app.state.paint.as_ref(),
+        doc: Some(&app.state.doc),
+        graph: Some(&app.state.graph),
+        baked_normal: app.state.bakes.baked_normal(),
+    };
+    app.state.export.export_current(&ctx)
 }
 
 /// Typed failure for dispatch-by-id (queue row 154, wave 2a): the agent/MCP
@@ -296,6 +339,8 @@ pub const COMMAND_IDS: &[&str] = &[
     "window.show_bakes",
     "window.show_export",
     "window.show_history",
+    "bake.run",
+    "export.run",
 ];
 
 /// Dispatch by dotted id — the path menus, shortcuts, the agent protocol
@@ -311,8 +356,48 @@ pub fn run_command_id(app: &mut UmberApp, id: &str) -> Result<(), CommandError> 
     if let Err(why) = actions::availability(action, app.shell_state()) {
         return Err(CommandError::Disabled(why));
     }
+    // The bake/export commands carry panel-level gates (no map checked,
+    // no tile selected) the shell registry cannot see: a remote caller
+    // gets them as a typed refusal instead of a toast it never reads.
+    match action {
+        toolbar::ShellAction::RunBake => return run_bake(app).map_err(CommandError::Disabled),
+        toolbar::ShellAction::RunExport => return run_export(app).map_err(CommandError::Disabled),
+        _ => {}
+    }
     run_command(app, action);
     Ok(())
+}
+
+/// The `job.status` wire payload (A2-4 tail): the bake and export
+/// results a control client waits on after `bake.run` / `export.run`.
+/// `completed` counts landed jobs, so a client reads it first and waits
+/// for it to grow. Read-only.
+pub fn job_status_json(app: &UmberApp) -> serde_json::Value {
+    let bakes = &app.state.bakes;
+    let export = &app.state.export;
+    // Absolute: the panels write under the app's working directory, which
+    // a remote client cannot know.
+    let abs = |p: &std::path::Path| {
+        std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .display()
+            .to_string()
+    };
+    let outputs: Vec<String> = bakes.last_records().iter().map(|r| abs(&r.path)).collect();
+    let written: Vec<String> = export.last_written().iter().map(|p| abs(p)).collect();
+    serde_json::json!({
+        "bake": {
+            "running": bakes.is_baking(),
+            "completed": bakes.completed_jobs(),
+            "status": bakes.status(),
+            "outputs": outputs,
+        },
+        "export": {
+            "completed": export.completed_exports(),
+            "status": export.status(),
+            "written": written,
+        },
+    })
 }
 
 /// The `command.list` wire payload (control channel, row 154 wave 2c): one
@@ -426,6 +511,25 @@ mod tests {
             .filter(|(_, p)| **p == Panel::History)
             .count();
         assert_eq!(count, 1);
+    }
+
+    /// A2-4 tail: bake and export run by id, through the registry, the
+    /// palette and both catalogs.
+    #[test]
+    fn bake_and_export_run_commands_are_registered() {
+        for (id, action) in [
+            ("bake.run", ShellAction::RunBake),
+            ("export.run", ShellAction::RunExport),
+        ] {
+            assert!(COMMAND_IDS.contains(&id), "{id} registered");
+            assert_eq!(ShellAction::from_id(id), Some(action));
+            assert_eq!(action.id(), id);
+            assert!(
+                crate::palette::CATALOG.iter().any(|e| e.action == action),
+                "{id} in the palette"
+            );
+            assert!(crate::actions::ALL_ACTIONS.contains(&action));
+        }
     }
 
     #[test]
