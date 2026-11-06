@@ -282,6 +282,20 @@ pub fn brush_grid_ui(
 }
 
 /// One swatch button + caption per library preset; the clicked one's name.
+/// The swatch card colour for the active theme (its raised surface, as
+/// sRGB 0..1), plus the cache-key salt so a theme switch re-renders.
+fn swatch_card() -> ([f32; 3], &'static str) {
+    let c = umber_gui::theme::raised();
+    (
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+        ],
+        umber_gui::theme::active_theme().name(),
+    )
+}
+
 fn brush_swatches(
     ui: &mut Ui,
     state: &mut AssetsPanel,
@@ -293,9 +307,14 @@ fn brush_swatches(
         let Some(entry) = brush.library.entries.get(i) else {
             continue;
         };
-        let json = entry.preset.to_json().unwrap_or_default();
+        let (card, salt) = swatch_card();
+        let json = format!("{salt}{}", entry.preset.to_json().unwrap_or_default());
         let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
-            crate::asset_thumbs::brush_preview(&entry.preset, crate::asset_thumbs::THUMB_PX * 2)
+            crate::asset_thumbs::brush_preview_on(
+                &entry.preset,
+                crate::asset_thumbs::THUMB_PX * 2,
+                card,
+            )
         }) else {
             continue;
         };
@@ -429,9 +448,14 @@ pub fn library_ui(
                 continue;
             }
             ui.horizontal(|ui| {
-                let json = entry.preset.to_json().unwrap_or_default();
+                let (card, salt) = swatch_card();
+                let json = format!("{salt}{}", entry.preset.to_json().unwrap_or_default());
                 if let Some(tex) = state.thumb(ui.ctx(), 0, &entry.preset.name, &json, || {
-                    crate::asset_thumbs::brush_preview(&entry.preset, crate::asset_thumbs::THUMB_PX)
+                    crate::asset_thumbs::brush_preview_on(
+                        &entry.preset,
+                        crate::asset_thumbs::THUMB_PX,
+                        card,
+                    )
                 }) {
                     ui.add(egui::Image::new(egui::load::SizedTexture::new(
                         tex,

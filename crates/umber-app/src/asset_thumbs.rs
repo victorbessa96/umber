@@ -178,7 +178,24 @@ pub fn material_preview(material: &SmartMaterial, size: u32) -> ColorImage {
 /// preset's falloff at its hardness, in its color, at its alpha, with
 /// the stroke tapering at both ends the way a pressure stroke does.
 /// Pure CPU, deterministic, `size` x `size` px.
+#[cfg(test)]
 pub fn brush_preview(preset: &umber_brush::preset::BrushPreset, size: u32) -> ColorImage {
+    brush_preview_on(preset, size, [DARK_CARD; 3])
+}
+
+/// The dark swatch card (sRGB, 0..1): the original card, kept by tests.
+#[cfg(test)]
+pub const DARK_CARD: f32 = 0.16;
+
+/// [`brush_preview`] over a `card` colour (sRGB, 0..1): the panel draws
+/// the swatch on the theme's raised surface (U4), so a Light shelf shows
+/// light cards instead of black boxes. The eraser checker is the same in
+/// every theme; its cut shows the card colour.
+pub fn brush_preview_on(
+    preset: &umber_brush::preset::BrushPreset,
+    size: u32,
+    card_rgb: [f32; 3],
+) -> ColorImage {
     let size = size.max(1) as usize;
     let params = &preset.params;
     let [cr, cg, cb, ca] = params.color;
@@ -241,7 +258,7 @@ pub fn brush_preview(preset: &umber_brush::preset::BrushPreset, size: u32) -> Co
             }
         }
     }
-    let card = |x: usize, y: usize| -> f32 {
+    let card = |x: usize, y: usize, c: usize| -> f32 {
         if eraser {
             // A light checker the stroke cuts through.
             let cell = (size / 8).max(1);
@@ -251,7 +268,7 @@ pub fn brush_preview(preset: &umber_brush::preset::BrushPreset, size: u32) -> Co
                 0.62
             }
         } else {
-            0.16
+            card_rgb[c]
         }
     };
     let mut px = vec![0u8; size * size * 4];
@@ -259,9 +276,9 @@ pub fn brush_preview(preset: &umber_brush::preset::BrushPreset, size: u32) -> Co
         for x in 0..size {
             let i = y * size + x;
             let a = acc[i].clamp(0.0, 1.0);
-            let base = card(x, y);
             for c in 0..3 {
-                let target = if eraser { 0.16 } else { ink[c] };
+                let base = card(x, y, c);
+                let target = if eraser { card_rgb[c] } else { ink[c] };
                 px[i * 4 + c] = ((base + (target - base) * a) * 255.0).round() as u8;
             }
             px[i * 4 + 3] = 255;
@@ -293,6 +310,20 @@ pub fn thumb_key(kind: u8, name: &str, preset_json: &str) -> ThumbKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// U4: the default swatch is the dark card exactly; a light card
+    /// lightens the background and keeps the stroke.
+    #[test]
+    fn swatch_card_follows_the_given_colour() {
+        let p = brush("hard-round");
+        let dark = brush_preview(&p, 32);
+        assert_eq!(dark.pixels, brush_preview_on(&p, 32, [DARK_CARD; 3]).pixels);
+        let light = brush_preview_on(&p, 32, [0.9; 3]);
+        // Corner = bare card.
+        assert_eq!(dark.pixels[0].r(), (DARK_CARD * 255.0).round() as u8);
+        assert_eq!(light.pixels[0].r(), (0.9f32 * 255.0).round() as u8);
+        assert_ne!(dark.pixels, light.pixels);
+    }
 
     fn brush(name: &str) -> umber_brush::preset::BrushPreset {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

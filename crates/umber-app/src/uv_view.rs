@@ -15,10 +15,6 @@ use crate::path_tool::PaintPathTool;
 
 /// Wireframe color for UV island edges.
 const UV_EDGE_COLOR: Color32 = Color32::from_rgb(140, 190, 255);
-/// Background inside the 0..1 UV square.
-const UV_BG_COLOR: Color32 = Color32::from_rgb(38, 38, 42);
-/// Background outside the UV square (padding area).
-const PAD_COLOR: Color32 = Color32::from_rgb(28, 28, 30);
 /// The paint-path polyline + points (green: distinct from the lasso
 /// amber, the symmetry orange and the quick-mask red).
 const PATH_COLOR: Color32 = Color32::from_rgb(110, 220, 130);
@@ -37,14 +33,9 @@ const PATH_OPACITY_TRAVEL_PX: f32 = 36.0;
 const FOOTER_H: f32 = 24.0;
 /// The UDIM grid is 10×10 tiles (`1001..=1100`).
 const TILE_GRID_N: usize = 10;
-/// A present-but-inactive UDIM tile's background (dimmer than the
-/// active cell the paint canvas covers).
-const TILE_BG_DIM: Color32 = Color32::from_rgb(32, 32, 36);
-/// The tile-number label color.
-const TILE_LABEL_COLOR: Color32 = Color32::from_rgb(110, 118, 130);
-/// The UDIM grid line stroke (a fn: egui's `Stroke::new` is not const).
+/// The UDIM grid line stroke (the theme's canvas grid colour; U4).
 fn tile_grid_stroke() -> Stroke {
-    Stroke::new(0.5, Color32::from_rgb(55, 58, 64))
+    Stroke::new(0.5, umber_gui::theme::canvas().grid)
 }
 
 /// The 2D UV view panel state: the cached quick-mask overlay texture.
@@ -501,8 +492,8 @@ impl UvView {
             .is_some_and(|p| p.quick_mask().is_editing());
 
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, PAD_COLOR);
-        painter.rect_filled(square, 0.0, UV_BG_COLOR);
+        painter.rect_filled(rect, 0.0, umber_gui::theme::canvas().pad);
+        painter.rect_filled(square, 0.0, umber_gui::theme::canvas().square);
 
         // Live paint canvas: the paint target presented through the
         // texture-display callback, clipped to the UV square, through the
@@ -579,7 +570,7 @@ impl UvView {
                     egui::Align2::CENTER_CENTER,
                     tr("uv.no-mesh"),
                     egui::FontId::proportional(13.0),
-                    egui::Color32::from_gray(120),
+                    umber_gui::theme::canvas().label,
                 );
             }
         }
@@ -899,14 +890,14 @@ fn draw_udim_grid(painter: &egui::Painter, canvas: egui::Rect, present: &[u16], 
     for &tile in present {
         let r = cell_rect(canvas, tile_cell(tile));
         if tile != active {
-            painter.rect_filled(r, 1.0, TILE_BG_DIM);
+            painter.rect_filled(r, 1.0, umber_gui::theme::canvas().tile_dim);
         }
         painter.text(
             r.left_top() + egui::vec2(3.0, 3.0),
             egui::Align2::LEFT_TOP,
             tile.to_string(),
             egui::FontId::monospace(10.0),
-            TILE_LABEL_COLOR,
+            umber_gui::theme::canvas().label,
         );
     }
     // Per-cell borders for present tiles (cleaner than full grid lines:

@@ -231,6 +231,58 @@ pub fn tokens() -> Tokens {
     active_theme().tokens()
 }
 
+/// The 2D canvas colours (the UV view's padding, the UV square, the
+/// UDIM tile fill, labels and grid): content backdrops, so they stay a
+/// neutral dark under Light (as the 3D view does) but follow the theme's
+/// viewport token. Dark keeps the original UV-view constants exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasColors {
+    /// Outside the 0..1 square.
+    pub pad: Color32,
+    /// Inside the 0..1 square.
+    pub square: Color32,
+    /// A present but inactive UDIM tile.
+    pub tile_dim: Color32,
+    /// Tile numbers and the empty-canvas hint.
+    pub label: Color32,
+    /// The UDIM grid lines.
+    pub grid: Color32,
+}
+
+impl Theme {
+    /// This theme's 2D canvas colours.
+    pub fn canvas(self) -> CanvasColors {
+        match self {
+            Self::Dark => CanvasColors {
+                pad: Color32::from_rgb(28, 28, 30),
+                square: Color32::from_rgb(38, 38, 42),
+                tile_dim: Color32::from_rgb(32, 32, 36),
+                label: Color32::from_rgb(110, 118, 130),
+                grid: Color32::from_rgb(55, 58, 64),
+            },
+            Self::Light => CanvasColors {
+                pad: Color32::from_rgb(0x3A, 0x3C, 0x40),
+                square: Color32::from_rgb(0x48, 0x4A, 0x4F),
+                tile_dim: Color32::from_rgb(0x41, 0x43, 0x48),
+                label: Color32::from_rgb(0xB4, 0xBA, 0xC4),
+                grid: Color32::from_rgb(0x62, 0x65, 0x6C),
+            },
+            Self::HighContrast => CanvasColors {
+                pad: Color32::from_rgb(0, 0, 0),
+                square: Color32::from_rgb(0x14, 0x14, 0x14),
+                tile_dim: Color32::from_rgb(0x0A, 0x0A, 0x0A),
+                label: Color32::from_rgb(0xD0, 0xD0, 0xD0),
+                grid: Color32::from_rgb(0x80, 0x80, 0x80),
+            },
+        }
+    }
+}
+
+/// The active theme's 2D canvas colours.
+pub fn canvas() -> CanvasColors {
+    active_theme().canvas()
+}
+
 /// WCAG 2.x relative luminance of an sRGB color.
 pub fn relative_luminance(c: Color32) -> f32 {
     let lin = |u: u8| {
@@ -706,6 +758,10 @@ fn visuals_for(theme: Theme, ov: Option<&TokenOverrides>) -> egui::Visuals {
     w.open.corner_radius = radius;
 
     if theme == Theme::HighContrast {
+        // Disabled labels and placeholders stay at 7:1 or better on
+        // black (egui's defaults halve the text: about 5:1 here).
+        v.disabled_alpha = 0.75;
+        v.weak_text_color = Some(token(theme, ov, "text_faint"));
         // Every interactive edge drawn: no fill-only affordances.
         let edge = Stroke::new(1.0, token(theme, ov, "text_faint"));
         w.inactive.bg_stroke = edge;
@@ -902,6 +958,27 @@ mod tests {
         }
         assert_eq!(Theme::from_name("bogus"), None);
         assert!((contrast_ratio(Color32::WHITE, Color32::BLACK) - 21.0).abs() < 0.01);
+    }
+
+    /// U4 follow-up: canvas labels read on their own square in every
+    /// theme (4.5:1), grid lines show (1.5:1 is enough for a 0.5 px
+    /// guide on dark), and Dark is the original UV-view constants.
+    #[test]
+    fn canvas_colors_read_in_every_theme() {
+        let d = Theme::Dark.canvas();
+        assert_eq!(d.square, Color32::from_rgb(38, 38, 42));
+        assert_eq!(d.pad, Color32::from_rgb(28, 28, 30));
+        for t in [Theme::Light, Theme::HighContrast] {
+            let c = t.canvas();
+            assert!(contrast_ratio(c.label, c.square) >= 4.5, "{t:?} label");
+            assert!(contrast_ratio(c.grid, c.square) >= 1.5, "{t:?} grid");
+        }
+        let hc = themed_style(Theme::HighContrast, Density::Comfortable, 1.0);
+        // egui fades disabled text with `disable` (a premultiplied
+        // gamma-multiply): over black the shown colour is the rgb.
+        let disabled = hc.visuals.disable(Tokens::HIGH_CONTRAST.text);
+        let on_black = Color32::from_rgb(disabled.r(), disabled.g(), disabled.b());
+        assert!(contrast_ratio(on_black, Color32::BLACK) >= 7.0);
     }
 
     /// U4: each theme's visuals carry its own tokens and egui base.
