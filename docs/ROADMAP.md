@@ -200,7 +200,10 @@ pass; the .ftl lock lift (if it stands).
   button path lacks `flush_for_export` (export.run has it); `job.status`
   keeps stale paths after a failed job; export > 30 s times out over
   `--control` (`UI_REPLY_TIMEOUT`). CLOSED the same day: audit A2-4's
-  bake/export-by-id tail, the e2e smoke in CI, the push guard.
+  bake/export-by-id tail, the e2e smoke in CI, the push guard, the button
+  flush + failed-job fields (row 237), and the last sub-item, the
+  export > 30 s timeout: `command.run` of `bake.run`/`export.run` now
+  waits `JOB_REPLY_TIMEOUT` (30 min) — queue row 246.
 
 - ~~The cached ID-mask bake~~ **LANDED SILENTLY** — the P1 tile
   cache + the L3 pre-warm; this row was stale for a week.

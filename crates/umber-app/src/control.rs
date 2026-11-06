@@ -2,7 +2,8 @@
 //! (queue row 153). v2 adds the UI-thread command queue: `ui.inspect` and
 //! `viewport.screenshot` execute on the UI thread (the app drains
 //! [`ControlServer::requests`] at the top of `fn ui`); listener threads
-//! block on a per-request reply channel for at most [`UI_REPLY_TIMEOUT`].
+//! block on a per-request reply channel for at most [`UI_REPLY_TIMEOUT`]
+//! (job commands: [`JOB_REPLY_TIMEOUT`]).
 //! `umber-app --bridge <port>` (step 5) relays MCP stdio frames verbatim
 //! to an `umber-cli mcp` child process — one authed client at a time; the
 //! app never interprets MCP frames.
@@ -52,6 +53,30 @@ pub const METHODS: &[&str] = &[
 /// How long a connection thread waits for the UI thread to answer a queued
 /// request before replying `ui_timeout`.
 pub const UI_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Commands that start a long-running job when run by id (A2-4 tail):
+/// `bake.run` hands off to a worker, `export.run` exports synchronously on
+/// the UI thread, so their reply can legitimately outlast
+/// [`UI_REPLY_TIMEOUT`]. The ROADMAP standing debt of 2026-11-06 ("an
+/// export longer than 30 s times out over --control although it
+/// finishes") is closed by waiting [`JOB_REPLY_TIMEOUT`] for exactly
+/// these ids; every other request keeps the 30 s UI timeout.
+pub const JOB_COMMANDS: &[&str] = &["bake.run", "export.run"];
+/// The reply ceiling for [`JOB_COMMANDS`]: long enough for a big export,
+/// still bounded so a stuck UI thread cannot hang a client forever.
+pub const JOB_REPLY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// The reply ceiling for one request: [`JOB_REPLY_TIMEOUT`] for a
+/// `command.run` of a [`JOB_COMMANDS`] id, [`UI_REPLY_TIMEOUT`] otherwise.
+pub fn reply_timeout_for(req: &Value) -> Duration {
+    let is_command_run = req.get("method").and_then(Value::as_str) == Some("command.run");
+    let id = req.pointer("/params/id").and_then(Value::as_str);
+    if is_command_run && id.is_some_and(|i| JOB_COMMANDS.contains(&i)) {
+        JOB_REPLY_TIMEOUT
+    } else {
+        UI_REPLY_TIMEOUT
+    }
+}
 
 /// A request forwarded to the UI thread (queue row 153 steps 3-4). The app
 /// drains the queue at the top of `fn ui` and sends the result back; `Err`
@@ -383,11 +408,11 @@ fn handle_conn(
                     );
                     continue;
                 }
+                let reply_timeout = reply_timeout_for(&req);
                 match cmd_id {
                     Some(cmd_id) => {
-                        match forward_ui(requests, repaint, |reply| ControlRequest::RunCommand {
-                            id: cmd_id,
-                            reply,
+                        match forward_ui_with(requests, repaint, reply_timeout, |reply| {
+                            ControlRequest::RunCommand { id: cmd_id, reply }
                         }) {
                             Ok(v) => v,
                             Err(e) => {
@@ -464,6 +489,17 @@ fn forward_ui(
     repaint: &egui::Context,
     make: impl FnOnce(Sender<Result<Value, String>>) -> ControlRequest,
 ) -> Result<Value, String> {
+    forward_ui_with(requests, repaint, UI_REPLY_TIMEOUT, make)
+}
+
+/// Same as [`forward_ui`] with an explicit reply ceiling (job commands get
+/// [`JOB_REPLY_TIMEOUT`]; see [`reply_timeout_for`]).
+fn forward_ui_with(
+    requests: &Sender<ControlRequest>,
+    repaint: &egui::Context,
+    timeout: Duration,
+    make: impl FnOnce(Sender<Result<Value, String>>) -> ControlRequest,
+) -> Result<Value, String> {
     let (tx, rx) = mpsc::channel();
     requests
         .send(make(tx))
@@ -472,11 +508,11 @@ fn forward_ui(
     // frame is coming, so wake it explicitly or every UI-forwarded method
     // dies on ui_timeout (found by the 2026-11-05 headless smoke).
     repaint.request_repaint();
-    match rx.recv_timeout(UI_REPLY_TIMEOUT) {
+    match rx.recv_timeout(timeout) {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(e),
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!("ui_timeout after {}s", UI_REPLY_TIMEOUT.as_secs()))
+            Err(format!("ui_timeout after {}s", timeout.as_secs()))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err("ui thread dropped the reply channel".to_string())
@@ -781,6 +817,27 @@ mod tests {
         assert!(parse_control_arg("[::1]:8377").is_err());
         assert!(parse_control_arg("8377x").is_err());
         assert!(parse_control_arg("99999").is_err());
+    }
+
+    #[test]
+    fn job_commands_get_the_job_reply_timeout() {
+        for id in JOB_COMMANDS {
+            let req = json!({"method": "command.run", "params": {"id": id}});
+            assert_eq!(reply_timeout_for(&req), JOB_REPLY_TIMEOUT, "{id}");
+        }
+        for req in [
+            json!({"method": "command.run", "params": {"id": "view.toggle_grid"}}),
+            json!({"method": "command.run"}),
+            json!({"method": "job.status"}),
+            json!({"method": "ui.inspect"}),
+        ] {
+            assert_eq!(reply_timeout_for(&req), UI_REPLY_TIMEOUT, "{req}");
+        }
+        // A job id on another method keeps the short UI timeout.
+        assert_eq!(
+            reply_timeout_for(&json!({"method": "job.status", "params": {"id": "export.run"}})),
+            UI_REPLY_TIMEOUT
+        );
     }
 
     #[test]

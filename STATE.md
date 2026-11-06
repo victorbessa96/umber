@@ -93,12 +93,11 @@ signing, the alpha tag.
 - **T3, `scripts/safe-push.py`**: the only push path (ledger by session with
   patch-id for rebases, fast-forward, fmt/scorecard/layers on the pushed
   commit's tree, pushes the checked SHA). 12 scratch-repo tests.
-- Open: the Export panel's own BUTTON path does not call
-  `flush_for_export` yet (only `export.run` does; a fill added and exported
-  in the same frame could export stale); `job.status` keeps the previous
-  paths after a failed job; an export longer than 30 s times out over the
-  control channel although it finishes. Spec §8's A2-4 row still says open:
-  the spec file was under a sibling lock (u7-spec) at landing time.
+- Open: none of the T1-T3 debts. The Export button flush and the
+  failed-job `job.status` fields closed in row 237; the export-longer-
+  than-30 s control timeout closed in row 246 (`JOB_REPLY_TIMEOUT` for
+  `bake.run`/`export.run`, pinned by `job_commands_get_the_job_reply_
+  timeout`). Spec §8's A2-4 row was marked fixed in row 237.
 - Evidence and the kill table: `docs/loop/kill-reports/2026-11-06-charter-v2-t1-t3.md`, queue row 229.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
