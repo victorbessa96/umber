@@ -377,7 +377,7 @@ fn catalog_json() -> Value {
         { "name": "bake", "description": "Bake mesh maps headless: {maps, out_dir, size, rays, dilate, margin, tiles} — same fields as the agent `bake` step; out_dir is write-root-relative.", "inputSchema": { "type": "object" } },
         { "name": "bake_status", "description": "Poll the running bake job.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "export", "description": "Export textures with a preset: {preset, out_dir, size, rays, tiles, usda}; out_dir is write-root-relative.", "inputSchema": { "type": "object" } },
-        { "name": "paint_stroke", "description": "Paint one stroke through the real headless engine: {points: [[x,y]..], color: [r,g,b,a], radius_scale, radius?, layer?}.", "inputSchema": { "type": "object" } },
+        { "name": "paint_stroke", "description": "Paint one stroke through the real headless engine: {points: [[x,y]..], color: [r,g,b,a], radius_scale, radius?, radius_texels?, layer?}.", "inputSchema": { "type": "object" } },
         { "name": "paint_read", "description": "Read texels of the selected plane: {texels: [[x,y]..], channel, tile?, layer?, composite?}.", "inputSchema": { "type": "object" } },
         { "name": "paint_snapshot", "description": "Write the selected plane as PNG: exactly one of {out, out_dir} (write-root-relative).", "inputSchema": { "type": "object" } },
         { "name": "set_active", "description": "Choose the working texture set: {set}.", "inputSchema": { "type": "object", "properties": { "set": { "type": "string" } }, "required": ["set"] } },
@@ -387,7 +387,7 @@ fn catalog_json() -> Value {
         { "name": "paint_redo", "description": "Redo one paint stroke.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "command_list", "description": "List the live app's command registry (id, label, menu, shortcut, params, enabled) over its --control channel. Typed error when no channel is configured (UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE).", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "command_run", "description": "Run one GUI command by dotted id on the live app's --control channel (same dispatch as a menu click): {id}. Unknown/disabled ids are the app's typed errors.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
-        { "name": "library_list", "description": "List the asset libraries headless — the bundled starter assets/ plus the per-user library dirs (state-dir smart/, brushes/, env/) — with the assets panel's own scan rules. Replies rows {path, kind, name, bytes, source: starter|user} for smart materials, smart masks, brushes and env maps. No arguments; no control channel needed.", "inputSchema": { "type": "object", "properties": {} } }
+        { "name": "library_list", "description": "List the asset libraries headless — the bundled starter assets/ plus the per-user library dirs (state-dir smart/, brushes/, env/) — with the assets panel's own scan rules. Replies rows {path, kind, name, bytes, source: starter|user} for smart materials, smart masks, smart filters, brushes and env maps. No arguments; no control channel needed.", "inputSchema": { "type": "object", "properties": {} } }
     ])
 }
 
@@ -579,7 +579,7 @@ mod tests {
         let list = tools.iter().find(|t| t.name == "library_list").unwrap();
         assert_eq!(
             list.description.as_deref(),
-            Some("List the asset libraries headless — the bundled starter assets/ plus the per-user library dirs (state-dir smart/, brushes/, env/) — with the assets panel's own scan rules. Replies rows {path, kind, name, bytes, source: starter|user} for smart materials, smart masks, brushes and env maps. No arguments; no control channel needed.")
+            Some("List the asset libraries headless — the bundled starter assets/ plus the per-user library dirs (state-dir smart/, brushes/, env/) — with the assets panel's own scan rules. Replies rows {path, kind, name, bytes, source: starter|user} for smart materials, smart masks, smart filters, brushes and env maps. No arguments; no control channel needed.")
         );
         assert_eq!(
             serde_json::to_value(&list.input_schema).unwrap(),
@@ -781,6 +781,7 @@ mod tests {
             }
             std::fs::write(assets.join("smart/mat.umbersmart"), b"{}").unwrap();
             std::fs::write(assets.join("smart/mask.umbermask"), b"{}").unwrap();
+            std::fs::write(assets.join("smart/filter.umberfilter"), b"{}").unwrap();
             std::fs::write(assets.join("brushes/b.umberbrush"), b"{}").unwrap();
             std::fs::write(assets.join("env/studio.png"), b"12345").unwrap();
             std::fs::write(assets.join("env/skip.txt"), b"no").unwrap();
@@ -793,13 +794,13 @@ mod tests {
             assert_eq!(reply["ok"], true, "{reply}");
             assert_eq!(reply["step"], "library_list", "{reply}");
             let rows = reply["rows"].as_array().unwrap();
-            assert_eq!(reply["count"], 4, "{reply}");
-            assert_eq!(rows.len(), 4, "{reply}");
+            assert_eq!(reply["count"], 5, "{reply}");
+            assert_eq!(rows.len(), 5, "{reply}");
             let mut kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
             kinds.sort();
             assert_eq!(
                 kinds,
-                ["brush", "env", "smart-mask", "smart-material"],
+                ["brush", "env", "smart-filter", "smart-mask", "smart-material"],
                 "{reply}"
             );
             for row in rows {

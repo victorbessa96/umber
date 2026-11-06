@@ -722,6 +722,139 @@ fn an_absolute_radius_paints_wider_and_persists() {
     assert!(agent.wait_exit().success());
 }
 
+/// `radius_texels` — the unit-named alias of `radius`, delegating to the
+/// c287bcf `set_brush_radius_texels` seam: a 96-texel stroke paints
+/// where the default 24 cannot reach, the reply reports the radius in
+/// force, a follow-up stroke without the field inherits it, and an
+/// out-of-range value clamps through the typed range (1000 → 192).
+#[test]
+fn radius_texels_sets_the_session_brush_through_the_texel_seam() {
+    let dir = write_fixture_project("radius-texels");
+    let mut agent = Agent::spawn();
+    assert_ok(
+        &agent.call(&json!({ "project_open": { "dir": dir } })),
+        "project_open",
+    );
+
+    // Default brush first: the reply reports the historical 24 texels.
+    let narrow = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.20, 0.50], [0.30, 0.50]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+    } }));
+    if is_gpu_skip(&narrow) {
+        eprintln!("skipping: {narrow}");
+        return;
+    }
+    assert_ok(&narrow, "paint_stroke");
+    assert_eq!(narrow["radius"], 24.0, "{narrow}");
+
+    // radius_texels: 96 — the wide stroke (0.60,0.50)->(0.70,0.50).
+    let wide = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.60, 0.50], [0.70, 0.50]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+        "radius_texels": 96,
+    } }));
+    assert_ok(&wide, "paint_stroke");
+    assert_eq!(wide["radius"], 96.0, "{wide}");
+
+    // Same geometry pins as the `radius` test: (128,255) narrow centre,
+    // (202,255) the untouched gap, (406,255) 48 texels past the wide
+    // stroke's end — inside its 96-texel radius, unreachable by 24.
+    let after = agent.call(&json!({ "paint_read": {
+        "composite": false,
+        "texels": [[128, 255], [202, 255], [406, 255]],
+    } }));
+    assert_ok(&after, "paint_read");
+    for (i, which) in [(0, "narrow centre"), (2, "wide edge")] {
+        let px = &after["texels"][i];
+        assert_eq!(px[0], 0, "R stays 0 under green ({which}): {after}");
+        assert_eq!(px[2], 0, "B stays 0 under green ({which}): {after}");
+        assert!(px[1].as_u64().unwrap_or(0) > 0, "{which} G painted: {after}");
+        assert!(px[3].as_u64().unwrap_or(0) > 0, "{which} A painted: {after}");
+    }
+    assert_eq!(
+        after["texels"][1],
+        json!([0, 0, 0, 0]),
+        "the gap between the strokes stays untouched: {after}"
+    );
+
+    // Session state: a stroke with NEITHER radius field inherits 96.
+    let inherit = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.60, 0.10], [0.70, 0.10]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+    } }));
+    assert_ok(&inherit, "paint_stroke");
+    assert_eq!(inherit["radius"], 96.0, "{inherit}");
+
+    // The clamp path: out-of-range clamps through the typed range
+    // (BRUSH_RADIUS_TEXELS_MAX = 8.0 × 24 = 192) and the reply reports it.
+    let clamped = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.60, 0.90], [0.70, 0.90]],
+        "color": [0.0, 1.0, 0.0, 1.0],
+        "radius_texels": 1000,
+    } }));
+    assert_ok(&clamped, "paint_stroke");
+    assert_eq!(clamped["radius"], 192.0, "{clamped}");
+
+    assert_ok(&agent.call(&json!("quit")), "quit");
+    assert!(agent.wait_exit().success());
+}
+
+/// The typed refusal paths of the radius fields: `radius_texels` `<= 0`
+/// is a typed error naming the field and the clamp range, giving BOTH
+/// `radius` and `radius_texels` is a typed error, and the plain `radius`
+/// field keeps working alone.
+#[test]
+fn radius_texels_refusals_are_typed_and_radius_still_works() {
+    let dir = write_fixture_project("radius-texels-errors");
+    let mut agent = Agent::spawn();
+    assert_ok(
+        &agent.call(&json!({ "project_open": { "dir": dir } })),
+        "project_open",
+    );
+    // Prime the paint half so the success arm below is GPU-gated.
+    let prime = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.5, 0.5]], "color": [1.0, 0.0, 0.0, 1.0],
+    } }));
+    if is_gpu_skip(&prime) {
+        eprintln!("skipping: {prime}");
+        return;
+    }
+    assert_ok(&prime, "paint_stroke");
+
+    // The refusals fire BEFORE any GPU work — they hold even ungated.
+    for bad in [0.0, -3.0] {
+        let r = agent.call(&json!({ "paint_stroke": {
+            "points": [[0.5, 0.5]], "color": [0.0, 1.0, 0.0, 1.0],
+            "radius_texels": bad,
+        } }));
+        assert_eq!(r["ok"], false, "{r}");
+        let err = r["error"].as_str().unwrap();
+        assert!(err.contains("radius_texels"), "{r}");
+        assert!(err.contains("1.2..=192.0"), "{r}");
+    }
+    let both = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.5, 0.5]], "color": [0.0, 1.0, 0.0, 1.0],
+        "radius": 24, "radius_texels": 24,
+    } }));
+    assert_eq!(both["ok"], false, "{both}");
+    assert!(
+        both["error"].as_str().unwrap().contains("not both"),
+        "{both}"
+    );
+
+    // `radius` alone still works — the existing field is untouched.
+    let legacy = agent.call(&json!({ "paint_stroke": {
+        "points": [[0.5, 0.9]], "color": [0.0, 1.0, 0.0, 1.0],
+        "radius": 48,
+    } }));
+    assert_ok(&legacy, "paint_stroke");
+    assert_eq!(legacy["radius"], 48.0, "{legacy}");
+
+    assert_ok(&agent.call(&json!("quit")), "quit");
+    assert!(agent.wait_exit().success());
+}
+
 /// `paint_snapshot`'s `out_dir` arm (2026-10-19 `snapshot-dir`, the
 /// harness-script report's own deferral): two snapshots into one
 /// directory land at `<out_dir>/<step:05>.png`, `step` being the 0-based

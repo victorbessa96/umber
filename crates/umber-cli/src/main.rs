@@ -55,7 +55,7 @@ fn main() -> Result<()> {
             println!("          mcp     [--read-root DIR] [--write-root DIR]   (MCP server on stdio, tools over the agent session)");
             println!("          serve   --port N [--read-root DIR] [--write-root DIR]   (token-auth loopback JSONL, one session per connection)");
             println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
-            println!("          import-asset <file> --kind <smart-material|smart-mask|brush|env> [--library DIR] [--dry-run]");
+            println!("          import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]");
             println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
             Ok(())
         }
@@ -71,11 +71,11 @@ fn inspect_cmd(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `import-asset <file> --kind <smart-material|smart-mask|brush|env>
+/// `import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env>
 /// [--library DIR] [--dry-run]` — validated asset import (assets wave
 /// K5); validation and copying live in [`import_asset`].
 fn import_asset_cmd(args: &[String]) -> Result<()> {
-    const USAGE: &str = "usage: umber-cli import-asset <file> --kind <smart-material|smart-mask|brush|env> [--library DIR] [--dry-run]";
+    const USAGE: &str = "usage: umber-cli import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]";
     let mut file: Option<&str> = None;
     let mut kind: Option<import_asset::AssetKind> = None;
     let mut library: Option<&str> = None;
@@ -89,7 +89,7 @@ fn import_asset_cmd(args: &[String]) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("--kind needs a value\n{USAGE}"))?;
                 kind = Some(import_asset::AssetKind::from_name(value).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "--kind: unknown kind '{value}' (expected smart-material|smart-mask|brush|env)"
+                        "--kind: unknown kind '{value}' (expected smart-material|smart-mask|smart-filter|brush|env)"
                     )
                 })?);
                 i += 2;

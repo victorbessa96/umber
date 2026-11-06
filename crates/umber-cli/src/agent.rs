@@ -53,9 +53,10 @@
 //! is the engine's own history, separate from the model's `undo` (the
 //! app's two-stack shape). v1 boundaries: no fill/material evaluation
 //! (their rows composite nothing here), no mask strokes, no pressure.
-//! `paint_stroke`'s optional `radius` sets the session brush's ABSOLUTE
-//! radius in target texels (state, not per-stroke — later strokes
-//! inherit it; see [`PaintStrokeStep`]). `paint_snapshot` writes the
+//! `paint_stroke`'s optional `radius` (alias `radius_texels`) sets the
+//! session brush's ABSOLUTE radius in target texels through the c287bcf
+//! seam (state, not per-stroke — later strokes inherit it; see
+//! [`PaintStrokeStep`]). `paint_snapshot` writes the
 //! selected plane to `out` or, with `out_dir`, to
 //! `<out_dir>/<step:05>.png` (exactly one destination; both or neither
 //! is a typed refusal before any GPU work — see [`PaintSnapshotStep`]).
@@ -98,8 +99,8 @@
 //! [`crate::import_asset::default_library_dir`] roots) with the assets
 //! panel's own lister rules and replies JSON rows
 //! `{path, kind, name, bytes, source: starter|user}` over smart
-//! materials, smart masks, brushes and env maps; `import_asset {
-//! file, kind, library?, dry_run? }` delegates to K5's
+//! materials, smart masks, smart filters, brushes and env maps;
+//! `import_asset { file, kind, library?, dry_run? }` delegates to K5's
 //! [`crate::import_asset::import_asset`] — the GUI's own loaders
 //! validate, bytes copy untouched, and every refusal is a typed
 //! error, never a silent copy. Both are ADDITIVE step variants — no
@@ -279,15 +280,22 @@ struct SetActiveStep {
 /// tile). `color` is straight RGBA in `0..=1`; `radius_scale` multiplies
 /// the session brush's radius (the engine's per-stroke scale).
 ///
-/// `radius` (optional) is the ABSOLUTE brush radius in target texels for
-/// this stroke: applied through [`PaintState::set_brush_radius_texels`]
-/// before the stroke begins, it SETS THE SESSION BRUSH — later strokes
-/// inherit it until another `radius` arrives (the GUI's brush-size rule:
-/// the size is state, not per-stroke; `paint_undo` restores pixels,
-/// never the brush). The engine clamps the implied multiplier
-/// (`sanitize_size`, `0.05..=8.0` → `1.2..=192.0` texels); non-finite or
-/// `<= 0` input is a typed error BEFORE any GPU work, and the reply
-/// reports the radius actually in force.
+/// `radius` (optional) is the ABSOLUTE brush radius for this stroke:
+/// applied through [`PaintState::set_brush_radius_texels`] before the
+/// stroke begins, it SETS THE SESSION BRUSH — later strokes inherit it
+/// until another radius arrives (the GUI's brush-size rule: the size is
+/// state, not per-stroke; `paint_undo` restores pixels, never the
+/// brush). The engine clamps the value through
+/// `sanitize_radius_texels` into
+/// `BRUSH_RADIUS_TEXELS_MIN..=BRUSH_RADIUS_TEXELS_MAX` (1.2..=192.0
+/// target texels); non-finite or `<= 0` input is a typed error BEFORE
+/// any GPU work, and the reply reports the radius actually in force.
+///
+/// `radius_texels` (optional) is the same absolute radius, unit-named —
+/// it delegates to the same c287bcf seam
+/// ([`PaintState::set_brush_radius_texels`]). `radius` and
+/// `radius_texels` are aliases: give at most ONE of them — both present
+/// is a typed error.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaintStrokeStep {
@@ -297,10 +305,17 @@ struct PaintStrokeStep {
     color: [f32; 4],
     #[serde(default = "default_radius_scale")]
     radius_scale: f32,
-    /// The absolute brush radius in target texels (see the struct docs):
-    /// sets the session brush before the stroke; absent keeps it.
+    /// The absolute brush radius (see the struct docs): sets the session
+    /// brush before the stroke; absent keeps it. Alias of
+    /// `radius_texels` — at most one of the two.
     #[serde(default)]
     radius: Option<f32>,
+    /// The absolute brush radius in target texels, unit-named; delegates
+    /// to [`PaintState::set_brush_radius_texels`] (the c287bcf seam) —
+    /// clamped to 1.2..=192.0 texels, non-finite/`<= 0` a typed error.
+    /// Alias of `radius` — at most one of the two.
+    #[serde(default)]
+    radius_texels: Option<f32>,
 }
 
 /// The `paint_stroke` radius scale when absent: the session brush as-is.
@@ -506,9 +521,10 @@ struct CommandRunStep {
 /// `import_asset` — K5's validated import as an agent step (assets
 /// wave K6): `{"import_asset": {"file": "...", "kind": "brush",
 /// "library": "...", "dry_run": true}}`. `kind` is the CLI's `--kind`
-/// vocabulary (`smart-material|smart-mask|brush|env`); `library` and
-/// `dry_run` are optional — an absent `library` resolves to the kind's
-/// per-user library dir ([`crate::import_asset::default_library_dir`]).
+/// vocabulary (`smart-material|smart-mask|smart-filter|brush|env`);
+/// `library` and `dry_run` are optional — an absent `library` resolves
+/// to the kind's per-user library dir
+/// ([`crate::import_asset::default_library_dir`]).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportAssetStep {
@@ -561,14 +577,15 @@ struct LibraryRow {
 
 /// The listers' extension gate for `kind` — the same rules as the
 /// GUI's scan fns: case-sensitive `umbersmart` / `umbermask` /
-/// `umberbrush` (`document::list_smart_*`, `preset_library`'s scan
-/// filter), case-insensitive `.png|.exr` for env (`env.rs`'s
-/// `format_for_path` gate).
+/// `umberfilter` / `umberbrush` (`document::list_smart_*`,
+/// `preset_library`'s scan filter), case-insensitive `.png|.exr` for
+/// env (`env.rs`'s `format_for_path` gate).
 fn library_file_ok(kind: AssetKind, path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str());
     match kind {
-        AssetKind::SmartMaterial => ext == Some("umbersmart"),
-        AssetKind::SmartMask => ext == Some("umbermask"),
+        AssetKind::SmartMaterial => ext == Some(umber_core::smart::SMART_MATERIAL_EXT),
+        AssetKind::SmartMask => ext == Some(umber_core::smart::SMART_MASK_EXT),
+        AssetKind::SmartFilter => ext == Some(umber_core::smart::SMART_FILTER_EXT),
         AssetKind::Brush => ext == Some("umberbrush"),
         AssetKind::Env => {
             ext.is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "exr"))
@@ -583,7 +600,7 @@ fn library_file_ok(kind: AssetKind, path: &Path) -> bool {
 /// dir).
 fn library_dirs(kind: AssetKind) -> (Option<PathBuf>, Option<PathBuf>) {
     let sub = match kind {
-        AssetKind::SmartMaterial | AssetKind::SmartMask => "smart",
+        AssetKind::SmartMaterial | AssetKind::SmartMask | AssetKind::SmartFilter => "smart",
         AssetKind::Brush => "brushes",
         AssetKind::Env => "env",
     };
@@ -1768,11 +1785,20 @@ impl Session {
                 "radius_scale {scale} must be finite and > 0"
             ));
         }
-        if let Some(radius) = s.radius {
-            if !radius.is_finite() || radius <= 0.0 {
-                return Err(anyhow::anyhow!(
-                    "radius {radius} must be finite and > 0 (target texels; the engine clamps 1.2..=192.0)"
-                ));
+        // The two absolute-radius fields are aliases of the same
+        // c287bcf seam — at most one may be given.
+        if s.radius.is_some() && s.radius_texels.is_some() {
+            return Err(anyhow::anyhow!(
+                "paint_stroke: give `radius` or `radius_texels`, not both"
+            ));
+        }
+        for (field, value) in [("radius", s.radius), ("radius_texels", s.radius_texels)] {
+            if let Some(radius) = value {
+                if !radius.is_finite() || radius <= 0.0 {
+                    return Err(anyhow::anyhow!(
+                        "{field} {radius} must be finite and > 0 (target texels; the engine clamps 1.2..=192.0)"
+                    ));
+                }
             }
         }
         let held = self.project_mut()?;
@@ -1810,9 +1836,11 @@ impl Session {
         paint.set_exact_input(true);
         // The absolute radius SETS the session brush (persisting for
         // later strokes — the GUI's brush-size rule); absent keeps it.
-        // Captured after the apply so the reply reports what this stroke
-        // actually painted with, clamped value included.
-        if let Some(radius) = s.radius {
+        // `radius` and `radius_texels` are aliases, so at most one is
+        // Some here (validated above). Captured after the apply so the
+        // reply reports what this stroke actually painted with, clamped
+        // value included.
+        if let Some(radius) = s.radius.or(s.radius_texels) {
             paint.set_brush_radius_texels(radius);
         }
         let radius = paint.brush_radius_texels();
@@ -2099,7 +2127,8 @@ impl Session {
 
     /// `library_list` (assets wave K6): the starter + user libraries
     /// headless. Rows are `{path, kind, name, bytes, source}` over the
-    /// four kinds; a missing dir contributes no rows, so an empty
+    /// five kinds (smart materials, smart masks, smart filters, brushes,
+    /// env maps); a missing dir contributes no rows, so an empty
     /// library is `{"rows": [], "count": 0}`, never an error. No mesh,
     /// project or control channel needed.
     fn library_list(&self) -> Result<Fields> {
@@ -2107,6 +2136,7 @@ impl Session {
         for kind in [
             AssetKind::SmartMaterial,
             AssetKind::SmartMask,
+            AssetKind::SmartFilter,
             AssetKind::Brush,
             AssetKind::Env,
         ] {
@@ -2126,7 +2156,7 @@ impl Session {
     fn import_asset(&self, s: ImportAssetStep) -> Result<Fields> {
         let kind = AssetKind::from_name(&s.kind).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown kind {:?} (expected smart-material|smart-mask|brush|env)",
+                "unknown kind {:?} (expected smart-material|smart-mask|smart-filter|brush|env)",
                 s.kind
             )
         })?;
@@ -3198,6 +3228,32 @@ mod tests {
     }
 
     #[test]
+    fn library_list_scans_umberfilter_rows_as_smart_filter() {
+        let starter = scratch("filter-starter");
+        let user = scratch("filter-user");
+        std::fs::write(starter.join("crunch.umberfilter"), b"{}").unwrap();
+        // A material in the same smart/ dir is NOT a filter row.
+        std::fs::write(starter.join("mat.umbersmart"), b"m").unwrap();
+        std::fs::write(user.join("mine.umberfilter"), b"xx").unwrap();
+        let mut rows = Vec::new();
+        scan_library(
+            AssetKind::SmartFilter,
+            Some(&starter),
+            Some(&user),
+            &mut rows,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].kind, "smart-filter");
+        assert_eq!(rows[0].name, "crunch");
+        assert_eq!(rows[0].source, "starter");
+        assert_eq!(rows[0].path, starter.join("crunch.umberfilter"));
+        assert_eq!(rows[1].kind, "smart-filter");
+        assert_eq!(rows[1].name, "mine");
+        assert_eq!(rows[1].source, "user");
+        assert_eq!(rows[1].bytes, 2);
+    }
+
+    #[test]
     fn library_list_step_replies_rows_over_the_real_dirs() {
         // The bundled starter ships in-tree, so rows exist even with
         // zero user state; the env lock keeps the scratch-pointing
@@ -3213,7 +3269,7 @@ mod tests {
             for row in rows {
                 assert!(row["path"].is_string(), "{row}");
                 assert!(
-                    ["smart-material", "smart-mask", "brush", "env"]
+                    ["smart-material", "smart-mask", "smart-filter", "brush", "env"]
                         .contains(&row["kind"].as_str().unwrap()),
                     "{row}"
                 );
@@ -3292,6 +3348,50 @@ mod tests {
             "{r}"
         );
         assert!(!lib.join("bad.umbersmart").exists());
+    }
+
+    #[test]
+    fn import_asset_step_accepts_kind_smart_filter() {
+        let src_dir = scratch("filter-step-src");
+        let src = src_dir.join("crunch.umberfilter");
+        std::fs::write(
+            &src,
+            r#"{"name":"F","version":1,"ops":[{"type":"posterize","levels":4}]}"#,
+        )
+        .unwrap();
+        let lib = scratch("filter-step-lib");
+        let line = serde_json::json!({ "import_asset": {
+            "file": src, "kind": "smart-filter", "library": lib,
+        }})
+        .to_string();
+        let r = &session(&format!("{line}\n"))[0];
+        assert_eq!(r["step"], "import_asset", "{r}");
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["kind"], "smart-filter", "{r}");
+        assert_eq!(
+            r["target"],
+            lib.join("crunch.umberfilter").display().to_string(),
+            "{r}"
+        );
+        assert_eq!(
+            std::fs::read(lib.join("crunch.umberfilter")).unwrap(),
+            std::fs::read(&src).unwrap(),
+            "bytes untouched"
+        );
+        // Invalid filter content is a typed refusal — nothing copied.
+        let bad = scratch("filter-step-bad").join("bad.umberfilter");
+        std::fs::write(&bad, b"nope").unwrap();
+        let bad_line = serde_json::json!({ "import_asset": {
+            "file": bad, "kind": "smart-filter", "library": lib, "dry_run": true,
+        }})
+        .to_string();
+        let r = &session(&format!("{bad_line}\n"))[0];
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("failed validation"),
+            "{r}"
+        );
+        assert!(!lib.join("bad.umberfilter").exists());
     }
 
     #[test]

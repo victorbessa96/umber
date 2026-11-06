@@ -8,6 +8,8 @@
 //!   filter) + `umber_core::smart::SmartMaterial::load_file`
 //! * `smart-mask` — extension `umbermask` +
 //!   `umber_core::smart::SmartMask::load_file`
+//! * `smart-filter` — extension `umberfilter` +
+//!   `umber_core::smart::SmartFilter::load_file`
 //! * `brush` — extension `umberbrush` (`preset_library`'s scan filter) +
 //!   the per-file pipeline of `preset_library::load_one_file` (bytes ->
 //!   UTF-8 -> `BrushPreset::from_json` -> `validate()`)
@@ -27,11 +29,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The four importable asset kinds — K5's `--kind` vocabulary.
+/// The five importable asset kinds — K5's `--kind` vocabulary plus the
+/// smart-filter kind (3b1f4ae's `.umberfilter` tier).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetKind {
     SmartMaterial,
     SmartMask,
+    SmartFilter,
     Brush,
     Env,
 }
@@ -42,6 +46,7 @@ impl AssetKind {
         match name {
             "smart-material" => Some(Self::SmartMaterial),
             "smart-mask" => Some(Self::SmartMask),
+            "smart-filter" => Some(Self::SmartFilter),
             "brush" => Some(Self::Brush),
             "env" => Some(Self::Env),
             _ => None,
@@ -53,18 +58,22 @@ impl AssetKind {
         match self {
             Self::SmartMaterial => "smart-material",
             Self::SmartMask => "smart-mask",
+            Self::SmartFilter => "smart-filter",
             Self::Brush => "brush",
             Self::Env => "env",
         }
     }
 
     /// The extension the GUI's library listers scan for, case-sensitive
-    /// (`document::list_smart_*`, `preset_library::sorted_preset_files`).
+    /// (`document::list_smart_*`, `preset_library::sorted_preset_files`;
+    /// the smart tier's extensions are the core
+    /// [`umber_core::smart::SMART_*_EXT`] constants).
     /// `Env` has none — it is gated by [`env_format_for_path`] instead.
     fn listed_extension(self) -> Option<&'static str> {
         match self {
-            Self::SmartMaterial => Some("umbersmart"),
-            Self::SmartMask => Some("umbermask"),
+            Self::SmartMaterial => Some(umber_core::smart::SMART_MATERIAL_EXT),
+            Self::SmartMask => Some(umber_core::smart::SMART_MASK_EXT),
+            Self::SmartFilter => Some(umber_core::smart::SMART_FILTER_EXT),
             Self::Brush => Some("umberbrush"),
             Self::Env => None,
         }
@@ -88,7 +97,9 @@ pub fn default_library_dir(kind: AssetKind) -> Option<PathBuf> {
     let user = umber_brush::preset_library::user_preset_dir()?;
     match kind {
         AssetKind::Brush => Some(user),
-        AssetKind::SmartMaterial | AssetKind::SmartMask => Some(user.parent()?.join("smart")),
+        AssetKind::SmartMaterial | AssetKind::SmartMask | AssetKind::SmartFilter => {
+            Some(user.parent()?.join("smart"))
+        }
         AssetKind::Env => Some(user.parent()?.join("env")),
     }
 }
@@ -205,6 +216,9 @@ fn validate(file: &Path, kind: AssetKind) -> Result<(), ImportError> {
         AssetKind::SmartMask => umber_core::smart::SmartMask::load_file(file)
             .map(|_| ())
             .map_err(|e| invalid(e.to_string())),
+        AssetKind::SmartFilter => umber_core::smart::SmartFilter::load_file(file)
+            .map(|_| ())
+            .map_err(|e| invalid(e.to_string())),
         AssetKind::Brush => validate_brush(file).map_err(invalid),
         // The format gate above is the whole env gate: pixel decode
         // happens at GPU load time in the GUI, not in the CLI.
@@ -305,6 +319,19 @@ mod tests {
     const MASK: &str = "assets/smart/ao-cavity.umbermask";
     const BRUSH: &str = "assets/brushes/hard-round.umberbrush";
 
+    /// A minimal VALID `.umberfilter` document (3b1f4ae's schema: name +
+    /// an ops list; posterize levels clamp into 2..=256). No starter
+    /// filter ships yet, so tests write their own fixture.
+    const FILTER_JSON: &str =
+        r#"{"name":"Test Filter","version":1,"ops":[{"type":"posterize","levels":3}]}"#;
+
+    /// Writes `FILTER_JSON` to `<dir>/<file_name>` and returns the path.
+    fn filter_fixture(dir: &Path, file_name: &str) -> PathBuf {
+        let path = dir.join(file_name);
+        std::fs::write(&path, FILTER_JSON).unwrap();
+        path
+    }
+
     fn assert_bytes_identical(a: &Path, b: &Path) {
         assert_eq!(
             std::fs::read(a).unwrap(),
@@ -341,6 +368,73 @@ mod tests {
         let out = import_asset(&src, AssetKind::Brush, Some(&lib), false).unwrap();
         assert_eq!(out.target, lib.join("hard-round.umberbrush"));
         assert_bytes_identical(&src, &out.target);
+    }
+
+    #[test]
+    fn valid_smart_filter_imports_bytes_untouched() {
+        let src_dir = tmp_dir("filter-src");
+        let lib = tmp_dir("filter-lib");
+        let src = filter_fixture(&src_dir, "crunch.umberfilter");
+        let out = import_asset(&src, AssetKind::SmartFilter, Some(&lib), false).unwrap();
+        assert_eq!(out.kind, AssetKind::SmartFilter);
+        assert_eq!(out.target, lib.join("crunch.umberfilter"));
+        assert_eq!(out.bytes, std::fs::metadata(&src).unwrap().len());
+        assert_bytes_identical(&src, &out.target);
+        // And it really parses through the core loader.
+        let loaded = umber_core::smart::SmartFilter::load_file(&out.target).unwrap();
+        assert_eq!(loaded.name, "Test Filter");
+    }
+
+    #[test]
+    fn invalid_smart_filter_is_a_typed_refusal() {
+        let dir = tmp_dir("bad-filter");
+        let lib = tmp_dir("bad-filter-lib");
+        let bad = dir.join("bad.umberfilter");
+        std::fs::write(&bad, b"{ not json").unwrap();
+        let err = import_asset(&bad, AssetKind::SmartFilter, Some(&lib), false).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ImportError::Invalid {
+                    kind: AssetKind::SmartFilter,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(!lib.join("bad.umberfilter").exists(), "never a silent copy");
+        // A valid-JSON but schema-invalid filter (unknown op) is refused too.
+        let unknown = dir.join("unknown-op.umberfilter");
+        std::fs::write(&unknown, r#"{"name":"X","ops":[{"type":"magic"}]}"#).unwrap();
+        assert!(matches!(
+            import_asset(&unknown, AssetKind::SmartFilter, Some(&lib), false),
+            Err(ImportError::Invalid {
+                kind: AssetKind::SmartFilter,
+                ..
+            })
+        ));
+        assert!(!lib.join("unknown-op.umberfilter").exists());
+    }
+
+    #[test]
+    fn smart_filter_with_the_wrong_extension_is_refused_before_content() {
+        let src_dir = tmp_dir("filter-wrong-ext");
+        let lib = tmp_dir("filter-wrong-ext-lib");
+        // A VALID .umberfilter offered as smart-material: the listers'
+        // extension gate rejects it before the loader runs.
+        let src = filter_fixture(&src_dir, "crunch.umberfilter");
+        let err = import_asset(&src, AssetKind::SmartMaterial, Some(&lib), false).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ImportError::UnsupportedExtension {
+                    kind: AssetKind::SmartMaterial,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(!lib.join("crunch.umberfilter").exists());
     }
 
     #[test]
@@ -545,12 +639,17 @@ mod tests {
             default_library_dir(AssetKind::SmartMask),
             Some(state.join("smart"))
         );
+        assert_eq!(
+            default_library_dir(AssetKind::SmartFilter),
+            Some(state.join("smart")),
+            "smart filters share the state-dir smart/ library the listers scan"
+        );
         assert_eq!(default_library_dir(AssetKind::Env), Some(state.join("env")));
     }
 
     #[test]
     fn kind_names_round_trip() {
-        for name in ["smart-material", "smart-mask", "brush", "env"] {
+        for name in ["smart-material", "smart-mask", "smart-filter", "brush", "env"] {
             let kind = AssetKind::from_name(name).unwrap();
             assert_eq!(kind.name(), name);
             assert_eq!(kind.to_string(), name);
