@@ -174,6 +174,8 @@ home =
     .recent-clear = Limpar todos os recentes
     .recover = Recuperar a última sessão
     .recover-tip = O Umber fechou sem salvar da última vez. Abra a cópia salva automaticamente desse trabalho.
+    .browse-assets = Explorar materiais iniciais
+    .browse-assets-tip = Abre o painel Assets com os pincéis, materiais, máscaras e mapas de ambiente iniciais empacotados
 
 ## Painel de conjuntos de texturas
 
@@ -1034,6 +1036,12 @@ assets =
     .env-maps = Mapas de ambiente
     .empty = Nada aqui ainda.
     .no-matches = Nenhum resultado para esta busca.
+    .saved-searches = Buscas salvas
+    .save-current = Salvar atual
+    .save-current-tip = Salva a busca atual com o nome digitado (a própria busca quando nenhum nome é digitado)
+    .saved-name-hint = Nome da busca salva
+    .saved-apply-tip = Aplicar esta busca salva
+    .saved-delete-tip = Excluir esta busca salva
     .import = Importar…
     .import-title = Importar
     .extra-dirs = Pastas de biblioteca extras

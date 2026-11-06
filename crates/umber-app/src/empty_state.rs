@@ -123,6 +123,9 @@ pub enum HomeCardAction {
     OpenRecent(PathBuf),
     /// The Recover last session row: open the autosave snapshot.
     RecoverSession,
+    /// K4: the Browse starter materials button — the shell docks and
+    /// activates the Assets panel.
+    BrowseAssets,
 }
 
 /// The shell state the card reads: the recent list (Remove / Clear edit
@@ -225,11 +228,14 @@ fn zone_rect(rect: Rect) -> Rect {
 
 /// The card's estimated height for `rows` recent rows and the Recover row
 /// (`recover`), with `item_gap` (egui's vertical item spacing) between
-/// widgets. Title, hint, buttons, [recent heading + rows], [recover],
-/// formats line, plus the padding.
+/// widgets. Title, hint, buttons, the K4 browse row, [recent heading +
+/// rows], [recover], formats line, plus the padding.
 fn content_height(rows: usize, recover: bool, item_gap: f32) -> f32 {
     let mut h = 2.0 * CARD_PAD + HEADING_LINE + UI_LINE + SECTION_GAP + BUTTON_SIZE.y;
     let mut items = 3;
+    // K4: the Browse starter materials row under New / Open.
+    h += SECTION_GAP + ROW_H;
+    items += 1;
     if rows > 0 {
         h += SECTION_GAP + LABEL_LINE + rows as f32 * ROW_H;
         items += 1 + rows;
@@ -424,6 +430,17 @@ pub fn home_card(
             }
 
             let row_w = ui.available_width();
+            // K4: first-run browse — the bundled starter library is one
+            // click away even with an empty viewport (the shell docks
+            // and activates the Assets panel).
+            ui.add_space(SECTION_GAP);
+            if ui
+                .add(Button::new(tr("home.browse-assets")).min_size(Vec2::new(row_w, ROW_H)))
+                .on_hover_text(tr("home.browse-assets-tip"))
+                .clicked()
+            {
+                action = Some(HomeCardAction::BrowseAssets);
+            }
             if !rows.is_empty() {
                 ui.add_space(SECTION_GAP);
                 ui.label(
@@ -616,8 +633,8 @@ mod tests {
         assert_eq!(content_height(0, true, 0.0) - bare, SECTION_GAP + ROW_H);
         assert_eq!(
             content_height(0, false, 4.0) - bare,
-            4.0 * 4.0,
-            "title, hint, buttons, formats"
+            4.0 * 5.0,
+            "title, hint, buttons, browse, formats"
         );
     }
 

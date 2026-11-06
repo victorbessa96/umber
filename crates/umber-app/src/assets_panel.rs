@@ -1022,6 +1022,8 @@ mod kittest {
         /// The first non-empty outcome (clicks land on one frame; the
         /// next frame's outcome is empty again).
         hit: Option<LibraryOutcome>,
+        search_path: Option<std::path::PathBuf>,
+        saved_path: Option<std::path::PathBuf>,
     }
 
     fn harness() -> Harness<'static, AssetsHarness> {
@@ -1029,13 +1031,28 @@ mod kittest {
     }
 
     fn harness_with(brush: crate::brush_panel::BrushPanel) -> Harness<'static, AssetsHarness> {
+        harness_full(brush, None, None)
+    }
+
+    fn harness_full(
+        brush: crate::brush_panel::BrushPanel,
+        search_path: Option<std::path::PathBuf>,
+        saved_path: Option<std::path::PathBuf>,
+    ) -> Harness<'static, AssetsHarness> {
         crate::i18n::init();
         Harness::<AssetsHarness>::builder()
             .with_step_dt(1.0 / 60.0)
             .with_size([480.0, 640.0])
             .build_ui_state(
                 |ui, s: &mut AssetsHarness| {
-                    let o = library_ui(ui, &mut s.panel, &s.brush, None, None, None);
+                    let o = library_ui(
+                        ui,
+                        &mut s.panel,
+                        &s.brush,
+                        None,
+                        s.search_path.as_deref(),
+                        s.saved_path.as_deref(),
+                    );
                     if o.material.is_some()
                         || o.mask.is_some()
                         || o.brush.is_some()
@@ -1048,6 +1065,8 @@ mod kittest {
                     panel: AssetsPanel::default(),
                     brush,
                     hit: None,
+                    search_path,
+                    saved_path,
                 },
             )
     }
@@ -1369,6 +1388,92 @@ mod kittest {
         assert!(h.query_by_label("Worn metal").is_none());
     }
 
+    /// K3: saved searches save-current / apply / delete through the UI
+    /// and persist to the state-dir JSON file (the single-query file is
+    /// a separate, untouched path).
+    #[test]
+    fn saved_searches_save_apply_delete_and_persist() {
+        let dir = std::env::temp_dir().join(format!(
+            "umber-saved-searches-{}",
+            std::process::id()
+        ));
+        let saved_path = dir.join("assets_saved_searches.json");
+        let _ = std::fs::remove_file(&saved_path);
+        let mut h = harness_full(seeded_brushes(), None, Some(saved_path.clone()));
+        assert!(h.run_ok().is_some());
+        // DEFAULT CLOSED: no save button in the resting panel.
+        assert!(h.query_by_label(&tr("assets.save-current")).is_none());
+        h.get_by_label(&tr("assets.saved-searches")).click();
+        assert!(h.run_ok().is_some());
+        // Type a query, name it, save current.
+        h.state_mut().panel.search = "worn".into();
+        h.state_mut().panel.new_search_name = "Wear".into();
+        h.get_by_label(&tr("assets.save-current")).click();
+        assert!(h.run_ok().is_some());
+        assert_eq!(
+            h.state().panel.saved,
+            vec![SavedSearch {
+                name: "Wear".into(),
+                query: "worn".into()
+            }]
+        );
+        assert!(saved_path.exists(), "persisted to the state-dir file");
+        let on_disk: Vec<SavedSearch> =
+            serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+        assert_eq!(on_disk, h.state().panel.saved, "the file holds the row");
+        // The row draws; clearing the search then applying restores it.
+        assert!(h.query_by_label("Wear").is_some(), "the saved row");
+        h.state_mut().panel.search.clear();
+        assert!(h.run_ok().is_some());
+        h.get_by_label("Wear").click();
+        assert!(h.run_ok().is_some());
+        assert_eq!(h.state().panel.search, "worn", "apply restores the query");
+        // Delete removes the row and persists the empty list.
+        h.get_by_label("✕").click();
+        assert!(h.run_ok().is_some());
+        assert!(h.state().panel.saved.is_empty());
+        let on_disk: Vec<SavedSearch> =
+            serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+        assert!(on_disk.is_empty(), "the delete persisted");
+        // A fresh panel restores the (empty) list from the same file.
+        let mut p = AssetsPanel::default();
+        restore_saved(&mut p, Some(&saved_path));
+        assert!(p.saved.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// K4: a fresh-state panel (zero user state — the first-run shape)
+    /// lists the bundled starter rows in every category: brushes, smart
+    /// materials, masks, and — opened — env maps.
+    #[test]
+    fn a_fresh_state_panel_lists_the_bundled_starter_rows() {
+        let mut h = harness_with(seeded_brushes());
+        assert!(h.run_ok().is_some());
+        let brush_names: Vec<String> = h
+            .state()
+            .brush
+            .library
+            .entries
+            .iter()
+            .map(|e| e.preset.name.clone())
+            .collect();
+        assert!(
+            brush_names.len() >= 10,
+            "the bundled brush library: {brush_names:?}"
+        );
+        for name in &brush_names {
+            assert!(h.query_by_label(name).is_some(), "brush row {name}");
+        }
+        assert!(h.query_by_label("Worn metal").is_some(), "starter material");
+        assert!(h.query_by_label("Painted wood").is_some(), "starter material");
+        assert!(h.query_by_label("Edge wear").is_some(), "starter mask");
+        // Env maps: closed by default; opened, the bundled studio maps list.
+        assert!(h.query_by_label("studio-neutral").is_none());
+        h.get_by_label(&tr("assets.env-maps")).click();
+        assert!(h.run_ok().is_some());
+        assert!(h.query_by_label("studio-neutral").is_some(), "starter env map");
+    }
+
     /// K2: a brush row with a `<stem>.stamp.png` sidecar keys its swatch
     /// by the stamp file (THUMB_KIND_STAMP); the bundled shelf has no
     /// sidecars, so it keys only the procedural swatch.
@@ -1420,7 +1525,7 @@ mod kittest {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The K1/K2 key pins: the new assets keys resolve — and actually
+    /// The K1/K2/K3/K4 key pins: the new keys resolve — and actually
     /// translate — in BOTH shipped catalogs; the empty-library label is
     /// unchanged by K2.
     #[test]
@@ -1428,7 +1533,18 @@ mod kittest {
         crate::i18n::init();
         let mut pt = crate::i18n::I18n::builtin();
         assert_eq!(pt.set_locale("pt-BR"), "pt-BR");
-        for key in ["assets.env-maps", "assets.no-matches"] {
+        for key in [
+            "assets.env-maps",
+            "assets.no-matches",
+            "assets.saved-searches",
+            "assets.save-current",
+            "assets.save-current-tip",
+            "assets.saved-name-hint",
+            "assets.saved-apply-tip",
+            "assets.saved-delete-tip",
+            "home.browse-assets",
+            "home.browse-assets-tip",
+        ] {
             let en = crate::i18n::tr_en(key);
             assert_ne!(en, key, "en-US defines {key}");
             let pt_s = pt.lookup(key, None);
@@ -1467,5 +1583,63 @@ mod tests {
         restore_search(&mut c, Some(&path));
         assert_eq!(c.search, "a b");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_searches_persist_and_restore_through_a_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "umber-assets-saved-{}",
+            std::process::id()
+        ));
+        let path = dir.join("assets_saved_searches.json");
+        let _ = std::fs::remove_file(&path);
+        let mut a = AssetsPanel::default();
+        restore_saved(&mut a, Some(&path));
+        assert!(a.saved.is_empty(), "no file yet = empty");
+        a.saved = vec![
+            SavedSearch {
+                name: "metals".into(),
+                query: "metal".into(),
+            },
+            SavedSearch {
+                name: "wear".into(),
+                query: "worn".into(),
+            },
+        ];
+        persist_saved(&mut a, Some(&path));
+        assert!(path.exists(), "the change was written");
+        let mut b = AssetsPanel::default();
+        restore_saved(&mut b, Some(&path));
+        assert_eq!(b.saved, a.saved, "the next session reopens on them");
+        // No change → no rewrite (mtime stable).
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        persist_saved(&mut b, Some(&path));
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        // A corrupt file reads as empty, never a panic.
+        std::fs::write(&path, "{not json").unwrap();
+        let mut c = AssetsPanel::default();
+        restore_saved(&mut c, Some(&path));
+        assert!(c.saved.is_empty());
+        // None path: loads and saves are both no-ops.
+        let mut d = AssetsPanel::default();
+        restore_saved(&mut d, None);
+        d.saved.push(SavedSearch {
+            name: "x".into(),
+            query: String::new(),
+        });
+        persist_saved(&mut d, None);
+        assert_eq!(d.saved.len(), 1, "the session keeps the list");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_category_warns_only_when_the_starter_dir_is_missing_too() {
+        assert!(empty_without_starter_warns(0, false), "both missing: warn");
+        assert!(
+            !empty_without_starter_warns(0, true),
+            "starter found: the list may be legitimately empty"
+        );
+        assert!(!empty_without_starter_warns(4, false), "non-empty: silent");
+        assert!(!empty_without_starter_warns(4, true));
     }
 }

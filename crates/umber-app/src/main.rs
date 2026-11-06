@@ -5150,6 +5150,14 @@ impl eframe::App for UmberApp {
                         self.recover(&meta);
                     }
                 }
+                crate::empty_state::HomeCardAction::BrowseAssets => {
+                    // K4: the home card's Browse starter materials button
+                    // docks + activates the Assets panel (the palette's
+                    // own show path), so the bundled starter library is
+                    // one click from the empty viewport.
+                    self.focus.restore(&mut self.dock);
+                    shell_menu::show_panel(&mut self.dock, &Panel::Assets);
+                }
             }
         }
 

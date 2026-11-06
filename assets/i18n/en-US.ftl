@@ -170,6 +170,8 @@ home =
     .recent-clear = Clear all recents
     .recover = Recover last session
     .recover-tip = Umber closed without saving last time. Open the autosaved copy of that work.
+    .browse-assets = Browse starter materials
+    .browse-assets-tip = Open the Assets panel with the bundled starter brushes, materials, masks and environment maps
 
 ## Texture Sets panel
 
@@ -1015,6 +1017,12 @@ assets =
     .env-maps = Environment maps
     .empty = Nothing here yet.
     .no-matches = No matches for this search.
+    .saved-searches = Saved searches
+    .save-current = Save current
+    .save-current-tip = Save the current search under the entered name (the query itself when no name is entered)
+    .saved-name-hint = Name for the saved search
+    .saved-apply-tip = Apply this saved search
+    .saved-delete-tip = Delete this saved search
     .import = Import…
     .import-title = Import
     .extra-dirs = Extra library folders
