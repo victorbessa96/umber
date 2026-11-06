@@ -164,11 +164,10 @@ jobs:
       # on job.status, and asserts the outputs exist, are nonzero, and the
       # exported base colour and the viewport are not all black. Linux
       # only: the Windows leg has no launch step to extend.
-      # continue-on-error until the first green CI run: its first CI run
-        # (e8ad906, run 42258606524) exited 101 before listening and the
-        # job log did not carry the app's panic. The script now prints the
-        # app.log tail on failure; flip this to blocking once it is green
-        # (queue row names the run).
+      # continue-on-error until the first green CI run. Run 1 (e8ad906)
+        # exited 101 with no reason in the log; run 2 (910348c, with the
+        # app.log tail) named it: libxkbcommon-x11 missing, now installed.
+        # Flip this to blocking once a run is green (queue row names it).
       - name: E2E smoke (release GUI over --control, Linux only)
         if: runner.os == 'Linux'
         continue-on-error: true
@@ -176,7 +175,10 @@ jobs:
           RUST_BACKTRACE: "1"
           RUST_LOG: info
         run: |
-          sudo apt-get install -y xvfb
+          # libxkbcommon-x11-0: winit dlopens it on X11 and panics without
+          # it (run 910348c: "Library libxkbcommon-x11.so could not be
+          # loaded"); the ubuntu-24.04 image ships only libxkbcommon0.
+          sudo apt-get install -y xvfb libxkbcommon-x11-0
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg" && mkdir -p -m 700 "$XDG_RUNTIME_DIR"
           unset WAYLAND_DISPLAY
           xvfb-run -a -s "-screen 0 1600x1000x24" python3 scripts/e2e-smoke.py --timeout 900
