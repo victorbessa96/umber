@@ -1,7 +1,7 @@
 //! The SMART LAYER TIER (§3:42, §3:45, §5:68): anchors, smart materials,
-//! smart masks.
+//! smart masks, smart filters.
 //!
-//! One shared mechanism in three shapes:
+//! One shared mechanism in four shapes:
 //!
 //! * [`AnchorRef`] — a typed `(layer, channel)` reference a node-graph
 //!   input binds within the same texture set. The graph eval resolves it
@@ -17,6 +17,13 @@
 //! * [`SmartMask`] — an `.umbermask` effect-stack preset: an ordered list
 //!   of `{source, op, params}` entries composed into one mask, applyable
 //!   to any layer's mask slot.
+//! * [`SmartFilter`] — an `.umberfilter` preset: a named, ordered list of
+//!   parameterized image ops ([`FilterOp`]) with a pure-CPU, deterministic
+//!   [`SmartFilter::apply`] over an RGBA8 buffer. Core-only for now: wiring
+//!   it into the assets panel / drag payloads / CLI is the follow-up kill
+//!   (assets-panel gap #2 in `docs/loop/briefs/2026-11-05-assets-panel-
+//!   starter-content.md`); [`smart_kind_for_path`] already recognizes the
+//!   extension so that gating has a hook.
 //!
 //! # Judgment calls (for the static verifier)
 //!
@@ -30,6 +37,13 @@
 //!   raster path reuses the same op order.
 //! * Preset layer kinds are a closed `#[serde(tag)]` enum: an unknown kind
 //!   fails the parse loudly rather than loading as a silent paint layer.
+//!   The same discipline holds for [`FilterOp`]: an unknown op tag is a
+//!   typed parse error, never a silent no-op. Filter params are validated
+//!   finite at parse and clamped into their ranges there, and `apply`
+//!   re-clamps defensively — a hostile `.umberfilter` can produce a typed
+//!   `Err` or a clamped no-op, never a panic or a non-deterministic pixel.
+//! * Filter ops act on RGB only and preserve alpha; the filter is a color
+//!   operation on a layer, not an alpha operation.
 
 use serde::{Deserialize, Serialize};
 
@@ -141,16 +155,92 @@ pub enum SmartError {
         /// The cap.
         cap: usize,
     },
+    /// A filter op with no ops cannot apply.
+    #[error("smart filter {0:?} has no ops")]
+    EmptyFilter(String),
+    /// A filter op parameter parsed as a non-finite float (a JSON number
+    /// too large for `f32` saturates to ±inf; `"NaN"` strings fail the
+    /// parse itself). Refused at parse, never stored.
+    #[error("smart filter {name:?} op {op} has non-finite {param}")]
+    NonFiniteParam {
+        /// The filter's display name.
+        name: String,
+        /// The op's index in the op list.
+        op: usize,
+        /// The offending parameter (`"low"`, `"gamma"`, `"point"`, …).
+        param: &'static str,
+    },
+    /// The RGBA buffer passed to [`SmartFilter::apply`] does not match
+    /// `width * height * 4`.
+    #[error("RGBA buffer is {actual} bytes; {expected} expected for the given dimensions")]
+    BadBuffer {
+        /// `width * height * 4`.
+        expected: usize,
+        /// The buffer's actual length.
+        actual: usize,
+    },
 }
 
-/// Largest `.umbersmart` / `.umbermask` file read (1 MiB). The shipped
-/// presets are ~1 KB; a preset is JSON metadata, never pixels.
+/// Largest `.umbersmart` / `.umbermask` / `.umberfilter` file read
+/// (1 MiB). The shipped presets are ~1 KB; a preset is JSON metadata,
+/// never pixels.
 pub const MAX_PRESET_BYTES: u64 = 1 << 20;
 /// Most layers a smart material may instantiate in one apply.
 pub const MAX_PRESET_LAYERS: usize = 256;
 /// Most stages a smart mask may compose. Every op runs once per texel
 /// (16.8M at 4K), so this bounds the apply's cost, not just its size.
 pub const MAX_MASK_OPS: usize = 64;
+/// Most ops a smart filter may chain. Each op is a full-buffer pass
+/// (16.8M texels at 4K), so this bounds the apply's cost.
+pub const MAX_FILTER_OPS: usize = 64;
+/// Largest box-blur radius a [`FilterOp::Blur`] accepts (clamped down to
+/// this at parse; the apply is O(pixels), the radius only widens the
+/// window).
+pub const MAX_BLUR_RADIUS: u32 = 64;
+/// Most control points a [`FilterOp::Curves`] accepts.
+pub const MAX_CURVE_POINTS: usize = 32;
+/// Posterize band count is clamped into `2..=256` (256 = identity).
+pub const MAX_POSTERIZE_LEVELS: u32 = 256;
+/// Levels gamma is clamped into `0.1..=10.0` (0 would be a div-by-zero
+/// in the exponent's inverse; the mask path's degenerate guard does not
+/// fit a stored param).
+pub const MIN_GAMMA: f32 = 0.1;
+/// See [`MIN_GAMMA`].
+pub const MAX_GAMMA: f32 = 10.0;
+
+/// The `.umbersmart` file extension (without the dot).
+pub const SMART_MATERIAL_EXT: &str = "umbersmart";
+/// The `.umbermask` file extension (without the dot).
+pub const SMART_MASK_EXT: &str = "umbermask";
+/// The `.umberfilter` file extension (without the dot).
+pub const SMART_FILTER_EXT: &str = "umberfilter";
+
+/// Which smart-asset kind a path is, by extension (case-insensitive) —
+/// the `env::format_for_path`-style gate for the smart tier, so the app's
+/// library scan / import gating has one core-side hook. Returns `None`
+/// for anything that isn't a smart preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SmartAssetKind {
+    /// A `.umbersmart` layer-stack template ([`SmartMaterial`]).
+    Material,
+    /// An `.umbermask` effect-stack preset ([`SmartMask`]).
+    Mask,
+    /// A `.umberfilter` image-op preset ([`SmartFilter`]).
+    Filter,
+}
+
+/// Picks the smart-asset kind from the file extension
+/// (case-insensitive), mirroring `env::format_for_path` in umber-app:
+/// the extension is the gate, content is never sniffed here.
+pub fn smart_kind_for_path(path: &std::path::Path) -> Option<SmartAssetKind> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        SMART_MATERIAL_EXT => Some(SmartAssetKind::Material),
+        SMART_MASK_EXT => Some(SmartAssetKind::Mask),
+        SMART_FILTER_EXT => Some(SmartAssetKind::Filter),
+        _ => None,
+    }
+}
 
 /// Reads a preset file, refusing anything over [`MAX_PRESET_BYTES`]
 /// BEFORE allocating it (the size comes from metadata, and the read is
@@ -569,6 +659,441 @@ impl SmartMask {
     }
 }
 
+/// One parameterized image operation in a [`SmartFilter`] op list.
+///
+/// The vocabulary is closed (`#[serde(tag = "type")]`): an unknown `type`
+/// fails the parse with a typed [`SmartError::Json`], never a silent
+/// no-op. Numeric params are validated finite and clamped into range at
+/// parse ([`SmartFilter::from_json`]) and re-clamped defensively in
+/// [`SmartFilter::apply`] — both paths are total, neither panics.
+///
+/// Every op acts on the RGB channels only; alpha is preserved (a filter
+/// is a color operation on a layer).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum FilterOp {
+    /// Separable box blur over RGB, border-replicated, integer
+    /// accumulation (byte-identical for same input + radius). `radius`
+    /// is clamped to `0..=[MAX_BLUR_RADIUS]`; 0 is a no-op.
+    Blur {
+        /// Blur radius in pixels (default 1).
+        #[serde(default = "default_blur_radius")]
+        radius: u32,
+    },
+    /// Per-channel levels remap on RGB:
+    /// `t = clamp01((v - low) / (high - low))`, `out = t^gamma` through a
+    /// 256-entry LUT. `low`/`high` clamp to `0.0..=1.0`, `gamma` to
+    /// [`MIN_GAMMA`]..=[`MAX_GAMMA`]. Degenerate `high <= low` is a step:
+    /// `v <= low` → 0, else 1 (no division by zero).
+    Levels {
+        /// Black point (default 0.0).
+        #[serde(default)]
+        low: f32,
+        /// White point (default 1.0).
+        #[serde(default = "default_opacity")]
+        high: f32,
+        /// Gamma (default 1.0 = linear).
+        #[serde(default = "default_opacity")]
+        gamma: f32,
+    },
+    /// Piecewise-linear tone curve through `(x, y)` control points.
+    /// Points are clamped to `0.0..=1.0` each and sorted by `x` at parse;
+    /// endpoints extend flat. Empty points = identity. At most
+    /// [`MAX_CURVE_POINTS`] points.
+    Curves {
+        /// `(x, y)` control points as `[x, y]` pairs.
+        #[serde(default)]
+        points: Vec<(f32, f32)>,
+    },
+    /// Posterize into `levels` bands, pure integer math:
+    /// `q = min(levels - 1, v * levels / 256)`,
+    /// `out = round(q * 255 / (levels - 1))`.
+    /// `levels` clamps to `2..=[MAX_POSTERIZE_LEVELS]` (256 = identity).
+    Posterize {
+        /// Band count (default 4).
+        #[serde(default = "default_posterize_levels")]
+        levels: u32,
+    },
+}
+
+fn default_blur_radius() -> u32 {
+    1
+}
+
+fn default_posterize_levels() -> u32 {
+    4
+}
+
+impl FilterOp {
+    /// Validates finite + clamps into range. Parse-time path: non-finite
+    /// params are a typed error; out-of-range finite params clamp.
+    fn normalized(self, filter_name: &str, op_index: usize) -> Result<Self, SmartError> {
+        let non_finite = |param: &'static str| SmartError::NonFiniteParam {
+            name: filter_name.to_string(),
+            op: op_index,
+            param,
+        };
+        Ok(match self {
+            FilterOp::Blur { radius } => FilterOp::Blur {
+                radius: radius.min(MAX_BLUR_RADIUS),
+            },
+            FilterOp::Levels { low, high, gamma } => {
+                for (param, v) in [("low", low), ("high", high), ("gamma", gamma)] {
+                    if !v.is_finite() {
+                        return Err(non_finite(param));
+                    }
+                }
+                FilterOp::Levels {
+                    low: low.clamp(0.0, 1.0),
+                    high: high.clamp(0.0, 1.0),
+                    gamma: gamma.clamp(MIN_GAMMA, MAX_GAMMA),
+                }
+            }
+            FilterOp::Curves { points } => {
+                if points.len() > MAX_CURVE_POINTS {
+                    return Err(SmartError::TooMany {
+                        name: filter_name.to_string(),
+                        what: "curve points",
+                        count: points.len(),
+                        cap: MAX_CURVE_POINTS,
+                    });
+                }
+                let mut pts = Vec::with_capacity(points.len());
+                for (x, y) in points {
+                    if !x.is_finite() || !y.is_finite() {
+                        return Err(non_finite("point"));
+                    }
+                    pts.push((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+                }
+                // Finite floats: partial_cmp is total here; the
+                // fallback keeps the comparator total by construction.
+                pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                FilterOp::Curves { points: pts }
+            }
+            FilterOp::Posterize { levels } => FilterOp::Posterize {
+                levels: levels.clamp(2, MAX_POSTERIZE_LEVELS),
+            },
+        })
+    }
+}
+
+/// An `.umberfilter` preset: a named, ordered list of [`FilterOp`]s
+/// applied to a layer's RGBA8 buffer by [`SmartFilter::apply`].
+///
+/// File shape (serde JSON, extension `.umberfilter`):
+///
+/// ```json
+/// {
+///   "name": "Crunch",
+///   "version": 1,
+///   "ops": [
+///     { "type": "levels", "low": 0.1, "high": 0.9, "gamma": 0.8 },
+///     { "type": "posterize", "levels": 3 }
+///   ]
+/// }
+/// ```
+///
+/// Determinism contract: `apply` is pure CPU with integer or LUT-based
+/// float math — the same buffer + same params always produce
+/// byte-identical output. There is no randomness, no threading, and no
+/// platform-dependent step in any op.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmartFilter {
+    /// Preset display name.
+    pub name: String,
+    /// Preset schema version (1 in this build).
+    #[serde(default = "default_preset_version")]
+    pub version: u32,
+    /// Ops, applied bottom (index 0) first to top.
+    pub ops: Vec<FilterOp>,
+}
+
+impl SmartFilter {
+    /// Parses an `.umberfilter` document, validating every op (finite
+    /// params, caps) and storing the clamped form.
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::Json`] on malformed input (including unknown op
+    /// tags, `"NaN"` strings, over-deep nesting, and numbers too large
+    /// for their integer type); [`SmartError::NonFiniteParam`] on float
+    /// params that saturate to ±inf; [`SmartError::TooMany`] past the
+    /// op / curve-point caps.
+    pub fn from_json(json: &str) -> Result<Self, SmartError> {
+        let filter: Self = serde_json::from_str(json)?;
+        if filter.ops.len() > MAX_FILTER_OPS {
+            return Err(SmartError::TooMany {
+                name: filter.name,
+                what: "ops",
+                count: filter.ops.len(),
+                cap: MAX_FILTER_OPS,
+            });
+        }
+        let name = filter.name;
+        let mut ops = Vec::with_capacity(filter.ops.len());
+        for (i, op) in filter.ops.into_iter().enumerate() {
+            ops.push(op.normalized(&name, i)?);
+        }
+        Ok(Self {
+            name,
+            version: filter.version,
+            ops,
+        })
+    }
+
+    /// Reads an `.umberfilter` file.
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::Io`] / [`SmartError::Json`] / [`SmartError::TooLarge`]
+    /// on unreadable, oversized, or malformed input.
+    pub fn load_file(path: &std::path::Path) -> Result<Self, SmartError> {
+        let text = read_capped(path)?;
+        Self::from_json(&text)
+    }
+
+    /// Serializes to pretty JSON (the on-disk `.umberfilter` form).
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::Json`] if serialization fails (only reachable for a
+    /// struct built by hand with non-finite floats — `from_json` never
+    /// stores one; serde would emit `null`, which fails to re-parse).
+    pub fn to_json(&self) -> Result<String, SmartError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Writes the preset to `path` as pretty JSON, refusing to write
+    /// more than [`MAX_PRESET_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::TooLarge`] / [`SmartError::Io`] / [`SmartError::Json`].
+    pub fn save_file(&self, path: &std::path::Path) -> Result<(), SmartError> {
+        let text = self.to_json()?;
+        if text.len() as u64 > MAX_PRESET_BYTES {
+            return Err(SmartError::TooLarge(text.len() as u64));
+        }
+        std::fs::write(path, text)?;
+        Ok(())
+    }
+
+    /// Applies the op list, in order (index 0 first), to `pixels` —
+    /// RGBA8, row-major, `width` × `height`. RGB channels are filtered;
+    /// alpha is preserved by every op. Pure CPU and deterministic: the
+    /// same buffer + same params always produce byte-identical output.
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::EmptyFilter`] when the preset has no ops;
+    /// [`SmartError::BadBuffer`] when `pixels.len()` is not
+    /// `width * height * 4` (overflow-safe: a hostile dimension pair
+    /// saturates and fails the check, never panics).
+    pub fn apply(&self, pixels: &mut [u8], width: usize, height: usize) -> Result<(), SmartError> {
+        if self.ops.is_empty() {
+            return Err(SmartError::EmptyFilter(self.name.clone()));
+        }
+        let expected = width.saturating_mul(height).saturating_mul(4);
+        if pixels.len() != expected {
+            return Err(SmartError::BadBuffer {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        for op in &self.ops {
+            op.apply_rgba(pixels, width, height);
+        }
+        Ok(())
+    }
+}
+
+impl FilterOp {
+    /// Applies this one op to the RGB channels of `buf` in place; alpha
+    /// is never touched. Total: params that only a hand-built struct can
+    /// make non-finite fall back to defaults here, never panic.
+    fn apply_rgba(&self, buf: &mut [u8], width: usize, height: usize) {
+        match self {
+            FilterOp::Blur { radius } => {
+                apply_blur(buf, width, height, (*radius).min(MAX_BLUR_RADIUS))
+            }
+            FilterOp::Levels { low, high, gamma } => {
+                let lut = levels_lut(*low, *high, *gamma);
+                apply_lut(buf, &lut);
+            }
+            FilterOp::Curves { points } => {
+                let lut = curves_lut(points);
+                apply_lut(buf, &lut);
+            }
+            FilterOp::Posterize { levels } => {
+                let l = (*levels).clamp(2, MAX_POSTERIZE_LEVELS);
+                for px in buf.chunks_exact_mut(4) {
+                    for c in &mut px[..3] {
+                        *c = posterize_channel(*c, l);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Maps every RGB channel through a 256-entry LUT; alpha untouched.
+fn apply_lut(buf: &mut [u8], lut: &[u8; 256]) {
+    for px in buf.chunks_exact_mut(4) {
+        px[0] = lut[px[0] as usize];
+        px[1] = lut[px[1] as usize];
+        px[2] = lut[px[2] as usize];
+    }
+}
+
+/// The levels LUT: `t = clamp01((v - low)/(high - low))`, `out = t^gamma`,
+/// degenerate `high <= low` as a step at `low`. All inputs re-clamped
+/// defensively; the result is always a finite `0..=255` round.
+fn levels_lut(low: f32, high: f32, gamma: f32) -> [u8; 256] {
+    let low = if low.is_finite() {
+        low.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let high = if high.is_finite() {
+        high.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let gamma = if gamma.is_finite() {
+        gamma.clamp(MIN_GAMMA, MAX_GAMMA)
+    } else {
+        1.0
+    };
+    let mut lut = [0u8; 256];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let v = i as f32 / 255.0;
+        let out = if high <= low {
+            if v <= low {
+                0.0
+            } else {
+                1.0
+            }
+        } else {
+            (((v - low) / (high - low)).clamp(0.0, 1.0))
+                .powf(gamma)
+                .clamp(0.0, 1.0)
+        };
+        *slot = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    lut
+}
+
+/// The curves LUT: piecewise-linear interpolation between the (sorted,
+/// clamped) control points, endpoints extended flat, empty = identity.
+fn curves_lut(points: &[(f32, f32)]) -> [u8; 256] {
+    let mut pts: Vec<(f32, f32)> = points
+        .iter()
+        .map(|&(x, y)| {
+            (
+                if x.is_finite() {
+                    x.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+                if y.is_finite() {
+                    y.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
+            )
+        })
+        .collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut lut = [0u8; 256];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let x = i as f32 / 255.0;
+        let y = if pts.is_empty() {
+            x
+        } else if x <= pts[0].0 {
+            pts[0].1
+        } else if x >= pts[pts.len() - 1].0 {
+            pts[pts.len() - 1].1
+        } else {
+            let mut j = 0;
+            while j + 1 < pts.len() && pts[j + 1].0 <= x {
+                j += 1;
+            }
+            let (x0, y0) = pts[j];
+            let (x1, y1) = pts[j + 1];
+            if x1 <= x0 {
+                y1
+            } else {
+                y0 + (y1 - y0) * ((x - x0) / (x1 - x0))
+            }
+        };
+        *slot = (y.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    lut
+}
+
+/// One posterize step, pure integer math:
+/// `q = min(levels - 1, v * levels / 256)`, then
+/// `out = round(q * 255 / (levels - 1))`. `levels >= 2` always (clamped
+/// by the caller), so the divisor is never zero.
+fn posterize_channel(v: u8, levels: u32) -> u8 {
+    let q = ((v as u32 * levels) / 256).min(levels - 1);
+    ((q * 255 + (levels - 1) / 2) / (levels - 1)) as u8
+}
+
+/// Separable box blur over RGB with border replication, integer
+/// accumulation via per-line prefix sums (u64, so no overflow at any
+/// sane width) — O(pixels), byte-identical for same input + radius.
+/// Alpha is copied through both passes.
+fn apply_blur(buf: &mut [u8], width: usize, height: usize, radius: u32) {
+    let r = radius.min(MAX_BLUR_RADIUS) as usize;
+    let Some(expected) = width.checked_mul(height).and_then(|n| n.checked_mul(4)) else {
+        return;
+    };
+    if r == 0 || buf.len() != expected {
+        return;
+    }
+    let mut tmp = vec![0u8; expected];
+    let mut prefix = vec![[0u64; 3]; width.max(height) + 1];
+    // Horizontal pass: buf -> tmp.
+    for y in 0..height {
+        let row = y * width;
+        for x in 0..width {
+            let i = (row + x) * 4;
+            prefix[x + 1][0] = prefix[x][0] + buf[i] as u64;
+            prefix[x + 1][1] = prefix[x][1] + buf[i + 1] as u64;
+            prefix[x + 1][2] = prefix[x][2] + buf[i + 2] as u64;
+        }
+        for x in 0..width {
+            let x0 = x.saturating_sub(r);
+            let x1 = (x + r).min(width - 1);
+            let count = (x1 - x0 + 1) as u64;
+            let o = (row + x) * 4;
+            tmp[o] = ((prefix[x1 + 1][0] - prefix[x0][0]) / count) as u8;
+            tmp[o + 1] = ((prefix[x1 + 1][1] - prefix[x0][1]) / count) as u8;
+            tmp[o + 2] = ((prefix[x1 + 1][2] - prefix[x0][2]) / count) as u8;
+            tmp[o + 3] = buf[o + 3];
+        }
+    }
+    // Vertical pass: tmp -> buf.
+    for x in 0..width {
+        for y in 0..height {
+            let i = (y * width + x) * 4;
+            prefix[y + 1][0] = prefix[y][0] + tmp[i] as u64;
+            prefix[y + 1][1] = prefix[y][1] + tmp[i + 1] as u64;
+            prefix[y + 1][2] = prefix[y][2] + tmp[i + 2] as u64;
+        }
+        for y in 0..height {
+            let y0 = y.saturating_sub(r);
+            let y1 = (y + r).min(height - 1);
+            let count = (y1 - y0 + 1) as u64;
+            let o = (y * width + x) * 4;
+            buf[o] = ((prefix[y1 + 1][0] - prefix[y0][0]) / count) as u8;
+            buf[o + 1] = ((prefix[y1 + 1][1] - prefix[y0][1]) / count) as u8;
+            buf[o + 2] = ((prefix[y1 + 1][2] - prefix[y0][2]) / count) as u8;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,6 +1386,276 @@ mod tests {
             }
             .compose_scalar(&|_| 1.0),
             Err(SmartError::EmptyMask(_))
+        ));
+    }
+
+    const CRUNCH_FILTER_JSON: &str = r#"{
+        "name": "Crunch",
+        "version": 1,
+        "ops": [
+            { "type": "levels", "low": 0.1, "high": 0.9, "gamma": 0.8 },
+            { "type": "posterize", "levels": 3 },
+            { "type": "blur", "radius": 2 },
+            { "type": "curves", "points": [[0.0, 0.2], [1.0, 0.8]] }
+        ]
+    }"#;
+
+    #[test]
+    fn smart_filter_save_load_roundtrip_is_exact() {
+        let filter = SmartFilter::from_json(CRUNCH_FILTER_JSON).expect("parses");
+        let path = std::env::temp_dir().join(format!(
+            "umber-filter-rt-{}.umberfilter",
+            std::process::id()
+        ));
+        filter.save_file(&path).expect("saves");
+        let loaded = SmartFilter::load_file(&path).expect("loads");
+        assert_eq!(loaded, filter, "save -> load must be struct-exact");
+        assert_eq!(
+            loaded.to_json().unwrap(),
+            filter.to_json().unwrap(),
+            "re-serializing the loaded preset is byte-identical"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn smart_kind_for_path_detects_all_three_extensions() {
+        assert_eq!(
+            smart_kind_for_path(std::path::Path::new("a.umbersmart")),
+            Some(SmartAssetKind::Material)
+        );
+        assert_eq!(
+            smart_kind_for_path(std::path::Path::new("b.UMBERMASK")),
+            Some(SmartAssetKind::Mask)
+        );
+        assert_eq!(
+            smart_kind_for_path(std::path::Path::new("c.UmberFilter")),
+            Some(SmartAssetKind::Filter)
+        );
+        assert_eq!(smart_kind_for_path(std::path::Path::new("d.png")), None);
+        assert_eq!(smart_kind_for_path(std::path::Path::new("no-ext")), None);
+        assert_eq!(SMART_FILTER_EXT, "umberfilter");
+    }
+
+    #[test]
+    fn filter_malformed_and_hostile_inputs_are_typed_errors() {
+        // Garbage.
+        assert!(matches!(
+            SmartFilter::from_json("not json"),
+            Err(SmartError::Json(_))
+        ));
+        // Unknown op tag: closed vocabulary, loud parse failure.
+        let unknown = r#"{"name":"x","ops":[{"type":"sharpen","amount":9}]}"#;
+        assert!(matches!(
+            SmartFilter::from_json(unknown),
+            Err(SmartError::Json(_))
+        ));
+        // NaN as a string fails the f32 parse.
+        let nan_str = r#"{"name":"x","ops":[{"type":"levels","gamma":"NaN"}]}"#;
+        assert!(matches!(
+            SmartFilter::from_json(nan_str),
+            Err(SmartError::Json(_))
+        ));
+        // A huge float saturates f32 to +inf: typed, never stored.
+        let huge = r#"{"name":"x","ops":[{"type":"levels","gamma":1e300}]}"#;
+        assert!(matches!(
+            SmartFilter::from_json(huge),
+            Err(SmartError::NonFiniteParam {
+                op: 0,
+                param: "gamma",
+                ..
+            })
+        ));
+        // An integer param beyond its type's range fails the parse.
+        let huge_int = r#"{"name":"x","ops":[{"type":"posterize","levels":99999999999999999999}]}"#;
+        assert!(matches!(
+            SmartFilter::from_json(huge_int),
+            Err(SmartError::Json(_))
+        ));
+        // Deep nesting: serde_json's recursion limit errors out, no
+        // stack overflow.
+        let deep = format!("{{\"name\":\"x\",\"ops\":{} }}", "[".repeat(10_000));
+        assert!(matches!(
+            SmartFilter::from_json(&deep),
+            Err(SmartError::Json(_))
+        ));
+        // Ops over the cap.
+        let op = r#"{"type":"posterize","levels":2}"#;
+        let ops = vec![op; MAX_FILTER_OPS + 1].join(",");
+        assert!(matches!(
+            SmartFilter::from_json(&format!(r#"{{"name":"Big","ops":[{ops}]}}"#)),
+            Err(SmartError::TooMany { what: "ops", .. })
+        ));
+        // Curve points over the cap.
+        let pts = vec!["[0.5,0.5]"; MAX_CURVE_POINTS + 1].join(",");
+        assert!(matches!(
+            SmartFilter::from_json(&format!(
+                r#"{{"name":"C","ops":[{{"type":"curves","points":[{pts}]}}]}}"#
+            )),
+            Err(SmartError::TooMany {
+                what: "curve points",
+                ..
+            })
+        ));
+        // An oversized file is refused from metadata, unread.
+        let path = std::env::temp_dir().join(format!(
+            "umber-big-filter-{}.umberfilter",
+            std::process::id()
+        ));
+        std::fs::write(&path, vec![b' '; (MAX_PRESET_BYTES + 1) as usize]).unwrap();
+        assert!(matches!(
+            SmartFilter::load_file(&path),
+            Err(SmartError::TooLarge(_))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn filter_params_are_clamped_at_parse() {
+        let json = r#"{"name":"clamp","ops":[
+            {"type":"blur","radius":4000},
+            {"type":"posterize","levels":999999},
+            {"type":"posterize","levels":0},
+            {"type":"levels","low":-5.0,"high":9.0,"gamma":100.0},
+            {"type":"curves","points":[[5.0,-3.0],[0.5,0.5]]}
+        ]}"#;
+        let f = SmartFilter::from_json(json).expect("finite out-of-range params clamp, not error");
+        assert_eq!(
+            f.ops[0],
+            FilterOp::Blur {
+                radius: MAX_BLUR_RADIUS
+            }
+        );
+        assert_eq!(
+            f.ops[1],
+            FilterOp::Posterize {
+                levels: MAX_POSTERIZE_LEVELS
+            }
+        );
+        assert_eq!(f.ops[2], FilterOp::Posterize { levels: 2 });
+        assert_eq!(
+            f.ops[3],
+            FilterOp::Levels {
+                low: 0.0,
+                high: 1.0,
+                gamma: MAX_GAMMA
+            }
+        );
+        // Curve points clamp into 0..=1 and sort by x.
+        assert_eq!(
+            f.ops[4],
+            FilterOp::Curves {
+                points: vec![(0.5, 0.5), (1.0, 0.0)]
+            }
+        );
+    }
+
+    #[test]
+    fn posterize_two_levels_pins_a_known_2x2_answer() {
+        // 2x2 RGBA; R=G=B per pixel are 0, 64, 128, 255; alpha distinct.
+        let src: [u8; 16] = [
+            0, 0, 0, 255, //
+            64, 64, 64, 200, //
+            128, 128, 128, 100, //
+            255, 255, 255, 0,
+        ];
+        let filter =
+            SmartFilter::from_json(r#"{"name":"p2","ops":[{"type":"posterize","levels":2}]}"#)
+                .unwrap();
+        let mut buf = src;
+        filter.apply(&mut buf, 2, 2).expect("applies");
+        // q = min(1, v*2/256): 0->0, 64->0, 128->1, 255->1; out = q*255.
+        // Alpha passes through untouched.
+        let expected: [u8; 16] = [
+            0, 0, 0, 255, //
+            0, 0, 0, 200, //
+            255, 255, 255, 100, //
+            255, 255, 255, 0,
+        ];
+        assert_eq!(buf, expected, "posterize levels=2 known answer");
+    }
+
+    #[test]
+    fn blur_radius_one_pins_a_known_row_answer() {
+        // 3x1 row of gray values 0, 90, 180, radius 1, border-replicated:
+        // windows [0,1], [0,2], [1,2] -> means 45, 90, 135 (the vertical
+        // pass is a no-op on a 1px-tall image).
+        let src: [u8; 12] = [
+            0, 0, 0, 255, //
+            90, 90, 90, 200, //
+            180, 180, 180, 100,
+        ];
+        let filter =
+            SmartFilter::from_json(r#"{"name":"b","ops":[{"type":"blur","radius":1}]}"#).unwrap();
+        let mut buf = src;
+        filter.apply(&mut buf, 3, 1).unwrap();
+        let expected: [u8; 12] = [
+            45, 45, 45, 255, //
+            90, 90, 90, 200, //
+            135, 135, 135, 100,
+        ];
+        assert_eq!(buf, expected, "blur radius=1 known answer");
+    }
+
+    #[test]
+    fn levels_degenerate_range_is_a_step_not_a_div_by_zero() {
+        let filter = SmartFilter::from_json(
+            r#"{"name":"s","ops":[{"type":"levels","low":0.5,"high":0.5,"gamma":1.0}]}"#,
+        )
+        .unwrap();
+        let mut buf: [u8; 8] = [0, 0, 0, 255, 200, 200, 200, 255];
+        filter.apply(&mut buf, 2, 1).unwrap();
+        // v=0 <= 0.5 -> 0; v=200/255 ~= 0.784 > 0.5 -> 255.
+        assert_eq!(&buf[..4], &[0, 0, 0, 255]);
+        assert_eq!(&buf[4..], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn filter_apply_is_deterministic_byte_identical() {
+        let filter = SmartFilter::from_json(CRUNCH_FILTER_JSON).unwrap();
+        // Deterministic pseudo-random 8x8 buffer (LCG; no rand crate).
+        let mut src = [0u8; 8 * 8 * 4];
+        let mut state = 0x1234_5678u32;
+        for b in src.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *b = (state >> 24) as u8;
+        }
+        let mut a = src;
+        let mut b = src;
+        filter.apply(&mut a, 8, 8).unwrap();
+        filter.apply(&mut b, 8, 8).unwrap();
+        assert_eq!(a, b, "same input + params must be byte-identical");
+        assert_ne!(a, src, "the op chain actually changed pixels");
+        for (i, px) in a.chunks_exact(4).enumerate() {
+            assert_eq!(px[3], src[i * 4 + 3], "alpha must pass through untouched");
+        }
+    }
+
+    #[test]
+    fn filter_apply_rejects_empty_and_bad_buffers_typed() {
+        let empty = SmartFilter {
+            name: "e".into(),
+            version: 1,
+            ops: vec![],
+        };
+        let mut buf = [0u8; 4];
+        assert!(matches!(
+            empty.apply(&mut buf, 1, 1),
+            Err(SmartError::EmptyFilter(_))
+        ));
+        let f =
+            SmartFilter::from_json(r#"{"name":"p","ops":[{"type":"blur","radius":1}]}"#).unwrap();
+        assert!(matches!(
+            f.apply(&mut buf, 2, 2),
+            Err(SmartError::BadBuffer {
+                expected: 16,
+                actual: 4
+            })
+        ));
+        // Hostile dimensions saturate instead of panicking.
+        assert!(matches!(
+            f.apply(&mut buf, usize::MAX, usize::MAX),
+            Err(SmartError::BadBuffer { .. })
         ));
     }
 }
