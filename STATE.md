@@ -100,6 +100,32 @@ signing, the alpha tag.
   timeout`). Spec §8's A2-4 row was marked fixed in row 237.
 - Evidence and the kill table: `docs/loop/kill-reports/2026-11-06-charter-v2-t1-t3.md`, queue row 229.
 
+## 2026-11-06 (local-1625-rz6f2a, Razul) — rows 246, 247, 248 + the 2026-11-06 cargo clean
+
+- **Row 246 LANDED+PUSHED `567a7db`:** the last T1-T3 ROADMAP debt closed —
+  `command.run` of `bake.run`/`export.run` over `--control` waits
+  `JOB_REPLY_TIMEOUT` (30 min), not `ui_timeout after 30s`
+  (`control.rs`: `JOB_COMMANDS`, `reply_timeout_for`, `forward_ui_with`;
+  pin `job_commands_get_the_job_reply_timeout`). Stale hunt b09ae253
+  swept as completed (landed 0981d2f + 6ef5b3d).
+- **Row 247 LANDED+PUSHED `ec45651` (+`22255d4` row citation):** installers
+  gap #1 — `--version`/`-V` on both binaries via
+  `umber_core::control::is_version_arg` (pin `version_flag_predicate`);
+  live-verified on the dev bins, headless-safe.
+- **Row 248 (installers gap #4) in flight, lock `razul-bench-budget`:**
+  bench reference mesh resized 64→18 subdivisions (49,152→3,888 tris) to
+  fit `MAX_TRIS_PER_BAKE` (4096); pin
+  `the_reference_mesh_fits_the_bake_paths_triangle_budget`. Battery log
+  /tmp/umber-bench-battery.log. Queue row + COORDINATION line deferred:
+  queue.md/COORDINATION are held by sibling lock `razul-bundled-assets`
+  (dirty uncommitted bundled-assets work, no live process at claim).
+- **Housekeeping per Bessa:** `cargo clean` removed 105,557 files /
+  72.3 GiB from `target/`; / went 94% → 55% (14G → 101G free). Registry
+  kept for offline rebuilds. Next battery rebuilds target from scratch.
+- Next: installers gap #5 (no-display launch poisons GPU fallback to GL),
+  gap #2 (exe-relative runtime assets, sibling lane), row 242 split-redo
+  wiring; v0.1.0 tag stays partner-gated.
+
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
 **Row 156-B (the UV G-buffer single source of truth) CLOSED.** One

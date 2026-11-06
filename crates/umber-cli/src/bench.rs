@@ -5,10 +5,13 @@
 //!
 //! - **Mesh:** a generated cube grid (6 faces × n² quads, pure arithmetic,
 //!   identical bytes on every machine), so no asset ships and two reports
-//!   always measure the same geometry. [`BENCH_SUBDIVISIONS`] = 64 →
-//!   49,152 triangles: large enough to load the bakers, small enough for
-//!   a laptop iGPU. (The 1M-triangle viewport scene stays behind
-//!   umber-gpu's `perf` feature; `docs/perf/protocol.md`.)
+//!   always measure the same geometry. [`BENCH_SUBDIVISIONS`] = 18 →
+//!   3,888 triangles: large enough to load the bakers, and sized to fit
+//!   `umber_bake::position::MAX_TRIS_PER_BAKE` (4096), the shared-memory
+//!   bake path's brute-force ceiling — the earlier 64 (49,152 tris) made
+//!   every bench fail with "over the 4096 budget" (installers gap #4). A
+//!   test pins the mesh under the ceiling. (The 1M-triangle viewport
+//!   scene stays behind umber-gpu's `perf` feature; `docs/perf/protocol.md`.)
 //! - **Timed:** mesh generation, GPU context creation, each of the six
 //!   bakers (bake + UV padding, as `bake-all` runs them), and the PNG
 //!   encode of each map, wall-clock per stage via `Instant`.
@@ -28,8 +31,11 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-/// Cube-grid subdivisions per face edge for the bench mesh.
-pub const BENCH_SUBDIVISIONS: u32 = 64;
+/// Cube-grid subdivisions per face edge for the bench mesh. 18 → 3,888
+/// triangles, under `umber_bake::position::MAX_TRIS_PER_BAKE` (4096):
+/// the bake path refuses bigger meshes, so a larger constant would make
+/// every bench fail (installers gap #4). Pinned by a test below.
+pub const BENCH_SUBDIVISIONS: u32 = 18;
 
 /// The bench's reference mesh: a cube of six `n × n` quad grids, with
 /// each face's UVs filling [0, 1]² (overlapping UVs: every face bakes into
@@ -219,8 +225,8 @@ mod tests {
     #[test]
     fn the_reference_mesh_is_fixed_and_well_formed() {
         let mesh = bench_mesh(BENCH_SUBDIVISIONS);
-        assert_eq!(mesh.indices.len() / 3, 6 * 64 * 64 * 2, "49,152 triangles");
-        assert_eq!(mesh.positions.len(), 6 * 65 * 65);
+        assert_eq!(mesh.indices.len() / 3, 6 * 18 * 18 * 2, "3,888 triangles");
+        assert_eq!(mesh.positions.len(), 6 * 19 * 19);
         assert!(mesh
             .indices
             .iter()
@@ -236,6 +242,19 @@ mod tests {
         assert_eq!(mesh.indices, again.indices);
         // A spot value pins the layout: +X face, first vertex.
         assert_eq!(mesh.positions[0], [1.0, -1.0, -1.0]);
+    }
+
+    #[test]
+    fn the_reference_mesh_fits_the_bake_paths_triangle_budget() {
+        // Installers gap #4: bench used to generate 49,152 tris against
+        // MAX_TRIS_PER_BAKE = 4096, so `umber-cli bench` always failed.
+        // The reference mesh must stay under that ceiling.
+        let tris = bench_mesh(BENCH_SUBDIVISIONS).indices.len() / 3;
+        assert!(
+            (tris as u32) <= umber_bake::position::MAX_TRIS_PER_BAKE,
+            "{tris} tris over MAX_TRIS_PER_BAKE {}",
+            umber_bake::position::MAX_TRIS_PER_BAKE
+        );
     }
 
     #[test]
