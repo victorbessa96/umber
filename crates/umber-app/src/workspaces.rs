@@ -340,10 +340,65 @@ pub fn apply_viewport_preset(dock: &mut DockState<Panel>, preset: ViewportPreset
         }
     }
 
+    /// Re-docks `missing` as a split BESIDE `present`'s leaf (the 2D
+    /// view right of the 3D, the 3D left of the 2D: the Paint preset's
+    /// own arrangement, Painter's viewport mode). The old path pushed it
+    /// as a tab into the focused leaf, usually a side rail, so "Both"
+    /// after "3D only" hid the 2D view behind the rail's tabs.
+    fn dock_beside(dock: &mut DockState<Panel>, present: Panel, missing: Panel) {
+        if dock.find_tab(&missing).is_some() {
+            return;
+        }
+        let Some(at) = dock.find_tab(&present) else {
+            ensure_docked(dock, missing);
+            return;
+        };
+        let surface = &mut dock[at.surface];
+        if missing == UvView {
+            surface.split_right(at.node, 0.62, vec![missing]);
+        } else {
+            surface.split_left(at.node, 0.38, vec![missing]);
+        }
+    }
+
+    /// Whether `panel`'s leaf holds any tab `other` than the given set.
+    fn shares_leaf(dock: &DockState<Panel>, panel: Panel, allowed: &[Panel]) -> bool {
+        let Some(at) = dock.find_tab(&panel) else {
+            return false;
+        };
+        dock[at.surface][at.node]
+            .tabs()
+            .is_some_and(|tabs| tabs.iter().any(|t| *t != panel && !allowed.contains(t)))
+    }
+
     match preset {
         ViewportPreset::Both => {
-            ensure_docked(dock, Viewport);
-            ensure_docked(dock, UvView);
+            // "Both" means both views visible side by side. A layout saved
+            // while the old re-dock bug was live has the views as tabs in a
+            // side rail; pull each out of a shared leaf first (the 3D view
+            // only when it shares with a non-view panel, so a deliberate
+            // 3D+2D tab pair splits in place), then dock what is missing.
+            if shares_leaf(dock, Viewport, &[UvView]) {
+                undock(dock, Viewport);
+            }
+            if shares_leaf(dock, UvView, &[]) {
+                undock(dock, UvView);
+            }
+            match (dock.find_tab(&Viewport), dock.find_tab(&UvView)) {
+                (Some(_), None) => dock_beside(dock, Viewport, UvView),
+                (None, Some(_)) => dock_beside(dock, UvView, Viewport),
+                (None, None) => {
+                    // Anchor on the left rail (Texture Sets) when docked.
+                    if let Some(rail) = dock.find_tab(&Panel::TextureSets) {
+                        dock[rail.surface].split_right(rail.node, 0.3, vec![Viewport]);
+                        dock_beside(dock, Viewport, UvView);
+                    } else {
+                        ensure_docked(dock, Viewport);
+                        ensure_docked(dock, UvView);
+                    }
+                }
+                (Some(_), Some(_)) => {}
+            }
         }
         ViewportPreset::View3d => {
             undock(dock, UvView);
@@ -614,6 +669,81 @@ mod tests {
         assert!(dock.find_tab(&Panel::Viewport).is_some());
         assert!(dock.find_tab(&Panel::UvView).is_some());
         assert_eq!(docked(&dock), ALL_PANELS.to_vec(), "no panel lost");
+    }
+
+    /// Found by the 2026-11-05 second-round audit (live, via the control
+    /// channel): "3D only" then "Both" re-docked the 2D view as a tab in
+    /// the focused side rail, so the views were no longer side by side.
+    /// Both now splits the missing view beside the present one, and
+    /// every layout keeps its eleven panels.
+    #[test]
+    fn viewport_preset_both_redocks_the_missing_view_beside_the_other() {
+        for (gone_with, missing) in [
+            (ViewportPreset::View3d, Panel::UvView),
+            (ViewportPreset::View2d, Panel::Viewport),
+        ] {
+            let mut dock = preset(Workspace::Paint);
+            // Focus a side rail, as a click in Texture Sets does.
+            let rail = dock.find_tab(&Panel::TextureSets).expect("rail");
+            dock.set_focused_node_and_surface(rail.node_path());
+            apply_viewport_preset(&mut dock, gone_with);
+            apply_viewport_preset(&mut dock, ViewportPreset::Both);
+            let vp = dock.find_tab(&Panel::Viewport).expect("3D docked");
+            let uv = dock.find_tab(&Panel::UvView).expect("2D docked");
+            assert_ne!(vp.node, uv.node, "{missing:?}: views split, not tabbed");
+            for view in [vp, uv] {
+                let leaf = dock.main_surface()[view.node].get_leaf().unwrap();
+                assert_eq!(
+                    leaf.tabs.len(),
+                    1,
+                    "{missing:?}: a view leaf holds only its view"
+                );
+            }
+            assert_eq!(docked(&dock), ALL_PANELS.to_vec(), "no panel lost");
+        }
+    }
+
+    /// The layout the old bug saved (both views as tabs in the left
+    /// rail) and a deliberate 3D+2D tab pair: "Both" splits each into
+    /// side-by-side leaves and keeps the rail's own panels in the rail.
+    #[test]
+    fn viewport_preset_both_repairs_views_tabbed_into_a_rail_or_together() {
+        let mut dock = preset(Workspace::Paint);
+        for v in [Panel::Viewport, Panel::UvView] {
+            let at = dock.find_tab(&v).unwrap();
+            dock.remove_tab(at);
+        }
+        let rail = dock.find_tab(&Panel::TextureSets).unwrap();
+        dock.set_focused_node_and_surface(rail.node_path());
+        dock.push_to_focused_leaf(Panel::Viewport);
+        dock.push_to_focused_leaf(Panel::UvView);
+        apply_viewport_preset(&mut dock, ViewportPreset::Both);
+        let solo = |dock: &DockState<Panel>, p: Panel| {
+            let at = dock.find_tab(&p).expect("docked");
+            dock.main_surface()[at.node].get_leaf().unwrap().tabs == vec![p]
+        };
+        assert!(
+            solo(&dock, Panel::Viewport) && solo(&dock, Panel::UvView),
+            "views split"
+        );
+        let rail = dock.find_tab(&Panel::TextureSets).unwrap();
+        assert_eq!(
+            dock.main_surface()[rail.node]
+                .get_leaf()
+                .unwrap()
+                .tabs
+                .len(),
+            4,
+            "rail keeps its four"
+        );
+        assert_eq!(docked(&dock), ALL_PANELS.to_vec(), "no panel lost");
+
+        let mut pair = DockState::new(vec![Panel::Viewport, Panel::UvView]);
+        apply_viewport_preset(&mut pair, ViewportPreset::Both);
+        assert!(
+            solo(&pair, Panel::Viewport) && solo(&pair, Panel::UvView),
+            "pair split"
+        );
     }
 
     #[test]
