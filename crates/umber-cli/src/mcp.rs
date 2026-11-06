@@ -22,6 +22,11 @@
 //! umber-app's `--control` channel when the session has one
 //! (`UMBER_CONTROL_PORT` + `UMBER_CONTROL_TOKEN_FILE` in the env) and
 //! answer a typed error when it does not (see [`crate::agent`]).
+//! `library_list` (assets wave K6) likewise carries no arguments: it
+//! scans the bundled starter `assets/` plus the per-user library dirs
+//! and replies rows `{path, kind, name, bytes, source}`; `import_asset`
+//! rides `run_step` / `run_steps` with its `file` (read root) and
+//! `library` (write root) paths confined like every file tool.
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -218,6 +223,7 @@ fn run_tool(
             })?;
             let mode = step_mode(&step);
             ws.confine_step(&mut step, mode)?;
+            confine_import_asset(ws, &mut step)?;
             step
         }
         "run_steps" => {
@@ -237,6 +243,7 @@ fn run_tool(
                 let mut s = s.clone();
                 let mode = step_mode(&s);
                 ws.confine_step(&mut s, mode)?;
+                confine_import_asset(ws, &mut s)?;
                 let reply = dispatch(sess, s, index);
                 let ok = reply["ok"].as_bool().unwrap_or(false);
                 results.push(reply.clone());
@@ -290,6 +297,7 @@ fn run_tool(
         }
         "bake_status" => json!({ "bake_status": {} }),
         "command_list" => json!({ "command_list": {} }),
+        "library_list" => json!({ "library_list": {} }),
         "command_run" => {
             let id = args.get("id").and_then(Value::as_str).ok_or_else(|| {
                 anyhow!("`id` (dotted command id, e.g. \"view.toggle_grid\") is required")
@@ -326,9 +334,37 @@ fn step_mode(step: &Value) -> Access {
     }
 }
 
+/// Confine an `import_asset` step's path fields — `file` reads, an
+/// explicit `library` writes (`confine_step` only knows the shared key
+/// set). Without roots the step fails closed like every file tool;
+/// an absent `library` keeps K5's per-user library dir default.
+fn confine_import_asset(ws: &AuthorizedWorkspace, step: &mut Value) -> Result<()> {
+    let Some(body) = step
+        .as_object_mut()
+        .and_then(|o| o.get_mut("import_asset"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    for (key, access) in [("file", Access::Read), ("library", Access::Write)] {
+        if let Some(v) = body.get_mut(key) {
+            if let Some(s) = v.as_str() {
+                let host = match access {
+                    Access::Read => ws.host_read_path(s)?,
+                    Access::Write => ws.host_write_path(s)?,
+                };
+                *v = Value::String(host.display().to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The static tool catalog as the exact JSON the pre-rmcp server sent
 /// on `tools/list` (row 155 pin: names, descriptions, and inputSchema
-/// shapes are byte-identical to that wire array).
+/// shapes are byte-identical to that wire array). Assets wave K6
+/// (2026-11-05) appended exactly one tool, `library_list`, after
+/// `command_run`; the pre-K6 entries are untouched.
 fn catalog_json() -> Value {
     json!([
         { "name": "version", "description": "Protocol and build versions: {\"protocol_version\", \"umber_version\"}.", "inputSchema": { "type": "object", "properties": {} } },
@@ -350,7 +386,8 @@ fn catalog_json() -> Value {
         { "name": "paint_undo", "description": "Undo one paint stroke.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "paint_redo", "description": "Redo one paint stroke.", "inputSchema": { "type": "object", "properties": {} } },
         { "name": "command_list", "description": "List the live app's command registry (id, label, menu, shortcut, params, enabled) over its --control channel. Typed error when no channel is configured (UMBER_CONTROL_PORT/UMBER_CONTROL_TOKEN_FILE).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "command_run", "description": "Run one GUI command by dotted id on the live app's --control channel (same dispatch as a menu click): {id}. Unknown/disabled ids are the app's typed errors.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } }
+        { "name": "command_run", "description": "Run one GUI command by dotted id on the live app's --control channel (same dispatch as a menu click): {id}. Unknown/disabled ids are the app's typed errors.", "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
+        { "name": "library_list", "description": "List the asset libraries headless — the bundled starter assets/ plus the per-user library dirs (state-dir smart/, brushes/, env/) — with the assets panel's own scan rules. Replies rows {path, kind, name, bytes, source: starter|user} for smart materials, smart masks, brushes and env maps. No arguments; no control channel needed.", "inputSchema": { "type": "object", "properties": {} } }
     ])
 }
 
