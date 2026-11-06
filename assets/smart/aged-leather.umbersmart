@@ -4,13 +4,18 @@
   "layers": [
     {
       "name": "Leather folder",
-      "kind": "folder"
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
     },
     {
       "name": "Leather base",
       "kind": "fill",
       "blend_mode": "Normal",
       "opacity": 1.0,
+      "mask": null,
       "generator": {
         "node_def": "noise_worley",
         "map_name": "",
@@ -33,7 +38,9 @@
       "name": "Patina",
       "kind": "paint",
       "blend_mode": "Screen",
-      "opacity": 0.35
+      "opacity": 0.35,
+      "mask": null,
+      "generator": null
     }
   ]
 }

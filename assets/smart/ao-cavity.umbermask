@@ -9,7 +9,12 @@
         "map_name": "AO"
       },
       "op": "multiply",
-      "params": {}
+      "params": {
+        "amount": 1.0,
+        "low": 0.0,
+        "high": 1.0,
+        "gamma": 1.0
+      }
     },
     {
       "source": {
@@ -18,7 +23,10 @@
       },
       "op": "add",
       "params": {
-        "amount": 1.0
+        "amount": 1.0,
+        "low": 0.0,
+        "high": 1.0,
+        "gamma": 1.0
       }
     },
     {
@@ -28,6 +36,7 @@
       },
       "op": "levels",
       "params": {
+        "amount": 1.0,
         "low": 0.3,
         "high": 0.95,
         "gamma": 1.0

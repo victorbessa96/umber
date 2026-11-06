@@ -14,7 +14,12 @@ No licensed content, fully procedural: every pixel is pure math.
 
 PyPNG-style dependency-free: the PNG encoder below is ~25 lines of stdlib
 (struct + zlib). Fully deterministic (pure math, no RNG): re-running
-produces byte-identical output for every scene.
+produces byte-identical output for every scene. Pin that contract with
+
+  python3 assets/gen/make_studio_env.py --check
+
+which re-renders every scene in memory and compares against the committed
+PNG byte-for-byte WITHOUT writing; exit 0 when all match, 1 otherwise.
 
 Layout convention (see umber-gpu/src/ibl.rs): the PNG is stored
 viewer-conventional — displayed TOP row = +Y zenith. umber's PNG loader
@@ -25,6 +30,7 @@ data row (v=1 = +Y). Do NOT "fix" the orientation: it is load-bearing.
 import math
 import os
 import struct
+import sys
 import zlib
 
 WIDTH = 1024
@@ -119,7 +125,7 @@ def pixel(u, v, s):
     return rgb
 
 
-def write_png(path, width, height, rows):
+def png_bytes(width, height, rows):
     def chunk(ctype, data):
         out = struct.pack(">I", len(data)) + ctype + data
         out += struct.pack(">I", zlib.crc32(ctype + data) & 0xFFFFFFFF)
@@ -127,14 +133,17 @@ def write_png(path, width, height, rows):
 
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
     raw = b"".join(b"\x00" + bytes(row) for row in rows)
-    png = (
+    return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", ihdr)
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
+
+
+def write_png(path, width, height, rows):
     with open(path, "wb") as f:
-        f.write(png)
+        f.write(png_bytes(width, height, rows))
 
 
 def render_rows(scene):
@@ -150,16 +159,37 @@ def render_rows(scene):
     return rows
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    check = "--check" in argv
     here = os.path.dirname(os.path.abspath(__file__))
     out_dir = os.path.normpath(os.path.join(here, "..", "env"))
-    os.makedirs(out_dir, exist_ok=True)
+    status = 0
     for name, overrides in SCENES.items():
         scene = {**BASE, **overrides}
+        data = png_bytes(WIDTH, HEIGHT, render_rows(scene))
         out = os.path.join(out_dir, name + ".png")
-        write_png(out, WIDTH, HEIGHT, render_rows(scene))
-        print(f"wrote {out} ({WIDTH}x{HEIGHT})")
+        if check:
+            # Determinism pin: re-render in memory and compare against the
+            # committed file WITHOUT writing. Byte-identical or it fails.
+            try:
+                with open(out, "rb") as f:
+                    existing = f.read()
+            except FileNotFoundError:
+                print(f"MISSING {out}")
+                status = 1
+                continue
+            if existing == data:
+                print(f"ok      {out} ({len(data)} bytes, byte-identical regen)")
+            else:
+                print(f"STALE   {out} (on disk {len(existing)} B, regen {len(data)} B)")
+                status = 1
+        else:
+            os.makedirs(out_dir, exist_ok=True)
+            write_png(out, WIDTH, HEIGHT, render_rows(scene))
+            print(f"wrote {out} ({WIDTH}x{HEIGHT})")
+    return status
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

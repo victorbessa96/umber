@@ -1658,4 +1658,96 @@ mod tests {
             Err(SmartError::BadBuffer { .. })
         ));
     }
+
+    // ---- K7 starter-library round-trip pins (assets wave) ------------------
+    //
+    // Each .umbersmart / .umbermask this wave ships under assets/smart/ (8
+    // materials + 4 masks) is pinned: load_file -> canonical save (pretty
+    // JSON + trailing newline, the on-disk form of every starter file) must
+    // come back byte-identical to the committed file, so the starter library
+    // can never silently drift from the serializer. One pin per file.
+
+    fn starter_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/smart")
+    }
+
+    fn roundtrip_pin<T: serde::Serialize>(
+        file: &str,
+        load: fn(&std::path::Path) -> Result<T, SmartError>,
+    ) {
+        let path = starter_dir().join(file);
+        let original = std::fs::read(&path).expect("shipped starter file is present");
+        let preset = load(&path).expect("shipped starter file loads");
+        let mut saved = serde_json::to_string_pretty(&preset).expect("preset serializes");
+        saved.push('\n');
+        let tmp =
+            std::env::temp_dir().join(format!("umber-starter-rt-{}-{}", std::process::id(), file));
+        std::fs::write(&tmp, saved.as_bytes()).expect("save writes");
+        let read_back = std::fs::read(&tmp).expect("saved file reads back");
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(
+            read_back, original,
+            "{file}: load_file -> save -> byte-identical pin"
+        );
+    }
+
+    #[test]
+    fn starter_aged_leather_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("aged-leather.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_brushed_steel_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("brushed-steel.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_glazed_ceramic_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("glazed-ceramic.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_matte_plastic_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("matte-plastic.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_polished_marble_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("polished-marble.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_raw_concrete_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("raw-concrete.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_rusted_iron_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("rusted-iron.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_woven_fabric_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("woven-fabric.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter_ao_cavity_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("ao-cavity.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter_grime_noise_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("grime-noise.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter_height_ridges_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("height-ridges.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter_inverted_wear_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("inverted-wear.umbermask", SmartMask::load_file);
+    }
 }

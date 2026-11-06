@@ -9,7 +9,12 @@
         "map_name": "height"
       },
       "op": "multiply",
-      "params": {}
+      "params": {
+        "amount": 1.0,
+        "low": 0.0,
+        "high": 1.0,
+        "gamma": 1.0
+      }
     },
     {
       "source": {
@@ -18,6 +23,7 @@
       },
       "op": "levels",
       "params": {
+        "amount": 1.0,
         "low": 0.55,
         "high": 1.0,
         "gamma": 1.2

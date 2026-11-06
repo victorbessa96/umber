@@ -4,13 +4,18 @@
   "layers": [
     {
       "name": "Marble folder",
-      "kind": "folder"
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
     },
     {
       "name": "Marble base",
       "kind": "fill",
       "blend_mode": "Normal",
       "opacity": 1.0,
+      "mask": null,
       "generator": {
         "node_def": "noise_perlin",
         "map_name": "",
@@ -34,7 +39,8 @@
       "kind": "paint",
       "blend_mode": "Normal",
       "opacity": 1.0,
-      "mask": "Chips mask"
+      "mask": "Chips mask",
+      "generator": null
     }
   ]
 }

@@ -4,13 +4,18 @@
   "layers": [
     {
       "name": "Concrete folder",
-      "kind": "folder"
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
     },
     {
       "name": "Concrete base",
       "kind": "fill",
       "blend_mode": "Normal",
       "opacity": 1.0,
+      "mask": null,
       "generator": {
         "node_def": "mesh_map_generator",
         "map_name": "AO",
@@ -22,6 +27,7 @@
       "kind": "fill",
       "blend_mode": "Multiply",
       "opacity": 0.4,
+      "mask": null,
       "generator": {
         "node_def": "noise_value",
         "map_name": "",

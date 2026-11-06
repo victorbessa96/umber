@@ -43,7 +43,10 @@ PNG byte-for-byte:
 - `assets/env/studio-cool-fill.png`
 
 All 1024×512 LDR (8-bit RGBA) equirects. Generated output of an original
-script; dedicated to the public domain under CC0 1.0.
+script; dedicated to the public domain under CC0 1.0. Determinism is
+pinned: `python3 assets/gen/make_studio_env.py --check` re-renders every
+scene in memory and requires byte-identical output against the committed
+PNGs (exit 0), without writing.
 
 ## Not covered by this file
 
