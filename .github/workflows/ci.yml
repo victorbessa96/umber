@@ -164,13 +164,13 @@ jobs:
       # on job.status, and asserts the outputs exist, are nonzero, and the
       # exported base colour and the viewport are not all black. Linux
       # only: the Windows leg has no launch step to extend.
-      # continue-on-error until the first green CI run. Run 1 (e8ad906)
-        # exited 101 with no reason in the log; run 2 (910348c, with the
-        # app.log tail) named it: libxkbcommon-x11 missing, now installed.
-        # Flip this to blocking once a run is green (queue row names it).
+      # Blocking. History: run 1 (e8ad906) exited 101 with no reason in the
+        # log; run 2 (910348c, with the app.log tail) named it:
+        # libxkbcommon-x11 missing; run 42263309370 (a2880af) PASSED with it
+        # installed (base colour 255, viewport p99 255).
       - name: E2E smoke (release GUI over --control, Linux only)
         if: runner.os == 'Linux'
-        continue-on-error: true
+
         env:
           RUST_BACKTRACE: "1"
           RUST_LOG: info
