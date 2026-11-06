@@ -1798,6 +1798,14 @@ pub fn layer_mask_ui(ui: &mut egui::Ui, doc: &mut Document, paint: &mut PaintSta
         Select(Option<u64>),
         Detach(u64),
     }
+    if rows.is_empty() {
+        // UI/UX audit A2-6: an empty section says what goes in it.
+        ui.label(
+            egui::RichText::new(tr("layers.masks-empty"))
+                .size(umber_gui::theme::TEXT_STATUS)
+                .color(umber_gui::theme::faint()),
+        );
+    }
     let mut actions: Vec<MaskAction> = Vec::new();
     for row in &rows {
         ui.horizontal(|ui| {

@@ -278,17 +278,76 @@ pub fn brush_shelf_ui(
             .map(|(_, v)| v.clone())
             .unwrap_or_default(),
     };
-    egui::ScrollArea::horizontal()
+    let out = egui::ScrollArea::horizontal()
         .id_salt("umber-brush-shelf")
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| picked = brush_swatches(ui, state, brush, &shown));
         });
+    // UI/UX audit A2-5: a fade at each edge with more swatches beyond it,
+    // so a clipped last card reads as "scroll for more", not as cut off.
+    let (left, right) = shelf_overflow(
+        out.state.offset.x,
+        out.content_size.x,
+        out.inner_rect.width(),
+    );
+    let bg = umber_gui::theme::panel_bg();
+    let r = out.inner_rect;
+    for (edge, show) in [(r.left(), left), (r.right() - SHELF_FADE, right)] {
+        if !show {
+            continue;
+        }
+        let fade = egui::Rect::from_min_size(
+            egui::pos2(edge, r.top()),
+            egui::vec2(SHELF_FADE, r.height()),
+        );
+        let (a, b) = if edge == r.left() {
+            (bg, bg.gamma_multiply(0.0))
+        } else {
+            (bg.gamma_multiply(0.0), bg)
+        };
+        let mut mesh = egui::Mesh::default();
+        let i = mesh.vertices.len() as u32;
+        for (p, c) in [
+            (fade.left_top(), a),
+            (fade.right_top(), b),
+            (fade.right_bottom(), b),
+            (fade.left_bottom(), a),
+        ] {
+            mesh.colored_vertex(p, c);
+        }
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i, i + 2, i + 3);
+        ui.painter().add(egui::Shape::mesh(mesh));
+    }
     picked
+}
+
+/// Width of the shelf's overflow fades, points.
+pub const SHELF_FADE: f32 = 24.0;
+
+/// Whether the shelf has swatches hidden past its left / right edge: the
+/// scroll offset, the content width and the visible width, all in points.
+/// Half a point of slack absorbs float rounding at the ends.
+pub fn shelf_overflow(offset: f32, content: f32, visible: f32) -> (bool, bool) {
+    (offset > 0.5, offset + visible < content - 0.5)
 }
 
 /// Swatches per row in the brush popup.
 pub const POPUP_COLUMNS: usize = 6;
+
+#[cfg(test)]
+mod shelf_overflow_tests {
+    use super::shelf_overflow;
+
+    #[test]
+    fn fades_mark_only_the_edges_with_hidden_swatches() {
+        assert_eq!(shelf_overflow(0.0, 300.0, 400.0), (false, false), "fits");
+        assert_eq!(shelf_overflow(0.0, 600.0, 400.0), (false, true), "start");
+        assert_eq!(shelf_overflow(100.0, 600.0, 400.0), (true, true), "middle");
+        assert_eq!(shelf_overflow(200.0, 600.0, 400.0), (true, false), "end");
+    }
+}
 
 /// The brush popup's body (Shift+Space): the same swatches as the shelf,
 /// one titled section per catalog, each in rows of [`POPUP_COLUMNS`], so

@@ -151,6 +151,7 @@ Verification per kill: rustfmt, clippy `-D warnings`, the touched crates' tests,
 - 2026-11-05: **U3-5 LANDED** (queue row 191): the preset pressure curves drive flow and size. **Wave U3 complete.**
 - 2026-11-05: **Wave U4 LANDED** (queue row 192): Dark / Light / High Contrast themes, the real theme preference (Quick Setup's Light was a no-op), Reduce Motion honoured everywhere.
 - 2026-11-05: U4 follow-up LANDED (queue row 196): UV canvas and brush swatch cards themed, High Contrast disabled text at 7:1.
+- 2026-11-06: **Wave U6 LANDED** (rows 211-214): A2-2..A2-6 fixed, A2-7 dropped with reason.
 - 2026-11-05: **Second-round audit** (§8): requirements re-scored all met; seven new findings, A2-1 fixed (`42c9d93`, row 201). Next: wave U6 (§8.3). U5 stays parked until egui_dock ships for egui 0.37.
 
 ## 8. Second-round audit (after U1-U4)
@@ -176,12 +177,12 @@ Method: the release build driven through `--control` (`command.list`, `command.r
 | # | Sev | Finding | State |
 |---|---|---|---|
 | A2-1 | P0 | View > 3D only then Both re-docked the 2D view as a tab in the focused side rail, so the views stopped being side by side, and the saved layout kept it (the scratch profile carried six tabs in its left rail). | FIXED `42c9d93` (queue row 201): Both splits the missing view beside the other and repairs such a saved layout. |
-| A2-2 | P0 | A freshly loaded mesh renders as a black silhouette: the base-colour canvas starts transparent black and the viewport shows it as black. Painter opens a new mesh on a neutral grey default material, so the shape reads before the first stroke. | OPEN. Display-only fix preferred (the viewport composites unpainted texels over a neutral 0.5 grey; export unchanged), so no golden moves. |
-| A2-3 | P1 | Below about 1120 logical px the floors scale every leaf down, and the default Paint preset clips: "Symmetr…", "Overlay…", "Flatten sel…", ".umbersm…", brush names, the third right-rail tab. A 1366 x 768 laptop at 125% is in that range. | OPEN. A width-aware first layout (2D view tabbed behind the 3D below the threshold) on egui 0.36; the icon rail (U5) is the full answer. |
-| A2-4 | P1 | The command registry has 31 commands (file, edit, view, mask, brush size/popup, window). Layer, texture-set, bake and export actions are not in it, so the command palette and the control channel cannot reach them. Blender's F3 searches every menu operator. | OPEN. Extend row 154's registry to the Layers/Bakes/Export panel actions. |
-| A2-5 | P2 | The brush shelf clips its last swatch at the strip edge with no scroll cue. | OPEN. A fade or arrow at the overflowing edge. |
-| A2-6 | P2 | The Layers panel's empty "Masks" section shows no hint of what goes there. | OPEN. One faint line of empty-state copy. |
-| A2-7 | P2 | High Contrast marks selected items by fill only (no outline). Contrast is well above 7:1, so it reads, but a 2 px accent outline on the selected state would match the "every edge drawn" rule. | OPEN. |
+| A2-2 | P0 | A freshly loaded mesh renders as a black silhouette: the base-colour canvas starts transparent black and the viewport shows it as black. Painter opens a new mesh on a neutral grey default material, so the shape reads before the first stroke. | FIXED `16322db` (row 211): unpainted texels display over sRGB 0.5 grey; export unchanged, every GPU golden byte-identical. |
+| A2-3 | P1 | Below about 1120 logical px the floors scale every leaf down, and the default Paint preset clips: "Symmetr…", "Overlay…", "Flatten sel…", ".umbersm…", brush names, the third right-rail tab. A 1366 x 768 laptop at 125% is in that range. | FIXED `f1c846c` (row 212): the boot default and Reset Layout tab the 2D view behind the 3D when the row cannot fit. The icon rail (U5) remains the full answer. |
+| A2-4 | P1 | The command registry has 31 commands (file, edit, view, mask, brush size/popup, window). Layer, texture-set, bake and export actions are not in it, so the command palette and the control channel cannot reach them. Blender's F3 searches every menu operator. | FIXED `ca18c60` (row 213): nine commands, add paint/fill/folder layer and show each side panel (31 -> 40). Running a bake or export by id stays open (needs the panel's settings). |
+| A2-5 | P2 | The brush shelf clips its last swatch at the strip edge with no scroll cue. | FIXED (row 214): edge fades where swatches are hidden. |
+| A2-6 | P2 | The Layers panel's empty "Masks" section shows no hint of what goes there. | FIXED (row 214): one faint hint line. |
+| A2-7 | P2 | High Contrast marks selected items by fill only (no outline). Contrast is well above 7:1, so it reads, but a 2 px accent outline on the selected state would match the "every edge drawn" rule. | DROPPED (row 214): egui 0.36's `interact_selectable` never draws `bg_stroke` for the selected state, so a ring needs a custom widget; contrast already passes 7:1. |
 
 Not counted as findings: the axis gizmo overlapping content (Blender and Painter do the same) and the dark viewport under Light (deliberate, §U4).
 

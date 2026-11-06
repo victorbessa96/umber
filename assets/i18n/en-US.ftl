@@ -543,6 +543,7 @@ layers =
     .add-menu = + ▼
     .add-menu-hint = Add a fill, folder or material layer
     .masks-section = Masks
+    .masks-empty = Add a layer, then give it a mask here.
     .mask-add = + Mask
     .mask-default-name = Mask for { $layer }
     .mask-remove = Remove mask

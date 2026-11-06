@@ -562,6 +562,7 @@ layers =
     .add-menu = + ▼
     .add-menu-hint = Adicionar camada de preenchimento, pasta ou material
     .masks-section = Máscaras
+    .masks-empty = Adicione uma camada e depois uma máscara aqui.
     .mask-add = + Máscara
     .mask-default-name = Máscara para { $layer }
     .mask-remove = Remover máscara
