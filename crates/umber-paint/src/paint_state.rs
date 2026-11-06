@@ -409,7 +409,7 @@ use std::sync::Arc;
 use emath::Pos2;
 use umber_bake::id::{bake_id_mesh, IdBakeParams, IdFlavor};
 use umber_brush::id_mask::{select_id, SelectIdError};
-use umber_brush::path::{sanitize_size, PaintPath, PathOp};
+use umber_brush::path::{sanitize_size, PaintPath, PathOp, PATH_MAX_SIZE, PATH_MIN_SIZE};
 use umber_brush::retouch::{coverage, footprint, DirtyRect, RetouchDab};
 use umber_brush::symmetry::{expand_dabs, texel_transforms};
 use umber_brush::{
@@ -570,6 +570,30 @@ pub const HEIGHT_CHANNEL: &str = "height";
 
 /// Brush radius in target texels.
 const BRUSH_RADIUS_TEXELS: f32 = 24.0;
+
+/// Smallest absolute brush radius the texel seam accepts, in target
+/// texels: `BRUSH_RADIUS_TEXELS * PATH_MIN_SIZE`. A smaller radius would
+/// starve spacing (near-zero dab step → the `MAX_DABS_PER_CALL` cap).
+pub const BRUSH_RADIUS_TEXELS_MIN: f32 = BRUSH_RADIUS_TEXELS * PATH_MIN_SIZE;
+/// Largest absolute brush radius the texel seam accepts, in target
+/// texels: `BRUSH_RADIUS_TEXELS * PATH_MAX_SIZE`.
+pub const BRUSH_RADIUS_TEXELS_MAX: f32 = BRUSH_RADIUS_TEXELS * PATH_MAX_SIZE;
+
+/// Clamps an absolute brush radius (target texels) to
+/// `BRUSH_RADIUS_TEXELS_MIN..=BRUSH_RADIUS_TEXELS_MAX`; a non-finite
+/// radius becomes `BRUSH_RADIUS_TEXELS` (the session default — a
+/// malformed value degrades to an ordinary brush, never a panic and
+/// never a spacing starvation). This is the texel-space twin of the
+/// path tool's `sanitize_size`, which clamps the multiplier the seam
+/// stores; the two agree exactly (`sanitize_radius_texels(r) /
+/// BRUSH_RADIUS_TEXELS` is a fixed point of `sanitize_size`).
+pub fn sanitize_radius_texels(radius: f32) -> f32 {
+    if radius.is_finite() {
+        radius.clamp(BRUSH_RADIUS_TEXELS_MIN, BRUSH_RADIUS_TEXELS_MAX)
+    } else {
+        BRUSH_RADIUS_TEXELS
+    }
+}
 
 /// Synthetic event-clock step: nominal nanoseconds between consecutive
 /// pointer events fed to the stroke conditioner.
@@ -4730,8 +4754,9 @@ impl PaintState {
 
     /// The live-stroke brush radius in target texels (the radius every
     /// viewport dab is stamped with, before per-event pressure scaling):
-    /// `BRUSH_RADIUS_TEXELS × brush_size`. Read by the viewport's brush
-    /// cursor (GUI plan G1).
+    /// `BRUSH_RADIUS_TEXELS × brush_size`, always within
+    /// `BRUSH_RADIUS_TEXELS_MIN..=BRUSH_RADIUS_TEXELS_MAX` (the px API's
+    /// clamp). Read by the viewport's brush cursor (GUI plan G1).
     pub fn brush_radius_texels(&self) -> f32 {
         BRUSH_RADIUS_TEXELS * self.brush_size
     }
@@ -4751,16 +4776,21 @@ impl PaintState {
     }
 
     /// Sets the live brush radius in target texels — the ABSOLUTE form of
-    /// [`Self::set_brush_size`]: the implied multiplier
-    /// `radius / BRUSH_RADIUS_TEXELS` rides the same `sanitize_size`
-    /// clamp, so a finite radius lands in `1.2..=192.0` texels and a
-    /// non-finite radius resets to the historical 24. A stroke in flight
-    /// keeps the size it began with (the [`Self::set_brush_size`] rule).
+    /// [`Self::set_brush_size`]: the radius is clamped through
+    /// [`sanitize_radius_texels`] to
+    /// `BRUSH_RADIUS_TEXELS_MIN..=BRUSH_RADIUS_TEXELS_MAX` (1.2..=192.0
+    /// texels) and the implied multiplier then rides the same
+    /// `sanitize_size` clamp, so a non-finite radius resets to the
+    /// historical 24 texels and a finite one always lands in the named
+    /// range — clamped, never a panic, never a spacing starvation. A
+    /// stroke in flight keeps the size it began with (the
+    /// [`Self::set_brush_size`] rule).
     /// The agent protocol's `paint_stroke.radius` seam — the
     /// absolute-radius follow-up docs/specs/agent-paint-ops-design.md
-    /// names.
+    /// names; wiring that field onto this fn in `umber-cli`'s `agent.rs`
+    /// is the follow-up owned by the cli lane, not this crate.
     pub fn set_brush_radius_texels(&mut self, radius: f32) {
-        self.set_brush_size(radius / BRUSH_RADIUS_TEXELS);
+        self.set_brush_size(sanitize_radius_texels(radius) / BRUSH_RADIUS_TEXELS);
     }
 
     /// Sets the brush hardness, clamped to `0..=1` (non-finite ignored).
@@ -6516,6 +6546,104 @@ mod tests {
         assert_eq!(s.brush_hardness(), 1.0);
         s.set_brush_hardness(0.25);
         assert_eq!(s.brush_hardness(), 0.25);
+    }
+
+    #[test]
+    fn sanitize_radius_texels_clamps_to_the_named_range() {
+        // In-range passes through; out-of-range clamps to the named
+        // constants; malformed (non-finite) resets to the default —
+        // never a panic, never a zero/negative radius.
+        assert_eq!(sanitize_radius_texels(24.0), 24.0);
+        assert_eq!(
+            sanitize_radius_texels(BRUSH_RADIUS_TEXELS_MIN),
+            BRUSH_RADIUS_TEXELS_MIN
+        );
+        assert_eq!(
+            sanitize_radius_texels(BRUSH_RADIUS_TEXELS_MAX),
+            BRUSH_RADIUS_TEXELS_MAX
+        );
+        assert_eq!(sanitize_radius_texels(0.0), BRUSH_RADIUS_TEXELS_MIN);
+        assert_eq!(sanitize_radius_texels(-5.0), BRUSH_RADIUS_TEXELS_MIN);
+        assert_eq!(sanitize_radius_texels(1.0e9), BRUSH_RADIUS_TEXELS_MAX);
+        assert_eq!(sanitize_radius_texels(f32::NAN), BRUSH_RADIUS_TEXELS);
+        assert_eq!(sanitize_radius_texels(f32::INFINITY), BRUSH_RADIUS_TEXELS);
+        assert_eq!(
+            sanitize_radius_texels(f32::NEG_INFINITY),
+            BRUSH_RADIUS_TEXELS
+        );
+        // The named range IS the px API's clamp expressed in texels, and
+        // the sanitize is a fixed point of the size clamp the seam stores.
+        assert_eq!(BRUSH_RADIUS_TEXELS_MIN, BRUSH_RADIUS_TEXELS * PATH_MIN_SIZE);
+        assert_eq!(BRUSH_RADIUS_TEXELS_MAX, BRUSH_RADIUS_TEXELS * PATH_MAX_SIZE);
+        let r = sanitize_radius_texels(96.0);
+        assert_eq!(
+            sanitize_size(r / BRUSH_RADIUS_TEXELS),
+            r / BRUSH_RADIUS_TEXELS
+        );
+    }
+
+    #[test]
+    fn brush_radius_texels_seam_round_trips_through_the_px_api() {
+        const EPS: f32 = 1e-5;
+        // PaintState needs a device; GPU-less hosts skip (the house rule).
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        // In-range: set/get round-trip (within fp rounding of the
+        // texels → multiplier → texels composition).
+        s.set_brush_radius_texels(96.0);
+        assert!((s.brush_radius_texels() - 96.0).abs() <= EPS);
+        assert!((s.brush_size() - 96.0 / BRUSH_RADIUS_TEXELS).abs() <= EPS);
+        // The stored size composes back to exactly the radius the stroke
+        // path would feed the conditioner (push_event_styled's
+        // `BRUSH_RADIUS_TEXELS * sanitize_size(scale)`).
+        let stroke_radius = BRUSH_RADIUS_TEXELS * sanitize_size(s.brush_size());
+        assert!((stroke_radius - 96.0).abs() <= EPS);
+        // Out-of-range clamps to the named constants — no panic.
+        s.set_brush_radius_texels(1.0e9);
+        assert!((s.brush_radius_texels() - BRUSH_RADIUS_TEXELS_MAX).abs() <= EPS);
+        s.set_brush_radius_texels(0.0);
+        assert!((s.brush_radius_texels() - BRUSH_RADIUS_TEXELS_MIN).abs() <= EPS);
+        // Malformed input resets to the default radius.
+        s.set_brush_radius_texels(f32::NAN);
+        assert!((s.brush_radius_texels() - BRUSH_RADIUS_TEXELS).abs() <= EPS);
+        // The px API is untouched and agrees with the seam's getter.
+        s.set_brush_size(2.0);
+        assert!((s.brush_radius_texels() - BRUSH_RADIUS_TEXELS * 2.0).abs() <= EPS);
+    }
+
+    #[test]
+    fn brush_radius_texels_seam_scales_dab_spacing() {
+        // The seam's stored size enters the stroke path as the radius the
+        // conditioner spaces with; spacing's dab step is
+        // `radius / dabs_per_radius`, so dab count scales inversely with
+        // the seam's radius. Pin that with the density the session
+        // constructs its conditioner with (5.0).
+        let density = 5.0;
+        let seg_len = 192.0_f32; // texels of travel
+        let dabs_at = |radius_texels: f32| {
+            let mut acc = umber_brush::SpacingAccumulator::new(density).expect("valid density");
+            acc.plan_dabs([0.0, 0.0], [seg_len, 0.0], radius_texels, [1.0, 1.0])
+                .len()
+        };
+        let small = sanitize_radius_texels(BRUSH_RADIUS_TEXELS); // 24
+        let big = sanitize_radius_texels(BRUSH_RADIUS_TEXELS_MAX); // 192 = 8× small
+        let n_small = dabs_at(small);
+        let n_big = dabs_at(big);
+        assert!(n_small > 0 && n_big > 0);
+        // step = radius / density: 8× the radius → 1/8 the dabs (±1 for
+        // fp accumulation in the residual carry).
+        assert!(
+            (n_small as i64 - 8 * n_big as i64).abs() <= 1,
+            "n_small={n_small} n_big={n_big}"
+        );
+        // A clamped-out-of-range input spaces exactly like the clamp bound.
+        assert_eq!(dabs_at(sanitize_radius_texels(1.0e9)), n_big);
+        assert_eq!(
+            dabs_at(sanitize_radius_texels(-1.0)),
+            dabs_at(BRUSH_RADIUS_TEXELS_MIN)
+        );
     }
 
     #[test]
