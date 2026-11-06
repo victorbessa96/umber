@@ -346,4 +346,88 @@ FUZZ_BATTERY_MUTANTS = {
 }
 for _rel, _b64 in FUZZ_BATTERY_MUTANTS.items():
     write(_rel, base64.b64decode(_b64))
+
+# ------------------------------------- row 156-B: uv_gbuffer-targeted seeds
+# Seed shapes aimed at the uv_gbuffer.rs code paths (UvGBuffer::build,
+# texel_window edge cases, tile_offset with extreme UDIM tiles like 9999,
+# degenerate UvTri::from_uvs): UVs in tile 9999's region (tile_offset(9999)
+# = (8, 899)), 1e30 / f32::MAX / -0.0, UVs exactly on integer tile edges,
+# and sub-UV_DET_EPS collinear footprints. Each seed stays a typed Err
+# through every importer entry (the out-of-range index is what makes it
+# hostile), so hostile_corpus keeps its never-Ok contract while the
+# mutational lane explores the UV parse paths feeding MeshData.uvs.
+
+POS4 = f32(0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0)  # 4 verts, 48 bytes
+
+
+def gltf_uv_doc(idx: bytes, uvs: bytes) -> bytes:
+    """A .gltf with POSITION(4 verts) + TEXCOORD_0(4) + the given indices.
+
+    The three bufferViews stay 4-byte aligned for the 5126 accessors.
+    """
+    off_idx = len(POS4)
+    pad = (-len(idx)) % 4
+    off_uv = off_idx + len(idx) + pad
+    buf = POS4 + idx + b"\x00" * pad + uvs
+    views = (
+        '{"buffer": 0, "byteOffset": 0, "byteLength": %d}, '
+        '{"buffer": 0, "byteOffset": %d, "byteLength": %d}, '
+        '{"buffer": 0, "byteOffset": %d, "byteLength": %d}'
+        % (len(POS4), off_idx, len(idx), off_uv, len(uvs))
+    )
+    accs = (
+        '{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0,0,0], "max": [1,1,0]}, '
+        '{"bufferView": 1, "componentType": 5123, "count": %d, "type": "SCALAR"}, '
+        '{"bufferView": 2, "componentType": 5126, "count": %d, "type": "VEC2"}'
+        % (len(idx) // 2, len(uvs) // 8)
+    )
+    uri = base64.b64encode(buf).decode("ascii")
+    return (
+        "{\n"
+        '  "asset": {"version": "2.0"},\n'
+        '  "scene": 0,\n'
+        '  "scenes": [{"nodes": [0]}],\n'
+        '  "nodes": [{"mesh": 0}],\n'
+        '  "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 2}, "indices": 1}]}],\n'
+        '  "buffers": [{"byteLength": %d, "uri": "data:application/octet-stream;base64,%s"}],\n'
+        '  "bufferViews": [%s],\n'
+        '  "accessors": [%s]\n'
+        "}" % (len(buf), uri, views, accs)
+    ).encode()
+
+
+# Extreme UDIM-range UVs (tile 9999's region u 8999..9000), 1e30 / -1e30 /
+# f32::MAX, -0.0, and exact integer tile edges 1.0/2.0 (texel_window bounds).
+# Index 999 is out of range for 4 vertices -> typed Err from load_gltf.
+write(
+    "gltf/uv_extreme_udim_texcoord.gltf",
+    gltf_uv_doc(
+        u16(0, 1, 999),
+        f32(8999.5, 899.5, 1e30, -1e30, -0.0, 3.4028235e38, 1.0, 2.0),
+    ),
+)
+
+# Degenerate UV footprint for UvTri::from_uvs: tri 0 is collinear with legs
+# 5e-6 (area 1.25e-11 < UV_DET_EPS = 1e-10) and vertex 3 sits in tile 9999's
+# region; index 999 is out of range -> typed Err.
+write(
+    "gltf/uv_degenerate_triangle.gltf",
+    gltf_uv_doc(
+        u16(0, 1, 2, 0, 2, 999),
+        f32(0.0, 0.0, 5e-6, 0.0, 0.0, 5e-6, 8999.5, 899.5),
+    ),
+)
+
+# The same UV shapes through the usda primvar path (primvars:st): sub-eps
+# collinear triangle + extreme UDIM uv; faceVertexIndices [0,1,2,0,2,9] has
+# index 9 out of range for 4 points -> typed Err.
+usda(
+    "primvar_st_udim_extreme.usda",
+    mesh_body(
+        "int[] faceVertexCounts = [3, 3]\n"
+        "int[] faceVertexIndices = [0, 1, 2, 0, 2, 9]\n"
+        "point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)]\n"
+        "texCoord2f[] primvars:st = [(0, 0), (5e-6, 0), (0, 5e-6), (8999.5, 899.5)]"
+    ),
+)
 print("corpus generated under", HERE)
