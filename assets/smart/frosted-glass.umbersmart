@@ -1,0 +1,46 @@
+{
+  "name": "Frosted glass",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Glass folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Glass base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Frost",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.55,
+      "mask": null,
+      "generator": {
+        "node_def": "noise_value",
+        "map_name": "",
+        "channel": "roughness"
+      }
+    },
+    {
+      "name": "Fingerprints",
+      "kind": "paint",
+      "blend_mode": "Multiply",
+      "opacity": 0.3,
+      "mask": null,
+      "generator": null
+    }
+  ]
+}

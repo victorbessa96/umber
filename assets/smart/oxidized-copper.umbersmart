@@ -1,0 +1,62 @@
+{
+  "name": "Oxidized copper",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Copper folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Copper base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Copper sheen",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.4,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "curvature",
+        "channel": "metallic"
+      }
+    },
+    {
+      "name": "Verdigris",
+      "kind": "fill",
+      "blend_mode": "Overlay",
+      "opacity": 0.75,
+      "mask": "Patina mask",
+      "generator": {
+        "node_def": "noise_worley",
+        "map_name": "",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Cavity patina",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.55,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "roughness"
+      }
+    }
+  ]
+}

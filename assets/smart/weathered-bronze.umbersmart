@@ -1,0 +1,50 @@
+{
+  "name": "Weathered bronze",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Bronze folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Bronze base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "metallic"
+      }
+    },
+    {
+      "name": "Bronze tarnish",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.6,
+      "mask": "Tarnish mask",
+      "generator": {
+        "node_def": "noise_perlin",
+        "map_name": "",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Polished highlights",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.35,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "curvature",
+        "channel": "roughness"
+      }
+    }
+  ]
+}

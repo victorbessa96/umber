@@ -15,6 +15,11 @@ Four original swatches, one per new starter preset:
   soft-pencil.stamp.png  gaussian soft disc
   speckle.stamp.png      deterministic speckle dots (splitmix64 integer hash)
 
+Starter wave 2 adds two more:
+
+  chalk.stamp.png        grainy disc: soft disc x per-pixel hashed grain
+  crosshatch.stamp.png   two crossed hatch-line sets (+45 / -45 deg) in a disc
+
 No licensed content, fully procedural: every pixel is pure math.
 Dependency-free like make_studio_env.py — the PNG encoder is ~15 lines of
 stdlib (struct + zlib). Fully deterministic (pure math + integer hashing;
@@ -133,11 +138,48 @@ def coverage_speckle():
     return cov
 
 
+def coverage_chalk():
+    """Grainy disc (chalk on a rough surface): a soft-edged disc whose
+    coverage is thinned by a per-pixel splitmix64 grain threshold."""
+    r0, soft = 50.0, 6.0
+    cov = [[0.0] * SIZE for _ in range(SIZE)]
+    for y in range(SIZE):
+        for x in range(SIZE):
+            dx = x + 0.5 - SIZE / 2.0
+            dy = y + 0.5 - SIZE / 2.0
+            disc = smoothstep((r0 - math.hypot(dx, dy)) / soft)
+            h = splitmix64(0xC4A1 ^ (y * SIZE + x))
+            grain = ((h >> 11) & 0xFFFF) / 65535.0
+            cov[y][x] = 255.0 * disc * smoothstep((grain - 0.25) / 0.5)
+    return cov
+
+
+def coverage_crosshatch():
+    """Two crossed sets of parallel hatch lines (+45 / -45 deg), clipped
+    to a soft disc."""
+    period, half_wid, soft, r0 = 14.0, 1.6, 1.0, 54.0
+    cov = [[0.0] * SIZE for _ in range(SIZE)]
+    s = math.sqrt(0.5)
+    for y in range(SIZE):
+        for x in range(SIZE):
+            dx = x + 0.5 - SIZE / 2.0
+            dy = y + 0.5 - SIZE / 2.0
+            best = 0.0
+            for u in ((dx + dy) * s, (dx - dy) * s):
+                m = u - period * math.floor(u / period + 0.5)
+                best = max(best, smoothstep(0.5 - (abs(m) - half_wid) / soft))
+            disc = smoothstep((r0 - math.hypot(dx, dy)) / 4.0)
+            cov[y][x] = 255.0 * best * disc
+    return cov
+
+
 STAMPS = {
     "flat-liner": coverage_flat_liner,
     "wide-marker": coverage_wide_marker,
     "soft-pencil": coverage_soft_pencil,
     "speckle": coverage_speckle,
+    "chalk": coverage_chalk,
+    "crosshatch": coverage_crosshatch,
 }
 
 

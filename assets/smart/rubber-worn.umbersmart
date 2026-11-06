@@ -1,0 +1,50 @@
+{
+  "name": "Worn rubber",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Rubber folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Rubber base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Scuffed edges",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.4,
+      "mask": "Scuff mask",
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "curvature",
+        "channel": "roughness"
+      }
+    },
+    {
+      "name": "Dust in cavities",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.45,
+      "mask": null,
+      "generator": {
+        "node_def": "noise_perlin",
+        "map_name": "",
+        "channel": "baseColor"
+      }
+    }
+  ]
+}

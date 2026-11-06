@@ -1,0 +1,50 @@
+{
+  "name": "Mossy stone",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Stone folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Stone base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Moss growth",
+      "kind": "fill",
+      "blend_mode": "Overlay",
+      "opacity": 0.8,
+      "mask": "Moss mask",
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "position",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Moss clumps",
+      "kind": "fill",
+      "blend_mode": "Multiply",
+      "opacity": 0.5,
+      "mask": null,
+      "generator": {
+        "node_def": "noise_worley",
+        "map_name": "",
+        "channel": "roughness"
+      }
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "name": "Carbon fiber",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Carbon folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Weave base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "noise_value",
+        "map_name": "",
+        "channel": "baseColor"
+      }
+    },
+    {
+      "name": "Weave relief",
+      "kind": "fill",
+      "blend_mode": "Overlay",
+      "opacity": 0.6,
+      "mask": null,
+      "generator": {
+        "node_def": "noise_value",
+        "map_name": "",
+        "channel": "normal"
+      }
+    },
+    {
+      "name": "Clear coat",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.25,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "roughness"
+      }
+    }
+  ]
+}

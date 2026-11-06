@@ -1,0 +1,50 @@
+{
+  "name": "Cast aluminum",
+  "version": 1,
+  "layers": [
+    {
+      "name": "Aluminum folder",
+      "kind": "folder",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": null
+    },
+    {
+      "name": "Aluminum base",
+      "kind": "fill",
+      "blend_mode": "Normal",
+      "opacity": 1.0,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "AO",
+        "channel": "metallic"
+      }
+    },
+    {
+      "name": "Casting grain",
+      "kind": "fill",
+      "blend_mode": "Overlay",
+      "opacity": 0.3,
+      "mask": null,
+      "generator": {
+        "node_def": "noise_value",
+        "map_name": "",
+        "channel": "roughness"
+      }
+    },
+    {
+      "name": "Edge polish",
+      "kind": "fill",
+      "blend_mode": "Screen",
+      "opacity": 0.45,
+      "mask": null,
+      "generator": {
+        "node_def": "mesh_map_generator",
+        "map_name": "curvature",
+        "channel": "roughness"
+      }
+    }
+  ]
+}

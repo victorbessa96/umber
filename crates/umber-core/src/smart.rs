@@ -1751,6 +1751,89 @@ mod tests {
         roundtrip_pin("inverted-wear.umbermask", SmartMask::load_file);
     }
 
+    // Starter wave 2 (assets lane, 2026-11-06): +10 materials, +6 masks,
+    // pinned by the same load_file -> save byte-identical contract.
+
+    #[test]
+    fn starter2_oxidized_copper_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("oxidized-copper.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_weathered_bronze_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("weathered-bronze.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_cast_aluminum_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("cast-aluminum.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_chipped_paint_metal_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("chipped-paint-metal.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_carbon_fiber_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("carbon-fiber.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_rubber_worn_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("rubber-worn.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_sandstone_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("sandstone.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_mossy_stone_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("mossy-stone.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_lacquered_wood_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("lacquered-wood.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_frosted_glass_umbersmart_roundtrip_byte_identical() {
+        roundtrip_pin("frosted-glass.umbersmart", SmartMaterial::load_file);
+    }
+
+    #[test]
+    fn starter2_dust_top_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("dust-top.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter2_drip_streaks_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("drip-streaks.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter2_scratches_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("scratches.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter2_cavity_dirt_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("cavity-dirt.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter2_moss_crevices_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("moss-crevices.umbermask", SmartMask::load_file);
+    }
+
+    #[test]
+    fn starter2_height_peaks_umbermask_roundtrip_byte_identical() {
+        roundtrip_pin("height-peaks.umbermask", SmartMask::load_file);
+    }
+
     // ---- SmartFilter::apply reference battery -----------------------------
     //
     // Goldens below are computed by independent reference code in the test

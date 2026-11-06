@@ -760,7 +760,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{} must validate: {e}", path.display()));
             count += 1;
         }
-        assert_eq!(count, 16, "the starter library ships sixteen presets");
+        assert_eq!(count, 18, "the starter library ships eighteen presets");
     }
 
     /// U3-5: the preset's own curves reach the engine params, and the
@@ -924,6 +924,44 @@ mod tests {
             let (w, h) = png_rgba8_envelope(&bytes)
                 .unwrap_or_else(|e| panic!("{} must parse as PNG: {e}", sidecar.display()));
             assert!(w > 0 && h > 0, "non-empty stamp");
+        }
+    }
+
+    /// Starter wave 2 (assets lane): two more original stamped presets,
+    /// each with a `<stem>.stamp.png` sidecar from make_brush_stamps.py.
+    const STARTER2_WAVE_PRESETS: [&str; 2] = ["chalk.umberbrush", "crosshatch.umberbrush"];
+
+    #[test]
+    fn starter2_wave_presets_round_trip_byte_identical() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/brushes");
+        for file in STARTER2_WAVE_PRESETS {
+            let path = std::path::Path::new(dir).join(file);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+            let preset = BrushPreset::from_json(&text)
+                .unwrap_or_else(|e| panic!("{} must parse: {e}", path.display()));
+            preset
+                .validate()
+                .unwrap_or_else(|e| panic!("{} must validate: {e}", path.display()));
+            assert!(preset.params.stamped, "{file} is a stamped starter preset");
+            assert!(!preset.catalog.is_empty(), "{file} is filed in a catalog");
+            let again = preset.to_json().expect("re-serialize");
+            assert_eq!(again, text, "{file} must re-serialize byte-identically");
+        }
+    }
+
+    #[test]
+    fn starter2_wave_stamp_sidecars_exist_and_parse_as_rgba8_png() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/brushes");
+        for file in STARTER2_WAVE_PRESETS {
+            let sidecar = std::path::Path::new(dir)
+                .join(file)
+                .with_extension("stamp.png");
+            let bytes = std::fs::read(&sidecar)
+                .unwrap_or_else(|e| panic!("{} must exist: {e}", sidecar.display()));
+            let (w, h) = png_rgba8_envelope(&bytes)
+                .unwrap_or_else(|e| panic!("{} must parse as PNG: {e}", sidecar.display()));
+            assert_eq!((w, h), (128, 128), "{file}: generator emits 128x128 stamps");
         }
     }
 }

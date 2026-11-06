@@ -1,0 +1,61 @@
+{
+  "name": "Moss crevices",
+  "version": 1,
+  "ops": [
+    {
+      "source": {
+        "type": "generator",
+        "node_def": "mesh_map_generator",
+        "map_name": "AO"
+      },
+      "op": "invert",
+      "params": {
+        "amount": 1.0,
+        "low": 0.0,
+        "high": 1.0,
+        "gamma": 1.0
+      }
+    },
+    {
+      "source": {
+        "type": "generator",
+        "node_def": "mesh_map_generator",
+        "map_name": "position"
+      },
+      "op": "multiply",
+      "params": {
+        "amount": 1.0,
+        "low": 0.0,
+        "high": 1.0,
+        "gamma": 1.0
+      }
+    },
+    {
+      "source": {
+        "type": "generator",
+        "node_def": "noise_worley",
+        "map_name": ""
+      },
+      "op": "multiply",
+      "params": {
+        "amount": 1.0,
+        "low": 0.0,
+        "high": 1.0,
+        "gamma": 1.0
+      }
+    },
+    {
+      "source": {
+        "type": "constant",
+        "value": 0.0
+      },
+      "op": "levels",
+      "params": {
+        "amount": 1.0,
+        "low": 0.1,
+        "high": 0.6,
+        "gamma": 1.0
+      }
+    }
+  ]
+}
