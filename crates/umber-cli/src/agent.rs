@@ -570,7 +570,9 @@ fn library_file_ok(kind: AssetKind, path: &Path) -> bool {
         AssetKind::SmartMaterial => ext == Some("umbersmart"),
         AssetKind::SmartMask => ext == Some("umbermask"),
         AssetKind::Brush => ext == Some("umberbrush"),
-        AssetKind::Env => ext.is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "exr")),
+        AssetKind::Env => {
+            ext.is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "exr"))
+        }
     }
 }
 
@@ -593,12 +595,7 @@ fn library_dirs(kind: AssetKind) -> (Option<PathBuf>, Option<PathBuf>) {
 /// `kind`'s lister gate, sorted by file name in byte order (the
 /// `preset_library::sorted_preset_files` rule). A missing or
 /// unreadable dir contributes nothing — never an error.
-fn scan_library_dir(
-    kind: AssetKind,
-    dir: &Path,
-    source: &'static str,
-    rows: &mut Vec<LibraryRow>,
-) {
+fn scan_library_dir(kind: AssetKind, dir: &Path, source: &'static str, rows: &mut Vec<LibraryRow>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -2133,9 +2130,8 @@ impl Session {
                 s.kind
             )
         })?;
-        let out =
-            crate::import_asset::import_asset(&s.file, kind, s.library.as_deref(), s.dry_run)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let out = crate::import_asset::import_asset(&s.file, kind, s.library.as_deref(), s.dry_run)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         fields(serde_json::json!({
             "kind": out.kind.name(),
             "source": out.source,
@@ -3163,7 +3159,12 @@ mod tests {
         std::fs::write(user.join("probe.ExR"), b"").unwrap();
         let mut rows = Vec::new();
         // smart-material: .umbersmart only, sorted by file name, source tagged.
-        scan_library(AssetKind::SmartMaterial, Some(&starter), Some(&user), &mut rows);
+        scan_library(
+            AssetKind::SmartMaterial,
+            Some(&starter),
+            Some(&user),
+            &mut rows,
+        );
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[0].name, "a-material");
         assert_eq!(rows[0].bytes, 2);
@@ -3263,7 +3264,10 @@ mod tests {
         let r = &session(&format!("{line}\n"))[0];
         assert_eq!(r["ok"], false, "{r}");
         assert!(
-            r["error"].as_str().unwrap().contains("target already exists"),
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("target already exists"),
             "{r}"
         );
         // An unknown kind is a typed error.

@@ -757,10 +757,8 @@ mod tests {
 
     /// A fresh per-test scratch dir under the system temp dir.
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "umber-mcp-library-{}-{tag}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("umber-mcp-library-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -799,7 +797,11 @@ mod tests {
             assert_eq!(rows.len(), 4, "{reply}");
             let mut kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
             kinds.sort();
-            assert_eq!(kinds, ["brush", "env", "smart-material", "smart-mask"], "{reply}");
+            assert_eq!(
+                kinds,
+                ["brush", "env", "smart-mask", "smart-material"],
+                "{reply}"
+            );
             for row in rows {
                 assert_eq!(row["source"], "starter", "{row}");
                 assert!(
@@ -861,7 +863,11 @@ mod tests {
             assert_eq!(reply["kind"], "brush", "{reply}");
             let target = write.join("lib/hard-round.umberbrush");
             assert_eq!(reply["target"], target.display().to_string(), "{reply}");
-            assert_eq!(reply["bytes"], std::fs::metadata(&src).unwrap().len(), "{reply}");
+            assert_eq!(
+                reply["bytes"],
+                std::fs::metadata(&src).unwrap().len(),
+                "{reply}"
+            );
             assert!(target.is_file(), "the bytes landed inside the write root");
             assert_eq!(
                 std::fs::read(&target).unwrap(),
