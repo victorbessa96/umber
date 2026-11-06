@@ -6077,6 +6077,16 @@ fn main() -> eframe::Result<()> {
         std::process::exit(code);
     }
 
+    // `umber --version` / `-V` (installers gap #1, queue row 240): print
+    // and exit before any window or GPU work.
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| umber_core::control::is_version_arg(&a))
+    {
+        println!("umber v{}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     // Paint-compositor requirement (umber-gpu paint claw reviewer checklist
     // item #1): read_write storage textures need the adapter-specific format
     // features requested on the device, or the compute splat pass panics at

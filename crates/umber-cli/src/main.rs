@@ -41,6 +41,10 @@ fn main() -> Result<()> {
         Some("extract-spp") => spp_extract::extract_spp_cmd(&args[1..]),
         Some("import-asset") => import_asset_cmd(&args[1..]),
         Some("bench") => bench::bench_cmd(&args[1..]),
+        Some(other) if umber_core::control::is_version_arg(other) => {
+            println!("umber-cli v{}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some(other) => Err(anyhow::anyhow!(
             "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|mcp|serve|extract-spp|import-asset|bench> ..."
         )),
@@ -57,6 +61,7 @@ fn main() -> Result<()> {
             println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
             println!("          import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]");
             println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
+            println!("          --version | -V   print the version and exit");
             Ok(())
         }
     }

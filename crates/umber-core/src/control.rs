@@ -226,9 +226,25 @@ pub fn write_json_line(w: &mut impl Write, v: &serde_json::Value) -> std::io::Re
     w.flush()
 }
 
+/// `--version` / `-V` for both binaries (installers gap #1, queue row
+/// 240): `umber` and `umber-cli` print their version and exit before any
+/// window or GPU work. One predicate, one pin.
+pub fn is_version_arg(a: &str) -> bool {
+    a == "--version" || a == "-V"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_flag_predicate() {
+        assert!(is_version_arg("--version"));
+        assert!(is_version_arg("-V"));
+        assert!(!is_version_arg("--verbose"));
+        assert!(!is_version_arg("inspect"));
+        assert!(!is_version_arg(""));
+    }
 
     #[test]
     fn tokens() {
