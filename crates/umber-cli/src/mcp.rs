@@ -862,7 +862,17 @@ mod tests {
             assert_eq!(reply["step"], "import_asset", "{reply}");
             assert_eq!(reply["kind"], "brush", "{reply}");
             let target = write.join("lib/hard-round.umberbrush");
-            assert_eq!(reply["target"], target.display().to_string(), "{reply}");
+            // Compare canonical paths: the confined workspace reports the
+            // canonical form, which on Windows is the `\\?\` verbatim
+            // path with long names, while the temp dir can come back in
+            // 8.3 short form (`RUNNER~1`), so the strings differ for the
+            // same file.
+            let reported = PathBuf::from(reply["target"].as_str().expect("target string"));
+            assert_eq!(
+                reported.canonicalize().unwrap(),
+                target.canonicalize().unwrap(),
+                "{reply}"
+            );
             assert_eq!(
                 reply["bytes"],
                 std::fs::metadata(&src).unwrap().len(),
