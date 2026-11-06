@@ -1031,18 +1031,19 @@ mod kittest {
     }
 
     fn harness_with(brush: crate::brush_panel::BrushPanel) -> Harness<'static, AssetsHarness> {
-        harness_full(brush, None, None)
+        harness_full(brush, None, None, [480.0, 640.0])
     }
 
     fn harness_full(
         brush: crate::brush_panel::BrushPanel,
         search_path: Option<std::path::PathBuf>,
         saved_path: Option<std::path::PathBuf>,
+        size: [f32; 2],
     ) -> Harness<'static, AssetsHarness> {
         crate::i18n::init();
         Harness::<AssetsHarness>::builder()
             .with_step_dt(1.0 / 60.0)
-            .with_size([480.0, 640.0])
+            .with_size(size)
             .build_ui_state(
                 |ui, s: &mut AssetsHarness| {
                     let o = library_ui(
@@ -1396,7 +1397,12 @@ mod kittest {
         let dir = std::env::temp_dir().join(format!("umber-saved-searches-{}", std::process::id()));
         let saved_path = dir.join("assets_saved_searches.json");
         let _ = std::fs::remove_file(&saved_path);
-        let mut h = harness_full(seeded_brushes(), None, Some(saved_path.clone()));
+        let mut h = harness_full(
+            seeded_brushes(),
+            None,
+            Some(saved_path.clone()),
+            [480.0, 640.0],
+        );
         assert!(h.run_ok().is_some());
         // DEFAULT CLOSED: no save button in the resting panel.
         assert!(h.query_by_label(&tr("assets.save-current")).is_none());
@@ -1444,7 +1450,9 @@ mod kittest {
     /// materials, masks, and — opened — env maps.
     #[test]
     fn a_fresh_state_panel_lists_the_bundled_starter_rows() {
-        let mut h = harness_with(seeded_brushes());
+        // Tall window: the env-maps header sits on-screen so its click
+        // lands (at 640px with a full brush list it is below the fold).
+        let mut h = harness_full(seeded_brushes(), None, None, [480.0, 1600.0]);
         assert!(h.run_ok().is_some());
         let brush_names: Vec<String> = h
             .state()
@@ -1478,8 +1486,10 @@ mod kittest {
     }
 
     /// K2: a brush row with a `<stem>.stamp.png` sidecar keys its swatch
-    /// by the stamp file (THUMB_KIND_STAMP); the bundled shelf has no
-    /// sidecars, so it keys only the procedural swatch.
+    /// by the stamp file (THUMB_KIND_STAMP). The bundled shelf ships
+    /// sidecars for some starter presets (the content lane), so the pin
+    /// is: a stamp key exists exactly for the presets that HAVE a
+    /// sidecar, and those rows never also key the procedural swatch.
     #[test]
     fn brush_rows_key_stamp_sidecar_swatches_through_the_thumb_cache() {
         crate::i18n::init();
@@ -1517,13 +1527,33 @@ mod kittest {
         );
         let mut h2 = harness_with(seeded_brushes());
         assert!(h2.run_ok().is_some());
+        let with_sidecar: Vec<String> = h2
+            .state()
+            .brush
+            .library
+            .entries
+            .iter()
+            .filter(|e| e.source_path.with_extension("stamp.png").is_file())
+            .map(|e| e.preset.name.clone())
+            .collect();
+        let keys: Vec<_> = h2.state().panel.thumbs.keys().cloned().collect();
+        for name in &with_sidecar {
+            assert!(
+                keys.iter()
+                    .any(|k| k.kind == THUMB_KIND_STAMP && &k.name == name),
+                "sidecar preset {name} got its stamp-keyed swatch"
+            );
+            assert!(
+                !keys
+                    .iter()
+                    .any(|k| k.kind == THUMB_KIND_BRUSH && &k.name == name),
+                "the procedural key is not used when the sidecar exists: {name}"
+            );
+        }
         assert!(
-            h2.state()
-                .panel
-                .thumbs
-                .keys()
-                .all(|k| k.kind != THUMB_KIND_STAMP),
-            "no sidecars in the bundled shelf → no stamp-keyed swatches"
+            keys.iter()
+                .all(|k| k.kind != THUMB_KIND_STAMP || with_sidecar.contains(&k.name)),
+            "no phantom stamp keys without a sidecar file: {keys:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
