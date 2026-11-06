@@ -108,7 +108,19 @@ impl StylusPoller {
     /// every headless/CI run, by design.
     pub fn new() -> Self {
         Self {
-            stream: stylus::open_system_stream(),
+            // Never in unit tests: every `AppState::default()` lands here,
+            // one per test thread, and the XI2 backend opens its own
+            // `XOpenDisplay`. Xlib without `XInitThreads` is not
+            // thread-safe, so parallel tests on a machine with a live
+            // DISPLAY corrupted the heap ("corrupted size vs. prev_size",
+            // SIGSEGV in XIQueryVersion; ~1 in 12 local runs, 2026-11-06).
+            // CI never saw it: no DISPLAY in its test step. Tests that need
+            // a stream inject one through `with_stream`.
+            stream: if cfg!(test) {
+                None
+            } else {
+                stylus::open_system_stream()
+            },
             frame: 0,
             last_pressure: None,
             pressure_frame: 0,
