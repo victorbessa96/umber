@@ -1,0 +1,118 @@
+{
+  "format": "umber-brush-preset",
+  "version": 1,
+  "name": "Flat Liner",
+  "params": {
+    "color": [
+      0.85,
+      0.2,
+      0.1,
+      1.0
+    ],
+    "alpha": 0.9,
+    "hardness": 1.0,
+    "pressure_gamma": 1.0,
+    "pressure_curve": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.33333334,
+        0.33333334
+      ],
+      [
+        0.6666667,
+        0.6666667
+      ],
+      [
+        1.0,
+        1.0
+      ]
+    ],
+    "wash_mode": "build_up",
+    "falloff": "smooth",
+    "falloff_custom": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.33333334,
+        0.33333334
+      ],
+      [
+        0.6666667,
+        0.6666667
+      ],
+      [
+        1.0,
+        1.0
+      ]
+    ],
+    "stamped": true,
+    "stamp_angle": {
+      "mode": "follow_stroke",
+      "offset_degrees": 0.0
+    },
+    "jitter": {
+      "size": 0.0,
+      "angle_degrees": 0.0,
+      "position": 0.0,
+      "flow": 0.0
+    }
+  },
+  "one_euro": {
+    "min_cutoff": 1.0,
+    "beta": 0.007,
+    "d_cutoff": 1.0
+  },
+  "lazy_mouse": {
+    "radius_px": 12.0,
+    "strength": 0.75
+  },
+  "spacing": {
+    "dabs_per_radius": 10.0
+  },
+  "alpha_curve": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      0.33333334,
+      0.33333334
+    ],
+    [
+      0.6666667,
+      0.6666667
+    ],
+    [
+      1.0,
+      1.0
+    ]
+  ],
+  "radius_curve": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      0.33333334,
+      0.33333334
+    ],
+    [
+      0.6666667,
+      0.6666667
+    ],
+    [
+      1.0,
+      1.0
+    ]
+  ],
+  "stroke_method": {
+    "kind": "space"
+  },
+  "size": 1.0,
+  "catalog": "Detail"
+}

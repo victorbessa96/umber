@@ -760,7 +760,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{} must validate: {e}", path.display()));
             count += 1;
         }
-        assert_eq!(count, 12, "the starter library ships twelve presets");
+        assert_eq!(count, 16, "the starter library ships sixteen presets");
     }
 
     /// U3-5: the preset's own curves reach the engine params, and the
@@ -808,6 +808,122 @@ mod tests {
                 let p = BrushPreset::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 assert!(!p.catalog.is_empty(), "{} has a catalog", path.display());
             }
+        }
+    }
+
+    /// The 2026-11-06 brush-starter wave (assets lane): four original
+    /// stamped presets, each carrying its `<stem>.stamp.png` sidecar.
+    const STARTER_WAVE_PRESETS: [&str; 4] = [
+        "flat-liner.umberbrush",
+        "soft-pencil.umberbrush",
+        "speckle.umberbrush",
+        "wide-marker.umberbrush",
+    ];
+
+    #[test]
+    fn starter_wave_presets_round_trip_byte_identical() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/brushes");
+        for file in STARTER_WAVE_PRESETS {
+            let path = std::path::Path::new(dir).join(file);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()));
+            let preset = BrushPreset::from_json(&text)
+                .unwrap_or_else(|e| panic!("{} must parse: {e}", path.display()));
+            preset
+                .validate()
+                .unwrap_or_else(|e| panic!("{} must validate: {e}", path.display()));
+            assert!(preset.params.stamped, "{file} is a stamped starter preset");
+            let again = preset.to_json().expect("re-serialize");
+            assert_eq!(again, text, "{file} must re-serialize byte-identically");
+        }
+    }
+
+    /// Std-only structural PNG parse (magic, per-chunk CRCs, IHDR fields,
+    /// IEND, no trailing bytes): the crate has no image dependency, so the
+    /// sidecar pin checks the envelope here; assets/gen/check_stamps.py
+    /// re-checks it outside the build with a full IDAT inflate.
+    fn png_rgba8_envelope(bytes: &[u8]) -> Result<(u32, u32), String> {
+        const MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        if bytes.len() < 8 + 12 || bytes[..8] != MAGIC {
+            return Err("bad PNG magic".to_owned());
+        }
+        let mut pos = 8usize;
+        let mut dims = None;
+        while pos + 8 <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            let ctype = &bytes[pos + 4..pos + 8];
+            if pos + 12 + len > bytes.len() {
+                return Err(format!(
+                    "truncated {} chunk",
+                    String::from_utf8_lossy(ctype)
+                ));
+            }
+            let crc = u32::from_be_bytes(bytes[pos + 8 + len..pos + 12 + len].try_into().unwrap());
+            if crc != crc32(&bytes[pos + 4..pos + 8 + len]) {
+                return Err(format!(
+                    "bad CRC in {} chunk",
+                    String::from_utf8_lossy(ctype)
+                ));
+            }
+            match ctype {
+                b"IHDR" => {
+                    let data = &bytes[pos + 8..pos + 8 + len];
+                    if len != 13 {
+                        return Err("IHDR length must be 13".to_owned());
+                    }
+                    if data[8] != 8
+                        || data[9] != 6
+                        || data[10] != 0
+                        || data[11] != 0
+                        || data[12] != 0
+                    {
+                        return Err("sidecar must be 8-bit RGBA, non-interlaced".to_owned());
+                    }
+                    let w = u32::from_be_bytes(data[0..4].try_into().unwrap());
+                    let h = u32::from_be_bytes(data[4..8].try_into().unwrap());
+                    dims = Some((w, h));
+                }
+                b"IEND" => {
+                    pos += 12 + len;
+                    if pos != bytes.len() {
+                        return Err("trailing bytes after IEND".to_owned());
+                    }
+                    return dims.ok_or_else(|| "no IHDR chunk".to_owned());
+                }
+                _ => {}
+            }
+            pos += 12 + len;
+        }
+        Err("no IEND chunk".to_owned())
+    }
+
+    #[test]
+    fn starter_wave_stamp_sidecars_exist_and_parse_as_rgba8_png() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/brushes");
+        for file in STARTER_WAVE_PRESETS {
+            let path = std::path::Path::new(dir).join(file);
+            let preset = BrushPreset::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert!(
+                preset.params.stamped,
+                "{file} keys its stamp load on stamped:true"
+            );
+            let sidecar = path.with_extension("stamp.png");
+            let bytes = std::fs::read(&sidecar)
+                .unwrap_or_else(|e| panic!("{} must exist: {e}", sidecar.display()));
+            let (w, h) = png_rgba8_envelope(&bytes)
+                .unwrap_or_else(|e| panic!("{} must parse as PNG: {e}", sidecar.display()));
+            assert!(w > 0 && h > 0, "non-empty stamp");
         }
     }
 }
