@@ -1,9 +1,29 @@
 name: ci
 
+# CI is a RELEASE gate, not a per-push gate (Bessa 2026-11-06). Pushes to
+# master are gated locally by scripts/safe-push.py (ledger, ff, fmt,
+# scorecard, layers, clippy + test on the affected crates). The full
+# matrix runs:
+#   * on demand: `bash scripts/release-ci.sh` dispatches it on the exact
+#     bump SHA and waits; a version tag is cut only after it is green;
+#   * on version tags (release.yml packages the same tag);
+#   * weekly (Mondays 06:00 UTC), so Windows and runner-image drift
+#     surface within a week instead of at the next bump;
+#   * on pull requests.
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
   push:
-    branches: [master]
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
   pull_request:
+
+# A newer run on the same ref supersedes the older one (pull requests
+# re-pushed mid-run); dispatched and tag runs each get their own group.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

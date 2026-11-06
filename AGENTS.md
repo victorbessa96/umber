@@ -69,7 +69,7 @@ Clippy `-D warnings`:
 
 | Command | When | Notes |
 |---|---|---|
-| `cargo fmt --all --check` | before every push | CI runs this exact gate; a miss is a 4-minute round-trip for nothing. |
+| `cargo fmt --all --check` | before every push | `scripts/safe-push.py` runs it on the pushed commit. CI no longer runs per push (2026-11-06): it runs at version bumps (`scripts/release-ci.sh`), weekly, and on PRs. |
 | `bash scripts/verify-kill.sh <files…>` | before finishing, on every file you touched | **Rewrites files in place** (rustfmt). Hard-fails on brace imbalance and fmt only. The thiserror, `matches!` and doc-attachment checks are WARN; treat WARN as fail unless it's a false positive you can name. Safe on `.ftl` (fmt is skipped). |
 | `cargo clippy -p <crate> --all-targets -- -D warnings` | before finishing, per touched crate | Matches CI's clippy flags. Use `cargo check -p <crate>` for faster iteration. |
 | `bash scripts/pre-push.sh` | dragon only | Gates HEAD~1 plus staged files; useless on an uncommitted tree. It's the only gate with the neg-cmp and derivable-Default greps, so check those by hand. |

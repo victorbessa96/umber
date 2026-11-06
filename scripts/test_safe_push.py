@@ -40,6 +40,7 @@ class Repo:
         self.tree = os.path.join(self.base, "tree")
         self.bin = os.path.join(self.base, "bin")
         os.makedirs(self.bin)
+        self.cargo_codes = {}
         git(self.base, "init", "-q", "--bare", "-b", "master", self.origin)
         git(self.base, "clone", "-q", self.origin, self.tree)
         git(self.tree, "config", "user.email", "t@t")
@@ -49,16 +50,50 @@ class Repo:
         self.set_gate("fmt", 0)
         self.set_gate("score", 0)
         self.set_gate("layers", 0)
+        self.set_gate("clippy", 0)
+        self.set_gate("test", 0)
+        # Three crates: core <- paint <- app (app also on core), plus gui
+        # standalone, so the reverse-dependency closure is observable.
+        for d, deps in (
+            ("umber-core", []),
+            ("umber-paint", ["umber-core"]),
+            ("umber-app", ["umber-paint", "umber-core"]),
+            ("umber-gui", []),
+        ):
+            os.makedirs(os.path.join(self.tree, "crates", d, "src"))
+            lines = [f'[package]\nname = "{d}"\n\n[dependencies]']
+            lines += [f"{x} = {{ workspace = true }}" for x in deps]
+            self.write(f"crates/{d}/Cargo.toml", "\n".join(lines) + "\n")
+            self.write(f"crates/{d}/src/lib.rs", "\n")
+        shutil.copy(
+            os.path.join(os.path.dirname(GUARD), "ci-classify.py"),
+            os.path.join(self.tree, "scripts", "ci-classify.py"),
+        )
         self.write("README", "base\n")
         git(self.tree, "add", "-A")
         git(self.tree, "commit", "-q", "-m", "base")
         git(self.tree, "push", "-q", "origin", "HEAD:master")
 
     def set_gate(self, gate, code):
-        """Stub one gate: exit `code` (layers prints GREEN only on 0)."""
-        if gate == "fmt":
+        """Stub one gate: exit `code` (layers prints GREEN only on 0).
+
+        fmt / clippy / test share the stub `cargo` on PATH: each
+        subcommand reads its own exit code, and every call is logged to
+        bin/cargo.log so a case can see which crates were gated."""
+        if gate in ("fmt", "clippy", "test"):
+            self.cargo_codes[gate] = code
             path = os.path.join(self.bin, "cargo")
-            body = f"#!/bin/sh\nexit {code}\n"
+            log = os.path.join(self.bin, "cargo.log")
+            c = self.cargo_codes
+            body = (
+                "#!/bin/sh\n"
+                f'echo "$@" >> {log}\n'
+                'case "$1" in\n'
+                f"  fmt) exit {c.get('fmt', 0)} ;;\n"
+                f"  clippy) exit {c.get('clippy', 0)} ;;\n"
+                f"  test) exit {c.get('test', 0)} ;;\n"
+                "esac\nexit 0\n"
+            )
         elif gate == "score":
             path = os.path.join(self.tree, "scripts", "scorecard.py")
             body = f"import sys\nsys.exit({code})\n"
@@ -74,8 +109,24 @@ class Repo:
         with open(os.path.join(self.tree, name), "w") as fh:
             fh.write(text)
 
+    def cargo_calls(self):
+        path = os.path.join(self.bin, "cargo.log")
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return [ln.split() for ln in fh.read().splitlines()]
+
+    def gated_crates(self, sub):
+        """The -p crates of the last `cargo <sub>` call ([] = never ran)."""
+        calls = [c for c in self.cargo_calls() if c and c[0] == sub]
+        if not calls:
+            return []
+        args = calls[-1]
+        return sorted(args[i + 1] for i, a in enumerate(args) if a == "-p")
+
     def commit(self, name, session=None):
         """Commit one file; ledger it under `session` (None = outside dcommit)."""
+        os.makedirs(os.path.dirname(os.path.join(self.tree, name)) or self.tree, exist_ok=True)
         self.write(name, name + "\n")
         git(self.tree, "add", name)
         git(self.tree, "commit", "-q", "-m", f"add {name}")
@@ -89,6 +140,8 @@ class Repo:
         env = dict(os.environ)
         env["PATH"] = self.bin + os.pathsep + env["PATH"]
         env.pop("DRAGON_SESSION", None)
+        # A private lock: a sibling's real cargo must not stall the stubs.
+        env["UMBER_CARGO_LOCK"] = os.path.join(self.base, "cargo.lock")
         env.pop("HERMES_SESSION_ID", None)
         cmd = [sys.executable, GUARD, *args]
         if session:
@@ -189,12 +242,14 @@ def non_fast_forward_refused():
 
 @case
 def failing_gates_refused():
-    for gate in ("fmt", "score", "layers"):
+    for gate in ("fmt", "score", "layers", "clippy", "test"):
         r = Repo()
         try:
             # The gates read the pushed commit's tree, so a failing gate
-            # script must be IN the commit (fmt's stub is cargo on PATH).
+            # script must be IN the commit (cargo's stub is on PATH). A
+            # crate file rides so clippy/test have something to gate.
             r.set_gate(gate, 1)
+            r.write("crates/umber-gui/src/lib.rs", f"// {gate}\n")
             git(r.tree, "add", "-A")
             git(r.tree, "commit", "-q", "--allow-empty", "-m", f"break {gate}")
             h = git(r.tree, "rev-parse", "HEAD")
@@ -286,6 +341,59 @@ def a_commit_landing_mid_check_never_rides():
         expect(r.origin_head() == h, "pushed something other than the checked SHA")
     finally:
         r.close()
+
+
+@case
+def a_core_change_gates_core_and_every_dependent():
+    r = Repo()
+    try:
+        r.commit("crates/umber-core/src/x.rs", ME)
+        code, out = r.guard()
+        expect(code == 0, f"exit {code}: {out}")
+        want = ["umber-app", "umber-core", "umber-paint"]
+        expect(r.gated_crates("clippy") == want, f"clippy on {r.gated_crates('clippy')}")
+        expect(r.gated_crates("test") == want, f"test on {r.gated_crates('test')}")
+    finally:
+        r.close()
+
+
+@case
+def a_leaf_change_gates_only_the_leaf():
+    r = Repo()
+    try:
+        r.commit("crates/umber-gui/src/x.rs", ME)
+        code, out = r.guard()
+        expect(code == 0, f"exit {code}: {out}")
+        expect(r.gated_crates("test") == ["umber-gui"], f"test on {r.gated_crates('test')}")
+    finally:
+        r.close()
+
+
+@case
+def a_docs_or_scripts_change_skips_the_cargo_gates():
+    r = Repo()
+    try:
+        r.commit("docs/note.md", ME)
+        r.commit("scripts/tool.py", ME)
+        code, out = r.guard()
+        expect(code == 0 and "gates skipped" in out, f"exit {code}: {out}")
+        expect(not r.gated_crates("clippy") and not r.gated_crates("test"), str(r.cargo_calls()))
+    finally:
+        r.close()
+
+
+@case
+def a_lockfile_or_unknown_path_gates_every_crate():
+    for path in ("Cargo.lock", "build-helpers/gen.txt"):
+        r = Repo()
+        try:
+            r.commit(path, ME)
+            code, out = r.guard()
+            expect(code == 0, f"{path}: exit {code}: {out}")
+            want = ["umber-app", "umber-core", "umber-gui", "umber-paint"]
+            expect(r.gated_crates("test") == want, f"{path}: test on {r.gated_crates('test')}")
+        finally:
+            r.close()
 
 
 @case

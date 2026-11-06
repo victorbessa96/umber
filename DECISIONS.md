@@ -115,3 +115,12 @@ Context: the night-hunt session pushed the full wave (133dd12..f867215) to origi
 Options rejected: push my commits too (compounds the breach); revert the sibling's push from origin (history destruction for a quality-green wave Bessa may ratify as-is).
 Owner: Razul; the ratify/rollback call is Bessa's.
 Revisit when: Bessa answers either way — ratify (the push stands, the gate flips for the next wave) or rollback (revert-commits, never force-push).
+
+
+## [2026-11-06 15:5x] ci-release-gate-not-per-push
+Decision: `.github/workflows/ci.yml` no longer runs on every push to master. It runs on `workflow_dispatch` (driven by `scripts/release-ci.sh` when preparing a version bump: dispatch on the exact tip, wait, tag only after green on both platforms), on version tags, weekly (Mondays 06:00 UTC) and on pull requests. Pushes stay open; `scripts/safe-push.py` becomes the per-push gate and gains clippy `-D warnings` + `cargo test` on the crates the pushed range touches plus their reverse dependencies (docs/scripts-only ranges skip cargo; root manifests, the lockfile and unknown paths gate every crate).
+Context: Bessa, 2026-11-06: "run through the CI only when bumping up the version ... leave commits and push available, but test it for release when preparing the bumps." Nine CI runs stacked in one afternoon of shared-tree pushes, each green run ~20-26 min on the Windows leg.
+Pitfall named in the same session: `scripts/release-ci.sh` gates only origin/master's TIP (`workflow_dispatch` runs the branch head); gating an older SHA refuses with exit 2, so a sibling push after the bump means re-running it on the new tip.
+Options rejected: CI strictly at bumps with no other runs (Windows and runner-image drift, the 2026-10-21 ubuntu-26.04 SIGSEGV and the 2026-11-06 missing libxkbcommon-x11, would surface weeks late inside a release; the weekly run bounds that to a week); keeping per-push CI with only `cancel-in-progress` (still a run per push).
+Owner: Razul (proposal), Bessa (go-ahead "Follow your suggestions for the CI").
+Revisit when: a Windows-only regression reaches a bump that the weekly run did not catch, or pushes become rare enough that per-push CI costs nothing.
