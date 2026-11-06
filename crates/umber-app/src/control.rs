@@ -46,6 +46,7 @@ pub const METHODS: &[&str] = &[
     "mesh.load",
     "project.open",
     "job.status",
+    "assets.gc",
 ];
 
 /// How long a connection thread waits for the UI thread to answer a queued
@@ -360,6 +361,16 @@ fn handle_conn(
                     }
                 }
             }
+            "assets.gc" => match assets_gc_reply(&req) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = control::write_json_line(
+                        &mut writer,
+                        &json!({"id": id, "ok": false, "error": e}),
+                    );
+                    continue;
+                }
+            },
             "command.run" => {
                 let cmd_id = req
                     .pointer("/params/id")
@@ -410,6 +421,41 @@ fn handle_conn(
             &json!({"id": id, "ok": true, "result": result}),
         );
     }
+}
+
+/// `assets.gc {path, dry_run?, min_age_secs?}`: one AssetStore GC pass
+/// over the project folder at `path` (requirements row 121). Runs on the
+/// connection thread: it reads only the project's files, never egui
+/// state, and refuses on its own while a save is staged or pending
+/// (`umber_app::asset_gc`'s rules). `dry_run` defaults to TRUE, so a
+/// bare call only lists what would go and the bytes reclaimable.
+pub fn assets_gc_reply(req: &Value) -> Result<Value, String> {
+    let path = req
+        .pointer("/params/path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| "missing params.path (the project folder)".to_string())?;
+    if !path.is_dir() {
+        return Err(format!("no such folder: {}", path.display()));
+    }
+    let mut options = umber_app::asset_gc::GcOptions::default();
+    match req.pointer("/params/dry_run") {
+        None | Some(Value::Null) => {}
+        Some(Value::Bool(b)) => options.dry_run = *b,
+        Some(_) => return Err("params.dry_run must be a boolean".to_string()),
+    }
+    match req.pointer("/params/min_age_secs") {
+        None | Some(Value::Null) => {}
+        Some(v) => {
+            let secs = v
+                .as_u64()
+                .ok_or_else(|| "params.min_age_secs must be a non-negative integer".to_string())?;
+            options.min_age = Duration::from_secs(secs);
+        }
+    }
+    umber_app::asset_gc::collect(&path, options)
+        .map(|report| report.to_json())
+        .map_err(|e| e.to_string())
 }
 
 /// Forward a request to the UI thread's queue and wait for the reply.
@@ -876,6 +922,47 @@ mod tests {
         // or an idle window never drains the queue (2026-11-05 headless smoke).
         assert!(ctx.has_requested_repaint());
         drop(drain);
+    }
+
+    #[test]
+    fn assets_gc_runs_on_the_connection_thread_dry_by_default() {
+        let dir = std::env::temp_dir().join(format!("umber-control-gc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("paint")).unwrap();
+        let store = umber_core::AssetStore::new(&dir);
+        let live = store.store(b"live", "png").unwrap();
+        let orphan = store.store(b"orphan!", "png").unwrap();
+        let line = format!("tile-1001.png {} png 4 tile-1001.png.tmp.1", live.hash);
+        std::fs::write(
+            dir.join("paint/manifest.txt"),
+            format!("# Umber paint commit v2\n{line}\n"),
+        )
+        .unwrap();
+        // No drain thread: a UI-forwarded method would time out here.
+        let server = start(0, egui::Context::default()).unwrap();
+        let token = server.token.clone();
+        let path = dir.display().to_string();
+        let replies = roundtrip(
+            server.port,
+            &token,
+            &[
+                json!({"id": 0, "method": "auth", "params": {"token": token}}).to_string(),
+                json!({"id": 1, "method": "assets.gc", "params": {"path": path, "min_age_secs": 0}}).to_string(),
+                json!({"id": 2, "method": "assets.gc", "params": {"path": path, "dry_run": false, "min_age_secs": 0}}).to_string(),
+                json!({"id": 3, "method": "assets.gc", "params": {}}).to_string(),
+                json!({"id": 4, "method": "assets.gc", "params": {"path": path, "dry_run": "yes"}}).to_string(),
+            ],
+        );
+        assert_eq!(replies[1]["ok"], true, "{}", replies[1]);
+        assert_eq!(replies[1]["result"]["dry_run"], true);
+        assert_eq!(replies[1]["result"]["orphan_bytes"], 7);
+        assert_eq!(replies[1]["result"]["deleted_blobs"], 0);
+        assert_eq!(replies[2]["result"]["deleted_bytes"], 7);
+        assert_eq!(replies[3]["ok"], false);
+        assert_eq!(replies[4]["ok"], false);
+        assert!(store.contains(&live));
+        assert!(!store.contains(&orphan));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

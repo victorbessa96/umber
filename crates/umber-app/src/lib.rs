@@ -66,6 +66,9 @@ pub mod history_panel;
 pub mod i18n;
 // `document` names `layers_panel`; `toolbar` names `rich_tooltip`: the
 // lib target needs the whole `crate::` closure of the kittest modules.
+/// AssetStore garbage collection (requirements row 121): manifest-
+/// referenced live set, dry run, crash-safe rename-then-remove deletes.
+pub mod asset_gc;
 pub mod layers_panel;
 pub mod palette;
 pub mod psd_import;

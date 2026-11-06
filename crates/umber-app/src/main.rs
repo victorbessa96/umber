@@ -62,8 +62,9 @@
 //!   so its blob is fsynced through a mirrored shard path (pinned by a
 //!   test against the real store). Power-loss durability rests on
 //!   `sync_all` + the unix directory fsync; only process-crash states are
-//!   test-pinned. v1 boundaries: no store GC (superseded paint blobs
-//!   accumulate under `assets/` until a store-wide GC lands); each saved
+//!   test-pinned. Superseded blobs are reclaimed by the store GC
+//!   (`asset_gc`: `umber gc <project>` / control `assets.gc`, dry run by
+//!   default, manifest-referenced live set). v1 boundaries: each saved
 //!   tile is written twice (sidecar + blob) — hard-links were not worth
 //!   the cross-platform surface; a hand-clobbered sidecar is not checked
 //!   against `manifest.txt` on open (the sidecar wins).
@@ -6066,6 +6067,15 @@ fn main() -> eframe::Result<()> {
     // UI strings: catalogs + locale on this (the UI) thread, before any
     // panel renders (docs/specs/i18n-design.md).
     i18n::init();
+
+    // `umber gc <project> [--delete]`: the AssetStore GC (requirements
+    // row 121), headless; it exits before any window or GPU work.
+    if std::env::args().nth(1).as_deref() == Some("gc") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let code =
+            umber_app::asset_gc::run_cli(&args, &mut std::io::stdout(), &mut std::io::stderr());
+        std::process::exit(code);
+    }
 
     // Paint-compositor requirement (umber-gpu paint claw reviewer checklist
     // item #1): read_write storage textures need the adapter-specific format
