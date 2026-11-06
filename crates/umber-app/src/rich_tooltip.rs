@@ -74,6 +74,15 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::ViewportPreset3d => ("viewkeys.preset-3d", None),
         ShellAction::ViewportPreset2d => ("viewkeys.preset-2d", None),
         ShellAction::ViewportPresetSwap => ("viewkeys.preset-swap", None),
+        ShellAction::AddPaintLayer => ("cmd-layer-add-paint", None),
+        ShellAction::AddFillLayer => ("cmd-layer-add-fill", None),
+        ShellAction::AddFolderLayer => ("cmd-layer-add-folder", None),
+        ShellAction::ShowLayers => ("cmd-window-show-layers", None),
+        ShellAction::ShowTextureSets => ("cmd-window-show-texture-sets", None),
+        ShellAction::ShowAssets => ("cmd-window-show-assets", None),
+        ShellAction::ShowBakes => ("cmd-window-show-bakes", None),
+        ShellAction::ShowExport => ("cmd-window-show-export", None),
+        ShellAction::ShowHistory => ("cmd-window-show-history", None),
     }
 }
 

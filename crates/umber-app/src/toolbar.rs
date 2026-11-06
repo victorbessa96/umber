@@ -154,6 +154,20 @@ pub enum ShellAction {
     ViewportPreset2d,
     /// Viewport preset: swap the 3D and 2D views' places. F5.
     ViewportPresetSwap,
+    /// Add a paint / fill / folder layer on top of the active set's
+    /// stack and select it (the Layers panel's creation row, UI/UX U6
+    /// A2-4: reachable from the command palette and the control channel).
+    AddPaintLayer,
+    AddFillLayer,
+    AddFolderLayer,
+    /// Dock (if closed) and bring forward a side panel (U6 A2-4: the
+    /// palette reaches every panel, Blender F3's "every operator" rule).
+    ShowLayers,
+    ShowTextureSets,
+    ShowAssets,
+    ShowBakes,
+    ShowExport,
+    ShowHistory,
 }
 
 impl ShellAction {
@@ -197,6 +211,15 @@ impl ShellAction {
             ViewportPreset3d => "view.viewport_preset_3d",
             ViewportPreset2d => "view.viewport_preset_2d",
             ViewportPresetSwap => "view.viewport_preset_swap",
+            AddPaintLayer => "layer.add_paint",
+            AddFillLayer => "layer.add_fill",
+            AddFolderLayer => "layer.add_folder",
+            ShowLayers => "window.show_layers",
+            ShowTextureSets => "window.show_texture_sets",
+            ShowAssets => "window.show_assets",
+            ShowBakes => "window.show_bakes",
+            ShowExport => "window.show_export",
+            ShowHistory => "window.show_history",
         }
     }
 
@@ -237,6 +260,15 @@ impl ShellAction {
             ViewportPreset3d => "cmd-view-viewport-preset-3d",
             ViewportPreset2d => "cmd-view-viewport-preset-2d",
             ViewportPresetSwap => "cmd-view-viewport-preset-swap",
+            AddPaintLayer => "cmd-layer-add-paint",
+            AddFillLayer => "cmd-layer-add-fill",
+            AddFolderLayer => "cmd-layer-add-folder",
+            ShowLayers => "cmd-window-show-layers",
+            ShowTextureSets => "cmd-window-show-texture-sets",
+            ShowAssets => "cmd-window-show-assets",
+            ShowBakes => "cmd-window-show-bakes",
+            ShowExport => "cmd-window-show-export",
+            ShowHistory => "cmd-window-show-history",
         }
     }
 
@@ -276,6 +308,15 @@ impl ShellAction {
             "view.viewport_preset_3d" => Some(ViewportPreset3d),
             "view.viewport_preset_2d" => Some(ViewportPreset2d),
             "view.viewport_preset_swap" => Some(ViewportPresetSwap),
+            "layer.add_paint" => Some(AddPaintLayer),
+            "layer.add_fill" => Some(AddFillLayer),
+            "layer.add_folder" => Some(AddFolderLayer),
+            "window.show_layers" => Some(ShowLayers),
+            "window.show_texture_sets" => Some(ShowTextureSets),
+            "window.show_assets" => Some(ShowAssets),
+            "window.show_bakes" => Some(ShowBakes),
+            "window.show_export" => Some(ShowExport),
+            "window.show_history" => Some(ShowHistory),
             // "tool.select" carries a ToolKind payload: no fixed action.
             _ => None,
         }
@@ -1086,6 +1127,15 @@ mod tests {
             ShellAction::ViewportPreset3d,
             ShellAction::ViewportPreset2d,
             ShellAction::ViewportPresetSwap,
+            ShellAction::AddPaintLayer,
+            ShellAction::AddFillLayer,
+            ShellAction::AddFolderLayer,
+            ShellAction::ShowLayers,
+            ShellAction::ShowTextureSets,
+            ShellAction::ShowAssets,
+            ShellAction::ShowBakes,
+            ShellAction::ShowExport,
+            ShellAction::ShowHistory,
         ];
         let mut ids = std::collections::HashSet::new();
         for action in all {

@@ -143,6 +143,18 @@ pub fn apply_group_pick(dock: &mut DockState<Panel>, pick: GroupPick) -> bool {
 }
 
 /// Whether `panel` is docked anywhere.
+/// Docks `panel` if it is closed (into the focused leaf, as Window >
+/// Panels does) and makes it the active tab of its leaf (UI/UX U6 A2-4:
+/// the palette's "Show … panel" commands).
+pub fn show_panel(dock: &mut DockState<Panel>, panel: &Panel) {
+    if dock.find_tab(panel).is_none() {
+        toggle_panel(dock, panel);
+    }
+    if let Some(path) = dock.find_tab(panel) {
+        let _ = dock.set_active_tab(path);
+    }
+}
+
 pub fn is_open(dock: &DockState<Panel>, panel: &Panel) -> bool {
     dock.find_tab(panel).is_some()
 }

@@ -141,6 +141,51 @@ pub const CATALOG: &[Entry] = &[
     ),
     e(ShellAction::NextMeshMap, "viewkeys.next-map", "menu.view"),
     e(ShellAction::PrevMeshMap, "viewkeys.prev-map", "menu.view"),
+    e(
+        ShellAction::AddPaintLayer,
+        "cmd-layer-add-paint",
+        "panel.layers",
+    ),
+    e(
+        ShellAction::AddFillLayer,
+        "cmd-layer-add-fill",
+        "panel.layers",
+    ),
+    e(
+        ShellAction::AddFolderLayer,
+        "cmd-layer-add-folder",
+        "panel.layers",
+    ),
+    e(
+        ShellAction::ShowLayers,
+        "cmd-window-show-layers",
+        "menu.window",
+    ),
+    e(
+        ShellAction::ShowTextureSets,
+        "cmd-window-show-texture-sets",
+        "menu.window",
+    ),
+    e(
+        ShellAction::ShowAssets,
+        "cmd-window-show-assets",
+        "menu.window",
+    ),
+    e(
+        ShellAction::ShowBakes,
+        "cmd-window-show-bakes",
+        "menu.window",
+    ),
+    e(
+        ShellAction::ShowExport,
+        "cmd-window-show-export",
+        "menu.window",
+    ),
+    e(
+        ShellAction::ShowHistory,
+        "cmd-window-show-history",
+        "menu.window",
+    ),
 ];
 
 /// Most results shown at once.

@@ -1072,6 +1072,15 @@ cmd-window-command-palette = Paleta de comandos
 cmd-window-preferences = Preferências
 cmd-window-next-workspace = Próximo espaço de trabalho
 cmd-window-prev-workspace = Espaço de trabalho anterior
+cmd-layer-add-paint = Adicionar camada de pintura
+cmd-layer-add-fill = Adicionar camada de preenchimento
+cmd-layer-add-folder = Adicionar pasta de camadas
+cmd-window-show-layers = Mostrar painel Camadas
+cmd-window-show-texture-sets = Mostrar painel Conjuntos de texturas
+cmd-window-show-assets = Mostrar painel Assets
+cmd-window-show-bakes = Mostrar painel Bakes
+cmd-window-show-export = Mostrar painel Exportação
+cmd-window-show-history = Mostrar painel Histórico
 
 ## The panel-group menu under each tab bar's end button (UI/UX U2-3).
 dock =

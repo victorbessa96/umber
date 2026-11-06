@@ -295,6 +295,15 @@ pub const ALL_ACTIONS: &[ShellAction] = &[
     ShellAction::ViewportPreset3d,
     ShellAction::ViewportPreset2d,
     ShellAction::ViewportPresetSwap,
+    ShellAction::AddPaintLayer,
+    ShellAction::AddFillLayer,
+    ShellAction::AddFolderLayer,
+    ShellAction::ShowLayers,
+    ShellAction::ShowTextureSets,
+    ShellAction::ShowAssets,
+    ShellAction::ShowBakes,
+    ShellAction::ShowExport,
+    ShellAction::ShowHistory,
 ];
 
 /// The persisted name of `action`: the variant's Debug spelling
@@ -1069,6 +1078,11 @@ pub fn availability(action: ShellAction, state: ShellState) -> Result<(), &'stat
         ShellAction::BrushSmaller | ShellAction::BrushLarger if !state.paint_available => {
             Err("action.unavailable-no-mesh")
         }
+        ShellAction::AddPaintLayer | ShellAction::AddFillLayer | ShellAction::AddFolderLayer
+            if !state.paint_available =>
+        {
+            Err("action.unavailable-no-mesh")
+        }
         _ => Ok(()),
     }
 }
@@ -1372,10 +1386,19 @@ mod tests {
             | ShellAction::ViewportPresetBoth
             | ShellAction::ViewportPreset3d
             | ShellAction::ViewportPreset2d
-            | ShellAction::ViewportPresetSwap => {}
+            | ShellAction::ViewportPresetSwap
+            | ShellAction::AddPaintLayer
+            | ShellAction::AddFillLayer
+            | ShellAction::AddFolderLayer
+            | ShellAction::ShowLayers
+            | ShellAction::ShowTextureSets
+            | ShellAction::ShowAssets
+            | ShellAction::ShowBakes
+            | ShellAction::ShowExport
+            | ShellAction::ShowHistory => {}
         };
         ALL_ACTIONS.iter().copied().for_each(guard);
-        assert_eq!(ALL_ACTIONS.len(), 30 + ToolKind::ALL.len());
+        assert_eq!(ALL_ACTIONS.len(), 39 + ToolKind::ALL.len());
         for kind in ToolKind::ALL {
             assert!(
                 ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),

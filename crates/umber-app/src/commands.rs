@@ -137,6 +137,58 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
                 paint.set_brush_size(next);
             }
         }
+        // U6 A2-4: the Layers panel's creation row, by id. Same command
+        // and the same add-then-select rule as the panel's "+" row.
+        ShellAction::AddPaintLayer | ShellAction::AddFillLayer | ShellAction::AddFolderLayer => {
+            let kind = match action {
+                ShellAction::AddPaintLayer => crate::document::NewLayer::Paint,
+                ShellAction::AddFillLayer => crate::document::NewLayer::Fill,
+                _ => crate::document::NewLayer::Folder,
+            };
+            let doc = &mut app.state.doc;
+            let n = doc.layers().len() + 1;
+            doc.run(umber_core::layers::LayerCommand::add(
+                kind.default_name(n),
+                kind.kind(),
+            ));
+            if let Some(top) = doc.layers().last() {
+                let target = umber_paint::paint_state::PlaneOwner::Layer(top.id);
+                if let Some(paint) = app.state.paint.as_mut() {
+                    paint.set_active_target(target);
+                }
+                crate::sync_gesture_selection(&mut app.state.layer_gestures, target);
+            }
+        }
+        ShellAction::ShowLayers => {
+            app.focus.restore(&mut app.dock);
+            shell_menu::show_panel(&mut app.dock, &Panel::LayerStack);
+            app.save_layouts();
+        }
+        ShellAction::ShowTextureSets => {
+            app.focus.restore(&mut app.dock);
+            shell_menu::show_panel(&mut app.dock, &Panel::TextureSets);
+            app.save_layouts();
+        }
+        ShellAction::ShowAssets => {
+            app.focus.restore(&mut app.dock);
+            shell_menu::show_panel(&mut app.dock, &Panel::Assets);
+            app.save_layouts();
+        }
+        ShellAction::ShowBakes => {
+            app.focus.restore(&mut app.dock);
+            shell_menu::show_panel(&mut app.dock, &Panel::Bakes);
+            app.save_layouts();
+        }
+        ShellAction::ShowExport => {
+            app.focus.restore(&mut app.dock);
+            shell_menu::show_panel(&mut app.dock, &Panel::Export);
+            app.save_layouts();
+        }
+        ShellAction::ShowHistory => {
+            app.focus.restore(&mut app.dock);
+            shell_menu::show_panel(&mut app.dock, &Panel::History);
+            app.save_layouts();
+        }
         // Applied by `ViewToggles::apply` above.
         ShellAction::ToggleWireframe | ShellAction::ToggleGrid | ShellAction::CycleViewMode => {}
     }
@@ -203,6 +255,15 @@ pub const COMMAND_IDS: &[&str] = &[
     "window.preferences",
     "window.next_workspace",
     "window.prev_workspace",
+    "layer.add_paint",
+    "layer.add_fill",
+    "layer.add_folder",
+    "window.show_layers",
+    "window.show_texture_sets",
+    "window.show_assets",
+    "window.show_bakes",
+    "window.show_export",
+    "window.show_history",
 ];
 
 /// Dispatch by dotted id — the path menus, shortcuts, the agent protocol
@@ -288,6 +349,51 @@ mod tests {
                 "cmd key missing from en-US catalog"
             );
         }
+    }
+
+    /// U6 A2-4: the layer and panel commands are in the registry, the
+    /// palette and both catalogs, so the command palette and the control
+    /// channel reach them.
+    #[test]
+    fn layer_and_panel_commands_are_registered() {
+        for id in [
+            "layer.add_paint",
+            "layer.add_fill",
+            "layer.add_folder",
+            "window.show_layers",
+            "window.show_texture_sets",
+            "window.show_assets",
+            "window.show_bakes",
+            "window.show_export",
+            "window.show_history",
+        ] {
+            assert!(COMMAND_IDS.contains(&id), "{id} registered");
+            let action = ShellAction::from_id(id).expect(id);
+            assert!(
+                crate::palette::CATALOG.iter().any(|e| e.action == action),
+                "{id} in the palette"
+            );
+        }
+    }
+
+    #[test]
+    fn show_panel_docks_a_closed_panel_and_activates_it() {
+        let mut dock = crate::workspaces::preset(crate::workspaces::Workspace::Paint);
+        crate::shell_menu::toggle_panel(&mut dock, &Panel::Bakes);
+        assert!(!crate::shell_menu::is_open(&dock, &Panel::Bakes));
+        crate::shell_menu::show_panel(&mut dock, &Panel::Bakes);
+        let at = dock.find_tab(&Panel::Bakes).expect("docked");
+        let leaf = dock.leaf(at.node_path()).unwrap();
+        assert_eq!(leaf.active, at.tab, "brought forward");
+        // An open but hidden tab is brought forward, not duplicated.
+        let hist = dock.find_tab(&Panel::History).unwrap();
+        crate::shell_menu::show_panel(&mut dock, &Panel::History);
+        assert_eq!(dock.leaf(hist.node_path()).unwrap().active, hist.tab);
+        let count = dock
+            .iter_all_tabs()
+            .filter(|(_, p)| **p == Panel::History)
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]
