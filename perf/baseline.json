@@ -1,9 +1,17 @@
 {
-  "seeded": "2026-10-19",
-  "adapter": "lavapipe (CI software Vulkan) — reseeded from same-tip master runs after the 2026-10-19 runner-fleet drift conviction: the 2026-10-16 baseline's own tip (5e0d89e, which measured 45.54/48.31 on 10-16/17) reads 89.29 benched 10-19, and five tips spanning 5e0d89e..0955ac8 all read 78-91 on today's fleet — no code regression exists (the four-leg bisect: docs/perf/protocol.md's 2026-10-19 sections); GitHub's ubuntu-24.04 fleet shifted CPU throughput ~x0.5 between 10-17 and 10-19 on this llvmpipe-bound bench, with the image byte-identical both eras (v20261012.334.1)",
-  "note": "Same-tip means of the TWO 0955ac8 master runs measured 2026-10-19 (39263843229 at 13:52Z + 39268968173 at 14:26Z): viewport_mean (83.4674+87.2804)/2 = 85.3739; viewport_p95 (91.2494+95.6265)/2 = 93.43795; input-photon p50 (0.2189+0.1665)/2 = 0.1927; p95 (10.2041+10.1557)/2 = 10.1799. The x1.06 same-tip 'noise floor' of 10-16/17 was two samples of a fleet in transition — today's same-tip spread (83.5 vs 87.3, x1.05) is the live floor; the drift-hardening prescription (N>=3-run medians before any REGRESSION verdict + a same-tip canary leg on any red) is the named follow-up kill. Baselines are per-hardware-class AND per-fleet-era (protocol: 'Baselines are per-hardware-class'); this file is the CI lavapipe class, 2026-10-19 fleet era. Extra keys (seeded/adapter/note) are inert to perf_compare.py, which reads the flat metric keys.",
-  "viewport_p95_ms": 93.43795,
-  "viewport_mean_ms": 85.3739,
-  "input_photon_p95_ms": 10.1799,
-  "input_photon_p50_ms": 0.1927
+  "date": "2026-11-06",
+  "commit": "ac7b5c428241e0f5a47ae315715211b0439e165a",
+  "gpu": "Intel(R) HD Graphics 530 (SKL GT2) \u2014 Intel open-source Mesa driver, Mesa 26.2.6-arch1.1 | real GPU (IntegratedGpu, Vulkan backend) | adapter census: Vulkan/IntegratedGpu",
+  "resolution": 4096,
+  "mesh_tris": 1002252,
+  "samples": 300,
+  "p50_ms": 121.7853,
+  "p95_ms": 183.1327,
+  "viewport_fps_estimate": 7.567,
+  "viewport_mean_ms": 132.1488,
+  "viewport_p95_ms": 184.0395,
+  "input_photon_p50_ms": 121.7853,
+  "input_photon_p95_ms": 183.1327,
+  "adapter": "Intel(R) HD Graphics 530 (SKL GT2) \u2014 Intel open-source Mesa driver, Mesa 26.2.6-arch1.1 | real GPU (IntegratedGpu, Vulkan backend) | adapter census: Vulkan/IntegratedGpu",
+  "note": "worklist #2 re-baseline on the 4096-default paint path: 300 input->photon samples over the app's --control JSONL channel (input = command.run drained at frame top; photon = viewport.screenshot reply, egui's post-present Screenshot event; sample = send->reply wall ms, PNG encode included in the photon leg). Viewport frame times are consecutive screenshot-reply intervals (299 frames). Mesh = cube_grid(289) GLB (1002252 tris) generated under scratch; scratch project pins texture set 'ReferenceMaterial' at resolution 4096 (project.json + paint/target_sizes.txt). Present proxy is post-present, so input->photon is a lower bound on true event->present (same honesty note as input_photon.rs). Non-TRACKED keys are inert to perf_compare.py."
 }
