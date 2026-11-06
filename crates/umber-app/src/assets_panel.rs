@@ -1192,6 +1192,12 @@ mod kittest {
             "one cached swatch each"
         );
         let target = names.last().unwrap().clone();
+        // The shelf scrolls horizontally: with the wave-2 library (18
+        // brushes) the last swatch sits past the 900 px harness, where a
+        // click lands on nothing. Scroll it into view first, as a user would.
+        h.get_by_role_and_label(egui::accesskit::Role::Button, &target)
+            .scroll_to_me();
+        h.run();
         h.get_by_role_and_label(egui::accesskit::Role::Button, &target)
             .click();
         h.run();
@@ -1394,7 +1400,15 @@ mod kittest {
     /// studio maps, and clicking a row yields its path in the outcome.
     #[test]
     fn the_env_maps_category_is_closed_by_default_and_applies_on_click() {
-        let mut h = harness();
+        // Tall: the wave-2 library (31 smart assets) pushes the fourth
+        // category below a 640 px panel, where a click lands on nothing
+        // and the opened rows draw off-screen (egui culls them).
+        let mut h = harness_full(
+            crate::brush_panel::BrushPanel::new(),
+            None,
+            None,
+            [480.0, 2400.0],
+        );
         assert!(h.run_ok().is_some());
         let header = tr("assets.env-maps");
         assert!(h.query_by_label(&header).is_some(), "the header draws");
