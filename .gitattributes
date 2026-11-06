@@ -10,3 +10,10 @@
 *.wgsl text eol=lf
 *.json text eol=lf
 *.sh   text eol=lf
+# Asset files the starter library ships as pretty JSON and pins byte-for-
+# byte on load -> save (umber-core smart.rs starter_*_roundtrip tests):
+# a Windows CRLF checkout broke all twelve (windows-latest, 2026-11-06).
+*.umbersmart  text eol=lf
+*.umbermask   text eol=lf
+*.umberbrush  text eol=lf
+*.umberfilter text eol=lf
