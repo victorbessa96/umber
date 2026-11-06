@@ -770,6 +770,11 @@ pub struct BakesPanel {
     output_dir: PathBuf,
     status: String,
     last_records: Vec<BakeRecord>,
+    /// The latest landed job failed. `last_records` deliberately keeps the
+    /// last SUCCESSFUL bake (the curvature feed and the export's baked
+    /// normal read it), so `job.status` needs this to avoid reporting that
+    /// older bake's files as the failed job's outputs.
+    last_failed: bool,
     /// Which present tiles a Bake covers (default: all present).
     tiles: TileSelection,
     /// The loaded mesh's present tiles, cached across frames.
@@ -887,6 +892,7 @@ impl BakesPanel {
             output_dir,
             status: tr("bakes.no-bake-yet"),
             last_records: Vec::new(),
+            last_failed: false,
             tiles: TileSelection::new(),
             mesh_tiles: MeshTilesCache::default(),
             job: None,
@@ -1395,6 +1401,12 @@ impl BakesPanel {
     /// The last bake's per-map records.
     pub fn last_records(&self) -> &[BakeRecord] {
         &self.last_records
+    }
+
+    /// Whether the latest landed bake job failed (its outputs are none;
+    /// [`Self::last_records`] still holds the last successful bake's).
+    pub fn last_job_failed(&self) -> bool {
+        self.last_failed
     }
 
     /// Draws the panel: the settings / maps / sets [`umber_gui::ParamGroup`]
@@ -2040,12 +2052,14 @@ impl BakesPanel {
                     }
                 }
                 self.last_records = records;
+                self.last_failed = false;
             }
             Err(err) => {
                 log::error!("bake failed: {err:#}");
                 let args = [("error", FluentValue::from(format!("{err:#}")))];
                 self.status = tr_args("bakes.failed", args);
                 self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
+                self.last_failed = true;
             }
         }
     }
@@ -2966,6 +2980,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_failed_bake_is_flagged_and_keeps_the_last_good_records() {
+        // job.status must tell a failed job from the last good one: the
+        // records stay (consumers read them), the flag says it failed.
+        let mut p = panel();
+        let record = BakeRecord {
+            selection: Some(BakeSelection::Ao),
+            set: "Cube".into(),
+            tile: FIRST_TILE,
+            path: PathBuf::from("/tmp/umber-bakes-test/cube_ao.png"),
+            elapsed_ms: 1,
+            skew_clamped: 0,
+        };
+        p.apply_outcome(Ok(vec![record]), &[], &[]);
+        assert_eq!(p.last_records().len(), 1);
+        assert!(!p.last_job_failed());
+        p.apply_outcome(Err(anyhow::anyhow!("gpu lost")), &[], &[]);
+        assert!(p.last_job_failed(), "the failure is visible to job.status");
+        // The last good bake's records stay (the curvature feed's contract,
+        // failed_job_reaches_the_status_line_and_keeps_old_records).
+        assert_eq!(p.last_records().len(), 1);
+        assert!(p.status.contains("gpu lost"), "{}", p.status);
+    }
 
     fn panel() -> BakesPanel {
         BakesPanel::new(PathBuf::from("/tmp/umber-bakes-test"))

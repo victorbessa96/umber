@@ -330,6 +330,17 @@ def run(args) -> None:
                 os.kill(proc.pid, signal.SIGKILL)
                 proc.wait()
         log.close()
+        if not passed:
+            # CI keeps nothing after the job: put the app's own words in the
+            # job log (a bare "exited 101" told nobody why).
+            try:
+                with open(log_path, errors="replace") as fh:
+                    tail = [ln for ln in fh.read().splitlines() if "zbus" not in ln][-60:]
+                print("e2e: ---- app.log tail ----", file=sys.stderr)
+                for ln in tail:
+                    print(f"e2e: | {ln}", file=sys.stderr)
+            except OSError as err:
+                print(f"e2e: app.log unreadable: {err}", file=sys.stderr)
         if args.keep or not passed:
             # A failed run keeps its app.log and outputs for diagnosis.
             print(f"e2e: kept {work}")

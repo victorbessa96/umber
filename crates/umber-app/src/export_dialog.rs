@@ -800,6 +800,10 @@ impl ExportDialog {
                 let args = [("error", FluentValue::from(format!("{err:#}")))];
                 self.status = tr_args("export.failed", args);
                 self.toast = Some((umber_gui::NoticeLevel::Error, self.status.clone()));
+                // `job.status` reads `last_written` as THIS export's files:
+                // a failed export must not report the previous run's.
+                self.last_written.clear();
+                self.last_skipped.clear();
             }
         }
         self.completed_exports += 1;
@@ -1142,6 +1146,30 @@ mod tests {
         // No GPU: refused before the driver runs, nothing counted.
         assert_eq!(d.export_current(&ctx), Err("export.no-gpu"));
         assert_eq!(d.completed_exports(), 0);
+    }
+
+    #[test]
+    fn a_failed_export_reports_no_files_not_the_previous_runs() {
+        // job.status reads last_written as the latest export's files: a
+        // failed run after a good one must not report the good one's.
+        let mut d = dialog();
+        d.last_written = vec![PathBuf::from("/tmp/umber-export-test/old_baseColor.png")];
+        let ctx = ExportContext {
+            gpu: None,
+            mesh: None,
+            mesh_path: None,
+            paint: None,
+            doc: None,
+            graph: None,
+            baked_normal: None,
+        };
+        // The driver bails (no mesh, no GPU): the Err arm runs.
+        d.export_now(&ctx);
+        assert!(
+            d.last_written.is_empty(),
+            "stale files after a failed export"
+        );
+        assert_eq!(d.completed_exports(), 1, "a failed run still lands");
     }
 
     #[test]
