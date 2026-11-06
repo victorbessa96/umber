@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 umber-bake = { workspace = true }
+umber-brush = { workspace = true }
 umber-core = { workspace = true }
 umber-mesh = { workspace = true }
 umber-export = { workspace = true }
@@ -31,6 +32,9 @@ pollster = { workspace = true }
 emath = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# import-asset's typed ImportError (K5); already in the tree via
+# umber-core/umber-brush.
+thiserror = { workspace = true }
 # Token generation for the serve control channel (absorbed 2026-11-01
 # from storytold/texturecraft security.rs; getrandom 0.3.4 already in
 # Cargo.lock). Promote to [workspace.dependencies] at the next wave close.

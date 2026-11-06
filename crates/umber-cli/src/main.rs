@@ -13,6 +13,7 @@
 mod agent;
 mod batch;
 mod bench;
+mod import_asset;
 mod mcp;
 mod security;
 mod serve;
@@ -38,9 +39,10 @@ fn main() -> Result<()> {
         Some("mcp") => mcp::mcp_cmd(&args[1..]),
         Some("serve") => serve::serve_cmd(&args[1..]),
         Some("extract-spp") => spp_extract::extract_spp_cmd(&args[1..]),
+        Some("import-asset") => import_asset_cmd(&args[1..]),
         Some("bench") => bench::bench_cmd(&args[1..]),
         Some(other) => Err(anyhow::anyhow!(
-            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|mcp|serve|extract-spp|bench> ..."
+            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|mcp|serve|extract-spp|import-asset|bench> ..."
         )),
         None => {
             println!("umber-cli v{} (wave-6)", env!("CARGO_PKG_VERSION"));
@@ -53,6 +55,7 @@ fn main() -> Result<()> {
             println!("          mcp     [--read-root DIR] [--write-root DIR]   (MCP server on stdio, tools over the agent session)");
             println!("          serve   --port N [--read-root DIR] [--write-root DIR]   (token-auth loopback JSONL, one session per connection)");
             println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
+            println!("          import-asset <file> --kind <smart-material|smart-mask|brush|env> [--library DIR] [--dry-run]");
             println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
             Ok(())
         }
@@ -65,6 +68,64 @@ fn inspect_cmd(args: &[String]) -> Result<()> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("usage: umber-cli inspect <mesh-file>"))?;
     inspect_mesh(Path::new(path))?;
+    Ok(())
+}
+
+/// `import-asset <file> --kind <smart-material|smart-mask|brush|env>
+/// [--library DIR] [--dry-run]` — validated asset import (assets wave
+/// K5); validation and copying live in [`import_asset`].
+fn import_asset_cmd(args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: umber-cli import-asset <file> --kind <smart-material|smart-mask|brush|env> [--library DIR] [--dry-run]";
+    let mut file: Option<&str> = None;
+    let mut kind: Option<import_asset::AssetKind> = None;
+    let mut library: Option<&str> = None;
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--kind" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--kind needs a value\n{USAGE}"))?;
+                kind = Some(import_asset::AssetKind::from_name(value).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--kind: unknown kind '{value}' (expected smart-material|smart-mask|brush|env)"
+                    )
+                })?);
+                i += 2;
+            }
+            "--library" => {
+                library = Some(
+                    args.get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--library needs a value\n{USAGE}"))?,
+                );
+                i += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            other if !other.starts_with("--") && file.is_none() => {
+                file = Some(other);
+                i += 1;
+            }
+            other => return Err(anyhow::anyhow!("unknown argument '{other}'\n{USAGE}")),
+        }
+    }
+    let file = file.ok_or_else(|| anyhow::anyhow!("{USAGE}"))?;
+    let kind = kind.ok_or_else(|| anyhow::anyhow!("{USAGE}"))?;
+    let outcome =
+        import_asset::import_asset(Path::new(file), kind, library.map(Path::new), dry_run)
+            .map_err(|e| anyhow::anyhow!("import-asset: refused: {e}"))?;
+    println!("kind:       {}", outcome.kind);
+    println!("source:     {}", outcome.source.display());
+    println!("target:     {}", outcome.target.display());
+    println!("validation: ok");
+    if outcome.dry_run {
+        println!("dry-run:    yes — not copied");
+    } else {
+        println!("copied:     {} bytes", outcome.bytes);
+    }
     Ok(())
 }
 
