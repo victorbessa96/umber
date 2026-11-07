@@ -219,6 +219,11 @@ signing, the alpha tag.
   missing dir usage exit 2). ROADMAP row marked landed. Docs-only, no
   battery per the 8af2058 receipt rule. Queue row deferred with the
   sibling lock.
+- **Row 259 (docs kill, stale ROADMAP row) LANDED:** quick-mask
+  persistence landed `73f8724` (in origin/master) — `paint/quick_mask/`
+  sidecar, 8-bit planes, own manifest commit protocol. ROADMAP row
+  marked LANDED; the undoable-mask-strokes follow-up stays open.
+  Docs-only, no battery per the 8af2058 receipt rule.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
