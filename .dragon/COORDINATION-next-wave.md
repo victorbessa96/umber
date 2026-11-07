@@ -2272,3 +2272,14 @@ row 268, so this wave is row 269 (queue + STATE + the three briefs renumbered). 
 — the sibling's abr commit ca70ea80 rode the range and the ledger named its session (local-1625-rz6f2a); that lane
 pushed first (origin/master 288d1a57) and this wave pushed on top. Kill report
 docs/loop/kill-reports/2026-11-07-svg-loader-wiring.md.
+
+## WATCH 2026-11-07 19:26 -03 — project-watch cron (row 270)
+
+Master tip `c87ebf3c` is CODE-RED: release-gate CI run 42419285457 fails Tests on
+ubuntu + windows — `gpu_startup::tests::session_confirms_on_the_third_frame_and_persists_a_fallback`
+at `crates/umber-app/src/gpu_startup.rs:1564` (`left: None, right: Some(Gl)`), 755/1 on the
+ubuntu bin suite. No new landings until a fix kill lands (lock razul-gpu-startup-fix).
+Kill locks empty at 19:26; two kill-reports dirty (sibling lanes) — do not sweep.
+L-AI (separate repo): wave-1 = main = `f893544`, 0 ahead; its CI failures (runs
+42419710366 / 42419711929) are INFRA-RED (runner_id=0, zero steps, 2-4 s — no runner
+assigned, billing/spending class), not code failures.
