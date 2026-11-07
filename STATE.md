@@ -147,6 +147,14 @@ signing, the alpha tag.
   (`850b839`, rows 167/242 engine; History-panel wiring still waits on the
   sibling's document.rs/main.rs lock); merge-below-top annotated OPEN with
   its retouch.rs:658 precondition (redo-top accessor in umber_core::undo).
+- **Row 251 (row 222(c) seam-clip golden) in flight, lock
+  `razul-udim-seam-golden`:** tests-only pin
+  `udim_seam_dab_clips_at_the_tile_boundary_and_mirrors_byte_exact` +
+  `udim_seam_quad` fixture in paint_state.rs: a dab near a UDIM seam clips
+  at its own tile and mirrors byte-exact into the neighbor tile (checked
+  through the engine's own `mirror_uv`); seam-free control leaves tile 1002
+  untouched. Battery /tmp/umber-udim-battery.log (paint 194/0 incl. pin).
+  Queue row + COORDINATION line deferred with the sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

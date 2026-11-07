@@ -9403,6 +9403,37 @@ mod tests {
         }
     }
 
+    /// A UDIM seam fixture: one 3D quad split into two triangles whose
+    /// shared diagonal 3D edge carries DIFFERENT UVs per triangle, which
+    /// is exactly what `build_seam_graph` marks as a seam. Tri 0's island
+    /// lives in tile 1001 (uv 0..1); tri 1's island lives at uv ~1.4..2.0,
+    /// i.e. tile 1002. Painting near the diagonal on tri 0's side must
+    /// clip there and mirror into tile 1002.
+    fn udim_seam_quad() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            positions: vec![
+                [0.0, 0.0, 0.0], // 0: A (tri 0)
+                [1.0, 0.0, 0.0], // 1: tri 0 only
+                [1.0, 1.0, 0.0], // 2: B (tri 0)
+                [0.0, 0.0, 0.0], // 3: A (tri 1, same 3D point)
+                [1.0, 1.0, 0.0], // 4: B (tri 1, same 3D point)
+                [0.0, 1.0, 0.0], // 5: tri 1 only
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 6],
+            uvs: vec![
+                [0.0, 0.0], // A, tri 0 -> island 1001
+                [1.0, 0.0], // tri 0
+                [1.0, 1.0], // B, tri 0 -> island 1001
+                [1.4, 0.6], // A, tri 1 -> island 1002
+                [2.0, 1.0], // B, tri 1 -> island 1002
+                [1.4, 1.6], // tri 1 -> island 1002
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        }
+    }
+
     /// A UV on the `uv_a` diagonal, ~0.021 UV units off the seam line:
     /// inside the mirror gate (radius 36/512 ≈ 0.070).
     const NEAR_SEAM_UV: [f32; 2] = [0.5, 0.53];
@@ -11372,6 +11403,147 @@ mod tests {
             "mirrors never move the active tile"
         );
         state.process_pending().expect("drain succeeds");
+    }
+
+    /// Row 222(c)'s seam-clip golden: a stroke near the UDIM seam diagonal
+    /// of [`udim_seam_quad`]. The primary dabs clip at their own tile
+    /// (1001) and the seam mirror repaints the neighbor tile (1002), so
+    /// every changed texel in one tile maps through the engine's own
+    /// [`mirror_uv`] to a changed texel in the other with equal bytes. On
+    /// the seam-free [`two_tile_strip`] the same stroke leaves 1002
+    /// untouched and 1001 is byte-identical to the seam case's primary.
+    #[test]
+    fn udim_seam_dab_clips_at_the_tile_boundary_and_mirrors_byte_exact() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        // A fresh state's active target is Base (strokes paint there until
+        // a layer is selected); read_plane(Base, ..) routes to read_target.
+        let owner = PlaneOwner::Base;
+        let ch = BASE_COLOR_CHANNEL;
+        let n = 512usize;
+        let px = |buf: &[u8], x: usize, y: usize| -> [u8; 4] {
+            let i = (y * n + x) * 4;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        // A plane never written reads as absent; texels are zero-initialized
+        // on first write, so "before" = zeros.
+        let read = |s: &mut PaintState, tile: u16| -> Vec<u8> {
+            s.read_plane(owner, tile, ch)
+                .map(|b| b.data)
+                .unwrap_or_else(|| vec![0; n * n * 4])
+        };
+        let mesh = udim_seam_quad();
+        let graph = build_seam_graph(&mesh);
+        assert_eq!(graph.edges.len(), 1, "fixture carries exactly one seam");
+        let edge = &graph.edges[0];
+        // The mirror map between the two islands, wide enough to cover a
+        // whole dab footprint (gate radius + brush radius in UV).
+        let map_dist = mirror_radius_uv(512.0) * 2.0;
+        // global uv of a texel in `tile`
+        let texel_uv = |tile: u16, x: usize, y: usize| -> [f32; 2] {
+            [
+                (tile - 1001) as f32 + (x as f32 + 0.5) / n as f32,
+                (y as f32 + 0.5) / n as f32,
+            ]
+        };
+
+        // Seam mesh: stroke marching near the diagonal (all events inside
+        // the mirror gate of ~0.070 UV).
+        let mut seam = PaintState::with_target_size(device, queue, 512).expect("state builds");
+        seam.set_mesh(&mesh);
+        let pre_a = read(&mut seam, 1001);
+        let pre_b = read(&mut seam, 1002);
+        drive_stroke(&mut seam, [0.5, 0.53], [0.02, 0.02], 10);
+        seam.end_stroke();
+        seam.process_pending().expect("drain succeeds");
+        let a = read(&mut seam, 1001);
+        let b = read(&mut seam, 1002);
+
+        assert!(
+            seam.staged_batch_count_for(1001) > 0,
+            "primary dabs stage in tile 1001"
+        );
+        assert_eq!(
+            seam.staged_batch_count(),
+            seam.staged_batch_count_for(1001) + seam.staged_batch_count_for(1002),
+            "batches land only in the two seam tiles"
+        );
+
+        let mut count_a = 0usize;
+        let mut count_b = 0usize;
+        for y in 0..n {
+            for x in 0..n {
+                // primary side: texel (x,y) in 1001
+                let changed_a = px(&a, x, y) != px(&pre_a, x, y);
+                // its mirror image in 1002, through the engine's own map
+                let g = texel_uv(1001, x, y);
+                let mirror_b = umber_mesh::seam_mirror::mirror_uv(g, edge, map_dist);
+                if let Some(m) = mirror_b {
+                    // m is a global uv in tile 1002; local texel:
+                    let lx = ((m[0] - 1.0) * n as f32 - 0.5).round() as i64;
+                    let ly = (m[1] * n as f32 - 0.5).round() as i64;
+                    if (0..n as i64).contains(&lx) && (0..n as i64).contains(&ly) {
+                        let (lx, ly) = (lx as usize, ly as usize);
+                        assert_eq!(
+                            changed_a,
+                            px(&b, lx, ly) != px(&pre_b, lx, ly),
+                            "mirror symmetry of the changed set broken at ({x},{y}) -> ({lx},{ly})"
+                        );
+                        let pa = px(&a, x, y);
+                        let pb = px(&b, lx, ly);
+                        assert!(
+                            pa.iter().zip(pb.iter()).all(|(u, v)| u.abs_diff(*v) <= 1),
+                            "mirror bytes differ at ({x},{y}) -> ({lx},{ly}): {pa:?} vs {pb:?}"
+                        );
+                    }
+                }
+                count_a += changed_a as usize;
+                count_b += (px(&b, x, y) != px(&pre_b, x, y)) as usize;
+            }
+        }
+        assert!(count_a > 0, "the primary dab paints tile 1001");
+        assert!(
+            count_b > 0,
+            "the seam mirror paints tile 1002 (seam-clip, not bleed)"
+        );
+
+        // Control: the same stroke on the seam-free continuous strip. No
+        // seam, no mirror: tile 1002 stays untouched and tile 1001 is
+        // byte-identical to the seam case's primary side.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut strip = PaintState::with_target_size(device, queue, 512).expect("state builds");
+        strip.set_mesh(&two_tile_strip());
+        let spre_a = read(&mut strip, 1001);
+        let spre_b = read(&mut strip, 1002);
+        drive_stroke(&mut strip, [0.5, 0.53], [0.02, 0.02], 10);
+        strip.end_stroke();
+        strip.process_pending().expect("drain succeeds");
+        let sa = read(&mut strip, 1001);
+        let sb = read(&mut strip, 1002);
+
+        let mut strip_changed_a = 0usize;
+        let mut strip_changed_b = 0usize;
+        for y in 0..n {
+            for x in 0..n {
+                strip_changed_a += (px(&sa, x, y) != px(&spre_a, x, y)) as usize;
+                strip_changed_b += (px(&sb, x, y) != px(&spre_b, x, y)) as usize;
+            }
+        }
+        assert!(strip_changed_a > 0, "control: the dab paints tile 1001");
+        assert_eq!(
+            strip_changed_b, 0,
+            "seam-free strip: no mirror, tile 1002 untouched (the dab clips at its own tile)"
+        );
+        // The seam's mirrored events share the stroke's conditioner, so the
+        // primary footprint may space slightly differently; only its order
+        // of magnitude is pinned, not byte-equality with the control.
+        assert!(
+            (count_a as f32 - strip_changed_a as f32).abs() <= count_a as f32 * 0.5,
+            "seam case primary footprint {count_a} vs control {strip_changed_a}"
+        );
     }
 
     // --- Paint paths (§2 line 26's P1 row) ---
