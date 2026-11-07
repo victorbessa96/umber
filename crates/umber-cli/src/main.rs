@@ -18,6 +18,7 @@ mod mcp;
 mod security;
 mod serve;
 mod spp_extract;
+mod stencil_convert;
 mod workspace;
 
 use std::path::{Path, PathBuf};
@@ -40,13 +41,14 @@ fn main() -> Result<()> {
         Some("serve") => serve::serve_cmd(&args[1..]),
         Some("extract-spp") => spp_extract::extract_spp_cmd(&args[1..]),
         Some("import-asset") => import_asset_cmd(&args[1..]),
+        Some("stencil") => stencil_cmd(&args[1..]),
         Some("bench") => bench::bench_cmd(&args[1..]),
         Some(other) if umber_core::control::is_version_arg(other) => {
             println!("umber-cli v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some(other) => Err(anyhow::anyhow!(
-            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|mcp|serve|extract-spp|import-asset|bench> ..."
+            "unknown command: {other}\nusage: umber-cli <inspect|bake-ao|bake-all|export|batch|agent|mcp|serve|extract-spp|import-asset|stencil|bench> ..."
         )),
         None => {
             println!("umber-cli v{} (wave-6)", env!("CARGO_PKG_VERSION"));
@@ -60,6 +62,7 @@ fn main() -> Result<()> {
             println!("          serve   --port N [--read-root DIR] [--write-root DIR]   (token-auth loopback JSONL, one session per connection)");
             println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
             println!("          import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]");
+            println!("          stencil <file.svg> [--size N] <out.png>   (SVG stencil rasterized to a PNG; --size is the pixel cap, ceiling 8192^2)");
             println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
             println!("          --version | -V   print the version and exit");
             Ok(())
@@ -132,6 +135,19 @@ fn import_asset_cmd(args: &[String]) -> Result<()> {
         println!("copied:     {} bytes", outcome.bytes);
     }
     Ok(())
+}
+
+/// `stencil <file.svg> [--size N] <out.png>` — headless SVG stencil
+/// conversion (row 268, leaf B). The conversion, its named refusals and
+/// its exit codes (0 ok, 2 refused/usage) live in [`stencil_convert`];
+/// this shell wrapper only turns a non-zero code into the process exit.
+fn stencil_cmd(args: &[String]) -> Result<()> {
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    match stencil_convert::convert(args, &mut out, &mut err) {
+        0 => Ok(()),
+        code => std::process::exit(code),
+    }
 }
 
 /// Loads `path` and prints its summary (inspect + the batch `inspect`
