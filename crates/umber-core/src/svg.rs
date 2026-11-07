@@ -140,6 +140,20 @@ const SUPERSAMPLE: usize = 4;
 /// Subsamples per pixel (4x4).
 const SUBSAMPLES: u32 = (SUPERSAMPLE * SUPERSAMPLE) as u32;
 
+/// The most shapes one document may contribute (hostile-input budget).
+///
+/// The raster cap bounds the output, not the work: a million tiny paths
+/// fit any raster and still cost a million shape builds, a million edge
+/// sorts and a per-row scan over a million shapes.
+pub const MAX_SHAPES: usize = 65_536;
+
+/// The most flattened points one shape may contribute (hostile-input
+/// budget). Curve flattening adds up to
+/// [`MAX_SEGMENTS_PER_CURVE`] points per curve, so a path data string
+/// with many curves can multiply fast; this bounds the geometry one
+/// shape hands to the edge builder.
+pub const MAX_POINTS_PER_SHAPE: usize = 262_144;
+
 /// Everything that can go wrong rasterizing an SVG.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SvgError {
@@ -177,6 +191,20 @@ pub enum SvgError {
     Unsupported {
         /// The construct, quoted from the input.
         what: String,
+    },
+    /// The document exceeds a structural budget (shapes or points).
+    ///
+    /// The raster-size cap bounds the OUTPUT, not the input's work: a
+    /// file with a million tiny paths fits any raster and still costs a
+    /// million shape builds, a million edge sorts and a per-row scan
+    /// over a million shapes. These budgets refuse that class before
+    /// the geometry is built.
+    #[error("SVG is too complex: more than {limit} {what}")]
+    TooComplex {
+        /// What was counted ("shapes" or "path points").
+        what: &'static str,
+        /// The budget that refused it.
+        limit: usize,
     },
 }
 
@@ -1463,7 +1491,17 @@ fn build_shape(name: &str, attrs: &[Attr], style: Style) -> Result<Option<Shape>
         }
         _ => return Ok(None),
     }
-    Ok(shape_from_polys(&b.finish(), style.rule))
+    let polys = b.finish();
+    // The hostile-input budget: one shape's flattened geometry is
+    // bounded before the edge builder touches it.
+    let points: usize = polys.iter().map(|p| p.len()).sum();
+    if points > MAX_POINTS_PER_SHAPE {
+        return Err(SvgError::TooComplex {
+            what: "path points",
+            limit: MAX_POINTS_PER_SHAPE,
+        });
+    }
+    Ok(shape_from_polys(&polys, style.rule))
 }
 
 fn is_shape(name: &str) -> bool {
@@ -1540,6 +1578,16 @@ fn parse_document(text: &str, base: usize, max_pixels: usize) -> Result<Document
                         let style = apply_presentation(parent, &attrs)?;
                         if style.painted {
                             shapes.extend(build_shape(&name, &attrs, style)?);
+                            // The document-level shape budget (see
+                            // [`MAX_SHAPES`]): checked as the document is
+                            // walked, so a shape flood never reaches the
+                            // edge builder or the rasterizer.
+                            if shapes.len() > MAX_SHAPES {
+                                return Err(SvgError::TooComplex {
+                                    what: "shapes",
+                                    limit: MAX_SHAPES,
+                                });
+                            }
                         }
                         None
                     }
@@ -2073,6 +2121,38 @@ mod tests {
         );
         let neg = rasterize_svg_default(br#"<svg viewBox="0 0 -1 4"/>"#);
         assert!(matches!(neg, Err(SvgError::Parse { .. })));
+    }
+
+    /// The hostile-input budgets: a shape flood and a point flood are
+    /// both refused with the named error, before the geometry is built.
+    #[test]
+    fn complexity_budgets_refuse_shape_and_point_floods() {
+        // A shape flood: one more shape than the budget allows.
+        let mut doc = String::from(r#"<svg width="4" height="4">"#);
+        for _ in 0..=MAX_SHAPES {
+            doc.push_str(r#"<rect x="0" y="0" width="1" height="1"/>"#);
+        }
+        doc.push_str("</svg>");
+        assert_eq!(
+            rasterize_svg_default(doc.as_bytes()),
+            Err(SvgError::TooComplex {
+                what: "shapes",
+                limit: MAX_SHAPES,
+            })
+        );
+        // A point flood: one path with more points than the budget.
+        let mut d = String::from("M 0 0");
+        for i in 1..=MAX_POINTS_PER_SHAPE {
+            d.push_str(&format!(" L {} {}", i % 4, i % 4));
+        }
+        let doc = format!(r#"<svg width="4" height="4"><path d="{d}"/></svg>"#);
+        assert_eq!(
+            rasterize_svg_default(doc.as_bytes()),
+            Err(SvgError::TooComplex {
+                what: "path points",
+                limit: MAX_POINTS_PER_SHAPE,
+            })
+        );
     }
 
     #[test]
