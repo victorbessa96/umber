@@ -212,7 +212,13 @@ signing, the alpha tag.
   and `record_stroke_stacks_when_the_stroke_touches_an_entry_above_the_target`,
   both byte-exact roundtrip. Battery /tmp/umber-below-battery4.log:
   clippy -D warnings 0, core 189/0 (bundled:: skipped, sibling-dirty
-  worktree), paint 196/0. ROADMAP merge-below-top debt marked WIRED.
+  worktree), paint 196/0.  ROADMAP merge-below-top debt marked WIRED.
+- **Row 258 (docs kill, stale ROADMAP debt) LANDED:** the AssetStore GC
+  shell caller landed `1f0e438` (row 238) — `umber gc` headless lane;
+  live-verified 2026-11-07 on the dev binary (dry-run JSON exit 0,
+  missing dir usage exit 2). ROADMAP row marked landed. Docs-only, no
+  battery per the 8af2058 receipt rule. Queue row deferred with the
+  sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

@@ -229,8 +229,11 @@ pass; the .ftl lock lift (if it stands).
   bytes are absent).
 - DPI runtime re-raster — OPEN (the manual ui_scale exists;
   the runtime-change re-raster does not).
-- The AssetStore GC's shell caller — OPEN (engine landed 10-16,
-  caller still queued).
+- ~~The AssetStore GC's shell caller~~ **LANDED `1f0e438` (row 238)** —
+  `umber gc <project> [--delete] [--min-age-secs N]` headless lane in
+  main.rs over `asset_gc::run_cli`; live-verified 2026-11-07: dry-run on a
+  fresh project prints the zero report JSON exit 0, a missing dir prints
+  usage exit 2. This row was stale.
 - Stamp images persisted with presets — OPEN (the 6c row).
 
 ## Never (hard walls — restated)
