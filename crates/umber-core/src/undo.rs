@@ -310,6 +310,15 @@ impl<C: Command> UndoStack<C> {
         self.undo.back()
     }
 
+    /// The entry `k` below the undo top (`k = 0` is
+    /// [`peek_undo`](Self::peek_undo)) — read-only, for the paint crate's
+    /// merge-below-top scan: it walks down a bounded window looking for an
+    /// older entry a new stroke can coalesce into through
+    /// [`merge_below_top`](Self::merge_below_top).
+    pub fn peek_undo_at(&self, k: usize) -> Option<&C> {
+        self.undo.get(self.undo.len().checked_sub(1 + k)?)
+    }
+
     /// The command [`redo`](Self::redo) would re-apply next — the most
     /// recently undone one — without touching either stack. Named
     /// follow-up from the paint crate's split-redo (retouch.rs's

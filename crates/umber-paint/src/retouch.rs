@@ -607,23 +607,66 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
 }
 
 /// Records a finished stroke on `history`: merged into the top entry when
-/// [`can_merge`] allows, else pushed as its own entry. The push's queued
-/// re-apply is dropped from `writes` (the stroke already uploaded its
-/// bytes). `false` (history untouched) when no tile was written.
+/// [`can_merge`] allows, else — when the redo stack is empty and the stroke
+/// touches no entry above it — spliced into an older entry within a bounded
+/// window via [`UndoStack::merge_below_top`] (row 257), else pushed as its
+/// own entry. The push's queued re-apply is dropped from `writes` (the
+/// stroke already uploaded its bytes). `false` (history untouched) when no
+/// tile was written.
 pub(crate) fn record_stroke(
     history: &mut UndoStack<PaintStrokeCommand>,
     writes: &mut PaintWrites,
     tiles: &[StrokeTile<'_>],
 ) -> bool {
-    let merge = history.peek_undo().is_some_and(|top| can_merge(top, tiles));
-    let command = if merge {
-        history
+    // Top fast path: coalesce into the top entry (unchanged).
+    if history.peek_undo().is_some_and(|top| can_merge(top, tiles)) {
+        let command = history
             .take_top_unreverted()
-            .map(|top| merge_stroke(top, tiles))
-    } else {
-        stroke_command(tiles)
-    };
-    let Some(command) = command else {
+            .map(|top| merge_stroke(top, tiles));
+        if let Some(command) = command {
+            history.push(command, writes);
+            writes.writes.clear();
+            return true;
+        }
+    }
+    // Below-top splice (row 257): a bounded window below the top, but only
+    // when the redo stack is empty (a fresh edit otherwise clears it via
+    // the plain push below) and the stroke intersects NO entry above the
+    // merge target — redoing those entries would clobber the merged
+    // after over the overlap, so such strokes stack instead.
+    const MERGE_WINDOW: usize = 8;
+    if !history.can_redo() {
+        let window = MERGE_WINDOW.min(history.len());
+        'scan: for k in 1..window {
+            let Some(target) = history.peek_undo_at(k) else {
+                break;
+            };
+            if !can_merge(target, tiles) {
+                continue;
+            }
+            for above in 0..k {
+                let Some(a) = history.peek_undo_at(above) else {
+                    break 'scan;
+                };
+                let hits_above = a.regions.iter().any(|r| {
+                    tiles.iter().any(|t| {
+                        r.owner == t.owner
+                            && r.tile == t.tile
+                            && r.channel == t.channel
+                            && intersects(r.rect, t.rect)
+                    })
+                });
+                if hits_above {
+                    continue 'scan;
+                }
+            }
+            if history.merge_below_top(k, writes, |t| Some(merge_stroke(t.clone(), tiles))) {
+                writes.writes.clear();
+                return true;
+            }
+        }
+    }
+    let Some(command) = stroke_command(tiles) else {
         return false;
     };
     history.push(command, writes);
@@ -2073,6 +2116,75 @@ mod tests {
             image, after_all,
             "redoing the preserved stack reproduces the pre-undo image exactly"
         );
+    }
+
+    /// Below-top merge (row 257): a stroke that overlaps an older entry but
+    /// not the top splices into the older one, keeping the journal short;
+    /// undo/redo stay byte-exact.
+    #[test]
+    fn record_stroke_merges_below_top_when_the_stroke_skips_the_top_entry() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        record_fill(&mut history, &mut writes, &mut image, rect(0, 0, 16, 16), 1);
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(16, 16, 24, 24),
+            2,
+        );
+        assert_eq!(history.len(), 2, "disjoint strokes stack");
+        // Overlaps entry 0 (0..16) but not the top entry 1 (16..24).
+        record_fill(&mut history, &mut writes, &mut image, rect(8, 8, 14, 14), 3);
+        assert_eq!(history.len(), 2, "spliced into the entry below the top");
+        let after_all = image.clone();
+        while history.undo(&mut writes) {
+            drain(&mut writes, &mut image);
+        }
+        assert_eq!(image, original, "full undo returns to the base image");
+        while history.redo(&mut writes) {
+            drain(&mut writes, &mut image);
+        }
+        assert_eq!(
+            image, after_all,
+            "full redo is byte-exact through the splice"
+        );
+    }
+
+    /// Below-top merge guard (row 257): when the stroke ALSO intersects an
+    /// entry above the merge target, the splice is refused and the stroke
+    /// stacks — redoing the above entry would clobber the merged after.
+    #[test]
+    fn record_stroke_stacks_when_the_stroke_touches_an_entry_above_the_target() {
+        let original = hard_edge();
+        let mut image = original.clone();
+        let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
+        let mut writes = PaintWrites::default();
+        record_fill(&mut history, &mut writes, &mut image, rect(0, 0, 16, 16), 1);
+        record_fill(
+            &mut history,
+            &mut writes,
+            &mut image,
+            rect(16, 16, 24, 24),
+            2,
+        );
+        assert_eq!(history.len(), 2);
+        // Overlaps both entries; the top-merge size guard refuses, the
+        // below-top target (entry 0) would accept, but entry 1 sits above
+        // it and intersects — so the stroke must stack.
+        record_fill(&mut history, &mut writes, &mut image, rect(8, 8, 20, 20), 3);
+        assert_eq!(history.len(), 3, "guard refused the below-top splice");
+        let after_all = image.clone();
+        while history.undo(&mut writes) {
+            drain(&mut writes, &mut image);
+        }
+        assert_eq!(image, original);
+        while history.redo(&mut writes) {
+            drain(&mut writes, &mut image);
+        }
+        assert_eq!(image, after_all);
     }
 
     /// The envelope: a split pushes `parts` entries through the normal
