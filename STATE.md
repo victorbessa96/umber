@@ -155,13 +155,23 @@ signing, the alpha tag.
   through the engine's own `mirror_uv`); seam-free control leaves tile 1002
   untouched. Battery /tmp/umber-udim-battery.log (paint 194/0 incl. pin).
   Queue row + COORDINATION line deferred with the sibling lock.
-- **Row 252 (redo-top accessor) in flight, lock `razul-redo-top-accessor`:**
-  `UndoStack::peek_redo` + `redo_len` in umber-core undo.rs — the named
-  precondition (retouch.rs:658) for lifting split_redo's `RedoPending`
-  refusal and for the merge-below-top debt. Pin
-  `peek_redo_reads_the_next_redo_without_touching_the_stacks`. Battery
-  /tmp/umber-redoconfig-battery.log. Queue row + COORDINATION line deferred
-  with the sibling lock (live again at census: 3 procs in umber).
+- **Row 252 (redo-top accessor) LANDED `03181ec`:** `UndoStack::peek_redo` +
+  `redo_len` in umber-core undo.rs — the named precondition (retouch.rs:658)
+  for lifting split_redo's `RedoPending` refusal and for the merge-below-top
+  debt. Pin `peek_redo_reads_the_next_redo_without_touching_the_stacks` green
+  (worktree battery showed 192/0 with only the sibling-dirty lib.rs breaking
+  bundled::tests; commit-tree safe-push gates green on all 7 crates, pushed
+  8eee11b..03181ec). Queue row + COORDINATION line deferred with the sibling
+  lock.
+- **Row 253 (cli paint_stroke radius validation pins) in flight, lock
+  `razul-cli-radius-pins`:** session-level pin
+  `paint_stroke_validates_radius_fields_before_any_project_or_mesh` — the
+  conflict / negative / zero-radius / zero-scale rejections all fire BEFORE
+  any project or mesh, and a valid radius reaches only "no project open".
+  Closes row 208's cli-wiring follow-up at the validation seam. Battery
+  /tmp/umber-cliradius-battery3.log: clippy 0, 8 suites ok 0 failed (bin
+  94/0 incl. the pin). Queue row 253 + COORDINATION line deferred with the
+  sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

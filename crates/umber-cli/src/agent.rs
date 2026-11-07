@@ -2589,6 +2589,49 @@ mod tests {
     }
 
     #[test]
+    fn paint_stroke_validates_radius_fields_before_any_project_or_mesh() {
+        // Row 208's cli wiring of paint_stroke.radius (agent.rs:1844) is
+        // pinned at the validation seam: every rejection below fires
+        // BEFORE `project_mut()`, so no project or mesh is needed; the
+        // final line proves a valid radius passes validation and fails
+        // only on the missing project.
+        let replies = session(
+            "{\"paint_stroke\": {\"points\": [[0.5, 0.5]], \"color\": [0.5, 0.5, 0.5, 1.0], \"radius\": 12.0, \"radius_texels\": 12.0}}\n\
+             {\"paint_stroke\": {\"points\": [[0.5, 0.5]], \"color\": [0.5, 0.5, 0.5, 1.0], \"radius\": -3.0}}\n\
+             {\"paint_stroke\": {\"points\": [[0.5, 0.5]], \"color\": [0.5, 0.5, 0.5, 1.0], \"radius_texels\": 0.0}}\n\
+             {\"paint_stroke\": {\"points\": [[0.5, 0.5]], \"color\": [0.5, 0.5, 0.5, 1.0], \"radius_scale\": 0.0}}\n\
+             {\"paint_stroke\": {\"points\": [[0.5, 0.5]], \"color\": [0.5, 0.5, 0.5, 1.0], \"radius\": 12.0}}\n",
+        );
+        assert_eq!(replies.len(), 5);
+        let err = |r: &Value| r["error"].as_str().expect("error reply").to_string();
+        assert!(
+            err(&replies[0]).contains("give `radius` or `radius_texels`, not both"),
+            "conflict: {}",
+            err(&replies[0])
+        );
+        assert!(
+            err(&replies[1]).contains("radius -3 must be finite and > 0"),
+            "negative radius: {}",
+            err(&replies[1])
+        );
+        assert!(
+            err(&replies[2]).contains("radius_texels 0 must be finite and > 0"),
+            "zero radius_texels: {}",
+            err(&replies[2])
+        );
+        assert!(
+            err(&replies[3]).contains("radius_scale 0 must be finite and > 0"),
+            "zero scale: {}",
+            err(&replies[3])
+        );
+        assert!(
+            err(&replies[4]).contains("no project open"),
+            "a valid radius passes validation and only then needs a project: {}",
+            err(&replies[4])
+        );
+    }
+
+    #[test]
     fn bake_and_export_need_a_loaded_mesh() {
         let replies = session(
             "{\"bake\": {\"out_dir\": \"o\"}}\n{\"export\": {\"preset\": \"gltf\", \"out_dir\": \"o\"}}\n",
