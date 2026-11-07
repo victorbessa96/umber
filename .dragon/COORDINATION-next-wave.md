@@ -2229,3 +2229,28 @@ Cargo.lock, which the lane changed but never listed). Building in the
 isolated worktree from the dead lane's bytes; shared-tree copies left
 untouched.
 - 2026-11-07 row 261 LANDED (adopted razul-bundled-assets): exe-relative bundled assets, gap #2 closed; lock razul-bundled-assets-adopt removed with the commit.
+
+---
+
+## IN FLIGHT 2026-11-07 16:2x -03 — claude-svg-core (row 266)
+
+Claw (claude, opus, headless -p acceptEdits) implementing crates/umber-core/src/svg.rs per
+docs/loop/briefs/2026-11-07-wave-svg-import-design.md + 2026-11-07-svg-core-kill-brief.md.
+Lock claude-svg-core holds svg.rs + lib.rs (stale razul-svg-core from dead session
+local-1625-rz6f2a removed and re-added fresh; holder exit confirmed: no subagents, no cargo
+on umber, claude agents --json empty). Result JSON: ~/.hermes/cache/scratch/svg-core-kill-result.json,
+sentinel SVG_KILL_EXIT=. Dragon gates on exit: rustfmt, check-layers, scorecard, clippy -p umber-core
+-D warnings, cargo test -p umber-core under /tmp/umber-cargo.lock, kill report, dcommit, safe-push.
+No sibling live on the tree at dispatch (16:26).
+Re-dispatch 16:5x: first dispatch exited 127 — claude binary moved from ~/.local/bin to
+~/.npm-global/bin/claude (which claude); tree untouched, no claw ran. Re-dispatched with the
+npm-global path as proc_8bdc61f3b892 (result files same scratch paths, sentinel SVG_KILL_EXIT=).
+17:30 row 266 LANDED + PUSHED 5d4fcccc (origin/master verified 5d4fcccc via ls-remote). Claw wrote
+crates/umber-core/src/svg.rs (2,110 lines, 16 tests); dragon ran rustfmt (one whitespace pass), check-layers
+GREEN 16, scorecard current, clippy -p umber-core --all-targets -D warnings 0, umber-core 213/0 in a scratch
+worktree at ~/.hermes/cache/scratch/wt-svg-266 (own CARGO_TARGET_DIR; the repo flock was held by a sibling's
+workspace hygiene battery at /tmp/umber-hygiene-f8d6d84.log). safe-push green on 8 crates, pushed f8d6d84f..5d4fcccc.
+Sibling-lane collision: the dirty `pub mod svg;` hunk in crates/umber-core/src/lib.rs was reverted by another
+lane mid-flight (lib.rs clean at 17:2x); re-applied by the dragon before the commit. Row 267 was taken by the
+sibling's pushed wave-abr design brief (f8d6d84f) — the svg loader wave is row 268; its three briefs are written.
+Next: dispatch row 268 as two leaves (claw-svg-loader-app, claw-svg-stencil-cli) with disjoint locks.

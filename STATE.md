@@ -240,6 +240,24 @@ signing, the alpha tag.
   --all-targets 1048/0 across 10 suites. ROADMAP split-redo row marked
   fully closed. Queue row + COORDINATION line deferred (queue.md under
   the sibling's lock pattern).
+- **Row 266 (SVG core: clean-room parser + rasterizer) LANDED `5d4fcccc`,
+  lock `claude-svg-core`:** new `umber_core::svg` module (2,110 lines, 16
+  tests, std + thiserror only — no new dependency). Hand-rolled XML
+  tokenizer with byte-offset errors, element subset `svg g path rect circle
+  ellipse polygon polyline line`, the full path-data command set with arcs
+  converted endpoint→center→segment fan, transform composition
+  (matrix/translate/scale/rotate/skew), curve flattening (Wang/sagitta,
+  0.05 px), viewBox stretch mapping, scanline fill (nonzero + evenodd) with
+  4x4 supersampling per pixel row, coverage = round(255·hits/16). API:
+  `rasterize_svg`, `rasterize_svg_default`, `SvgRaster` (+`to_rgba`),
+  `SvgError`, cap `DEFAULT_SVG_RASTER_PIXELS` (2048²). Claw-authored
+  (claude/opus session 9b36591f, $3.11), dragon reviewed + gated: fmt clean,
+  layers GREEN 16, scorecard current, clippy `-p umber-core --all-targets
+  -D warnings` 0, umber-core **213/0** with 16/16 svg pins green (scratch
+  worktree battery; the repo flock was held by a sibling's workspace
+  hygiene run). Kill report docs/loop/kill-reports/2026-11-07-svg-core.md.
+  NEXT wave = row 268 (loader wiring: app `.svg` stencil loader + `umber-cli
+  stencil` converter), brief docs/loop/briefs/2026-11-07-svg-loader-wiring-design.md.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
