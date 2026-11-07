@@ -116,6 +116,86 @@ impl<C: Command> UndoStack<C> {
         self.enforce_budget();
     }
 
+    /// Pushes an entry whose effect is ALREADY in the document — budget
+    /// accounting and redo-clearing exactly like [`push`](Self::push), but
+    /// no `apply`. Used to re-seat entries taken with
+    /// [`take_top_unreverted`](Self::take_top_unreverted) after a below-top
+    /// splice: their texels were never reverted, so re-applying would
+    /// double-paint.
+    pub fn push_unapplied(&mut self, command: C) {
+        self.bytes_held += command.memory_bytes();
+
+        for stale in self.redo.drain(..) {
+            Self::evict(&mut self.bytes_held, &mut self.on_evict, stale);
+        }
+
+        self.undo.push_back(command);
+        self.enforce_budget();
+    }
+
+    /// Rewrites the entry `k` below the undo top (`k = 0` is the top, the
+    /// usual coalescing merge) by folding `build` into it, WITHOUT touching
+    /// the entries above: they are taken unreverted and re-seated unapplied,
+    /// and any pending redo stack is preserved via
+    /// [`take_redo`](Self::take_redo)/[`restore_redo`](Self::restore_redo).
+    /// The merged command goes through [`push`](Self::push) — its `apply`
+    /// lands the document exactly where it already is (the caller's new
+    /// edit is already painted), same as the top-merge path.
+    ///
+    /// Returns `false` with the journal untouched when `k` is out of range
+    /// or `build` declines (`None`); the taken entries are re-seated and the
+    /// redo stack restored on that path too. This is the primitive that
+    /// lifts the merge-below-top debt (retouch.rs:34): a below-top rewrite
+    /// no longer invalidates anything above it.
+    pub fn merge_below_top(
+        &mut self,
+        k: usize,
+        doc: &mut C::Doc,
+        build: impl FnOnce(&C) -> Option<C>,
+    ) -> bool {
+        if k >= self.undo.len() {
+            return false;
+        }
+        let preserved = self.take_redo();
+        let mut above: Vec<C> = Vec::with_capacity(k);
+        for _ in 0..k {
+            match self.take_top_unreverted() {
+                Some(c) => above.push(c),
+                None => {
+                    while let Some(c) = above.pop() {
+                        self.push_unapplied(c);
+                    }
+                    self.restore_redo(preserved);
+                    return false;
+                }
+            }
+        }
+        let target = self.take_top_unreverted();
+        let merged = target.as_ref().and_then(build);
+        match merged {
+            Some(m) => {
+                self.push(m, doc);
+                while let Some(c) = above.pop() {
+                    self.push_unapplied(c);
+                }
+                self.restore_redo(preserved);
+                true
+            }
+            None => {
+                // Declined: nothing was reverted, so re-seat the original
+                // target unapplied, then the above entries, then the redo.
+                if let Some(t) = target {
+                    self.push_unapplied(t);
+                }
+                while let Some(c) = above.pop() {
+                    self.push_unapplied(c);
+                }
+                self.restore_redo(preserved);
+                false
+            }
+        }
+    }
+
     fn evict(bytes_held: &mut usize, on_evict: &mut Option<Box<dyn FnMut(C)>>, command: C) {
         *bytes_held = bytes_held.saturating_sub(command.memory_bytes());
         if let Some(cb) = on_evict.as_mut() {
@@ -408,6 +488,65 @@ mod tests {
         assert!(stack.redo(&mut doc) && stack.redo(&mut doc));
         assert!(!stack.can_redo());
         assert_eq!(doc, Counter(1 + 1000 + 10 + 100));
+    }
+
+    #[test]
+    fn merge_below_top_rewrites_the_target_and_keeps_above_entries_and_redo() {
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<AddCommand> = UndoStack::new(100);
+        stack.push(AddCommand { delta: 1 }, &mut doc);
+        stack.push(AddCommand { delta: 10 }, &mut doc);
+        stack.push(AddCommand { delta: 100 }, &mut doc);
+        assert_eq!(doc, Counter(111));
+        assert!(stack.undo(&mut doc)); // doc 11, redo [100]
+        assert_eq!(stack.peek_redo().map(|c| c.delta), Some(100));
+
+        // Splice one below the top: fold +5 into the target (delta 1 -> 6).
+        // The merged entry goes through `push` (its apply is the caller's
+        // already-painted edit, idempotent for write-type commands); the
+        // entry above is taken unreverted and re-seated unapplied.
+        assert!(stack.merge_below_top(1, &mut doc, |t| Some(AddCommand { delta: t.delta + 5 })));
+        assert_eq!(stack.len(), 2, "above entry re-seated, target replaced");
+        assert_eq!(stack.peek_undo().map(|c| c.delta), Some(10));
+        assert_eq!(
+            stack.peek_redo().map(|c| c.delta),
+            Some(100),
+            "the pending redo survived the splice"
+        );
+        // The merged entry replaced the target in place: undoing twice
+        // reverts the above entry and the merged one, leaving the base.
+        assert!(stack.undo(&mut doc));
+        assert!(stack.undo(&mut doc));
+        assert_eq!(doc, Counter(1));
+        while stack.redo(&mut doc) {}
+        assert_eq!(
+            doc,
+            Counter(1 + 6 + 10 + 100),
+            "redo replays merged + above + preserved"
+        );
+    }
+
+    #[test]
+    fn merge_below_top_declined_or_out_of_range_leaves_the_journal_untouched() {
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<AddCommand> = UndoStack::new(100);
+        stack.push(AddCommand { delta: 1 }, &mut doc);
+        stack.push(AddCommand { delta: 10 }, &mut doc);
+        assert!(stack.undo(&mut doc));
+        let held = stack.bytes_held();
+
+        assert!(!stack.merge_below_top(5, &mut doc, |t| { Some(AddCommand { delta: t.delta }) }));
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.redo_len(), 1);
+        assert_eq!(stack.peek_redo().map(|c| c.delta), Some(10));
+
+        assert!(!stack.merge_below_top(0, &mut doc, |_| None,));
+        assert_eq!(stack.len(), 1, "declined merge re-seats the target");
+        assert_eq!(stack.peek_undo().map(|c| c.delta), Some(1));
+        assert_eq!(stack.redo_len(), 1, "redo side restored on decline");
+        assert_eq!(stack.peek_redo().map(|c| c.delta), Some(10));
+        assert_eq!(stack.bytes_held(), held, "no budget drift on refusal");
+        assert_eq!(doc, Counter(1), "nothing was applied or reverted");
     }
 
     #[test]

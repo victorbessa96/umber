@@ -191,6 +191,16 @@ signing, the alpha tag.
   no-reapply splice in umber_core::undo. Docs-only, no battery per the
   8af2058 receipt rule. Queue row 255 + COORDINATION line deferred with the
   sibling lock.
+- **Row 255 LANDED `6b5af7b`** (ROADMAP docs kill pushed 1347e13..6b5af7b).
+- **Row 256 (merge-below-top splice primitive) in flight, lock
+  `razul-merge-below-splice`:** `UndoStack::merge_below_top(k, doc, build)`
+  + `push_unapplied` in undo.rs — rewrites the entry k below the top without
+  re-applying the entries above, preserves pending redo, declined/out-of-
+  range leaves the journal untouched; both pins green (core 189/0 modulo the
+  sibling-dirty worktree bundled:: skip). ROADMAP debt updated: wiring
+  record_stroke to use the splice is next. Battery
+  /tmp/umber-mergebelow-battery4.log. Queue row 256 + COORDINATION line
+  deferred with the sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
