@@ -234,7 +234,12 @@ pass; the .ftl lock lift (if it stands).
   main.rs over `asset_gc::run_cli`; live-verified 2026-11-07: dry-run on a
   fresh project prints the zero report JSON exit 0, a missing dir prints
   usage exit 2. This row was stale.
-- Stamp images persisted with presets — OPEN (the 6c row).
+- ~~Stamp images persisted with presets~~ **LANDED 2026-11-06 (`b800297`
+  presets + stamp PNGs, `6c95e26` panel wiring)** — stamped presets carry
+  their `<stem>.stamp.png` sidecar, round-trip byte-identical
+  (`starter_wave_presets_round_trip_byte_identical`,
+  `starter_wave_stamp_sidecars_exist_and_parse_as_rgba8_png`). This row
+  was stale.
 
 ## Never (hard walls — restated)
 
