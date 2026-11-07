@@ -230,6 +230,21 @@ impl<C: Command> UndoStack<C> {
         self.undo.back()
     }
 
+    /// The command [`redo`](Self::redo) would re-apply next — the most
+    /// recently undone one — without touching either stack. Named
+    /// follow-up from the paint crate's split-redo (retouch.rs's
+    /// `RedoPending` note): lifting that refusal, and the
+    /// merge-below-top debt, both need to inspect the redo top before
+    /// deciding whether a journal mutation is safe.
+    pub fn peek_redo(&self) -> Option<&C> {
+        self.redo.last()
+    }
+
+    /// How many entries wait on the redo stack.
+    pub fn redo_len(&self) -> usize {
+        self.redo.len()
+    }
+
     /// Removes the command [`undo`](Self::undo) would revert next WITHOUT
     /// reverting it, releasing its [`Command::memory_bytes`] from the
     /// budget and bypassing `on_evict` (the entry is not dropped history —
@@ -305,6 +320,35 @@ mod tests {
         fn revert(&mut self, doc: &mut Counter) {
             doc.0 -= self.delta;
         }
+    }
+
+    #[test]
+    fn peek_redo_reads_the_next_redo_without_touching_the_stacks() {
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<AddCommand> = UndoStack::new(100);
+        assert!(stack.peek_redo().is_none());
+        assert_eq!(stack.redo_len(), 0);
+
+        stack.push(AddCommand { delta: 1 }, &mut doc);
+        stack.push(AddCommand { delta: 10 }, &mut doc);
+        assert!(stack.peek_redo().is_none(), "nothing undone yet");
+
+        assert!(stack.undo(&mut doc)); // reverts delta 10
+        assert_eq!(stack.peek_redo().map(|c| c.delta), Some(10));
+        assert_eq!(stack.redo_len(), 1);
+        assert!(stack.undo(&mut doc)); // reverts delta 1
+        assert_eq!(
+            stack.peek_redo().map(|c| c.delta),
+            Some(1),
+            "redo top is the MOST RECENTLY undone"
+        );
+        assert_eq!(stack.redo_len(), 2);
+        assert_eq!(doc, Counter(0));
+        assert!(stack.peek_undo().is_none(), "undo side drained");
+
+        assert!(stack.redo(&mut doc));
+        assert_eq!(stack.peek_redo().map(|c| c.delta), Some(10));
+        assert_eq!(doc, Counter(1), "the accessor never applied anything");
     }
 
     #[test]

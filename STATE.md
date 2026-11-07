@@ -155,6 +155,13 @@ signing, the alpha tag.
   through the engine's own `mirror_uv`); seam-free control leaves tile 1002
   untouched. Battery /tmp/umber-udim-battery.log (paint 194/0 incl. pin).
   Queue row + COORDINATION line deferred with the sibling lock.
+- **Row 252 (redo-top accessor) in flight, lock `razul-redo-top-accessor`:**
+  `UndoStack::peek_redo` + `redo_len` in umber-core undo.rs — the named
+  precondition (retouch.rs:658) for lifting split_redo's `RedoPending`
+  refusal and for the merge-below-top debt. Pin
+  `peek_redo_reads_the_next_redo_without_touching_the_stacks`. Battery
+  /tmp/umber-redoconfig-battery.log. Queue row + COORDINATION line deferred
+  with the sibling lock (live again at census: 3 procs in umber).
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
