@@ -439,6 +439,9 @@ pub struct ExportDialog {
     status: String,
     last_written: Vec<PathBuf>,
     last_skipped: Vec<SkippedOutput>,
+    /// Whether the latest landed export failed (`job.status`'s
+    /// `export.failed`; the bake side has `BakesPanel::last_job_failed`).
+    last_export_failed: bool,
     /// Which exportable tiles an Export covers (default: all).
     tiles: TileSelection,
     /// The loaded mesh's present tiles, cached across frames.
@@ -474,6 +477,7 @@ impl ExportDialog {
             status: tr("export.no-export-yet"),
             last_written: Vec::new(),
             last_skipped: Vec::new(),
+            last_export_failed: false,
             tiles: TileSelection::new(),
             mesh_tiles: MeshTilesCache::default(),
             materialx: false,
@@ -570,6 +574,13 @@ impl ExportDialog {
     /// baked maps).
     pub fn last_skipped(&self) -> &[SkippedOutput] {
         &self.last_skipped
+    }
+
+    /// Whether the latest landed export failed (`job.status`'s
+    /// `export.failed`, row 232's tail; mirrors
+    /// `BakesPanel::last_job_failed`).
+    pub fn last_export_failed(&self) -> bool {
+        self.last_export_failed
     }
 
     /// How many exports have finished (success or failure) since the
@@ -814,6 +825,7 @@ impl ExportDialog {
                 self.status = status;
                 self.last_written = outcome.written;
                 self.last_skipped = outcome.skipped;
+                self.last_export_failed = false;
             }
             Err(err) => {
                 log::error!("export failed: {err:#}");
@@ -824,6 +836,7 @@ impl ExportDialog {
                 // a failed export must not report the previous run's.
                 self.last_written.clear();
                 self.last_skipped.clear();
+                self.last_export_failed = true;
             }
         }
         self.completed_exports += 1;
@@ -1213,6 +1226,16 @@ mod tests {
             "stale files after a failed export"
         );
         assert_eq!(d.completed_exports(), 1, "a failed run still lands");
+        assert!(
+            d.last_export_failed(),
+            "the Err arm flags the failure for job.status export.failed"
+        );
+    }
+
+    #[test]
+    fn the_failed_flag_starts_clear() {
+        let d = dialog();
+        assert!(!d.last_export_failed(), "a clean dialog reports success");
     }
 
     #[test]

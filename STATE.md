@@ -134,6 +134,14 @@ signing, the alpha tag.
   main.rs untouched (sibling-locked); prepare() signature unchanged.
   Battery log /tmp/umber-headless-battery.log. Queue row + COORDINATION
   line deferred until `razul-bundled-assets` releases.
+- **Row 250 (row 232's tail) in flight, lock `razul-export-failed-flag`:**
+  `job.status` export object gains `failed` — `ExportDialog::last_export_failed`
+  set in export_now's Err arm, cleared on Ok; `commands.rs` wires it into
+  `job_status_json` (signature unchanged, main.rs untouched). Pins in
+  export_dialog.rs (`a_failed_export_reports_no_files_...` extended +
+  `the_failed_flag_starts_clear`). Battery log
+  /tmp/umber-exportflag-battery.log. Queue row + COORDINATION line deferred
+  with the sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

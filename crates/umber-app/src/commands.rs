@@ -408,6 +408,10 @@ pub fn job_status_json(app: &UmberApp) -> serde_json::Value {
         },
         "export": {
             "completed": export.completed_exports(),
+            // Row 232's tail: the latest landed export's outcome, so a
+            // client can tell a failed run from a good one (the bake
+            // side has had `failed` since 87d0285).
+            "failed": export.last_export_failed(),
             "status": export.status(),
             "written": written,
         },
