@@ -74,6 +74,10 @@
 //!   which says nothing about a real desktop; persisting it poisoned
 //!   later launches into GL permanently (installers gap #5, queue row
 //!   249). See [`Decision::persist_on_success_in`] and [`has_display`].
+//!   The display question is asked by the CALLER
+//!   ([`Session::new_with_display`]), never read from the environment
+//!   inside the session — that made the tests machine-dependent (CI has
+//!   no display; CI RED on 2026-11-07, run 42419285457).
 //! * State dir: the parent of the brushes dir (`$XDG_DATA_HOME/umber`,
 //!   `~/.local/share/umber`, `%APPDATA%\umber`), the same root the plugins
 //!   dir uses; `temp_dir()/umber` when no home is discoverable.
@@ -671,12 +675,30 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(dir: PathBuf, guard: Option<MarkerGuard>, decision: &Decision) -> Self {
+    /// One launch's session.
+    ///
+    /// The display question is the CALLER's: reading
+    /// `WAYLAND_DISPLAY`/`DISPLAY` inside this constructor made the
+    /// session's behavior depend on the machine the test runs on — a CI
+    /// runner has no display, a desktop does — and the same test then
+    /// asserted two different outcomes (CI RED on 2026-11-07, run
+    /// 42419285457).
+    ///
+    /// The production path passes [`has_display()`]: a launch with no
+    /// display never persists its fallback (installers gap #5, queue row
+    /// 249 — a software-GL pick made headless must not poison later
+    /// desktop launches). The tests pass the branch they mean.
+    pub fn new_with_display(
+        dir: PathBuf,
+        guard: Option<MarkerGuard>,
+        decision: &Decision,
+        has_display: bool,
+    ) -> Self {
         Session {
             dir,
             guard,
             marker: Marker::new(decision.planned()),
-            persist: decision.persist_on_success_in(has_display()),
+            persist: decision.persist_on_success_in(has_display),
             frames: 0,
             fallback: matches!(
                 decision.reason,
@@ -873,7 +895,9 @@ pub fn prepare(safe_flag: bool) -> Decision {
     );
     log_decision(&decision, stale.as_ref());
 
-    let mut session = Session::new(dir, guard, &decision);
+    // The display question is the CALLER's: a launch with no display
+    // never persists its fallback (installers gap #5, row 249).
+    let mut session = Session::new_with_display(dir, guard, &decision, has_display());
     if let Err(e) = session.write_marker() {
         log::warn!("gpu startup: could not write the marker ({e})");
     }
@@ -1016,7 +1040,7 @@ mod tests {
         write_persisted(&dir, Backend::Gl).expect("seed a remembered GL");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
         let d = fell_back(Backend::Vulkan, Backend::Gl, None);
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.write_marker().expect("write");
         s.finish(false).expect("finish");
         drop(s);
@@ -1100,11 +1124,11 @@ mod tests {
     #[test]
     fn confirmation_writes_gpu_backend_only_when_the_session_carries_a_persist() {
         // The confirm path itself is unchanged; the headless gate only
-        // decides whether `persist` is set (Session::new).
+        // decides whether `persist` is set (Session::new_with_display).
         let dir = fresh_dir("confirm-persist");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
         let d = fell_back(Backend::Vulkan, Backend::Gl, None);
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.persist = Some(Backend::Gl); // as a display-ful launch would have
         for _ in 0..FRAMES_TO_CONFIRM - 1 {
             assert!(!s.note_frame().expect("frame"));
@@ -1117,7 +1141,7 @@ mod tests {
         let dir = fresh_dir("confirm-no-persist");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
         let d = fell_back(Backend::Vulkan, Backend::Gl, None);
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.persist = None; // what a headless launch now gets
         for _ in 0..FRAMES_TO_CONFIRM {
             let _ = s.note_frame().expect("frame");
@@ -1126,6 +1150,30 @@ mod tests {
             read_persisted(&dir).expect("read"),
             None,
             "nothing persisted"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A headless SESSION never persists its fallback, even after the
+    /// confirm frame — the session-level twin of
+    /// `a_headless_launch_never_persists_its_fallback` (installers gap
+    /// #5). The branch is chosen by the CALLER, so the pin means the
+    /// same thing on a desktop and on a CI runner with no display.
+    #[test]
+    fn a_headless_session_never_persists_its_fallback() {
+        let dir = fresh_dir("headless-session");
+        let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
+        let d = fell_back(Backend::Vulkan, Backend::Gl, None);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, false);
+        s.write_marker().expect("write");
+        for _ in 0..FRAMES_TO_CONFIRM {
+            let _ = s.note_frame().expect("frame");
+        }
+        assert_eq!(
+            read_persisted(&dir).expect("read"),
+            None,
+            "headless: the fallback is never persisted"
         );
         drop(s);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1527,7 +1575,7 @@ mod tests {
         let dir = fresh_dir("adapter");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
         let d = fell_back(Backend::Vulkan, Backend::Gl, None);
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.write_marker().expect("write");
         s.note_adapter("llvmpipe", wgpu::Backend::Gl, "mesa")
             .expect("adapter");
@@ -1550,7 +1598,7 @@ mod tests {
         let dir = fresh_dir("session");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
         let d = fell_back(Backend::Vulkan, Backend::Gl, None);
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.write_marker().expect("write");
         assert!(!s.note_frame().expect("1"));
         assert!(!s.note_frame().expect("2"));
@@ -1571,7 +1619,7 @@ mod tests {
         let dir = fresh_dir("session-pref");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
         let d = decide_backend(None, None, None, false, Platform::Unix);
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.write_marker().expect("write");
         for _ in 0..FRAMES_TO_CONFIRM {
             s.note_frame().expect("frame");
@@ -1589,7 +1637,7 @@ mod tests {
         };
         let dir = fresh_dir("finish-ok");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.write_marker().expect("write");
         s.finish(true).expect("finish");
         assert!(!dir.join(MARKER_FILE).exists());
@@ -1598,7 +1646,7 @@ mod tests {
 
         let dir = fresh_dir("finish-err");
         let (guard, _) = free(acquire_marker(&dir).expect("acquire"));
-        let mut s = Session::new(dir.clone(), Some(guard), &d);
+        let mut s = Session::new_with_display(dir.clone(), Some(guard), &d, true);
         s.write_marker().expect("write");
         s.finish(false).expect("finish");
         drop(s);
