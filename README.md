@@ -1,10 +1,33 @@
 # Umber
 
-**Open-source, Rust-native 3D texture painting — the community's answer to Adobe Substance 3D Painter.**
+<p align="center">
+  <b>Open-source, Rust-native 3D texture painting — the community's answer to Adobe Substance 3D Painter.</b><br>
+  Paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps,
+  and export engine-ready texture sets. Fast, local-first, and free forever. Written entirely in Rust.
+</p>
 
-Umber is a ground-up reimagining of the 3D texture-painting DCC: paint PBR materials directly on your meshes, build non-destructive layer stacks, bake mesh maps, and export engine-ready texture sets — fast, local-first, and free forever. Built completely in Rust for **Windows and Linux**.
+<p align="center">
+  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-d69e2e?style=flat-square">
+  <img alt="Written in pure Rust" src="https://img.shields.io/badge/pure-Rust-b7410e?style=flat-square&logo=rust">
+  <img alt="Linux · Windows" src="https://img.shields.io/badge/Linux%20%C2%B7%20Windows-2f7bf5?style=flat-square">
+  <img alt="Agents: JSONL control + CLI" src="https://img.shields.io/badge/agents-JSONL%20%2B%20CLI-555555?style=flat-square">
+  <img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-3a3a3a?style=flat-square">
+</p>
 
-> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,600+<!-- /scorecard --> tests. No release tag yet: SPEC ratification and the perf baseline lead the 0.1.0 checklist (`docs/specs/release-checklist-0.1.0.md`).
+> [!IMPORTANT]
+> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,600+<!-- /scorecard --> tests.
+>
+> **Not yet:** no release tag (SPEC ratification and the perf baseline lead the 0.1.0 checklist, `docs/specs/release-checklist-0.1.0.md`); the open feature waves — brush angle/jitter, bitmap stamps, the Win32 tablet path, a11y pass, projection fill — are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+<p align="center">
+  <a href="#why">Why</a> ·
+  <a href="#why-umber">Why Umber</a> ·
+  <a href="#what-works-today">What works today</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#repository-layout">Repository layout</a> ·
+  <a href="#contributing">Contributing</a> ·
+  <a href="#license">License</a>
+</p>
 
 ## Why
 
@@ -18,6 +41,15 @@ Substance Painter is the industry standard for game/film texturing — and it is
 - **Original procedural engine.** We do not touch Adobe's .sbsar/.spp formats — Umber ships its own node-graph engine for generators, filters, and smart materials.
 - **Git-friendly project format.** Diffable, mergeable projects — the anti-.spp.
 - **Windows + Linux first-class.** One codebase, no second-class platform.
+
+## Why Umber
+
+- **Familiar.** Texture sets, a layer stack with per-channel blending, masks, smart materials, the tool shelf, 3D and 2D views — the layout texture artists already know.
+- **Fast.** A tiled, byte-exact paint engine with GPU viewport; mesh maps bake on the GPU, and the undo journal is bounded and coalescing.
+- **Seamless.** Strokes flow across UV seams (UDIM-aware, seam-clipped at tile boundaries), and front-face falloff keeps paint off the back of the model.
+- **Robust.** Crash-safe GPU startup with automatic backend fallback, crash-safe saves with a commit protocol, hostile-input-tested commands.
+- **Open.** glTF/GLB, FBX, OBJ, USDA/USDC/USDZ in; PNG, JPEG, TIFF, EXR, PSD, USD out at up to 8K with engine presets.
+- **Agent-native.** Every panel action is a registered command: drive the same paint engine from the UI, the `--control` JSON channel, the headless CLI, or the JSONL agent protocol.
 
 ## What works today
 
@@ -36,11 +68,15 @@ Substance Painter is the industry standard for game/film texturing — and it is
 
 Still open is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) — brush angle / jitter, bitmap stamps, the Win32 tablet path, and the 0.1.0 release gates among them.
 
-## Try it
+## Quick start
 
 ```bash
 # the app: viewport, layer stack, Bakes panel, Export dialog
+git clone https://github.com/victorbessa96/umber.git && cd umber
 cargo run -p umber-app
+
+# the app plus a loopback JSON control channel (drive panels by command id)
+cargo run -p umber-app -- --control 7878
 
 # headless: bake every P0 mesh map from a mesh, seam-padded
 cargo run -p umber-cli -- bake-all sword.obj out/ --size 1024 --rays 16 --dilate 16
@@ -74,6 +110,7 @@ umber/
 ├── CHANGELOG.md       # what landed, by wave
 ├── docs/
 │   ├── ROADMAP.md     # the plan of record
+│   ├── references/    # reference READMEs from sibling open-source apps
 │   ├── specs/         # design docs per subsystem
 │   ├── loop/          # the autonomous-build records: queue, kill-ledger,
 │   │                  #   kill-reports/ (per-kill evidence), briefs, coordination notes
