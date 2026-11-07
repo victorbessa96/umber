@@ -31,8 +31,13 @@
 //! entry stores the oldest before + the newest after, never the
 //! intermediate pair. Judgment calls:
 //!
-//! * Merge happens at PUSH time, against the TOP undo entry only (older
-//!   entries are never rewritten). It needs the new stroke's FULL-tile
+//! * Merge happens at PUSH time, against the TOP undo entry first; when the
+//!   top refuses (disjoint rects or the size guard) but an OLDER entry
+//!   within a bounded window (8) accepts, the stroke splices into it via
+//!   [`UndoStack::merge_below_top`] (row 257) — provided the redo stack is
+//!   empty and the stroke intersects NO entry above the target (redoing
+//!   those would clobber the merged after over the overlap). It needs the
+//!   new stroke's FULL-tile
 //!   start and end images ([`StrokeTile`]), not just its rect bytes: the
 //!   merged rect is the bounding box `U` of the two rects, and `U`'s
 //!   corners lie in neither rect, so neither entry holds their bytes. With

@@ -145,8 +145,8 @@ impl<C: Command> UndoStack<C> {
     /// Returns `false` with the journal untouched when `k` is out of range
     /// or `build` declines (`None`); the taken entries are re-seated and the
     /// redo stack restored on that path too. This is the primitive that
-    /// lifts the merge-below-top debt (retouch.rs:34): a below-top rewrite
-    /// no longer invalidates anything above it.
+    /// lifts the merge-below-top debt (retouch.rs's merge judgment calls):
+    /// a below-top rewrite no longer invalidates anything above it.
     pub fn merge_below_top(
         &mut self,
         k: usize,
@@ -321,10 +321,10 @@ impl<C: Command> UndoStack<C> {
 
     /// The command [`redo`](Self::redo) would re-apply next — the most
     /// recently undone one — without touching either stack. Named
-    /// follow-up from the paint crate's split-redo (retouch.rs's
-    /// `RedoPending` note): lifting that refusal, and the
-    /// merge-below-top debt, both need to inspect the redo top before
-    /// deciding whether a journal mutation is safe.
+    /// follow-up from the paint crate's split-redo: lifting that refusal
+    /// (landed `1347e13` via `take_redo`/`restore_redo`) and the
+    /// merge-below-top debt (wired `bbdc08b`) both needed to inspect the
+    /// redo top before deciding whether a journal mutation is safe.
     pub fn peek_redo(&self) -> Option<&C> {
         self.redo.last()
     }
