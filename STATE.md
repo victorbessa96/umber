@@ -172,6 +172,17 @@ signing, the alpha tag.
   /tmp/umber-cliradius-battery3.log: clippy 0, 8 suites ok 0 failed (bin
   94/0 incl. the pin). Queue row 253 + COORDINATION line deferred with the
   sibling lock.
+- **Row 253 LANDED `f340fdd`** (cli radius pins pushed 03181ec..f340fdd).
+- **Row 254 (split_redo RedoPending lift) in flight, lock `razul-splitredo-lift`:**
+  `UndoStack::take_redo`/`restore_redo` (undo.rs, pin
+  `take_redo_restore_redo_roundtrip_preserves_order_and_budget`) +
+  split_redo now preserves pending redos below the split parts instead of
+  refusing; `SplitOutcome::RedoPending` retained-but-unreturned (sibling's
+  History match arms still compile). Rewritten test proves redo_len 1+3 and
+  byte-exact replay of the preserved stack. Battery
+  /tmp/umber-splitlift-battery4.log (core 187/0 modulo the sibling-dirty
+  worktree bundled:: failure; paint 194/0). Queue row 254 + COORDINATION
+  line deferred with the sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

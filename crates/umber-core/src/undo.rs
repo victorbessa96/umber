@@ -245,6 +245,27 @@ impl<C: Command> UndoStack<C> {
         self.redo.len()
     }
 
+    /// Takes every redo-stack entry, oldest-first, WITHOUT firing
+    /// `on_evict` or releasing budget bytes — the entries are being
+    /// preserved across a journal mutation, not dropped. Paired with
+    /// [`restore_redo`](Self::restore_redo): a caller whose operation
+    /// pushes fresh entries (and would therefore clear the redo stack
+    /// through [`push`](Self::push), e.g. the paint crate's split-redo)
+    /// takes the redo side out first and restores it in the right order
+    /// afterwards.
+    pub fn take_redo(&mut self) -> Vec<C> {
+        self.redo.drain(..).collect()
+    }
+
+    /// Puts entries back on the redo stack in the order
+    /// [`take_redo`](Self::take_redo) returned them, so the next
+    /// [`redo`](Self::redo) re-applies exactly the entry it would have
+    /// before the take. No budget or eviction accounting: the entries
+    /// never left `bytes_held`.
+    pub fn restore_redo(&mut self, entries: Vec<C>) {
+        self.redo.extend(entries);
+    }
+
     /// Removes the command [`undo`](Self::undo) would revert next WITHOUT
     /// reverting it, releasing its [`Command::memory_bytes`] from the
     /// budget and bypassing `on_evict` (the entry is not dropped history —
@@ -349,6 +370,44 @@ mod tests {
         assert!(stack.redo(&mut doc));
         assert_eq!(stack.peek_redo().map(|c| c.delta), Some(10));
         assert_eq!(doc, Counter(1), "the accessor never applied anything");
+    }
+
+    #[test]
+    fn take_redo_restore_redo_roundtrip_preserves_order_and_budget() {
+        let mut doc = Counter::default();
+        let mut stack: UndoStack<AddCommand> = UndoStack::new(100);
+        stack.push(AddCommand { delta: 1 }, &mut doc);
+        stack.push(AddCommand { delta: 10 }, &mut doc);
+        stack.push(AddCommand { delta: 100 }, &mut doc);
+        assert!(stack.undo(&mut doc) && stack.undo(&mut doc));
+        let held = stack.bytes_held();
+        assert_eq!(stack.redo_len(), 2);
+        assert_eq!(stack.peek_redo().map(|c| c.delta), Some(10));
+
+        let taken = stack.take_redo();
+        assert_eq!(taken.len(), 2);
+        assert!(!stack.can_redo(), "take drains the redo side");
+        assert_eq!(stack.bytes_held(), held, "take releases no budget bytes");
+
+        // A push in between (which normally clears the redo stack) sees an
+        // empty redo, then the restore lands the taken entries back.
+        stack.push(AddCommand { delta: 1000 }, &mut doc);
+        let held_after_push = stack.bytes_held();
+        stack.restore_redo(taken);
+        assert_eq!(stack.redo_len(), 2);
+        assert_eq!(
+            stack.peek_redo().map(|c| c.delta),
+            Some(10),
+            "the same entry is the next redo again"
+        );
+        assert_eq!(
+            stack.bytes_held(),
+            held_after_push,
+            "restore does not double-count"
+        );
+        assert!(stack.redo(&mut doc) && stack.redo(&mut doc));
+        assert!(!stack.can_redo());
+        assert_eq!(doc, Counter(1 + 1000 + 10 + 100));
     }
 
     #[test]

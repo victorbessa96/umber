@@ -653,10 +653,10 @@ pub enum SplitOutcome {
     /// The next redo entry is a single stroke: there is nothing to split
     /// (plain [`UndoStack::redo`] already replays it alone).
     NotMerged,
-    /// More than one entry waits on the redo stack. The split pushes its
-    /// parts, and a push clears the redo stack, so splitting here would
-    /// drop the later undone strokes; refused instead (lifting this needs
-    /// a redo-top accessor in `umber_core::undo`, a named follow-up).
+    /// More than one entry waits on the redo stack. No longer returned:
+    /// the split now takes the pending redos aside and restores them below
+    /// the split parts (row 254), so an undone future is never dropped.
+    /// Retained so existing match arms keep compiling.
     RedoPending,
     /// The parts alone exceed the envelope (more parts than
     /// `max_entries`, or more split bytes than `max_bytes`): the entry
@@ -751,36 +751,40 @@ pub(crate) fn split_redo(
     if !history.redo(writes) {
         return SplitOutcome::Empty;
     }
-    let refusal = if history.can_redo() {
-        Some(SplitOutcome::RedoPending)
-    } else {
-        match history.peek_undo().and_then(split_parts) {
-            None => Some(SplitOutcome::NotMerged),
-            Some(parts)
-                if parts.len() > envelope.max_entries
-                    || parts.iter().map(Command::memory_bytes).sum::<usize>()
-                        > envelope.max_bytes =>
-            {
-                Some(SplitOutcome::ExceedsEnvelope)
+    // The split pushes fresh entries, and a push clears the redo stack;
+    // take the pending redos out first and restore them afterwards, so a
+    // split never drops an undone future (the old RedoPending refusal).
+    let preserved = history.take_redo();
+    let refusal = match history.peek_undo().and_then(split_parts) {
+        None => Some(SplitOutcome::NotMerged),
+        Some(parts)
+            if parts.len() > envelope.max_entries
+                || parts.iter().map(Command::memory_bytes).sum::<usize>() > envelope.max_bytes =>
+        {
+            Some(SplitOutcome::ExceedsEnvelope)
+        }
+        Some(parts) => {
+            let _merged = history.take_top_unreverted();
+            let count = parts.len();
+            let mut first = parts[0].clone();
+            for part in parts {
+                history.push(part, writes);
             }
-            Some(parts) => {
-                let _merged = history.take_top_unreverted();
-                let count = parts.len();
-                let mut first = parts[0].clone();
-                for part in parts {
-                    history.push(part, writes);
-                }
-                for _ in 1..count {
-                    history.undo(writes);
-                }
-                // Net effect on the (pre-redo) document: the first part's
-                // after over its rect; every other write cancels out.
-                writes.writes.truncate(mark);
-                first.apply(writes);
-                return SplitOutcome::Split { parts: count };
+            // Restore below the split parts: the undo loop next pushes
+            // parts 2..=n on top of the redo stack, so redo order stays
+            // part2, ..., partn, then the preserved older entries.
+            history.restore_redo(preserved);
+            for _ in 1..count {
+                history.undo(writes);
             }
+            // Net effect on the (pre-redo) document: the first part's
+            // after over its rect; every other write cancels out.
+            writes.writes.truncate(mark);
+            first.apply(writes);
+            return SplitOutcome::Split { parts: count };
         }
     };
+    history.restore_redo(preserved);
     history.undo(writes);
     writes.writes.truncate(mark);
     refusal.unwrap_or(SplitOutcome::NotMerged)
@@ -2028,8 +2032,9 @@ mod tests {
             "an unmerged entry has no parts"
         );
 
-        // A merged entry with a later entry undone above it: splitting
-        // would clear that redo, so it is refused.
+        // A merged entry with a later entry undone above it: the split
+        // preserves the pending redos below its own parts instead of
+        // refusing (the row 254 lift via UndoStack::take_redo/restore_redo).
         let mut history: UndoStack<PaintStrokeCommand> = UndoStack::new(64);
         let mut image = original.clone();
         for (k, &r) in soak_rects().iter().enumerate() {
@@ -2043,17 +2048,31 @@ mod tests {
             9,
         );
         assert_eq!(history.len(), 2);
+        let after_all = image.clone();
         assert!(history.undo(&mut writes) && history.undo(&mut writes));
         drain(&mut writes, &mut image);
         assert_eq!(image, original);
+        assert_eq!(history.redo_len(), 2);
         assert_eq!(
             split_redo(&mut history, &mut writes, BIG),
-            SplitOutcome::RedoPending
+            SplitOutcome::Split { parts: 4 }
         );
-        assert!(writes.writes.is_empty());
-        assert_eq!(history.len(), 0);
-        assert!(history.redo(&mut writes) && history.redo(&mut writes));
-        assert!(!history.can_redo(), "both redos survived the refusal");
+        drain(&mut writes, &mut image);
+        assert_eq!(history.len(), 1, "only the first part stays applied");
+        assert_eq!(
+            history.redo_len(),
+            1 + 3,
+            "the split consumed the merged redo itself; the other older redo + 3 parts remain"
+        );
+        assert!(history.can_redo());
+        while history.redo(&mut writes) {
+            drain(&mut writes, &mut image);
+        }
+        assert!(!history.can_redo(), "the preserved redos all replayed");
+        assert_eq!(
+            image, after_all,
+            "redoing the preserved stack reproduces the pre-undo image exactly"
+        );
     }
 
     /// The envelope: a split pushes `parts` entries through the normal
