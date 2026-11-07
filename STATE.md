@@ -201,6 +201,18 @@ signing, the alpha tag.
   record_stroke to use the splice is next. Battery
   /tmp/umber-mergebelow-battery4.log. Queue row 256 + COORDINATION line
   deferred with the sibling lock.
+- **Row 257 (record_stroke below-top wiring) LANDED `bbdc08b`, push in
+  flight (safe-push proc_95bba5ac8a64), lock `razul-recordstroke-below`:**
+  `UndoStack::peek_undo_at(k)` added in undo.rs; `record_stroke`
+  (retouch.rs) now scans a bounded window (8) below the top and splices
+  the stroke into an older entry via `merge_below_top`, guarded by: redo
+  stack empty, and the stroke intersects no entry above the target
+  (redo-clobber guard). Pins:
+  `record_stroke_merges_below_top_when_the_stroke_skips_the_top_entry`
+  and `record_stroke_stacks_when_the_stroke_touches_an_entry_above_the_target`,
+  both byte-exact roundtrip. Battery /tmp/umber-below-battery4.log:
+  clippy -D warnings 0, core 189/0 (bundled:: skipped, sibling-dirty
+  worktree), paint 196/0. ROADMAP merge-below-top debt marked WIRED.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

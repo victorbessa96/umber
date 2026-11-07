@@ -213,14 +213,18 @@ pass; the .ftl lock lift (if it stands).
   entry then redoing replays its constituent strokes one at a time.
   REMAINING: the History-panel "split" affordance wiring — blocked on
   document.rs/main.rs (sibling lock `razul-bundled-assets`).
-- Merge below the top undo entry — OPEN, splice primitive landed (`592df58`,
-  row 256). `UndoStack::merge_below_top(k, doc, build)` + `push_unapplied`
-  rewrite the entry `k` below the top without re-applying the entries above
-  them (taken unreverted, re-seated unapplied) and preserve any pending
-  redo via `take_redo`/`restore_redo`; declined or out-of-range splices
-  leave the journal untouched (pinned). What remains: wiring
-  `record_stroke` (retouch.rs:613) to consider below-top entries through
-  this splice instead of top-only.
+- Merge below the top undo entry — **WIRED 2026-11-07** (`bbdc08b`, row
+  257): the splice primitive landed `592df58` (row 256) —
+  `UndoStack::merge_below_top(k, doc, build)` + `push_unapplied` rewrite
+  the entry `k` below the top without re-applying the entries above them
+  (taken unreverted, re-seated unapplied) and preserve any pending redo
+  via `take_redo`/`restore_redo`. `record_stroke` (retouch.rs) now scans a
+  bounded window (8) below the top through the new `peek_undo_at`, but
+  only when the redo stack is empty and the stroke intersects NO entry
+  above the target (redoing those would clobber the merged after over the
+  overlap); both directions pinned byte-exact. What remains: the
+  History-panel "split" affordance wiring — blocked on
+  document.rs/main.rs (sibling lock).
 - The winink live-HWND question — OPEN, now deeper-gated (the
   bytes are absent).
 - DPI runtime re-raster — OPEN (the manual ui_scale exists;
