@@ -995,7 +995,8 @@ overlays =
     .stencil-load-failed = Stencil not loaded: { $reason }
     .stencil-unreadable = the file could not be read.
     .stencil-too-large = { $width }×{ $height } is over the { $max }-pixel limit.
-    .stencil-unsupported = not a supported PNG (8-bit RGB or RGBA).
+    .stencil-unsupported = not a supported PNG (8-bit RGB or RGBA) or SVG.
+    .stencil-unsupported-svg = the SVG could not be used: { $detail }
     .stencil-n-hint = N toggles the stencil — paint passes through while it is ignored.
     .stencil-gate-live = Gate live ({ $width }×{ $height }, { $open }% open) — paint passes only where it opens.
 

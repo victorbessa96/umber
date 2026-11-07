@@ -331,7 +331,7 @@ pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
         ui.weak(path);
         if ui.button(i18n::tr("overlays.stencil-load")).clicked() {
             out.picked = rfd::FileDialog::new()
-                .add_filter("PNG", &["png"])
+                .add_filter("PNG / SVG", &["png", "svg"])
                 .pick_file();
         }
     });

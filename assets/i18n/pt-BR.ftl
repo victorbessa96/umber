@@ -1014,7 +1014,8 @@ overlays =
     .stencil-load-failed = Estêncil não carregado: { $reason }
     .stencil-unreadable = não foi possível ler o arquivo.
     .stencil-too-large = { $width }×{ $height } passa do limite de { $max } pixels.
-    .stencil-unsupported = não é um PNG suportado (RGB ou RGBA de 8 bits).
+    .stencil-unsupported = não é um PNG (RGB ou RGBA de 8 bits) nem um SVG suportado.
+    .stencil-unsupported-svg = não foi possível usar o SVG: { $detail }
     .stencil-n-hint = N alterna o estêncil — a tinta passa livre enquanto ele é ignorado.
     .stencil-gate-live = Máscara ativa ({ $width }×{ $height }, { $open }% aberta) — a tinta passa apenas onde ela abre.
 

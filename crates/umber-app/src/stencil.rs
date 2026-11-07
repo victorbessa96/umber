@@ -7,6 +7,13 @@
 //!
 //! Judgment calls (the next kill extends from these):
 //!
+//! - **`.svg` is accepted next to PNG** ([`load_image_rgba`], row 268): an
+//!   `.svg`/`.SVG` path is read and rasterized by
+//!   `umber_core::svg::rasterize_svg_default` (2048² cap), then thresholded
+//!   through `StencilImage::from_alpha` exactly like a PNG (alpha >= 128).
+//!   Any other extension takes the PNG path unchanged. The file is refused
+//!   from its metadata when it is over
+//!   `umber_core::svg::MAX_SVG_INPUT_BYTES` (16 MiB), before the read.
 //! - **The decoder is `umber_graph::decode_png_rgba8`**, NOT
 //!   `umber_export::png::read_png_rgba8` (the path the shell's other PNG
 //!   loads use, e.g. main.rs's import publish and brush_panel.rs's stamp
@@ -103,6 +110,9 @@ pub enum StencilLoadError {
     /// The decoded bytes did not build a coverage image.
     #[error("stencil image rejected: {0}")]
     Image(#[from] StencilError),
+    /// The SVG did not parse or rasterize (malformed, no size, over its cap).
+    #[error("stencil SVG rejected: {0}")]
+    Svg(#[from] umber_core::svg::SvgError),
 }
 
 impl StencilLoadError {
@@ -113,6 +123,8 @@ impl StencilLoadError {
         match self {
             Self::Io(_) => "overlays.stencil-unreadable",
             Self::TooLarge { .. } => "overlays.stencil-too-large",
+            Self::Svg(umber_core::svg::SvgError::TooLarge { .. }) => "overlays.stencil-too-large",
+            Self::Svg(_) => "overlays.stencil-unsupported-svg",
             Self::Decode(_) | Self::Image(_) => "overlays.stencil-unsupported",
         }
     }
@@ -132,6 +144,22 @@ impl StencilLoadError {
                     ("height", FluentValue::from(i64::from(*h))),
                     ("max", FluentValue::from(*cap as i64)),
                 ],
+            ),
+            Self::Svg(umber_core::svg::SvgError::TooLarge {
+                width: w,
+                height: h,
+                max_pixels: cap,
+            }) => crate::i18n::tr_args(
+                "overlays.stencil-too-large",
+                [
+                    ("width", FluentValue::from(i64::from(*w))),
+                    ("height", FluentValue::from(i64::from(*h))),
+                    ("max", FluentValue::from(*cap as i64)),
+                ],
+            ),
+            Self::Svg(err) => crate::i18n::tr_args(
+                self.reason_key(),
+                [("detail", FluentValue::from(err.to_string()))],
             ),
             _ => crate::i18n::tr(self.reason_key()),
         }
@@ -384,6 +412,38 @@ pub fn load_png_rgba(path: &Path) -> Result<StencilImage, StencilLoadError> {
     stencil_from_png_bytes(&bytes, DEFAULT_MAX_STENCIL_PIXELS)
 }
 
+/// Loads a stencil image from `path`: an `.svg`/`.SVG` extension is
+/// rasterized (2048² cap) and thresholded like a PNG; every other
+/// extension takes the [`load_png_rgba`] path unchanged.
+pub fn load_image_rgba(path: &Path) -> Result<StencilImage, StencilLoadError> {
+    let is_svg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    if !is_svg {
+        return load_png_rgba(path);
+    }
+    // The input-byte budget (cross-review F2): refuse an oversized file
+    // from its metadata, BEFORE the read — a huge SVG must never be
+    // pulled into memory just to be refused afterwards.
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > umber_core::svg::MAX_SVG_INPUT_BYTES as u64 {
+        return Err(StencilLoadError::Svg(
+            umber_core::svg::SvgError::InputTooLarge {
+                bytes: meta.len() as usize,
+                max_bytes: umber_core::svg::MAX_SVG_INPUT_BYTES,
+            },
+        ));
+    }
+    let bytes = std::fs::read(path)?;
+    let raster = umber_core::svg::rasterize_svg_default(&bytes)?;
+    Ok(StencilImage::from_alpha(
+        raster.width(),
+        raster.height(),
+        &raster.to_rgba(),
+    )?)
+}
+
 /// The Display panel's stencil section (the Overlays popover hosts the
 /// same rows once the viewport kill lands — step 3): draws
 /// [`crate::display_panel::stencil_rows`] over `state`, loads a picked
@@ -422,7 +482,7 @@ pub fn panel_section(ui: &mut egui::Ui, state: &mut StencilState, paint: Option<
     );
     let mut restage = response.toggled;
     if let Some(path) = response.picked {
-        let result = load_png_rgba(&path);
+        let result = load_image_rgba(&path);
         // The picked file's own dims are only known after the load.
         let view = match (target, &result) {
             (None, Ok(image)) => [image.width() as f32, image.height() as f32],
@@ -501,6 +561,53 @@ mod tests {
     /// PNG bytes -> image under the default cap.
     fn load(bytes: &[u8]) -> Result<StencilImage, StencilLoadError> {
         stencil_from_png_bytes(bytes, DEFAULT_MAX_STENCIL_PIXELS)
+    }
+
+    const TEST_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect x="4" y="4" width="20" height="20"/><circle cx="44" cy="44" r="12"/></svg>"#;
+
+    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("umber-stencil-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn svg_loads_end_to_end_to_the_thresholded_raster() {
+        let path = write_temp("shapes.svg", TEST_SVG.as_bytes());
+        let image = load_image_rgba(&path).unwrap();
+        let raster = umber_core::svg::rasterize_svg_default(TEST_SVG.as_bytes()).unwrap();
+        let expected =
+            StencilImage::from_alpha(raster.width(), raster.height(), &raster.to_rgba()).unwrap();
+        assert_eq!((image.width(), image.height()), (64, 64));
+        assert_eq!(image, expected);
+        // Uppercase extension takes the same path.
+        let upper = write_temp("SHAPES.SVG", TEST_SVG.as_bytes());
+        assert_eq!(load_image_rgba(&upper).unwrap(), expected);
+    }
+
+    #[test]
+    fn over_cap_svg_refuses_too_large() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"/>"#;
+        let path = write_temp("huge.svg", svg.as_bytes());
+        assert!(matches!(
+            load_image_rgba(&path),
+            Err(StencilLoadError::Svg(
+                umber_core::svg::SvgError::TooLarge { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn malformed_svg_refuses_parse() {
+        let path = write_temp("bad.svg", b"<svg width=\"8\" height=\"8\"><rect");
+        let err = load_image_rgba(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            StencilLoadError::Svg(umber_core::svg::SvgError::Parse { .. })
+        ));
+        assert_eq!(err.reason_key(), "overlays.stencil-unsupported-svg");
     }
 
     fn active_pattern() -> StencilState {

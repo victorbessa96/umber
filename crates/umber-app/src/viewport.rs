@@ -2066,7 +2066,7 @@ fn stencil_popover_rows(
     );
     let mut restage = response.toggled;
     if let Some(path) = response.picked {
-        let result = crate::stencil::load_png_rgba(&path);
+        let result = crate::stencil::load_image_rgba(&path);
         stencil.adopt(path, result, view);
         restage = true;
     }
