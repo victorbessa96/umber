@@ -225,6 +225,10 @@ signing, the alpha tag.
   landed `1f0e438`; stamp-images-with-presets landed `b800297`/`6c95e26`.
   All three ROADMAP rows marked landed. Docs-only, no battery per the
   8af2058 receipt rule.
+- **Row 260 (doc-comment sync) LANDED+PUSHED `f78f7f4c`:** retouch.rs's
+  merge judgment-calls and undo.rs's `merge_below_top`/`peek_redo` doc
+  comments now describe the landed below-top splice (row 257) instead of
+  "top entry only". clippy -D warnings green via safe-push gates.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
