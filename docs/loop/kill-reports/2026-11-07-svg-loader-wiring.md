@@ -55,3 +55,14 @@
 
 - Two leaves ran in parallel on disjoint surfaces (claude/sonnet + opencode); each brief named every wall it would hit (no cargo, no locks script, no commit). The dragon owned the review pass, the byte budget, the gates and the landing.
 - Row 268 was taken by the sibling lane's wave-abr design brief (`f8d6d84f`) and then by its abr-core kill; this wave is row 269.
+
+## Live smoke (the packaged binary, not a mock)
+
+Run with the debug binary from a clean env and a different CWD (`env -i PATH=/usr/bin:/bin HOME=/tmp`,
+cwd = scratch), against a hand-written fixture with a rect, a circle, a transformed path and an arc:
+
+- `umber-cli stencil fixture.svg out.png` → **exit 0**, stdout `{"width":120,"height":90,"out":"…/out.png"}`, the PNG written.
+- The PNG decoded (PIL): 120×90 RGBA, RGB white everywhere sampled, alpha 255 inside the rect / circle / transformed triangle / arc region, 0 outside, and **179 partial-coverage pixels** on the antialiased edges — the 4x4 supersampled plane, not a hard mask.
+- Missing argument → **exit 2** with the usage line. Malformed SVG → **exit 2**, `stencil: refused: SVG parse error at byte 28: unterminated tag <rect`.
+- **The F2 byte budget, live:** a 24 MB SVG → **exit 2**, `stencil: refused: SVG input is 24000034 bytes, over the 16777216-byte cap`, and **no PNG was written** (refused before the read).
+- `--size 99999999` → **exit 2**, `stencil: refused: --size 99999999 exceeds the stencil ceiling of 67108864 pixels (8192x8192)`.

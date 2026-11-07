@@ -297,7 +297,26 @@ signing, the alpha tag.
   -p umber-cli --all-targets -D warnings` 0, **1,407 tests / 0 failed**
   across 21 suites. Kill report
   docs/loop/kill-reports/2026-11-07-svg-loader-wiring.md. (Row numbering:
-  the sibling lane's abr-core kill took row 268; this wave is row 269.)
+  the sibling lane's abr-core kill took row 268); this wave is row 269.)
+- **Row 271 (CI red fix) LANDED:** the row 269 push's release-gate CI run
+  42419285457 was RED on BOTH runners in the Tests step —
+  `gpu_startup::tests::session_confirms_on_the_third_frame_and_persists_a_fallback`
+  (`left: None, right: Some(Gl)`). NOT the svg wave: the regression is
+  `59779065` (row 249, 2026-11-06 20:21), which made `Session::new` read
+  the AMBIENT display env — a CI runner has no display, so the session
+  persisted nothing and the test failed; this was the FIRST CI run since
+  CI became a release gate, so it surfaced a latent red that never ran on
+  a runner. FIX: the display question is the CALLER's —
+  `Session::new_with_display(dir, guard, decision, has_display)`; the
+  production site passes `has_display()` (production behavior unchanged:
+  a headless launch still never persists its fallback); the shorthand
+  constructor is gone; every test names its branch; new pin
+  `a_headless_session_never_persists_its_fallback`. Gates: the CI
+  condition reproduced locally (`env -u DISPLAY -u WAYLAND_DISPLAY
+  -u WAYLAND_SOCKET cargo test -p umber-app --bin umber gpu_startup::tests`
+  → 28/0), clippy `-D warnings` 0, `cargo test -p umber-app --all-targets`
+  green (lib 256/0, bin 757/0). Kill report
+  docs/loop/kill-reports/2026-11-07-gpu-startup-ci-red.md.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
