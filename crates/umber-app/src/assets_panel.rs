@@ -189,12 +189,10 @@ fn persist_saved(state: &mut AssetsPanel, path: Option<&std::path::Path>) {
     state.saved_last = state.saved.clone();
 }
 
-/// K4: a category's bundled starter dir (repo `assets/<name>`), the
-/// manifest-relative path the listers scan first.
+/// K4: a category's bundled starter dir (repo `assets/<name>`), resolved
+/// through the bundled-data lookup — exe-relative in packaged builds.
 fn starter_dir(rel: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../")
-        .join(rel)
+    umber_core::bundled::data_path(rel)
 }
 
 /// K4: whether the starter dir was found on disk — the manifest join,

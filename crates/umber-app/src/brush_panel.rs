@@ -265,9 +265,10 @@ impl BrushPanel {
             dirs.push(user);
         }
         // The packaged install dir (`current_exe` parent + "brushes") is
-        // covered by `Library::load_default_dirs`; in dev the exe lives
-        // under target/, so name the repo dir explicitly instead.
-        dirs.push(PathBuf::from("assets/brushes"));
+        // covered by `Library::load_default_dirs`; the bundled lookup adds
+        // the exe-relative `assets/brushes` (dist archives) and the repo
+        // root (dev).
+        dirs.push(umber_core::bundled::data_path("assets/brushes"));
         Self::with_dirs(dirs)
     }
 

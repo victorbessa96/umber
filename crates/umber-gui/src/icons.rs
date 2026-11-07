@@ -434,15 +434,13 @@ impl std::fmt::Display for AtlasLoadError {
 
 impl std::error::Error for AtlasLoadError {}
 
-/// The runtime atlas dir: `$UMBER_ICON_ATLAS_DIR`, else the in-tree
-/// `assets/icons/atlas/` (resolved from this crate's manifest dir, the
-/// `fonts_dir` pattern).
+/// The runtime atlas dir: `$UMBER_ICON_ATLAS_DIR`, else the best bundled
+/// location of `assets/icons/atlas/` — exe-relative in packaged builds,
+/// the source tree in dev (`umber_core::bundled`).
 pub fn atlas_dir() -> PathBuf {
     match std::env::var_os(ATLAS_DIR_ENV) {
         Some(dir) => PathBuf::from(dir),
-        None => Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../")
-            .join(ATLAS_DIR_PATH),
+        None => umber_core::bundled::data_path(ATLAS_DIR_PATH),
     }
 }
 

@@ -15,6 +15,9 @@ serde_json = { workspace = true }
 # in icons.rs — NOT umber-export's GPU-row-order reader; see that module's
 # cycle decision). Same crate + version umber-export uses.
 png = "0.17"
+# Bundled runtime-data path resolution (umber_core::bundled) for packaged
+# builds: icon atlas + fonts must be found relative to the executable.
+umber-core = { workspace = true }
 
 [dev-dependencies]
 # Feature-gated `gpu` smoke test only (the renderer::tests::gpu pattern).

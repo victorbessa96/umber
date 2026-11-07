@@ -67,14 +67,13 @@ impl std::fmt::Display for MissingFont {
 
 impl std::error::Error for MissingFont {}
 
-/// The runtime fonts dir: `$UMBER_FONTS_DIR`, else the in-tree
-/// `assets/fonts/` (resolved from this crate's manifest dir, so it is
-/// correct for `cargo run` from a checkout. Packaged builds use
-/// `embedded-fonts` or set the env var).
+/// The runtime fonts dir: `$UMBER_FONTS_DIR`, else the best bundled
+/// `assets/fonts/` (exe-relative in packaged builds, the source tree in
+/// dev). Packaged builds may instead use `embedded-fonts` or the env var.
 pub fn fonts_dir() -> PathBuf {
     match std::env::var_os(FONTS_DIR_ENV) {
         Some(dir) => PathBuf::from(dir),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts"),
+        None => umber_core::bundled::data_path("assets/fonts"),
     }
 }
 

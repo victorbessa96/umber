@@ -2211,3 +2211,21 @@ path-limited dcommit (exact files only). The push waits for the filter lane:
 `scripts/safe-push.py` refuses while 05105aa (another session's) sits in
 origin/master..HEAD, by design. Filter lane: push 05105aa yourself, then
 Razul's commit rides the next safe-push.
+
+---
+
+## ADOPTION 2026-11-07 09:3x -03: razul-bundled-assets (installers gap #2) (Razul subagent, worktree subagent-sa-0-3a6c2216)
+
+Stale lock `razul-bundled-assets` (taken 2026-11-06 18:17) adopted as
+`razul-bundled-assets-adopt` (same file list + Cargo.lock, kill report
+renamed to docs/loop/kill-reports/2026-11-07-bundled-assets.md).
+Evidence, re-verified 09:32 -03 before touching anything:
+holder session 20261106_175041_ccfbc2 ended_at=1794011098 (2026-11-06
+~21:24), last message ts 1794010711, 280 msgs / 154 tools; ps shows no
+process from it (only live cargo is `cargo test -p brain` in
+~/Projects/Learning-AI); dirty-file mtimes 18:19-18:27 Nov 6 (bundled.rs
+18:27:03); no other kill locks; git status matches the lock (plus
+Cargo.lock, which the lane changed but never listed). Building in the
+isolated worktree from the dead lane's bytes; shared-tree copies left
+untouched.
+- 2026-11-07 row 261 LANDED (adopted razul-bundled-assets): exe-relative bundled assets, gap #2 closed; lock razul-bundled-assets-adopt removed with the commit.

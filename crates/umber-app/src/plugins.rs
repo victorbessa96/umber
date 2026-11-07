@@ -111,9 +111,10 @@ pub fn plugin_paths_from(user_brush_dir: Option<&Path>, dev_dir: Option<&Path>) 
     dirs
 }
 
-/// The repo's `examples/` dir (where the example `.wasm` modules live).
+/// The bundled `examples/` dir (where the example `.wasm` modules live),
+/// resolved through the bundled-data lookup (exe-relative when packaged).
 pub fn dev_plugin_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")
+    umber_core::bundled::data_path("examples")
 }
 
 /// The plugin dirs for this process: the user plugins dir (when a home

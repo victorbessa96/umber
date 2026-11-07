@@ -1203,8 +1203,10 @@ pub fn smart_dirs() -> Vec<std::path::PathBuf> {
 
 /// [`smart_dirs`] with explicit extras (the testable core).
 pub fn smart_dirs_with(extras: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
-    let mut dirs =
-        vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/smart")];
+    let mut dirs = umber_core::bundled::data_paths("assets/smart");
+    if dirs.is_empty() {
+        dirs.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/smart"));
+    }
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
@@ -1212,7 +1214,10 @@ pub fn smart_dirs_with(extras: &[std::path::PathBuf]) -> Vec<std::path::PathBuf>
         dirs.push(exe_dir.join("smart"));
     }
     for e in extras {
-        if !dirs.contains(e) {
+        let dup = dirs.iter().any(|d| {
+            d == e || (d.exists() && e.exists() && d.canonicalize().ok() == e.canonicalize().ok())
+        });
+        if !dup {
             dirs.push(e.clone());
         }
     }

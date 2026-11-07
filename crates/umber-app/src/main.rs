@@ -6087,6 +6087,13 @@ fn main() -> eframe::Result<()> {
         std::process::exit(0);
     }
 
+    // Which bundled data root won (installers-smoke gap #2 diagnosability:
+    // a packaged binary must say where it reads assets/ from).
+    log::info!(
+        "bundled data root: {}",
+        umber_core::bundled::data_root().display()
+    );
+
     // Paint-compositor requirement (umber-gpu paint claw reviewer checklist
     // item #1): read_write storage textures need the adapter-specific format
     // features requested on the device, or the compute splat pass panics at

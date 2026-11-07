@@ -58,16 +58,20 @@ pub fn load_environment_file(gpu: &GpuContext, path: &Path) -> anyhow::Result<En
         .map_err(|e| anyhow::anyhow!("convolving {}: {e:#}", path.display()))
 }
 
-/// Candidate locations for the studio default, in order: the
-/// repository-relative path (correct when the binary runs with the repo
-/// root as CWD — `cargo run`, the usual dev loop), then the
-/// compile-time manifest path (correct when CWD is elsewhere but the
-/// binary was built from this source tree).
+/// Candidate locations for the studio default, in order: every bundled
+/// location that actually holds the asset (`$UMBER_ASSETS_DIR`, then
+/// exe-relative, then the repo root, then the CWD — see
+/// [`umber_core::bundled`]); when none exists, the CWD-relative path and
+/// the compile-time manifest path, so dev error messages are unchanged.
 pub fn default_env_candidates() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from(DEFAULT_ENV_ASSET),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env/studio-neutral.png"),
-    ]
+    let mut v = umber_core::bundled::data_paths(DEFAULT_ENV_ASSET);
+    if v.is_empty() {
+        v.push(PathBuf::from(DEFAULT_ENV_ASSET));
+        v.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env/studio-neutral.png"),
+        );
+    }
+    v
 }
 
 /// Loads the committed studio default if present, else `None`
@@ -108,7 +112,10 @@ pub fn env_dirs() -> Vec<PathBuf> {
 /// [`env_dirs`] with explicit extras (the testable core, mirroring
 /// [`crate::document::smart_dirs_with`]).
 pub fn env_dirs_with(extras: &[PathBuf]) -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env")];
+    let mut dirs = umber_core::bundled::data_paths("assets/env");
+    if dirs.is_empty() {
+        dirs.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env"));
+    }
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
@@ -116,7 +123,10 @@ pub fn env_dirs_with(extras: &[PathBuf]) -> Vec<PathBuf> {
         dirs.push(exe_dir.join("env"));
     }
     for e in extras {
-        if !dirs.contains(e) {
+        let dup = dirs.iter().any(|d| {
+            d == e || (d.exists() && e.exists() && d.canonicalize().ok() == e.canonicalize().ok())
+        });
+        if !dup {
             dirs.push(e.clone());
         }
     }
@@ -202,12 +212,18 @@ mod tests {
     #[test]
     fn default_candidates_end_at_the_committed_asset() {
         let candidates = default_env_candidates();
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], PathBuf::from(DEFAULT_ENV_ASSET));
+        assert!(!candidates.is_empty());
+        for c in &candidates {
+            assert!(
+                c.ends_with("assets/env/studio-neutral.png"),
+                "every candidate lands on the asset: {}",
+                c.display()
+            );
+        }
         assert!(
-            candidates[1].ends_with("assets/env/studio-neutral.png"),
-            "manifest fallback must land on the asset: {}",
-            candidates[1].display()
+            candidates[0].is_file(),
+            "the first candidate exists on disk: {}",
+            candidates[0].display()
         );
     }
 
@@ -288,7 +304,11 @@ mod tests {
         let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env");
         let extra = std::env::temp_dir().join("umber-env-dirs-extra");
         let dirs = env_dirs_with(&[bundled.clone(), extra.clone(), extra.clone()]);
-        assert_eq!(dirs[0], bundled, "bundled assets/env first (wins dedup)");
+        assert_eq!(
+            dirs[0].canonicalize().unwrap(),
+            bundled.canonicalize().unwrap(),
+            "bundled assets/env first (wins dedup): {dirs:?}"
+        );
         assert_eq!(
             dirs.iter().filter(|d| **d == extra).count(),
             1,

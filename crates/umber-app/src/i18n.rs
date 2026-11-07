@@ -340,16 +340,20 @@ pub fn persist_locale(i18n: &mut I18n, wanted: &str, pref_path: Option<&Path>) {
     }
 }
 
-/// Catalog dirs in load order (later replaces earlier per locale): the
-/// compile-time repo path, then the CWD-relative repo path, then an
+/// Catalog dirs in load order (later replaces earlier per locale): every
+/// bundled location that holds `assets/i18n` (`$UMBER_ASSETS_DIR`,
+/// exe-relative, repo root, CWD — see [`umber_core::bundled`]), then an
 /// `i18n/` dir next to the executable. Need not exist.
 pub fn catalog_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(CATALOG_DIR),
-        PathBuf::from(CATALOG_DIR),
-    ];
+    let mut dirs = umber_core::bundled::data_paths(CATALOG_DIR);
+    if dirs.is_empty() {
+        dirs.push(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(CATALOG_DIR),
+        );
+        dirs.push(PathBuf::from(CATALOG_DIR));
+    }
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
