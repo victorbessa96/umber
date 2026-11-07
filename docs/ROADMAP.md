@@ -169,7 +169,7 @@ freeze-recovery close scripts; the loop restart machinery
 | Geometry masks (R-B2) | per-mesh/per-tile include/exclude on layers/effects | rides UDIM |
 | Baker sync (R-D1) + channel manage (R-B4's tail) + the four post nodes (R-E5) | the power-user tail | each small; census-verified open |
 | wave-fuzz-corpus (b) | coverage-guided fuzzing | cargo-fuzz + nightly + a corpus budget |
-| wave-abr | .abr brush preset import | the one legal Adobe format |
+| wave-abr | .abr brush preset import — **the stamp reader LANDED 2026-11-07 `3f0e232d` (row 268)**: clean-room v6/v7 `samp` reader (`umber_brush::abr::read_abr`), 190/0 gate. The brush SETTINGS (diameter/hardness/spacing) live in the descriptor sections and are the named follow-up, as is the `.abr` → `.umberbrush` + stamp-PNG mapping wave | the one legal Adobe format |
 | wave-svg-import | SVG vector assets | the wave-5 row, still open |
 | wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) |
 | Split-redo (engine landed 850b839; RedoPending lift landed 1347e13; **History-panel wiring LANDED 2026-11-07 `22e0efb`, row 262**: `edit.split_redo` command + the panel's "Split redo" button, outcome notices, both i18n catalogs, snapshots regenerated**) + merge-below-top (**WIRED 2026-11-07 `bbdc08b`, row 257**) | the undo journal's two named follow-ups — both closed | retouch.rs's debts |

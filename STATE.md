@@ -240,6 +240,27 @@ signing, the alpha tag.
   --all-targets 1048/0 across 10 suites. ROADMAP split-redo row marked
   fully closed. Queue row + COORDINATION line deferred (queue.md under
   the sibling's lock pattern).
+- **Row 266 cross-reviewed + row 268 landed (dragon session
+  local-1625-rz6f2a):**
+  - **Cross-review of the sibling's svg-core (`5d4fcccc`)**: independent
+    clippy + 213/0 umber-core run; the raster cap-before-allocation, the
+    edge-sort invariant, the subsample accounting and the iterative
+    parse all verified; ONE finding (F1 MEDIUM: no structural budgets —
+    a shape flood bypassed the raster cap) FIXED by the reviewer in
+    `107f90d1` (`MAX_SHAPES`, `MAX_POINTS_PER_SHAPE`,
+    `SvgError::TooComplex`, pin
+    `complexity_budgets_refuse_shape_and_point_floods`); receipt at
+    docs/loop/kill-reports/2026-11-07-svg-core-cross-review.md.
+  - **Row 268 `abr-core` LANDED `3f0e232d`**: the claw (opencode /
+    deepseek-v4.1-flash-free) wrote the clean-room .abr v6/v7 stamp
+    reader; the dragon corrected it (the per-brush parameter block is
+    PADDING, not the brush's settings — the three fabricated parameter
+    fields were removed; the total-plane budget was added; the clippy
+    manual_is_multiple_of class fixed), gated it (clippy -D warnings 0,
+    umber-brush 190/0) and landed it. Kill report
+    docs/loop/kill-reports/2026-11-07-abr-core.md; the claw's own notes
+    preserved at 2026-11-07-abr-core-claw-result.md.
+  - **Row 267**: the wave-abr design brief landed `f8d6d84f`.
 - **Row 266 (SVG core: clean-room parser + rasterizer) LANDED `5d4fcccc`,
   lock `claude-svg-core`:** new `umber_core::svg` module (2,110 lines, 16
   tests, std + thiserror only — no new dependency). Hand-rolled XML
