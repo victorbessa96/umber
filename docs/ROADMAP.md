@@ -172,7 +172,7 @@ freeze-recovery close scripts; the loop restart machinery
 | wave-abr | .abr brush preset import | the one legal Adobe format |
 | wave-svg-import | SVG vector assets | the wave-5 row, still open |
 | wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) |
-| Split-redo (engine landed 850b839; RedoPending lift landed 1347e13; History-panel wiring waits on the sibling's document.rs/main.rs lock) + merge-below-top (OPEN, splice landed 592df58, wiring record_stroke next) | the undo journal's two named follow-ups | retouch.rs:21's debts |
+| Split-redo (engine landed 850b839; RedoPending lift landed 1347e13; **History-panel wiring LANDED 2026-11-07 `22e0efb`, row 262**: `edit.split_redo` command + the panel's "Split redo" button, outcome notices, both i18n catalogs, snapshots regenerated**) + merge-below-top (**WIRED 2026-11-07 `bbdc08b`, row 257**) | the undo journal's two named follow-ups — both closed | retouch.rs's debts |
 | wave-procedural-history | graph topology edits as undoable commands | Wave 9 |
 | wave-smart-material-params | exposed parameter UI | Wave 9 |
 | wave-community-templates | 10 curated .umber templates | Wave 9 — the fastest show-off |

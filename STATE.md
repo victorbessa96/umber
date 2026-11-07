@@ -229,6 +229,17 @@ signing, the alpha tag.
   merge judgment-calls and undo.rs's `merge_below_top`/`peek_redo` doc
   comments now describe the landed below-top splice (row 257) instead of
   "top entry only". clippy -D warnings green via safe-push gates.
+- **Row 262 (History-panel split-redo wiring) LANDED `22e0efbf`, lock
+  `razul-splitredo-panel`:** new `ShellAction::SplitRedo`
+  (`edit.split_redo`, palette + command surface), dispatch arm calling
+  `PaintState::split_redo_stroke()` with outcome notices
+  (`history.split-done`/`split-refused`), a "Split redo" button in the
+  History panel controls row (enabled on `can_redo_stroke()`), both i18n
+  catalogs, snapshots regenerated. Battery
+  /tmp/umber-splitpanel-battery7.log: clippy -D warnings 0, umber-app
+  --all-targets 1048/0 across 10 suites. ROADMAP split-redo row marked
+  fully closed. Queue row + COORDINATION line deferred (queue.md under
+  the sibling's lock pattern).
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
