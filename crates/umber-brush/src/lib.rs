@@ -28,6 +28,7 @@ pub struct StrokeEvent {
     pub contact: bool,
 }
 
+pub mod abr;
 pub mod cavity;
 pub mod dab_adapter;
 pub mod falloff;
