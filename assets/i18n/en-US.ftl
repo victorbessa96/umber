@@ -636,6 +636,12 @@ history =
     .section-log = Session log
     .undo = ↺ Undo
     .redo = ↻ Redo
+    .split-redo = ⇥ Split redo
+    .split-done = { $count ->
+        [one] Split: redid 1 stroke of the merged entry
+       *[other] Split: redid the first of { $count } merged strokes
+    }
+    .split-refused = Nothing to split (the next redo is a single stroke, or the envelope is full).
     .journal = { $count ->
         [one] { $count } entry in journal
        *[other] { $count } entries in journal
@@ -1043,6 +1049,7 @@ cmd-file-save-project = Save
 cmd-file-save-project-as = Save As…
 cmd-edit-undo = Undo
 cmd-edit-redo = Redo
+cmd-edit-split-redo = Split redo
 cmd-view-toggle-wireframe = Toggle Wireframe
 cmd-view-toggle-grid = Toggle Grid
 cmd-view-cycle-view-mode = Cycle View Mode

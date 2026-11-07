@@ -103,6 +103,9 @@ pub enum ShellAction {
     Undo,
     /// Redo one document edit. Ctrl+Shift+Z.
     Redo,
+    /// Split redo (row 262): replay only the first stroke of a merged
+    /// redo entry, leaving the rest on the redo stack. No default key.
+    SplitRedo,
     /// Wireframe overlay on/off. W.
     ToggleWireframe,
     /// Ground grid on/off. G.
@@ -198,6 +201,7 @@ impl ShellAction {
             SaveProjectAs => "file.save_project_as",
             Undo => "edit.undo",
             Redo => "edit.redo",
+            SplitRedo => "edit.split_redo",
             ToggleWireframe => "view.toggle_wireframe",
             ToggleGrid => "view.toggle_grid",
             CycleViewMode => "view.cycle_view_mode",
@@ -251,6 +255,7 @@ impl ShellAction {
             SaveProjectAs => "cmd-file-save-project-as",
             Undo => "cmd-edit-undo",
             Redo => "cmd-edit-redo",
+            SplitRedo => "cmd-edit-split-redo",
             ToggleWireframe => "cmd-view-toggle-wireframe",
             ToggleGrid => "cmd-view-toggle-grid",
             CycleViewMode => "cmd-view-cycle-view-mode",
@@ -304,6 +309,7 @@ impl ShellAction {
             "file.save_project_as" => Some(SaveProjectAs),
             "edit.undo" => Some(Undo),
             "edit.redo" => Some(Redo),
+            "edit.split_redo" => Some(SplitRedo),
             "view.toggle_wireframe" => Some(ToggleWireframe),
             "view.toggle_grid" => Some(ToggleGrid),
             "view.cycle_view_mode" => Some(CycleViewMode),
@@ -1128,6 +1134,7 @@ mod tests {
             ShellAction::SaveProjectAs,
             ShellAction::Undo,
             ShellAction::Redo,
+            ShellAction::SplitRedo,
             ShellAction::ToggleWireframe,
             ShellAction::ToggleGrid,
             ShellAction::CycleViewMode,

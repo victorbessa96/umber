@@ -962,6 +962,7 @@ pub fn history_ui_with_graph(
     // first red). The closures below stay shared-borrow-only.
     let mut undo_clicked = false;
     let mut redo_clicked = false;
+    let mut split_clicked = false;
     let mut travel: Option<u64> = None;
     ParamGroup::new("history-controls", controls_title.as_str()).show(ui, |group| {
         let ui: &mut egui::Ui = &mut *group.ui;
@@ -988,6 +989,17 @@ pub fn history_ui_with_graph(
             {
                 redo_clicked = true;
             }
+            // Split redo (row 262): steps the next redo entry's FIRST
+            // stroke only when it is a merged run; enabled whenever a
+            // redo exists (a single-stroke redo just reports "nothing to
+            // split" through the command path's notice).
+            let can_split = paint.as_ref().is_some_and(|p| p.can_redo_stroke());
+            if ui
+                .add_enabled(can_split, egui::Button::new(tr("history.split-redo")))
+                .clicked()
+            {
+                split_clicked = true;
+            }
         });
         let n = doc.history.len();
         ui.label(tr_args(
@@ -1000,6 +1012,11 @@ pub fn history_ui_with_graph(
     }
     if redo_clicked {
         unified_redo(doc, paint.as_deref_mut(), graph.as_deref_mut());
+    }
+    if split_clicked {
+        if let Some(paint) = paint.as_deref_mut() {
+            let _ = paint.split_redo_stroke();
+        }
     }
     let log_title = tr("history.section-log");
     ParamGroup::new("history-log", log_title.as_str()).show(ui, |group| {

@@ -85,6 +85,30 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
                 );
             }
         }
+        // Split redo (row 262): the History panel's split affordance —
+        // replays only the FIRST stroke of a merged redo entry and leaves
+        // the rest on the redo stack; the outcome rides a notice.
+        ShellAction::SplitRedo => {
+            if let Some(paint) = app.state.paint.as_mut() {
+                match paint.split_redo_stroke() {
+                    umber_paint::retouch::SplitOutcome::Split { parts } => app.notices.post(
+                        umber_gui::NoticeLevel::Info,
+                        crate::i18n::tr_args(
+                            "history.split-done",
+                            [("count", fluent::FluentValue::from(parts))],
+                        ),
+                    ),
+                    _ => app
+                        .notices
+                        .post(umber_gui::NoticeLevel::Info, tr("history.split-refused")),
+                };
+            } else {
+                app.notices.post(
+                    umber_gui::NoticeLevel::Info,
+                    tr("action.unavailable-no-mesh"),
+                );
+            }
+        }
         // Quick mask (§2's P1 row): needs a paint session; I inverts
         // only while the mask is being edited (outside it, nothing).
         ShellAction::ToggleMaskMode => {
@@ -314,6 +338,7 @@ pub const COMMAND_IDS: &[&str] = &[
     "file.save_project_as",
     "edit.undo",
     "edit.redo",
+    "edit.split_redo",
     "view.toggle_wireframe",
     "view.toggle_grid",
     "view.cycle_view_mode",

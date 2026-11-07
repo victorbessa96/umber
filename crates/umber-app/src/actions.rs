@@ -266,6 +266,7 @@ pub const ALL_ACTIONS: &[ShellAction] = &[
     ShellAction::SaveProjectAs,
     ShellAction::Undo,
     ShellAction::Redo,
+    ShellAction::SplitRedo,
     ShellAction::CommandPalette,
     ShellAction::Preferences,
     ShellAction::ToggleWireframe,
@@ -705,6 +706,7 @@ fn reference_text(action: ShellAction) -> &'static str {
     match action {
         ShellAction::Undo => "Undo",
         ShellAction::Redo => "Redo",
+        ShellAction::SplitRedo => "Split redo (replay the first stroke of a merged entry)",
         ShellAction::SaveProject => "Save project (asks for a folder the first time)",
         ShellAction::SaveProjectAs => "Save project as (always asks)",
         ShellAction::OpenProject => "Open project",
@@ -1080,6 +1082,9 @@ pub fn availability(action: ShellAction, state: ShellState) -> Result<(), &'stat
     match action {
         ShellAction::Undo if !state.can_undo => Err("action.unavailable-nothing-to-undo"),
         ShellAction::Redo if !state.can_redo => Err("action.unavailable-nothing-to-redo"),
+        ShellAction::SplitRedo if !state.paint_available || !state.can_redo => {
+            Err("action.unavailable-nothing-to-redo")
+        }
         ShellAction::ToggleMaskMode if !state.paint_available => Err("action.unavailable-no-mesh"),
         ShellAction::InvertMask if !state.mask_editing => {
             Err("action.unavailable-not-editing-mask")
@@ -1409,6 +1414,7 @@ mod tests {
             | ShellAction::SaveProjectAs
             | ShellAction::Undo
             | ShellAction::Redo
+            | ShellAction::SplitRedo
             | ShellAction::ToggleWireframe
             | ShellAction::ToggleGrid
             | ShellAction::CycleViewMode
@@ -1448,7 +1454,7 @@ mod tests {
             | ShellAction::FoldRight => {}
         };
         ALL_ACTIONS.iter().copied().for_each(guard);
-        assert_eq!(ALL_ACTIONS.len(), 43 + ToolKind::ALL.len());
+        assert_eq!(ALL_ACTIONS.len(), 44 + ToolKind::ALL.len());
         for kind in ToolKind::ALL {
             assert!(
                 ALL_ACTIONS.contains(&ShellAction::SelectTool(kind)),

@@ -690,6 +690,12 @@ history =
     .section-log = Registro da sessão
     .undo = ↺ Desfazer
     .redo = ↻ Refazer
+    .split-redo = ⇥ Dividir refazer
+    .split-done = { $count ->
+        [one] Divisão: refez 1 traço da entrada mesclada
+       *[other] Divisão: refez o primeiro de { $count } traços mesclados
+    }
+    .split-refused = Nada para dividir (o próximo refazer é um traço único ou o envelope está cheio).
     .journal = { $count ->
         [one] { $count } entrada no histórico
        *[other] { $count } entradas no histórico
@@ -1062,6 +1068,7 @@ cmd-file-save-project = Salvar
 cmd-file-save-project-as = Salvar como…
 cmd-edit-undo = Desfazer
 cmd-edit-redo = Refazer
+cmd-edit-split-redo = Dividir refazer
 cmd-view-toggle-wireframe = Alternar aramado
 cmd-view-toggle-grid = Alternar grade
 cmd-view-cycle-view-mode = Alternar modo de visão

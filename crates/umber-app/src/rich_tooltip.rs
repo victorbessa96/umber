@@ -45,6 +45,7 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
         ShellAction::SaveProjectAs => ("button.save-as", Some("tip.save-project")),
         ShellAction::Undo => ("shell.undo", Some("tip.undo")),
         ShellAction::Redo => ("shell.redo", Some("tip.redo")),
+        ShellAction::SplitRedo => ("history.split-redo", None),
         ShellAction::ToggleWireframe => ("shell.wireframe", Some("tip.wireframe")),
         ShellAction::ToggleGrid => ("shell.grid", Some("tip.grid")),
         ShellAction::CycleViewMode => ("tip.view-cycle-title", Some("tip.view-cycle")),
