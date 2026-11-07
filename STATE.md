@@ -261,6 +261,20 @@ signing, the alpha tag.
     docs/loop/kill-reports/2026-11-07-abr-core.md; the claw's own notes
     preserved at 2026-11-07-abr-core-claw-result.md.
   - **Row 267**: the wave-abr design brief landed `f8d6d84f`.
+- **Row 271 (the `.abr` reader against REAL files) LANDED:** the upstream
+  ag-psd corpus's real `.abr` files (MIT, trimmed to their `samp`
+  sections, provenance in `crates/umber-brush/tests/fixtures/FIXTURES.md`)
+  were parsed by the clean-room reader: the v6.2 file's 11,760-byte alpha
+  plane is BYTE-IDENTICAL to ag-psd's oracle PNG alpha channel (0
+  differing). The real files forced two semantic corrections: a `samp`
+  record is a SAMPLE (tip bitmap with an id and a position), not a brush
+  — so `AbrBrush`/`read_abr` became `AbrSample`/`read_samples` with the
+  x/y position no longer dropped — and real files use v6/v7/v9/v10, so
+  the version gate widened from v6/v7. Gate: clippy -D warnings 0,
+  umber-brush 190/0 + the new 4/0 real-file test. Report:
+  docs/loop/kill-reports/2026-11-07-abr-realfile.md. The descriptor wave
+  (the brushes' settings) and the samples→presets mapping wave stay
+  named and open.
 - **Row 266 (SVG core: clean-room parser + rasterizer) LANDED `5d4fcccc`,
   lock `claude-svg-core`:** new `umber_core::svg` module (2,110 lines, 16
   tests, std + thiserror only — no new dependency). Hand-rolled XML

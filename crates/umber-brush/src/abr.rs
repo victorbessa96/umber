@@ -1,5 +1,14 @@
-//! Clean-room reader for Adobe Photoshop `.abr` brush files, **v6/v7
-//! `samp` sections only**.
+//! Clean-room reader for Adobe Photoshop `.abr` brush files, **the
+//! `samp` sections of v6/v7/v9/v10 files**.
+//!
+//! What a `samp` record IS (verified against real files, 2026-11-07):
+//! a **sampled tip image**, not a brush. Real v6/v7/v9/v10 files carry
+//! the tip bitmaps in `samp` (each with a UUID-ish id string, an
+//! absolute position and a size) and the BRUSHES themselves — their
+//! names, sizes, hardness, spacing, dynamics — in the descriptor
+//! (`desc`) section, which this module does not parse. So this reader
+//! returns **samples** (tip bitmaps with their ids), and a caller
+//! matches them to brushes through the descriptor's sampled-data id.
 //!
 //! Provenance: the section walk and the PackBits/RLE decoder are a
 //! clean-room port of the *logic* in the vendored `ag-psd` reference
@@ -14,11 +23,13 @@
 //! * the byte after the 16-bit bit depth is a **one-byte compression
 //!   code** (0 = raw, 1 = PackBits/RLE), not a 16-bit row count.
 //!
-//! Supported: version 6 and 7 (minor version 1 or 2), the `8BIM` section
-//! walk, `samp` sampled-stamp records, 8-bit raw and RLE alpha, and
-//! 16-bit raw alpha (the high byte is kept). Every other section (`desc`,
-//! `patt`, `phry`, unknown tags) is skipped by its declared length, so a
-//! normal v6/v7 file parses even though only `samp` is interpreted.
+//! Supported: version 6, 7, 9 and 10 (minor version 1 or 2) — the
+//! versions the reference accepts and the ones real files use — the
+//! `8BIM` section walk, `samp` sample records, 8-bit raw and RLE alpha,
+//! and 16-bit raw alpha (the high byte is kept). Every other section
+//! (`desc`, `patt`, `phry`, unknown tags) is skipped by its declared
+//! length, so a normal file parses even though only `samp` is
+//! interpreted.
 //!
 //! Deliberate non-goals (the v1 boundary):
 //!
@@ -29,7 +40,7 @@
 //! * 16-bit RLE (rejected with a named error);
 //! * writing `.abr` — never (the format is read-only for umber).
 //!
-//! Safety caps (hostile input): at most [`MAX_BRUSHES`] brushes per file,
+//! Safety caps (hostile input): at most [`MAX_SAMPLES`] samples per file,
 //! and at most [`MAX_STAMP_DIMENSION`] x [`MAX_STAMP_DIMENSION`] pixels per
 //! stamp. Both are checked *before* the stamp plane is allocated, so a
 //! hostile header cannot trigger a huge allocation.
@@ -59,8 +70,8 @@
 
 use thiserror::Error;
 
-/// Maximum number of brushes accepted from one file.
-pub const MAX_BRUSHES: usize = 4096;
+/// Maximum number of samples accepted from one file.
+pub const MAX_SAMPLES: usize = 4096;
 
 /// Maximum accepted stamp width and height, in pixels.
 pub const MAX_STAMP_DIMENSION: u32 = 4096;
@@ -72,14 +83,25 @@ pub const MAX_STAMP_DIMENSION: u32 = 4096;
 /// capped too.
 pub const MAX_TOTAL_ALPHA_BYTES: usize = 256 * 1024 * 1024;
 
-/// One parsed brush from an `.abr` file.
+/// One parsed **sample** (a tip bitmap) from an `.abr` file's `samp`
+/// section.
+///
+/// A sample is NOT a brush: real files put the tip bitmaps here, keyed
+/// by an id string, and the brushes (name, size, hardness, spacing,
+/// dynamics) in the descriptor (`desc`) section. A caller matches a
+/// brush to its tip through the descriptor's sampled-data id.
 #[derive(Debug, Clone)]
-pub struct AbrBrush {
-    /// The brush name, decoded byte-for-byte as Latin-1.
-    pub name: String,
-    /// Stamp width in pixels.
+pub struct AbrSample {
+    /// The sample's id string, decoded byte-for-byte as Latin-1 (real
+    /// files use a UUID-ish form).
+    pub id: String,
+    /// The sample's left edge in the file's coordinate space.
+    pub x: i32,
+    /// The sample's top edge in the file's coordinate space.
+    pub y: i32,
+    /// Sample width in pixels.
     pub width: u32,
-    /// Stamp height in pixels.
+    /// Sample height in pixels.
     pub height: u32,
     /// 8-bit alpha plane, row-major, exactly `width * height` bytes.
     pub alpha: Vec<u8>,
@@ -98,7 +120,7 @@ pub enum AbrError {
     NotAbr,
     /// A recognized but unsupported ABR version (v1–v5, or the
     /// descriptor-only v8 and later).
-    #[error("unsupported .abr version {version}: only v6 and v7 sampled brushes are supported")]
+    #[error("unsupported .abr version {version}: only v6, v7, v9 and v10 are supported")]
     UnsupportedVersion {
         /// The version field as stored in the file.
         version: i16,
@@ -115,8 +137,8 @@ pub enum AbrError {
         /// What failed, in user-facing terms.
         detail: String,
     },
-    /// More than [`MAX_BRUSHES`] brush records.
-    #[error("too many brushes ({count}): the safety cap is {max} per file")]
+    /// More than [`MAX_SAMPLES`] sample records.
+    #[error("too many samples ({count}): the safety cap is {max} per file")]
     TooManyBrushes {
         /// The count that tripped the cap (one past the maximum).
         count: usize,
@@ -160,7 +182,7 @@ pub enum AbrError {
 /// Parses every brush in an `.abr` file.
 ///
 /// Only v6/v7 `samp` sections are interpreted; other sections are skipped
-/// by their declared length. The returned brushes are in file order.
+/// by their declared length. The returned samples are in file order.
 ///
 /// # Errors
 ///
@@ -173,14 +195,17 @@ pub enum AbrError {
 /// * [`AbrError::Malformed`] for truncated or structurally invalid data.
 /// * [`AbrError::UnsupportedBitDepth`] / [`AbrError::UnsupportedCompression`]
 ///   for stamp encodings this reader does not decode.
-pub fn read_abr(bytes: &[u8]) -> Result<Vec<AbrBrush>, AbrError> {
+pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
     if bytes.len() < 2 {
         return Err(AbrError::NotAbr);
     }
 
     let mut reader = Reader::new(bytes);
     let version = reader.i16()?;
-    if !(6..=7).contains(&version) {
+    // The versions real files use (and the ones the format authority
+    // accepts): 6, 7, 9, 10. v8 is not a thing; v1-v5 predate the
+    // `8BIM` section layout this reader walks.
+    if !matches!(version, 6 | 7 | 9 | 10) {
         return if version >= 1 {
             Err(AbrError::UnsupportedVersion { version })
         } else {
@@ -194,7 +219,7 @@ pub fn read_abr(bytes: &[u8]) -> Result<Vec<AbrBrush>, AbrError> {
     }
     let parameter_len = if minor == 1 { 10 } else { 264 };
 
-    let mut brushes = Vec::new();
+    let mut samples = Vec::new();
     while reader.remaining() > 0 {
         if reader.remaining() < 12 {
             return Err(malformed("truncated section header"));
@@ -210,7 +235,7 @@ pub fn read_abr(bytes: &[u8]) -> Result<Vec<AbrBrush>, AbrError> {
         let payload = reader.take(size)?;
 
         if kind == b"samp" {
-            parse_samp(payload, parameter_len, &mut brushes)?;
+            parse_samp(payload, parameter_len, &mut samples)?;
         }
 
         // Sections are padded to a four-byte boundary. The trailing padding
@@ -220,16 +245,16 @@ pub fn read_abr(bytes: &[u8]) -> Result<Vec<AbrBrush>, AbrError> {
         reader.skip(skip)?;
     }
 
-    Ok(brushes)
+    Ok(samples)
 }
 
 /// Parses the concatenated brush records of one `samp` payload.
 fn parse_samp(
     payload: &[u8],
     parameter_len: usize,
-    brushes: &mut Vec<AbrBrush>,
+    samples: &mut Vec<AbrSample>,
 ) -> Result<(), AbrError> {
-    parse_samp_with_budget(payload, parameter_len, brushes, MAX_TOTAL_ALPHA_BYTES)
+    parse_samp_with_budget(payload, parameter_len, samples, MAX_TOTAL_ALPHA_BYTES)
 }
 
 /// [`parse_samp`] with an explicit total-plane budget (the test seam for
@@ -237,16 +262,16 @@ fn parse_samp(
 fn parse_samp_with_budget(
     payload: &[u8],
     parameter_len: usize,
-    brushes: &mut Vec<AbrBrush>,
+    samples: &mut Vec<AbrSample>,
     max_total_bytes: usize,
 ) -> Result<(), AbrError> {
     let mut reader = Reader::new(payload);
     let mut total_bytes = 0usize;
     while reader.remaining() > 0 {
-        if brushes.len() >= MAX_BRUSHES {
+        if samples.len() >= MAX_SAMPLES {
             return Err(AbrError::TooManyBrushes {
-                count: brushes.len() + 1,
-                max: MAX_BRUSHES,
+                count: samples.len() + 1,
+                max: MAX_SAMPLES,
             });
         }
         if reader.remaining() < 4 {
@@ -263,12 +288,12 @@ fn parse_samp_with_budget(
             .checked_add(pad)
             .ok_or_else(|| malformed("brush record length overflow"))?;
         let body = reader.take(padded)?;
-        let brush = parse_brush(body, parameter_len)?;
+        let sample = parse_sample(body, parameter_len)?;
         // The total-plane budget: the per-stamp cap alone still allows
         // 4096 stamps of 16 MiB each (64 GiB of decoded planes from a
         // small hostile file), so the SUM is capped too.
         total_bytes = total_bytes
-            .checked_add(brush.alpha.len())
+            .checked_add(sample.alpha.len())
             .ok_or_else(|| malformed("total stamp data size overflow"))?;
         if total_bytes > max_total_bytes {
             return Err(AbrError::TooMuchData {
@@ -276,18 +301,18 @@ fn parse_samp_with_budget(
                 max: max_total_bytes,
             });
         }
-        brushes.push(brush);
+        samples.push(sample);
     }
     Ok(())
 }
 
 /// Parses one brush record body (everything after its length prefix).
-fn parse_brush(body: &[u8], parameter_len: usize) -> Result<AbrBrush, AbrError> {
+fn parse_sample(body: &[u8], parameter_len: usize) -> Result<AbrSample, AbrError> {
     let mut reader = Reader::new(body);
 
-    let name_len = usize::from(reader.u8()?);
-    let name_bytes = reader.take(name_len)?;
-    let name: String = name_bytes.iter().map(|&byte| byte as char).collect();
+    let id_len = usize::from(reader.u8()?);
+    let id_bytes = reader.take(id_len)?;
+    let id: String = id_bytes.iter().map(|&byte| byte as char).collect();
 
     // The v6.1 tip-shape block is five big-endian u16s; v6.2 widens the
     // block to 264 bytes but (per the module docs) keeps the same prefix.
@@ -299,7 +324,8 @@ fn parse_brush(body: &[u8], parameter_len: usize) -> Result<AbrBrush, AbrError> 
     // numbers that are not the brush's, so this parser refuses to guess.
     let _parameters = reader.take(parameter_len)?;
 
-    // Bounds: y, x, bottom, right. Height and width are the spans.
+    // Bounds: y, x, bottom, right. Height and width are the spans; x
+    // and y are the sample's absolute position in the file's space.
     let y = i64::from(reader.i32()?);
     let x = i64::from(reader.i32()?);
     let bottom = i64::from(reader.i32()?);
@@ -357,8 +383,10 @@ fn parse_brush(body: &[u8], parameter_len: usize) -> Result<AbrBrush, AbrError> 
         (depth, _) => return Err(AbrError::UnsupportedBitDepth { depth }),
     }
 
-    Ok(AbrBrush {
-        name,
+    Ok(AbrSample {
+        id,
+        x: i32::try_from(x).unwrap_or(i32::MIN),
+        y: i32::try_from(y).unwrap_or(i32::MIN),
         width,
         height,
         alpha,
@@ -670,13 +698,13 @@ mod tests {
         let record = brush_record(&stamp);
         let file = abr_file(1, &[(b"samp", record)]);
 
-        let brushes = read_abr(&file).expect("synthetic v6 file parses");
-        assert_eq!(brushes.len(), 1);
-        let brush = &brushes[0];
-        assert_eq!(brush.name, "Test Tip");
-        assert_eq!(brush.width, 4);
-        assert_eq!(brush.height, 2);
-        assert_eq!(brush.alpha, alpha);
+        let samples = read_samples(&file).expect("synthetic v6 file parses");
+        assert_eq!(samples.len(), 1);
+        let sample = &samples[0];
+        assert_eq!(sample.id, "Test Tip");
+        assert_eq!(sample.width, 4);
+        assert_eq!(sample.height, 2);
+        assert_eq!(sample.alpha, alpha);
     }
 
     /// Pin 2: one row mixing a literal run and a repeat run decodes to the
@@ -689,8 +717,8 @@ mod tests {
         let stamp = Stamp::new("Rle", 6, 1, &payload);
         let file = abr_file(1, &[(b"samp", brush_record(&stamp))]);
 
-        let brushes = read_abr(&file).expect("RLE fixture parses");
-        assert_eq!(brushes[0].alpha, vec![1, 2, 3, 9, 9, 9]);
+        let samples = read_samples(&file).expect("RLE fixture parses");
+        assert_eq!(samples[0].alpha, vec![1, 2, 3, 9, 9, 9]);
     }
 
     /// Pin 3: the per-brush parameter block is SKIPPED, never published —
@@ -707,12 +735,12 @@ mod tests {
         stamp.diameter = 9;
         let file = abr_file(1, &[(b"samp", brush_record(&stamp))]);
 
-        let brushes = read_abr(&file).expect("percent fixture parses");
+        let samples = read_samples(&file).expect("percent fixture parses");
         // The stamp is exact; the block's numbers are NOT exposed.
-        assert_eq!(brushes[0].name, "Half");
-        assert_eq!(brushes[0].width, 1);
-        assert_eq!(brushes[0].height, 1);
-        assert_eq!(brushes[0].alpha, alpha);
+        assert_eq!(samples[0].id, "Half");
+        assert_eq!(samples[0].width, 1);
+        assert_eq!(samples[0].height, 1);
+        assert_eq!(samples[0].alpha, alpha);
         // A file whose block holds different bytes parses to the SAME
         // stamp: the block carries no published data.
         let mut other = Stamp::new("Half", 1, 1, &alpha);
@@ -721,17 +749,17 @@ mod tests {
         other.spacing_percent = 250;
         other.diameter = 4096;
         let other_file = abr_file(1, &[(b"samp", brush_record(&other))]);
-        let other_brushes = read_abr(&other_file).expect("variant fixture parses");
-        assert_eq!(other_brushes[0].alpha, brushes[0].alpha);
-        assert_eq!(other_brushes[0].width, brushes[0].width);
+        let other_samples = read_samples(&other_file).expect("variant fixture parses");
+        assert_eq!(other_samples[0].alpha, samples[0].alpha);
+        assert_eq!(other_samples[0].width, samples[0].width);
     }
 
     /// Pin 4: wrong magic bytes give the named "not an .abr" error.
     #[test]
     fn wrong_magic_is_not_an_abr() {
-        assert_eq!(read_abr(&[]).unwrap_err(), AbrError::NotAbr);
+        assert_eq!(read_samples(&[]).unwrap_err(), AbrError::NotAbr);
         assert_eq!(
-            read_abr(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap_err(),
+            read_samples(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap_err(),
             AbrError::NotAbr
         );
 
@@ -742,7 +770,10 @@ mod tests {
         file.raw(b"8BAD");
         file.raw(b"samp");
         file.u32(0);
-        assert_eq!(read_abr(&file.into_vec()).unwrap_err(), AbrError::NotAbr);
+        assert_eq!(
+            read_samples(&file.into_vec()).unwrap_err(),
+            AbrError::NotAbr
+        );
     }
 
     /// Pin 5: a file cut inside the alpha payload is malformed, never a
@@ -758,7 +789,7 @@ mod tests {
         // record padding). Length-delimited parsing reports the truncation
         // before it can produce a brush.
         let cut = file.len() - 4;
-        let error = read_abr(&file[..cut]).unwrap_err();
+        let error = read_samples(&file[..cut]).unwrap_err();
         assert!(
             matches!(error, AbrError::Malformed { .. }),
             "expected Malformed, got {error:?}"
@@ -793,7 +824,7 @@ mod tests {
         record.raw(&body);
         let file = abr_file(1, &[(b"samp", record.into_vec())]);
 
-        let error = read_abr(&file).unwrap_err();
+        let error = read_samples(&file).unwrap_err();
         assert_eq!(
             error,
             AbrError::StampTooLarge {
@@ -815,7 +846,7 @@ mod tests {
         file.u32(0);
 
         assert_eq!(
-            read_abr(&file.into_vec()).unwrap_err(),
+            read_samples(&file.into_vec()).unwrap_err(),
             AbrError::UnsupportedVersion { version: 8 }
         );
     }
@@ -828,7 +859,7 @@ mod tests {
             file.i16(version);
             file.i16(1);
             assert_eq!(
-                read_abr(&file.into_vec()).unwrap_err(),
+                read_samples(&file.into_vec()).unwrap_err(),
                 AbrError::UnsupportedVersion { version }
             );
         }
@@ -841,7 +872,7 @@ mod tests {
         file.i16(6);
         file.i16(3);
         assert_eq!(
-            read_abr(&file.into_vec()).unwrap_err(),
+            read_samples(&file.into_vec()).unwrap_err(),
             AbrError::UnsupportedMinorVersion { minor: 3 }
         );
     }
@@ -854,10 +885,10 @@ mod tests {
         stamp.compression = 0;
         let file = abr_file(1, &[(b"samp", brush_record(&stamp))]);
 
-        let brushes = read_abr(&file).expect("raw fixture parses");
-        assert_eq!(brushes[0].alpha, alpha);
-        assert_eq!(brushes[0].width, 3);
-        assert_eq!(brushes[0].height, 2);
+        let samples = read_samples(&file).expect("raw fixture parses");
+        assert_eq!(samples[0].alpha, alpha);
+        assert_eq!(samples[0].width, 3);
+        assert_eq!(samples[0].height, 2);
     }
 
     /// 16-bit raw samples keep their high byte (big-endian).
@@ -869,8 +900,8 @@ mod tests {
         stamp.depth = 16;
         let file = abr_file(1, &[(b"samp", brush_record(&stamp))]);
 
-        let brushes = read_abr(&file).expect("16-bit fixture parses");
-        assert_eq!(brushes[0].alpha, vec![0x12, 0xAB]);
+        let samples = read_samples(&file).expect("16-bit fixture parses");
+        assert_eq!(samples[0].alpha, vec![0x12, 0xAB]);
     }
 
     /// PackBits header 128 is a no-op, matching the reference.
@@ -881,8 +912,8 @@ mod tests {
         let stamp = Stamp::new("Noop", 6, 1, &payload);
         let file = abr_file(1, &[(b"samp", brush_record(&stamp))]);
 
-        let brushes = read_abr(&file).expect("no-op fixture parses");
-        assert_eq!(brushes[0].alpha, vec![1, 2, 3, 9, 9, 9]);
+        let samples = read_samples(&file).expect("no-op fixture parses");
+        assert_eq!(samples[0].alpha, vec![1, 2, 3, 9, 9, 9]);
     }
 
     /// Non-`samp` sections are skipped by their declared length, so a
@@ -896,17 +927,17 @@ mod tests {
         let record = brush_record(&stamp);
         let file = abr_file(1, &[(b"desc", descriptor), (b"samp", record)]);
 
-        let brushes = read_abr(&file).expect("desc-prefixed file parses");
-        assert_eq!(brushes.len(), 1);
-        assert_eq!(brushes[0].name, "After Desc");
-        assert_eq!(brushes[0].alpha, vec![200]);
+        let samples = read_samples(&file).expect("desc-prefixed file parses");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].id, "After Desc");
+        assert_eq!(samples[0].alpha, vec![200]);
     }
 
     /// The brush-count cap fires at 4097 records.
     #[test]
     fn more_than_max_brushes_is_rejected() {
         let mut payload = Vec::new();
-        for index in 0..=MAX_BRUSHES {
+        for index in 0..=MAX_SAMPLES {
             let name = format!("b{index}");
             let alpha = [index as u8];
             let mut stamp = Stamp::new(&name, 1, 1, &alpha);
@@ -916,10 +947,10 @@ mod tests {
         let file = abr_file(1, &[(b"samp", payload)]);
 
         assert_eq!(
-            read_abr(&file).unwrap_err(),
+            read_samples(&file).unwrap_err(),
             AbrError::TooManyBrushes {
-                count: MAX_BRUSHES + 1,
-                max: MAX_BRUSHES,
+                count: MAX_SAMPLES + 1,
+                max: MAX_SAMPLES,
             }
         );
     }
@@ -955,11 +986,11 @@ mod tests {
         record.raw(&body);
         let file = abr_file(2, &[(b"samp", record.into_vec())]);
 
-        let brushes = read_abr(&file).expect("minor-2 fixture parses");
-        assert_eq!(brushes[0].name, "V62");
-        assert_eq!(brushes[0].alpha, vec![77]);
-        assert_eq!(brushes[0].width, 1);
-        assert_eq!(brushes[0].height, 1);
+        let samples = read_samples(&file).expect("minor-2 fixture parses");
+        assert_eq!(samples[0].id, "V62");
+        assert_eq!(samples[0].alpha, vec![77]);
+        assert_eq!(samples[0].width, 1);
+        assert_eq!(samples[0].height, 1);
     }
 
     /// The total-plane budget refuses a file whose decoded stamps exceed
@@ -987,9 +1018,9 @@ mod tests {
         let mut file = abr_file(1, &[(b"samp", brush_record(&stamp))]);
         file[0..2].copy_from_slice(&7i16.to_be_bytes());
 
-        let brushes = read_abr(&file).expect("v7 fixture parses");
-        assert_eq!(brushes[0].name, "V7");
-        assert_eq!(brushes[0].alpha, vec![5]);
+        let samples = read_samples(&file).expect("v7 fixture parses");
+        assert_eq!(samples[0].id, "V7");
+        assert_eq!(samples[0].alpha, vec![5]);
     }
 
     /// A zero-length brush record is rejected instead of looping forever.
@@ -999,7 +1030,7 @@ mod tests {
         payload.u32(0);
         let file = abr_file(1, &[(b"samp", payload.into_vec())]);
 
-        let error = read_abr(&file).unwrap_err();
+        let error = read_samples(&file).unwrap_err();
         assert!(
             matches!(error, AbrError::Malformed { .. }),
             "expected Malformed, got {error:?}"
