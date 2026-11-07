@@ -277,8 +277,27 @@ signing, the alpha tag.
   -D warnings` 0, umber-core **213/0** with 16/16 svg pins green (scratch
   worktree battery; the repo flock was held by a sibling's workspace
   hygiene run). Kill report docs/loop/kill-reports/2026-11-07-svg-core.md.
-  NEXT wave = row 268 (loader wiring: app `.svg` stencil loader + `umber-cli
+  NEXT wave = row 269 (loader wiring: app `.svg` stencil loader + `umber-cli
   stencil` converter), brief docs/loop/briefs/2026-11-07-svg-loader-wiring-design.md.
+- **Row 269 (SVG loader wiring) LANDED+PUSHED `57f88d6f` + `399dce90` +
+  `06d29936`:** the app stencil loader accepts `.svg` next to `.png` —
+  `load_image_rgba` rasterizes at import (`umber_core::svg`, 2048² cap) and
+  thresholds through `StencilImage::from_alpha` exactly like a PNG (alpha ≥
+  128); both load sites (panel + viewport) switched, the picker filter is
+  `PNG / SVG`, and a new i18n key `overlays.stencil-unsupported-svg` landed
+  in both catalogs. `umber-cli stencil <in.svg> [--size N] <out.png>`
+  rasterizes headlessly to a PNG (`--size` is the rasterizer's PIXEL cap,
+  8192² ceiling refused by name before the file is touched, `Transfer::Linear`
+  because the plane is data, one JSON summary line, exit 2 refusals). The
+  dragon's review pass closed the cross-review's F2: core gained
+  `MAX_SVG_INPUT_BYTES` (16 MiB) + `SvgError::InputTooLarge` + a pin, and
+  BOTH consumers refuse an oversized file from its metadata BEFORE the read;
+  an over-cap SVG maps to `overlays.stencil-too-large`. Battery: fmt clean,
+  layers GREEN 16, scorecard current, clippy `-p umber-core -p umber-app
+  -p umber-cli --all-targets -D warnings` 0, **1,407 tests / 0 failed**
+  across 21 suites. Kill report
+  docs/loop/kill-reports/2026-11-07-svg-loader-wiring.md. (Row numbering:
+  the sibling lane's abr-core kill took row 268; this wave is row 269.)
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

@@ -1,4 +1,4 @@
-# Kill brief — svg-loader-app: the app stencil loader accepts .svg (row 268, leaf A)
+# Kill brief — svg-loader-app: the app stencil loader accepts .svg (row 269, leaf A)
 
 ## Seat and surface
 

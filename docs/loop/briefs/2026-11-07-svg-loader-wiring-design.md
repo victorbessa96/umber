@@ -1,4 +1,4 @@
-# Design brief — svg loader wiring: .svg stencils in app + headless CLI converter (row 268, planned)
+# Design brief — svg loader wiring: .svg stencils in app + headless CLI converter (row 269)
 
 - **Status:** design only. Depends on row 266 (`claude-svg-core`, in flight)
   landing with its pinned API: `umber_core::svg::{rasterize_svg(bytes, max_pixels),

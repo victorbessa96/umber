@@ -1,4 +1,4 @@
-# Kill brief — svg-stencil-cli: `umber-cli stencil` headless .svg → .png converter (row 268, leaf B)
+# Kill brief — svg-stencil-cli: `umber-cli stencil` headless .svg → .png converter (row 269, leaf B)
 
 ## Seat and surface
 

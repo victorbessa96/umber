@@ -2254,3 +2254,21 @@ Sibling-lane collision: the dirty `pub mod svg;` hunk in crates/umber-core/src/l
 lane mid-flight (lib.rs clean at 17:2x); re-applied by the dragon before the commit. Row 267 was taken by the
 sibling's pushed wave-abr design brief (f8d6d84f) — the svg loader wave is row 268; its three briefs are written.
 Next: dispatch row 268 as two leaves (claw-svg-loader-app, claw-svg-stencil-cli) with disjoint locks.
+17:56 CROSS-REVIEW landed by the sibling dragon session local-1625-rz6f2a (it was NOT dead — it reviewed my
+commit and pushed): 107f90d1 fix(core) hostile-input budgets (MAX_SHAPES 65,536 + MAX_POINTS_PER_SHAPE 262,144,
+SvgError::TooComplex, new pin) and fedaf1e4 the cross-review receipt (FIX-FIRST on that one class, otherwise
+APPROVE; reviewer re-ran clippy + umber-core --lib 214/0). F2 (INFO, accepted): no input-BYTE cap in core — the
+loader wave (row 268) must cap the file read; the dragon adds that cap in the review pass for both the app loader
+and the CLI converter. Row 268 leaves dispatched 18:0x (claude/sonnet for the app loader, opencode for the CLI
+converter; locks claw-svg-loader-app over 5 app+ftl files, claw-svg-stencil-cli over 2 cli files).
+18:5x ROW 269 LANDED (the svg loader wave): three commits — 57f88d6f (core: MAX_SVG_INPUT_BYTES 16 MiB +
+SvgError::InputTooLarge + pin, the dragon's review pass closing the cross-review's F2), 399dce90 (app:
+load_image_rgba accepts .svg next to .png; both load sites; picker PNG/SVG; i18n key in both catalogs),
+06d29936 (cli: umber-cli stencil .svg -> .png converter, --size is the pixel cap, 8192^2 ceiling, Transfer::Linear,
+JSON summary, exit 2 refusals). Claws: claude/sonnet e4185b18 (leaf A, $0.26) + opencode ses_e482866 (leaf B).
+Battery: fmt clean, layers GREEN 16, scorecard current, clippy -p umber-core -p umber-app -p umber-cli
+--all-targets -D warnings 0, 1,407/0 across 21 suites. ROW NUMBERING: the sibling lane's abr-core kill took
+row 268, so this wave is row 269 (queue + STATE + the three briefs renumbered). PUSH: the first safe-push REFUSED
+— the sibling's abr commit ca70ea80 rode the range and the ledger named its session (local-1625-rz6f2a); that lane
+pushed first (origin/master 288d1a57) and this wave pushed on top. Kill report
+docs/loop/kill-reports/2026-11-07-svg-loader-wiring.md.
