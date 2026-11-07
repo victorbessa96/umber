@@ -32,6 +32,7 @@ pub mod layers;
 pub mod project;
 pub mod smart;
 pub mod stencil;
+pub mod svg;
 pub mod tiles;
 pub mod undo;
 pub mod uv_dilation;
