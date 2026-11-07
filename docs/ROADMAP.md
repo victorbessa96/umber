@@ -172,7 +172,7 @@ freeze-recovery close scripts; the loop restart machinery
 | wave-abr | .abr brush preset import | the one legal Adobe format |
 | wave-svg-import | SVG vector assets | the wave-5 row, still open |
 | wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) |
-| Split-redo + merge-below-top | the undo journal's two named follow-ups | retouch.rs:21's debts |
+| Split-redo (engine landed 850b839; History-panel wiring waits on the sibling's document.rs/main.rs lock) + merge-below-top (OPEN, needs a redo-top accessor) | the undo journal's two named follow-ups | retouch.rs:21's debts |
 | wave-procedural-history | graph topology edits as undoable commands | Wave 9 |
 | wave-smart-material-params | exposed parameter UI | Wave 9 |
 | wave-community-templates | 10 curated .umber templates | Wave 9 — the fastest show-off |
@@ -207,8 +207,16 @@ pass; the .ftl lock lift (if it stands).
 
 - ~~The cached ID-mask bake~~ **LANDED SILENTLY** — the P1 tile
   cache + the L3 pre-warm; this row was stale for a week.
-- Split-redo under merged undo entries — OPEN.
-- Merge below the top undo entry — OPEN.
+- ~~Split-redo under merged undo entries~~ **ENGINE LANDED 2026-11-06**
+  (`850b839`, split_redo/split_parts in retouch.rs + `PaintState::
+  split_redo_stroke`, byte-exact pins; rows 167/242): undoing a merged
+  entry then redoing replays its constituent strokes one at a time.
+  REMAINING: the History-panel "split" affordance wiring — blocked on
+  document.rs/main.rs (sibling lock `razul-bundled-assets`).
+- Merge below the top undo entry — OPEN (retouch.rs:34's judgment call:
+  only the top entry merges, older entries are never rewritten because a
+  below-top rewrite would invalidate the redo stack; lifting it wants a
+  redo-top accessor in `umber_core::undo` — see retouch.rs:658's note).
 - The winink live-HWND question — OPEN, now deeper-gated (the
   bytes are absent).
 - DPI runtime re-raster — OPEN (the manual ui_scale exists;

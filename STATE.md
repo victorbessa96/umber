@@ -142,6 +142,11 @@ signing, the alpha tag.
   `the_failed_flag_starts_clear`). Battery log
   /tmp/umber-exportflag-battery.log. Queue row + COORDINATION line deferred
   with the sibling lock.
+- **Docs kill (lock `razul-roadmap-splitredo`, docs-only, no battery per the
+  8af2058 receipt rule):** ROADMAP split-redo debt marked ENGINE LANDED
+  (`850b839`, rows 167/242 engine; History-panel wiring still waits on the
+  sibling's document.rs/main.rs lock); merge-below-top annotated OPEN with
+  its retouch.rs:658 precondition (redo-top accessor in umber_core::undo).
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
