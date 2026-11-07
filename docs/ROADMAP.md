@@ -172,7 +172,7 @@ freeze-recovery close scripts; the loop restart machinery
 | wave-abr | .abr brush preset import | the one legal Adobe format |
 | wave-svg-import | SVG vector assets | the wave-5 row, still open |
 | wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) |
-| Split-redo (engine landed 850b839; History-panel wiring waits on the sibling's document.rs/main.rs lock) + merge-below-top (OPEN, needs a redo-top accessor) | the undo journal's two named follow-ups | retouch.rs:21's debts |
+| Split-redo (engine landed 850b839; RedoPending lift landed 1347e13; History-panel wiring waits on the sibling's document.rs/main.rs lock) + merge-below-top (OPEN, primitives landed 03181ec/1347e13, needs a no-reapply splice) | the undo journal's two named follow-ups | retouch.rs:21's debts |
 | wave-procedural-history | graph topology edits as undoable commands | Wave 9 |
 | wave-smart-material-params | exposed parameter UI | Wave 9 |
 | wave-community-templates | 10 curated .umber templates | Wave 9 — the fastest show-off |
@@ -213,10 +213,14 @@ pass; the .ftl lock lift (if it stands).
   entry then redoing replays its constituent strokes one at a time.
   REMAINING: the History-panel "split" affordance wiring — blocked on
   document.rs/main.rs (sibling lock `razul-bundled-assets`).
-- Merge below the top undo entry — OPEN (retouch.rs:34's judgment call:
-  only the top entry merges, older entries are never rewritten because a
-  below-top rewrite would invalidate the redo stack; lifting it wants a
-  redo-top accessor in `umber_core::undo` — see retouch.rs:658's note).
+- Merge below the top undo entry — OPEN, primitives landed. retouch.rs:34's
+  judgment call (only the top entry merges) stood because a below-top
+  rewrite would invalidate the redo stack; the read side is now landed
+  (`peek_redo`/`redo_len`, `03181ec`) and the preserve side too
+  (`take_redo`/`restore_redo`, `1347e13`, used by the row-254 split lift).
+  What remains is a splice primitive in `umber_core::undo` that rewrites an
+  entry BELOW the top without re-applying the entries above it (`push`
+  applies its command, so naive pop-merge-repush would double-apply).
 - The winink live-HWND question — OPEN, now deeper-gated (the
   bytes are absent).
 - DPI runtime re-raster — OPEN (the manual ui_scale exists;

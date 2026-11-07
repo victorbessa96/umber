@@ -183,6 +183,14 @@ signing, the alpha tag.
   /tmp/umber-splitlift-battery4.log (core 187/0 modulo the sibling-dirty
   worktree bundled:: failure; paint 194/0). Queue row 254 + COORDINATION
   line deferred with the sibling lock.
+- **Row 254 LANDED `1347e13`** (split_redo RedoPending lift pushed
+  f340fdd..1347e13).
+- **Docs kill (row 255) in flight, lock `razul-roadmap-mergebelow`:**
+  ROADMAP merge-below-top updated — primitives landed (peek_redo/redo_len
+  03181ec, take_redo/restore_redo 1347e13); remaining blocker named as a
+  no-reapply splice in umber_core::undo. Docs-only, no battery per the
+  8af2058 receipt rule. Queue row 255 + COORDINATION line deferred with the
+  sibling lock.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 
