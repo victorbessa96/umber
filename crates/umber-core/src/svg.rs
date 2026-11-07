@@ -154,6 +154,16 @@ pub const MAX_SHAPES: usize = 65_536;
 /// shape hands to the edge builder.
 pub const MAX_POINTS_PER_SHAPE: usize = 262_144;
 
+/// The most bytes one SVG document may carry (hostile-input budget).
+///
+/// The raster cap bounds the OUTPUT and the structural budgets bound the
+/// WORK; neither bounds the INPUT a caller read into memory before it
+/// called in. A caller that reads a file should refuse an oversized file
+/// from its metadata, before the read; this constant is the shared
+/// number for that check and the last line of defence for callers that
+/// hand the bytes over directly.
+pub const MAX_SVG_INPUT_BYTES: usize = 16 * 1024 * 1024;
+
 /// Everything that can go wrong rasterizing an SVG.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SvgError {
@@ -185,6 +195,14 @@ pub enum SvgError {
         height: u32,
         /// The cap that refused it.
         max_pixels: usize,
+    },
+    /// The input is larger than [`MAX_SVG_INPUT_BYTES`].
+    #[error("SVG input is {bytes} bytes, over the {max_bytes}-byte cap")]
+    InputTooLarge {
+        /// The input length.
+        bytes: usize,
+        /// The cap that refused it.
+        max_bytes: usize,
     },
     /// A construct whose skip would produce a wrong result (a non-px unit).
     #[error("unsupported SVG construct: {what}")]
@@ -264,6 +282,14 @@ pub fn rasterize_svg_default(bytes: &[u8]) -> Result<SvgRaster, SvgError> {
 /// (checked before anything is allocated), [`SvgError::Unsupported`] for
 /// non-px lengths.
 pub fn rasterize_svg(bytes: &[u8], max_pixels: usize) -> Result<SvgRaster, SvgError> {
+    // The input-byte budget: refused before the bytes are parsed, so a
+    // huge document costs one length check (see [`MAX_SVG_INPUT_BYTES`]).
+    if bytes.len() > MAX_SVG_INPUT_BYTES {
+        return Err(SvgError::InputTooLarge {
+            bytes: bytes.len(),
+            max_bytes: MAX_SVG_INPUT_BYTES,
+        });
+    }
     let text = std::str::from_utf8(bytes)
         .map_err(|e| parse_err(e.valid_up_to(), "the input is not valid UTF-8"))?;
     let (base, text) = match text.strip_prefix('\u{feff}') {
@@ -2153,6 +2179,28 @@ mod tests {
                 limit: MAX_POINTS_PER_SHAPE,
             })
         );
+    }
+
+    /// The input-byte budget: an over-cap document is refused before it
+    /// is parsed (the raster cap and the structural budgets bound the
+    /// output and the work; this one bounds the input).
+    #[test]
+    fn input_byte_budget_refuses_an_oversized_document() {
+        let doc = vec![b'x'; MAX_SVG_INPUT_BYTES + 1];
+        assert_eq!(
+            rasterize_svg_default(&doc),
+            Err(SvgError::InputTooLarge {
+                bytes: MAX_SVG_INPUT_BYTES + 1,
+                max_bytes: MAX_SVG_INPUT_BYTES,
+            })
+        );
+        // One byte under the cap is not refused by the budget (it is
+        // malformed, so it fails on the parse instead).
+        let under = vec![b'x'; MAX_SVG_INPUT_BYTES];
+        assert!(matches!(
+            rasterize_svg_default(&under),
+            Err(SvgError::Parse { .. })
+        ));
     }
 
     #[test]
