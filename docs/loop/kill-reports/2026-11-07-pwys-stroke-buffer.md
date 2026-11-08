@@ -41,3 +41,14 @@
 ## Process note
 
 - The claw could not run cargo (bash gated; the workspace is untrusted for claude) — the expected wall, named in the brief. Its first two pins failed in the dragon's battery for the reasons above; both were test-side, and the production shape was kept.
+- **Doc-comment sync (row 275):** the `PaintProjection` doc in
+  `crates/umber-paint/src/paint_state.rs` still described the
+  camera-snapshotting buffer as "the named follow-up for when camera
+  animation during strokes lands" — the very behavior this kill landed.
+  It now names the landed snapshot (the old judgment stays as history).
+  The `PaintProjection::Screen` contract itself did not change: the
+  viewport still resolves the pointer to a UV before conditioning; the
+  resolution now happens against the FROZEN camera.
+- **Truth-check:** `docs/specs/requirements.md` §1's P1 row (the Mari
+  buffer) and the ROADMAP's `wave-svg-import` row (which still read "the
+  wave-5 row, still open") were patched to name what landed tonight.

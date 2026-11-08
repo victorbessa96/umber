@@ -27,7 +27,7 @@
 | Brush presets (.abr import optional; native preset files) | P0 | 2 | ✓ built (`f18a0ce`/`0d49d83`/`57ce764`) |
 | Seam-aware stamping: strokes crossing UV seams land consistently in both islands; 3D-space-neighbor padding/dilation | P0 | 2 | ✓ built (`fb984d1`..`7106a79`) |
 | Stroke evaluated in 3D space, not per-tile (works single-tile; UDIM cross-tile continuity arrives with UDIM in Wave 4) | P0 | 2 | ✓ built (`708ae8a`, UDIM `82c694c`..`10cdffa`) |
-| Paint-what-you-see projection modes beyond UV (Mari-style paint buffer) | P1 | 4 | ✓ built (`b2306c6`) — v1 live-raycast; the deferred Mari buffer = the named follow-up (the camera can't move mid-stroke today) |
+| Paint-what-you-see projection modes beyond UV (Mari-style paint buffer) | P1 | 4 | ✓ built (`b2306c6`) — v1 live-raycast; the deferred Mari buffer = the named follow-up — **LANDED 2026-11-07 (`93877796`, row 272): the stroke buffer (option A of docs/specs/pwys-stroke-buffer-design.md) — the stroke's raycast is frozen against the camera at stroke start, so the camera may now move mid-stroke (the pointer navigation stays with the stroke; the camera keys run during it)** |
 
 ## 2. Layer + channel system — [01]
 
