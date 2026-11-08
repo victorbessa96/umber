@@ -1025,6 +1025,8 @@ overlays =
     .projection-arm = Armar (congelar visão)
     .projection-apply = Aplicar na pintura
     .projection-opacity = Opacidade
+    .projection-tile = Repetir
+    .projection-tile-hint = Repete a imagem por toda a visão congelada em vez de deixar o lado de fora transparente. A sobreposição mostra só uma cópia.
 
 ## Rótulos compartilhados da linha do seletor de cores (picker-app-sites;
 ## letras de canal são a convenção internacional — uma localização pode traduzi-las)

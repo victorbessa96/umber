@@ -1006,6 +1006,8 @@ overlays =
     .projection-arm = Arm (freeze view)
     .projection-apply = Apply to paint
     .projection-opacity = Opacity
+    .projection-tile = Tile
+    .projection-tile-hint = Repeat the image across the frozen view instead of leaving its outside clear. The overlay previews one tile.
 
 ## Shared colour-picker row labels (picker-app-sites; channel letters are
 ## the international convention — a locale may localize them)

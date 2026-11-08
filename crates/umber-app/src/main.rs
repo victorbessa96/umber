@@ -1666,6 +1666,7 @@ fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
             has_image: state.image.is_some(),
             armed: state.armed,
             opacity: &mut opacity,
+            tiling: &mut state.tiling,
         },
     );
     if let Some(v) = response.opacity {

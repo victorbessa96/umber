@@ -13,8 +13,22 @@
 //!
 //! v1 cut line (plan §7 names the follow-ups):
 //!
-//! - **No tiling/repeat**: outside the placed image every texel is
-//!   transparent (the zero border).
+//! - **Tiling is opt-in (v2a, row 287,
+//!   `docs/loop/briefs/2026-11-08-projection-tiling-design.md`)**: with
+//!   [`ProjectionState::tiling`] off, outside the placed image every
+//!   texel is transparent (the zero border), byte-identical to v1. With
+//!   it on, the per-texel image point wraps `rem_euclid` into
+//!   `[0, w) x [0, h)` and [`RgbaImage::sample_bilinear_wrapped`] wraps
+//!   the taps too, so the decal repeats seamlessly (edges blend with the
+//!   opposite edge). Every upstream skip (off-mesh, behind the eye,
+//!   off-NDC) is unchanged, so tiling never leaks outside the frozen
+//!   viewport. v2a cuts: infinite wrap only (no repeat count), no
+//!   mirror tiling, no UV-space tiling, and the OVERLAY still previews
+//!   one tile (a single quad) while Apply tiles everywhere in view.
+//!   The flag is a placement mode, not image data: `adopt` keeps it.
+//!   The wrapped sampler clears past [`MAX_WRAPPED_REACH`] (`2^24` px),
+//!   where f32 can no longer address texels; the raster always wraps
+//!   first, so it never reaches that guard with a finite point.
 //! - **No live projector**: Apply rasterizes through the placement frozen
 //!   at [`ProjectionState::arm`], never the live camera.
 //! - **No depth or backface culling**: a texel whose world point sits
@@ -85,6 +99,13 @@ pub const DEFAULT_PROJECTION_OPACITY: f32 = 0.5;
 /// The default source-image pixel cap (2048², the plan §4 raster cap and
 /// the svg rasterizer's own default).
 pub const DEFAULT_MAX_PROJECTION_PIXELS: u32 = 2048 * 2048;
+
+/// The wrapped sampler's reach, `2^24` image px on either axis: past it
+/// an f32 coordinate can no longer address single texels (the spacing
+/// between representable values reaches 2 px), so a sample there is
+/// noise, not a tile. [`RgbaImage::sample_bilinear_wrapped`] returns
+/// clear beyond it (the "negative-huge" guard; see the module docs).
+pub const MAX_WRAPPED_REACH: f32 = 16_777_216.0;
 
 /// Everything that can go wrong loading a projection source.
 #[derive(Debug, Error)]
@@ -260,15 +281,43 @@ impl RgbaImage {
         if !in_reach {
             return [0; 4];
         }
+        Self::bilinear(img_pt, |x, y| self.texel(x, y))
+    }
+
+    /// Bilinear sample at image-px `img_pt` with WRAPPED taps (R-A2 v2a
+    /// tiling): every tap index wraps with `rem_euclid` into the image,
+    /// so an edge footprint blends with the OPPOSITE edge (seamless
+    /// repeat, never clamp, never the zero border). Same premultiplied
+    /// core as [`Self::sample_bilinear`], so wherever no tap leaves the
+    /// image the two agree exactly. A non-finite `img_pt`, or one beyond
+    /// [`MAX_WRAPPED_REACH`] on either axis, returns `[0, 0, 0, 0]`.
+    pub fn sample_bilinear_wrapped(&self, img_pt: [f32; 2]) -> [u8; 4] {
+        let [px, py] = img_pt;
+        // Rejects NaN/inf (and f32 coordinates too coarse to address a
+        // texel) before the float -> int casts.
+        let in_reach = (-MAX_WRAPPED_REACH..=MAX_WRAPPED_REACH).contains(&px)
+            && (-MAX_WRAPPED_REACH..=MAX_WRAPPED_REACH).contains(&py);
+        if !in_reach {
+            return [0; 4];
+        }
+        let (w, h) = (i64::from(self.width), i64::from(self.height));
+        Self::bilinear(img_pt, |x, y| self.texel(x.rem_euclid(w), y.rem_euclid(h)))
+    }
+
+    /// The shared premultiplied bilinear core over `tap` (texel centers
+    /// at `i + 0.5`). The caller has already guarded `img_pt` finite and
+    /// in reach.
+    fn bilinear(img_pt: [f32; 2], tap: impl Fn(i64, i64) -> [f32; 4]) -> [u8; 4] {
+        let [px, py] = img_pt;
         let (ux, uy) = (px - 0.5, py - 0.5);
         let (x0, y0) = (ux.floor(), uy.floor());
         let (fx, fy) = (ux - x0, uy - y0);
         let (x0, y0) = (x0 as i64, y0 as i64);
         let taps = [
-            (self.texel(x0, y0), (1.0 - fx) * (1.0 - fy)),
-            (self.texel(x0 + 1, y0), fx * (1.0 - fy)),
-            (self.texel(x0, y0 + 1), (1.0 - fx) * fy),
-            (self.texel(x0 + 1, y0 + 1), fx * fy),
+            (tap(x0, y0), (1.0 - fx) * (1.0 - fy)),
+            (tap(x0 + 1, y0), fx * (1.0 - fy)),
+            (tap(x0, y0 + 1), (1.0 - fx) * fy),
+            (tap(x0 + 1, y0 + 1), fx * fy),
         ];
         let mut rgb = [0.0f32; 3];
         let mut alpha = 0.0f32;
@@ -406,11 +455,15 @@ pub struct ProjectionState {
     pub path: Option<PathBuf>,
     /// The last load's refusal, localized (cleared by the next success).
     pub load_error: Option<String>,
+    /// Tile (R-A2 v2a): the image repeats infinitely over the frozen
+    /// viewport instead of falling to the zero border. A placement mode,
+    /// so [`ProjectionState::adopt`] keeps it.
+    pub tiling: bool,
 }
 
 impl Default for ProjectionState {
     /// No image, the default transform, unarmed, nothing frozen,
-    /// [`DEFAULT_PROJECTION_OPACITY`].
+    /// [`DEFAULT_PROJECTION_OPACITY`], tiling off.
     fn default() -> Self {
         Self {
             image: None,
@@ -420,6 +473,7 @@ impl Default for ProjectionState {
             frozen: None,
             path: None,
             load_error: None,
+            tiling: false,
         }
     }
 }
@@ -470,7 +524,8 @@ impl ProjectionState {
 /// `None` without an image, without a frozen placement, under a
 /// degenerate transform (scale not finite and positive) or a degenerate
 /// frozen rect. Texels off the mesh, behind the eye, off the frozen
-/// viewport or outside the image write `[0, 0, 0, 0]`.
+/// viewport or (tiling off) outside the image write `[0, 0, 0, 0]`; with
+/// [`ProjectionState::tiling`] the image repeats instead (module docs).
 pub fn rasterize_projection(
     state: &ProjectionState,
     mesh: &umber_mesh::MeshData,
@@ -512,7 +567,17 @@ pub fn rasterize_projection(
             // Viewport-local px (see the module docs), y down.
             let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
             let img_pt = inverse_map(&state.transform, size, screen);
-            let rgba = image.sample_bilinear(img_pt);
+            let rgba = if state.tiling {
+                // Wrap into [0, w) x [0, h) first (NaN/inf stay NaN and
+                // the sampler's guard clears them), then wrap the taps.
+                let wrapped = [
+                    img_pt[0].rem_euclid(size[0] as f32),
+                    img_pt[1].rem_euclid(size[1] as f32),
+                ];
+                image.sample_bilinear_wrapped(wrapped)
+            } else {
+                image.sample_bilinear(img_pt)
+            };
             let at = (y as usize * w as usize + x as usize) * 4;
             if let Some(dst) = out.get_mut(at..at + 4) {
                 dst.copy_from_slice(&rgba);
@@ -733,7 +798,147 @@ mod tests {
         assert_eq!(img.sample_bilinear([f32::NAN, 0.5]), CLEAR);
     }
 
+    // --- wrapped sampler (R-A2 v2a tiling) ---
+
+    #[test]
+    fn wrapped_sampler_clears_non_finite_and_huge_points_and_agrees_in_range() {
+        let img = image(4, 4, |x, y| [x as u8 * 60, y as u8 * 50 + 5, 7, 255]);
+        for pt in [
+            [f32::NAN, 1.5],
+            [1.5, f32::NAN],
+            [f32::INFINITY, 1.5],
+            [1.5, f32::NEG_INFINITY],
+            [-1.0e30, 1.5],
+            [1.5, -1.0e30],
+            [-MAX_WRAPPED_REACH * 2.0, 1.5],
+        ] {
+            assert_eq!(img.sample_bilinear_wrapped(pt), CLEAR, "{pt:?}");
+        }
+        // Wherever no tap leaves the image the two samplers agree exactly.
+        for pt in [[0.5, 0.5], [1.5, 2.5], [2.0, 1.25], [3.5, 3.5], [1.75, 0.5]] {
+            assert_eq!(
+                img.sample_bilinear_wrapped(pt),
+                img.sample_bilinear(pt),
+                "{pt:?}"
+            );
+        }
+        // Texel (2, 1) center, exact: [2 * 60, 1 * 50 + 5, 7, 255].
+        assert_eq!(img.sample_bilinear_wrapped([2.5, 1.5]), [120, 55, 7, 255]);
+    }
+
+    #[test]
+    fn wrapped_sampler_seam_blends_the_opposite_edge() {
+        // Column 7 is blue, column 0 is red: across the wrap seam both
+        // x = 8 - 0.001 and x = -0.001 sit at ux = 7.499 / -0.501, so
+        // the taps are texel 7 (weight 0.501) and texel 0 (0.499):
+        // r = 255 * 0.499 = 127.2 -> 127, b = 255 * 0.501 = 127.8 -> 128.
+        let img = red_blue();
+        let seam = [127, 0, 128, 255];
+        assert_eq!(img.sample_bilinear_wrapped([8.0 - 0.001, 4.5]), seam);
+        assert_eq!(img.sample_bilinear_wrapped([-0.001, 4.5]), seam);
+        // Not clamp (pure blue / pure red at the edges) and not the zero
+        // border (half alpha): the v1 sampler at the same points.
+        assert_eq!(img.sample_bilinear([8.0 - 0.001, 4.5]), [0, 0, 255, 128]);
+        // (Red's weight is 0.499 there: alpha 127.2 -> 127.)
+        assert_eq!(img.sample_bilinear([-0.001, 4.5]), [255, 0, 0, 127]);
+        // The y seam wraps the same way (rows 7 and 0, red column).
+        let rows = image(2, 8, |_, y| if y == 0 { RED } else { BLUE });
+        assert_eq!(rows.sample_bilinear_wrapped([0.5, -0.001]), seam);
+    }
+
     // --- raster ---
+
+    /// The v1 chain by hand (world_at_uv -> frozen view_proj -> NDC ->
+    /// viewport px -> inverse_map -> zero-border sampler), the reference
+    /// tiling-off output must match byte for byte.
+    fn v1_reference(state: &ProjectionState, mesh: &umber_mesh::MeshData, n: u32) -> Vec<u8> {
+        let image = state.image.as_ref().unwrap();
+        let frozen = state.frozen.unwrap();
+        let (rw, rh) = (frozen.rect.width(), frozen.rect.height());
+        let vp = frozen.camera.view_proj(rw / rh);
+        let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(1001);
+        let mut out = vec![0u8; (n * n * 4) as usize];
+        for y in 0..n {
+            for x in 0..n {
+                let uv = umber_mesh::uv_gbuffer::texel_center_uv(ox, oy, x, y, n, n);
+                let Some(world) = umber_mesh::world_at_uv(mesh, uv) else {
+                    continue;
+                };
+                let clip = vp * glam::Vec4::new(world[0], world[1], world[2], 1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let ndc = clip.truncate() / clip.w;
+                if ndc.x.abs() > 1.0 || ndc.y.abs() > 1.0 {
+                    continue;
+                }
+                let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
+                let size = [image.width(), image.height()];
+                let img_pt = inverse_map(&state.transform, size, screen);
+                let at = ((y * n + x) * 4) as usize;
+                out[at..at + 4].copy_from_slice(&image.sample_bilinear(img_pt));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tiling_off_is_byte_identical_to_the_v1_chain() {
+        let mesh = quad();
+        // A small, rotated, off-center image so the zero border, the
+        // image interior and the bilinear edges all appear in the tile.
+        let mut state = armed(red_blue(), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform = StencilTransform {
+            center: [43.0, 57.0],
+            scale: 3.0,
+            rotation: 0.3,
+        };
+        assert!(!state.tiling);
+        let out = rasterize_projection(&state, &mesh, 1001, 16, 16).unwrap();
+        assert_eq!(out, v1_reference(&state, &mesh, 16));
+        // Sanity: the fixture really exercises both border and image.
+        assert!(out.chunks(4).any(|t| t == CLEAR));
+        assert!(out.chunks(4).any(|t| t[3] == 255));
+    }
+
+    #[test]
+    fn tiling_wraps_a_point_left_of_the_image_onto_its_repeat() {
+        // 8x8 gradient at scale 12.5, center (156.25, 56.25): texel (4, 4)
+        // of a 9x9 tile is the world origin = screen (50, 50), so
+        // img_pt = ((50 - 156.25) / 12.5 + 4, (50 - 56.25) / 12.5 + 4)
+        // = (-4.5, 3.5), in [-w, 0). Wrapped: (3.5, 3.5) = texel (3, 3).
+        let img = image(8, 8, |x, y| [x as u8 * 30, y as u8 * 20 + 5, 7, 255]);
+        let mut state = armed(img.clone(), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform.center = [156.25, 56.25];
+        let off = rasterize_projection(&state, &quad(), 1001, 9, 9).unwrap();
+        // v1: -4.5 is beyond the zero border's reach.
+        assert_eq!(texel(&off, 9, 4, 4), CLEAR);
+        state.tiling = true;
+        let on = rasterize_projection(&state, &quad(), 1001, 9, 9).unwrap();
+        assert_eq!(texel(&on, 9, 4, 4), img.sample_bilinear([-4.5 + 8.0, 3.5]));
+        assert_eq!(texel(&on, 9, 4, 4), [90, 65, 7, 255]);
+    }
+
+    #[test]
+    fn tiling_fills_outside_the_image_but_never_outside_the_frozen_view() {
+        // A 10 px square at the view center: v1 leaves the corners clear,
+        // tiling repeats the (uniform red) image over them.
+        let mut state = armed(image(2, 2, |_, _| RED), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform.scale = 5.0;
+        state.tiling = true;
+        let out = rasterize_projection(&state, &quad(), 1001, 8, 8).unwrap();
+        assert_eq!(texel(&out, 8, 0, 0), RED);
+        assert_eq!(texel(&out, 8, 7, 7), RED);
+        // Distance 1: the quad's corner texels fall off the frozen NDC,
+        // so tiling still leaves them clear; the center stays red.
+        let mut state = armed(image(2, 2, |_, _| RED), head_on(glam::Vec3::ZERO, 1.0));
+        state.transform.scale = 5.0;
+        state.tiling = true;
+        let out = rasterize_projection(&state, &quad(), 1001, 8, 8).unwrap();
+        assert_eq!(texel(&out, 8, 0, 0), CLEAR);
+        assert_eq!(texel(&out, 8, 7, 0), CLEAR);
+        assert_eq!(texel(&out, 8, 4, 4), RED);
+    }
 
     #[test]
     fn center_texel_samples_the_source_center() {
@@ -863,6 +1068,48 @@ mod tests {
         assert!(!s.armed && s.frozen.is_none());
         assert!(s.image.is_none() && s.path.is_none() && s.load_error.is_none());
         assert_eq!(s.transform, StencilTransform::default());
+        assert!(!s.tiling);
+    }
+
+    #[test]
+    fn adopt_keeps_tiling_and_arm_disarm_never_touch_it() {
+        let mut s = ProjectionState {
+            tiling: true,
+            ..ProjectionState::default()
+        };
+        let cam = head_on(glam::Vec3::ZERO, 5.0);
+        s.arm(cam, view_rect());
+        assert!(s.tiling);
+        s.disarm();
+        assert!(s.tiling);
+        // A successful load refits and disarms, but tiling is a
+        // placement mode, not image data: it stays.
+        s.adopt(
+            PathBuf::from("a.png"),
+            Ok(image(4, 2, |_, _| RED)),
+            [200.0, 100.0],
+        );
+        assert!(s.tiling && !s.armed && s.frozen.is_none());
+        // A refusal keeps it too; and off stays off across a load.
+        s.adopt(
+            PathBuf::from("b.png"),
+            Err(ProjectionLoadError::Malformed {
+                width: 0,
+                height: 0,
+                bytes: 0,
+            }),
+            [200.0, 100.0],
+        );
+        assert!(s.tiling);
+        s.tiling = false;
+        s.adopt(
+            PathBuf::from("c.png"),
+            Ok(image(2, 2, |_, _| RED)),
+            [200.0, 100.0],
+        );
+        assert!(!s.tiling);
+        s.arm(cam, view_rect());
+        assert!(!s.tiling);
     }
 
     #[test]

@@ -120,6 +120,12 @@
 //! brief's rule — Apply reads as "apply what the armed view shows");
 //! the opacity field resets to [`DEFAULT_STENCIL_OPACITY`], the value
 //! `projection::DEFAULT_PROJECTION_OPACITY` carries over.
+//!
+//! Row 287 (R-A2 v2a tiling) adds a Tile checkbox beside Arm, enabled
+//! with an image. Unlike Arm it writes through its borrow
+//! ([`ProjectionRow::tiling`]): toggling the repeat needs no camera
+//! freeze, so there is nothing for the caller to do but keep the flag.
+//! The response is unchanged (no `toggled_tile` field).
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -412,6 +418,10 @@ pub struct ProjectionRow<'a> {
     pub armed: bool,
     /// The overlay preview + applied alpha, `0..=1`.
     pub opacity: &'a mut f32,
+    /// Tile (R-A2 v2a): the image repeats over the frozen viewport. A
+    /// real borrow: the Tile checkbox writes through it (unlike Arm,
+    /// flipping it needs nothing only the caller can reach).
+    pub tiling: &'a mut bool,
 }
 
 /// What the projection rows asked for this frame.
@@ -457,12 +467,21 @@ pub fn projection_rows(ui: &mut Ui, row: ProjectionRow<'_>) -> ProjectionRowResp
     // The checkbox edits a local copy: the caller owns the arm (it must
     // freeze the camera), so the flip is reported, not written.
     let mut armed = row.armed;
-    out.toggled_arm = ui
-        .add_enabled(
+    ui.horizontal(|ui| {
+        out.toggled_arm = ui
+            .add_enabled(
+                row.has_image,
+                egui::Checkbox::new(&mut armed, i18n::tr("overlays.projection-arm")),
+            )
+            .changed();
+        // Tile writes straight through the borrow (a placement mode the
+        // raster reads at Apply; nothing to freeze).
+        ui.add_enabled(
             row.has_image,
-            egui::Checkbox::new(&mut armed, i18n::tr("overlays.projection-arm")),
+            egui::Checkbox::new(&mut *row.tiling, i18n::tr("overlays.projection-tile")),
         )
-        .changed();
+        .on_hover_text(i18n::tr("overlays.projection-tile-hint"));
+    });
     ui.add_enabled_ui(row.has_image, |ui| {
         ui.horizontal(|ui| {
             ui.label(i18n::tr("overlays.projection-opacity"));
@@ -1143,6 +1162,7 @@ mod tests {
                                 has_image: *has_image,
                                 armed: *armed,
                                 opacity,
+                                tiling: &mut false,
                             },
                         );
                         *toggled |= response.toggled_arm;
@@ -1180,6 +1200,54 @@ mod tests {
     }
 
     #[test]
+    fn projection_tile_checkbox_writes_through_the_borrow() {
+        // (tiling, has_image, toggled-arm seen)
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        type TileState = (bool, bool, bool);
+        let build = |has_image: bool, tiling: bool| {
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(360.0, 260.0))
+                .build_ui_state(
+                    |ui, s: &mut TileState| {
+                        let (tiling, has_image, toggled) = s;
+                        let mut opacity = DEFAULT_STENCIL_OPACITY;
+                        let response = projection_rows(
+                            ui,
+                            ProjectionRow {
+                                path: None,
+                                load_error: None,
+                                has_image: *has_image,
+                                armed: false,
+                                opacity: &mut opacity,
+                                tiling,
+                            },
+                        );
+                        *toggled |= response.toggled_arm;
+                    },
+                    (tiling, has_image, false),
+                )
+        };
+        // With an image: one click turns tiling on, a second turns it
+        // off; neither reports an arm flip.
+        let mut harness = build(true, false);
+        harness.run();
+        harness.get_by_label("Tile").click();
+        harness.run();
+        assert!(harness.state().0, "Tile writes the borrowed flag on");
+        harness.get_by_label("Tile").click();
+        harness.run();
+        assert!(!harness.state().0, "a second click writes it off");
+        assert!(!harness.state().2, "Tile is not an arm flip");
+        // Without an image the checkbox is disabled: the flag holds.
+        let mut harness = build(false, true);
+        harness.run();
+        harness.get_by_label("Tile").click();
+        harness.run();
+        assert!(harness.state().0, "disabled Tile leaves the flag alone");
+    }
+
+    #[test]
     fn overlay_keys_exist_in_both_catalogs() {
         let i18n = i18n::I18n::builtin();
         for key in [
@@ -1211,6 +1279,8 @@ mod tests {
             "overlays.projection-arm",
             "overlays.projection-apply",
             "overlays.projection-opacity",
+            "overlays.projection-tile",
+            "overlays.projection-tile-hint",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");
