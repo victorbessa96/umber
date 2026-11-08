@@ -117,6 +117,26 @@ pub fn uv_to_barycentric(mesh: &MeshData, uv: [f32; 2]) -> Option<UvHit> {
     found
 }
 
+/// The world-space position of `uv` on the mesh — the inverse direction of
+/// [`uv_at`](crate::raycast::uv_at) (hit → UV): the covering triangle's
+/// barycentric interpolation of its vertex positions, through
+/// [`uv_to_barycentric`] + [`lerp3`] so the interpolation order stays
+/// bit-identical with every other CPU consumer. `None` on a UV miss, a
+/// non-finite `uv`, an out-of-range index or an empty mesh.
+///
+/// Row 277 (projection-fill plan `docs/specs/projection-fill-plan.md`): the
+/// decal projector's per-texel raster maps texel → UV → world with this and
+/// then projects through the frozen camera — it never raycasts.
+pub fn world_at_uv(mesh: &MeshData, uv: [f32; 2]) -> Option<[f32; 3]> {
+    let hit = uv_to_barycentric(mesh, uv)?;
+    let base = hit.triangle.checked_mul(3)?;
+    let idx = mesh.indices.get(base..base.checked_add(3)?)?;
+    let p0 = *mesh.positions.get(idx[0] as usize)?;
+    let p1 = *mesh.positions.get(idx[1] as usize)?;
+    let p2 = *mesh.positions.get(idx[2] as usize)?;
+    Some(lerp3(p0, p1, p2, hit.bary))
+}
+
 /// Barycentric interpolation of three values (`a*b0 + b*b1 + c*b2`), the
 /// order every CPU consumer uses so results stay bit-identical.
 #[inline]
@@ -409,5 +429,78 @@ mod tests {
         assert_eq!(tile_offset(1012), (1.0, 1.0));
         assert_eq!(tile_offset(1100), (9.0, 9.0));
         assert_eq!(tile_offset(0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn world_at_uv_reconstructs_the_flat_quad() {
+        let mesh = quad();
+        for (uv, want) in [
+            ([0.7, 0.2], [0.7, 0.2, 0.0]),
+            ([0.25, 0.75], [0.25, 0.75, 0.0]),
+            ([0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([1.0, 1.0], [1.0, 1.0, 0.0]),
+        ] {
+            let p = world_at_uv(&mesh, uv).expect("inside the quad");
+            assert!(
+                (p[0] - want[0]).abs() < 1e-6
+                    && (p[1] - want[1]).abs() < 1e-6
+                    && (p[2] - want[2]).abs() < 1e-6,
+                "uv {uv:?} -> {p:?}, want {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn world_at_uv_interpolates_z_and_agrees_with_the_barycentric_hit() {
+        // Same UV quad, but the positions rise in z: world_at_uv must carry
+        // the interpolated z, and must pick the SAME triangle the point
+        // lookup picks (last in index order wins on the diagonal).
+        let mut mesh = quad();
+        mesh.positions = vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 4.0],
+            [0.0, 2.0, 4.0],
+        ];
+        // (0.25, 0.25) is inside tri 0 (uvs (0,0),(1,0),(1,1)): bary
+        // (0.75, 0.0, 0.25) -> 0.75*p0 + 0.25*p2 = (0.5, 0.5, 1.0).
+        let p = world_at_uv(&mesh, [0.25, 0.25]).expect("inside tri 0");
+        assert!(
+            (p[0] - 0.5).abs() < 1e-6 && (p[1] - 0.5).abs() < 1e-6 && (p[2] - 1.0).abs() < 1e-6,
+            "{p:?}"
+        );
+        let hit = uv_to_barycentric(&mesh, [0.5, 0.5]).expect("on the diagonal");
+        assert_eq!(hit.triangle, 1, "the diagonal belongs to the last tri");
+        let p = world_at_uv(&mesh, [0.5, 0.5]).expect("on the diagonal");
+        // tri 1 = (0, 2, 3), uvs (0,0),(1,1),(0,1); (0.5,0.5) -> bary (0.5, 0.5, 0).
+        let want = lerp3(
+            mesh.positions[0],
+            mesh.positions[2],
+            mesh.positions[3],
+            hit.bary,
+        );
+        assert!(
+            (p[0] - want[0]).abs() < 1e-6
+                && (p[1] - want[1]).abs() < 1e-6
+                && (p[2] - want[2]).abs() < 1e-6,
+            "{p:?} vs {want:?}"
+        );
+    }
+
+    #[test]
+    fn world_at_uv_misses_exactly_where_the_point_lookup_misses() {
+        let mut mesh = quad();
+        assert_eq!(world_at_uv(&mesh, [1.5, 0.5]), None);
+        assert_eq!(world_at_uv(&mesh, [f32::NAN, 0.5]), None);
+        assert_eq!(world_at_uv(&mesh, [0.5, f32::INFINITY]), None);
+        assert_eq!(world_at_uv(&MeshData::default(), [0.5, 0.5]), None);
+        // A UV-degenerate triangle covers nothing, so its UVs miss too.
+        mesh.uvs = vec![[0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]];
+        assert_eq!(world_at_uv(&mesh, [0.5, 0.5]), None);
+        // An out-of-range index in the winning triangle misses instead of
+        // panicking.
+        mesh.uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        mesh.indices = vec![0, 1, 99];
+        assert_eq!(world_at_uv(&mesh, [0.7, 0.2]), None);
     }
 }
