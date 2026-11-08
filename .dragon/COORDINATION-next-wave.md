@@ -2293,6 +2293,20 @@ stroke. Brief docs/loop/briefs/2026-11-07-pwys-stroke-buffer-kill-brief.md (four
 paint/gpu crates and the i18n catalogs out of scope). Lock claw-pwys-buffer over viewport.rs
 (disjoint from the sibling's razul-abr-realfile wave). Sibling lane holds STATE.md + ROADMAP.md
 in that lock — leave them until it is released.
+20:5x ROW 272 LANDED (pwys stroke buffer): the claw wrote crates/umber-app/src/viewport.rs
+(+508/-75): stroke_camera: Option<OrbitCamera> latched on the first event that opens a stroke and
+cleared when it ends; pick_with(rect, mesh, pos, camera) + stroke_event(...) resolving the stroke
+against the snapshot; the guard split by input source (handle_pointer_nav still skipped during a
+stroke, handle_camera_keys — P/F — now runs). Dragon review pass: three TEST-side corrections (the
+control's hand-derived constant got a 1e-3 tolerance + a new "the live camera really moved"
+assertion; the GPU pin's device now requests TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES and skips
+without it; the readback pin asserts the painted SPAN instead of the final point's exact texel —
+the dab placement is spacing-driven, so the last point's dab is not stamped mid-stroke; the first
+battery run measured the span ending at 318 vs the frozen UV's 321). Battery: clippy -p umber-app
+--all-targets -D warnings 0, umber-app 1,056/0 over 10 suites, all four pins green. Commits 93877796
+(code) + 15a39c66 (docs). ROW NUMBERING: the fix row was written as 271, but the sibling's abr
+real-file kill took 271 and the project-watch cron took 273 in the same window — the CI-fix row was
+renumbered to 274 (max + 1 at write time); the pwys row stays 272 (no collision).
 
 ## WATCH 2026-11-07 19:26 -03 — project-watch cron (row 270)
 
