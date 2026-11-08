@@ -55,3 +55,23 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Row 282 additions (2026-11-08, desc sections)
+
+Two more vendored copies from the same upstream corpus, this time keeping
+the `desc` section (the descriptor tree) that the trimmed set above dropped:
+
+- `test/abr-read/simple/src.abr` -> `abr_real_v6_2_full.abr` (662 bytes,
+  whole file: `samp`+`patt`+`desc`; upstream `data.json` vendored beside it as
+  `abr_real_v6_2_full.data.json` — 0 samples, one computed brush "Soft Round"
+  size 30 spacing 0.25 hardness 0).
+- `test/abr-read/sample-and-pattern/src.abr` ->
+  `abr_real_v6_2_samp_desc.abr` (10,816 bytes): the version header plus ONLY
+  the `samp` (7,812 B) and `desc` (2,976 B) sections, `patt` (~1 MiB) and
+  `phry` dropped; section payload bytes untouched. Upstream `data.json`
+  vendored as `abr_real_v6_2_samp_desc.data.json` — 1 sample
+  `a8f34db0-4814-634e-807c-c61aecde18fd` (112x105 at (2,1)) and 1 sampled
+  brush "Bobbys Brush 743" (size 112, spacing 0.02) linked by that id.
+
+Same MIT license and copyright as above; the trimming rule is section-level,
+never a re-encode.
