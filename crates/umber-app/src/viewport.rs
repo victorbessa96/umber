@@ -176,6 +176,50 @@
 //!   registry rows (actions.rs `BINDINGS`), so N's toggle is the shell's
 //!   handoff (a `ShellAction` row; P-in-viewport is the alternative
 //!   precedent).
+//!
+//! # The camera mid-stroke (pwys-stroke-buffer, option A)
+//!
+//! docs/specs/pwys-stroke-buffer-design.md, "The v1 choice: A"
+//! (requirements §1's "the camera can't move mid-stroke" follow-up).
+//! Before this, the frame loop skipped ALL camera input during a paint
+//! drag, so the live camera could not move while a stroke was open. Now
+//! the stroke freezes its RAYCAST instead of the camera:
+//!
+//! - **The snapshot**: `Viewport::stroke_camera` is a plain-data copy of
+//!   the [`OrbitCamera`] (it is `Copy`), latched by the first event that
+//!   opens a viewport stroke — the very camera that event resolved
+//!   against — and cleared on the frame the paint drag ends (the same
+//!   frame `end_stroke` runs). A drag that opens on a miss latches
+//!   nothing until its first hit (the stroke starts there).
+//! - **The resolve**: every stroke event goes through `stroke_event`,
+//!   which picks against the snapshot (`pick_with`), never the live
+//!   camera. Hit/miss is the START camera's: a ray that hit at stroke
+//!   start still paints after the live camera turns away, and a frozen
+//!   miss skips the dab whatever the live view shows. The front-face
+//!   weight comes from the same frozen pick. The eyedropper, the ID-mask
+//!   select, the brush cursor, the straight line and the orbit pivot keep
+//!   picking against the LIVE camera.
+//! - **Per-event staging is unchanged**: the paint crate still receives
+//!   one resolved UV per event (`begin_/extend_screen_point_pressured`),
+//!   so the live preview (UV view, the 3D bind, export reads), the drain
+//!   cadence, undo capture and the seam/symmetry/retouch accounting see
+//!   exactly the old flow. A stationary camera paints byte-identically.
+//! - **The guard is per input source**: pointer navigation
+//!   (`handle_pointer_nav`: the preset's drag chords + the wheel) still
+//!   stands down while painting — the artist's pointer belongs to the
+//!   stroke. The non-pointer camera sources (`handle_camera_keys`: P
+//!   projection, F frame) now run mid-stroke too. Judgment call: a
+//!   Shift-held key stands down mid-stroke, because a stroke always
+//!   holds Ctrl/Cmd and Cmd+Shift+P is the shell's command palette. No
+//!   new binding was invented; a turntable or gamepad source would join
+//!   `handle_camera_keys`' side of the guard.
+//! - **Deferred** (the design's non-goals): screen-space GPU reprojection,
+//!   resolve-at-end (option B, the named follow-up), camera animation
+//!   authored mid-stroke. Known v1 seam: the live 3D view may now show
+//!   the dab landing where the mesh WAS at stroke start, not under the
+//!   cursor — the design's paint-what-you-saw-at-stroke-start contract.
+//!   `load_mesh` mid-stroke does not reset the snapshot (the stroke ends
+//!   with the drag, as before).
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 use umber_color::{apply_display_chain, DisplaySettings};
@@ -405,6 +449,14 @@ pub struct Viewport {
     /// The in-flight paint stroke was begun by THIS viewport (so the
     /// viewport ends it on release, and never ends a UV-view stroke).
     stroke_from_viewport: bool,
+    /// The live stroke's FROZEN camera (pwys-stroke-buffer option A): a
+    /// plain-data copy of [`Self::camera`] latched when the stroke begins
+    /// (the first event that opens a stroke) and cleared when the paint
+    /// drag ends. Every later event of the stroke raycasts against it, so
+    /// the live camera may move without disturbing the stroke in flight.
+    /// `None` between strokes (and while a drag that opened on a miss has
+    /// not hit yet).
+    stroke_camera: Option<OrbitCamera>,
     /// A gizmo tip took this frame's click (the straight line, the
     /// eyedropper and the ID-mask must not also act on it).
     gizmo_clicked: bool,
@@ -986,82 +1038,81 @@ impl Viewport {
         }
         if !painting {
             self.stroke_from_viewport = false;
+            // The stroke's frozen camera dies with the stroke (see the
+            // module docs' "camera mid-stroke" section).
+            self.stroke_camera = None;
         }
-        if !painting {
-            // A stencil chord owns the pointer: no navigation under it.
-            if !stencil_owns {
-                self.handle_input(ui, &response);
+        // The guard is per INPUT SOURCE (pwys-stroke-buffer option A): the
+        // artist's pointer belongs to a live stroke, so pointer-driven
+        // navigation (drag chords, wheel) stands down while painting; the
+        // non-pointer camera sources (the P / F keys) stay live, because
+        // the stroke raycasts against its start-camera snapshot and never
+        // reads the live camera. A stencil chord owns the pointer: no
+        // navigation of either kind under it.
+        if !stencil_owns {
+            if !painting {
+                self.handle_pointer_nav(ui, &response);
             }
-        } else if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let picked = self.pick(rect, mesh, pos);
-                let hit = picked.map(|(uv, _)| egui::Pos2::new(uv[0], uv[1]));
-                let facing_weight = picked.map_or(1.0, |(_, w)| w);
-                // CORE-LOOP CRITICAL 5 — real pressure: the digitizer's
-                // per-event force feeds the stroke. The source is the RAW
-                // `Event::Touch` stream, NOT `multi_touch()`: the gesture
-                // aggregate returns `None` below two active touches
-                // (egui's own contract — "returns None for single-touch
-                // gestures"), so a single pen contact never carried force
-                // through it and painted at a constant 1.0 (the cross-review
-                // finding on f867215, receipt 2026-10-12-pressure-kill-
-                // cross-review-receipt.md). `Event::Touch` carries
-                // `force: Option<f32>` per event, single touches included,
-                // in 0..=1; `None`/0.0 maps to 1.0 — a mouse drag (no touch
-                // events at all) and a platform that cannot measure force
-                // both paint at full pressure, never a ghost-faint stroke.
-                // V1 takes the frame's LAST touch event's force (the
-                // single-pen case; per-touch-id tracking rides with the
-                // stylus-crate backends — Windows Ink, XI2 — the named
-                // follow-up for tilt, proximity, eraser).
-                //
-                // STYLUS (XI2) PREFERENCE: `stylus_pressure` is this
-                // frame's Motion pressure from the poller
-                // (`stylus_input::StylusPoller::pressure_for_frame` —
-                // `Some` only when a stylus Motion drained THIS frame).
-                // It wins over Touch; Touch wins over 1.0; the shared
-                // `resolve_pressure` folds non-positive/non-finite to
-                // 1.0 (the mouse / can't-measure-force rule, unchanged).
-                let touch_force = ui.input(|i| {
-                    let mut force: Option<f32> = None;
-                    for event in &i.events {
-                        if let egui::Event::Touch {
-                            phase: egui::TouchPhase::Start | egui::TouchPhase::Move,
-                            pos,
-                            force: f,
-                            ..
-                        } = event
-                        {
-                            // Only the touch stream inside this viewport
-                            // feeds the stroke: a second finger landing on
-                            // a panel mid-stroke must not override the
-                            // pen's force for the frame.
-                            if rect.contains(*pos) {
-                                force = *f;
-                            }
+            self.handle_camera_keys(ui, &response, painting);
+        }
+        if let (true, Some(paint), Some(pos)) =
+            (painting, paint.as_mut(), response.interact_pointer_pos())
+        {
+            // CORE-LOOP CRITICAL 5 — real pressure: the digitizer's
+            // per-event force feeds the stroke. The source is the RAW
+            // `Event::Touch` stream, NOT `multi_touch()`: the gesture
+            // aggregate returns `None` below two active touches
+            // (egui's own contract — "returns None for single-touch
+            // gestures"), so a single pen contact never carried force
+            // through it and painted at a constant 1.0 (the cross-review
+            // finding on f867215, receipt 2026-10-12-pressure-kill-
+            // cross-review-receipt.md). `Event::Touch` carries
+            // `force: Option<f32>` per event, single touches included,
+            // in 0..=1; `None`/0.0 maps to 1.0 — a mouse drag (no touch
+            // events at all) and a platform that cannot measure force
+            // both paint at full pressure, never a ghost-faint stroke.
+            // V1 takes the frame's LAST touch event's force (the
+            // single-pen case; per-touch-id tracking rides with the
+            // stylus-crate backends — Windows Ink, XI2 — the named
+            // follow-up for tilt, proximity, eraser).
+            //
+            // STYLUS (XI2) PREFERENCE: `stylus_pressure` is this
+            // frame's Motion pressure from the poller
+            // (`stylus_input::StylusPoller::pressure_for_frame` —
+            // `Some` only when a stylus Motion drained THIS frame).
+            // It wins over Touch; Touch wins over 1.0; the shared
+            // `resolve_pressure` folds non-positive/non-finite to
+            // 1.0 (the mouse / can't-measure-force rule, unchanged).
+            let touch_force = ui.input(|i| {
+                let mut force: Option<f32> = None;
+                for event in &i.events {
+                    if let egui::Event::Touch {
+                        phase: egui::TouchPhase::Start | egui::TouchPhase::Move,
+                        pos,
+                        force: f,
+                        ..
+                    } = event
+                    {
+                        // Only the touch stream inside this viewport
+                        // feeds the stroke: a second finger landing on
+                        // a panel mid-stroke must not override the
+                        // pen's force for the frame.
+                        if rect.contains(*pos) {
+                            force = *f;
                         }
                     }
-                    force
-                });
-                // Front-face falloff rides the pressure channel: it scales
-                // the dab's strength exactly as a lighter pen would, so it
-                // inherits every downstream rule (pressure curve, wash,
-                // symmetry) with no new paint-engine surface. Off (the
-                // default) the weight is exactly 1.0 — pressure unchanged.
-                let pressure = crate::stylus_input::resolve_pressure(stylus_pressure, touch_force)
-                    * facing_weight;
-                if !paint.is_stroking() {
-                    paint.begin_screen_point_pressured(hit, pressure);
-                } else {
-                    paint.extend_screen_point_pressured(hit, pressure);
                 }
-                // Mark ownership only once a stroke actually began (a drag
-                // that opened on a miss starts nothing until it hits).
-                self.stroke_from_viewport = paint.is_stroking();
-                if hit.is_some() {
-                    self.last_stroke_end = Some(pos);
-                }
-            }
+                force
+            });
+            // Front-face falloff rides the pressure channel: it scales
+            // the dab's strength exactly as a lighter pen would, so it
+            // inherits every downstream rule (pressure curve, wash,
+            // symmetry) with no new paint-engine surface. Off (the
+            // default) the weight is exactly 1.0 — pressure unchanged.
+            // The facing weight is applied inside `stroke_event`, from
+            // the same frozen-camera pick that resolves the UV.
+            let pressure = crate::stylus_input::resolve_pressure(stylus_pressure, touch_force);
+            self.stroke_event(rect, paint, pos, pressure);
         }
 
         if self.mesh.is_none() {
@@ -1751,10 +1802,85 @@ impl Viewport {
         mesh: &umber_mesh::MeshData,
         pos: egui::Pos2,
     ) -> Option<([f32; 2], f32)> {
+        self.pick_with(rect, mesh, pos, &self.camera)
+    }
+
+    /// The camera a viewport stroke's raycast resolves against: the
+    /// stroke's frozen start camera while one is latched, the live camera
+    /// otherwise (the stroke's opening event, or a drag still waiting for
+    /// its first hit).
+    fn stroke_raycast_camera(&self) -> &OrbitCamera {
+        self.stroke_camera.as_ref().unwrap_or(&self.camera)
+    }
+
+    /// One viewport paint event (pwys-stroke-buffer option A): resolves
+    /// `pos` against [`Self::stroke_raycast_camera`] — never the live
+    /// camera once the stroke is open — and feeds the hit to the paint
+    /// session (`begin_screen_point_pressured` on the opening event,
+    /// `extend_screen_point_pressured` after). `pressure` is the resolved
+    /// pen pressure; the front-face weight of the SAME pick scales it.
+    /// The hit/miss decision is the frozen camera's: a ray that hits under
+    /// the start camera paints even if the live camera has turned away,
+    /// and a frozen-camera miss skips the dab (the paint crate's
+    /// no-orphan-dab rule) whatever the live camera sees. Returns the
+    /// resolved UV (`None` on a miss).
+    fn stroke_event(
+        &mut self,
+        rect: egui::Rect,
+        paint: &mut PaintState,
+        pos: egui::Pos2,
+        pressure: f32,
+    ) -> Option<[f32; 2]> {
+        let camera = *self.stroke_raycast_camera();
+        let picked = self
+            .mesh_data
+            .as_ref()
+            .and_then(|mesh| self.pick_with(rect, mesh, pos, &camera));
+        let hit = picked.map(|(uv, _)| egui::Pos2::new(uv[0], uv[1]));
+        let pressure = pressure * picked.map_or(1.0, |(_, w)| w);
+        if !paint.is_stroking() {
+            paint.begin_screen_point_pressured(hit, pressure);
+        } else {
+            paint.extend_screen_point_pressured(hit, pressure);
+        }
+        // Mark ownership only once a stroke actually began (a drag that
+        // opened on a miss starts nothing until it hits).
+        self.stroke_from_viewport = paint.is_stroking();
+        self.latch_stroke_camera(paint.is_stroking(), camera);
+        if hit.is_some() {
+            self.last_stroke_end = Some(pos);
+        }
+        picked.map(|(uv, _)| uv)
+    }
+
+    /// The snapshot's lifecycle: the FIRST event that leaves a stroke open
+    /// latches `camera` (the very camera that event resolved against, so
+    /// the opening dab and the rest of the stroke share one ray set); a
+    /// latched snapshot is never overwritten mid-stroke; no open stroke
+    /// clears it.
+    fn latch_stroke_camera(&mut self, stroking: bool, camera: OrbitCamera) {
+        if !stroking {
+            self.stroke_camera = None;
+        } else if self.stroke_camera.is_none() {
+            self.stroke_camera = Some(camera);
+        }
+    }
+
+    /// [`Self::pick`] against an explicit `camera` — the live one for the
+    /// non-stroke picks (eyedropper, ID mask, the brush cursor, the
+    /// straight line), a stroke's frozen start camera for
+    /// [`Self::stroke_event`].
+    fn pick_with(
+        &self,
+        rect: egui::Rect,
+        mesh: &umber_mesh::MeshData,
+        pos: egui::Pos2,
+        camera: &OrbitCamera,
+    ) -> Option<([f32; 2], f32)> {
         let aspect = rect.width() / rect.height();
         let ndc_x = (pos.x - rect.left()) / rect.width() * 2.0 - 1.0;
         let ndc_y = 1.0 - (pos.y - rect.top()) / rect.height() * 2.0;
-        let view_proj = self.camera.view_proj(aspect);
+        let view_proj = camera.view_proj(aspect);
         let inv = view_proj.inverse();
         // Unproject the near (z=0) and far (z=1) NDC points (directx
         // depth convention) to build the ray.
@@ -1765,8 +1891,8 @@ impl Viewport {
         // NEAR point on the sight ray, not the eye (fanning from the eye
         // would slant every pick). The perspective arm below is exactly
         // today's code.
-        let origin = match self.camera.projection {
-            umber_gpu::camera::Projection::Perspective => self.camera.eye(),
+        let origin = match camera.projection {
+            umber_gpu::camera::Projection::Perspective => camera.eye(),
             umber_gpu::camera::Projection::Orthographic => near,
         };
         let hit = umber_mesh::ray_intersect(mesh, origin, dir)?;
@@ -1784,7 +1910,11 @@ impl Viewport {
         Some((uv, weight))
     }
 
-    fn handle_input(&mut self, ui: &Ui, response: &Response) {
+    /// The POINTER-driven navigation: the preset's drag chords (orbit /
+    /// pan / zoom, RMB-cancel) and the wheel zoom. Skipped while a
+    /// viewport stroke is live — the artist's pointer belongs to the
+    /// stroke (the caller's guard).
+    fn handle_pointer_nav(&mut self, ui: &Ui, response: &Response) {
         // Navigation goes through the preset (`crate::navigation`): the
         // first held button whose (button, modifiers) chord the preset
         // binds drives the camera this frame.
@@ -1858,6 +1988,22 @@ impl Viewport {
                 self.camera
                     .zoom_toward(glam::Vec2::new(ndc.x, ndc.y), step, aspect);
             }
+        }
+    }
+
+    /// The NON-pointer camera sources (today: the P projection toggle and
+    /// the F frame), live during a stroke as well as between strokes —
+    /// the stroke resolves against its frozen start camera, so moving the
+    /// live camera here cannot disturb it. Mid-stroke (`stroking`) a
+    /// Shift-held press stands down: a viewport stroke always holds the
+    /// paint chord's Ctrl/Cmd, so Shift+P there is the shell's command
+    /// palette (Cmd+Shift+P, actions.rs `BINDINGS`), never a projection
+    /// flip. Between strokes the keys behave exactly as before.
+    fn handle_camera_keys(&mut self, ui: &Ui, response: &Response, stroking: bool) {
+        if stroking && ui.input(|i| i.modifiers.shift) {
+            return;
+        }
+        if response.hovered() {
             // Projection toggle (P, mnemonic: Projection): free because the
             // shell's SHORTCUT_KEYS (toolbar.rs: W/G/V/X/I/E/Z/S/O) and the
             // graph canvas (Delete/Backspace/Escape) bind nothing else;
@@ -2454,6 +2600,293 @@ mod tests {
         assert!(
             (uv[0] - 0.5).abs() < 1e-4 && (uv[1] - 0.5).abs() < 1e-4,
             "center must map to center UV, got {uv:?}"
+        );
+    }
+
+    // --- pwys-stroke-buffer option A: the camera may move mid-stroke ---
+    //
+    // Geometry shared by the pins (the head-on fixture: eye at (0, 0, 5),
+    // fov 45°, so tan(22.5°) = 0.414214, rect 200×200, aspect 1). A
+    // screen point at NDC x = s, y = 0 casts the ray
+    // `forward + k·right` with `k = s·tan(22.5°)`; under yaw `y` it meets
+    // the z = 0 quad at `x = 5k / (cos y + k·sin y)` (y = 0 ⇒ `5k`), and
+    // the quad's UV is `u = (x + 1) / 2`, `v = 0.5`.
+
+    /// Pixel x = 80 ⇒ NDC s = -0.2.
+    const STROKE_PX: egui::Pos2 = egui::Pos2 { x: 80.0, y: 100.0 };
+    /// Head-on: x = 5·(-0.2·0.414214) = -0.414214 ⇒ u = 0.292893.
+    const START_U: f32 = 0.292_893;
+    /// Yaw 0.7: k = -0.082843, den = 0.764842 - 0.082843·0.644218 =
+    /// 0.711473, x = -0.414214 / 0.711473 = -0.582191 ⇒ u = 0.208905.
+    const ROTATED_U: f32 = 0.208_905;
+    const ROTATED_YAW: f32 = 0.7;
+
+    fn painting_viewport() -> Viewport {
+        Viewport {
+            mesh_data: Some(quad()),
+            ..head_on_viewport()
+        }
+    }
+
+    /// The stroke's own resolve (what `stroke_event` picks with).
+    fn stroke_uv(viewport: &Viewport, pos: egui::Pos2) -> Option<[f32; 2]> {
+        let mesh = viewport.mesh_data.as_ref()?;
+        viewport
+            .pick_with(rect200(), mesh, pos, viewport.stroke_raycast_camera())
+            .map(|(uv, _)| uv)
+    }
+
+    fn assert_uv(uv: [f32; 2], u: f32, v: f32, what: &str) {
+        assert_uv_loose(uv, u, v, 1e-4, what);
+    }
+
+    /// The same assertion with an explicit tolerance — for the
+    /// hand-derived CONTROL values, whose paper arithmetic lands a few
+    /// 1e-4 away from the f32 ray math.
+    fn assert_uv_loose(uv: [f32; 2], u: f32, v: f32, tol: f32, what: &str) {
+        assert!(
+            (uv[0] - u).abs() < tol && (uv[1] - v).abs() < tol,
+            "{what}: expected ({u}, {v}) +/- {tol}, got {uv:?}"
+        );
+    }
+
+    #[test]
+    fn stroke_resolves_against_the_start_camera_after_a_rotation() {
+        // Pin 1, the frozen rule: the stroke opens head-on, the live
+        // camera rotates, and the stroke's later events still resolve to
+        // the START camera's UV — not the rotated camera's.
+        let mut viewport = painting_viewport();
+        let start = stroke_uv(&viewport, STROKE_PX).expect("head-on ray hits");
+        assert_uv(start, START_U, 0.5, "the opening event (live == start)");
+        let start_camera = viewport.camera;
+        viewport.latch_stroke_camera(true, start_camera);
+
+        viewport.camera.yaw = ROTATED_YAW;
+        // The live camera really moved (else the pin is vacuous): its own
+        // pick of the same pixel lands at the rotated UV.
+        let live = viewport
+            .pick_uv(rect200(), &quad(), STROKE_PX)
+            .expect("rotated ray still hits the quad");
+        // The control's expected value is HAND-DERIVED (the ray math in
+        // f32 lands ~1.5e-4 away from the paper value), so it carries a
+        // looser tolerance than the pins. What matters is that the live
+        // camera's pick is a DIFFERENT point from the frozen one — that
+        // is what makes the pin non-vacuous.
+        assert_uv_loose(live, ROTATED_U, 0.5, 1e-3, "the live camera's pick");
+        assert!(
+            (live[0] - START_U).abs() > 0.05,
+            "the live camera really moved: {live:?} vs {START_U}"
+        );
+
+        let during = stroke_uv(&viewport, STROKE_PX).expect("frozen ray hits");
+        assert_uv(during, START_U, 0.5, "the mid-stroke event");
+        let reference = viewport
+            .pick_with(rect200(), &quad(), STROKE_PX, &start_camera)
+            .map(|(uv, _)| uv)
+            .expect("start camera's own pick");
+        assert_eq!(during, reference, "the stroke IS the start camera's pick");
+    }
+
+    #[test]
+    fn the_stroke_snapshot_is_independent_of_the_live_camera() {
+        // Pin 2: mutating the live camera mid-stroke never reaches the
+        // snapshot, a second latch mid-stroke never overwrites it, and the
+        // stroke's end clears it.
+        let mut viewport = painting_viewport();
+        assert_eq!(viewport.stroke_camera, None, "no stroke, no snapshot");
+        let (yaw0, pitch0, distance0) = (
+            viewport.camera.yaw,
+            viewport.camera.pitch,
+            viewport.camera.distance,
+        );
+        viewport.latch_stroke_camera(true, viewport.camera);
+
+        viewport.camera.orbit(0.9, 0.3);
+        viewport.camera.zoom(0.5);
+        viewport.camera.toggle_projection();
+        assert_ne!(viewport.camera.yaw, yaw0, "the live camera moved");
+        // A later event of the same stroke re-latches with the moved camera:
+        // the snapshot must keep the start state.
+        let moved = viewport.camera;
+        viewport.latch_stroke_camera(true, moved);
+
+        let snap = viewport.stroke_camera.expect("latched for the stroke");
+        assert_eq!(snap.yaw, yaw0);
+        assert_eq!(snap.pitch, pitch0);
+        assert_eq!(snap.distance, distance0);
+        assert_eq!(snap.projection, umber_gpu::camera::Projection::Perspective);
+        assert_eq!(viewport.stroke_raycast_camera(), &snap);
+
+        viewport.latch_stroke_camera(false, moved);
+        assert_eq!(viewport.stroke_camera, None, "the stroke's end clears it");
+        assert_eq!(
+            viewport.stroke_raycast_camera(),
+            &moved,
+            "between strokes the resolve is the live camera"
+        );
+    }
+
+    #[test]
+    fn a_start_camera_hit_still_paints_after_the_live_camera_turns_away() {
+        // Pin 4, miss-skip under a rotated camera: pixel x = 70 (s = -0.3,
+        // k = -0.124264) hits head-on at x = -0.621320 ⇒ u = 0.189340.
+        // Under yaw 1.0: den = 0.540302 - 0.124264·0.841471 = 0.435738,
+        // x = -0.621320 / 0.435738 = -1.425906 — off the ±1 quad, a MISS.
+        // The stroke still resolves (hit/miss is the start camera's).
+        let pos = egui::pos2(70.0, 100.0);
+        let mut viewport = painting_viewport();
+        viewport.latch_stroke_camera(true, viewport.camera);
+        viewport.camera.yaw = 1.0;
+        assert_eq!(
+            viewport.pick_uv(rect200(), &quad(), pos),
+            None,
+            "the live camera must miss here (else the pin is vacuous)"
+        );
+        let uv = stroke_uv(&viewport, pos).expect("the start camera hits");
+        assert_uv(uv, 0.189_340, 0.5, "the frozen hit");
+
+        // The converse: a start-camera miss stays a miss even where the
+        // live camera would hit. Pixel x = 30 (s = -0.7, k = -0.289950):
+        // head-on x = 5k = -1.449749, off the quad. The live camera then
+        // dollies to distance 5/3, where the same pixel meets x = (5/3)k
+        // = -0.483250 — a hit the frozen stroke must not take.
+        let far = egui::pos2(30.0, 100.0);
+        let mut viewport = painting_viewport();
+        viewport.latch_stroke_camera(true, viewport.camera);
+        viewport.camera.distance = 5.0 / 3.0;
+        assert!(
+            viewport.pick_uv(rect200(), &quad(), far).is_some(),
+            "the zoomed live camera hits here"
+        );
+        assert_eq!(stroke_uv(&viewport, far), None, "the frozen camera misses");
+    }
+
+    /// A paint-capable device: the paint state needs
+    /// `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`, so the device request
+    /// carries it and an adapter without it SKIPS the test (the
+    /// perf_soak helper's pattern; the bakes panel's copy asks for a
+    /// plain device, which the paint state rejects).
+    fn try_request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no wgpu adapter available");
+            return None;
+        };
+        if !adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            eprintln!("skipping: adapter lacks TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    #[test]
+    fn the_staged_dabs_read_back_mid_stroke_at_the_start_camera_uvs() {
+        // Pin 3 (GPU-gated): the preview stays live. A real stroke through
+        // `stroke_event` (head-on, x 80 → 82 px), then the camera rotates
+        // and the stroke goes on at x = 82: the tile readback WHILE the
+        // stroke is still open shows the dabs at the start camera's UVs,
+        // and nothing at the rotated camera's UV for the same pixel.
+        //
+        // Texel math (1024² target, texel = round(uv · 1023)): x = 80 ⇒
+        // u 0.292893 ⇒ texel 300; x = 82 (s = -0.18, k = -0.074558) ⇒
+        // head-on u = (1 - 0.372792)/2 = 0.313604 ⇒ texel 321. Rotated to
+        // yaw 0.7: den = 0.764842 - 0.074558·0.644218 = 0.716810, x =
+        // -0.372792 / 0.716810 = -0.520071 ⇒ u 0.239965 ⇒ texel 245 — 55
+        // texels left of the painted span, beyond the 12-texel brush
+        // (`BRUSH_RADIUS_TEXELS` 24 × size 0.5). v = 0.5 ⇒ row 512.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 1024).expect("paint builds");
+        paint.set_brush_color([1.0, 0.0, 0.0, 1.0]);
+        paint.set_brush_size(0.5);
+        let mut viewport = painting_viewport();
+        let rect = rect200();
+
+        let mut first = None;
+        for i in 0..=4 {
+            let pos = egui::pos2(80.0 + 0.5 * i as f32, 100.0);
+            let uv = viewport.stroke_event(rect, &mut paint, pos, 1.0);
+            first = first.or(uv);
+        }
+        assert!(paint.is_stroking(), "the stroke is open");
+        assert_uv(first.expect("opening hit"), START_U, 0.5, "the opening UV");
+        let start_camera = viewport.camera;
+        assert_eq!(viewport.stroke_camera, Some(start_camera), "latched");
+
+        viewport.camera.yaw = ROTATED_YAW;
+        let edge = egui::pos2(82.0, 100.0);
+        for _ in 0..4 {
+            let uv = viewport
+                .stroke_event(rect, &mut paint, edge, 1.0)
+                .expect("the frozen ray still hits");
+            assert_uv(uv, 0.313_604, 0.5, "a post-rotation event");
+        }
+        assert_eq!(viewport.stroke_camera, Some(start_camera), "kept");
+
+        // Mid-stroke readback (no end_stroke yet): `read_tile` drains the
+        // staged dabs first, so the open stroke is visible.
+        assert!(paint.is_stroking(), "still mid-stroke at the readback");
+        let image = paint.read_tile(1001).expect("tile 1001 reads back");
+        assert_eq!((image.width, image.height), (1024, 1024));
+        let texel = |x: u32, y: u32| {
+            let i = (y * image.width + x) as usize * 4;
+            [
+                image.data[i],
+                image.data[i + 1],
+                image.data[i + 2],
+                image.data[i + 3],
+            ]
+        };
+        // The untouched reference: a far corner no dab reaches (whatever
+        // the Base plane's clear value is, it is this).
+        let untouched = texel(1000, 1000);
+        // The painted SPAN along the stroke's row (row 512 = v 0.5).
+        //
+        // The pin is the SPAN, not the last point's exact texel: the dab
+        // placement along a stroke is spacing-driven, so the final
+        // point's own dab is not necessarily stamped while the stroke is
+        // still open (the first battery run showed the span ending at
+        // 318, three texels short of the frozen UV's 321 — the dabs are
+        // there, the last texel is not). What the pin asserts is the
+        // CONTRACT: the dabs live where the FROZEN camera said and never
+        // where the rotated camera said.
+        let span: Vec<u32> = (0..image.width)
+            .filter(|&x| texel(x, 512) != untouched)
+            .collect();
+        assert!(!span.is_empty(), "the stroke shows mid-stroke");
+        let first = *span.first().expect("non-empty span");
+        let last = *span.last().expect("non-empty span");
+        assert_eq!(
+            span.len() as u32,
+            last - first + 1,
+            "the span is contiguous: {first}..{last}"
+        );
+        assert!(
+            span.contains(&300),
+            "the start-camera dab shows: {first}..{last}"
+        );
+        assert!(
+            last >= 309,
+            "the post-rotation dabs reach the FROZEN uv's texels: {first}..{last}"
+        );
+        assert!(
+            first > 257,
+            "nothing landed at the rotated camera's uv (245 +- the brush radius): {first}..{last}"
+        );
+        assert_eq!(
+            texel(245, 512),
+            untouched,
+            "nothing lands at the rotated camera's UV"
         );
     }
 
