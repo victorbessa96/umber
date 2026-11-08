@@ -2272,6 +2272,27 @@ row 268, so this wave is row 269 (queue + STATE + the three briefs renumbered). 
 — the sibling's abr commit ca70ea80 rode the range and the ledger named its session (local-1625-rz6f2a); that lane
 pushed first (origin/master 288d1a57) and this wave pushed on top. Kill report
 docs/loop/kill-reports/2026-11-07-svg-loader-wiring.md.
+20:0x CI RED → FIXED → RE-RUNNING. The first release-gate CI run since CI became a gate
+(42419285457, tip c87ebf3c) was RED on both runners: gpu_startup::tests::
+session_confirms_on_the_third_frame_and_persists_a_fallback (left None, right Some(Gl)).
+NOT the svg wave — the regression is 59779065 (row 249, Nov 6 20:21): Session::new read the
+AMBIENT display env (has_display()), so the session's persistence depended on the MACHINE
+(CI has no display → nothing persisted → red; a desktop → green). This was the first CI run
+since the gate became one, so it surfaced a latent red that never ran on a runner. FIX
+(f4a8fe47, lock razul-gpu-startup-ci): one constructor, Session::new_with_display(dir, guard,
+decision, has_display) — the display question is the CALLER's; the production site passes
+has_display() (behavior unchanged); the shorthand constructor is gone; every test names its
+branch; new pin a_headless_session_never_persists_its_fallback. The CI condition was reproduced
+locally (env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo test -p umber-app --bin
+umber gpu_startup::tests → 28/0), clippy 0, umber-app lib 256 / bin 757 green. Pushed with the
+docs (99b5a4eb). New release-ci run 42423441912 dispatched on that tip.
+20:05 ROW 272 DISPATCHED (pwys stroke buffer): claude/opus implementing option A of
+docs/specs/pwys-stroke-buffer-design.md in crates/umber-app/src/viewport.rs ONLY — the stroke's
+raycasts resolve against the camera frozen at stroke start, so the live camera may move mid-
+stroke. Brief docs/loop/briefs/2026-11-07-pwys-stroke-buffer-kill-brief.md (four pins, the
+paint/gpu crates and the i18n catalogs out of scope). Lock claw-pwys-buffer over viewport.rs
+(disjoint from the sibling's razul-abr-realfile wave). Sibling lane holds STATE.md + ROADMAP.md
+in that lock — leave them until it is released.
 
 ## WATCH 2026-11-07 19:26 -03 — project-watch cron (row 270)
 

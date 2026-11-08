@@ -312,7 +312,7 @@ signing, the alpha tag.
   across 21 suites. Kill report
   docs/loop/kill-reports/2026-11-07-svg-loader-wiring.md. (Row numbering:
   the sibling lane's abr-core kill took row 268); this wave is row 269.)
-- **Row 271 (CI red fix) LANDED:** the row 269 push's release-gate CI run
+- **Row 274 (CI red fix) LANDED:** the row 269 push's release-gate CI run
   42419285457 was RED on BOTH runners in the Tests step —
   `gpu_startup::tests::session_confirms_on_the_third_frame_and_persists_a_fallback`
   (`left: None, right: Some(Gl)`). NOT the svg wave: the regression is
@@ -331,6 +331,25 @@ signing, the alpha tag.
   → 28/0), clippy `-D warnings` 0, `cargo test -p umber-app --all-targets`
   green (lib 256/0, bin 757/0). Kill report
   docs/loop/kill-reports/2026-11-07-gpu-startup-ci-red.md.
+- **Row 272 (the paint-what-you-see stroke buffer) LANDED `93877796`:** the
+  camera may now move mid-stroke. The viewport freezes the camera at the
+  stroke's first event (`stroke_camera: Option<OrbitCamera>`, a plain
+  `Copy`), the stroke's events resolve against that snapshot through
+  `pick_with`, and the guard is split by INPUT SOURCE — the pointer
+  navigation (drag chords, RMB cancel, wheel zoom) still belongs to the
+  stroke, while the camera KEYS (P projection, F frame) now run during
+  it. Everything else (the eyedropper, the ID-mask select, the brush
+  cursor, the straight line, the orbit pivot) keeps picking against the
+  live camera; the paint crate, the GPU crate and the i18n catalogs were
+  not touched. Closes requirements §1's named follow-up ("the camera
+  can't move mid-stroke today"). Claw-authored (claude/opus, $2.79) with
+  a dragon review pass that corrected three test-side claims (the
+  control's hand-derived constant, the GPU pin's device features, and a
+  wrong exact-texel literal replaced by the painted-SPAN contract).
+  Battery: fmt clean, layers GREEN 16, scorecard current, clippy
+  `-p umber-app --all-targets -D warnings` 0, umber-app **1,056/0** across
+  10 suites with all four pins green. Kill report
+  docs/loop/kill-reports/2026-11-07-pwys-stroke-buffer.md.
 
 ## 2026-11-05 (local-8dc7062e, Razul) — row 156-B closed + the UI/UX pass U1-U4
 

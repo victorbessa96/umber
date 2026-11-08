@@ -1,4 +1,4 @@
-# Kill report — 2026-11-07 CI red fix: the GPU session's display question is the caller's (row 271)
+# Kill report — 2026-11-07 CI red fix: the GPU session's display question is the caller's (row 274)
 
 - **Authorship:** Razul (dragon). Lock `razul-gpu-startup-ci` — `crates/umber-app/src/gpu_startup.rs`.
 - **Trigger:** the row 269 push's release-gate CI run 42419285457 (tip `c87ebf3c`) went RED on BOTH runners in the Tests step: `gpu_startup::tests::session_confirms_on_the_third_frame_and_persists_a_fallback` panicked at `gpu_startup.rs:1564` with `left: None, right: Some(Gl)`. The project-watch cron recorded it as the WATCH row 270.
@@ -32,4 +32,4 @@
 ## Deferred
 
 - The row 249 behavior itself is unchanged and stays as designed; the sibling's row 249 kill report (docs/loop/kill-reports/2026-11-06-headless-no-persist.md) remains the record of that decision.
-- The cron's WATCH row 270 stays as the watcher's record of the red; this kill is the fix record (row 271).
+- The cron's WATCH row 270 stays as the watcher's record of the red; this kill is the fix record. ROW NUMBER: the fix was written as row 271, but the sibling lane's abr real-file kill took 271 and the project-watch cron took 273 in the same window, so the fix row is 274 (max + 1 at write time).
