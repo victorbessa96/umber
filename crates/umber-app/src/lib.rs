@@ -71,6 +71,7 @@ pub mod i18n;
 pub mod asset_gc;
 pub mod layers_panel;
 pub mod palette;
+pub mod projection;
 pub mod psd_import;
 pub mod rich_tooltip;
 /// The set-switch glue (the W-C4 L1 extraction): the texture-sets

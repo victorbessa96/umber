@@ -4635,6 +4635,146 @@ impl PaintState {
         record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles)
     }
 
+    /// Blends a rasterized decal (`rgba`, `w`x`h`, straight alpha) onto the
+    /// active layer's `tile` in the active paint channel as ONE undo step
+    /// (row 279 of `docs/specs/projection-fill-plan.md`, the R-A2 decal
+    /// projector; the app-side rasterizer is row 278).
+    ///
+    /// Per texel the effective alpha is `src_alpha * opacity * gate`, where
+    /// `gate` is [`Self::gate_plane`] — it already folds the quick mask, the
+    /// cavity mask and THE STENCIL GATE, so the stencil masks the projection
+    /// with no extra code (one screen-space gate, two consumers). Texels
+    /// with `gate <= 0` are skipped. The blend is the premultiplied
+    /// source-over the planes store (`out = src * a + dst * (1 - a)`, alpha
+    /// likewise) at full coverage: a flat decal, not the brush's soft
+    /// falloff.
+    ///
+    /// The undo capture mirrors a stroke's: the plane is read back before,
+    /// published whole after ([`Self::publish_plane`], which marks the
+    /// `(tile, channel)` cache `Full`-dirty — coarser than a rect, and the
+    /// lazy-cache rule coalesces it), and the changed bounding rect records
+    /// through `record_stroke` with a queued [`StrokeCommit`].
+    ///
+    /// v1 cut line: NO seam expansion and NO symmetry mirror of the
+    /// projection (follow-ups), and NO depth test — the caller rasterizes
+    /// the visible decal. `w`/`h` must equal the plane's size, or nothing is
+    /// written.
+    ///
+    /// Returns `false` (no writes, no history) while a stroke is live, on
+    /// bad dims or a short/long `rgba`, an unpaintable or mask-editing
+    /// target, a budget refusal, `opacity == 0` (clamped to `0..=1`), or when
+    /// no texel changed; `true` when at least one texel was written.
+    pub fn apply_projection(
+        &mut self,
+        tile: u16,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        opacity: f32,
+    ) -> bool {
+        if self.stroking || w == 0 || h == 0 || rgba.len() != w as usize * h as usize * 4 {
+            return false;
+        }
+        if opacity.is_nan() {
+            return false;
+        }
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return false;
+        }
+        if self.mask_edit_layer.is_some()
+            || self.quick_mask().is_editing()
+            || self.active_verdict.is_err()
+        {
+            return false;
+        }
+        let owner = self.active_target;
+        let channel = self.active_channel.clone();
+        if self.tile_channel_size(tile, &channel) != (w, h) {
+            return false;
+        }
+        let gate = self.gate_plane(tile);
+        if gate.len() != w as usize * h as usize {
+            return false;
+        }
+        // Materialize-then-read: a never-painted plane's blank bytes are the
+        // correct before-state (the capture's contract).
+        if let Err(refusal) = self.materialize_plane(owner, tile, &channel) {
+            self.stroke_refusal = Some(refusal);
+            return false;
+        }
+        let Some(before) = self.read_plane(owner, tile, &channel) else {
+            return false;
+        };
+        if (before.width, before.height) != (w, h) {
+            return false;
+        }
+        let mut after = before.clone();
+        let mut rect: Option<DirtyRect> = None;
+        for y in 0..h {
+            for x in 0..w {
+                let i = y as usize * w as usize + x as usize;
+                let g = gate[i];
+                // NaN gates skip too.
+                if g.is_nan() || g <= 0.0 {
+                    continue;
+                }
+                let alpha = (f32::from(rgba[4 * i + 3]) / 255.0 * opacity * g).clamp(0.0, 1.0);
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let dst = after.texel(x, y);
+                let mut out = [0u8; 4];
+                for (c, slot) in out.iter_mut().take(3).enumerate() {
+                    let src = f32::from(rgba[4 * i + c]) * alpha;
+                    *slot = (src + f32::from(dst[c]) * (1.0 - alpha))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+                out[3] = (alpha * 255.0 + f32::from(dst[3]) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+                if out != dst {
+                    after.set_texel(x, y, out);
+                    let texel = DirtyRect {
+                        x0: x,
+                        y0: y,
+                        x1: x + 1,
+                        y1: y + 1,
+                    };
+                    rect = DirtyRect::union_opt(rect, Some(texel));
+                }
+            }
+        }
+        let Some(rect) = rect else {
+            return false;
+        };
+        let data = after.data.clone();
+        if self
+            .publish_plane(owner, tile, &channel, w, h, data)
+            .is_err()
+        {
+            return false;
+        }
+        let cursor = self.retouch_history.len();
+        let tiles = [StrokeTile {
+            owner,
+            tile,
+            channel: channel.clone(),
+            rect,
+            start: &before,
+            end: &after,
+        }];
+        if record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles) {
+            self.pending_commits.push(StrokeCommit {
+                cursor,
+                depth: self.retouch_history.len(),
+                layer: self.stroke_layer(),
+            });
+        }
+        true
+    }
+
     /// Replays `path` as ONE stroke in the `op` mode: each point becomes a
     /// styled event (its folded pressure, its radius scale) through the
     /// EXISTING pipeline — routing, seam mirrors, symmetry, wash, mask,
@@ -6444,6 +6584,110 @@ mod tests {
         assert!(s.set_cavity_mask(None));
         assert!(!s.cavity_gates());
         assert!(s.gate_plane(tile).iter().all(|v| *v == 1.0));
+    }
+
+    /// A 4x4 opaque-red decal (straight alpha).
+    fn red_decal() -> Vec<u8> {
+        [255u8, 0, 0, 255].repeat(16)
+    }
+
+    #[test]
+    fn apply_projection_writes_blends_and_undoes_as_one_step() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        let tile = FIRST_TILE;
+        let owner = s.active_target();
+        let channel = s.active_channel().to_string();
+        let before = s.read_plane(owner, tile, &channel).expect("plane reads");
+        let depth = s.stroke_len();
+        assert!(s.apply_projection(tile, 4, 4, &red_decal(), 1.0));
+        // Opaque source at opacity 1: alpha 1 replaces the texel exactly.
+        let after = s.read_plane(owner, tile, &channel).expect("plane reads");
+        assert!(after.data.chunks(4).all(|t| t == [255, 0, 0, 255]));
+        assert_eq!(s.stroke_len(), depth + 1, "exactly one history entry");
+        assert_eq!(s.take_stroke_commits().len(), 1);
+        // One undo step reverts the whole projection.
+        assert!(s.undo_stroke());
+        let undone = s.read_plane(owner, tile, &channel).expect("plane reads");
+        assert_eq!(undone.data, before.data);
+    }
+
+    #[test]
+    fn apply_projection_opacity_scales_the_written_alpha() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        let tile = FIRST_TILE;
+        let owner = s.active_target();
+        let channel = s.active_channel().to_string();
+        let before = s.read_plane(owner, tile, &channel).expect("plane reads");
+        assert!(s.apply_projection(tile, 4, 4, &red_decal(), 0.5));
+        let after = s.read_plane(owner, tile, &channel).expect("plane reads");
+        // alpha = 1.0 * 0.5 * 1.0 = 0.5: out = round(src * 0.5 + dst * 0.5).
+        let d = before.texel(0, 0);
+        let expect_r = (255.0 * 0.5 + f32::from(d[0]) * 0.5).round() as u8;
+        let expect_a = (255.0 * 0.5 + f32::from(d[3]) * 0.5).round() as u8;
+        assert_eq!(after.texel(0, 0)[0], expect_r);
+        assert_eq!(after.texel(0, 0)[3], expect_a);
+        // Zero opacity (and NaN) write nothing and record nothing.
+        let depth = s.stroke_len();
+        assert!(!s.apply_projection(tile, 4, 4, &red_decal(), 0.0));
+        assert!(!s.apply_projection(tile, 4, 4, &red_decal(), f32::NAN));
+        assert_eq!(s.stroke_len(), depth);
+    }
+
+    #[test]
+    fn apply_projection_respects_the_stencil_gate() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        let tile = FIRST_TILE;
+        let owner = s.active_target();
+        let channel = s.active_channel().to_string();
+        let before = s.read_plane(owner, tile, &channel).expect("plane reads");
+        let left_open: Vec<u8> = (0..16).map(|i| if i % 4 < 2 { 255 } else { 0 }).collect();
+        assert!(s.set_stencil_gate(Some((4, 4, left_open))));
+        assert!(s.apply_projection(tile, 4, 4, &red_decal(), 1.0));
+        let after = s.read_plane(owner, tile, &channel).expect("plane reads");
+        for y in 0..4 {
+            for x in 0..4 {
+                if x < 2 {
+                    assert_eq!(after.texel(x, y), [255, 0, 0, 255], "open ({x},{y})");
+                } else {
+                    assert_eq!(after.texel(x, y), before.texel(x, y), "blocked ({x},{y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn apply_projection_refuses_midstroke_bad_dims_and_empty_sources() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut s = PaintState::with_target_size(device, queue, 4).expect("paint state builds");
+        let tile = FIRST_TILE;
+        let depth = s.stroke_len();
+        // Bad dims: a short buffer, and a zero side.
+        assert!(!s.apply_projection(tile, 4, 4, &red_decal()[..60], 1.0));
+        assert!(!s.apply_projection(tile, 0, 4, &[], 1.0));
+        // All-zero alpha: nothing changes, nothing records.
+        assert!(!s.apply_projection(tile, 4, 4, &[0u8; 64], 1.0));
+        assert_eq!(s.stroke_len(), depth);
+        assert!(s.take_stroke_commits().is_empty());
+        // Mid-stroke refusal.
+        let owner = s.active_target();
+        let channel = s.active_channel().to_string();
+        s.begin_stroke(emath::pos2(0.5, 0.5));
+        let mid = s.read_plane(owner, tile, &channel).expect("plane reads");
+        assert!(!s.apply_projection(tile, 4, 4, &red_decal(), 1.0));
+        let still = s.read_plane(owner, tile, &channel).expect("plane reads");
+        assert_eq!(still.data, mid.data);
+        s.end_stroke();
     }
 
     #[test]
