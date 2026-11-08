@@ -450,8 +450,19 @@ use crate::retouch::{
 /// staged-batch accounting the seam/symmetry hooks rely on. It is also
 /// unnecessary in the current wiring: `Viewport::ui` skips `handle_input`
 /// while a paint drag is in flight, so the camera cannot move mid-stroke
-/// and there is nothing to tear. The deferred, camera-snapshotting buffer is
-/// the named follow-up for when camera animation during strokes lands.
+/// and there is nothing to tear.
+///
+/// **The camera-snapshotting buffer that this judgment deferred LANDED
+/// 2026-11-07 (`93877796`, row 272 — option A of
+/// `docs/specs/pwys-stroke-buffer-design.md`):** the viewport freezes the
+/// camera at the stroke's FIRST event and resolves the stroke's raycasts
+/// against that snapshot, so the live camera may now move mid-stroke (the
+/// pointer navigation stays with the stroke; the camera keys run during
+/// it). The paint session's contract did NOT change — `Screen` still means
+/// "the viewport resolves the pointer to a UV before conditioning", and the
+/// per-event staging, the drain cadence and the seam/symmetry accounting
+/// above still hold — but the resolution now happens against the FROZEN
+/// camera, and the deferred buffer is no longer deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaintProjection {
     /// 2D UV editing only; the 3D viewport orbits.
