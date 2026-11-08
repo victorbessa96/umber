@@ -29,8 +29,21 @@
 //!   The wrapped sampler clears past [`MAX_WRAPPED_REACH`] (`2^24` px),
 //!   where f32 can no longer address texels; the raster always wraps
 //!   first, so it never reaches that guard with a finite point.
-//! - **No live projector**: Apply rasterizes through the placement frozen
-//!   at [`ProjectionState::arm`], never the live camera.
+//! - **The live projector is opt-in (v2b, row 288,
+//!   `docs/loop/briefs/2026-11-08-projection-follow-design.md`)**: with
+//!   [`ProjectionState::follow_camera`] off, Apply rasterizes through
+//!   the placement frozen at [`ProjectionState::arm`], byte-identical to
+//!   v1. With it on, `arm` arms the chords but freezes NOTHING
+//!   (`frozen = None`), and Apply runs [`rasterize_projection_live`]
+//!   through the LIVE camera + live view rect (paint what you see now).
+//!   Both entries share one per-texel core (`rasterize_with`), so the
+//!   live raster under the frozen camera equals the frozen raster byte
+//!   for byte. [`rasterize_projection`] keeps its v1 contract: no frozen
+//!   placement, no raster (`None`), so a follow-on caller must use the
+//!   live entry. Tiling composes orthogonally (it wraps the image point;
+//!   follow picks the camera). The flag is a placement mode: `adopt`,
+//!   `disarm` and tiling never touch it. v2b cuts: Apply re-rasterizes
+//!   once per click, never per frame or mid-stroke; no persistence.
 //! - **No depth or backface culling**: a texel whose world point sits
 //!   behind another surface still writes, and both faces of a sheet
 //!   write. Only behind-the-eye (`w <= 0`) and off-viewport (NDC outside
@@ -459,11 +472,15 @@ pub struct ProjectionState {
     /// viewport instead of falling to the zero border. A placement mode,
     /// so [`ProjectionState::adopt`] keeps it.
     pub tiling: bool,
+    /// Follow camera (R-A2 v2b): Apply projects through the LIVE camera
+    /// and view rect instead of a frozen placement, and `arm` freezes
+    /// nothing. A placement mode, so [`ProjectionState::adopt`] keeps it.
+    pub follow_camera: bool,
 }
 
 impl Default for ProjectionState {
     /// No image, the default transform, unarmed, nothing frozen,
-    /// [`DEFAULT_PROJECTION_OPACITY`], tiling off.
+    /// [`DEFAULT_PROJECTION_OPACITY`], tiling and follow-camera off.
     fn default() -> Self {
         Self {
             image: None,
@@ -474,6 +491,7 @@ impl Default for ProjectionState {
             path: None,
             load_error: None,
             tiling: false,
+            follow_camera: false,
         }
     }
 }
@@ -505,10 +523,16 @@ impl ProjectionState {
         }
     }
 
-    /// Freezes `camera` + `rect` as the placement and arms the chords.
-    /// Re-arming re-freezes.
+    /// Arms the chords. With [`Self::follow_camera`] off it also freezes
+    /// `camera` + `rect` as the placement (re-arming re-freezes); with it
+    /// on nothing is frozen (`frozen = None`): Apply reads the live
+    /// camera instead (see the module docs).
     pub fn arm(&mut self, camera: OrbitCamera, rect: egui::Rect) {
-        self.frozen = Some(FrozenPlacement { camera, rect });
+        self.frozen = if self.follow_camera {
+            None
+        } else {
+            Some(FrozenPlacement { camera, rect })
+        };
         self.armed = true;
     }
 
@@ -526,6 +550,10 @@ impl ProjectionState {
 /// frozen rect. Texels off the mesh, behind the eye, off the frozen
 /// viewport or (tiling off) outside the image write `[0, 0, 0, 0]`; with
 /// [`ProjectionState::tiling`] the image repeats instead (module docs).
+///
+/// This is the FROZEN entry regardless of [`ProjectionState::follow_camera`]:
+/// with follow on, `arm` freezes nothing, so this returns `None` and the
+/// caller must use [`rasterize_projection_live`].
 pub fn rasterize_projection(
     state: &ProjectionState,
     mesh: &umber_mesh::MeshData,
@@ -533,13 +561,43 @@ pub fn rasterize_projection(
     w: u32,
     h: u32,
 ) -> Option<Vec<u8>> {
-    let image = state.image.as_ref()?;
     let frozen = state.frozen.as_ref()?;
+    rasterize_with(state, mesh, tile, w, h, &frozen.camera, frozen.rect)
+}
+
+/// [`rasterize_projection`] through a LIVE `camera` + viewport `rect`
+/// (R-A2 v2b follow camera) instead of the frozen placement; ignores
+/// [`ProjectionState::frozen`]. Same output contract and refusals (no
+/// image, degenerate transform, degenerate `rect`), same per-texel core.
+pub fn rasterize_projection_live(
+    state: &ProjectionState,
+    mesh: &umber_mesh::MeshData,
+    tile: u16,
+    w: u32,
+    h: u32,
+    camera: &OrbitCamera,
+    rect: egui::Rect,
+) -> Option<Vec<u8>> {
+    rasterize_with(state, mesh, tile, w, h, camera, rect)
+}
+
+/// The shared per-texel core: `state`'s image + transform + tiling
+/// projected through `camera` onto the viewport `rect` (only its size is
+/// read; screen space is viewport-local, see the module docs).
+fn rasterize_with(
+    state: &ProjectionState,
+    mesh: &umber_mesh::MeshData,
+    tile: u16,
+    w: u32,
+    h: u32,
+    camera: &OrbitCamera,
+    rect: egui::Rect,
+) -> Option<Vec<u8>> {
+    let image = state.image.as_ref()?;
     let scale = state.transform.scale;
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
-    let rect = frozen.rect;
     let (rw, rh) = (rect.width(), rect.height());
     if !rw.is_finite() || !rh.is_finite() || rw <= 0.0 || rh <= 0.0 {
         return None;
@@ -547,7 +605,7 @@ pub fn rasterize_projection(
     let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
     let mut out = vec![0u8; len];
     let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(tile);
-    let vp = frozen.camera.view_proj(rw / rh);
+    let vp = camera.view_proj(rw / rh);
     let size = [image.width(), image.height()];
     for y in 0..h {
         for x in 0..w {
@@ -852,10 +910,22 @@ mod tests {
     /// viewport px -> inverse_map -> zero-border sampler), the reference
     /// tiling-off output must match byte for byte.
     fn v1_reference(state: &ProjectionState, mesh: &umber_mesh::MeshData, n: u32) -> Vec<u8> {
-        let image = state.image.as_ref().unwrap();
         let frozen = state.frozen.unwrap();
-        let (rw, rh) = (frozen.rect.width(), frozen.rect.height());
-        let vp = frozen.camera.view_proj(rw / rh);
+        reference_through(state, mesh, n, &frozen.camera, frozen.rect)
+    }
+
+    /// The same hand chain through an explicit `camera` + `rect` (the
+    /// follow-camera pins' re-projection reference).
+    fn reference_through(
+        state: &ProjectionState,
+        mesh: &umber_mesh::MeshData,
+        n: u32,
+        camera: &OrbitCamera,
+        rect: egui::Rect,
+    ) -> Vec<u8> {
+        let image = state.image.as_ref().unwrap();
+        let (rw, rh) = (rect.width(), rect.height());
+        let vp = camera.view_proj(rw / rh);
         let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(1001);
         let mut out = vec![0u8; (n * n * 4) as usize];
         for y in 0..n {
@@ -1059,6 +1129,127 @@ mod tests {
         assert!(rasterize_projection(&state, &mesh, 1001, 4, 4).is_none());
     }
 
+    // --- follow camera (R-A2 v2b) ---
+
+    /// The camera head-on at the origin, panned +x by 0.5 world units
+    /// (the "camera moved" fixture of the follow pins).
+    fn panned() -> OrbitCamera {
+        head_on(glam::Vec3::new(0.5, 0.0, 0.0), 5.0)
+    }
+
+    #[test]
+    fn follow_off_arm_freezes_and_rasterizes_byte_identical_to_v1() {
+        let mut state = armed(red_blue(), head_on(glam::Vec3::ZERO, 5.0));
+        assert!(!state.follow_camera);
+        assert!(state.armed && state.frozen.is_some());
+        state.transform = StencilTransform {
+            center: [43.0, 57.0],
+            scale: 3.0,
+            rotation: 0.3,
+        };
+        let out = rasterize_projection(&state, &quad(), 1001, 16, 16).unwrap();
+        assert_eq!(out, v1_reference(&state, &quad(), 16));
+        // Re-arming with follow off re-freezes the new camera.
+        state.arm(panned(), view_rect());
+        assert_eq!(state.frozen.map(|f| f.camera), Some(panned()));
+    }
+
+    #[test]
+    fn follow_on_arm_freezes_nothing_and_the_frozen_entry_refuses() {
+        let mut state = ProjectionState {
+            follow_camera: true,
+            ..armed(red_blue(), head_on(glam::Vec3::ZERO, 5.0))
+        };
+        // `armed()` armed with follow off, so a placement is frozen;
+        // re-arming with follow on clears it.
+        assert!(state.frozen.is_some());
+        let cam = head_on(glam::Vec3::ZERO, 5.0);
+        state.arm(cam, view_rect());
+        assert!(state.armed);
+        assert_eq!(state.frozen, None);
+        // The v1 entry needs a frozen placement: callers must go live.
+        assert!(rasterize_projection(&state, &quad(), 1001, 8, 8).is_none());
+        assert!(
+            rasterize_projection_live(&state, &quad(), 1001, 8, 8, &cam, view_rect()).is_some()
+        );
+        // The live entry keeps the degenerate-rect refusal.
+        let flat = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(0.0, 100.0));
+        assert!(rasterize_projection_live(&state, &quad(), 1001, 8, 8, &cam, flat).is_none());
+    }
+
+    #[test]
+    fn live_raster_under_the_frozen_camera_equals_the_frozen_raster() {
+        let cam = head_on(glam::Vec3::ZERO, 5.0);
+        let mut state = armed(red_blue(), cam);
+        state.transform = StencilTransform {
+            center: [43.0, 57.0],
+            scale: 3.0,
+            rotation: 0.3,
+        };
+        let frozen = rasterize_projection(&state, &quad(), 1001, 16, 16).unwrap();
+        let live =
+            rasterize_projection_live(&state, &quad(), 1001, 16, 16, &cam, view_rect()).unwrap();
+        assert_eq!(live, frozen);
+    }
+
+    #[test]
+    fn live_raster_reprojects_through_a_moved_camera() {
+        // 3x3, green center texel, black ring, at scale 100/3 centered.
+        let img = image(3, 3, |x, y| if (x, y) == (1, 1) { GREEN } else { BLACK });
+        let state = armed(img, head_on(glam::Vec3::ZERO, 5.0));
+        let frozen = rasterize_projection(&state, &quad(), 1001, 9, 9).unwrap();
+        assert_eq!(texel(&frozen, 9, 4, 4), GREEN);
+        let cam = panned();
+        let live =
+            rasterize_projection_live(&state, &quad(), 1001, 9, 9, &cam, view_rect()).unwrap();
+        assert_ne!(live, frozen, "the moved camera changes the raster");
+        assert_eq!(
+            live,
+            reference_through(&state, &quad(), 9, &cam, view_rect())
+        );
+        // By hand: texel (4, 4) is the world origin, 0.5 left of the
+        // panned eye at depth 5: ndc.x = -0.5 / (5 tan 22.5°) = -0.241421
+        // -> screen x = 50 (1 - 0.241421) = 37.9289 -> image x =
+        // (37.9289 - 50) / (100/3) + 1.5 = 1.137868 (y stays 1.5). Taps
+        // texel 0 (black, 0.362132) and texel 1 (green, 0.637868):
+        // g = 255 * 0.637868 = 162.66 -> 163.
+        assert_eq!(texel(&live, 9, 4, 4), [0, 163, 0, 255]);
+    }
+
+    #[test]
+    fn tiling_composes_with_follow_under_the_live_camera() {
+        // The v2a wrap fixture (8x8 gradient, scale 12.5, center
+        // (156.25, 56.25)), follow on, raster through the PANNED camera:
+        // screen x = 37.9289 (see the moved-camera pin) -> image x =
+        // (37.9289 - 156.25) / 12.5 + 4 = -5.46569, wrapped +8 = 2.53431:
+        // taps 2 (r 60, weight 0.96569) and 3 (r 90, 0.03431): r = 61.03
+        // -> 61; y = 3.5 is row 3 exactly: g = 3 * 20 + 5 = 65.
+        let img = image(8, 8, |x, y| [x as u8 * 30, y as u8 * 20 + 5, 7, 255]);
+        let mut state = ProjectionState {
+            follow_camera: true,
+            ..armed(img, head_on(glam::Vec3::ZERO, 5.0))
+        };
+        state.transform.center = [156.25, 56.25];
+        state.arm(panned(), view_rect());
+        assert_eq!(state.frozen, None);
+        let live = |s: &ProjectionState| {
+            rasterize_projection_live(s, &quad(), 1001, 9, 9, &panned(), view_rect()).unwrap()
+        };
+        // Untiled: -5.47 is beyond the zero border's reach.
+        assert_eq!(texel(&live(&state), 9, 4, 4), CLEAR);
+        state.tiling = true;
+        let on = live(&state);
+        assert_eq!(texel(&on, 9, 4, 4), [61, 65, 7, 255]);
+        // Same bytes as the frozen tiled raster through that camera.
+        let mut frozen = state.clone();
+        frozen.follow_camera = false;
+        frozen.arm(panned(), view_rect());
+        assert_eq!(
+            rasterize_projection(&frozen, &quad(), 1001, 9, 9).unwrap(),
+            on
+        );
+    }
+
     // --- state ---
 
     #[test]
@@ -1069,6 +1260,47 @@ mod tests {
         assert!(s.image.is_none() && s.path.is_none() && s.load_error.is_none());
         assert_eq!(s.transform, StencilTransform::default());
         assert!(!s.tiling);
+        assert!(!s.follow_camera);
+    }
+
+    #[test]
+    fn adopt_keeps_follow_camera_and_arm_disarm_tiling_never_touch_it() {
+        let mut s = ProjectionState {
+            follow_camera: true,
+            ..ProjectionState::default()
+        };
+        let cam = head_on(glam::Vec3::ZERO, 5.0);
+        s.arm(cam, view_rect());
+        assert!(s.follow_camera && s.armed && s.frozen.is_none());
+        s.tiling = true;
+        assert!(s.follow_camera);
+        s.disarm();
+        assert!(s.follow_camera && !s.armed);
+        s.adopt(
+            PathBuf::from("a.png"),
+            Ok(image(4, 2, |_, _| RED)),
+            [200.0, 100.0],
+        );
+        assert!(s.follow_camera && !s.armed && s.frozen.is_none());
+        s.adopt(
+            PathBuf::from("b.png"),
+            Err(ProjectionLoadError::Malformed {
+                width: 0,
+                height: 0,
+                bytes: 0,
+            }),
+            [200.0, 100.0],
+        );
+        assert!(s.follow_camera);
+        // Off stays off across a load and an arm (which then freezes).
+        s.follow_camera = false;
+        s.adopt(
+            PathBuf::from("c.png"),
+            Ok(image(2, 2, |_, _| RED)),
+            [200.0, 100.0],
+        );
+        s.arm(cam, view_rect());
+        assert!(!s.follow_camera && s.frozen.is_some());
     }
 
     #[test]

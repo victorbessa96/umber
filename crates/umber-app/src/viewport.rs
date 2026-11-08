@@ -216,10 +216,15 @@
 //!   [`rasterize_projection`], and
 //!   `PaintState::apply_projection` (row 279) blends them at
 //!   `projection.opacity`.
-//! - **v1 cut line**: no tiling/repeat; no live projector (the frozen
-//!   placement never re-projects after arm — re-arm re-freezes); no depth
-//!   or backface culling (`rasterize_projection` writes every texel whose
-//!   projection lands in the image).
+//! - **Follow camera (R-A2 v2b, row 288)**: with
+//!   `projection.follow_camera` AND armed, Apply instead runs
+//!   [`rasterize_projection_live`] through the viewport's LIVE camera and
+//!   the `rect` the shell hands in (its last drawn view rect), once per
+//!   Apply click (never per frame or mid-stroke). Follow off is the
+//!   frozen path above, unchanged.
+//! - **v1 cut line**: (tiling landed in v2a, the live projector in v2b
+//!   above); no depth or backface culling (`rasterize_projection` writes
+//!   every texel whose projection lands in the image).
 //!
 //! # The camera mid-stroke (pwys-stroke-buffer, option A)
 //!
@@ -268,7 +273,9 @@
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 // The lib owns the projection module (row 278); main.rs re-exports it
 // (row 281), so the path names the lib directly — the same types either way.
-use umber_app::projection::{overlay_quad, rasterize_projection, ProjectionState};
+use umber_app::projection::{
+    overlay_quad, rasterize_projection, rasterize_projection_live, ProjectionState,
+};
 use umber_color::{apply_display_chain, DisplaySettings};
 use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
 use umber_gpu::postfx::PostChain;
@@ -1516,14 +1523,18 @@ impl Viewport {
     /// The target dims are the active tile's quick-mask dims
     /// (`stencil::panel_section`'s target-dims rule).
     ///
-    /// `rect` is the LIVE viewport rect and is deliberately unused by the
-    /// raster: the frozen placement carries its own camera and rect, so
-    /// the live view may have moved since arm (v1: no live projector; no
-    /// tiling; no depth/backface culling — see the module docs).
+    /// `rect` is the LIVE viewport rect. With follow camera off it is
+    /// deliberately unused: the frozen placement carries its own camera
+    /// and rect, so the live view may have moved since arm (no depth/
+    /// backface culling — see the module docs). With
+    /// `projection.follow_camera` AND armed (R-A2 v2b, row 288) the
+    /// raster is [`rasterize_projection_live`] through `self.camera` and
+    /// `rect`: paint what you see now, and `frozen` may be `None`.
     ///
-    /// `false` without an image or a frozen placement (no paint call), on
-    /// a degenerate raster, or when the paint state refused / changed
-    /// nothing. The shell's Apply button (row 281) calls this.
+    /// `false` without an image (no paint call), unarmed-follow or
+    /// follow-off without a frozen placement, on a degenerate raster, or
+    /// when the paint state refused / changed nothing. The shell's Apply
+    /// button (row 281) calls this.
     pub fn apply_projection(
         &mut self,
         rect: egui::Rect,
@@ -1531,14 +1542,18 @@ impl Viewport {
         paint: &mut PaintState,
         projection: &ProjectionState,
     ) -> bool {
-        // The live rect never reaches the raster (see above).
-        let _ = rect;
-        if projection.image.is_none() || projection.frozen.is_none() {
+        let live = projection.follow_camera && projection.armed;
+        if projection.image.is_none() || (!live && projection.frozen.is_none()) {
             return false;
         }
         let tile = paint.active_tile();
         let (w, h) = paint.quick_mask_for_tile(tile).dimensions();
-        let Some(rgba) = rasterize_projection(projection, mesh, tile, w, h) else {
+        let raster = if live {
+            rasterize_projection_live(projection, mesh, tile, w, h, &self.camera, rect)
+        } else {
+            rasterize_projection(projection, mesh, tile, w, h)
+        };
+        let Some(rgba) = raster else {
             return false;
         };
         paint.apply_projection(tile, w, h, &rgba, projection.opacity)
@@ -4223,6 +4238,70 @@ mod tests {
             .expect("plane reads");
         // Opaque source at opacity 1: alpha 1 replaces each texel exactly.
         assert_eq!(after.data, frozen, "Apply wrote the FROZEN raster");
+    }
+
+    #[test]
+    fn projection_apply_with_follow_camera_writes_through_the_live_camera() {
+        // GPU-gated. R-A2 v2b: follow on, arm freezes nothing, then the
+        // LIVE camera turns: Apply writes the turned camera's raster.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 8).expect("paint builds");
+        let mesh = quad();
+        let mut viewport = painting_viewport();
+        let rect = rect200();
+        let (red, blue) = ([255u8, 0, 0, 255], [0u8, 0, 255, 255]);
+        let mut rgba = Vec::new();
+        for _y in 0..8 {
+            for x in 0..8 {
+                rgba.extend_from_slice(if x < 4 { &red } else { &blue });
+            }
+        }
+        let mut projection = ProjectionState {
+            image: Some(RgbaImage::new(8, 8, rgba).expect("8x8 RGBA")),
+            transform: StencilTransform {
+                center: [100.0, 100.0],
+                scale: 25.0,
+                rotation: 0.0,
+            },
+            opacity: 1.0,
+            follow_camera: true,
+            ..ProjectionState::default()
+        };
+        // Unarmed follow: refused, nothing frozen to fall back on.
+        assert!(!viewport.apply_projection(rect, &mesh, &mut paint, &projection));
+        let armed_camera = viewport.camera;
+        projection.arm(armed_camera, rect);
+        assert!(projection.armed && projection.frozen.is_none());
+
+        let tile = paint.active_tile();
+        let (w, h) = paint.quick_mask_for_tile(tile).dimensions();
+        let turned_camera = OrbitCamera {
+            yaw: ROTATED_YAW,
+            ..armed_camera
+        };
+        let raster = |cam: &OrbitCamera| {
+            rasterize_projection_live(&projection, &mesh, tile, w, h, cam, rect)
+        };
+        let at_arm = raster(&armed_camera).expect("arm-camera raster");
+        let turned = raster(&turned_camera).expect("turned raster");
+        assert_ne!(at_arm, turned, "the pin can tell the two cameras apart");
+        assert!(
+            turned.chunks_exact(4).all(|t| t[3] == 255),
+            "every texel opaque (the exact-replace precondition)"
+        );
+
+        viewport.camera = turned_camera;
+        let owner = paint.active_target();
+        let channel = paint.active_channel().to_string();
+        let depth = paint.stroke_len();
+        assert!(viewport.apply_projection(rect, &mesh, &mut paint, &projection));
+        assert_eq!(paint.stroke_len(), depth + 1, "one history entry");
+        let after = paint
+            .read_plane(owner, tile, &channel)
+            .expect("plane reads");
+        assert_eq!(after.data, turned, "Apply wrote the LIVE camera's raster");
     }
 
     #[test]

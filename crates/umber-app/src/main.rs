@@ -1648,7 +1648,13 @@ fn projection_fit_view(
 /// has not drawn yet) stays unarmed and logs, because a frozen placement
 /// needs a rect; a refused load keeps the previous image and does not
 /// re-arm; Apply passes the frozen rect as the "live" rect argument
-/// (`Viewport::apply_projection` ignores it by design).
+/// (`Viewport::apply_projection` ignores it by design). Follow camera
+/// (R-A2 v2b, row 288): the checkbox writes `state.follow_camera`
+/// through the row; Apply then passes the LIVE view rect (the viewport
+/// supplies its live camera), and flipping follow OFF while armed
+/// re-arms so a placement is frozen again (else Apply would refuse an
+/// armed state with no freeze). Flipping it ON while armed keeps the old
+/// freeze (unused while following; harmless).
 fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
     let ProjectionSectionCtx {
         projection: state,
@@ -1658,6 +1664,7 @@ fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
         paint,
     } = ctx;
     let mut opacity = state.opacity;
+    let followed = state.follow_camera;
     let response = display_panel::projection_rows(
         ui,
         display_panel::ProjectionRow {
@@ -1667,10 +1674,16 @@ fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
             armed: state.armed,
             opacity: &mut opacity,
             tiling: &mut state.tiling,
+            follow_camera: &mut state.follow_camera,
         },
     );
     if let Some(v) = response.opacity {
         state.opacity = v;
+    }
+    // Follow flipped OFF while armed (row 288): the follow arm froze
+    // nothing, so re-arm to freeze the live view and keep Apply valid.
+    if followed && !state.follow_camera && state.armed && !response.toggled_arm {
+        arm_projection(state, viewport, view_rect);
     }
     if let Some(path) = response.picked {
         // The cap: the module's own constant, the same 2048² as
@@ -1700,8 +1713,14 @@ fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
         }
     }
     if response.apply {
-        let frozen_rect = state.frozen.map(|f| f.rect);
-        match (mesh, paint, frozen_rect) {
+        // Follow camera (row 288) projects through the LIVE view rect;
+        // the frozen path passes its frozen rect (ignored by design).
+        let apply_rect = if state.follow_camera {
+            view_rect
+        } else {
+            state.frozen.map(|f| f.rect)
+        };
+        match (mesh, paint, apply_rect) {
             (Some(mesh), Some(paint), Some(rect)) => {
                 if !viewport.apply_projection(rect, mesh, paint, state) {
                     log::info!("projection: Apply wrote nothing (refused or no texel changed)");

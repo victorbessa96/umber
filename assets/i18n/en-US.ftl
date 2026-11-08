@@ -1008,6 +1008,8 @@ overlays =
     .projection-opacity = Opacity
     .projection-tile = Tile
     .projection-tile-hint = Repeat the image across the frozen view instead of leaving its outside clear. The overlay previews one tile.
+    .projection-follow = Follow camera
+    .projection-follow-hint = Apply projects through the current camera and view instead of the view frozen at Arm.
 
 ## Shared colour-picker row labels (picker-app-sites; channel letters are
 ## the international convention — a locale may localize them)

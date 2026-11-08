@@ -126,6 +126,13 @@
 //! ([`ProjectionRow::tiling`]): toggling the repeat needs no camera
 //! freeze, so there is nothing for the caller to do but keep the flag.
 //! The response is unchanged (no `toggled_tile` field).
+//!
+//! Row 288 (R-A2 v2b follow camera) adds a Follow camera checkbox after
+//! Tile, same shape: enabled with an image, writes through its borrow
+//! ([`ProjectionRow::follow_camera`]), no response field. The one thing
+//! only the caller can do (re-freeze when follow flips off while armed,
+//! so Apply has a placement again) is done by comparing the flag before
+//! and after the rows (`main.rs` `projection_section`).
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -422,6 +429,10 @@ pub struct ProjectionRow<'a> {
     /// real borrow: the Tile checkbox writes through it (unlike Arm,
     /// flipping it needs nothing only the caller can reach).
     pub tiling: &'a mut bool,
+    /// Follow camera (R-A2 v2b): Apply projects through the live camera.
+    /// A real borrow like [`Self::tiling`]: the checkbox writes through
+    /// it (the caller re-freezes on an off-flip while armed).
+    pub follow_camera: &'a mut bool,
 }
 
 /// What the projection rows asked for this frame.
@@ -481,6 +492,16 @@ pub fn projection_rows(ui: &mut Ui, row: ProjectionRow<'_>) -> ProjectionRowResp
             egui::Checkbox::new(&mut *row.tiling, i18n::tr("overlays.projection-tile")),
         )
         .on_hover_text(i18n::tr("overlays.projection-tile-hint"));
+        // Follow camera writes through too (row 288): the raster reads
+        // it at Apply; the caller handles re-freezing.
+        ui.add_enabled(
+            row.has_image,
+            egui::Checkbox::new(
+                &mut *row.follow_camera,
+                i18n::tr("overlays.projection-follow"),
+            ),
+        )
+        .on_hover_text(i18n::tr("overlays.projection-follow-hint"));
     });
     ui.add_enabled_ui(row.has_image, |ui| {
         ui.horizontal(|ui| {
@@ -1163,6 +1184,7 @@ mod tests {
                                 armed: *armed,
                                 opacity,
                                 tiling: &mut false,
+                                follow_camera: &mut false,
                             },
                         );
                         *toggled |= response.toggled_arm;
@@ -1221,6 +1243,7 @@ mod tests {
                                 armed: false,
                                 opacity: &mut opacity,
                                 tiling,
+                                follow_camera: &mut false,
                             },
                         );
                         *toggled |= response.toggled_arm;
@@ -1245,6 +1268,56 @@ mod tests {
         harness.get_by_label("Tile").click();
         harness.run();
         assert!(harness.state().0, "disabled Tile leaves the flag alone");
+    }
+
+    #[test]
+    fn projection_follow_checkbox_writes_through_the_borrow() {
+        // (follow_camera, tiling, has_image, toggled-arm seen)
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        type FollowState = (bool, bool, bool, bool);
+        let build = |has_image: bool, follow: bool| {
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(480.0, 260.0))
+                .build_ui_state(
+                    |ui, s: &mut FollowState| {
+                        let (follow_camera, tiling, has_image, toggled) = s;
+                        let mut opacity = DEFAULT_STENCIL_OPACITY;
+                        let response = projection_rows(
+                            ui,
+                            ProjectionRow {
+                                path: None,
+                                load_error: None,
+                                has_image: *has_image,
+                                armed: false,
+                                opacity: &mut opacity,
+                                tiling,
+                                follow_camera,
+                            },
+                        );
+                        *toggled |= response.toggled_arm;
+                    },
+                    (follow, false, has_image, false),
+                )
+        };
+        // With an image: click on, click off; never tiling, never an arm
+        // flip.
+        let mut harness = build(true, false);
+        harness.run();
+        harness.get_by_label("Follow camera").click();
+        harness.run();
+        assert!(harness.state().0, "Follow camera writes the flag on");
+        assert!(!harness.state().1, "Follow camera is not Tile");
+        harness.get_by_label("Follow camera").click();
+        harness.run();
+        assert!(!harness.state().0, "a second click writes it off");
+        assert!(!harness.state().3, "Follow camera is not an arm flip");
+        // Without an image the checkbox is disabled: the flag holds.
+        let mut harness = build(false, true);
+        harness.run();
+        harness.get_by_label("Follow camera").click();
+        harness.run();
+        assert!(harness.state().0, "disabled Follow leaves the flag alone");
     }
 
     #[test]
@@ -1281,6 +1354,8 @@ mod tests {
             "overlays.projection-opacity",
             "overlays.projection-tile",
             "overlays.projection-tile-hint",
+            "overlays.projection-follow",
+            "overlays.projection-follow-hint",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");
