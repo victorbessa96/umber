@@ -1,19 +1,24 @@
-//! Clean-room reader for Adobe Photoshop `.abr` brush files, **the
-//! `samp` sections of v6/v7/v9/v10 files**.
+//! Clean-room reader for Adobe Photoshop `.abr` brush files (v6/v7/v9/v10):
+//! the `samp` tip bitmaps AND, since row 282 of the wave-abr design brief
+//! (`docs/loop/briefs/2026-11-08-wave-abr-desc-design.md`), the `desc`
+//! brush descriptors.
 //!
 //! What a `samp` record IS (verified against real files, 2026-11-07):
 //! a **sampled tip image**, not a brush. Real v6/v7/v9/v10 files carry
 //! the tip bitmaps in `samp` (each with a UUID-ish id string, an
 //! absolute position and a size) and the BRUSHES themselves — their
 //! names, sizes, hardness, spacing, dynamics — in the descriptor
-//! (`desc`) section, which this module does not parse. So this reader
-//! returns **samples** (tip bitmaps with their ids), and a caller
-//! matches them to brushes through the descriptor's sampled-data id.
+//! (`desc`) section. [`read_abr`] returns both: the samples
+//! ([`AbrSample`]) and the brushes ([`AbrBrush`]), and [`match_sample`]
+//! links a `sampledBrush` to its tip through the descriptor's
+//! `sampledData` id.
 //!
-//! Provenance: the section walk and the PackBits/RLE decoder are a
-//! clean-room port of the *logic* in the vendored `ag-psd` reference
-//! (`docs/claw-artifacts/ag-psd/src-tree/src/abr.rs`, `read_abr` and
-//! `read_data_rle`). No reference code, comments or prose were copied.
+//! Provenance: the section walk, the PackBits/RLE decoder and the brush
+//! mapping are a clean-room port of the *logic* in the vendored `ag-psd`
+//! reference (`docs/claw-artifacts/ag-psd/src-tree/src/abr.rs`: `read_abr`,
+//! `read_data_rle`, `parse_brush`, `parse_brush_shape`, `parse_dynamics`);
+//! the descriptor core lives in `abr_desc.rs` (ported from the reference's
+//! `descriptor.rs`). No reference code, comments or prose were copied.
 //! That reference is this module's format authority: where it disagrees
 //! with a prose description, the reference wins. Two consequences are
 //! worth stating up front because they are easy to get wrong:
@@ -26,49 +31,91 @@
 //! Supported: version 6, 7, 9 and 10 (minor version 1 or 2) — the
 //! versions the reference accepts and the ones real files use — the
 //! `8BIM` section walk, `samp` sample records, 8-bit raw and RLE alpha,
-//! and 16-bit raw alpha (the high byte is kept). Every other section
-//! (`desc`, `patt`, `phry`, unknown tags) is skipped by its declared
-//! length, so a normal file parses even though only `samp` is
-//! interpreted.
+//! 16-bit raw alpha (the high byte is kept), and (row 282, LANDED) the
+//! `desc` section: a version-16 descriptor whose `Brsh` list holds one
+//! brush descriptor per brush. Each brush's outer class id names its tool
+//! (`MixB` mixer, `SmTl` smudge, anything else — `_` in practice — the
+//! plain brush), its `Brsh` key holds the tip-shape descriptor, and the
+//! `computedBrush` / `sampledBrush` shape classes are mapped to
+//! [`AbrBrush`]; every other shape class (`dBrush`, `dTips`, ...) is
+//! skipped and counted in [`AbrFile::skipped_shape_classes`]. A `phry`
+//! section is parsed as a descriptor and ignored. `patt` and unknown
+//! sections are skipped by their declared length.
 //!
 //! Deliberate non-goals (the v1 boundary):
 //!
-//! * descriptor (`desc`) parsing: brush *settings* (dynamics, texture,
-//!   dual brush, ...) are a separate kill;
 //! * `patt` pattern decoding;
 //! * v8+ files, which are descriptor-only and rejected as unsupported;
+//! * unknown descriptor OSTypes — a named strict error
+//!   ([`AbrError::UnsupportedDescriptorType`]); extending the table is a
+//!   later kill if a real file needs it;
+//! * dual brush, texture, scattering, color dynamics, transfer, and every
+//!   dynamics channel except size (`szVr`): the descriptor reader parses
+//!   those keys but nothing maps them;
+//! * mapping an [`AbrBrush`] onto a `BrushPreset` (row 283);
 //! * 16-bit RLE (rejected with a named error);
 //! * writing `.abr` — never (the format is read-only for umber).
 //!
 //! Safety caps (hostile input): at most [`MAX_SAMPLES`] samples per file,
-//! and at most [`MAX_STAMP_DIMENSION`] x [`MAX_STAMP_DIMENSION`] pixels per
-//! stamp. Both are checked *before* the stamp plane is allocated, so a
-//! hostile header cannot trigger a huge allocation.
+//! at most [`MAX_STAMP_DIMENSION`] x [`MAX_STAMP_DIMENSION`] pixels per
+//! stamp, [`MAX_TOTAL_ALPHA_BYTES`] of decoded planes per file, and at
+//! most [`MAX_DESC_SECTION_BYTES`] per declared descriptor section (plus
+//! the descriptor reader's own item / list / text / raw / depth /
+//! reference caps, `abr_desc.rs`). Every cap is checked *before* the
+//! allocation it guards.
 //!
 //! Judgment calls:
 //!
 //! * The per-brush parameter block between the name and the bounds is 10
 //!   bytes at minor version 1 and 264 bytes at minor version 2. The
 //!   reference implementation SKIPS the whole block without naming its
-//!   fields, and the brush's real settings (diameter, hardness,
-//!   spacing, angle, dynamics) live in the descriptor (`desc`) sections,
-//!   which this parser does not read. The block is therefore skipped,
-//!   never interpreted: publishing bytes as parameters would report
-//!   numbers that are not the brush's. The descriptor wave is the named
-//!   follow-up.
+//!   fields, and the brush's real settings live in the descriptor, so the
+//!   block is skipped, never interpreted.
+//! * [`read_samples`] keeps its row-268 behavior EXACTLY: it runs the
+//!   same walk in a samples-only mode that skips `desc`/`phry` by length
+//!   instead of parsing them. Descriptor parsing is strict (an unknown
+//!   OSType is an error), so routing the samples-only entry point through
+//!   it would turn a working tip import into a refusal on any real file
+//!   whose descriptor holds an OSType outside the table. [`read_abr`] is
+//!   the strict full read.
+//! * A brush's name is its outer `Nm  ` key, falling back to the shape's
+//!   `Nm  ` (sampled shapes carry one too); missing both → empty.
+//! * `hardness` reads the shape's `Hrdn` for both shape classes (missing
+//!   → 1.0, the percent default); `spacing_on` / `spacing` come from the
+//!   shape's `Intr` / `Spcn`.
+//! * [`AbrBrush::dynamics`] is the SIZE dynamics (`szVr`), present only
+//!   when the brush's `useTipDynamics` is true (the reference's gate).
+//!   `bVTy` / `fStp` stay the stored integers: naming the control source
+//!   and mapping it onto Umber's inputs is row 283's call.
+//! * A brush descriptor without a `Brsh` shape descriptor is malformed
+//!   (the reference refuses it too); a `Brsh` list entry that is not a
+//!   descriptor is ignored (the reference ignores it).
+//! * The raw descriptor tree types (`Descriptor`, `DescValue`, ...) are
+//!   re-exported so a later kill (row 283, a CLI inspector) can read the
+//!   keys this module does not map.
 //! * PackBits header byte 128 is a no-op: the reference ignores it. It
 //!   does **not** mean "repeat the next byte three times".
 //! * A row whose RLE stream decodes fewer than `width` bytes leaves the
 //!   remainder of that row zero (the reference's behavior). A stream that
 //!   claims bytes past the end of its row is a malformed error.
-//! * Brush names are decoded byte-for-byte as Latin-1 (each byte becomes
+//! * Sample ids are decoded byte-for-byte as Latin-1 (each byte becomes
 //!   the code point of the same value), matching the reference's
-//!   `read_short_string`; name decoding can never fail.
-//! * A v6/v7 file with no `samp` section parses to an empty brush list
-//!   rather than an error: the section walk is length-delimited, so the
-//!   absence of stamps is not corruption.
+//!   `read_short_string`; id decoding can never fail.
+//! * A file with no `samp` / `desc` section parses to empty lists rather
+//!   than an error: the section walk is length-delimited, so the absence
+//!   of stamps is not corruption.
 
 use thiserror::Error;
+
+use crate::abr_desc::{
+    as_bool, as_descriptor, as_number, as_text, dget, parse_angle, parse_percent,
+    parse_units_to_number, read_version_and_descriptor,
+};
+
+pub use crate::abr_desc::{DescValue, Descriptor, ObjectArrayItem, RefItem};
+
+/// Maximum declared byte length of one `desc` / `phry` section.
+pub const MAX_DESC_SECTION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum number of samples accepted from one file.
 pub const MAX_SAMPLES: usize = 4096;
@@ -177,12 +224,129 @@ pub enum AbrError {
         /// The compression code as stored in the file.
         compression: u8,
     },
+    /// A descriptor whose version field is not 16.
+    #[error("unsupported .abr descriptor version {0}: only version 16 is supported")]
+    UnsupportedDescriptorVersion(u32),
+    /// A descriptor value (or reference item) whose four-byte type
+    /// signature this reader does not decode.
+    #[error("unsupported .abr descriptor value type {0:?}")]
+    UnsupportedDescriptorType(String),
+    /// A unit code outside the units table, or a value whose units are not
+    /// the ones its key requires.
+    #[error("invalid .abr descriptor units {0:?}")]
+    InvalidDescriptorUnits(String),
+    /// A descriptor count, length, nesting depth or section size over its
+    /// safety cap (refused before anything is allocated from it).
+    #[error("the .abr descriptor's {what} ({count}) exceeds the safety cap of {max}")]
+    DescriptorTooLarge {
+        /// Which cap tripped (`"text"`, `"list items"`, ...).
+        what: &'static str,
+        /// The stored value that tripped it.
+        count: u64,
+        /// The cap itself.
+        max: u64,
+    },
+    /// A truncated or structurally invalid descriptor.
+    #[error("malformed .abr descriptor: {detail}")]
+    MalformedDescriptor {
+        /// What failed, in user-facing terms.
+        detail: String,
+    },
 }
 
-/// Parses every brush in an `.abr` file.
+/// The tool a descriptor brush belongs to (the brush descriptor's class
+/// id: `MixB`, `SmTl`, anything else).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbrToolClass {
+    /// The plain brush tool (class `_`, and the fallback for any other id).
+    Brush,
+    /// The mixer brush (class `MixB`).
+    MixerBrush,
+    /// The smudge tool (class `SmTl`).
+    Smudge,
+}
+
+/// A brush's size dynamics (`szVr`), as stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbrDynamics {
+    /// The control source index (`bVTy`): 0 off, then the file's
+    /// fade / pen / tilt / ... order (not named here — row 283).
+    pub control_index: i32,
+    /// The fade step count (`fStp`).
+    pub steps: i32,
+    /// Jitter as a fraction (`jitter`, percent / 100).
+    pub jitter: f64,
+    /// Minimum as a fraction (`Mnm `, percent / 100).
+    pub minimum: f64,
+}
+
+/// One brush from a `desc` section (`computedBrush` or `sampledBrush`
+/// shape).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbrBrush {
+    /// The tool the brush belongs to.
+    pub tool_class: AbrToolClass,
+    /// The brush's name (outer `Nm  `, else the shape's `Nm  `).
+    pub name: String,
+    /// Tip diameter in pixels (`Dmtr`, `#Pxl`).
+    pub diameter_px: f64,
+    /// Tip angle in degrees (`Angl`, `#Ang`; missing → 0).
+    pub angle_deg: f64,
+    /// Tip roundness as a fraction (`Rndn`; missing → 1).
+    pub roundness: f64,
+    /// Whether spacing is enabled (`Intr`).
+    pub spacing_on: bool,
+    /// Spacing as a fraction of the diameter (`Spcn`; missing → 1).
+    pub spacing: f64,
+    /// Horizontal flip (`flipX`).
+    pub flip_x: bool,
+    /// Vertical flip (`flipY`).
+    pub flip_y: bool,
+    /// Hardness as a fraction (`Hrdn`; missing → 1).
+    pub hardness: f64,
+    /// The `sampledData` id linking a `sampledBrush` to its
+    /// [`AbrSample`]; always `None` for a `computedBrush`.
+    pub sampled_data_id: Option<String>,
+    /// Size dynamics, when `useTipDynamics` is on.
+    pub dynamics: Option<AbrDynamics>,
+}
+
+/// Everything [`read_abr`] extracts from one file.
+#[derive(Debug, Clone, Default)]
+pub struct AbrFile {
+    /// The `samp` tip bitmaps, in file order.
+    pub samples: Vec<AbrSample>,
+    /// The `desc` brushes, in file order.
+    pub brushes: Vec<AbrBrush>,
+    /// How many `Brsh` entries had a shape class other than
+    /// `computedBrush` / `sampledBrush` and were skipped.
+    pub skipped_shape_classes: u32,
+}
+
+/// The sample a brush stamps with: the [`AbrSample`] whose id equals the
+/// brush's `sampled_data_id`. `None` for a computed brush or an id no
+/// sample carries.
+pub fn match_sample<'a>(brush: &AbrBrush, file: &'a AbrFile) -> Option<&'a AbrSample> {
+    let id = brush.sampled_data_id.as_deref()?;
+    file.samples.iter().find(|sample| sample.id == id)
+}
+
+/// Whether the walk interprets the descriptor sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkMode {
+    /// `samp` only; `desc` / `phry` are skipped by length (row 268's
+    /// behavior, kept for [`read_samples`]).
+    SamplesOnly,
+    /// `samp`, `desc` and `phry` ([`read_abr`]).
+    Full,
+}
+
+/// Parses every sample (tip bitmap) in an `.abr` file.
 ///
-/// Only v6/v7 `samp` sections are interpreted; other sections are skipped
-/// by their declared length. The returned samples are in file order.
+/// Only `samp` sections are interpreted; every other section (`desc` and
+/// `phry` included) is skipped by its declared length — row 268's exact
+/// behavior. Use [`read_abr`] for the brushes too. The returned samples
+/// are in file order.
 ///
 /// # Errors
 ///
@@ -196,6 +360,34 @@ pub enum AbrError {
 /// * [`AbrError::UnsupportedBitDepth`] / [`AbrError::UnsupportedCompression`]
 ///   for stamp encodings this reader does not decode.
 pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
+    walk(bytes, WalkMode::SamplesOnly).map(|file| file.samples)
+}
+
+/// Parses an `.abr` file's samples AND its descriptor brushes.
+///
+/// `samp` sections give [`AbrFile::samples`]; each `desc` section's `Brsh`
+/// list gives [`AbrFile::brushes`] (unmapped shape classes are counted in
+/// [`AbrFile::skipped_shape_classes`]); `phry` is parsed and ignored;
+/// `patt` and unknown sections are skipped by length.
+///
+/// # Errors
+///
+/// Every [`read_samples`] error, plus:
+///
+/// * [`AbrError::UnsupportedDescriptorVersion`] for a descriptor version
+///   other than 16;
+/// * [`AbrError::UnsupportedDescriptorType`] for an unknown OSType;
+/// * [`AbrError::InvalidDescriptorUnits`] for an unknown unit code or a
+///   value in the wrong units;
+/// * [`AbrError::DescriptorTooLarge`] for a descriptor cap breach;
+/// * [`AbrError::MalformedDescriptor`] for a truncated descriptor or a
+///   descriptor section whose declared size runs past the end of the file.
+pub fn read_abr(bytes: &[u8]) -> Result<AbrFile, AbrError> {
+    walk(bytes, WalkMode::Full)
+}
+
+/// The shared `8BIM` section walk behind [`read_samples`] and [`read_abr`].
+fn walk(bytes: &[u8], mode: WalkMode) -> Result<AbrFile, AbrError> {
     if bytes.len() < 2 {
         return Err(AbrError::NotAbr);
     }
@@ -219,7 +411,7 @@ pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
     }
     let parameter_len = if minor == 1 { 10 } else { 264 };
 
-    let mut samples = Vec::new();
+    let mut file = AbrFile::default();
     while reader.remaining() > 0 {
         if reader.remaining() < 12 {
             return Err(malformed("truncated section header"));
@@ -230,12 +422,34 @@ pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
             return Err(AbrError::NotAbr);
         }
         let kind = reader.take(4)?;
-        let size = usize::try_from(reader.u32()?)
+        let declared = reader.u32()?;
+        let size = usize::try_from(declared)
             .map_err(|_| malformed("section size does not fit in memory"))?;
+        let descriptor_section = mode == WalkMode::Full && (kind == b"desc" || kind == b"phry");
+        if descriptor_section {
+            if size > MAX_DESC_SECTION_BYTES {
+                return Err(AbrError::DescriptorTooLarge {
+                    what: "descriptor section bytes",
+                    count: u64::from(declared),
+                    max: MAX_DESC_SECTION_BYTES as u64,
+                });
+            }
+            if size > reader.remaining() {
+                return Err(AbrError::MalformedDescriptor {
+                    detail: "the descriptor section runs past the end of the file".to_string(),
+                });
+            }
+        }
         let payload = reader.take(size)?;
 
         if kind == b"samp" {
-            parse_samp(payload, parameter_len, &mut samples)?;
+            parse_samp(payload, parameter_len, &mut file.samples)?;
+        } else if descriptor_section && kind == b"desc" {
+            parse_desc(payload, &mut file)?;
+        } else if descriptor_section {
+            // `phry`: parsed so a corrupt section is caught, then ignored
+            // (the reference does the same; its meaning is undocumented).
+            let _ = read_version_and_descriptor(payload)?;
         }
 
         // Sections are padded to a four-byte boundary. The trailing padding
@@ -245,7 +459,103 @@ pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
         reader.skip(skip)?;
     }
 
-    Ok(samples)
+    Ok(file)
+}
+
+/// Parses one `desc` payload: a versioned descriptor whose `Brsh` list
+/// holds one brush descriptor per brush.
+fn parse_desc(payload: &[u8], file: &mut AbrFile) -> Result<(), AbrError> {
+    let root = read_version_and_descriptor(payload)?;
+    let Some(DescValue::List(entries)) = dget(&root, "Brsh") else {
+        return Ok(());
+    };
+    for entry in entries {
+        // A non-descriptor list entry carries no brush (the reference
+        // ignores it too).
+        let DescValue::Descriptor(brush) = entry else {
+            continue;
+        };
+        match parse_brush(brush)? {
+            Some(parsed) => file.brushes.push(parsed),
+            None => file.skipped_shape_classes = file.skipped_shape_classes.saturating_add(1),
+        }
+    }
+    Ok(())
+}
+
+/// The tool class for a brush descriptor's class id.
+fn tool_class(class_id: &str) -> AbrToolClass {
+    match class_id {
+        "MixB" => AbrToolClass::MixerBrush,
+        "SmTl" => AbrToolClass::Smudge,
+        _ => AbrToolClass::Brush,
+    }
+}
+
+/// A `long` as stored; other numeric types truncate (saturating), absent
+/// → 0.
+fn as_integer(value: Option<&DescValue>) -> i32 {
+    match value {
+        Some(DescValue::Integer(number)) => *number,
+        other => as_number(other) as i32,
+    }
+}
+
+/// Maps one brush descriptor. `Ok(None)` when its shape class is neither
+/// `computedBrush` nor `sampledBrush` (the caller counts the skip).
+fn parse_brush(brush: &Descriptor) -> Result<Option<AbrBrush>, AbrError> {
+    let Some(shape) = as_descriptor(dget(brush, "Brsh")) else {
+        return Err(AbrError::MalformedDescriptor {
+            detail: "a brush has no tip-shape descriptor".to_string(),
+        });
+    };
+    let sampled = match shape.class_id.as_str() {
+        "sampledBrush" => true,
+        "computedBrush" => false,
+        _ => return Ok(None),
+    };
+
+    let name = as_text(dget(brush, "Nm  "))
+        .or_else(|| as_text(dget(shape, "Nm  ")))
+        .unwrap_or_default()
+        .to_string();
+    let sampled_data_id = if sampled {
+        as_text(dget(shape, "sampledData")).map(str::to_string)
+    } else {
+        None
+    };
+    let dynamics = if as_bool(dget(brush, "useTipDynamics")) {
+        as_descriptor(dget(brush, "szVr"))
+            .map(parse_dynamics)
+            .transpose()?
+    } else {
+        None
+    };
+
+    Ok(Some(AbrBrush {
+        tool_class: tool_class(&brush.class_id),
+        name,
+        diameter_px: parse_units_to_number(dget(shape, "Dmtr"), "Pixels")?,
+        angle_deg: parse_angle(dget(shape, "Angl"))?,
+        roundness: parse_percent(dget(shape, "Rndn"))?,
+        spacing_on: as_bool(dget(shape, "Intr")),
+        spacing: parse_percent(dget(shape, "Spcn"))?,
+        flip_x: as_bool(dget(shape, "flipX")),
+        flip_y: as_bool(dget(shape, "flipY")),
+        hardness: parse_percent(dget(shape, "Hrdn"))?,
+        sampled_data_id,
+        dynamics,
+    }))
+}
+
+/// Maps one dynamics descriptor (`bVTy` / `fStp` / `jitter` / `Mnm `).
+fn parse_dynamics(desc: &Descriptor) -> Result<AbrDynamics, AbrError> {
+    Ok(AbrDynamics {
+        control_index: as_integer(dget(desc, "bVTy")),
+        steps: as_integer(dget(desc, "fStp")),
+        jitter: parse_percent(dget(desc, "jitter"))?,
+        minimum: parse_percent(dget(desc, "Mnm "))?,
+    })
 }
 
 /// Parses the concatenated brush records of one `samp` payload.
@@ -543,6 +853,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abr_desc::{MAX_DESC_DEPTH, MAX_TEXT_CHARS};
 
     /// Minimal big-endian writer for the synthetic fixtures.
     struct Builder {
@@ -587,6 +898,177 @@ mod tests {
 
         fn into_vec(self) -> Vec<u8> {
             self.bytes
+        }
+    }
+
+    /// One descriptor value for the synthetic `desc` fixtures.
+    enum Val {
+        Text(&'static str),
+        Units(&'static [u8; 4], f64),
+        Bool(bool),
+        Long(i32),
+        Obj(&'static str, Vec<(&'static str, Val)>),
+        List(Vec<Val>),
+    }
+
+    /// The descriptor writers (big-endian, the layout `abr_desc` reads).
+    impl Builder {
+        fn f64(&mut self, value: f64) {
+            self.bytes.extend_from_slice(&value.to_be_bytes());
+        }
+
+        /// `u32` code-unit count + big-endian UTF-16 units.
+        fn unicode(&mut self, text: &str) {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            self.u32(u32::try_from(units.len()).expect("test text fits a u32"));
+            for unit in units {
+                self.u16(unit);
+            }
+        }
+
+        /// ascii-or-class-id: a four-byte id as `0` + the id, otherwise
+        /// `i32` length + bytes.
+        fn id(&mut self, id: &str) {
+            if id.len() == 4 {
+                self.i32(0);
+            } else {
+                self.i32(i32::try_from(id.len()).expect("test id fits an i32"));
+            }
+            self.raw(id.as_bytes());
+        }
+
+        /// A type signature + its value.
+        fn value(&mut self, value: &Val) {
+            match value {
+                Val::Text(text) => {
+                    self.raw(b"TEXT");
+                    self.unicode(text);
+                }
+                Val::Units(code, number) => {
+                    self.raw(b"UntF");
+                    self.raw(*code);
+                    self.f64(*number);
+                }
+                Val::Bool(flag) => {
+                    self.raw(b"bool");
+                    self.u8(u8::from(*flag));
+                }
+                Val::Long(number) => {
+                    self.raw(b"long");
+                    self.i32(*number);
+                }
+                Val::Obj(class_id, items) => {
+                    self.raw(b"Objc");
+                    self.descriptor_body(class_id, items);
+                }
+                Val::List(items) => {
+                    self.raw(b"VlLs");
+                    self.i32(i32::try_from(items.len()).expect("test list fits an i32"));
+                    for item in items {
+                        self.value(item);
+                    }
+                }
+            }
+        }
+
+        /// Class structure (empty name + class id) + item count + items.
+        fn descriptor_body(&mut self, class_id: &str, items: &[(&'static str, Val)]) {
+            self.unicode("");
+            self.id(class_id);
+            self.u32(u32::try_from(items.len()).expect("test items fit a u32"));
+            for (key, value) in items {
+                self.id(key);
+                self.value(value);
+            }
+        }
+    }
+
+    /// A versioned (16) root descriptor of class `null` with `items`.
+    fn root_payload(items: &[(&'static str, Val)]) -> Vec<u8> {
+        let mut payload = Builder::new();
+        payload.u32(16);
+        payload.descriptor_body("null", items);
+        payload.into_vec()
+    }
+
+    /// A `desc` payload whose `Brsh` list holds `entries`.
+    fn desc_payload(entries: Vec<Val>) -> Vec<u8> {
+        root_payload(&[("Brsh", Val::List(entries))])
+    }
+
+    /// The 4x4 raw tip the descriptor fixtures stamp with.
+    const TIP_ALPHA: [u8; 16] = [
+        0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255,
+    ];
+
+    /// One raw 8-bit 4x4 `samp` record with id `tip1`.
+    fn tip_record() -> Vec<u8> {
+        let mut stamp = Stamp::new("tip1", 4, 4, &TIP_ALPHA);
+        stamp.compression = 0;
+        brush_record(&stamp)
+    }
+
+    /// A brush descriptor (outer class `outer`) with a `sampledBrush`
+    /// shape linked to `tip_id`, and size dynamics on.
+    fn sampled_brush(outer: &'static str, tip_id: &'static str) -> Val {
+        Val::Obj(
+            outer,
+            vec![
+                (
+                    "Brsh",
+                    Val::Obj(
+                        "sampledBrush",
+                        vec![
+                            ("Nm  ", Val::Text("Test Tip")),
+                            ("Dmtr", Val::Units(b"#Pxl", 32.0)),
+                            ("Angl", Val::Units(b"#Ang", 15.0)),
+                            ("Rndn", Val::Units(b"#Prc", 100.0)),
+                            ("Intr", Val::Bool(true)),
+                            ("Spcn", Val::Units(b"#Prc", 25.0)),
+                            ("Hrdn", Val::Units(b"#Prc", 80.0)),
+                            ("flipX", Val::Bool(false)),
+                            ("flipY", Val::Bool(false)),
+                            ("sampledData", Val::Text(tip_id)),
+                        ],
+                    ),
+                ),
+                ("useTipDynamics", Val::Bool(true)),
+                (
+                    "szVr",
+                    Val::Obj(
+                        "brVr",
+                        vec![
+                            ("bVTy", Val::Long(1)),
+                            ("fStp", Val::Long(4)),
+                            ("jitter", Val::Units(b"#Prc", 10.0)),
+                            ("Mnm ", Val::Units(b"#Prc", 0.0)),
+                        ],
+                    ),
+                ),
+            ],
+        )
+    }
+
+    /// The exact brush [`sampled_brush`] must parse to.
+    fn expected_sampled(tool_class: AbrToolClass, tip_id: &str) -> AbrBrush {
+        AbrBrush {
+            tool_class,
+            name: "Test Tip".to_string(),
+            diameter_px: 32.0,
+            angle_deg: 15.0,
+            roundness: 1.0,
+            spacing_on: true,
+            spacing: 0.25,
+            flip_x: false,
+            flip_y: false,
+            hardness: 0.8,
+            sampled_data_id: Some(tip_id.to_string()),
+            dynamics: Some(AbrDynamics {
+                control_index: 1,
+                steps: 4,
+                jitter: 0.1,
+                minimum: 0.0,
+            }),
         }
     }
 
@@ -1034,6 +1516,275 @@ mod tests {
         assert!(
             matches!(error, AbrError::Malformed { .. }),
             "expected Malformed, got {error:?}"
+        );
+    }
+
+    /// Row 282 pin: one samp + one desc holding one sampledBrush parse to
+    /// the exact written fields, and the brush matches its tip by id.
+    #[test]
+    fn reads_a_sampled_brush_and_matches_its_tip() {
+        let desc = desc_payload(vec![sampled_brush("_", "tip1")]);
+        let file = abr_file(1, &[(b"samp", tip_record()), (b"desc", desc)]);
+
+        let abr = read_abr(&file).expect("the synthetic desc file parses");
+        assert_eq!(abr.samples.len(), 1);
+        assert_eq!(abr.skipped_shape_classes, 0);
+        assert_eq!(
+            abr.brushes,
+            vec![expected_sampled(AbrToolClass::Brush, "tip1")]
+        );
+
+        let tip = match_sample(&abr.brushes[0], &abr).expect("the brush finds its tip");
+        assert_eq!(tip.id, "tip1");
+        assert_eq!(tip.width, 4);
+        assert_eq!(tip.height, 4);
+        assert_eq!(tip.alpha, TIP_ALPHA);
+    }
+
+    /// A computedBrush has no sampled id (and takes the angle default);
+    /// a dBrush entry in the same list is skipped and counted.
+    #[test]
+    fn computed_brush_has_no_sample_and_dbrush_is_skipped() {
+        let computed = Val::Obj(
+            "SmTl",
+            vec![
+                ("Nm  ", Val::Text("Hard Round")),
+                (
+                    "Brsh",
+                    Val::Obj(
+                        "computedBrush",
+                        vec![
+                            ("Dmtr", Val::Units(b"#Pxl", 12.0)),
+                            ("Rndn", Val::Units(b"#Prc", 50.0)),
+                            ("Intr", Val::Bool(true)),
+                            ("Spcn", Val::Units(b"#Prc", 10.0)),
+                            ("Hrdn", Val::Units(b"#Prc", 100.0)),
+                            ("flipX", Val::Bool(true)),
+                            ("flipY", Val::Bool(false)),
+                        ],
+                    ),
+                ),
+            ],
+        );
+        let dbrush_shape = vec![("Dmtr", Val::Units(b"#Pxl", 5.0))];
+        let dynamic = Val::Obj("_", vec![("Brsh", Val::Obj("dBrush", dbrush_shape))]);
+        let file = abr_file(1, &[(b"desc", desc_payload(vec![computed, dynamic]))]);
+
+        let abr = read_abr(&file).expect("the computed fixture parses");
+        assert_eq!(abr.skipped_shape_classes, 1);
+        assert_eq!(
+            abr.brushes,
+            vec![AbrBrush {
+                tool_class: AbrToolClass::Smudge,
+                name: "Hard Round".to_string(),
+                diameter_px: 12.0,
+                angle_deg: 0.0,
+                roundness: 0.5,
+                spacing_on: true,
+                spacing: 0.1,
+                flip_x: true,
+                flip_y: false,
+                hardness: 1.0,
+                sampled_data_id: None,
+                dynamics: None,
+            }]
+        );
+        assert!(match_sample(&abr.brushes[0], &abr).is_none());
+    }
+
+    /// Two sampledBrush entries in one desc give two brushes, in order,
+    /// with their own tool classes.
+    #[test]
+    fn two_sampled_brushes_give_two_entries() {
+        let entries = vec![sampled_brush("_", "tip1"), sampled_brush("MixB", "tip2")];
+        let file = abr_file(1, &[(b"desc", desc_payload(entries))]);
+
+        let abr = read_abr(&file).expect("the two-brush fixture parses");
+        assert_eq!(
+            abr.brushes,
+            vec![
+                expected_sampled(AbrToolClass::Brush, "tip1"),
+                expected_sampled(AbrToolClass::MixerBrush, "tip2"),
+            ]
+        );
+    }
+
+    /// A sampledData id no sample carries matches nothing.
+    #[test]
+    fn unmatched_sampled_data_id_is_none() {
+        let desc = desc_payload(vec![sampled_brush("_", "missing")]);
+        let file = abr_file(1, &[(b"samp", tip_record()), (b"desc", desc)]);
+
+        let abr = read_abr(&file).expect("the unmatched fixture parses");
+        assert_eq!(abr.brushes.len(), 1);
+        assert!(match_sample(&abr.brushes[0], &abr).is_none());
+    }
+
+    /// A descriptor version other than 16 is refused by name.
+    #[test]
+    fn descriptor_version_fifteen_is_unsupported() {
+        let mut payload = Builder::new();
+        payload.u32(15);
+        payload.descriptor_body("null", &[]);
+        let file = abr_file(1, &[(b"desc", payload.into_vec())]);
+
+        assert_eq!(
+            read_abr(&file).unwrap_err(),
+            AbrError::UnsupportedDescriptorVersion(15)
+        );
+    }
+
+    /// An OSType outside the table is a named strict error.
+    #[test]
+    fn unknown_ostype_is_unsupported() {
+        let mut payload = Builder::new();
+        payload.u32(16);
+        payload.unicode("");
+        payload.id("null");
+        payload.u32(1);
+        payload.id("abcd");
+        payload.raw(b"zzzz");
+        let file = abr_file(1, &[(b"desc", payload.into_vec())]);
+
+        assert_eq!(
+            read_abr(&file).unwrap_err(),
+            AbrError::UnsupportedDescriptorType("zzzz".to_string())
+        );
+    }
+
+    /// A TEXT longer than the cap is refused before the string is
+    /// allocated: no text bytes follow the length, so a read-then-check
+    /// would report a truncation instead.
+    #[test]
+    fn oversized_text_is_refused_before_allocating() {
+        let mut payload = Builder::new();
+        payload.u32(16);
+        payload.unicode("");
+        payload.id("null");
+        payload.u32(1);
+        payload.id("Nm  ");
+        payload.raw(b"TEXT");
+        payload.u32(u32::try_from(MAX_TEXT_CHARS + 1).expect("the cap fits a u32"));
+        let file = abr_file(1, &[(b"desc", payload.into_vec())]);
+
+        assert_eq!(
+            read_abr(&file).unwrap_err(),
+            AbrError::DescriptorTooLarge {
+                what: "text",
+                count: (MAX_TEXT_CHARS + 1) as u64,
+                max: MAX_TEXT_CHARS as u64,
+            }
+        );
+    }
+
+    /// Lists nested past the depth cap are refused by name.
+    #[test]
+    fn nesting_past_the_depth_cap_is_refused() {
+        let mut deep = Val::List(Vec::new());
+        for _ in 0..MAX_DESC_DEPTH {
+            deep = Val::List(vec![deep]);
+        }
+        let file = abr_file(1, &[(b"desc", root_payload(&[("deep", deep)]))]);
+
+        assert_eq!(
+            read_abr(&file).unwrap_err(),
+            AbrError::DescriptorTooLarge {
+                what: "nesting depth",
+                count: (MAX_DESC_DEPTH + 1) as u64,
+                max: MAX_DESC_DEPTH as u64,
+            }
+        );
+    }
+
+    /// An unknown unit code is refused by name.
+    #[test]
+    fn unknown_unit_code_is_invalid() {
+        let payload = root_payload(&[("Dmtr", Val::Units(b"#Zzz", 1.0))]);
+        let file = abr_file(1, &[(b"desc", payload)]);
+
+        assert_eq!(
+            read_abr(&file).unwrap_err(),
+            AbrError::InvalidDescriptorUnits("#Zzz".to_string())
+        );
+    }
+
+    /// A desc whose declared 8BIM size runs past EOF is a malformed
+    /// DESCRIPTOR under `read_abr`; `read_samples` keeps row 268's plain
+    /// `Malformed`.
+    #[test]
+    fn truncated_desc_is_malformed_descriptor() {
+        let mut file = Builder::new();
+        file.i16(6);
+        file.i16(1);
+        file.raw(b"8BIM");
+        file.raw(b"desc");
+        file.u32(64);
+        file.u32(16);
+        file.u32(0);
+        let file = file.into_vec();
+
+        let error = read_abr(&file).unwrap_err();
+        assert!(
+            matches!(error, AbrError::MalformedDescriptor { .. }),
+            "expected MalformedDescriptor, got {error:?}"
+        );
+        let error = read_samples(&file).unwrap_err();
+        assert!(
+            matches!(error, AbrError::Malformed { .. }),
+            "expected Malformed, got {error:?}"
+        );
+    }
+
+    /// A `phry` section is parsed (a bad version is caught) and ignored.
+    #[test]
+    fn phry_section_parses_and_is_ignored() {
+        let phry = root_payload(&[("Nm  ", Val::Text("physics"))]);
+        let file = abr_file(1, &[(b"phry", phry), (b"samp", tip_record())]);
+
+        let abr = read_abr(&file).expect("the phry fixture parses");
+        assert!(abr.brushes.is_empty());
+        assert_eq!(abr.skipped_shape_classes, 0);
+        assert_eq!(abr.samples.len(), 1);
+        assert_eq!(abr.samples[0].alpha, TIP_ALPHA);
+
+        let mut bad = Builder::new();
+        bad.u32(15);
+        let bad_file = abr_file(1, &[(b"phry", bad.into_vec())]);
+        assert_eq!(
+            read_abr(&bad_file).unwrap_err(),
+            AbrError::UnsupportedDescriptorVersion(15)
+        );
+    }
+
+    /// `read_abr` keeps the v8 refusal unchanged.
+    #[test]
+    fn read_abr_refuses_v8() {
+        let mut file = Builder::new();
+        file.i16(8);
+        file.i16(2);
+        file.raw(b"8BIM");
+        file.raw(b"desc");
+        file.u32(0);
+
+        assert_eq!(
+            read_abr(&file.into_vec()).unwrap_err(),
+            AbrError::UnsupportedVersion { version: 8 }
+        );
+    }
+
+    /// The garbage desc `read_samples` skips (pin above) is refused by
+    /// the strict full read: the samples-only mode is what keeps it green.
+    #[test]
+    fn read_abr_parses_the_desc_read_samples_skips() {
+        let descriptor = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+        let file = abr_file(1, &[(b"desc", descriptor)]);
+
+        assert!(read_samples(&file)
+            .expect("samples-only skips desc")
+            .is_empty());
+        assert_eq!(
+            read_abr(&file).unwrap_err(),
+            AbrError::UnsupportedDescriptorVersion(0xDEAD_BEEF)
         );
     }
 }
