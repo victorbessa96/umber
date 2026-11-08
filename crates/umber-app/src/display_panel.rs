@@ -103,6 +103,23 @@
 //! same fn" shape above); the Overlays popover (viewport.rs) gains the
 //! same call with the overlay draw and chords — step 3. The N hint and
 //! the pending line say what is not wired yet rather than implying it.
+//!
+//! # The projection rows (projection-fill row 281, closes R-A2 v1)
+//!
+//! [`projection_rows`] draws the decal projector's section: path +
+//! Load…, the refusal line, Arm (freeze view), Opacity, Apply to paint.
+//! Same type-free shape as the stencil: [`ProjectionRow`] borrows plain
+//! fields and never names `crate::projection` (the bin's `main.rs`
+//! `projection_section` adapts the state). With this row the decal
+//! projector is usable end to end: load → arm/freeze → S-chords place →
+//! Apply writes through the frozen camera into the ordinary layers,
+//! stencil-gated. Judgment calls: the Arm checkbox reports a flip and
+//! never writes the flag itself (arming must freeze the camera, which
+//! only the caller can reach); Apply is enabled only with an image AND
+//! armed, even though a disarmed state keeps its frozen placement (the
+//! brief's rule — Apply reads as "apply what the armed view shows");
+//! the opacity field resets to [`DEFAULT_STENCIL_OPACITY`], the value
+//! `projection::DEFAULT_PROJECTION_OPACITY` carries over.
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -377,6 +394,98 @@ pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
         );
         ui.add_enabled(false, egui::Label::new(line));
     }
+    out
+}
+
+/// What the projection rows show and edit (projection-fill row 281; see
+/// the module docs' projection section for why this borrows fields
+/// instead of naming `crate::projection::ProjectionState`).
+pub struct ProjectionRow<'a> {
+    /// The loaded image's file, if any.
+    pub path: Option<&'a Path>,
+    /// The last load's refusal (already localized by the state).
+    pub load_error: Option<&'a str>,
+    /// Whether an image is loaded (Arm, opacity and Apply need one).
+    pub has_image: bool,
+    /// Whether the projection is armed (the S-chords drive it and a
+    /// placement is frozen).
+    pub armed: bool,
+    /// The overlay preview + applied alpha, `0..=1`.
+    pub opacity: &'a mut f32,
+}
+
+/// What the projection rows asked for this frame.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ProjectionRowResponse {
+    /// Load… picked this file.
+    pub picked: Option<PathBuf>,
+    /// The Arm checkbox flipped (the caller arms/re-freezes or disarms).
+    pub toggled_arm: bool,
+    /// Apply was clicked.
+    pub apply: bool,
+    /// The opacity field's new value, when it changed this frame.
+    pub opacity: Option<f32>,
+}
+
+/// The projection section's rows over `row`: title, path + Load…, the
+/// refusal line, Arm, Opacity, Apply (enabled only with an image AND
+/// armed — the frozen placement Apply rasterizes through).
+pub fn projection_rows(ui: &mut Ui, row: ProjectionRow<'_>) -> ProjectionRowResponse {
+    let mut out = ProjectionRowResponse::default();
+    ui.label(i18n::tr("overlays.projection"));
+    ui.horizontal(|ui| {
+        let path = match row.path {
+            Some(path) => path.display().to_string(),
+            None => i18n::tr("overlays.projection-no-image"),
+        };
+        ui.weak(path);
+        if ui.button(i18n::tr("overlays.projection-load")).clicked() {
+            out.picked = rfd::FileDialog::new()
+                .add_filter("PNG / SVG", &["png", "svg"])
+                .pick_file();
+        }
+    });
+    if let Some(reason) = row.load_error {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            i18n::tr_args(
+                "overlays.projection-load-failed",
+                [("reason", FluentValue::from(reason))],
+            ),
+        );
+    }
+    // The checkbox edits a local copy: the caller owns the arm (it must
+    // freeze the camera), so the flip is reported, not written.
+    let mut armed = row.armed;
+    out.toggled_arm = ui
+        .add_enabled(
+            row.has_image,
+            egui::Checkbox::new(&mut armed, i18n::tr("overlays.projection-arm")),
+        )
+        .changed();
+    ui.add_enabled_ui(row.has_image, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(i18n::tr("overlays.projection-opacity"));
+            // The reset value is the stencil overlay's default, which
+            // `projection::DEFAULT_PROJECTION_OPACITY` carries over (a
+            // main.rs test pins the two equal).
+            let field = ValueField::new(&mut *row.opacity)
+                .percent(true)
+                .context_menu(crate::i18n::prop_menu_labels())
+                .default_value(DEFAULT_STENCIL_OPACITY)
+                .range(0.0..=1.0)
+                .step(0.05);
+            if ui.add(field).changed() {
+                out.opacity = Some(*row.opacity);
+            }
+        });
+    });
+    out.apply = ui
+        .add_enabled(
+            row.has_image && row.armed,
+            egui::Button::new(i18n::tr("overlays.projection-apply")),
+        )
+        .clicked();
     out
 }
 
@@ -1015,6 +1124,62 @@ mod tests {
     }
 
     #[test]
+    fn projection_rows_report_arm_and_gate_apply_on_image_and_arm() {
+        // (armed, opacity, has_image, toggled-arm seen, apply seen)
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        type RowState = (bool, f32, bool, bool, bool);
+        let build = |has_image: bool, armed: bool| {
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(360.0, 260.0))
+                .build_ui_state(
+                    |ui, s: &mut RowState| {
+                        let (armed, opacity, has_image, toggled, applied) = s;
+                        let response = projection_rows(
+                            ui,
+                            ProjectionRow {
+                                path: None,
+                                load_error: None,
+                                has_image: *has_image,
+                                armed: *armed,
+                                opacity,
+                            },
+                        );
+                        *toggled |= response.toggled_arm;
+                        *applied |= response.apply;
+                    },
+                    (armed, DEFAULT_STENCIL_OPACITY, has_image, false, false),
+                )
+        };
+        // Image, unarmed: Arm reports the flip but never writes the flag
+        // (the caller freezes the camera); Apply is disabled.
+        let mut harness = build(true, false);
+        harness.run();
+        harness.get_by_label("Arm (freeze view)").click();
+        harness.run();
+        harness.get_by_label("Apply to paint").click();
+        harness.run();
+        assert!(harness.state().3, "the arm flip is reported");
+        assert!(!harness.state().0, "the panel never writes `armed`");
+        assert!(!harness.state().4, "Apply is disabled while unarmed");
+        assert_eq!(harness.state().1, DEFAULT_STENCIL_OPACITY);
+        // Image AND armed: Apply fires.
+        let mut harness = build(true, true);
+        harness.run();
+        harness.get_by_label("Apply to paint").click();
+        harness.run();
+        assert!(harness.state().4, "Apply fires with an image and armed");
+        // Armed but no image: Arm and Apply are both disabled.
+        let mut harness = build(false, true);
+        harness.run();
+        harness.get_by_label("Arm (freeze view)").click();
+        harness.run();
+        harness.get_by_label("Apply to paint").click();
+        harness.run();
+        assert!(!harness.state().3 && !harness.state().4);
+    }
+
+    #[test]
     fn overlay_keys_exist_in_both_catalogs() {
         let i18n = i18n::I18n::builtin();
         for key in [
@@ -1039,6 +1204,13 @@ mod tests {
             "overlays.stencil-unsupported",
             "overlays.stencil-n-hint",
             "overlays.stencil-gate-live",
+            "overlays.projection",
+            "overlays.projection-no-image",
+            "overlays.projection-load",
+            "overlays.projection-load-failed",
+            "overlays.projection-arm",
+            "overlays.projection-apply",
+            "overlays.projection-opacity",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");

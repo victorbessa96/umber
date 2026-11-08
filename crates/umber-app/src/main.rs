@@ -185,6 +185,10 @@ use set_switch::PendingResize;
 pub use umber_app::dock_rail;
 pub use umber_app::set_switch;
 pub use umber_app::stencil;
+// The decal projector's session module (projection-fill rows 278/281):
+// the lib owns it; this re-export gives the shell the same `projection::`
+// path the stencil has (row 280's viewport docs named it missing).
+pub use umber_app::projection;
 
 use bakes_panel::{BakesContext, BakesPanel};
 use brush_panel::BrushPanel;
@@ -525,6 +529,14 @@ struct PanelViewer<'a> {
     dormant: &'a std::collections::HashSet<u64>,
     /// The session stencil (the Display panel's stencil section edits it).
     stencil: &'a mut stencil::StencilState,
+    /// The session decal projector (projection-fill row 281): the
+    /// Display panel's projection section edits it, the viewport draws
+    /// and chord-edits it while armed.
+    projection: &'a mut projection::ProjectionState,
+    /// The rect the viewport last drew in (captured at its ui call, read
+    /// by the projection section's Arm/Apply; `None` before the viewport
+    /// tab has drawn once).
+    projection_view_rect: &'a mut Option<egui::Rect>,
     /// Preferences ▸ Interface ▸ brush shelf (U3).
     show_brush_shelf: &'a bool,
     /// Each leaf's tab list and the closed panels, snapshotted before the
@@ -684,15 +696,27 @@ impl TabViewer for PanelViewer<'_> {
                         recovery: Some(recovery),
                     },
                 );
-                let click = self.viewport.ui_with_home(
+                // The rect the viewport is about to claim: `ui_with_stencil`
+                // allocates exactly `available_rect_before_wrap()` (nothing
+                // draws on `ui` between here and there), so this IS its
+                // rect. Kept for the projection section's Arm (the frozen
+                // placement) and Apply — the Display tab cannot see it.
+                let view_rect = ui.available_rect_before_wrap();
+                if view_rect.width() > 0.0 && view_rect.height() > 0.0 {
+                    *self.projection_view_rect = Some(view_rect);
+                }
+                let click = self.viewport.ui_with_stencil(
                     ui,
                     self.gpu,
                     self.paint.as_deref_mut(),
                     self.stylus_pressure,
                     self.display_lut,
                     self.postfx,
-                    home,
-                    Some(&mut *self.stencil),
+                    viewport::ViewportExtras {
+                        home,
+                        stencil: Some(&mut *self.stencil),
+                        projection: Some(&mut *self.projection),
+                    },
                 );
                 // The card's click (or the double-click) is collected and
                 // the app drains it after the dock: the viewer cannot
@@ -1553,6 +1577,20 @@ impl TabViewer for PanelViewer<'_> {
                     // to umber-paint's hook (`stencil`).
                     stencil::panel_section(ui, self.stencil, self.paint.as_deref_mut());
                     ui.separator();
+                    // The decal projector (projection-fill row 281): Load
+                    // adopts + arms, Arm toggles (re-freezing), Apply
+                    // writes through the frozen camera.
+                    projection_section(
+                        ui,
+                        ProjectionSectionCtx {
+                            projection: &mut *self.projection,
+                            view_rect: *self.projection_view_rect,
+                            viewport: &mut *self.viewport,
+                            mesh: self.mesh,
+                            paint: self.paint.as_deref_mut(),
+                        },
+                    );
+                    ui.separator();
                     // The view mode decides whether an active chain is
                     // live or bypassed (data modes) — the status line.
                     let mode = self.viewport.view_mode();
@@ -1560,6 +1598,130 @@ impl TabViewer for PanelViewer<'_> {
                 });
             }
         }
+    }
+}
+
+/// What the Display panel's projection section reads and edits (one
+/// struct: the section needs six inputs and the borrow split is clearer
+/// spelled out at the call site).
+struct ProjectionSectionCtx<'a> {
+    projection: &'a mut projection::ProjectionState,
+    /// The rect the viewport last drew in (`None` before its first frame).
+    view_rect: Option<egui::Rect>,
+    viewport: &'a mut Viewport,
+    mesh: Option<&'a umber_mesh::MeshData>,
+    paint: Option<&'a mut paint_state::PaintState>,
+}
+
+/// The `view` a freshly loaded projection fits to (`[width, height]`).
+///
+/// Judgment call (row 281): the brief said "the active tile dims, mirroring
+/// the stencil", but a projection's transform lives in VIEWPORT-LOCAL px
+/// (`projection.rs` module docs: the S-chords, `overlay_quad` and the
+/// raster through the frozen rect all read that space), so the viewport
+/// rect's size wins when the viewport has drawn. Without it the stencil's
+/// rule applies: the active tile's dims, else the image's own dims
+/// (scale 1), else zero.
+fn projection_fit_view(
+    view_rect: Option<[f32; 2]>,
+    tile_dims: Option<(u32, u32)>,
+    image_dims: Option<(u32, u32)>,
+) -> [f32; 2] {
+    match (view_rect, tile_dims, image_dims) {
+        (Some(view), _, _) => view,
+        (None, Some((w, h)), _) | (None, None, Some((w, h))) => [w as f32, h as f32],
+        (None, None, None) => [0.0, 0.0],
+    }
+}
+
+/// The Display panel's projection section (projection-fill row 281, the
+/// last v1 row of `docs/specs/projection-fill-plan.md`): draws
+/// [`display_panel::projection_rows`] over the session's
+/// [`projection::ProjectionState`] and acts on its response. With this
+/// the decal projector is usable end to end: Load adopts the image and
+/// ARMS (freezing the viewport's live camera + rect), the S-chords place
+/// it on the viewport (row 280), Apply rasterizes through the FROZEN
+/// placement and writes into the ordinary paint layers, stencil-gated
+/// (row 279's `PaintState::apply_projection`).
+///
+/// Judgment calls: Arm without a known viewport rect (the viewport tab
+/// has not drawn yet) stays unarmed and logs, because a frozen placement
+/// needs a rect; a refused load keeps the previous image and does not
+/// re-arm; Apply passes the frozen rect as the "live" rect argument
+/// (`Viewport::apply_projection` ignores it by design).
+fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
+    let ProjectionSectionCtx {
+        projection: state,
+        view_rect,
+        viewport,
+        mesh,
+        paint,
+    } = ctx;
+    let mut opacity = state.opacity;
+    let response = display_panel::projection_rows(
+        ui,
+        display_panel::ProjectionRow {
+            path: state.path.as_deref(),
+            load_error: state.load_error.as_deref(),
+            has_image: state.image.is_some(),
+            armed: state.armed,
+            opacity: &mut opacity,
+        },
+    );
+    if let Some(v) = response.opacity {
+        state.opacity = v;
+    }
+    if let Some(path) = response.picked {
+        // The cap: the module's own constant, the same 2048² as
+        // `umber_core::svg::DEFAULT_SVG_RASTER_PIXELS` but already `u32`.
+        let cap = projection::DEFAULT_MAX_PROJECTION_PIXELS;
+        let result = projection::load_image_rgba8(&path, cap);
+        let tile_dims = paint
+            .as_deref()
+            .map(|p| p.quick_mask_for_tile(p.active_tile()).dimensions());
+        let image_dims = result.as_ref().ok().map(|i| (i.width(), i.height()));
+        let view = projection_fit_view(
+            view_rect.map(|r| [r.width(), r.height()]),
+            tile_dims,
+            image_dims,
+        );
+        let loaded = result.is_ok();
+        state.adopt(path, result, view);
+        if loaded {
+            arm_projection(state, viewport, view_rect);
+        }
+    }
+    if response.toggled_arm {
+        if state.armed {
+            state.disarm();
+        } else {
+            arm_projection(state, viewport, view_rect);
+        }
+    }
+    if response.apply {
+        let frozen_rect = state.frozen.map(|f| f.rect);
+        match (mesh, paint, frozen_rect) {
+            (Some(mesh), Some(paint), Some(rect)) => {
+                if !viewport.apply_projection(rect, mesh, paint, state) {
+                    log::info!("projection: Apply wrote nothing (refused or no texel changed)");
+                }
+            }
+            _ => log::warn!("projection: Apply needs a mesh, a paint session and an armed view"),
+        }
+    }
+}
+
+/// Arms `state` with the viewport's LIVE camera and `view_rect` (the
+/// frozen placement; re-arming re-freezes). Without a rect (the viewport
+/// tab has not drawn yet) it stays unarmed and logs.
+fn arm_projection(
+    state: &mut projection::ProjectionState,
+    viewport: &Viewport,
+    view_rect: Option<egui::Rect>,
+) {
+    match view_rect {
+        Some(rect) => state.arm(viewport.camera(), rect),
+        None => log::warn!("projection: the viewport has not drawn yet; Arm needs its rect"),
     }
 }
 
@@ -1683,6 +1845,13 @@ pub struct AppState {
     /// transform, gating flag, overlay opacity and the staged gate.
     /// Session state, never serialized.
     pub stencil: stencil::StencilState,
+    /// The session decal projector (projection-fill row 281): image,
+    /// placement, opacity, arm + the frozen camera. Session state, never
+    /// serialized (like the stencil).
+    pub projection: projection::ProjectionState,
+    /// The rect the viewport last drew in (the projection's Arm freezes
+    /// it). Session-only; `None` until the viewport tab first draws.
+    pub projection_view_rect: Option<egui::Rect>,
     /// Mesh-map import by naming convention (§7 P1 row): the folder-scan
     /// routing + unmatched report + session texture set (channels ensured
     /// on apply). Owns the session set so imported user channels survive
@@ -5255,6 +5424,8 @@ impl eframe::App for UmberApp {
                         import_badges: &self.state.import_badges,
                         dormant: &self.state.dormant,
                         stencil: &mut self.state.stencil,
+                        projection: &mut self.state.projection,
+                        projection_view_rect: &mut self.state.projection_view_rect,
                         store: store.as_ref(),
                         hdr_mode: &mut self.hdr_mode,
                         stylus_pressure,
@@ -7573,5 +7744,46 @@ mod tab_overflow_dock_tests {
         let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
         assert!(leaf.scroll < 0.0);
         disarm(&ctx);
+    }
+}
+
+/// Projection-fill row 281 (the shell half): the fit-view rule and the
+/// opacity-default carry-over the panel's field leans on.
+#[cfg(test)]
+mod projection_section_tests {
+    use super::{display_panel, projection, projection_fit_view};
+
+    #[test]
+    fn the_viewport_rect_wins_then_the_tile_then_the_image_then_zero() {
+        // The drawn viewport's size beats every other source.
+        assert_eq!(
+            projection_fit_view(Some([800.0, 600.0]), Some((2048, 2048)), Some((64, 32))),
+            [800.0, 600.0]
+        );
+        // No viewport yet: the stencil's rule — the active tile's dims.
+        assert_eq!(
+            projection_fit_view(None, Some((1024, 512)), Some((64, 32))),
+            [1024.0, 512.0]
+        );
+        // No paint session: the image's own dims (scale 1).
+        assert_eq!(
+            projection_fit_view(None, None, Some((640, 320))),
+            [640.0, 320.0]
+        );
+        assert_eq!(projection_fit_view(None, None, None), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_panel_opacity_reset_is_the_projection_default() {
+        // The panel resets its field to the stencil default because it may
+        // not name `crate::projection`; the two must stay equal.
+        assert_eq!(
+            projection::DEFAULT_PROJECTION_OPACITY,
+            display_panel::DEFAULT_STENCIL_OPACITY
+        );
+        assert_eq!(
+            projection::ProjectionState::default().opacity,
+            display_panel::DEFAULT_STENCIL_OPACITY
+        );
     }
 }

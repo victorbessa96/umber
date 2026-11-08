@@ -180,8 +180,8 @@
 //! # The decal projector's viewport wiring (projection-fill row 280)
 //!
 //! `docs/specs/projection-fill-plan.md` row 280, on top of row 278's
-//! [`umber_app::projection`] module (the lib's; the bin has no
-//! `crate::projection` re-export yet). The shell hands its
+//! [`umber_app::projection`] module (the lib's; main.rs re-exports it as
+//! `projection::` since row 281). The shell hands its
 //! [`ProjectionState`] in through
 //! [`ViewportExtras::projection`]; `None` (every [`Viewport::ui_with_home`]
 //! call until row 281 wires main.rs) changes nothing. Judgment calls:
@@ -266,9 +266,8 @@
 //!   with the drag, as before).
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
-// The lib owns the projection module (row 278); the bin has no
-// `crate::projection` re-export yet (main.rs is row 281's surface), so
-// the path names the lib directly — the same types either way.
+// The lib owns the projection module (row 278); main.rs re-exports it
+// (row 281), so the path names the lib directly — the same types either way.
 use umber_app::projection::{overlay_quad, rasterize_projection, ProjectionState};
 use umber_color::{apply_display_chain, DisplaySettings};
 use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
@@ -1524,10 +1523,7 @@ impl Viewport {
     ///
     /// `false` without an image or a frozen placement (no paint call), on
     /// a degenerate raster, or when the paint state refused / changed
-    /// nothing.
-    // `dead_code`: the shell's Apply button calls this once row 281 wires
-    // main.rs + the panel (main.rs is outside row 280's surface).
-    #[allow(dead_code)]
+    /// nothing. The shell's Apply button (row 281) calls this.
     pub fn apply_projection(
         &mut self,
         rect: egui::Rect,
@@ -1872,6 +1868,13 @@ impl Viewport {
     /// The navigation preset (the status bar's hints read it).
     pub fn nav_preset(&self) -> crate::navigation::NavPreset {
         self.nav
+    }
+
+    /// The LIVE camera, by value (`OrbitCamera` is `Copy`): the shell's
+    /// projection Arm freezes it (projection-fill row 281; the brief's
+    /// sanctioned "tiny accessor" — no other surface reaches it).
+    pub fn camera(&self) -> OrbitCamera {
+        self.camera
     }
 
     /// Sets the front-face falloff start angle in degrees, or `None` to

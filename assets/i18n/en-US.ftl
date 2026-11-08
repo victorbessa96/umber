@@ -999,6 +999,13 @@ overlays =
     .stencil-unsupported-svg = the SVG could not be used: { $detail }
     .stencil-n-hint = N toggles the stencil — paint passes through while it is ignored.
     .stencil-gate-live = Gate live ({ $width }×{ $height }, { $open }% open) — paint passes only where it opens.
+    .projection = Projection
+    .projection-no-image = no image
+    .projection-load = Load…
+    .projection-load-failed = projection load failed: { $reason }
+    .projection-arm = Arm (freeze view)
+    .projection-apply = Apply to paint
+    .projection-opacity = Opacity
 
 ## Shared colour-picker row labels (picker-app-sites; channel letters are
 ## the international convention — a locale may localize them)

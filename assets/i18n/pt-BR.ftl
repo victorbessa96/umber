@@ -1018,6 +1018,13 @@ overlays =
     .stencil-unsupported-svg = não foi possível usar o SVG: { $detail }
     .stencil-n-hint = N alterna o estêncil — a tinta passa livre enquanto ele é ignorado.
     .stencil-gate-live = Máscara ativa ({ $width }×{ $height }, { $open }% aberta) — a tinta passa apenas onde ela abre.
+    .projection = Projeção
+    .projection-no-image = sem imagem
+    .projection-load = Carregar…
+    .projection-load-failed = falha ao carregar a projeção: { $reason }
+    .projection-arm = Armar (congelar visão)
+    .projection-apply = Aplicar na pintura
+    .projection-opacity = Opacidade
 
 ## Rótulos compartilhados da linha do seletor de cores (picker-app-sites;
 ## letras de canal são a convenção internacional — uma localização pode traduzi-las)
