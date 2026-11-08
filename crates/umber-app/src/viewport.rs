@@ -177,6 +177,50 @@
 //!   handoff (a `ShellAction` row; P-in-viewport is the alternative
 //!   precedent).
 //!
+//! # The decal projector's viewport wiring (projection-fill row 280)
+//!
+//! `docs/specs/projection-fill-plan.md` row 280, on top of row 278's
+//! [`umber_app::projection`] module (the lib's; the bin has no
+//! `crate::projection` re-export yet). The shell hands its
+//! [`ProjectionState`] in through
+//! [`ViewportExtras::projection`]; `None` (every [`Viewport::ui_with_home`]
+//! call until row 281 wires main.rs) changes nothing. Judgment calls:
+//!
+//! - **Arming routes the S-chords**: while the handed-in projection is
+//!   armed AND holds an image, an S+button drag edits
+//!   `projection.transform` (same [`StencilChord`] set, same
+//!   [`stencil_drag`] mapping, same Shift snap); the stencil's chords stand
+//!   down. Unarmed, the stencil keeps its chords exactly as before. An
+//!   armed projection WITHOUT an image routes nothing (it has no dims to
+//!   map with), so the stencil keeps the chords then too.
+//! - **Never two drags at once**: the projection latches only while no
+//!   stencil drag is in flight, and the stencil latches only while the
+//!   projection is unarmed and no projection drag is in flight. A drag
+//!   already latched runs to its release whatever arms meanwhile.
+//! - **The chord frame is read once** ([`ChordFrame`], every egui input
+//!   the chords consume) and both input blocks run from it, so the routing
+//!   is pinnable without an egui frame or a GPU mesh.
+//! - **The projection's release re-stages nothing**: unlike the stencil,
+//!   its transform feeds no paint gate (Apply rasterizes on demand).
+//! - **The overlay is an untextured quad** (v1): the corners of
+//!   [`overlay_quad`] as a translucent polygon in the
+//!   theme accent (`visuals.selection.bg_fill`), its fill at the
+//!   projection's opacity times [`PROJECTION_FILL_FACTOR`] (0.25), plus a
+//!   1 px accent border. No texture upload: the stencil's texture
+//!   path stays stencil-only. Drawn only while armed with an image, in the
+//!   stencil's slot (after it, so the armed decal reads on top).
+//! - **Apply ([`Viewport::apply_projection`]) rasterizes through the
+//!   FROZEN placement**, never the live camera or rect: the target dims
+//!   are the active tile's quick-mask dims (`stencil::panel_section`'s
+//!   target-dims rule), the texels come from
+//!   [`rasterize_projection`], and
+//!   `PaintState::apply_projection` (row 279) blends them at
+//!   `projection.opacity`.
+//! - **v1 cut line**: no tiling/repeat; no live projector (the frozen
+//!   placement never re-projects after arm — re-arm re-freezes); no depth
+//!   or backface culling (`rasterize_projection` writes every texel whose
+//!   projection lands in the image).
+//!
 //! # The camera mid-stroke (pwys-stroke-buffer, option A)
 //!
 //! docs/specs/pwys-stroke-buffer-design.md, "The v1 choice: A"
@@ -222,6 +266,10 @@
 //!   with the drag, as before).
 
 use egui::{Color32, PointerButton, Response, Sense, Ui};
+// The lib owns the projection module (row 278); the bin has no
+// `crate::projection` re-export yet (main.rs is row 281's surface), so
+// the path names the lib directly — the same types either way.
+use umber_app::projection::{overlay_quad, rasterize_projection, ProjectionState};
 use umber_color::{apply_display_chain, DisplaySettings};
 use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
 use umber_gpu::postfx::PostChain;
@@ -480,6 +528,10 @@ pub struct Viewport {
     /// An S-chord stencil drag in flight (latched at its press; see the
     /// module docs' stencil section).
     stencil_drag: Option<StencilDrag>,
+    /// An S-chord PROJECTION drag in flight (projection-fill row 280: the
+    /// same chord-shaped latch, editing the armed projection's transform;
+    /// never `Some` alongside [`Self::stencil_drag`]).
+    projection_drag: Option<StencilDrag>,
     /// The stencil overlay's texture and the image it was built from.
     stencil_texture: Option<(StencilTextureKey, egui::TextureHandle)>,
 }
@@ -493,6 +545,10 @@ pub struct ViewportExtras<'a> {
     /// The session's stencil: drawn, chord-edited and hosted in the
     /// Overlays popover. `None` = no stencil at all.
     pub stencil: Option<&'a mut StencilState>,
+    /// The session's decal projector (projection-fill row 280): while
+    /// armed it takes the S-chords and draws its quad. `None` = no
+    /// projector (row 281 wires the shell's state).
+    pub projection: Option<&'a mut ProjectionState>,
 }
 
 /// Which transform an S-chord drag edits (g6-stencil-overlay).
@@ -739,7 +795,11 @@ impl Viewport {
         home: Option<crate::empty_state::HomeCardInput<'_>>,
         stencil: Option<&mut StencilState>,
     ) -> Option<ViewportClick> {
-        let extras = ViewportExtras { home, stencil };
+        let extras = ViewportExtras {
+            home,
+            stencil,
+            projection: None,
+        };
         self.ui_with_stencil(ui, gpu, paint, stylus_pressure, display_lut, postfx, extras)
     }
 
@@ -758,7 +818,11 @@ impl Viewport {
         postfx: &PostChain,
         extras: ViewportExtras<'_>,
     ) -> Option<ViewportClick> {
-        let ViewportExtras { home, mut stencil } = extras;
+        let ViewportExtras {
+            home,
+            mut stencil,
+            mut projection,
+        } = extras;
 
         // THE TILE OBSERVER (the cross-tile-stroke residual seam):
         // umber-paint's `push_event_styled` moves `active_tile` when a
@@ -800,12 +864,14 @@ impl Viewport {
 
         // The stencil chords (S + LMB / RMB / MMB, the module docs): run
         // before every other click/drag consumer, which all stand down
-        // while the chord owns the pointer.
-        let stencil_owns = self.stencil_input(
-            ui,
-            &response,
-            rect,
+        // while the chord owns the pointer. An armed projection takes the
+        // same chords (row 280); `stencil_owns` is "a chord owns the
+        // pointer", whichever target it edits.
+        let chords = ChordFrame::read(ui, &response, rect, self.mesh.is_some());
+        let stencil_owns = self.chord_input(
+            &chords,
             stencil.as_deref_mut(),
+            projection.as_deref_mut(),
             paint.as_deref_mut(),
         );
 
@@ -1238,6 +1304,11 @@ impl Viewport {
         if let (true, Some(s)) = (self.mesh.is_some(), stencil.as_deref()) {
             self.paint_stencil_overlay(ui, rect, s);
         }
+        // The armed projector's quad (row 280): the same slot, after the
+        // stencil so the decal being placed reads on top.
+        if let (true, Some(p)) = (self.mesh.is_some(), projection.as_deref()) {
+            self.paint_projection_overlay(ui, rect, p);
+        }
         // The brush cursor (GUI plan G1): the ring at the brush's on-screen
         // radius, over everything above. Drawn last so no overlay hides it.
         self.paint_line_preview(ui, &response, rect);
@@ -1312,13 +1383,17 @@ impl Viewport {
     /// `stencil.transform`, and re-stages the gate once on release.
     /// Returns whether the stencil owns the pointer this frame (a latched
     /// drag, or S armed on a click), which every other consumer obeys.
+    ///
+    /// `chords_free` is the projector's routing (row 280): `false` while
+    /// an armed projection holds the chords, so no NEW stencil drag
+    /// latches (one already in flight still runs to its release, and N
+    /// still toggles).
     fn stencil_input(
         &mut self,
-        ui: &Ui,
-        response: &Response,
-        rect: egui::Rect,
+        frame: &ChordFrame,
         stencil: Option<&mut StencilState>,
         mut paint: Option<&mut PaintState>,
+        chords_free: bool,
     ) -> bool {
         let Some(stencil) = stencil else {
             self.stencil_drag = None;
@@ -1328,56 +1403,21 @@ impl Viewport {
         // through, the overlay hides). Only with an image, never while
         // a text field has the keyboard, and the gate follows the
         // flip immediately through the unified re-stage + hand-off.
-        if stencil.image.is_some()
-            && ui.input(|i| i.key_pressed(egui::Key::N))
-            && !ui.ctx().memory(|m| m.focused().is_some())
-        {
+        if stencil.image.is_some() && frame.n_pressed {
             stencil.active = !stencil.active;
             restage_stencil(stencil, paint.as_deref_mut());
         }
-        let mods = ui.input(|i| i.modifiers);
-        let armed = self.mesh.is_some()
-            && stencil.active
-            && stencil.image.is_some()
-            && !mods.alt
-            && !(mods.ctrl || mods.command)
-            && ui.input(|i| i.key_down(egui::Key::S));
-        let local = |p: egui::Pos2| [p.x - rect.min.x, p.y - rect.min.y];
+        let armed = chords_free && frame.s_held && stencil.active && stencil.image.is_some();
         if self.stencil_drag.is_none() && armed {
-            let started = [
-                PointerButton::Primary,
-                PointerButton::Secondary,
-                PointerButton::Middle,
-            ]
-            .into_iter()
-            .find(|b| response.drag_started_by(*b));
-            let chord = started.and_then(StencilChord::for_button);
-            // Map from the PRESS: drag_started fires past the threshold.
-            let origin = ui
-                .input(|i| i.pointer.press_origin())
-                .or_else(|| response.interact_pointer_pos());
-            if let (Some(chord), Some(origin)) = (chord, origin) {
-                self.stencil_drag = Some(StencilDrag {
-                    chord,
-                    start: stencil.transform,
-                    origin: local(origin),
-                });
-            }
+            self.stencil_drag = frame.latch(stencil.transform);
         }
         let Some(drag) = self.stencil_drag else {
-            return armed && !response.dragged();
+            return armed && !frame.dragged;
         };
-        if response.dragged_by(drag.chord.button()) {
+        if frame.held(drag.chord.button()) {
             let dims = stencil.image.as_ref().map(|i| [i.width(), i.height()]);
-            if let (Some(pos), Some(dims)) = (response.interact_pointer_pos(), dims) {
-                stencil.transform = stencil_drag(
-                    &drag.start,
-                    drag.chord.with_snap(mods.shift),
-                    drag.origin,
-                    local(pos),
-                    dims,
-                    [rect.width(), rect.height()],
-                );
+            if let Some(t) = dims.and_then(|dims| frame.drag_to(&drag, dims)) {
+                stencil.transform = t;
             }
         } else {
             // Released: the one re-rasterize this gesture costs.
@@ -1385,6 +1425,127 @@ impl Viewport {
             restage_stencil(stencil, paint);
         }
         true
+    }
+
+    /// The projector's chord block (row 280; the module docs' projector
+    /// section): while `projection` is armed with an image, an S-held
+    /// drag latches at its press and maps every frame through
+    /// [`stencil_drag`] into `projection.transform`. Latches only while no
+    /// stencil drag is in flight. Returns whether it owns the pointer this
+    /// frame. The release re-stages nothing (no gate reads this
+    /// transform).
+    fn projection_input(
+        &mut self,
+        frame: &ChordFrame,
+        projection: Option<&mut ProjectionState>,
+    ) -> bool {
+        let Some(projection) = projection else {
+            self.projection_drag = None;
+            return false;
+        };
+        let dims = projection.image.as_ref().map(|i| [i.width(), i.height()]);
+        let armed = frame.s_held && projection.armed && dims.is_some();
+        if self.projection_drag.is_none() && self.stencil_drag.is_none() && armed {
+            self.projection_drag = frame.latch(projection.transform);
+        }
+        let Some(drag) = self.projection_drag else {
+            return armed && !frame.dragged;
+        };
+        if frame.held(drag.chord.button()) {
+            if let Some(t) = dims.and_then(|dims| frame.drag_to(&drag, dims)) {
+                projection.transform = t;
+            }
+        } else {
+            self.projection_drag = None;
+        }
+        true
+    }
+
+    /// Routes this frame's S-chords (row 280): an armed projection with
+    /// an image takes them, otherwise the stencil keeps them exactly as
+    /// before. Both blocks always run (each clears its own latch when its
+    /// target is absent, and a drag in flight runs to its release).
+    /// Returns whether either owns the pointer.
+    fn chord_input(
+        &mut self,
+        frame: &ChordFrame,
+        stencil: Option<&mut StencilState>,
+        projection: Option<&mut ProjectionState>,
+        paint: Option<&mut PaintState>,
+    ) -> bool {
+        let projection_routes = projection
+            .as_deref()
+            .is_some_and(|p| p.armed && p.image.is_some());
+        let projection_owns = self.projection_input(frame, projection);
+        let chords_free = !projection_routes && self.projection_drag.is_none();
+        let stencil_owns = self.stencil_input(frame, stencil, paint, chords_free);
+        projection_owns || stencil_owns
+    }
+
+    /// Draws the armed projector's quad (row 280; the module docs'
+    /// projector section): the corners of [`overlay_quad`] as a
+    /// translucent accent polygon, its fill alpha the opacity times
+    /// [`PROJECTION_FILL_FACTOR`], with a 1 px accent border. Untextured in v1. Nothing while unarmed or
+    /// imageless.
+    fn paint_projection_overlay(&self, ui: &Ui, rect: egui::Rect, projection: &ProjectionState) {
+        let Some(image) = projection.image.as_ref() else {
+            return;
+        };
+        if !projection.armed || projection.opacity.is_nan() {
+            return;
+        }
+        let corners = overlay_quad(&projection.transform, [image.width(), image.height()])
+            .map(|p| rect.min + p.to_vec2());
+        if corners.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+            return;
+        }
+        let accent = ui.visuals().selection.bg_fill;
+        let fill_alpha = (projection.opacity * PROJECTION_FILL_FACTOR).clamp(0.0, 1.0);
+        // A rotated, uniformly scaled rectangle: always convex.
+        let quad = egui::Shape::convex_polygon(
+            corners.to_vec(),
+            accent.gamma_multiply(fill_alpha),
+            egui::Stroke::new(PROJECTION_OUTLINE_WIDTH, accent),
+        );
+        ui.painter().with_clip_rect(rect).add(quad);
+    }
+
+    /// The projector's Apply (row 280): rasterizes `projection` into the
+    /// active tile through its FROZEN placement
+    /// ([`rasterize_projection`]) and blends it via
+    /// `PaintState::apply_projection` (row 279) at `projection.opacity`.
+    /// The target dims are the active tile's quick-mask dims
+    /// (`stencil::panel_section`'s target-dims rule).
+    ///
+    /// `rect` is the LIVE viewport rect and is deliberately unused by the
+    /// raster: the frozen placement carries its own camera and rect, so
+    /// the live view may have moved since arm (v1: no live projector; no
+    /// tiling; no depth/backface culling — see the module docs).
+    ///
+    /// `false` without an image or a frozen placement (no paint call), on
+    /// a degenerate raster, or when the paint state refused / changed
+    /// nothing.
+    // `dead_code`: the shell's Apply button calls this once row 281 wires
+    // main.rs + the panel (main.rs is outside row 280's surface).
+    #[allow(dead_code)]
+    pub fn apply_projection(
+        &mut self,
+        rect: egui::Rect,
+        mesh: &umber_mesh::MeshData,
+        paint: &mut PaintState,
+        projection: &ProjectionState,
+    ) -> bool {
+        // The live rect never reaches the raster (see above).
+        let _ = rect;
+        if projection.image.is_none() || projection.frozen.is_none() {
+            return false;
+        }
+        let tile = paint.active_tile();
+        let (w, h) = paint.quick_mask_for_tile(tile).dimensions();
+        let Some(rgba) = rasterize_projection(projection, mesh, tile, w, h) else {
+            return false;
+        };
+        paint.apply_projection(tile, w, h, &rgba, projection.opacity)
     }
 
     /// Draws the stencil quad (see the module docs): the cached coverage
@@ -2058,6 +2219,117 @@ const STENCIL_OVERLAY_MAX_SIDE: u32 = 512;
 /// red.
 const STENCIL_TINT: [u8; 3] = [190, 120, 255];
 const STENCIL_OUTLINE_WIDTH: f32 = 1.0;
+
+/// The projector overlay's fill alpha per unit of `projection.opacity`
+/// (row 280's brief: `opacity * 0.25`): faint enough that the mesh under
+/// the decal being placed stays readable.
+pub const PROJECTION_FILL_FACTOR: f32 = 0.25;
+/// The projector overlay's border width, px.
+const PROJECTION_OUTLINE_WIDTH: f32 = 1.0;
+
+/// The chord buttons, in latch priority order (LMB, RMB, MMB).
+const CHORD_BUTTONS: [PointerButton; 3] = [
+    PointerButton::Primary,
+    PointerButton::Secondary,
+    PointerButton::Middle,
+];
+
+/// One frame of the S-chord input, read once from egui
+/// ([`ChordFrame::read`]) so both chord targets — the stencil and the
+/// armed projection (row 280) — route from the same snapshot, and the
+/// routing pins without an egui frame or a GPU mesh. Positions are
+/// viewport-local px (the stencil section's space).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChordFrame {
+    /// S held with no Alt/Ctrl/Cmd and a mesh loaded (the arm condition,
+    /// minus the target's own state).
+    s_held: bool,
+    /// Shift held (Rotate's quarter-turn snap).
+    shift: bool,
+    /// N pressed this frame with no text field focused (the stencil's
+    /// toggle).
+    n_pressed: bool,
+    /// The first chord button whose drag started this frame.
+    started: Option<PointerButton>,
+    /// The press origin (`pointer.press_origin()`, else the interact
+    /// position).
+    origin: Option<[f32; 2]>,
+    /// The pointer (`interact_pointer_pos`).
+    pos: Option<[f32; 2]>,
+    /// Whether each of [`CHORD_BUTTONS`] is dragging the viewport.
+    dragged_by: [bool; 3],
+    /// The viewport is being dragged by any button.
+    dragged: bool,
+    /// The viewport's size, px.
+    view: [f32; 2],
+}
+
+impl ChordFrame {
+    /// Reads this frame's chord input off `ui` + the viewport's
+    /// `response` (exactly the reads the stencil block made inline).
+    fn read(ui: &Ui, response: &Response, rect: egui::Rect, has_mesh: bool) -> Self {
+        let mods = ui.input(|i| i.modifiers);
+        let local = |p: egui::Pos2| [p.x - rect.min.x, p.y - rect.min.y];
+        let s_held = has_mesh
+            && !mods.alt
+            && !(mods.ctrl || mods.command)
+            && ui.input(|i| i.key_down(egui::Key::S));
+        let n_pressed = ui.input(|i| i.key_pressed(egui::Key::N))
+            && !ui.ctx().memory(|m| m.focused().is_some());
+        // Map from the PRESS: drag_started fires past the threshold.
+        let origin = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| response.interact_pointer_pos())
+            .map(local);
+        Self {
+            s_held,
+            shift: mods.shift,
+            n_pressed,
+            started: CHORD_BUTTONS
+                .into_iter()
+                .find(|b| response.drag_started_by(*b)),
+            origin,
+            pos: response.interact_pointer_pos().map(local),
+            dragged_by: CHORD_BUTTONS.map(|b| response.dragged_by(b)),
+            dragged: response.dragged(),
+            view: [rect.width(), rect.height()],
+        }
+    }
+
+    /// Whether `button` is dragging the viewport this frame.
+    fn held(&self, button: PointerButton) -> bool {
+        CHORD_BUTTONS
+            .iter()
+            .position(|b| *b == button)
+            .is_some_and(|i| self.dragged_by[i])
+    }
+
+    /// The drag this frame's press latches on `start`: a chord button's
+    /// drag started and the press origin is known.
+    fn latch(&self, start: StencilTransform) -> Option<StencilDrag> {
+        let chord = self.started.and_then(StencilChord::for_button)?;
+        let origin = self.origin?;
+        Some(StencilDrag {
+            chord,
+            start,
+            origin,
+        })
+    }
+
+    /// `drag`'s transform this frame for an image of `dims` (the snap
+    /// read live), or `None` without a pointer position.
+    fn drag_to(&self, drag: &StencilDrag, dims: [u32; 2]) -> Option<StencilTransform> {
+        let pos = self.pos?;
+        Some(stencil_drag(
+            &drag.start,
+            drag.chord.with_snap(self.shift),
+            drag.origin,
+            pos,
+            dims,
+            self.view,
+        ))
+    }
+}
 /// Texture coords for [`screen_quad`]'s corner order (image rows run
 /// top-down, as egui's v does).
 const STENCIL_QUAD_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
@@ -3756,5 +4028,232 @@ mod tests {
         let (size, rgba) = stencil_overlay_rgba(&image);
         assert_eq!(size, [2, 300]);
         assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
+    }
+
+    // --- projection-fill row 280: the projector's chords + Apply ---
+
+    use umber_app::projection::RgbaImage;
+
+    /// The chords' starting transform for both targets: centered in the
+    /// 200 px view at unit scale.
+    const CHORD_START: StencilTransform = StencilTransform {
+        center: [100.0, 100.0],
+        scale: 1.0,
+        rotation: 0.0,
+    };
+
+    /// One S-held chord frame: `started` begins a drag this frame,
+    /// `held` is the MMB still dragging, the pointer sits at `pos`.
+    fn s_frame(started: Option<PointerButton>, pos: [f32; 2], held: bool) -> ChordFrame {
+        ChordFrame {
+            s_held: true,
+            shift: false,
+            n_pressed: false,
+            started,
+            origin: Some([100.0, 100.0]),
+            pos: Some(pos),
+            dragged_by: [false, false, held],
+            dragged: held,
+            view: [200.0, 200.0],
+        }
+    }
+
+    fn active_stencil() -> StencilState {
+        StencilState {
+            image: Some(stencil_image(4, 4, |_, _| true)),
+            transform: CHORD_START,
+            active: true,
+            ..StencilState::default()
+        }
+    }
+
+    fn opaque_projection(armed: bool) -> ProjectionState {
+        ProjectionState {
+            image: Some(RgbaImage::new(2, 2, vec![255; 16]).expect("2x2 RGBA")),
+            transform: CHORD_START,
+            armed,
+            ..ProjectionState::default()
+        }
+    }
+
+    /// An S+MMB move from (100, 100) to (130, 120): press, drag, release.
+    /// Returns the ownership flag of each of the three frames.
+    fn run_move(
+        viewport: &mut Viewport,
+        stencil: &mut StencilState,
+        projection: &mut ProjectionState,
+    ) -> [bool; 3] {
+        let frames = [
+            s_frame(Some(PointerButton::Middle), [100.0, 100.0], true),
+            s_frame(None, [130.0, 120.0], true),
+            s_frame(None, [130.0, 120.0], false),
+        ];
+        frames.map(|f| viewport.chord_input(&f, Some(&mut *stencil), Some(&mut *projection), None))
+    }
+
+    #[test]
+    fn armed_projection_takes_the_chords_and_unarmed_leaves_them_to_the_stencil() {
+        // Move = start center + the pointer delta (30, 20), inside the
+        // 200 px view so the clamp is idle: (130, 120) exactly.
+        let moved = [130.0, 120.0];
+        let mut viewport = Viewport::default();
+        let mut stencil = active_stencil();
+        let mut projection = opaque_projection(true);
+        let owns = run_move(&mut viewport, &mut stencil, &mut projection);
+        assert_eq!(owns, [true, true, true], "the chord owns every frame");
+        assert_eq!(
+            projection.transform.center, moved,
+            "armed: projection moves"
+        );
+        assert_eq!(stencil.transform, CHORD_START, "armed: stencil untouched");
+        assert_eq!(viewport.projection_drag, None, "released");
+        assert_eq!(viewport.stencil_drag, None, "the stencil never latched");
+
+        // Unarmed: the same gesture drives the stencil, not the projection.
+        let mut viewport = Viewport::default();
+        let mut stencil = active_stencil();
+        let mut projection = opaque_projection(false);
+        let owns = run_move(&mut viewport, &mut stencil, &mut projection);
+        assert_eq!(owns, [true, true, true]);
+        assert_eq!(stencil.transform.center, moved, "unarmed: stencil moves");
+        assert_eq!(
+            projection.transform, CHORD_START,
+            "unarmed: projection untouched"
+        );
+        assert_eq!(
+            viewport.projection_drag, None,
+            "the projection never latched"
+        );
+
+        // Armed without an image: nothing to map, the stencil keeps them.
+        let mut viewport = Viewport::default();
+        let mut stencil = active_stencil();
+        let mut projection = ProjectionState {
+            image: None,
+            ..opaque_projection(true)
+        };
+        run_move(&mut viewport, &mut stencil, &mut projection);
+        assert_eq!(
+            stencil.transform.center, moved,
+            "imageless arm: stencil moves"
+        );
+        assert_eq!(projection.transform, CHORD_START);
+    }
+
+    #[test]
+    fn a_stencil_drag_in_flight_keeps_running_when_the_projection_arms() {
+        let mut viewport = Viewport::default();
+        let mut stencil = active_stencil();
+        let mut projection = opaque_projection(false);
+        let press = s_frame(Some(PointerButton::Middle), [100.0, 100.0], true);
+        assert!(viewport.chord_input(&press, Some(&mut stencil), Some(&mut projection), None));
+        assert!(viewport.stencil_drag.is_some(), "the stencil latched");
+        // The projection arms mid-gesture: the stencil's drag runs on,
+        // and the projection does not latch alongside it.
+        projection.armed = true;
+        let drag = s_frame(None, [130.0, 120.0], true);
+        assert!(viewport.chord_input(&drag, Some(&mut stencil), Some(&mut projection), None));
+        assert_eq!(stencil.transform.center, [130.0, 120.0]);
+        assert_eq!(projection.transform, CHORD_START);
+        assert_eq!(viewport.projection_drag, None, "never two drags at once");
+    }
+
+    #[test]
+    fn projection_apply_writes_through_the_frozen_camera() {
+        // GPU-gated (the paint state needs a device). Arm head-on, then
+        // turn the LIVE camera: Apply's texels are the frozen placement's
+        // raster byte for byte, and differ from the turned camera's.
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 8).expect("paint builds");
+        let mesh = quad();
+        let mut viewport = painting_viewport();
+        let rect = rect200();
+        // Left half red, right half blue, 8x8, scale 25 = the whole
+        // 200 px view: every on-quad texel (screen ~52..148 px at the
+        // fixture's distance 5) samples the image interior, alpha 255.
+        let (red, blue) = ([255u8, 0, 0, 255], [0u8, 0, 255, 255]);
+        let mut rgba = Vec::new();
+        for _y in 0..8 {
+            for x in 0..8 {
+                rgba.extend_from_slice(if x < 4 { &red } else { &blue });
+            }
+        }
+        let mut projection = ProjectionState {
+            image: Some(RgbaImage::new(8, 8, rgba).expect("8x8 RGBA")),
+            transform: StencilTransform {
+                center: [100.0, 100.0],
+                scale: 25.0,
+                rotation: 0.0,
+            },
+            opacity: 1.0,
+            ..ProjectionState::default()
+        };
+        projection.arm(viewport.camera, rect);
+
+        let tile = paint.active_tile();
+        let (w, h) = paint.quick_mask_for_tile(tile).dimensions();
+        let frozen = rasterize_projection(&projection, &mesh, tile, w, h).expect("frozen raster");
+        assert!(
+            frozen.chunks_exact(4).all(|t| t[3] == 255),
+            "every texel opaque (the exact-replace precondition)"
+        );
+        let turned_camera = OrbitCamera {
+            yaw: ROTATED_YAW,
+            ..viewport.camera
+        };
+        let mut turned = projection.clone();
+        turned.arm(turned_camera, rect);
+        let live = rasterize_projection(&turned, &mesh, tile, w, h).expect("turned raster");
+        assert_ne!(frozen, live, "the pin can tell the two cameras apart");
+
+        // The live camera moves after arm.
+        viewport.camera = turned_camera;
+        let owner = paint.active_target();
+        let channel = paint.active_channel().to_string();
+        let depth = paint.stroke_len();
+        assert!(viewport.apply_projection(rect, &mesh, &mut paint, &projection));
+        assert_eq!(paint.stroke_len(), depth + 1, "one history entry");
+        let after = paint
+            .read_plane(owner, tile, &channel)
+            .expect("plane reads");
+        // Opaque source at opacity 1: alpha 1 replaces each texel exactly.
+        assert_eq!(after.data, frozen, "Apply wrote the FROZEN raster");
+    }
+
+    #[test]
+    fn projection_apply_without_image_or_freeze_is_refused_unpainted() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint = PaintState::with_target_size(device, queue, 8).expect("paint builds");
+        let mesh = quad();
+        let mut viewport = painting_viewport();
+        let rect = rect200();
+        let tile = paint.active_tile();
+        let owner = paint.active_target();
+        let channel = paint.active_channel().to_string();
+        let before = paint
+            .read_plane(owner, tile, &channel)
+            .expect("plane reads");
+        let depth = paint.stroke_len();
+
+        // Never armed: an image, no frozen placement.
+        let unfrozen = opaque_projection(false);
+        assert!(unfrozen.frozen.is_none());
+        assert!(!viewport.apply_projection(rect, &mesh, &mut paint, &unfrozen));
+
+        // Frozen, but no image.
+        let mut imageless = ProjectionState::default();
+        imageless.arm(viewport.camera, rect);
+        assert!(!viewport.apply_projection(rect, &mesh, &mut paint, &imageless));
+
+        assert_eq!(paint.stroke_len(), depth, "no history entry");
+        assert!(paint.take_stroke_commits().is_empty(), "no commit queued");
+        let after = paint
+            .read_plane(owner, tile, &channel)
+            .expect("plane reads");
+        assert_eq!(after.data, before.data, "no texel written");
     }
 }
