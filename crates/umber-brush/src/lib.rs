@@ -30,6 +30,7 @@ pub struct StrokeEvent {
 
 pub mod abr;
 pub(crate) mod abr_desc;
+pub mod abr_import;
 pub mod cavity;
 pub mod dab_adapter;
 pub mod falloff;
