@@ -61,7 +61,7 @@ fn main() -> Result<()> {
             println!("          mcp     [--read-root DIR] [--write-root DIR]   (MCP server on stdio, tools over the agent session)");
             println!("          serve   --port N [--read-root DIR] [--write-root DIR]   (token-auth loopback JSONL, one session per connection)");
             println!("          extract-spp <file.spp> <out-dir>   (Painter channels as <set>_<channel>.png)");
-            println!("          import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]");
+            println!("          import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]   (brush takes .umberbrush, or an .abr library fanned out to one preset per brush)");
             println!("          stencil <file.svg> [--size N] <out.png>   (SVG stencil rasterized to a PNG; --size is the pixel cap, ceiling 8192^2)");
             println!("          bench [--size N] [--rays N] [--json PATH]   (comparable bake timings)");
             println!("          --version | -V   print the version and exit");
@@ -81,9 +81,13 @@ fn inspect_cmd(args: &[String]) -> Result<()> {
 
 /// `import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env>
 /// [--library DIR] [--dry-run]` — validated asset import (assets wave
-/// K5); validation and copying live in [`import_asset`].
+/// K5); validation and copying live in [`import_asset`]. Row 284: a
+/// `--kind brush` `.abr` file fans out through
+/// [`import_asset::import_abr_asset`] and prints ONE JSON line (the
+/// [`import_asset::AbrImportOutcome`] fields); refusals exit like the
+/// single-file lane's.
 fn import_asset_cmd(args: &[String]) -> Result<()> {
-    const USAGE: &str = "usage: umber-cli import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]";
+    const USAGE: &str = "usage: umber-cli import-asset <file> --kind <smart-material|smart-mask|smart-filter|brush|env> [--library DIR] [--dry-run]\n       (brush: a .umberbrush, or an .abr library -> one .umberbrush (+ .stamp.png) per brush)";
     let mut file: Option<&str> = None;
     let mut kind: Option<import_asset::AssetKind> = None;
     let mut library: Option<&str> = None;
@@ -122,6 +126,13 @@ fn import_asset_cmd(args: &[String]) -> Result<()> {
     }
     let file = file.ok_or_else(|| anyhow::anyhow!("{USAGE}"))?;
     let kind = kind.ok_or_else(|| anyhow::anyhow!("{USAGE}"))?;
+    if kind == import_asset::AssetKind::Brush && import_asset::is_abr_path(Path::new(file)) {
+        let outcome =
+            import_asset::import_abr_asset(Path::new(file), library.map(Path::new), dry_run)
+                .map_err(|e| anyhow::anyhow!("import-asset: refused: {e}"))?;
+        println!("{}", serde_json::to_string(&outcome)?);
+        return Ok(());
+    }
     let outcome =
         import_asset::import_asset(Path::new(file), kind, library.map(Path::new), dry_run)
             .map_err(|e| anyhow::anyhow!("import-asset: refused: {e}"))?;

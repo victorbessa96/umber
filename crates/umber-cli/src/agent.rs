@@ -2153,6 +2153,12 @@ impl Session {
     /// into `library` (or the kind's per-user dir), and every refusal
     /// (bad kind, wrong extension, loader rejection, existing target)
     /// is this step's typed error. Nothing is ever silently copied.
+    ///
+    /// Row 284: a `brush` `.abr` file fans out through
+    /// [`crate::import_asset::import_abr_asset`]; the reply carries
+    /// `targets` (a list) plus the `presets` / `stamps_written` /
+    /// `duplicate_stamps_skipped` / `orphan_samples` /
+    /// `brushes_without_sample` counts instead of `target` / `bytes`.
     fn import_asset(&self, s: ImportAssetStep) -> Result<Fields> {
         let kind = AssetKind::from_name(&s.kind).ok_or_else(|| {
             anyhow::anyhow!(
@@ -2160,6 +2166,22 @@ impl Session {
                 s.kind
             )
         })?;
+        if kind == AssetKind::Brush && crate::import_asset::is_abr_path(&s.file) {
+            let out =
+                crate::import_asset::import_abr_asset(&s.file, s.library.as_deref(), s.dry_run)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            return fields(serde_json::json!({
+                "kind": out.kind.name(),
+                "source": out.source,
+                "targets": out.targets,
+                "dry_run": out.dry_run,
+                "presets": out.presets,
+                "stamps_written": out.stamps_written,
+                "duplicate_stamps_skipped": out.duplicate_stamps_skipped,
+                "orphan_samples": out.orphan_samples,
+                "brushes_without_sample": out.brushes_without_sample,
+            }));
+        }
         let out = crate::import_asset::import_asset(&s.file, kind, s.library.as_deref(), s.dry_run)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         fields(serde_json::json!({
@@ -3461,5 +3483,54 @@ mod tests {
             "{r}"
         );
         assert!(!lib.join("hard-round.umberbrush").exists());
+    }
+
+    /// Row 284: a brush `.abr` replies the fan-out's multi fields.
+    #[test]
+    fn import_asset_step_fans_out_an_abr() {
+        let src = scratch("abr-step-src").join("set.abr");
+        std::fs::write(&src, crate::import_asset::abr_fixture::bytes()).unwrap();
+        let lib = scratch("abr-step-lib");
+        let line = serde_json::json!({ "import_asset": {
+            "file": src, "kind": "brush", "library": lib,
+        }})
+        .to_string();
+        let r = &session(&format!("{line}\n"))[0];
+        assert_eq!(r["step"], "import_asset", "{r}");
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["kind"], "brush", "{r}");
+        assert_eq!(r["dry_run"], false, "{r}");
+        let targets: Vec<&str> = r["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                lib.join("my-brush.umberbrush").display().to_string(),
+                lib.join("my-brush.stamp.png").display().to_string(),
+                lib.join("round.umberbrush").display().to_string(),
+            ],
+            "{r}"
+        );
+        assert_eq!(r["presets"], 2, "{r}");
+        assert_eq!(r["stamps_written"], 1, "{r}");
+        assert_eq!(r["duplicate_stamps_skipped"], 1, "{r}");
+        assert_eq!(r["orphan_samples"], 0, "{r}");
+        assert_eq!(r["brushes_without_sample"], 1, "{r}");
+        assert!(r.get("target").is_none(), "no single-file fields: {r}");
+        assert!(lib.join("my-brush.stamp.png").is_file());
+        // A second run: the all-or-nothing TargetExists refusal.
+        let r = &session(&format!("{line}\n"))[0];
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("target already exists"),
+            "{r}"
+        );
     }
 }
