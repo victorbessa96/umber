@@ -58,9 +58,19 @@ band vs the 2026-10-19 seed cannot resolve that). The code delta between
 the last green and first red nightly tip has zero runtime effect on the
 bench path (Leg 1) and measures within band on a fixed machine (Leg 3).
 No code change lands with this hunt. Confirmation reading: the
-2026-11-09 03:00Z scheduled nightly on the current tip; if it reds again
-on the SAME fleet day as a green same-tip reading, re-open with a full
-local 3-pair A/B (scratch paths, not /tmp).
+2026-11-09 scheduled nightly on the current tip; if it reds again on the
+SAME fleet day as a green same-tip reading, re-open with a full local
+3-pair A/B (scratch paths, not /tmp).
+
+**Correction (2026-11-09):** this report first named the confirmation
+reading as "the 2026-11-09 **03:00Z** scheduled nightly". The workflow's
+cron IS `0 3 * * *`, but GitHub dispatches it 6-7 hours late on this
+repo — nine consecutive schedule runs fired between 09:15Z and 10:29Z
+(10-31 through 11-08). The 11-09 nightly therefore appears between
+roughly 09:00Z and 10:30Z, not at 03:00Z, and it measures the tip as of
+its FIRE time, not as of 03:00Z. Do not read the absence of a 03:00Z run
+as a skipped nightly. Evidence: vault
+`projects/umber/2026-11-09-perf-nightly-fire-time.md`.
 
 ## Process notes
 
