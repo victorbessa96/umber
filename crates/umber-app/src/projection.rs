@@ -5,11 +5,35 @@
 //! overlay quad. Row 279 (`PaintState::apply_projection`) receives the
 //! texels this module builds; rows 280/281 wire the viewport and the panel.
 //!
-//! The raster is TARGET-TEXEL driven and never raycasts: each texel of the
-//! active tile maps to its world point through `umber_mesh::world_at_uv`
-//! (row 277), then through the frozen camera's `view_proj` to the frozen
-//! viewport, then through `umber_core::stencil::inverse_map` into the
-//! image. One O(1) lookup chain per texel, ONE tile-sized RGBA buffer.
+//! The raster is TRIANGLE driven (v2d, row 298,
+//! `docs/loop/briefs/2026-11-09-projection-one-pass-design.md`) and never
+//! raycasts: ONE pass of `umber_mesh::for_each_uv_geometry` walks the
+//! mesh's triangles in index order and yields every texel of the active
+//! tile a triangle's UV footprint covers, with that triangle's world point
+//! and raw geometric normal; each yield goes through the camera's
+//! `view_proj` to the viewport, then through
+//! `umber_core::stencil::inverse_map` into the image. Cost O(triangles +
+//! covered texels), ONE tile-sized RGBA buffer, no geometry buffer.
+//!
+//! Before v2d the raster was TARGET-TEXEL driven: per texel, a
+//! `world_and_face_normal_at_uv` lookup, which SCANS EVERY TRIANGLE — so
+//! O(texels x triangles), not the "one O(1) lookup chain per texel" these
+//! docs claimed (every fixture was a 2-triangle quad on a 16² tile).
+//! Measured (release, flat UV grid): 2 048 triangles at 1024² took 34.7 s
+//! (the one-pass walk: 46 ms); 8 192 triangles at 1024² 131.6 s (51 ms),
+//! ≈120 µs per texel — ≈34 MINUTES for one Apply at the default 4096²
+//! target, on the UI thread.
+//!
+//! **The write rule that keeps v2d byte-identical**: a texel two footprints
+//! cover is yielded once per footprint, and the LAST in index order must
+//! decide it (the per-texel lookup's winner). So every yield WRITES: a
+//! yield with no value (back-facing under the cull, behind the eye,
+//! off-NDC, a non-finite or missing-position winner) writes transparent
+//! `[0, 0, 0, 0]` instead of skipping, or an earlier triangle's colour
+//! would survive. Uncovered texels are never yielded and stay transparent.
+//! The per-texel WORK (transform, tiling wrap, samplers, the backface
+//! test) is unchanged; the test module keeps the pre-v2d per-texel raster
+//! as the byte-identity reference.
 //!
 //! v1 cut line (plan §7 names the follow-ups):
 //!
@@ -36,7 +60,7 @@
 //!   v1. With it on, `arm` arms the chords but freezes NOTHING
 //!   (`frozen = None`), and Apply runs [`rasterize_projection_live`]
 //!   through the LIVE camera + live view rect (paint what you see now).
-//!   Both entries share one per-texel core (`rasterize_with`), so the
+//!   Both entries share one raster core (`rasterize_with`), so the
 //!   live raster under the frozen camera equals the frozen raster byte
 //!   for byte. [`rasterize_projection`] keeps its v1 contract: no frozen
 //!   placement, no raster (`None`), so a follow-on caller must use the
@@ -48,10 +72,10 @@
 //!   `docs/loop/briefs/2026-11-09-projection-backface-design.md`)**: with
 //!   [`ProjectionState::cull_backfaces`] on, a texel whose covering
 //!   triangle faces away from the projecting camera's eye
-//!   (`dot(n, eye - p) < 0`) writes nothing. `n` is the triangle's
-//!   GEOMETRIC normal in index order
-//!   (`umber_mesh::world_and_face_normal_at_uv`, the same single
-//!   barycentric scan as before), so the projector culls exactly what the
+//!   (`dot(n, eye - p) < 0`) takes nothing (writes transparent). `n` is the triangle's
+//!   GEOMETRIC normal in index order (the walk's raw cross product,
+//!   normalized by `usable_facing` under `umber_mesh::world_and_face_normal_at_uv`'s
+//!   rule), so the projector culls exactly what the
 //!   viewport's `cull_mode: Back` + CCW-front mesh pass culls; the eye is
 //!   the camera the raster projects through (frozen, or live under
 //!   follow). Grazing texels (`dot == 0`), degenerate triangles and NaN
@@ -596,7 +620,7 @@ pub fn rasterize_projection(
 /// [`rasterize_projection`] through a LIVE `camera` + viewport `rect`
 /// (R-A2 v2b follow camera) instead of the frozen placement; ignores
 /// [`ProjectionState::frozen`]. Same output contract and refusals (no
-/// image, degenerate transform, degenerate `rect`), same per-texel core.
+/// image, degenerate transform, degenerate `rect`), same raster core.
 pub fn rasterize_projection_live(
     state: &ProjectionState,
     mesh: &umber_mesh::MeshData,
@@ -609,7 +633,8 @@ pub fn rasterize_projection_live(
     rasterize_with(state, mesh, tile, w, h, camera, rect)
 }
 
-/// The shared per-texel core: `state`'s image + transform + tiling
+/// The shared raster core (one triangle-driven pass, module docs):
+/// `state`'s image + transform + tiling
 /// projected through `camera` onto the viewport `rect` (only its size is
 /// read; screen space is viewport-local, see the module docs).
 fn rasterize_with(
@@ -632,52 +657,74 @@ fn rasterize_with(
     }
     let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
     let mut out = vec![0u8; len];
-    let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(tile);
     let vp = camera.view_proj(rw / rh);
     // The SAME camera the raster projects through (frozen or live).
     let eye = camera.eye();
     let size = [image.width(), image.height()];
-    for y in 0..h {
-        for x in 0..w {
-            let uv = umber_mesh::uv_gbuffer::texel_center_uv(ox, oy, x, y, w, h);
-            let Some((world, normal)) = umber_mesh::world_and_face_normal_at_uv(mesh, uv) else {
-                continue;
-            };
-            // v2c: a back-facing texel writes nothing (the buffer is
-            // already zero), the same faces the viewport's mesh pass culls.
-            if state.cull_backfaces && faces_away(normal, eye, world) {
-                continue;
-            }
-            let clip = vp * glam::Vec4::new(world[0], world[1], world[2], 1.0);
-            // `w <= 0` is at or behind the eye; the divide would mirror it.
-            if clip.w.is_nan() || clip.w <= 0.0 {
-                continue;
-            }
-            let ndc = clip.truncate() / clip.w;
-            if !(-1.0..=1.0).contains(&ndc.x) || !(-1.0..=1.0).contains(&ndc.y) {
-                continue;
-            }
-            // Viewport-local px (see the module docs), y down.
-            let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
-            let img_pt = inverse_map(&state.transform, size, screen);
-            let rgba = if state.tiling {
-                // Wrap into [0, w) x [0, h) first (NaN/inf stay NaN and
-                // the sampler's guard clears them), then wrap the taps.
-                let wrapped = [
-                    img_pt[0].rem_euclid(size[0] as f32),
-                    img_pt[1].rem_euclid(size[1] as f32),
-                ];
-                image.sample_bilinear_wrapped(wrapped)
-            } else {
-                image.sample_bilinear(img_pt)
-            };
+    // One texel's value from its covering triangle's geometry; `None` is
+    // "no value" (culled, behind the eye, off the viewport).
+    let shade = |world: [f32; 3], raw_normal: [f32; 3]| -> Option<[u8; 4]> {
+        // v2c: a back-facing texel takes nothing, the same faces the
+        // viewport's mesh pass culls.
+        if state.cull_backfaces && faces_away(usable_facing(raw_normal), eye, world) {
+            return None;
+        }
+        let clip = vp * glam::Vec4::new(world[0], world[1], world[2], 1.0);
+        // `w <= 0` is at or behind the eye; the divide would mirror it.
+        if clip.w.is_nan() || clip.w <= 0.0 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        if !(-1.0..=1.0).contains(&ndc.x) || !(-1.0..=1.0).contains(&ndc.y) {
+            return None;
+        }
+        // Viewport-local px (see the module docs), y down.
+        let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
+        let img_pt = inverse_map(&state.transform, size, screen);
+        Some(if state.tiling {
+            // Wrap into [0, w) x [0, h) first (NaN/inf stay NaN and the
+            // sampler's guard clears them), then wrap the taps.
+            let wrapped = [
+                img_pt[0].rem_euclid(size[0] as f32),
+                img_pt[1].rem_euclid(size[1] as f32),
+            ];
+            image.sample_bilinear_wrapped(wrapped)
+        } else {
+            image.sample_bilinear(img_pt)
+        })
+    };
+    // v2d: ONE triangle-driven pass (module docs). Every yield WRITES —
+    // "no value" writes transparent, never skips — so the last triangle in
+    // index order decides each texel, exactly the per-texel lookup's
+    // winner (design brief §3).
+    umber_mesh::for_each_uv_geometry(
+        mesh,
+        tile,
+        w,
+        h,
+        |_| true,
+        |x, y, world, raw| {
+            let rgba = shade(world, raw).unwrap_or([0; 4]);
             let at = (y as usize * w as usize + x as usize) * 4;
             if let Some(dst) = out.get_mut(at..at + 4) {
                 dst.copy_from_slice(&rgba);
             }
-        }
-    }
+        },
+    );
     Some(out)
+}
+
+/// The projector's facing rule over the walk's RAW cross product (the
+/// `umber_mesh::world_and_face_normal_at_uv` rule, same expression, same
+/// bits): the unit normal when the length is finite and above
+/// `umber_mesh::FACE_NORMAL_EPS`, else `None` ("no facing", and
+/// [`faces_away`] keeps the texel).
+fn usable_facing(raw: [f32; 3]) -> Option<[f32; 3]> {
+    let len = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
+    if !len.is_finite() || len <= umber_mesh::FACE_NORMAL_EPS {
+        return None;
+    }
+    Some([raw[0] / len, raw[1] / len, raw[2] / len])
 }
 
 /// The v2c backface test: `true` (cull) exactly when the face normal `n`
@@ -1426,6 +1473,357 @@ mod tests {
             reference_through(&state, &quad(), 8, &behind, view_rect())
         );
         assert_eq!(texel(&off, 8, 4, 4), RED);
+    }
+
+    // --- one pass (R-A2 v2d) ---
+
+    /// The pre-v2d raster core, VERBATIM (target-texel driven: one
+    /// `world_and_face_normal_at_uv` scan per texel): the byte-identity
+    /// reference for the triangle-driven pass, culling + tiling included.
+    fn per_texel_reference(
+        state: &ProjectionState,
+        mesh: &umber_mesh::MeshData,
+        tile: u16,
+        w: u32,
+        h: u32,
+        camera: &OrbitCamera,
+        rect: egui::Rect,
+    ) -> Option<Vec<u8>> {
+        let image = state.image.as_ref()?;
+        let scale = state.transform.scale;
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let (rw, rh) = (rect.width(), rect.height());
+        if !rw.is_finite() || !rh.is_finite() || rw <= 0.0 || rh <= 0.0 {
+            return None;
+        }
+        let len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+        let mut out = vec![0u8; len];
+        let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(tile);
+        let vp = camera.view_proj(rw / rh);
+        let eye = camera.eye();
+        let size = [image.width(), image.height()];
+        for y in 0..h {
+            for x in 0..w {
+                let uv = umber_mesh::uv_gbuffer::texel_center_uv(ox, oy, x, y, w, h);
+                let Some((world, normal)) = umber_mesh::world_and_face_normal_at_uv(mesh, uv)
+                else {
+                    continue;
+                };
+                if state.cull_backfaces && faces_away(normal, eye, world) {
+                    continue;
+                }
+                let clip = vp * glam::Vec4::new(world[0], world[1], world[2], 1.0);
+                if clip.w.is_nan() || clip.w <= 0.0 {
+                    continue;
+                }
+                let ndc = clip.truncate() / clip.w;
+                if !(-1.0..=1.0).contains(&ndc.x) || !(-1.0..=1.0).contains(&ndc.y) {
+                    continue;
+                }
+                let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
+                let img_pt = inverse_map(&state.transform, size, screen);
+                let rgba = if state.tiling {
+                    let wrapped = [
+                        img_pt[0].rem_euclid(size[0] as f32),
+                        img_pt[1].rem_euclid(size[1] as f32),
+                    ];
+                    image.sample_bilinear_wrapped(wrapped)
+                } else {
+                    image.sample_bilinear(img_pt)
+                };
+                let at = (y as usize * w as usize + x as usize) * 4;
+                if let Some(dst) = out.get_mut(at..at + 4) {
+                    dst.copy_from_slice(&rgba);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The frozen raster and the reference through the frozen placement.
+    fn frozen_pair(
+        state: &ProjectionState,
+        mesh: &umber_mesh::MeshData,
+        n: u32,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let frozen = state.frozen.unwrap();
+        (
+            rasterize_projection(state, mesh, 1001, n, n).unwrap(),
+            per_texel_reference(state, mesh, 1001, n, n, &frozen.camera, frozen.rect).unwrap(),
+        )
+    }
+
+    /// A 3x3-cell grid over [-1, 1]² with unit-grid UVs (18 triangles),
+    /// bumpy in z (`0.15 * ((7i + 3j) mod 5)`), and the cells with
+    /// `i + j` EVEN wound clockwise: a head-on camera sees their back
+    /// faces, so the cull has work on a multi-triangle mesh. The bumps are
+    /// too shallow to flip any facing seen from the +z eye (the winding
+    /// alone decides it).
+    fn grid() -> umber_mesh::MeshData {
+        let mut mesh = umber_mesh::MeshData::default();
+        for j in 0..4u32 {
+            for i in 0..4u32 {
+                let (fi, fj) = (i as f32, j as f32);
+                let z = 0.15 * ((i * 7 + j * 3) % 5) as f32;
+                mesh.positions
+                    .push([-1.0 + 2.0 * fi / 3.0, -1.0 + 2.0 * fj / 3.0, z]);
+                mesh.uvs.push([fi / 3.0, fj / 3.0]);
+            }
+        }
+        for j in 0..3u32 {
+            for i in 0..3u32 {
+                let (a, b) = (j * 4 + i, j * 4 + i + 1);
+                let (c, d) = (b + 4, a + 4);
+                if (i + j) % 2 == 0 {
+                    mesh.indices.extend_from_slice(&[a, c, b, a, d, c]);
+                } else {
+                    mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+                }
+            }
+        }
+        mesh
+    }
+
+    /// A uniform red image covering the whole view (scale 1000): every
+    /// texel that projects into the view and is not culled reads RED.
+    fn red_everywhere() -> ProjectionState {
+        let mut state = armed(image(2, 2, |_, _| RED), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform.scale = 1000.0;
+        state
+    }
+
+    #[test]
+    fn one_pass_equals_the_per_texel_raster_on_a_multi_triangle_mesh() {
+        let mesh = grid();
+        for cull in [false, true] {
+            for tiling in [false, true] {
+                let mut state = v1_fixture();
+                state.cull_backfaces = cull;
+                state.tiling = tiling;
+                let (got, want) = frozen_pair(&state, &mesh, 24);
+                assert_eq!(got, want, "cull {cull} tiling {tiling}");
+                // Follow: the live entry through a moved camera.
+                let cam = panned();
+                let live =
+                    rasterize_projection_live(&state, &mesh, 1001, 24, 24, &cam, view_rect())
+                        .unwrap();
+                let want =
+                    per_texel_reference(&state, &mesh, 1001, 24, 24, &cam, view_rect()).unwrap();
+                assert_eq!(live, want, "live: cull {cull} tiling {tiling}");
+            }
+        }
+        // The fixture really culls: the clockwise cells drop out under it.
+        let mut state = red_everywhere();
+        let (on, _) = frozen_pair(&state, &mesh, 24);
+        state.cull_backfaces = false;
+        let (off, _) = frozen_pair(&state, &mesh, 24);
+        assert_ne!(on, off);
+        assert!(on.chunks(4).any(|t| t == RED) && on.chunks(4).any(|t| t == CLEAR));
+    }
+
+    /// [`quad`] plus a triangle UNDER it (first in index order) and one ON
+    /// TOP (last), each with its own vertices, world points and UVs that
+    /// overlap the quad's: the winner rule decides those texels.
+    fn overlapping_islands() -> umber_mesh::MeshData {
+        let mut mesh = quad();
+        mesh.positions.extend_from_slice(&[
+            [-0.5, -0.5, 0.3],
+            [0.9, -0.4, 0.2],
+            [0.2, 0.8, 0.1],
+            [0.6, 0.6, -0.2],
+            [-0.8, 0.1, 0.4],
+            [0.3, -0.9, 0.0],
+        ]);
+        mesh.uvs.extend_from_slice(&[
+            [0.1, 0.1],
+            [0.9, 0.2],
+            [0.4, 0.9],
+            [0.8, 0.8],
+            [0.1, 0.5],
+            [0.5, 0.05],
+        ]);
+        mesh.indices = vec![4, 5, 6, 0, 1, 2, 0, 2, 3, 7, 8, 9];
+        mesh
+    }
+
+    #[test]
+    fn one_pass_equals_the_per_texel_raster_on_overlapping_uv_islands() {
+        let mesh = overlapping_islands();
+        // The 8x8 gradient covering the whole view: every world point
+        // samples its own colour, so a wrong winner shows.
+        let img = image(8, 8, |x, y| [x as u8 * 30, y as u8 * 20 + 5, 7, 255]);
+        for cull in [false, true] {
+            let mut state = armed(img.clone(), head_on(glam::Vec3::ZERO, 5.0));
+            state.cull_backfaces = cull;
+            let (got, want) = frozen_pair(&state, &mesh, 16);
+            assert_eq!(got, want, "cull {cull}");
+            // The top triangle matters: without it the bytes differ.
+            let mut no_top = mesh.clone();
+            no_top.indices.truncate(9);
+            assert_ne!(frozen_pair(&state, &no_top, 16).0, got, "cull {cull}");
+        }
+    }
+
+    #[test]
+    fn a_nan_position_winner_blanks_its_texels_like_the_per_texel_raster() {
+        // Tri 2 = (NaN vertex, 1, 2), uvs (0.25, 0.25), (1, 0), (1, 1),
+        // last in index order: it wins texel (11, 9) of 16 (uv (0.71875,
+        // 0.40625), shared with tri 0) and its NaN world point blanks it.
+        let mut mesh = quad();
+        mesh.positions.push([f32::NAN, 0.0, 0.0]);
+        mesh.uvs.push([0.25, 0.25]);
+        mesh.indices.extend_from_slice(&[4, 1, 2]);
+        for cull in [false, true] {
+            let mut state = red_everywhere();
+            state.cull_backfaces = cull;
+            let (got, want) = frozen_pair(&state, &mesh, 16);
+            assert_eq!(got, want, "cull {cull}");
+            assert_eq!(texel(&got, 16, 11, 9), CLEAR, "cull {cull}");
+            // Not tri 0's red showing through; tri 1's texels still paint.
+            assert_eq!(texel(&frozen_pair(&state, &quad(), 16).0, 16, 11, 9), RED);
+            assert_eq!(texel(&got, 16, 0, 0), RED, "cull {cull}");
+        }
+    }
+
+    #[test]
+    fn a_missing_position_winner_blanks_its_texels_like_the_per_texel_raster() {
+        // Same UV layout, but vertex 4 has a UV and NO position: the
+        // per-texel lookup's winner had no world point (nothing written);
+        // the walk yields NaN for it, which writes transparent.
+        let mut mesh = quad();
+        mesh.uvs.push([0.25, 0.25]);
+        mesh.indices.extend_from_slice(&[4, 1, 2]);
+        for cull in [false, true] {
+            let mut state = red_everywhere();
+            state.cull_backfaces = cull;
+            let (got, want) = frozen_pair(&state, &mesh, 16);
+            assert_eq!(got, want, "cull {cull}");
+            assert_eq!(texel(&got, 16, 11, 9), CLEAR, "cull {cull}");
+            assert_eq!(texel(&got, 16, 0, 0), RED, "cull {cull}");
+        }
+    }
+
+    #[test]
+    fn a_back_facing_winner_under_the_cull_is_transparent_not_the_earlier_colour() {
+        // The design §3 rule: [`quad`] (front-facing) plus tri 0 again in
+        // REVERSED order, last: it wins tri 0's texels and faces away.
+        let mut mesh = quad();
+        mesh.indices.extend_from_slice(&[0, 2, 1]);
+        let mut state = red_everywhere();
+        assert!(state.cull_backfaces);
+        let (got, want) = frozen_pair(&state, &mesh, 16);
+        assert_eq!(got, want);
+        // Texel (15, 15): uv (0.96875, 0.03125), tri 0 + its reversed
+        // copy. The front tri 0 alone paints it RED; the culled winner
+        // must leave it CLEAR, not tri 0's red.
+        assert_eq!(texel(&frozen_pair(&state, &quad(), 16).0, 16, 15, 15), RED);
+        assert_eq!(texel(&got, 16, 15, 15), CLEAR);
+        // Texel (0, 0) is tri 1's alone: front-facing, painted.
+        assert_eq!(texel(&got, 16, 0, 0), RED);
+        // Culling off: the reversed winner writes too.
+        state.cull_backfaces = false;
+        let (got, want) = frozen_pair(&state, &mesh, 16);
+        assert_eq!(got, want);
+        assert_eq!(texel(&got, 16, 15, 15), RED);
+    }
+
+    #[test]
+    fn a_degenerate_winner_over_a_culled_face_still_keeps_paint() {
+        // [`reversed_quad`] (culled everywhere) plus a LAST triangle with
+        // tri 0's UVs and collinear positions (no facing): it wins tri 0's
+        // texels and the cull keeps them — malformed geometry never
+        // silently kills paint, also in the one-pass raster.
+        let mut mesh = reversed_quad();
+        mesh.positions
+            .extend_from_slice(&[[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+        mesh.uvs
+            .extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]);
+        mesh.indices.extend_from_slice(&[4, 5, 6]);
+        let state = red_everywhere();
+        assert!(state.cull_backfaces);
+        let (got, want) = frozen_pair(&state, &mesh, 16);
+        assert_eq!(got, want);
+        assert_eq!(texel(&got, 16, 15, 15), RED, "the degenerate winner kept");
+        assert_eq!(texel(&got, 16, 0, 0), CLEAR, "tri 1 is back-facing");
+    }
+
+    /// A NEEDLE: three nearly-collinear UVs. Its area clears
+    /// `UV_DET_EPS` (a VALID footprint), but the barycentric solve is
+    /// ill-conditioned: for a texel centre outside the footprint the
+    /// weights stop reconstructing the point, yet every component clears
+    /// the lower-bound test, so the point lookup claims it.
+    ///
+    /// The UVs are the exact ones the dragon's fuzz found diverging
+    /// (area -1.49e-8). Texel (15, 0) — uv (0.96875, 0.96875) — gets
+    /// weights `[0.0, 0.0, 2.0]`, i.e. the world point `2 * p2`.
+    ///
+    /// The OLD per-texel lookup claimed that texel and PAINTED it. The
+    /// one-pass walk does not: its texel set comes from the triangle's
+    /// bounding-box window, so it never claims a texel outside the
+    /// footprint.
+    ///
+    /// So on a needle the two rasters DIFFER, and the difference is the
+    /// old path painting garbage outside the mesh's UV footprint. This is
+    /// the ONE place the byte-identity claim of R-A2 v2d does not hold,
+    /// it is a fix rather than a regression, and this pin states it
+    /// exactly so nobody has to rediscover it. The underlying primitive
+    /// bug (`UvTri::bary` has no upper bound) is shared with the GPU bake
+    /// shader and is a separate kill.
+    #[test]
+    fn a_needle_is_not_painted_outside_its_footprint_by_the_one_pass_raster() {
+        // p2 = (0.25, 0.25, 0): the garbage world point `2 * p2` is
+        // (0.5, 0.5, 0), inside the view, so the old path really paints
+        // it (a red image covers the whole view).
+        let mesh = umber_mesh::MeshData {
+            positions: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.25, 0.25, 0.0]],
+            uvs: vec![
+                [0.1614995, 0.16149949],
+                [0.35829717, 0.3582972],
+                [0.57094914, 0.57094914],
+            ],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        let state = red_everywhere();
+        let (got, want) = frozen_pair(&state, &mesh, 16);
+        // Texel (15, 0) is outside the needle's footprint (uv 0.96875 vs
+        // the footprint's 0.1615..0.5709): the old path painted it, the
+        // one-pass raster does not.
+        assert_eq!(
+            texel(&want, 16, 15, 0),
+            RED,
+            "the old path painted the out-of-footprint texel"
+        );
+        assert_eq!(
+            texel(&got, 16, 15, 0),
+            CLEAR,
+            "the one-pass raster painted outside the footprint"
+        );
+        assert_ne!(got, want, "the needle no longer exercises the difference");
+        // Every texel the one-pass raster painted lies within the
+        // triangle's WINDOW (its UV bounds expanded by ~1.5 texels), not
+        // arbitrarily far outside: the walk is bounded by the window,
+        // while the point lookup scanned every triangle at every texel
+        // and claimed texels far outside the footprint.
+        const MARGIN: f32 = 2.0 / 16.0; // two texels
+        const LO: f32 = 0.16149949;
+        const HI: f32 = 0.57094914;
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let uv = umber_mesh::uv_gbuffer::texel_center_uv(0.0, 0.0, x, y, 16, 16);
+                let within = (LO - MARGIN..=HI + MARGIN).contains(&uv[0])
+                    && (LO - MARGIN..=HI + MARGIN).contains(&uv[1]);
+                if !within {
+                    assert_eq!(
+                        texel(&got, 16, x, y),
+                        CLEAR,
+                        "texel {x},{y} (uv {uv:?}) painted far outside the footprint"
+                    );
+                }
+            }
+        }
     }
 
     // --- state ---

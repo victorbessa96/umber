@@ -531,6 +531,15 @@ pub struct TexelGeom {
 /// two triangles cover one texel the LAST in index order wins (overlapping
 /// UV islands are an authoring error; a deterministic rule beats a random
 /// one). Zero-sized targets yield an empty vec.
+///
+/// R-A2 v2d: the walk, the world point and the cross product are
+/// [`crate::uv_gbuffer::for_each_uv_geometry`] (the crate's ONE
+/// triangle-driven geometry walk, shared with the decal projector); this
+/// function keeps only its own rules — the `pos_finite` triangle filter
+/// and the normalization (`len > 0` → unit, else `[0, 0, 0]`). The
+/// covering triangle's index is the last one the filter accepted (the
+/// walk calls `filter` right before each triangle's texels, in index
+/// order).
 pub fn rasterize_uv_geometry(
     mesh: &MeshData,
     tile: u16,
@@ -547,64 +556,40 @@ pub fn rasterize_uv_geometry(
     // pair, for CPU fill, UV pick, export padding and the GPU bakes.
     let (tu, tv) = crate::uv_gbuffer::tile_offset(tile);
     let mut out: Vec<Option<TexelGeom>> = vec![None; w * h];
-    for (tri_idx, tri) in mesh.indices.chunks_exact(3).enumerate() {
-        let (Some(&i0), Some(&i1), Some(&i2)) = (tri.first(), tri.get(1), tri.get(2)) else {
-            continue;
-        };
-        let (Some(&p0), Some(&p1), Some(&p2)) = (
-            mesh.positions.get(i0 as usize),
-            mesh.positions.get(i1 as usize),
-            mesh.positions.get(i2 as usize),
-        ) else {
-            continue;
-        };
-        if !pos_finite([p0, p1, p2]) {
-            continue;
-        }
-        // Malformed UV indices, non-finite UVs and degenerate footprints
-        // (|area| < UV_DET_EPS) cover nothing.
-        let Some(footprint) = crate::uv_gbuffer::UvTri::of(mesh, tri_idx) else {
-            continue;
-        };
-        // Face normal from positions (see `TexelGeom::normal`).
-        let ax = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-        let bx = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-        let n = [
-            ax[1] * bx[2] - ax[2] * bx[1],
-            ax[2] * bx[0] - ax[0] * bx[2],
-            ax[0] * bx[1] - ax[1] * bx[0],
-        ];
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        let normal = if len > 0.0 {
-            [n[0] / len, n[1] / len, n[2] / len]
-        } else {
-            [0.0, 0.0, 0.0]
-        };
-        // UV bbox -> tile-local texel range (expanded by one texel so
-        // texel-center coverage at footprint edges is exact, then clamped).
-        let Some((x0, x1, y0, y1)) =
-            crate::uv_gbuffer::texel_window(&footprint, tu, tv, width, height)
-        else {
-            continue;
-        };
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let uv =
-                    crate::uv_gbuffer::texel_center_uv(tu, tv, x as u32, y as u32, width, height);
-                // True barycentrics `-e_i / area`, winding-agnostic inside
-                // test (the derivation lives in `uv_gbuffer`).
-                let Some(b) = footprint.bary(uv) else {
-                    continue;
-                };
-                out[y * w + x] = Some(TexelGeom {
-                    pos: crate::uv_gbuffer::lerp3(p0, p1, p2, b),
+    // The triangle the walk is on: set by the filter (called once per
+    // triangle, immediately before its texels), read by the texel visitor.
+    let current = std::cell::Cell::new(0usize);
+    crate::uv_gbuffer::for_each_uv_geometry(
+        mesh,
+        tile,
+        width,
+        height,
+        |tri| {
+            let keep = triangle_positions_finite(mesh, tri);
+            if keep {
+                current.set(tri);
+            }
+            keep
+        },
+        |x, y, pos, n| {
+            // Face normal from positions (see `TexelGeom::normal`).
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let normal = if len > 0.0 {
+                [n[0] / len, n[1] / len, n[2] / len]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+            let uv = crate::uv_gbuffer::texel_center_uv(tu, tv, x, y, width, height);
+            if let Some(slot) = out.get_mut(y as usize * w + x as usize) {
+                *slot = Some(TexelGeom {
+                    pos,
                     normal,
                     uv,
-                    triangle: tri_idx,
+                    triangle: current.get(),
                 });
             }
-        }
-    }
+        },
+    );
     out
 }
 
@@ -625,20 +610,31 @@ pub fn uv_coverage(mesh: &MeshData, tile: u16, width: u32, height: u32) -> Vec<b
         tile,
         width,
         height,
-        |tri| {
-            let idx = &mesh.indices[tri * 3..tri * 3 + 3];
-            match (
-                mesh.positions.get(idx[0] as usize),
-                mesh.positions.get(idx[1] as usize),
-                mesh.positions.get(idx[2] as usize),
-            ) {
-                (Some(&p0), Some(&p1), Some(&p2)) => pos_finite([p0, p1, p2]),
-                _ => false,
-            }
-        },
+        |tri| triangle_positions_finite(mesh, tri),
         |_, x, y, _| out[y * w + x] = true,
     );
     out
+}
+
+/// The fill's triangle filter (shared by [`rasterize_uv_geometry`] and
+/// [`uv_coverage`]): all three position indices in range and every
+/// position finite. Out-of-range triangle indices are `false`, never a
+/// panic.
+fn triangle_positions_finite(mesh: &MeshData, tri: usize) -> bool {
+    let Some(idx) = tri
+        .checked_mul(3)
+        .and_then(|base| mesh.indices.get(base..base.checked_add(3)?))
+    else {
+        return false;
+    };
+    match (
+        mesh.positions.get(idx[0] as usize),
+        mesh.positions.get(idx[1] as usize),
+        mesh.positions.get(idx[2] as usize),
+    ) {
+        (Some(&p0), Some(&p1), Some(&p2)) => pos_finite([p0, p1, p2]),
+        _ => false,
+    }
 }
 
 fn pos_finite(ps: [[f32; 3]; 3]) -> bool {
@@ -1355,6 +1351,213 @@ mod tests {
             assert_eq!(uv_coverage(&mesh, tile, w, h), want, "tile {tile} {w}x{h}");
         }
         assert!(uv_coverage(&full_uv_quad(), 1001, 0, 8).is_empty());
+    }
+
+    // --- R-A2 v2d: rasterize_uv_geometry delegates to for_each_uv_geometry ---
+
+    /// The pre-v2d `rasterize_uv_geometry`, kept verbatim as the
+    /// reference the delegated version must equal bit for bit.
+    fn rasterize_uv_geometry_reference(
+        mesh: &MeshData,
+        tile: u16,
+        width: u32,
+        height: u32,
+    ) -> Vec<Option<TexelGeom>> {
+        let (w, h) = (width as usize, height as usize);
+        if w == 0 || h == 0 {
+            return Vec::new();
+        }
+        let (tu, tv) = crate::uv_gbuffer::tile_offset(tile);
+        let mut out: Vec<Option<TexelGeom>> = vec![None; w * h];
+        for (tri_idx, tri) in mesh.indices.chunks_exact(3).enumerate() {
+            let (Some(&i0), Some(&i1), Some(&i2)) = (tri.first(), tri.get(1), tri.get(2)) else {
+                continue;
+            };
+            let (Some(&p0), Some(&p1), Some(&p2)) = (
+                mesh.positions.get(i0 as usize),
+                mesh.positions.get(i1 as usize),
+                mesh.positions.get(i2 as usize),
+            ) else {
+                continue;
+            };
+            if !pos_finite([p0, p1, p2]) {
+                continue;
+            }
+            let Some(footprint) = crate::uv_gbuffer::UvTri::of(mesh, tri_idx) else {
+                continue;
+            };
+            let ax = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let bx = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            let n = [
+                ax[1] * bx[2] - ax[2] * bx[1],
+                ax[2] * bx[0] - ax[0] * bx[2],
+                ax[0] * bx[1] - ax[1] * bx[0],
+            ];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let normal = if len > 0.0 {
+                [n[0] / len, n[1] / len, n[2] / len]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+            let Some((x0, x1, y0, y1)) =
+                crate::uv_gbuffer::texel_window(&footprint, tu, tv, width, height)
+            else {
+                continue;
+            };
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let uv = crate::uv_gbuffer::texel_center_uv(
+                        tu, tv, x as u32, y as u32, width, height,
+                    );
+                    let Some(b) = footprint.bary(uv) else {
+                        continue;
+                    };
+                    out[y * w + x] = Some(TexelGeom {
+                        pos: crate::uv_gbuffer::lerp3(p0, p1, p2, b),
+                        normal,
+                        uv,
+                        triangle: tri_idx,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// One texel's geometry as bit patterns (pos, normal, uv, triangle).
+    type GeomBits = Option<([u32; 3], [u32; 3], [u32; 2], usize)>;
+
+    /// Bit patterns of a geometry raster (`-0.0 != 0.0`, NaN-safe), so
+    /// equality is byte identity, not float `==`.
+    fn geom_bits(geom: &[Option<TexelGeom>]) -> Vec<GeomBits> {
+        geom.iter()
+            .map(|g| {
+                g.map(|g| {
+                    (
+                        g.pos.map(f32::to_bits),
+                        g.normal.map(f32::to_bits),
+                        g.uv.map(f32::to_bits),
+                        g.triangle,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// The fixtures the delegation must not change: overlap (an extra
+    /// triangle on top of the quad, plus one UNDER it in index order),
+    /// a NaN position, short positions, a degenerate-position triangle,
+    /// UDIM tiles and odd sizes.
+    #[test]
+    fn delegated_geometry_raster_is_bit_identical_to_the_pre_v2d_walk() {
+        let mut overlap = full_uv_quad();
+        overlap.positions.push([0.3, 0.2, 0.7]);
+        overlap.uvs.push([0.25, 0.25]);
+        overlap.indices.extend_from_slice(&[4, 1, 2]);
+        let mut under = vec![4, 2, 3];
+        under.extend_from_slice(&overlap.indices);
+        overlap.indices = under;
+        let mut nan = full_uv_quad();
+        nan.positions.push([f32::NAN, 0.0, 0.0]);
+        nan.uvs.push([0.25, 0.25]);
+        nan.indices.extend_from_slice(&[4, 1, 2]);
+        let mut short = unit_cube();
+        short.positions.truncate(3);
+        let mut flat = full_uv_quad();
+        flat.positions[2] = [3.0, -1.0, 0.0]; // tri 0 collinear: normal [0, 0, 0]
+        for (name, mesh, tile, w, h) in [
+            ("quad", full_uv_quad(), 1001u16, 8u32, 8u32),
+            ("half", half_uv_quad(), 1001, 9, 7),
+            ("cube", unit_cube(), 1001, 32, 32),
+            ("cube odd", unit_cube(), 1001, 17, 9),
+            ("off tile", full_uv_quad(), 1002, 8, 8),
+            ("overlap", overlap, 1001, 16, 16),
+            ("nan", nan, 1001, 16, 16),
+            ("short", short, 1001, 16, 16),
+            ("flat", flat, 1001, 8, 8),
+            ("empty", MeshData::default(), 1001, 4, 4),
+            ("zero", full_uv_quad(), 1001, 0, 8),
+        ] {
+            let got = rasterize_uv_geometry(&mesh, tile, w, h);
+            let want = rasterize_uv_geometry_reference(&mesh, tile, w, h);
+            assert_eq!(geom_bits(&got), geom_bits(&want), "{name}");
+        }
+    }
+
+    /// The overlap winner AND its `triangle` index survive the delegation
+    /// (the index comes from the filter-before-texels order): the extra
+    /// triangle (index 2, last) owns the texels it shares with tri 0.
+    #[test]
+    fn delegated_geometry_raster_keeps_the_last_winner_and_its_index() {
+        let mut mesh = full_uv_quad();
+        mesh.positions.push([0.3, 0.2, 0.7]);
+        mesh.uvs.push([0.25, 0.25]);
+        mesh.indices.extend_from_slice(&[4, 1, 2]);
+        let geom = rasterize_uv_geometry(&mesh, 1001, 16, 16);
+        // Texel (11, 9): uv (11.5/16, 1 - 9.5/16) = (0.71875, 0.40625),
+        // inside tri 0 (u > v) and inside tri 2 ((0.25,0.25),(1,0),(1,1)).
+        let g = geom[9 * 16 + 11].expect("covered");
+        assert_eq!(g.triangle, 2);
+        assert_eq!(
+            Some(g.triangle),
+            crate::uv_gbuffer::uv_to_barycentric(&mesh, g.uv).map(|h| h.triangle)
+        );
+        // Texel (8, 15): uv (0.53125, 0.03125), below tri 2's lower edge
+        // (from (0.25, 0.25) to (1, 0): v = 0.15625 at that u), so tri 0
+        // keeps it.
+        assert_eq!(geom[15 * 16 + 8].map(|g| g.triangle), Some(0));
+    }
+
+    /// `for_each_uv_geometry`'s filter is honoured with the fill's rule: a
+    /// NaN-position triangle (on top of the quad in index order)
+    /// contributes no texels, so the quad shows through; unfiltered, the
+    /// same walk DOES yield that triangle's texels (the projector's rule).
+    #[test]
+    fn the_fill_filter_skips_a_nan_triangle_the_unfiltered_walk_visits() {
+        let mut mesh = full_uv_quad();
+        mesh.positions.push([f32::NAN, 0.0, 0.0]);
+        mesh.uvs.push([0.25, 0.25]);
+        mesh.indices.extend_from_slice(&[4, 1, 2]);
+        let mut filtered_nan = 0;
+        let mut filtered = 0;
+        crate::uv_gbuffer::for_each_uv_geometry(
+            &mesh,
+            1001,
+            16,
+            16,
+            |tri| triangle_positions_finite(&mesh, tri),
+            |_, _, world, _| {
+                filtered += 1;
+                if world[0].is_nan() {
+                    filtered_nan += 1;
+                }
+            },
+        );
+        assert_eq!(filtered_nan, 0, "the NaN triangle is filtered out");
+        // Only the quad's two triangles: 256 texels plus the diagonal's
+        // double visits.
+        assert!(filtered >= 256, "{filtered}");
+        let mut unfiltered_nan = 0;
+        crate::uv_gbuffer::for_each_uv_geometry(
+            &mesh,
+            1001,
+            16,
+            16,
+            |_| true,
+            |_, _, world, _| {
+                if world[0].is_nan() {
+                    unfiltered_nan += 1;
+                }
+            },
+        );
+        assert!(
+            unfiltered_nan > 0,
+            "unfiltered, the NaN triangle is visited"
+        );
+        // And the fill (which filters) never reports a NaN position.
+        let geom = rasterize_uv_geometry(&mesh, 1001, 16, 16);
+        assert!(geom.iter().flatten().all(|g| g.pos[0].is_finite()));
+        assert!(geom.iter().flatten().all(|g| g.triangle < 2));
     }
 
     /// Malformed meshes degrade to uncovered texels, never panics — the
