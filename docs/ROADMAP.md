@@ -18,7 +18,67 @@ partner."
 
 ---
 
-## Delta since 2026-10-24 (as of 2026-11-05)
+## Delta since 2026-10-24 (as of 2026-11-09)
+
+### The R-A2 decal lane is closed to v2d (2026-11-09)
+
+The projector went v1 → v2a (tiling) → v2b (follow-camera) → v2c
+(backface culling) → **v2d (one pass)**. v2d was a PERFORMANCE kill: the
+raster was `O(texels × triangles)` because its per-texel mesh lookup
+scanned every triangle, so one Apply click at the default 4096² target
+took **~34 minutes on the UI thread** (the app froze) on an
+8 192-triangle mesh. Now one triangle-driven streaming pass:
+**34.7 s → 46 ms at 1024²/2 048 triangles (754×)**, **131.6 s → 51 ms at
+8 192 triangles (2 602×)**, **~34 min → ~0.6 s at 4K**, zero extra
+memory. Code `98fb6e8e`, CI run `42646713045` (all four jobs green), report
+`docs/loop/kill-reports/2026-11-09-projection-one-pass.md`.
+
+Two lessons are now doctrine (skill `umber-wave-ops` →
+`references/perf-kill-cost-discipline.md`): a plan that states a false
+complexity is a bug later kills inherit (the v1 plan's "one O(1) lookup
+chain per texel" hid the freeze across three kills), and a byte-identity
+promise is proven by fuzzing BOTH implementations against each other on
+hostile inputs, not by a fixture list.
+
+### The primitive bug the fuzz exposed (2026-11-09, MEASURED, not yet fixed)
+
+`UvTri::bary` tests only the LOWER bound of each barycentric weight
+(`b_i >= -UV_BARY_EPS`) and never the upper bound. On a degenerate
+**needle** (area −1.49e-8 — still a VALID footprint) the edge-function
+formula stops being a barycentric decomposition: a texel centre far
+outside the footprint gets weights like `[0, 0, 2.0]` that reconstruct to
+`(1.1419, 1.1419)` instead of the texel centre. The old per-texel lookup
+CLAIMED and PAINTED those texels. The GPU bake shader quotes the same
+formula (`crates/umber-gpu/src/bake_shaders.rs`), so it has the same blind
+spot.
+
+**The fix is measured, not guessed** (probes under
+`~/.hermes/cache/scratch/probe-raster-cost/`):
+
+| candidate | verdict |
+| --- | --- |
+| per-point upper bound (`b_i <= 1 + eps`) | **REJECTED** — makes it worse (lost claims 7→16, lookup-vs-walk set diff 31→54) |
+| per-point reconstruction tolerance | **REJECTED** — not separable: legitimate claims of a thin triangle carry up to 3.5e-1 reconstruction error |
+| **per-triangle conditioning** (reject `norm_area = \|area\| / longest_edge²` below a threshold) | **ACCEPTED** — garbage 272→**0**, lookup-vs-walk set diff 31→**0**, **0** production triangles rejected at threshold 1e-6 |
+
+The threshold is **1e-6 on the normalized area**. At 1e-6: grids
+**0/10 912** triangles rejected, random triangles **0/4 263** rejected,
+and the only coverage lost is the degenerate needles themselves (the
+1e-7 family's whole coverage; the 1e-6 family's none). The rule also
+makes the two lookup paths agree EXACTLY, which is the property row 298
+needed and could not get from the per-point route.
+
+This is **wave 1** of the plan below.
+
+### The perf-nightly went green again (2026-11-09)
+
+Run `42604373218` on `061237ac`: **SUCCESS** — the first green since the
+11-08 fleet-red `42468823675`. That matches the 11-08 verdict (the reds
+were fleet, not code). The fire-time drift study stands: the cron says
+`0 3 * * *` but GitHub dispatches 6-7 h late (nine consecutive nights,
+09:15Z-10:29Z), so the nightly measures the tip as of its FIRE time.
+
+### Delta since 2026-10-24 (as of 2026-11-05)
 
 - Row 156-B CLOSED: the UV G-buffer is the single texel->barycentric
   source for paint, composite, masks, export padding and every bake
