@@ -127,14 +127,67 @@ pub fn uv_to_barycentric(mesh: &MeshData, uv: [f32; 2]) -> Option<UvHit> {
 /// Row 277 (projection-fill plan `docs/specs/projection-fill-plan.md`): the
 /// decal projector's per-texel raster maps texel → UV → world with this and
 /// then projects through the frozen camera — it never raycasts.
+///
+/// A thin wrapper over [`world_and_face_normal_at_uv`] (one barycentric
+/// scan implementation); the world point is the same expression, so the
+/// result is unchanged.
 pub fn world_at_uv(mesh: &MeshData, uv: [f32; 2]) -> Option<[f32; 3]> {
+    world_and_face_normal_at_uv(mesh, uv).map(|(world, _)| world)
+}
+
+/// The degenerate-normal threshold on the geometric cross product's
+/// LENGTH (world units²): at or below it the triangle has no usable
+/// facing (R-A2 v2c design brief
+/// `docs/loop/briefs/2026-11-09-projection-backface-design.md` §2).
+pub const FACE_NORMAL_EPS: f32 = 1e-12;
+
+/// [`world_at_uv`] plus the covering triangle's unit GEOMETRIC normal,
+/// from ONE barycentric scan (R-A2 v2c, the decal projector's backface
+/// cull). `None` exactly where [`world_at_uv`] is `None` (a UV miss, a
+/// non-finite `uv`, an out-of-range index, an empty mesh): nothing to
+/// write.
+///
+/// The world point is `lerp3(p0, p1, p2, bary)`, the same expression and
+/// order as every other CPU consumer. The normal is
+/// `normalize((p1 - p0) x (p2 - p0))` over the positions IN INDEX ORDER:
+/// per-TRIANGLE, matching the mesh pipeline's `cull_mode: Back` +
+/// CCW-front convention (the same expression the renderer's tangent-frame
+/// builder uses), so a CPU facing test agrees with what the viewport
+/// culls. It is NOT the per-vertex `MeshData::normals` (optional and
+/// smooth-shaded, which would disagree with the viewport's silhouette).
+///
+/// The normal is an inner `Option` so a degenerate triangle (cross
+/// product length `<= FACE_NORMAL_EPS`, or non-finite) still yields its
+/// world point: the caller keeps the texel and simply has no facing to
+/// test — malformed geometry never silently kills paint.
+pub fn world_and_face_normal_at_uv(
+    mesh: &MeshData,
+    uv: [f32; 2],
+) -> Option<([f32; 3], Option<[f32; 3]>)> {
     let hit = uv_to_barycentric(mesh, uv)?;
     let base = hit.triangle.checked_mul(3)?;
     let idx = mesh.indices.get(base..base.checked_add(3)?)?;
     let p0 = *mesh.positions.get(idx[0] as usize)?;
     let p1 = *mesh.positions.get(idx[1] as usize)?;
     let p2 = *mesh.positions.get(idx[2] as usize)?;
-    Some(lerp3(p0, p1, p2, hit.bary))
+    Some((lerp3(p0, p1, p2, hit.bary), face_normal(p0, p1, p2)))
+}
+
+/// `normalize((p1 - p0) x (p2 - p0))`, or `None` when the cross product's
+/// length is `<= FACE_NORMAL_EPS` or not finite.
+fn face_normal(p0: [f32; 3], p1: [f32; 3], p2: [f32; 3]) -> Option<[f32; 3]> {
+    let a = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    let b = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+    let n = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ];
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if !len.is_finite() || len <= FACE_NORMAL_EPS {
+        return None;
+    }
+    Some([n[0] / len, n[1] / len, n[2] / len])
 }
 
 /// Barycentric interpolation of three values (`a*b0 + b*b1 + c*b2`), the
@@ -502,5 +555,102 @@ mod tests {
         mesh.uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         mesh.indices = vec![0, 1, 99];
         assert_eq!(world_at_uv(&mesh, [0.7, 0.2]), None);
+    }
+
+    // --- world_and_face_normal_at_uv (R-A2 v2c) ---
+
+    #[test]
+    fn face_normal_world_point_is_byte_identical_to_world_at_uv() {
+        // The z-rising quad so the interpolation is non-trivial.
+        let mut mesh = quad();
+        mesh.positions = vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 4.0],
+            [0.0, 2.0, 4.0],
+        ];
+        for uv in [
+            [0.7, 0.2],
+            [0.25, 0.75],
+            [0.5, 0.5],
+            [0.13, 0.91],
+            [1.0, 1.0],
+        ] {
+            let (world, _) = world_and_face_normal_at_uv(&mesh, uv).expect("inside the quad");
+            let want = world_at_uv(&mesh, uv).expect("inside the quad");
+            assert_eq!(world.map(f32::to_bits), want.map(f32::to_bits), "uv {uv:?}");
+        }
+    }
+
+    #[test]
+    fn face_normal_is_unit_and_along_plus_z_for_the_ccw_quad() {
+        // Tri 0 = (0,0,0),(1,0,0),(1,1,0): (1,0,0) x (1,1,0) = (0,0,1),
+        // already unit; tri 1 = (0,0,0),(1,1,0),(0,1,0): (1,1,0) x
+        // (0,1,0) = (0,0,1).
+        let mesh = quad();
+        for uv in [[0.7, 0.2], [0.2, 0.7]] {
+            let (_, n) = world_and_face_normal_at_uv(&mesh, uv).expect("inside");
+            assert_eq!(n, Some([0.0, 0.0, 1.0]), "uv {uv:?}");
+        }
+        // A non-unit cross product is normalized: scale x by 3 and z-tilt
+        // tri 0 to (0,0,0),(3,0,0),(3,1,4): (3,0,0) x (3,1,4) =
+        // (0, -12, 3), length sqrt(153) = 12.369317.
+        let mut tilted = quad();
+        tilted.positions = vec![
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [3.0, 1.0, 4.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let (_, n) = world_and_face_normal_at_uv(&tilted, [0.7, 0.2]).expect("inside");
+        let n = n.expect("non-degenerate");
+        let len = 153.0_f32.sqrt();
+        assert_eq!(n[0], 0.0);
+        assert!((n[1] - (-12.0 / len)).abs() < 1e-6, "{n:?}");
+        assert!((n[2] - 3.0 / len).abs() < 1e-6, "{n:?}");
+        let unit = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        assert!((unit - 1.0).abs() < 1e-6, "length {unit}");
+    }
+
+    #[test]
+    fn reversing_the_winding_flips_the_face_normal() {
+        // The UV lookup is winding-agnostic (same triangle covers), but the
+        // normal follows the index order: CW in index order -> -z.
+        let mut cw = quad();
+        cw.indices = vec![0, 2, 1, 0, 3, 2];
+        for uv in [[0.7, 0.2], [0.2, 0.7]] {
+            let (world, n) = world_and_face_normal_at_uv(&cw, uv).expect("inside");
+            assert_eq!(n, Some([0.0, 0.0, -1.0]), "uv {uv:?}");
+            assert_eq!(Some(world), world_at_uv(&cw, uv));
+        }
+    }
+
+    #[test]
+    fn a_degenerate_triangle_keeps_its_world_point_but_has_no_normal() {
+        // UVs stay a proper quad (the lookup hits), but tri 0's positions
+        // are collinear on the x axis: zero cross product.
+        let mut mesh = quad();
+        mesh.positions[2] = [2.0, 0.0, 0.0];
+        let (world, n) = world_and_face_normal_at_uv(&mesh, [0.7, 0.2]).expect("uv hit");
+        assert_eq!(n, None, "collinear triangle has no facing");
+        assert_eq!(Some(world), world_at_uv(&mesh, [0.7, 0.2]));
+        // Non-finite positions: no normal either, never a NaN normal.
+        mesh.positions[2] = [f32::INFINITY, 1.0, 0.0];
+        let (_, n) = world_and_face_normal_at_uv(&mesh, [0.7, 0.2]).expect("uv hit");
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn a_uv_miss_yields_nothing_from_the_normal_lookup() {
+        let mesh = quad();
+        assert_eq!(world_and_face_normal_at_uv(&mesh, [1.5, 0.5]), None);
+        assert_eq!(world_and_face_normal_at_uv(&mesh, [f32::NAN, 0.5]), None);
+        assert_eq!(
+            world_and_face_normal_at_uv(&MeshData::default(), [0.5, 0.5]),
+            None
+        );
+        let mut broken = quad();
+        broken.indices = vec![0, 1, 99];
+        assert_eq!(world_and_face_normal_at_uv(&broken, [0.7, 0.2]), None);
     }
 }

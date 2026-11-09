@@ -44,10 +44,30 @@
 //!   follow picks the camera). The flag is a placement mode: `adopt`,
 //!   `disarm` and tiling never touch it. v2b cuts: Apply re-rasterizes
 //!   once per click, never per frame or mid-stroke; no persistence.
-//! - **No depth or backface culling**: a texel whose world point sits
-//!   behind another surface still writes, and both faces of a sheet
-//!   write. Only behind-the-eye (`w <= 0`) and off-viewport (NDC outside
-//!   `[-1, 1]`) texels are skipped.
+//! - **Backface culling is ON by default (v2c, row 297,
+//!   `docs/loop/briefs/2026-11-09-projection-backface-design.md`)**: with
+//!   [`ProjectionState::cull_backfaces`] on, a texel whose covering
+//!   triangle faces away from the projecting camera's eye
+//!   (`dot(n, eye - p) < 0`) writes nothing. `n` is the triangle's
+//!   GEOMETRIC normal in index order
+//!   (`umber_mesh::world_and_face_normal_at_uv`, the same single
+//!   barycentric scan as before), so the projector culls exactly what the
+//!   viewport's `cull_mode: Back` + CCW-front mesh pass culls; the eye is
+//!   the camera the raster projects through (frozen, or live under
+//!   follow). Grazing texels (`dot == 0`), degenerate triangles and NaN
+//!   facings KEEP the texel (never silently kill paint). With it off the
+//!   raster is byte-identical to v1 ("both faces write"). Tiling and
+//!   follow compose orthogonally (the cull reads neither). The flag is a
+//!   placement mode: `adopt` keeps it, `arm`/`disarm` never touch it; no
+//!   persistence. The default flip is user-visible: before v2c a decal
+//!   reached back faces.
+//! - **No depth culling (deferred, design brief §5)**: a texel whose
+//!   world point sits behind another FRONT-facing surface still writes.
+//!   It needs the visible surface's depth per screen pixel — either the
+//!   GPU frame's depth (a new seam into `umber-gpu`) or a CPU depth
+//!   raster; the route is open. Besides the backface cull, only
+//!   behind-the-eye (`w <= 0`) and off-viewport (NDC outside `[-1, 1]`)
+//!   texels are skipped.
 //!
 //! Judgment calls (the next kill extends from these):
 //!
@@ -476,11 +496,17 @@ pub struct ProjectionState {
     /// and view rect instead of a frozen placement, and `arm` freezes
     /// nothing. A placement mode, so [`ProjectionState::adopt`] keeps it.
     pub follow_camera: bool,
+    /// Cull back faces (R-A2 v2c): texels whose covering triangle faces
+    /// away from the projecting camera's eye take nothing. Default `true`;
+    /// off restores v1's "both faces write". A placement mode, so
+    /// [`ProjectionState::adopt`] keeps it.
+    pub cull_backfaces: bool,
 }
 
 impl Default for ProjectionState {
     /// No image, the default transform, unarmed, nothing frozen,
-    /// [`DEFAULT_PROJECTION_OPACITY`], tiling and follow-camera off.
+    /// [`DEFAULT_PROJECTION_OPACITY`], tiling and follow-camera off,
+    /// backface culling ON.
     fn default() -> Self {
         Self {
             image: None,
@@ -492,6 +518,7 @@ impl Default for ProjectionState {
             load_error: None,
             tiling: false,
             follow_camera: false,
+            cull_backfaces: true,
         }
     }
 }
@@ -547,7 +574,8 @@ impl ProjectionState {
 /// top-down, RGBA8, `w * h * 4` bytes) through the frozen placement.
 /// `None` without an image, without a frozen placement, under a
 /// degenerate transform (scale not finite and positive) or a degenerate
-/// frozen rect. Texels off the mesh, behind the eye, off the frozen
+/// frozen rect. Texels off the mesh, back-facing (with
+/// [`ProjectionState::cull_backfaces`]), behind the eye, off the frozen
 /// viewport or (tiling off) outside the image write `[0, 0, 0, 0]`; with
 /// [`ProjectionState::tiling`] the image repeats instead (module docs).
 ///
@@ -606,13 +634,20 @@ fn rasterize_with(
     let mut out = vec![0u8; len];
     let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(tile);
     let vp = camera.view_proj(rw / rh);
+    // The SAME camera the raster projects through (frozen or live).
+    let eye = camera.eye();
     let size = [image.width(), image.height()];
     for y in 0..h {
         for x in 0..w {
             let uv = umber_mesh::uv_gbuffer::texel_center_uv(ox, oy, x, y, w, h);
-            let Some(world) = umber_mesh::world_at_uv(mesh, uv) else {
+            let Some((world, normal)) = umber_mesh::world_and_face_normal_at_uv(mesh, uv) else {
                 continue;
             };
+            // v2c: a back-facing texel writes nothing (the buffer is
+            // already zero), the same faces the viewport's mesh pass culls.
+            if state.cull_backfaces && faces_away(normal, eye, world) {
+                continue;
+            }
             let clip = vp * glam::Vec4::new(world[0], world[1], world[2], 1.0);
             // `w <= 0` is at or behind the eye; the divide would mirror it.
             if clip.w.is_nan() || clip.w <= 0.0 {
@@ -643,6 +678,20 @@ fn rasterize_with(
         }
     }
     Some(out)
+}
+
+/// The v2c backface test: `true` (cull) exactly when the face normal `n`
+/// points away from `eye` as seen from the world point `p`, i.e.
+/// `dot(n, eye - p) < 0`. A missing (degenerate) normal, or a NaN dot,
+/// keeps the texel (`false`): malformed geometry never silently kills
+/// paint. `dot == 0` (grazing) keeps it too, so the silhouette does not
+/// flicker.
+fn faces_away(n: Option<[f32; 3]>, eye: glam::Vec3, p: [f32; 3]) -> bool {
+    let Some(n) = n else {
+        return false;
+    };
+    let dot = n[0] * (eye.x - p[0]) + n[1] * (eye.y - p[1]) + n[2] * (eye.z - p[2]);
+    dot < 0.0
 }
 
 /// The projection quad's corners in viewport-local px (the drawer adds
@@ -1250,6 +1299,135 @@ mod tests {
         );
     }
 
+    // --- backface culling (R-A2 v2c) ---
+
+    /// [`quad`] with every triangle's index order reversed: the same UV
+    /// coverage and world points, but the geometric normal is -z, so a
+    /// [`head_on`] camera on +z sees its BACK face.
+    fn reversed_quad() -> umber_mesh::MeshData {
+        umber_mesh::MeshData {
+            indices: vec![0, 2, 1, 0, 3, 2],
+            ..quad()
+        }
+    }
+
+    /// The v1 pin's fixture: a rotated, off-center red/blue image.
+    fn v1_fixture() -> ProjectionState {
+        let mut state = armed(red_blue(), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform = StencilTransform {
+            center: [43.0, 57.0],
+            scale: 3.0,
+            rotation: 0.3,
+        };
+        state
+    }
+
+    #[test]
+    fn culling_on_front_facing_quad_is_byte_identical_to_the_v1_chain() {
+        // The regression guard: the quad's CCW triangles face the +z eye
+        // (normal (0, 0, 1), dot = 5 - 0 > 0), so nothing is culled.
+        let state = v1_fixture();
+        assert!(state.cull_backfaces);
+        let out = rasterize_projection(&state, &quad(), 1001, 16, 16).unwrap();
+        assert_eq!(out, v1_reference(&state, &quad(), 16));
+        assert!(out.chunks(4).any(|t| t[3] == 255), "the decal landed");
+    }
+
+    #[test]
+    fn culling_on_reversed_quad_takes_nothing() {
+        // Normal (0, 0, -1), eye (0, 0, 5): dot = -5 < 0 on every texel.
+        let state = v1_fixture();
+        assert!(state.cull_backfaces);
+        let out = rasterize_projection(&state, &reversed_quad(), 1001, 16, 16).unwrap();
+        assert_eq!(out, vec![0; 16 * 16 * 4]);
+    }
+
+    #[test]
+    fn culling_off_restores_v1_on_the_reversed_quad() {
+        let mut state = v1_fixture();
+        state.cull_backfaces = false;
+        let mesh = reversed_quad();
+        let out = rasterize_projection(&state, &mesh, 1001, 16, 16).unwrap();
+        assert_eq!(out, v1_reference(&state, &mesh, 16));
+        assert!(out.chunks(4).any(|t| t[3] == 255), "both faces write again");
+    }
+
+    #[test]
+    fn culling_keeps_texels_of_degenerate_triangles() {
+        // Every triangle's positions are collinear on the x axis (zero
+        // cross product -> no normal), but the UVs still cover the tile:
+        // the cull has no facing to test, so it keeps every texel and the
+        // raster equals the cull-off raster.
+        let mut mesh = quad();
+        mesh.positions = vec![
+            [-1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ];
+        let mut state = armed(image(2, 2, |_, _| RED), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform.scale = 1000.0;
+        let on = rasterize_projection(&state, &mesh, 1001, 8, 8).unwrap();
+        state.cull_backfaces = false;
+        let off = rasterize_projection(&state, &mesh, 1001, 8, 8).unwrap();
+        assert_eq!(on, off);
+        assert_eq!(texel(&on, 8, 4, 4), RED, "the degenerate texel kept paint");
+    }
+
+    #[test]
+    fn tiling_composes_with_culling() {
+        // The tiling fixture (a 10 px red square, scale 5): tiling fills
+        // the front quad's corner texels; the reversed quad still takes
+        // nothing; culling off brings the tiled corners back.
+        let mut state = armed(image(2, 2, |_, _| RED), head_on(glam::Vec3::ZERO, 5.0));
+        state.transform.scale = 5.0;
+        state.tiling = true;
+        assert!(state.cull_backfaces);
+        let front = rasterize_projection(&state, &quad(), 1001, 8, 8).unwrap();
+        assert_eq!(texel(&front, 8, 0, 0), RED);
+        assert_eq!(texel(&front, 8, 7, 7), RED);
+        let back = rasterize_projection(&state, &reversed_quad(), 1001, 8, 8).unwrap();
+        assert_eq!(back, vec![0; 8 * 8 * 4]);
+        state.cull_backfaces = false;
+        let both = rasterize_projection(&state, &reversed_quad(), 1001, 8, 8).unwrap();
+        assert_eq!(texel(&both, 8, 0, 0), RED);
+        assert_eq!(texel(&both, 8, 7, 7), RED);
+    }
+
+    #[test]
+    fn follow_composes_with_culling_through_the_live_eye() {
+        // Frozen head-on from +z (the front side), follow on, then Apply
+        // through a LIVE camera orbited to yaw = pi: eye (~0, 0, -5),
+        // looking +z at the quad. The quad is in front of it (clip w > 0)
+        // but its +z normal faces away (dot = -5 < 0): culled everywhere.
+        // Only the live eye explains that — the frozen eye sees the front.
+        let mut state = ProjectionState {
+            follow_camera: true,
+            ..armed(image(2, 2, |_, _| RED), head_on(glam::Vec3::ZERO, 5.0))
+        };
+        state.transform.scale = 1000.0;
+        let behind = OrbitCamera {
+            yaw: std::f32::consts::PI,
+            ..head_on(glam::Vec3::ZERO, 5.0)
+        };
+        let live = |s: &ProjectionState, cam: &OrbitCamera| {
+            rasterize_projection_live(s, &quad(), 1001, 8, 8, cam, view_rect()).unwrap()
+        };
+        assert!(state.cull_backfaces);
+        assert_eq!(live(&state, &behind), vec![0; 8 * 8 * 4]);
+        // From the front the same live raster paints.
+        let front = head_on(glam::Vec3::ZERO, 5.0);
+        assert_eq!(texel(&live(&state, &front), 8, 4, 4), RED);
+        // Culling off: the back view writes, exactly the v1 hand chain.
+        state.cull_backfaces = false;
+        let off = live(&state, &behind);
+        assert_eq!(
+            off,
+            reference_through(&state, &quad(), 8, &behind, view_rect())
+        );
+        assert_eq!(texel(&off, 8, 4, 4), RED);
+    }
+
     // --- state ---
 
     #[test]
@@ -1261,6 +1439,44 @@ mod tests {
         assert_eq!(s.transform, StencilTransform::default());
         assert!(!s.tiling);
         assert!(!s.follow_camera);
+        assert!(s.cull_backfaces, "v2c: back faces are culled by default");
+    }
+
+    #[test]
+    fn adopt_keeps_cull_backfaces_and_arm_disarm_never_touch_it() {
+        // Both values survive every arm / disarm / adopt (ok and refused),
+        // under follow off (arm freezes) and follow on (arm freezes nothing).
+        for (cull, follow) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut s = ProjectionState {
+                cull_backfaces: cull,
+                follow_camera: follow,
+                ..ProjectionState::default()
+            };
+            let cam = head_on(glam::Vec3::ZERO, 5.0);
+            s.arm(cam, view_rect());
+            assert_eq!(s.cull_backfaces, cull, "arm (follow {follow})");
+            s.disarm();
+            assert_eq!(s.cull_backfaces, cull, "disarm (follow {follow})");
+            s.adopt(
+                PathBuf::from("a.png"),
+                Ok(image(4, 2, |_, _| RED)),
+                [200.0, 100.0],
+            );
+            assert!(!s.armed && s.frozen.is_none());
+            assert_eq!(s.cull_backfaces, cull, "adopt ok (follow {follow})");
+            s.adopt(
+                PathBuf::from("b.png"),
+                Err(ProjectionLoadError::Malformed {
+                    width: 0,
+                    height: 0,
+                    bytes: 0,
+                }),
+                [200.0, 100.0],
+            );
+            assert_eq!(s.cull_backfaces, cull, "adopt refused (follow {follow})");
+            s.arm(cam, view_rect());
+            assert_eq!(s.cull_backfaces, cull, "re-arm (follow {follow})");
+        }
     }
 
     #[test]

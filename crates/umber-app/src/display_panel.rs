@@ -133,6 +133,12 @@
 //! only the caller can do (re-freeze when follow flips off while armed,
 //! so Apply has a placement again) is done by comparing the flag before
 //! and after the rows (`main.rs` `projection_section`).
+//!
+//! Row 297 (R-A2 v2c backface culling) adds a Cull back faces checkbox
+//! after Follow camera, same shape again: enabled with an image, writes
+//! through its borrow ([`ProjectionRow::cull_backfaces`]), no response
+//! field, and nothing for the caller to do (no freeze involved). It is
+//! drawn CHECKED on a fresh session (the state's default is `true`).
 
 use crate::i18n;
 use egui::{Color32, Ui};
@@ -433,6 +439,10 @@ pub struct ProjectionRow<'a> {
     /// A real borrow like [`Self::tiling`]: the checkbox writes through
     /// it (the caller re-freezes on an off-flip while armed).
     pub follow_camera: &'a mut bool,
+    /// Cull back faces (R-A2 v2c): back-facing surfaces take no decal. A
+    /// real borrow like [`Self::tiling`]: the checkbox writes through it
+    /// and the caller has nothing to do (the raster reads it at Apply).
+    pub cull_backfaces: &'a mut bool,
 }
 
 /// What the projection rows asked for this frame.
@@ -502,6 +512,16 @@ pub fn projection_rows(ui: &mut Ui, row: ProjectionRow<'_>) -> ProjectionRowResp
             ),
         )
         .on_hover_text(i18n::tr("overlays.projection-follow-hint"));
+        // Cull back faces writes through as well (row 297): a raster
+        // mode with nothing to freeze.
+        ui.add_enabled(
+            row.has_image,
+            egui::Checkbox::new(
+                &mut *row.cull_backfaces,
+                i18n::tr("overlays.projection-cull-backfaces"),
+            ),
+        )
+        .on_hover_text(i18n::tr("overlays.projection-cull-backfaces-hint"));
     });
     ui.add_enabled_ui(row.has_image, |ui| {
         ui.horizontal(|ui| {
@@ -1185,6 +1205,7 @@ mod tests {
                                 opacity,
                                 tiling: &mut false,
                                 follow_camera: &mut false,
+                                cull_backfaces: &mut true,
                             },
                         );
                         *toggled |= response.toggled_arm;
@@ -1244,6 +1265,7 @@ mod tests {
                                 opacity: &mut opacity,
                                 tiling,
                                 follow_camera: &mut false,
+                                cull_backfaces: &mut true,
                             },
                         );
                         *toggled |= response.toggled_arm;
@@ -1293,6 +1315,7 @@ mod tests {
                                 opacity: &mut opacity,
                                 tiling,
                                 follow_camera,
+                                cull_backfaces: &mut true,
                             },
                         );
                         *toggled |= response.toggled_arm;
@@ -1318,6 +1341,57 @@ mod tests {
         harness.get_by_label("Follow camera").click();
         harness.run();
         assert!(harness.state().0, "disabled Follow leaves the flag alone");
+    }
+
+    #[test]
+    fn projection_cull_checkbox_writes_through_the_borrow() {
+        // (cull_backfaces, tiling, follow_camera, has_image, toggled-arm seen)
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        type CullState = (bool, bool, bool, bool, bool);
+        let build = |has_image: bool, cull: bool| {
+            egui_kittest::Harness::builder()
+                .with_size(egui::vec2(640.0, 260.0))
+                .build_ui_state(
+                    |ui, s: &mut CullState| {
+                        let (cull_backfaces, tiling, follow_camera, has_image, toggled) = s;
+                        let mut opacity = DEFAULT_STENCIL_OPACITY;
+                        let response = projection_rows(
+                            ui,
+                            ProjectionRow {
+                                path: None,
+                                load_error: None,
+                                has_image: *has_image,
+                                armed: false,
+                                opacity: &mut opacity,
+                                tiling,
+                                follow_camera,
+                                cull_backfaces,
+                            },
+                        );
+                        *toggled |= response.toggled_arm;
+                    },
+                    (cull, false, false, has_image, false),
+                )
+        };
+        // With an image, starting checked (the state's default): click
+        // off, click on; never Tile, never Follow, never an arm flip.
+        let mut harness = build(true, true);
+        harness.run();
+        harness.get_by_label("Cull back faces").click();
+        harness.run();
+        assert!(!harness.state().0, "Cull back faces writes the flag off");
+        assert!(!harness.state().1 && !harness.state().2, "not Tile/Follow");
+        harness.get_by_label("Cull back faces").click();
+        harness.run();
+        assert!(harness.state().0, "a second click writes it back on");
+        assert!(!harness.state().4, "Cull back faces is not an arm flip");
+        // Without an image the checkbox is disabled: the flag holds.
+        let mut harness = build(false, false);
+        harness.run();
+        harness.get_by_label("Cull back faces").click();
+        harness.run();
+        assert!(!harness.state().0, "disabled Cull leaves the flag alone");
     }
 
     #[test]
@@ -1356,6 +1430,8 @@ mod tests {
             "overlays.projection-tile-hint",
             "overlays.projection-follow",
             "overlays.projection-follow-hint",
+            "overlays.projection-cull-backfaces",
+            "overlays.projection-cull-backfaces-hint",
         ] {
             for locale in ["en-US", "pt-BR"] {
                 assert!(i18n.has_key(locale, key), "{locale} missing {key}");

@@ -223,8 +223,11 @@
 //!   Apply click (never per frame or mid-stroke). Follow off is the
 //!   frozen path above, unchanged.
 //! - **v1 cut line**: (tiling landed in v2a, the live projector in v2b
-//!   above); no depth or backface culling (`rasterize_projection` writes
-//!   every texel whose projection lands in the image).
+//!   above); no depth culling (`rasterize_projection` writes every texel
+//!   whose projection lands in the image, including one behind another
+//!   front-facing surface). Backface culling landed in v2c (row 297):
+//!   `projection.cull_backfaces` (default on) skips the texels whose
+//!   covering triangle faces away from the projecting camera's eye.
 //!
 //! # The camera mid-stroke (pwys-stroke-buffer, option A)
 //!
