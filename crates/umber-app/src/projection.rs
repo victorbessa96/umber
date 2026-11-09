@@ -1750,32 +1750,28 @@ mod tests {
     }
 
     /// A NEEDLE: three nearly-collinear UVs. Its area clears
-    /// `UV_DET_EPS` (a VALID footprint), but the barycentric solve is
-    /// ill-conditioned: for a texel centre outside the footprint the
-    /// weights stop reconstructing the point, yet every component clears
-    /// the lower-bound test, so the point lookup claims it.
+    /// `UV_DET_EPS` (-1.49e-8) but its NORMALIZED area
+    /// `|area| / longest_edge²` (~4.4e-8) is below `UV_COND_EPS`, so since
+    /// W1.1 `UvTri::of` rejects it: it is not a valid footprint.
     ///
-    /// The UVs are the exact ones the dragon's fuzz found diverging
-    /// (area -1.49e-8). Texel (15, 0) — uv (0.96875, 0.96875) — gets
-    /// weights `[0.0, 0.0, 2.0]`, i.e. the world point `2 * p2`.
+    /// The UVs are the exact ones the dragon's fuzz found diverging.
+    /// BEFORE W1.1 the barycentric solve was ill-conditioned: texel
+    /// (15, 0) — uv (0.96875, 0.96875), far outside the footprint —
+    /// got weights `[0.0, 0.0, 2.0]`, passed the lower-bound-only inside
+    /// test, and the OLD per-texel lookup claimed and PAINTED it, while
+    /// the one-pass walk never did. That divergence was the one place
+    /// R-A2 v2d's byte-identity claim did not hold.
     ///
-    /// The OLD per-texel lookup claimed that texel and PAINTED it. The
-    /// one-pass walk does not: its texel set comes from the triangle's
-    /// bounding-box window, so it never claims a texel outside the
-    /// footprint.
-    ///
-    /// So on a needle the two rasters DIFFER, and the difference is the
-    /// old path painting garbage outside the mesh's UV footprint. This is
-    /// the ONE place the byte-identity claim of R-A2 v2d does not hold,
-    /// it is a fix rather than a regression, and this pin states it
-    /// exactly so nobody has to rediscover it. The underlying primitive
-    /// bug (`UvTri::bary` has no upper bound) is shared with the GPU bake
-    /// shader and is a separate kill.
+    /// W1.1 closed it at the primitive: both paths now route through
+    /// `UvTri::of`, both reject the needle, and the two rasters come out
+    /// empty and IDENTICAL. This pin states that, so nobody has to
+    /// rediscover it: on a needle, neither raster paints anything,
+    /// anywhere.
     #[test]
     fn a_needle_is_not_painted_outside_its_footprint_by_the_one_pass_raster() {
-        // p2 = (0.25, 0.25, 0): the garbage world point `2 * p2` is
-        // (0.5, 0.5, 0), inside the view, so the old path really paints
-        // it (a red image covers the whole view).
+        // p2 = (0.25, 0.25, 0): pre-W1.1 the garbage world point `2 * p2`
+        // = (0.5, 0.5, 0) sat inside the view, so the old path really
+        // painted texel (15, 0) (a red image covers the whole view).
         let mesh = umber_mesh::MeshData {
             positions: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.25, 0.25, 0.0]],
             uvs: vec![
@@ -1786,42 +1782,43 @@ mod tests {
             indices: vec![0, 1, 2],
             ..Default::default()
         };
+        assert_eq!(
+            umber_mesh::UvTri::of(&mesh, 0),
+            None,
+            "W1.1: the needle is not a valid footprint"
+        );
         let state = red_everywhere();
         let (got, want) = frozen_pair(&state, &mesh, 16);
-        // Texel (15, 0) is outside the needle's footprint (uv 0.96875 vs
-        // the footprint's 0.1615..0.5709): the old path painted it, the
-        // one-pass raster does not.
+        // W1.1: both rasters agree on the needle — empty.
         assert_eq!(
-            texel(&want, 16, 15, 0),
-            RED,
-            "the old path painted the out-of-footprint texel"
+            got, want,
+            "W1.1 closed the needle divergence: both rasters agree"
         );
+        // Texel (15, 0) is outside the needle's footprint (uv 0.96875 vs
+        // the footprint's 0.1615..0.5709): neither path paints it.
         assert_eq!(
             texel(&got, 16, 15, 0),
             CLEAR,
             "the one-pass raster painted outside the footprint"
         );
-        assert_ne!(got, want, "the needle no longer exercises the difference");
-        // Every texel the one-pass raster painted lies within the
-        // triangle's WINDOW (its UV bounds expanded by ~1.5 texels), not
-        // arbitrarily far outside: the walk is bounded by the window,
-        // while the point lookup scanned every triangle at every texel
-        // and claimed texels far outside the footprint.
-        const MARGIN: f32 = 2.0 / 16.0; // two texels
-        const LO: f32 = 0.16149949;
-        const HI: f32 = 0.57094914;
+        assert_eq!(
+            texel(&want, 16, 15, 0),
+            CLEAR,
+            "the old path still paints the out-of-footprint texel"
+        );
+        // No texel anywhere is painted, on either raster.
         for y in 0..16u32 {
             for x in 0..16u32 {
-                let uv = umber_mesh::uv_gbuffer::texel_center_uv(0.0, 0.0, x, y, 16, 16);
-                let within = (LO - MARGIN..=HI + MARGIN).contains(&uv[0])
-                    && (LO - MARGIN..=HI + MARGIN).contains(&uv[1]);
-                if !within {
-                    assert_eq!(
-                        texel(&got, 16, x, y),
-                        CLEAR,
-                        "texel {x},{y} (uv {uv:?}) painted far outside the footprint"
-                    );
-                }
+                assert_eq!(
+                    texel(&got, 16, x, y),
+                    CLEAR,
+                    "texel {x},{y} painted by the one-pass raster"
+                );
+                assert_eq!(
+                    texel(&want, 16, x, y),
+                    CLEAR,
+                    "texel {x},{y} painted by the old path"
+                );
             }
         }
     }

@@ -6,11 +6,30 @@
 //! WGSL: the position and ID bake shaders) with two different degenerate
 //! epsilons. The CPU copies now delegate here; the GPU side quotes
 //! [`UV_DET_EPS`] / [`UV_BARY_EPS`] so both run the same formula.
+//! [`UV_COND_EPS`] has no WGSL copy on purpose. `umber_bake::gbuffer`
+//! uploads an all-zero record (area 0) for every triangle [`UvTri::of`]
+//! rejects, and the shader's `abs(area) < UV_DET_EPS` skip drops it. So the
+//! GPU inherits the rule without any change to the shader formula.
 //!
 //! Contract (shared by every consumer):
 //! - Triangles are `mesh.indices.chunks_exact(3)`; the triangle index is
-//!   the chunk position. Malformed (out-of-range UV index), non-finite and
-//!   UV-degenerate (`|area| < UV_DET_EPS`) triangles cover nothing.
+//!   the chunk position. Malformed (out-of-range UV index), non-finite,
+//!   UV-degenerate (`|area| < UV_DET_EPS`) and ILL-CONDITIONED
+//!   (`|area| / longest_edge² < UV_COND_EPS`) triangles cover nothing.
+//! - The conditioning rule (W1.1, design brief
+//!   `docs/loop/briefs/2026-11-09-uv-triangle-conditioning-design.md`) is
+//!   a VALIDITY rule, not a tolerance. The inside test checks only the lower
+//!   bound, and on a needle the f32 edge functions stop being a barycentric
+//!   decomposition. The fuzz's needle (area -1.49e-8, which clears
+//!   `UV_DET_EPS`) got weights `[0, 0, 2]` at texel centre (0.96875,
+//!   0.96875), far outside its footprint, so the point lookup CLAIMED that
+//!   texel. Per-point fixes were measured and REJECTED: an upper bound
+//!   `b_i <= 1 + eps` made it worse (lookup-vs-walk diff 31 -> 54), and a
+//!   reconstruction tolerance cannot be separated from a thin triangle's
+//!   legitimate error (up to 3.5e-1). Conditioning belongs to the
+//!   TRIANGLE, so the rule rejects the triangle: garbage 272 -> 0, and the
+//!   point lookup and the windowed walk agree exactly. Do not "simplify"
+//!   it back to a per-point bound.
 //! - Barycentrics are `b_i = -e_i / area` (the edge-function correction
 //!   documented at the call sites: `E_ab(v_opp) = -area` in both
 //!   windings), so the inside test is one winding-agnostic branch:
@@ -36,6 +55,21 @@ pub const UV_DET_EPS: f32 = 1e-10;
 /// Edge-inclusive inside tolerance in barycentric space (scale-invariant).
 pub const UV_BARY_EPS: f32 = 1e-6;
 
+/// The conditioning threshold on a footprint's NORMALIZED area
+/// `|area| / longest_edge²`. Here `area` is the signed cross product
+/// [`UvTri::area`] and `longest_edge` is the longest of the three UV
+/// edges. A triangle below it is not a valid footprint: it covers
+/// nothing, on the CPU and (through the all-zero upload record) the GPU.
+///
+/// The measure is dimensionless, so a needle is a needle whether the UVs
+/// span 0..1 or 0..1000. Measured (W1.1 design brief §4): 1e-6 rejects
+/// 0 / 10 912 grid triangles and 0 / 4 263 random triangles in [0,1]²,
+/// and it kills every degenerate needle in the hostile corpus. The first
+/// garbage claims appear near 3.7e-7, so 1e-6 sits above them with margin.
+/// 1e-5 also rejects no production triangle, but 1e-6 is the tighter
+/// choice at the same measured cost.
+pub const UV_COND_EPS: f32 = 1e-6;
+
 /// One lookup result: the covering triangle and its barycentric weights
 /// (`bary[0] + bary[1] + bary[2] == 1` up to f32 rounding).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,17 +82,43 @@ pub struct UvHit {
 
 /// A triangle's UV footprint, prepared once so per-texel loops pay only
 /// the edge functions. Built by [`UvTri::of`].
+///
+/// A `UvTri` exists only for a VALID footprint, meaning all of these hold:
+/// - the UVs are finite;
+/// - `|area| >= UV_DET_EPS`, so it is not degenerate;
+/// - `|area| / longest_edge² >= UV_COND_EPS`, so it is well-conditioned.
+///
+/// The last rule (W1.1) exists because [`UvTri::bary`] tests only the
+/// lower bound of each weight. On a needle, f32 cannot represent the
+/// weights for ANY point, so a texel far outside the footprint can pass.
+/// The fuzz's needle (normalized area ~4.4e-8) claimed texel (15, 0) of a
+/// 16² tile with weights `[0, 0, 2]`. Rejecting the triangle is the
+/// measured fix (see the module docs for the rejected per-point ones).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UvTri {
     /// The three vertex UVs.
     pub uv: [[f32; 2]; 3],
-    /// Signed UV-space area (cross product; never below `UV_DET_EPS`).
+    /// Signed UV-space area (cross product; never below `UV_DET_EPS`, and
+    /// never below `UV_COND_EPS * longest_edge²`).
     pub area: f32,
+}
+
+/// `|area| / longest_edge²`, the scale-free conditioning measure behind
+/// [`UV_COND_EPS`] (`longest_edge` = the longest of the three UV edges,
+/// squared lengths compared in f32). A squared edge that overflows to
+/// infinity gives 0 (rejected), which is right for such an extreme needle.
+fn normalized_area(uv: [[f32; 2]; 3], area: f32) -> f32 {
+    let sq = |a: [f32; 2], b: [f32; 2]| {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        dx * dx + dy * dy
+    };
+    let longest_sq = sq(uv[0], uv[1]).max(sq(uv[1], uv[2])).max(sq(uv[2], uv[0]));
+    area.abs() / longest_sq
 }
 
 impl UvTri {
     /// Prepares triangle `tri` of `mesh`, or `None` when it is malformed,
-    /// non-finite or UV-degenerate.
+    /// non-finite, UV-degenerate or ill-conditioned (see [`UvTri`]).
     pub fn of(mesh: &MeshData, tri: usize) -> Option<UvTri> {
         let base = tri.checked_mul(3)?;
         let idx = mesh.indices.get(base..base.checked_add(3)?)?;
@@ -69,6 +129,9 @@ impl UvTri {
     }
 
     /// Prepares a footprint from raw UVs (same validity rules as [`UvTri::of`]).
+    /// This is the ONE construction point, so every CPU consumer and the
+    /// GPU upload (`umber_bake::gbuffer`, through [`UvTri::of`]) share the
+    /// rules.
     pub fn from_uvs(uv: [[f32; 2]; 3]) -> Option<UvTri> {
         if !uv.iter().all(|t| t[0].is_finite() && t[1].is_finite()) {
             return None;
@@ -76,6 +139,11 @@ impl UvTri {
         let [uv0, uv1, uv2] = uv;
         let area = (uv1[0] - uv0[0]) * (uv2[1] - uv0[1]) - (uv2[0] - uv0[0]) * (uv1[1] - uv0[1]);
         if !area.is_finite() || area.abs() < UV_DET_EPS {
+            return None;
+        }
+        // The conditioning rule (W1.1): a needle covers nothing.
+        let norm = normalized_area(uv, area);
+        if norm.is_nan() || norm < UV_COND_EPS {
             return None;
         }
         Some(UvTri { uv, area })
@@ -380,8 +448,8 @@ fn for_each_covered_texel(
 ///   nothing to write for a yield must therefore OVERWRITE (e.g. with
 ///   transparent), never skip, or an earlier triangle's value survives.
 /// - **`filter(triangle)`** runs once per UV-valid triangle (malformed,
-///   non-finite-UV and UV-degenerate triangles cover nothing and are never
-///   offered), in index order, immediately BEFORE that triangle's texels;
+///   non-finite-UV, UV-degenerate and ill-conditioned triangles cover
+///   nothing and are never offered), in index order, immediately BEFORE that triangle's texels;
 ///   `false` skips the triangle entirely (it is not visited). So the last
 ///   index `filter` accepted names the triangle every following yield
 ///   belongs to, until the next accepted call.
@@ -897,8 +965,9 @@ mod tests {
     }
 
     /// A NEEDLE: three nearly-collinear UVs along the diagonal. Its area
-    /// clears `UV_DET_EPS` (it is a VALID footprint), but the triangle is
-    /// so thin that the barycentric solve is ill-conditioned.
+    /// clears `UV_DET_EPS`, but the triangle is so thin that the
+    /// barycentric solve is ill-conditioned, so the conditioning rule
+    /// rejects it.
     ///
     /// The UVs are the exact ones the dragon's fuzz found diverging
     /// (area -1.49e-8).
@@ -915,96 +984,327 @@ mod tests {
         }
     }
 
-    /// The walk and the POINT LOOKUP differ on a needle, and the point
-    /// lookup is the one that is wrong (R-A2 v2d).
-    ///
-    /// `UvTri::bary` tests only the LOWER bound of each barycentric
-    /// weight (`b_i >= -UV_BARY_EPS`) and never the upper bound. On a
-    /// needle the edge-function formula stops being a barycentric
-    /// DECOMPOSITION: the weights it returns do not reconstruct the point
-    /// they came from. Texel (15, 0) — uv (0.96875, 0.96875), far
-    /// outside the needle's footprint — gets weights `[0.0, 0.0, 2.0]`,
-    /// which reconstruct to `2 * uv2 = (1.1419, 1.1419)`, NOT the texel
-    /// centre. Every component clears the lower-bound test, so the point
-    /// lookup (`uv_to_barycentric`, and everything built on it) CLAIMS
-    /// that texel.
-    ///
-    /// The walk tests the same `bary` but only inside the triangle's
-    /// bounding-box window, so it does not claim it. This pin states the
-    /// difference EXACTLY, so a future change to either side has to face
-    /// it:
-    ///
-    /// - the walk's texel set is a SUBSET of the point lookup's here (it
-    ///   never claims a texel the lookup misses);
-    /// - the texels the lookup claims and the walk does not are ones the
-    ///   lookup's weights cannot reconstruct — they are not barycentric
-    ///   decompositions at all;
-    /// - on a WELL-CONDITIONED mesh the two agree exactly.
-    ///
-    /// The GPU bake shader quotes the same lower-bound-only formula
-    /// (`crates/umber-gpu/src/bake_shaders.rs`), so the GPU has the same
-    /// blind spot: fixing it is a separate kill (one formula, both sides).
+    // --- the conditioning rule (W1.1) ---
+
+    /// The signed cross-product area, the expression `UvTri::from_uvs`
+    /// uses, so a test can show which rule rejected a triangle.
+    fn raw_area(uv: [[f32; 2]; 3]) -> f32 {
+        let [uv0, uv1, uv2] = uv;
+        (uv1[0] - uv0[0]) * (uv2[1] - uv0[1]) - (uv2[0] - uv0[0]) * (uv1[1] - uv0[1])
+    }
+
+    /// Pin 1: the fuzz's needle covers nothing. Before W1.1 it was a valid
+    /// footprint, and the point lookup claimed texel (15, 0) of a 16² tile
+    /// (uv (0.96875, 0.96875), far outside the footprint) with weights
+    /// `[0, 0, 2]`. Now the triangle is rejected, so it is rejected by
+    /// EVERY path: the point lookup, the G-buffer walk and the geometry
+    /// walk.
     #[test]
-    fn a_needle_is_claimed_outside_its_footprint_by_the_point_lookup_but_not_by_the_walk() {
+    fn a_needle_covers_nothing() {
         let mesh = needle();
-        let t = UvTri::of(&mesh, 0).expect("the needle is a valid footprint");
-        // It IS a valid (non-degenerate) footprint: the area clears the
-        // epsilon, so nothing filters it out.
-        assert!(t.area.abs() >= UV_DET_EPS, "area {}", t.area);
+        let uv = [mesh.uvs[0], mesh.uvs[1], mesh.uvs[2]];
+        // The DET rule alone would keep it (the area clears 1e-10)...
+        let area = raw_area(uv);
+        assert!(area.abs() >= UV_DET_EPS, "area {area:e}");
+        // ...but its normalized area is far below the threshold. A range
+        // check, because the exact f32 bits of the squared edge sum are
+        // not derivable by hand: |area| ~1.49e-8 / longest² ~0.3353
+        // (the uv0-uv2 edge) is ~4.4e-8.
+        let norm = normalized_area(uv, area);
+        assert!(
+            norm < UV_COND_EPS / 10.0,
+            "needle normalized area {norm:e} (want < {:e})",
+            UV_COND_EPS / 10.0
+        );
+        assert_eq!(UvTri::of(&mesh, 0), None);
+        assert_eq!(UvTri::from_uvs(uv), None);
 
         let (w, h) = (16u32, 16u32);
-        let (last, _) = last_yields(&mesh, w, h);
-        let mut claimed_only_by_the_lookup = 0usize;
+        // The texel the fuzz caught, explicitly.
+        let caught = texel_center_uv(0.0, 0.0, 15, 0, w, h);
+        assert_eq!(caught, [0.96875, 0.96875]);
+        assert_eq!(uv_to_barycentric(&mesh, caught), None);
+        // Neither path claims ANY texel.
         for y in 0..h {
             for x in 0..w {
                 let uv = texel_center_uv(0.0, 0.0, x, y, w, h);
-                let hit = uv_to_barycentric(&mesh, uv);
-                let walked = last[(y * w + x) as usize].is_some();
-                match hit {
-                    None => assert!(!walked, "the walk claims texel {x},{y} the lookup misses"),
-                    Some(hit) => {
-                        if !walked {
-                            claimed_only_by_the_lookup += 1;
-                            // The weights must NOT reconstruct the point: a
-                            // barycentric decomposition always does.
-                            let q = [
-                                hit.bary[0] * t.uv[0][0]
-                                    + hit.bary[1] * t.uv[1][0]
-                                    + hit.bary[2] * t.uv[2][0],
-                                hit.bary[0] * t.uv[0][1]
-                                    + hit.bary[1] * t.uv[1][1]
-                                    + hit.bary[2] * t.uv[2][1],
-                            ];
-                            let err = ((q[0] - uv[0]).powi(2) + (q[1] - uv[1]).powi(2)).sqrt();
-                            assert!(
-                                err > 1e-3,
-                                "texel {x},{y}: the claimed weights reconstruct {q:?}, \
-                                 not the texel centre {uv:?} — the ill-conditioned case \
-                                 did not happen"
-                            );
-                        }
-                    }
-                }
+                assert_eq!(uv_to_barycentric(&mesh, uv), None, "lookup texel {x},{y}");
             }
         }
-        // The difference is REAL (the fixture exercises it) and the walk
-        // never claims a texel the lookup misses.
-        assert!(
-            claimed_only_by_the_lookup > 0,
-            "the needle fixture no longer exercises the difference"
-        );
-        // And on a well-conditioned mesh the two agree exactly.
-        let quad_mesh = quad();
-        let (last, _) = last_yields(&quad_mesh, 16, 16);
-        for y in 0..16u32 {
-            for x in 0..16u32 {
-                let uv = texel_center_uv(0.0, 0.0, x, y, 16, 16);
+        let g = UvGBuffer::build(&mesh, 1001, w, h);
+        assert!(g.covered().iter().all(|&c| !c), "the walk claims a texel");
+        let (_, yields) = last_yields(&mesh, w, h);
+        assert_eq!(yields, 0, "the geometry walk yields a texel");
+    }
+
+    /// A subdivided unit quad: `2*n*n` triangles over [0,1]², shared
+    /// diagonals, no overlaps (the production-shaped layout).
+    fn grid_mesh(n: u32) -> MeshData {
+        let row = n + 1;
+        let mut mesh = MeshData::default();
+        for j in 0..row {
+            for i in 0..row {
+                let (s, t) = (i as f32 / n as f32, j as f32 / n as f32);
+                mesh.positions.push([s, t, 0.0]);
+                mesh.uvs.push([s, t]);
+            }
+        }
+        for j in 0..n {
+            for i in 0..n {
+                let a = j * row + i;
+                mesh.indices
+                    .extend_from_slice(&[a, a + 1, a + 1 + row, a, a + 1 + row, a + row]);
+            }
+        }
+        mesh
+    }
+
+    /// Pin 2: a well-conditioned mesh is untouched. No grid triangle is
+    /// rejected (each is a right isosceles triangle, normalized area 0.5),
+    /// and the G-buffer is byte-identical to one built under the PRE-W1.1
+    /// validity rule (finite + `UV_DET_EPS` only), reimplemented here as
+    /// an O(texels x triangles) scan.
+    #[test]
+    fn a_well_conditioned_grid_is_untouched() {
+        let mesh = grid_mesh(16);
+        let tris = mesh.indices.len() / 3;
+        assert_eq!(tris, 512);
+        let rejected = (0..tris).filter(|&t| UvTri::of(&mesh, t).is_none()).count();
+        assert_eq!(rejected, 0, "grid triangles rejected");
+
+        let (w, h) = (64u32, 64u32);
+        let g = UvGBuffer::build(&mesh, 1001, w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let p = texel_center_uv(0.0, 0.0, x, y, w, h);
+                let mut old = None;
+                for (triangle, idx) in mesh.indices.chunks_exact(3).enumerate() {
+                    let uv = [
+                        mesh.uvs[idx[0] as usize],
+                        mesh.uvs[idx[1] as usize],
+                        mesh.uvs[idx[2] as usize],
+                    ];
+                    let area = raw_area(uv);
+                    if !area.is_finite() || area.abs() < UV_DET_EPS {
+                        continue;
+                    }
+                    let t = UvTri { uv, area };
+                    if let Some(bary) = t.bary(p) {
+                        old = Some(UvHit { triangle, bary });
+                    }
+                }
+                let new = g.at(x, y);
                 assert_eq!(
-                    last[(y * 16 + x) as usize].is_some(),
-                    uv_to_barycentric(&quad_mesh, uv).is_some(),
+                    new.map(|hit| (hit.triangle, hit.bary.map(f32::to_bits))),
+                    old.map(|hit| (hit.triangle, hit.bary.map(f32::to_bits))),
                     "texel {x},{y}"
                 );
             }
         }
+        assert!(g.covered().iter().all(|&c| c), "the grid covers the tile");
+    }
+
+    /// The boundary fixture: `(0,0), (1,0), (0.5, h)`. The arithmetic is
+    /// exact in f32: area = `1*h - 0.5*0 = h`, and the longest edge is the
+    /// base (squared length 1; the legs are `0.25 + h²`, which rounds to
+    /// 0.25), so the normalized area is exactly `h`.
+    fn boundary_tri(h: f32) -> [[f32; 2]; 3] {
+        [[0.0, 0.0], [1.0, 0.0], [0.5, h]]
+    }
+
+    /// Pin 3: the threshold is 1e-6, inclusive, and pinned on both sides.
+    #[test]
+    fn the_conditioning_threshold_is_1e_6_inclusive() {
+        assert_eq!(UV_COND_EPS, 1e-6);
+        let at = UV_COND_EPS;
+        let below = f32::from_bits(at.to_bits() - 1);
+        for (h, valid) in [
+            (1.1e-6_f32, true),
+            (at, true),
+            (below, false),
+            (0.9e-6, false),
+        ] {
+            let uv = boundary_tri(h);
+            assert_eq!(normalized_area(uv, raw_area(uv)), h, "exact fixture");
+            // Every case clears the DET rule: only conditioning decides.
+            assert!(raw_area(uv).abs() >= UV_DET_EPS);
+            assert_eq!(
+                UvTri::from_uvs(uv).is_some(),
+                valid,
+                "normalized area {h:e} vs UV_COND_EPS {UV_COND_EPS:e}: want valid={valid}"
+            );
+        }
+    }
+
+    /// Pin 4: the rule is scale-free. The same needle shape (normalized
+    /// area 1e-7) is rejected at UV scale 1 and at scale 1000, where its
+    /// raw area (0.1) is a billion times `UV_DET_EPS`. The well-conditioned
+    /// shape (apex at height 0.5, normalized area 0.5) is valid at both.
+    #[test]
+    fn the_conditioning_rule_is_scale_free() {
+        for scale in [1.0_f32, 1000.0] {
+            let s = |uv: [[f32; 2]; 3]| uv.map(|p| p.map(|c| c * scale));
+            let needle = s(boundary_tri(1e-7));
+            let area = raw_area(needle);
+            assert!(area.abs() >= UV_DET_EPS, "scale {scale}: area {area:e}");
+            let norm = normalized_area(needle, area);
+            // A range check: at scale 1000 the products round (1000 *
+            // 1e-4 is not exactly 0.1 in f32), so the normalized area is
+            // 1e-7 to within f32 rounding, not bit-exact.
+            assert!(
+                (norm - 1e-7).abs() < 1e-12,
+                "scale {scale}: normalized area {norm:e}"
+            );
+            assert_eq!(UvTri::from_uvs(needle), None, "scale {scale}: needle kept");
+            let fat = s(boundary_tri(0.5));
+            assert!(
+                UvTri::from_uvs(fat).is_some(),
+                "scale {scale}: fat rejected"
+            );
+        }
+        // The fuzz's needle at x1000 is rejected too (its f32 area at that
+        // scale is pure cancellation noise; either rule may catch it).
+        let n = needle();
+        let big = [0, 1, 2].map(|i| n.uvs[i].map(|c| c * 1000.0));
+        assert_eq!(UvTri::from_uvs(big), None);
+    }
+
+    /// A small deterministic PRNG (xorshift32) for the hostile corpus.
+    struct Rng(u32);
+
+    impl Rng {
+        /// Uniform in [0, 1).
+        fn unit(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 17;
+            self.0 ^= self.0 << 5;
+            (self.0 >> 8) as f32 / (1u32 << 24) as f32
+        }
+
+        fn point(&mut self) -> [f32; 2] {
+            [self.unit(), self.unit()]
+        }
+    }
+
+    /// The hostile corpus (the W1.1 fuzz's families, reimplemented):
+    /// random triangles, slivers at normalized areas 1e-1 … 1e-8 (the third
+    /// vertex offset `eps * |ab|` off the segment ab), needles (three
+    /// near-collinear points with 1e-8 jitter), large triangles, NaN and
+    /// infinite UVs, and the fuzz's own needle.
+    ///
+    /// The large family is bounded to ±100 UV units. `UV_BARY_EPS` is
+    /// relative, so the edge-inclusive slack in UV units is `1e-6 x height`.
+    /// Past ~3e4 UV units that slack exceeds the walk's one-texel window
+    /// margin at 32², which is a separate property from conditioning and
+    /// not this pin's.
+    fn hostile_corpus() -> Vec<[[f32; 2]; 3]> {
+        let mut rng = Rng(0x9E37_79B9);
+        let mut out = Vec::new();
+        for _ in 0..64 {
+            out.push([rng.point(), rng.point(), rng.point()]);
+        }
+        for k in 1..=8 {
+            let eps = 10f32.powi(-k);
+            for _ in 0..12 {
+                let (a, b) = (rng.point(), rng.point());
+                let t = rng.unit();
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                // m on ab, pushed off it along the perpendicular (-dy, dx)
+                // by eps * |ab|: cross(ab, am) = eps * |ab|².
+                let m = [a[0] + t * dx - eps * dy, a[1] + t * dy + eps * dx];
+                out.push([a, m, b]);
+            }
+        }
+        for _ in 0..32 {
+            let (a, b) = (rng.point(), rng.point());
+            let mut tri = [[0.0; 2]; 3];
+            for v in &mut tri {
+                let t = rng.unit();
+                *v = [
+                    a[0] + t * (b[0] - a[0]) + (rng.unit() - 0.5) * 1e-8,
+                    a[1] + t * (b[1] - a[1]) + (rng.unit() - 0.5) * 1e-8,
+                ];
+            }
+            out.push(tri);
+        }
+        for _ in 0..16 {
+            let mut big = || [(rng.unit() - 0.5) * 200.0, (rng.unit() - 0.5) * 200.0];
+            out.push([big(), big(), big()]);
+        }
+        out.push([[f32::NAN, 0.5], [1.0, 0.0], [1.0, 1.0]]);
+        out.push([[0.0, 0.0], [f32::INFINITY, 0.0], [1.0, 1.0]]);
+        let n = needle();
+        out.push([n.uvs[0], n.uvs[1], n.uvs[2]]);
+        out
+    }
+
+    /// One single-triangle mesh. The positions vary through out-of-range
+    /// (missing), NaN and huge values; UV coverage must not care.
+    fn corpus_mesh(uv: [[f32; 2]; 3], i: usize) -> MeshData {
+        let positions = match i % 3 {
+            0 => Vec::new(),
+            1 => vec![[f32::NAN; 3]; 3],
+            _ => vec![[1e30, -1e30, 1e30]; 3],
+        };
+        MeshData {
+            positions,
+            uvs: uv.to_vec(),
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        }
+    }
+
+    /// Pin 5, the kill's real value: on the hostile corpus the point
+    /// lookup (every triangle at every texel) and the windowed walk (each
+    /// triangle's bounding-box window only) claim EXACTLY the same texels
+    /// with the same hits. They do so per triangle and for the whole corpus
+    /// as one overlapping mesh (the winner rule). Before W1.1 the needle
+    /// alone made them differ (texel (15, 0) at 16²).
+    #[test]
+    fn the_point_lookup_and_the_walk_agree_on_a_hostile_corpus() {
+        let corpus = hostile_corpus();
+        // The corpus exercises the rule: some triangles pass the DET rule
+        // and are rejected ONLY by conditioning, and some survive.
+        let cond_only = corpus
+            .iter()
+            .filter(|&&uv| {
+                let area = raw_area(uv);
+                uv.iter().flatten().all(|c| c.is_finite())
+                    && area.is_finite()
+                    && area.abs() >= UV_DET_EPS
+                    && UvTri::from_uvs(uv).is_none()
+            })
+            .count();
+        let valid = corpus
+            .iter()
+            .filter(|&&uv| UvTri::from_uvs(uv).is_some())
+            .count();
+        assert!(cond_only > 0, "no conditioning-only rejection");
+        assert!(valid > 0, "the corpus has no valid triangle");
+
+        let agree = |mesh: &MeshData, w: u32, h: u32, what: &str| {
+            let g = UvGBuffer::build(mesh, 1001, w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let uv = texel_center_uv(0.0, 0.0, x, y, w, h);
+                    assert_eq!(
+                        g.at(x, y),
+                        uv_to_barycentric(mesh, uv),
+                        "{what} at {w}x{h}: texel {x},{y}"
+                    );
+                }
+            }
+        };
+        let mut all = MeshData::default();
+        for (i, &uv) in corpus.iter().enumerate() {
+            let mesh = corpus_mesh(uv, i);
+            let what = format!("corpus triangle {i} {uv:?}");
+            agree(&mesh, 16, 16, what.as_str());
+            agree(&mesh, 32, 32, what.as_str());
+            let base = all.uvs.len() as u32;
+            all.uvs.extend_from_slice(&uv);
+            all.indices.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+        agree(&all, 32, 32, "the whole corpus");
     }
 }

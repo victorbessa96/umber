@@ -1805,8 +1805,12 @@ fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 ///   term in the CPU's order; the signed `area` is computed ONCE on the CPU
 ///   and uploaded (`uv2.z`) so both sides divide by the same bits.
 /// - Inside = every `b_i >= -UV_BARY_EPS` (edge-inclusive, winding-free);
-///   degenerate, malformed and non-finite triangles arrive as all-zero
-///   records (`area = 0`) and never claim a texel.
+///   degenerate, malformed, non-finite and ILL-CONDITIONED triangles
+///   (`|area| / longest_edge² < umber_mesh::uv_gbuffer::UV_COND_EPS`, the
+///   W1.1 needle rule) arrive as all-zero records (`area = 0`) and never
+///   claim a texel. The conditioning rule lives ONLY on the CPU
+///   (`UvTri::from_uvs`); the shader inherits it through that zero record,
+///   so it has no WGSL constant.
 /// - Overlap: last in index order wins.
 ///
 /// # Outputs

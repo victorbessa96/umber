@@ -5,8 +5,9 @@
 //! The CPU `umber_mesh::UvGBuffer` is the authority; this pass is its
 //! accelerator. The per-triangle signed UV area is computed on the CPU by
 //! `umber_mesh::UvTri::from_uvs` and uploaded, so both sides divide by
-//! identical bits and apply identical validity rules (malformed, non-finite
-//! and degenerate triangles upload as all-zero records and claim nothing).
+//! identical bits and apply identical validity rules (malformed, non-finite,
+//! degenerate and ill-conditioned triangles upload as all-zero records and
+//! claim nothing; the W1.1 conditioning rule reaches the GPU only this way).
 //! Parity is pinned texel-for-texel by the `gpu` tests below.
 
 use std::borrow::Cow;
@@ -437,6 +438,43 @@ mod tests {
         );
     }
 
+    /// The W1.1 needle: the fuzz's exact UVs. Its area (-1.49e-8) clears
+    /// `UV_DET_EPS`, but its normalized area (~4.4e-8) is below
+    /// `UV_COND_EPS`, so `UvTri::of` rejects it.
+    fn needle() -> MeshData {
+        MeshData {
+            positions: vec![[0.0; 3]; 3],
+            uvs: vec![
+                [0.1614995, 0.16149949],
+                [0.35829717, 0.3582972],
+                [0.57094914, 0.57094914],
+            ],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        }
+    }
+
+    /// The channel the GPU inherits the conditioning rule through. A needle
+    /// uploads as an all-zero record (area 0, which the shader skips),
+    /// with no shader change. Riding on a quad, it keeps index alignment.
+    /// This needs no GPU: it pins that `build_triangles` routes through
+    /// `UvTri::of`.
+    #[test]
+    fn a_needle_uploads_as_a_zero_record() {
+        let mut mesh = quad();
+        let n = needle();
+        mesh.uvs.extend_from_slice(&n.uvs);
+        mesh.positions.extend_from_slice(&n.positions);
+        mesh.indices.extend_from_slice(&[4, 5, 6]);
+        assert_eq!(UvTri::of(&mesh, 2), None, "the needle is rejected");
+        let tris = build_triangles(&mesh);
+        assert_eq!(tris.len(), 3);
+        assert_eq!(tris[2], GpuGbTri::zeroed());
+        assert_eq!(tris[2].uv2[2], 0.0, "area 0 = the shader's skip");
+        assert_ne!(tris[0].uv2[2], 0.0);
+        assert_ne!(tris[1].uv2[2], 0.0);
+    }
+
     #[test]
     fn validate_rejects_empty_inputs() {
         assert!(matches!(
@@ -453,7 +491,7 @@ mod tests {
     #[cfg(feature = "gpu")]
     mod gpu {
         use super::super::*;
-        use super::quad;
+        use super::{needle, quad};
 
         fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
             let instance = wgpu::Instance::default();
@@ -542,6 +580,37 @@ mod tests {
             let mut m = quad();
             m.indices.extend_from_slice(&[0, 1, 99]);
             assert_parity(&m, 1001, 16, 16, umber_mesh::UV_BARY_EPS);
+        }
+
+        /// W1.1 parity golden: a needle mesh gives EMPTY coverage on the
+        /// CPU and the GPU alike. If the GPU claims a texel the CPU drops,
+        /// the upload path no longer routes through `UvTri::of`. Before
+        /// W1.1 the CPU point lookup claimed texel (15, 0) at 16² with
+        /// weights `[0, 0, 2]`. Also checked with the needle on top of the
+        /// quad: it must not steal any texel from it.
+        #[test]
+        fn a_needle_claims_nothing_on_the_cpu_or_the_gpu() {
+            let mesh = needle();
+            for (w, h) in [(16, 16), (32, 32)] {
+                let cpu = UvGBuffer::build(&mesh, 1001, w, h);
+                assert!(
+                    cpu.covered().iter().all(|&c| !c),
+                    "{w}x{h}: the CPU claims a needle texel"
+                );
+                assert_parity(&mesh, 1001, w, h, umber_mesh::UV_BARY_EPS);
+            }
+            let mut on_quad = quad();
+            on_quad.uvs.extend_from_slice(&mesh.uvs);
+            on_quad.positions.extend_from_slice(&mesh.positions);
+            on_quad.indices.extend_from_slice(&[4, 5, 6]);
+            // Every texel stays the quad's (tri 0 or 1); the needle (tri 2)
+            // owns none.
+            let cpu = UvGBuffer::build(&on_quad, 1001, 16, 16);
+            for (i, hit) in cpu.hits.iter().enumerate() {
+                let owner = hit.map(|hit| hit.triangle);
+                assert!(matches!(owner, Some(0 | 1)), "texel {i}: owner {owner:?}");
+            }
+            assert_parity(&on_quad, 1001, 16, 16, umber_mesh::UV_BARY_EPS);
         }
 
         /// Brief kill 8: prefer a CPU (lavapipe-class) adapter when the
