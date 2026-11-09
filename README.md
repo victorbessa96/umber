@@ -15,7 +15,7 @@
 </p>
 
 > [!IMPORTANT]
-> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,700+<!-- /scorecard --> tests.
+> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,800+<!-- /scorecard --> tests.
 >
 > **Not yet:** no release tag (SPEC ratification and the perf baseline lead the 0.1.0 checklist, `docs/specs/release-checklist-0.1.0.md`); the open feature waves — brush angle/jitter, bitmap stamps, the Win32 tablet path, a11y pass, projection fill — are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
