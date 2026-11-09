@@ -3,16 +3,29 @@
 Rust 3D texture-painting DCC. 16-crate workspace (layering enforced by `scripts/check-layers.py`), wgpu 30 + egui/eframe 0.36, toolchain pinned 1.97.0.
 Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, then traps, tooling, pointers.
 
+**Tree location (since 2026-11-09):** the real path is
+`/mnt/hdd/data/Projects/umber` (HDD, sda1); `/home/bessa/Projects/umber`
+is a symlink to it. Work through either path; briefs state the real one.
+The Hermes `umber` MCP server and the 30-min `project-watch-lai-umber`
+cron resolve through the symlink, so no tooling edits were needed.
+
 ## Hard rules
 
 1. **Claws: no cargo at all** (the dispatch amendment forbids it; the dragon
-   runs the battery). Dragon-side (the wave model, 2026-10-14): Gate 1 =
-   `bash scripts/wave-battery.sh <crates…>` per kill — fmt + clippy -D
-   warnings + the FULL test suites, locally under the flock at
-   /tmp/umber-cargo.lock, one battery at a time. Gate 2 = ONE push per
-   wave + ONE CI run (ubuntu + windows). Kills batch unpushed between
-   gates. Never stack cargo commands in one shell line — the machine has
-   crashed under stacked builds.
+   runs the battery). Dragon-side (the wave model, two gates per kill):
+   Gate 1 = the battery locally under `flock /tmp/umber-cargo.lock`, one
+   battery at a time — `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets -- -D warnings`,
+   `cargo test` on the touched crates, `python3 scripts/check-layers.py`,
+   `python3 scripts/scorecard.py --check` (or `bash scripts/wave-battery.sh
+   <crates…>`). Gate 2 = the commit + push + CI: `python3 .dragon/dcommit.py
+   --session <id> --lock <file>… --path-limited -- -m "…"`, then
+   `python3 scripts/safe-push.py --session <id>` **BARE** — never wrap it
+   in an outer `flock /tmp/umber-cargo.lock`, the script takes that lock
+   itself and a nested flock self-deadlocks. `scripts/release-ci.sh` is the
+   release gate before any tag (CI has been the release gate since
+   2026-11-06). Never stack cargo commands in one shell line — the machine
+   has crashed under stacked builds.
 2. **Never commit.** No `git add/commit/push/stash/checkout/reset`. The orchestrator ("the dragon") reviews, gates and commits. The exception is a brief that explicitly gives you the tree.
 3. **Extend, don't revert.** Other agents edit the tree concurrently. If a file you didn't write changed, build on it, and never "clean up" someone else's hunk. Concurrent kills own DISJOINT file surfaces: the dragon registers each kill's files via `bash scripts/kill-locks.sh add <name> <files…>` and refuses any dispatch whose surface intersects a live lock.
 4. **Don't guess dependency APIs.** Read the source first: `docs/claw-artifacts/<crate>/` (vendored, with a verified-facts README), then `~/.cargo/registry/src/*/`.
@@ -32,6 +45,15 @@ Applies to every coding agent (Claude Code, OpenCode, …). Hard rules first, th
 10. **Hard walls**: no .sbsar execution, no Adobe SDKs, no WRITING .spp. `.spp` IMPORT is ratified (binding ruling 2026-10-12): read-only through `crates/spp` (umber-spp), clean-room per `docs/research/spp-hdf5-layout.md` — never a write path. License stays GPL-3.0-or-later.
 11. **Never crash in the engine crates** (the never-crash gate, 2026-10-13): `umber-core`, `umber-color`, `umber-spp` deny `unwrap`/`expect`/`panic` in non-test code (`cfg_attr(not(test), deny(...))` at the crate root + `clippy.toml`). Return typed errors; a provably-infallible case needs `#[allow(clippy::expect_used)]` + the reason. `umber-gpu`/`umber-app` are exempt (harness + UI code), but the discipline is the same there.
 12. **Crate layering** (2026-10-14, absorbed from photocraft): every crate sits in a layer in `scripts/check-layers.py` (L0 leaves … L6 the shell); dependencies point DOWN only, and UI crates (egui/eframe/winit/rfd/egui_dock) stay in umber-gpu (egui-wgpu only) / umber-gui / umber-app. A NEW crate fails the gate until registered there in the same commit. Pure Python, no cargo — run it any time: `python3 scripts/check-layers.py`.
+
+13. **A new module registers in the kill that creates it** (2026-10-17,
+    from the full-project audit): if your kill writes a new `.rs` file,
+    the `mod x;` / `pub use` lines land IN THE SAME KILL — negotiate the
+    lock extension in your brief if the registration point (mod.rs,
+    lib.rs) sits under a live lock. An unregistered new file is dead
+    bytes the battery silently skips. (Cost: type_ahead.rs +
+    dialog_buttons.rs sat unregistered for hours because mod.rs was
+    lock-held; caught at the wave-close consolidation, not by any gate.)
 
 ## Rust traps (each one cost a CI round; check your diff for all of them)
 
@@ -117,7 +139,10 @@ Other scripts (`brief-template.sh`, `ci-consume.sh`, `loop-status.sh`, `perf_com
 - **GUI:** `docs/specs/gui-audit-and-roadmap.md`.
   - Phase 0a is done (`umber-gui` exists; the Brush panel migrated).
   - Next is **0b**: shell chrome, meaning `toolbar.rs` and `status_bar.rs` in umber-app built from umber-gui parts, plus the empty state and the 9 shortcuts.
-- **Session handoff:** the "Handoff note" section of `STATE.md`. Its status line at the top is stale; ignore it.
+- **Session handoff:** STATE.md (status line at the top; the handoff note
+  below it). The plan of record for the work order is
+  `docs/loop/waves/2026-11-09-wave-plan.md` (the six waves, 2026-11-09);
+  `docs/loop/queue.md` is the live row log (max row first).
 - **Why decisions were made:** `DECISIONS.md` (append-only, don't edit).
 
 ## Report (end every task with exactly this)

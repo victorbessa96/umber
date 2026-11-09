@@ -1,7 +1,7 @@
 # Umber Long-Horizon Roadmap — the Substance-Parity March and Beyond
 
-Version: 2026-10-24 (the consolidation era). Supersedes the
-2026-10-14 edition. requirements.md stays the CONTRACT of record
+Version: 2026-10-24 (the consolidation era), delta through 2026-11-09.
+Supersedes the 2026-10-14 edition. requirements.md stays the CONTRACT of record
 (each kill's Doc-delta updates its rows); this roadmap ORDERS the
 work. The 2026-10-24 full-project audit
 (`docs/loop/audit-2026-10-24-full-project.md` + its six lens
@@ -40,17 +40,17 @@ chain per texel" hid the freeze across three kills), and a byte-identity
 promise is proven by fuzzing BOTH implementations against each other on
 hostile inputs, not by a fixture list.
 
-### The primitive bug the fuzz exposed (2026-11-09, MEASURED, not yet fixed)
+### The primitive bug the fuzz exposed — FIXED by W1.1 (2026-11-09, `7aad67c3`)
 
 `UvTri::bary` tests only the LOWER bound of each barycentric weight
 (`b_i >= -UV_BARY_EPS`) and never the upper bound. On a degenerate
-**needle** (area −1.49e-8 — still a VALID footprint) the edge-function
-formula stops being a barycentric decomposition: a texel centre far
-outside the footprint gets weights like `[0, 0, 2.0]` that reconstruct to
-`(1.1419, 1.1419)` instead of the texel centre. The old per-texel lookup
-CLAIMED and PAINTED those texels. The GPU bake shader quotes the same
-formula (`crates/umber-gpu/src/bake_shaders.rs`), so it has the same blind
-spot.
+**needle** (area −1.49e-8 — which still cleared `UV_DET_EPS`, i.e. was a
+"valid" footprint) the edge-function formula stops being a barycentric
+decomposition: a texel centre far outside the footprint got weights like
+`[0, 0, 2.0]` that reconstruct to `(1.1419, 1.1419)` instead of the
+texel centre. The old per-texel lookup CLAIMED and PAINTED those texels.
+The GPU bake shader quoted the same formula
+(`crates/umber-gpu/src/bake_shaders.rs`), so it had the same blind spot.
 
 **The fix is measured, not guessed** (probes under
 `~/.hermes/cache/scratch/probe-raster-cost/`):
@@ -61,14 +61,20 @@ spot.
 | per-point reconstruction tolerance | **REJECTED** — not separable: legitimate claims of a thin triangle carry up to 3.5e-1 reconstruction error |
 | **per-triangle conditioning** (reject `norm_area = \|area\| / longest_edge²` below a threshold) | **ACCEPTED** — garbage 272→**0**, lookup-vs-walk set diff 31→**0**, **0** production triangles rejected at threshold 1e-6 |
 
-The threshold is **1e-6 on the normalized area**. At 1e-6: grids
-**0/10 912** triangles rejected, random triangles **0/4 263** rejected,
-and the only coverage lost is the degenerate needles themselves (the
-1e-7 family's whole coverage; the 1e-6 family's none). The rule also
-makes the two lookup paths agree EXACTLY, which is the property row 298
-needed and could not get from the per-point route.
+The threshold is **1e-6 on the normalized area**, landed as
+`UV_COND_EPS` in `UvTri::from_uvs` (wave 1 kill 1.1, commit `7aad67c3`,
+release CI run `42677040220` GREEN). At 1e-6: grids **0/10 912**
+triangles rejected, random triangles **0/4 263** rejected, and the only
+coverage lost is the degenerate needles themselves. The rule also makes
+the two lookup paths agree EXACTLY, which is the property row 298 needed
+and could not get from the per-point route. The GPU inherits the rule
+through the existing all-zero-record upload channel — **no WGSL change**
+(`crates/umber-bake/src/gbuffer.rs:108` routes every triangle through
+`UvTri::of`). Report:
+`docs/loop/kill-reports/2026-11-09-uv-triangle-conditioning.md`.
 
-This is **wave 1** of the plan below.
+This is **wave 1 kill 1.1** of the plan in
+`docs/loop/waves/2026-11-09-wave-plan.md` (the plan of record).
 
 ### The perf-nightly went green again (2026-11-09)
 
@@ -225,7 +231,7 @@ freeze-recovery close scripts; the loop restart machinery
 | **The Assets panel (R-C1, P0)** | **LANDED 2026-10-24 (the v1 discoverability layer)**: the library browser (search + Brushes/Materials/Masks) over the existing engines; the `select_preset_by_name` seam; the smart-mask compose flow extracted (one path, two doors); the placeholder dead; report `docs/loop/kill-reports/2026-10-24-rc1-assets-panel.md`. The named follow-ups: drag-to-stack, thumbnails, saved searches, custom dirs, the filter/mesh/env categories. |
 | **Layer-stack flatten (R-B1, P0)** | ~~group → baked fill layer~~ → LANDED 2026-10-24 as the SELECTED-LAYERS flatten: `bake_layers` (the isolated fold) + the Layers panel button + the shell's handler; fully undoable (tombstones + journal reverts); report `docs/loop/kill-reports/2026-10-24-rb1-flatten.md`. The folder kind + the compound one-step = the named follow-ups. |
 | Material picker (R-A10) | **LANDED 2026-10-24 (the v1)**: Ctrl+Alt+click picks the ACTIVE channel's composite texel at the cursor into the selected fill layer's Solid (the inspector's mirrored-row convention, the panel's own journalable SetFill path; the status-bar hint in both catalogs); report in kill-reports. The two landed halves: the channel target (0f55ebd) + the pick gesture. Follow-ups: the all-channels mode, the e2e kittest, ~~the pick toast~~ **CLOSED 2026-10-25: the toast rides the home_actions rail's own pattern (the viewer's pick_notices vec, the dock closure's tuple return, the app's post loop) — `uv.pick-applied` in both catalogs with the hex color**. | the census's "small" row grew a prerequisite + this v1 across two kills; both banked |
-| Projection fill (R-A2) | **LANDED 2026-11-08 (v1 decal projector)**: load a PNG/`.svg`, Arm freezes the camera+viewport rect, the S-chords place translate/scale/rotate, Apply rasterizes target-texel-wise through the frozen camera (`world_at_uv` → `view_proj` → `inverse_map` → bilinear) and writes via `PaintState::apply_projection` — one undo step, gated by the existing stencil (`gate_plane`), no new paint concepts. Rows 277-281 (`92d0d329`, `4856b377`, `23331a32`, `c573dc87`); plan `docs/specs/projection-fill-plan.md`. Follow-ups (v2+): tiling/repeat, the live camera-following projector (pwys option B), seam/symmetry expansion of projections, depth/backface culling | the decal workflow's other half; pairs with the landed stencil; rides the pwys design |
+| Projection fill (R-A2) | **CLOSED to v2d + W1.1 (2026-11-09)**: v1 decal projector landed 11-08 (rows 277-281, `c573dc87`; load PNG/`.svg`, Arm freezes camera+viewport rect, Apply rasterizes through the frozen camera, one undo step, stencil-gated); v2a tiling, v2b follow-camera, v2c backface culling, then **v2d one-pass raster** (`98fb6e8e`, CI `42646713045` — ~34 min UI freeze at 4K → ~0.6 s) and **W1.1 the UV conditioning rule** (`7aad67c3`, CI `42677040220` — needle triangles are not valid footprints, CPU+GPU). Remaining: depth/occlusion culling (v3, wave 2), seam/symmetry expansion of projections (a product question), a decal channel + the bake family | plan of record: `docs/loop/waves/2026-11-09-wave-plan.md`; plan `docs/specs/projection-fill-plan.md` |
 | Geometry masks (R-B2) | per-mesh/per-tile include/exclude on layers/effects | rides UDIM |
 | Baker sync (R-D1) + channel manage (R-B4's tail) + the four post nodes (R-E5) | the power-user tail | each small; census-verified open |
 | wave-fuzz-corpus (b) | coverage-guided fuzzing | cargo-fuzz + nightly + a corpus budget |
@@ -315,7 +321,7 @@ pass; the .ftl lock lift (if it stands).
 | SPP family | Verdict |
 |---|---|
 | Painting core (stamps/flow/spacing/falloff/jitter/angle/methods/stabilizers) | PARITY |
-| Stencil/projection | PARITY — stencil lane closed; **projection fill LANDED 2026-11-08 (R-A2 v1 decal projector, rows 277-281, `c573dc87`)** |
+| Stencil/projection | PARITY — stencil lane closed; **projection fill CLOSED to v2d + W1.1 (rows 277-281 + `98fb6e8e` one-pass + `7aad67c3` conditioning, CI `42677040220` green)** |
 | Retouch + masks (quick/cavity/ID) | PARITY (persistence gaps on quick mask + symmetry) |
 | Path tools | PARITY (paint-along + filled + polygon + straight-line); ribbon GAP |
 | Fill/material layers + anchors + instances | PARITY (materials composite-only by design) |

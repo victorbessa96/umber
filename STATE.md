@@ -11,7 +11,23 @@
 
 ## Status line
 
-Current phase (2026-11-06): **charter-v2 T1-T3 LANDED (`5af3c84`, pushed
+Current phase (2026-11-09): **the tree lives on the HDD and the work is
+planned in waves.** The tree moved 2026-11-09 to
+`/mnt/hdd/data/Projects/umber` (`~/Projects/umber` is now a symlink;
+MCP server + watch cron resolve through it; report
+`docs/loop/kill-reports/2026-11-09-tree-move-to-hdd.md`). The decal
+projector lane (R-A2) is **CLOSED to v2d + W1.1**: the one-pass raster
+(`98fb6e8e`, CI `42646713045`; ~34 min UI freeze at 4K → ~0.6 s) and the
+UV triangle conditioning rule `UV_COND_EPS = 1e-6` (`7aad67c3`, release
+CI `42677040220` GREEN — needle triangles are not valid footprints, CPU
+and GPU agree exactly). The plan of record is
+`docs/loop/waves/2026-11-09-wave-plan.md` (six waves: W1 correctness —
+1.1 landed, 1.2 the malformed-triangle policy asymmetry next; W2 the
+R-A2 close; W3 the wave-abr tail; W4 the Wave-9 lanes; W5 the power-user
+tail; W6 the gated rows). Live row log: `docs/loop/queue.md` (rows
+307-310). Agent contracts: CLAUDE.md = AGENTS.md (kept identical).
+
+Previous phase (2026-11-06): **charter-v2 T1-T3 LANDED (`5af3c84`, pushed
 through the new `scripts/safe-push.py`)**: bake/export by command id +
 `job.status`, the e2e smoke in CI, the push guard (see the 2026-11-06
 local-3230b69f section below). Before it (2026-11-05): the UI/UX pass, waves
