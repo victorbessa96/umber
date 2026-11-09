@@ -48,8 +48,9 @@ pub use udim::{
 };
 pub use usd::load_usda;
 pub use uv_gbuffer::{
-    for_each_uv_geometry, lerp2, lerp3, uv_to_barycentric, world_and_face_normal_at_uv,
-    world_at_uv, UvGBuffer, UvHit, UvTri, FACE_NORMAL_EPS, UV_BARY_EPS, UV_DET_EPS,
+    for_each_uv_geometry, lerp2, lerp3, triangle_positions_finite, uv_to_barycentric,
+    world_and_face_normal_at_uv, world_at_uv, UvGBuffer, UvHit, UvTri, FACE_NORMAL_EPS,
+    UV_BARY_EPS, UV_DET_EPS,
 };
 
 /// Interleaved mesh data as imported, before any GPU upload.

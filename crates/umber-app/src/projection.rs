@@ -28,9 +28,19 @@
 //! cover is yielded once per footprint, and the LAST in index order must
 //! decide it (the per-texel lookup's winner). So every yield WRITES: a
 //! yield with no value (back-facing under the cull, behind the eye,
-//! off-NDC, a non-finite or missing-position winner) writes transparent
-//! `[0, 0, 0, 0]` instead of skipping, or an earlier triangle's colour
-//! would survive. Uncovered texels are never yielded and stay transparent.
+//! off-NDC) writes transparent `[0, 0, 0, 0]` instead of skipping, or an
+//! earlier triangle's colour would survive. Uncovered texels are never
+//! yielded and stay transparent.
+//!
+//! **Malformed positions cover nothing** (W1.2,
+//! `docs/loop/briefs/2026-11-09-malformed-triangle-policy-design.md`): a
+//! triangle with a non-finite position or an out-of-range position index
+//! is never offered by the walk (`umber_mesh::triangle_positions_finite`,
+//! composed into every filter), the same rule the fill uses. Such a
+//! triangle no longer blanks the texels it wins: an earlier finite
+//! triangle keeps them, and with no finite competitor they stay
+//! transparent. This is the one deliberate byte change against the
+//! pre-v2d per-texel raster, whose malformed winner blanked the texel.
 //! The per-texel WORK (transform, tiling wrap, samplers, the backface
 //! test) is unchanged; the test module keeps the pre-v2d per-texel raster
 //! as the byte-identity reference.
@@ -696,7 +706,9 @@ fn rasterize_with(
     // v2d: ONE triangle-driven pass (module docs). Every yield WRITES —
     // "no value" writes transparent, never skips — so the last triangle in
     // index order decides each texel, exactly the per-texel lookup's
-    // winner (design brief §3).
+    // winner (design brief §3). `|_| true`: the walk itself never offers a
+    // malformed-position triangle (W1.2), so it covers nothing here and
+    // cannot blank an earlier triangle's paint.
     umber_mesh::for_each_uv_geometry(
         mesh,
         tile,
@@ -1666,42 +1678,189 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_nan_position_winner_blanks_its_texels_like_the_per_texel_raster() {
-        // Tri 2 = (NaN vertex, 1, 2), uvs (0.25, 0.25), (1, 0), (1, 1),
-        // last in index order: it wins texel (11, 9) of 16 (uv (0.71875,
-        // 0.40625), shared with tri 0) and its NaN world point blanks it.
+    /// [`quad`] plus a LAST triangle 2 = (4, 1, 2), uvs (0.25, 0.25),
+    /// (1, 0), (1, 1): a valid footprint sharing texel (11, 9) of 16 (uv
+    /// (0.71875, 0.40625)) with tri 0. Vertex 4's position is `pos`, or
+    /// missing when `None` (its UV still exists).
+    fn quad_with_malformed_top(pos: Option<[f32; 3]>) -> umber_mesh::MeshData {
         let mut mesh = quad();
-        mesh.positions.push([f32::NAN, 0.0, 0.0]);
+        mesh.positions.extend(pos);
         mesh.uvs.push([0.25, 0.25]);
         mesh.indices.extend_from_slice(&[4, 1, 2]);
-        for cull in [false, true] {
-            let mut state = red_everywhere();
-            state.cull_backfaces = cull;
-            let (got, want) = frozen_pair(&state, &mesh, 16);
-            assert_eq!(got, want, "cull {cull}");
-            assert_eq!(texel(&got, 16, 11, 9), CLEAR, "cull {cull}");
-            // Not tri 0's red showing through; tri 1's texels still paint.
-            assert_eq!(texel(&frozen_pair(&state, &quad(), 16).0, 16, 11, 9), RED);
-            assert_eq!(texel(&got, 16, 0, 0), RED, "cull {cull}");
+        mesh
+    }
+
+    /// W1.2 (reverses the row-298 pins `a_nan_position_winner_blanks_its_
+    /// texels_like_the_per_texel_raster` and `a_missing_position_winner_
+    /// blanks_its_texels_like_the_per_texel_raster`): a malformed-position
+    /// triangle on top covers nothing, so tri 0's shaded RED survives
+    /// under it instead of being blanked. The raster now equals the raster
+    /// of the mesh WITHOUT the malformed triangle, byte for byte, and
+    /// deliberately differs from the pre-v2d per-texel reference (whose
+    /// malformed winner blanked the texel).
+    #[test]
+    fn projector_keeps_finite_winner_under_malformed_triangle() {
+        for (name, pos) in [
+            ("nan", Some([f32::NAN, 0.0, 0.0])),
+            ("inf", Some([0.0, f32::INFINITY, 0.0])),
+            ("missing", None),
+        ] {
+            let mesh = quad_with_malformed_top(pos);
+            let mut without = mesh.clone();
+            without.indices.truncate(6);
+            for cull in [false, true] {
+                let mut state = red_everywhere();
+                state.cull_backfaces = cull;
+                let (got, old) = frozen_pair(&state, &mesh, 16);
+                assert_eq!(texel(&got, 16, 11, 9), RED, "{name} cull {cull}");
+                assert_eq!(texel(&got, 16, 0, 0), RED, "{name} cull {cull}");
+                assert_eq!(
+                    got,
+                    frozen_pair(&state, &without, 16).0,
+                    "{name} cull {cull}"
+                );
+                // The one deliberate byte change: the old per-texel winner
+                // blanked the texel (NaN world point / no world point; the
+                // inf case's old bytes are not derived by hand, so only the
+                // new bytes are pinned for it).
+                if name != "inf" {
+                    assert_eq!(texel(&old, 16, 11, 9), CLEAR, "{name} cull {cull}");
+                    assert_ne!(got, old, "{name} cull {cull}");
+                }
+            }
         }
     }
 
+    /// W1.2: a malformed-position triangle with no finite competitor
+    /// leaves its texels transparent, the same bytes as before W1.2 (and
+    /// as the per-texel reference): there is nothing to keep.
     #[test]
-    fn a_missing_position_winner_blanks_its_texels_like_the_per_texel_raster() {
-        // Same UV layout, but vertex 4 has a UV and NO position: the
-        // per-texel lookup's winner had no world point (nothing written);
-        // the walk yields NaN for it, which writes transparent.
-        let mut mesh = quad();
-        mesh.uvs.push([0.25, 0.25]);
-        mesh.indices.extend_from_slice(&[4, 1, 2]);
-        for cull in [false, true] {
-            let mut state = red_everywhere();
-            state.cull_backfaces = cull;
-            let (got, want) = frozen_pair(&state, &mesh, 16);
-            assert_eq!(got, want, "cull {cull}");
-            assert_eq!(texel(&got, 16, 11, 9), CLEAR, "cull {cull}");
-            assert_eq!(texel(&got, 16, 0, 0), RED, "cull {cull}");
+    fn projector_malformed_triangle_alone_stays_transparent() {
+        let mut nan = quad();
+        nan.positions[0] = [f32::NAN, 0.0, 0.0];
+        let mut far = quad();
+        far.uvs.resize(1000, [0.0, 0.0]);
+        far.uvs[999] = [0.0, 0.0];
+        far.indices = vec![999, 1, 2, 999, 2, 3];
+        for (name, mesh) in [("nan", nan), ("far", far)] {
+            // The UV footprints are valid: only the position rule decides.
+            assert!(umber_mesh::UvTri::of(&mesh, 0).is_some(), "{name}");
+            for cull in [false, true] {
+                let mut state = red_everywhere();
+                state.cull_backfaces = cull;
+                let (got, want) = frozen_pair(&state, &mesh, 16);
+                assert_eq!(got, want, "{name} cull {cull}");
+                assert!(got.chunks(4).all(|t| t == CLEAR), "{name} cull {cull}");
+            }
+        }
+    }
+
+    /// The texels the projector's walk claims (every yield, painted or
+    /// not), as a coverage mask.
+    fn projector_claimed(mesh: &umber_mesh::MeshData, n: u32) -> Vec<bool> {
+        let mut claimed = vec![false; (n * n) as usize];
+        umber_mesh::for_each_uv_geometry(
+            mesh,
+            1001,
+            n,
+            n,
+            |_| true,
+            |x, y, _, _| claimed[(y * n + x) as usize] = true,
+        );
+        claimed
+    }
+
+    /// W1.2: on a hostile corpus the fill's coverage mask
+    /// (`umber_mesh::fill::uv_coverage`) is EXACTLY the set of texels the
+    /// projector's walk claims, per triangle and as one overlapping mesh.
+    /// One walk enforces one rule, so the two paths cannot diverge. The
+    /// corpus mixes NaN, infinite, missing and far-out-of-range positions
+    /// with degenerate UVs, needles and well-formed triangles, and the
+    /// projector paints nothing outside that mask.
+    #[test]
+    fn fill_coverage_equals_projector_claimed_texels_on_hostile_corpus() {
+        let uvs: [[[f32; 2]; 3]; 6] = [
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+            [[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            [[0.25, 0.25], [1.0, 0.0], [1.0, 1.0]],
+            [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]],
+            // The W1.1 fuzz's needle.
+            [
+                [0.1614995, 0.16149949],
+                [0.35829717, 0.3582972],
+                [0.57094914, 0.57094914],
+            ],
+            [[0.1, 0.9], [0.9, 0.1], [0.6, 0.7]],
+        ];
+        let finite = [[-0.5, -0.5, 0.1], [0.5, -0.5, 0.2], [0.0, 0.5, 0.3]];
+        let positions: [Option<[[f32; 3]; 3]>; 5] = [
+            Some(finite),
+            Some([[f32::NAN, 0.0, 0.0], finite[1], finite[2]]),
+            Some([finite[0], [0.0, f32::INFINITY, 0.0], finite[2]]),
+            Some([finite[0], finite[1], [0.0, 0.0, f32::NEG_INFINITY]]),
+            None, // out-of-range position indices
+        ];
+        let mut all = umber_mesh::MeshData::default();
+        let mut far: Vec<u32> = Vec::new();
+        let mut seen_malformed_cover = false;
+        for (i, uv) in uvs.iter().enumerate() {
+            for (j, pos) in positions.iter().enumerate() {
+                // Alone.
+                let mut one = umber_mesh::MeshData {
+                    uvs: uv.to_vec(),
+                    indices: vec![0, 1, 2],
+                    ..Default::default()
+                };
+                one.positions.extend(pos.iter().flatten());
+                if pos.is_none() {
+                    one.uvs.resize(1000, [0.0, 0.0]);
+                    one.uvs[997..1000].copy_from_slice(uv);
+                    one.indices = vec![997, 998, 999];
+                }
+                let fill = umber_mesh::fill::uv_coverage(&one, 1001, 16, 16);
+                assert_eq!(fill, projector_claimed(&one, 16), "uv {i} pos {j}");
+                let malformed = !umber_mesh::triangle_positions_finite(&one, 0);
+                if malformed {
+                    assert!(fill.iter().all(|&c| !c), "uv {i} pos {j} covers");
+                    let g = umber_mesh::UvGBuffer::build(&one, 1001, 16, 16);
+                    seen_malformed_cover |= g.covered().iter().any(|&c| c);
+                }
+                // Into the shared mesh (vertices appended, index order kept).
+                let base = all.uvs.len() as u32;
+                all.uvs.extend_from_slice(uv);
+                match pos {
+                    Some(p) => {
+                        // Pad so vertex indices line up with the UVs (the
+                        // out-of-range triangles add UVs only).
+                        all.positions.resize(base as usize, finite[0]);
+                        all.positions.extend_from_slice(p);
+                        all.indices.extend_from_slice(&[base, base + 1, base + 2]);
+                    }
+                    None => far.extend_from_slice(&[base, base + 1, base + 2]),
+                }
+            }
+        }
+        // The out-of-range triangles go LAST, pointing past every position.
+        for (k, &v) in far.iter().enumerate() {
+            let idx = 10_000 + k as u32;
+            all.uvs.resize(idx as usize + 1, [0.0, 0.0]);
+            all.uvs[idx as usize] = all.uvs[v as usize];
+            all.indices.push(idx);
+        }
+        assert!(
+            seen_malformed_cover,
+            "no malformed triangle had a valid footprint"
+        );
+        let fill = umber_mesh::fill::uv_coverage(&all, 1001, 32, 32);
+        assert_eq!(fill, projector_claimed(&all, 32), "the whole corpus");
+        assert!(fill.iter().any(|&c| c), "the corpus covers nothing");
+        // The projector paints only inside the fill's mask.
+        let state = red_everywhere();
+        let got = rasterize_projection(&state, &all, 1001, 32, 32).unwrap();
+        for (k, t) in got.chunks(4).enumerate() {
+            if !fill[k] {
+                assert_eq!(t, CLEAR, "texel {k} painted outside the fill mask");
+            }
         }
     }
 

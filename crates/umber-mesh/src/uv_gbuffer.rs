@@ -36,6 +36,14 @@
 //!   every `b_i >= -UV_BARY_EPS` (edge-inclusive).
 //! - Overlap: the LAST triangle in index order wins.
 //! - Never panics; NaN / infinite inputs miss.
+//! - The geometry walk [`for_each_uv_geometry`] adds ONE position rule
+//!   (W1.2, design brief
+//!   `docs/loop/briefs/2026-11-09-malformed-triangle-policy-design.md`):
+//!   a triangle with a non-finite position or an out-of-range position
+//!   index ([`triangle_positions_finite`] is `false`) covers nothing on
+//!   that walk, so no caller (fill or projector) can see it. The UV-only
+//!   paths ([`UvGBuffer::build`], [`uv_to_barycentric`]) never read
+//!   positions and are unchanged.
 //!
 //! Per-texel consumers never loop [`uv_to_barycentric`] over a tile (that
 //! is O(texels x triangles): R-A2 v2d measured 34 min for one 4096² decal
@@ -384,8 +392,9 @@ impl UvGBuffer {
 /// Visits every covered texel of `tile` in triangle-index order, calling
 /// `f(&UvTri, x, y, hit)`. A texel two triangles cover is visited twice;
 /// writing the result into a buffer therefore gives the last-in-index-
-/// order winner. `filter` lets callers skip triangles (e.g. ones with
-/// non-finite positions) before any texel work.
+/// order winner. `filter` lets callers skip triangles before any texel
+/// work ([`for_each_uv_geometry`] composes [`triangle_positions_finite`]
+/// into it).
 pub(crate) fn for_each_covered_texel_filtered(
     mesh: &MeshData,
     tile: u16,
@@ -447,12 +456,13 @@ fn for_each_covered_texel(
 ///   order — exactly [`uv_to_barycentric`]'s winner. A consumer that has
 ///   nothing to write for a yield must therefore OVERWRITE (e.g. with
 ///   transparent), never skip, or an earlier triangle's value survives.
-/// - **`filter(triangle)`** runs once per UV-valid triangle (malformed,
-///   non-finite-UV, UV-degenerate and ill-conditioned triangles cover
-///   nothing and are never offered), in index order, immediately BEFORE that triangle's texels;
-///   `false` skips the triangle entirely (it is not visited). So the last
-///   index `filter` accepted names the triangle every following yield
-///   belongs to, until the next accepted call.
+/// - **`filter(triangle)`** runs once per VALID triangle, in index order,
+///   immediately BEFORE that triangle's texels; `false` skips the triangle
+///   entirely (it is not visited). Malformed, non-finite-UV, UV-degenerate,
+///   ill-conditioned and malformed-POSITION triangles cover nothing and
+///   are never offered (next bullet). So the last index `filter` accepted
+///   names the triangle every following yield belongs to, until the next
+///   accepted call.
 /// - **`world`** is `lerp3(p0, p1, p2, bary)`, the expression and order of
 ///   [`world_at_uv`], so the two agree byte for byte.
 /// - **`raw_normal`** is the UNNORMALIZED `(p1 - p0) x (p2 - p0)` over the
@@ -461,28 +471,38 @@ fn for_each_covered_texel(
 ///   needs a usable facing (`len > FACE_NORMAL_EPS` and finite, else "no
 ///   facing"), the fill normalizes when `len > 0` and else yields
 ///   `[0, 0, 0]`.
-/// - **Malformed positions are still visited** (only `filter` skips): a
-///   triangle with non-finite positions yields its (non-finite) world point
-///   and normal; one whose POSITION indices are out of range (its UV
-///   indices being valid) yields `[NaN; 3]` for both. That keeps the
-///   projector's winner semantics — today's malformed winner blanks the
-///   texel, it does not let an earlier triangle show through. Never panics.
+/// - **Malformed positions are never offered** (W1.2, design brief
+///   `docs/loop/briefs/2026-11-09-malformed-triangle-policy-design.md`):
+///   the walk composes the caller's filter as
+///   `triangle_positions_finite(mesh, tri) && filter(tri)`, so a triangle
+///   with a non-finite position, or a POSITION index out of range (its UV
+///   indices being valid), covers nothing on EVERY path, structurally.
+///   Every yield's world point and raw normal come from finite positions.
+///   An earlier finite triangle keeps the texels such a triangle overlaps
+///   (the projector no longer blanks them, and the fill always skipped
+///   them); with no finite competitor they stay uncovered. Never panics.
 /// - Zero-sized targets (`width == 0` or `height == 0`) visit nothing.
 pub fn for_each_uv_geometry(
     mesh: &MeshData,
     tile: u16,
     width: u32,
     height: u32,
-    filter: impl FnMut(usize) -> bool,
+    mut filter: impl FnMut(usize) -> bool,
     mut f: impl FnMut(u32, u32, [f32; 3], [f32; 3]),
 ) {
     // The current triangle's positions + raw normal, computed once per
     // triangle (its texels arrive contiguously, in index order).
     let mut current: Option<(usize, [[f32; 3]; 3], [f32; 3])> = None;
+    // The position rule runs FIRST, so the caller's filter is never
+    // offered a malformed-position triangle (W1.2).
+    let filter = |tri| triangle_positions_finite(mesh, tri) && filter(tri);
     for_each_covered_texel_filtered(mesh, tile, width, height, filter, |_, x, y, hit| {
         let (p, raw) = match current {
             Some((tri, p, raw)) if tri == hit.triangle => (p, raw),
             _ => {
+                // Unreachable `None` since W1.2 (the composed filter only
+                // admits triangles whose positions exist); kept as the
+                // no-panic fallback.
                 let p = triangle_positions(mesh, hit.triangle).unwrap_or([[f32::NAN; 3]; 3]);
                 let raw = raw_face_normal(p[0], p[1], p[2]);
                 current = Some((hit.triangle, p, raw));
@@ -494,6 +514,22 @@ pub fn for_each_uv_geometry(
         // both casts are lossless.
         f(x as u32, y as u32, world, raw);
     });
+}
+
+/// The geometry walk's position rule (W1.2; moved from `fill`): `true`
+/// when triangle `tri` exists, all three POSITION indices are in range
+/// and every position component is finite. Out-of-range triangle indices
+/// are `false`, never a panic. [`for_each_uv_geometry`] composes it into
+/// every caller's filter, so it is the ONE formula behind both the fill
+/// and the decal projector.
+pub fn triangle_positions_finite(mesh: &MeshData, tri: usize) -> bool {
+    triangle_positions(mesh, tri).is_some_and(pos_finite)
+}
+
+/// Every component of the three positions is finite.
+pub(crate) fn pos_finite(ps: [[f32; 3]; 3]) -> bool {
+    ps.iter()
+        .all(|p| p[0].is_finite() && p[1].is_finite() && p[2].is_finite())
 }
 
 /// Triangle `tri`'s three positions in index order, `None` when an index
@@ -914,45 +950,128 @@ mod tests {
         assert_eq!(last[7 * 8 + 7].map(|(_, raw)| raw), Some([0.0, 12.0, -3.0]));
     }
 
-    #[test]
-    fn malformed_positions_are_visited_and_only_the_filter_skips() {
-        // Tri 2 = (4, 1, 2) on top: vertex 4 has a valid UV.
-        let mut mesh = quad();
-        mesh.uvs.push([0.25, 0.25]);
-        mesh.indices.extend_from_slice(&[4, 1, 2]);
-        // (a) A NaN position: visited unfiltered, its world point NaN.
-        mesh.positions.push([f32::NAN, 0.0, 0.0]);
-        let (last, _) = last_yields(&mesh, 16, 16);
-        let (world, raw) = last[9 * 16 + 11].expect("tri 2 is visited");
-        assert!(world[0].is_nan() && raw.iter().any(|c| c.is_nan()));
-        // (b) A MISSING position (index past `positions`): visited, NaN.
-        mesh.positions.pop();
-        let (last, _) = last_yields(&mesh, 16, 16);
-        let (world, raw) = last[9 * 16 + 11].expect("tri 2 is visited");
-        assert!(world.iter().all(|c| c.is_nan()) && raw.iter().all(|c| c.is_nan()));
-        // (c) The filter skips it: tri 0 owns the texel again, and the
-        // filter saw every UV-valid triangle once, in index order.
+    /// The walk's offers and the owner of texel `(x, y)` per yield, under
+    /// a caller filter that accepts everything and records what it sees.
+    fn offers_and_owners(mesh: &MeshData, x: u32, y: u32) -> (Vec<usize>, Vec<usize>) {
         let mut offered = Vec::new();
         let mut owner = Vec::new();
         let current = std::cell::Cell::new(usize::MAX);
         for_each_uv_geometry(
-            &mesh,
+            mesh,
             1001,
             16,
             16,
             |tri| {
                 offered.push(tri);
                 current.set(tri);
-                tri != 2
+                true
             },
-            |x, y, _, _| {
-                if (x, y) == (11, 9) {
+            |tx, ty, _, _| {
+                if (tx, ty) == (x, y) {
                     owner.push(current.get());
                 }
             },
         );
-        assert_eq!(offered, vec![0, 1, 2]);
-        assert_eq!(owner, vec![0], "only tri 0 yields the texel");
+        (offered, owner)
+    }
+
+    /// [`quad`] plus tri 2 = (4, 1, 2) on top, uvs (0.25, 0.25), (1, 0),
+    /// (1, 1): a VALID footprint that shares texel (11, 9) of 16 (uv
+    /// (0.71875, 0.40625)) with tri 0. Vertex 4 has a UV but no position.
+    fn quad_with_top() -> MeshData {
+        let mut mesh = quad();
+        mesh.uvs.push([0.25, 0.25]);
+        mesh.indices.extend_from_slice(&[4, 1, 2]);
+        mesh
+    }
+
+    /// W1.2 (reverses the row-298 pin `malformed_positions_are_visited_
+    /// and_only_the_filter_skips`): a triangle with a NaN position is never
+    /// offered, even to a filter that accepts everything, so tri 0 keeps
+    /// the shared texel and no yield carries a NaN.
+    #[test]
+    fn walk_never_offers_non_finite_position_triangles() {
+        for bad in [
+            [f32::NAN, 0.0, 0.0],
+            [0.0, f32::INFINITY, 0.0],
+            [0.0, 0.0, f32::NEG_INFINITY],
+        ] {
+            let mut mesh = quad_with_top();
+            mesh.positions.push(bad);
+            assert!(UvTri::of(&mesh, 2).is_some(), "the UV footprint is valid");
+            assert!(!triangle_positions_finite(&mesh, 2), "{bad:?}");
+            let (offered, owner) = offers_and_owners(&mesh, 11, 9);
+            assert_eq!(offered, vec![0, 1], "{bad:?}");
+            assert_eq!(owner, vec![0], "{bad:?}: tri 0 keeps the texel");
+            let (last, _) = last_yields(&mesh, 16, 16);
+            assert!(
+                last.iter()
+                    .flatten()
+                    .all(|(world, raw)| world.iter().chain(raw).all(|c| c.is_finite())),
+                "{bad:?}: a yield carries a non-finite value"
+            );
+            // The same mesh with a finite vertex 4: tri 2 is offered and
+            // wins, so the rule (not the fixture) removed it above.
+            mesh.positions[4] = [0.25, 0.25, 0.0];
+            assert!(triangle_positions_finite(&mesh, 2));
+            assert_eq!(offers_and_owners(&mesh, 11, 9), (vec![0, 1, 2], vec![0, 2]));
+        }
+    }
+
+    /// W1.2: a triangle whose POSITION index is out of range (its UV index
+    /// valid) is never offered either: no `[NaN; 3]` yields, tri 0 keeps
+    /// the texel. Covers a missing vertex (index 4, `positions.len() == 4`)
+    /// and a far one (index 999 with a matching UV).
+    #[test]
+    fn walk_never_offers_out_of_range_position_indices() {
+        let missing = quad_with_top();
+        let mut far = quad();
+        far.uvs.resize(1000, [0.0, 0.0]);
+        far.uvs[999] = [0.25, 0.25];
+        far.indices.extend_from_slice(&[999, 1, 2]);
+        for (name, mesh) in [("missing", missing), ("far", far)] {
+            assert!(
+                UvTri::of(&mesh, 2).is_some(),
+                "{name}: the UV footprint is valid"
+            );
+            assert!(!triangle_positions_finite(&mesh, 2), "{name}");
+            let (offered, owner) = offers_and_owners(&mesh, 11, 9);
+            assert_eq!(offered, vec![0, 1], "{name}");
+            assert_eq!(owner, vec![0], "{name}: tri 0 keeps the texel");
+            let (last, _) = last_yields(&mesh, 16, 16);
+            assert!(
+                last.iter()
+                    .flatten()
+                    .all(|(world, raw)| world.iter().chain(raw).all(|c| c.is_finite())),
+                "{name}: a yield carries a NaN"
+            );
+        }
+        // Out-of-range TRIANGLE indices are `false`, never a panic.
+        assert!(!triangle_positions_finite(&quad(), 2));
+        assert!(!triangle_positions_finite(&quad(), usize::MAX));
+        assert!(triangle_positions_finite(&quad(), 1));
+    }
+
+    /// W1.2: a malformed-position triangle with no finite competitor
+    /// covers nothing on the walk, while the UV-only G-buffer (which never
+    /// reads positions) still covers it.
+    #[test]
+    fn a_malformed_position_triangle_alone_yields_nothing() {
+        let mut nan = quad();
+        nan.positions[0] = [f32::NAN, 0.0, 0.0];
+        nan.indices.truncate(3);
+        let mut missing = quad();
+        missing.positions.truncate(2);
+        missing.indices.truncate(3);
+        for (name, mesh) in [("nan", nan), ("missing", missing)] {
+            let (_, yields) = last_yields(&mesh, 16, 16);
+            assert_eq!(yields, 0, "{name}");
+            let g = UvGBuffer::build(&mesh, 1001, 16, 16);
+            assert!(
+                g.covered().iter().any(|&c| c),
+                "{name}: UV coverage unchanged"
+            );
+        }
     }
 
     #[test]

@@ -535,9 +535,12 @@ pub struct TexelGeom {
 /// R-A2 v2d: the walk, the world point and the cross product are
 /// [`crate::uv_gbuffer::for_each_uv_geometry`] (the crate's ONE
 /// triangle-driven geometry walk, shared with the decal projector); this
-/// function keeps only its own rules — the `pos_finite` triangle filter
-/// and the normalization (`len > 0` → unit, else `[0, 0, 0]`). The
-/// covering triangle's index is the last one the filter accepted (the
+/// function keeps only its own rule, the normalization (`len > 0` → unit,
+/// else `[0, 0, 0]`). The position rule (non-finite positions or
+/// out-of-range position indices cover nothing) is the walk's own since
+/// W1.2 ([`crate::uv_gbuffer::triangle_positions_finite`], composed into
+/// every filter), so this passes `|_| true` and the output is unchanged.
+/// The covering triangle's index is the last one the filter accepted (the
 /// walk calls `filter` right before each triangle's texels, in index
 /// order).
 pub fn rasterize_uv_geometry(
@@ -565,11 +568,10 @@ pub fn rasterize_uv_geometry(
         width,
         height,
         |tri| {
-            let keep = triangle_positions_finite(mesh, tri);
-            if keep {
-                current.set(tri);
-            }
-            keep
+            // The walk only offers triangles with finite, in-range
+            // positions (W1.2), so every offered triangle is kept.
+            current.set(tri);
+            true
         },
         |x, y, pos, n| {
             // Face normal from positions (see `TexelGeom::normal`).
@@ -595,51 +597,32 @@ pub fn rasterize_uv_geometry(
 
 /// The coverage mask of [`rasterize_uv_geometry`] (`true` where it would
 /// return `Some`), without assembling positions or normals: what export
-/// padding's dilation consumes. Same triangle filter (malformed indices,
-/// non-finite positions or UVs, degenerate footprints cover nothing), same
-/// texel walk (`uv_gbuffer`), so the mask is identical by construction —
-/// pinned by `uv_coverage_equals_rasterized_coverage`.
+/// padding's dilation consumes. Same triangle rule (malformed indices,
+/// non-finite positions or UVs, degenerate footprints cover nothing: the
+/// geometry walk's own rule since W1.2), same texel walk
+/// ([`crate::uv_gbuffer::for_each_uv_geometry`], with `|_| true`), so the
+/// mask is identical by construction — pinned by
+/// `uv_coverage_equals_rasterized_coverage`. It is also exactly the set of
+/// texels the decal projector's walk claims.
 pub fn uv_coverage(mesh: &MeshData, tile: u16, width: u32, height: u32) -> Vec<bool> {
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 {
         return Vec::new();
     }
     let mut out = vec![false; w * h];
-    crate::uv_gbuffer::for_each_covered_texel_filtered(
+    crate::uv_gbuffer::for_each_uv_geometry(
         mesh,
         tile,
         width,
         height,
-        |tri| triangle_positions_finite(mesh, tri),
-        |_, x, y, _| out[y * w + x] = true,
+        |_| true,
+        |x, y, _, _| {
+            if let Some(slot) = out.get_mut(y as usize * w + x as usize) {
+                *slot = true;
+            }
+        },
     );
     out
-}
-
-/// The fill's triangle filter (shared by [`rasterize_uv_geometry`] and
-/// [`uv_coverage`]): all three position indices in range and every
-/// position finite. Out-of-range triangle indices are `false`, never a
-/// panic.
-fn triangle_positions_finite(mesh: &MeshData, tri: usize) -> bool {
-    let Some(idx) = tri
-        .checked_mul(3)
-        .and_then(|base| mesh.indices.get(base..base.checked_add(3)?))
-    else {
-        return false;
-    };
-    match (
-        mesh.positions.get(idx[0] as usize),
-        mesh.positions.get(idx[1] as usize),
-        mesh.positions.get(idx[2] as usize),
-    ) {
-        (Some(&p0), Some(&p1), Some(&p2)) => pos_finite([p0, p1, p2]),
-        _ => false,
-    }
-}
-
-fn pos_finite(ps: [[f32; 3]; 3]) -> bool {
-    ps.iter()
-        .all(|p| p[0].is_finite() && p[1].is_finite() && p[2].is_finite())
 }
 
 /// A fill layer's evaluated tile: RGBA8 bytes plus the 0..=1 coverage mask,
@@ -718,6 +701,7 @@ pub fn evaluate_fill_tile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::uv_gbuffer::{pos_finite, triangle_positions_finite};
 
     const EPS: f32 = 1e-5;
 
@@ -1508,53 +1492,55 @@ mod tests {
         assert_eq!(geom[15 * 16 + 8].map(|g| g.triangle), Some(0));
     }
 
-    /// `for_each_uv_geometry`'s filter is honoured with the fill's rule: a
-    /// NaN-position triangle (on top of the quad in index order)
-    /// contributes no texels, so the quad shows through; unfiltered, the
-    /// same walk DOES yield that triangle's texels (the projector's rule).
+    /// W1.2: the position rule lives in `for_each_uv_geometry` itself. A
+    /// NaN-position triangle (on top of the quad in index order) is never
+    /// offered, with the old explicit fill filter AND with `|_| true` (the
+    /// projector's call): both walks yield the same texels with the same
+    /// bits, none of them NaN, and the quad shows through. Before W1.2 the
+    /// unfiltered walk DID visit it (the row-298 asymmetry, reversed here).
     #[test]
-    fn the_fill_filter_skips_a_nan_triangle_the_unfiltered_walk_visits() {
+    fn the_walk_never_offers_a_nan_triangle_filtered_or_not() {
         let mut mesh = full_uv_quad();
         mesh.positions.push([f32::NAN, 0.0, 0.0]);
         mesh.uvs.push([0.25, 0.25]);
         mesh.indices.extend_from_slice(&[4, 1, 2]);
-        let mut filtered_nan = 0;
-        let mut filtered = 0;
-        crate::uv_gbuffer::for_each_uv_geometry(
-            &mesh,
-            1001,
-            16,
-            16,
-            |tri| triangle_positions_finite(&mesh, tri),
-            |_, _, world, _| {
-                filtered += 1;
-                if world[0].is_nan() {
-                    filtered_nan += 1;
-                }
-            },
+        assert!(!triangle_positions_finite(&mesh, 2));
+        type Yields = Vec<(u32, u32, [u32; 3], [u32; 3])>;
+        let walk = |explicit: bool| -> (Vec<usize>, Yields) {
+            let mut offered = Vec::new();
+            let mut yields = Vec::new();
+            crate::uv_gbuffer::for_each_uv_geometry(
+                &mesh,
+                1001,
+                16,
+                16,
+                |tri| {
+                    offered.push(tri);
+                    !explicit || triangle_positions_finite(&mesh, tri)
+                },
+                |x, y, world, raw| {
+                    yields.push((x, y, world.map(f32::to_bits), raw.map(f32::to_bits)))
+                },
+            );
+            (offered, yields)
+        };
+        let (filtered_offered, filtered) = walk(true);
+        let (unfiltered_offered, unfiltered) = walk(false);
+        assert_eq!(filtered_offered, vec![0, 1], "the NaN triangle is offered");
+        assert_eq!(
+            unfiltered_offered,
+            vec![0, 1],
+            "the NaN triangle is offered"
         );
-        assert_eq!(filtered_nan, 0, "the NaN triangle is filtered out");
+        assert_eq!(filtered, unfiltered);
         // Only the quad's two triangles: 256 texels plus the diagonal's
-        // double visits.
-        assert!(filtered >= 256, "{filtered}");
-        let mut unfiltered_nan = 0;
-        crate::uv_gbuffer::for_each_uv_geometry(
-            &mesh,
-            1001,
-            16,
-            16,
-            |_| true,
-            |_, _, world, _| {
-                if world[0].is_nan() {
-                    unfiltered_nan += 1;
-                }
-            },
-        );
-        assert!(
-            unfiltered_nan > 0,
-            "unfiltered, the NaN triangle is visited"
-        );
-        // And the fill (which filters) never reports a NaN position.
+        // double visits, every one finite.
+        assert!(unfiltered.len() >= 256, "{}", unfiltered.len());
+        assert!(unfiltered.iter().all(|(_, _, world, raw)| world
+            .iter()
+            .chain(raw)
+            .all(|&b| f32::from_bits(b).is_finite())));
+        // And the fill never reports a NaN position or the NaN triangle.
         let geom = rasterize_uv_geometry(&mesh, 1001, 16, 16);
         assert!(geom.iter().flatten().all(|g| g.pos[0].is_finite()));
         assert!(geom.iter().flatten().all(|g| g.triangle < 2));
