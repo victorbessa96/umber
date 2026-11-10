@@ -19,7 +19,8 @@
       "generator": {
         "node_def": "noise_worley",
         "map_name": "",
-        "channel": "baseColor"
+        "channel": "baseColor",
+        "param": "roughness"
       }
     },
     {
@@ -31,7 +32,8 @@
       "generator": {
         "node_def": "mesh_map_generator",
         "map_name": "curvature",
-        "channel": "roughness"
+        "channel": "roughness",
+        "param": "wear"
       }
     },
     {
@@ -41,6 +43,30 @@
       "opacity": 0.35,
       "mask": null,
       "generator": null
+    }
+  ],
+  "parameters": [
+    {
+      "id": "wear",
+      "label": "Wear amount",
+      "kind": {
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+        "default": 0.35
+      }
+    },
+    {
+      "id": "roughness",
+      "label": "Grain roughness",
+      "kind": {
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+        "default": 0.6
+      }
     }
   ]
 }

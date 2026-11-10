@@ -13,7 +13,11 @@
 //!   layer-stack template (folder + fill layers + masks) whose fill layers
 //!   bind mesh-map-driven generators (`AO` → generator nodes via anchors).
 //!   Applying instantiates the template into a [`LayerStack`] and resolves
-//!   the anchors to freshly-allocated layer ids.
+//!   the anchors to freshly-allocated layer ids. Its optional `parameters`
+//!   block declares tweakable [`SmartParam`]s, and a generator binding's
+//!   `param` names one — that is how a node input (wear amount, rust
+//!   coverage, an oxide mode) is driven by a declared control instead of a
+//!   hard-coded value.
 //! * [`SmartMask`] — an `.umbermask` effect-stack preset: an ordered list
 //!   of `{source, op, params}` entries composed into one mask, applyable
 //!   to any layer's mask slot.
@@ -44,6 +48,28 @@
 //!   `Err` or a clamped no-op, never a panic or a non-deterministic pixel.
 //! * Filter ops act on RGB only and preserve alpha; the filter is a color
 //!   operation on a layer, not an alpha operation.
+//! * Parameters are declared on the MATERIAL, not per layer (4.1a,
+//!   2026-11-10). One flat id namespace lets several generator bindings
+//!   share one control (one "wear" driving two layers) without duplicate
+//!   declarations, and the inspector half (4.1b) presents one control set
+//!   per applied preset. A per-layer block would fork the namespace and
+//!   force the UI to merge duplicates; the brief names this fork and asks
+//!   for one arm only.
+//! * `SmartMaterial::version` stays 1 with the parameters block. The block
+//!   is additive and optional (`#[serde(default, skip_serializing_if)]`),
+//!   and no struct on this path sets `deny_unknown_fields` (checked in the
+//!   4.1a kill), so an old reader ignores `parameters`/`param` and still
+//!   instantiates the layer stack — it only loses the controls. Old files
+//!   parse with `parameters: []`. A version bump would strand every shipped
+//!   preset for a purely additive field, so the compat note lives here.
+//!   The `param` key is skipped when absent so specs without it (all other
+//!   starter materials) re-serialize byte-identically.
+//! * Parameter declarations are validated loudly at parse AND apply
+//!   (duplicate ids, empty labels, a default outside its range, a choice
+//!   default not among its options, a generator `param` naming an unknown
+//!   id) — these are authored metadata, so a clamp would hide the author's
+//!   mistake. Filter runtime params clamp instead because there the value
+//!   is per-pixel input, not a declaration.
 
 use serde::{Deserialize, Serialize};
 
@@ -179,6 +205,36 @@ pub enum SmartError {
         /// The buffer's actual length.
         actual: usize,
     },
+    /// A generator binding's `param` names an id the preset never declares.
+    /// Refused at parse and at apply — never a silent ignore.
+    #[error("smart material {material:?} layer {layer:?} binds unknown parameter {param:?}")]
+    UnknownParam {
+        /// The preset's display name.
+        material: String,
+        /// The template layer whose generator carries the dangling ref.
+        layer: String,
+        /// The undeclared parameter id.
+        param: String,
+    },
+    /// A declared parameter id lookup found nothing ([`SmartMaterial::param`]).
+    #[error("smart material {material:?} declares no parameter {param:?}")]
+    UnknownParamId {
+        /// The preset's display name.
+        material: String,
+        /// The undeclared parameter id.
+        param: String,
+    },
+    /// A parameter declaration is malformed. `why` is a fixed phrase so the
+    /// caller can pin it in a test.
+    #[error("smart material {material:?} parameter {param:?} is invalid: {why}")]
+    BadParam {
+        /// The preset's display name.
+        material: String,
+        /// The offending parameter id (possibly empty).
+        param: String,
+        /// What is wrong, in a fixed phrase.
+        why: &'static str,
+    },
 }
 
 /// Largest `.umbersmart` / `.umbermask` / `.umberfilter` file read
@@ -187,6 +243,13 @@ pub enum SmartError {
 pub const MAX_PRESET_BYTES: u64 = 1 << 20;
 /// Most layers a smart material may instantiate in one apply.
 pub const MAX_PRESET_LAYERS: usize = 256;
+/// Most parameters a smart material may declare. A parameter block is UI
+/// metadata, one control per entry; 64 is far past any shipped preset and
+/// keeps a hostile file from making the inspector build thousands of rows.
+pub const MAX_PRESET_PARAMS: usize = 64;
+/// Most options a [`SmartParamKind::Choice`] may offer (same reasoning as
+/// [`MAX_PRESET_PARAMS`]: a combo box, not a database).
+pub const MAX_PARAM_CHOICES: usize = 64;
 /// Most stages a smart mask may compose. Every op runs once per texel
 /// (16.8M at 4K), so this bounds the apply's cost, not just its size.
 pub const MAX_MASK_OPS: usize = 64;
@@ -288,6 +351,16 @@ pub struct GeneratorBinding {
     /// The channel the applied layer exposes as an anchor.
     #[serde(default = "default_anchor_channel")]
     pub channel: String,
+    /// The declared parameter id driving this generator's input (a wear
+    /// amount, a coverage float, an oxide mode — whatever the node calls
+    /// its primary input). `None` = the input is fixed by the template.
+    ///
+    /// Resolved against [`SmartMaterial::parameters`] at parse and apply
+    /// ([`SmartMaterial::resolve_binding`]); an unknown id is a typed
+    /// [`SmartError::UnknownParam`], never a silent ignore. Skipped when
+    /// absent so presets without parameters re-serialize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
 }
 
 /// One layer entry in a [`.umbersmart`](SmartMaterial) template.
@@ -330,8 +403,147 @@ pub enum SmartLayerKind {
     Folder,
 }
 
+/// The value vocabulary of a [`SmartParam`].
+///
+/// Closed (`#[serde(tag = "type")]`): an unknown `type` fails the parse
+/// loudly, never loads as a silent float. `Bool` is deliberately absent —
+/// none of the shipped materials needs a two-state control yet, and the
+/// enum is cheap to extend when one does. Adding a variant later is
+/// additive for readers that know it and a loud typed
+/// [`SmartError::Json`] for readers that do not — never a misread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SmartParamKind {
+    /// A bounded float control.
+    Float {
+        /// Lower bound (inclusive), finite.
+        min: f32,
+        /// Upper bound (inclusive), finite, `>= min`.
+        max: f32,
+        /// Slider step, finite and `> 0`.
+        step: f32,
+        /// Starting value, within `min..=max`.
+        default: f32,
+    },
+    /// A one-of-N string control.
+    Choice {
+        /// Option names: non-empty, unique, at most [`MAX_PARAM_CHOICES`].
+        options: Vec<String>,
+        /// Starting option; must be one of `options`.
+        default: String,
+    },
+}
+
+/// A parameter's current value, in the shape a generator input consumes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SmartParamValue<'a> {
+    /// A [`SmartParamKind::Float`] value.
+    Float(f32),
+    /// The selected [`SmartParamKind::Choice`] option name.
+    Choice(&'a str),
+}
+
+/// One declared, tweakable smart-material parameter (4.1a, 2026-11-10).
+///
+/// File shape (nested under [`SmartMaterial::parameters`]):
+///
+/// ```json
+/// { "id": "wear", "label": "Wear amount",
+///   "kind": { "type": "float", "min": 0.0, "max": 1.0,
+///             "step": 0.01, "default": 0.35 } }
+/// ```
+///
+/// `kind` is a nested object rather than a flattened one: the file already
+/// nests `generator`, and a nested internally-tagged enum avoids serde's
+/// flatten/tag interaction. Ids form one flat namespace per material,
+/// shared by every [`GeneratorBinding::param`] reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmartParam {
+    /// Stable machine id, referenced by [`GeneratorBinding::param`].
+    pub id: String,
+    /// Human-readable control label (the 4.1b inspector renders it).
+    pub label: String,
+    /// The control's shape and starting value.
+    pub kind: SmartParamKind,
+}
+
+impl SmartParam {
+    /// The value this parameter starts at (its declared default). Core
+    /// stores the declaration only; a per-instance override lives with the
+    /// applied material (4.1b).
+    pub fn value(&self) -> SmartParamValue<'_> {
+        match &self.kind {
+            SmartParamKind::Float { default, .. } => SmartParamValue::Float(*default),
+            SmartParamKind::Choice { default, .. } => SmartParamValue::Choice(default),
+        }
+    }
+
+    /// Structural validation, shared by the parse and apply paths. The
+    /// `why` phrases are fixed so tests can pin them (module docs: this is
+    /// authored metadata, so errors are loud rather than clamped).
+    fn validate(&self, material: &str) -> Result<(), SmartError> {
+        let bad = |why: &'static str| SmartError::BadParam {
+            material: material.to_string(),
+            param: self.id.clone(),
+            why,
+        };
+        if self.id.trim().is_empty() {
+            return Err(bad("empty parameter id"));
+        }
+        if self.label.trim().is_empty() {
+            return Err(bad("empty parameter label"));
+        }
+        match &self.kind {
+            SmartParamKind::Float {
+                min,
+                max,
+                step,
+                default,
+            } => {
+                for v in [*min, *max, *step, *default] {
+                    if !v.is_finite() {
+                        return Err(bad("non-finite float bound"));
+                    }
+                }
+                if min > max {
+                    return Err(bad("min is greater than max"));
+                }
+                if *step <= 0.0 {
+                    return Err(bad("step must be positive"));
+                }
+                if *default < *min || *default > *max {
+                    return Err(bad("default is outside min..=max"));
+                }
+            }
+            SmartParamKind::Choice { options, default } => {
+                if options.is_empty() {
+                    return Err(bad("choice has no options"));
+                }
+                if options.len() > MAX_PARAM_CHOICES {
+                    return Err(SmartError::TooMany {
+                        name: material.to_string(),
+                        what: "choices",
+                        count: options.len(),
+                        cap: MAX_PARAM_CHOICES,
+                    });
+                }
+                if !options.iter().any(|option| option == default) {
+                    return Err(bad("default is not one of the options"));
+                }
+                for (i, option) in options.iter().enumerate() {
+                    if options[..i].contains(option) {
+                        return Err(bad("duplicate choice option"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A `.umbersmart` folder preset (§3:45): a layer-stack template whose fill
-/// layers bind mesh-map-driven generators via anchors.
+/// layers bind mesh-map-driven generators via anchors, plus an optional
+/// block of declared [`SmartParam`]s that generator bindings reference.
 ///
 /// File shape (serde JSON, extension `.umbersmart`):
 ///
@@ -343,10 +555,21 @@ pub enum SmartLayerKind {
 ///     { "name": "Base", "kind": "folder" },
 ///     { "name": "Wear", "kind": "fill",
 ///       "generator": { "node_def": "mesh_map_generator",
-///                      "map_name": "AO", "channel": "baseColor" } }
+///                      "map_name": "AO", "channel": "baseColor",
+///                      "param": "wear" } }
+///   ],
+///   "parameters": [
+///     { "id": "wear", "label": "Wear amount",
+///       "kind": { "type": "float", "min": 0.0, "max": 1.0,
+///                 "step": 0.01, "default": 0.35 } }
 ///   ]
 /// }
 /// ```
+///
+/// `parameters` is optional and is emitted after `layers` (an appended
+/// block, so adding controls to a preset is an additive diff); a preset
+/// without it parses with an empty vec and re-serializes byte-identically.
+/// `version` stays 1 — see the module docs' compat note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SmartMaterial {
     /// Preset display name.
@@ -356,6 +579,11 @@ pub struct SmartMaterial {
     pub version: u32,
     /// Stack template, bottom (index 0) to top.
     pub layers: Vec<SmartLayerTemplate>,
+    /// Declared tweakable parameters, in presentation order. Empty for
+    /// presets authored before 4.1a (2026-11-10) and for presets with no
+    /// knobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<SmartParam>,
 }
 
 /// What [`SmartMaterial::apply`] created.
@@ -369,11 +597,16 @@ pub struct SmartApplyResult {
 }
 
 impl SmartMaterial {
-    /// Parses a `.umbersmart` document.
+    /// Parses a `.umbersmart` document, validating the layer cap and the
+    /// parameter block (declarations and every generator `param` ref).
     ///
     /// # Errors
     ///
-    /// [`SmartError::Json`] on malformed input.
+    /// [`SmartError::Json`] on malformed input (including unknown kinds and
+    /// unknown parameter `type` tags); [`SmartError::TooMany`] past the
+    /// layer / parameter / choice caps; [`SmartError::BadParam`] for a
+    /// malformed declaration; [`SmartError::UnknownParam`] when a generator
+    /// binding names an undeclared parameter id.
     pub fn from_json(json: &str) -> Result<Self, SmartError> {
         let material: Self = serde_json::from_str(json)?;
         if material.layers.len() > MAX_PRESET_LAYERS {
@@ -384,6 +617,7 @@ impl SmartMaterial {
                 cap: MAX_PRESET_LAYERS,
             });
         }
+        material.validate_params()?;
         Ok(material)
     }
 
@@ -391,10 +625,88 @@ impl SmartMaterial {
     ///
     /// # Errors
     ///
-    /// [`SmartError::Io`] / [`SmartError::Json`] on unreadable input.
+    /// [`SmartError::Io`] / [`SmartError::Json`] on unreadable input, plus
+    /// [`Self::from_json`]'s validation errors.
     pub fn load_file(path: &std::path::Path) -> Result<Self, SmartError> {
         let text = read_capped(path)?;
         Self::from_json(&text)
+    }
+
+    /// Looks up a declared parameter by id (the inspector's binding path;
+    /// generator references resolve through [`Self::resolve_binding`]).
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::UnknownParamId`] when the preset declares no such id.
+    pub fn param(&self, id: &str) -> Result<&SmartParam, SmartError> {
+        self.parameters
+            .iter()
+            .find(|param| param.id == id)
+            .ok_or_else(|| SmartError::UnknownParamId {
+                material: self.name.clone(),
+                param: id.to_string(),
+            })
+    }
+
+    /// Resolves a template layer's generator `param` reference to the
+    /// declaration it names. `Ok(None)` for a layer with no generator or a
+    /// fixed generator binding (`param: None`).
+    ///
+    /// # Errors
+    ///
+    /// [`SmartError::UnknownParam`] when the binding names an id the
+    /// preset does not declare — the same loud path parse and apply take.
+    pub fn resolve_binding(
+        &self,
+        template: &SmartLayerTemplate,
+    ) -> Result<Option<&SmartParam>, SmartError> {
+        let Some(generator) = &template.generator else {
+            return Ok(None);
+        };
+        let Some(id) = &generator.param else {
+            return Ok(None);
+        };
+        self.parameters
+            .iter()
+            .find(|param| &param.id == id)
+            .map(Some)
+            .ok_or_else(|| SmartError::UnknownParam {
+                material: self.name.clone(),
+                layer: template.name.clone(),
+                param: id.clone(),
+            })
+    }
+
+    /// Validates the declaration block and every generator reference —
+    /// caps, duplicate ids, malformed kinds, and unknown `param` ids.
+    /// Called from [`Self::from_json`] and [`Self::apply`], so a
+    /// hand-built preset cannot skip it.
+    fn validate_params(&self) -> Result<(), SmartError> {
+        if self.parameters.len() > MAX_PRESET_PARAMS {
+            return Err(SmartError::TooMany {
+                name: self.name.clone(),
+                what: "parameters",
+                count: self.parameters.len(),
+                cap: MAX_PRESET_PARAMS,
+            });
+        }
+        for (i, param) in self.parameters.iter().enumerate() {
+            param.validate(&self.name)?;
+            if self.parameters[..i]
+                .iter()
+                .any(|other| other.id == param.id)
+            {
+                return Err(SmartError::BadParam {
+                    material: self.name.clone(),
+                    param: param.id.clone(),
+                    why: "duplicate parameter id",
+                });
+            }
+        }
+        for template in &self.layers {
+            self.resolve_binding(template)?;
+        }
+        Ok(())
     }
 
     /// Instantiates the template into `stack` (bottom to top) and resolves
@@ -406,11 +718,16 @@ impl SmartMaterial {
     ///
     /// # Errors
     ///
-    /// [`SmartError::EmptyPreset`] when the template has no layers.
+    /// [`SmartError::EmptyPreset`] when the template has no layers;
+    /// [`SmartError::BadParam`] / [`SmartError::UnknownParam`] /
+    /// [`SmartError::TooMany`] when the parameter block or a generator
+    /// reference is invalid — checked BEFORE any layer is added, so a
+    /// refused apply leaves `stack` untouched.
     pub fn apply(&self, stack: &mut LayerStack) -> Result<SmartApplyResult, SmartError> {
         if self.layers.is_empty() {
             return Err(SmartError::EmptyPreset(self.name.clone()));
         }
+        self.validate_params()?;
         let mut layer_ids = Vec::with_capacity(self.layers.len());
         let mut anchors = Vec::new();
         for template in &self.layers {
@@ -1238,6 +1555,7 @@ mod tests {
             name: "Empty".into(),
             version: 1,
             layers: vec![],
+            parameters: vec![],
         };
         let mut stack = LayerStack::new();
         assert!(matches!(
@@ -1247,6 +1565,307 @@ mod tests {
         assert!(
             SmartMaterial::from_json(r#"{"name":"x","layers":[{"name":"y","kind":"voxel"}]}"#)
                 .is_err()
+        );
+    }
+
+    // ---- 4.1a smart-material parameters (2026-11-10) ----------------------
+
+    #[test]
+    fn old_format_preset_parses_with_empty_parameters() {
+        // WORN_METAL_JSON predates the `parameters` key (and its bindings
+        // predate `param`): the block defaults to empty and is NOT invented
+        // on save, which is what keeps every other shipped starter
+        // byte-identical under the round-trip pin.
+        let preset = SmartMaterial::from_json(WORN_METAL_JSON).expect("old format parses");
+        assert!(preset.parameters.is_empty(), "absent block = empty vec");
+        let saved = serde_json::to_string_pretty(&preset).expect("serializes");
+        assert!(
+            !saved.contains("parameters"),
+            "an empty block must not be invented on save: {saved}"
+        );
+        assert!(
+            !saved.contains("\"param\""),
+            "a fixed generator must not gain a param key: {saved}"
+        );
+    }
+
+    #[test]
+    fn param_references_resolve_ok_and_fail_loud() {
+        let material = SmartMaterial::load_file(&starter_dir().join("rusted-iron.umbersmart"))
+            .expect("shipped rusted iron loads");
+        assert_eq!(
+            material.param("rust-coverage").expect("declared").value(),
+            SmartParamValue::Float(0.55)
+        );
+        assert_eq!(
+            material.param("oxide-mode").expect("declared").value(),
+            SmartParamValue::Choice("metal")
+        );
+        let rust = material
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Rust patches")
+            .expect("layer present");
+        assert_eq!(
+            material
+                .resolve_binding(rust)
+                .expect("binding resolves")
+                .map(|param| param.id.as_str()),
+            Some("rust-coverage")
+        );
+        // A folder (no generator) and a fixed binding both resolve to None.
+        let folder = material
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Iron folder")
+            .expect("layer present");
+        assert!(material
+            .resolve_binding(folder)
+            .expect("no generator is not an error")
+            .is_none());
+        let edge = material
+            .layers
+            .iter()
+            .find(|layer| layer.name == "Edge rust")
+            .expect("layer present");
+        assert!(material
+            .resolve_binding(edge)
+            .expect("fixed binding is not an error")
+            .is_none());
+        // Unknown lookup and unknown reference are typed errors.
+        assert!(matches!(
+            material.param("ghost"),
+            Err(SmartError::UnknownParamId { .. })
+        ));
+        let mut dangling = rust.clone();
+        dangling.generator.as_mut().expect("has a generator").param = Some("ghost".into());
+        match material.resolve_binding(&dangling) {
+            Err(SmartError::UnknownParam { layer, param, .. }) => {
+                assert_eq!(layer, "Rust patches");
+                assert_eq!(param, "ghost");
+            }
+            other => panic!("dangling param ref must be typed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_param_reference_fails_parse_and_apply_without_touching_the_stack() {
+        let json = r#"{
+            "name": "Dangling",
+            "layers": [{ "name": "Wear", "kind": "fill",
+                         "generator": { "node_def": "noise_perlin", "param": "ghost" } }],
+            "parameters": []
+        }"#;
+        match SmartMaterial::from_json(json) {
+            Err(SmartError::UnknownParam { layer, param, .. }) => {
+                assert_eq!(layer, "Wear");
+                assert_eq!(param, "ghost");
+            }
+            other => panic!("parse must refuse the dangling ref, got {other:?}"),
+        }
+        // The same preset built by hand (serde bypassed) is refused at
+        // apply, before the first layer is added.
+        let preset = SmartMaterial {
+            name: "Dangling".into(),
+            version: 1,
+            layers: vec![SmartLayerTemplate {
+                name: "Wear".into(),
+                kind: SmartLayerKind::Fill,
+                blend_mode: BlendMode::Normal,
+                opacity: 1.0,
+                mask: None,
+                generator: Some(GeneratorBinding {
+                    node_def: "noise_perlin".into(),
+                    map_name: String::new(),
+                    channel: "baseColor".into(),
+                    param: Some("ghost".into()),
+                }),
+            }],
+            parameters: vec![],
+        };
+        let mut stack = LayerStack::new();
+        assert!(matches!(
+            preset.apply(&mut stack),
+            Err(SmartError::UnknownParam { .. })
+        ));
+        assert!(
+            stack.layers.is_empty(),
+            "a refused apply must not half-apply the template"
+        );
+    }
+
+    fn material_with_param(param_json: &str) -> Result<SmartMaterial, SmartError> {
+        SmartMaterial::from_json(&format!(
+            r#"{{ "name": "P", "layers": [{{ "name": "L", "kind": "fill" }}],
+                 "parameters": [{param_json}] }}"#
+        ))
+    }
+
+    #[test]
+    fn malformed_parameter_declarations_are_typed_parse_errors() {
+        let cases = [
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "default": 2.0 } }"#,
+                "default is outside min..=max",
+            ),
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "float", "min": 2.0, "max": 1.0, "step": 0.01, "default": 1.5 } }"#,
+                "min is greater than max",
+            ),
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.0, "default": 0.5 } }"#,
+                "step must be positive",
+            ),
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "default": 1e300 } }"#,
+                "non-finite float bound",
+            ),
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "choice", "options": ["x", "y"], "default": "z" } }"#,
+                "default is not one of the options",
+            ),
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "choice", "options": [], "default": "z" } }"#,
+                "choice has no options",
+            ),
+            (
+                r#"{ "id": "a", "label": "A", "kind": { "type": "choice", "options": ["x", "x"], "default": "x" } }"#,
+                "duplicate choice option",
+            ),
+            (
+                r#"{ "id": " ", "label": "A", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "default": 0.5 } }"#,
+                "empty parameter id",
+            ),
+            (
+                r#"{ "id": "a", "label": "", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "default": 0.5 } }"#,
+                "empty parameter label",
+            ),
+        ];
+        for (json, why) in cases {
+            match material_with_param(json) {
+                Err(SmartError::BadParam { why: got, .. }) => assert_eq!(got, why, "{json}"),
+                other => panic!("{json} must be a typed BadParam, got {other:?}"),
+            }
+        }
+        // A `type` outside the closed vocabulary fails the parse itself.
+        assert!(matches!(
+            material_with_param(
+                r#"{ "id": "a", "label": "A", "kind": { "type": "int", "default": 1 } }"#
+            ),
+            Err(SmartError::Json(_))
+        ));
+        // Duplicate ids are structural (each declaration is valid).
+        let duplicate = r#"{ "name": "D", "layers": [{ "name": "L" }], "parameters": [
+            { "id": "a", "label": "A", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.1, "default": 0.5 } },
+            { "id": "a", "label": "B", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.1, "default": 0.5 } }
+        ] }"#;
+        match SmartMaterial::from_json(duplicate) {
+            Err(SmartError::BadParam {
+                material,
+                param,
+                why,
+            }) => {
+                assert_eq!(material, "D");
+                assert_eq!(param, "a");
+                assert_eq!(why, "duplicate parameter id");
+            }
+            other => panic!("duplicate ids must be a typed BadParam, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parameter_and_choice_caps_are_enforced() {
+        let param = r#"{ "id": "ID", "label": "L", "kind": { "type": "float", "min": 0.0, "max": 1.0, "step": 0.1, "default": 0.5 } }"#;
+        let params: Vec<String> = (0..=MAX_PRESET_PARAMS)
+            .map(|i| param.replace("ID", &format!("p{i}")))
+            .collect();
+        let json = format!(
+            r#"{{ "name": "Big", "layers": [{{ "name": "L" }}], "parameters": [{}] }}"#,
+            params.join(",")
+        );
+        match SmartMaterial::from_json(&json) {
+            Err(SmartError::TooMany {
+                name,
+                what: "parameters",
+                count,
+                cap,
+            }) => {
+                assert_eq!(name, "Big");
+                assert_eq!(count, MAX_PRESET_PARAMS + 1);
+                assert_eq!(cap, MAX_PRESET_PARAMS);
+            }
+            other => panic!("over the parameter cap must be a typed TooMany, got {other:?}"),
+        }
+        let options: Vec<String> = (0..=MAX_PARAM_CHOICES)
+            .map(|i| format!("\"o{i}\""))
+            .collect();
+        let json = format!(
+            r#"{{ "name": "BigChoice", "layers": [{{ "name": "L" }}], "parameters": [
+                {{ "id": "c", "label": "C", "kind": {{ "type": "choice", "options": [{}], "default": "o0" }} }}
+            ] }}"#,
+            options.join(",")
+        );
+        match SmartMaterial::from_json(&json) {
+            Err(SmartError::TooMany {
+                name,
+                what: "choices",
+                count,
+                cap,
+            }) => {
+                assert_eq!(name, "BigChoice");
+                assert_eq!(count, MAX_PARAM_CHOICES + 1);
+                assert_eq!(cap, MAX_PARAM_CHOICES);
+            }
+            other => panic!("over the choice cap must be a typed TooMany, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shipped_param_materials_are_wired_not_decorative() {
+        // Every declared parameter must drive at least one generator
+        // binding, and every binding ref must resolve — a decorative
+        // declaration fails the first check, a dangling ref the second.
+        for file in ["aged-leather.umbersmart", "rusted-iron.umbersmart"] {
+            let material = SmartMaterial::load_file(&starter_dir().join(file)).expect("loads");
+            assert!(
+                !material.parameters.is_empty(),
+                "{file} declares parameters"
+            );
+            let mut referenced = std::collections::BTreeSet::new();
+            for layer in &material.layers {
+                if let Some(param) = material.resolve_binding(layer).expect("ref resolves") {
+                    referenced.insert(param.id.as_str());
+                }
+            }
+            let declared: std::collections::BTreeSet<&str> = material
+                .parameters
+                .iter()
+                .map(|param| param.id.as_str())
+                .collect();
+            assert_eq!(referenced, declared, "{file}: declared == referenced");
+        }
+        // Pinned authoring: the two locked materials ship these controls.
+        let leather = SmartMaterial::load_file(&starter_dir().join("aged-leather.umbersmart"))
+            .expect("leather loads");
+        assert_eq!(leather.parameters.len(), 2);
+        assert_eq!(
+            leather.param("wear").expect("wear").value(),
+            SmartParamValue::Float(0.35)
+        );
+        assert_eq!(
+            leather.param("roughness").expect("roughness").value(),
+            SmartParamValue::Float(0.6)
+        );
+        let iron = SmartMaterial::load_file(&starter_dir().join("rusted-iron.umbersmart"))
+            .expect("iron loads");
+        assert_eq!(iron.parameters.len(), 2);
+        assert_eq!(
+            iron.param("rust-coverage").expect("coverage").value(),
+            SmartParamValue::Float(0.55)
+        );
+        assert_eq!(
+            iron.param("oxide-mode").expect("mode").value(),
+            SmartParamValue::Choice("metal")
         );
     }
 

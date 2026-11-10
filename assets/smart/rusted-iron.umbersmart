@@ -19,7 +19,8 @@
       "generator": {
         "node_def": "mesh_map_generator",
         "map_name": "AO",
-        "channel": "metallic"
+        "channel": "metallic",
+        "param": "oxide-mode"
       }
     },
     {
@@ -31,7 +32,8 @@
       "generator": {
         "node_def": "noise_perlin",
         "map_name": "",
-        "channel": "baseColor"
+        "channel": "baseColor",
+        "param": "rust-coverage"
       }
     },
     {
@@ -44,6 +46,31 @@
         "node_def": "mesh_map_generator",
         "map_name": "curvature",
         "channel": "baseColor"
+      }
+    }
+  ],
+  "parameters": [
+    {
+      "id": "rust-coverage",
+      "label": "Rust coverage",
+      "kind": {
+        "type": "float",
+        "min": 0.0,
+        "max": 1.0,
+        "step": 0.01,
+        "default": 0.55
+      }
+    },
+    {
+      "id": "oxide-mode",
+      "label": "Oxide mode",
+      "kind": {
+        "type": "choice",
+        "options": [
+          "metal",
+          "oxide"
+        ],
+        "default": "metal"
       }
     }
   ]
