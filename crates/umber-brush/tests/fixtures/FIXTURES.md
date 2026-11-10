@@ -75,3 +75,21 @@ the `desc` section (the descriptor tree) that the trimmed set above dropped:
 
 Same MIT license and copyright as above; the trimming rule is section-level,
 never a re-encode.
+
+## Row 3.1a additions (2026-11-09, `patt` sections)
+
+**No new binary fixture.** The clean-room reader now decodes `patt` sections,
+but the only vendored file that still keeps a `patt` section
+(`abr_real_v6_2_full.abr`) has an EMPTY one: `8BIMpatt` at offset 16 with a
+zero declared size, then `8BIMdesc` at offset 28. It pins the soft path
+(`tests/abr_real_patt.rs`): `patterns` empty, `skipped_patterns` 0, the
+brush still "Soft Round", and the import still yields that one untextured
+preset.
+
+Upstream `sample-and-pattern/src.abr` carries the only real non-empty
+pattern (~1 MiB; id `d667d14d-41d6-894d-b613-58c58768aab0`, "Bobbys Paint",
+595 x 597), and rows 271/282 trimmed `patt` out of the vendored copies. A
+pattern cannot be trimmed without re-encoding, so wave 3.1a ships synthetic
+records instead (partner ruling Q3, `docs/research/2026-11-09-abr-patt-analysis.md`);
+an oracle comparison against the untrimmed file is a one-off outside the
+repo.

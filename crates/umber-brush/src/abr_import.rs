@@ -24,20 +24,35 @@
 //!   white and A = the tip's alpha byte (the same white-plus-coverage
 //!   convention as the `.svg` stencil raster: white is multiplied by the
 //!   stroke colour, so the tip tints like a paint);
+//! * a brush with a texture (`useTexture` + `Txtr`) whose pattern id a
+//!   `patt` record carries gets `texture` = the index of that pattern in
+//!   [`AbrImport::patterns`] plus its parameters; the pattern itself is
+//!   carried once per id, however many brushes share it;
 //! * any other brush is a radial preset (`stamped = false`, no stamp).
 //!
 //! Judgment calls: a duplicate stamp (byte-equal to an earlier emitted
 //! entry's) drops the LATER entry and counts it — two brushes sharing a
-//! tip add no shape variety, and the first keeps its settings; an
-//! orphan sample (no brush references its id) is counted, never an
-//! error; a zero-area tip is treated as missing.
+//! tip add no shape variety, and the first keeps its settings; the
+//! duplicate rule still compares stamps only, so a dropped duplicate's
+//! texture is lost (revisiting that is kill 3.1c's call) and its pattern
+//! stays carried because the source file references it; an orphan sample
+//! (no brush references its id) is counted, never an error; a zero-area
+//! tip is treated as missing; a textured brush whose pattern record is
+//! missing keeps its other settings, gets `texture: None` and is counted;
+//! an unreferenced pattern record (or a second record with an already
+//! carried id) is counted and not carried.
 //!
-//! Non-goals (v1): `patt` patterns, v8+ files, dual brush, texture,
-//! scattering, roundness, flips, dynamics → engine wiring (the parsed
-//! [`AbrBrush::dynamics`] is dropped), `.abr` writing (never), and the
+//! The decoded pattern is cloned into [`AbrImport::patterns`]: the CLI
+//! consumes the import after the source bytes are gone, so the mapping
+//! cannot borrow from [`AbrFile`]. One clone per referenced pattern.
+//!
+//! Non-goals (v1): v8+ files, dual brush, scattering, roundness, flips,
+//! dynamics → engine wiring (the parsed [`AbrBrush::dynamics`] is dropped),
+//! sampling the carried texture in the paint engine (kill 3.1c — the
+//! import writes no pixels that use it), `.abr` writing (never), and the
 //! CLI fan-out over a whole file (row 284).
 
-use crate::abr::{match_sample, read_abr, AbrBrush, AbrError, AbrFile};
+use crate::abr::{match_pattern, match_sample, read_abr, AbrBrush, AbrError, AbrFile, AbrPattern};
 use crate::preset::{BrushPreset, ControlCurve, LazyMouseConfig, SpacingConfig};
 use crate::{BrushParams, OneEuroParams, StampAngle, StrokeMethod};
 
@@ -49,8 +64,29 @@ pub struct AbrImportEntry {
     /// `(width, height, RGBA8)` — `Some` for sampled brushes. RGB is
     /// white; A is the tip coverage.
     pub stamp: Option<(u32, u32, Vec<u8>)>,
+    /// The brush's resolved texture link, `Some` only when the brush names
+    /// a pattern the file carries. `pattern_index` indexes
+    /// [`AbrImport::patterns`].
+    pub texture: Option<AbrImportTexture>,
     /// Index of the source brush in [`AbrFile::brushes`].
     pub brush_index: usize,
+}
+
+/// A brush's texture parameters, resolved against [`AbrImport::patterns`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbrImportTexture {
+    /// Index into [`AbrImport::patterns`].
+    pub pattern_index: usize,
+    /// Scale as a fraction (`textureScale`, percent / 100; missing → 1.0).
+    pub scale: f64,
+    /// Depth as a fraction (`textureDepth`, percent / 100; missing → 1.0).
+    pub depth: f64,
+    /// Whether the pattern is inverted (`InvT`).
+    pub invert: bool,
+    /// The stored blend-mode enum string (`BlnM.<code>`), undecoded.
+    pub blend_mode: String,
+    /// Whether the texture applies to each tip (`TxtC`).
+    pub each_tip: bool,
 }
 
 /// The result of importing one `.abr` file.
@@ -58,13 +94,23 @@ pub struct AbrImportEntry {
 pub struct AbrImport {
     /// One entry per brush kept.
     pub entries: Vec<AbrImportEntry>,
+    /// The patterns at least one brush in the file references, in file
+    /// order, one entry per id. Cloned from [`AbrFile::patterns`].
+    pub patterns: Vec<AbrPattern>,
     /// `samp` records no brush references.
     pub orphan_samples: u32,
+    /// `patt` records no brush references, plus a second record with an
+    /// id already carried (the first record wins, the same rule
+    /// [`match_pattern`] uses).
+    pub orphan_patterns: u32,
     /// Brushes emitted as radial presets (computed brushes, and sampled
     /// brushes whose tip is missing).
     pub brushes_without_sample: u32,
     /// Entries dropped because an earlier entry has the identical stamp.
     pub duplicate_stamps_skipped: u32,
+    /// Textured brushes whose pattern id no `patt` record carries; their
+    /// `texture` is `None`.
+    pub textures_missing_pattern: u32,
 }
 
 /// Parses `bytes` as an `.abr` file and maps it (see the module docs).
@@ -93,6 +139,24 @@ fn map_file(file: &AbrFile) -> AbrImport {
         ..AbrImport::default()
     };
 
+    // Carry the patterns a brush in this file references: file order, one
+    // entry per id (the same first-wins rule `match_pattern` applies). An
+    // unreferenced record, or a duplicate id, is counted and dropped.
+    for pattern in &file.patterns {
+        let referenced = file.brushes.iter().any(|brush| {
+            brush
+                .texture
+                .as_ref()
+                .is_some_and(|texture| texture.pattern_id == pattern.id)
+        });
+        let already_carried = out.patterns.iter().any(|kept| kept.id == pattern.id);
+        if referenced && !already_carried {
+            out.patterns.push(pattern.clone());
+        } else {
+            out.orphan_patterns += 1;
+        }
+    }
+
     for (index, brush) in file.brushes.iter().enumerate() {
         let stamp = match_sample(brush, file)
             .filter(|s| {
@@ -117,9 +181,29 @@ fn map_file(file: &AbrFile) -> AbrImport {
             out.brushes_without_sample += 1;
         }
 
+        // Resolve the texture against the patterns carried above, through
+        // the reader's own link rule. A brush whose id no record carries
+        // keeps its other settings and is counted.
+        let texture = brush.texture.as_ref().and_then(|texture| {
+            let pattern = match_pattern(brush, file)?;
+            let pattern_index = out.patterns.iter().position(|kept| kept.id == pattern.id)?;
+            Some(AbrImportTexture {
+                pattern_index,
+                scale: texture.scale,
+                depth: texture.depth,
+                invert: texture.invert,
+                blend_mode: texture.blend_mode.clone(),
+                each_tip: texture.each_tip,
+            })
+        });
+        if brush.texture.is_some() && texture.is_none() {
+            out.textures_missing_pattern += 1;
+        }
+
         out.entries.push(AbrImportEntry {
             preset: map_preset(brush, index, stamp.is_some()),
             stamp,
+            texture,
             brush_index: index,
         });
     }
@@ -186,7 +270,7 @@ fn map_preset(brush: &AbrBrush, index: usize, stamped: bool) -> BrushPreset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abr::{AbrSample, AbrToolClass};
+    use crate::abr::{AbrSample, AbrTexture, AbrToolClass};
 
     fn brush(name: &str, tip: Option<&str>) -> AbrBrush {
         AbrBrush {
@@ -202,6 +286,29 @@ mod tests {
             hardness: 0.8,
             sampled_data_id: tip.map(str::to_owned),
             dynamics: None,
+            texture: None,
+        }
+    }
+
+    fn texture(id: &str) -> AbrTexture {
+        AbrTexture {
+            pattern_id: id.to_owned(),
+            pattern_name: "Pattern".to_owned(),
+            scale: 0.66,
+            depth: 1.0,
+            invert: false,
+            blend_mode: "BlnM.CBrn".to_owned(),
+            each_tip: true,
+        }
+    }
+
+    fn pattern(id: &str) -> AbrPattern {
+        AbrPattern {
+            id: id.to_owned(),
+            name: "Pattern".to_owned(),
+            width: 1,
+            height: 1,
+            rgba: vec![9, 8, 7, 255],
         }
     }
 
@@ -221,10 +328,20 @@ mod tests {
     }
 
     fn file(samples: Vec<AbrSample>, brushes: Vec<AbrBrush>) -> AbrFile {
+        file_with_patterns(samples, brushes, Vec::new())
+    }
+
+    fn file_with_patterns(
+        samples: Vec<AbrSample>,
+        brushes: Vec<AbrBrush>,
+        patterns: Vec<AbrPattern>,
+    ) -> AbrFile {
         AbrFile {
             samples,
             brushes,
+            patterns,
             skipped_shape_classes: 0,
+            skipped_patterns: 0,
         }
     }
 
@@ -380,5 +497,103 @@ mod tests {
         let out = import_abr(&bytes).expect("parses");
         assert!(out.entries.is_empty());
         assert_eq!(out.orphan_samples, 1);
+        assert!(out.patterns.is_empty());
+    }
+
+    /// Wave 3.1a pin 16: a textured brush points at the right pattern
+    /// index, and the pattern's parameters ride on the entry.
+    #[test]
+    fn textured_brush_points_at_its_pattern() {
+        let mut b = brush("Tex", None);
+        b.texture = Some(texture("pat-1"));
+        let out = map_file(&file_with_patterns(vec![], vec![b], vec![pattern("pat-1")]));
+        assert_eq!(out.patterns.len(), 1);
+        assert_eq!(out.patterns[0].id, "pat-1");
+        assert_eq!(out.orphan_patterns, 0);
+        assert_eq!(out.textures_missing_pattern, 0);
+        let t = out.entries[0]
+            .texture
+            .as_ref()
+            .expect("the pattern resolves");
+        assert_eq!(t.pattern_index, 0);
+        assert_eq!(t.scale, 0.66);
+        assert_eq!(t.depth, 1.0);
+        assert!(!t.invert);
+        assert_eq!(t.blend_mode, "BlnM.CBrn");
+        assert!(t.each_tip);
+    }
+
+    /// Two brushes sharing one pattern id yield ONE pattern entry, and both
+    /// entries point at it. (Computed brushes, so the duplicate-stamp rule
+    /// cannot collapse them.)
+    #[test]
+    fn two_brushes_sharing_a_pattern_yield_one_pattern() {
+        let mut first = brush("One", None);
+        first.texture = Some(texture("pat-1"));
+        let mut second = brush("Two", None);
+        second.texture = Some(texture("pat-1"));
+        second.texture.as_mut().expect("texture just set").scale = 0.5;
+        let out = map_file(&file_with_patterns(
+            vec![],
+            vec![first, second],
+            vec![pattern("pat-1"), pattern("pat-1")],
+        ));
+        assert_eq!(out.patterns.len(), 1, "one entry per id");
+        assert_eq!(out.orphan_patterns, 1, "the duplicate record is counted");
+        assert_eq!(out.entries.len(), 2);
+        assert_eq!(
+            out.entries[0]
+                .texture
+                .as_ref()
+                .expect("resolved")
+                .pattern_index,
+            0
+        );
+        assert_eq!(
+            out.entries[1]
+                .texture
+                .as_ref()
+                .expect("resolved")
+                .pattern_index,
+            0
+        );
+        assert_eq!(
+            out.entries[1].texture.as_ref().expect("resolved").scale,
+            0.5
+        );
+    }
+
+    /// An unreferenced pattern is an orphan; a textured brush whose id no
+    /// record carries keeps its other settings and is counted.
+    #[test]
+    fn orphan_pattern_and_missing_pattern_are_counted() {
+        let mut lost = brush("Lost Texture", None);
+        lost.texture = Some(texture("missing"));
+        let out = map_file(&file_with_patterns(
+            vec![],
+            vec![lost],
+            vec![pattern("unused")],
+        ));
+        assert!(out.patterns.is_empty(), "nothing references the record");
+        assert_eq!(out.orphan_patterns, 1);
+        assert_eq!(out.textures_missing_pattern, 1);
+        assert_eq!(out.entries.len(), 1);
+        assert!(out.entries[0].texture.is_none());
+        assert_eq!(out.entries[0].preset.name, "Lost Texture");
+        assert!(out.entries[0].preset.validate().is_ok());
+    }
+
+    /// A brush without a texture never touches the pattern table.
+    #[test]
+    fn untextured_brush_has_no_texture_and_no_patterns() {
+        let out = map_file(&file_with_patterns(
+            vec![],
+            vec![brush("Plain", None)],
+            vec![pattern("unused")],
+        ));
+        assert!(out.entries[0].texture.is_none());
+        assert!(out.patterns.is_empty());
+        assert_eq!(out.orphan_patterns, 1);
+        assert_eq!(out.textures_missing_pattern, 0);
     }
 }

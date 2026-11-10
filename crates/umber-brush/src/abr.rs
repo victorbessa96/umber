@@ -1,7 +1,9 @@
 //! Clean-room reader for Adobe Photoshop `.abr` brush files (v6/v7/v9/v10):
-//! the `samp` tip bitmaps AND, since row 282 of the wave-abr design brief
-//! (`docs/loop/briefs/2026-11-08-wave-abr-desc-design.md`), the `desc`
-//! brush descriptors.
+//! the `samp` tip bitmaps, since row 282 of the wave-abr design brief
+//! (`docs/loop/briefs/2026-11-08-wave-abr-desc-design.md`) the `desc`
+//! brush descriptors, and since wave 3.1a
+//! (`docs/loop/briefs/2026-11-09-abr-patt-reader-kill-brief.md`) the `patt`
+//! brush textures.
 //!
 //! What a `samp` record IS (verified against real files, 2026-11-07):
 //! a **sampled tip image**, not a brush. Real v6/v7/v9/v10 files carry
@@ -39,45 +41,77 @@
 //! `computedBrush` / `sampledBrush` shape classes are mapped to
 //! [`AbrBrush`]; every other shape class (`dBrush`, `dTips`, ...) is
 //! skipped and counted in [`AbrFile::skipped_shape_classes`]. A `phry`
-//! section is parsed as a descriptor and ignored. `patt` and unknown
-//! sections are skipped by their declared length.
+//! section is parsed as a descriptor and ignored.
+//!
+//! Since wave 3.1a a `patt` section is decoded into
+//! [`AbrFile::patterns`] ([`AbrPattern`], RGBA8, alpha fixed at 255) and a
+//! brush whose descriptor sets `useTexture` and carries a `Txtr` descriptor
+//! gets [`AbrBrush::texture`]; [`match_pattern`] resolves the brush's
+//! `Txtr.Idnt` against the decoded patterns. A pattern section that decodes
+//! to nothing is not an error (see the soft-decoding note below). Unknown
+//! sections are still skipped by their declared length.
 //!
 //! Deliberate non-goals (the v1 boundary):
 //!
-//! * `patt` pattern decoding;
+//! * sampling a brush texture in the paint engine (kill 3.1c): carrying the
+//!   pattern does not change a painted pixel;
+//! * naming the stored `BlnM.<code>` blend-mode string;
 //! * v8+ files, which are descriptor-only and rejected as unsupported;
 //! * unknown descriptor OSTypes — a named strict error
 //!   ([`AbrError::UnsupportedDescriptorType`]); extending the table is a
 //!   later kill if a real file needs it;
-//! * dual brush, texture, scattering, color dynamics, transfer, and every
-//!   dynamics channel except size (`szVr`): the descriptor reader parses
-//!   those keys but nothing maps them;
+//! * dual brush, scattering, color dynamics, transfer, and every dynamics
+//!   channel except size (`szVr`): the descriptor reader parses those keys
+//!   but nothing maps them (the texture keys ARE mapped, see
+//!   [`AbrBrush::texture`]);
 //! * mapping an [`AbrBrush`] onto a `BrushPreset` (row 283);
 //! * 16-bit RLE (rejected with a named error);
 //! * writing `.abr` — never (the format is read-only for umber).
 //!
 //! Safety caps (hostile input): at most [`MAX_SAMPLES`] samples per file,
 //! at most [`MAX_STAMP_DIMENSION`] x [`MAX_STAMP_DIMENSION`] pixels per
-//! stamp, [`MAX_TOTAL_ALPHA_BYTES`] of decoded planes per file, and at
-//! most [`MAX_DESC_SECTION_BYTES`] per declared descriptor section (plus
-//! the descriptor reader's own item / list / text / raw / depth /
-//! reference caps, `abr_desc.rs`). Every cap is checked *before* the
-//! allocation it guards.
+//! stamp, at most [`MAX_PATTERNS`] patterns per file with
+//! [`MAX_PATTERN_DIMENSION`] pixels per side, [`MAX_TOTAL_ALPHA_BYTES`] of
+//! decoded stamp AND pattern bytes per file (one shared budget, so a file
+//! cannot spend it twice), and at most [`MAX_DESC_SECTION_BYTES`] per
+//! declared descriptor section (plus the descriptor reader's own item /
+//! list / text / raw / depth / reference caps, `abr_desc.rs`). Every cap is
+//! checked *before* the allocation it guards. The stamp caps are *strict*
+//! (a breach refuses the file); the pattern caps are *soft* (a breach skips
+//! the record — see below).
 //!
 //! Judgment calls:
 //!
+//! * **Pattern decoding is soft, deliberately unlike `desc`.** A `patt`
+//!   section has been accepted by skipping since row 268, so no pattern
+//!   problem may turn a file that imports today into a refusal. An
+//!   undecodable record is skipped by its declared length and counted in
+//!   [`AbrFile::skipped_patterns`]; a record whose declared length runs
+//!   past the section ends pattern parsing for that section and is counted
+//!   once. [`read_abr`] therefore never fails because of `patt` content —
+//!   not even a hostile one. The per-record rules live in `abr_patt.rs`.
 //! * The per-brush parameter block between the name and the bounds is 10
 //!   bytes at minor version 1 and 264 bytes at minor version 2. The
 //!   reference implementation SKIPS the whole block without naming its
 //!   fields, and the brush's real settings live in the descriptor, so the
 //!   block is skipped, never interpreted.
 //! * [`read_samples`] keeps its row-268 behavior EXACTLY: it runs the
-//!   same walk in a samples-only mode that skips `desc`/`phry` by length
-//!   instead of parsing them. Descriptor parsing is strict (an unknown
-//!   OSType is an error), so routing the samples-only entry point through
-//!   it would turn a working tip import into a refusal on any real file
-//!   whose descriptor holds an OSType outside the table. [`read_abr`] is
-//!   the strict full read.
+//!   same walk in a samples-only mode that skips `desc`/`phry`/`patt` by
+//!   length instead of parsing them. Descriptor parsing is strict (an
+//!   unknown OSType is an error), so routing the samples-only entry point
+//!   through it would turn a working tip import into a refusal on any real
+//!   file whose descriptor holds an OSType outside the table. [`read_abr`]
+//!   is the strict full read (strict about everything except `patt`).
+//! * [`AbrBrush::texture`] is `Some` only when `useTexture` is true AND
+//!   `Txtr` is a descriptor: a `Txtr` without the gate is dead data (the
+//!   reference's rule), and a texture with no pattern record still resolves
+//!   to a texture whose id matches nothing ([`match_pattern`] returns
+//!   `None`) — the import layer, not the reader, decides what a dangling
+//!   link means.
+//! * The texture's percent fields keep [`parse_percent`]'s "missing →
+//!   1.0" default and its wrong-units error; the blend mode is the stored
+//!   `as_text` value (`BlnM.<code>`) undecoded — naming the code is
+//!   3.1b/3.1c's call.
 //! * A brush's name is its outer `Nm  ` key, falling back to the shape's
 //!   `Nm  ` (sampled shapes carry one too); missing both → empty.
 //! * `hardness` reads the shape's `Hrdn` for both shape classes (missing
@@ -113,6 +147,9 @@ use crate::abr_desc::{
 };
 
 pub use crate::abr_desc::{DescValue, Descriptor, ObjectArrayItem, RefItem};
+pub use crate::abr_patt::{AbrPattern, MAX_PATTERNS, MAX_PATTERN_DIMENSION};
+
+use crate::abr_patt::parse_patterns;
 
 /// Maximum declared byte length of one `desc` / `phry` section.
 pub const MAX_DESC_SECTION_BYTES: usize = 64 * 1024 * 1024;
@@ -123,11 +160,13 @@ pub const MAX_SAMPLES: usize = 4096;
 /// Maximum accepted stamp width and height, in pixels.
 pub const MAX_STAMP_DIMENSION: u32 = 4096;
 
-/// The maximum TOTAL decoded stamp data one file may produce, in bytes.
+/// The maximum TOTAL decoded plane data one file may produce, in bytes.
 ///
 /// The per-stamp cap alone still allows 4096 stamps of 16 MiB each — 64
 /// GiB of decoded planes out of a small hostile file — so the sum is
-/// capped too.
+/// capped too. Stamps and patterns draw on the SAME budget: the reader
+/// keeps one running total and pattern records are charged as they are
+/// decoded (a pattern that would overshoot is skipped, not fatal).
 pub const MAX_TOTAL_ALPHA_BYTES: usize = 256 * 1024 * 1024;
 
 /// One parsed **sample** (a tip bitmap) from an `.abr` file's `samp`
@@ -280,6 +319,33 @@ pub struct AbrDynamics {
     pub minimum: f64,
 }
 
+/// A brush's texture link (`useTexture` + `Txtr`), as stored.
+///
+/// The pattern itself lives in [`AbrFile::patterns`]: `pattern_id` is the
+/// link key (`Txtr.Idnt`), resolved by [`match_pattern`]. Alpha is not a
+/// thing here — a pattern is a tiling colour image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AbrTexture {
+    /// The referenced pattern id (`Txtr.Idnt`, Latin-1-ish text).
+    pub pattern_id: String,
+    /// The referenced pattern's display name (`Txtr.Nm  `); informational,
+    /// the id is the link.
+    pub pattern_name: String,
+    /// Texture scale as a fraction (`textureScale`, percent / 100;
+    /// missing → 1.0).
+    pub scale: f64,
+    /// Texture depth as a fraction (`textureDepth`, percent / 100;
+    /// missing → 1.0).
+    pub depth: f64,
+    /// Whether the pattern is inverted (`InvT`).
+    pub invert: bool,
+    /// The stored blend-mode enum string (`BlnM.<code>`, e.g.
+    /// `BlnM.CBrn`), undecoded.
+    pub blend_mode: String,
+    /// Whether the texture applies to each tip (`TxtC`).
+    pub each_tip: bool,
+}
+
 /// One brush from a `desc` section (`computedBrush` or `sampledBrush`
 /// shape).
 #[derive(Debug, Clone, PartialEq)]
@@ -309,6 +375,9 @@ pub struct AbrBrush {
     pub sampled_data_id: Option<String>,
     /// Size dynamics, when `useTipDynamics` is on.
     pub dynamics: Option<AbrDynamics>,
+    /// The brush's texture, when `useTexture` is on and `Txtr` is a
+    /// descriptor; the pattern it names is in [`AbrFile::patterns`].
+    pub texture: Option<AbrTexture>,
 }
 
 /// Everything [`read_abr`] extracts from one file.
@@ -318,9 +387,15 @@ pub struct AbrFile {
     pub samples: Vec<AbrSample>,
     /// The `desc` brushes, in file order.
     pub brushes: Vec<AbrBrush>,
+    /// The `patt` patterns, in file order, decoded to RGBA8 (alpha 255).
+    pub patterns: Vec<AbrPattern>,
     /// How many `Brsh` entries had a shape class other than
     /// `computedBrush` / `sampledBrush` and were skipped.
     pub skipped_shape_classes: u32,
+    /// How many `patt` records were skipped (undecodable, past the
+    /// per-file cap, or running past the section end). Soft: never an
+    /// error.
+    pub skipped_patterns: u32,
 }
 
 /// The sample a brush stamps with: the [`AbrSample`] whose id equals the
@@ -329,6 +404,14 @@ pub struct AbrFile {
 pub fn match_sample<'a>(brush: &AbrBrush, file: &'a AbrFile) -> Option<&'a AbrSample> {
     let id = brush.sampled_data_id.as_deref()?;
     file.samples.iter().find(|sample| sample.id == id)
+}
+
+/// The pattern a brush is textured with: the [`AbrPattern`] whose id equals
+/// the brush's `texture.pattern_id`. `None` for a brush without a texture
+/// (or with a texture link no `patt` record carries).
+pub fn match_pattern<'a>(brush: &AbrBrush, file: &'a AbrFile) -> Option<&'a AbrPattern> {
+    let id = brush.texture.as_ref()?.pattern_id.as_str();
+    file.patterns.iter().find(|pattern| pattern.id == id)
 }
 
 /// Whether the walk interprets the descriptor sections.
@@ -343,10 +426,10 @@ enum WalkMode {
 
 /// Parses every sample (tip bitmap) in an `.abr` file.
 ///
-/// Only `samp` sections are interpreted; every other section (`desc` and
-/// `phry` included) is skipped by its declared length — row 268's exact
-/// behavior. Use [`read_abr`] for the brushes too. The returned samples
-/// are in file order.
+/// Only `samp` sections are interpreted; every other section (`desc`,
+/// `phry` and `patt` included) is skipped by its declared length — row
+/// 268's exact behavior. Use [`read_abr`] for the brushes and patterns too.
+/// The returned samples are in file order.
 ///
 /// # Errors
 ///
@@ -363,12 +446,14 @@ pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
     walk(bytes, WalkMode::SamplesOnly).map(|file| file.samples)
 }
 
-/// Parses an `.abr` file's samples AND its descriptor brushes.
+/// Parses an `.abr` file's samples, descriptor brushes AND `patt` patterns.
 ///
 /// `samp` sections give [`AbrFile::samples`]; each `desc` section's `Brsh`
 /// list gives [`AbrFile::brushes`] (unmapped shape classes are counted in
-/// [`AbrFile::skipped_shape_classes`]); `phry` is parsed and ignored;
-/// `patt` and unknown sections are skipped by length.
+/// [`AbrFile::skipped_shape_classes`]); `patt` sections give
+/// [`AbrFile::patterns`] (undecodable records are counted in
+/// [`AbrFile::skipped_patterns`], never an error); `phry` is parsed and
+/// ignored; unknown sections are skipped by length.
 ///
 /// # Errors
 ///
@@ -412,6 +497,10 @@ fn walk(bytes: &[u8], mode: WalkMode) -> Result<AbrFile, AbrError> {
     let parameter_len = if minor == 1 { 10 } else { 264 };
 
     let mut file = AbrFile::default();
+    // One running total of decoded plane bytes for the whole file: stamps
+    // and patterns share the [`MAX_TOTAL_ALPHA_BYTES`] budget, so a file
+    // cannot spend it twice over.
+    let mut decoded_bytes = 0usize;
     while reader.remaining() > 0 {
         if reader.remaining() < 12 {
             return Err(malformed("truncated section header"));
@@ -443,13 +532,27 @@ fn walk(bytes: &[u8], mode: WalkMode) -> Result<AbrFile, AbrError> {
         let payload = reader.take(size)?;
 
         if kind == b"samp" {
-            parse_samp(payload, parameter_len, &mut file.samples)?;
+            parse_samp(
+                payload,
+                parameter_len,
+                &mut file.samples,
+                &mut decoded_bytes,
+            )?;
         } else if descriptor_section && kind == b"desc" {
             parse_desc(payload, &mut file)?;
         } else if descriptor_section {
             // `phry`: parsed so a corrupt section is caught, then ignored
             // (the reference does the same; its meaning is undocumented).
             let _ = read_version_and_descriptor(payload)?;
+        } else if mode == WalkMode::Full && kind == b"patt" {
+            // Soft: a `patt` payload costs patterns, never the file. The
+            // samples-only walk keeps row 268's skip-by-length.
+            parse_patterns(
+                payload,
+                &mut file.patterns,
+                &mut file.skipped_patterns,
+                &mut decoded_bytes,
+            );
         }
 
         // Sections are padded to a four-byte boundary. The trailing padding
@@ -531,6 +634,16 @@ fn parse_brush(brush: &Descriptor) -> Result<Option<AbrBrush>, AbrError> {
     } else {
         None
     };
+    // The texture gate: `useTexture` alone is not enough, `Txtr` must be a
+    // descriptor (the reference's rule). A `Txtr` without the gate is dead
+    // data and yields `None`.
+    let texture = if as_bool(dget(brush, "useTexture")) {
+        as_descriptor(dget(brush, "Txtr"))
+            .map(|txtr| parse_texture(brush, txtr))
+            .transpose()?
+    } else {
+        None
+    };
 
     Ok(Some(AbrBrush {
         tool_class: tool_class(&brush.class_id),
@@ -545,7 +658,24 @@ fn parse_brush(brush: &Descriptor) -> Result<Option<AbrBrush>, AbrError> {
         hardness: parse_percent(dget(shape, "Hrdn"))?,
         sampled_data_id,
         dynamics,
+        texture,
     }))
+}
+
+/// Maps one texture: the link descriptor `Txtr` (`Idnt`, `Nm  `) plus the
+/// brush-level parameters that shape it.
+fn parse_texture(brush: &Descriptor, txtr: &Descriptor) -> Result<AbrTexture, AbrError> {
+    Ok(AbrTexture {
+        pattern_id: as_text(dget(txtr, "Idnt")).unwrap_or_default().to_string(),
+        pattern_name: as_text(dget(txtr, "Nm  ")).unwrap_or_default().to_string(),
+        scale: parse_percent(dget(brush, "textureScale"))?,
+        depth: parse_percent(dget(brush, "textureDepth"))?,
+        invert: as_bool(dget(brush, "InvT")),
+        blend_mode: as_text(dget(brush, "textureBlendMode"))
+            .unwrap_or_default()
+            .to_string(),
+        each_tip: as_bool(dget(brush, "TxtC")),
+    })
 }
 
 /// Maps one dynamics descriptor (`bVTy` / `fStp` / `jitter` / `Mnm `).
@@ -558,25 +688,51 @@ fn parse_dynamics(desc: &Descriptor) -> Result<AbrDynamics, AbrError> {
     })
 }
 
-/// Parses the concatenated brush records of one `samp` payload.
+/// Parses the concatenated brush records of one `samp` payload, charging
+/// decoded planes against the file's running total (shared with `patt`).
 fn parse_samp(
     payload: &[u8],
     parameter_len: usize,
     samples: &mut Vec<AbrSample>,
+    total_bytes: &mut usize,
 ) -> Result<(), AbrError> {
-    parse_samp_with_budget(payload, parameter_len, samples, MAX_TOTAL_ALPHA_BYTES)
+    parse_samp_into(
+        payload,
+        parameter_len,
+        samples,
+        total_bytes,
+        MAX_TOTAL_ALPHA_BYTES,
+    )
 }
 
 /// [`parse_samp`] with an explicit total-plane budget (the test seam for
 /// the cap; production always passes [`MAX_TOTAL_ALPHA_BYTES`]).
+#[cfg(test)]
 fn parse_samp_with_budget(
     payload: &[u8],
     parameter_len: usize,
     samples: &mut Vec<AbrSample>,
     max_total_bytes: usize,
 ) -> Result<(), AbrError> {
-    let mut reader = Reader::new(payload);
     let mut total_bytes = 0usize;
+    parse_samp_into(
+        payload,
+        parameter_len,
+        samples,
+        &mut total_bytes,
+        max_total_bytes,
+    )
+}
+
+/// The shared body of [`parse_samp`] and [`parse_samp_with_budget`].
+fn parse_samp_into(
+    payload: &[u8],
+    parameter_len: usize,
+    samples: &mut Vec<AbrSample>,
+    total_bytes: &mut usize,
+    max_total_bytes: usize,
+) -> Result<(), AbrError> {
+    let mut reader = Reader::new(payload);
     while reader.remaining() > 0 {
         if samples.len() >= MAX_SAMPLES {
             return Err(AbrError::TooManyBrushes {
@@ -601,13 +757,14 @@ fn parse_samp_with_budget(
         let sample = parse_sample(body, parameter_len)?;
         // The total-plane budget: the per-stamp cap alone still allows
         // 4096 stamps of 16 MiB each (64 GiB of decoded planes from a
-        // small hostile file), so the SUM is capped too.
-        total_bytes = total_bytes
+        // small hostile file), so the SUM is capped too. The same total
+        // carries the pattern planes.
+        *total_bytes = total_bytes
             .checked_add(sample.alpha.len())
             .ok_or_else(|| malformed("total stamp data size overflow"))?;
-        if total_bytes > max_total_bytes {
+        if *total_bytes > max_total_bytes {
             return Err(AbrError::TooMuchData {
-                bytes: total_bytes,
+                bytes: *total_bytes,
                 max: max_total_bytes,
             });
         }
@@ -729,8 +886,9 @@ fn decode_rle(
 ///
 /// Header `0..=127` is a literal run of `header + 1` bytes; `129..=255`
 /// repeats the next byte `257 - header` times; `128` is a no-op. This is
-/// exactly the reference's `read_data_rle` behavior.
-fn decode_packbits_row(encoded: &[u8], out: &mut [u8]) -> Result<(), AbrError> {
+/// exactly the reference's `read_data_rle` behavior. `pub(crate)` so the
+/// `patt` decoder (`abr_patt.rs`) reuses this one PackBits implementation.
+pub(crate) fn decode_packbits_row(encoded: &[u8], out: &mut [u8]) -> Result<(), AbrError> {
     let mut index = 0usize;
     let mut written = 0usize;
 
@@ -776,28 +934,31 @@ fn decode_packbits_row(encoded: &[u8], out: &mut [u8]) -> Result<(), AbrError> {
 }
 
 /// Builds a [`AbrError::Malformed`] with a static, user-facing detail.
-fn malformed(detail: impl Into<String>) -> AbrError {
+pub(crate) fn malformed(detail: impl Into<String>) -> AbrError {
     AbrError::Malformed {
         detail: detail.into(),
     }
 }
 
 /// A bounds-checked, big-endian cursor over the input bytes.
-struct Reader<'a> {
+///
+/// `pub(crate)` so the `patt` decoder (`abr_patt.rs`) reads its records with
+/// the same bounds-checked primitives as the `samp` reader.
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.offset)
     }
 
-    fn take(&mut self, len: usize) -> Result<&'a [u8], AbrError> {
+    pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], AbrError> {
         let end = self
             .offset
             .checked_add(len)
@@ -810,39 +971,39 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
-    fn skip(&mut self, len: usize) -> Result<(), AbrError> {
+    pub(crate) fn skip(&mut self, len: usize) -> Result<(), AbrError> {
         self.take(len).map(|_| ())
     }
 
-    fn u8(&mut self) -> Result<u8, AbrError> {
+    pub(crate) fn u8(&mut self) -> Result<u8, AbrError> {
         match self.take(1)? {
             [byte] => Ok(*byte),
             _ => Err(malformed("unexpected end of file")),
         }
     }
 
-    fn u16(&mut self) -> Result<u16, AbrError> {
+    pub(crate) fn u16(&mut self) -> Result<u16, AbrError> {
         match self.take(2)? {
             [high, low] => Ok(u16::from_be_bytes([*high, *low])),
             _ => Err(malformed("unexpected end of file")),
         }
     }
 
-    fn i16(&mut self) -> Result<i16, AbrError> {
+    pub(crate) fn i16(&mut self) -> Result<i16, AbrError> {
         match self.take(2)? {
             [high, low] => Ok(i16::from_be_bytes([*high, *low])),
             _ => Err(malformed("unexpected end of file")),
         }
     }
 
-    fn u32(&mut self) -> Result<u32, AbrError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, AbrError> {
         match self.take(4)? {
             [a, b, c, d] => Ok(u32::from_be_bytes([*a, *b, *c, *d])),
             _ => Err(malformed("unexpected end of file")),
         }
     }
 
-    fn i32(&mut self) -> Result<i32, AbrError> {
+    pub(crate) fn i32(&mut self) -> Result<i32, AbrError> {
         match self.take(4)? {
             [a, b, c, d] => Ok(i32::from_be_bytes([*a, *b, *c, *d])),
             _ => Err(malformed("unexpected end of file")),
@@ -907,6 +1068,7 @@ mod tests {
         Units(&'static [u8; 4], f64),
         Bool(bool),
         Long(i32),
+        Enum(&'static str, &'static str),
         Obj(&'static str, Vec<(&'static str, Val)>),
         List(Vec<Val>),
     }
@@ -956,6 +1118,11 @@ mod tests {
                 Val::Long(number) => {
                     self.raw(b"long");
                     self.i32(*number);
+                }
+                Val::Enum(kind, value) => {
+                    self.raw(b"enum");
+                    self.id(kind);
+                    self.id(value);
                 }
                 Val::Obj(class_id, items) => {
                     self.raw(b"Objc");
@@ -1069,6 +1236,7 @@ mod tests {
                 jitter: 0.1,
                 minimum: 0.0,
             }),
+            texture: None,
         }
     }
 
@@ -1587,6 +1755,7 @@ mod tests {
                 hardness: 1.0,
                 sampled_data_id: None,
                 dynamics: None,
+                texture: None,
             }]
         );
         assert!(match_sample(&abr.brushes[0], &abr).is_none());
@@ -1786,5 +1955,271 @@ mod tests {
             read_abr(&file).unwrap_err(),
             AbrError::UnsupportedDescriptorVersion(0xDEAD_BEEF)
         );
+    }
+
+    /// A brush descriptor carrying the texture keys; `pattern_id` is what
+    /// `Txtr.Idnt` names.
+    fn textured_brush(use_texture: bool, pattern_id: &'static str) -> Val {
+        Val::Obj(
+            "_",
+            vec![
+                ("Nm  ", Val::Text("Texture Brush")),
+                ("useTexture", Val::Bool(use_texture)),
+                ("textureScale", Val::Units(b"#Prc", 66.0)),
+                ("textureDepth", Val::Units(b"#Prc", 100.0)),
+                ("InvT", Val::Bool(false)),
+                ("textureBlendMode", Val::Enum("BlnM", "CBrn")),
+                ("TxtC", Val::Bool(true)),
+                (
+                    "Txtr",
+                    Val::Obj(
+                        "null",
+                        vec![
+                            ("Idnt", Val::Text(pattern_id)),
+                            ("Nm  ", Val::Text("Bobbys Paint")),
+                        ],
+                    ),
+                ),
+                (
+                    "Brsh",
+                    Val::Obj(
+                        "computedBrush",
+                        vec![
+                            ("Dmtr", Val::Units(b"#Pxl", 40.0)),
+                            ("Rndn", Val::Units(b"#Prc", 100.0)),
+                            ("Hrdn", Val::Units(b"#Prc", 100.0)),
+                        ],
+                    ),
+                ),
+            ],
+        )
+    }
+
+    /// A minimal 1x1 grayscale `patt` record: one raw sample, then the two
+    /// empty mask slots. The body is 94 bytes, so the record carries two
+    /// pad bytes.
+    fn tiny_pattern_record() -> Vec<u8> {
+        let mut body = Builder::new();
+        body.u32(1); // record version
+        body.u32(1); // grayscale
+        body.i16(0); // vertical size (unused)
+        body.i16(0); // horizontal size (unused)
+        body.u32(3); // name: three UTF-16 units
+        for unit in "Pat".encode_utf16() {
+            body.u16(unit);
+        }
+        body.pascal("pid");
+        body.u32(3); // pixel-array version
+        body.u32(0); // pixel-array length (ignored)
+        body.u32(0); // top
+        body.u32(0); // left
+        body.u32(1); // bottom
+        body.u32(1); // right
+        body.u32(1); // channel count -> three slots
+        body.u32(1); // written
+        body.u32(24); // slot length = 23 + one sample
+        body.u32(8); // depth
+        body.u32(0); // channel top
+        body.u32(0); // channel left
+        body.u32(1); // channel bottom
+        body.u32(1); // channel right
+        body.u16(8); // depth again
+        body.u8(0); // raw
+        body.u8(77); // the sample
+        body.u32(0); // empty mask slot
+        body.u32(0); // empty mask slot
+        let mut body = body.into_vec();
+        assert_eq!(body.len(), 94, "the synthetic record body is pinned");
+        let declared = u32::try_from(body.len()).expect("test record fits a u32");
+        while !body.len().is_multiple_of(4) {
+            body.push(0);
+        }
+        let mut record = Builder::new();
+        record.u32(declared);
+        record.raw(&body);
+        record.into_vec()
+    }
+
+    /// Wave 3.1a pin 14: `useTexture` + `Txtr` maps every texture field
+    /// exactly, and the rest of the brush is untouched.
+    #[test]
+    fn parse_brush_maps_the_texture_behind_the_use_texture_gate() {
+        let file = abr_file(
+            1,
+            &[(b"desc", desc_payload(vec![textured_brush(true, "pat-1")]))],
+        );
+        let abr = read_abr(&file).expect("textured desc parses");
+        assert_eq!(abr.brushes.len(), 1);
+        let texture = abr.brushes[0]
+            .texture
+            .as_ref()
+            .expect("useTexture + Txtr yields a texture");
+        assert_eq!(texture.pattern_id, "pat-1");
+        assert_eq!(texture.pattern_name, "Bobbys Paint");
+        assert_eq!(texture.scale, 0.66);
+        assert_eq!(texture.depth, 1.0);
+        assert!(!texture.invert);
+        assert_eq!(texture.blend_mode, "BlnM.CBrn");
+        assert!(texture.each_tip);
+        assert_eq!(abr.brushes[0].name, "Texture Brush");
+        assert_eq!(abr.brushes[0].diameter_px, 40.0);
+    }
+
+    /// The gate is the `useTexture` bool: a `Txtr` without it is dead data.
+    #[test]
+    fn a_texture_descriptor_without_the_gate_is_none() {
+        let file = abr_file(
+            1,
+            &[(b"desc", desc_payload(vec![textured_brush(false, "pat-1")]))],
+        );
+        let abr = read_abr(&file).expect("ungated desc parses");
+        assert!(abr.brushes[0].texture.is_none());
+    }
+
+    /// Wave 3.1a: the `patt` arm in `walk` is wired — a real record decodes
+    /// end to end and the brush's texture resolves to it.
+    #[test]
+    fn a_pattern_section_decodes_through_the_walk() {
+        let file = abr_file(
+            1,
+            &[
+                (b"patt", tiny_pattern_record()),
+                (b"desc", desc_payload(vec![textured_brush(true, "pid")])),
+            ],
+        );
+        let abr = read_abr(&file).expect("the pattern fixture parses");
+        assert_eq!(abr.patterns.len(), 1);
+        assert_eq!(abr.patterns[0].id, "pid");
+        assert_eq!(abr.patterns[0].name, "Pat");
+        assert_eq!((abr.patterns[0].width, abr.patterns[0].height), (1, 1));
+        assert_eq!(abr.patterns[0].rgba, vec![77, 77, 77, 255]);
+        assert_eq!(abr.skipped_patterns, 0);
+        let pattern = match_pattern(&abr.brushes[0], &abr).expect("the texture resolves");
+        assert_eq!(pattern.id, "pid");
+    }
+
+    /// Wave 3.1a pin 10 (walk level): a record the decoder refuses costs
+    /// the pattern only — samples and a following `desc` still parse.
+    ///
+    /// One variant stands for all seven (`abr_patt.rs`
+    /// `undecodable_records_are_skipped_not_fatal`): the section loop has a
+    /// single `Err(_) => skip` arm, so the walk cannot tell them apart.
+    #[test]
+    fn a_bad_pattern_record_does_not_break_the_file() {
+        let mut patt = Builder::new();
+        patt.u32(4);
+        patt.u32(2); // record version 2 is undecodable
+        let file = abr_file(
+            1,
+            &[
+                (b"patt", patt.into_vec()),
+                (b"samp", tip_record()),
+                (b"desc", desc_payload(vec![sampled_brush("_", "tip1")])),
+            ],
+        );
+        let abr = read_abr(&file).expect("a bad patt record is soft");
+        assert!(abr.patterns.is_empty());
+        assert_eq!(abr.skipped_patterns, 1);
+        assert_eq!(abr.samples.len(), 1);
+        assert_eq!(
+            abr.brushes,
+            vec![expected_sampled(AbrToolClass::Brush, "tip1")]
+        );
+    }
+
+    /// Wave 3.1a pin 11 (walk level): a record whose declared length runs
+    /// past the section end is counted once, and nothing else is disturbed.
+    #[test]
+    fn a_pattern_record_past_the_section_end_is_soft_and_counted_once() {
+        let mut patt = Builder::new();
+        patt.u32(1000); // declared length far past the 4-byte payload
+        patt.u32(1);
+        let file = abr_file(
+            1,
+            &[
+                (b"patt", patt.into_vec()),
+                (b"samp", tip_record()),
+                (b"desc", desc_payload(vec![sampled_brush("_", "tip1")])),
+            ],
+        );
+        let abr = read_abr(&file).expect("a record past the section is soft");
+        assert!(abr.patterns.is_empty());
+        assert_eq!(abr.skipped_patterns, 1);
+        assert_eq!(abr.samples.len(), 1);
+        assert_eq!(abr.brushes.len(), 1);
+    }
+
+    /// Wave 3.1a pin 13: `read_samples` skips `patt` by length, hostile or
+    /// not, and returns identical samples.
+    #[test]
+    fn read_samples_ignores_a_garbage_patt_section() {
+        let clean = abr_file(1, &[(b"samp", tip_record())]);
+        let mut patt = Builder::new();
+        patt.u32(0xFFFF_FFFF); // an absurd declared record length
+        patt.raw(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03]);
+        let dirty = abr_file(1, &[(b"patt", patt.into_vec()), (b"samp", tip_record())]);
+
+        let without = read_samples(&clean).expect("the clean file parses");
+        let with = read_samples(&dirty).expect("a garbage patt payload is skipped");
+        assert_eq!(without.len(), 1);
+        assert_eq!(with.len(), 1);
+        assert_eq!(without[0].id, with[0].id);
+        assert_eq!(without[0].alpha, with[0].alpha);
+        assert_eq!(
+            (without[0].width, without[0].height),
+            (with[0].width, with[0].height)
+        );
+        // The full read is soft on `patt` too.
+        let abr = read_abr(&dirty).expect("the full read is soft on patt");
+        assert!(abr.patterns.is_empty());
+        assert_eq!(abr.skipped_patterns, 1);
+        assert_eq!(abr.samples.len(), 1);
+    }
+
+    /// Wave 3.1a pin 15: `match_pattern` resolves the brush's texture id,
+    /// and an unknown id (or no texture) resolves to none.
+    #[test]
+    fn match_pattern_resolves_the_texture_id() {
+        let mut brush = expected_sampled(AbrToolClass::Brush, "tip1");
+        brush.texture = Some(AbrTexture {
+            pattern_id: "pat-1".to_string(),
+            pattern_name: "Pattern".to_string(),
+            scale: 1.0,
+            depth: 1.0,
+            invert: false,
+            blend_mode: String::new(),
+            each_tip: false,
+        });
+        let file = AbrFile {
+            samples: Vec::new(),
+            brushes: vec![brush],
+            patterns: vec![AbrPattern {
+                id: "pat-1".to_string(),
+                name: "Pattern".to_string(),
+                width: 1,
+                height: 1,
+                rgba: vec![9, 8, 7, 255],
+            }],
+            skipped_shape_classes: 0,
+            skipped_patterns: 0,
+        };
+
+        let pattern = match_pattern(&file.brushes[0], &file).expect("the id resolves");
+        assert_eq!(pattern.name, "Pattern");
+        assert_eq!(pattern.rgba, vec![9, 8, 7, 255]);
+
+        let mut unknown = file.brushes[0].clone();
+        unknown.texture = Some(AbrTexture {
+            pattern_id: "missing".to_string(),
+            ..file.brushes[0]
+                .texture
+                .clone()
+                .expect("the fixture texture")
+        });
+        assert!(match_pattern(&unknown, &file).is_none());
+
+        let mut plain = file.brushes[0].clone();
+        plain.texture = None;
+        assert!(match_pattern(&plain, &file).is_none());
     }
 }
