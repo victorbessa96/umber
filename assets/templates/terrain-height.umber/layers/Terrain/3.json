@@ -1,0 +1,13 @@
+{
+  "id": 3,
+  "name": "Grass Mask",
+  "kind": "Paint",
+  "opacity": 0.9,
+  "visible": true,
+  "blend_mode": "Overlay",
+  "mask": {
+    "name": "Grass Mask",
+    "enabled": true
+  },
+  "fill": null
+}

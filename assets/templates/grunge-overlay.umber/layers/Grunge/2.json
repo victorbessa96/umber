@@ -1,0 +1,10 @@
+{
+  "id": 2,
+  "name": "Scratch Pass",
+  "kind": "Paint",
+  "opacity": 0.4,
+  "visible": true,
+  "blend_mode": "Screen",
+  "mask": null,
+  "fill": null
+}

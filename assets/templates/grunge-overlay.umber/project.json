@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Grunge",
+      "resolution": 1024,
+      "channels": [
+        {
+          "name": "opacity",
+          "kind": "Data"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Grunge",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "next_layer_id": 4
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Grunge"
+  }
+}

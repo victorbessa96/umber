@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Shadow Band",
+  "kind": "Paint",
+  "opacity": 0.6,
+  "visible": true,
+  "blend_mode": "Multiply",
+  "mask": null,
+  "fill": null
+}

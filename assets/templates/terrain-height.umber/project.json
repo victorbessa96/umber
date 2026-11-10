@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Terrain",
+      "resolution": 2048,
+      "channels": [
+        {
+          "name": "height",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        },
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "ambient_occlusion",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Terrain",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "next_layer_id": 6
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Terrain"
+  }
+}

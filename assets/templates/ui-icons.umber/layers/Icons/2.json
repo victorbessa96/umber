@@ -1,0 +1,10 @@
+{
+  "id": 2,
+  "name": "Glow",
+  "kind": "Paint",
+  "opacity": 0.5,
+  "visible": true,
+  "blend_mode": "Screen",
+  "mask": null,
+  "fill": null
+}

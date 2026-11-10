@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Weathered",
+      "resolution": 2048,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "metallic",
+          "kind": "Data"
+        },
+        {
+          "name": "ambient_occlusion",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Weathered",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "next_layer_id": 5
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Weathered"
+  }
+}

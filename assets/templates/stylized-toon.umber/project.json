@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Toon",
+      "resolution": 2048,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "opacity",
+          "kind": "Data"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Toon",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "next_layer_id": 5
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Toon"
+  }
+}

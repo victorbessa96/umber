@@ -1,0 +1,10 @@
+{
+  "id": 4,
+  "name": "SSS Tint",
+  "kind": "Paint",
+  "opacity": 0.25,
+  "visible": true,
+  "blend_mode": "SoftLight",
+  "mask": null,
+  "fill": null
+}

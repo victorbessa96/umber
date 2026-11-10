@@ -1,0 +1,13 @@
+{
+  "id": 3,
+  "name": "Foam Mask",
+  "kind": "Paint",
+  "opacity": 1.0,
+  "visible": true,
+  "blend_mode": "Normal",
+  "mask": {
+    "name": "Foam Mask",
+    "enabled": true
+  },
+  "fill": null
+}

@@ -1,0 +1,13 @@
+{
+  "id": 2,
+  "name": "Flush Zones",
+  "kind": "Paint",
+  "opacity": 0.3,
+  "visible": true,
+  "blend_mode": "SoftLight",
+  "mask": {
+    "name": "Flush Mask",
+    "enabled": true
+  },
+  "fill": null
+}

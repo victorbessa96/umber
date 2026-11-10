@@ -1,0 +1,13 @@
+{
+  "id": 3,
+  "name": "Bloom Mask",
+  "kind": "Paint",
+  "opacity": 0.6,
+  "visible": true,
+  "blend_mode": "Screen",
+  "mask": {
+    "name": "Bloom Mask",
+    "enabled": true
+  },
+  "fill": null
+}

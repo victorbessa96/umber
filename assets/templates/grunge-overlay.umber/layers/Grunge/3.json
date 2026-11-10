@@ -1,0 +1,13 @@
+{
+  "id": 3,
+  "name": "Edge Grime",
+  "kind": "Paint",
+  "opacity": 0.35,
+  "visible": true,
+  "blend_mode": "Overlay",
+  "mask": {
+    "name": "Edge Mask",
+    "enabled": true
+  },
+  "fill": null
+}

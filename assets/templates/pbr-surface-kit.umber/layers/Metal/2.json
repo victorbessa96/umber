@@ -1,0 +1,13 @@
+{
+  "id": 2,
+  "name": "Edge Wear",
+  "kind": "Paint",
+  "opacity": 0.35,
+  "visible": true,
+  "blend_mode": "Screen",
+  "mask": {
+    "name": "Wear Mask",
+    "enabled": true
+  },
+  "fill": null
+}

@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Skin",
+      "resolution": 4096,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        },
+        {
+          "name": "height",
+          "kind": "Data"
+        },
+        {
+          "name": "ambient_occlusion",
+          "kind": "Data"
+        }
+      ]
+    },
+    {
+      "name": "Eyes",
+      "resolution": 1024,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Skin",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "next_layer_id": 5
+    },
+    {
+      "texture_set": "Eyes",
+      "layer_ids": [
+        0,
+        1,
+        2
+      ],
+      "next_layer_id": 3
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Skin"
+  }
+}

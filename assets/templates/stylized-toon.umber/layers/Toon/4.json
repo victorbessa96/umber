@@ -1,0 +1,14 @@
+{
+  "id": 4,
+  "name": "Face Decals",
+  "kind": {
+    "Folder": {
+      "passthrough": true
+    }
+  },
+  "opacity": 1.0,
+  "visible": true,
+  "blend_mode": "Passthrough",
+  "mask": null,
+  "fill": null
+}

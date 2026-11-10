@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Pores",
+  "kind": "Paint",
+  "opacity": 0.4,
+  "visible": true,
+  "blend_mode": "SoftLight",
+  "mask": null,
+  "fill": null
+}

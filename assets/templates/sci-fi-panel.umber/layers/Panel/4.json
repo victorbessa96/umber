@@ -1,0 +1,13 @@
+{
+  "id": 4,
+  "name": "Edge Dirt",
+  "kind": "Paint",
+  "opacity": 0.45,
+  "visible": true,
+  "blend_mode": "Multiply",
+  "mask": {
+    "name": "Edge Mask",
+    "enabled": true
+  },
+  "fill": null
+}

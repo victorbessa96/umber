@@ -1,0 +1,13 @@
+{
+  "id": 3,
+  "name": "Ink Outline",
+  "kind": "Paint",
+  "opacity": 1.0,
+  "visible": true,
+  "blend_mode": "Normal",
+  "mask": {
+    "name": "Outline Mask",
+    "enabled": true
+  },
+  "fill": null
+}

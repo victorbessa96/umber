@@ -1,0 +1,10 @@
+{
+  "id": 3,
+  "name": "Blemish Fix",
+  "kind": "Paint",
+  "opacity": 0.2,
+  "visible": false,
+  "blend_mode": "Normal",
+  "mask": null,
+  "fill": null
+}

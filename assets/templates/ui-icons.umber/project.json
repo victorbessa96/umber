@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Icons",
+      "resolution": 512,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "opacity",
+          "kind": "Data"
+        },
+        {
+          "name": "emissive",
+          "kind": "Color"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Icons",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "next_layer_id": 4
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Icons"
+  }
+}

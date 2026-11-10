@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Panel",
+      "resolution": 4096,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "metallic",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        },
+        {
+          "name": "height",
+          "kind": "Data"
+        },
+        {
+          "name": "ambient_occlusion",
+          "kind": "Data"
+        },
+        {
+          "name": "emissive",
+          "kind": "Color"
+        }
+      ]
+    },
+    {
+      "name": "Trim",
+      "resolution": 2048,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "metallic",
+          "kind": "Data"
+        },
+        {
+          "name": "normal",
+          "kind": "Data"
+        },
+        {
+          "name": "height",
+          "kind": "Data"
+        },
+        {
+          "name": "ambient_occlusion",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Panel",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "next_layer_id": 5
+    },
+    {
+      "texture_set": "Trim",
+      "layer_ids": [
+        0,
+        1,
+        2
+      ],
+      "next_layer_id": 3
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Panel"
+  }
+}

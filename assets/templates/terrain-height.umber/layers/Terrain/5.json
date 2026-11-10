@@ -1,0 +1,10 @@
+{
+  "id": 5,
+  "name": "Snow",
+  "kind": "Paint",
+  "opacity": 0.35,
+  "visible": true,
+  "blend_mode": "Screen",
+  "mask": null,
+  "fill": null
+}

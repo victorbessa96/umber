@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Pore Detail",
+  "kind": "Paint",
+  "opacity": 0.35,
+  "visible": true,
+  "blend_mode": "Overlay",
+  "mask": null,
+  "fill": null
+}

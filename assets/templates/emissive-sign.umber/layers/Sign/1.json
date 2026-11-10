@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Sign Face",
+  "kind": "Paint",
+  "opacity": 1.0,
+  "visible": true,
+  "blend_mode": "Normal",
+  "mask": null,
+  "fill": null
+}

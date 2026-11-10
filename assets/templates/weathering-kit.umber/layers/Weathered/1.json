@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Rust Patches",
+  "kind": "Paint",
+  "opacity": 0.65,
+  "visible": true,
+  "blend_mode": "Multiply",
+  "mask": null,
+  "fill": null
+}

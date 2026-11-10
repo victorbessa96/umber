@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "name": "Bevel Highlights",
+  "kind": "Paint",
+  "opacity": 0.7,
+  "visible": true,
+  "blend_mode": "Screen",
+  "mask": null,
+  "fill": null
+}

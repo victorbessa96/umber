@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Water",
+      "resolution": 1024,
+      "channels": [
+        {
+          "name": "normal",
+          "kind": "Data"
+        },
+        {
+          "name": "height",
+          "kind": "Data"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "opacity",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Water",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "next_layer_id": 4
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Water"
+  }
+}

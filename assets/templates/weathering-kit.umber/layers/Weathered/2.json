@@ -1,0 +1,13 @@
+{
+  "id": 2,
+  "name": "Streaks",
+  "kind": "Paint",
+  "opacity": 0.4,
+  "visible": true,
+  "blend_mode": "Multiply",
+  "mask": {
+    "name": "Streak Mask",
+    "enabled": true
+  },
+  "fill": null
+}

@@ -1,0 +1,10 @@
+{
+  "id": 2,
+  "name": "Crease Wear",
+  "kind": "Paint",
+  "opacity": 0.5,
+  "visible": true,
+  "blend_mode": "Multiply",
+  "mask": null,
+  "fill": null
+}

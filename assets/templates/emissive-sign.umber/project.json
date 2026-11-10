@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "texture_sets": [
+    {
+      "name": "Sign",
+      "resolution": 1024,
+      "channels": [
+        {
+          "name": "baseColor",
+          "kind": "Color"
+        },
+        {
+          "name": "emissive",
+          "kind": "Color"
+        },
+        {
+          "name": "roughness",
+          "kind": "Data"
+        },
+        {
+          "name": "opacity",
+          "kind": "Data"
+        }
+      ]
+    }
+  ],
+  "layer_sets": [
+    {
+      "texture_set": "Sign",
+      "layer_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "next_layer_id": 4
+    }
+  ],
+  "settings": {
+    "active_texture_set": "Sign"
+  }
+}
