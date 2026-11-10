@@ -1031,6 +1031,8 @@ overlays =
     .projection-follow-hint = Aplicar projeta pela câmera e visão atuais em vez da visão congelada ao Armar.
     .projection-cull-backfaces = Ocultar faces traseiras
     .projection-cull-backfaces-hint = Superfícies voltadas para longe da câmera não recebem o decalque. Desmarque para pintar os dois lados.
+    .projection-occlusion = Oclusão
+    .projection-occlusion-hint = Texels atrás de uma superfície mais próxima não recebem o decalque. Desmarque para deixar cada texel coberto escrever.
 
 ## Rótulos compartilhados da linha do seletor de cores (picker-app-sites;
 ## letras de canal são a convenção internacional — uma localização pode traduzi-las)

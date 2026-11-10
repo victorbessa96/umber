@@ -95,11 +95,23 @@
 //!   placement mode: `adopt` keeps it, `arm`/`disarm` never touch it; no
 //!   persistence. The default flip is user-visible: before v2c a decal
 //!   reached back faces.
-//! - **No depth culling (deferred, design brief §5)**: a texel whose
-//!   world point sits behind another FRONT-facing surface still writes.
-//!   It needs the visible surface's depth per screen pixel — either the
-//!   GPU frame's depth (a new seam into `umber-gpu`) or a CPU depth
-//!   raster; the route is open. Besides the backface cull, only
+//! - **Occlusion culling is ON by default (v3, row 324,
+//!   `docs/loop/briefs/2026-11-09-projection-occlusion-design.md`)**: with
+//!   [`ProjectionState::occlusion`] on, `rasterize_with` builds ONE
+//!   viewport-sized screen-space depth buffer per Apply through the SAME
+//!   camera the raster projects through (frozen or live;
+//!   [`umber_mesh::rasterize_depth`], nearest `clip.w` per pixel), and a
+//!   texel whose screen pixel is covered by a strictly nearer surface
+//!   (`depth < clip.w * (1 - OCCL_EPS)`) takes nothing (writes transparent,
+//!   the v2d write rule unchanged). The covering triangle reads
+//!   `depth == clip.w`, so self is never occluded. Cost: one extra
+//!   O(viewport_px + triangles) pass and one `rw*rh` f32 buffer (64 MiB at
+//!   4096²) per Apply, no per-texel raycasts. With the flag off the buffer
+//!   is empty and the raster is byte-identical to pre-v3. The flag is a
+//!   placement mode: `adopt` keeps it, `arm`/`disarm` never touch it; no
+//!   persistence. The default flip is user-visible: before v3 a decal
+//!   reached texels behind nearer geometry.
+//! - Besides the backface cull and the occlusion test, only
 //!   behind-the-eye (`w <= 0`) and off-viewport (NDC outside `[-1, 1]`)
 //!   texels are skipped.
 //!
@@ -162,6 +174,15 @@ use umber_gpu::camera::OrbitCamera;
 /// The projection's opacity on a fresh session (overlay preview AND the
 /// applied alpha; see the module docs).
 pub const DEFAULT_PROJECTION_OPACITY: f32 = 0.5;
+
+/// The occlusion test's relative epsilon (R-A2 v3): a screen pixel occludes
+/// a texel when its nearest depth is below `clip.w * (1 - OCCL_EPS)`. The
+/// covering triangle itself reads `depth == clip.w` (same surface, same
+/// point, up to raster interpolation error ~1e-6 relative), so 1e-4 leaves
+/// two orders of magnitude over float error while still resolving surfaces
+/// nearer by more than 0.01%. Pinned both sides by
+/// `occlusion_epsilon_pinned_both_sides`.
+pub const OCCL_EPS: f32 = 1e-4;
 
 /// The default source-image pixel cap (2048², the plan §4 raster cap and
 /// the svg rasterizer's own default).
@@ -535,12 +556,18 @@ pub struct ProjectionState {
     /// off restores v1's "both faces write". A placement mode, so
     /// [`ProjectionState::adopt`] keeps it.
     pub cull_backfaces: bool,
+    /// Occlusion (R-A2 v3): a texel whose screen pixel is covered by a
+    /// strictly nearer surface takes nothing (writes transparent). Default
+    /// `true`; off restores the pre-v3 "a texel behind another surface
+    /// still writes". A placement mode, so [`ProjectionState::adopt`]
+    /// keeps it, `arm`/`disarm` never touch it.
+    pub occlusion: bool,
 }
 
 impl Default for ProjectionState {
     /// No image, the default transform, unarmed, nothing frozen,
     /// [`DEFAULT_PROJECTION_OPACITY`], tiling and follow-camera off,
-    /// backface culling ON.
+    /// backface culling and occlusion ON.
     fn default() -> Self {
         Self {
             image: None,
@@ -553,6 +580,7 @@ impl Default for ProjectionState {
             tiling: false,
             follow_camera: false,
             cull_backfaces: true,
+            occlusion: true,
         }
     }
 }
@@ -608,8 +636,9 @@ impl ProjectionState {
 /// top-down, RGBA8, `w * h * 4` bytes) through the frozen placement.
 /// `None` without an image, without a frozen placement, under a
 /// degenerate transform (scale not finite and positive) or a degenerate
-/// frozen rect. Texels off the mesh, back-facing (with
-/// [`ProjectionState::cull_backfaces`]), behind the eye, off the frozen
+/// degenerate frozen rect. Texels off the mesh, back-facing (with
+/// [`ProjectionState::cull_backfaces`]), occluded by a nearer surface (with
+/// [`ProjectionState::occlusion`]), behind the eye, off the frozen
 /// viewport or (tiling off) outside the image write `[0, 0, 0, 0]`; with
 /// [`ProjectionState::tiling`] the image repeats instead (module docs).
 ///
@@ -670,9 +699,18 @@ fn rasterize_with(
     let vp = camera.view_proj(rw / rh);
     // The SAME camera the raster projects through (frozen or live).
     let eye = camera.eye();
+    // v3: ONE depth pass per Apply through that same camera (viewport-sized
+    // buffer, 64 MiB at 4096²); the shade's occlusion test reads it. With
+    // the flag off the buffer stays empty and the test is skipped.
+    let (dw, dh) = (rw as u32, rh as u32);
+    let depth = if state.occlusion {
+        umber_mesh::rasterize_depth(mesh, vp, dw, dh)
+    } else {
+        Vec::new()
+    };
     let size = [image.width(), image.height()];
     // One texel's value from its covering triangle's geometry; `None` is
-    // "no value" (culled, behind the eye, off the viewport).
+    // "no value" (culled, behind the eye, off the viewport, occluded).
     let shade = |world: [f32; 3], raw_normal: [f32; 3]| -> Option<[u8; 4]> {
         // v2c: a back-facing texel takes nothing, the same faces the
         // viewport's mesh pass culls.
@@ -690,6 +728,18 @@ fn rasterize_with(
         }
         // Viewport-local px (see the module docs), y down.
         let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
+        // v3: a strictly nearer surface at this screen pixel occludes the
+        // texel. The NDC guard puts screen inside [0, rw] x [0, rh]; the
+        // min clamps the == rw / == rh edge into range.
+        if state.occlusion {
+            let px = (screen[0] as u32).min(dw.saturating_sub(1));
+            let py = (screen[1] as u32).min(dh.saturating_sub(1));
+            if let Some(&near) = depth.get(py as usize * dw as usize + px as usize) {
+                if near < clip.w - OCCL_EPS * clip.w {
+                    return None;
+                }
+            }
+        }
         let img_pt = inverse_map(&state.transform, size, screen);
         Some(if state.tiling {
             // Wrap into [0, w) x [0, h) first (NaN/inf stay NaN and the
@@ -1515,6 +1565,14 @@ mod tests {
         let (ox, oy) = umber_mesh::uv_gbuffer::tile_offset(tile);
         let vp = camera.view_proj(rw / rh);
         let eye = camera.eye();
+        // v3: the same depth pass the raster core builds, so this oracle
+        // applies the same occlusion rule (occluded -> stays transparent).
+        let (dw, dh) = (rw as u32, rh as u32);
+        let depth = if state.occlusion {
+            umber_mesh::rasterize_depth(mesh, vp, dw, dh)
+        } else {
+            Vec::new()
+        };
         let size = [image.width(), image.height()];
         for y in 0..h {
             for x in 0..w {
@@ -1535,6 +1593,15 @@ mod tests {
                     continue;
                 }
                 let screen = [(ndc.x + 1.0) * 0.5 * rw, (1.0 - ndc.y) * 0.5 * rh];
+                if state.occlusion {
+                    let px = (screen[0] as u32).min(dw.saturating_sub(1));
+                    let py = (screen[1] as u32).min(dh.saturating_sub(1));
+                    if let Some(&near) = depth.get(py as usize * dw as usize + px as usize) {
+                        if near < clip.w - OCCL_EPS * clip.w {
+                            continue;
+                        }
+                    }
+                }
                 let img_pt = inverse_map(&state.transform, size, screen);
                 let rgba = if state.tiling {
                     let wrapped = [
@@ -2169,5 +2236,144 @@ mod tests {
         assert_eq!(quad[2], egui::pos2(140.0, 70.0));
         let f = forward_map(&t, [40, 20], [40.0, 0.0]);
         assert_eq!(quad[1], egui::pos2(f[0], f[1]));
+    }
+
+    // --- occlusion (R-A2 v3) ---
+
+    /// The z = 0 target quad plus a wall quad at z = `wall_z` (nearer the
+    /// +z eye), both spanning [-1, 1]² with unit UVs. `wall_last` puts the
+    /// wall last in index order (it wins the write), else the target does.
+    fn wall_scene(wall_z: f32, wall_last: bool) -> umber_mesh::MeshData {
+        let wall = umber_mesh::MeshData {
+            positions: vec![
+                [-1.0, -1.0, wall_z],
+                [1.0, -1.0, wall_z],
+                [1.0, 1.0, wall_z],
+                [-1.0, 1.0, wall_z],
+            ],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Default::default()
+        };
+        let target = quad();
+        let (mut first, mut second) = if wall_last {
+            (target, wall)
+        } else {
+            (wall, target)
+        };
+        let off = first.positions.len() as u32;
+        second.indices.iter_mut().for_each(|i| *i += off);
+        first.positions.extend_from_slice(&second.positions);
+        first.uvs.extend_from_slice(&second.uvs);
+        first.indices.extend_from_slice(&second.indices);
+        first
+    }
+
+    #[test]
+    fn occluded_texels_write_transparent_and_off_restores_pre_v3() {
+        // Eye at z = 5: the z = 0 target has clip.w = 5, the z = 0.5 wall
+        // 4.5 -> the target is occluded. Target LAST in index order, so its
+        // (occluded) transparent write decides every covered texel.
+        let mesh = wall_scene(0.5, false);
+        let mut state = red_everywhere();
+        assert!(state.occlusion);
+        let on = rasterize_projection(&state, &mesh, 1001, 8, 8).unwrap();
+        assert_eq!(on, vec![0; 8 * 8 * 4], "the wall hides the target");
+        // Flag off: byte-identical to the pre-v3 behavior (target paints).
+        state.occlusion = false;
+        let off = rasterize_projection(&state, &mesh, 1001, 8, 8).unwrap();
+        assert!(off.chunks(4).all(|t| t == RED), "off restores the write");
+        // Wall last: the wall wins the write and is not occluded by itself.
+        let state = red_everywhere();
+        let wall_last = rasterize_projection(&state, &wall_scene(0.5, true), 1001, 8, 8).unwrap();
+        assert!(
+            wall_last.chunks(4).all(|t| t == RED),
+            "the wall itself paints"
+        );
+    }
+
+    #[test]
+    fn self_is_never_occluded() {
+        // A single quad under a head-on camera: depth == clip.w at every
+        // covered pixel, so nothing is occluded; on == off byte for byte.
+        let mut state = red_everywhere();
+        let on = rasterize_projection(&state, &quad(), 1001, 8, 8).unwrap();
+        state.occlusion = false;
+        let off = rasterize_projection(&state, &quad(), 1001, 8, 8).unwrap();
+        assert_eq!(on, off);
+        assert_eq!(texel(&on, 8, 4, 4), RED);
+    }
+
+    #[test]
+    fn occlusion_epsilon_pinned_both_sides() {
+        // Relative epsilon 1e-4 at clip.w = 5 occludes when the wall is
+        // nearer by more than 5e-4 in w. Target last in index order.
+        // wall_z = 1e-3: w_wall = 4.999 < 5 - 5e-4 = 4.9995 -> occluded.
+        let state = red_everywhere();
+        let deep = rasterize_projection(&state, &wall_scene(1e-3, false), 1001, 8, 8).unwrap();
+        assert_eq!(deep, vec![0; 8 * 8 * 4], "beyond the epsilon: occluded");
+        // wall_z = 1e-4: w_wall = 4.9999, NOT < 4.9995 -> paints.
+        let shallow = rasterize_projection(&state, &wall_scene(1e-4, false), 1001, 8, 8).unwrap();
+        assert!(
+            shallow.chunks(4).all(|t| t == RED),
+            "inside the epsilon: not occluded"
+        );
+    }
+
+    #[test]
+    fn near_plane_and_behind_eye_cases_do_not_panic() {
+        // Eye BEHIND the target quad (z = -5): every texel has clip.w < 0
+        // and is skipped by the behind-the-eye rule; the depth raster
+        // clamps those vertices to NEAR_EPS without panicking.
+        let behind = OrbitCamera {
+            yaw: std::f32::consts::PI,
+            ..head_on(glam::Vec3::ZERO, 5.0)
+        };
+        let state = red_everywhere();
+        let out =
+            rasterize_projection_live(&state, &quad(), 1001, 8, 8, &behind, view_rect()).unwrap();
+        assert_eq!(out, vec![0; 8 * 8 * 4]);
+        // And the depth buffer alone handles a behind-eye vertex.
+        let vp = behind.view_proj(1.0);
+        let d = umber_mesh::rasterize_depth(&quad(), vp, 16, 16);
+        assert_eq!(d.len(), 256);
+        assert!(d
+            .iter()
+            .all(|v| v.is_infinite() || *v >= umber_mesh::NEAR_EPS - 1e-9));
+    }
+
+    #[test]
+    fn occlusion_composes_with_cull_tiling_frozen_live_and_flag_discipline() {
+        let mesh = wall_scene(0.5, false);
+        for cull in [false, true] {
+            for tiling in [false, true] {
+                let mut state = red_everywhere();
+                state.cull_backfaces = cull;
+                state.tiling = tiling;
+                // Frozen: occluded target -> clear everywhere.
+                let frozen = rasterize_projection(&state, &mesh, 1001, 8, 8).unwrap();
+                assert_eq!(frozen, vec![0; 8 * 8 * 4], "cull {cull} tiling {tiling}");
+                // Live through the SAME (frozen) camera: byte-identical.
+                let cam = state.frozen.unwrap().camera;
+                let live = rasterize_projection_live(&state, &mesh, 1001, 8, 8, &cam, view_rect())
+                    .unwrap();
+                assert_eq!(live, frozen, "live == frozen: cull {cull} tiling {tiling}");
+                // The oracle with the same depth rule agrees.
+                let (_, want) = frozen_pair(&state, &mesh, 8);
+                assert_eq!(frozen, want, "oracle: cull {cull} tiling {tiling}");
+            }
+        }
+        // Flag discipline: adopt keeps it, arm/disarm never touch it.
+        let mut state = red_everywhere();
+        assert!(state.occlusion);
+        state.arm(head_on(glam::Vec3::ZERO, 5.0), view_rect());
+        state.disarm();
+        assert!(state.occlusion, "arm/disarm never touch occlusion");
+        state.adopt(
+            PathBuf::from("x.png"),
+            Ok(image(2, 2, |_, _| RED)),
+            [100.0, 100.0],
+        );
+        assert!(state.occlusion, "adopt keeps occlusion");
     }
 }

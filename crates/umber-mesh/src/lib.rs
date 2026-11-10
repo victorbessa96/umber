@@ -8,6 +8,7 @@ use glam::Vec3;
 
 pub mod bake_support;
 pub mod bvh;
+pub mod depth;
 pub mod fbx;
 pub mod fill;
 pub mod gltf;
@@ -23,6 +24,7 @@ pub mod usd;
 pub mod usdc;
 pub mod uv_gbuffer;
 
+pub use depth::{rasterize_depth, NEAR_EPS, SCREEN_COND_EPS};
 pub use fbx::load_fbx;
 pub use fill::{
     cylindrical_coords, evaluate_fill_tile, projection_sample_2d, rasterize_uv_geometry,

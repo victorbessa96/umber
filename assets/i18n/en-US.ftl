@@ -1012,6 +1012,8 @@ overlays =
     .projection-follow-hint = Apply projects through the current camera and view instead of the view frozen at Arm.
     .projection-cull-backfaces = Cull back faces
     .projection-cull-backfaces-hint = Surfaces facing away from the camera do not take the decal. Uncheck to paint both sides.
+    .projection-occlusion = Occlusion
+    .projection-occlusion-hint = Texels behind a nearer surface do not take the decal. Uncheck to let every covered texel write.
 
 ## Shared colour-picker row labels (picker-app-sites; channel letters are
 ## the international convention — a locale may localize them)

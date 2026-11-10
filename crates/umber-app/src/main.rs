@@ -1676,6 +1676,7 @@ fn projection_section(ui: &mut Ui, ctx: ProjectionSectionCtx<'_>) {
             tiling: &mut state.tiling,
             follow_camera: &mut state.follow_camera,
             cull_backfaces: &mut state.cull_backfaces,
+            occlusion: &mut state.occlusion,
         },
     );
     if let Some(v) = response.opacity {
