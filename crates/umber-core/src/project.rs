@@ -1576,4 +1576,67 @@ mod tests {
         assert_eq!(read_project_file(&p, 32).unwrap().len(), 32);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// The shipped starter projects (`assets/templates/<slug>.umber/`) are
+    /// part of the format's public surface: every one must load with no
+    /// special-casing, so this walks the bundled data root and loads each.
+    ///
+    /// The dir genuinely cannot exist in some installed layouts (a packager
+    /// that omits `assets/`), so absence skips; in the repo dev loop the
+    /// manifest-root fallback always resolves, so a present-but-broken set
+    /// fails loudly here — that is the authoring gate. Keep the count in
+    /// step with `assets/templates/TEMPLATES.md` (authoring rule 10).
+    #[test]
+    fn every_shipped_template_loads() {
+        let root = crate::bundled::data_path("assets/templates");
+        if !root.is_dir() {
+            eprintln!(
+                "assets/templates absent at {} (installed binary); skipping",
+                root.display()
+            );
+            return;
+        }
+
+        let mut templates: Vec<PathBuf> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| p.is_dir() && p.extension().and_then(|e| e.to_str()) == Some("umber"))
+            .collect();
+        templates.sort();
+        assert_eq!(
+            templates.len(),
+            10,
+            "TEMPLATES.md promises 10 shipped templates, found {templates:?}"
+        );
+
+        for dir in &templates {
+            let model = load_from_dir(dir)
+                .unwrap_or_else(|e| panic!("template {} must load: {e}", dir.display()));
+            assert_eq!(
+                model.version,
+                CURRENT_PROJECT_VERSION,
+                "template {} must stay version-pinned",
+                dir.display()
+            );
+            assert!(
+                !model.texture_sets.is_empty(),
+                "template {} ships no texture set",
+                dir.display()
+            );
+            assert_eq!(
+                model.layers.len(),
+                model.texture_sets.len(),
+                "template {} must order every texture set",
+                dir.display()
+            );
+            for entry in &model.layers {
+                assert!(
+                    !entry.stack.layers.is_empty(),
+                    "template {} set {:?} ships no layers",
+                    dir.display(),
+                    entry.texture_set
+                );
+            }
+        }
+    }
 }
