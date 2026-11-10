@@ -100,14 +100,18 @@ were fleet, not code). The fire-time drift study stands: the cron says
 
 ## Where we stand (2026-10-24)
 
-**186,170 LOC across 16 crates, 2,251 test functions** (12.1/kLOC,
-no crate below 7). The core loop is Gate-0-proven end to end:
+**230,737 LOC across 16 crates, 2,879 `#[test]` attributes** (12.5/kLOC,
+lowest crate 7.3 — live, 2026-11-10: `find crates -name '*.rs' | xargs cat |
+wc -l`; `python3 scripts/scorecard.py --print`). The core loop is Gate-0-proven end to end:
 mesh → 4K pressured paint → compositor → undo/redo → save/reopen →
 export, both CI platforms, verified as recently as the 10-24 green
 battery runs (umber-paint 178 + umber-app 851). The perf nightly is
 GREEN on the pinned 24.04 image (run 40075780768, 10-24 08:51Z —
 the stale-baseline class is dead, killed by `ec7ccb8`'s pin). The
-requirements contract: 90 of 100 rows ticked, stable since 10-17.
+requirements contract: 89 of 94 requirement rows carry a ✓ status cell,
+1 ◐, 4 none (the three open P2 rows + the `.spp` reversed row; §12's
+budget rows excluded) — live count 2026-11-10, by status-cell inspection
+of `docs/specs/requirements.md`, not a carried number.
 The scorecard generator's `--check` passes.
 
 The night of 10-23/24 landed the W-C4 runway's first four kills
@@ -121,7 +125,7 @@ compose revert. The two-gate wave model runs the march; the
 battery's machine-fit defaults + the feature-on RUN leg hardened
 it this same week.
 
-## ✅ LANDED — the completed archive (2026-10-10 → 2026-10-24)
+## ✅ LANDED — the completed archive (2026-10-10 → 2026-11-10)
 
 Every closed row of the march, consolidated. Proof cites the
 commit or the live tree; details live in each era's kill reports
@@ -214,7 +218,7 @@ locks + the main-tree pattern; the brief-template; the
 freeze-recovery close scripts; the loop restart machinery
 (2026-10-24 04:05).
 
-## The OPEN waves (dependency-ordered; each row names its gate)
+## Open waves + recent landings (dependency-ordered; each row names its gate and its status)
 
 ### Ungated — the runway continues (the next kills)
 
@@ -231,11 +235,11 @@ freeze-recovery close scripts; the loop restart machinery
 | **The Assets panel (R-C1, P0)** | **LANDED 2026-10-24 (the v1 discoverability layer)**: the library browser (search + Brushes/Materials/Masks) over the existing engines; the `select_preset_by_name` seam; the smart-mask compose flow extracted (one path, two doors); the placeholder dead; report `docs/loop/kill-reports/2026-10-24-rc1-assets-panel.md`. The named follow-ups: drag-to-stack, thumbnails, saved searches, custom dirs, the filter/mesh/env categories. |
 | **Layer-stack flatten (R-B1, P0)** | ~~group → baked fill layer~~ → LANDED 2026-10-24 as the SELECTED-LAYERS flatten: `bake_layers` (the isolated fold) + the Layers panel button + the shell's handler; fully undoable (tombstones + journal reverts); report `docs/loop/kill-reports/2026-10-24-rb1-flatten.md`. The folder kind + the compound one-step = the named follow-ups. |
 | Material picker (R-A10) | **LANDED 2026-10-24 (the v1)**: Ctrl+Alt+click picks the ACTIVE channel's composite texel at the cursor into the selected fill layer's Solid (the inspector's mirrored-row convention, the panel's own journalable SetFill path; the status-bar hint in both catalogs); report in kill-reports. The two landed halves: the channel target (0f55ebd) + the pick gesture. Follow-ups: the all-channels mode, the e2e kittest, ~~the pick toast~~ **CLOSED 2026-10-25: the toast rides the home_actions rail's own pattern (the viewer's pick_notices vec, the dock closure's tuple return, the app's post loop) — `uv.pick-applied` in both catalogs with the hex color**. | the census's "small" row grew a prerequisite + this v1 across two kills; both banked |
-| Projection fill (R-A2) | **CLOSED to v2d + W1.1 (2026-11-09)**: v1 decal projector landed 11-08 (rows 277-281, `c573dc87`; load PNG/`.svg`, Arm freezes camera+viewport rect, Apply rasterizes through the frozen camera, one undo step, stencil-gated); v2a tiling, v2b follow-camera, v2c backface culling, then **v2d one-pass raster** (`98fb6e8e`, CI `42646713045` — ~34 min UI freeze at 4K → ~0.6 s) and **W1.1 the UV conditioning rule** (`7aad67c3`, CI `42677040220` — needle triangles are not valid footprints, CPU+GPU). Remaining: depth/occlusion culling (v3, wave 2), seam/symmetry expansion of projections (a product question), a decal channel + the bake family | plan of record: `docs/loop/waves/2026-11-09-wave-plan.md`; plan `docs/specs/projection-fill-plan.md` |
+| Projection fill (R-A2) | **CLOSED to v3 (2026-11-10)**: v1 decal projector landed 11-08 (rows 277-281, `c573dc87`; load PNG/`.svg`, Arm freezes camera+viewport rect, Apply rasterizes through the frozen camera, one undo step, stencil-gated); v2a tiling, v2b follow-camera, v2c backface culling, then **v2d one-pass raster** (`98fb6e8e`, CI `42646713045` — ~34 min UI freeze at 4K → ~0.6 s), **W1.1 the UV conditioning rule** (`7aad67c3`, CI `42677040220` — needle triangles are not valid footprints, CPU+GPU) and **v3 depth/occlusion culling** (`b228767f`, 2026-11-10 — depth raster + `ProjectionState::occlusion`, default on). Remaining: seam/symmetry expansion of projections (a product question), a decal channel + the bake family | plan of record: `docs/loop/waves/2026-11-09-wave-plan.md`; plan `docs/specs/projection-fill-plan.md` |
 | Geometry masks (R-B2) | per-mesh/per-tile include/exclude on layers/effects | rides UDIM |
 | Baker sync (R-D1) + channel manage (R-B4's tail) + the four post nodes (R-E5) | the power-user tail | each small; census-verified open |
 | wave-fuzz-corpus (b) | coverage-guided fuzzing | cargo-fuzz + nightly + a corpus budget |
-| wave-abr | .abr brush preset import — **FULL WAVE LANDED 2026-11-08 (rows 268/271 + 282-285)**: the clean-room v6/v7/v9/v10 reader is complete end-to-end: `samp` reader (`ca70ea80`, oracle-exact vs real files row 271), the `desc` descriptor parser (`a68f97f4`, `abr_desc.rs` + `read_abr`/`AbrBrush`/`match_sample`, pinned against UNTRIMMED upstream files `577bc07c`), the `.abr` → `.umberbrush` + `.stamp.png` mapping (`c9ee71e5`, `abr_import.rs`), and the CLI fan-out `umber-cli import-asset --kind brush <file.abr>` (`4cc2bdfe`, whole-import TargetExists refusal, JSON outcome, agent step). Live-verified on real Photoshop files: "Soft Round" (computed) and "Bobbys Brush 743" (sampled, 112x105 stamp) import correctly. Still open: cross-library stamp dedup (blake3), `patt` patterns, v8+, dynamics→engine wiring | the one legal Adobe format |
+| wave-abr | .abr brush preset import — **FULL WAVE CLOSED 2026-11-10 (rows 268/271 + 282-285 + wave 3)**: the clean-room v6/v7/v9/v10 reader is complete end-to-end: `samp` reader (`ca70ea80`, oracle-exact vs real files row 271), the `desc` descriptor parser (`a68f97f4`, `abr_desc.rs` + `read_abr`/`AbrBrush`/`match_sample`, pinned against UNTRIMMED upstream files `577bc07c`), the `.abr` → `.umberbrush` + `.stamp.png` mapping (`c9ee71e5`, `abr_import.rs`), and the CLI fan-out `umber-cli import-asset --kind brush <file.abr>` (`4cc2bdfe`). The wave-3 tail landed too: `patt` pattern reader (`72b409cc`) + `PatternTexture` preset block / CLI sidecar (`14d9dbf1`), per-brush skip-and-count (wave 3.2, row 338), dynamics→engine wiring (wave 3.3, `3079e4cb`), cross-library stamp dedup (`0bcc1687`, wave 3.4) — wave 3 CLOSED (row 340). v8/11 stay refused as **unattested** (row 333: no public sample exists; "descriptor-only" is a content class, not a header number). Live-verified on real Photoshop files: "Soft Round" (computed) and "Bobbys Brush 743" (sampled, 112x105 stamp). | the one legal Adobe format |
 | wave-svg-import | SVG vector assets — **the IMPORT wave LANDED 2026-11-07 (rows 266 + 269)**: the clean-room `umber_core::svg` parser + 4x4-supersampled scanline rasterizer (`5d4fcccc`, cross-reviewed with hostile-input budgets in `107f90d1`), the app stencil loader accepting `.svg` next to `.png` (`399dce90`) with the 16 MiB input budget (`57f88d6f`), and the headless `umber-cli stencil` converter (`06d29936`). An `.svg` rasterizes AT IMPORT into the stencil coverage plane — no vector state persists. What is still open: the PATH-TOOL wave (live, editable vector paths on the canvas — the row 265 design calls that the path-tool wave's problem, not the stencil's) | the one legal vector format artists hand over |
 | wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) |
 | Split-redo (engine landed 850b839; RedoPending lift landed 1347e13; **History-panel wiring LANDED 2026-11-07 `22e0efb`, row 262**: `edit.split_redo` command + the panel's "Split redo" button, outcome notices, both i18n catalogs, snapshots regenerated**) + merge-below-top (**WIRED 2026-11-07 `bbdc08b`, row 257**) | the undo journal's two named follow-ups — both closed | retouch.rs's debts |
@@ -247,7 +251,7 @@ freeze-recovery close scripts; the loop restart machinery
 
 | Lane | The gate |
 |---|---|
-| L4: winink live hook | S1's parked bytes (winink.rs) are NOT in the tree — the lane cannot derive until they land |
+| L4: winink live hook | the file IS in the tree (`crates/stylus/src/winink.rs`, 307 lines of passive decode — `GetPointerInfo`/`GetPointerPenInfo`, `#[cfg(all(windows, feature = "winink"))]`); the gate is the **WndProc hook + HWND hand-off**, not the bytes (module doc: "Live pointer-pump integration is Wave 2") |
 | L7: the color_button delegate conversion | G1-gated |
 | wave-stylus-win32 | the Windows dual-path; real-pen verification = D1's Windows leg (partner-gated) |
 | wave-wasm-shaders / tessellation / hdr / ray-query | the eframe/wgpu upgrade postures (the probes built) |
@@ -291,8 +295,9 @@ pass; the .ftl lock lift (if it stands).
   overlap); both directions pinned byte-exact. What remains: the
   History-panel "split" affordance wiring — blocked on
   document.rs/main.rs (sibling lock).
-- The winink live-HWND question — OPEN, now deeper-gated (the
-  bytes are absent).
+- The winink live-HWND question — OPEN: the decode IS in the tree
+  (`crates/stylus/src/winink.rs`, passive decode); the WndProc hook +
+  HWND hand-off is the gate.
 - DPI runtime re-raster — OPEN (the manual ui_scale exists;
   the runtime-change re-raster does not).
 - ~~The AssetStore GC's shell caller~~ **LANDED `1f0e438` (row 238)** —
@@ -322,7 +327,7 @@ pass; the .ftl lock lift (if it stands).
 |---|---|
 | Painting core (stamps/flow/spacing/falloff/jitter/angle/methods/stabilizers) | PARITY |
 | Stencil/projection | PARITY — stencil lane closed; **projection fill CLOSED to v2d + W1.1 (rows 277-281 + `98fb6e8e` one-pass + `7aad67c3` conditioning, CI `42677040220` green)** |
-| Retouch + masks (quick/cavity/ID) | PARITY (persistence gaps on quick mask + symmetry) |
+| Retouch + masks (quick/cavity/ID) | PARITY (the persistence gaps closed: quick mask `73f8724`, 2026-10-31; symmetry `c88b4f6a`, 2026-10-24) |
 | Path tools | PARITY (paint-along + filled + polygon + straight-line); ribbon GAP |
 | Fill/material layers + anchors + instances | PARITY (materials composite-only by design) |
 | Texture sets / channels / UDIM | PARITY (the auto-assign landed; channel add/remove/rename open) |

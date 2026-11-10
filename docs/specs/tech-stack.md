@@ -24,7 +24,7 @@
 |---|---|---|---|---|
 | glTF/OBJ | **gltf 1.4, tobj 4.0, meshopt** | Solid, slow-moving, correct | 4 | Low |
 | FBX | **ufbx 0.11.5** | MIT C lib with official Rust bindings; only credible FBX route (Autodesk SDK non-redistributable) | 4 | Low-med |
-| USD | **openusd 0.7** (pure-Rust) | usda/usdc/usdz R/W, LIVRPS composition; scope: import + UsdShade/primvar export; golden-test vs pxr | 3 | Med-high (pre-1.0) |
+| USD | **openusd 0.8.0** (pure-Rust; live pin `Cargo.toml:81`, verified 2026-11-10) | usda/usdc/usdz R/W, LIVRPS composition; scope: import + UsdShade/primvar export; golden-test vs pxr | 3 | Med-high (pre-1.0) |
 | Images | **image 0.25, exr 1.74, half 2.7** | PNG/JPEG/TIFF + pure-Rust OpenEXR + f16/bf16 | 5 | Low |
 | GPU texture containers | **ktx2, ddsfile, ctt** (BCn/ASTC) | Compressed cache/pipeline textures | 3–4 | Med |
 | Color | **ocio-rs 0.2** (stub-gated; vendored OCIO 2.5 manual-dispatch) + **png-crate iCCP** (bundled sRGB profile) | OCIO v2 configs (built-in ACES 2.0 CG/Studio) + GPU shader extraction; ICC embed landed WITHOUT lcms2 (png crate writes iCCP natively — survey: docs/research/ocio-aces-integration.md) | 3 | Med (single maintainer — golden tests + LUT fallback) |
@@ -36,10 +36,10 @@
 
 | Layer | Crate | Why | Maturity | Risk |
 |---|---|---|---|---|
-| Windows installer | **cargo-dist** (MSI + scripts) | Full GH Actions release pipeline from a tag | 4 | Low |
+| Windows installer | **cargo-dist** (shell + PowerShell archives; **no MSI** — the installers design dropped it, C2-19) | Full GH Actions release pipeline from a tag | 4 | Low |
 | Linux | **Flatpak manifest + AppImage** (cargo-packager) | Flatpak = best Vulkan-driver sandbox story | 4 | Low |
 | CI | **GH Actions**: windows-latest + ubuntu; **lavapipe** software-Vulkan for headless GPU tests | wgpu's own CI pattern | 4 | Low |
-| Plugin runtime | **wasmtime 49 + WASI 0.3 + wit-bindgen** | Sandboxed plugins orchestrate via host API; never execute paint hot paths. WASI 0.3 ratified 2026-06. Native dynlib plugins (abi_stable — stale 3y) deferred | 5 | Low |
+| Plugin runtime | **wasmtime `=50.0.0-rc.1` + WASI 0.3 + wit-bindgen** (live pin `Cargo.toml:102`, verified 2026-11-10) | Sandboxed plugins orchestrate via host API; never execute paint hot paths. WASI 0.3 ratified 2026-06. Native dynlib plugins (abi_stable — stale 3y) deferred | 5 | Low |
 | Undo | **own command journal** (undo 0.52 as reference) | Stroke merging, memory-budgeted history, dirty-tile snapshots | 4 | Low |
 | Hot reload (dev) | notify + naga pipeline rebuild; hot-lib-reloader for Rust code | Fast iteration loop | 4 | Low |
 
@@ -57,22 +57,15 @@
 - No experimental wgpu features in the core paint path (RT, mesh shaders, bindless) — cargo-feature-gated only.
 - **Dependency license audit gate (Wave 1):** THIRD_PARTY.md manifest listing every dependency's license before first merge to master; MIT relicensing of standalone crates requires upstream license compatibility verified per crate (octotablet absorption, ctt's vendored ISPC/astcenc components, ocio-sys, openusd crate — all checked at manifest time, not assumed). libmypaint relationship = documented-semantics reimplementation, never a code derivative (LGPL line drawn explicitly).
 
-## Cargo workspace shape (Wave 1)
+## Cargo workspace shape
 
-```
-crates/
-  umber-app        # binary: egui shell + winit loop + app state wiring
-  umber-core       # document model: texture sets, layers, channels, undo journal
-  umber-gpu        # wgpu device context, render graph, tile pool, shaders (naga_oil)
-  umber-brush      # libmypaint-lineage state machine + dab batching + stroke jobs
-  umber-mesh       # half-edge DCEL, import (gltf/tobj/ufbx), raycast picking
-  umber-bake      # mesh-map bakers (compute passes)
-  umber-graph      # procedural node engine (evaluates as MaterialX documents)
-  umber-export     # template/preset engine + encoders
-  umber-color      # OCIO/ICC integration + display transforms
-  stylus           # owned input crate (dual Windows + Linux tablet protocols)
-  umber-cli        # headless automation (bake/export/batch)
-xtask/             # workspace tasks (dist, golden-image tests, bench)
-```
+The live workspace is **16 crates**, mapped in [`AGENTS.md`](../../AGENTS.md)
+(the workspace map — current as of 2026-11-10, `ls -d crates/*/ | wc -l`). The
+Wave-1 sketch this section used to carry (11 crates + `xtask/`) is retired:
+`xtask/` never landed — the task scripts live in `scripts/` — and the map now
+also names `umber-paint` (the headless paint engine), `umber-gui`
+(design-language widgets), `umber-wasm` + `umber-plugin-sdk` (plugin host /
+guest SDK) and `crates/spp` (umber-spp, the ratified read-only `.spp`
+importer, `AGENTS.md` hard wall 10).
 
 Library crates get clean boundaries; the app is a thin composition. Standalone-usable crates (stylus, umber-graph, umber-color) keep MIT-option per license decision.
