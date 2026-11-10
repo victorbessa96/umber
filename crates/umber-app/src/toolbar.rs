@@ -560,7 +560,12 @@ pub struct ToolbarView {
 /// (dispatched by the caller after the panel closes).
 pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellAction> {
     use crate::rich_tooltip::RichTooltip;
-    ui.set_style(theme::umber_style(theme::Density::Comfortable));
+    // F6: Umber style at this density, but at the context's text scale.
+    ui.set_style(theme::chrome_style(
+        ui.ctx(),
+        ui.style(),
+        theme::Density::Comfortable,
+    ));
     let mut actions = Vec::new();
     // The registry's view, for the rich tooltips' unavailable reasons.
     let state = crate::actions::ShellState {
@@ -749,7 +754,12 @@ const STRIP_SIZE_MAX: f32 = 512.0;
 pub fn contextual_strip(ui: &mut Ui, view: &mut ContextualView<'_>) -> Vec<StripEdit> {
     use umber_gui::widgets::ValueField;
     let mut edits = Vec::new();
-    ui.set_style(theme::umber_style(theme::Density::Compact));
+    // F6: Umber style at this density, but at the context's text scale.
+    ui.set_style(theme::chrome_style(
+        ui.ctx(),
+        ui.style(),
+        theme::Density::Compact,
+    ));
     ui.horizontal(|ui| {
         ui.label(tr("strip.size"));
         let mut size = view.size;

@@ -216,21 +216,30 @@ pub fn format_fps(dt: f32) -> String {
 
 /// Draws the bar into `ui`.
 pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
-    ui.set_style(theme::umber_style(theme::Density::Compact));
+    // F6: Umber style at compact density, but at the context's text scale;
+    // fonts resolved from that (scaled) style instead of fixed px.
+    ui.set_style(theme::chrome_style(
+        ui.ctx(),
+        ui.style(),
+        theme::Density::Compact,
+    ));
+    let fonts = ui.style().text_styles.clone();
+    let status_font = fonts[&egui::TextStyle::Name(theme::STATUS_STYLE.into())].clone();
+    let mono_font = fonts[&egui::TextStyle::Monospace].clone();
+    let body_font = fonts[&egui::TextStyle::Body].clone();
     let label = |text: String| {
         RichText::new(text)
-            .size(theme::TEXT_STATUS)
+            .font(status_font.clone())
             .color(theme::muted())
     };
     let value = |text: String| {
         RichText::new(text)
-            .size(theme::TEXT_STATUS)
-            .monospace()
+            .font(mono_font.clone())
             .color(theme::text())
     };
     let key = |text: String| {
         RichText::new(text)
-            .size(theme::TEXT_STATUS)
+            .font(body_font.clone())
             .strong()
             .color(theme::text())
     };

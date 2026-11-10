@@ -520,6 +520,15 @@ pub fn viewport_bg() -> Color32 {
     tokens().viewport
 }
 
+/// F6 (2026-11-10 round-3 audit): the shell chrome's style helper —
+/// the Umber style at `density`, but at the CONTEXT's current text scale
+/// (read off the Body font) instead of a hard 1.0, so the text-scale
+/// preference reaches the toolbar, strip and status bar.
+pub fn chrome_style(ctx: &egui::Context, ui_style: &egui::Style, density: Density) -> egui::Style {
+    let scale = ui_style.text_styles[&egui::TextStyle::Body].size / TEXT_UI;
+    umber_style_scaled_with(ctx, density, scale)
+}
+
 /// The Umber style at the default text scale.
 pub fn umber_style(density: Density) -> egui::Style {
     umber_style_scaled(density, 1.0)
