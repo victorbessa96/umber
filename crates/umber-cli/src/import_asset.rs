@@ -53,6 +53,12 @@
 //!   first, as the `.abr` stores them).
 //! * a dry run reports the PLANNED counts (`presets` / `stamps_written` /
 //!   `patterns_written` = what would be written) with `dry_run: true`.
+//! * size dynamics (`szVr`) map as far as the engine can express them
+//!   (wave 3.3): jitter → the preset's per-dab size jitter, minimum → a
+//!   radius-curve floor. The control source and the fade step count have
+//!   no engine equivalent, so they are counted in
+//!   [`AbrImportOutcome::dynamics_unmapped`] instead of being invented
+//!   as a fade-over-distance parameter.
 //! * a mid-write IO failure can leave the files already written in
 //!   place (no rollback); the targets were all fresh, so nothing the
 //!   user owned was overwritten.
@@ -88,7 +94,9 @@
 //! Non-goals (v1): cross-library stamp dedup (blake3 of a new stamp vs
 //! the library's existing sidecars — follow-up), one sidecar per shared
 //! pattern, sampling a carried texture in the paint engine (kill 3.1c),
-//! v8+ files, dynamics → engine wiring, and `.abr` WRITING (never).
+//! v8+ files, the size dynamics beyond jitter + minimum (the control
+//! source's own response, fade steps, angle/roundness dynamics), and
+//! `.abr` WRITING (never).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -449,6 +457,11 @@ pub struct AbrImportOutcome {
     /// Brushes emitted radial — computed, or tip missing
     /// (`AbrImport::brushes_without_sample`).
     pub brushes_without_sample: u32,
+    /// Kept brushes whose `szVr` size dynamics were on (`control_index
+    /// != 0`): the jitter and minimum mapped, but the control source and
+    /// fade `steps` have no engine equivalent (wave 3.3,
+    /// `AbrImport::dynamics_unmapped`). Planned on a dry run too.
+    pub dynamics_unmapped: u32,
 }
 
 /// The slug length cap, in chars (ASCII, so also bytes).
@@ -654,6 +667,7 @@ pub fn import_abr_asset(
         duplicate_stamps_skipped: imported.duplicate_stamps_skipped,
         orphan_samples: imported.orphan_samples,
         brushes_without_sample: imported.brushes_without_sample,
+        dynamics_unmapped: imported.dynamics_unmapped,
     };
     if dry_run {
         return Ok(outcome);
@@ -760,6 +774,12 @@ pub(crate) mod abr_fixture {
             self.raw(b"bool");
             self.u8(u8::from(value));
         }
+        /// An `i32` integer value: the `long` type + the number.
+        fn integer(&mut self, key: &str, value: i32) {
+            self.id(key);
+            self.raw(b"long");
+            self.i32(value);
+        }
         /// The `Brsh` tip-shape descriptor: `Objc` + a class header, the
         /// nine base keys, and `sampledData` when sampled.
         fn shape(&mut self, name: &str, tip: Option<&str>) {
@@ -790,6 +810,33 @@ pub(crate) mod abr_fixture {
             self.obj_header("_", 1);
             self.id("Brsh");
             self.shape(name, tip);
+        }
+        /// Wave 3.3: [`Self::brush`] plus the size-dynamics block on the
+        /// OUTER descriptor (`useTipDynamics` + `szVr`), where
+        /// `parse_brush` reads it. The jitter and minimum are stored as
+        /// `#Prc` percentages, like Photoshop's own `szVr`.
+        fn dynamics_brush(
+            &mut self,
+            name: &str,
+            tip: Option<&str>,
+            control_index: i32,
+            steps: i32,
+            jitter_percent: f64,
+            minimum_percent: f64,
+        ) {
+            self.raw(b"Objc");
+            // `Brsh` plus `useTipDynamics` and `szVr`.
+            self.obj_header("_", 3);
+            self.id("Brsh");
+            self.shape(name, tip);
+            self.boolean("useTipDynamics", true);
+            self.id("szVr");
+            self.raw(b"Objc");
+            self.obj_header("brVr", 4);
+            self.integer("bVTy", control_index);
+            self.integer("fStp", steps);
+            self.units("jitter", b"#Prc", jitter_percent);
+            self.units("Mnm ", b"#Prc", minimum_percent);
         }
         /// Wave 3.1b: [`Self::brush`] plus the seven texture keys on the
         /// OUTER descriptor — where `parse_brush` reads them — and the
@@ -876,6 +923,25 @@ pub(crate) mod abr_fixture {
         file.i16(6);
         file.i16(1);
         file.section(b"samp", &samp.0);
+        file.section(b"desc", &desc.0);
+        file.0
+    }
+
+    /// Wave 3.3: one computed brush whose `szVr` size dynamics are on
+    /// (control fade = `bVTy` 1, 4 steps, 30% jitter, 40% minimum). No
+    /// `samp` section: the brush maps to a radial preset.
+    pub(crate) fn bytes_with_dynamics() -> Vec<u8> {
+        let mut desc = Enc(Vec::new());
+        desc.u32(16);
+        desc.obj_header("null", 1);
+        desc.id("Brsh");
+        desc.raw(b"VlLs");
+        desc.i32(1);
+        desc.dynamics_brush("Fade Tip", None, 1, 4, 30.0, 40.0);
+
+        let mut file = Enc(Vec::new());
+        file.i16(6);
+        file.i16(1);
         file.section(b"desc", &desc.0);
         file.0
     }
@@ -1677,5 +1743,49 @@ mod tests {
             std::fs::read(lib.join("paper-two.pattern.png")).unwrap(),
             b"mine"
         );
+    }
+
+    // --- wave 3.3: size dynamics → jitter + radius floor -----------------
+
+    /// Writes the dynamics `.abr` fixture to `<dir>/<file_name>`.
+    fn dynamics_abr_file(dir: &Path, file_name: &str) -> PathBuf {
+        let path = dir.join(file_name);
+        std::fs::write(&path, abr_fixture::bytes_with_dynamics()).unwrap();
+        path
+    }
+
+    /// Wave 3.3: a `szVr` block lands its jitter on `params.jitter.size`
+    /// and its minimum on the radius-curve floor, and the control/steps
+    /// are counted (both on a plain import and on a dry run).
+    #[test]
+    fn abr_size_dynamics_land_jitter_and_a_radius_floor() {
+        let src_dir = tmp_dir("abr-dyn-src");
+        let lib = tmp_dir("abr-dyn-lib");
+        let src = dynamics_abr_file(&src_dir, "fade.abr");
+        let dry = import_abr_asset(&src, Some(&lib), true).unwrap();
+        assert!(dry.dry_run);
+        assert_eq!(dry.presets, 1);
+        assert_eq!(dry.dynamics_unmapped, 1, "a dry run plans the count");
+        let out = import_abr_asset(&src, Some(&lib), false).unwrap();
+        assert_eq!(out.presets, 1);
+        assert_eq!(out.stamps_written, 0, "a computed brush has no tip");
+        assert_eq!(out.dynamics_unmapped, 1);
+        let preset = load_preset(&lib.join("fade-tip.umberbrush"));
+        // 30% of the diameter jitters by up to 30%; the fallback default
+        // (no dynamics) is 0.
+        assert!((preset.params.jitter.size - 0.3).abs() < 1e-6);
+        // 40% minimum: the floor has exact endpoints and a linear middle.
+        assert_eq!(preset.radius_curve.evaluate(0.0), 0.4);
+        assert!((preset.radius_curve.evaluate(0.5) - 0.7).abs() < 1e-6);
+        assert_eq!(preset.radius_curve.evaluate(1.0), 1.0);
+        assert_eq!(
+            preset.alpha_curve,
+            umber_brush::preset::ControlCurve::identity()
+        );
+        // The other jitter channels stay off (only size dynamics map).
+        assert_eq!(preset.params.jitter.angle_degrees, 0.0);
+        assert_eq!(preset.params.jitter.position, 0.0);
+        assert_eq!(preset.params.jitter.flow, 0.0);
+        assert!(preset.validate().is_ok());
     }
 }

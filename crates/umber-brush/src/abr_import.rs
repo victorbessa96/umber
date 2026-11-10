@@ -28,7 +28,27 @@
 //!   `patt` record carries gets `texture` = the index of that pattern in
 //!   [`AbrImport::patterns`] plus its parameters; the pattern itself is
 //!   carried once per id, however many brushes share it;
+//! * a brush whose size dynamics are on (`useTipDynamics` + `szVr`, and
+//!   `control_index != 0`) gets `params.jitter.size` ← `jitter` (a
+//!   fraction, clamped to `0..=1`) and, when `minimum > 0`, `radius_curve`
+//!   ← the straight line `(0, minimum) → (1, 1)` — the closest shape a
+//!   4-point piecewise-linear [`ControlCurve`] can express, stored as its
+//!   samples at the identity curve's x knots; `alpha_curve` is untouched;
 //! * any other brush is a radial preset (`stamped = false`, no stamp).
+//!
+//! Size dynamics judgment calls: `szVr` maps only as far as the engine
+//! can express them. `jitter` becomes the per-dab size jitter and
+//! `minimum` a radius floor *as if it were pressure-driven*: the stored
+//! control source (`bVTy`: fade / pen / tilt / rotation / …) is not
+//! translated, so a fade minimum applied as a pressure floor is the
+//! closest available shape rather than an equivalent, and `steps` (the
+//! fade step count) has no engine counterpart (there is no
+//! fade-over-distance parameter). Brushes whose dynamics are ON
+//! (`control_index != 0`) are counted in
+//! [`AbrImport::dynamics_unmapped`], so the loss stays visible. A missing
+//! `szVr`, or one whose control is off (`control_index == 0`), maps
+//! exactly as before — default jitter, identity curves — which keeps
+//! every pre-3.3 import byte-identical.
 //!
 //! Judgment calls: a duplicate stamp (byte-equal to an earlier emitted
 //! entry's) drops the LATER entry and counts it — two brushes sharing a
@@ -47,12 +67,14 @@
 //! cannot borrow from [`AbrFile`]. One clone per referenced pattern.
 //!
 //! Non-goals (v1): v8+ files, dual brush, scattering, roundness, flips,
-//! dynamics → engine wiring (the parsed [`AbrBrush::dynamics`] is dropped),
-//! sampling the carried texture in the paint engine (kill 3.1c — the
-//! import writes no pixels that use it), `.abr` writing (never), and the
-//! CLI fan-out over a whole file (row 284).
+//! the rest of dynamics (the control source's own response, fade steps,
+//! angle/roundness dynamics), sampling the carried texture in the paint
+//! engine (kill 3.1c — the import writes no pixels that use it), `.abr`
+//! writing (never), and the CLI fan-out over a whole file (row 284).
 
-use crate::abr::{match_pattern, match_sample, read_abr, AbrBrush, AbrError, AbrFile, AbrPattern};
+use crate::abr::{
+    match_pattern, match_sample, read_abr, AbrBrush, AbrDynamics, AbrError, AbrFile, AbrPattern,
+};
 use crate::preset::{BrushPreset, ControlCurve, LazyMouseConfig, SpacingConfig};
 use crate::{BrushParams, OneEuroParams, StampAngle, StrokeMethod};
 
@@ -111,6 +133,12 @@ pub struct AbrImport {
     /// Textured brushes whose pattern id no `patt` record carries; their
     /// `texture` is `None`.
     pub textures_missing_pattern: u32,
+    /// Kept brushes whose size dynamics were on (`szVr` with
+    /// `control_index != 0`): the jitter and minimum mapped, but the
+    /// control source and the fade `steps` have no engine equivalent, so
+    /// the brush is counted here (wave 3.3). Brushes whose dynamics are
+    /// off, and brushes dropped as stamp duplicates, are not counted.
+    pub dynamics_unmapped: u32,
 }
 
 /// Parses `bytes` as an `.abr` file and maps it (see the module docs).
@@ -206,6 +234,12 @@ fn map_file(file: &AbrFile) -> AbrImport {
             texture,
             brush_index: index,
         });
+        // Wave 3.3: the size dynamics that do not map (an ON control has
+        // no engine equivalent) are counted per kept brush. The gate is
+        // the same one `map_preset` maps through.
+        if mapped_size_dynamics(brush.dynamics).is_some() {
+            out.dynamics_unmapped += 1;
+        }
     }
     out
 }
@@ -243,14 +277,25 @@ fn map_preset(brush: &AbrBrush, index: usize, stamped: bool) -> BrushPreset {
         0.0
     };
 
+    let mut params = BrushParams {
+        hardness: hardness as f32,
+        stamped,
+        stamp_angle: StampAngle::Fixed { degrees },
+        ..BrushParams::default()
+    };
+    let mut radius_curve = ControlCurve::default();
+    if let Some((jitter, minimum)) = mapped_size_dynamics(brush.dynamics) {
+        params.jitter.size = jitter;
+        // `minimum` 0 is "no floor": the identity curve (today's value),
+        // so a zero minimum leaves the serialized preset unchanged.
+        if minimum > 0.0 {
+            radius_curve = floor_curve(minimum);
+        }
+    }
+
     BrushPreset {
         name,
-        params: BrushParams {
-            hardness: hardness as f32,
-            stamped,
-            stamp_angle: StampAngle::Fixed { degrees },
-            ..BrushParams::default()
-        },
+        params,
         one_euro: OneEuroParams::default(),
         lazy_mouse: LazyMouseConfig {
             radius_px: radius as f32,
@@ -260,7 +305,7 @@ fn map_preset(brush: &AbrBrush, index: usize, stamped: bool) -> BrushPreset {
             dabs_per_radius: dabs as f32,
         },
         alpha_curve: ControlCurve::default(),
-        radius_curve: ControlCurve::default(),
+        radius_curve,
         stroke_method: StrokeMethod::default(),
         size: 1.0,
         catalog: String::new(),
@@ -270,10 +315,47 @@ fn map_preset(brush: &AbrBrush, index: usize, stamped: bool) -> BrushPreset {
     }
 }
 
+/// The engine-side part of a brush's size dynamics: `(jitter, minimum)`
+/// as fractions, or `None` when the dynamics are off (`control_index ==
+/// 0`) or absent. Non-finite values become 0, and both are clamped to
+/// their engine range (`Jitter::size` is 0..=1; a floor above 1 is a
+/// constant full size, i.e. 1).
+fn mapped_size_dynamics(dynamics: Option<AbrDynamics>) -> Option<(f32, f32)> {
+    let dynamics = dynamics.filter(|d| d.control_index != 0)?;
+    let fraction = |v: f64| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        }
+    };
+    Some((fraction(dynamics.jitter), fraction(dynamics.minimum)))
+}
+
+/// `minimum` as a radius floor: the straight line `(0, minimum) → (1, 1)`,
+/// sampled at [`ControlCurve::identity`]'s x knots. The curve is
+/// piecewise-linear, so this is exactly that line; four points is the
+/// only shape the type stores.
+fn floor_curve(minimum: f32) -> ControlCurve {
+    let at = |x: f32| minimum + (1.0 - minimum) * x;
+    let points = [
+        (0.0, minimum),
+        (1.0 / 3.0, at(1.0 / 3.0)),
+        (2.0 / 3.0, at(2.0 / 3.0)),
+        (1.0, 1.0),
+    ];
+    ControlCurve::try_new(&points).unwrap_or_else(|_| {
+        // Unreachable: every coordinate is finite and x is strictly
+        // increasing, so `try_new` cannot reject this. Fall back to no
+        // floor rather than crash (the never-crash rule).
+        ControlCurve::identity()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abr::{AbrSample, AbrTexture, AbrToolClass};
+    use crate::abr::{AbrDynamics, AbrSample, AbrTexture, AbrToolClass};
 
     fn brush(name: &str, tip: Option<&str>) -> AbrBrush {
         AbrBrush {
@@ -598,5 +680,92 @@ mod tests {
         assert!(out.patterns.is_empty());
         assert_eq!(out.orphan_patterns, 1);
         assert_eq!(out.textures_missing_pattern, 0);
+    }
+
+    // --- wave 3.3: size dynamics → jitter + radius floor -----------------
+
+    fn dynamics(control_index: i32, steps: i32, jitter: f64, minimum: f64) -> AbrDynamics {
+        AbrDynamics {
+            control_index,
+            steps,
+            jitter,
+            minimum,
+        }
+    }
+
+    /// Wave 3.3: an ON `szVr` lands its jitter on `params.jitter.size` and
+    /// its minimum on a radius floor through `(0, minimum) → (1, 1)`.
+    #[test]
+    fn size_dynamics_map_jitter_and_a_radius_floor() {
+        let mut b = brush("Dynamic", None);
+        b.dynamics = Some(dynamics(2, 3, 0.25, 0.4));
+        let out = map_file(&file(vec![], vec![b]));
+        let p = &out.entries[0].preset;
+        assert_eq!(p.params.jitter.size, 0.25, "25% jitter is the fraction");
+        // The floor's endpoints are exact; the midpoint is an f32 lerp.
+        assert_eq!(p.radius_curve.evaluate(0.0), 0.4);
+        assert!((p.radius_curve.evaluate(0.5) - 0.7).abs() < 1e-6);
+        assert_eq!(p.radius_curve.evaluate(1.0), 1.0);
+        // Only the SIZE channel maps: the flow curve stays the identity.
+        assert_eq!(p.alpha_curve, ControlCurve::identity());
+        assert_eq!(out.dynamics_unmapped, 1, "control + steps do not map");
+        assert!(p.validate().is_ok());
+    }
+
+    /// Byte-compat pin: `control_index == 0` ("off") must serialize exactly
+    /// as a brush with no `szVr` at all.
+    #[test]
+    fn size_dynamics_off_serializes_like_no_dynamics() {
+        let plain = brush("Same", None);
+        let mut off = brush("Same", None);
+        off.dynamics = Some(dynamics(0, 4, 0.5, 0.5));
+        let out = map_file(&file(vec![], vec![plain, off]));
+        assert_eq!(
+            out.entries[0].preset.to_json().expect("serializes"),
+            out.entries[1].preset.to_json().expect("serializes"),
+            "an off control maps exactly as today"
+        );
+        let p = &out.entries[1].preset;
+        assert_eq!(p.params.jitter.size, 0.0);
+        assert_eq!(p.radius_curve, ControlCurve::identity());
+        assert_eq!(out.dynamics_unmapped, 0, "an off control carries nothing");
+    }
+
+    /// Out-of-range and non-finite dynamics values are pulled into the
+    /// engine's documented ranges instead of rejecting the brush.
+    #[test]
+    fn size_dynamics_clamp_out_of_range_and_non_finite() {
+        for (jitter, minimum) in [(-1.0, 0.0), (f64::NAN, f64::NAN)] {
+            let mut b = brush("Clamped", None);
+            b.dynamics = Some(dynamics(1, 4, jitter, minimum));
+            let out = map_file(&file(vec![], vec![b]));
+            let p = &out.entries[0].preset;
+            assert_eq!(p.params.jitter.size, 0.0, "jitter {jitter}");
+            assert_eq!(p.radius_curve, ControlCurve::identity(), "min {minimum}");
+        }
+        // 250% jitter clamps to `Jitter::size`'s 1.0 ceiling.
+        let mut high = brush("Ceiling", None);
+        high.dynamics = Some(dynamics(1, 4, 2.5, 0.0));
+        let out = map_file(&file(vec![], vec![high]));
+        assert_eq!(out.entries[0].preset.params.jitter.size, 1.0);
+        // A 300% minimum clamps to a constant full-size floor.
+        let mut full = brush("Floor", None);
+        full.dynamics = Some(dynamics(1, 4, 0.0, 3.0));
+        let out = map_file(&file(vec![], vec![full]));
+        assert_eq!(out.entries[0].preset.radius_curve.evaluate(0.0), 1.0);
+    }
+
+    /// A duplicate-stamp brush is dropped before mapping, so its dynamics
+    /// are not counted.
+    #[test]
+    fn dynamics_count_only_kept_brushes_with_a_control() {
+        let mut first = brush("First", Some("t1"));
+        first.dynamics = Some(dynamics(2, 3, 0.1, 0.0));
+        let mut second = brush("Second", Some("t1"));
+        second.dynamics = Some(dynamics(2, 3, 0.1, 0.0));
+        let out = map_file(&file(vec![sample("t1", ramp())], vec![first, second]));
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].preset.name, "First");
+        assert_eq!(out.dynamics_unmapped, 1);
     }
 }

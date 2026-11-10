@@ -17,7 +17,13 @@
 //!   its hardness, angle and spacing.
 //! - Dynamics, textures, dual brushes, colour dynamics, "tips" and
 //!   "dynamic" shapes have no Umber equivalent yet. They are listed per
-//!   brush in the report, never silently dropped.
+//!   brush in the report, never silently dropped. Exception (wave 3.3):
+//!   the size dynamics' jitter and minimum diameter DO carry over — the
+//!   jitter to `params.jitter.size`, the minimum to a radius-curve floor
+//!   (the closest shape the engine has: the control source itself is not
+//!   translated, so a fade minimum acts as a pressure floor) — while the
+//!   rest of the block (the control, its fade steps, the angle/roundness
+//!   dynamics) is still reported as `shape dynamics control`.
 //!
 //! Never-crash: the file is size-capped before parsing, tips are capped
 //! in pixels, and every mapping step returns a report line instead of
@@ -25,8 +31,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ag_psd::abr::{BrushShape, SampleInfo};
-use umber_brush::preset::{BrushPreset, SpacingConfig};
+use ag_psd::abr::{Brush, BrushShape, SampleInfo};
+use umber_brush::preset::{BrushPreset, ControlCurve, SpacingConfig};
 use umber_brush::StampAngle;
 
 /// Largest `.abr` read (64 MiB; packs are typically under 20 MiB).
@@ -260,6 +266,36 @@ fn preflight_samples(b: &[u8]) -> Result<(), AbrError> {
     Ok(())
 }
 
+/// The engine-side part of a brush's size dynamics (`szVr`): `(jitter,
+/// minimum)` as fractions, or `None` when the control is off or the brush
+/// carries no shape dynamics. ag-psd already stores both as percent / 100.
+fn size_dynamics_mapping(brush: &Brush) -> Option<(f64, f64)> {
+    let shape = brush.shape_dynamics.as_ref()?;
+    if shape.size_dynamics.control == "off" {
+        return None;
+    }
+    Some((shape.size_dynamics.jitter, shape.size_dynamics.minimum))
+}
+
+/// `minimum` as a radius floor: the straight line `(0, minimum) → (1, 1)`,
+/// sampled at the identity curve's x knots. A [`ControlCurve`] is
+/// piecewise-linear and always stores four points, so this is exactly
+/// that line.
+fn floor_curve(minimum: f32) -> ControlCurve {
+    let at = |x: f32| minimum + (1.0 - minimum) * x;
+    let points = [
+        (0.0, minimum),
+        (1.0 / 3.0, at(1.0 / 3.0)),
+        (2.0 / 3.0, at(2.0 / 3.0)),
+        (1.0, 1.0),
+    ];
+    match ControlCurve::try_new(&points) {
+        Ok(curve) => curve,
+        // Unreachable: finite coordinates and strictly increasing x.
+        Err(_) => ControlCurve::identity(),
+    }
+}
+
 /// The mapping, separated from parsing so it is testable with
 /// hand-built brushes.
 pub fn map_abr(brushes: &[ag_psd::abr::Brush], samples: &[SampleInfo]) -> AbrImport {
@@ -272,7 +308,10 @@ pub fn map_abr(brushes: &[ag_psd::abr::Brush], samples: &[SampleInfo]) -> AbrImp
         };
         let mut dropped = Vec::new();
         if brush.shape_dynamics.is_some() {
-            dropped.push("shape dynamics");
+            // Wave 3.3 maps the size jitter and minimum diameter; the
+            // control source, its fade steps and the angle/roundness
+            // channels still have no engine equivalent.
+            dropped.push("shape dynamics control");
         }
         if brush.scatter.is_some() {
             dropped.push("scattering");
@@ -381,6 +420,20 @@ pub fn map_abr(brushes: &[ag_psd::abr::Brush], samples: &[SampleInfo]) -> AbrImp
                 degrees: angle as f32,
             };
         }
+        // Wave 3.3: the size dynamics the engine can express — the per-dab
+        // size jitter and the minimum-diameter floor — mapped the same way
+        // as the CLI importer. `size` above is the brush's own diameter
+        // and stays untouched.
+        if let Some((jitter, minimum)) = size_dynamics_mapping(brush) {
+            preset.params.jitter.size = if jitter.is_finite() {
+                jitter.clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            };
+            if minimum.is_finite() && minimum > 0.0 {
+                preset.radius_curve = floor_curve(minimum.clamp(0.0, 1.0) as f32);
+            }
+        }
         if !dropped.is_empty() {
             out.report
                 .push(format!("{name}: not carried over: {}", dropped.join(", ")));
@@ -453,7 +506,7 @@ pub fn write_brushes(import: &AbrImport, dir: &Path) -> Result<Vec<PathBuf>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ag_psd::abr::{Brush, SampleBounds};
+    use ag_psd::abr::{Brush, BrushDynamics, SampleBounds, ShapeDynamics};
 
     fn brush(name: &str, shape: BrushShape) -> Brush {
         Brush {
@@ -487,6 +540,47 @@ mod tests {
             flip_x: false,
             flip_y: false,
             sampled_data: id.into(),
+        }
+    }
+
+    /// One 2x2 tip (`abc`) as ag-psd hands it over.
+    fn one_tip() -> Vec<SampleInfo> {
+        vec![SampleInfo {
+            id: "abc".into(),
+            bounds: SampleBounds {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 2,
+            },
+            alpha: vec![0, 128, 255, 64],
+        }]
+    }
+
+    /// A `shape_dynamics` block whose size channel is set and whose other
+    /// channels are off.
+    fn size_dynamics(control: &str, steps: f64, jitter: f64, minimum: f64) -> ShapeDynamics {
+        let off = || BrushDynamics {
+            control: "off".into(),
+            steps: 0.0,
+            jitter: 0.0,
+            minimum: 0.0,
+        };
+        ShapeDynamics {
+            size_dynamics: BrushDynamics {
+                control: control.into(),
+                steps,
+                jitter,
+                minimum,
+            },
+            minimum_diameter: 0.0,
+            tilt_scale: 0.0,
+            angle_dynamics: off(),
+            roundness_dynamics: off(),
+            minimum_roundness: 0.0,
+            flip_x: false,
+            flip_y: false,
+            brush_projection: false,
         }
     }
 
@@ -543,6 +637,62 @@ mod tests {
         assert_eq!(b.preset.params.stamp_angle, StampAngle::None);
         assert_eq!(b.dropped, vec!["wet edges"]);
         assert!(out.report.iter().any(|l| l.contains("wet edges")));
+    }
+
+    /// Wave 3.3: an ON size-dynamics block lands its jitter on
+    /// `params.jitter.size` and its minimum on a radius floor, without
+    /// touching the GUI's own size mapping.
+    #[test]
+    fn size_dynamics_map_jitter_and_a_radius_floor() {
+        let mut b = brush("Dynamics", sampled("abc", 96.0, 0.25, 0.0));
+        b.shape_dynamics = Some(size_dynamics("fade", 4.0, 0.3, 0.5));
+        let out = map_abr(&[b], &one_tip());
+        let preset = &out.brushes[0].preset;
+        assert!((preset.params.jitter.size - 0.3).abs() < 1e-6);
+        // The floor's endpoints are exact; the midpoint is an f32 lerp.
+        assert_eq!(preset.radius_curve.evaluate(0.0), 0.5);
+        assert!((preset.radius_curve.evaluate(0.5) - 0.75).abs() < 1e-6);
+        assert_eq!(preset.radius_curve.evaluate(1.0), 1.0);
+        assert_eq!(preset.alpha_curve, ControlCurve::identity());
+        // The diameter → size mapping is untouched (96 px = 2 × 48).
+        assert!((preset.size - 2.0).abs() < 1e-6);
+        // The residual block is still reported, never silently dropped.
+        assert_eq!(out.brushes[0].dropped, vec!["shape dynamics control"]);
+        assert!(
+            out.report
+                .iter()
+                .any(|l| l.contains("shape dynamics control")),
+            "{:?}",
+            out.report
+        );
+    }
+
+    /// An off control (`bVTy` 0) maps exactly as a brush with no
+    /// shape-dynamics block: default jitter, identity curves.
+    #[test]
+    fn size_dynamics_off_keeps_the_defaults() {
+        let mut b = brush("Off", sampled("abc", 96.0, 0.25, 0.0));
+        b.shape_dynamics = Some(size_dynamics("off", 4.0, 0.5, 0.5));
+        let out = map_abr(&[b], &one_tip());
+        let preset = &out.brushes[0].preset;
+        assert_eq!(preset.params.jitter.size, 0.0);
+        assert_eq!(preset.radius_curve, ControlCurve::identity());
+    }
+
+    /// Out-of-range and non-finite dynamics are clamped to the engine's
+    /// documented ranges instead of rejecting the brush.
+    #[test]
+    fn size_dynamics_clamp_out_of_range_and_non_finite() {
+        let mut b = brush("Huge", sampled("abc", 96.0, 0.25, 0.0));
+        b.shape_dynamics = Some(size_dynamics("pen pressure", 0.0, 2.5, f64::NAN));
+        let out = map_abr(&[b], &one_tip());
+        let preset = &out.brushes[0].preset;
+        assert_eq!(preset.params.jitter.size, 1.0, "250% clamps to the ceiling");
+        assert_eq!(
+            preset.radius_curve,
+            ControlCurve::identity(),
+            "a non-finite minimum is no floor"
+        );
     }
 
     #[test]
