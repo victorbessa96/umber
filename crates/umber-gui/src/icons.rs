@@ -90,7 +90,12 @@ pub const TOOL_ICONS: [&str; 10] = [
 /// panel toggles) plus the Properties context rail's own glyphs
 /// (`layers`, `layout-grid`) and distinct view-toggle glyphs
 /// (`grid-3x3` grid, `box` wireframe, `sun` lit view; UI/UX pass U1-3).
-pub const PANEL_ICONS: [&str; 13] = [
+/// 2026-11-10 round-3 audit: distinct glyphs for the file pair and the
+/// mask pair, and rail icons that no longer collide with toolbar actions
+/// (`boxes` Open Mesh, `pencil-line`/`contrast` mask pair,
+/// `sliders-horizontal` Properties, `library` Assets, `history` History,
+/// `upload` Export).
+pub const PANEL_ICONS: [&str; 20] = [
     "file",
     "folder-open",
     "save",
@@ -104,6 +109,13 @@ pub const PANEL_ICONS: [&str; 13] = [
     "grid-3x3",
     "box",
     "sun",
+    "boxes",
+    "pencil-line",
+    "contrast",
+    "sliders-horizontal",
+    "library",
+    "history",
+    "upload",
 ];
 
 /// One icon's pixel rect inside the atlas.
@@ -1135,11 +1147,14 @@ mod tests {
         assert_eq!(manifest.tool.atlas, [80, 60]);
         assert_eq!(manifest.tool2x.atlas, [160, 120]);
         // UI/UX pass U1-3 grew the panel family 8 -> 13 (rail + view
-        // glyphs): pack_grid(13, 16) = 4 cols x 4 rows = 64x64.
-        assert_eq!(manifest.panel.atlas, [64, 64]);
-        assert_eq!(manifest.panel2x.atlas, [128, 128]);
+        // glyphs): pack_grid(13, 16) = 4 cols x 4 rows = 64x64. The
+        // 2026-11-10 round-3 icon audit grew it 13 -> 20 (distinct glyphs
+        // for the file pair, the mask pair, and the colliding rail icons):
+        // pack_grid(20, 16) = 5 cols x 4 rows = 80x64.
+        assert_eq!(manifest.panel.atlas, [80, 64]);
+        assert_eq!(manifest.panel2x.atlas, [160, 128]);
         assert_eq!(manifest.tool.order.len(), 10, "the tool family census");
-        assert_eq!(manifest.panel.order.len(), 13, "the panel family census");
+        assert_eq!(manifest.panel.order.len(), 20, "the panel family census");
         assert!(manifest.missing.is_empty());
     }
 

@@ -583,7 +583,7 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
             actions.push(ShellAction::NewProject);
         }
         let icon_size = 16.0;
-        if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
+        if icons::icon_button(ui, atlas, "boxes", icon_size, false)
             .action_tip(ShellAction::OpenMesh, state)
             .clicked()
         {
@@ -671,12 +671,13 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         }
         ui.separator();
 
-        // Quick mask (X / I): the pencil glyph paints the mask's edit
-        // state as the active tint.
+        // Quick mask (X / I): the pencil-line glyph paints the mask's edit
+        // state as the active tint; invert uses the contrast glyph so the
+        // pair no longer shares one icon (round-3 audit F4).
         let mask = icons::icon_button_enabled(
             ui,
             atlas,
-            "pencil",
+            "pencil-line",
             icon_size,
             view.mask_editing,
             view.paint_available,
@@ -686,7 +687,7 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
             actions.push(ShellAction::ToggleMaskMode);
         }
         let invert =
-            icons::icon_button_enabled(ui, atlas, "pencil", icon_size, false, view.mask_editing)
+            icons::icon_button_enabled(ui, atlas, "contrast", icon_size, false, view.mask_editing)
                 .action_tip(ShellAction::InvertMask, state);
         if invert.clicked() && view.mask_editing {
             actions.push(ShellAction::InvertMask);
@@ -1510,7 +1511,8 @@ mod tests {
     }
 
     /// Every glyph the top strip paints.
-    const TOP_STRIP_GLYPHS: [&str; 8] = [
+    const TOP_STRIP_GLYPHS: [&str; 10] = [
+        "boxes",
         "folder-open",
         "save",
         "undo-2",
@@ -1518,8 +1520,19 @@ mod tests {
         "box",
         "grid-3x3",
         "sun",
-        "pencil",
+        "pencil-line",
+        "contrast",
     ];
+
+    /// Round-3 audit F1/F4: no two top-strip actions may share a glyph.
+    #[test]
+    fn top_strip_glyphs_are_unique_per_action() {
+        let mut sorted = TOP_STRIP_GLYPHS;
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            assert_ne!(pair[0], pair[1], "two top-strip actions share a glyph");
+        }
+    }
 
     /// R-GLYPH-1 end to end: the atlas the APP loads (both families,
     /// merged) resolves every glyph the toolbar, the tool row and the

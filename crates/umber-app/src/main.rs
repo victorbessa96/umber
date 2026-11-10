@@ -373,12 +373,12 @@ impl Panel {
     pub fn rail_icon(&self) -> &'static str {
         match self {
             Panel::LayerStack => "layers",
-            Panel::Properties => "pencil",
-            Panel::Assets => "folder-open",
-            Panel::History => "undo-2",
+            Panel::Properties => "sliders-horizontal",
+            Panel::Assets => "library",
+            Panel::History => "history",
             Panel::TextureSets => "layout-grid",
             Panel::Bakes => "sun",
-            Panel::Export => "save",
+            Panel::Export => "upload",
             Panel::Graph => "grid-3x3",
             Panel::Display => "eye",
             Panel::Viewport | Panel::UvView => "box",
@@ -5598,6 +5598,9 @@ impl eframe::App for UmberApp {
                 }
                 crate::empty_state::HomeCardAction::OpenProject => {
                     self.dispatch(toolbar::ShellAction::OpenProject)
+                }
+                crate::empty_state::HomeCardAction::OpenMesh => {
+                    self.dispatch(toolbar::ShellAction::OpenMesh)
                 }
                 crate::empty_state::HomeCardAction::OpenRecent(path) => {
                     self.open_project_at(path.clone());

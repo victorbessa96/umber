@@ -119,6 +119,9 @@ pub enum HomeCardAction {
     /// The Open… button, or a double-click on empty space
     /// (`ShellAction::OpenProject`).
     OpenProject,
+    /// The Open Mesh button (round-3 audit F2): the drop-zone hero said
+    /// "drop a mesh" but offered no button for it.
+    OpenMesh,
     /// A recent row: open this project dir.
     OpenRecent(PathBuf),
     /// The Recover last session row: open the autosave snapshot.
@@ -427,6 +430,18 @@ pub fn home_card(
                 .clicked()
             {
                 action = Some(HomeCardAction::OpenProject);
+            }
+            let mesh_rect = Rect::from_min_size(
+                pair.min + Vec2::new(2.0 * (BUTTON_SIZE.x + BUTTON_GAP), 0.0),
+                BUTTON_SIZE,
+            );
+            let mesh = home_button(tr("home.open-mesh"), ShellAction::OpenMesh, is_mac);
+            if ui
+                .place(mesh_rect, mesh)
+                .on_hover_text(tr("home.open-mesh-tip"))
+                .clicked()
+            {
+                action = Some(HomeCardAction::OpenMesh);
             }
 
             let row_w = ui.available_width();
