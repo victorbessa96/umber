@@ -309,6 +309,10 @@ pub fn map_abr(brushes: &[ag_psd::abr::Brush], samples: &[SampleInfo]) -> AbrImp
             stroke_method: umber_brush::StrokeMethod::default(),
             catalog: String::new(),
             size: 1.0,
+            // Wave 3.1b field: the GUI path drops `abr.patterns` (it
+            // reports texture as "not carried over"), so the block stays
+            // empty here.
+            texture: None,
         };
         let mut stamp = None;
         let (size, spacing, spacing_on, angle) = match &brush.shape {

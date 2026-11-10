@@ -51,8 +51,8 @@
 //! * the stamp sidecar is written `Transfer::Linear` (a coverage data
 //!   plane, the stencil converter's rule), rows in file order (top row
 //!   first, as the `.abr` stores them).
-//! * a dry run reports the PLANNED counts (`presets` / `stamps_written`
-//!   = what would be written) with `dry_run: true`.
+//! * a dry run reports the PLANNED counts (`presets` / `stamps_written` /
+//!   `patterns_written` = what would be written) with `dry_run: true`.
 //! * a mid-write IO failure can leave the files already written in
 //!   place (no rollback); the targets were all fresh, so nothing the
 //!   user owned was overwritten.
@@ -61,9 +61,34 @@
 //!   library DIR and whose `bytes` is the total written; the CLI and the
 //!   agent step call [`import_abr_asset`] directly for the full outcome.
 //!
+//! ## The texture sidecar (wave 3.1b)
+//!
+//! A brush whose descriptor names a `patt` pattern
+//! (`AbrImportEntry::texture`) gets a `<slug>.pattern.png` sidecar beside
+//! its preset, and that preset's `texture` block names the file
+//! (`umber_brush::preset::PatternTexture`). Judgment calls:
+//!
+//! * the sidecar is named after the PRESET slug — one file per preset that
+//!   references a pattern, not one per pattern. A pack sharing one paper
+//!   texture across many brushes therefore writes byte-identical copies.
+//!   That keeps each preset self-contained (its `file` always names its own
+//!   sidecar); one shared file would need a pattern-slug rule (name vs id vs
+//!   the first referencing preset) this kill does not define. Deduping is a
+//!   follow-up.
+//! * the PNG uses the same `Transfer::Linear` call shape as the stamp:
+//!   `.abr` pattern bytes are stored unmanaged, so they pass through
+//!   unchanged, and the engine consumer (kill 3.1c) owns any colour decode.
+//! * pattern sidecars are appended AFTER every `<slug>.umberbrush` +
+//!   `<slug>.stamp.png` pair in `targets`, so the target order of a file
+//!   without patterns is unchanged.
+//! * the texture block is PERSISTED but not sampled: no painted pixel changes
+//!   until kill 3.1c. Persisting now is deliberate — the import is one-shot,
+//!   and a re-run to pick up the texture would hit the no-overwrite refusal.
+//!
 //! Non-goals (v1): cross-library stamp dedup (blake3 of a new stamp vs
-//! the library's existing sidecars — follow-up), `patt` patterns, v8+
-//! files, dynamics → engine wiring, and `.abr` WRITING (never).
+//! the library's existing sidecars — follow-up), one sidecar per shared
+//! pattern, sampling a carried texture in the paint engine (kill 3.1c),
+//! v8+ files, dynamics → engine wiring, and `.abr` WRITING (never).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -405,13 +430,17 @@ pub struct AbrImportOutcome {
     pub source: PathBuf,
     /// Every file written (or planned), in entry order: each
     /// `<slug>.umberbrush`, followed by its `<slug>.stamp.png` when
-    /// stamped.
+    /// stamped, then — after every preset/stamp pair — each
+    /// `<slug>.pattern.png` texture sidecar.
     pub targets: Vec<PathBuf>,
     pub dry_run: bool,
     /// `.umberbrush` files written (planned, on a dry run).
     pub presets: u32,
     /// `.stamp.png` sidecars written (planned, on a dry run).
     pub stamps_written: u32,
+    /// `.pattern.png` texture sidecars written (planned, on a dry run) —
+    /// one per preset whose brush names a pattern (wave 3.1b).
+    pub patterns_written: u32,
     /// Brushes dropped because an earlier brush in the file has the
     /// byte-identical stamp (`AbrImport::duplicate_stamps_skipped`).
     pub duplicate_stamps_skipped: u32,
@@ -478,23 +507,27 @@ fn unique_slug(base: String, taken: &mut HashSet<String>) -> String {
     }
 }
 
-/// One planned preset file and its optional stamp sidecar.
+/// One planned preset file plus its optional stamp and texture sidecars.
 struct AbrPlanItem {
     preset_path: PathBuf,
     json: String,
     stamp: Option<(PathBuf, u32, u32, Vec<u8>)>,
+    /// `<slug>.pattern.png` — the brush's `.abr` pattern (wave 3.1b).
+    pattern: Option<(PathBuf, u32, u32, Vec<u8>)>,
 }
 
 /// Row 284: fans an `.abr` brush library out into the brush library dir
 /// (`library`, or the user preset dir) — one `<slug>.umberbrush` per kept
-/// brush plus a `<slug>.stamp.png` per stamped one (module docs: the
-/// slug rules, the all-or-nothing refusal, the dry-run counts).
+/// brush, a `<slug>.stamp.png` per stamped one and a `<slug>.pattern.png`
+/// per textured one (module docs: the slug rules, the all-or-nothing
+/// refusal, the dry-run counts).
 ///
 /// # Errors
 ///
 /// [`ImportError::SourceNotFound`]; [`ImportError::UnsupportedExtension`]
 /// for a non-`.abr` file; [`ImportError::Invalid`] when the file does
-/// not parse (or a mapped preset fails to serialize / validate);
+/// not parse, a mapped preset fails to serialize / validate, or a brush's
+/// texture names a pattern index the import did not carry;
 /// [`ImportError::LibraryDirUnavailable`]; [`ImportError::TargetExists`]
 /// when ANY planned target exists (nothing is written);
 /// [`ImportError::Io`] on a write failure.
@@ -537,22 +570,56 @@ pub fn import_abr_asset(
     let mut plan = Vec::with_capacity(imported.entries.len());
     for entry in imported.entries {
         let index = entry.brush_index;
-        entry
-            .preset
-            .validate()
-            .map_err(|e| invalid(format!("brush {index} maps to an invalid preset: {e}")))?;
-        let json = entry
-            .preset
-            .to_json()
-            .map_err(|e| invalid(format!("brush {index} does not serialize: {e}")))?;
-        let slug = unique_slug(abr_slug(&entry.preset.name, entry.brush_index), &mut taken);
+        let mut preset = entry.preset;
+        let slug = unique_slug(abr_slug(&preset.name, index), &mut taken);
         let stamp = entry
             .stamp
             .map(|(w, h, rgba)| (dir.join(format!("{slug}.stamp.png")), w, h, rgba));
+        // Wave 3.1b: a brush whose descriptor names a `patt` pattern gets
+        // a `<slug>.pattern.png` sidecar and a texture block naming it.
+        // The pattern index is resolved against the carried patterns; an
+        // index the import did not carry is a mapping bug, not a file the
+        // user can fix, so it refuses typed.
+        let pattern = match entry.texture {
+            Some(texture) => {
+                let source = imported
+                    .patterns
+                    .get(texture.pattern_index)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "brush {index} references pattern {} the import did not carry",
+                            texture.pattern_index
+                        ))
+                    })?;
+                let file = format!("{slug}.pattern.png");
+                preset.texture = Some(umber_brush::preset::PatternTexture {
+                    file: file.clone(),
+                    scale: texture.scale as f32,
+                    depth: texture.depth as f32,
+                    invert: texture.invert,
+                    blend_mode: texture.blend_mode,
+                    each_tip: texture.each_tip,
+                });
+                Some((
+                    dir.join(file),
+                    source.width,
+                    source.height,
+                    source.rgba.clone(),
+                ))
+            }
+            None => None,
+        };
+        preset
+            .validate()
+            .map_err(|e| invalid(format!("brush {index} maps to an invalid preset: {e}")))?;
+        let json = preset
+            .to_json()
+            .map_err(|e| invalid(format!("brush {index} does not serialize: {e}")))?;
         plan.push(AbrPlanItem {
             preset_path: dir.join(format!("{slug}.umberbrush")),
             json,
             stamp,
+            pattern,
         });
     }
     let mut targets = Vec::new();
@@ -562,12 +629,20 @@ pub fn import_abr_asset(
             targets.push(path.clone());
         }
     }
+    // Texture sidecars come after every preset/stamp pair (module docs):
+    // a file without patterns keeps exactly the target order it had.
+    for item in &plan {
+        if let Some((path, ..)) = &item.pattern {
+            targets.push(path.clone());
+        }
+    }
     if let Some(existing) = targets.iter().find(|t| t.exists()) {
         return Err(ImportError::TargetExists(existing.clone()));
     }
 
     let presets = plan.len() as u32;
     let stamps_written = plan.iter().filter(|i| i.stamp.is_some()).count() as u32;
+    let patterns_written = plan.iter().filter(|i| i.pattern.is_some()).count() as u32;
     let outcome = AbrImportOutcome {
         kind,
         source: file.to_path_buf(),
@@ -575,6 +650,7 @@ pub fn import_abr_asset(
         dry_run,
         presets,
         stamps_written,
+        patterns_written,
         duplicate_stamps_skipped: imported.duplicate_stamps_skipped,
         orphan_samples: imported.orphan_samples,
         brushes_without_sample: imported.brushes_without_sample,
@@ -592,7 +668,8 @@ pub fn import_abr_asset(
             context: format!("writing {}", item.preset_path.display()),
             source: e,
         })?;
-        if let Some((path, w, h, rgba)) = &item.stamp {
+        for sidecar in item.stamp.iter().chain(item.pattern.iter()) {
+            let (path, w, h, rgba) = sidecar;
             umber_export::png::write_png(path, *w, *h, rgba, umber_export::png::Transfer::Linear)
                 .map_err(|e| ImportError::Io {
                 context: format!("writing {}", path.display()),
@@ -609,6 +686,10 @@ pub fn import_abr_asset(
 /// Brush!!"`, `"Second"`) plus one computed brush (`"Round"`). Maps to 2
 /// presets (`my-brush`, `round`), 1 stamp, 1 duplicate, 0 orphans, 1
 /// brush without a sample. Shared with agent.rs's step test.
+///
+/// [`abr_fixture::bytes_with_pattern`] is the wave-3.1b companion: the
+/// same tip, one grayscale 2x2 `patt` pattern `pat1`, and two brushes
+/// (`"Paper One"` sampled, `"Paper Two"` computed) that BOTH name it.
 #[cfg(test)]
 pub(crate) mod abr_fixture {
     /// The tip's alpha plane, row-major, top row first.
@@ -648,6 +729,9 @@ pub(crate) mod abr_fixture {
                 self.u16(unit);
             }
         }
+        fn into_vec(self) -> Vec<u8> {
+            self.0
+        }
         /// A four-char id as `0` + bytes, else `i32` length + bytes.
         fn id(&mut self, id: &str) {
             let len = if id.len() == 4 { 0 } else { id.len() as i32 };
@@ -676,12 +760,9 @@ pub(crate) mod abr_fixture {
             self.raw(b"bool");
             self.u8(u8::from(value));
         }
-        /// One `Brsh` list entry: an `Objc` of class `_` whose `Brsh`
-        /// item is the tip-shape descriptor (name inside the shape).
-        fn brush(&mut self, name: &str, tip: Option<&str>) {
-            self.raw(b"Objc");
-            self.obj_header("_", 1);
-            self.id("Brsh");
+        /// The `Brsh` tip-shape descriptor: `Objc` + a class header, the
+        /// nine base keys, and `sampledData` when sampled.
+        fn shape(&mut self, name: &str, tip: Option<&str>) {
             self.raw(b"Objc");
             let class = if tip.is_some() {
                 "sampledBrush"
@@ -701,6 +782,48 @@ pub(crate) mod abr_fixture {
             if let Some(tip) = tip {
                 self.text("sampledData", tip);
             }
+        }
+        /// One `Brsh` list entry: an `Objc` of class `_` whose `Brsh`
+        /// item is the tip-shape descriptor (name inside the shape).
+        fn brush(&mut self, name: &str, tip: Option<&str>) {
+            self.raw(b"Objc");
+            self.obj_header("_", 1);
+            self.id("Brsh");
+            self.shape(name, tip);
+        }
+        /// Wave 3.1b: [`Self::brush`] plus the seven texture keys on the
+        /// OUTER descriptor — where `parse_brush` reads them — and the
+        /// `Txtr` link descriptor naming `pattern_id`.
+        fn textured_brush(&mut self, name: &str, pattern_id: &str, tip: Option<&str>) {
+            self.raw(b"Objc");
+            // Seven texture keys plus the `Brsh` shape item.
+            self.obj_header("_", 8);
+            self.boolean("useTexture", true);
+            self.units("textureScale", b"#Prc", 66.0);
+            self.units("textureDepth", b"#Prc", 100.0);
+            self.boolean("InvT", false);
+            self.enum_value("textureBlendMode", "BlnM", "CBrn");
+            self.boolean("TxtC", true);
+            self.id("Txtr");
+            self.raw(b"Objc");
+            self.obj_header("null", 2);
+            self.text("Idnt", pattern_id);
+            self.text("Nm  ", "Pat");
+            self.id("Brsh");
+            self.shape(name, tip);
+        }
+        /// `enum`: the key, the `enum` OSType, then the type and value
+        /// ascii-or-class-id strings (`BlnM.CBrn` on read).
+        fn enum_value(&mut self, key: &str, kind: &str, value: &str) {
+            self.id(key);
+            self.raw(b"enum");
+            self.id(kind);
+            self.id(value);
+        }
+        /// A Pascal string: one length byte, then the bytes.
+        fn pascal(&mut self, id: &str) {
+            self.u8(id.len() as u8);
+            self.raw(id.as_bytes());
         }
         /// `8BIM` + kind + size + payload + 4-byte pad.
         fn section(&mut self, kind: &[u8; 4], payload: &[u8]) {
@@ -753,6 +876,95 @@ pub(crate) mod abr_fixture {
         file.i16(6);
         file.i16(1);
         file.section(b"samp", &samp.0);
+        file.section(b"desc", &desc.0);
+        file.0
+    }
+
+    /// The pattern's 2x2 grayscale samples, row-major, top row first.
+    pub(crate) const PATTERN_GRAY: [u8; 4] = [10, 20, 30, 40];
+
+    /// One raw 2x2 grayscale `patt` record (the layout `abr_patt.rs`
+    /// reads): a name, a Pascal id, the pixel-array header, the pattern
+    /// rectangle, one 8-bit channel and the two empty mask slots.
+    fn pattern_record() -> Vec<u8> {
+        let mut body = Enc(Vec::new());
+        body.u32(1); // record version
+        body.u32(1); // grayscale
+        body.i16(2); // vertical size (read and discarded)
+        body.i16(2); // horizontal size (read and discarded)
+        body.unicode("Pat"); // name: 3 UTF-16 units
+        body.pascal("pat1"); // the link key `Txtr.Idnt` names
+        body.u32(3); // pixel-array version
+        body.u32(0); // pixel-array length (read and ignored)
+        body.u32(0); // top
+        body.u32(0); // left
+        body.u32(2); // bottom -> height 2
+        body.u32(2); // right  -> width 2
+        body.u32(1); // channel count -> three slots (two are masks)
+        body.u32(1); // first slot written
+        body.u32(23 + PATTERN_GRAY.len() as u32); // 23-byte header + samples
+        body.u32(8); // depth
+        body.u32(0); // channel top
+        body.u32(0); // channel left
+        body.u32(2); // channel bottom
+        body.u32(2); // channel right
+        body.u16(8); // depth again
+        body.u8(0); // compression: raw
+        body.raw(&PATTERN_GRAY);
+        body.u32(0); // empty mask slot
+        body.u32(0); // empty mask slot
+
+        // Derivation: 4+4+2+2+ (4 + 3*2) + (1 + 4) + 4+4+16+4+4+4+4+16
+        // + 2+1+ 4 + 4+4 = 98 bytes, so the record carries two pad bytes.
+        assert_eq!(body.0.len(), 98, "the synthetic pattern body is pinned");
+        let declared = body.0.len() as u32;
+        while !body.0.len().is_multiple_of(4) {
+            body.u8(0);
+        }
+        let mut record = Enc(Vec::new());
+        record.u32(declared);
+        record.raw(&body.0);
+        record.into_vec()
+    }
+
+    /// Wave 3.1b: one `patt` pattern shared by two brushes (one sampled,
+    /// one computed), each naming it through `useTexture` + `Txtr`.
+    pub(crate) fn bytes_with_pattern() -> Vec<u8> {
+        // The same 4x4 tip as `bytes()`, so the stamp path is covered too.
+        let mut body = Enc(Vec::new());
+        body.u8(4);
+        body.raw(b"tip1");
+        for _ in 0..5 {
+            body.u16(0);
+        }
+        for v in [0i32, 0, 4, 4] {
+            body.i32(v);
+        }
+        body.i16(8);
+        body.u8(0);
+        body.raw(&TIP_ALPHA);
+        let declared = body.0.len() as u32;
+        while !body.0.len().is_multiple_of(4) {
+            body.u8(0);
+        }
+        let mut samp = Enc(Vec::new());
+        samp.u32(declared);
+        samp.raw(&body.0);
+
+        let mut desc = Enc(Vec::new());
+        desc.u32(16);
+        desc.obj_header("null", 1);
+        desc.id("Brsh");
+        desc.raw(b"VlLs");
+        desc.i32(2);
+        desc.textured_brush("Paper One", "pat1", Some("tip1"));
+        desc.textured_brush("Paper Two", "pat1", None);
+
+        let mut file = Enc(Vec::new());
+        file.i16(6);
+        file.i16(1);
+        file.section(b"samp", &samp.0);
+        file.section(b"patt", &pattern_record());
         file.section(b"desc", &desc.0);
         file.0
     }
@@ -1215,6 +1427,10 @@ mod tests {
         let out = import_abr_asset(&src, Some(&lib), false).unwrap();
         assert_eq!(out.presets, 2);
         assert_eq!(out.stamps_written, 1);
+        assert_eq!(
+            out.patterns_written, 0,
+            "the fixture carries no patt section"
+        );
         assert_eq!(out.duplicate_stamps_skipped, 1);
         assert_eq!(out.orphan_samples, 0);
         assert_eq!(out.brushes_without_sample, 1);
@@ -1260,6 +1476,7 @@ mod tests {
         assert_eq!(out.targets[0], lib.join("my-brush.umberbrush"));
         assert_eq!(out.presets, 2, "dry run reports the planned counts");
         assert_eq!(out.stamps_written, 1);
+        assert_eq!(out.patterns_written, 0);
         assert!(dir_entries(&lib).is_empty(), "dry run must not write");
     }
 
@@ -1328,5 +1545,137 @@ mod tests {
         assert_eq!(unique_slug("my-brush".into(), &mut taken), "my-brush-2");
         assert_eq!(unique_slug("my-brush".into(), &mut taken), "my-brush-3");
         assert_eq!(unique_slug("my-brush-2".into(), &mut taken), "my-brush-2-2");
+    }
+
+    // --- wave 3.1b: the pattern texture sidecar -------------------------
+
+    /// Writes the patterned `.abr` fixture to `<dir>/<file_name>`.
+    fn patterned_abr_file(dir: &Path, file_name: &str) -> PathBuf {
+        let path = dir.join(file_name);
+        std::fs::write(&path, abr_fixture::bytes_with_pattern()).unwrap();
+        path
+    }
+
+    /// Wave 3.1b: a textured brush writes its `.pattern.png` beside the
+    /// preset and names it in the preset's `texture` block, which
+    /// round-trips through `from_json`.
+    #[test]
+    fn abr_pattern_writes_a_sidecar_and_a_texture_block() {
+        let src_dir = tmp_dir("abr-patt-src");
+        let lib = tmp_dir("abr-patt-lib");
+        let src = patterned_abr_file(&src_dir, "papers.abr");
+        let out = import_abr_asset(&src, Some(&lib), false).unwrap();
+        assert_eq!(out.kind, AssetKind::Brush);
+        assert!(!out.dry_run);
+        assert_eq!(out.presets, 2);
+        assert_eq!(out.stamps_written, 1);
+        assert_eq!(out.patterns_written, 2, "one sidecar per textured preset");
+        assert_eq!(out.brushes_without_sample, 1);
+        assert_eq!(out.duplicate_stamps_skipped, 0);
+        // Preset/stamp pairs first, then the pattern sidecars.
+        assert_eq!(
+            out.targets,
+            vec![
+                lib.join("paper-one.umberbrush"),
+                lib.join("paper-one.stamp.png"),
+                lib.join("paper-two.umberbrush"),
+                lib.join("paper-one.pattern.png"),
+                lib.join("paper-two.pattern.png"),
+            ]
+        );
+        assert_eq!(
+            dir_entries(&lib),
+            vec![
+                "paper-one.pattern.png",
+                "paper-one.stamp.png",
+                "paper-one.umberbrush",
+                "paper-two.pattern.png",
+                "paper-two.umberbrush",
+            ]
+        );
+
+        // The block: a bare sidecar name plus the stored `.abr` values.
+        let one_path = lib.join("paper-one.umberbrush");
+        let text = std::fs::read_to_string(&one_path).unwrap();
+        assert!(text.contains("\"texture\""), "{text}");
+        let one = load_preset(&one_path);
+        let texture = one.texture.as_ref().expect("the import writes the block");
+        assert_eq!(texture.file, "paper-one.pattern.png");
+        assert_eq!(texture.scale, 0.66_f32, "66% is stored as a fraction");
+        assert_eq!(texture.depth, 1.0);
+        assert!(!texture.invert);
+        assert_eq!(
+            texture.blend_mode, "BlnM.CBrn",
+            "the stored label is preserved undecoded"
+        );
+        assert!(texture.each_tip);
+        // The written preset round-trips byte-identically.
+        assert_eq!(one.to_json().unwrap(), text);
+        let two = load_preset(&lib.join("paper-two.umberbrush"));
+        assert_eq!(
+            two.texture.as_ref().map(|t| t.file.as_str()),
+            Some("paper-two.pattern.png"),
+            "each preset names its own sidecar"
+        );
+
+        // Both sidecars decode to the pattern's RGBA; `read_png_rgba8`
+        // returns GPU row order, so the expected plane is the rows
+        // reversed: [10,20 / 30,40] becomes 30,40 then 10,20.
+        let mut expected = Vec::new();
+        for row in abr_fixture::PATTERN_GRAY.chunks_exact(2).rev() {
+            for &gray in row {
+                expected.extend_from_slice(&[gray, gray, gray, 255]);
+            }
+        }
+        for file in ["paper-one.pattern.png", "paper-two.pattern.png"] {
+            let (w, h, rgba) = umber_export::png::read_png_rgba8(&lib.join(file)).unwrap();
+            assert_eq!((w, h), (2, 2), "{file}");
+            assert_eq!(rgba, expected, "{file} decodes to the pattern plane");
+        }
+    }
+
+    /// Wave 3.1b: a dry run reports the planned pattern count and writes
+    /// nothing.
+    #[test]
+    fn abr_dry_run_counts_patterns() {
+        let src_dir = tmp_dir("abr-patt-dry-src");
+        let lib = tmp_dir("abr-patt-dry-lib");
+        let src = patterned_abr_file(&src_dir, "papers.abr");
+        let out = import_abr_asset(&src, Some(&lib), true).unwrap();
+        assert!(out.dry_run);
+        assert_eq!(out.patterns_written, 2);
+        assert_eq!(out.presets, 2);
+        assert_eq!(out.stamps_written, 1);
+        assert_eq!(out.targets.len(), 5);
+        assert_eq!(out.targets[3], lib.join("paper-one.pattern.png"));
+        assert!(dir_entries(&lib).is_empty(), "dry run must not write");
+    }
+
+    /// Wave 3.1b: an existing `.pattern.png` refuses the whole import —
+    /// the pattern sidecar is part of the all-or-nothing target set.
+    #[test]
+    fn abr_existing_pattern_sidecar_refuses_the_whole_import() {
+        let src_dir = tmp_dir("abr-patt-exists-src");
+        let lib = tmp_dir("abr-patt-exists-lib");
+        let src = patterned_abr_file(&src_dir, "papers.abr");
+        // The LAST planned target: the refusal must still fire before the
+        // first one is written.
+        std::fs::write(lib.join("paper-two.pattern.png"), b"mine").unwrap();
+        let err = import_abr_asset(&src, Some(&lib), false).unwrap_err();
+        match err {
+            ImportError::TargetExists(path) => {
+                assert_eq!(path, lib.join("paper-two.pattern.png"));
+            }
+            other => panic!("expected TargetExists, got {other:?}"),
+        }
+        assert_eq!(
+            dir_entries(&lib),
+            vec!["paper-two.pattern.png"],
+            "nothing written"
+        );
+        assert_eq!(
+            std::fs::read(lib.join("paper-two.pattern.png")).unwrap(),
+            b"mine"
+        );
     }
 }

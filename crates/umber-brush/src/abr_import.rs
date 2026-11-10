@@ -264,6 +264,9 @@ fn map_preset(brush: &AbrBrush, index: usize, stamped: bool) -> BrushPreset {
         stroke_method: StrokeMethod::default(),
         size: 1.0,
         catalog: String::new(),
+        // The texture block is set by the CLI write path (wave 3.1b),
+        // which is the only place that can name the sidecar it writes.
+        texture: None,
     }
 }
 

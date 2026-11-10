@@ -2624,6 +2624,10 @@ mod tests {
             stroke_method: Default::default(),
             catalog: String::new(),
             size: 1.0,
+            // Wave 3.1b field: the GUI importer has no pattern sidecar to
+            // name, so it leaves the block empty (texture is "not carried
+            // over" on this path).
+            texture: None,
         }
     }
 

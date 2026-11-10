@@ -15,6 +15,12 @@
 //! write→read→write is byte-identical. Forward compatibility: every
 //! [`BrushPreset`] field carries `#[serde(default)]`, so JSON missing a key
 //! loads with that field's default instead of failing.
+//!
+//! Wave 3.1b adds one optional field: [`PatternTexture`], the brush texture
+//! an `.abr` import carries beside the preset as a `<slug>.pattern.png`
+//! sidecar. It is `None` for every hand-authored preset, and a `None` field
+//! is not written at all, so pre-texture files round-trip byte-identically.
+//! Nothing samples the texture yet: kill 3.1c is the paint-engine consumer.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -67,8 +73,10 @@ pub enum PresetError {
     EmptyName,
     /// A parameter is outside its engine domain: `alpha`/`hardness` outside
     /// 0..=1, `pressure_gamma` non-finite or <= 0, one-euro fields outside
-    /// their `try_new` domain, spacing density outside its `new` domain, or
-    /// a control curve built with the wrong point count.
+    /// their `try_new` domain, spacing density outside its `new` domain, a
+    /// control curve built with the wrong point count, or a texture block
+    /// whose `file` is not a bare file name / whose `scale` or `depth` is
+    /// outside `0 < x <= 100`.
     #[error("preset parameter outside its valid domain")]
     InvalidParams,
 }
@@ -224,6 +232,71 @@ impl Default for SpacingConfig {
     }
 }
 
+/// A brush's tiling texture: the `.abr` import's `patt` pattern, persisted
+/// as a `<slug>.pattern.png` sidecar beside the preset and referenced here
+/// by bare file name.
+///
+/// Wave 3.1b. Every field carries a serde default, so a partial or
+/// forward-written block still loads; `scale`/`depth` default to `1.0`
+/// (100%) rather than `0.0`, because a zero scale is outside the domain
+/// [`BrushPreset::validate`] enforces and a defaulted block should load
+/// valid, not rejected.
+///
+/// `scale`/`depth` are fractions (`1.0` = 100%), the shape
+/// [`AbrImportTexture`](crate::abr_import::AbrImportTexture) already
+/// speaks. [`BrushPreset::validate`] bounds them by `0 < x <= 100` — wider
+/// than a fraction needs — so a percent-valued file from another authoring
+/// path also loads; the engine consumer (kill 3.1c) decides which it
+/// samples.
+///
+/// `blend_mode` is the stored `.abr` label, undecoded (e.g.
+/// `"BlnM.CBrn"`): naming the mode is 3.1c's call, so the import preserves
+/// what the file said rather than guessing a umber mode. Empty means "the
+/// file did not say".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatternTexture {
+    /// Sidecar file name relative to the preset, e.g.
+    /// `"chalk.pattern.png"`. A bare file name: [`BrushPreset::validate`]
+    /// rejects path separators, so a preset cannot point outside its own
+    /// directory.
+    #[serde(default)]
+    pub file: String,
+    /// Texture scale as a fraction (`1.0` = 100%); finite and `> 0`.
+    #[serde(default = "default_texture_level")]
+    pub scale: f32,
+    /// Texture depth as a fraction (`1.0` = 100%); finite and `> 0`.
+    #[serde(default = "default_texture_level")]
+    pub depth: f32,
+    /// Whether the pattern is inverted.
+    #[serde(default)]
+    pub invert: bool,
+    /// The stored blend-mode label, undecoded (see the type docs).
+    #[serde(default)]
+    pub blend_mode: String,
+    /// Whether the texture applies to each tip rather than per stroke.
+    #[serde(default)]
+    pub each_tip: bool,
+}
+
+fn default_texture_level() -> f32 {
+    1.0
+}
+
+impl Default for PatternTexture {
+    fn default() -> Self {
+        // Tuned default (a level of 1.0, not the derived 0.0): a
+        // default-constructed block must pass `validate()`.
+        Self {
+            file: String::new(),
+            scale: default_texture_level(),
+            depth: default_texture_level(),
+            invert: false,
+            blend_mode: String::new(),
+            each_tip: false,
+        }
+    }
+}
+
 /// A named, saveable brush: the full engine parameter set plus curves.
 ///
 /// Every field carries `#[serde(default)]` (the forward-compat rule): JSON
@@ -269,6 +342,16 @@ pub struct BrushPreset {
     /// value is not written, so pre-catalog files round-trip unchanged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub catalog: String,
+    /// The brush's tiling texture (wave 3.1b; [`PatternTexture`]): the
+    /// `.abr` import's `patt` pattern, kept as a sidecar beside this
+    /// preset. `None` = no texture, and the key is not written at all, so
+    /// pre-texture files round-trip byte-identically. Declared last so the
+    /// serialized key order of every older field is unchanged. Nothing
+    /// samples it yet (kill 3.1c is the engine consumer); the block is
+    /// persisted now because the import is one-shot and re-running it
+    /// would hit the import's no-overwrite refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<PatternTexture>,
 }
 
 fn default_size() -> f32 {
@@ -355,6 +438,11 @@ impl BrushPreset {
     /// [`PresetError::InvalidParams`] for any out-of-domain parameter, and
     /// [`PresetError::NonMonotonicX`]/[`PresetError::NonFinite`] if a curve
     /// somehow violates its invariants.
+    ///
+    /// A present [`PatternTexture`] is checked too: its `file` must be a
+    /// bare file name (non-empty, not `.`/`..`, no `/`, `\`, `:` or NUL)
+    /// and `scale`/`depth` must be finite in `0 < x <= 100`. A preset
+    /// without a texture skips both rules.
     pub fn validate(&self) -> Result<(), PresetError> {
         if self.name.is_empty() {
             return Err(PresetError::EmptyName);
@@ -399,6 +487,28 @@ impl BrushPreset {
         }
         if self.stroke_method.validate().is_err() {
             return Err(PresetError::InvalidParams);
+        }
+        // The texture block (wave 3.1b). `file` names a sidecar beside the
+        // preset, so it must be a bare file name: a separator would let a
+        // preset point into another directory, and `.`/`..` name a
+        // directory rather than a file. `:` is refused too — it is a path
+        // separator on some platforms and cannot appear in a portable
+        // sidecar name.
+        if let Some(texture) = &self.texture {
+            let file = texture.file.as_str();
+            let has_path_syntax = file.chars().any(|c| matches!(c, '/' | '\\' | ':' | '\0'));
+            if file.is_empty() || file == "." || file == ".." || has_path_syntax {
+                return Err(PresetError::InvalidParams);
+            }
+            // Fractions (1.0 = 100%) bounded by the wide 0 < x <= 100
+            // domain: a fraction is well inside it, and a percent-valued
+            // file from another authoring path still loads. NaN and the
+            // infinities fail `is_finite` before the range compares.
+            for level in [texture.scale, texture.depth] {
+                if !level.is_finite() || level <= 0.0 || level > 100.0 {
+                    return Err(PresetError::InvalidParams);
+                }
+            }
         }
         Ok(())
     }
@@ -472,6 +582,7 @@ mod tests {
                 length_px: 20.0,
             },
             size: 1.5,
+            texture: None,
         }
     }
 
@@ -963,5 +1074,124 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{} must parse as PNG: {e}", sidecar.display()));
             assert_eq!((w, h), (128, 128), "{file}: generator emits 128x128 stamps");
         }
+    }
+
+    /// Wave 3.1b: the texture block is additive. A preset without one
+    /// writes no `"texture"` key, and a shipped pre-texture file still
+    /// re-serializes byte-identically with `texture: None`.
+    #[test]
+    fn presets_without_a_texture_write_no_texture_key() {
+        let fixture = non_default_preset().to_json().expect("serialize");
+        assert!(
+            !fixture.contains("\"texture\""),
+            "a None texture must not be written: {fixture}"
+        );
+        assert!(BrushPreset::from_json(&fixture)
+            .expect("parse")
+            .texture
+            .is_none());
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/brushes/flat-liner.umberbrush"
+        );
+        let text = std::fs::read_to_string(path).expect("shipped preset");
+        let preset = BrushPreset::from_json(&text).expect("pre-texture file parses");
+        assert!(preset.texture.is_none());
+        assert_eq!(
+            preset.to_json().expect("re-serialize"),
+            text,
+            "a pre-texture preset must round-trip byte-identically"
+        );
+    }
+
+    /// Wave 3.1b: a textured preset keeps every field through the file
+    /// round trip, and a block missing `scale`/`depth` loads at 100%.
+    #[test]
+    fn textured_preset_round_trips_and_defaults_missing_levels() {
+        let mut preset = non_default_preset();
+        preset.texture = Some(PatternTexture {
+            file: "test-chisel.pattern.png".to_owned(),
+            scale: 0.66,
+            depth: 1.0,
+            invert: true,
+            blend_mode: "BlnM.CBrn".to_owned(),
+            each_tip: true,
+        });
+        preset.validate().expect("a textured preset validates");
+        let text = preset.to_json().expect("serialize");
+        assert!(
+            text.contains("\"file\": \"test-chisel.pattern.png\""),
+            "{text}"
+        );
+        let back = BrushPreset::from_json(&text).expect("parse");
+        assert_eq!(back, preset, "the block survives the round trip");
+        assert_eq!(back.to_json().expect("re-serialize"), text);
+
+        // A hand-written block with only the file name: every level
+        // defaults to 100% (not 0.0, which validate would reject).
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        value["texture"] = serde_json::json!({ "file": "x.pattern.png" });
+        let sparse = serde_json::to_string_pretty(&value).expect("re-serialize");
+        let loaded = BrushPreset::from_json(&sparse).expect("a partial block loads");
+        let texture = loaded.texture.as_ref().expect("the block is present");
+        assert_eq!(texture.scale, 1.0);
+        assert_eq!(texture.depth, 1.0);
+        assert!(!texture.invert);
+        assert_eq!(texture.blend_mode, "");
+        assert!(!texture.each_tip);
+        loaded.validate().expect("a partial block validates");
+    }
+
+    /// Wave 3.1b: `validate` refuses a texture `file` that is not a bare
+    /// file name, and levels outside `0 < x <= 100`.
+    #[test]
+    fn validate_rejects_a_path_y_texture_file_and_out_of_range_levels() {
+        let textured = |file: &str, scale: f32, depth: f32| {
+            let mut preset = non_default_preset();
+            preset.texture = Some(PatternTexture {
+                file: file.to_owned(),
+                scale,
+                depth,
+                ..PatternTexture::default()
+            });
+            preset.validate()
+        };
+        assert!(textured("chalk.pattern.png", 1.0, 1.0).is_ok());
+        assert!(
+            textured("chalk.pattern.png", 0.66, 100.0).is_ok(),
+            "the level domain is (0, 100]"
+        );
+        for file in [
+            "",
+            ".",
+            "..",
+            "sub/chalk.png",
+            "sub\\chalk.png",
+            "C:chalk.png",
+            "a\0b",
+        ] {
+            assert_eq!(
+                textured(file, 1.0, 1.0),
+                Err(PresetError::InvalidParams),
+                "file {file:?}"
+            );
+        }
+        for (scale, depth) in [
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (100.5, 1.0),
+            (f32::NAN, 1.0),
+            (1.0, f32::INFINITY),
+            (1.0, 0.0),
+        ] {
+            assert_eq!(
+                textured("chalk.pattern.png", scale, depth),
+                Err(PresetError::InvalidParams),
+                "scale {scale}, depth {depth}"
+            );
+        }
+        // A preset with no texture skips both rules entirely.
+        assert!(non_default_preset().validate().is_ok());
     }
 }

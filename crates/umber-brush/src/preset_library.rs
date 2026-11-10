@@ -289,6 +289,8 @@ mod tests {
             stroke_method: Default::default(),
             catalog: String::new(),
             size: 1.0,
+            // Wave 3.1b field: a hand-built preset carries no texture.
+            texture: None,
         }
     }
 
