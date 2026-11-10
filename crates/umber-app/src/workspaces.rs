@@ -94,19 +94,19 @@ pub fn preset(workspace: Workspace) -> DockState<Panel> {
             let tree = dock.main_surface_mut();
             let [_, right] =
                 tree.split_right(NodeIndex::root(), 0.6, vec![Panel::Viewport, Panel::UvView]);
+            // F3: no leaf holds more than 4 tabs — the side leaf stacks
+            // 4 + 4 instead of 8.
+            let side = vec![
+                Panel::Properties,
+                Panel::LayerStack,
+                Panel::TextureSets,
+                Panel::Assets,
+            ];
+            let [_, bottom] = tree.split_below(right, 0.5, side);
             tree.split_below(
-                right,
+                bottom,
                 0.5,
-                vec![
-                    Panel::Properties,
-                    Panel::LayerStack,
-                    Panel::TextureSets,
-                    Panel::Assets,
-                    Panel::Bakes,
-                    Panel::Export,
-                    Panel::Display,
-                    Panel::History,
-                ],
+                vec![Panel::Bakes, Panel::Export, Panel::Display, Panel::History],
             );
             dock
         }
@@ -121,9 +121,19 @@ fn side_layout(front: Vec<Panel>, rest: Vec<Panel>) -> DockState<Panel> {
     // re-splitting the root wraps the whole tree).
     let mut dock = DockState::new(vec![Panel::Viewport]);
     let tree = dock.main_surface_mut();
-    let [others, _] = tree.split_left(NodeIndex::root(), 0.19, front);
-    let [centre, _] = tree.split_right(others, 0.72, rest);
+    let [others, _] = tree.split_left(NodeIndex::root(), 0.20, front);
+    // F3: no leaf holds more than 4 tabs — `rest` stacks in leaves of at
+    // most 4 below the first.
+    let first = rest.len().min(4);
+    let [centre, mut rest_leaf] = tree.split_right(others, 0.72, rest[..first].to_vec());
     tree.split_right(centre, 0.62, vec![Panel::UvView]);
+    let mut remaining = &rest[first..];
+    while !remaining.is_empty() {
+        let take = remaining.len().min(4);
+        let [_, below] = tree.split_below(rest_leaf, 0.5, remaining[..take].to_vec());
+        rest_leaf = below;
+        remaining = &remaining[take..];
+    }
     dock
 }
 
@@ -212,7 +222,9 @@ impl Workspaces {
 
 /// The layouts file's schema version; another version is ignored (the
 /// presets load instead).
-pub const LAYOUTS_VERSION: u32 = 2;
+pub const LAYOUTS_VERSION: u32 = 3;
+// v3 (2026-11-10 F3): boot default project column 0.19 -> 0.20 and the
+// Bake/Export/Graph presets stack their side tabs in leaves of at most 4.
 // v2: the Painter-faithful default — viewport dominant in the centre
 // (3D left / 2D right), rails on the edges. v1 files (views tabbed in the
 // centre, rails 0.25/0.2) fall back to the presets on load.

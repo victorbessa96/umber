@@ -42,10 +42,11 @@ pub fn default_dock() -> DockState<Panel> {
     // LEFT child. `default_dock_order_and_widths` pins the result.
     let mut dock = DockState::new(vec![Panel::Viewport]);
     let tree = dock.main_surface_mut();
-    // Project column (left, 19%) | everything else.
+    // Project column (left, 20%; F3: the strip must fit 4 tabs at 1400) |
+    // everything else.
     let [rest, _] = tree.split_left(
         NodeIndex::root(),
-        0.19,
+        0.20,
         vec![
             Panel::TextureSets,
             Panel::Assets,

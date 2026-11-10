@@ -283,11 +283,12 @@ fn dock_tab_widths(text: &[f32], spacing: f32, minimum: Option<f32>, close: f32)
 }
 
 /// The visible width of a leaf's tab strip: the leaf's width less the
-/// tab bar's horizontal inner margin and the three buttons the shell's
-/// `DockArea` shows at the bar's end (the panel-group menu, close-all
-/// and collapse) — egui_dock 0.21.1 `tab_bar`'s `available_width`.
+/// tab bar's horizontal inner margin and the one button the shell's
+/// `DockArea` shows at the bar's end (the panel-group menu; F3 hid the
+/// per-tab close, close-all and collapse buttons) — egui_dock 0.21.1
+/// `tab_bar`'s `available_width`.
 fn dock_bar_width(leaf_width: f32, margin_x: f32) -> f32 {
-    (leaf_width - margin_x - 3.0 * DOCK_BUTTON_SIZE).max(0.0)
+    (leaf_width - margin_x - DOCK_BUTTON_SIZE).max(0.0)
 }
 
 /// Scrolls every leaf whose active tab changed since the last call so
@@ -302,7 +303,9 @@ fn scroll_active_tabs_into_view(
     font: &egui::FontId,
     style: &Style,
 ) -> bool {
-    let close = DOCK_BUTTON_SIZE.min(style.tab_bar.height);
+    // F3 (2026-11-10 round-3 audit): per-tab close buttons are hidden
+    // (DockArea::show_close_buttons(false)), so a tab costs no close glyph.
+    let close = 0.0;
     let margin_x = style.tab_bar.inner_margin.sum().x;
     let mut live = std::collections::HashSet::new();
     let mut moved = false;
@@ -5480,6 +5483,13 @@ impl eframe::App for UmberApp {
                         // whose popup is `PanelViewer::add_popup`.
                         .show_add_buttons(true)
                         .show_add_popup(true)
+                        // F3 (2026-11-10 round-3 audit): 40 pt of every tab
+                        // and 48 pt of every strip were close chrome; hide
+                        // per-tab close, close-all and collapse, keep the
+                        // group menu. Tabs close via the group menu / rail.
+                        .show_close_buttons(false)
+                        .show_leaf_close_all_buttons(false)
+                        .show_leaf_collapse_buttons(false)
                         .show_inside(ui, &mut viewer);
                     // U7 flyout: the folded panel drawn by the same viewer
                     // over the canvas edge beside its rail. Escape or the
@@ -7653,10 +7663,58 @@ mod tab_overflow_dock_tests {
             [80.0, 116.0]
         );
         assert!(dock_tab_widths(&[], 2.0, None, 24.0).is_empty());
-        // The bar loses the margin and the group-menu + close-all +
-        // collapse buttons (U2-3 added the group menu: 300 - 4 - 3·24).
-        assert_eq!(dock_bar_width(300.0, 4.0), 224.0);
-        assert_eq!(dock_bar_width(30.0, 0.0), 0.0);
+        // The bar loses the margin and the group-menu button only (F3 hid
+        // close / close-all / collapse: 300 - 4 - 1·24).
+        assert_eq!(dock_bar_width(300.0, 4.0), 272.0);
+        assert_eq!(dock_bar_width(30.0, 0.0), 6.0); // 30 - 1·24, clamped at 0 below
+    }
+
+    /// R3-3 (F3 fix): at 1400 x 900 every leaf of every workspace preset
+    /// fits its tab strip — dock_floor rects + real galley widths +
+    /// `dock_tab_widths`(close hidden) + `dock_bar_width`(group menu only).
+    #[test]
+    fn r3_3_every_preset_leaf_fits_its_tab_strip_at_1400x900() {
+        let ctx = ctx();
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        let style = Style::from_egui(&ctx.global_style());
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        for ws in [
+            crate::workspaces::Workspace::Paint,
+            crate::workspaces::Workspace::Bake,
+            crate::workspaces::Workspace::Export,
+            crate::workspaces::Workspace::Graph,
+        ] {
+            let dock = crate::workspaces::preset(ws);
+            let sizes = crate::dock_floor::leaf_sizes(&dock, area);
+            let leaves: Vec<_> = dock.iter_leaves().collect();
+            assert_eq!(leaves.len(), sizes.len(), "{ws:?}: leaf census mismatch");
+            for ((path, leaf), (_, size)) in leaves.iter().zip(sizes.iter()) {
+                let w = size.x;
+                let text: Vec<f32> = leaf
+                    .tabs
+                    .iter()
+                    .map(|p| {
+                        tab_overflow::elided_title(
+                            &ctx,
+                            &panel_title(p),
+                            font.clone(),
+                            tab_overflow::TAB_TITLE_MAX,
+                        )
+                        .size()
+                        .x
+                    })
+                    .collect();
+                let widths =
+                    dock_tab_widths(&text, style.tab.spacing, style.tab.minimum_width, 0.0);
+                let total: f32 = widths.iter().sum();
+                let bar = dock_bar_width(w, style.tab_bar.inner_margin.sum().x);
+                assert!(
+                    total <= bar,
+                    "{ws:?} leaf {path:?} overflows its strip: {total:.0} > {bar:.0} (leaf {w:.0} pt, {} tabs)",
+                    text.len()
+                );
+            }
+        }
     }
 
     /// Every panel in one leaf: eleven tabs, far wider than 300 pt.
@@ -7706,7 +7764,7 @@ mod tab_overflow_dock_tests {
             &mut dock, &mut seen, &ctx, &font, &style
         ));
         let (_, leaf) = dock.iter_leaves_mut().next().unwrap();
-        let close = DOCK_BUTTON_SIZE.min(style.tab_bar.height);
+        let close = 0.0; // F3: per-tab close buttons hidden
         let text: Vec<f32> = leaf
             .tabs
             .iter()
