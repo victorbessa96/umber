@@ -53,6 +53,12 @@
 //!   first, as the `.abr` stores them).
 //! * a dry run reports the PLANNED counts (`presets` / `stamps_written` /
 //!   `patterns_written` = what would be written) with `dry_run: true`.
+//! * a brush whose descriptor does not map is skipped by the READER, not
+//!   here: one bad preset costs that preset, never the file (wave 3.2). The
+//!   count rides in [`AbrImportOutcome::skipped_brushes`] beside the other
+//!   per-file counts, on a dry run too; a file whose brushes ALL fail still
+//!   succeeds with `presets: 0` (the same answer a `desc` with no `Brsh`
+//!   list has always given).
 //! * size dynamics (`szVr`) map as far as the engine can express them
 //!   (wave 3.3): jitter → the preset's per-dab size jitter, minimum → a
 //!   radius-curve floor. The control source and the fade step count have
@@ -94,9 +100,9 @@
 //! Non-goals (v1): cross-library stamp dedup (blake3 of a new stamp vs
 //! the library's existing sidecars — follow-up), one sidecar per shared
 //! pattern, sampling a carried texture in the paint engine (kill 3.1c),
-//! v8+ files, the size dynamics beyond jitter + minimum (the control
-//! source's own response, fade steps, angle/roundness dynamics), and
-//! `.abr` WRITING (never).
+//! v8 and 11+ header numbers (unattested versions), the size dynamics
+//! beyond jitter + minimum (the control source's own response, fade
+//! steps, angle/roundness dynamics), and `.abr` WRITING (never).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -457,6 +463,11 @@ pub struct AbrImportOutcome {
     /// Brushes emitted radial — computed, or tip missing
     /// (`AbrImport::brushes_without_sample`).
     pub brushes_without_sample: u32,
+    /// Brushes the reader SKIPPED because their descriptor did not map — no
+    /// tip-shape descriptor, or a value in the wrong units (wave 3.2,
+    /// `AbrImport::skipped_brushes`). They wrote no preset; the rest of the
+    /// file imported. Planned on a dry run too.
+    pub skipped_brushes: u32,
     /// Kept brushes whose `szVr` size dynamics were on (`control_index
     /// != 0`): the jitter and minimum mapped, but the control source and
     /// fade `steps` have no engine equivalent (wave 3.3,
@@ -667,6 +678,7 @@ pub fn import_abr_asset(
         duplicate_stamps_skipped: imported.duplicate_stamps_skipped,
         orphan_samples: imported.orphan_samples,
         brushes_without_sample: imported.brushes_without_sample,
+        skipped_brushes: imported.skipped_brushes,
         dynamics_unmapped: imported.dynamics_unmapped,
     };
     if dry_run {
@@ -838,6 +850,13 @@ pub(crate) mod abr_fixture {
             self.units("jitter", b"#Prc", jitter_percent);
             self.units("Mnm ", b"#Prc", minimum_percent);
         }
+        /// Wave 3.2: a `Brsh` list entry with NO `Brsh` item at all — a
+        /// descriptor the reader cannot map (a real geometry-less preset).
+        fn brush_without_shape(&mut self, name: &str) {
+            self.raw(b"Objc");
+            self.obj_header("_", 1);
+            self.text("Nm  ", name);
+        }
         /// Wave 3.1b: [`Self::brush`] plus the seven texture keys on the
         /// OUTER descriptor — where `parse_brush` reads them — and the
         /// `Txtr` link descriptor naming `pattern_id`.
@@ -938,6 +957,26 @@ pub(crate) mod abr_fixture {
         desc.raw(b"VlLs");
         desc.i32(1);
         desc.dynamics_brush("Fade Tip", None, 1, 4, 30.0, 40.0);
+
+        let mut file = Enc(Vec::new());
+        file.i16(6);
+        file.i16(1);
+        file.section(b"desc", &desc.0);
+        file.0
+    }
+
+    /// Wave 3.2: one computed brush that maps plus one `Brsh`-less brush
+    /// the reader skips. No `samp` section: the good brush maps to a radial
+    /// preset and the bad one is counted, never a refusal.
+    pub(crate) fn bytes_with_unmappable_brush() -> Vec<u8> {
+        let mut desc = Enc(Vec::new());
+        desc.u32(16);
+        desc.obj_header("null", 1);
+        desc.id("Brsh");
+        desc.raw(b"VlLs");
+        desc.i32(2);
+        desc.brush("Round", None);
+        desc.brush_without_shape("No Shape");
 
         let mut file = Enc(Vec::new());
         file.i16(6);
@@ -1505,6 +1544,35 @@ mod tests {
         assert_eq!(json["kind"], "brush");
         assert_eq!(json["targets"].as_array().unwrap().len(), 3);
         assert_eq!(json["presets"], 2);
+    }
+
+    /// Wave 3.2: one unmappable brush costs that brush only. The good brush
+    /// imports, the count rides on the outcome (dry run included) and the
+    /// summary JSON carries it next to the other counts.
+    #[test]
+    fn abr_skips_one_unmappable_brush_and_imports_the_rest() {
+        let src_dir = tmp_dir("abr-skip-src");
+        let lib = tmp_dir("abr-skip-lib");
+        let src = src_dir.join("mixed.abr");
+        std::fs::write(&src, abr_fixture::bytes_with_unmappable_brush()).unwrap();
+
+        let dry = import_abr_asset(&src, Some(&lib), true).unwrap();
+        assert_eq!(dry.presets, 1, "the good brush is planned");
+        assert_eq!(dry.skipped_brushes, 1, "a dry run reports the skip count");
+        assert!(dir_entries(&lib).is_empty(), "dry run must not write");
+        assert_eq!(
+            serde_json::to_value(&dry).unwrap()["skipped_brushes"],
+            1,
+            "the CLI's one-line summary carries the count"
+        );
+
+        let out = import_abr_asset(&src, Some(&lib), false).unwrap();
+        assert_eq!(out.skipped_brushes, 1);
+        assert_eq!(out.presets, 1);
+        assert_eq!(dir_entries(&lib), vec!["round.umberbrush"]);
+        let preset = load_preset(&lib.join("round.umberbrush"));
+        assert_eq!(preset.name, "Round");
+        assert!(!preset.params.stamped);
     }
 
     #[test]

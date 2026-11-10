@@ -34,7 +34,11 @@
 //!   ← the straight line `(0, minimum) → (1, 1)` — the closest shape a
 //!   4-point piecewise-linear [`ControlCurve`] can express, stored as its
 //!   samples at the identity curve's x knots; `alpha_curve` is untouched;
-//! * any other brush is a radial preset (`stamped = false`, no stamp).
+//! * any other brush is a radial preset (`stamped = false`, no stamp);
+//! * a `Brsh` entry the reader could not map never reaches this mapping
+//!   (wave 3.2): it contributes no entry and its count rides on
+//!   [`AbrImport::skipped_brushes`], so the CLI can report it. One bad
+//!   preset in the file therefore costs that preset only.
 //!
 //! Size dynamics judgment calls: `szVr` maps only as far as the engine
 //! can express them. `jitter` becomes the per-dab size jitter and
@@ -66,11 +70,12 @@
 //! consumes the import after the source bytes are gone, so the mapping
 //! cannot borrow from [`AbrFile`]. One clone per referenced pattern.
 //!
-//! Non-goals (v1): v8+ files, dual brush, scattering, roundness, flips,
-//! the rest of dynamics (the control source's own response, fade steps,
-//! angle/roundness dynamics), sampling the carried texture in the paint
-//! engine (kill 3.1c — the import writes no pixels that use it), `.abr`
-//! writing (never), and the CLI fan-out over a whole file (row 284).
+//! Non-goals (v1): v8 and 11+ header numbers (unattested versions), dual
+//! brush, scattering, roundness, flips, the rest of dynamics (the control
+//! source's own response, fade steps, angle/roundness dynamics), sampling
+//! the carried texture in the paint engine (kill 3.1c — the import writes
+//! no pixels that use it), `.abr` writing (never), and the CLI fan-out
+//! over a whole file (row 284).
 
 use crate::abr::{
     match_pattern, match_sample, read_abr, AbrBrush, AbrDynamics, AbrError, AbrFile, AbrPattern,
@@ -128,6 +133,10 @@ pub struct AbrImport {
     /// Brushes emitted as radial presets (computed brushes, and sampled
     /// brushes whose tip is missing).
     pub brushes_without_sample: u32,
+    /// `Brsh` entries the reader skipped because they did not map (wave
+    /// 3.2, [`AbrFile::skipped_brushes`]): they contribute no entry. One
+    /// bad preset never refused the file.
+    pub skipped_brushes: u32,
     /// Entries dropped because an earlier entry has the identical stamp.
     pub duplicate_stamps_skipped: u32,
     /// Textured brushes whose pattern id no `patt` record carries; their
@@ -164,6 +173,9 @@ fn map_file(file: &AbrFile) -> AbrImport {
         .count() as u32;
     let mut out = AbrImport {
         orphan_samples,
+        // Wave 3.2: the reader's per-brush skip count rides along (the
+        // skipped brushes are absent from `file.brushes`).
+        skipped_brushes: file.skipped_brushes,
         ..AbrImport::default()
     };
 
@@ -426,6 +438,7 @@ mod tests {
             brushes,
             patterns,
             skipped_shape_classes: 0,
+            skipped_brushes: 0,
             skipped_patterns: 0,
         }
     }
@@ -680,6 +693,19 @@ mod tests {
         assert!(out.patterns.is_empty());
         assert_eq!(out.orphan_patterns, 1);
         assert_eq!(out.textures_missing_pattern, 0);
+    }
+
+    /// Wave 3.2: the reader's per-brush skip count rides on the import (the
+    /// skipped brush contributes no entry), so the CLI can report it.
+    #[test]
+    fn skipped_brushes_ride_through_the_import() {
+        let out = map_file(&AbrFile {
+            skipped_brushes: 1,
+            ..file(vec![], vec![brush("Kept", None)])
+        });
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].preset.name, "Kept");
+        assert_eq!(out.skipped_brushes, 1);
     }
 
     // --- wave 3.3: size dynamics → jitter + radius floor -----------------

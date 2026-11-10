@@ -56,7 +56,11 @@
 //! * sampling a brush texture in the paint engine (kill 3.1c): carrying the
 //!   pattern does not change a painted pixel;
 //! * naming the stored `BlnM.<code>` blend-mode string;
-//! * v8+ files, which are descriptor-only and rejected as unsupported;
+//! * v8 and 11+ files: their header numbers are unattested in the public
+//!   record (no published table or reader lists one), so they are rejected
+//!   as unattested versions and the whitelist stays 6/7/9/10.
+//!   "Descriptor-only" is a content class, not a version: a file with no
+//!   `samp` at an attested version already imports (see the judgment calls);
 //! * unknown descriptor OSTypes — a named strict error
 //!   ([`AbrError::UnsupportedDescriptorType`]); extending the table is a
 //!   later kill if a real file needs it;
@@ -90,6 +94,14 @@
 //!   past the section ends pattern parsing for that section and is counted
 //!   once. [`read_abr`] therefore never fails because of `patt` content —
 //!   not even a hostile one. The per-record rules live in `abr_patt.rs`.
+//! * **One malformed brush descriptor costs that brush, never the file.**
+//!   A `Brsh` entry `parse_brush` cannot map (no tip-shape descriptor, or
+//!   a value in the wrong units) is skipped and counted in
+//!   [`AbrFile::skipped_brushes`]; the rest of the file imports. Only the
+//!   structural failures — a descriptor root that does not parse, a section
+//!   whose framing is broken — still refuse the file. A file whose brushes
+//!   ALL fail still parses: zero brushes is not corruption (a `desc` with
+//!   no `Brsh` list has always parsed to zero brushes).
 //! * The per-brush parameter block between the name and the bounds is 10
 //!   bytes at minor version 1 and 264 bytes at minor version 2. The
 //!   reference implementation SKIPS the whole block without naming its
@@ -121,9 +133,12 @@
 //!   when the brush's `useTipDynamics` is true (the reference's gate).
 //!   `bVTy` / `fStp` stay the stored integers: naming the control source
 //!   and mapping it onto Umber's inputs is row 283's call.
-//! * A brush descriptor without a `Brsh` shape descriptor is malformed
-//!   (the reference refuses it too); a `Brsh` list entry that is not a
-//!   descriptor is ignored (the reference ignores it).
+//! * A brush descriptor without a `Brsh` shape descriptor is malformed, so
+//!   that one brush is skipped and counted in
+//!   [`AbrFile::skipped_brushes`] (the reference refuses the whole file
+//!   there; an importer whose contract is "report per brush" must not); a
+//!   `Brsh` list entry that is not a descriptor is ignored (the reference
+//!   ignores it).
 //! * The raw descriptor tree types (`Descriptor`, `DescValue`, ...) are
 //!   re-exported so a later kill (row 283, a CLI inspector) can read the
 //!   keys this module does not map.
@@ -204,8 +219,10 @@ pub enum AbrError {
     /// signature.
     #[error("not an .abr brush file: missing the 8BIM section signature")]
     NotAbr,
-    /// A recognized but unsupported ABR version (v1–v5, or the
-    /// descriptor-only v8 and later).
+    /// A recognized but unsupported ABR version: v1–v5 (they predate the
+    /// `8BIM` section layout this reader walks), and v8 / v11+ (their
+    /// header numbers are unattested in the public record — not a format
+    /// fact, and the whitelist stays 6/7/9/10).
     #[error("unsupported .abr version {version}: only v6, v7, v9 and v10 are supported")]
     UnsupportedVersion {
         /// The version field as stored in the file.
@@ -392,6 +409,10 @@ pub struct AbrFile {
     /// How many `Brsh` entries had a shape class other than
     /// `computedBrush` / `sampledBrush` and were skipped.
     pub skipped_shape_classes: u32,
+    /// How many `Brsh` entries failed to map and were skipped (no tip-shape
+    /// descriptor, or a value in the wrong units, ...). Soft: one bad brush
+    /// never refuses the file.
+    pub skipped_brushes: u32,
     /// How many `patt` records were skipped (undecodable, past the
     /// per-file cap, or running past the section end). Soft: never an
     /// error.
@@ -450,7 +471,8 @@ pub fn read_samples(bytes: &[u8]) -> Result<Vec<AbrSample>, AbrError> {
 ///
 /// `samp` sections give [`AbrFile::samples`]; each `desc` section's `Brsh`
 /// list gives [`AbrFile::brushes`] (unmapped shape classes are counted in
-/// [`AbrFile::skipped_shape_classes`]); `patt` sections give
+/// [`AbrFile::skipped_shape_classes`], unmappable brushes in
+/// [`AbrFile::skipped_brushes`]); `patt` sections give
 /// [`AbrFile::patterns`] (undecodable records are counted in
 /// [`AbrFile::skipped_patterns`], never an error); `phry` is parsed and
 /// ignored; unknown sections are skipped by length.
@@ -480,8 +502,10 @@ fn walk(bytes: &[u8], mode: WalkMode) -> Result<AbrFile, AbrError> {
     let mut reader = Reader::new(bytes);
     let version = reader.i16()?;
     // The versions real files use (and the ones the format authority
-    // accepts): 6, 7, 9, 10. v8 is not a thing; v1-v5 predate the
-    // `8BIM` section layout this reader walks.
+    // accepts): 6, 7, 9, 10. Versions 1-5 predate the `8BIM` section
+    // layout this reader walks; 8 and 11+ are unattested in the public
+    // record (no published table or reader lists one), which is a
+    // statement about the observed corpus, not the format.
     if !matches!(version, 6 | 7 | 9 | 10) {
         return if version >= 1 {
             Err(AbrError::UnsupportedVersion { version })
@@ -567,6 +591,10 @@ fn walk(bytes: &[u8], mode: WalkMode) -> Result<AbrFile, AbrError> {
 
 /// Parses one `desc` payload: a versioned descriptor whose `Brsh` list
 /// holds one brush descriptor per brush.
+///
+/// A brush `parse_brush` cannot map is skipped and counted in
+/// [`AbrFile::skipped_brushes`] — one bad preset never refuses the file.
+/// Only the descriptor root failing to parse (structural) is an error.
 fn parse_desc(payload: &[u8], file: &mut AbrFile) -> Result<(), AbrError> {
     let root = read_version_and_descriptor(payload)?;
     let Some(DescValue::List(entries)) = dget(&root, "Brsh") else {
@@ -578,9 +606,10 @@ fn parse_desc(payload: &[u8], file: &mut AbrFile) -> Result<(), AbrError> {
         let DescValue::Descriptor(brush) = entry else {
             continue;
         };
-        match parse_brush(brush)? {
-            Some(parsed) => file.brushes.push(parsed),
-            None => file.skipped_shape_classes = file.skipped_shape_classes.saturating_add(1),
+        match parse_brush(brush) {
+            Ok(Some(parsed)) => file.brushes.push(parsed),
+            Ok(None) => file.skipped_shape_classes = file.skipped_shape_classes.saturating_add(1),
+            Err(_) => file.skipped_brushes = file.skipped_brushes.saturating_add(1),
         }
     }
     Ok(())
@@ -605,7 +634,9 @@ fn as_integer(value: Option<&DescValue>) -> i32 {
 }
 
 /// Maps one brush descriptor. `Ok(None)` when its shape class is neither
-/// `computedBrush` nor `sampledBrush` (the caller counts the skip).
+/// `computedBrush` nor `sampledBrush` (the caller counts the skip); an
+/// `Err` costs only this brush — the caller counts it in
+/// [`AbrFile::skipped_brushes`] and keeps the rest of the file.
 fn parse_brush(brush: &Descriptor) -> Result<Option<AbrBrush>, AbrError> {
     let Some(shape) = as_descriptor(dget(brush, "Brsh")) else {
         return Err(AbrError::MalformedDescriptor {
@@ -1485,7 +1516,8 @@ mod tests {
         );
     }
 
-    /// Pin 7: a v8+ descriptor-only file names its version.
+    /// Pin 7: a v8 header is refused by name (v8 is unattested; the
+    /// whitelist stays 6/7/9/10).
     #[test]
     fn descriptor_only_v8_is_unsupported() {
         let mut file = Builder::new();
@@ -1759,6 +1791,68 @@ mod tests {
             }]
         );
         assert!(match_sample(&abr.brushes[0], &abr).is_none());
+    }
+
+    /// Wave 3.2: one good brush plus one with no `Brsh` shape descriptor
+    /// imports the good brush; the bad one is skipped and counted, never
+    /// an error.
+    #[test]
+    fn one_unmappable_brush_is_skipped_and_counted() {
+        let bad = Val::Obj("_", vec![("Nm  ", Val::Text("No Shape"))]);
+        let entries = vec![sampled_brush("_", "tip1"), bad];
+        let file = abr_file(
+            1,
+            &[(b"samp", tip_record()), (b"desc", desc_payload(entries))],
+        );
+
+        let abr = read_abr(&file).expect("one bad brush does not refuse the file");
+        assert_eq!(
+            abr.brushes,
+            vec![expected_sampled(AbrToolClass::Brush, "tip1")]
+        );
+        assert_eq!(abr.skipped_brushes, 1);
+        assert_eq!(abr.skipped_shape_classes, 0);
+    }
+
+    /// Wave 3.2: both per-brush map failures — a missing shape descriptor
+    /// and a value in the wrong units — are skipped brushes, not file
+    /// refusals.
+    #[test]
+    fn every_unmappable_brush_kind_is_counted() {
+        let no_shape = Val::Obj("_", vec![("Nm  ", Val::Text("No Shape"))]);
+        let wrong_units = Val::Obj(
+            "_",
+            vec![(
+                "Brsh",
+                Val::Obj("computedBrush", vec![("Dmtr", Val::Units(b"#Prc", 50.0))]),
+            )],
+        );
+        let entries = vec![sampled_brush("_", "tip1"), no_shape, wrong_units];
+        let file = abr_file(1, &[(b"desc", desc_payload(entries))]);
+
+        let abr = read_abr(&file).expect("two bad brushes do not refuse the file");
+        assert_eq!(abr.brushes.len(), 1);
+        assert_eq!(abr.brushes[0].name, "Test Tip");
+        assert_eq!(abr.skipped_brushes, 2);
+    }
+
+    /// Wave 3.2: a `desc` whose brushes ALL fail still parses — zero
+    /// brushes is not corruption (a `desc` with no `Brsh` list has always
+    /// parsed that way).
+    #[test]
+    fn all_unmappable_brushes_import_as_zero_brushes() {
+        let bad = Val::Obj("_", vec![("Nm  ", Val::Text("No Shape"))]);
+        let file = abr_file(1, &[(b"desc", desc_payload(vec![bad]))]);
+
+        let abr = read_abr(&file).expect("an all-bad desc still parses");
+        assert!(abr.brushes.is_empty());
+        assert_eq!(abr.skipped_brushes, 1);
+
+        // The contract a `desc` with no `Brsh` list already had.
+        let empty = abr_file(1, &[(b"desc", root_payload(&[]))]);
+        let abr = read_abr(&empty).expect("a desc with no Brsh list parses");
+        assert!(abr.brushes.is_empty());
+        assert_eq!(abr.skipped_brushes, 0);
     }
 
     /// Two sampledBrush entries in one desc give two brushes, in order,
@@ -2201,6 +2295,7 @@ mod tests {
                 rgba: vec![9, 8, 7, 255],
             }],
             skipped_shape_classes: 0,
+            skipped_brushes: 0,
             skipped_patterns: 0,
         };
 
