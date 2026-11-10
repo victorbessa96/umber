@@ -522,6 +522,7 @@ mod tests {
         let mat = SmartMaterial {
             name: "m".into(),
             version: 1,
+            parameters: Vec::new(),
             layers: vec![
                 SmartLayerTemplate {
                     name: "base".into(),
@@ -541,6 +542,7 @@ mod tests {
                         node_def: "mesh_map_generator".into(),
                         map_name: "AO".into(),
                         channel: "baseColor".into(),
+                        param: None,
                     }),
                 },
             ],
