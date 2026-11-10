@@ -4,6 +4,45 @@ All notable changes to Umber are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); commits are
 the source of truth.
 
+## The November waves — W1 correctness, the R-A2 close, the ABR tail, the SVG import (2026-10-24 → 2026-11-10)
+
+- **Fixed — W1, the primitive conditioning rule:** `UvTri` now rejects a
+  triangle whose normalized area is below `UV_COND_EPS = 1e-6`
+  (`7aad67c3` — needle triangles are not valid footprints, CPU and GPU
+  agree exactly) and one mesh-wide malformed-triangle policy
+  (`fce31e7c` — the walk never offers non-finite-position triangles; the
+  fill and the projector share it). Reports:
+  `docs/loop/kill-reports/2026-11-09-uv-triangle-conditioning.md`,
+  `2026-11-09-malformed-triangle-policy.md`.
+- **Added — the R-A2 decal projector lane, closed to v3:** the end-to-end
+  decal projector (`c573dc87`), backface culling, the one-pass raster
+  (`98fb6e8e` — a ~34 min UI freeze at 4K became ~0.6 s), and
+  depth/occlusion culling (`b228767f`, default on). Reports:
+  `docs/loop/kill-reports/2026-11-08-projection-fill-v1.md`,
+  `2026-11-09-projection-one-pass.md`, `2026-11-09-projection-backface.md`,
+  `2026-11-09-projection-occlusion.md`.
+- **Added — the wave-abr tail, W3 closed 2026-11-10:** the `patt` pattern
+  reader (`72b409cc`), the `PatternTexture` block in `.umberbrush` + the
+  CLI pattern sidecar (`14d9dbf1`), soft per-brush failures
+  (`041b0796`), `szVr` dynamics → engine jitter (`3079e4cb`), and blake3
+  cross-library stamp dedup (`0bcc1687`). Reports:
+  `docs/loop/kill-reports/2026-11-09-abr-patt-reader.md`,
+  `2026-11-10-abr-patt-preset-write.md`, `2026-11-10-abr-soft-brushes.md`,
+  `2026-11-10-abr-dynamics-wiring.md`, `2026-11-10-abr-stamp-dedup.md`.
+- **Added — SVG import:** a clean-room SVG subset parser + scanline
+  rasterizer (`5d4fcccc`) and the CLI `stencil` converter (`06d29936`);
+  the app's stencil loader accepts `.svg` next to `.png`. Reports:
+  `docs/loop/kill-reports/2026-11-07-svg-core.md`,
+  `2026-11-07-svg-loader-wiring.md`.
+- **Changed — the docs/loop lane:** the tree moved to
+  `/mnt/hdd/data/Projects/umber` (report
+  `docs/loop/kill-reports/2026-11-09-tree-move-to-hdd.md`), and the
+  contract docs were truthed — `.spp` import recorded in `DECISIONS.md`,
+  the requirements rows corrected in both directions, README/STATE status
+  lines current, the wave plan closed through W3.
+- Per-kill evidence: `docs/loop/kill-reports/` (99 reports in this
+  window).
+
 ## The W-C3b sweep closed + the flatpak chain went green end to end (2026-10-23, the sweep four + the five walls)
 
 - **Added — the parked W-C3b sweep, all four kills:** the .usdz

@@ -9,6 +9,11 @@
 > not the active order. The active queue lives in docs/loop/queue.md. This
 > amendment does not change the spec's deliverables, non-goals, or exit
 > criteria; it reorders execution and freezes chrome until Gate 0 passes.
+>
+> AMENDMENT NOTE 2 (2026-10-12, ruling 1 — BINDING): `.spp` **import** is
+> ratified and in scope (read-only, clean-room, `crates/spp`); the non-goal
+> below applies to *writing* `.spp` and to `.sbsar` *execution* only.
+> Recorded in `DECISIONS.md` `[2026-10-12 23:20] spp-import-ratified`.
 
 ## One-sentence goal
 
@@ -20,7 +25,7 @@ What this project will NOT do. (Guardrails against scope creep.)
 
 - No mesh modeling/editing (this is a painter, not a modeler — Blender exists)
 - No sculpting in the v0.1 horizon
-- **No Adobe format execution, ever:** .sbsar runs only under Adobe's closed Materials SDK terms — bundling it in an OSS app is legally unresolved at best (docs/research/01 §4) and violates local-first principles regardless; .spp is undocumented HDF5. Umber ships an **original node-graph engine** whose graphs serialize as **MaterialX documents with declared custom nodedefs** for painter-specific nodes.
+- **No Adobe format *execution*, ever:** .sbsar runs only under Adobe's closed Materials SDK terms — bundling it in an OSS app is legally unresolved at best (docs/research/01 §4) and violates local-first principles regardless. **Writing `.spp` is a permanent wall**; **reading** it is ratified (binding ruling 2026-10-12, `DECISIONS.md`): import-only, clean-room from published community HDF5-layout docs, per-project import report, geometry stays FBX/USD — see AMENDMENT NOTE 2 above. Umber ships an **original node-graph engine** whose graphs serialize as **MaterialX documents with declared custom nodedefs** for painter-specific nodes.
 - No cloud/account requirement — local-first always; no telemetry
 - No subscription — free, GPL, community-owned
 - No macOS in the v0.1 horizon (Windows + Linux is the contract; macOS when contributors arrive)
@@ -79,7 +84,7 @@ Hard limits the work must respect.
 
 - Rust-only core; FFI only where no viable Rust crate exists (OCIO via ocio-rs vendored, ufbx for FBX) and license-compatible
 - **Dependency license audit is a Wave-1 merge gate:** every dependency's license recorded in a THIRD_PARTY.md manifest before first merge to master; standalone-crate MIT relicensing requires the upstream license to permit it (verified per crate — e.g. octotablet absorption happens only after its license is confirmed compatible); the libmypaint relationship is a documented-semantics reimplementation, never a code derivative
-- No Adobe SDKs, no .sbsar/.spp execution ever
+- No Adobe SDKs, no .sbsar execution, and no `.spp` *writing* ever — `.spp` import is ratified (read-only, clean-room; AMENDMENT NOTE 2)
 - GPL-3.0-or-later for the application; standalone utility crates may be MIT
 - Hardware floor: Vulkan 1.3 / DX12 (GL fallback tier not built in v0.1)
 - No network-required features; local-first

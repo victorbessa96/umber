@@ -17,7 +17,7 @@
 > [!IMPORTANT]
 > **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,800+<!-- /scorecard --> tests.
 >
-> **Not yet:** no release tag (SPEC ratification and the perf baseline lead the 0.1.0 checklist, `docs/specs/release-checklist-0.1.0.md`); the open feature waves — brush angle/jitter, bitmap stamps, the Win32 tablet path, a11y pass — are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) and the current wave plan [`docs/loop/waves/2026-11-09-wave-plan.md`](docs/loop/waves/2026-11-09-wave-plan.md) (the decal projector lane closed 2026-11-09).
+> **Not yet:** no release tag (SPEC ratification and the first drift-hardened nightly green lead the 0.1.0 checklist, `docs/specs/release-checklist-0.1.0.md`); the open feature waves — the Win32 tablet path, the a11y pass, the power-user tail and the 0.1.0 release gates — are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) and the current wave plan [`docs/loop/waves/2026-11-09-wave-plan.md`](docs/loop/waves/2026-11-09-wave-plan.md) (the decal projector lane closed 2026-11-09; brush angle/jitter and bitmap stamps landed C2-11, 2026-10-19).
 
 <p align="center">
   <a href="#why">Why</a> ·
@@ -38,7 +38,7 @@ Substance Painter is the industry standard for game/film texturing — and it is
 - **Free forever, GPL-3.0-or-later.** No subscriptions, no license servers, no telemetry. Community-owned, community-extended.
 - **Local-first.** Your machine, your files. No account. No cloud requirement — ever.
 - **Fast by construction.** Rust + wgpu (Vulkan/DX12). Compute-first painting and baking. 60fps viewport floor.
-- **Original procedural engine.** We do not touch Adobe's .sbsar/.spp formats — Umber ships its own node-graph engine for generators, filters, and smart materials.
+- **Original procedural engine.** Umber ships its own node-graph engine for generators, filters, and smart materials. It never executes Adobe's formats: `.sbsar` is out, and `.spp` is import-only (read-only, clean-room, `crates/spp` — ratified 2026-10-12), never written.
 - **Git-friendly project format.** Diffable, mergeable projects — the anti-.spp.
 - **Windows + Linux first-class.** One codebase, no second-class platform.
 
@@ -66,7 +66,7 @@ Substance Painter is the industry standard for game/film texturing — and it is
 | **Extensibility** | sandboxed WASM plugins (wasmtime, fuel-metered, memory-capped) |
 | **Platform** | Linux + Windows; crash-safe GPU startup with backend fallback; i18n (en-US, pt-BR) |
 
-Still open is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) — brush angle / jitter, bitmap stamps, the Win32 tablet path, and the 0.1.0 release gates among them.
+Still open is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) — the Win32 tablet path, the a11y pass, channel manage, the four post nodes, and the 0.1.0 release gates among them.
 
 ## Quick start
 
@@ -90,6 +90,8 @@ printf '%s\n' '"version"' '"quit"' | cargo run -p umber-cli -- agent
 
 GPU work needs a Vulkan (Linux) or DX12 (Windows) adapter; `mesa-vulkan-drivers` (lavapipe) works for headless use. If a driver crashes at startup, the next launch steps down to a safer backend automatically; `--safe-gpu` or `WGPU_BACKEND` force one.
 
+**First time?** Follow [`docs/user/getting-started.md`](docs/user/getting-started.md): open a mesh → bake → paint → save → export, every step naming the real menu. Shortcuts live in [`docs/user/keyboard.md`](docs/user/keyboard.md) — note the two viewport-local keys, `P` (toggle orthographic) and `F` (frame the mesh), which fire only while the viewport is hovered.
+
 ## Code signing policy
 
 Windows builds are not signed yet; Umber is applying for free open-source
@@ -112,6 +114,7 @@ umber/
 │   ├── ROADMAP.md     # the plan of record
 │   ├── references/    # reference READMEs from sibling open-source apps
 │   ├── specs/         # design docs per subsystem
+│   ├── user/          # the newcomer path: getting-started.md, keyboard.md
 │   ├── loop/          # the autonomous-build records: queue, kill-ledger,
 │   │                  #   kill-reports/ (per-kill evidence), briefs, coordination notes
 │   ├── research/      # cited research (Painter inventory, competitors, absorption ledgers)

@@ -13,6 +13,6 @@ What you ran to prove it (test command + result, doc lint, CI green). Screenshot
 ## Checklist
 
 - [ ] Matches SPEC.md scope (no silent spec drift — name it if this changes the contract)
-- [ ] No Adobe format/SDK touch (.sbsar/.spp remain forbidden)
+- [ ] No Adobe **execution**: no `.sbsar`, no Adobe SDK, and **no `.spp` writing**. `.spp` **reading** is allowed (read-only, clean-room, `crates/spp`) — see `CONTRIBUTING.md` and `DECISIONS.md` `[2026-10-12 23:20]`
 - [ ] License-compatible code only (GPL-3.0-or-later)
 - [ ] DECISIONS.md entry added if this makes an architectural call

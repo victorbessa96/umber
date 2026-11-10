@@ -124,3 +124,10 @@ Pitfall named in the same session: `scripts/release-ci.sh` gates only origin/mas
 Options rejected: CI strictly at bumps with no other runs (Windows and runner-image drift, the 2026-10-21 ubuntu-26.04 SIGSEGV and the 2026-11-06 missing libxkbcommon-x11, would surface weeks late inside a release; the weekly run bounds that to a week); keeping per-push CI with only `cancel-in-progress` (still a run per push).
 Owner: Razul (proposal), Bessa (go-ahead "Follow your suggestions for the CI").
 Revisit when: a Windows-only regression reaches a bump that the weekly run did not catch, or pushes become rare enough that per-push CI costs nothing.
+
+## [2026-10-12 23:20] spp-import-ratified
+Decision: `.spp` **IMPORT** is ratified and pulled to wave 3 before PSD import — read-only forever, clean-room from published community HDF5-layout docs, per-project import report, geometry stays FBX/USD. **Writing `.spp` stays the hard wall**, and `.sbsar` execution stays banned.
+Context: the pull-users-from-Substance story matters most; the ban on *execution* was being read as a ban on *reading*, so SPEC.md's "no .sbsar/.spp execution ever" overstated the wall and the PR template repeated it. The reader crate landed as `30b966e` (`crates/spp`, HDF5 subset, corpus-gated on real Painter files). This entry is recorded retroactively (2026-11-10) from the loop registry's ruling 1 (`docs/loop/decisions.md`, 2026-10-12 ~23:20, BINDING) because SPEC.md names this file as its only amendment path and the ruling was missing here.
+Options rejected: keep the flat ban (loses the migration story); write support (the wall).
+Owner: Bessa (binding ruling; loop registry `docs/loop/decisions.md` ruling 1).
+Revisit when: never for writing; import-fidelity lanes are tracked in the .spp census.

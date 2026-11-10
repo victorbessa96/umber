@@ -11,21 +11,23 @@
 
 ## Status line
 
-Current phase (2026-11-09): **the tree lives on the HDD and the work is
-planned in waves.** The tree moved 2026-11-09 to
+Current phase (2026-11-10): **the tree lives on the HDD and the work is
+planned in waves; waves 1-3 are CLOSED.** The tree moved 2026-11-09 to
 `/mnt/hdd/data/Projects/umber` (`~/Projects/umber` is now a symlink;
 MCP server + watch cron resolve through it; report
 `docs/loop/kill-reports/2026-11-09-tree-move-to-hdd.md`). The decal
-projector lane (R-A2) is **CLOSED to v2d + W1.1**: the one-pass raster
-(`98fb6e8e`, CI `42646713045`; ~34 min UI freeze at 4K → ~0.6 s) and the
-UV triangle conditioning rule `UV_COND_EPS = 1e-6` (`7aad67c3`, release
-CI `42677040220` GREEN — needle triangles are not valid footprints, CPU
-and GPU agree exactly). The plan of record is
-`docs/loop/waves/2026-11-09-wave-plan.md` (six waves: W1 correctness —
-1.1 landed, 1.2 the malformed-triangle policy asymmetry next; W2 the
-R-A2 close; W3 the wave-abr tail; W4 the Wave-9 lanes; W5 the power-user
-tail; W6 the gated rows). Live row log: `docs/loop/queue.md` (rows
-307-310). Agent contracts: CLAUDE.md = AGENTS.md (kept identical).
+projector lane (R-A2) is **CLOSED to v3**: the one-pass raster
+(`98fb6e8e`, CI `42646713045`; ~34 min UI freeze at 4K → ~0.6 s), the
+UV triangle conditioning rule `UV_COND_EPS = 1e-6` (`7aad67c3`), and
+depth/occlusion culling (`b228767f`, wave 2.1, default on). **W1
+correctness closed** (1.1 `7aad67c3`, 1.2 `fce31e7c` — the mesh-wide
+malformed-triangle policy); **W3 the wave-abr tail closed 2026-11-10**
+(3.1a `72b409cc`, 3.1b `14d9dbf1`, 3.2 `041b0796`, 3.3 `3079e4cb`,
+3.4 `0bcc1687`). W4 (the Wave-9 lanes) is next; W5 the power-user tail
+and W6 the gated rows stay open. The plan of record is
+`docs/loop/waves/2026-11-09-wave-plan.md`; the live row log is
+`docs/loop/queue.md` (rows to 343). Agent contracts: CLAUDE.md =
+AGENTS.md (kept identical).
 
 Previous phase (2026-11-06): **charter-v2 T1-T3 LANDED (`5af3c84`, pushed
 through the new `scripts/safe-push.py`)**: bake/export by command id +
@@ -458,11 +460,16 @@ other commands in the same shell line — stacked full-parallelism gates
 crashed Hermes (2026-10-12, Bessa's order). Local cargo now runs under
 the flock at /tmp/umber-cargo.lock.
 
-TWO-GATE WAVES (Bessa's ruling 2026-10-14, replacing per-push CI):
-Gate 1 = scripts/wave-battery.sh per kill (fmt + clippy -D warnings +
-full suites, local, minutes — this gate catches what CI catches);
-Gate 2 = ONE push per wave + ONE CI run (scripts/ci-watch.sh
-backgrounded with a notify pattern; the verdict pings between turns).
+TWO-GATE WAVES (Bessa's ruling 2026-10-14; CI became a **release**
+gate on 2026-11-06, `DECISIONS.md`):
+Gate 1 = the battery per kill — `cargo fmt --all -- --check`, clippy
+`-D warnings`, the touched crates' suites, `check-layers.py`,
+`scorecard.py --check` — local, minutes; this gate catches what CI
+catches.
+Gate 2 = `dcommit.py` (path-limited, with the locks) → `safe-push.py`
+**bare** (the per-push gate; it takes `/tmp/umber-cargo.lock` itself).
+CI runs at version bumps (`scripts/release-ci.sh`), on tags, on PRs and
+weekly — not per push.
 Kills batch as commits unpushed between gates; nothing idles on a
 foreground sleep. Proven Waves 1-4: every real bug caught by Gate 1.
 
