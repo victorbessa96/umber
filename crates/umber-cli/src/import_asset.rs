@@ -97,12 +97,49 @@
 //!   until kill 3.1c. Persisting now is deliberate — the import is one-shot,
 //!   and a re-run to pick up the texture would hit the no-overwrite refusal.
 //!
-//! Non-goals (v1): cross-library stamp dedup (blake3 of a new stamp vs
-//! the library's existing sidecars — follow-up), one sidecar per shared
-//! pattern, sampling a carried texture in the paint engine (kill 3.1c),
-//! v8 and 11+ header numbers (unattested versions), the size dynamics
-//! beyond jitter + minimum (the control source's own response, fade
-//! steps, angle/roundness dynamics), and `.abr` WRITING (never).
+//! ## Cross-library stamp dedup (wave 3.4)
+//!
+//! The reader's in-file stamp dedup (`AbrImport::duplicate_stamps_skipped`)
+//! drops a later entry whose stamp is byte-equal to an earlier one. The
+//! same drop-the-later rule is extended to the target library: in the plan
+//! phase every existing `*.stamp.png` in `dir` is decoded with
+//! `umber_export::png::read_png_rgba8` and hashed, and a planned stamp
+//! whose plane already exists — in the library, or in an earlier item of
+//! this same plan — drops its whole item (no preset, no stamp, no pattern
+//! sidecar) and counts in
+//! [`AbrImportOutcome::cross_library_duplicates_skipped`], on a dry run
+//! too. Judgment calls:
+//!
+//! * the plane is hashed (blake3) in STORED row order: `read_png_rgba8`
+//!   returns GPU row order (last stored row first) while `write_png`
+//!   stores rows as given, so the decoded rows are reversed back before
+//!   hashing — hashing the decoder's order directly would compare two
+//!   orientations and never match the sidecar the import itself wrote.
+//! * the dimensions ride in the hash, the same `(w, h, rgba)` triple the
+//!   in-file rule compares: a 2×2 and a 4×1 sharing a byte plane are
+//!   different stamps.
+//! * a sidecar that does not decode is skipped silently — a stray or
+//!   corrupt PNG is not ours to judge, and it never blocks an import. A
+//!   missing `dir` is an empty set (a first import).
+//! * in-file duplicates keep counting in `duplicate_stamps_skipped`; this
+//!   count is the library half only, so the two never overlap.
+//! * dropping the item also drops its `.pattern.png` sidecar: a preset is
+//!   what names a pattern file, and a dropped duplicate writes no preset.
+//!   Sharing ONE stamp file between two presets would need a new preset
+//!   field (a stamp is keyed by `stamped: true` + `<stem>.stamp.png`) —
+//!   explicitly out of scope, so the later brush gets no preset at all.
+//! * existing files are only ever read: dedup removes WRITES, never a
+//!   file. A same-named sidecar with different bytes still hits the
+//!   no-overwrite refusal, and the target/exists check runs on the
+//!   post-dedup plan.
+//! * the scan decodes every `*.stamp.png` in the library once per import:
+//!   an import-time cost only — nothing on the paint path reads it.
+//!
+//! Non-goals (v1): one sidecar per shared pattern, sampling a carried
+//! texture in the paint engine (kill 3.1c), v8 and 11+ header numbers
+//! (unattested versions), the size dynamics beyond jitter + minimum (the
+//! control source's own response, fade steps, angle/roundness dynamics),
+//! and `.abr` WRITING (never).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -458,6 +495,12 @@ pub struct AbrImportOutcome {
     /// Brushes dropped because an earlier brush in the file has the
     /// byte-identical stamp (`AbrImport::duplicate_stamps_skipped`).
     pub duplicate_stamps_skipped: u32,
+    /// Items dropped because the target library already holds their stamp
+    /// (wave 3.4): an existing `*.stamp.png` sidecar decodes to the same
+    /// RGBA plane, or an earlier item of this same plan does. The whole
+    /// item drops — no preset, no stamp, no pattern sidecar — and nothing
+    /// existing is overwritten. Planned on a dry run too.
+    pub cross_library_duplicates_skipped: u32,
     /// `samp` tips no brush references (`AbrImport::orphan_samples`).
     pub orphan_samples: u32,
     /// Brushes emitted radial — computed, or tip missing
@@ -538,6 +581,67 @@ struct AbrPlanItem {
     stamp: Option<(PathBuf, u32, u32, Vec<u8>)>,
     /// `<slug>.pattern.png` — the brush's `.abr` pattern (wave 3.1b).
     pattern: Option<(PathBuf, u32, u32, Vec<u8>)>,
+}
+
+/// The cross-library dedup key for one stamp plane (wave 3.4): blake3 over
+/// the dimensions plus the RGBA bytes, in STORED row order — the order
+/// `write_png` writes and the `.abr` stores, top row first.
+///
+/// The dimensions ride in the hash because the in-file rule compares the
+/// `(w, h, rgba)` triple: a 2×2 and a 4×1 sharing a byte plane are
+/// different stamps.
+fn stamp_hash(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&width.to_le_bytes());
+    hasher.update(&height.to_le_bytes());
+    hasher.update(rgba);
+    *hasher.finalize().as_bytes()
+}
+
+/// `rgba` (a plane `read_png_rgba8` returned, in GPU row order: last
+/// stored row first) rewritten in stored row order, the order
+/// [`stamp_hash`] takes. A plane whose length does not match the
+/// dimensions is returned unchanged — the caller hashes what it read.
+fn into_stored_order(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let stride = u64::from(width) * 4;
+    if stride == 0 || stride.checked_mul(u64::from(height)) != Some(rgba.len() as u64) {
+        return rgba.to_vec();
+    }
+    let stride = stride as usize;
+    let mut out = Vec::with_capacity(rgba.len());
+    for row in rgba.chunks_exact(stride).rev() {
+        out.extend_from_slice(row);
+    }
+    out
+}
+
+/// Every stamp plane the library `dir` already holds: the RGBA planes of
+/// its `*.stamp.png` sidecars, decoded (`read_png_rgba8`) and hashed
+/// ([`stamp_hash`]) in stored row order.
+///
+/// A file that does not decode is skipped silently: a stray or corrupt PNG
+/// is not ours to judge, and it must never block an import. A missing
+/// `dir` is an empty set (a first import).
+fn existing_stamp_hashes(dir: &Path) -> HashSet<[u8; 32]> {
+    let mut hashes = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return hashes;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_stamp_sidecar = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".stamp.png"));
+        if !is_stamp_sidecar {
+            continue;
+        }
+        if let Ok((width, height, rgba)) = umber_export::png::read_png_rgba8(&path) {
+            let stored = into_stored_order(width, height, &rgba);
+            hashes.insert(stamp_hash(width, height, &stored));
+        }
+    }
+    hashes
 }
 
 /// Row 284: fans an `.abr` brush library out into the brush library dir
@@ -646,6 +750,28 @@ pub fn import_abr_asset(
             pattern,
         });
     }
+
+    // Wave 3.4: cross-library stamp dedup. A planned stamp whose plane the
+    // library already holds — an existing `<stem>.stamp.png`, or an
+    // earlier item of this same plan — is a redundant write: the whole
+    // item drops (no preset, no stamp, no pattern sidecar), nothing
+    // existing is touched, and the count rides on the outcome. The set is
+    // seeded from the library and grown in plan order, the same
+    // "the first keeps its place" rule the reader's in-file dedup applies.
+    let mut stamp_hashes = existing_stamp_hashes(&dir);
+    let mut cross_library_duplicates_skipped = 0u32;
+    let mut deduped = Vec::with_capacity(plan.len());
+    for item in plan {
+        if let Some((_, width, height, rgba)) = &item.stamp {
+            if !stamp_hashes.insert(stamp_hash(*width, *height, rgba)) {
+                cross_library_duplicates_skipped += 1;
+                continue;
+            }
+        }
+        deduped.push(item);
+    }
+    let plan = deduped;
+
     let mut targets = Vec::new();
     for item in &plan {
         targets.push(item.preset_path.clone());
@@ -676,6 +802,7 @@ pub fn import_abr_asset(
         stamps_written,
         patterns_written,
         duplicate_stamps_skipped: imported.duplicate_stamps_skipped,
+        cross_library_duplicates_skipped,
         orphan_samples: imported.orphan_samples,
         brushes_without_sample: imported.brushes_without_sample,
         skipped_brushes: imported.skipped_brushes,
@@ -981,6 +1108,46 @@ pub(crate) mod abr_fixture {
         let mut file = Enc(Vec::new());
         file.i16(6);
         file.i16(1);
+        file.section(b"desc", &desc.0);
+        file.0
+    }
+
+    /// Wave 3.4: one sampled brush and nothing else — the cross-library
+    /// dedup's fixture, where the single planned stamp IS the import, so a
+    /// skipped stamp means no file written at all.
+    pub(crate) fn bytes_with_one_stamp() -> Vec<u8> {
+        let mut body = Enc(Vec::new());
+        body.u8(4);
+        body.raw(b"tip1");
+        for _ in 0..5 {
+            body.u16(0);
+        }
+        for v in [0i32, 0, 4, 4] {
+            body.i32(v); // y, x, bottom (height), right (width)
+        }
+        body.i16(8);
+        body.u8(0);
+        body.raw(&TIP_ALPHA);
+        let declared = body.0.len() as u32;
+        while !body.0.len().is_multiple_of(4) {
+            body.u8(0);
+        }
+        let mut samp = Enc(Vec::new());
+        samp.u32(declared);
+        samp.raw(&body.0);
+
+        let mut desc = Enc(Vec::new());
+        desc.u32(16);
+        desc.obj_header("null", 1);
+        desc.id("Brsh");
+        desc.raw(b"VlLs");
+        desc.i32(1);
+        desc.brush("My Brush!!", Some("tip1"));
+
+        let mut file = Enc(Vec::new());
+        file.i16(6);
+        file.i16(1);
+        file.section(b"samp", &samp.0);
         file.section(b"desc", &desc.0);
         file.0
     }
@@ -1537,6 +1704,10 @@ mod tests {
             "the fixture carries no patt section"
         );
         assert_eq!(out.duplicate_stamps_skipped, 1);
+        assert_eq!(
+            out.cross_library_duplicates_skipped, 0,
+            "an empty library holds no stamp to dedup against"
+        );
         assert_eq!(out.orphan_samples, 0);
         assert_eq!(out.brushes_without_sample, 1);
         // And it serializes to the one-line JSON the CLI prints.
@@ -1855,5 +2026,151 @@ mod tests {
         assert_eq!(preset.params.jitter.position, 0.0);
         assert_eq!(preset.params.jitter.flow, 0.0);
         assert!(preset.validate().is_ok());
+    }
+
+    // --- wave 3.4: cross-library stamp dedup -----------------------------
+
+    /// The 4x4 white-plus-coverage plane the fixture's tip maps to, in the
+    /// stamp's stored row order (top row first) — exactly what the import
+    /// hands `write_png`.
+    fn fixture_stamp_plane() -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(abr_fixture::TIP_ALPHA.len() * 4);
+        for &alpha in &abr_fixture::TIP_ALPHA {
+            rgba.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+        rgba
+    }
+
+    /// Writes the one-stamp `.abr` fixture to `<dir>/<file_name>`.
+    fn one_stamp_abr_file(dir: &Path, file_name: &str) -> PathBuf {
+        let path = dir.join(file_name);
+        std::fs::write(&path, abr_fixture::bytes_with_one_stamp()).unwrap();
+        path
+    }
+
+    /// Wave 3.4: a library that already holds the identical stamp plane
+    /// (under a different file name — the rule is the bytes, not the name)
+    /// skips the whole item, counts it, and writes nothing.
+    #[test]
+    fn abr_cross_library_duplicate_stamp_is_skipped_and_counted() {
+        let src_dir = tmp_dir("abr-dedup-src");
+        let lib = tmp_dir("abr-dedup-lib");
+        let src = one_stamp_abr_file(&src_dir, "one.abr");
+        let seeded = lib.join("existing.stamp.png");
+        umber_export::png::write_png(
+            &seeded,
+            4,
+            4,
+            &fixture_stamp_plane(),
+            umber_export::png::Transfer::Linear,
+        )
+        .unwrap();
+        let seeded_bytes = std::fs::read(&seeded).unwrap();
+
+        let out = import_abr_asset(&src, Some(&lib), false).unwrap();
+        assert_eq!(out.cross_library_duplicates_skipped, 1);
+        assert_eq!(
+            out.duplicate_stamps_skipped, 0,
+            "the fixture has one stamp: no in-file duplicate"
+        );
+        assert_eq!(out.presets, 0, "the whole item drops, preset included");
+        assert_eq!(out.stamps_written, 0);
+        assert!(out.targets.is_empty(), "nothing is planned");
+        assert_eq!(
+            dir_entries(&lib),
+            vec!["existing.stamp.png"],
+            "no new file, and the library file is never overwritten"
+        );
+        assert_eq!(
+            std::fs::read(&seeded).unwrap(),
+            seeded_bytes,
+            "the existing sidecar is byte-untouched"
+        );
+        // The CLI prints the outcome through serde: the count rides along.
+        assert_eq!(
+            serde_json::to_value(&out).unwrap()["cross_library_duplicates_skipped"],
+            1
+        );
+    }
+
+    /// Wave 3.4: a library stamp with the same dimensions but different
+    /// pixels is a different stamp — both are written, nothing is counted.
+    #[test]
+    fn abr_different_stamp_bytes_are_both_written() {
+        let src_dir = tmp_dir("abr-dedup-diff-src");
+        let lib = tmp_dir("abr-dedup-diff-lib");
+        let src = one_stamp_abr_file(&src_dir, "one.abr");
+        // 4x4 like the fixture's tip, all-zero pixels: not the same plane.
+        let other = vec![0u8; 4 * 4 * 4];
+        umber_export::png::write_png(
+            &lib.join("other.stamp.png"),
+            4,
+            4,
+            &other,
+            umber_export::png::Transfer::Linear,
+        )
+        .unwrap();
+
+        let out = import_abr_asset(&src, Some(&lib), false).unwrap();
+        assert_eq!(out.cross_library_duplicates_skipped, 0);
+        assert_eq!(out.presets, 1);
+        assert_eq!(out.stamps_written, 1);
+        assert_eq!(
+            out.targets,
+            vec![
+                lib.join("my-brush.umberbrush"),
+                lib.join("my-brush.stamp.png"),
+            ]
+        );
+        assert_eq!(
+            dir_entries(&lib),
+            vec![
+                "my-brush.stamp.png",
+                "my-brush.umberbrush",
+                "other.stamp.png"
+            ]
+        );
+        // The new sidecar decodes to the tip's plane (decoder row order:
+        // the fixture's rows reversed).
+        let (w, h, rgba) =
+            umber_export::png::read_png_rgba8(&lib.join("my-brush.stamp.png")).unwrap();
+        assert_eq!((w, h), (4, 4));
+        let mut expected = Vec::new();
+        for row in (0..4).rev() {
+            for col in 0..4 {
+                let alpha = abr_fixture::TIP_ALPHA[row * 4 + col];
+                expected.extend_from_slice(&[255, 255, 255, alpha]);
+            }
+        }
+        assert_eq!(rgba, expected);
+    }
+
+    /// Wave 3.4: a dry run reports the cross-library skip count and writes
+    /// nothing.
+    #[test]
+    fn abr_dry_run_counts_cross_library_duplicates_without_writing() {
+        let src_dir = tmp_dir("abr-dedup-dry-src");
+        let lib = tmp_dir("abr-dedup-dry-lib");
+        let src = one_stamp_abr_file(&src_dir, "one.abr");
+        umber_export::png::write_png(
+            &lib.join("existing.stamp.png"),
+            4,
+            4,
+            &fixture_stamp_plane(),
+            umber_export::png::Transfer::Linear,
+        )
+        .unwrap();
+
+        let out = import_abr_asset(&src, Some(&lib), true).unwrap();
+        assert!(out.dry_run);
+        assert_eq!(out.cross_library_duplicates_skipped, 1);
+        assert_eq!(out.presets, 0);
+        assert_eq!(out.stamps_written, 0);
+        assert!(out.targets.is_empty());
+        assert_eq!(
+            dir_entries(&lib),
+            vec!["existing.stamp.png"],
+            "dry run must not write"
+        );
     }
 }
