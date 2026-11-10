@@ -294,10 +294,12 @@ use crate::paint_state::PaintState;
 use crate::set_switch::restage_stencil;
 use crate::stencil::StencilState;
 
-/// Background shown when there is no mesh loaded (and behind the mesh
-/// otherwise, since the shared egui render pass has no clear op of its
-/// own — see `GpuContext::new` docs on why there's no depth/clear here).
-const EMPTY_VIEWPORT_COLOR: Color32 = Color32::from_rgb(28, 28, 30);
+// F7 (2026-11-10 round-3 audit): the loaded-mesh backdrop was a hard-coded
+// (28,28,30); it now uses the theme's viewport token via
+// `theme::viewport_bg()`, matching the empty state and High Contrast.
+// (Behind the mesh otherwise, since the shared egui render pass has no
+// clear op of its own — see `GpuContext::new` docs on why there's no
+// depth/clear here.)
 
 /// Degrees-per-pixel for drag-orbit; chosen so a full-width drag on a
 /// typical viewport is roughly one full turn.
@@ -1193,7 +1195,8 @@ impl Viewport {
         if self.mesh.is_none() {
             crate::empty_state::paint_backdrop(ui.painter(), rect);
         } else {
-            ui.painter().rect_filled(rect, 0.0, EMPTY_VIEWPORT_COLOR);
+            ui.painter()
+                .rect_filled(rect, 0.0, umber_gui::theme::viewport_bg());
         }
         // The empty state (Phase 0b, GUI plan g5-home-screen): the home
         // card until a mesh loads, lit while a file drag hovers the
