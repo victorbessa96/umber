@@ -849,7 +849,13 @@ pub fn layers_ui(
                 for (name, mask) in list_smart_masks(&smart_dirs()) {
                     ui.horizontal(|ui| {
                         ui.label(format!("{name} ▸ .umbermask"));
-                        if ui.button("+").clicked() {
+                        if umber_gui::widgets::glyph_button(
+                            ui,
+                            "+",
+                            &tr("layers.attach-smart-mask-tip"),
+                        )
+                        .clicked()
+                        {
                             doc.run(LayerCommand::attach_mask(target, name.clone()));
                             outcome.smart_mask_applied = Some((target, mask));
                         }
@@ -1002,7 +1008,9 @@ pub fn layers_ui(
                     }
                     // ✕ arms the confirm window (the Delete key removes at
                     // once); the shell's gesture state owns the window.
-                    if ui.small_button("✕").clicked() {
+                    if umber_gui::widgets::glyph_button(ui, "✕", &tr("layers.delete-layer-tip"))
+                        .clicked()
+                    {
                         outcome.gestures.push(LayerGesture::Delete {
                             ids: vec![layer.id],
                             source: DeleteSource::RowButton,
@@ -1589,7 +1597,9 @@ pub fn smart_shelf_ui(
     for name in names.unwrap_or_default() {
         ui.horizontal(|ui| {
             ui.label(&name);
-            if ui.button("+").clicked() {
+            if umber_gui::widgets::glyph_button(ui, "+", &tr("layers.add-smart-material-tip"))
+                .clicked()
+            {
                 if let Some((_, material)) = list_smart_materials(&smart_dirs())
                     .into_iter()
                     .find(|(n, _)| *n == name)
@@ -2263,9 +2273,12 @@ mod tests {
             }]
         );
         harness.state_mut().gestures.clear();
-        // Rows list top-first: the LAST ✕ belongs to "Bottom".
-        let removes: Vec<_> = harness.query_all_by_label("✕").collect();
-        assert_eq!(removes.len(), 2, "one ✕ per row");
+        // Rows list top-first: the LAST delete button belongs to "Bottom".
+        // F8: the ✕ buttons' accessible label is now the tooltip, not the
+        // glyph.
+        let delete_tip = tr("layers.delete-layer-tip");
+        let removes: Vec<_> = harness.query_all_by_label(&delete_tip).collect();
+        assert_eq!(removes.len(), 2, "one delete button per row");
         removes.last().unwrap().click();
         harness.run();
         assert_eq!(

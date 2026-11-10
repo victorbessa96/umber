@@ -694,7 +694,7 @@ pub fn library_ui(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut state.new_dir);
-                if ui.small_button("+").clicked() {
+                if umber_gui::widgets::glyph_button(ui, "+", &tr("assets.add-dir-tip")).clicked() {
                     let p = std::path::PathBuf::from(state.new_dir.trim());
                     if p.is_dir() && !extras.contains(&p) {
                         extras.push(p);
@@ -706,7 +706,9 @@ pub fn library_ui(
             let mut remove: Option<std::path::PathBuf> = None;
             for d in &extras {
                 ui.horizontal(|ui| {
-                    if ui.small_button("✕").clicked() {
+                    if umber_gui::widgets::glyph_button(ui, "✕", &tr("assets.remove-dir-tip"))
+                        .clicked()
+                    {
                         remove = Some(d.clone());
                     }
                     ui.label(d.display().to_string())
@@ -786,7 +788,8 @@ pub fn library_ui(
                 }
                 ui.label(&entry.preset.name)
                     .on_hover_text(entry.source_path.display().to_string());
-                if ui.small_button("▸").clicked() {
+                if umber_gui::widgets::glyph_button(ui, "▸", &tr("assets.use-brush-tip")).clicked()
+                {
                     out.brush = Some(entry.preset.name.clone());
                 }
             });
@@ -855,7 +858,7 @@ pub fn library_ui(
             label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
                 crate::layers_panel::AssetDropRef::Material(name.clone()),
             ));
-            if ui.small_button("+").clicked() {
+            if umber_gui::widgets::glyph_button(ui, "+", &tr("assets.add-material-tip")).clicked() {
                 out.material = Some(material.clone());
             }
         });
@@ -913,7 +916,7 @@ pub fn library_ui(
             label.dnd_set_drag_payload(crate::layers_panel::AssetDrag(
                 crate::layers_panel::AssetDropRef::Mask(name.clone()),
             ));
-            if ui.small_button("+").clicked() {
+            if umber_gui::widgets::glyph_button(ui, "+", &tr("assets.attach-mask-tip")).clicked() {
                 if let Some(target) = selected_layer {
                     out.mask = Some((target, mask.clone()));
                 }
@@ -1364,7 +1367,12 @@ mod kittest {
             .next()
             .map(|(_, m)| m.name)
             .expect("the bundled library has materials");
-        let plus = h.get_all_by_label("+").next().expect("row buttons");
+        // F8: the + buttons' accessible label is now the tooltip.
+        let add_material_tip = tr("assets.add-material-tip");
+        let plus = h
+            .get_all_by_label(&add_material_tip)
+            .next()
+            .expect("row buttons");
         plus.click();
         assert!(h.run_ok().is_some());
         let out = h
