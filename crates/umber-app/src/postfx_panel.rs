@@ -64,6 +64,10 @@ fn effect_label(pass: PostPass) -> String {
         PostPass::Vignette => i18n::tr("postfx.vignette"),
         PostPass::Sharpen => i18n::tr("postfx.sharpen"),
         PostPass::ToneMap => i18n::tr("postfx.tonemap"),
+        PostPass::Glare => i18n::tr("postfx.glare"),
+        PostPass::LensFlare => i18n::tr("postfx.lens-flare"),
+        PostPass::ChromaticAberration => i18n::tr("postfx.chromatic-aberration"),
+        PostPass::FilmGrain => i18n::tr("postfx.film-grain"),
     }
 }
 
@@ -138,6 +142,42 @@ pub fn carry_from_chain(chain: &PostChain) -> PostFxCarry {
                     },
                     exposure,
                 },
+                PostEffect::Glare {
+                    threshold,
+                    knee,
+                    intensity,
+                    radius,
+                } => PostFxEffect::Glare {
+                    threshold,
+                    knee,
+                    intensity,
+                    radius,
+                },
+                PostEffect::LensFlare {
+                    threshold,
+                    intensity,
+                    decay,
+                    tint,
+                } => PostFxEffect::LensFlare {
+                    threshold,
+                    intensity,
+                    decay,
+                    tint,
+                },
+                PostEffect::ChromaticAberration { strength, center } => {
+                    PostFxEffect::ChromaticAberration { strength, center }
+                }
+                PostEffect::FilmGrain {
+                    amount,
+                    seed,
+                    size,
+                    monochrome,
+                } => PostFxEffect::FilmGrain {
+                    amount,
+                    seed,
+                    size,
+                    monochrome,
+                },
             })
             .collect(),
         enabled: chain.enabled.clone(),
@@ -177,6 +217,42 @@ pub fn chain_from_carry(carry: &PostFxCarry) -> PostChain {
                     PostFxToneMapMode::Reinhard => ToneMapMode::Reinhard,
                 },
                 exposure,
+            },
+            PostFxEffect::Glare {
+                threshold,
+                knee,
+                intensity,
+                radius,
+            } => PostEffect::Glare {
+                threshold,
+                knee,
+                intensity,
+                radius,
+            },
+            PostFxEffect::LensFlare {
+                threshold,
+                intensity,
+                decay,
+                tint,
+            } => PostEffect::LensFlare {
+                threshold,
+                intensity,
+                decay,
+                tint,
+            },
+            PostFxEffect::ChromaticAberration { strength, center } => {
+                PostEffect::ChromaticAberration { strength, center }
+            }
+            PostFxEffect::FilmGrain {
+                amount,
+                seed,
+                size,
+                monochrome,
+            } => PostEffect::FilmGrain {
+                amount,
+                seed,
+                size,
+                monochrome,
             },
         };
         // `push` clamps and appends enabled; the index is the one just
@@ -316,6 +392,131 @@ fn param_rows(ui: &mut Ui, effect: &mut PostEffect) -> bool {
                     .step(0.1)
                     .unit("EV"),
             );
+        }
+        PostEffect::Glare {
+            threshold,
+            knee,
+            intensity,
+            radius,
+        } => {
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.threshold"),
+                ValueField::new(threshold)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.knee"),
+                ValueField::new(knee)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.intensity"),
+                ValueField::new(intensity)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=4.0)
+                    .step(0.05),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.radius"),
+                ValueField::new(radius)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0..=umber_gpu::postfx::GLARE_MAX_RADIUS)
+                    .unit("px"),
+            );
+        }
+        PostEffect::LensFlare {
+            threshold,
+            intensity,
+            decay,
+            tint,
+        } => {
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.threshold"),
+                ValueField::new(threshold)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.intensity"),
+                ValueField::new(intensity)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=4.0)
+                    .step(0.05),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.decay"),
+                ValueField::new(decay)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=umber_gpu::postfx::LENS_FLARE_MAX_DECAY),
+            );
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(i18n::tr("postfx.tint")).color(umber_gui::muted()));
+                changed |= ui.color_edit_button_rgb(tint).changed();
+            });
+        }
+        PostEffect::ChromaticAberration { strength, center } => {
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.strength"),
+                ValueField::new(strength)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(-0.5..=0.5)
+                    .step(0.0)
+                    .decimals(4),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.center-x"),
+                ValueField::new(&mut center[0])
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.center-y"),
+                ValueField::new(&mut center[1])
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
+        }
+        PostEffect::FilmGrain {
+            amount,
+            seed,
+            size,
+            monochrome,
+        } => {
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.amount"),
+                ValueField::new(amount)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(0.0..=1.0),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.seed"),
+                ValueField::new(seed).context_menu(crate::i18n::prop_menu_labels()),
+            );
+            changed |= field_row(
+                ui,
+                &i18n::tr("postfx.grain-size"),
+                ValueField::new(size)
+                    .context_menu(crate::i18n::prop_menu_labels())
+                    .range(1..=64)
+                    .unit("px"),
+            );
+            changed |= ui
+                .checkbox(monochrome, i18n::tr("postfx.monochrome"))
+                .changed();
         }
     }
     changed
@@ -540,7 +741,9 @@ mod tests {
         assert!(chain.set_enabled(1, false));
         let carry = carry_from_chain(&chain);
         assert_eq!(carry.effects.len(), PostPass::ALL.len());
-        assert_eq!(carry.enabled, vec![true, false, true, true, true]);
+        let mut flags = vec![true; PostPass::ALL.len()];
+        flags[1] = false;
+        assert_eq!(carry.enabled, flags);
         assert_eq!(chain_from_carry(&carry), chain);
     }
 
@@ -567,6 +770,132 @@ mod tests {
             }]
         );
         assert_eq!(chain.enabled, vec![true]);
+    }
+
+    #[test]
+    fn post_node_effects_cross_the_carry_with_exact_params() {
+        // Non-default params on the four post-node effects (a negative
+        // seed, mono off, an off-centre CA): carry -> chain -> carry is
+        // exact, and each maps to its own carry variant.
+        let effects = [
+            PostEffect::Glare {
+                threshold: 0.5,
+                knee: 0.2,
+                intensity: 2.5,
+                radius: 7,
+            },
+            PostEffect::LensFlare {
+                threshold: 0.4,
+                intensity: 1.5,
+                decay: 0.7,
+                tint: [1.0, 0.5, 0.25],
+            },
+            PostEffect::ChromaticAberration {
+                strength: -0.125,
+                center: [0.25, 0.75],
+            },
+            PostEffect::FilmGrain {
+                amount: 0.3,
+                seed: -9,
+                size: 2,
+                monochrome: false,
+            },
+        ];
+        let mut chain = PostChain::new();
+        for e in effects {
+            chain.push(e);
+        }
+        assert_eq!(chain.effects, effects, "already inside the clamps");
+        let carry = carry_from_chain(&chain);
+        assert!(matches!(
+            carry.effects[0],
+            PostFxEffect::Glare { radius: 7, .. }
+        ));
+        assert!(matches!(
+            carry.effects[1],
+            PostFxEffect::LensFlare { decay, .. } if decay == 0.7
+        ));
+        assert!(matches!(
+            carry.effects[2],
+            PostFxEffect::ChromaticAberration {
+                center: [0.25, 0.75],
+                ..
+            }
+        ));
+        assert!(matches!(
+            carry.effects[3],
+            PostFxEffect::FilmGrain {
+                seed: -9,
+                monochrome: false,
+                ..
+            }
+        ));
+        assert_eq!(chain_from_carry(&carry), chain);
+        assert_eq!(carry_from_chain(&chain_from_carry(&carry)), carry);
+    }
+
+    #[test]
+    fn chain_from_carry_clamps_post_node_params() {
+        // A hand-edited file past the GPU tap budgets clamps on load.
+        let carry = PostFxCarry {
+            effects: vec![
+                PostFxEffect::Glare {
+                    threshold: 0.8,
+                    knee: 0.1,
+                    intensity: 1.0,
+                    radius: 256,
+                },
+                PostFxEffect::LensFlare {
+                    threshold: 0.9,
+                    intensity: 1.0,
+                    decay: 0.999,
+                    tint: [0.6, 0.8, 1.0],
+                },
+            ],
+            enabled: vec![],
+        };
+        let chain = chain_from_carry(&carry);
+        assert!(matches!(
+            chain.effects[0],
+            PostEffect::Glare { radius, .. } if radius == umber_gpu::postfx::GLARE_MAX_RADIUS
+        ));
+        assert!(matches!(
+            chain.effects[1],
+            PostEffect::LensFlare { decay, .. } if decay == umber_gpu::postfx::LENS_FLARE_MAX_DECAY
+        ));
+    }
+
+    #[test]
+    fn add_effect_dispatches_each_post_node_to_its_pass() {
+        // The panel's "Add effect" path (`PostEffect::default_for` on the
+        // picked kind): every new kind lands as its own pass with the CPU
+        // node's defaults, labelled, and plans one GPU stage.
+        for pass in [
+            PostPass::Glare,
+            PostPass::LensFlare,
+            PostPass::ChromaticAberration,
+            PostPass::FilmGrain,
+        ] {
+            assert!(
+                PostPass::ALL.contains(&pass),
+                "{pass:?} listed in the picker"
+            );
+            let mut chain = PostChain::new();
+            chain.push(PostEffect::default_for(pass));
+            assert_eq!(chain.effects[0].pass(), pass);
+            let plan = umber_gpu::postfx_exec::plan_chain(&chain);
+            assert_eq!(plan.passes.len(), 1, "{pass:?} is one stage");
+            assert!(!effect_label(pass).starts_with("postfx."), "{pass:?}");
+        }
+        assert_eq!(
+            PostEffect::default_for(PostPass::FilmGrain),
+            PostEffect::FilmGrain {
+                amount: 0.05,
+                seed: 0,
+                size: 1,
+                monochrome: true,
+            }
+        );
     }
 
     #[test]

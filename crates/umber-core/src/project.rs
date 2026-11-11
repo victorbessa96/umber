@@ -204,6 +204,29 @@ pub enum PostFxEffect {
         mode: PostFxToneMapMode,
         exposure: f32,
     },
+    /// Soft-knee glare: bright-pass threshold + knee, intensity, box radius.
+    Glare {
+        threshold: f32,
+        knee: f32,
+        intensity: f32,
+        radius: u32,
+    },
+    /// Horizontal lens-flare streak: threshold, intensity, falloff, tint.
+    LensFlare {
+        threshold: f32,
+        intensity: f32,
+        decay: f32,
+        tint: [f32; 3],
+    },
+    /// Lateral chromatic aberration: radial split + optical centre (UV).
+    ChromaticAberration { strength: f32, center: [f32; 2] },
+    /// Seeded film grain: amplitude, replay seed, cell size, mono flag.
+    FilmGrain {
+        amount: f32,
+        seed: i32,
+        size: u32,
+        monochrome: bool,
+    },
 }
 
 /// The persisted post-effects chain (requirements §7:84): the effect list
@@ -1362,6 +1385,79 @@ mod tests {
         assert_eq!(loaded, model);
 
         save_to_dir(&loaded, &dir_b).expect("resave postfx");
+        assert_dirs_byte_identical(&dir_a, &dir_b);
+
+        for dir in [dir_a, dir_b] {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn postfx_carry_round_trips_the_post_node_effects() {
+        // The four wave-5 post-node effects ride the same carry: exact
+        // params across save -> load (a negative seed, a non-representable
+        // float, the bool), stable wire names, and a byte-identical resave.
+        let mut model = fixture_model();
+        model.settings.postfx = PostFxCarry {
+            effects: vec![
+                PostFxEffect::Glare {
+                    threshold: 0.8,
+                    knee: 0.1,
+                    intensity: 1.0,
+                    radius: 4,
+                },
+                PostFxEffect::LensFlare {
+                    threshold: 0.9,
+                    intensity: 1.0,
+                    decay: 0.95,
+                    tint: [0.6, 0.8, 1.0],
+                },
+                PostFxEffect::ChromaticAberration {
+                    strength: -0.005,
+                    center: [0.3, 0.7],
+                },
+                PostFxEffect::FilmGrain {
+                    amount: 0.05,
+                    seed: -42,
+                    size: 3,
+                    monochrome: false,
+                },
+            ],
+            enabled: vec![true, true, false, true],
+        };
+        let dir_a = unique_temp_dir("postfx-nodes-a");
+        let dir_b = unique_temp_dir("postfx-nodes-b");
+
+        save_to_dir(&model, &dir_a).expect("save postfx nodes");
+        let json = fs::read_to_string(dir_a.join("project.json")).unwrap();
+        for name in [
+            r#""Glare""#,
+            r#""LensFlare""#,
+            r#""ChromaticAberration""#,
+            r#""FilmGrain""#,
+            r#""monochrome""#,
+        ] {
+            assert!(json.contains(name), "{name} missing: {json}");
+        }
+
+        let loaded = load_from_dir(&dir_a).expect("load postfx nodes");
+        assert_eq!(loaded.settings.postfx, model.settings.postfx);
+        match loaded.settings.postfx.effects[3] {
+            PostFxEffect::FilmGrain {
+                seed, monochrome, ..
+            } => {
+                assert_eq!(seed, -42);
+                assert!(!monochrome);
+            }
+            other => panic!("expected FilmGrain last, got {other:?}"),
+        }
+        match loaded.settings.postfx.effects[1] {
+            PostFxEffect::LensFlare { decay, .. } => {
+                assert_eq!(decay.to_bits(), 0.95f32.to_bits());
+            }
+            other => panic!("expected LensFlare second, got {other:?}"),
+        }
+        save_to_dir(&loaded, &dir_b).expect("resave postfx nodes");
         assert_dirs_byte_identical(&dir_a, &dir_b);
 
         for dir in [dir_a, dir_b] {

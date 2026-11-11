@@ -54,6 +54,17 @@
 //! - **Bind groups are per run.** The input and depth views are the
 //!   caller's and may change every frame; a pass's bind group is cheap
 //!   next to its fullscreen draw.
+//! - **The four graph post passes mirror their CPU nodes.** Glare, lens
+//!   flare, chromatic aberration and film grain are op-for-op ports of
+//!   `umber_graph::nodes::post` (the parity reference, pinned on a real
+//!   adapter by the gpu-gated tests below), single-stage, integer texel
+//!   addressing (`textureLoad` at edge-clamped coordinates, so the gather
+//!   matches the CPU's edge clamp exactly). Two tap budgets differ from
+//!   the CPU node and clamp in the model: glare's one-pass `(2r+1)²`
+//!   box caps the radius at [`crate::postfx::GLARE_MAX_RADIUS`], and the
+//!   flare streak gathers at most [`LENS_FLARE_TAPS`] pixels each side
+//!   (decay capped at [`crate::postfx::LENS_FLARE_MAX_DECAY`], whose tail
+//!   past the budget is under 1e-4).
 //! - **Two slots even for one effect.** The committed allocation contract
 //!   is 0-or-2; a single-effect chain leaves slot 1 idle rather than
 //!   resizing the pool when a second effect is toggled on.
@@ -89,6 +100,9 @@ pub const DOF_TAPS: u32 = 32;
 /// far from the focus plane).
 pub const DOF_MAX_RADIUS_PX: f32 = 12.0;
 
+/// Taps each side of the lens-flare streak gather (the GPU budget).
+pub const LENS_FLARE_TAPS: u32 = 512;
+
 /// One fullscreen draw. Bloom is two stages; every other effect is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostStage {
@@ -104,6 +118,14 @@ pub enum PostStage {
     Sharpen,
     /// The scene-linear tone-map.
     ToneMap,
+    /// Soft-knee glare (bright pass + box + add).
+    Glare,
+    /// Horizontal exponential lens-flare streak.
+    LensFlare,
+    /// Lateral chromatic aberration.
+    ChromaticAberration,
+    /// Seeded film grain.
+    FilmGrain,
 }
 
 impl PostStage {
@@ -115,6 +137,10 @@ impl PostStage {
             PostPass::Vignette => &[Self::Vignette],
             PostPass::Sharpen => &[Self::Sharpen],
             PostPass::ToneMap => &[Self::ToneMap],
+            PostPass::Glare => &[Self::Glare],
+            PostPass::LensFlare => &[Self::LensFlare],
+            PostPass::ChromaticAberration => &[Self::ChromaticAberration],
+            PostPass::FilmGrain => &[Self::FilmGrain],
         }
     }
 
@@ -127,6 +153,10 @@ impl PostStage {
             Self::Vignette => "fs_vignette",
             Self::Sharpen => "fs_sharpen",
             Self::ToneMap => "fs_tone_map",
+            Self::Glare => "fs_glare",
+            Self::LensFlare => "fs_lens_flare",
+            Self::ChromaticAberration => "fs_chromatic_aberration",
+            Self::FilmGrain => "fs_film_grain",
         }
     }
 }
@@ -327,7 +357,8 @@ pub struct PostUniform {
     pub texel: [f32; 4],
     /// x = near, y = far, z = 1 when a real depth view is bound.
     pub camera: [f32; 4],
-    /// x = tone-map mode id ([`tone_map_mode_id`]).
+    /// x = tone-map mode id ([`tone_map_mode_id`]); the integer params of
+    /// the post-node passes (see [`pack_uniform`]).
     pub mode: [u32; 4],
 }
 
@@ -343,7 +374,12 @@ pub fn tone_map_mode_id(mode: ToneMapMode) -> u32 {
 /// Packs one pass's uniform. `params` per effect:
 /// Dof (focus, aperture), Bloom (threshold, intensity, radius),
 /// Vignette (strength, softness), Sharpen (amount, radius),
-/// ToneMap (exposure; the mode rides `mode.x`).
+/// ToneMap (exposure; the mode rides `mode.x`),
+/// Glare (threshold, knee, intensity, radius),
+/// LensFlare (threshold, then `tint * intensity` as the RGB gain; the
+/// decay's f32 bits ride `mode.x`),
+/// ChromaticAberration (strength, center.x, center.y),
+/// FilmGrain (amount; `mode` = seed bits, cell size, monochrome flag).
 pub fn pack_uniform(effect: PostEffect, frame: &PostFrame<'_>) -> PostUniform {
     let size = frame.size;
     let mut mode = [0u32; 4];
@@ -359,6 +395,34 @@ pub fn pack_uniform(effect: PostEffect, frame: &PostFrame<'_>) -> PostUniform {
         PostEffect::ToneMap { mode: tm, exposure } => {
             mode[0] = tone_map_mode_id(tm);
             [exposure, 0.0, 0.0, 0.0]
+        }
+        PostEffect::Glare {
+            threshold,
+            knee,
+            intensity,
+            radius,
+        } => [threshold, knee, intensity, radius as f32],
+        PostEffect::LensFlare {
+            threshold,
+            intensity,
+            decay,
+            tint,
+        } => {
+            mode[0] = decay.to_bits();
+            let gain = tint.map(|t| t.max(0.0) * intensity);
+            [threshold, gain[0], gain[1], gain[2]]
+        }
+        PostEffect::ChromaticAberration { strength, center } => {
+            [strength, center[0], center[1], 0.0]
+        }
+        PostEffect::FilmGrain {
+            amount,
+            seed,
+            size,
+            monochrome,
+        } => {
+            mode = [seed as u32, size, u32::from(monochrome), 0];
+            [amount, 0.0, 0.0, 0.0]
         }
     };
     let inv = |v: u32| 1.0 / v.max(1) as f32;
@@ -626,6 +690,155 @@ fn fs_tone_map(in: FullscreenOut) -> @location(0) vec4<f32> {
         tone_map_channel(mode, e, c.b),
         c.a
     );
+}
+
+// ---- The graph post-node passes (op-for-op ports of
+// umber_graph::nodes::post; integer texel addressing, edge clamped) ----
+
+const LENS_FLARE_TAPS: i32 = 512;
+const LENS_FLARE_KNEE: f32 = 0.05;
+
+fn pixel_of(in: FullscreenOut) -> vec2<i32> {
+    return vec2<i32>(floor(in.clip_position.xy));
+}
+
+fn load_clamped(p: vec2<i32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(read_tex));
+    return textureLoad(read_tex, clamp(p, vec2<i32>(0), dims - vec2<i32>(1)), 0);
+}
+
+/// Mirrors `bright_weight` in umber_graph::nodes::post.
+fn bright_weight(l: f32, threshold: f32, knee: f32) -> f32 {
+    if (l <= 0.0) {
+        return 0.0;
+    }
+    let hard = max(l - threshold, 0.0);
+    var soft = 0.0;
+    if (knee > 0.0) {
+        let s = clamp(l - threshold + knee, 0.0, 2.0 * knee);
+        soft = s * s / (4.0 * knee);
+    }
+    return max(hard, soft) / l;
+}
+
+fn bright_rgb(c: vec3<f32>, threshold: f32, knee: f32) -> vec3<f32> {
+    return c * bright_weight(luminance(c), threshold, knee);
+}
+
+@fragment
+fn fs_glare(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let p = pixel_of(in);
+    let c = load_clamped(p);
+    let threshold = post.params.x;
+    let knee = post.params.y;
+    let r = i32(post.params.w);
+    var sum = vec3<f32>(0.0);
+    for (var dy = -r; dy <= r; dy = dy + 1) {
+        for (var dx = -r; dx <= r; dx = dx + 1) {
+            sum = sum + bright_rgb(load_clamped(p + vec2<i32>(dx, dy)).rgb, threshold, knee);
+        }
+    }
+    let k = f32((2 * r + 1) * (2 * r + 1));
+    return vec4<f32>(c.rgb + post.params.z * sum / k, c.a);
+}
+
+@fragment
+fn fs_lens_flare(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let p = pixel_of(in);
+    let c = load_clamped(p);
+    let width = i32(textureDimensions(read_tex).x);
+    let threshold = post.params.x;
+    let decay = bitcast<f32>(post.mode.x);
+    // Zero past the row's ends (the CPU streak's boundary), not clamped.
+    var sum = bright_rgb(c.rgb, threshold, LENS_FLARE_KNEE);
+    var w = 1.0;
+    for (var d = 1; d <= LENS_FLARE_TAPS; d = d + 1) {
+        w = w * decay;
+        if (w < 1e-7) {
+            break;
+        }
+        if (p.x - d >= 0) {
+            sum = sum + bright_rgb(load_clamped(p - vec2<i32>(d, 0)).rgb, threshold, LENS_FLARE_KNEE) * w;
+        }
+        if (p.x + d < width) {
+            sum = sum + bright_rgb(load_clamped(p + vec2<i32>(d, 0)).rgb, threshold, LENS_FLARE_KNEE) * w;
+        }
+    }
+    let norm = (1.0 - decay) / (1.0 + decay);
+    return vec4<f32>(c.rgb + post.params.yzw * sum * norm, c.a);
+}
+
+/// Mirrors `sample_bilinear` in umber_graph::nodes::post: pixel-space
+/// position (centres at integer + 0.5), edge clamped, one channel.
+fn bilinear_channel(x: f32, y: f32, ch: i32) -> f32 {
+    let fx = x - 0.5;
+    let fy = y - 0.5;
+    let x0 = floor(fx);
+    let y0 = floor(fy);
+    let tx = fx - x0;
+    let ty = fy - y0;
+    let i0 = vec2<i32>(i32(x0), i32(y0));
+    let a = load_clamped(i0)[ch];
+    let b = load_clamped(i0 + vec2<i32>(1, 0))[ch];
+    let c = load_clamped(i0 + vec2<i32>(0, 1))[ch];
+    let d = load_clamped(i0 + vec2<i32>(1, 1))[ch];
+    let top = a * (1.0 - tx) + b * tx;
+    let bot = c * (1.0 - tx) + d * tx;
+    return top * (1.0 - ty) + bot * ty;
+}
+
+@fragment
+fn fs_chromatic_aberration(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let p = pixel_of(in);
+    let c = load_clamped(p);
+    let strength = post.params.x;
+    let dims = vec2<f32>(textureDimensions(read_tex));
+    let center = post.params.yz * dims;
+    let d = (vec2<f32>(p) + vec2<f32>(0.5)) - center;
+    let rp = center + d * (1.0 + strength);
+    let bp = center + d * (1.0 - strength);
+    return vec4<f32>(bilinear_channel(rp.x, rp.y, 0), c.g, bilinear_channel(bp.x, bp.y, 2), c.a);
+}
+
+/// Mirrors `grain_hash` (lowbias32 over a combined key; u32 wraps).
+fn grain_hash(seed: u32, x: u32, y: u32, c: u32) -> u32 {
+    var h = seed * 0x9E3779B9u + x * 0x85EBCA6Bu + y * 0xC2B2AE35u + c * 0x27D4EB2Fu;
+    h = h ^ (h >> 16u);
+    h = h * 0x7FEB352Du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846CA68Bu;
+    h = h ^ (h >> 16u);
+    return h;
+}
+
+/// Mirrors `grain_value`: triangular noise in [-1, 1].
+fn grain_value(seed: u32, x: u32, y: u32, c: u32) -> f32 {
+    let a = grain_hash(seed, x, y, c);
+    let b = grain_hash(seed ^ 0x5bd1e995u, x, y, c);
+    let ua = f32(a >> 8u) / 16777216.0;
+    let ub = f32(b >> 8u) / 16777216.0;
+    return ua + ub - 1.0;
+}
+
+@fragment
+fn fs_film_grain(in: FullscreenOut) -> @location(0) vec4<f32> {
+    let p = pixel_of(in);
+    let c = load_clamped(p);
+    let amount = post.params.x;
+    let seed = post.mode.x;
+    let size = max(post.mode.y, 1u);
+    let mono = post.mode.z != 0u;
+    let g = vec2<u32>(p) / size;
+    var out = c.rgb;
+    for (var ch = 0u; ch < 3u; ch = ch + 1u) {
+        var key = ch;
+        if (mono) {
+            key = 0u;
+        }
+        // Scene-linear: clamp only the negative overshoot.
+        out[ch] = max(c[ch] + amount * grain_value(seed, g.x, g.y, key), 0.0);
+    }
+    return vec4<f32>(out, c.a);
 }
 "#;
 
@@ -1243,6 +1456,51 @@ mod tests {
     }
 
     #[test]
+    fn post_node_passes_are_single_stage_and_pack_their_params() {
+        for pass in [
+            PostPass::Glare,
+            PostPass::LensFlare,
+            PostPass::ChromaticAberration,
+            PostPass::FilmGrain,
+        ] {
+            assert_eq!(PostStage::of(pass).len(), 1, "{pass:?}");
+        }
+        let frame = PostFrame {
+            size: (8, 4),
+            near: 0.1,
+            far: 100.0,
+            depth: None,
+        };
+        let pack = |p: PostPass| pack_uniform(PostEffect::default_for(p), &frame);
+        assert_eq!(pack(PostPass::Glare).params, [0.8, 0.1, 1.0, 4.0]);
+        let flare = pack(PostPass::LensFlare);
+        assert_eq!(flare.params, [0.9, 0.6, 0.8, 1.0], "tint * intensity");
+        assert_eq!(f32::from_bits(flare.mode[0]), 0.95, "decay rides mode.x");
+        assert_eq!(
+            pack(PostPass::ChromaticAberration).params,
+            [0.005, 0.5, 0.5, 0.0]
+        );
+        let grain = pack_uniform(
+            PostEffect::FilmGrain {
+                amount: 0.25,
+                seed: -3,
+                size: 4,
+                monochrome: false,
+            },
+            &frame,
+        );
+        assert_eq!(grain.params[0], 0.25);
+        assert_eq!(
+            grain.mode,
+            [(-3i32) as u32, 4, 0, 0],
+            "seed bits, size, mono"
+        );
+        assert!(POSTFX_SHADER.contains(&format!("const LENS_FLARE_TAPS: i32 = {LENS_FLARE_TAPS};")));
+        // The flare tail past the tap budget is negligible at the clamp.
+        assert!(crate::postfx::LENS_FLARE_MAX_DECAY.powi(LENS_FLARE_TAPS as i32) < 1e-4);
+    }
+
+    #[test]
     fn uniform_layout_fits_the_stride() {
         assert_eq!(std::mem::size_of::<PostUniform>(), 64);
         assert!(std::mem::size_of::<PostUniform>() as u64 <= UNIFORM_STRIDE);
@@ -1386,8 +1644,16 @@ mod tests {
                 .run(&mut encoder, &chain, &input.view, &frame)
                 .is_some());
             queue.submit(Some(encoder.finish()));
-            assert_eq!(stack.pipeline_count(), 5, "Vignette twice = one pipeline");
-            assert_eq!(stack.pool().uniform_passes, 7, "bloom is two passes");
+            assert_eq!(
+                stack.pipeline_count(),
+                PostPass::ALL.len(),
+                "Vignette twice = one pipeline"
+            );
+            assert_eq!(
+                stack.pool().uniform_passes,
+                PostPass::ALL.len() + 2,
+                "bloom is two passes, plus the second vignette"
+            );
 
             // Disable everything: the stack releases its intermediates.
             for i in 0..chain.effects.len() {
@@ -1400,6 +1666,349 @@ mod tests {
                 .run(&mut encoder, &chain, &input.view, &frame)
                 .is_none());
             assert_eq!(stack.pool(), PoolState::default());
+        }
+        /// IEEE binary16 → f32 (the slots are `Rgba16Float`; no `half` dep).
+        fn f16_to_f32(h: u16) -> f32 {
+            let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+            let exp = i32::from((h >> 10) & 0x1f);
+            let frac = f32::from(h & 0x3ff);
+            match exp {
+                0 => sign * frac * 2f32.powi(-24),
+                31 => {
+                    if frac == 0.0 {
+                        sign * f32::INFINITY
+                    } else {
+                        f32::NAN
+                    }
+                }
+                _ => sign * (1.0 + frac / 1024.0) * 2f32.powi(exp - 15),
+            }
+        }
+
+        /// The CPU node's byte convention (`byte_round`: clamp, round half up).
+        fn to_byte(v: f32) -> u8 {
+            (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+        }
+
+        /// Runs a one-effect chain on `rgba` (`w`×`h`, uploaded as
+        /// Rgba8Unorm — the CPU node's exact byte/255 input) and returns
+        /// the result quantized to bytes like the CPU node.
+        fn run_gpu(
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            effect: PostEffect,
+            (w, h): (u32, u32),
+            rgba: &[u8],
+        ) -> Vec<u8> {
+            let input = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("umber_postfx_parity_input"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &input,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut stack = PostStack::new(device.clone(), queue.clone());
+            let mut chain = PostChain::new();
+            chain.push(effect);
+            let frame = PostFrame {
+                size: (w, h),
+                near: 0.1,
+                far: 100.0,
+                depth: None,
+            };
+            let row = w * 8;
+            let padded = row.div_ceil(256) * 256;
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("umber_postfx_parity_readback"),
+                size: u64::from(padded * h),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("umber_postfx_parity_encoder"),
+            });
+            let out = stack
+                .run(&mut encoder, &chain, &input_view, &frame)
+                .expect("one active effect runs");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: out.texture(),
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit(Some(encoder.finish()));
+            let slice = buffer.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .expect("device poll");
+            let mapped = slice.get_mapped_range().expect("mapped range");
+            let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                let start = (y * padded) as usize;
+                for half in mapped[start..start + row as usize].chunks_exact(2) {
+                    bytes.push(to_byte(f16_to_f32(u16::from_le_bytes([half[0], half[1]]))));
+                }
+            }
+            bytes
+        }
+
+        /// A deterministic non-constant fixture with bright spots (so the
+        /// bright passes fire) and varied alpha.
+        fn fixture(w: u32, h: u32) -> Vec<u8> {
+            let mut data = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let hot = (x * 7 + y * 3) % 11 == 0;
+                    let base = |k: u32| ((x * k + y * (k + 6)) % 200) as u8;
+                    data.extend_from_slice(&[
+                        if hot { 250 } else { base(37) },
+                        if hot { 245 } else { base(13) },
+                        if hot { 240 } else { base(71) },
+                        ((x * 5 + y * 17 + 128) % 256) as u8,
+                    ]);
+                }
+            }
+            data
+        }
+
+        /// The CPU reference: the graph node `def` with `params`.
+        fn run_cpu(
+            def: &str,
+            params: &[(String, umber_graph::ParamValue)],
+            (w, h): (u32, u32),
+            rgba: &[u8],
+        ) -> Vec<u8> {
+            let registry = umber_graph::full_registry();
+            let node = registry.get(def).expect("post node registered");
+            let img = umber_graph::value::ImageBuffer::new(w, h, rgba.to_vec()).expect("fixture");
+            match node
+                .eval(
+                    vec![("in".into(), umber_graph::NodeOutput::Image(img))],
+                    params,
+                    &umber_graph::EvalContext::new(w, h),
+                )
+                .expect("cpu eval")
+            {
+                umber_graph::NodeOutput::Image(b) => b.data,
+                other => panic!("expected Image, got {other:?}"),
+            }
+        }
+
+        /// GPU vs CPU within `tol` bytes per RGB channel. Alpha is not
+        /// compared: the CPU nodes pass it through, and the GPU pass keeps
+        /// it too, but the f16 slot can round it by one.
+        fn assert_parity(name: &str, gpu: &[u8], cpu: &[u8], tol: u8) {
+            assert_eq!(gpu.len(), cpu.len());
+            let mut worst = 0u8;
+            for (i, (g, c)) in gpu.iter().zip(cpu).enumerate() {
+                let d = g.abs_diff(*c);
+                if i % 4 == 3 {
+                    assert!(d <= 1, "{name}: alpha byte {i} gpu {g} cpu {c}");
+                    continue;
+                }
+                worst = worst.max(d);
+                assert!(d <= tol, "{name}: byte {i} gpu {g} cpu {c} (tol {tol})");
+            }
+            eprintln!("{name}: worst RGB delta {worst} byte(s)");
+        }
+
+        const PARITY_SIZE: (u32, u32) = (23, 13);
+        /// Bytes: f16 storage (≈0.12 byte near 1) plus float-order
+        /// differences can cross one half-up rounding edge.
+        const PARITY_TOL: u8 = 1;
+
+        #[test]
+        fn glare_matches_the_cpu_node() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let src = fixture(PARITY_SIZE.0, PARITY_SIZE.1);
+            use umber_graph::ParamValue as P;
+            for (threshold, knee, intensity, radius) in
+                [(0.8, 0.1, 1.0, 4), (0.5, 0.0, 2.0, 1), (0.6, 0.3, 0.7, 8)]
+            {
+                let gpu = run_gpu(
+                    &device,
+                    &queue,
+                    PostEffect::Glare {
+                        threshold,
+                        knee,
+                        intensity,
+                        radius,
+                    },
+                    PARITY_SIZE,
+                    &src,
+                );
+                let cpu = run_cpu(
+                    "glare",
+                    &[
+                        ("threshold".into(), P::Float(threshold)),
+                        ("knee".into(), P::Float(knee)),
+                        ("intensity".into(), P::Float(intensity)),
+                        ("radius".into(), P::Int(radius as i32)),
+                    ],
+                    PARITY_SIZE,
+                    &src,
+                );
+                assert_parity("glare", &gpu, &cpu, PARITY_TOL);
+            }
+        }
+
+        #[test]
+        fn lens_flare_matches_the_cpu_node() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let src = fixture(PARITY_SIZE.0, PARITY_SIZE.1);
+            use umber_graph::ParamValue as P;
+            for (threshold, intensity, decay, tint) in [
+                (0.9, 1.0, 0.95, [0.6, 0.8, 1.0]),
+                (0.5, 2.0, 0.5, [1.0, 0.2, 0.0]),
+                (0.7, 1.0, 0.0, [1.0, 1.0, 1.0]),
+            ] {
+                let gpu = run_gpu(
+                    &device,
+                    &queue,
+                    PostEffect::LensFlare {
+                        threshold,
+                        intensity,
+                        decay,
+                        tint,
+                    },
+                    PARITY_SIZE,
+                    &src,
+                );
+                let cpu = run_cpu(
+                    "lens_flare",
+                    &[
+                        ("threshold".into(), P::Float(threshold)),
+                        ("intensity".into(), P::Float(intensity)),
+                        ("decay".into(), P::Float(decay)),
+                        ("tint".into(), P::Color(tint)),
+                    ],
+                    PARITY_SIZE,
+                    &src,
+                );
+                assert_parity("lens_flare", &gpu, &cpu, PARITY_TOL);
+            }
+        }
+
+        #[test]
+        fn chromatic_aberration_matches_the_cpu_node() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let src = fixture(PARITY_SIZE.0, PARITY_SIZE.1);
+            use umber_graph::ParamValue as P;
+            for (strength, center) in [
+                (0.005, [0.5, 0.5]),
+                (0.2, [0.3, 0.7]),
+                (-0.35, [0.5, 0.5]),
+                (0.0, [0.5, 0.5]),
+            ] {
+                let gpu = run_gpu(
+                    &device,
+                    &queue,
+                    PostEffect::ChromaticAberration { strength, center },
+                    PARITY_SIZE,
+                    &src,
+                );
+                let cpu = run_cpu(
+                    "chromatic_aberration",
+                    &[
+                        ("strength".into(), P::Float(strength)),
+                        ("center".into(), P::Vec2(center)),
+                    ],
+                    PARITY_SIZE,
+                    &src,
+                );
+                assert_parity("chromatic_aberration", &gpu, &cpu, PARITY_TOL);
+            }
+        }
+
+        #[test]
+        fn film_grain_matches_the_cpu_node() {
+            let Some((device, queue)) = try_request_device() else {
+                return;
+            };
+            let src = fixture(PARITY_SIZE.0, PARITY_SIZE.1);
+            use umber_graph::ParamValue as P;
+            for (amount, seed, size, monochrome) in [
+                (0.05, 0, 1, true),
+                (0.3, 12345, 1, false),
+                (0.2, -7, 4, true),
+            ] {
+                let gpu = run_gpu(
+                    &device,
+                    &queue,
+                    PostEffect::FilmGrain {
+                        amount,
+                        seed,
+                        size,
+                        monochrome,
+                    },
+                    PARITY_SIZE,
+                    &src,
+                );
+                let cpu = run_cpu(
+                    "film_grain",
+                    &[
+                        ("amount".into(), P::Float(amount)),
+                        ("seed".into(), P::Int(seed)),
+                        ("size".into(), P::Int(size as i32)),
+                        ("monochrome".into(), P::Bool(monochrome)),
+                    ],
+                    PARITY_SIZE,
+                    &src,
+                );
+                assert_parity("film_grain", &gpu, &cpu, PARITY_TOL);
+            }
         }
     }
 }

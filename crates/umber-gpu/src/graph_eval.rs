@@ -29,6 +29,7 @@
 //! | `edge_detect` | GPU | dilated Sobel kernel with edge clamping |
 //! | `direction_warp` | GPU | bilinear resample with edge clamping |
 //! | `flood_fill`, `histogram_match` | CPU (`GlobalPass`) | connected-component labeling and CDF transfer need whole-image global passes/reductions — no single per-pixel dispatch expresses them |
+//! | `glare`, `lens_flare`, `chromatic_aberration`, `film_grain` | CPU (`GlobalPass`) | the wave-5 post nodes: neighbourhood/row gathers evaluated by their byte-exact CPU nodes (the viewport's GPU versions are `postfx` passes, not graph dispatches) |
 //! | `synth` | CPU (`GlobalPass`) | multiresolution example-based synthesis is an iterative whole-image search (coherence propagation across raster order) — no per-pixel GPU dispatch expresses it either |
 //! | `mesh_map_generator` | CPU (`External`) | bridge-provided bytes (bake outputs); cloned/uploaded, never computed |
 //! | `anchor` | CPU (`External`) | bridge-provided bytes (the bound layer's composited channel); clone, never computed |
@@ -210,8 +211,9 @@ impl GpuOp {
 pub enum CpuPath {
     /// `image_asset`: filesystem decode, then uploaded as a texture.
     AssetLoad,
-    /// `flood_fill`, `histogram_match`, `synth`: whole-image global
-    /// passes.
+    /// `flood_fill`, `histogram_match`, `synth`, and the four post nodes
+    /// (`glare`, `lens_flare`, `chromatic_aberration`, `film_grain`):
+    /// whole-image passes on the CPU node.
     GlobalPass,
     /// `mesh_map_generator`: bridge-provided bytes, cloned/uploaded.
     External,
@@ -287,6 +289,9 @@ impl GpuRoute {
             "color_correct" => Self::Gpu(GpuOp::ColorCorrect),
             "hsv_adjust" => Self::Gpu(GpuOp::HsvAdjust),
             "flood_fill" | "histogram_match" | "synth" => Self::Cpu(CpuPath::GlobalPass),
+            "glare" | "lens_flare" | "chromatic_aberration" | "film_grain" => {
+                Self::Cpu(CpuPath::GlobalPass)
+            }
             "edge_detect" => Self::Gpu(GpuOp::EdgeDetect),
             "direction_warp" => Self::Gpu(GpuOp::Warp),
             "triplanar_blend" => Self::Gpu(GpuOp::Triplanar),
@@ -1998,6 +2003,7 @@ mod tests {
         register_filter_color_nodes(&mut registry);
         register_mask_spatial_nodes(&mut registry);
         umber_graph::nodes::register_synth_nodes(&mut registry);
+        umber_graph::nodes::register_post_nodes(&mut registry);
         registry
     }
 
@@ -2026,7 +2032,7 @@ mod tests {
     fn routing_covers_every_registered_node_def() {
         let registry = full_registry();
         let defs = registry.node_defs();
-        assert_eq!(defs.len(), 26, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 30, "unexpected registry size: {defs:?}");
         for def in defs {
             let route = GpuRoute::route(def, &[]);
             assert!(
@@ -2103,6 +2109,13 @@ mod tests {
             GpuRoute::route("histogram_match", &[]),
             GpuRoute::Cpu(CpuPath::GlobalPass)
         );
+        for def in ["glare", "lens_flare", "chromatic_aberration", "film_grain"] {
+            assert_eq!(
+                GpuRoute::route(def, &[]),
+                GpuRoute::Cpu(CpuPath::GlobalPass),
+                "{def} dispatches to its CPU node, not the plugin catch-all"
+            );
+        }
         assert_eq!(
             GpuRoute::route("mesh_map_generator", &[]),
             GpuRoute::Cpu(CpuPath::External)

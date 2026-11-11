@@ -74,7 +74,62 @@ pub enum PostEffect {
         /// Exposure stop applied before the curve, -4..=4.
         exposure: f32,
     },
+    /// Soft-knee highlight glow (the `glare` graph node's pass):
+    /// `out = in + intensity * box(bright(in))`.
+    Glare {
+        /// Bright-pass threshold on Rec.709 luma, 0..=1.
+        threshold: f32,
+        /// Soft-knee half-width around the threshold, 0..=1.
+        knee: f32,
+        /// Additive intensity 0..=4.
+        intensity: f32,
+        /// Box radius in pixels, 0..=[`GLARE_MAX_RADIUS`] (the GPU tap
+        /// budget: one `(2r+1)²` gather, no separable scratch).
+        radius: u32,
+    },
+    /// Anamorphic horizontal streak (the `lens_flare` graph node's pass).
+    LensFlare {
+        /// Bright-pass threshold on Rec.709 luma, 0..=1 (fixed knee 0.05).
+        threshold: f32,
+        /// Additive intensity 0..=4.
+        intensity: f32,
+        /// Per-pixel falloff 0..=[`LENS_FLARE_MAX_DECAY`].
+        decay: f32,
+        /// Streak tint, each channel 0..=1.
+        tint: [f32; 3],
+    },
+    /// Lateral (radial) chromatic aberration (the `chromatic_aberration`
+    /// graph node's pass): R and B sample at radially scaled offsets.
+    ChromaticAberration {
+        /// Radial R/B split, -0.5..=0.5 (negative swaps the fringes).
+        strength: f32,
+        /// UV of the optical centre, each axis 0..=1.
+        center: [f32; 2],
+    },
+    /// Seeded, deterministic additive grain (the `film_grain` graph
+    /// node's pass): same seed + same input = same output.
+    FilmGrain {
+        /// Grain amplitude 0..=1.
+        amount: f32,
+        /// The replay key.
+        seed: i32,
+        /// Grain cell size in pixels, 1..=64.
+        size: u32,
+        /// One noise value shared by R, G, B (false: per channel).
+        monochrome: bool,
+    },
 }
+
+/// The glare pass's largest box radius (pixels): the GPU gathers
+/// `(2r+1)²` taps per pixel in one pass, so the model clamps here instead
+/// of the CPU node's 256.
+pub const GLARE_MAX_RADIUS: u32 = 8;
+
+/// The lens-flare pass's largest decay: the GPU gathers at most
+/// `postfx_exec::LENS_FLARE_TAPS` (512) pixels each side, and
+/// `0.98^512 ≈ 3e-5`, so the truncated tail stays far under one byte
+/// (the CPU node allows 0.999 over the whole row).
+pub const LENS_FLARE_MAX_DECAY: f32 = 0.98;
 
 impl PostEffect {
     /// Clamps every parameter into its documented range (the panel sends
@@ -106,6 +161,43 @@ impl PostEffect {
                 mode,
                 exposure: exposure.clamp(-4.0, 4.0),
             },
+            Self::Glare {
+                threshold,
+                knee,
+                intensity,
+                radius,
+            } => Self::Glare {
+                threshold: threshold.clamp(0.0, 1.0),
+                knee: knee.clamp(0.0, 1.0),
+                intensity: intensity.clamp(0.0, 4.0),
+                radius: radius.min(GLARE_MAX_RADIUS),
+            },
+            Self::LensFlare {
+                threshold,
+                intensity,
+                decay,
+                tint,
+            } => Self::LensFlare {
+                threshold: threshold.clamp(0.0, 1.0),
+                intensity: intensity.clamp(0.0, 4.0),
+                decay: decay.clamp(0.0, LENS_FLARE_MAX_DECAY),
+                tint: tint.map(|t| t.clamp(0.0, 1.0)),
+            },
+            Self::ChromaticAberration { strength, center } => Self::ChromaticAberration {
+                strength: strength.clamp(-0.5, 0.5),
+                center: center.map(|c| c.clamp(0.0, 1.0)),
+            },
+            Self::FilmGrain {
+                amount,
+                seed,
+                size,
+                monochrome,
+            } => Self::FilmGrain {
+                amount: amount.clamp(0.0, 1.0),
+                seed,
+                size: size.clamp(1, 64),
+                monochrome,
+            },
         }
     }
 
@@ -134,6 +226,30 @@ impl PostEffect {
                 mode: ToneMapMode::Aces,
                 exposure: 0.0,
             },
+            // The four graph post nodes start at their CPU node defaults
+            // (`umber_graph::nodes::post`).
+            PostPass::Glare => Self::Glare {
+                threshold: 0.8,
+                knee: 0.1,
+                intensity: 1.0,
+                radius: 4,
+            },
+            PostPass::LensFlare => Self::LensFlare {
+                threshold: 0.9,
+                intensity: 1.0,
+                decay: 0.95,
+                tint: [0.6, 0.8, 1.0],
+            },
+            PostPass::ChromaticAberration => Self::ChromaticAberration {
+                strength: 0.005,
+                center: [0.5, 0.5],
+            },
+            PostPass::FilmGrain => Self::FilmGrain {
+                amount: 0.05,
+                seed: 0,
+                size: 1,
+                monochrome: true,
+            },
         }
     }
 
@@ -145,6 +261,10 @@ impl PostEffect {
             Self::Vignette { .. } => PostPass::Vignette,
             Self::Sharpen { .. } => PostPass::Sharpen,
             Self::ToneMap { .. } => PostPass::ToneMap,
+            Self::Glare { .. } => PostPass::Glare,
+            Self::LensFlare { .. } => PostPass::LensFlare,
+            Self::ChromaticAberration { .. } => PostPass::ChromaticAberration,
+            Self::FilmGrain { .. } => PostPass::FilmGrain,
         }
     }
 }
@@ -166,7 +286,7 @@ impl ToneMapMode {
     pub const ALL: [Self; 3] = [Self::Aces, Self::Filmic, Self::Reinhard];
 }
 
-/// The five pipeline kinds (bloom's is internally the down+blur+add pair).
+/// The nine pipeline kinds (bloom's is internally the down+blur+add pair).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostPass {
     /// Depth-of-field gather.
@@ -179,16 +299,28 @@ pub enum PostPass {
     Sharpen,
     /// Scene-linear tone-map.
     ToneMap,
+    /// Soft-knee glare.
+    Glare,
+    /// Horizontal lens-flare streak.
+    LensFlare,
+    /// Lateral chromatic aberration.
+    ChromaticAberration,
+    /// Seeded film grain.
+    FilmGrain,
 }
 
 impl PostPass {
     /// Every pass kind, in the panel's "Add effect" order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 9] = [
         Self::Dof,
         Self::Bloom,
         Self::Vignette,
         Self::Sharpen,
         Self::ToneMap,
+        Self::Glare,
+        Self::LensFlare,
+        Self::ChromaticAberration,
+        Self::FilmGrain,
     ];
 }
 
@@ -439,6 +571,66 @@ mod tests {
         assert_eq!(chain.effects.len(), chain.enabled.len());
         assert_eq!(chain.effects[0].pass(), PostPass::ToneMap);
         assert!(!chain.remove(5));
+    }
+
+    #[test]
+    fn post_node_params_clamp_at_construct() {
+        assert_eq!(
+            PostEffect::Glare {
+                threshold: 2.0,
+                knee: -1.0,
+                intensity: 9.0,
+                radius: 300,
+            }
+            .clamped(),
+            PostEffect::Glare {
+                threshold: 1.0,
+                knee: 0.0,
+                intensity: 4.0,
+                radius: GLARE_MAX_RADIUS,
+            }
+        );
+        assert_eq!(
+            PostEffect::LensFlare {
+                threshold: -1.0,
+                intensity: -1.0,
+                decay: 0.999,
+                tint: [2.0, -1.0, 0.5],
+            }
+            .clamped(),
+            PostEffect::LensFlare {
+                threshold: 0.0,
+                intensity: 0.0,
+                decay: LENS_FLARE_MAX_DECAY,
+                tint: [1.0, 0.0, 0.5],
+            }
+        );
+        assert_eq!(
+            PostEffect::ChromaticAberration {
+                strength: 0.9,
+                center: [-1.0, 3.0],
+            }
+            .clamped(),
+            PostEffect::ChromaticAberration {
+                strength: 0.5,
+                center: [0.0, 1.0],
+            }
+        );
+        assert_eq!(
+            PostEffect::FilmGrain {
+                amount: 3.0,
+                seed: -7,
+                size: 0,
+                monochrome: false,
+            }
+            .clamped(),
+            PostEffect::FilmGrain {
+                amount: 1.0,
+                seed: -7,
+                size: 1,
+                monochrome: false,
+            }
+        );
     }
 
     #[test]

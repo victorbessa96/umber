@@ -33,7 +33,7 @@ pub use topo::{Edge, Graph, GraphError};
 pub use value::{decode_png_rgba8, encode_png_rgba8, ImageBuffer, ImageError, NodeOutput};
 
 /// Builds the shared registry: the engine seed plus every merged node
-/// family (generator, filter + color, mask + spatial, anchor, synth) plus
+/// family (generator, filter + color, mask + spatial, anchor, synth, post) plus
 /// the dynamic-material nodes (`material_output`).
 ///
 /// The Graph panel and the material eval driver share this one registry —
@@ -49,6 +49,7 @@ pub fn full_registry() -> NodeRegistry {
     nodes::register_mask_spatial_nodes(&mut registry);
     anchor::register_anchor_nodes(&mut registry);
     nodes::register_synth_nodes(&mut registry);
+    nodes::register_post_nodes(&mut registry);
     material::register_material_nodes(&mut registry);
     registry
 }
@@ -169,6 +170,10 @@ mod tests {
             "anchor",
             "synth",
             "material_output",
+            "glare",
+            "lens_flare",
+            "chromatic_aberration",
+            "film_grain",
         ] {
             assert!(
                 registry.get(def).is_some(),

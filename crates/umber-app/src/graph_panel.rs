@@ -2046,10 +2046,11 @@ mod tests {
     fn registry_listing_covers_all_merged_families() {
         // 3 engine seeds + 7 slice-2a + 8 slice-2b + 6 slice-2c + 1 anchor
         // + 1 synth (post-v1) + 1 material_output (the dynmat channel
-        // contract, Kill A) = 27; +gradient_map (2026-11-01) = 28.
+        // contract, Kill A) = 27; +gradient_map (2026-11-01) = 28; +the four
+        // wave-5 post nodes (2026-11-11) = 32.
         let panel = GraphPanel::new();
         let defs = panel.registry().node_defs();
-        assert_eq!(defs.len(), 28, "unexpected registry size: {defs:?}");
+        assert_eq!(defs.len(), 32, "unexpected registry size: {defs:?}");
         for expected in [
             "uniform",
             "image_asset",
@@ -2078,6 +2079,10 @@ mod tests {
             "mesh_map_generator",
             "anchor",
             "synth",
+            "glare",
+            "lens_flare",
+            "chromatic_aberration",
+            "film_grain",
         ] {
             assert!(
                 defs.contains(&expected),
