@@ -119,6 +119,125 @@ impl TextureSet {
             tiles: BTreeMap::new(),
         }
     }
+
+    /// Declares a new channel (the Texture Sets panel's add row, R-B4).
+    /// The name is trimmed; an empty name, a name another channel already
+    /// carries (case-insensitively: per-channel paint planes save as one
+    /// directory each, and Windows folds case), or one that is unsafe as a
+    /// single directory name is refused. Tiled sets get the channel on
+    /// every tile too, so the per-tile lists stay in step with `channels`.
+    pub fn add_channel(&mut self, name: &str, kind: ChannelKind) -> Result<(), ChannelError> {
+        let name = self.check_new_name(name, None)?;
+        let channel = Channel { name, kind };
+        for tile in self.tiles.values_mut() {
+            tile.channels.push(channel.clone());
+        }
+        self.channels.push(channel);
+        Ok(())
+    }
+
+    /// Removes a channel from the set's DECLARATION and returns it. The
+    /// paint planes stay: an undeclared channel still edits (the panel's
+    /// materialized-but-unlisted rule), so removal never deletes pixels.
+    /// [`BASE_COLOR_CHANNEL`] is protected.
+    pub fn remove_channel(&mut self, name: &str) -> Result<Channel, ChannelError> {
+        if name == BASE_COLOR_CHANNEL {
+            return Err(ChannelError::BaseColorProtected);
+        }
+        let at = self
+            .channels
+            .iter()
+            .position(|c| c.name == name)
+            .ok_or_else(|| ChannelError::Unknown(name.to_string()))?;
+        for tile in self.tiles.values_mut() {
+            tile.channels.retain(|c| c.name != name);
+        }
+        Ok(self.channels.remove(at))
+    }
+
+    /// Renames a declared channel in place (order and kind kept). The new
+    /// name follows [`Self::add_channel`]'s rules (a case-only rename of
+    /// the same channel is allowed); [`BASE_COLOR_CHANNEL`] can be neither
+    /// renamed nor taken as a new name. Declaration only: planes keyed by
+    /// the old name stay under it (the kill report's strand rule).
+    pub fn rename_channel(&mut self, old: &str, new: &str) -> Result<(), ChannelError> {
+        if old == BASE_COLOR_CHANNEL || new.trim() == BASE_COLOR_CHANNEL {
+            return Err(ChannelError::BaseColorProtected);
+        }
+        if !self.channels.iter().any(|c| c.name == old) {
+            return Err(ChannelError::Unknown(old.to_string()));
+        }
+        let new = self.check_new_name(new, Some(old))?;
+        for channel in self
+            .channels
+            .iter_mut()
+            .chain(self.tiles.values_mut().flat_map(|t| t.channels.iter_mut()))
+        {
+            if channel.name == old {
+                channel.name = new.clone();
+            }
+        }
+        Ok(())
+    }
+
+    /// The trimmed name, or why it cannot name a channel of this set
+    /// (`except` = the channel being renamed, ignored by the dup check).
+    fn check_new_name(&self, name: &str, except: Option<&str>) -> Result<String, ChannelError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ChannelError::EmptyName);
+        }
+        if !is_valid_channel_name(name) {
+            return Err(ChannelError::InvalidName(name.to_string()));
+        }
+        let folded = name.to_lowercase();
+        let taken = self
+            .channels
+            .iter()
+            .filter(|c| Some(c.name.as_str()) != except)
+            .any(|c| c.name.to_lowercase() == folded);
+        if taken {
+            return Err(ChannelError::Duplicate(name.to_string()));
+        }
+        Ok(name.to_string())
+    }
+}
+
+/// The reserved base channel every set paints into (the paint session's
+/// `BASE_COLOR_CHANNEL` names the same string). It IS the set's size and
+/// its legacy flat sidecar, so the channel commands never remove or
+/// rename it.
+pub const BASE_COLOR_CHANNEL: &str = "baseColor";
+
+/// Whether `name` is safe as ONE directory name under the project's
+/// `paint/` sidecar on every OS: no separators, no Windows-reserved
+/// characters, no control characters, not dot-only. Mirrors the paint
+/// persistence's manifest trust check, plus `/`, so a declared channel
+/// can always save.
+fn is_valid_channel_name(name: &str) -> bool {
+    !name.chars().all(|c| c == '.')
+        && !name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
+        && !name.chars().any(char::is_control)
+}
+
+/// Why a channel add/remove/rename was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChannelError {
+    /// The name was empty (or whitespace only).
+    #[error("a channel name cannot be empty")]
+    EmptyName,
+    /// Another channel of the set already carries the name.
+    #[error("channel {0:?} already exists")]
+    Duplicate(String),
+    /// The name is not safe as a sidecar directory name.
+    #[error("{0:?} is not a valid channel name")]
+    InvalidName(String),
+    /// No declared channel has this name.
+    #[error("no channel {0:?}")]
+    Unknown(String),
+    /// baseColor cannot be removed, renamed, or renamed onto.
+    #[error("the baseColor channel cannot be removed or renamed")]
+    BaseColorProtected,
 }
 
 /// A flat 3D bounding box, in the mesh's own coordinate space.
@@ -140,5 +259,118 @@ mod tests {
         assert_eq!(ts.channels[0].kind, ChannelKind::Color);
         assert_eq!(ts.channels[2].name, "metallic");
         assert_eq!(ts.channels[2].kind, ChannelKind::Data);
+    }
+
+    fn names(ts: &TextureSet) -> Vec<&str> {
+        ts.channels.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn add_channel_appends_trimmed_and_refuses_empty_dup_and_unsafe() {
+        let mut ts = TextureSet::new_default("Body");
+        ts.add_channel("  dirt_mask ", ChannelKind::Data).unwrap();
+        assert_eq!(ts.channels.last().unwrap().name, "dirt_mask");
+        assert_eq!(ts.channels.len(), 6);
+        ts.add_channel("emissive", ChannelKind::Color).unwrap();
+        assert_eq!(ts.channels.last().unwrap().kind, ChannelKind::Color);
+        let before = ts.clone();
+        assert_eq!(
+            ts.add_channel("   ", ChannelKind::Data),
+            Err(ChannelError::EmptyName)
+        );
+        assert_eq!(
+            ts.add_channel("Roughness", ChannelKind::Data),
+            Err(ChannelError::Duplicate("Roughness".into()))
+        );
+        for bad in ["a/b", "..", "c:d", "x\\y", "tab\there"] {
+            assert_eq!(
+                ts.add_channel(bad, ChannelKind::Data),
+                Err(ChannelError::InvalidName(bad.into())),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(ts, before, "a refused add changes nothing");
+    }
+
+    #[test]
+    fn remove_channel_protects_base_color_and_reports_unknown() {
+        let mut ts = TextureSet::new_default("Body");
+        let removed = ts.remove_channel("metallic").unwrap();
+        assert_eq!(removed.name, "metallic");
+        assert_eq!(names(&ts), ["baseColor", "roughness", "normal", "height"]);
+        assert_eq!(
+            ts.remove_channel(BASE_COLOR_CHANNEL),
+            Err(ChannelError::BaseColorProtected)
+        );
+        assert_eq!(
+            ts.remove_channel("metallic"),
+            Err(ChannelError::Unknown("metallic".into()))
+        );
+        assert_eq!(ts.channels.len(), 4);
+    }
+
+    #[test]
+    fn rename_channel_keeps_order_and_kind_and_refuses_dup_and_base_color() {
+        let mut ts = TextureSet::new_default("Body");
+        ts.rename_channel("height", " displacement ").unwrap();
+        assert_eq!(
+            names(&ts),
+            [
+                "baseColor",
+                "roughness",
+                "metallic",
+                "normal",
+                "displacement"
+            ]
+        );
+        assert_eq!(ts.channels[4].kind, ChannelKind::Data);
+        // A case-only rename of the same channel is not a duplicate.
+        ts.rename_channel("normal", "Normal").unwrap();
+        assert_eq!(ts.channels[3].name, "Normal");
+        let before = ts.clone();
+        assert_eq!(
+            ts.rename_channel("roughness", "METALLIC"),
+            Err(ChannelError::Duplicate("METALLIC".into()))
+        );
+        assert_eq!(
+            ts.rename_channel(BASE_COLOR_CHANNEL, "albedo"),
+            Err(ChannelError::BaseColorProtected)
+        );
+        assert_eq!(
+            ts.rename_channel("roughness", BASE_COLOR_CHANNEL),
+            Err(ChannelError::BaseColorProtected)
+        );
+        assert_eq!(
+            ts.rename_channel("nope", "x"),
+            Err(ChannelError::Unknown("nope".into()))
+        );
+        assert_eq!(
+            ts.rename_channel("roughness", ""),
+            Err(ChannelError::EmptyName)
+        );
+        assert_eq!(ts, before, "a refused rename changes nothing");
+    }
+
+    #[test]
+    fn channel_commands_keep_tiled_sets_in_step() {
+        let mut ts = TextureSet::new_default("Body");
+        ts.tiles
+            .insert(1001, TileChannels::new(ts.resolution, ts.channels.clone()));
+        ts.tiles
+            .insert(1002, TileChannels::new(1024, ts.channels.clone()));
+        ts.add_channel("dirt", ChannelKind::Data).unwrap();
+        ts.rename_channel("roughness", "gloss").unwrap();
+        ts.remove_channel("metallic").unwrap();
+        for tile in ts.tiles.values() {
+            assert_eq!(tile.channels, ts.channels);
+        }
+    }
+
+    #[test]
+    fn base_color_constant_names_the_default_first_channel() {
+        assert_eq!(
+            TextureSet::new_default("Body").channels[0].name,
+            BASE_COLOR_CHANNEL
+        );
     }
 }

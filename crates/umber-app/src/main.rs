@@ -1320,21 +1320,17 @@ impl TabViewer for PanelViewer<'_> {
                             }
                         }
                         umber_gui::ContextKind::TextureSet => {
-                            let channels: Vec<String> = self
-                                .mesh_import
-                                .session_set
-                                .channels
-                                .iter()
-                                .map(|channel| channel.name.clone())
-                                .collect();
-                            texture_sets_panel_ui(
+                            // A channel add/remove/rename edits the session
+                            // set's declaration: the document is unsaved.
+                            if texture_sets_panel_ui(
                                 ui,
                                 self.paint.as_deref_mut(),
                                 Some(&mut *self.stencil),
-                                self.mesh_import.session_set.name.as_str(),
-                                &channels,
+                                &mut self.mesh_import.session_set,
                                 self.pending_resize,
-                            );
+                            ) {
+                                self.doc.dirty = true;
+                            }
                             // The document follows the paint session's
                             // active set (C2-9): the Layers panel, undo and
                             // History then act on that set's own stack.
@@ -1476,21 +1472,17 @@ impl TabViewer for PanelViewer<'_> {
                 }
             }
             Panel::TextureSets => {
-                let channels: Vec<String> = self
-                    .mesh_import
-                    .session_set
-                    .channels
-                    .iter()
-                    .map(|channel| channel.name.clone())
-                    .collect();
-                texture_sets_panel_ui(
+                // A channel add/remove/rename edits the session set's
+                // declaration: the document is unsaved.
+                if texture_sets_panel_ui(
                     ui,
                     self.paint.as_deref_mut(),
                     Some(&mut *self.stencil),
-                    self.mesh_import.session_set.name.as_str(),
-                    &channels,
+                    &mut self.mesh_import.session_set,
                     self.pending_resize,
-                );
+                ) {
+                    self.doc.dirty = true;
+                }
                 // The document follows the paint session's active set
                 // (C2-9): the Layers panel, undo and History then act on
                 // that set's own stack.
@@ -3505,15 +3497,15 @@ fn texture_sets_panel_ui(
     ui: &mut Ui,
     paint: Option<&mut paint_state::PaintState>,
     stencil: Option<&mut stencil::StencilState>,
-    session_set: &str,
-    channels: &[String],
+    session: &mut umber_core::TextureSet,
     pending: &mut Option<PendingResize>,
-) {
+) -> bool {
     let Some(paint) = paint else {
         ui.label(tr("texturesets.no-paint"));
-        return;
+        return false;
     };
-    paint.ensure_set(session_set);
+    let session_set = session.name.clone();
+    paint.ensure_set(&session_set);
     // Selection first (owned, so the borrow ends before the size combo
     // and the activation mutate the session below).
     let mut active = paint.active_set().to_string();
@@ -3616,10 +3608,22 @@ fn texture_sets_panel_ui(
             });
         }
     }
+    // The Channels manage section (R-B4 tail): add / rename / remove on
+    // the active set's DECLARATION. Only when the panel's active set IS
+    // the session set — on a switch frame the caller swaps the session
+    // set right after this returns, and an edit would land on the
+    // outgoing one.
+    let mut declared_changed = false;
+    if active == session.name {
+        ui.separator();
+        ui.label(tr("texturesets.channels"))
+            .on_hover_text(tr("texturesets.channels-hint"));
+        declared_changed = channel_manage_ui(ui, session);
+    }
     // Per-channel rows for the SELECTED set: the document's channels plus
     // any materialized-but-unlisted one (an override outliving its import
     // still edits — dropping it from the panel would strand it).
-    let mut rows: Vec<String> = channels.to_vec();
+    let mut rows: Vec<String> = session.channels.iter().map(|c| c.name.clone()).collect();
     for tile in paint.tiles_of_set(&active) {
         for channel in paint.channels_present(tile) {
             if !rows.contains(&channel) {
@@ -3630,7 +3634,7 @@ fn texture_sets_panel_ui(
     rows.sort();
     rows.retain(|channel| channel.as_str() != paint_state::BASE_COLOR_CHANNEL);
     if rows.is_empty() {
-        return;
+        return declared_changed;
     }
     ui.label(tr("texturesets.per-channel"))
         .on_hover_text(tr("texturesets.channel-resize-clears"));
@@ -3671,10 +3675,193 @@ fn texture_sets_panel_ui(
             }
         }
     }
+    declared_changed
+}
+
+/// The localized label of a channel kind (the add row's kind combo).
+fn channel_kind_label(kind: umber_core::ChannelKind) -> String {
+    tr(match kind {
+        umber_core::ChannelKind::Color => "texturesets.kind-color",
+        umber_core::ChannelKind::Data => "texturesets.kind-data",
+    })
+}
+
+/// The localized reason a channel command was refused.
+fn channel_error_text(err: &umber_core::ChannelError) -> String {
+    use umber_core::ChannelError as E;
+    let (key, name) = match err {
+        E::EmptyName => ("texturesets.channel-error-empty", ""),
+        E::Duplicate(name) => ("texturesets.channel-error-duplicate", name.as_str()),
+        E::InvalidName(name) => ("texturesets.channel-error-invalid", name.as_str()),
+        E::Unknown(name) => ("texturesets.channel-error-unknown", name.as_str()),
+        E::BaseColorProtected => ("texturesets.channel-error-base-color", ""),
+    };
+    crate::i18n::tr_args(key, [("name", fluent::FluentValue::from(name))])
+}
+
+/// One edit the Channels section collected this frame, applied after
+/// the rows are drawn (the rows borrow the channel list).
+enum ChannelEdit {
+    Rename(String, String),
+    ArmRemove(String),
+    Remove(String),
+    CancelRemove,
+    Add(String, umber_core::ChannelKind),
+}
+
+/// The Channels manage section of [`texture_sets_panel_ui`] (R-B4 tail):
+/// one row per declared channel with a rename field (committed on focus
+/// loss through [`document::rename_commit`], the layer rename's rule) and
+/// a remove button, plus an add row (name, kind, add). baseColor is
+/// listed but neither renamable nor removable — core refuses too.
+///
+/// Remove is destructive-confirmed (GUI plan rule 8) though it only drops
+/// the DECLARATION: painted planes stay and keep editing through the
+/// per-channel rows below. Rename re-declares under the new name; planes
+/// painted under the old name stay keyed by it (the strand rule, see the
+/// kill report). A refused command shows its reason in the warn colour
+/// until the next edit. Returns whether the declaration changed (the
+/// caller marks the document dirty so the change saves).
+fn channel_manage_ui(ui: &mut Ui, session: &mut umber_core::TextureSet) -> bool {
+    let error_id = Id::new(("channel-manage-error", session.name.as_str()));
+    let pending_id = Id::new(("channel-manage-remove", session.name.as_str()));
+    let add_id = Id::new(("channel-manage-add", session.name.as_str()));
+    let kind_id = Id::new(("channel-manage-kind", session.name.as_str()));
+    let pending: Option<String> = ui.ctx().data(|d| d.get_temp(pending_id)).flatten();
+    let mut edits = Vec::new();
+    for channel in &session.channels {
+        let name = channel.name.as_str();
+        ui.horizontal(|ui| {
+            if name == umber_core::BASE_COLOR_CHANNEL {
+                ui.label(name)
+                    .on_hover_text(tr("texturesets.channel-base-color"));
+                return;
+            }
+            let edit_id = Id::new(("channel-rename", session.name.as_str(), name));
+            let mut text: String = ui
+                .ctx()
+                .data(|d| d.get_temp(edit_id))
+                .unwrap_or_else(|| name.to_owned());
+            let response = ui
+                .add(egui::TextEdit::singleline(&mut text).desired_width(120.0))
+                .on_hover_text(tr("texturesets.channel-rename"));
+            if response.changed() {
+                ui.ctx().data_mut(|d| d.insert_temp(edit_id, text.clone()));
+            }
+            if response.lost_focus() {
+                ui.ctx().data_mut(|d| d.remove::<String>(edit_id));
+                if let Some(new) = document::rename_commit(name, &text) {
+                    edits.push(ChannelEdit::Rename(name.to_owned(), new));
+                }
+            }
+            ui.label(channel_kind_label(channel.kind));
+            if ui
+                .button(tr("texturesets.channel-remove"))
+                .on_hover_text(tr("texturesets.channel-remove-hint"))
+                .clicked()
+            {
+                edits.push(ChannelEdit::ArmRemove(name.to_owned()));
+            }
+        });
+    }
+    if let Some(armed) = &pending {
+        ui.group(|ui| {
+            ui.label(
+                egui::RichText::new(crate::i18n::tr_args(
+                    "texturesets.channel-remove-confirm",
+                    [
+                        ("channel", fluent::FluentValue::from(armed.as_str())),
+                        ("set", fluent::FluentValue::from(session.name.as_str())),
+                    ],
+                ))
+                .color(umber_gui::theme::warn()),
+            );
+            ui.horizontal(|ui| {
+                if ui.button(tr("texturesets.channel-remove-apply")).clicked() {
+                    edits.push(ChannelEdit::Remove(armed.clone()));
+                }
+                if ui.button(tr("texturesets.channel-remove-cancel")).clicked() {
+                    edits.push(ChannelEdit::CancelRemove);
+                }
+            });
+        });
+    }
+    let mut add_name: String = ui.ctx().data(|d| d.get_temp(add_id)).unwrap_or_default();
+    let mut kind: umber_core::ChannelKind = ui
+        .ctx()
+        .data(|d| d.get_temp(kind_id))
+        .unwrap_or(umber_core::ChannelKind::Data);
+    ui.horizontal(|ui| {
+        let label = ui.label(tr("texturesets.channel-add-name"));
+        let response = ui
+            .add(egui::TextEdit::singleline(&mut add_name).desired_width(120.0))
+            .labelled_by(label.id);
+        if response.changed() {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(add_id, add_name.clone()));
+        }
+        egui::ComboBox::from_id_salt(("channel-add-kind", session.name.as_str()))
+            .selected_text(channel_kind_label(kind))
+            .show_ui(ui, |ui| {
+                for option in [
+                    umber_core::ChannelKind::Data,
+                    umber_core::ChannelKind::Color,
+                ] {
+                    ui.selectable_value(&mut kind, option, channel_kind_label(option));
+                }
+            });
+        ui.ctx().data_mut(|d| d.insert_temp(kind_id, kind));
+        if ui.button(tr("texturesets.channel-add")).clicked() {
+            edits.push(ChannelEdit::Add(add_name.clone(), kind));
+        }
+    });
+    let mut changed = false;
+    for edit in edits {
+        let result = match edit {
+            ChannelEdit::Rename(old, new) => session.rename_channel(&old, &new),
+            ChannelEdit::ArmRemove(name) => {
+                ui.ctx().data_mut(|d| d.insert_temp(pending_id, Some(name)));
+                continue;
+            }
+            ChannelEdit::CancelRemove => {
+                ui.ctx()
+                    .data_mut(|d| d.remove::<Option<String>>(pending_id));
+                continue;
+            }
+            ChannelEdit::Remove(name) => {
+                ui.ctx()
+                    .data_mut(|d| d.remove::<Option<String>>(pending_id));
+                session.remove_channel(&name).map(|_| ())
+            }
+            ChannelEdit::Add(name, kind) => {
+                let added = session.add_channel(&name, kind);
+                if added.is_ok() {
+                    ui.ctx().data_mut(|d| d.remove::<String>(add_id));
+                }
+                added
+            }
+        };
+        match result {
+            Ok(()) => {
+                changed = true;
+                ui.ctx().data_mut(|d| d.remove::<String>(error_id));
+            }
+            Err(err) => {
+                log::info!("channel edit refused on '{}': {err}", session.name);
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(error_id, channel_error_text(&err)));
+            }
+        }
+    }
+    if let Some(error) = ui.ctx().data(|d| d.get_temp::<String>(error_id)) {
+        ui.label(egui::RichText::new(error).color(umber_gui::theme::warn()));
+    }
+    changed
 }
 
 /// The catalog keys of [`texture_sets_panel_ui`]'s labelled rows, in draw
-/// order (the set picker, the size combo, the per-channel heading): the
+/// order (the set picker, the size combo, the Channels heading, the
+/// per-channel heading): the
 /// Properties rail's search vocabulary for the TextureSet context
 /// (`rail-row-labels`; the inclusion rule is stated on
 /// `brush_panel::ROW_LABEL_KEYS`). The per-channel rows are labelled by
@@ -3685,6 +3872,7 @@ fn texture_sets_panel_ui(
 const TEXTURE_SET_LABEL_KEYS: &[&str] = &[
     "texturesets.set",
     "texturesets.size",
+    "texturesets.channels",
     "texturesets.per-channel",
 ];
 
@@ -6845,7 +7033,12 @@ mod properties_row_label_tests {
         );
         assert_eq!(
             texture_sets_row_labels(),
-            ["Texture set", "Paint target size", "Per-channel sizes"]
+            [
+                "Texture set",
+                "Paint target size",
+                "Channels",
+                "Per-channel sizes"
+            ]
         );
     }
 
@@ -7868,5 +8061,135 @@ mod projection_section_tests {
             projection::ProjectionState::default().opacity,
             display_panel::DEFAULT_STENCIL_OPACITY
         );
+    }
+}
+
+/// The Channels manage section (R-B4 tail), drawn headless: remove arms a
+/// confirm and only the confirm drops the declaration; add declares a
+/// channel; a refused add shows its reason and changes nothing.
+/// (`channel_manage_ui` takes no paint session, so this runs without a
+/// GPU — the full panel needs one.)
+#[cfg(test)]
+mod channel_manage_tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    struct State {
+        set: umber_core::TextureSet,
+        changed: usize,
+    }
+
+    fn harness() -> Harness<'static, State> {
+        i18n::init();
+        Harness::<State>::builder()
+            .with_size(egui::vec2(480.0, 400.0))
+            .build_ui_state(
+                |ui, s: &mut State| {
+                    if channel_manage_ui(ui, &mut s.set) {
+                        s.changed += 1;
+                    }
+                },
+                State {
+                    set: umber_core::TextureSet::new_default("Body"),
+                    changed: 0,
+                },
+            )
+    }
+
+    fn names(s: &State) -> Vec<String> {
+        s.set.channels.iter().map(|c| c.name.clone()).collect()
+    }
+
+    #[test]
+    fn remove_needs_the_confirm_and_base_color_has_no_remove() {
+        let mut h = harness();
+        h.run();
+        // baseColor is listed without a remove button: four removes for
+        // the five default channels.
+        let remove = tr("texturesets.channel-remove");
+        {
+            let removes: Vec<_> = h.query_all_by_label(&remove).collect();
+            assert_eq!(removes.len(), 4);
+            // Row order follows the declaration: index 1 is metallic.
+            removes[1].click();
+        }
+        h.run();
+        assert_eq!(h.state().set.channels.len(), 5, "the click only arms");
+        assert_eq!(h.state().changed, 0);
+        h.get_by_label(&tr("texturesets.channel-remove-apply"))
+            .click();
+        h.run();
+        assert_eq!(
+            names(h.state()),
+            ["baseColor", "roughness", "normal", "height"]
+        );
+        assert_eq!(h.state().changed, 1);
+        assert!(
+            h.query_by_label(&tr("texturesets.channel-remove-apply"))
+                .is_none(),
+            "the confirm closes"
+        );
+    }
+
+    #[test]
+    fn cancel_disarms_the_remove() {
+        let mut h = harness();
+        h.run();
+        h.query_all_by_label(&tr("texturesets.channel-remove"))
+            .next()
+            .unwrap()
+            .click();
+        h.run();
+        h.get_by_label(&tr("texturesets.channel-remove-cancel"))
+            .click();
+        h.run();
+        assert_eq!(h.state().set.channels.len(), 5);
+        assert_eq!(h.state().changed, 0);
+    }
+
+    #[test]
+    fn add_declares_and_a_duplicate_is_refused_with_its_reason() {
+        let mut h = harness();
+        let add_id = Id::new(("channel-manage-add", "Body"));
+        h.ctx
+            .data_mut(|d| d.insert_temp(add_id, "dirt_mask".to_string()));
+        h.run();
+        h.get_by_label(&tr("texturesets.channel-add")).click();
+        h.run();
+        assert_eq!(names(h.state()).last().unwrap(), "dirt_mask");
+        assert_eq!(
+            h.state().set.channels.last().unwrap().kind,
+            umber_core::ChannelKind::Data
+        );
+        assert_eq!(h.state().changed, 1);
+        // The field cleared on success; a duplicate (case-folded) refuses.
+        h.ctx
+            .data_mut(|d| d.insert_temp(add_id, "ROUGHNESS".to_string()));
+        h.run();
+        h.get_by_label(&tr("texturesets.channel-add")).click();
+        h.run();
+        assert_eq!(h.state().set.channels.len(), 6);
+        assert_eq!(h.state().changed, 1);
+        let reason = channel_error_text(&umber_core::ChannelError::Duplicate("ROUGHNESS".into()));
+        assert!(h.query_by_label(&reason).is_some(), "the reason shows");
+    }
+
+    #[test]
+    fn every_channel_error_has_a_localized_reason() {
+        use umber_core::ChannelError as E;
+        for err in [
+            E::EmptyName,
+            E::Duplicate("x".into()),
+            E::InvalidName("x".into()),
+            E::Unknown("x".into()),
+            E::BaseColorProtected,
+        ] {
+            let text = channel_error_text(&err);
+            assert!(
+                !text.is_empty() && !text.starts_with("texturesets."),
+                "{err:?}"
+            );
+        }
     }
 }

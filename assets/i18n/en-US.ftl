@@ -197,6 +197,24 @@ texturesets =
     .inherit-short = Inherit
     .per-channel = Per-channel sizes
     .channel-resize-clears = Resizing a channel clears its tiles
+    .channels = Channels
+    .channels-hint = Add, rename or remove declared channels. Removing keeps painted pixels.
+    .channel-base-color = baseColor is the set's base channel: it cannot be renamed or removed.
+    .channel-rename = Rename the channel (press Enter or click away to apply)
+    .channel-remove = Remove
+    .channel-remove-hint = Remove this channel from the set's declaration
+    .channel-remove-confirm = Remove channel { $channel } from { $set }? Painted pixels stay and still edit under Per-channel sizes.
+    .channel-remove-apply = Remove channel
+    .channel-remove-cancel = Keep channel
+    .channel-add-name = New channel
+    .channel-add = Add channel
+    .kind-color = Color (sRGB)
+    .kind-data = Data (linear)
+    .channel-error-empty = A channel name cannot be empty.
+    .channel-error-duplicate = A channel named { $name } already exists.
+    .channel-error-invalid = { $name } is not a valid channel name (no slashes, colons or reserved characters).
+    .channel-error-unknown = No channel named { $name }.
+    .channel-error-base-color = The baseColor channel cannot be renamed or removed.
     .no-paint = No paint session — the GPU target is unavailable.
 
 ## Bakes panel

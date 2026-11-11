@@ -201,6 +201,24 @@ texturesets =
     .inherit-short = Herdar
     .per-channel = Tamanhos por canal
     .channel-resize-clears = Redimensionar um canal limpa os tiles dele
+    .channels = Canais
+    .channels-hint = Adicione, renomeie ou remova canais declarados. Remover mantém os pixels pintados.
+    .channel-base-color = baseColor é o canal base do conjunto: não pode ser renomeado nem removido.
+    .channel-rename = Renomear o canal (pressione Enter ou clique fora para aplicar)
+    .channel-remove = Remover
+    .channel-remove-hint = Remover este canal da declaração do conjunto
+    .channel-remove-confirm = Remover o canal { $channel } de { $set }? Os pixels pintados permanecem e continuam editáveis em Tamanhos por canal.
+    .channel-remove-apply = Remover canal
+    .channel-remove-cancel = Manter canal
+    .channel-add-name = Novo canal
+    .channel-add = Adicionar canal
+    .kind-color = Cor (sRGB)
+    .kind-data = Dados (linear)
+    .channel-error-empty = O nome do canal não pode ficar vazio.
+    .channel-error-duplicate = Já existe um canal chamado { $name }.
+    .channel-error-invalid = { $name } não é um nome de canal válido (sem barras, dois-pontos ou caracteres reservados).
+    .channel-error-unknown = Nenhum canal chamado { $name }.
+    .channel-error-base-color = O canal baseColor não pode ser renomeado nem removido.
     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
 
 ## Painel de bakes

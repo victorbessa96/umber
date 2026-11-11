@@ -1011,6 +1011,32 @@ mod tests {
         let _ = fs::remove_dir_all(&dir_b);
     }
 
+    /// The channel commands (R-B4 tail) persist through project.json: an
+    /// added, a renamed and a removed channel all survive save -> load,
+    /// and the reload re-saves byte-identically.
+    #[test]
+    fn managed_channels_round_trip_through_project_json() {
+        let mut model = fixture_model();
+        let set = &mut model.texture_sets[0];
+        set.add_channel("dirt_mask", ChannelKind::Data).unwrap();
+        set.rename_channel("height", "displacement").unwrap();
+        set.remove_channel("metallic").unwrap();
+        let expected = set.channels.clone();
+        let dir_a = unique_temp_dir("channels-a");
+        let dir_b = unique_temp_dir("channels-b");
+
+        save_to_dir(&model, &dir_a).expect("first save");
+        let loaded = load_from_dir(&dir_a).expect("load");
+        assert_eq!(loaded.texture_sets[0].channels, expected);
+        assert_eq!(loaded, model);
+
+        save_to_dir(&loaded, &dir_b).expect("second save");
+        assert_dirs_byte_identical(&dir_a, &dir_b);
+
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
     /// A two-tile texture set: tile 1001 keeps the default channels at
     /// 2048, tile 1002 carries baseColor only at 1024.
     fn two_tile_texture_set() -> TextureSet {
