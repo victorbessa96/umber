@@ -130,6 +130,12 @@ impl TextureSet {
         let name = self.check_new_name(name, None)?;
         let channel = Channel { name, kind };
         for tile in self.tiles.values_mut() {
+            // A tile that already lists the name (a hand-edited project,
+            // where the tile lists and the declaration drifted) keeps its
+            // entry: pushing a second one would double-bind the plane.
+            if tile.channels.iter().any(|c| c.name == channel.name) {
+                continue;
+            }
             tile.channels.push(channel.clone());
         }
         self.channels.push(channel);
@@ -214,10 +220,21 @@ pub const BASE_COLOR_CHANNEL: &str = "baseColor";
 /// characters, no control characters, not dot-only. Mirrors the paint
 /// persistence's manifest trust check, plus `/`, so a declared channel
 /// can always save.
+///
+/// The set-name rule's extra clauses come with it: a trailing dot or
+/// space (Windows strips both, so "ao" and "ao." would be ONE sidecar
+/// directory) and the Windows reserved device stems ("CON", "CON.txt" —
+/// invalid on Windows whatever the extension). A channel name becomes a
+/// directory name exactly like a set name, so it answers to the same
+/// rule ([`crate::project::validate_set_name`]'s).
 fn is_valid_channel_name(name: &str) -> bool {
+    let stem = name.split_once('.').map_or(name, |(before, _)| before);
     !name.chars().all(|c| c == '.')
         && !name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
         && !name.chars().any(char::is_control)
+        && !name.ends_with('.')
+        && !name.ends_with(' ')
+        && !crate::project::WINDOWS_RESERVED_STEMS.contains(&stem.to_ascii_lowercase().as_str())
 }
 
 /// Why a channel add/remove/rename was refused.
@@ -263,6 +280,65 @@ mod tests {
 
     fn names(ts: &TextureSet) -> Vec<&str> {
         ts.channels.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn channel_names_refuse_the_windows_device_stems_and_trailing_dots() {
+        let mut ts = TextureSet::new_default("Body");
+        // The set-name rule's clauses, for a channel name too: a channel
+        // becomes a `paint/<channel>/` directory.
+        for name in [
+            "CON", "con", "PRN.txt", "aux", "NUL", "COM1", "lpt9", "com1.log",
+        ] {
+            assert_eq!(
+                ts.add_channel(name, ChannelKind::Data),
+                Err(ChannelError::InvalidName(name.to_string())),
+                "{name} must be refused",
+            );
+        }
+        for name in ["ao.", "ao.."] {
+            assert_eq!(
+                ts.add_channel(name, ChannelKind::Data),
+                Err(ChannelError::InvalidName(name.to_string())),
+                "{name} must be refused",
+            );
+        }
+        // A trailing SPACE is not refused: the name is trimmed first, so
+        // "ao " lands on "ao" — the same directory Windows would keep.
+        ts.add_channel("ao ", ChannelKind::Data).unwrap();
+        assert!(ts.channels.iter().any(|c| c.name == "ao"));
+        assert!(!ts.channels.iter().any(|c| c.name == "ao "));
+        // The ordinary names still pass.
+        ts.add_channel("dirt_mask", ChannelKind::Data).unwrap();
+        ts.add_channel("ao2", ChannelKind::Data).unwrap();
+        assert!(ts.channels.iter().any(|c| c.name == "dirt_mask"));
+    }
+
+    #[test]
+    fn add_channel_never_doubles_a_tile_entry() {
+        let mut ts = TextureSet::new_default("Body");
+        // A tile that already lists the name (a drifted project.json):
+        // the declaration gains the channel, the tile keeps ONE entry.
+        ts.tiles.insert(
+            1001,
+            TileChannels::new(
+                2048,
+                vec![Channel {
+                    name: "ao".into(),
+                    kind: ChannelKind::Data,
+                }],
+            ),
+        );
+        ts.add_channel("ao", ChannelKind::Data).unwrap();
+        assert_eq!(ts.channels.iter().filter(|c| c.name == "ao").count(), 1);
+        assert_eq!(
+            ts.tiles[&1001]
+                .channels
+                .iter()
+                .filter(|c| c.name == "ao")
+                .count(),
+            1
+        );
     }
 
     #[test]

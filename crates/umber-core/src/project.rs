@@ -443,7 +443,10 @@ struct VersionProbe {
 
 /// Windows device names reserved regardless of extension (`CON`, `CON.txt`,
 /// ... are all invalid). Compared case-insensitively.
-const WINDOWS_RESERVED_STEMS: &[&str] = &[
+///
+/// `pub(crate)`: the channel-name rule (a channel becomes a sidecar
+/// directory name too) must refuse the same names as the set-name rule.
+pub(crate) const WINDOWS_RESERVED_STEMS: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
