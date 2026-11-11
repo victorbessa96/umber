@@ -18,6 +18,8 @@
 
 use std::collections::BTreeSet;
 
+use crate::i18n::{tr, tr_args};
+
 use umber_mesh::FIRST_TILE;
 
 /// Which present UDIM tiles a panel action covers.
@@ -112,17 +114,20 @@ impl TileSelection {
     /// single-tile list — a plain `Tile 1001` label (nothing to choose).
     pub fn show(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.label("Tiles:");
+            ui.label(tr("tiles.label"));
             if self.known.len() <= 1 {
                 match self.known.first() {
-                    Some(tile) => ui.label(format!("Tile {tile}")),
-                    None => ui.label("none"),
+                    Some(tile) => ui.label(tr_args("tiles.tile", [("tile", (*tile).into())])),
+                    None => ui.label(tr("tiles.none")),
                 };
                 return;
             }
             for tile in self.known.clone() {
                 let mut on = self.selected.contains(&tile);
-                if ui.checkbox(&mut on, format!("Tile {tile}")).changed() {
+                if ui
+                    .checkbox(&mut on, tr_args("tiles.tile", [("tile", tile.into())]))
+                    .changed()
+                {
                     self.set_selected(tile, on);
                 }
             }

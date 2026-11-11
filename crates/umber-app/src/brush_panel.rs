@@ -327,7 +327,7 @@ impl BrushPanel {
         ui.separator();
         let Some(idx) = self.active else {
             ui.centered_and_justified(|ui| {
-                ui.label("No preset selected");
+                ui.label(tr("brush.no-preset"));
             });
             return;
         };
@@ -636,7 +636,7 @@ impl BrushPanel {
         });
 
         ui.horizontal_wrapped(|ui| {
-            ui.label("Color");
+            ui.label(tr("brush.color"));
             let mut rgb = [
                 preset.params.color[0],
                 preset.params.color[1],
@@ -867,10 +867,10 @@ impl BrushPanel {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label("Save as");
+            ui.label(tr("brush.save-as-label"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.save_as_name)
-                    .hint_text("New preset name")
+                    .hint_text(tr("brush.new-preset-name"))
                     .desired_width(140.0),
             );
             if ui.button(tr("button.save-as")).clicked() {
@@ -879,9 +879,9 @@ impl BrushPanel {
         });
         // Labels are English until the catalogs' lock frees (queue).
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Import .abr…").clicked() {
+            if ui.button(tr("brush.import-abr")).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Photoshop brushes", &["abr"])
+                    .add_filter(tr("brush.abr-filter"), &["abr"])
                     .pick_file()
                 {
                     self.import_abr(&path);

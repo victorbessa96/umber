@@ -204,7 +204,7 @@ pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) -> Option<Pat
     // Set inside the report loop, which borrows `state.parsed`; assigned
     // to `state.status` after it.
     let mut status: Option<String> = None;
-    use crate::i18n::tr;
+    use crate::i18n::{tr, tr_args};
     ui.heading(tr("spp-import.title"));
     crate::i18n::hint_line(ui, tr("spp-import.hint"), Some(tr("spp-import.hint-more")));
     ui.add_space(4.0);
@@ -247,7 +247,10 @@ pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) -> Option<Pat
                 // Labels are English until the catalogs' lock frees
                 // (`spp-hint-honest` in the queue adds the keys).
                 if ui
-                    .button(format!("Extract {channel_count} channel(s) as layers"))
+                    .button(tr_args(
+                        "spp-import.extract-channels",
+                        [("count", channel_count.into())],
+                    ))
                     .clicked()
                 {
                     let dir = extract_dir_for(path);

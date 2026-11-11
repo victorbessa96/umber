@@ -84,6 +84,11 @@ button =
 ## Status phrases
 
 status =
+    .pen-windows-ink = Pen (Windows Ink)
+    .pen-wintab = Pen (WinTab)
+    .pen-wayland = Pen (Wayland tablet)
+    .pen-x11 = Pen (X11)
+    .pen-mouse = Mouse (fallback)
     .baking = { $count ->
         [one] Baking { $count } map…
        *[other] Baking { $count } maps…
@@ -286,6 +291,7 @@ export =
 ## Graph panel (list view, editor, status line)
 
 graph =
+    .trust-load = Trust & load
     .view-canvas = Canvas
     .view-list = List
     .canvas-help = Drag empty space to pan, wheel to zoom, drag an output port onto an input to connect, right-click to add, Delete removes the selected edge.
@@ -410,6 +416,11 @@ viewmode =
 ## Brush properties panel
 
 brush =
+    .color = Color
+    .save-as-label = Save as
+    .new-preset-name = New preset name
+    .import-abr = Import .abr…
+    .abr-filter = Photoshop brushes
     .no-preset = No preset selected
     .cavity = Cavity mask
     .cavity-enable = Paint by curvature
@@ -693,6 +704,7 @@ history =
 ## UDIM tile selector (Bakes + Export)
 
 tiles =
+    .none = none
     .label = Tiles:
     .tile = Tile { $tile }
 
@@ -754,6 +766,7 @@ psd-import =
 ## .spp import (ruling 1 — import-only forever; the report is the artifact)
 
 spp-import =
+    .extract-channels = Extract { $count } channel(s) as layers
     .title = Substance .spp import
     .hint = Drop a Substance 3D Painter .spp project to import its channels.
     .hint-more = Drop an Adobe Substance 3D Painter .spp project. The reader imports texture-set channels it can honestly parse and reports every dataset — HBO graphs are listed by era, not imported; geometry stays FBX/USD.
@@ -990,6 +1003,7 @@ strip =
 
 # The viewport's Overlays button + popover (GUI plan g6-overlays-popover).
 overlays =
+    .filter-raster = PNG / SVG
     .button = Overlays
     .tooltip = Viewport overlays: wireframe, grid, UV seams, face orientation, channel name.
     .wireframe = Wireframe
@@ -1126,3 +1140,39 @@ rail-expand = Unfold the column
 ## The panel-group menu under each tab bar's end button (UI/UX U2-3).
 dock =
     .group-closed = Closed panels
+
+## Blend modes (audit F10 — never the Debug name)
+
+blend =
+    .normal = Normal
+    .passthrough = Passthrough (folder)
+    .multiply = Multiply
+    .screen = Screen
+    .overlay = Overlay
+    .darken = Darken
+    .lighten = Lighten
+    .add = Add (Linear Dodge)
+    .subtract = Subtract
+    .difference = Difference
+    .soft-light = Soft Light
+    .hard-light = Hard Light
+    .color-dodge = Color Dodge
+    .color-burn = Color Burn
+    .linear-burn = Linear Burn
+    .divide = Divide
+    .inverse-divide = Inverse Divide
+    .inverse-subtract = Inverse Subtract
+    .exclusion = Exclusion
+    .add-sub = Add/Subtract
+    .vivid-light = Vivid Light
+    .linear-light = Linear Light
+    .pin-light = Pin Light
+    .disable = Disable
+    .replace = Replace
+    .tint = Tint
+    .saturation = Saturation
+    .color = Color
+    .value = Value
+    .normal-combine = Normal (Combine)
+    .normal-detail = Normal (Detail)
+    .normal-inverse-detail = Normal (Inverse Detail)

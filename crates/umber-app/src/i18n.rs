@@ -620,6 +620,59 @@ mod tests {
     }
 
     #[test]
+    fn no_bare_english_ui_literals_in_sources() {
+        // Audit F10 guard: a UI-facing call with a bare string literal
+        // that contains an ASCII letter and a space is English prose
+        // leaking past the catalogs (glyphs like "+" have no letters).
+        // Literal `format!`/tr()/tr_args() calls are not matched — only
+        // the bare-literal call shapes below.
+        let heads = [
+            ".label(\"",
+            ".button(\"",
+            ".hint_text(\"",
+            ".add_filter(\"",
+            ".selected_text(\"",
+        ];
+        let mut offenders = Vec::new();
+        for (name, text) in crate_sources() {
+            for (idx, line) in text.lines().enumerate() {
+                for head in heads {
+                    let mut from = 0;
+                    while let Some(pos) = line[from..].find(head) {
+                        let lit_start = from + pos + head.len();
+                        if let Some(end) = line[lit_start..].find('"') {
+                            let lit = &line[lit_start..lit_start + end];
+                            if lit.chars().any(|c| c.is_ascii_alphabetic()) && lit.contains(' ') {
+                                offenders.push(format!("{name}:{}: {lit}", idx + 1));
+                            }
+                        }
+                        from = lit_start;
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "bare English UI literals (route them through tr()): {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn every_blend_mode_has_a_key_in_both_catalogs() {
+        // Audit F10: the combo labels come from `blend.<label_key()>`;
+        // both locales must define every one, or the UI falls back to
+        // English (or the raw key) for that mode.
+        let en = I18n::builtin();
+        let mut pt = I18n::builtin();
+        pt.set_locale("pt-BR");
+        for mode in umber_core::BlendMode::ALL {
+            let key = format!("blend.{}", mode.label_key());
+            assert!(en.lookup(&key, None) != key, "en-US missing {key}");
+            assert!(pt.lookup(&key, None) != key, "pt-BR missing {key}");
+        }
+    }
+
+    #[test]
     fn every_called_key_exists_in_en() {
         let i18n = I18n::builtin();
         let sources = crate_sources();

@@ -377,8 +377,7 @@ impl GraphPanel {
                 ui.label("⚠");
                 ui.monospace(path.display().to_string());
                 ui.weak(format!("blake3 {}…", &hash[..12]));
-                // Untranslated until the catalogs take the consent keys.
-                if ui.button("Trust & load").clicked() {
+                if ui.button(tr("graph.trust-load")).clicked() {
                     trust = Some(i);
                 }
             });

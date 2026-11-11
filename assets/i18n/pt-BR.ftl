@@ -85,6 +85,11 @@ button =
 ## Mensagens de status
 
 status =
+    .pen-windows-ink = Caneta (Windows Ink)
+    .pen-wintab = Caneta (WinTab)
+    .pen-wayland = Tablet (Wayland)
+    .pen-x11 = Caneta (X11)
+    .pen-mouse = Mouse (reserva)
     .baking = { $count ->
         [one] Fazendo bake de { $count } mapa…
        *[other] Fazendo bake de { $count } mapas…
@@ -293,6 +298,7 @@ export =
 ## Painel do grafo (lista, editor, linha de status)
 
 graph =
+    .trust-load = Confiar e carregar
     .view-canvas = Canvas
     .view-list = Lista
     .canvas-help = Arraste o espaço vazio para mover a vista, use a roda para zoom, arraste uma porta de saída até uma entrada para conectar, clique com o botão direito para adicionar; Delete remove a aresta selecionada.
@@ -423,6 +429,11 @@ viewmode =
 ## Painel de propriedades do pincel
 
 brush =
+    .color = Cor
+    .save-as-label = Salvar como
+    .new-preset-name = Nome da nova predefinição
+    .import-abr = Importar .abr…
+    .abr-filter = Pincéis do Photoshop
     .no-preset = Nenhuma predefinição selecionada
     .cavity = Máscara de cavidade
     .cavity-enable = Pintar pela curvatura
@@ -748,6 +759,7 @@ history =
 ## Seletor de tiles UDIM (Bakes + Exportação)
 
 tiles =
+    .none = nenhuma
     .label = Tiles:
     .tile = Tile { $tile }
 
@@ -774,6 +786,7 @@ psd-import =
 ## .spp import (ruling 1 — import-only forever; the report is the artifact)
 
 spp-import =
+    .extract-channels = Extrair { $count } canal(is) como camadas
     .title = Importar .spp do Substance
     .hint = Solte um projeto .spp do Substance 3D Painter para importar seus canais.
     .hint-more = Solte um projeto .spp do Adobe Substance 3D Painter. O leitor importa os canais que consegue analisar com honestidade e relata cada conjunto de dados — grafos HBO são listados por era, não importados; a geometria continua FBX/USD.
@@ -1009,6 +1022,7 @@ strip =
 
 # O botão Overlays do viewport + popover (plano de GUI g6-overlays-popover).
 overlays =
+    .filter-raster = PNG / SVG
     .button = Overlays
     .tooltip = Overlays do viewport: wireframe, grade, costuras UV, orientação das faces, nome do canal.
     .wireframe = Wireframe
@@ -1145,3 +1159,39 @@ rail-expand = Expandir a coluna
 ## The panel-group menu under each tab bar's end button (UI/UX U2-3).
 dock =
     .group-closed = Painéis fechados
+
+## Modos de mesclagem (auditoria F10 — nunca o nome Debug)
+
+blend =
+    .normal = Normal
+    .passthrough = Passagem (pasta)
+    .multiply = Multiplicar
+    .screen = Tela
+    .overlay = Sobrepor
+    .darken = Escurecer
+    .lighten = Clarear
+    .add = Adicionar (Dodge linear)
+    .subtract = Subtrair
+    .difference = Diferença
+    .soft-light = Luz suave
+    .hard-light = Luz dura
+    .color-dodge = Dodge de cor
+    .color-burn = Burn de cor
+    .linear-burn = Burn linear
+    .divide = Dividir
+    .inverse-divide = Divisão inversa
+    .inverse-subtract = Subtração inversa
+    .exclusion = Exclusão
+    .add-sub = Adicionar/Subtrair
+    .vivid-light = Luz vívida
+    .linear-light = Luz linear
+    .pin-light = Luz de pino
+    .disable = Desativado
+    .replace = Substituir
+    .tint = Matiz
+    .saturation = Saturação
+    .color = Cor
+    .value = Valor
+    .normal-combine = Normal (Combinar)
+    .normal-detail = Normal (Detalhe)
+    .normal-inverse-detail = Normal (Detalhe inverso)

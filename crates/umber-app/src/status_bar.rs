@@ -194,10 +194,22 @@ pub fn format_tile(tile: Option<u16>) -> String {
     tile.map_or_else(|| NO_VALUE.to_owned(), |t| t.to_string())
 }
 
-/// The pen backend token (`x11-xinput2`), or [`NO_VALUE`] with no pen
-/// event yet this session.
+/// The pen backend, localized (audit F10: never the raw `x11-xinput2`
+/// token), or [`NO_VALUE`] with no pen event yet this session.
 pub fn format_pen(source: Option<stylus::InputSource>) -> String {
-    source.map_or_else(|| NO_VALUE.to_owned(), |s| s.to_string())
+    source.map_or_else(
+        || NO_VALUE.to_owned(),
+        |s| {
+            let key = match s {
+                stylus::InputSource::WindowsInk => "status.pen-windows-ink",
+                stylus::InputSource::Wintab => "status.pen-wintab",
+                stylus::InputSource::WaylandTablet => "status.pen-wayland",
+                stylus::InputSource::X11Xinput2 => "status.pen-x11",
+                stylus::InputSource::MouseFallback => "status.pen-mouse",
+            };
+            tr(key)
+        },
+    )
 }
 
 /// Frames per second from a frame delta. `None` for a zero, negative or
@@ -346,15 +358,20 @@ mod tests {
     }
 
     #[test]
-    fn pen_formats_the_backend_token_or_dashes() {
-        // The token is the protocol id (untranslated); the label is.
+    fn pen_formats_the_localized_backend_or_dashes() {
+        // Audit F10: the status bar shows the localized label, never the
+        // raw protocol token.
         assert_eq!(
             format_pen(Some(stylus::InputSource::X11Xinput2)),
-            "x11-xinput2"
+            tr("status.pen-x11")
         );
         assert_eq!(
             format_pen(Some(stylus::InputSource::MouseFallback)),
-            "mouse-fallback"
+            tr("status.pen-mouse")
+        );
+        assert_ne!(
+            format_pen(Some(stylus::InputSource::X11Xinput2)),
+            "x11-xinput2"
         );
         assert_eq!(format_pen(None), "—");
     }

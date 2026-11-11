@@ -367,7 +367,7 @@ pub fn stencil_rows(ui: &mut Ui, row: StencilRow<'_>) -> StencilRowResponse {
         ui.weak(path);
         if ui.button(i18n::tr("overlays.stencil-load")).clicked() {
             out.picked = rfd::FileDialog::new()
-                .add_filter("PNG / SVG", &["png", "svg"])
+                .add_filter(i18n::tr("overlays.filter-raster"), &["png", "svg"])
                 .pick_file();
         }
     });
@@ -476,7 +476,7 @@ pub fn projection_rows(ui: &mut Ui, row: ProjectionRow<'_>) -> ProjectionRowResp
         ui.weak(path);
         if ui.button(i18n::tr("overlays.projection-load")).clicked() {
             out.picked = rfd::FileDialog::new()
-                .add_filter("PNG / SVG", &["png", "svg"])
+                .add_filter(i18n::tr("overlays.filter-raster"), &["png", "svg"])
                 .pick_file();
         }
     });

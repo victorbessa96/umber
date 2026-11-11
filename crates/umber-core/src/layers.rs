@@ -323,6 +323,82 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
+    /// Every variant, in catalog order — the `blend.*` keys of both
+    /// ftl catalogs are keyed off these (audit F10).
+    pub const ALL: [BlendMode; 32] = [
+        BlendMode::Normal,
+        BlendMode::Passthrough,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Add,
+        BlendMode::Subtract,
+        BlendMode::Difference,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::Divide,
+        BlendMode::InverseDivide,
+        BlendMode::InverseSubtract,
+        BlendMode::Exclusion,
+        BlendMode::AddSub,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::PinLight,
+        BlendMode::Disable,
+        BlendMode::Replace,
+        BlendMode::Tint,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Value,
+        BlendMode::NormalCombine,
+        BlendMode::NormalDetail,
+        BlendMode::NormalInverseDetail,
+    ];
+
+    /// i18n key for the blend-mode combo (audit F10: the UI shows this,
+    /// never the `Debug` name). Full key is `blend.<label_key>`.
+    pub fn label_key(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "normal",
+            BlendMode::Passthrough => "passthrough",
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Overlay => "overlay",
+            BlendMode::Darken => "darken",
+            BlendMode::Lighten => "lighten",
+            BlendMode::Add => "add",
+            BlendMode::Subtract => "subtract",
+            BlendMode::Difference => "difference",
+            BlendMode::SoftLight => "soft-light",
+            BlendMode::HardLight => "hard-light",
+            BlendMode::ColorDodge => "color-dodge",
+            BlendMode::ColorBurn => "color-burn",
+            BlendMode::LinearBurn => "linear-burn",
+            BlendMode::Divide => "divide",
+            BlendMode::InverseDivide => "inverse-divide",
+            BlendMode::InverseSubtract => "inverse-subtract",
+            BlendMode::Exclusion => "exclusion",
+            BlendMode::AddSub => "add-sub",
+            BlendMode::VividLight => "vivid-light",
+            BlendMode::LinearLight => "linear-light",
+            BlendMode::PinLight => "pin-light",
+            BlendMode::Disable => "disable",
+            BlendMode::Replace => "replace",
+            BlendMode::Tint => "tint",
+            BlendMode::Saturation => "saturation",
+            BlendMode::Color => "color",
+            BlendMode::Value => "value",
+            BlendMode::NormalCombine => "normal-combine",
+            BlendMode::NormalDetail => "normal-detail",
+            BlendMode::NormalInverseDetail => "normal-inverse-detail",
+        }
+    }
+
     /// Clamps a linear-space channel value to `0.0..=1.0` for blending.
     ///
     /// Fail-closed for ALL non-finite input: `NaN` AND `±inf` map to `0.0`
@@ -1899,6 +1975,24 @@ impl Command for LayerCommand {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn blend_mode_label_keys_are_stable_and_unique() {
+        // Audit F10: the UI combo shows `blend.<label_key()>`; the keys
+        // are the catalog contract, so they must be unique and never
+        // drift to the Debug name.
+        let all = BlendMode::ALL;
+        assert_eq!(all.len(), 32);
+        let keys: std::collections::BTreeSet<&str> = all.iter().map(|m| m.label_key()).collect();
+        assert_eq!(keys.len(), all.len(), "label_key must be unique per mode");
+        for mode in all {
+            let key = mode.label_key();
+            assert!(
+                key.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "label_key must be kebab-case, not a Debug name: {key} ({mode:?})"
+            );
+        }
+    }
 
     #[test]
     fn stacks_sharing_one_id_space_never_collide() {

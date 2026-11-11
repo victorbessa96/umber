@@ -392,10 +392,14 @@ fn channel_rows(
             };
             ui.checkbox(&mut next_enabled, name_text);
             egui::ComboBox::from_id_salt(combo_id)
-                .selected_text(format!("{next_blend:?}"))
+                .selected_text(tr(&format!("blend.{}", next_blend.label_key())))
                 .show_ui(ui, |ui| {
                     for option in channel_blend_options(name) {
-                        ui.selectable_value(&mut next_blend, option, format!("{option:?}"));
+                        ui.selectable_value(
+                            &mut next_blend,
+                            option,
+                            tr(&format!("blend.{}", option.label_key())),
+                        );
                     }
                 });
             ui.label(

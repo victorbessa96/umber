@@ -1723,7 +1723,10 @@ pub(crate) fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u6
                             })
                             .collect()
                     });
-                    let labels: Vec<String> = options.iter().map(|m| format!("{m:?}")).collect();
+                    let labels: Vec<String> = options
+                        .iter()
+                        .map(|m| tr(&format!("blend.{}", m.label_key())))
+                        .collect();
                     ui.ctx().data_mut(|d| {
                         d.get_temp_mut_or_insert_with(ahead_id, umber_gui::TypeAhead::default)
                             .frame(std::time::Duration::from_secs_f32(dt), typed, &labels)
@@ -1733,7 +1736,7 @@ pub(crate) fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u6
                     None
                 };
                 egui::ComboBox::from_id_salt(combo_id)
-                    .selected_text(format!("{mode:?}"))
+                    .selected_text(tr(&format!("blend.{}", mode.label_key())))
                     .show_ui(ui, |ui| {
                         for candidate in options {
                             // The type-ahead's jump targets by CURRENTLY
@@ -1741,11 +1744,15 @@ pub(crate) fn layer_properties_row(ui: &mut egui::Ui, doc: &mut Document, id: u6
                             // index-based; the index <=> label crossing
                             // happens on the labels list above).
                             if let Some(jump_label) = &jump {
-                                if format!("{candidate:?}") == *jump_label {
+                                if tr(&format!("blend.{}", candidate.label_key())) == *jump_label {
                                     mode = candidate;
                                 }
                             }
-                            ui.selectable_value(&mut mode, candidate, format!("{candidate:?}"));
+                            ui.selectable_value(
+                                &mut mode,
+                                candidate,
+                                tr(&format!("blend.{}", candidate.label_key())),
+                            );
                         }
                     });
                 if mode != layer.blend_mode {
