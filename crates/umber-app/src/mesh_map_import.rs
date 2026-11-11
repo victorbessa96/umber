@@ -720,7 +720,7 @@ impl MeshMapImportState {
         read: impl Fn(&PendingImport) -> Option<Vec<u8>> + Copy,
     ) {
         ui.heading(tr("import.title"));
-        ui.label(tr("import.hint"));
+        crate::i18n::hint_line(ui, tr("import.hint"), Some(tr("import.hint-more")));
         ui.horizontal(|ui| {
             if ui.button(tr("import.choose")).clicked() {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -874,6 +874,71 @@ mod tests {
     }
 
     use super::*;
+
+    /// kittest (audit F9 / R3-9): the Import window body (mesh-map, PSD
+    /// and .spp sections, as `main.rs` stacks them in the Assets tab) at
+    /// 260 pt wide shows each section's short hint (at most two wrapped
+    /// lines at that width), and the long text appears only on hover.
+    #[test]
+    fn import_sections_show_one_line_hints_at_260pt() {
+        use egui_kittest::kittest::Queryable;
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        struct Sections {
+            mesh: MeshMapImportState,
+            psd: crate::psd_import::PsdImportState,
+            spp: crate::spp_import::SppImportState,
+            doc: Document,
+        }
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(260.0, 640.0))
+            .build_ui_state(
+                |ui, s: &mut Sections| {
+                    s.mesh.show(ui, &mut s.doc, None, |_| None);
+                    ui.separator();
+                    crate::psd_import::show_section(ui, &mut s.psd, &mut s.doc);
+                    ui.separator();
+                    let _ = crate::spp_import::show_section(ui, &mut s.spp);
+                },
+                Sections {
+                    mesh: MeshMapImportState::default(),
+                    psd: Default::default(),
+                    spp: Default::default(),
+                    doc: Document::default(),
+                },
+            );
+        harness.run();
+        // One line of body text, measured from a short label the PSD
+        // section shows when nothing is scanned.
+        let line = harness
+            .get_by_label(&tr("psd-import.no-files"))
+            .rect()
+            .height();
+        for prefix in ["import", "psd-import", "spp-import"] {
+            let short = tr(&format!("{prefix}.hint"));
+            let more = tr(&format!("{prefix}.hint-more"));
+            assert!(short.chars().count() <= 80, "{prefix}: {short}");
+            assert!(
+                harness.query_by_label(&more).is_none(),
+                "{prefix}: the long text is hidden until hover"
+            );
+            let node = harness.get_by_label(&short);
+            // At most two lines at 260 pt (the old paragraphs took 5-7).
+            assert!(
+                node.rect().height() < 2.5 * line,
+                "{prefix}: the hint is {} pt tall at 260 pt (line {line})",
+                node.rect().height()
+            );
+        }
+        harness.get_by_label(&tr("import.hint")).hover();
+        // Tooltips open after the hover delay; step past it.
+        for _ in 0..60 {
+            harness.step();
+        }
+        assert!(
+            harness.query_by_label(&tr("import.hint-more")).is_some(),
+            "hovering the hint shows the full text"
+        );
+    }
 
     fn tmp_store(tag: &str) -> (AssetStore, PathBuf) {
         let dir =

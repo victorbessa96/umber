@@ -703,7 +703,7 @@ pub fn polygon_fill_rows(
         ui.checkbox(&mut armed, tr("fill.poly-armed"));
         tool.set_armed(armed);
     });
-    ui.label(tr("fill.poly-hint"));
+    crate::i18n::hint_line(ui, tr("fill.poly-hint"), None);
     // The target layer: the mask write preserves its source+projection.
     let mut target = tool.target();
     egui::ComboBox::from_id_salt("fill-poly-target")

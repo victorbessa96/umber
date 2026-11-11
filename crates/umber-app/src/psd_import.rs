@@ -1307,7 +1307,7 @@ pub fn show_section(
 ) {
     use crate::i18n::tr;
     ui.heading(tr("psd-import.title"));
-    ui.label(tr("psd-import.hint"));
+    crate::i18n::hint_line(ui, tr("psd-import.hint"), Some(tr("psd-import.hint-more")));
     ui.add_space(4.0);
     if state.pending.is_empty() && state.skipped.is_empty() {
         ui.label(tr("psd-import.no-files"));

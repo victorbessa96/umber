@@ -418,7 +418,7 @@ impl BrushPanel {
                     group
                         .ui
                         .checkbox(&mut params.follow, tr("brush.clone-follow"));
-                    group.ui.weak(tr("brush.clone-hint"));
+                    crate::i18n::hint_line(group.ui, tr("brush.clone-hint"), None);
                 }
                 BrushTool::Erase(params) => {
                     group.ui.horizontal_wrapped(|ui| {
@@ -428,7 +428,11 @@ impl BrushPanel {
                         ui.checkbox(&mut params.channels.b, "B");
                         ui.checkbox(&mut params.channels.a, "A");
                     });
-                    group.ui.weak(tr("brush.erase-hint"));
+                    crate::i18n::hint_line(
+                        group.ui,
+                        tr("brush.erase-hint"),
+                        Some(tr("brush.erase-hint-more")),
+                    );
                 }
             }
         });
@@ -1646,7 +1650,11 @@ fn quick_mask_body(group: &mut ParamGroupUi<'_>, paint: &mut PaintState) {
             ui.weak(tr("brush.quick-mask-inverted"));
         }
     });
-    ui.weak(tr("brush.quick-mask-hint"));
+    crate::i18n::hint_line(
+        ui,
+        tr("brush.quick-mask-hint"),
+        Some(tr("brush.quick-mask-hint-more")),
+    );
 }
 
 /// A muted-label + [`ValueField`] row for bodies that draw on a plain
@@ -1695,7 +1703,7 @@ fn symmetry_rows(ui: &mut egui::Ui, symmetry: &mut SymmetrySettings) {
                     .context_menu(crate::i18n::prop_menu_labels())
                     .range(0.0..=1.0),
             );
-            ui.weak(tr("brush.symmetry-hint"));
+            crate::i18n::hint_line(ui, tr("brush.symmetry-hint"), None);
         });
         let radial = &mut symmetry.radial;
         ui.checkbox(&mut radial.enabled, tr("brush.symmetry-radial"));
@@ -1759,7 +1767,11 @@ fn line_constraint_rows(ui: &mut egui::Ui, mode: &mut LineConstraintMode) {
                 )
             });
         }
-        group.ui.weak(tr("brush.line-constraint-hint"));
+        crate::i18n::hint_line(
+            group.ui,
+            tr("brush.line-constraint-hint"),
+            Some(tr("brush.line-constraint-hint-more")),
+        );
     });
 }
 
@@ -1781,7 +1793,11 @@ fn projection_rows(
             );
             ui.selectable_value(&mut *mode, PaintProjection::Uv, tr("brush.projection-uv"));
         });
-        group.ui.weak(tr("brush.projection-hint"));
+        crate::i18n::hint_line(
+            group.ui,
+            tr("brush.projection-hint"),
+            Some(tr("brush.projection-hint-more")),
+        );
         // Front-face falloff (absorbed from Blender's Normal Falloff):
         // viewport strokes fade on faces seen at a grazing angle. Off by
         // default; the angle is where the fade starts. 80 degrees is near

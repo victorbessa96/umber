@@ -299,6 +299,21 @@ pub fn tr_args<'a>(
     CURRENT.with(|c| c.borrow().lookup(key, Some(&fluent_args)))
 }
 
+/// An inline panel hint (audit F9 / R3-9): `short` as one weak line and,
+/// when given, `more` as its hover text with the Help cursor, so a panel
+/// never prints a paragraph. Callers pass the translated `<key>` and
+/// `<key>-more` strings with literal keys, so the completeness scan sees
+/// both.
+pub fn hint_line(ui: &mut egui::Ui, short: String, more: Option<String>) -> egui::Response {
+    let response = ui.weak(short);
+    match more {
+        Some(more) => response
+            .on_hover_cursor(egui::CursorIcon::Help)
+            .on_hover_text(more),
+        None => response,
+    }
+}
+
 /// Startup: load every catalog, pick the locale (preference → system →
 /// en-US) and install it on the calling (UI) thread.
 pub fn init() {
@@ -676,6 +691,71 @@ mod tests {
                 missing.is_empty() && extra.is_empty(),
                 "{locale}: missing {missing:?}, extra {extra:?}"
             );
+        }
+    }
+
+    /// Hint keys that are tooltip text only (each called solely inside an
+    /// `on_hover_text(` call), so the inline cap does not apply.
+    const HOVER_ONLY_HINTS: [&str; 6] = [
+        "bakes.margin-hint",
+        "layers.base-paint-hint",
+        "overlays.projection-tile-hint",
+        "overlays.projection-follow-hint",
+        "overlays.projection-cull-backfaces-hint",
+        "overlays.projection-occlusion-hint",
+    ];
+
+    /// The en-US cap for an inline panel hint (audit F9, R3-9).
+    const INLINE_HINT_MAX_CHARS: usize = 80;
+
+    #[test]
+    fn inline_hint_keys_fit_one_line() {
+        // Audit F9 / R3-9: an inline hint (`*.hint`, `*-hint`) is one
+        // line of at most 80 characters in en-US; the long form lives in
+        // its `-more` sibling, shown on hover.
+        let i18n = I18n::builtin();
+        let keys = catalog_keys(BUILTIN[0].1);
+        let hints: Vec<&String> = keys
+            .iter()
+            .filter(|k| k.ends_with(".hint") || k.ends_with("-hint"))
+            .collect();
+        assert!(hints.len() >= 12, "only {} hint keys found", hints.len());
+        let mut long = Vec::new();
+        for key in hints {
+            if HOVER_ONLY_HINTS.contains(&key.as_str()) {
+                continue;
+            }
+            let text = format_in(&i18n.bundles[FALLBACK_LOCALE], key, None)
+                .unwrap_or_else(|| panic!("{key} formats"));
+            let chars = text.chars().count();
+            if chars > INLINE_HINT_MAX_CHARS || text.contains('\n') {
+                long.push(format!("{key} ({chars})"));
+            }
+        }
+        assert!(long.is_empty(), "inline hints over 80 chars: {long:?}");
+        // The allow-list stays honest: each entry is a real key that the
+        // source only ever passes to a hover call.
+        let sources = crate_sources();
+        for key in HOVER_ONLY_HINTS {
+            assert!(keys.contains(key), "{key} is not in en-US");
+            let quoted = format!("\"{key}\"");
+            for (name, text) in &sources {
+                if name == "i18n.rs" {
+                    continue;
+                }
+                for (at, _) in text.match_indices(&quoted) {
+                    let mut from = at.saturating_sub(48);
+                    while !text.is_char_boundary(from) {
+                        from -= 1;
+                    }
+                    let head = text[from..at].trim_end();
+                    let in_list = head.ends_with(',') || head.ends_with('[');
+                    assert!(
+                        head.contains("on_hover_text(") || in_list,
+                        "{name}: {key} is used outside a hover"
+                    );
+                }
+            }
         }
     }
 

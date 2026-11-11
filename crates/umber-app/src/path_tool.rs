@@ -423,7 +423,7 @@ pub fn path_tool_rows(
         ui.checkbox(&mut armed, tr("path.armed"));
         tool.set_armed(armed);
     });
-    ui.label(tr("path.hint"));
+    crate::i18n::hint_line(ui, tr("path.hint"), Some(tr("path.hint-more")));
     // The three-mode picker (keys as literals so the i18n completeness
     // scan sees every call site).
     let mut kind = tool.kind();

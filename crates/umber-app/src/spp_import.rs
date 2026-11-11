@@ -206,7 +206,7 @@ pub fn show_section(ui: &mut egui::Ui, state: &mut SppImportState) -> Option<Pat
     let mut status: Option<String> = None;
     use crate::i18n::tr;
     ui.heading(tr("spp-import.title"));
-    ui.label(tr("spp-import.hint"));
+    crate::i18n::hint_line(ui, tr("spp-import.hint"), Some(tr("spp-import.hint-more")));
     ui.add_space(4.0);
     if state.pending.is_empty() && state.parsed.is_empty() {
         ui.label(tr("spp-import.no-files"));
