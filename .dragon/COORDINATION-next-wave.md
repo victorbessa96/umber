@@ -2358,3 +2358,34 @@ Note for the next actor: `docs/loop/briefs/2026-11-11-rd1-baker-sync.md`
 while this kill was in flight and names `razul-w5-channel-rename-planes` as
 the lock it waited behind. That lock is now RELEASED, so the R-D1 baker-sync
 kill is dispatchable once its own surface is free.
+
+---
+
+## 2026-11-11 17:4x — watch cron 7b61e319e085 (this job; scout-only plus this note)
+
+Monitor fired on umber head 123610ad->6cc87c4d + queue.md/push-gate fp change,
+LAI head 95179e7->34f2a8c. Verified by ls-remote: umber origin/master =
+6cc87c4da419cbc803e86b861c5e313a80938949 == local HEAD, 0/0, tree clean, so
+574ec188 (w5-channel-rename-planes) + 6cc87c4d (row 374) were landed and
+pushed by the sibling; nothing unpushed. push-gate approved=true; no per-push
+CI since 11-06 by design, latest ci 42829779018 SUCCESS + perf-nightly
+43002125765 SUCCESS, zero check-runs on 6cc87c4d (expected). LIVE LANE:
+razul-post-nodes.lock (mtime 16:46) held over crates/umber-graph/src/nodes/,
+crates/umber-app/src/postfx_panel.rs, both assets/i18n .ftl,
+docs/loop/queue.md and its kill report, with a live cargo clippy+test battery
+under /tmp/umber-cargo.lock in .worktrees/post-nodes-1794426519 (rustc/cc
+procs alive at scout). queue.md is under that lock, so NO queue row this fire.
+CONSEQUENCE: the R-D1 baker-sync brief (60b484cc) needs project.rs + both .ftl
++ queue.md, and the .ftl + queue.md sit inside the live post-nodes lock, so
+R-D1 QUEUES BEHIND razul-post-nodes and was NOT dispatched this fire. Stale
+razul-templates-land.lock (assets/templates only, kill landed per row 350)
+left in place. L-AI: wave-1 = main = 34f2a8c69eb87723b1d0f707ccd986132ca4bbbd
+== origin on both refs (ls-remote), 0/0, clean, nothing to push; CI runs
+43093114519 (wave-1) + 43093114736 (main) on 34f2a8c are INFRA-RED, not code:
+job `check` runner_id=0, runner_name empty, zero steps, 3 s / 41 s wall,
+check-runs 130775089427 + 130774995504 failure (billing/spending no-runner
+class, same signature as prior annotation-verified runs); CI cannot verify
+L-AI pushes until billing is fixed. Live L-AI lane: cargo test -p brain
+-p brain-tools --locked battery running (x1census scratch); cb4b2026 HOLD
+stands, no L-AI dispatch. delegate_task list empty; mnemosyne task-progress
+unreadable from cron context, queue.md carries the state.
