@@ -2420,3 +2420,32 @@ subagents 20261111_184340_413ac5 (routecensus bench) and 20261111_184340_52b5dd
 stands, no L-AI dispatch. delegate_task list empty for this profile. This job
 touched no code, ran no cargo, and pushed only this COORDINATION line
 (docs-only plain push).
+
+Updated: 2026-11-11 19:5x -03 (cron 7b61e319e085 project-watch): monitor fired on
+LAI head 508cf12->ca132a8 and umber head 5b970515->1f78a7c4. L-AI: wave-1 = main
+= ca132a81005ff52c847b841a2b9bc6c52d911634 == origin on both refs (ls-remote
+verified), local 0/0 on both branches, tree clean, nothing to push; landed since
+the 19:1x fire: eb0ff82 + f3fdbdc + ca132a8 (lai-fanout-86, arm 47 x1aux CANDIDATE,
+NEW LEADER MS 25/15/24/14/1/42, 099778bb abstain to exact 20%, all gates PASS).
+CI runs 43114091078 (wave-1) + 43114091577 (main) on ca132a8 are INFRA-RED, not
+code: job check runner_id=0, runner_name empty, steps=0, finished_at null,
+annotation verbatim "The job was not started because recent account payments have
+failed or your spending limit needs to be increased" (billing/spending class, gh
+api verified this fire); CI cannot verify L-AI pushes until billing is fixed.
+Live L-AI lane at scout (cargo test -p brain-tools --features bench
+bench_lme_s_world_bothdates proc + routecensus scratch run). cb4b2026 HOLD stands,
+no L-AI dispatch. UMBER: origin/master 1f78a7c4efd9b26462f3e6a0283e506f1d13f890
+== HEAD (ls-remote verified), 0/0, tree clean, nothing unpushed; the only new
+commit is 1f78a7c4 (the 19:1x watch line). push-gate.json approved=true; zero
+check-runs at the tip (no per-push CI since 11-06 by design), latest ci 42829779018
+SUCCESS + perf-nightly 43002125765 SUCCESS. Lock razul-post-nodes-wiring.lock
+(mtime 18:18; covers postfx.rs, postfx_exec.rs, graph_eval.rs, project.rs,
+postfx_panel.rs, graph lib.rs, both .ftl, queue.md, the wiring kill report) is
+LIVE this fire: cargo clippy battery under /tmp/umber-cargo.lock in worktree
+.worktrees/post-wiring-1794435382 (branch hermes-subagent/post-wiring-1794435382),
+so the w5-post-passes/full_registry wiring lane is owned by a sibling; queue.md
+sits under the lock, so no queue row this fire; stood down: no code touch, no
+cargo, no dispatch. Stale razul-templates-land.lock (assets/templates only) left
+in place. delegate_task list empty; mnemosyne uninitialized in cron context, this
+file carries the state. This job touched no code and ran no cargo; pushed only
+this COORDINATION line (docs-only plain push).
