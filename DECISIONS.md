@@ -131,3 +131,12 @@ Context: the pull-users-from-Substance story matters most; the ban on *execution
 Options rejected: keep the flat ban (loses the migration story); write support (the wall).
 Owner: Bessa (binding ruling; loop registry `docs/loop/decisions.md` ruling 1).
 Revisit when: never for writing; import-fidelity lanes are tracked in the .spp census.
+
+---
+
+## [2026-11-10 21:30] text_faint raised to the 4.5:1 text floor (audit F5)
+Decision: Dark `text_faint` `#6A6E78` → `#8E9298` (5.15:1 on panel, 4.59:1 on raised), Light `#76787F` → `#606167` (5.42:1 on panel, 4.82:1 on raised), and the Dark 2D-canvas label `(110,118,130)` → `#8C949E` (4.91:1 on the square). The contrast tests now assert 4.5:1 for faint on panel AND raised in every theme, label 4.5:1 in every theme, and measure egui's `weak_text_color` instead of assuming it.
+Context: the round-3 UX audit (F5) found faint text at 3.16:1 (Dark) / 3.87:1 (Light) carrying real content at 13 call sites; WCAG AA text floor is 4.5:1. `palette_hex_values_pinned` moves with the token (this entry is that DECISIONS line).
+Options rejected: a separate non-text hairline token (would break the roadmap §2.1 verbatim token pin; the two hairline sites just ride the brighter faint); leaving faint at 3:1 and reclassifying the text as non-text.
+Owner: Razul under the audit-fix delegation (Bessa's standing "build improvements from audit findings").
+Revisit when: a hairline legibility complaint or a palette redesign.

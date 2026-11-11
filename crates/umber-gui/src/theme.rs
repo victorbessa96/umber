@@ -24,7 +24,7 @@ pub mod palette {
     /// Muted text (labels, units).
     pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x9C, 0xA0, 0xAB);
     /// Faint text (disabled, placeholders).
-    pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6A, 0x6E, 0x78);
+    pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x8E, 0x92, 0x98);
     /// The ember-orange accent: selection / active / values.
     pub const ACCENT: Color32 = Color32::from_rgb(0xFF, 0x7A, 0x1A);
     /// Semantic success.
@@ -158,7 +158,7 @@ impl Tokens {
         hover: Color32::from_rgb(0xD8, 0xD4, 0xCC),
         text: Color32::from_rgb(0x1C, 0x1D, 0x21),
         text_muted: Color32::from_rgb(0x50, 0x53, 0x5B),
-        text_faint: Color32::from_rgb(0x76, 0x78, 0x7F),
+        text_faint: Color32::from_rgb(0x60, 0x61, 0x67),
         accent: Color32::from_rgb(0xC4, 0x55, 0x00),
         success: Color32::from_rgb(0x1E, 0x7A, 0x45),
         warn: Color32::from_rgb(0x8F, 0x5A, 0x00),
@@ -257,7 +257,7 @@ impl Theme {
                 pad: Color32::from_rgb(28, 28, 30),
                 square: Color32::from_rgb(38, 38, 42),
                 tile_dim: Color32::from_rgb(32, 32, 36),
-                label: Color32::from_rgb(110, 118, 130),
+                label: Color32::from_rgb(0x8C, 0x94, 0x9E),
                 grid: Color32::from_rgb(55, 58, 64),
             },
             Self::Light => CanvasColors {
@@ -830,7 +830,7 @@ mod tests {
             ("hover", "#333842"),
             ("text", "#E8E9EC"),
             ("text_muted", "#9CA0AB"),
-            ("text_faint", "#6A6E78"),
+            ("text_faint", "#8E9298"),
             ("accent", "#FF7A1A"),
             ("success", "#3FB972"),
             ("warn", "#E5A13D"),
@@ -938,9 +938,11 @@ mod tests {
     }
 
     /// U4: Dark IS the pinned palette; the names round-trip; every
-    /// theme's text tokens clear their contrast floor on the panel
-    /// (WCAG AA 4.5:1 for text and muted, 3:1 for faint and the accent;
-    /// High Contrast holds AAA 7:1 on every text token).
+    /// theme's text tokens clear the WCAG AA text floor (4.5:1) on the
+    /// panel, including faint (raised from the 3:1 non-text floor by the
+    /// 2026-11-10 round-3 audit F5); the accent and semantic colors hold
+    /// 3:1; High Contrast holds AAA 7:1 on every text token. egui's
+    /// weak_text_color is measured too, not assumed.
     #[test]
     fn themes_round_trip_and_clear_their_contrast_floors() {
         for (name, color) in palette::TOKENS {
@@ -953,13 +955,28 @@ mod tests {
                 assert!(k.get(name).is_some(), "{t:?} carries {name}");
             }
             let on = |c: Color32| contrast_ratio(c, k.panel);
+            let on_raised = |c: Color32| contrast_ratio(c, k.raised);
             assert!(on(k.text) >= 4.5, "{t:?} text {}", on(k.text));
             assert!(on(k.text_muted) >= 4.5, "{t:?} muted {}", on(k.text_muted));
-            assert!(on(k.text_faint) >= 3.0, "{t:?} faint {}", on(k.text_faint));
+            assert!(
+                on(k.text_faint) >= 4.5 && on_raised(k.text_faint) >= 4.5,
+                "{t:?} faint {} / raised {}",
+                on(k.text_faint),
+                on_raised(k.text_faint)
+            );
             assert!(on(k.accent) >= 3.0, "{t:?} accent {}", on(k.accent));
             for sem in [k.warn, k.error, k.success] {
                 assert!(on(sem) >= 3.0, "{t:?} semantic {}", on(sem));
             }
+            // egui's weak (disabled/placeholder) color is measured, not
+            // assumed: it must clear the text floor too (F5).
+            let v = visuals_for(t, None);
+            let weak = v.weak_text_color.unwrap_or(v.text_color());
+            assert!(
+                contrast_ratio(weak, k.panel) >= 4.5,
+                "{t:?} weak {}",
+                contrast_ratio(weak, k.panel)
+            );
         }
         let hc = Tokens::HIGH_CONTRAST;
         for c in [hc.text, hc.text_muted, hc.text_faint, hc.accent] {
@@ -977,11 +994,17 @@ mod tests {
         let d = Theme::Dark.canvas();
         assert_eq!(d.square, Color32::from_rgb(38, 38, 42));
         assert_eq!(d.pad, Color32::from_rgb(28, 28, 30));
-        for t in [Theme::Light, Theme::HighContrast] {
+        for t in [Theme::Dark, Theme::Light, Theme::HighContrast] {
             let c = t.canvas();
             assert!(contrast_ratio(c.label, c.square) >= 4.5, "{t:?} label");
+        }
+        // Grid lines are 0.5 px guides, not text: 1.5:1 where the canvas
+        // is light, still visible (>= 1.0) on the Dark original constants.
+        for t in [Theme::Light, Theme::HighContrast] {
+            let c = t.canvas();
             assert!(contrast_ratio(c.grid, c.square) >= 1.5, "{t:?} grid");
         }
+        assert!(contrast_ratio(d.grid, d.square) >= 1.0, "Dark grid");
         let hc = themed_style(Theme::HighContrast, Density::Comfortable, 1.0);
         // egui fades disabled text with `disable` (a premultiplied
         // gamma-multiply): over black the shown colour is the rgb.
