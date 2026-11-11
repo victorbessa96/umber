@@ -219,6 +219,9 @@ texturesets =
     .channel-error-invalid = { $name } não é um nome de canal válido (sem barras, dois-pontos ou caracteres reservados).
     .channel-error-unknown = Nenhum canal chamado { $name }.
     .channel-error-base-color = O canal baseColor não pode ser renomeado nem removido.
+    .channel-error-busy = Termine o traço antes de renomear um canal.
+    .channel-error-plane-exists = Este conjunto já tem pixels pintados em { $name }; renomeie esse canal primeiro.
+    .channel-error-case-only = { $name } tem pixels pintados, então seu nome não pode mudar só entre maiúsculas e minúsculas.
     .no-paint = Sem sessão de pintura — o alvo da GPU está indisponível.
 
 ## Painel de bakes

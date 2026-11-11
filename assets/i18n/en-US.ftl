@@ -215,6 +215,9 @@ texturesets =
     .channel-error-invalid = { $name } is not a valid channel name (no slashes, colons or reserved characters).
     .channel-error-unknown = No channel named { $name }.
     .channel-error-base-color = The baseColor channel cannot be renamed or removed.
+    .channel-error-busy = Finish the stroke before renaming a channel.
+    .channel-error-plane-exists = This set already holds painted pixels under { $name }; rename that channel first.
+    .channel-error-case-only = { $name } holds painted pixels, so its name cannot change only in letter case.
     .no-paint = No paint session — the GPU target is unavailable.
 
 ## Bakes panel

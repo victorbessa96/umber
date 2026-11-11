@@ -15,7 +15,7 @@
 </p>
 
 > [!IMPORTANT]
-> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,800+<!-- /scorecard --> tests.
+> **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->2,900+<!-- /scorecard --> tests.
 >
 > **Not yet:** no release tag (SPEC ratification and the first drift-hardened nightly green lead the 0.1.0 checklist, `docs/specs/release-checklist-0.1.0.md`); the open feature waves — the Win32 tablet path, the a11y pass, the power-user tail and the 0.1.0 release gates — are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) and the current wave plan [`docs/loop/waves/2026-11-09-wave-plan.md`](docs/loop/waves/2026-11-09-wave-plan.md) (the decal projector lane closed 2026-11-09; brush angle/jitter and bitmap stamps landed C2-11, 2026-10-19).
 

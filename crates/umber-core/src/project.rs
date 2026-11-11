@@ -1040,6 +1040,41 @@ mod tests {
         let _ = fs::remove_dir_all(&dir_b);
     }
 
+    /// w5-channel-rename-planes: a renamed channel's declaration survives
+    /// save -> load on a tiled set (every tile's list follows), and a
+    /// project whose `paint/` still holds the planes under the OLD name (a
+    /// project saved before this kill, the stranded layout) loads without
+    /// error: project.json never reads `paint/`, so stray channel
+    /// directories cannot fail the load.
+    #[test]
+    fn a_renamed_channel_round_trips_and_a_stranded_paint_dir_still_loads() {
+        let mut model = fixture_model();
+        let mut set = two_tile_texture_set();
+        set.rename_channel("roughness", "gloss").unwrap();
+        model.texture_sets[0] = TextureSet {
+            name: model.texture_sets[0].name.clone(),
+            ..set
+        };
+        let dir = unique_temp_dir("channel-rename");
+        save_to_dir(&model, &dir).expect("save");
+        // The stranded layout: planes under the old name, declaration new.
+        let stranded = dir.join("paint").join("roughness");
+        fs::create_dir_all(&stranded).unwrap();
+        fs::write(stranded.join("tile-1001.png"), b"not parsed by core").unwrap();
+        let loaded = load_from_dir(&dir).expect("a stranded paint dir still loads");
+        assert_eq!(loaded, model);
+        let names: Vec<&str> = loaded.texture_sets[0]
+            .channels
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(names.contains(&"gloss") && !names.contains(&"roughness"));
+        let tile = &loaded.texture_sets[0].tiles[&1001];
+        assert!(tile.channels.iter().any(|c| c.name == "gloss"));
+        assert!(tile.channels.iter().all(|c| c.name != "roughness"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A two-tile texture set: tile 1001 keeps the default channels at
     /// 2048, tile 1002 carries baseColor only at 1024.
     fn two_tile_texture_set() -> TextureSet {

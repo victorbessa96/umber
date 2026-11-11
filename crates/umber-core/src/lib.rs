@@ -164,8 +164,12 @@ impl TextureSet {
     /// Renames a declared channel in place (order and kind kept). The new
     /// name follows [`Self::add_channel`]'s rules (a case-only rename of
     /// the same channel is allowed); [`BASE_COLOR_CHANNEL`] can be neither
-    /// renamed nor taken as a new name. Declaration only: planes keyed by
-    /// the old name stay under it (the kill report's strand rule).
+    /// renamed nor taken as a new name. This edits the DECLARATION (and
+    /// every tile's channel list); the paint planes keyed by the old name
+    /// move in the paint session (`umber_paint::paint_state::PaintState::
+    /// rename_channel`), which the app runs between this check on a clone
+    /// of the set and the commit of that clone, so a refusal on either
+    /// side changes nothing and a landed rename carries its planes.
     pub fn rename_channel(&mut self, old: &str, new: &str) -> Result<(), ChannelError> {
         if old == BASE_COLOR_CHANNEL || new.trim() == BASE_COLOR_CHANNEL {
             return Err(ChannelError::BaseColorProtected);
@@ -226,8 +230,9 @@ pub const BASE_COLOR_CHANNEL: &str = "baseColor";
 /// directory) and the Windows reserved device stems ("CON", "CON.txt" —
 /// invalid on Windows whatever the extension). A channel name becomes a
 /// directory name exactly like a set name, so it answers to the same
-/// rule ([`crate::project::validate_set_name`]'s).
-fn is_valid_channel_name(name: &str) -> bool {
+/// rule ([`crate::project::validate_set_name`]'s). Public so the paint
+/// session's rename re-checks a target with the SAME rule.
+pub fn is_valid_channel_name(name: &str) -> bool {
     let stem = name.split_once('.').map_or(name, |(before, _)| before);
     !name.chars().all(|c| c == '.')
         && !name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
@@ -448,5 +453,26 @@ mod tests {
             TextureSet::new_default("Body").channels[0].name,
             BASE_COLOR_CHANNEL
         );
+    }
+
+    /// The public name rule the paint rename re-checks agrees with the
+    /// declaration: every name `rename_channel` refuses as invalid is
+    /// refused by `is_valid_channel_name`, and a real name passes.
+    #[test]
+    fn the_public_channel_name_rule_matches_the_rename_check() {
+        for bad in [
+            "../x", "a/b", "a\\b", "C:", "con", "CON.txt", "trail.", "...", "a\u{7}",
+        ] {
+            assert!(!is_valid_channel_name(bad), "{bad:?}");
+            let mut ts = TextureSet::new_default("Body");
+            assert_eq!(
+                ts.rename_channel("roughness", bad),
+                Err(ChannelError::InvalidName(bad.trim().to_string())),
+                "{bad:?}"
+            );
+        }
+        for good in ["gloss", "dirt_mask", "Roughness", "ao.v2"] {
+            assert!(is_valid_channel_name(good), "{good:?}");
+        }
     }
 }

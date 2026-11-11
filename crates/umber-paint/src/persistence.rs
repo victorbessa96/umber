@@ -754,6 +754,41 @@ pub fn prune_empty_layer_dirs(project_dir: &Path) {
     }
 }
 
+/// Removes the now-empty per-channel directories directly under `paint/`
+/// (`paint/<channel>/`, w5-channel-rename-planes): after a channel rename
+/// the save stages the planes under `paint/<new>/`, the apply step prunes
+/// the `paint/<old>/tile-<N>.png` files the manifest no longer names, and
+/// this drops the emptied `paint/<old>/` itself. `layers/` (pruned by
+/// [`prune_empty_layer_dirs`]) and `quick_mask/` (its own commit) are never
+/// candidates, nor is any name the channel trust check rejects. A
+/// directory that still holds any file (foreign junk the prune never
+/// lists, a staged temp) survives: nothing but an empty directory goes.
+pub fn prune_empty_channel_dirs(project_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(paint_sidecar_dir(project_dir)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if !path.is_dir()
+            || name == "layers"
+            || name == "quick_mask"
+            || !is_safe_channel_component(&name)
+        {
+            continue;
+        }
+        let empty = std::fs::read_dir(&path).is_ok_and(|mut inner| inner.next().is_none());
+        if empty {
+            if let Err(e) = std::fs::remove_dir(&path) {
+                log::warn!(
+                    "paint save: empty channel dir {} not removed: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
 /// Applies a pending commit (idempotent — safe to re-run after a crash at
 /// any step): renames each staged temp over its sidecar name; an entry
 /// whose temp is already gone is checked against its store blob and
@@ -820,8 +855,10 @@ pub fn apply_paint_commit(project_dir: &Path, max_steps: Option<usize>) -> std::
         }
     }
     // A deleted layer's planes prune as files above; their now-empty
-    // directories go here (bottom-up, `paint/layers/` only).
+    // directories go here (bottom-up, `paint/layers/` only), and so does
+    // a renamed channel's emptied `paint/<old>/`.
     prune_empty_layer_dirs(project_dir);
+    prune_empty_channel_dirs(project_dir);
     sync_dir(&dir)?;
     step()?;
     std::fs::rename(&pending, paint_manifest_path(project_dir))?;
@@ -3923,5 +3960,116 @@ mod tests {
             "tampered blob restores nothing"
         );
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// w5-channel-rename-planes: save, rename in the session, save again.
+    /// The second save writes `paint/<new>/tile-1001.png`, prunes the old
+    /// file AND its emptied directory, carries the size override's line to
+    /// the new name, and a reopen restores the bytes under the new name.
+    #[test]
+    fn a_renamed_channel_saves_under_its_new_dir_and_prunes_the_old() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 64)
+                .expect("paint builds");
+        let bytes = pattern_bytes(32, 32, 41);
+        paint.resize_channel(paint_state::DEFAULT_TEXTURE_SET, "roughness", 32, 32);
+        assert!(paint.publish_fill_channel(1001, "roughness", 32, 32, bytes.clone()));
+        paint.process_pending().expect("uploads land");
+        let dir = unique_temp_dir("channel-rename");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]),
+            2
+        );
+        let old_path = paint_channel_tile_path(&dir, "roughness", 1001);
+        assert!(old_path.exists(), "the first save writes the old layout");
+
+        paint
+            .rename_channel(paint_state::DEFAULT_TEXTURE_SET, "roughness", "gloss")
+            .expect("the rename lands");
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]),
+            2
+        );
+        let new_path = paint_channel_tile_path(&dir, "gloss", 1001);
+        assert!(new_path.exists(), "the planes saved under the new name");
+        assert!(!old_path.exists(), "the old file pruned");
+        assert!(
+            !paint_sidecar_dir(&dir).join("roughness").exists(),
+            "the emptied old directory pruned"
+        );
+        let sizes = std::fs::read_to_string(paint_set_sizes_path(&dir)).unwrap();
+        assert!(sizes.contains("channel/TextureSet/gloss=32x32"), "{sizes}");
+        assert!(!sizes.contains("roughness"), "{sizes}");
+
+        let mut fresh = paint_state::PaintState::new(device, queue).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
+        assert_eq!(report.restored, 2, "{report:?}");
+        assert_eq!(fresh.channels_present(1001), vec!["gloss".to_string()]);
+        let after = fresh
+            .read_channel_tile(1001, "gloss")
+            .expect("gloss reads back");
+        assert_eq!((after.width, after.height), (32, 32));
+        assert_eq!(
+            after.data, bytes,
+            "the renamed plane restores byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The channel-dir prune removes only EMPTY channel directories: a
+    /// foreign file keeps its directory alive (and is never deleted), and
+    /// `layers/` and `quick_mask/` are never candidates.
+    #[test]
+    fn prune_empty_channel_dirs_drops_only_empty_channel_dirs() {
+        let dir = unique_temp_dir("channel-dir-prune");
+        let paint = paint_sidecar_dir(&dir);
+        for sub in ["roughness", "kept", "layers", "quick_mask"] {
+            std::fs::create_dir_all(paint.join(sub)).unwrap();
+        }
+        std::fs::write(paint.join("kept").join("notes.txt"), b"foreign").unwrap();
+        prune_empty_channel_dirs(&dir);
+        assert!(!paint.join("roughness").exists());
+        assert!(paint.join("kept").join("notes.txt").exists());
+        assert!(paint.join("layers").exists());
+        assert!(paint.join("quick_mask").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Migration: a project saved before this kill, whose planes were
+    /// stranded under the old name (`paint/roughness/`) while the
+    /// declaration already says "gloss", still loads: the loader takes
+    /// every safe channel directory into Base whatever the declaration
+    /// says, so the stranded plane surfaces as materialized-but-unlisted.
+    #[test]
+    fn a_stranded_old_channel_dir_still_loads() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut paint =
+            paint_state::PaintState::with_target_size(device.clone(), queue.clone(), 32)
+                .expect("paint builds");
+        let bytes = pattern_bytes(32, 32, 13);
+        assert!(paint.publish_fill_channel(1001, "roughness", 32, 32, bytes.clone()));
+        paint.process_pending().expect("uploads land");
+        let dir = unique_temp_dir("stranded-load");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            save_paint_tiles(&mut paint, &dir, &no_live_layers(), &[]),
+            2
+        );
+        let mut fresh =
+            paint_state::PaintState::with_target_size(device, queue, 32).expect("fresh builds");
+        let report = load_paint_tiles_reported(&mut fresh, &dir, &no_live_layers());
+        assert_eq!(report.restored, 2, "{report:?}");
+        assert_eq!(fresh.channels_present(1001), vec!["roughness".to_string()]);
+        let after = fresh
+            .read_channel_tile(1001, "roughness")
+            .expect("the stranded plane reads back");
+        assert_eq!(after.data, bytes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -700,6 +700,48 @@ impl Plane {
     }
 }
 
+/// Why [`PaintState::rename_channel`] refused to move a channel's planes
+/// (w5-channel-rename-planes design brief, Target 1). A refusal changes
+/// nothing: no plane, override or history entry moved. No field is named
+/// `source` (the thiserror trap).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChannelRenameRefusal {
+    /// A stroke is in progress: its snapshot names the old plane.
+    #[error("a stroke is in progress")]
+    StrokeInFlight,
+    /// [`BASE_COLOR_CHANNEL`] can be neither renamed nor taken as a new
+    /// name (its plane is the flat legacy sidecar).
+    #[error("the baseColor channel cannot be renamed or renamed onto")]
+    BaseColor,
+    /// The new name is not safe as one directory name under `paint/`
+    /// (the persistence trust check, plus `/`, a leading or trailing
+    /// space, and a trailing dot).
+    #[error("{0:?} is not a safe channel directory name")]
+    InvalidName(String),
+    /// The set's tiles already hold a plane (or a size override, or a
+    /// tombstone) whose channel folds to the new name: the move would
+    /// merge two planes, or write two directories one case-insensitive
+    /// filesystem folds into one.
+    #[error("a plane named {0:?} already exists")]
+    PlaneExists(String),
+    /// A case-only rename (`roughness` to `Roughness`) of a channel that
+    /// holds planes: on a case-insensitive filesystem the save would write
+    /// the new files into the old directory and its prune would then
+    /// delete them. Allowed while the channel holds nothing.
+    #[error("a case-only rename of painted channel {0:?} is refused")]
+    CaseOnly(String),
+}
+
+/// Whether `name` may be a rename target: the core declaration rule
+/// ([`umber_core::is_valid_channel_name`]: no separators, no
+/// Windows-reserved characters or device stems, no trailing dot or
+/// space, not dot-only) plus already trimmed and non-empty. Re-checked
+/// here so a caller that skipped core cannot drive a plane into an
+/// escaping path.
+fn is_safe_rename_target(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && umber_core::is_valid_channel_name(name)
+}
+
 /// Every reason a stroke can be refused (per-layer-pool design §2.1,
 /// [M4]). One enum, so the status line has one surface. No field is named
 /// `source` (the thiserror trap).
@@ -5302,6 +5344,210 @@ impl PaintState {
                     .insert((tile, channel.to_string()), DirtyRegion::Full);
             }
         }
+    }
+
+    /// Renames `set`'s channel `old` to `new` IN THE SESSION: every plane
+    /// keyed by `old` on the set's tiles moves to `new` (the
+    /// w5-channel-rename-planes design brief, Target 1). Moved: the Base
+    /// threads, every layer-owned plane, the composite cache thread (its
+    /// dirt re-marked `Full` under the new key), the coalesced-full keys,
+    /// the mask-sync flags, the `(set, old)` size override, the tombstones
+    /// and the pending retirements; `active_channel` follows when it names
+    /// `old`. The committed records are CLEARED, not moved: the bytes now
+    /// belong at `paint/<new>/`, so the save's clean-skip must not fire and
+    /// the next save reads them back, stages them under the new name, and
+    /// its apply step prunes `paint/<old>/` (see
+    /// `persistence::prune_empty_channel_dirs`). When anything moved, the
+    /// stroke history clears and the stroke epoch bumps (the
+    /// [`Self::resize_channel`] contract: undo snapshots name the old
+    /// plane). A rename that moves nothing (no plane, override or
+    /// tombstone carries `old`) keeps the history.
+    ///
+    /// Other sets' tiles are untouched: a channel name is per set.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, changing nothing, while a stroke is in progress, when
+    /// either name is [`BASE_COLOR_CHANNEL`], when `new` is not a safe
+    /// directory name, and when the set's tiles already carry another
+    /// channel that folds to `new` case-insensitively (a stranded plane:
+    /// the move would merge two planes). A case-only rename (`roughness`
+    /// to `Roughness`) succeeds when `old` holds nothing, and refuses with
+    /// [`ChannelRenameRefusal::CaseOnly`] when it holds planes: on a
+    /// case-insensitive filesystem the save would write the new files into
+    /// the old directory and its prune would then delete them.
+    pub fn rename_channel(
+        &mut self,
+        set: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), ChannelRenameRefusal> {
+        if self.stroking {
+            return Err(ChannelRenameRefusal::StrokeInFlight);
+        }
+        if old == BASE_COLOR_CHANNEL || new == BASE_COLOR_CHANNEL {
+            return Err(ChannelRenameRefusal::BaseColor);
+        }
+        if !is_safe_rename_target(new) {
+            return Err(ChannelRenameRefusal::InvalidName(new.to_string()));
+        }
+        if old == new {
+            return Ok(());
+        }
+        let tiles = self.tiles_of_set(set);
+        let folded = new.to_lowercase();
+        let mut carried: BTreeSet<String> = BTreeSet::new();
+        for tile in &tiles {
+            if let Some(targets) = self.targets.get(tile) {
+                carried.extend(targets.channels.keys().cloned());
+            }
+        }
+        carried.extend(
+            self.planes
+                .keys()
+                .filter(|(_, tile, _)| tiles.contains(tile))
+                .map(|(_, _, channel)| channel.clone()),
+        );
+        carried.extend(
+            self.cache
+                .keys()
+                .filter(|(tile, _)| tiles.contains(tile))
+                .map(|(_, channel)| channel.clone()),
+        );
+        carried.extend(
+            self.channel_sizes
+                .keys()
+                .filter(|(s, _)| s == set)
+                .map(|(_, channel)| channel.clone()),
+        );
+        for (_, planes) in self.retired.values() {
+            carried.extend(
+                planes
+                    .iter()
+                    .filter(|plane| tiles.contains(&plane.tile))
+                    .map(|plane| plane.channel.clone()),
+            );
+        }
+        carried.extend(
+            self.retire_pending
+                .iter()
+                .filter(|entry| tiles.contains(&entry.1))
+                .map(|entry| entry.2.clone()),
+        );
+        let old_carried = carried.contains(old);
+        if let Some(clash) = carried
+            .iter()
+            .find(|channel| channel.to_lowercase() == folded && channel.as_str() != old)
+        {
+            return Err(ChannelRenameRefusal::PlaneExists(clash.clone()));
+        }
+        if old_carried && old.to_lowercase() == folded {
+            return Err(ChannelRenameRefusal::CaseOnly(old.to_string()));
+        }
+        if self.active_channel == old {
+            self.active_channel = new.to_string();
+        }
+        if self.stroke_channel == old {
+            self.stroke_channel = new.to_string();
+        }
+        if !old_carried {
+            return Ok(());
+        }
+        // Base threads (targets-resident planes).
+        for tile in &tiles {
+            if let Some(targets) = self.targets.get_mut(tile) {
+                if let Some(thread) = targets.channels.remove(old) {
+                    targets.channels.insert(new.to_string(), thread);
+                }
+            }
+        }
+        // Layer-owned (and published Base) planes.
+        let plane_keys: Vec<(PlaneOwner, u16, String)> = self
+            .planes
+            .keys()
+            .filter(|(_, tile, channel)| tiles.contains(tile) && channel == old)
+            .cloned()
+            .collect();
+        for key in &plane_keys {
+            if let Some(mut plane) = self.planes.remove(key) {
+                plane.committed = None;
+                self.planes.insert((key.0, key.1, new.to_string()), plane);
+            }
+        }
+        // Committed records: cleared under both names, every owner.
+        let committed_keys: Vec<(PlaneOwner, u16, String)> = self
+            .plane_committed
+            .keys()
+            .filter(|(_, tile, channel)| tiles.contains(tile) && (channel == old || channel == new))
+            .cloned()
+            .collect();
+        let mut owners: BTreeSet<PlaneOwner> = plane_keys.iter().map(|key| key.0).collect();
+        if tiles.iter().any(|tile| {
+            self.targets
+                .get(tile)
+                .is_some_and(|targets| targets.channels.contains_key(new))
+        }) {
+            owners.insert(PlaneOwner::Base);
+        }
+        for key in committed_keys {
+            self.plane_committed.remove(&key);
+        }
+        for owner in owners {
+            self.bump_revision(owner);
+        }
+        // The composite cache and its dirt: the moved cache is re-marked
+        // `Full` (it composites the moved planes under the new key).
+        for tile in &tiles {
+            let old_key = (*tile, old.to_string());
+            let new_key = (*tile, new.to_string());
+            let had_cache = if let Some(thread) = self.cache.remove(&old_key) {
+                self.cache.insert(new_key.clone(), thread);
+                true
+            } else {
+                false
+            };
+            let had_dirt = self.cache_dirty.remove(&old_key).is_some();
+            if had_cache || had_dirt {
+                self.cache_dirty.insert(new_key.clone(), DirtyRegion::Full);
+            }
+            if self.coalesced_fulls.remove(&old_key) {
+                self.coalesced_fulls.insert(new_key);
+            }
+        }
+        let synced: Vec<(PlaneOwner, u16, String)> = self
+            .mask_synced
+            .iter()
+            .filter(|(_, tile, channel)| tiles.contains(tile) && channel == old)
+            .cloned()
+            .collect();
+        for key in synced {
+            self.mask_synced.remove(&key);
+            self.mask_synced.insert((key.0, key.1, new.to_string()));
+        }
+        if let Some(size) = self
+            .channel_sizes
+            .remove(&(set.to_string(), old.to_string()))
+        {
+            self.channel_sizes
+                .insert((set.to_string(), new.to_string()), size);
+        }
+        for (_, planes) in self.retired.values_mut() {
+            for plane in planes.iter_mut() {
+                if tiles.contains(&plane.tile) && plane.channel == old {
+                    plane.channel = new.to_string();
+                }
+            }
+        }
+        for entry in &mut self.retire_pending {
+            if tiles.contains(&entry.1) && entry.2 == old {
+                entry.2 = new.to_string();
+            }
+        }
+        // Undo snapshots name the old plane.
+        self.retouch_history.clear();
+        self.pending_commits.clear();
+        self.stroke_epoch += 1;
+        Ok(())
     }
 
     /// The tile an event at `uv` routes to: `tile_of_uv` when the loaded
@@ -12414,5 +12660,181 @@ mod tests {
             state.channels_present(1001),
             vec![HEIGHT_CHANNEL.to_string()]
         );
+    }
+
+    /// w5-channel-rename-planes: a rename MOVES the channel's planes. The
+    /// Base plane and a layer plane both read back under the new name
+    /// byte-identical, the old name reads `None`, the size override and
+    /// the active channel follow, the committed record clears (the save
+    /// must read back and re-stage under the new path), the history
+    /// clears, and another set's same-named channel is untouched.
+    #[test]
+    fn rename_channel_carries_every_plane_and_the_override() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 64).expect("paint state builds");
+        fn pattern(seed: u8, size: u32) -> Vec<u8> {
+            let mut out = Vec::with_capacity((size * size * 4) as usize);
+            for y in 0..size {
+                for x in 0..size {
+                    for c in 0..4u32 {
+                        out.push(((x * 31 + y * 17 + c * 71 + u32::from(seed)) % 251) as u8);
+                    }
+                }
+            }
+            out
+        }
+        let base_bytes = pattern(5, 32);
+        let layer_bytes = pattern(9, 32);
+        assert_ne!(base_bytes, layer_bytes);
+        // The override first, so the planes materialize at 32.
+        state.resize_channel(DEFAULT_TEXTURE_SET, "roughness", 32, 32);
+        assert!(state.ensure_channel(1001, "roughness"));
+        assert!(state.publish_fill_channel(1001, "roughness", 32, 32, base_bytes.clone()));
+        let layer = PlaneOwner::Layer(3);
+        state
+            .publish_plane(layer, 1001, "roughness", 32, 32, layer_bytes.clone())
+            .expect("layer plane publishes");
+        state.process_pending().expect("uploads land");
+        state.mark_plane_committed(
+            PlaneOwner::Base,
+            1001,
+            "roughness",
+            PathBuf::from("/nowhere"),
+            blake3::hash(b"x"),
+        );
+        // A second set holding its own "roughness" on tile 1002.
+        state.assign_tile_to_set(1002, "Other");
+        assert!(state.ensure_channel(1002, "roughness"));
+        state.set_active_channel("roughness");
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 10);
+        state.end_stroke();
+        assert!(state.can_undo_stroke(), "the history clear is non-vacuous");
+        let epoch = state.stroke_epoch();
+
+        state
+            .rename_channel(DEFAULT_TEXTURE_SET, "roughness", "gloss")
+            .expect("the rename lands");
+
+        assert_eq!(
+            state.active_channel(),
+            "gloss",
+            "the active channel follows"
+        );
+        assert_eq!(state.channels_present(1001), vec!["gloss".to_string()]);
+        assert_eq!(
+            state.channels_present(1002),
+            vec!["roughness".to_string()],
+            "another set's channel of the same name is untouched"
+        );
+        assert_eq!(
+            state.channel_override(DEFAULT_TEXTURE_SET, "gloss"),
+            Some((32, 32))
+        );
+        assert_eq!(
+            state.channel_override(DEFAULT_TEXTURE_SET, "roughness"),
+            None
+        );
+        assert!(state
+            .plane_committed(PlaneOwner::Base, 1001, "gloss")
+            .is_none());
+        assert!(state
+            .plane_committed(PlaneOwner::Base, 1001, "roughness")
+            .is_none());
+        assert!(
+            !state.can_undo_stroke(),
+            "undo snapshots named the old plane"
+        );
+        assert!(state.stroke_epoch() > epoch);
+        assert!(state
+            .read_plane(PlaneOwner::Base, 1001, "roughness")
+            .is_none());
+        assert!(state.read_plane(layer, 1001, "roughness").is_none());
+        let moved_layer = state
+            .read_plane(layer, 1001, "gloss")
+            .expect("the layer plane moved");
+        assert_eq!(moved_layer.data, layer_bytes, "layer bytes moved intact");
+        let moved_base = state
+            .read_plane(PlaneOwner::Base, 1001, "gloss")
+            .expect("the Base plane moved");
+        assert_eq!((moved_base.width, moved_base.height), (32, 32));
+        assert_ne!(
+            moved_base.data,
+            vec![0u8; moved_base.data.len()],
+            "the Base plane carries its paint"
+        );
+        let keys = state.planes_present();
+        assert!(keys
+            .iter()
+            .all(|(_, tile, channel)| !(*tile == 1001 && channel == "roughness")));
+        assert!(keys.contains(&(PlaneOwner::Base, 1001, "gloss".to_string())));
+        assert!(keys.contains(&(layer, 1001, "gloss".to_string())));
+    }
+
+    /// The rename's refusals change nothing: mid-stroke, baseColor both
+    /// ways, an unsafe target, a target that case-folds onto a stranded
+    /// plane, and a case-only rename of a painted channel. A case-only
+    /// rename of an EMPTY channel, and a rename of a channel that holds
+    /// nothing, succeed and keep the history.
+    #[test]
+    fn rename_channel_refusals_change_nothing() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state =
+            PaintState::with_target_size(device, queue, 32).expect("paint state builds");
+        assert!(state.ensure_channel(1001, "roughness"));
+        // A stranded plane: painted under "Gloss", undeclared.
+        assert!(state.ensure_channel(1001, "Gloss"));
+        state.process_pending().expect("targets land");
+        let before = state.planes_present();
+
+        drive_stroke(&mut state, [0.3, 0.3], [0.0, 0.02], 10);
+        assert!(state.is_stroking());
+        assert_eq!(
+            state.rename_channel(DEFAULT_TEXTURE_SET, "roughness", "satin"),
+            Err(ChannelRenameRefusal::StrokeInFlight)
+        );
+        state.end_stroke();
+        assert!(state.can_undo_stroke());
+        assert_eq!(
+            state.rename_channel(DEFAULT_TEXTURE_SET, BASE_COLOR_CHANNEL, "albedo"),
+            Err(ChannelRenameRefusal::BaseColor)
+        );
+        assert_eq!(
+            state.rename_channel(DEFAULT_TEXTURE_SET, "roughness", BASE_COLOR_CHANNEL),
+            Err(ChannelRenameRefusal::BaseColor)
+        );
+        for bad in ["../x", "a/b", "C:", "con", "CON.txt", "trail.", " pad", ""] {
+            assert_eq!(
+                state.rename_channel(DEFAULT_TEXTURE_SET, "roughness", bad),
+                Err(ChannelRenameRefusal::InvalidName(bad.to_string())),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            state.rename_channel(DEFAULT_TEXTURE_SET, "roughness", "gloss"),
+            Err(ChannelRenameRefusal::PlaneExists("Gloss".to_string())),
+            "a case-folded stranded plane refuses the move"
+        );
+        assert_eq!(
+            state.rename_channel(DEFAULT_TEXTURE_SET, "roughness", "Roughness"),
+            Err(ChannelRenameRefusal::CaseOnly("roughness".to_string()))
+        );
+        assert_eq!(state.planes_present(), before, "no refusal moved a plane");
+        assert!(state.can_undo_stroke(), "no refusal cleared the history");
+
+        // Nothing carried under "metallic": the case-only and the plain
+        // renames succeed without touching the history.
+        state
+            .rename_channel(DEFAULT_TEXTURE_SET, "metallic", "Metallic")
+            .expect("a case-only rename of an empty channel lands");
+        state
+            .rename_channel(DEFAULT_TEXTURE_SET, "Metallic", "sheen")
+            .expect("an empty channel renames");
+        assert!(state.can_undo_stroke());
+        assert_eq!(state.planes_present(), before);
     }
 }

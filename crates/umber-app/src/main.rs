@@ -3618,7 +3618,7 @@ fn texture_sets_panel_ui(
         ui.separator();
         ui.label(tr("texturesets.channels"))
             .on_hover_text(tr("texturesets.channels-hint"));
-        declared_changed = channel_manage_ui(ui, session);
+        declared_changed = channel_manage_ui(ui, session, Some(&mut *paint));
     }
     // Per-channel rows for the SELECTED set: the document's channels plus
     // any materialized-but-unlisted one (an override outliving its import
@@ -3699,6 +3699,51 @@ fn channel_error_text(err: &umber_core::ChannelError) -> String {
     crate::i18n::tr_args(key, [("name", fluent::FluentValue::from(name))])
 }
 
+/// The localized reason the paint session refused to move a renamed
+/// channel's planes (w5-channel-rename-planes).
+fn channel_rename_refusal_text(refusal: &paint_state::ChannelRenameRefusal) -> String {
+    use paint_state::ChannelRenameRefusal as R;
+    let (key, name) = match refusal {
+        R::StrokeInFlight => ("texturesets.channel-error-busy", ""),
+        R::BaseColor => ("texturesets.channel-error-base-color", ""),
+        R::InvalidName(name) => ("texturesets.channel-error-invalid", name.as_str()),
+        R::PlaneExists(name) => ("texturesets.channel-error-plane-exists", name.as_str()),
+        R::CaseOnly(name) => ("texturesets.channel-error-case-only", name.as_str()),
+    };
+    crate::i18n::tr_args(key, [("name", fluent::FluentValue::from(name))])
+}
+
+/// The Channels section's rename (w5-channel-rename-planes design brief,
+/// Target 4): the declaration rename runs on a CLONE of the set first,
+/// then the paint session moves the planes keyed by the old name, and
+/// only then does the clone replace the set. A refusal on either side
+/// leaves the declaration AND the planes untouched (atomic in memory);
+/// the moved planes reach disk on the next Save through the paint
+/// commit, which prunes the emptied `paint/<old>/`. `paint` is `None`
+/// where no paint session exists (headless tests): the declaration
+/// renames alone, as nothing is painted.
+fn rename_declared_channel(
+    session: &mut umber_core::TextureSet,
+    paint: Option<&mut paint_state::PaintState>,
+    old: &str,
+    new: &str,
+) -> Result<(), String> {
+    let mut renamed = session.clone();
+    renamed
+        .rename_channel(old, new)
+        .map_err(|err| channel_error_text(&err))?;
+    // Core accepted the trimmed name (its `check_new_name`); the planes
+    // move under exactly that name.
+    let accepted = new.trim();
+    if let Some(paint) = paint {
+        paint
+            .rename_channel(&session.name, old, accepted)
+            .map_err(|refusal| channel_rename_refusal_text(&refusal))?;
+    }
+    *session = renamed;
+    Ok(())
+}
+
 /// One edit the Channels section collected this frame, applied after
 /// the rows are drawn (the rows borrow the channel list).
 enum ChannelEdit {
@@ -3717,12 +3762,18 @@ enum ChannelEdit {
 ///
 /// Remove is destructive-confirmed (GUI plan rule 8) though it only drops
 /// the DECLARATION: painted planes stay and keep editing through the
-/// per-channel rows below. Rename re-declares under the new name; planes
-/// painted under the old name stay keyed by it (the strand rule, see the
-/// kill report). A refused command shows its reason in the warn colour
-/// until the next edit. Returns whether the declaration changed (the
-/// caller marks the document dirty so the change saves).
-fn channel_manage_ui(ui: &mut Ui, session: &mut umber_core::TextureSet) -> bool {
+/// per-channel rows below. Rename re-declares under the new name AND
+/// moves the planes painted under the old name with it
+/// ([`rename_declared_channel`], w5-channel-rename-planes); `paint` is
+/// the live session (`None` in the headless tests). A refused command
+/// shows its reason in the warn colour until the next edit. Returns
+/// whether the declaration changed (the caller marks the document dirty
+/// so the change saves).
+fn channel_manage_ui(
+    ui: &mut Ui,
+    session: &mut umber_core::TextureSet,
+    mut paint: Option<&mut paint_state::PaintState>,
+) -> bool {
     let error_id = Id::new(("channel-manage-error", session.name.as_str()));
     let pending_id = Id::new(("channel-manage-remove", session.name.as_str()));
     let add_id = Id::new(("channel-manage-add", session.name.as_str()));
@@ -3818,7 +3869,9 @@ fn channel_manage_ui(ui: &mut Ui, session: &mut umber_core::TextureSet) -> bool 
     let mut changed = false;
     for edit in edits {
         let result = match edit {
-            ChannelEdit::Rename(old, new) => session.rename_channel(&old, &new),
+            ChannelEdit::Rename(old, new) => {
+                rename_declared_channel(session, paint.as_deref_mut(), &old, &new)
+            }
             ChannelEdit::ArmRemove(name) => {
                 ui.ctx().data_mut(|d| d.insert_temp(pending_id, Some(name)));
                 continue;
@@ -3831,14 +3884,17 @@ fn channel_manage_ui(ui: &mut Ui, session: &mut umber_core::TextureSet) -> bool 
             ChannelEdit::Remove(name) => {
                 ui.ctx()
                     .data_mut(|d| d.remove::<Option<String>>(pending_id));
-                session.remove_channel(&name).map(|_| ())
+                session
+                    .remove_channel(&name)
+                    .map(|_| ())
+                    .map_err(|err| channel_error_text(&err))
             }
             ChannelEdit::Add(name, kind) => {
                 let added = session.add_channel(&name, kind);
                 if added.is_ok() {
                     ui.ctx().data_mut(|d| d.remove::<String>(add_id));
                 }
-                added
+                added.map_err(|err| channel_error_text(&err))
             }
         };
         match result {
@@ -3846,10 +3902,9 @@ fn channel_manage_ui(ui: &mut Ui, session: &mut umber_core::TextureSet) -> bool 
                 changed = true;
                 ui.ctx().data_mut(|d| d.remove::<String>(error_id));
             }
-            Err(err) => {
-                log::info!("channel edit refused on '{}': {err}", session.name);
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(error_id, channel_error_text(&err)));
+            Err(reason) => {
+                log::info!("channel edit refused on '{}': {reason}", session.name);
+                ui.ctx().data_mut(|d| d.insert_temp(error_id, reason));
             }
         }
     }
@@ -8086,7 +8141,7 @@ mod channel_manage_tests {
             .with_size(egui::vec2(480.0, 400.0))
             .build_ui_state(
                 |ui, s: &mut State| {
-                    if channel_manage_ui(ui, &mut s.set) {
+                    if channel_manage_ui(ui, &mut s.set, None) {
                         s.changed += 1;
                     }
                 },
@@ -8191,5 +8246,98 @@ mod channel_manage_tests {
                 "{err:?}"
             );
         }
+        use paint_state::ChannelRenameRefusal as R;
+        for refusal in [
+            R::StrokeInFlight,
+            R::BaseColor,
+            R::InvalidName("x".into()),
+            R::PlaneExists("x".into()),
+            R::CaseOnly("x".into()),
+        ] {
+            let text = channel_rename_refusal_text(&refusal);
+            assert!(
+                !text.is_empty() && !text.starts_with("texturesets."),
+                "{refusal:?}"
+            );
+        }
+    }
+
+    /// Headless (no paint session): a committed rename field re-declares
+    /// the channel; a duplicate is refused with its reason.
+    #[test]
+    fn rename_field_redeclares_and_a_duplicate_is_refused() {
+        let mut h = harness();
+        h.run();
+        let mut s = h.state().set.clone();
+        assert!(rename_declared_channel(&mut s, None, "roughness", " gloss ").is_ok());
+        assert_eq!(s.channels[1].name, "gloss");
+        let before = s.clone();
+        let reason = rename_declared_channel(&mut s, None, "gloss", "METALLIC").unwrap_err();
+        assert_eq!(
+            reason,
+            channel_error_text(&umber_core::ChannelError::Duplicate("METALLIC".into()))
+        );
+        assert_eq!(s, before, "a refused rename changes nothing");
+    }
+
+    fn try_request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no wgpu adapter available");
+            return None;
+        };
+        if !adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            eprintln!("skipping: adapter lacks TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES");
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    /// With a paint session (w5-channel-rename-planes, Target 4): the
+    /// rename moves the declaration AND the planes; a paint refusal (a
+    /// stranded plane folding onto the new name) leaves BOTH untouched,
+    /// because core ran on a clone and the clone is committed last.
+    #[test]
+    fn the_full_rename_moves_planes_and_a_paint_refusal_is_atomic() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        i18n::init();
+        let mut paint = paint_state::PaintState::with_target_size(device, queue, 16)
+            .expect("paint state builds");
+        let mut set = umber_core::TextureSet::new_default(paint_state::DEFAULT_TEXTURE_SET);
+        assert!(paint.ensure_channel(1001, "roughness"));
+        assert!(paint.ensure_channel(1001, "Sheen"));
+        rename_declared_channel(&mut set, Some(&mut paint), "roughness", "gloss")
+            .expect("the full rename lands");
+        assert_eq!(set.channels[1].name, "gloss");
+        assert_eq!(
+            paint.channels_present(1001),
+            vec!["Sheen".to_string(), "gloss".to_string()]
+        );
+        let before = set.clone();
+        let reason = rename_declared_channel(&mut set, Some(&mut paint), "metallic", "sheen")
+            .expect_err("a stranded plane folds onto the new name");
+        assert_eq!(
+            reason,
+            channel_rename_refusal_text(&paint_state::ChannelRenameRefusal::PlaneExists(
+                "Sheen".into()
+            ))
+        );
+        assert_eq!(set, before, "the declaration did not move");
+        assert_eq!(
+            paint.channels_present(1001),
+            vec!["Sheen".to_string(), "gloss".to_string()],
+            "the planes did not move"
+        );
     }
 }
