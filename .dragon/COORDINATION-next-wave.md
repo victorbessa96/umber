@@ -2318,3 +2318,43 @@ Kill locks empty at 19:26; two kill-reports dirty (sibling lanes) — do not swe
 L-AI (separate repo): wave-1 = main = `f893544`, 0 ahead; its CI failures (runs
 42419710366 / 42419711929) are INFRA-RED (runner_id=0, zero steps, 2-4 s — no runner
 assigned, billing/spending class), not code failures.
+
+---
+
+## 2026-11-11 16:5x — watch cron 7b61e319e085: w5-channel-rename-planes LANDED (row 373/374)
+
+SELF-CORRECTION to this job's own queue row 373 (appended here because
+`docs/loop/queue.md` is under the live sibling's `razul-post-nodes` lock
+since 16:46, and its kill is in flight in `.worktrees/post-nodes-1794426519`):
+
+Row 373 claimed kill-lock `razul-w5-channel-rename-planes` over a surface that
+OMITTED `crates/umber-paint/src/paint_state.rs`. That lock was too narrow, and
+the first dispatched child stopped on exactly that (it refused to widen the
+lock silently, per its instructions). The parent re-took the lock WITH
+`paint_state.rs` added and re-dispatched. The landed kill's real lock
+surface is: `crates/umber-paint/src/paint_state.rs`,
+`crates/umber-paint/src/persistence.rs`, `crates/umber-core/src/lib.rs`,
+`crates/umber-core/src/project.rs`, `crates/umber-app/src/main.rs`,
+`assets/i18n/en-US.ftl`, `assets/i18n/pt-BR.ftl`,
+`docs/loop/kill-reports/2026-11-11-w5-channel-rename-planes.md`,
+`docs/loop/queue.md`. `crates/umber-cli/src/agent.rs` stayed OUT (no save
+signature changed). Row 373's lock list is WRONG as written; row 374 and the
+kill report carry the correct one. Correction belongs to session
+`local-b87a75e4ac3a4884de6d544f83423ae65362bd0ff93ad20689bab4acb798ebb9`
+(this watch job, 2026-11-11).
+
+Landed: `574ec188` "paint(channels): a channel rename carries its paint
+planes (w5-channel-rename-planes)", pushed to `origin/master` and verified by
+`git ls-remote` (574ec188bb57aa7d070366074d9a76917246963a). A channel rename
+now carries its paint planes: `PaintState::rename_channel` re-keys every
+plane store, the persistence prunes the emptied old directory inside the
+existing one-manifest commit, the app renames a clone then moves the planes
+then commits the clone (atomic in memory), refusals are localized in both
+catalogs. Design brief by the FIRST child at `73bc5f51`; implementation by the
+SECOND child. The queue.md claim row 373 was `5af473f8`.
+
+Note for the next actor: `docs/loop/briefs/2026-11-11-rd1-baker-sync.md`
+(commit `60b484cc`, session `20261111_144726_fa28`) was written by a sibling
+while this kill was in flight and names `razul-w5-channel-rename-planes` as
+the lock it waited behind. That lock is now RELEASED, so the R-D1 baker-sync
+kill is dispatchable once its own surface is free.
