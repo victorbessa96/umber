@@ -91,6 +91,13 @@ pub fn tooltip_keys(action: ShellAction) -> (&'static str, Option<&'static str>)
     }
 }
 
+/// The localized title of a shell action — the accessible name for
+/// icon buttons whose tooltip is `action_tip` (audit F11).
+pub fn action_title(action: ShellAction) -> String {
+    let (title, _) = tooltip_keys(action);
+    crate::i18n::tr(title)
+}
+
 /// Assembles `action`'s tooltip. `tr` translates; `state` decides the
 /// unavailable reason; `is_mac` picks the shortcut's modifier names.
 pub fn tooltip_parts(

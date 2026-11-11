@@ -559,7 +559,7 @@ pub struct ToolbarView {
 /// Draws the toolbar into `ui` and returns the actions clicked this frame
 /// (dispatched by the caller after the panel closes).
 pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellAction> {
-    use crate::rich_tooltip::RichTooltip;
+    use crate::rich_tooltip::{action_title, RichTooltip};
     // F6: Umber style at this density, but at the context's text scale.
     ui.set_style(theme::chrome_style(
         ui.ctx(),
@@ -588,34 +588,71 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
             actions.push(ShellAction::NewProject);
         }
         let icon_size = 16.0;
-        if icons::icon_button(ui, atlas, "boxes", icon_size, false)
-            .action_tip(ShellAction::OpenMesh, state)
-            .clicked()
+        if icons::icon_button(
+            ui,
+            atlas,
+            "boxes",
+            icon_size,
+            false,
+            &action_title(ShellAction::OpenMesh),
+        )
+        .action_tip(ShellAction::OpenMesh, state)
+        .clicked()
         {
             actions.push(ShellAction::OpenMesh);
         }
-        if icons::icon_button(ui, atlas, "folder-open", icon_size, false)
-            .action_tip(ShellAction::OpenProject, state)
-            .clicked()
+        if icons::icon_button(
+            ui,
+            atlas,
+            "folder-open",
+            icon_size,
+            false,
+            &action_title(ShellAction::OpenProject),
+        )
+        .action_tip(ShellAction::OpenProject, state)
+        .clicked()
         {
             actions.push(ShellAction::OpenProject);
         }
-        if icons::icon_button(ui, atlas, "save", icon_size, false)
-            .action_tip(ShellAction::SaveProject, state)
-            .clicked()
+        if icons::icon_button(
+            ui,
+            atlas,
+            "save",
+            icon_size,
+            false,
+            &action_title(ShellAction::SaveProject),
+        )
+        .action_tip(ShellAction::SaveProject, state)
+        .clicked()
         {
             actions.push(ShellAction::SaveProject);
         }
         ui.separator();
 
         // History.
-        let undo = icons::icon_button_enabled(ui, atlas, "undo-2", icon_size, false, view.can_undo)
-            .action_tip(ShellAction::Undo, state);
+        let undo = icons::icon_button_enabled(
+            ui,
+            atlas,
+            "undo-2",
+            icon_size,
+            false,
+            view.can_undo,
+            &action_title(ShellAction::Undo),
+        )
+        .action_tip(ShellAction::Undo, state);
         if undo.clicked() && view.can_undo {
             actions.push(ShellAction::Undo);
         }
-        let redo = icons::icon_button_enabled(ui, atlas, "redo-2", icon_size, false, view.can_redo)
-            .action_tip(ShellAction::Redo, state);
+        let redo = icons::icon_button_enabled(
+            ui,
+            atlas,
+            "redo-2",
+            icon_size,
+            false,
+            view.can_redo,
+            &action_title(ShellAction::Redo),
+        )
+        .action_tip(ShellAction::Redo, state);
         if redo.clicked() && view.can_redo {
             actions.push(ShellAction::Redo);
         }
@@ -645,13 +682,27 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         // distinct glyph each (UI/UX pass U1-3): box = wireframe, grid =
         // grid, sun = lit view. Active-tinted for the toggles; the cycle
         // button keeps the mode's name as its tooltip.
-        let wireframe = icons::icon_button(ui, atlas, "box", icon_size, view.view.wireframe)
-            .action_tip(ShellAction::ToggleWireframe, state);
+        let wireframe = icons::icon_button(
+            ui,
+            atlas,
+            "box",
+            icon_size,
+            view.view.wireframe,
+            &action_title(ShellAction::ToggleWireframe),
+        )
+        .action_tip(ShellAction::ToggleWireframe, state);
         if wireframe.clicked() {
             actions.push(ShellAction::ToggleWireframe);
         }
-        let grid = icons::icon_button(ui, atlas, "grid-3x3", icon_size, view.view.grid)
-            .action_tip(ShellAction::ToggleGrid, state);
+        let grid = icons::icon_button(
+            ui,
+            atlas,
+            "grid-3x3",
+            icon_size,
+            view.view.grid,
+            &action_title(ShellAction::ToggleGrid),
+        )
+        .action_tip(ShellAction::ToggleGrid, state);
         if grid.clicked() {
             actions.push(ShellAction::ToggleGrid);
         }
@@ -663,7 +714,15 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
         };
         // The cycle button's tooltip leads with the CURRENT mode (it is
         // the button's state), then what V does, from the registry.
-        let cycle = icons::icon_button(ui, atlas, "sun", icon_size, lit).on_hover_ui(|ui| {
+        let cycle = icons::icon_button(
+            ui,
+            atlas,
+            "sun",
+            icon_size,
+            lit,
+            &action_title(ShellAction::CycleViewMode),
+        )
+        .on_hover_ui(|ui| {
             ui.label(egui::RichText::new(&mode).color(theme::accent()));
             let is_mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
             crate::rich_tooltip::draw(
@@ -686,14 +745,22 @@ pub fn show(ui: &mut Ui, view: &ToolbarView, atlas: &IconAtlas) -> Vec<ShellActi
             icon_size,
             view.mask_editing,
             view.paint_available,
+            &action_title(ShellAction::ToggleMaskMode),
         )
         .action_tip(ShellAction::ToggleMaskMode, state);
         if mask.clicked() && view.paint_available {
             actions.push(ShellAction::ToggleMaskMode);
         }
-        let invert =
-            icons::icon_button_enabled(ui, atlas, "contrast", icon_size, false, view.mask_editing)
-                .action_tip(ShellAction::InvertMask, state);
+        let invert = icons::icon_button_enabled(
+            ui,
+            atlas,
+            "contrast",
+            icon_size,
+            false,
+            view.mask_editing,
+            &action_title(ShellAction::InvertMask),
+        )
+        .action_tip(ShellAction::InvertMask, state);
         if invert.clicked() && view.mask_editing {
             actions.push(ShellAction::InvertMask);
         }

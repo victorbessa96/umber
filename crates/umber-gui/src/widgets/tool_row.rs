@@ -91,8 +91,15 @@ impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
         let inner = ui.horizontal(|ui| {
             let mut row: Option<Response> = None;
             for (i, tool) in self.tools.iter().enumerate() {
-                let r = icon_button(ui, atlas, tool.icon, size, is_active(i, current))
-                    .on_hover_text(tool.tooltip);
+                let r = icon_button(
+                    ui,
+                    atlas,
+                    tool.icon,
+                    size,
+                    is_active(i, current),
+                    tool.tooltip,
+                )
+                .on_hover_text(tool.tooltip);
                 if r.clicked() {
                     clicked = Some(tool.id);
                 }

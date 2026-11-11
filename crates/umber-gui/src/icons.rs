@@ -770,15 +770,17 @@ pub fn icon(ui: &mut Ui, atlas: &IconAtlas, name: &str, size: f32) -> Response {
 pub const ICON_BUTTON_PAD: f32 = 4.0;
 
 /// A clickable icon. Hover raises the background. `active` tints the
-/// glyph with the accent (deepened while hovered).
+/// glyph with the accent (deepened while hovered). `label` is the
+/// localized accessible name (audit F11: never the raw atlas id).
 pub fn icon_button(
     ui: &mut Ui,
     atlas: &IconAtlas,
     name: &str,
     size: f32,
     active: bool,
+    label: &str,
 ) -> Response {
-    icon_button_enabled(ui, atlas, name, size, active, true)
+    icon_button_enabled(ui, atlas, name, size, active, true, label)
 }
 
 /// [`icon_button`] with an enable gate: a disabled icon paints at half
@@ -791,14 +793,14 @@ pub fn icon_button_enabled(
     size: f32,
     active: bool,
     enabled: bool,
+    label: &str,
 ) -> Response {
     let edge = size + 2.0 * ICON_BUTTON_PAD;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
-    // g7-accesskit-sweep: every painter-drawn icon slot is a Button.
-    // The icon's own name is the label (stable, non-localized — the
-    // caller's tooltip carries the localized description; the role is
-    // what screen readers need first).
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, name));
+    // g7-accesskit-sweep + audit F11: every painter-drawn icon slot is a
+    // Button whose accessible name is the caller's LOCALIZED label —
+    // never the atlas id (a screen reader must not read "grid-3x3").
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
     if ui.is_rect_visible(rect) {
         let hovered = enabled && response.hovered();
         if hovered || (enabled && response.is_pointer_button_down_on()) {
@@ -1265,11 +1267,18 @@ mod tests {
         use egui_kittest::kittest::Queryable;
         let atlas = IconAtlas::empty();
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            icon_button(ui, &atlas, "paintbrush", 16.0, false);
+            // Audit F11: the accessible name is the localized label,
+            // not the atlas id — the raw id must NOT match.
+            icon_button(ui, &atlas, "paintbrush", 16.0, false, "Brush");
         });
         harness.run();
-        // The role is what screen readers key on; the icon's name is
-        // the label (get_by_ panics on miss).
-        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Button, "paintbrush");
+        let _ = harness.get_by_role_and_label(egui::accesskit::Role::Button, "Brush");
+        assert!(
+            harness
+                .query_all_by_role_and_label(egui::accesskit::Role::Button, "paintbrush")
+                .count()
+                == 0,
+            "the atlas id must not be the accessible name"
+        );
     }
 }

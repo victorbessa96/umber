@@ -72,9 +72,16 @@ impl<'a> IconRail<'a> {
         ui.with_layout(Layout::top_down(Align::Center), |ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(2.0);
             ui.add_space(4.0);
-            if icon_button(ui, atlas, self.expand_icon, RAIL_ICON, false)
-                .on_hover_text(self.expand_tooltip)
-                .clicked()
+            if icon_button(
+                ui,
+                atlas,
+                self.expand_icon,
+                RAIL_ICON,
+                false,
+                self.expand_tooltip,
+            )
+            .on_hover_text(self.expand_tooltip)
+            .clicked()
             {
                 out.expand = true;
             }
@@ -83,9 +90,16 @@ impl<'a> IconRail<'a> {
             ui.painter().rect_filled(rect, 0.0, theme::faint());
             ui.add_space(2.0);
             for (i, item) in self.items.iter().enumerate() {
-                if icon_button(ui, atlas, item.icon, RAIL_ICON, self.open == Some(i))
-                    .on_hover_text(item.tooltip)
-                    .clicked()
+                if icon_button(
+                    ui,
+                    atlas,
+                    item.icon,
+                    RAIL_ICON,
+                    self.open == Some(i),
+                    item.tooltip,
+                )
+                .on_hover_text(item.tooltip)
+                .clicked()
                 {
                     out.picked = Some(i);
                 }
@@ -141,7 +155,9 @@ mod tests {
             }
         });
         harness.run();
-        harness.get_by_label("eye").click();
+        // Audit F11: the accessible label is the localized tooltip, not
+        // the atlas id.
+        harness.get_by_label("History").click();
         harness.run();
         drop(harness);
         assert_eq!(last.picked, Some(1));
@@ -155,7 +171,7 @@ mod tests {
             }
         });
         harness.run();
-        harness.get_by_label("panel-left").click();
+        harness.get_by_label("Expand").click();
         harness.run();
         drop(harness);
         assert!(last.expand);

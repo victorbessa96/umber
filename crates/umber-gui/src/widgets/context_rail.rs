@@ -411,8 +411,8 @@ impl ContextRail {
             for kind in kinds {
                 let active = kind == self.active;
                 let tooltip = ctx.tooltips[kind.index()];
-                let r =
-                    icon_button(ui, ctx.atlas, kind.icon(), size, active).on_hover_text(tooltip);
+                let r = icon_button(ui, ctx.atlas, kind.icon(), size, active, tooltip)
+                    .on_hover_text(tooltip);
                 r.widget_info(|| {
                     WidgetInfo::selected(WidgetType::SelectableLabel, true, active, tooltip)
                 });
