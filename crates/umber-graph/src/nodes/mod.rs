@@ -25,6 +25,11 @@
 //! "Example-based texture synthesis") — a standalone family (its own
 //! [`register_synth_nodes`], not folded into [`register_generator_nodes`],
 //! whose doc commits to "seven node_defs").
+//!
+//! Wave-5 post nodes (census R-E5): `glare`, `lens_flare`,
+//! `chromatic_aberration`, `film_grain` ([`post`]) — their own
+//! [`register_post_nodes`]; not yet folded into
+//! [`crate::full_registry`] (that wiring is a follow-up kill).
 
 pub mod color;
 pub mod filter;
@@ -32,6 +37,7 @@ pub mod gradient;
 pub mod mask;
 pub mod noise;
 pub mod pattern;
+pub mod post;
 pub mod spatial;
 pub mod synth;
 
@@ -45,6 +51,9 @@ pub use mask::{register_mask_nodes, EdgeDetectNode, FloodFillNode, HistogramMatc
 pub use noise::{build_perm, register_noise_nodes, PerlinNode, ValueNode, WorleyNode};
 pub use pattern::{
     register_pattern_nodes, BrickNode, CheckerNode, DotsNode, BRICK_FACE, BRICK_MORTAR,
+};
+pub use post::{
+    register_post_nodes, ChromaticAberrationNode, FilmGrainNode, GlareNode, LensFlareNode,
 };
 pub use spatial::{
     register_spatial_nodes, DirectionWarpNode, MeshMapGeneratorNode, TriplanarBlendNode,
