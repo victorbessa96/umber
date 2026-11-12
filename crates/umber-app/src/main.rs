@@ -4224,7 +4224,10 @@ impl UmberApp {
         .with_material_defs_mtlx(self.state.material_defs.clone())
         // The journal high-water mark: every entry recorded so far is in
         // this saved state, so none may replay on top of it.
-        .with_journal_seq(self.state.doc.journal_seq());
+        .with_journal_seq(self.state.doc.journal_seq())
+        // R-D1: persist the baker sync carry (per-set blocks + linked
+        // groups) with the project; empty carry is not serialized.
+        .with_bake_sync(self.state.bakes.sync_carry());
         if let Some(paint) = self.state.paint.as_ref() {
             model.version = paint_save_version(paint, &live);
         }
@@ -4418,6 +4421,9 @@ impl UmberApp {
     fn open_project_at(&mut self, dir: PathBuf) {
         match umber_core::project::load_from_dir(&dir) {
             Ok(model) => {
+                // R-D1: restore the baker sync carry (groups + per-set
+                // blocks) into the Bakes panel before anything reads it.
+                self.state.bakes.load_sync_carry(&model.bake_sync);
                 let active = model
                     .settings
                     .active_texture_set
