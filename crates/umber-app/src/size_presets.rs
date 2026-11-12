@@ -61,14 +61,23 @@ pub fn preset_label(size: u32) -> String {
 }
 
 /// Draws the size combo for `current`, offering exactly [`SIZE_PRESETS`].
-pub fn size_combo(ui: &mut egui::Ui, label: &str, current: &mut u32) {
-    egui::ComboBox::from_label(label)
+///
+/// `label` is drawn beside the combo; an empty `label` means the caller
+/// draws a row label itself. wave-a11y-first-pass: either way `name` is
+/// the combo's accessible name, so a Tab onto the row-labelled combo
+/// announces "Size" instead of only its value.
+pub fn size_combo(ui: &mut egui::Ui, label: &str, name: &str, current: &mut u32) {
+    let response = egui::ComboBox::from_label(label)
         .selected_text(preset_label(*current))
         .show_ui(ui, |ui| {
             for candidate in SIZE_PRESETS {
                 ui.selectable_value(current, candidate, preset_label(candidate));
             }
-        });
+        })
+        .response;
+    if label.is_empty() {
+        umber_gui::widgets::a11y::name(ui.ctx(), response.id, None, name);
+    }
 }
 
 #[cfg(test)]

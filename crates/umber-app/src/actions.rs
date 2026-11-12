@@ -828,8 +828,18 @@ pub fn keyboard_reference() -> String {
 /// frame — the key is pressed, no text field holds the keyboard (a text
 /// edit keeps its own Esc), and the command palette is closed (it consumes
 /// Esc and closes itself). egui menus/popups close on Esc natively.
+///
+/// wave-a11y-first-pass: Esc closes the TOPMOST thing only. While an egui
+/// popup (a menu, a combo box) is open, or an Umber popup holds Esc
+/// ([`umber_gui::widgets::a11y`], e.g. the colour picker), the press
+/// belongs to that popup; closing the Preferences window behind it on the
+/// same press threw away the user's place.
 pub fn esc_closes_overlays(ctx: &egui::Context, palette_open: bool) -> bool {
-    ctx.input(|i| i.key_pressed(Key::Escape)) && Focus::current(ctx) != Focus::Text && !palette_open
+    ctx.input(|i| i.key_pressed(Key::Escape))
+        && Focus::current(ctx) != Focus::Text
+        && !palette_open
+        && !egui::Popup::is_any_open(ctx)
+        && !umber_gui::widgets::a11y::escape_claimed(ctx)
 }
 
 // ---------------------------------------------------------------------------

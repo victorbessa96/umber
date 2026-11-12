@@ -96,6 +96,14 @@ impl<'a> ParamGroup<'a> {
         let height = ui.spacing().interact_size.y + HEADER_EXTRA;
         let (rect, header) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+        // wave-a11y-first-pass: the header is Tab-reachable (Sense::click
+        // is focusable) and Space/Enter toggles it, so it reports a
+        // collapsing-header role, its title, and the open state.
+        let open_now = state.is_open();
+        let title = self.title;
+        header.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::CollapsingHeader, true, open_now, title)
+        });
         if header.clicked() {
             state.toggle(ui);
         }
@@ -139,6 +147,7 @@ impl<'a> ParamGroup<'a> {
                 theme::faint(),
             );
         }
+        theme::paint_focus_ring(ui, &header);
         state.store(ui.ctx());
 
         state

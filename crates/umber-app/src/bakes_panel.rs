@@ -2158,16 +2158,23 @@ impl BakesPanel {
             if self.highlighted_setting == Some(BakeSettingId::Resolution) {
                 group.ui.horizontal(|ui| {
                     ui.label("▶");
+                    let resolution = tr("bakes.resolution");
                     crate::size_presets::size_combo(
                         ui,
-                        &tr("bakes.resolution"),
+                        &resolution,
+                        &resolution,
                         &mut self.resolution,
                     );
                 });
             } else {
                 let resolution_label = tr("bakes.resolution");
                 group.row(resolution_label.as_str(), |ui| {
-                    crate::size_presets::size_combo(ui, "", &mut self.resolution);
+                    crate::size_presets::size_combo(
+                        ui,
+                        "",
+                        &resolution_label,
+                        &mut self.resolution,
+                    );
                 });
             }
 

@@ -142,6 +142,8 @@ mod history_panel;
 mod i18n;
 #[cfg(test)]
 mod input_photon;
+#[cfg(test)]
+mod keyboard_journeys;
 mod layers_panel;
 mod logfile;
 mod navigation;
@@ -203,6 +205,14 @@ use umber_gpu::GpuContext;
 use umber_gui::widgets::tab_overflow;
 use uv_view::UvView;
 use viewport::Viewport;
+
+/// wave-a11y-first-pass: egui_dock registers each tab title as a bare
+/// focusable node (Tab reaches it, Enter/Space selects it) with no role
+/// and no name, so a screen reader announced "unknown". This names it
+/// with the panel title, as a Tab. Called from `on_tab_button`.
+fn dock_tab_a11y(ctx: &egui::Context, title: &str, response: &egui::Response) {
+    umber_gui::widgets::a11y::name(ctx, response.id, Some(egui::accesskit::Role::Tab), title);
+}
 
 /// A panel's localized title: the dock tab and Window ▸ Panels read it
 /// from here, so the two never name a panel differently.
@@ -592,6 +602,7 @@ impl TabViewer for PanelViewer<'_> {
         // A cut title keeps its full text in the hover (g5-tab-overflow);
         // the layout is memoized, so re-laying it here is a cache hit.
         let title = panel_title(tab);
+        dock_tab_a11y(&self.ctx, &title, response);
         let galley = tab_overflow::elided_title(
             &self.ctx,
             &title,
@@ -3558,7 +3569,7 @@ fn texture_sets_panel_ui(
     let mut size = width;
     ui.horizontal(|ui| {
         ui.label(tr("texturesets.size"));
-        size_presets::size_combo(ui, "", &mut size);
+        size_presets::size_combo(ui, "", &tr("texturesets.size"), &mut size);
     })
     // R-COPY-1 (UI/UX pass U1-5): the destructive-resize note rides the
     // control that triggers it (and the confirm below), not an always-on

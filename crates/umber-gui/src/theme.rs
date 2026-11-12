@@ -690,6 +690,33 @@ pub fn apply_theme(ctx: &egui::Context, theme: Theme, density: Density, text_sca
 /// share the state, which reads as the same emphasis).
 pub const FOCUS_RING_WIDTH: f32 = 2.0;
 
+/// The keyboard-focus ring as a stroke: [`FOCUS_RING_WIDTH`] in the
+/// active theme's accent (the same token the `active` visuals carry).
+pub fn focus_ring_stroke() -> Stroke {
+    Stroke::new(FOCUS_RING_WIDTH, accent())
+}
+
+/// wave-a11y-first-pass: paints the focus ring around a PAINTER-DRAWN
+/// widget while it holds keyboard focus. egui's own widgets get the ring
+/// from the `active` visuals; a widget that paints itself (an icon slot,
+/// a value field, a param-group header) must call this or Tab lands on
+/// it invisibly. Pointer hover/press never draw it (focus only).
+/// Returns whether the ring was drawn.
+pub fn paint_focus_ring(ui: &egui::Ui, response: &egui::Response) -> bool {
+    if !response.has_focus() || !ui.is_rect_visible(response.rect) {
+        return false;
+    }
+    ui.painter().rect_stroke(
+        response.rect,
+        3.0,
+        focus_ring_stroke(),
+        // Inside: a ring around a full-panel canvas (the 3D / UV views)
+        // would be clipped away by the panel's own clip rect if drawn out.
+        egui::StrokeKind::Inside,
+    );
+    true
+}
+
 /// The Umber visuals with the live [`TokenOverrides`] on `ctx`.
 fn umber_visuals(ctx: &egui::Context) -> egui::Visuals {
     visuals_for(active_theme(), Some(&token_overrides(ctx)))

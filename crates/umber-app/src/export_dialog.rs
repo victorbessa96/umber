@@ -648,20 +648,24 @@ impl ExportDialog {
         ParamGroup::new("export-preset", preset_title.as_str()).show(ui, |group| {
             let preset_label = tr("export.preset");
             group.row(preset_label.as_str(), |ui| {
-                egui::ComboBox::from_id_salt("export_preset_combo")
+                let combo = egui::ComboBox::from_id_salt("export_preset_combo")
                     .selected_text(self.preset.label())
                     .show_ui(ui, |ui| {
                         for candidate in PresetChoice::ALL {
                             ui.selectable_value(&mut self.preset, candidate, candidate.label());
                         }
-                    });
+                    })
+                    .response;
+                // wave-a11y-first-pass: the row label is drawn beside the
+                // combo, so the combo names itself for a screen reader.
+                umber_gui::widgets::a11y::name(ui.ctx(), combo.id, None, &preset_label);
             });
             let size_label = tr("export.size");
             group.row(size_label.as_str(), |ui| {
                 // The shared helper owns the preset list and the 8K VRAM
                 // note; the empty combo label keeps its text out of the
                 // row (the row label above carries it).
-                crate::size_presets::size_combo(ui, "", &mut self.size);
+                crate::size_presets::size_combo(ui, "", &size_label, &mut self.size);
             });
             group
                 .ui

@@ -136,6 +136,8 @@ impl<'a> SwatchGrid<'a> {
                 clicked = Some(color);
             }
         }
+        // wave-a11y-first-pass: painter-drawn and focusable.
+        theme::paint_focus_ring(ui, &response);
         clicked
     }
 }

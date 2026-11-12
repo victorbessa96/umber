@@ -540,6 +540,7 @@ fn channel_row(
             theme::muted(),
         );
     }
+    theme::paint_focus_ring(ui, &response);
     new_t
 }
 
@@ -590,6 +591,7 @@ fn sv_square(ui: &mut Ui, state: &mut ColorState, size: f32) -> Response {
         ui.painter()
             .circle_stroke(marker, 5.0, Stroke::new(1.5, ring));
     }
+    theme::paint_focus_ring(ui, &response);
     response
 }
 
@@ -629,6 +631,7 @@ fn hue_strip(ui: &mut Ui, state: &mut ColorState, width: f32) -> Response {
             StrokeKind::Outside,
         );
     }
+    theme::paint_focus_ring(ui, &response);
     response
 }
 
@@ -645,6 +648,7 @@ fn swatches(ui: &mut Ui, state: &mut ColorState) -> Response {
         if response.clicked() {
             state.revert();
         }
+        theme::paint_focus_ring(ui, &response);
         response
     })
     .inner
@@ -671,6 +675,9 @@ pub fn color_button(ui: &mut Ui, linear: &mut [f32; 3]) -> Response {
             StrokeKind::Inside,
         );
     }
+    // wave-a11y-first-pass: the swatch is painter-drawn; Tab reaches it
+    // and Space/Enter opens the picker, so it shows the focus ring.
+    theme::paint_focus_ring(ui, &response);
     let popup_id = response.id.with("color-popup");
     let state_id = response.id.with("color-state");
     let mut open: bool = ui.ctx().data(|d| d.get_temp(popup_id)).unwrap_or(false);
@@ -708,6 +715,10 @@ pub fn color_button(ui: &mut Ui, linear: &mut [f32; 3]) -> Response {
                 .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()));
         if clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
+        } else {
+            // wave-a11y-first-pass: an open picker owns Esc, so the window
+            // it sits in does not close on the same press.
+            super::a11y::claim_escape(ui.ctx());
         }
     }
     ui.ctx().data_mut(|d| d.insert_temp(popup_id, open));
@@ -750,6 +761,9 @@ pub fn color_button_with(
             StrokeKind::Inside,
         );
     }
+    // wave-a11y-first-pass: the swatch is painter-drawn; Tab reaches it
+    // and Space/Enter opens the picker, so it shows the focus ring.
+    theme::paint_focus_ring(ui, &response);
     let popup_id = response.id.with("color-popup");
     let state_id = response.id.with("color-state");
     let mut open: bool = ui.ctx().data(|d| d.get_temp(popup_id)).unwrap_or(false);
@@ -803,6 +817,10 @@ pub fn color_button_with(
                 .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()));
         if clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
+        } else {
+            // wave-a11y-first-pass: an open picker owns Esc, so the window
+            // it sits in does not close on the same press.
+            super::a11y::claim_escape(ui.ctx());
         }
     }
     if was_open && !open {

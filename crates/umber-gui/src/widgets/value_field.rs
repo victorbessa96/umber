@@ -833,6 +833,11 @@ impl<N: Numeric> Widget for ValueField<'_, N> {
                 );
             }
         }
+        // wave-a11y-first-pass: the field is painter-drawn. Tab INTO it
+        // opens the typed entry (the TextEdit draws egui's own ring), but
+        // Shift+Tab back out of that entry leaves focus on the field
+        // itself with the entry closed: this ring is what shows it.
+        theme::paint_focus_ring(ui, &response);
         response
     }
 }

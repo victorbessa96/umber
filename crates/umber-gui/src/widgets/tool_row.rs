@@ -91,15 +91,17 @@ impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
         let inner = ui.horizontal(|ui| {
             let mut row: Option<Response> = None;
             for (i, tool) in self.tools.iter().enumerate() {
-                let r = icon_button(
-                    ui,
-                    atlas,
-                    tool.icon,
-                    size,
-                    is_active(i, current),
-                    tool.tooltip,
-                )
-                .on_hover_text(tool.tooltip);
+                let selected = is_active(i, current);
+                let r = icon_button(ui, atlas, tool.icon, size, selected, tool.tooltip)
+                    .on_hover_text(tool.tooltip);
+                // wave-a11y-first-pass: each slot is its own Tab stop, so
+                // each reports its OWN tool name plus whether it is the
+                // active one (a toggle), instead of the row relabelling
+                // the first slot with the active tool's name (which read
+                // the same name on two slots once another tool was active).
+                r.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::Button, true, selected, tool.tooltip)
+                });
                 if r.clicked() {
                     clicked = Some(tool.id);
                 }
@@ -111,16 +113,6 @@ impl<'a, T: PartialEq + Copy> ToolRow<'a, T> {
             row
         });
         let mut response = inner.inner.unwrap_or(inner.response);
-        // g7-accesskit-sweep: the row IS the interactive widget (its
-        // buttons are painter-drawn icon slots — see icons.rs's own
-        // pending sweep); the union response carries the role + the
-        // active tool's tooltip as its label.
-        if let Some(index) = active_index(self.tools, active) {
-            if let Some(tool) = self.tools.get(index) {
-                response
-                    .widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tool.tooltip));
-            }
-        }
 
         let (next, changed) = resolve_click(*active, clicked);
         *active = next;

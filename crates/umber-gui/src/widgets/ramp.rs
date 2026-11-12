@@ -417,6 +417,8 @@ impl<'a> RampEdit<'a> {
                 ));
             }
         }
+        // wave-a11y-first-pass: painter-drawn and focusable.
+        theme::paint_focus_ring(ui, &response);
         response
     }
 }

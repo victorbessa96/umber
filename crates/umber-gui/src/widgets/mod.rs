@@ -5,6 +5,7 @@
 //! slider rows and recent-swatch popup) and the Properties context rail
 //! (g2-properties-context).
 
+pub mod a11y;
 pub mod color_picker;
 pub mod context_rail;
 pub mod curve;

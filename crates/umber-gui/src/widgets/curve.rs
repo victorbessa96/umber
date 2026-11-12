@@ -406,6 +406,8 @@ impl<'a> CurveEdit<'a> {
                 painter.circle(centre, 3.5, fill, Stroke::new(1.0, theme::app_bg()));
             }
         }
+        // wave-a11y-first-pass: painter-drawn and focusable.
+        theme::paint_focus_ring(ui, &response);
         response
     }
 }

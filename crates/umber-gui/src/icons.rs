@@ -796,7 +796,15 @@ pub fn icon_button_enabled(
     label: &str,
 ) -> Response {
     let edge = size + 2.0 * ICON_BUTTON_PAD;
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
+    // wave-a11y-first-pass: a disabled slot still senses clicks (the
+    // pointer path is unchanged) but is not a Tab stop: `Sense::CLICK`
+    // without FOCUSABLE, the way egui skips its own disabled widgets.
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::CLICK
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), sense);
     // g7-accesskit-sweep + audit F11: every painter-drawn icon slot is a
     // Button whose accessible name is the caller's LOCALIZED label —
     // never the atlas id (a screen reader must not read "grid-3x3").
@@ -817,6 +825,10 @@ pub fn icon_button_enabled(
             }
         };
         paint_icon(ui, atlas, name, rect.shrink(ICON_BUTTON_PAD), tint);
+        // wave-a11y-first-pass: the icon slot is painter-drawn, so the
+        // keyboard-focus ring is painted here (egui's `active` visuals
+        // never reach it). Focus only: the pointer paths are unchanged.
+        theme::paint_focus_ring(ui, &response);
     }
     response
 }
