@@ -545,6 +545,99 @@ pub struct Viewport {
     projection_drag: Option<StencilDrag>,
     /// The stencil overlay's texture and the image it was built from.
     stencil_texture: Option<(StencilTextureKey, egui::TextureHandle)>,
+    /// Hide-excluded (geometry masks K5): the session-only toggle and
+    /// the explicit per-triangle visibility it applies. See
+    /// [`HideExcluded`]; never persisted, never read by export or bake.
+    hide: HideExcluded,
+}
+
+/// The hide-excluded viewport state (geometry masks K5): a session-only
+/// toggle, off by default, plus the shell's explicit per-triangle
+/// visibility input (`true` = drawn). While the toggle is on and the input
+/// hides at least one triangle, the 3D draw and every viewport pick
+/// (stroke, eyedropper, ID mask, brush ring, straight line, orbit pivot)
+/// run against [`Self::visible_mesh`], an index subset of the loaded mesh,
+/// so a pick passes through hidden geometry to what it occluded. Off, or
+/// nothing hidden, the full mesh draws and picks: byte-identical to the
+/// pre-feature frame. The input is plain `bool`s (not the core layer type)
+/// so this viewport seam stays independent of the mask model;
+/// [`triangle_visibility`] is the adapter from mask predicates.
+#[derive(Default)]
+struct HideExcluded {
+    /// The toggle (View menu wiring rides the panel kill).
+    on: bool,
+    /// The shell's per-triangle input; `None` = nothing to hide. Entries
+    /// past the slice's end read as visible (a short, stale input never
+    /// hides geometry).
+    visible: Option<Vec<bool>>,
+    /// The visible triangles as an index subset of the loaded mesh
+    /// (`umber_mesh::filter_mesh_for_triangles`), derived from `visible`;
+    /// `None` when the input hides nothing.
+    subset: Option<umber_mesh::MeshData>,
+    /// The GPU draw subset no longer matches the effective state: the
+    /// next frame with a mesh re-binds it (`MeshBuffers::set_draw_subset`).
+    gpu_dirty: bool,
+}
+
+impl HideExcluded {
+    /// The mesh the draw and picks use while hiding: `Some` only when the
+    /// toggle is on AND the input hides at least one triangle.
+    fn visible_mesh(&self) -> Option<&umber_mesh::MeshData> {
+        self.subset.as_ref().filter(|_| self.on)
+    }
+
+    /// Re-derives [`Self::subset`] from the input against `mesh` (the
+    /// active layer, its mask, or the mesh changed).
+    fn rederive(&mut self, mesh: Option<&umber_mesh::MeshData>) {
+        self.subset = match (mesh, self.visible.as_deref()) {
+            (Some(mesh), Some(visible)) => {
+                let tri_count = mesh.indices.len() / 3;
+                let shown: Vec<u32> = (0..tri_count)
+                    .filter(|&t| visible.get(t).copied().unwrap_or(true))
+                    .map(|t| t as u32)
+                    .collect();
+                (shown.len() < tri_count)
+                    .then(|| umber_mesh::filter_mesh_for_triangles(mesh, &shown))
+            }
+            _ => None,
+        };
+        self.gpu_dirty = true;
+    }
+}
+
+/// The hide-excluded adapter (geometry masks K5): per-triangle visibility
+/// for a layer's mask predicates, in std types so the viewport seam needs
+/// no core mask type. A triangle is visible iff its tile
+/// (`umber_mesh::tile_of_triangle`, first vertex wins) is not in
+/// `excluded_tiles` AND its part name is not in `excluded_meshes`.
+/// `triangle_parts` holds one index into `part_names` per triangle, or is
+/// empty; any length mismatch makes mesh exclusions inert (the parts
+/// table's all-or-nothing rule), as does an out-of-range part index for
+/// that triangle. Tile exclusions always apply.
+// `dead_code`: the shell wires the active layer's mask in the panel kill
+// (K4); this kill ships the seam.
+#[allow(dead_code)]
+pub fn triangle_visibility(
+    mesh: &umber_mesh::MeshData,
+    triangle_parts: &[u16],
+    part_names: &[String],
+    excluded_meshes: &std::collections::BTreeSet<String>,
+    excluded_tiles: &std::collections::BTreeSet<u16>,
+) -> Vec<bool> {
+    let tiles = umber_mesh::tile_of_triangle(mesh);
+    let parts_live = !excluded_meshes.is_empty() && triangle_parts.len() == tiles.len();
+    tiles
+        .iter()
+        .enumerate()
+        .map(|(t, tile)| {
+            let tile_hidden = excluded_tiles.contains(tile);
+            let mesh_hidden = parts_live
+                && part_names
+                    .get(triangle_parts[t] as usize)
+                    .is_some_and(|name| excluded_meshes.contains(name));
+            !(tile_hidden || mesh_hidden)
+        })
+        .collect()
 }
 
 /// The shell state the viewport reads beyond the GPU / paint inputs (one
@@ -647,7 +740,53 @@ impl Viewport {
         self.mesh_data = Some(mesh.clone());
         self.mesh = Some(buffers);
         self.seam_cache = None;
+        // A new mesh invalidates the per-triangle input (its indices name
+        // the old mesh's triangles); the shell re-sends it. The fresh
+        // buffers draw the full mesh, so nothing is left to re-bind.
+        self.hide.visible = None;
+        self.hide.subset = None;
+        self.hide.gpu_dirty = false;
         Ok(())
+    }
+
+    /// Turns hide-excluded on or off (geometry masks K5): session-only,
+    /// off by default, never persisted. See [`HideExcluded`].
+    // `dead_code`: the shell's View-menu wiring rides the panel kill (K4).
+    #[allow(dead_code)]
+    pub fn set_hide_excluded(&mut self, on: bool) {
+        if self.hide.on != on {
+            self.hide.on = on;
+            self.hide.gpu_dirty = true;
+            self.seam_cache = None;
+        }
+    }
+
+    /// Whether hide-excluded is on.
+    #[allow(dead_code)]
+    pub fn hide_excluded(&self) -> bool {
+        self.hide.on
+    }
+
+    /// Sets the per-triangle visibility input (`true` = drawn, indexed
+    /// by triangle of the loaded mesh; see [`triangle_visibility`]), or
+    /// clears it with `None`. Cheap to call every frame: an unchanged
+    /// input re-derives nothing. Applies only while hide-excluded is on.
+    #[allow(dead_code)]
+    pub fn set_triangle_visibility(&mut self, visible: Option<&[bool]>) {
+        if self.hide.visible.as_deref() == visible {
+            return;
+        }
+        self.hide.visible = visible.map(<[bool]>::to_vec);
+        self.hide.rederive(self.mesh_data.as_ref());
+        self.seam_cache = None;
+    }
+
+    /// The mesh every viewport pick resolves against: the visible subset
+    /// while hide-excluded hides something, else the loaded mesh. (Sites
+    /// that also write other fields inline the same expression so the
+    /// borrow stays per-field.)
+    fn pick_mesh(&self) -> Option<&umber_mesh::MeshData> {
+        self.hide.visible_mesh().or(self.mesh_data.as_ref())
     }
 
     /// Swaps the bound environment: `Some(env)` enables the convolved
@@ -928,7 +1067,10 @@ impl Viewport {
             && !stencil_owns
             && response.clicked_by(PointerButton::Primary)
         {
-            if let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint.as_mut()) {
+            if let (Some(mesh), Some(paint)) = (
+                self.hide.visible_mesh().or(self.mesh_data.as_ref()),
+                paint.as_mut(),
+            ) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
                         // Read the texel from the tile the UV routes to: the
@@ -975,7 +1117,10 @@ impl Viewport {
             && !stencil_owns
             && response.clicked_by(PointerButton::Primary)
         {
-            if let (Some(mesh), Some(_)) = (self.mesh_data.as_ref(), paint.as_ref()) {
+            if let (Some(mesh), Some(_)) = (
+                self.hide.visible_mesh().or(self.mesh_data.as_ref()),
+                paint.as_ref(),
+            ) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some(uv) = self.pick_uv(rect, mesh, pos) {
                         return Some(ViewportClick::IdMask(uv));
@@ -1070,7 +1215,7 @@ impl Viewport {
         // preset.
         if let (Some(from), Some(mesh), Some(p)) = (
             self.last_stroke_end,
-            self.mesh_data.as_ref(),
+            self.hide.visible_mesh().or(self.mesh_data.as_ref()),
             paint.as_mut(),
         ) {
             let mods = ui.input(|i| i.modifiers);
@@ -1239,6 +1384,14 @@ impl Viewport {
             // route's callback is built, so paint shows in 3D the frame it
             // lands. No session / no target clears to the constant arm.
             bind_paint_target(gpu, mesh, paint.as_deref());
+            // Hide-excluded (K5): re-bind the draw subset only when the
+            // effective state changed (it uploads two buffers). A refused
+            // subset (count overflow) keeps the full draw.
+            if std::mem::take(&mut self.hide.gpu_dirty)
+                && mesh.set_draw_subset(gpu, self.hide.visible_mesh()).is_err()
+            {
+                let _ = mesh.set_draw_subset(gpu, None);
+            }
             let aspect = rect.width() / rect.height();
             let view_proj = self.camera.view_proj(aspect);
             // Normalized once here (review #6): the shader re-normalizes
@@ -1286,7 +1439,9 @@ impl Viewport {
             // UV seams (g6-overlays-popover): after the mesh, BEFORE the
             // wireframe so wire edges draw over them. Off adds no shape.
             if self.overlays.uv_seams {
-                if let Some(data) = self.mesh_data.as_ref() {
+                // Hidden triangles draw no seams either (K5): the cache is
+                // dropped whenever the hide state changes.
+                if let Some(data) = self.hide.visible_mesh().or(self.mesh_data.as_ref()) {
                     let segments = self
                         .seam_cache
                         .get_or_insert_with(|| uv_seam_segments(data));
@@ -1730,7 +1885,9 @@ impl Viewport {
         paint: Option<&crate::paint_state::PaintState>,
     ) {
         use crate::brush_cursor;
-        let (Some(mesh), Some(paint)) = (self.mesh_data.as_ref(), paint) else {
+        let (Some(mesh), Some(paint)) =
+            (self.hide.visible_mesh().or(self.mesh_data.as_ref()), paint)
+        else {
             return;
         };
         if self.pick_armed || self.idmask_armed || !paint.projection().viewport_paints() {
@@ -2018,8 +2175,7 @@ impl Viewport {
     ) -> Option<[f32; 2]> {
         let camera = *self.stroke_raycast_camera();
         let picked = self
-            .mesh_data
-            .as_ref()
+            .pick_mesh()
             .and_then(|mesh| self.pick_with(rect, mesh, pos, &camera));
         let hit = picked.map(|(uv, _)| egui::Pos2::new(uv[0], uv[1]));
         let pressure = pressure * picked.map_or(1.0, |(_, w)| w);
@@ -2134,7 +2290,10 @@ impl Viewport {
                     // what was just painted.
                     if let Some(b) = dragged {
                         if response.drag_started_by(b) {
-                            let pivot = match (self.mesh_data.as_ref(), self.last_stroke_end) {
+                            let pivot = match (
+                                self.hide.visible_mesh().or(self.mesh_data.as_ref()),
+                                self.last_stroke_end,
+                            ) {
                                 (Some(mesh), Some(end)) => self.world_at(response.rect, mesh, end),
                                 _ => None,
                             };
@@ -2883,6 +3042,159 @@ mod tests {
             .world_at(rect200(), &quad(), egui::pos2(100.0, 100.0))
             .expect("center ray must hit the quad");
         assert!(w.distance(glam::Vec3::ZERO) < 1e-4, "got {w:?}");
+    }
+
+    // --- geometry masks K5: hide-excluded ---
+
+    /// Two unit quads facing the head-on camera: a FRONT one at z = 1
+    /// whose UVs sit in tile 1002, and a BACK one at z = 0 in tile 1001.
+    /// Triangles 0-1 are the front quad (part 0), 2-3 the back (part 1).
+    fn stacked_quads() -> umber_mesh::MeshData {
+        let corners = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+        let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut positions = Vec::new();
+        let mut uvs = Vec::new();
+        for (z, du) in [(1.0, 1.0), (0.0, 0.0)] {
+            for (c, t) in corners.iter().zip(uv) {
+                positions.push([c[0], c[1], z]);
+                uvs.push([t[0] + du, t[1]]);
+            }
+        }
+        umber_mesh::MeshData {
+            positions,
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs,
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            material_names: vec![],
+            triangle_materials: Vec::new(),
+        }
+    }
+
+    fn hiding_viewport(visible: &[bool]) -> Viewport {
+        let mut vp = Viewport {
+            mesh_data: Some(stacked_quads()),
+            ..head_on_viewport()
+        };
+        vp.set_triangle_visibility(Some(visible));
+        vp
+    }
+
+    #[test]
+    fn triangle_visibility_applies_tile_and_mesh_predicates() {
+        use std::collections::BTreeSet;
+        let mesh = stacked_quads();
+        let parts = [0, 0, 1, 1];
+        let names = vec!["front".to_string(), "back".to_string()];
+        let no_meshes: BTreeSet<String> = BTreeSet::new();
+        let no_tiles: BTreeSet<u16> = BTreeSet::new();
+        let all = triangle_visibility(&mesh, &parts, &names, &no_meshes, &no_tiles);
+        assert_eq!(all, vec![true; 4]);
+        let tiles = BTreeSet::from([1002]);
+        let by_tile = triangle_visibility(&mesh, &parts, &names, &no_meshes, &tiles);
+        assert_eq!(by_tile, vec![false, false, true, true]);
+        let meshes = BTreeSet::from(["back".to_string()]);
+        let by_mesh = triangle_visibility(&mesh, &parts, &names, &meshes, &no_tiles);
+        assert_eq!(by_mesh, vec![true, true, false, false]);
+        // Both predicates: either one hides.
+        let both = triangle_visibility(&mesh, &parts, &names, &meshes, &tiles);
+        assert_eq!(both, vec![false; 4]);
+        // No parts table (or a mismatched one): mesh exclusions are
+        // inert, tile exclusions still apply.
+        let inert = triangle_visibility(&mesh, &[], &names, &meshes, &tiles);
+        assert_eq!(inert, vec![false, false, true, true]);
+        let short = triangle_visibility(&mesh, &[1, 1], &names, &meshes, &no_tiles);
+        assert_eq!(short, vec![true; 4]);
+        // A part index past the names table hides nothing.
+        let stray = triangle_visibility(&mesh, &[0, 0, 9, 9], &names, &meshes, &no_tiles);
+        assert_eq!(stray, vec![true; 4]);
+    }
+
+    #[test]
+    fn hidden_triangles_skip_draw_list() {
+        // Off by default: the input alone hides nothing.
+        let mut vp = hiding_viewport(&[false, false, true, true]);
+        assert!(vp.hide.visible_mesh().is_none());
+        vp.set_hide_excluded(true);
+        let drawn = vp.hide.visible_mesh().expect("front quad hidden");
+        // The draw list is exactly the back quad's two triangles, an
+        // index subset over the full vertex array (no re-indexing).
+        assert_eq!(drawn.indices, vec![4, 5, 6, 4, 6, 7]);
+        assert_eq!(drawn.positions.len(), 8);
+        assert!(vp.hide.gpu_dirty, "the GPU subset re-binds next frame");
+        // Short input: missing entries read as visible.
+        vp.set_triangle_visibility(Some(&[true, false]));
+        let drawn = vp.hide.visible_mesh().expect("one triangle hidden");
+        assert_eq!(drawn.indices, vec![0, 1, 2, 4, 5, 6, 4, 6, 7]);
+        // Everything visible: no subset, the full mesh draws.
+        vp.set_triangle_visibility(Some(&[true; 4]));
+        assert!(vp.hide.visible_mesh().is_none());
+        // Everything hidden: an empty draw list, not the full mesh.
+        vp.set_triangle_visibility(Some(&[false; 4]));
+        assert!(vp
+            .hide
+            .visible_mesh()
+            .expect("all hidden")
+            .indices
+            .is_empty());
+        // Cleared input or toggle off: back to the full draw.
+        vp.set_triangle_visibility(None);
+        assert!(vp.hide.visible_mesh().is_none());
+        vp.set_triangle_visibility(Some(&[false; 4]));
+        vp.set_hide_excluded(false);
+        assert!(vp.hide.visible_mesh().is_none());
+    }
+
+    #[test]
+    fn unchanged_visibility_input_is_not_rederived() {
+        let mut vp = hiding_viewport(&[false, false, true, true]);
+        vp.set_hide_excluded(true);
+        vp.hide.gpu_dirty = false;
+        vp.set_triangle_visibility(Some(&[false, false, true, true]));
+        assert!(!vp.hide.gpu_dirty, "same input must not re-upload");
+        vp.set_hide_excluded(true);
+        assert!(!vp.hide.gpu_dirty, "same toggle must not re-upload");
+    }
+
+    #[test]
+    fn hidden_triangles_skip_pick() {
+        let center = egui::pos2(100.0, 100.0);
+        let mut vp = hiding_viewport(&[false, false, true, true]);
+        // Toggle off: the front quad (tile 1002) occludes the back one.
+        let mesh = vp.pick_mesh().expect("mesh").clone();
+        let uv = vp.pick_uv(rect200(), &mesh, center).expect("hit");
+        assert!((uv[0] - 1.5).abs() < 1e-4, "front quad first, got {uv:?}");
+        // Toggle on: the pick passes through the hidden front quad.
+        vp.set_hide_excluded(true);
+        let mesh = vp.pick_mesh().expect("mesh").clone();
+        let uv = vp.pick_uv(rect200(), &mesh, center).expect("hit");
+        assert!(
+            (uv[0] - 0.5).abs() < 1e-4 && (uv[1] - 0.5).abs() < 1e-4,
+            "back quad behind the hidden one, got {uv:?}"
+        );
+        // The stroke path resolves through the same mesh.
+        let picked = vp
+            .pick_mesh()
+            .and_then(|m| vp.pick_with(rect200(), m, center, vp.stroke_raycast_camera()))
+            .map(|(uv, _)| uv)
+            .expect("stroke hit");
+        assert!((picked[0] - 0.5).abs() < 1e-4, "got {picked:?}");
+        // Everything hidden: the pick misses instead of hitting hidden
+        // geometry.
+        vp.set_triangle_visibility(Some(&[false; 4]));
+        let mesh = vp.pick_mesh().expect("mesh").clone();
+        assert!(vp.pick_uv(rect200(), &mesh, center).is_none());
+    }
+
+    #[test]
+    fn hide_toggle_is_not_persisted() {
+        // Session-only: a fresh viewport starts with the toggle off and no
+        // input, and the toggle rides none of the persisted overlay state.
+        let vp = Viewport::default();
+        assert!(!vp.hide_excluded());
+        assert!(vp.hide.visible.is_none());
+        let mut on = hiding_viewport(&[false; 4]);
+        on.set_hide_excluded(true);
+        assert_eq!(on.overlays(), Viewport::default().overlays());
     }
 
     #[test]

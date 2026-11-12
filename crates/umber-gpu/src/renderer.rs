@@ -535,8 +535,8 @@ impl GpuContext {
             pipeline: self.openpbr_pipeline.clone(),
             bind_group,
             vertex_buffer: buffers.vertex_buffer.clone(),
-            index_buffer: buffers.index_buffer.clone(),
-            index_count: buffers.index_count,
+            index_buffer: buffers.draw_index_buffer().clone(),
+            index_count: buffers.draw_index_count(),
         }
     }
 
@@ -578,8 +578,8 @@ impl GpuContext {
             pipeline: self.wire_pipeline.clone(),
             bind_group: buffers.bind_group.clone(),
             color_bind_group,
-            vertex_buffer: buffers.wire_buffer.clone(),
-            vertex_count: buffers.wire_count,
+            vertex_buffer: buffers.draw_wire_buffer().clone(),
+            vertex_count: buffers.draw_wire_count(),
             uniform_buffer: buffers.uniform_buffer.clone(),
             uniform,
         }
@@ -1369,11 +1369,28 @@ pub struct MeshBuffers {
     bind_group: wgpu::BindGroup,
     /// Duplicated-vertex wireframe buffer (Wave-4 item 7): 3 verts per
     /// triangle with barycentric corners, built once at upload from the
-    /// index list. Drawn non-indexed through the wire pipeline.
+    /// the index list. Drawn non-indexed through the wire pipeline.
     wire_buffer: wgpu::Buffer,
     /// Number of wire verts (3x the valid-triangle count; may be 0 for
     /// an index-less mesh — the buffer then holds one padding vert and
     /// every wire draw is a 0..0 no-op).
+    wire_count: u32,
+    /// The draw subset (geometry masks K5, hide-excluded): a SECOND
+    /// index buffer plus its wire buffer holding only the visible
+    /// triangles, set by [`Self::set_draw_subset`]. `None` (the default
+    /// and every fresh upload) draws the full mesh through the original
+    /// buffers, byte-identical to the pre-subset frame.
+    subset: Option<DrawSubset>,
+}
+
+/// The visible-triangle half of [`MeshBuffers`]: index + wire buffers
+/// built from a sub-mesh that shares the full mesh's vertex buffer (the
+/// `umber_mesh::filter_mesh_for_triangles` contract: index-subset, never
+/// re-indexed), so only the indices change.
+struct DrawSubset {
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    wire_buffer: wgpu::Buffer,
     wire_count: u32,
 }
 
@@ -1561,7 +1578,123 @@ impl MeshBuffers {
             bind_group,
             wire_buffer,
             wire_count,
+            subset: None,
         })
+    }
+
+    /// Restricts the mesh and wireframe draws to `subset`'s triangles
+    /// (geometry masks K5, hide-excluded), or restores the full draw with
+    /// `None`. `subset` must index the SAME vertex array the buffers were
+    /// uploaded from (a `umber_mesh::filter_mesh_for_triangles` result of
+    /// the uploaded mesh): only its `indices` are read, plus `positions`
+    /// for the wire verts. Indices past the uploaded vertex count are
+    /// dropped per triangle (the wire builder's leniency), so a stale
+    /// subset can never address outside the vertex buffer. An empty
+    /// subset uploads one padding index/vert and draws nothing (0..0),
+    /// the upload path's zero-sized-buffer rule. A count past `u32::MAX`
+    /// is refused like [`Self::upload`] and leaves the previous draw.
+    pub fn set_draw_subset(
+        &mut self,
+        gpu: &GpuContext,
+        subset: Option<&umber_mesh::MeshData>,
+    ) -> Result<(), GpuError> {
+        let Some(sub) = subset else {
+            self.subset = None;
+            return Ok(());
+        };
+        let vertex_count = (self.vertex_buffer.size() / size_of::<Vertex>() as u64) as usize;
+        let in_range = |tri: &[u32]| tri.iter().all(|&i| (i as usize) < vertex_count);
+        // The common case (every triangle addresses the uploaded
+        // vertices, trailing partial triple aside) borrows `sub`; only a
+        // stale subset pays for a filtered copy.
+        let clean: Cow<'_, umber_mesh::MeshData> =
+            if sub.indices.len().is_multiple_of(3) && sub.indices.chunks_exact(3).all(in_range) {
+                Cow::Borrowed(sub)
+            } else {
+                Cow::Owned(umber_mesh::MeshData {
+                    positions: sub.positions.clone(),
+                    indices: sub
+                        .indices
+                        .chunks_exact(3)
+                        .filter(|tri| in_range(tri))
+                        .flatten()
+                        .copied()
+                        .collect(),
+                    ..umber_mesh::MeshData::default()
+                })
+            };
+        let wire_vertices = umber_mesh::wire_vertices_from_indices(&clean);
+        let index_count = u32::try_from(clean.indices.len())
+            .map_err(|_| GpuError::IndexCountOverflow(clean.indices.len()))?;
+        let wire_count = u32::try_from(wire_vertices.len())
+            .map_err(|_| GpuError::IndexCountOverflow(clean.indices.len()))?;
+        let index_upload: &[u32] = if clean.indices.is_empty() {
+            &[0]
+        } else {
+            &clean.indices
+        };
+        let padding = [umber_mesh::WireVertex {
+            position: [0.0; 3],
+            bary: [1.0, 0.0, 0.0],
+        }];
+        let wire_upload: &[umber_mesh::WireVertex] = if wire_vertices.is_empty() {
+            &padding
+        } else {
+            &wire_vertices
+        };
+        let device = &gpu.device;
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_mesh_subset_index_buffer"),
+            contents: bytemuck::cast_slice(index_upload),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let wire_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_wire_subset_vertex_buffer"),
+            contents: bytemuck::cast_slice(wire_upload),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        self.subset = Some(DrawSubset {
+            index_buffer,
+            index_count,
+            wire_buffer,
+            wire_count,
+        });
+        Ok(())
+    }
+
+    /// Whether a draw subset is bound ([`Self::set_draw_subset`]).
+    pub fn has_draw_subset(&self) -> bool {
+        self.subset.is_some()
+    }
+
+    /// The index count the mesh draw issues: the subset's while one is
+    /// bound, else [`Self::index_count`].
+    pub fn draw_index_count(&self) -> u32 {
+        self.subset
+            .as_ref()
+            .map_or(self.index_count, |s| s.index_count)
+    }
+
+    /// The wire vert count the wireframe draw issues: the subset's while
+    /// one is bound, else [`Self::wire_count`].
+    pub fn draw_wire_count(&self) -> u32 {
+        self.subset
+            .as_ref()
+            .map_or(self.wire_count, |s| s.wire_count)
+    }
+
+    /// The index buffer the mesh draw binds (subset or full).
+    fn draw_index_buffer(&self) -> &wgpu::Buffer {
+        self.subset
+            .as_ref()
+            .map_or(&self.index_buffer, |s| &s.index_buffer)
+    }
+
+    /// The wire vertex buffer the wireframe draw binds (subset or full).
+    fn draw_wire_buffer(&self) -> &wgpu::Buffer {
+        self.subset
+            .as_ref()
+            .map_or(&self.wire_buffer, |s| &s.wire_buffer)
     }
 
     /// Rebuilds the group-0 bind group from the current flags + bound
@@ -1821,8 +1954,8 @@ impl MeshBuffers {
             bind_group: self.bind_group.clone(),
             lut_bind_group: lut.unwrap_or(&gpu.identity_lut).bind_group().clone(),
             vertex_buffer: self.vertex_buffer.clone(),
-            index_buffer: self.index_buffer.clone(),
-            index_count: self.index_count,
+            index_buffer: self.draw_index_buffer().clone(),
+            index_count: self.draw_index_count(),
             uniform_buffer: self.uniform_buffer.clone(),
             uniform,
             view_mode_buffer: self.view_mode_buffer.clone(),
@@ -2251,6 +2384,81 @@ mod tests {
 
             let uniform = CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y);
             let _callback = buffers.paint_callback(&gpu, uniform, None);
+        }
+
+        #[test]
+        fn draw_subset_splits_the_mesh_and_wire_draws() {
+            let Some((adapter, device, queue)) = try_request_device() else {
+                eprintln!("skipping draw_subset_splits_the_mesh_and_wire_draws: no wgpu adapter");
+                return;
+            };
+            let gpu = GpuContext::new(
+                adapter,
+                device,
+                queue,
+                wgpu::TextureFormat::Rgba8Unorm,
+                None,
+            );
+            let mesh = umber_mesh::MeshData {
+                positions: vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                normals: vec![],
+                uvs: vec![],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material_names: vec![],
+                triangle_materials: Vec::new(),
+            };
+            let mut buffers = MeshBuffers::upload(&gpu, &mesh).expect("upload succeeds");
+            assert!(!buffers.has_draw_subset());
+            assert_eq!(
+                (buffers.draw_index_count(), buffers.draw_wire_count()),
+                (6, 6)
+            );
+            // One triangle visible: both draws shrink to it; the full
+            // counts are untouched.
+            let one = umber_mesh::filter_mesh_for_triangles(&mesh, &[1]);
+            buffers
+                .set_draw_subset(&gpu, Some(&one))
+                .expect("subset binds");
+            assert!(buffers.has_draw_subset());
+            assert_eq!(
+                (buffers.draw_index_count(), buffers.draw_wire_count()),
+                (3, 3)
+            );
+            assert_eq!((buffers.index_count(), buffers.wire_count()), (6, 6));
+            let uniform = CameraUniform::new(glam::Mat4::IDENTITY, glam::Vec3::NEG_Y);
+            let cb = buffers.paint_callback(&gpu, uniform, None);
+            assert_eq!(cb.index_count, 3);
+            let wire = gpu.wire_callback(&buffers, uniform, WireColor::cage());
+            assert_eq!(wire.vertex_count, 3);
+            // A stale subset addressing past the vertex buffer drops the
+            // bad triangle instead of drawing out of range.
+            let mut stale = one.clone();
+            stale.indices.extend_from_slice(&[0, 1, 99]);
+            buffers
+                .set_draw_subset(&gpu, Some(&stale))
+                .expect("subset binds");
+            assert_eq!(buffers.draw_index_count(), 3);
+            // Empty subset: nothing draws (padding buffer, 0..0).
+            let none = umber_mesh::filter_mesh_for_triangles(&mesh, &[]);
+            buffers
+                .set_draw_subset(&gpu, Some(&none))
+                .expect("subset binds");
+            assert_eq!(
+                (buffers.draw_index_count(), buffers.draw_wire_count()),
+                (0, 0)
+            );
+            // Cleared: the full draw again.
+            buffers.set_draw_subset(&gpu, None).expect("clear");
+            assert!(!buffers.has_draw_subset());
+            assert_eq!(
+                (buffers.draw_index_count(), buffers.draw_wire_count()),
+                (6, 6)
+            );
         }
 
         #[test]
