@@ -162,6 +162,19 @@ pub enum ProjectError {
     /// increment away from overflowing.
     #[error("layer id overflow in texture set {0:?}")]
     LayerIdOverflow(String),
+
+    /// A layer file's geometry mask breaks a load-time cap
+    /// (`layers::MAX_GEOMETRY_MASK_*`). Refused, never truncated: a
+    /// truncating load would break byte-identical re-save.
+    #[error("layer {id} in texture set {set:?} has an over-cap geometry mask: {detail}")]
+    GeometryMaskOverCap {
+        /// The texture set the layer belongs to.
+        set: String,
+        /// The offending layer's id.
+        id: u64,
+        /// Which cap broke, with the actual count or length.
+        detail: String,
+    },
 }
 
 /// The tone-map curve family, as persisted: a plain-data mirror of
@@ -861,6 +874,13 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
                     found: layer.id,
                 });
             }
+            if let Some(detail) = layer.geometry_mask.cap_violation() {
+                return Err(ProjectError::GeometryMaskOverCap {
+                    set: layer_set.texture_set.clone(),
+                    id,
+                    detail,
+                });
+            }
             stack_layers.push(layer);
         }
 
@@ -1056,6 +1076,111 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A saved pre-geometry-mask project at `dir`: one set, one paint
+    /// layer whose file is `layer_bytes`.
+    fn write_one_layer_project(dir: &Path, layer_bytes: &[u8]) {
+        fs::create_dir_all(dir.join("layers").join("Body")).unwrap();
+        fs::write(
+            dir.join("project.json"),
+            br#"{"version":1,"texture_sets":[{"name":"Body","resolution":2048,"channels":[]}],"layer_sets":[{"texture_set":"Body","layer_ids":[0],"next_layer_id":1}],"settings":{"active_texture_set":null}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("layers").join("Body").join("0.json"), layer_bytes).unwrap();
+    }
+
+    #[test]
+    fn pre_geomask_layer_resaves_byte_identical() {
+        // The golden: a layer file exactly as a pre-geometry-mask build
+        // wrote it (pretty JSON + trailing newline, `fill: null`, no
+        // `material` key). Load → save must reproduce these bytes: the
+        // empty mask is the identity and writes no key.
+        const GOLDEN: &[u8] = b"{\n  \"id\": 0,\n  \"name\": \"Base\",\n  \"kind\": \"Paint\",\n  \"opacity\": 0.5,\n  \"visible\": true,\n  \"blend_mode\": \"Multiply\",\n  \"mask\": {\n    \"name\": \"Base Mask\",\n    \"enabled\": false\n  },\n  \"fill\": null\n}\n";
+        let dir = unique_temp_dir("pre-geomask");
+        write_one_layer_project(&dir, GOLDEN);
+
+        let loaded = load_from_dir(&dir).expect("pre-geomask file must load");
+        let layer = &loaded.layers[0].stack.layers[0];
+        assert!(layer.geometry_mask.is_empty());
+        assert_eq!(loaded.version, 1, "no version bump for geometry masks");
+
+        save_to_dir(&loaded, &dir).expect("resave works");
+        let resaved = fs::read(dir.join("layers").join("Body").join("0.json")).unwrap();
+        assert_eq!(
+            resaved,
+            GOLDEN,
+            "re-save must be byte-identical, got {}",
+            String::from_utf8_lossy(&resaved)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn geometry_mask_round_trips() {
+        use crate::layers::GeometryMask;
+        let dir = unique_temp_dir("geomask-rt");
+        let mut model = fixture_model();
+        let mask = GeometryMask {
+            excluded_meshes: BTreeSet::from(["Visor".to_string(), "Ä strap".to_string()]),
+            // 9999 is out of the UDIM grid: kept as inert data.
+            excluded_tiles: BTreeSet::from([1002, 1011, 9999]),
+        };
+        let base = model.layers[0].stack.layers[0].id;
+        model.layers[0].stack.set_geometry_mask(base, mask.clone());
+        save_to_dir(&model, &dir).expect("save writes");
+        let first =
+            fs::read_to_string(dir.join("layers").join("Body").join(format!("{base}.json")))
+                .unwrap();
+        assert!(first.contains("\"geometry_mask\""), "{first}");
+
+        let loaded = load_from_dir(&dir).expect("load reads");
+        assert_eq!(loaded, model);
+        assert_eq!(loaded.layers[0].stack.layers[0].geometry_mask, mask);
+        // Unmasked layers in the same project still carry no key.
+        let other = loaded.layers[1].stack.layers[0].id;
+        let other_json = fs::read_to_string(
+            dir.join("layers")
+                .join("Helmet")
+                .join(format!("{other}.json")),
+        )
+        .unwrap();
+        assert!(!other_json.contains("geometry_mask"), "{other_json}");
+
+        save_to_dir(&loaded, &dir).expect("resave writes");
+        let second =
+            fs::read_to_string(dir.join("layers").join("Body").join(format!("{base}.json")))
+                .unwrap();
+        assert_eq!(first, second, "save → load → save is byte-identical");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn geometry_mask_over_cap_is_refused() {
+        use crate::layers::{MAX_GEOMETRY_MASK_NAME_BYTES, MAX_GEOMETRY_MASK_TILES};
+        let tiles: Vec<String> = (0..=MAX_GEOMETRY_MASK_TILES)
+            .map(|n| (1001 + n).to_string())
+            .collect();
+        let over_tiles = format!(
+            r#"{{"id":0,"name":"Base","kind":"Paint","opacity":1.0,"visible":true,"blend_mode":"Normal","mask":null,"fill":null,"geometry_mask":{{"excluded_tiles":[{}]}}}}"#,
+            tiles.join(",")
+        );
+        let long_name = format!(
+            r#"{{"id":0,"name":"Base","kind":"Paint","opacity":1.0,"visible":true,"blend_mode":"Normal","mask":null,"fill":null,"geometry_mask":{{"excluded_meshes":["{}"]}}}}"#,
+            "x".repeat(MAX_GEOMETRY_MASK_NAME_BYTES + 1)
+        );
+        for (label, body) in [("tiles", over_tiles), ("name", long_name)] {
+            let dir = unique_temp_dir(&format!("geomask-cap-{label}"));
+            write_one_layer_project(&dir, body.as_bytes());
+            match load_from_dir(&dir) {
+                Err(ProjectError::GeometryMaskOverCap { set, id, detail }) => {
+                    assert_eq!((set.as_str(), id), ("Body", 0), "{label}");
+                    assert!(!detail.is_empty());
+                }
+                other => panic!("{label}: over-cap mask must be refused, got {other:?}"),
+            }
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

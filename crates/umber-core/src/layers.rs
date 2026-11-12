@@ -818,6 +818,87 @@ pub fn mask_coverage(value: u8) -> f32 {
     f32::from(value) / 255.0
 }
 
+/// Load-time cap on [`GeometryMask::excluded_meshes`] entries per layer
+/// (the geomask brief's security model: over the cap is a refused load,
+/// never a silent truncation, so re-save stays byte-identical).
+pub const MAX_GEOMETRY_MASK_MESHES: usize = 4096;
+/// Load-time cap on one excluded mesh name, in bytes. Importers truncate
+/// part names at a char boundary to this length, so a stored exclusion
+/// always matches the imported name.
+pub const MAX_GEOMETRY_MASK_NAME_BYTES: usize = 1024;
+/// Load-time cap on [`GeometryMask::excluded_tiles`] entries per layer:
+/// the UDIM grid size (`1001..=1100`).
+pub const MAX_GEOMETRY_MASK_TILES: usize = 100;
+
+/// A layer's geometry mask (R-B2, `docs/loop/briefs/2026-11-12-geomask-design.md`):
+/// the mesh-name and UV-tile EXCLUSIONS that keep the layer off part of
+/// the model.
+///
+/// A triangle is included iff its mesh part is not in `excluded_meshes`
+/// and its UDIM tile is not in `excluded_tiles`. Exclusions, not
+/// inclusions: the empty mask is the identity (every pre-feature layer is
+/// unmasked with no key on disk), a mesh or tile that appears later is
+/// included by default, and an exclusion naming a mesh or tile the
+/// current mesh lacks stays inert data. Out-of-grid tile ids are kept
+/// as-is (they match no triangle; keeping them preserves re-save bytes).
+///
+/// Metadata only, like [`LayerMask`]: paint planes are never edited by
+/// the mask, and the composite gate lives in the paint session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeometryMask {
+    /// Mesh part names whose triangles this layer skips.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub excluded_meshes: BTreeSet<String>,
+    /// UDIM tile ids whose triangles this layer skips.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub excluded_tiles: BTreeSet<u16>,
+}
+
+impl GeometryMask {
+    /// Whether the mask excludes nothing (the identity; serialized as no
+    /// key at all).
+    pub fn is_empty(&self) -> bool {
+        self.excluded_meshes.is_empty() && self.excluded_tiles.is_empty()
+    }
+
+    /// The heap bytes this mask holds: every excluded name's bytes plus
+    /// the tile ids' inline size ([`Layer::memory_bytes`]' helper).
+    pub fn memory_bytes(&self) -> usize {
+        self.excluded_meshes.iter().map(String::len).sum::<usize>()
+            + self.excluded_tiles.len() * size_of::<u16>()
+    }
+
+    /// The first load-time cap this mask breaks, described for the
+    /// error message, or `None` when it is within every cap
+    /// ([`MAX_GEOMETRY_MASK_MESHES`], [`MAX_GEOMETRY_MASK_NAME_BYTES`],
+    /// [`MAX_GEOMETRY_MASK_TILES`]).
+    pub fn cap_violation(&self) -> Option<String> {
+        if self.excluded_meshes.len() > MAX_GEOMETRY_MASK_MESHES {
+            return Some(format!(
+                "{} excluded meshes (cap {MAX_GEOMETRY_MASK_MESHES})",
+                self.excluded_meshes.len()
+            ));
+        }
+        if let Some(name) = self
+            .excluded_meshes
+            .iter()
+            .find(|n| n.len() > MAX_GEOMETRY_MASK_NAME_BYTES)
+        {
+            return Some(format!(
+                "an excluded mesh name of {} bytes (cap {MAX_GEOMETRY_MASK_NAME_BYTES})",
+                name.len()
+            ));
+        }
+        if self.excluded_tiles.len() > MAX_GEOMETRY_MASK_TILES {
+            return Some(format!(
+                "{} excluded tiles (cap {MAX_GEOMETRY_MASK_TILES})",
+                self.excluded_tiles.len()
+            ));
+        }
+        None
+    }
+}
+
 /// A dynamic material layer's per-layer parameters (requirements.md §2 P2
 /// row; `docs/specs/dynamic-materials-design.md` §1.1).
 ///
@@ -947,6 +1028,12 @@ pub struct Layer {
     /// it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialParams>,
+    /// The mesh/tile exclusions (see [`GeometryMask`]). Additive like
+    /// `material`: files without the key load with the empty mask, and an
+    /// empty mask writes no key, so pre-feature layers re-save
+    /// byte-identically (no project version bump).
+    #[serde(default, skip_serializing_if = "GeometryMask::is_empty")]
+    pub geometry_mask: GeometryMask,
 }
 
 impl Layer {
@@ -954,7 +1041,8 @@ impl Layer {
     /// plus heap name bytes plus the fill params' snapshot bytes (if any)
     /// plus the material params' heap (if any: the definition id, channel
     /// names and override names — the embedded definition mtlx itself is
-    /// counted on the project, not per layer).
+    /// counted on the project, not per layer) plus the geometry mask's
+    /// excluded names and tiles.
     /// See [`LayerStack::memory_bytes`] for the honesty contract (metadata
     /// only, no GPU tiles yet; the material eval cache is reported by the
     /// app state, never here).
@@ -968,6 +1056,7 @@ impl Layer {
                 .map(FillParams::memory_bytes)
                 .unwrap_or(0)
             + self.material.as_ref().map(material_bytes).unwrap_or(0)
+            + self.geometry_mask.memory_bytes()
     }
 }
 
@@ -1076,6 +1165,7 @@ impl LayerStack {
             mask: None,
             fill: None,
             material: None,
+            geometry_mask: GeometryMask::default(),
         });
         id
     }
@@ -1098,6 +1188,7 @@ impl LayerStack {
             mask: None,
             fill: None,
             material: None,
+            geometry_mask: GeometryMask::default(),
         });
         self.next_id = self.next_id.max(id + 1);
     }
@@ -1215,6 +1306,15 @@ impl LayerStack {
         Some(std::mem::replace(&mut layer.name, name))
     }
 
+    /// Replaces the layer's geometry mask, returning the previous one —
+    /// the undo handle. `None` when the layer is unknown (nothing
+    /// changes). Every layer kind accepts the write (a folder's mask is
+    /// stored and inert until folder membership exists).
+    pub fn set_geometry_mask(&mut self, id: u64, mask: GeometryMask) -> Option<GeometryMask> {
+        let layer = self.layer_mut(id)?;
+        Some(std::mem::replace(&mut layer.geometry_mask, mask))
+    }
+
     /// Enables or disables the layer's mask, returning the previous flag.
     /// `None` when the layer is unknown or has no mask (nothing changes).
     pub fn set_mask_enabled(&mut self, id: u64, enabled: bool) -> Option<bool> {
@@ -1257,6 +1357,7 @@ impl LayerStack {
             mask: None,
             fill: None,
             material: None,
+            geometry_mask: GeometryMask::default(),
         });
         Ok(id)
     }
@@ -1655,6 +1756,16 @@ pub enum LayerCommand {
         /// Previous flag, captured by `apply` for `revert`.
         old: Option<bool>,
     },
+    /// Replaces a layer's geometry mask (see
+    /// [`LayerStack::set_geometry_mask`]).
+    SetGeometryMask {
+        /// Id of the layer whose geometry mask changes.
+        id: u64,
+        /// The new mask.
+        new: GeometryMask,
+        /// Previous mask, captured by `apply` for `revert`.
+        old: Option<GeometryMask>,
+    },
 }
 
 impl LayerCommand {
@@ -1710,7 +1821,8 @@ impl LayerCommand {
             | Self::SetInstanceSource { id, .. }
             | Self::AttachMask { id, .. }
             | Self::DetachMask { id, .. }
-            | Self::SetMaskEnabled { id, .. } => Some(*id),
+            | Self::SetMaskEnabled { id, .. }
+            | Self::SetGeometryMask { id, .. } => Some(*id),
         }
     }
 
@@ -1790,6 +1902,15 @@ impl LayerCommand {
             old: None,
         }
     }
+
+    /// Builds a [`SetGeometryMask`](LayerCommand::SetGeometryMask) command.
+    pub fn set_geometry_mask(id: u64, mask: GeometryMask) -> Self {
+        LayerCommand::SetGeometryMask {
+            id,
+            new: mask,
+            old: None,
+        }
+    }
 }
 
 impl LayerCommand {
@@ -1851,6 +1972,9 @@ impl Command for LayerCommand {
             }
             LayerCommand::SetMaskEnabled { id, new, old } => {
                 *old = doc.set_mask_enabled(*id, *new);
+            }
+            LayerCommand::SetGeometryMask { id, new, old } => {
+                *old = doc.set_geometry_mask(*id, new.clone());
             }
         }
     }
@@ -1967,6 +2091,11 @@ impl Command for LayerCommand {
             LayerCommand::SetMaskEnabled { id, old, .. } => {
                 if let Some(value) = old.take() {
                     doc.set_mask_enabled(*id, value);
+                }
+            }
+            LayerCommand::SetGeometryMask { id, old, .. } => {
+                if let Some(mask) = old.take() {
+                    doc.set_geometry_mask(*id, mask);
                 }
             }
         }
@@ -2422,6 +2551,123 @@ mod tests {
         let params = sample_material_params();
         let expect = bare + material_bytes(&params);
         assert_eq!(with, expect, "every heap string counted exactly once");
+    }
+
+    fn sample_geometry_mask() -> GeometryMask {
+        GeometryMask {
+            excluded_meshes: BTreeSet::from(["Helmet".to_string(), "Visor".to_string()]),
+            excluded_tiles: BTreeSet::from([1002, 1011]),
+        }
+    }
+
+    #[test]
+    fn geometry_mask_default_is_empty() {
+        let mask = GeometryMask::default();
+        assert!(mask.is_empty());
+        assert_eq!(mask.cap_violation(), None);
+        // Every construction path starts unmasked (the identity).
+        let mut stack = LayerStack::new();
+        let paint = stack.add_layer("Base", LayerKind::Paint);
+        let inst = stack.add_instance("Copy", paint).unwrap();
+        assert!(stack.layer(paint).unwrap().geometry_mask.is_empty());
+        assert!(stack.layer(inst).unwrap().geometry_mask.is_empty());
+        // The empty mask writes no key; a non-empty one writes only its
+        // non-empty halves.
+        let json = serde_json::to_string(stack.layer(paint).unwrap()).unwrap();
+        assert!(!json.contains("geometry_mask"), "{json}");
+        let tiles_only = GeometryMask {
+            excluded_tiles: BTreeSet::from([1001]),
+            ..GeometryMask::default()
+        };
+        assert!(!tiles_only.is_empty());
+        assert_eq!(
+            serde_json::to_string(&tiles_only).unwrap(),
+            r#"{"excluded_tiles":[1001]}"#
+        );
+    }
+
+    #[test]
+    fn set_geometry_mask_undo_restores_old() {
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Base", LayerKind::Paint);
+        let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
+        let mask = sample_geometry_mask();
+        undo.push(
+            LayerCommand::set_geometry_mask(id, mask.clone()),
+            &mut stack,
+        );
+        assert_eq!(stack.layer(id).unwrap().geometry_mask, mask);
+        let narrower = GeometryMask {
+            excluded_tiles: BTreeSet::from([1002]),
+            ..GeometryMask::default()
+        };
+        undo.push(
+            LayerCommand::set_geometry_mask(id, narrower.clone()),
+            &mut stack,
+        );
+        assert_eq!(stack.layer(id).unwrap().geometry_mask, narrower);
+
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().geometry_mask, mask);
+        assert!(undo.undo(&mut stack));
+        assert!(stack.layer(id).unwrap().geometry_mask.is_empty());
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().geometry_mask, mask);
+
+        // Unknown ids change nothing and capture nothing to revert.
+        assert_eq!(stack.set_geometry_mask(99, mask.clone()), None);
+        let mut stray = LayerCommand::set_geometry_mask(99, mask);
+        let before = stack.clone();
+        stray.apply(&mut stack);
+        stray.revert(&mut stack);
+        assert_eq!(stack, before);
+        assert_eq!(
+            LayerCommand::set_geometry_mask(id, GeometryMask::default()).target_layer(&stack),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn geometry_mask_memory_bytes_counts_names() {
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Base", LayerKind::Paint);
+        let bare = stack.layer(id).unwrap().memory_bytes();
+        stack.set_geometry_mask(id, sample_geometry_mask());
+        let with = stack.layer(id).unwrap().memory_bytes();
+        // "Helmet" + "Visor" = 11 name bytes, plus two u16 tile ids.
+        assert_eq!(with, bare + 11 + 2 * size_of::<u16>());
+    }
+
+    #[test]
+    fn geometry_mask_cap_violation_names_each_cap() {
+        let at_cap = GeometryMask {
+            excluded_meshes: (0..MAX_GEOMETRY_MASK_MESHES)
+                .map(|n| format!("m{n}"))
+                .collect(),
+            excluded_tiles: (0..MAX_GEOMETRY_MASK_TILES as u16)
+                .map(|n| 1001 + n)
+                .collect(),
+        };
+        assert_eq!(at_cap.cap_violation(), None, "exactly at the cap loads");
+
+        let mut meshes = at_cap.clone();
+        meshes.excluded_meshes.insert("one-more".into());
+        assert!(meshes.cap_violation().unwrap().contains("excluded meshes"));
+
+        let long = GeometryMask {
+            excluded_meshes: BTreeSet::from(["x".repeat(MAX_GEOMETRY_MASK_NAME_BYTES + 1)]),
+            ..GeometryMask::default()
+        };
+        assert!(long.cap_violation().unwrap().contains("mesh name"));
+        let exact = GeometryMask {
+            excluded_meshes: BTreeSet::from(["x".repeat(MAX_GEOMETRY_MASK_NAME_BYTES)]),
+            ..GeometryMask::default()
+        };
+        assert_eq!(exact.cap_violation(), None);
+
+        let mut tiles = at_cap;
+        tiles.excluded_tiles.insert(5000); // out-of-grid ids still count
+        assert!(tiles.cap_violation().unwrap().contains("excluded tiles"));
     }
 
     fn blend(mode: BlendMode, src: f32, dst: f32) -> f32 {

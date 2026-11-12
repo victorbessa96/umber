@@ -173,6 +173,9 @@ pub enum HistoryKind {
     DetachMask,
     /// [`LayerCommand::SetMaskEnabled`] (a mask flips enabled).
     SetMaskEnabled,
+    /// [`LayerCommand::SetGeometryMask`] (a layer's mesh/tile exclusions
+    /// change).
+    SetGeometryMask,
     /// A brush stroke committed by the paint session. Undoable when recorded
     /// with a stroke depth (the per-frame drain's commit): clicking the row
     /// drives the stroke journal to it. Context-recorded strokes (no depth)
@@ -239,6 +242,7 @@ impl HistoryKind {
             LayerCommand::AttachMask { .. } => Self::AttachMask,
             LayerCommand::DetachMask { .. } => Self::DetachMask,
             LayerCommand::SetMaskEnabled { .. } => Self::SetMaskEnabled,
+            LayerCommand::SetGeometryMask { .. } => Self::SetGeometryMask,
         }
     }
 
@@ -263,6 +267,7 @@ impl HistoryKind {
             Self::AttachMask => tr("history.op-attach-mask"),
             Self::DetachMask => tr("history.op-detach-mask"),
             Self::SetMaskEnabled => tr("history.op-set-mask-enabled"),
+            Self::SetGeometryMask => tr("history.op-set-geometry-mask"),
             Self::BrushStroke => tr("history.op-brush-stroke"),
             Self::GraphAddNode => tr("history.op-graph-add-node"),
             Self::GraphRemoveNode => tr("history.op-graph-remove-node"),
@@ -301,6 +306,7 @@ impl HistoryKind {
             Self::AttachMask => "attach mask",
             Self::DetachMask => "detach mask",
             Self::SetMaskEnabled => "toggle mask",
+            Self::SetGeometryMask => "set geometry mask",
             Self::BrushStroke => "brush stroke",
             Self::GraphAddNode => "add graph node",
             Self::GraphRemoveNode => "remove graph node",
@@ -1719,6 +1725,7 @@ mod tests {
             AttachMask,
             DetachMask,
             SetMaskEnabled,
+            SetGeometryMask,
             BrushStroke,
             GraphAddNode,
             GraphRemoveNode,
@@ -1798,6 +1805,11 @@ mod tests {
                 LayerCommand::set_blend_mode(0, umber_core::layers::BlendMode::Multiply),
                 HistoryKind::SetBlendMode,
                 "Set blend mode",
+            ),
+            (
+                LayerCommand::set_geometry_mask(0, umber_core::layers::GeometryMask::default()),
+                HistoryKind::SetGeometryMask,
+                "Set geometry mask",
             ),
         ];
         for (command, kind, label) in cases {

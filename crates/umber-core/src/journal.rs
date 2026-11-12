@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::layers::{BlendMode, Layer, LayerCommand, LayerKind, LayerStack, MaterialParams};
+use crate::layers::{
+    BlendMode, GeometryMask, Layer, LayerCommand, LayerKind, LayerStack, MaterialParams,
+};
 use crate::project::ProjectModel;
 use crate::undo::Command;
 use umber_mesh::FillParams;
@@ -61,8 +63,10 @@ pub enum JournalOp {
     Insert {
         /// The stack position the layer landed at.
         index: usize,
-        /// The complete layer body.
-        layer: Layer,
+        /// The complete layer body. Boxed so the op enum stays small
+        /// (clippy `large_enum_variant`); serde writes a `Box<Layer>`
+        /// exactly as a `Layer`, so the line shape is unchanged.
+        layer: Box<Layer>,
     },
     /// A layer removed by id ([`LayerCommand::Remove`], or undoing an Add).
     Remove {
@@ -143,6 +147,16 @@ pub enum JournalOp {
         id: u64,
         /// The flag after the op.
         enabled: bool,
+    },
+    /// A layer's geometry mask ([`LayerCommand::SetGeometryMask`]): the
+    /// whole mask the stack holds after the op (absolute, so replay is
+    /// idempotent). An older build stops replay at this line (unknown op),
+    /// the brief's named downgrade behavior.
+    SetGeometryMask {
+        /// The layer's id.
+        id: u64,
+        /// The mask after the op (empty = unmasked).
+        mask: GeometryMask,
     },
     /// A layer's name ([`LayerCommand::Rename`]).
     Rename {
@@ -244,6 +258,13 @@ impl JournalOp {
                         enabled: mask.enabled,
                     })
             }
+            LayerCommand::SetGeometryMask { id, old, .. } => {
+                old.as_ref()?;
+                stack.layer(*id).map(|layer| JournalOp::SetGeometryMask {
+                    id: *id,
+                    mask: layer.geometry_mask.clone(),
+                })
+            }
             LayerCommand::Rename { id, .. } => stack.layer(*id).map(|layer| JournalOp::Rename {
                 id: *id,
                 name: layer.name.clone(),
@@ -260,7 +281,7 @@ impl JournalOp {
             LayerCommand::Remove { removed, .. } => {
                 removed.as_ref().map(|(index, layer)| JournalOp::Insert {
                     index: *index,
-                    layer: layer.clone(),
+                    layer: Box::new(layer.clone()),
                 })
             }
             // Revert runs `reorder(applied_to, from)`: the layer now at
@@ -310,6 +331,9 @@ impl JournalOp {
             LayerCommand::SetMaskEnabled { id, old, .. } => {
                 old.map(|enabled| JournalOp::SetMaskEnabled { id: *id, enabled })
             }
+            LayerCommand::SetGeometryMask { id, old, .. } => old
+                .clone()
+                .map(|mask| JournalOp::SetGeometryMask { id: *id, mask }),
             LayerCommand::Rename { id, old, .. } => old.as_ref().map(|name| JournalOp::Rename {
                 id: *id,
                 name: name.clone(),
@@ -352,8 +376,13 @@ impl JournalOp {
                 }
             }
             JournalOp::Insert { index, layer } => {
-                if layer.id != u64::MAX && stack.layer(layer.id).is_none() {
-                    stack.insert_layer(*index, layer.clone());
+                // An over-cap geometry mask fails the same load-time caps
+                // a layer file would (see `SetGeometryMask` below).
+                if layer.id != u64::MAX
+                    && layer.geometry_mask.cap_violation().is_none()
+                    && stack.layer(layer.id).is_none()
+                {
+                    stack.insert_layer(*index, (**layer).clone());
                 }
             }
             JournalOp::Remove { id } => {
@@ -416,6 +445,17 @@ impl JournalOp {
             }
             JournalOp::SetMaskEnabled { id, enabled } => {
                 let _ = stack.set_mask_enabled(*id, *enabled);
+            }
+            JournalOp::SetGeometryMask { id, mask } => {
+                // The load-time caps hold on the replay path too: an
+                // over-cap mask (a hand-edited or corrupt journal) is
+                // skipped, never stored, so a recovering save cannot write
+                // a layer file the next load refuses. Replay is
+                // best-effort, never an error: the line is consumed
+                // without effect.
+                if mask.cap_violation().is_none() {
+                    let _ = stack.set_geometry_mask(*id, mask.clone());
+                }
             }
             JournalOp::Rename { id, name } => {
                 let _ = stack.rename_layer(*id, name.clone());
@@ -818,6 +858,70 @@ mod tests {
 
         let recovered = load_from_dir(&dir).expect("recovering load");
         assert_eq!(recovered.layers[0].stack, live);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_geometry_mask_replays_after_crash() {
+        use std::collections::BTreeSet;
+        let dir = unique_temp_dir("set-geometry-mask");
+        let model = saved_base_project(&dir);
+        let mut session = Session::start(&dir, &model);
+        let mask = GeometryMask {
+            excluded_meshes: BTreeSet::from(["Visor".to_string()]),
+            excluded_tiles: BTreeSet::from([1002]),
+        };
+        session.run(LayerCommand::set_geometry_mask(0, mask.clone()));
+        session.undo(); // back to the empty mask
+        assert!(session.stack.layer(0).unwrap().geometry_mask.is_empty());
+        session.redo();
+        assert_eq!(session.stack.layer(0).unwrap().geometry_mask, mask);
+        // An unknown id is a no-op apply: nothing journaled.
+        session.run(LayerCommand::set_geometry_mask(42, mask.clone()));
+        let live = session.stack.clone();
+        drop(session); // the crash: no save
+
+        let entries = read_journal(&dir).unwrap();
+        assert_eq!(
+            entries.iter().map(|e| e.op.clone()).collect::<Vec<_>>(),
+            vec![
+                JournalOp::SetGeometryMask {
+                    id: 0,
+                    mask: mask.clone()
+                },
+                JournalOp::SetGeometryMask {
+                    id: 0,
+                    mask: GeometryMask::default()
+                },
+                JournalOp::SetGeometryMask {
+                    id: 0,
+                    mask: mask.clone()
+                },
+            ]
+        );
+        let text = fs::read_to_string(journal_path(&dir)).unwrap();
+        assert!(
+            text.lines().next().unwrap().contains(
+                r#""op":{"type":"set_geometry_mask","id":0,"mask":{"excluded_meshes":["Visor"],"excluded_tiles":[1002]}}"#
+            ),
+            "{text}"
+        );
+
+        let recovered = load_from_dir(&dir).expect("recovering load");
+        assert_eq!(recovered.layers[0].stack, live);
+        assert_eq!(
+            recovered.layers[0].stack.layer(0).unwrap().geometry_mask,
+            mask
+        );
+
+        // An over-cap mask on the replay path is consumed without effect.
+        let mut stack = recovered.layers[0].stack.clone();
+        let over = GeometryMask {
+            excluded_tiles: (0..=crate::layers::MAX_GEOMETRY_MASK_TILES as u16).collect(),
+            ..GeometryMask::default()
+        };
+        JournalOp::SetGeometryMask { id: 0, mask: over }.apply_to(&mut stack);
+        assert_eq!(stack.layer(0).unwrap().geometry_mask, mask);
         let _ = fs::remove_dir_all(&dir);
     }
 

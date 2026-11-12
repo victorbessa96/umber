@@ -40,7 +40,9 @@ pub mod uv_dilation;
 pub use assets::{AssetError, AssetRef, AssetStore};
 pub use journal::{Journal, JournalEntry, JournalOp};
 
-pub use layers::{BlendMode, InstanceError, Layer, LayerCommand, LayerKind, LayerMask, LayerStack};
+pub use layers::{
+    BlendMode, GeometryMask, InstanceError, Layer, LayerCommand, LayerKind, LayerMask, LayerStack,
+};
 pub use layers::{MaterialChannel, MaterialParamOverride, MaterialParamValue, MaterialParams};
 pub use project::{
     load_from_dir, save_to_dir, ProjectError, ProjectModel, ProjectSettings, TextureSetLayers,
