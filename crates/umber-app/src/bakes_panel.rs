@@ -113,8 +113,32 @@
 //!   tiles) and the out-dir row in the settings group; the Bake-button
 //!   warnings, the buttons, the param-tracking block, and the status
 //!   line stay on the plain panel `Ui` as actions, not parameters.
+//!
+//! Baker sync + linked bake groups (R-D1, census D1): [`BakeSync`] holds
+//! per-set [`BakeSettingsBlock`]s (baker kind -> `ParamValue` map + the
+//! out dir), the linked [`BakeGroup`]s (one shared block per group), and
+//! the session clipboard. The panel's sliders stay the one edit surface:
+//! picking a set in the sync group's "Settings for" combo loads that set's
+//! block (its group's, when linked) into the sliders, and every frame the
+//! sliders are written back to it ([`BakesPanel::commit_focus_settings`]),
+//! so editing any member writes the group block. With no set picked (the
+//! default) nothing is read or written: the pre-R-D1 panel exactly.
+//! - Copy/paste: [`BakesPanel::copy_settings`] copies the picked set's
+//!   block; [`BakesPanel::paste_settings`] applies it to the checked sets,
+//!   all or nothing: a target missing a carried baker refuses the whole
+//!   paste with the missing kind named ([`BakeSyncError::MissingBaker`]).
+//! - Groups: [`BakesPanel::link_sets`] links the checked sets under the
+//!   picked set's block; "Bake group" fans one `BakeJob` per member per
+//!   planned map out through the existing multi-set dispatch
+//!   ([`BakesPanel::group_plan`]); [`BakesPanel::unlink_set`] copies the
+//!   group block into the member as its own block, so later edits
+//!   diverge (a group left with one member dissolves the same way).
+//! - Persistence: [`BakesPanel::sync_carry`] / [`BakesPanel::load_sync_carry`]
+//!   convert to `umber_core::project::BakeSyncCarry`, the optional
+//!   `bake_sync` block of `project.json`. Manual Bake, Bake all and the
+//!   auto-rebake fire gate are unchanged.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -587,6 +611,422 @@ pub fn skipped_skew_note(skipped: &[u16]) -> Option<String> {
     Some(tr_args("bakes.skipped-skew-note", args))
 }
 
+/// The parameter keys a [`BakeSettingsBlock`] carries per baker (R-D1).
+/// Stable wire names: they land in `project.json`'s `bake_sync` block.
+pub mod bake_param {
+    /// Square bake resolution (`Int`).
+    pub const RESOLUTION: &str = "resolution";
+    /// UV-padding dilation width (`Int`).
+    pub const DILATION: &str = "dilation";
+    /// Margin fill strategy (`Int`: 0 = Extend, 1 = Adjacent faces).
+    pub const MARGIN: &str = "margin";
+    /// Hemisphere ray count (`Int`; the raycast bakers).
+    pub const RAYS: &str = "rays";
+    /// Occluder scope (`Bool`: the baked set's own triangles only).
+    pub const OCCLUDER_OWN_SET: &str = "occluder_own_set";
+    /// Skew edge-protection threshold in degrees (`Float`; the AO guard).
+    pub const SKEW_THRESHOLD: &str = "skew_threshold";
+}
+
+impl BakeSelection {
+    /// The stable baker-kind key (R-D1's persisted settings blocks).
+    pub fn kind_key(self) -> &'static str {
+        match self {
+            Self::Ao => "ao",
+            Self::Curvature => "curvature",
+            Self::Thickness => "thickness",
+            Self::Position => "position",
+            Self::Normal => "normal",
+            Self::WorldNormal => "world_normal",
+            Self::Id => "id",
+            Self::BentNormal => "bent_normal",
+            Self::Height => "height",
+        }
+    }
+
+    /// The inverse of [`Self::kind_key`] (`None` for an unknown key).
+    pub fn from_kind_key(key: &str) -> Option<Self> {
+        BakeSelection::ALL
+            .into_iter()
+            .chain([Self::Height])
+            .find(|s| s.kind_key() == key)
+    }
+
+    /// Whether this baker reads the ray count + occluder scope.
+    fn is_raycast(self) -> bool {
+        matches!(self, Self::Ao | Self::Thickness | Self::BentNormal)
+    }
+}
+
+/// One texture set's bake settings (R-D1): baker kind -> its parameters,
+/// plus the output directory. The key set IS the set's baker set (the
+/// checked maps), which copy/paste checks against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BakeSettingsBlock {
+    /// Per-baker parameters ([`bake_param`] keys).
+    pub bakers: BTreeMap<BakeSelection, BTreeMap<String, umber_graph::ParamValue>>,
+    /// Where the bake writes.
+    pub out_dir: PathBuf,
+}
+
+/// A named group of texture sets sharing ONE settings block (R-D1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BakeGroup {
+    /// Display name (unique within the panel).
+    pub name: String,
+    /// Member set names, in link order.
+    pub members: Vec<String>,
+    /// The shared block every member reads and writes.
+    pub settings: BakeSettingsBlock,
+}
+
+/// Why a baker-sync action refused (R-D1). A refusal changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BakeSyncError {
+    /// Paste with an empty clipboard.
+    NothingCopied,
+    /// A paste target has no baker of a carried kind (no silent drops:
+    /// the whole paste refuses).
+    MissingBaker {
+        /// The target set.
+        set: String,
+        /// The carried baker it lacks.
+        kind: BakeSelection,
+    },
+    /// Linking needs at least two distinct sets.
+    TooFewSets,
+    /// A set is already in a group (one group per set).
+    AlreadyLinked {
+        /// The set.
+        set: String,
+        /// The group holding it.
+        group: String,
+    },
+    /// Unlink on a set that is not in a group.
+    NotLinked {
+        /// The set.
+        set: String,
+    },
+}
+
+impl BakeSyncError {
+    /// The localized one-line refusal shown in the sync group.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NothingCopied => tr("bakes.paste-empty"),
+            Self::MissingBaker { set, kind } => tr_args(
+                "bakes.paste-refused",
+                [
+                    ("set", FluentValue::from(set.clone())),
+                    ("kind", FluentValue::from(kind.label())),
+                ],
+            ),
+            Self::TooFewSets => tr("bakes.link-refused-few"),
+            Self::AlreadyLinked { set, group } => tr_args(
+                "bakes.link-refused-member",
+                [
+                    ("set", FluentValue::from(set.clone())),
+                    ("group", FluentValue::from(group.clone())),
+                ],
+            ),
+            Self::NotLinked { set } => tr_args(
+                "bakes.not-linked",
+                [("set", FluentValue::from(set.clone()))],
+            ),
+        }
+    }
+}
+
+/// The baker-sync state (R-D1): per-set blocks for unlinked sets, the
+/// linked groups, and the session clipboard (never persisted).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BakeSync {
+    sets: BTreeMap<String, BakeSettingsBlock>,
+    groups: Vec<BakeGroup>,
+    clipboard: Option<BakeSettingsBlock>,
+}
+
+impl BakeSync {
+    /// The group holding `set`, if any.
+    pub fn group_of(&self, set: &str) -> Option<&BakeGroup> {
+        self.groups
+            .iter()
+            .find(|g| g.members.iter().any(|m| m == set))
+    }
+
+    /// The linked groups, in creation order.
+    pub fn groups(&self) -> &[BakeGroup] {
+        &self.groups
+    }
+
+    /// The block `set` bakes with: its group's when linked, else its own
+    /// (`None` = never stored).
+    pub fn settings_for(&self, set: &str) -> Option<&BakeSettingsBlock> {
+        match self.group_of(set) {
+            Some(group) => Some(&group.settings),
+            None => self.sets.get(set),
+        }
+    }
+
+    /// Writes `set`'s block: the GROUP block when `set` is linked (every
+    /// member sees it), else the set's own.
+    pub fn write_settings(&mut self, set: &str, block: BakeSettingsBlock) {
+        if let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|g| g.members.iter().any(|m| m == set))
+        {
+            group.settings = block;
+        } else {
+            self.sets.insert(set.to_owned(), block);
+        }
+    }
+
+    /// Puts `block` on the clipboard.
+    pub fn copy(&mut self, block: BakeSettingsBlock) {
+        self.clipboard = Some(block);
+    }
+
+    /// The clipboard, if anything was copied.
+    pub fn clipboard(&self) -> Option<&BakeSettingsBlock> {
+        self.clipboard.as_ref()
+    }
+
+    /// Pastes the clipboard onto `targets` (a target with no stored block
+    /// starts from `fallback`): every carried baker's parameters and the
+    /// out dir overwrite the target's. All or nothing: any target missing
+    /// a carried baker refuses the whole paste, naming it. Returns how
+    /// many targets took the paste.
+    pub fn paste(
+        &mut self,
+        targets: &[String],
+        fallback: &BakeSettingsBlock,
+    ) -> Result<usize, BakeSyncError> {
+        let clip = self.clipboard.clone().ok_or(BakeSyncError::NothingCopied)?;
+        let mut staged = Vec::with_capacity(targets.len());
+        for set in targets {
+            let mut block = self
+                .settings_for(set)
+                .cloned()
+                .unwrap_or_else(|| fallback.clone());
+            for (kind, params) in &clip.bakers {
+                let Some(slot) = block.bakers.get_mut(kind) else {
+                    return Err(BakeSyncError::MissingBaker {
+                        set: set.clone(),
+                        kind: *kind,
+                    });
+                };
+                *slot = params.clone();
+            }
+            block.out_dir = clip.out_dir.clone();
+            staged.push((set, block));
+        }
+        let count = staged.len();
+        for (set, block) in staged {
+            self.write_settings(set, block);
+        }
+        Ok(count)
+    }
+
+    /// Links `members` into a new group sharing `source` (the members'
+    /// own blocks are dropped: the group block replaces them). Returns
+    /// the group's name.
+    pub fn link(
+        &mut self,
+        members: &[String],
+        source: BakeSettingsBlock,
+    ) -> Result<String, BakeSyncError> {
+        let mut distinct: Vec<String> = Vec::new();
+        for m in members {
+            if !distinct.contains(m) {
+                distinct.push(m.clone());
+            }
+        }
+        if distinct.len() < 2 {
+            return Err(BakeSyncError::TooFewSets);
+        }
+        for m in &distinct {
+            if let Some(group) = self.group_of(m) {
+                return Err(BakeSyncError::AlreadyLinked {
+                    set: m.clone(),
+                    group: group.name.clone(),
+                });
+            }
+        }
+        let mut n = self.groups.len() + 1;
+        let name = loop {
+            let candidate = tr_args("bakes.group-default-name", [("n", FluentValue::from(n))]);
+            if !self.groups.iter().any(|g| g.name == candidate) {
+                break candidate;
+            }
+            n += 1;
+        };
+        for m in &distinct {
+            self.sets.remove(m);
+        }
+        self.groups.push(BakeGroup {
+            name: name.clone(),
+            members: distinct,
+            settings: source,
+        });
+        Ok(name)
+    }
+
+    /// Unlinks `set`: the group block is materialized as the set's own
+    /// block (later edits diverge). A group left with one member
+    /// dissolves the same way.
+    pub fn unlink(&mut self, set: &str) -> Result<(), BakeSyncError> {
+        let index = self
+            .groups
+            .iter()
+            .position(|g| g.members.iter().any(|m| m == set))
+            .ok_or_else(|| BakeSyncError::NotLinked {
+                set: set.to_owned(),
+            })?;
+        let group = &mut self.groups[index];
+        group.members.retain(|m| m != set);
+        let block = group.settings.clone();
+        self.sets.insert(set.to_owned(), block.clone());
+        if group.members.len() < 2 {
+            let group = self.groups.remove(index);
+            for m in group.members {
+                self.sets.insert(m, block.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// The sets one bake of `set` covers: its group's members when
+    /// linked, else `set` alone.
+    pub fn bake_sets(&self, set: &str) -> Vec<String> {
+        match self.group_of(set) {
+            Some(group) => group.members.clone(),
+            None => vec![set.to_owned()],
+        }
+    }
+
+    /// The persisted shape (`project.json`'s optional `bake_sync`).
+    pub fn to_carry(&self) -> umber_core::project::BakeSyncCarry {
+        umber_core::project::BakeSyncCarry {
+            sets: self
+                .sets
+                .iter()
+                .map(|(name, block)| (name.clone(), block_to_carry(block)))
+                .collect(),
+            groups: self
+                .groups
+                .iter()
+                .map(|g| umber_core::project::BakeGroupCarry {
+                    name: g.name.clone(),
+                    members: g.members.clone(),
+                    settings: block_to_carry(&g.settings),
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuilds from the persisted shape (the clipboard is session-only
+    /// and starts empty). Hand-edited files get mercy, never a panic:
+    /// unknown baker keys drop, a set claimed by two groups stays in the
+    /// first, a group left with fewer than two members dissolves into
+    /// per-set blocks, and a per-set block for a linked set drops (the
+    /// group block wins). A missing out dir falls back to `out_dir`.
+    pub fn from_carry(carry: &umber_core::project::BakeSyncCarry, out_dir: &Path) -> Self {
+        let mut sync = Self::default();
+        for g in &carry.groups {
+            let settings = block_from_carry(&g.settings, out_dir);
+            let mut members: Vec<String> = Vec::new();
+            for m in &g.members {
+                if !members.contains(m) && sync.group_of(m).is_none() {
+                    members.push(m.clone());
+                }
+            }
+            if members.len() < 2 {
+                for m in members {
+                    sync.sets.insert(m, settings.clone());
+                }
+                continue;
+            }
+            sync.groups.push(BakeGroup {
+                name: g.name.clone(),
+                members,
+                settings,
+            });
+        }
+        for (name, block) in &carry.sets {
+            if sync.group_of(name).is_none() && !sync.sets.contains_key(name) {
+                sync.sets
+                    .insert(name.clone(), block_from_carry(block, out_dir));
+            }
+        }
+        sync
+    }
+}
+
+fn param_to_carry(value: &umber_graph::ParamValue) -> Option<umber_core::project::BakeParamCarry> {
+    use umber_core::project::BakeParamCarry;
+    match value {
+        umber_graph::ParamValue::Float(v) => Some(BakeParamCarry::Float(*v)),
+        umber_graph::ParamValue::Int(v) => Some(BakeParamCarry::Int(*v)),
+        umber_graph::ParamValue::Bool(v) => Some(BakeParamCarry::Bool(*v)),
+        // Bake settings are scalar; nothing else is ever stored.
+        _ => None,
+    }
+}
+
+fn param_from_carry(value: umber_core::project::BakeParamCarry) -> umber_graph::ParamValue {
+    use umber_core::project::BakeParamCarry;
+    match value {
+        BakeParamCarry::Float(v) => umber_graph::ParamValue::Float(v),
+        BakeParamCarry::Int(v) => umber_graph::ParamValue::Int(v),
+        BakeParamCarry::Bool(v) => umber_graph::ParamValue::Bool(v),
+    }
+}
+
+fn block_to_carry(block: &BakeSettingsBlock) -> umber_core::project::BakeSettingsBlockCarry {
+    umber_core::project::BakeSettingsBlockCarry {
+        bakers: block
+            .bakers
+            .iter()
+            .map(|(kind, params)| {
+                (
+                    kind.kind_key().to_owned(),
+                    params
+                        .iter()
+                        .filter_map(|(k, v)| param_to_carry(v).map(|v| (k.clone(), v)))
+                        .collect(),
+                )
+            })
+            .collect(),
+        out_dir: Some(block.out_dir.display().to_string()),
+    }
+}
+
+fn block_from_carry(
+    carry: &umber_core::project::BakeSettingsBlockCarry,
+    out_dir: &Path,
+) -> BakeSettingsBlock {
+    BakeSettingsBlock {
+        bakers: carry
+            .bakers
+            .iter()
+            .filter_map(|(key, params)| {
+                let kind = BakeSelection::from_kind_key(key)?;
+                let params = params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), param_from_carry(*v)))
+                    .collect();
+                Some((kind, params))
+            })
+            .collect(),
+        out_dir: carry
+            .out_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| out_dir.to_path_buf()),
+    }
+}
+
 /// What [`BakesPanel::show`] needs from the app each frame.
 ///
 /// `gpu`/`mesh` are `Option` so the panel can gate itself: `None` mesh
@@ -792,6 +1232,13 @@ pub struct BakesPanel {
     /// The newest tile-1001 file per map (C2-10: a smart material's
     /// mesh-map generators bind to these when applied).
     latest: std::collections::BTreeMap<BakeSelection, PathBuf>,
+    /// Baker sync + linked groups (R-D1).
+    sync: BakeSync,
+    /// The set whose block the sliders edit (R-D1); `None` = the plain
+    /// panel (nothing read or written).
+    settings_focus: Option<String>,
+    /// The last sync action's one-line result (shown in the sync group).
+    sync_note: Option<String>,
 }
 
 /// The High-poly group's state (C2-29): the HIGH mesh a transfer bakes
@@ -900,7 +1347,277 @@ impl BakesPanel {
             high: HighPoly::default(),
             baked_normal: None,
             latest: std::collections::BTreeMap::new(),
+            sync: BakeSync::default(),
+            settings_focus: None,
+            sync_note: None,
         }
+    }
+
+    /// The sliders + checked maps + out dir as a settings block (R-D1):
+    /// one entry per checked map with the parameters that baker reads.
+    pub fn settings_snapshot(&self) -> BakeSettingsBlock {
+        use umber_graph::ParamValue;
+        let margin = match self.margin {
+            MarginType::Extend => 0,
+            MarginType::AdjacentFaces => 1,
+        };
+        let int = |v: u32| ParamValue::Int(i32::try_from(v).unwrap_or(i32::MAX));
+        let mut bakers = BTreeMap::new();
+        for kind in self.selected_maps() {
+            let mut params = BTreeMap::new();
+            params.insert(bake_param::RESOLUTION.to_owned(), int(self.resolution));
+            params.insert(
+                bake_param::DILATION.to_owned(),
+                int(self.dilation_iterations),
+            );
+            params.insert(bake_param::MARGIN.to_owned(), ParamValue::Int(margin));
+            if kind.is_raycast() {
+                params.insert(bake_param::RAYS.to_owned(), int(self.rays));
+                params.insert(
+                    bake_param::OCCLUDER_OWN_SET.to_owned(),
+                    ParamValue::Bool(self.occluder_own_set),
+                );
+            }
+            if kind == BakeSelection::Ao {
+                params.insert(
+                    bake_param::SKEW_THRESHOLD.to_owned(),
+                    ParamValue::Float(self.skew_threshold_deg),
+                );
+            }
+            bakers.insert(kind, params);
+        }
+        BakeSettingsBlock {
+            bakers,
+            out_dir: self.output_dir.clone(),
+        }
+    }
+
+    /// Loads `block` into the sliders (R-D1): the checked maps become the
+    /// block's bakers; each scalar takes the first baker's value that
+    /// carries it (through the clamping setters); absent scalars keep
+    /// the slider's current value.
+    pub fn apply_settings(&mut self, block: &BakeSettingsBlock) {
+        use umber_graph::ParamValue;
+        self.maps = block
+            .bakers
+            .keys()
+            .copied()
+            .filter(|k| BakeSelection::ALL.contains(k))
+            .collect();
+        let find = |key: &str| block.bakers.values().find_map(|p| p.get(key).cloned());
+        let uint = |v: i32| u32::try_from(v).unwrap_or(0);
+        if let Some(ParamValue::Int(v)) = find(bake_param::RESOLUTION) {
+            self.set_resolution(uint(v));
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::DILATION) {
+            self.set_dilation_iterations(uint(v));
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::MARGIN) {
+            self.margin = if v == 1 {
+                MarginType::AdjacentFaces
+            } else {
+                MarginType::Extend
+            };
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::RAYS) {
+            self.set_rays(uint(v));
+        }
+        if let Some(ParamValue::Bool(v)) = find(bake_param::OCCLUDER_OWN_SET) {
+            self.occluder_own_set = v;
+        }
+        if let Some(ParamValue::Float(v)) = find(bake_param::SKEW_THRESHOLD) {
+            self.set_skew_threshold_deg(v);
+        }
+        self.output_dir = block.out_dir.clone();
+    }
+
+    /// The baker-sync state (R-D1).
+    pub fn sync(&self) -> &BakeSync {
+        &self.sync
+    }
+
+    /// The set whose block the sliders edit (`None` = the plain panel).
+    pub fn settings_focus(&self) -> Option<&str> {
+        self.settings_focus.as_deref()
+    }
+
+    /// Points the sliders at `set`'s block (its group's when linked):
+    /// the current edits land on the old focus first, then the new
+    /// focus's stored block loads (a set with no block yet takes the
+    /// current sliders as its own). `None` detaches the sliders.
+    pub fn set_settings_focus(&mut self, set: Option<String>) {
+        self.commit_focus_settings();
+        self.settings_focus = set;
+        if let Some(set) = self.settings_focus.clone() {
+            match self.sync.settings_for(&set).cloned() {
+                Some(block) => self.apply_settings(&block),
+                None => {
+                    let snapshot = self.settings_snapshot();
+                    self.sync.write_settings(&set, snapshot);
+                }
+            }
+        }
+    }
+
+    /// Writes the sliders into the focus set's block (the GROUP block when
+    /// linked, so every member sees the edit). A no-op with no focus or
+    /// nothing changed. `show` calls it every frame after the controls.
+    pub fn commit_focus_settings(&mut self) {
+        let Some(set) = self.settings_focus.clone() else {
+            return;
+        };
+        let snapshot = self.settings_snapshot();
+        if self.sync.settings_for(&set) != Some(&snapshot) {
+            self.sync.write_settings(&set, snapshot);
+        }
+    }
+
+    /// Copies the focus set's block (or the plain sliders with no focus)
+    /// onto the session clipboard.
+    pub fn copy_settings(&mut self) {
+        self.commit_focus_settings();
+        let block = self
+            .settings_focus
+            .as_deref()
+            .and_then(|set| self.sync.settings_for(set).cloned())
+            .unwrap_or_else(|| self.settings_snapshot());
+        self.sync.copy(block);
+    }
+
+    /// Pastes the clipboard onto `targets` (all or nothing, see
+    /// [`BakeSync::paste`]); a target with no block yet starts from the
+    /// sliders. The sliders reload when the focus set took the paste.
+    pub fn paste_settings(&mut self, targets: &[String]) -> Result<usize, BakeSyncError> {
+        self.commit_focus_settings();
+        let fallback = self.settings_snapshot();
+        let count = self.sync.paste(targets, &fallback)?;
+        self.reload_focus();
+        Ok(count)
+    }
+
+    /// Links `members` into a group (R-D1). The shared block is the focus
+    /// set's when the focus is a member, else the first member's stored
+    /// block, else the sliders.
+    pub fn link_sets(&mut self, members: &[String]) -> Result<String, BakeSyncError> {
+        self.commit_focus_settings();
+        let source_set = self
+            .settings_focus
+            .clone()
+            .filter(|f| members.contains(f))
+            .or_else(|| members.first().cloned());
+        let source = source_set
+            .as_deref()
+            .and_then(|set| self.sync.settings_for(set).cloned())
+            .unwrap_or_else(|| self.settings_snapshot());
+        let name = self.sync.link(members, source)?;
+        self.reload_focus();
+        Ok(name)
+    }
+
+    /// Unlinks `set`: it keeps the group block as its own copy.
+    pub fn unlink_set(&mut self, set: &str) -> Result<(), BakeSyncError> {
+        self.commit_focus_settings();
+        self.sync.unlink(set)
+    }
+
+    /// One linked bake of `set` (pure): its block's bakers planned over
+    /// the selected tiles of `present`, fanned out one job per member set
+    /// (one per planned map), each carrying the shared block. An
+    /// unlinked set fans out to itself; a set with no block uses the
+    /// sliders.
+    pub fn group_plan(
+        &self,
+        set: &str,
+        present: &[u16],
+    ) -> Vec<(String, BakeJob, BakeSettingsBlock)> {
+        let block = self
+            .sync
+            .settings_for(set)
+            .cloned()
+            .unwrap_or_else(|| self.settings_snapshot());
+        let maps: Vec<BakeSelection> = BakeSelection::ALL
+            .into_iter()
+            .filter(|k| block.bakers.contains_key(k))
+            .collect();
+        let plan = plan_bake(&maps, present, &self.tiles.resolve(present));
+        let mut out = Vec::new();
+        for member in self.sync.bake_sets(set) {
+            for job in &plan.jobs {
+                out.push((member.clone(), *job, block.clone()));
+            }
+        }
+        out
+    }
+
+    /// The persisted baker-sync block (empty = no key in `project.json`).
+    pub fn sync_carry(&self) -> umber_core::project::BakeSyncCarry {
+        self.sync.to_carry()
+    }
+
+    /// Restores a loaded project's baker-sync block (the focus resets to
+    /// the plain panel; the clipboard empties).
+    pub fn load_sync_carry(&mut self, carry: &umber_core::project::BakeSyncCarry) {
+        self.sync = BakeSync::from_carry(carry, &self.output_dir);
+        self.settings_focus = None;
+        self.sync_note = None;
+    }
+
+    /// Re-applies the focus set's stored block to the sliders.
+    fn reload_focus(&mut self) {
+        if let Some(block) = self
+            .settings_focus
+            .as_deref()
+            .and_then(|set| self.sync.settings_for(set).cloned())
+        {
+            self.apply_settings(&block);
+        }
+    }
+
+    /// Bakes the focus set's group (or the set alone): its block loaded
+    /// into the sliders, then one dispatch over the members that are on
+    /// the mesh, through the same multi-set fan-out as a manual Bake.
+    fn bake_group(
+        &mut self,
+        device: &umber_gpu::WgpuDevice,
+        queue: &umber_gpu::WgpuQueue,
+        mesh: &umber_mesh::MeshData,
+        mesh_path: Option<&Path>,
+    ) {
+        if self.is_baking() {
+            return;
+        }
+        let Some(focus) = self.settings_focus.clone() else {
+            return;
+        };
+        if let Some(block) = self.sync.settings_for(&focus).cloned() {
+            self.apply_settings(&block);
+        }
+        let on_mesh = Self::set_names_for(mesh, mesh_path);
+        let sets: Vec<String> = self
+            .sync
+            .bake_sets(&focus)
+            .into_iter()
+            .filter(|s| on_mesh.contains(s))
+            .collect();
+        if sets.is_empty() {
+            return;
+        }
+        let present = self.mesh_tiles.get(mesh).to_vec();
+        let selected = self.tiles.resolve(&present);
+        let plan = plan_bake(&self.selected_maps(), &present, &selected);
+        let (skew_tiles, skew_skipped) = self.skew_tiles(&present, &selected);
+        self.bake_jobs(
+            device,
+            queue,
+            &BakeDispatch {
+                mesh,
+                plan,
+                skew_tiles,
+                skew_skipped,
+                sets,
+                transfer: None,
+            },
+        );
     }
 
     /// The tile selector's state (test hook: the UI's checkboxes drive
@@ -1556,6 +2273,15 @@ impl BakesPanel {
             }
         });
 
+        // Sync group (R-D1): which set the sliders edit, copy/paste of its
+        // block onto the checked sets, and linked groups.
+        let bake_group = self.show_sync_group(ui, mesh_loaded, gpu_ready);
+        if bake_group {
+            if let (Some(gpu), Some(mesh)) = (ctx.gpu, ctx.mesh) {
+                self.bake_group(&gpu.device, &gpu.queue, mesh, ctx.mesh_path);
+            }
+        }
+
         if !self.any_selected() {
             ui.label(tr("bakes.select-map"));
         }
@@ -1704,6 +2430,117 @@ impl BakesPanel {
             }
             ui.label(self.status.clone());
         });
+    }
+
+    /// Draws the sync group (R-D1); returns whether "Bake group" was
+    /// clicked. Commits the sliders to the focus set first, so this
+    /// frame's edits land before any action reads them.
+    fn show_sync_group(&mut self, ui: &mut egui::Ui, mesh_loaded: bool, gpu_ready: bool) -> bool {
+        self.commit_focus_settings();
+        let names: Vec<String> = self.sets.iter().map(|s| s.name.clone()).collect();
+        if let Some(focus) = &self.settings_focus {
+            if !names.is_empty() && !names.contains(focus) {
+                self.set_settings_focus(None);
+            }
+        }
+        let label_for = |sync: &BakeSync, set: &str| match sync.group_of(set) {
+            Some(group) => tr_args(
+                "bakes.group-member",
+                [
+                    ("set", FluentValue::from(set.to_owned())),
+                    ("group", FluentValue::from(group.name.clone())),
+                ],
+            ),
+            None => set.to_owned(),
+        };
+        let mut bake_group = false;
+        let title = tr("bakes.sync-group");
+        ParamGroup::new("bakes-sync", title.as_str()).show(ui, |group| {
+            let mut choice = self.settings_focus.clone();
+            let shown = match &choice {
+                Some(set) => label_for(&self.sync, set),
+                None => tr("bakes.sync-target-panel"),
+            };
+            let target_label = tr("bakes.sync-target");
+            group.row(target_label.as_str(), |ui| {
+                egui::ComboBox::from_id_salt("bakes-sync-target")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut choice, None, tr("bakes.sync-target-panel"));
+                        for name in &names {
+                            let label = label_for(&self.sync, name);
+                            ui.selectable_value(&mut choice, Some(name.clone()), label);
+                        }
+                    });
+            });
+            if choice != self.settings_focus {
+                self.set_settings_focus(choice);
+            }
+            let checked = self.enabled_sets();
+            let focus_linked = self
+                .settings_focus
+                .as_deref()
+                .is_some_and(|f| self.sync.group_of(f).is_some());
+            group.ui.horizontal_wrapped(|ui| {
+                if ui.button(tr("bakes.copy-settings")).clicked() {
+                    self.copy_settings();
+                    let source = self
+                        .settings_focus
+                        .clone()
+                        .unwrap_or_else(|| tr("bakes.sync-target-panel"));
+                    self.sync_note = Some(tr_args(
+                        "bakes.copied",
+                        [("set", FluentValue::from(source))],
+                    ));
+                }
+                let can_paste = self.sync.clipboard().is_some() && !checked.is_empty();
+                if ui
+                    .add_enabled(can_paste, egui::Button::new(tr("bakes.paste-settings")))
+                    .clicked()
+                {
+                    self.sync_note = Some(match self.paste_settings(&checked) {
+                        Ok(count) => tr_args("bakes.pasted", [("count", FluentValue::from(count))]),
+                        Err(err) => err.message(),
+                    });
+                }
+                if ui
+                    .add_enabled(checked.len() >= 2, egui::Button::new(tr("bakes.link-sets")))
+                    .clicked()
+                {
+                    self.sync_note = Some(match self.link_sets(&checked) {
+                        Ok(name) => tr_args(
+                            "bakes.linked",
+                            [
+                                ("count", FluentValue::from(checked.len())),
+                                ("group", FluentValue::from(name)),
+                            ],
+                        ),
+                        Err(err) => err.message(),
+                    });
+                }
+                if ui
+                    .add_enabled(focus_linked, egui::Button::new(tr("bakes.unlink")))
+                    .clicked()
+                {
+                    if let Some(set) = self.settings_focus.clone() {
+                        self.sync_note = Some(match self.unlink_set(&set) {
+                            Ok(()) => tr_args("bakes.unlinked", [("set", FluentValue::from(set))]),
+                            Err(err) => err.message(),
+                        });
+                    }
+                }
+                let can_bake_group = focus_linked
+                    && self.can_bake(mesh_loaded, gpu_ready)
+                    && !self.tiles.nothing_selected();
+                bake_group = ui
+                    .add_enabled(can_bake_group, egui::Button::new(tr("bakes.bake-group")))
+                    .clicked();
+            });
+            if let Some(note) = &self.sync_note {
+                group.ui.label(note.clone());
+            }
+        });
+        bake_group
     }
 
     /// Starts every checked bake over the selected tiles as a background
@@ -4047,5 +4884,353 @@ mod tests {
             "{}",
             entries[1].summary()
         );
+    }
+
+    // ---- R-D1: baker settings sync + linked bake groups ----
+
+    fn three_sets(p: &mut BakesPanel) -> Vec<String> {
+        let names: Vec<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        p.sync_sets(&names);
+        names
+    }
+
+    fn rays_of(block: &BakeSettingsBlock) -> Option<umber_graph::ParamValue> {
+        block.bakers[&BakeSelection::Ao]
+            .get(bake_param::RAYS)
+            .cloned()
+    }
+
+    #[test]
+    fn plain_panel_without_a_focus_reads_and_writes_no_block() {
+        let mut p = panel();
+        three_sets(&mut p);
+        p.set_rays(40);
+        p.commit_focus_settings();
+        assert!(p.sync().settings_for("A").is_none());
+        assert_eq!(
+            p.sync_carry(),
+            umber_core::project::BakeSyncCarry::default()
+        );
+        assert!(p.sync_carry().is_empty());
+    }
+
+    #[test]
+    fn snapshot_round_trips_through_apply() {
+        let mut p = panel();
+        p.set_rays(40);
+        p.set_dilation_iterations(7);
+        p.set_margin(MarginType::AdjacentFaces);
+        p.set_skew_threshold_deg(12.5);
+        assert!(p.set_resolution(1024));
+        p.set_map_enabled(BakeSelection::Id, true);
+        p.set_output_dir(PathBuf::from("/tmp/out-a"));
+        let block = p.settings_snapshot();
+        assert_eq!(rays_of(&block), Some(umber_graph::ParamValue::Int(40)));
+        // Curvature reads no rays: its entry carries none.
+        assert!(!block.bakers[&BakeSelection::Curvature].contains_key(bake_param::RAYS));
+        let mut q = panel();
+        q.apply_settings(&block);
+        assert_eq!(q.settings_snapshot(), block);
+        assert_eq!(q.rays(), 40);
+        assert_eq!(q.dilation_iterations(), 7);
+        assert_eq!(q.margin(), MarginType::AdjacentFaces);
+        assert_eq!(q.resolution(), 1024);
+        assert!(q.is_map_enabled(BakeSelection::Id));
+        assert_eq!(q.output_dir(), Path::new("/tmp/out-a"));
+    }
+
+    #[test]
+    fn linked_group_of_three_fans_out_three_jobs_with_equal_settings() {
+        let mut p = panel();
+        let names = three_sets(&mut p);
+        for k in BakeSelection::ALL {
+            p.set_map_enabled(k, k == BakeSelection::Ao);
+        }
+        p.set_settings_focus(Some("A".into()));
+        p.set_rays(24);
+        let group = p.link_sets(&names).expect("link three");
+        assert_eq!(p.sync().groups().len(), 1);
+        assert_eq!(p.sync().groups()[0].name, group);
+        assert_eq!(p.sync().groups()[0].members, names);
+
+        // One map (AO), single-tile mesh: exactly one job per member.
+        let jobs = p.group_plan("B", &[FIRST_TILE]);
+        assert_eq!(jobs.len(), 3);
+        let members: Vec<&str> = jobs.iter().map(|(m, _, _)| m.as_str()).collect();
+        assert_eq!(members, ["A", "B", "C"]);
+        assert!(jobs
+            .iter()
+            .all(|(_, j, _)| j.selection == BakeSelection::Ao));
+        assert!(jobs.windows(2).all(|w| w[0].2 == w[1].2), "settings differ");
+        assert_eq!(rays_of(&jobs[0].2), Some(umber_graph::ParamValue::Int(24)));
+        // Two maps -> 3 members x 2 jobs.
+        p.set_map_enabled(BakeSelection::Curvature, true);
+        p.commit_focus_settings();
+        assert_eq!(p.group_plan("C", &[FIRST_TILE]).len(), 6);
+        // An unlinked set fans out to itself only.
+        let mut solo = panel();
+        three_sets(&mut solo);
+        assert!(solo
+            .group_plan("A", &[FIRST_TILE])
+            .iter()
+            .all(|(m, _, _)| m == "A"));
+    }
+
+    #[test]
+    fn editing_through_member_a_is_visible_reading_member_b() {
+        let mut p = panel();
+        let names = three_sets(&mut p);
+        p.link_sets(&names).unwrap();
+        p.set_settings_focus(Some("A".into()));
+        p.set_rays(48);
+        p.commit_focus_settings();
+        let b = p.sync().settings_for("B").unwrap();
+        assert_eq!(rays_of(b), Some(umber_graph::ParamValue::Int(48)));
+        // Switching the sliders to B shows A's edit.
+        p.set_rays(4);
+        p.set_settings_focus(Some("B".into()));
+        assert_eq!(p.rays(), 4, "the edit before the switch lands on the group");
+        assert_eq!(
+            rays_of(p.sync().settings_for("C").unwrap()),
+            Some(umber_graph::ParamValue::Int(4))
+        );
+    }
+
+    #[test]
+    fn unlink_materializes_the_group_block_and_later_edits_diverge() {
+        let mut p = panel();
+        let names = three_sets(&mut p);
+        p.set_settings_focus(Some("A".into()));
+        p.set_rays(32);
+        p.link_sets(&names).unwrap();
+        p.unlink_set("B").unwrap();
+        assert!(p.sync().group_of("B").is_none());
+        // B kept the materialized copy.
+        assert_eq!(
+            rays_of(p.sync().settings_for("B").unwrap()),
+            Some(umber_graph::ParamValue::Int(32))
+        );
+        // Editing A (still linked with C) leaves B unchanged.
+        p.set_rays(8);
+        p.commit_focus_settings();
+        assert_eq!(
+            rays_of(p.sync().settings_for("C").unwrap()),
+            Some(umber_graph::ParamValue::Int(8))
+        );
+        assert_eq!(
+            rays_of(p.sync().settings_for("B").unwrap()),
+            Some(umber_graph::ParamValue::Int(32))
+        );
+        // Unlinking one of the last two dissolves the group: both keep it.
+        p.unlink_set("C").unwrap();
+        assert!(p.sync().groups().is_empty());
+        assert!(p.sync().group_of("A").is_none());
+        assert_eq!(
+            rays_of(p.sync().settings_for("A").unwrap()),
+            Some(umber_graph::ParamValue::Int(8))
+        );
+        assert_eq!(
+            p.unlink_set("A"),
+            Err(BakeSyncError::NotLinked { set: "A".into() })
+        );
+    }
+
+    #[test]
+    fn link_refusals_change_nothing() {
+        let mut p = panel();
+        three_sets(&mut p);
+        assert_eq!(p.link_sets(&["A".into()]), Err(BakeSyncError::TooFewSets));
+        assert_eq!(
+            p.link_sets(&["A".into(), "A".into()]),
+            Err(BakeSyncError::TooFewSets)
+        );
+        p.link_sets(&["A".into(), "B".into()]).unwrap();
+        let before = p.sync().clone();
+        assert!(matches!(
+            p.link_sets(&["B".into(), "C".into()]),
+            Err(BakeSyncError::AlreadyLinked { set, .. }) if set == "B"
+        ));
+        assert_eq!(p.sync(), &before);
+        assert!(!BakeSyncError::TooFewSets.message().is_empty());
+    }
+
+    #[test]
+    fn paste_onto_a_set_with_the_same_bakers_applies_every_carried_value() {
+        let mut p = panel();
+        three_sets(&mut p);
+        p.set_settings_focus(Some("A".into()));
+        p.set_rays(56);
+        p.set_dilation_iterations(3);
+        p.set_skew_threshold_deg(20.0);
+        p.set_output_dir(PathBuf::from("/tmp/out-copied"));
+        p.copy_settings();
+        let copied = p.sync().clipboard().cloned().unwrap();
+
+        // B has the same baker set (the defaults) but other values.
+        p.set_settings_focus(Some("B".into()));
+        p.set_rays(4);
+        p.set_dilation_iterations(60);
+        p.set_output_dir(PathBuf::from("/tmp/out-b"));
+        p.commit_focus_settings();
+        assert_eq!(p.paste_settings(&["B".into(), "C".into()]), Ok(2));
+        assert_eq!(p.sync().settings_for("B"), Some(&copied));
+        assert_eq!(p.sync().settings_for("C"), Some(&copied));
+        // The focus (B) took the paste: the sliders reload.
+        assert_eq!(p.rays(), 56);
+        assert_eq!(p.dilation_iterations(), 3);
+        assert_eq!(p.output_dir(), Path::new("/tmp/out-copied"));
+    }
+
+    #[test]
+    fn paste_onto_a_set_missing_a_baker_refuses_naming_the_kind() {
+        let mut p = panel();
+        three_sets(&mut p);
+        p.set_settings_focus(Some("A".into()));
+        p.set_map_enabled(BakeSelection::BentNormal, true);
+        p.copy_settings();
+        // B lacks bent normal.
+        p.set_settings_focus(Some("B".into()));
+        p.set_map_enabled(BakeSelection::BentNormal, false);
+        p.set_rays(4);
+        p.commit_focus_settings();
+        // C has every baker: the paste is all or nothing, so C is
+        // untouched too.
+        p.set_settings_focus(Some("C".into()));
+        p.set_map_enabled(BakeSelection::BentNormal, true);
+        p.set_rays(12);
+        p.commit_focus_settings();
+        let before = p.sync().clone();
+        let err = p
+            .paste_settings(&["C".into(), "B".into()])
+            .expect_err("partial paste refuses");
+        assert_eq!(
+            err,
+            BakeSyncError::MissingBaker {
+                set: "B".into(),
+                kind: BakeSelection::BentNormal,
+            }
+        );
+        assert_eq!(p.sync().groups(), before.groups());
+        assert_eq!(p.sync().settings_for("B"), before.settings_for("B"));
+        assert_eq!(p.sync().settings_for("C"), before.settings_for("C"));
+        assert_eq!(p.rays(), 12);
+        // The refusal message names the set and the missing kind.
+        let message = err.message();
+        assert!(message.contains('B'), "{message}");
+        assert!(
+            message.contains(&BakeSelection::BentNormal.label()),
+            "{message}"
+        );
+        // An empty clipboard refuses too.
+        let mut q = panel();
+        assert_eq!(
+            q.paste_settings(&["A".into()]),
+            Err(BakeSyncError::NothingCopied)
+        );
+    }
+
+    #[test]
+    fn sync_carry_round_trips_through_the_project_file() {
+        let mut p = panel();
+        let names = three_sets(&mut p);
+        p.set_settings_focus(Some("A".into()));
+        p.set_rays(28);
+        p.set_skew_threshold_deg(17.5);
+        p.link_sets(&names[..2]).unwrap();
+        p.set_settings_focus(Some("C".into()));
+        p.set_rays(6);
+        p.commit_focus_settings();
+        let carry = p.sync_carry();
+        assert_eq!(carry.groups.len(), 1);
+        assert_eq!(carry.groups[0].members, ["A", "B"]);
+        assert!(carry.sets.contains_key("C"));
+        assert!(!carry.sets.contains_key("A"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "umber-bakes-sync-{}-{}",
+            std::process::id(),
+            BakesPanel::now_unix_secs()
+        ));
+        let model = umber_core::project::ProjectModel::new(
+            vec![umber_core::TextureSet::new_default("A")],
+            Vec::new(),
+            umber_core::project::ProjectSettings::default(),
+        )
+        .with_bake_sync(carry.clone());
+        umber_core::project::save_to_dir(&model, &dir).unwrap();
+        let loaded = umber_core::project::load_from_dir(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded.bake_sync, carry);
+
+        let mut q = panel();
+        q.load_sync_carry(&loaded.bake_sync);
+        assert_eq!(q.sync().groups(), p.sync().groups());
+        assert_eq!(q.sync().settings_for("C"), p.sync().settings_for("C"));
+        assert_eq!(q.sync().clipboard(), None);
+        assert_eq!(q.settings_focus(), None);
+        // Editing through a member after reload still writes the group.
+        q.sync_sets(&names);
+        q.set_settings_focus(Some("B".into()));
+        assert_eq!(q.rays(), 28);
+        q.set_rays(10);
+        q.commit_focus_settings();
+        assert_eq!(
+            rays_of(q.sync().settings_for("A").unwrap()),
+            Some(umber_graph::ParamValue::Int(10))
+        );
+    }
+
+    #[test]
+    fn hand_edited_sync_carry_loads_with_mercy() {
+        use umber_core::project::{BakeGroupCarry, BakeSettingsBlockCarry, BakeSyncCarry};
+        let block = BakeSettingsBlockCarry {
+            bakers: [
+                ("ao".to_string(), BTreeMap::new()),
+                ("nope".to_string(), BTreeMap::new()),
+            ]
+            .into_iter()
+            .collect(),
+            out_dir: None,
+        };
+        let carry = BakeSyncCarry {
+            sets: [("A".to_string(), block.clone())].into_iter().collect(),
+            groups: vec![
+                BakeGroupCarry {
+                    name: "G1".into(),
+                    members: vec!["A".into(), "B".into()],
+                    settings: block.clone(),
+                },
+                // B is claimed twice; the second group dissolves to C.
+                BakeGroupCarry {
+                    name: "G2".into(),
+                    members: vec!["B".into(), "C".into()],
+                    settings: block,
+                },
+            ],
+        };
+        let mut p = panel();
+        p.load_sync_carry(&carry);
+        assert_eq!(p.sync().groups().len(), 1);
+        assert_eq!(p.sync().groups()[0].members, ["A", "B"]);
+        assert!(p.sync().group_of("C").is_none());
+        let c = p.sync().settings_for("C").unwrap();
+        // The unknown baker key dropped; the missing out dir fell back.
+        assert_eq!(
+            c.bakers.keys().copied().collect::<Vec<_>>(),
+            [BakeSelection::Ao]
+        );
+        assert_eq!(c.out_dir, p.output_dir());
+    }
+
+    #[test]
+    fn kind_keys_are_stable_and_invert() {
+        for k in BakeSelection::ALL
+            .into_iter()
+            .chain([BakeSelection::Height])
+        {
+            assert_eq!(BakeSelection::from_kind_key(k.kind_key()), Some(k));
+        }
+        assert_eq!(BakeSelection::Ao.kind_key(), "ao");
+        assert_eq!(BakeSelection::from_kind_key("bogus"), None);
     }
 }

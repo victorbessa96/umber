@@ -281,6 +281,28 @@ bakes =
     .skipped-skew-note = o skew só faz bake no tile 1001, tiles ignorados: { $tiles }
     .settings-group = Configurações
     .maps-group = Mapas
+    .sync-group = Sincronizar configurações
+    .sync-target = Configurações de
+    .sync-target-panel = Este painel (não salvo)
+    .group-member = { $set } (vinculado: { $group })
+    .group-default-name = Grupo { $n }
+    .copy-settings = Copiar configurações
+    .paste-settings = Colar nos conjuntos marcados
+    .copied = Configurações de bake de { $set } copiadas.
+    .pasted = { $count ->
+        [one] Configurações de bake coladas em 1 conjunto.
+       *[other] Configurações de bake coladas em { $count } conjuntos.
+    }
+    .paste-empty = Nada copiado ainda: copie as configurações de um conjunto primeiro.
+    .paste-refused = Colagem recusada: { $set } não tem o baker { $kind }. Marque esse mapa no destino primeiro.
+    .link-sets = Vincular conjuntos marcados
+    .linked = { $count } conjuntos vinculados como { $group }.
+    .link-refused-few = Marque pelo menos dois conjuntos de texturas para vincular.
+    .link-refused-member = { $set } já está vinculado em { $group }; desvincule-o primeiro.
+    .unlink = Desvincular
+    .unlinked = { $set } desvinculado: mantém sua própria cópia das configurações.
+    .not-linked = { $set } não está em um grupo vinculado.
+    .bake-group = Assar grupo
 
 ## Painel de exportação
 

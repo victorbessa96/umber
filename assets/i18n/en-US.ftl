@@ -277,6 +277,28 @@ bakes =
     .skipped-skew-note = skew bakes tile 1001 only, skipped tiles: { $tiles }
     .settings-group = Settings
     .maps-group = Maps
+    .sync-group = Settings sync
+    .sync-target = Settings for
+    .sync-target-panel = This panel (unsaved)
+    .group-member = { $set } (linked: { $group })
+    .group-default-name = Group { $n }
+    .copy-settings = Copy settings
+    .paste-settings = Paste to checked sets
+    .copied = Copied the bake settings of { $set }.
+    .pasted = { $count ->
+        [one] Pasted the bake settings onto 1 set.
+       *[other] Pasted the bake settings onto { $count } sets.
+    }
+    .paste-empty = Nothing copied yet: copy a set's settings first.
+    .paste-refused = Paste refused: { $set } has no { $kind } baker. Check that map on the target first.
+    .link-sets = Link checked sets
+    .linked = Linked { $count } sets as { $group }.
+    .link-refused-few = Check at least two texture sets to link.
+    .link-refused-member = { $set } is already linked in { $group }; unlink it first.
+    .unlink = Unlink
+    .unlinked = Unlinked { $set }: it keeps its own copy of the settings.
+    .not-linked = { $set } is not in a linked group.
+    .bake-group = Bake group
 
 ## Export panel
 

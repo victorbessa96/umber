@@ -329,6 +329,66 @@ impl Default for ProjectSymmetry {
     }
 }
 
+/// One persisted bake parameter value (R-D1): a plain-data mirror of the
+/// scalar `umber_graph::ParamValue` arms the Bakes panel's settings use.
+/// `umber-core` takes no graph dep for this carry (the
+/// [`PostFxEffect`] mirror rule); the app converts at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BakeParamCarry {
+    /// A float parameter (e.g. the skew threshold, degrees).
+    Float(f32),
+    /// An integer parameter (resolution, rays, dilation, margin index).
+    Int(i32),
+    /// A flag (e.g. the occluder scope).
+    Bool(bool),
+}
+
+/// One bake settings block (R-D1): baker kind (the app's stable baker key,
+/// e.g. `"ao"`) -> parameter name -> value, plus the output directory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BakeSettingsBlockCarry {
+    /// Per-baker parameters; the key set is the block's baker set.
+    pub bakers: BTreeMap<String, BTreeMap<String, BakeParamCarry>>,
+    /// The output directory (`None` = keep the panel's current one).
+    pub out_dir: Option<String>,
+}
+
+/// One linked bake group (R-D1): a named set of texture sets sharing ONE
+/// settings block.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BakeGroupCarry {
+    /// The group's display name (unique within a project).
+    pub name: String,
+    /// Member texture-set names, in link order.
+    pub members: Vec<String>,
+    /// The shared settings block every member reads and writes.
+    pub settings: BakeSettingsBlockCarry,
+}
+
+/// The persisted baker-sync state (R-D1): per-set settings blocks for
+/// unlinked sets plus the linked groups. Additive OPTIONAL carry: absent
+/// in the file = empty = no groups, so pre-R-D1 projects load unchanged,
+/// and an empty carry is not written (old files re-save byte-identically).
+/// Plain data only: the app owns membership rules (a set in at most one
+/// group) and drops what it cannot apply.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BakeSyncCarry {
+    /// Per-set blocks for sets that are not in a group.
+    pub sets: BTreeMap<String, BakeSettingsBlockCarry>,
+    /// Linked groups, in creation order.
+    pub groups: Vec<BakeGroupCarry>,
+}
+
+impl BakeSyncCarry {
+    /// Whether the carry holds nothing (the save path then writes no key).
+    pub fn is_empty(&self) -> bool {
+        self.sets.is_empty() && self.groups.is_empty()
+    }
+}
+
 /// One texture set's layer stack, as stored in a [`ProjectModel`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextureSetLayers {
@@ -373,6 +433,10 @@ pub struct ProjectModel {
     /// `journal.jsonl` entry this state already reflects (0 = none).
     /// Saves stamp it from the live journal; recovery advances it.
     pub journal_seq: u64,
+    /// The Bakes panel's baker-sync state (R-D1): per-set settings blocks
+    /// and linked bake groups. Empty for pre-R-D1 projects (no key on
+    /// disk); see [`BakeSyncCarry`].
+    pub bake_sync: BakeSyncCarry,
 }
 
 impl ProjectModel {
@@ -392,6 +456,7 @@ impl ProjectModel {
             graphs_mtlx: Vec::new(),
             material_defs_mtlx: BTreeMap::new(),
             journal_seq: 0,
+            bake_sync: BakeSyncCarry::default(),
         }
     }
 
@@ -419,6 +484,13 @@ impl ProjectModel {
         self.journal_seq = journal_seq;
         self
     }
+
+    /// Attaches the Bakes panel's baker-sync state (builder, R-D1).
+    #[must_use]
+    pub fn with_bake_sync(mut self, bake_sync: BakeSyncCarry) -> Self {
+        self.bake_sync = bake_sync;
+        self
+    }
 }
 
 /// On-disk shape of `project.json`. Deliberately distinct from
@@ -443,6 +515,11 @@ struct ProjectFile {
     /// pre-journal files loading unchanged.
     #[serde(default)]
     journal_seq: u64,
+    /// See [`ProjectModel::bake_sync`]. Optional block: `default` loads
+    /// pre-R-D1 files with no groups, and an empty carry is skipped on
+    /// save so those files re-save byte-identically.
+    #[serde(default, skip_serializing_if = "BakeSyncCarry::is_empty")]
+    bake_sync: BakeSyncCarry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -666,6 +743,7 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
         graphs_mtlx,
         material_defs_mtlx,
         journal_seq,
+        bake_sync,
     } = model;
     let texture_set_names: Vec<String> = texture_sets.iter().map(|ts| ts.name.clone()).collect();
     let layer_sets_for_validation: Vec<(String, Vec<u64>, u64)> = layers
@@ -710,6 +788,7 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
         graphs_mtlx: graphs_mtlx.clone(),
         material_defs_mtlx: material_defs_mtlx.clone(),
         journal_seq: *journal_seq,
+        bake_sync: bake_sync.clone(),
     };
     write_atomic(&dir.join("project.json"), &to_pretty_json_bytes(&file)?)?;
     if layers_root.exists() {
@@ -743,6 +822,7 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
         graphs_mtlx: file_graphs_mtlx,
         material_defs_mtlx: file_material_defs_mtlx,
         journal_seq: file_journal_seq,
+        bake_sync: file_bake_sync,
     } = file;
 
     let texture_set_names: Vec<String> =
@@ -798,6 +878,7 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
         graphs_mtlx: file_graphs_mtlx,
         material_defs_mtlx: file_material_defs_mtlx,
         journal_seq: file_journal_seq,
+        bake_sync: file_bake_sync,
     };
     recover_from_journal(&mut model, dir);
     Ok(model)
@@ -923,6 +1004,7 @@ mod tests {
             graphs_mtlx: model.graphs_mtlx.clone(),
             material_defs_mtlx: model.material_defs_mtlx.clone(),
             journal_seq: model.journal_seq,
+            bake_sync: model.bake_sync.clone(),
         };
 
         let bytes_1 = to_pretty_json_bytes(&file).unwrap();
@@ -1461,6 +1543,108 @@ mod tests {
         assert_dirs_byte_identical(&dir_a, &dir_b);
 
         for dir in [dir_a, dir_b] {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A two-baker settings block with an out dir (R-D1 fixture).
+    fn bake_block(rays: i32) -> BakeSettingsBlockCarry {
+        let common = |extra: &[(&str, BakeParamCarry)]| {
+            let mut params: BTreeMap<String, BakeParamCarry> = [
+                ("resolution".to_string(), BakeParamCarry::Int(1024)),
+                ("dilation".to_string(), BakeParamCarry::Int(16)),
+            ]
+            .into_iter()
+            .collect();
+            for (k, v) in extra {
+                params.insert((*k).to_string(), *v);
+            }
+            params
+        };
+        BakeSettingsBlockCarry {
+            bakers: [
+                (
+                    "ao".to_string(),
+                    common(&[
+                        ("rays", BakeParamCarry::Int(rays)),
+                        ("skew_threshold", BakeParamCarry::Float(0.3)),
+                        ("occluder_own_set", BakeParamCarry::Bool(true)),
+                    ]),
+                ),
+                ("curvature".to_string(), common(&[])),
+            ]
+            .into_iter()
+            .collect(),
+            out_dir: Some("/tmp/bakes out".to_string()),
+        }
+    }
+
+    #[test]
+    fn bake_sync_groups_and_settings_round_trip_byte_identical() {
+        // R-D1: a linked group + an unlinked set's own block survive
+        // save -> load exactly (bit-exact on a non-representable float),
+        // and save -> load -> save is byte-identical.
+        let mut model = fixture_model();
+        model.bake_sync = BakeSyncCarry {
+            sets: [("Helmet".to_string(), bake_block(8))]
+                .into_iter()
+                .collect(),
+            groups: vec![BakeGroupCarry {
+                name: "Armor".to_string(),
+                members: vec!["Body".to_string(), "Legs".to_string()],
+                settings: bake_block(32),
+            }],
+        };
+        let dir_a = unique_temp_dir("bake-sync-a");
+        let dir_b = unique_temp_dir("bake-sync-b");
+
+        save_to_dir(&model, &dir_a).expect("save bake sync");
+        let json = fs::read_to_string(dir_a.join("project.json")).unwrap();
+        for name in [r#""bake_sync""#, r#""Armor""#, r#""occluder_own_set""#] {
+            assert!(json.contains(name), "{name} missing: {json}");
+        }
+        let loaded = load_from_dir(&dir_a).expect("load bake sync");
+        assert_eq!(loaded.bake_sync, model.bake_sync);
+        assert_eq!(loaded, model);
+        let ao = &loaded.bake_sync.groups[0].settings.bakers["ao"];
+        assert_eq!(ao["skew_threshold"], BakeParamCarry::Float(0.3));
+        match ao["skew_threshold"] {
+            BakeParamCarry::Float(v) => assert_eq!(v.to_bits(), 0.3f32.to_bits()),
+            other => panic!("expected a float, got {other:?}"),
+        }
+        save_to_dir(&loaded, &dir_b).expect("resave bake sync");
+        assert_dirs_byte_identical(&dir_a, &dir_b);
+
+        for dir in [dir_a, dir_b] {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn pre_bake_sync_project_loads_with_zero_groups_and_resaves_without_the_key() {
+        // Old files have no "bake_sync" key: serde(default) yields the
+        // empty carry (zero groups), and the empty carry is not written
+        // back, so the old file's project.json re-saves unchanged.
+        let dir = unique_temp_dir("pre-bake-sync");
+        fs::create_dir_all(&dir).unwrap();
+        let old = br#"{"version":1,"texture_sets":[{"name":"Body","resolution":2048,"channels":[]}],"layer_sets":[{"texture_set":"Body","layer_ids":[],"next_layer_id":0}],"settings":{"active_texture_set":"Body"}}"#;
+        fs::write(dir.join("project.json"), old).unwrap();
+
+        let loaded = load_from_dir(&dir).expect("pre-bake-sync file must load");
+        assert!(loaded.bake_sync.groups.is_empty());
+        assert!(loaded.bake_sync.sets.is_empty());
+        assert!(loaded.bake_sync.is_empty());
+
+        save_to_dir(&loaded, &dir).expect("resave works");
+        let json = fs::read_to_string(dir.join("project.json")).unwrap();
+        assert!(!json.contains("bake_sync"), "empty carry written: {json}");
+        // The fixture model (no bake sync) also writes no key.
+        let dir_f = unique_temp_dir("pre-bake-sync-fixture");
+        save_to_dir(&fixture_model(), &dir_f).unwrap();
+        let json = fs::read_to_string(dir_f.join("project.json")).unwrap();
+        assert!(!json.contains("bake_sync"));
+
+        for dir in [dir, dir_f] {
             let _ = fs::remove_dir_all(&dir);
         }
     }
