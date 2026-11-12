@@ -2571,3 +2571,15 @@ unowned concrete step, so no dispatch; stood down on umber: no code touch, no
 cargo. Stale razul-templates-land.lock left in place. mnemosyne uninitialized
 in cron context; this file carries the state. This job touched no code, ran no
 cargo, and pushed only this COORDINATION line (docs-only plain push).
+
+## 2026-11-12 06:0x -03 (Razul-dispatched subagent, lock razul-geomask-brief): geometry
+masks R-B2 design brief landed as docs only. Lock razul-geomask-brief (held by the
+dispatcher) covers exactly docs/loop/briefs/2026-11-12-geomask-design.md,
+docs/loop/queue.md and this file; queue row 380 records it. Scope: the brief
+(what exists counted from source at 403d54ad, target predicate = mesh names x UV-tile
+sets stored as exclusions, concurrency, security, migration with serde(default)+skip-if-empty
+and no version bump, verification test names, non-goals, kill breakdown K1-K7 with
+disjoint lock surfaces). UNRUN pins: none owed (no code). NEXT: dispatch K1
+geomask-core; K2 geomask-mesh-parts and K5 geomask-viewport-hide may run in parallel
+(disjoint files). This dispatch touched no code, ran no cargo, created no worktree
+beyond the harness one, and pushed only these three docs paths (plain push).
