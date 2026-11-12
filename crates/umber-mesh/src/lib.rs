@@ -11,6 +11,7 @@ pub mod bvh;
 pub mod depth;
 pub mod fbx;
 pub mod fill;
+pub mod geometry_mask;
 pub mod gltf;
 pub mod mesh_maps;
 pub mod overlay;
@@ -30,6 +31,9 @@ pub use fill::{
     cylindrical_coords, evaluate_fill_tile, projection_sample_2d, rasterize_uv_geometry,
     sample_source, sample_triplanar, spherical_coords, triplanar_planar_uvs, triplanar_weights,
     uv_coverage, wrap01, FillParams, FillProjection, FillSource, FillTile, ProjAxis, TexelGeom,
+};
+pub use geometry_mask::{
+    geometry_coverage, truncate_name, MeshParts, MeshPartsBuilder, MAX_PART_NAME_BYTES,
 };
 pub use gltf::load_gltf;
 pub use mesh_maps::{
@@ -282,17 +286,28 @@ pub enum Format {
 /// is why the recursive parsers carry depth caps. Umber's OWN parse code
 /// validates before it indexes; this boundary is for code it does not own.
 pub fn load(path: &std::path::Path) -> Result<MeshData, ImportError> {
+    load_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load`] plus the geometry-mask part table ([`MeshParts`], design
+/// brief `docs/loop/briefs/2026-11-12-geomask-design.md`): the same
+/// dispatch, size preflight and panic boundary, and the SAME
+/// [`MeshData`] (`load` is this function with the parts dropped). Part
+/// names per importer: OBJ `o`/`g` object name, glTF mesh name (else the
+/// node name), FBX the owning node name, USD the Mesh prim path's last
+/// component.
+pub fn load_with_parts(path: &std::path::Path) -> Result<(MeshData, MeshParts), ImportError> {
     let format = detect_format(path)?;
     // Size preflight FIRST: the catch_unwind boundary below cannot catch
     // an allocation-failure abort from reading a hostile multi-GB file.
     ensure_import_size(path)?;
     let dispatch = || match format {
-        Format::Obj => load_obj(path),
-        Format::Gltf => load_gltf(path),
-        Format::Fbx => load_fbx(path),
-        Format::Usd => load_usda(path),
-        Format::Usdc => crate::usdc::load_usdc(path),
-        Format::Usdz => crate::usdc::load_usdz(path),
+        Format::Obj => load_obj_with_parts(path),
+        Format::Gltf => gltf::load_gltf_with_parts(path),
+        Format::Fbx => fbx::load_fbx_with_parts(path),
+        Format::Usd => usd::load_usda_with_parts(path),
+        Format::Usdc => crate::usdc::load_usdc_with_parts(path),
+        Format::Usdz => crate::usdc::load_usdz_with_parts(path),
     };
     // AssertUnwindSafe: the closure borrows only `path` and `format`
     // (read-only), and a caught panic returns an error — no partially
@@ -315,6 +330,14 @@ pub fn load(path: &std::path::Path) -> Result<MeshData, ImportError> {
 /// `positions`); only the glTF/FBX loaders zero-fill. Returns
 /// [`ImportError::Obj`] when the file cannot be parsed.
 pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
+    load_obj_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load_obj`] plus the geometry-mask part table: one part per OBJ
+/// object/group (`o`/`g`), named by tobj's `model.name`. A model tobj
+/// names `unnamed_object` (geometry before any `o`/`g`) counts as
+/// unnamed and becomes `mesh <n>`.
+pub fn load_obj_with_parts(path: &std::path::Path) -> Result<(MeshData, MeshParts), ImportError> {
     ensure_import_size(path)?;
     let (models, materials) = tobj::load_obj(
         path,
@@ -341,6 +364,7 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
     // fallback for the whole file.
     let mut pending_triangle_materials: Vec<u16> = Vec::new();
     let mut complete = true;
+    let mut parts = MeshPartsBuilder::new();
     for model in models {
         let mesh = model.mesh;
         let model_material = mesh
@@ -368,6 +392,8 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
         data.uvs
             .extend(mesh.texcoords.chunks_exact(2).map(|c| [c[0], c[1]]));
         data.indices.extend(mesh.indices.iter().copied());
+        let part_name = (model.name != "unnamed_object").then_some(model.name.as_str());
+        parts.push(part_name, mesh.indices.len() / 3);
         match model_material {
             Some(slot) => {
                 let triangles = mesh.indices.len() / 3;
@@ -386,7 +412,8 @@ pub fn load_obj(path: &std::path::Path) -> Result<MeshData, ImportError> {
     if data.positions.is_empty() {
         return Err(ImportError::Obj("no mesh geometry found".into()));
     }
-    Ok(data)
+    let parts = parts.finish(&data);
+    Ok((data, parts))
 }
 
 #[cfg(test)]

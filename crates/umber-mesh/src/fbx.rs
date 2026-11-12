@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use super::{ImportError, MeshData};
+use super::{ImportError, MeshData, MeshParts};
 
 /// Load an `.fbx` file into a single concatenated [`MeshData`].
 ///
@@ -19,22 +19,34 @@ use super::{ImportError, MeshData};
 /// the file cannot be parsed, when index data is internally inconsistent, or
 /// when the scene contains no mesh geometry at all.
 pub fn load_fbx(path: &Path) -> Result<MeshData, ImportError> {
+    load_fbx_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load_fbx`] plus the geometry-mask part table: one part per scene
+/// node carrying a mesh, named by the owning node (ufbx strips the
+/// `Model::` class prefix), else `mesh <n>`. Same-name nodes fold.
+pub fn load_fbx_with_parts(path: &Path) -> Result<(MeshData, MeshParts), ImportError> {
     crate::ensure_import_size(path)?;
     let path_str = path.to_string_lossy();
     let scene = ufbx::load_file(&path_str, ufbx::LoadOpts::default())
         .map_err(|e| ImportError::Fbx(format!("{e:?}")))?;
     let mut data = MeshData::default();
+    let mut parts = crate::geometry_mask::MeshPartsBuilder::new();
     for node in &scene.nodes {
         let Some(mesh) = node.mesh.as_ref() else {
             continue;
         };
         let mesh: &ufbx::Mesh = mesh;
+        let triangles_before = data.triangle_count();
         append_mesh(&mut data, mesh)?;
+        let name = node.element.name.to_string();
+        parts.push(Some(&name), data.triangle_count() - triangles_before);
     }
     if data.positions.is_empty() {
         return Err(ImportError::Fbx("no mesh geometry found".into()));
     }
-    Ok(data)
+    let parts = parts.finish(&data);
+    Ok((data, parts))
 }
 
 /// Append one triangulated [`ufbx::Mesh`] to the accumulated [`MeshData`].

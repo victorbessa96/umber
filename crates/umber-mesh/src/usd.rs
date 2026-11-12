@@ -39,7 +39,7 @@ use std::path::Path;
 
 use glam::Vec3;
 
-use super::{ImportError, MeshData};
+use super::{ImportError, MeshData, MeshParts};
 
 /// Magic bytes opening a binary crate (`usdc`) file.
 const USDC_MAGIC: &[u8] = b"PXR-USDC";
@@ -58,12 +58,29 @@ const LIST_OPS: [&str; 5] = ["prepend", "append", "add", "delete", "reorder"];
 /// Mesh prim, or the Mesh topology is inconsistent; [`ImportError::UsdBinary`]
 /// for binary crate content; [`ImportError::Io`] when the file can't be read.
 pub fn load_usda(path: &Path) -> Result<MeshData, ImportError> {
+    load_usda_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load_usda`] plus the geometry-mask part table. The loader imports
+/// the first `def Mesh` prim only, so the table holds one part named by
+/// that prim (the Mesh prim path's last component), else `mesh 1`.
+pub fn load_usda_with_parts(path: &Path) -> Result<(MeshData, MeshParts), ImportError> {
     let bytes = crate::read_capped(path)?;
-    parse_usda_bytes(&bytes)
+    let (data, prim) = parse_usda_bytes_named(&bytes)?;
+    let mut parts = crate::geometry_mask::MeshPartsBuilder::new();
+    parts.push(Some(&prim), data.triangle_count());
+    let parts = parts.finish(&data);
+    Ok((data, parts))
 }
 
 /// Parse in-memory `.usda` bytes (the testable core of [`load_usda`]).
+#[cfg(test)]
 fn parse_usda_bytes(bytes: &[u8]) -> Result<MeshData, ImportError> {
+    parse_usda_bytes_named(bytes).map(|(data, _)| data)
+}
+
+/// [`parse_usda_bytes`] plus the captured Mesh prim's name.
+fn parse_usda_bytes_named(bytes: &[u8]) -> Result<(MeshData, String), ImportError> {
     if bytes.starts_with(USDC_MAGIC) {
         return Err(ImportError::UsdBinary);
     }
@@ -84,7 +101,8 @@ fn parse_usda_bytes(bytes: &[u8]) -> Result<MeshData, ImportError> {
     let raw = parser
         .parse_layer()?
         .ok_or_else(|| ImportError::Usd("no 'def Mesh' prim found in the layer".into()))?;
-    build_mesh(&raw)
+    let data = build_mesh(&raw)?;
+    Ok((data, raw.name))
 }
 
 /// A [`ImportError::Usd`] carrying a 1-based line hint.

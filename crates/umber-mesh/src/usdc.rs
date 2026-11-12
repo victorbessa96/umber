@@ -25,7 +25,7 @@ use std::path::Path;
 use openusd::sdf::{AbstractData, Path as SdfPath, SpecType, Value};
 use openusd::usdc;
 
-use super::{ImportError, MeshData};
+use super::{ImportError, MeshData, MeshParts};
 
 /// Upper bound on a `.usdz` package's declared uncompressed content,
 /// checked against the zip CENTRAL DIRECTORY before any entry is
@@ -199,6 +199,12 @@ fn usdz_preflight(bytes: &[u8]) -> Result<(), ImportError> {
 /// Loads a `.usdc` (binary crate) file: the first Mesh prim becomes a
 /// fan-triangulated [`MeshData`], mirroring [`super::usd::load_usda`].
 pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
+    load_usdc_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load_usdc`] plus the geometry-mask part table: one part, named by
+/// the imported Mesh prim path's last component (`mesh 1` when empty).
+pub fn load_usdc_with_parts(path: &Path) -> Result<(MeshData, MeshParts), ImportError> {
     let bytes = crate::read_capped(path)?;
     if !bytes.starts_with(b"PXR-USDC") {
         return Err(ImportError::UsdBinary);
@@ -234,6 +240,12 @@ pub fn load_usdc(path: &Path) -> Result<MeshData, ImportError> {
 /// first-layer rule; a nested package's sublayers are not walked (the
 /// named boundary).
 pub fn load_usdz(path: &Path) -> Result<MeshData, ImportError> {
+    load_usdz_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load_usdz`] plus the geometry-mask part table (one part, the
+/// imported Mesh prim's name, as [`load_usdc_with_parts`]).
+pub fn load_usdz_with_parts(path: &Path) -> Result<(MeshData, MeshParts), ImportError> {
     // The package bytes are read under the same cap as every importer
     // (a multi-GB "package" would be an allocation abort, not a panic),
     // then the zip central directory is preflighted for declared
@@ -251,7 +263,7 @@ pub fn load_usdz(path: &Path) -> Result<MeshData, ImportError> {
         .map_err(|e| ImportError::Usd(format!("usdz: no readable root layer: {e}")))?;
     let root = SdfPath::abs_root();
     if let Some(mesh_path) = find_first_mesh(root_layer.as_ref(), &root) {
-        return build_mesh_from_spec(root_layer.as_ref(), &mesh_path);
+        return build_mesh_with_parts(root_layer.as_ref(), &mesh_path);
     }
     let mut visited = vec![archive.first_layer_name().unwrap_or_default()];
     for authored in sublayer_names(root_layer.as_ref(), &root)? {
@@ -314,7 +326,7 @@ fn walk_sublayers(
     authored: &str,
     visited: &mut Vec<String>,
     depth: usize,
-) -> Result<Option<MeshData>, ImportError> {
+) -> Result<Option<(MeshData, MeshParts)>, ImportError> {
     const MAX_SUB_LAYER_DEPTH: usize = 16;
     if depth >= MAX_SUB_LAYER_DEPTH {
         return Ok(None);
@@ -335,7 +347,7 @@ fn walk_sublayers(
     visited.push(name);
     let root = SdfPath::abs_root();
     if let Some(mesh_path) = find_first_mesh(layer.as_ref(), &root) {
-        return build_mesh_from_spec(layer.as_ref(), &mesh_path).map(Some);
+        return build_mesh_with_parts(layer.as_ref(), &mesh_path).map(Some);
     }
     for sub in sublayer_names(layer.as_ref(), &root)? {
         if let Some(mesh) = walk_sublayers(archive, &sub, visited, depth + 1)? {
@@ -347,11 +359,24 @@ fn walk_sublayers(
 
 /// Depth-first, authoring-order walk: the first prim whose `typeName`
 /// is `Mesh` — the same first-Mesh rule as the .usda parser.
-fn extract_first_mesh(data: &dyn AbstractData) -> Result<MeshData, ImportError> {
+fn extract_first_mesh(data: &dyn AbstractData) -> Result<(MeshData, MeshParts), ImportError> {
     let root = SdfPath::abs_root();
     let mesh_path = find_first_mesh(data, &root)
         .ok_or_else(|| ImportError::Usd("usd: no Mesh prim in document".to_string()))?;
-    build_mesh_from_spec(data, &mesh_path)
+    build_mesh_with_parts(data, &mesh_path)
+}
+
+/// [`build_mesh_from_spec`] plus the one-part table the first-Mesh rule
+/// yields: the Mesh prim path's last component names the part.
+fn build_mesh_with_parts(
+    data: &dyn AbstractData,
+    path: &SdfPath,
+) -> Result<(MeshData, MeshParts), ImportError> {
+    let mesh = build_mesh_from_spec(data, path)?;
+    let mut parts = crate::geometry_mask::MeshPartsBuilder::new();
+    parts.push(path.name(), mesh.triangle_count());
+    let parts = parts.finish(&mesh);
+    Ok((mesh, parts))
 }
 
 fn find_first_mesh(data: &dyn AbstractData, path: &SdfPath) -> Option<SdfPath> {

@@ -9,7 +9,7 @@
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
-use super::{ImportError, MeshData};
+use super::{ImportError, MeshData, MeshParts};
 
 /// Load a `.gltf` or `.glb` file into a single concatenated [`MeshData`].
 ///
@@ -17,6 +17,13 @@ use super::{ImportError, MeshData};
 /// buffer view cannot be resolved, or when the document contains no position
 /// data at all.
 pub fn load_gltf(path: &Path) -> Result<MeshData, ImportError> {
+    load_gltf_with_parts(path).map(|(data, _)| data)
+}
+
+/// [`load_gltf`] plus the geometry-mask part table: one part per glTF
+/// mesh, named by the mesh's `name`, else the first node that
+/// instances it, else `mesh <n>` (`geometry_mask::MeshPartsBuilder`).
+pub fn load_gltf_with_parts(path: &Path) -> Result<(MeshData, MeshParts), ImportError> {
     crate::ensure_import_size(path)?;
     validate_glb_container(path)?;
     // The `gltf`/`gltf-json` crates panic on shapes a crafted file can
@@ -81,16 +88,18 @@ fn validate_glb_container(path: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
-fn load_gltf_inner(path: &Path) -> Result<MeshData, ImportError> {
+fn load_gltf_inner(path: &Path) -> Result<(MeshData, MeshParts), ImportError> {
     let (document, buffers, _) =
         gltf::import(path).map_err(|e| ImportError::Gltf(e.to_string()))?;
     validate_accessors(&document)?;
     let mut data = MeshData::default();
+    let mut parts = crate::geometry_mask::MeshPartsBuilder::new();
     // Per-set masked bakes §1: the triangle→material map attaches only
     // when every primitive that emitted triangles named its material.
     let mut pending_triangle_materials: Vec<u16> = Vec::new();
     let mut complete = true;
     for mesh in document.meshes() {
+        let triangles_before = data.triangle_count();
         for primitive in mesh.primitives() {
             append_primitive(
                 &mut data,
@@ -100,6 +109,15 @@ fn load_gltf_inner(path: &Path) -> Result<MeshData, ImportError> {
                 &mut complete,
             )?;
         }
+        // Geometry masks (R-B2): the mesh name, else the first node
+        // instancing this mesh, else the builder's ordinal name.
+        let name = mesh.name().filter(|n| !n.trim().is_empty()).or_else(|| {
+            document
+                .nodes()
+                .find(|node| node.mesh().is_some_and(|m| m.index() == mesh.index()))
+                .and_then(|node| node.name())
+        });
+        parts.push(name, data.triangle_count() - triangles_before);
     }
     if complete && pending_triangle_materials.len() == data.triangle_count() {
         data.triangle_materials = pending_triangle_materials;
@@ -107,7 +125,8 @@ fn load_gltf_inner(path: &Path) -> Result<MeshData, ImportError> {
     if data.positions.is_empty() {
         return Err(ImportError::Gltf("no mesh geometry found".into()));
     }
-    Ok(data)
+    let parts = parts.finish(&data);
+    Ok((data, parts))
 }
 
 /// Pre-validates every accessor a primitive will read, BEFORE the `gltf`
