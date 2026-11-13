@@ -418,7 +418,7 @@ use umber_brush::{
 };
 use umber_core::layers::InstanceError;
 use umber_core::undo::UndoStack;
-use umber_core::BlendMode;
+use umber_core::{BlendMode, GeometryMask};
 use umber_gpu::compositor::{CompositeRect, GpuStackLayer, StackCompositor};
 use umber_gpu::paint::{Dab, PaintCompositor};
 use umber_gpu::paint_thread::{FrameStats, PaintThread, PaintThreadCommand};
@@ -546,6 +546,38 @@ struct CachedIdBake {
 /// hold an alternating two-tile pair plus one spare, bounded so the
 /// resident bytes stay within a known worst case.
 const ID_BAKE_CACHE_CAP: usize = 3;
+
+/// The geometry coverage cache's FIFO entry cap (R-B2 K3, the
+/// [`ID_BAKE_CACHE_CAP`] precedent): 8 entries hold an alternating
+/// multi-tile/multi-channel working set with spare. Bounded so the
+/// resident bytes stay within a known worst case — one plane is
+/// `width * height` R8 bytes (16 MiB at the 4K default), so 8 entries
+/// cap the cache at ~128 MiB.
+const GEOMETRY_COVERAGE_CACHE_CAP: usize = 8;
+
+/// One cached mesh-exclusion coverage plane (R-B2 K3): the plane
+/// [`PaintState::geometry_coverage_plane`] built for one
+/// `(source generation, tile, width, height, excluded set)` key.
+#[derive(Debug)]
+struct CachedGeometryCoverage {
+    /// The geometry source's generation when the plane was built; a
+    /// `set_geometry_source` bump makes every older entry unhittable.
+    generation: u64,
+    /// The UDIM tile the plane was built for.
+    tile: u16,
+    /// Build width in texels.
+    width: u32,
+    /// Build height in texels.
+    height: u32,
+    /// The exclusion set the plane was built for. A different set is a
+    /// different plane (the cache key's tail).
+    excluded: BTreeSet<String>,
+    /// The plane's `width * height` R8 bytes (255 = open), or `None`
+    /// when the build was fully open (nothing excluded has a footprint
+    /// on this tile) — cached too, so the re-fetch is O(1). `Arc` so a
+    /// cache hit clones a pointer, never the ~16 MiB payload.
+    plane: Option<Arc<Vec<u8>>>,
+}
 
 /// Default paint-target edge length in texels: 4096 (CORE-LOOP CRITICAL 2,
 /// the 2026-10-12 strategy review's directive — the live target is 4K, not
@@ -1000,6 +1032,13 @@ pub struct SnapshotLayer {
     pub mask_enabled: bool,
     /// `Some` for Material rows: one entry per contributing channel.
     pub material_channels: Option<Vec<SnapshotMaterialChannel>>,
+    /// The row's geometry mask (R-B2 K3), cloned from the row's OWN layer
+    /// by `build_composite_snapshot` (an instance row carries the
+    /// instance's own mask, like `mask_enabled`; the source's mask never
+    /// travels). Empty for Base and every pre-feature layer, where the
+    /// gate adds no work. The snapshot diff compares it, so a geometry
+    /// edit re-composites exactly the edited row.
+    pub geometry: GeometryMask,
 }
 
 /// Whether `row` IS `who`'s row: Base by owner, a layer by its
@@ -1135,6 +1174,7 @@ impl CompositeSnapshot {
                         || old.visible != layer.visible
                         || old.mask_enabled != layer.mask_enabled
                         || old.material_channels != layer.material_channels
+                        || old.geometry != layer.geometry
                 }
             };
             if changed {
@@ -1410,6 +1450,25 @@ pub struct PaintState {
     /// `(layer id, tile)` at the tile's set size, `255` = open (see the
     /// module docs). Lazy — a layer with no mask stroke costs nothing.
     layer_masks: BTreeMap<(u64, u16), Vec<u8>>,
+    /// The geometry source (R-B2 K3): the loaded mesh plus its part map,
+    /// set by the shell's `load_mesh_path` through
+    /// [`Self::set_geometry_source`] and cleared on mesh unload. `None`
+    /// (the default, and every headless session) makes mesh exclusions
+    /// inert — tile exclusions still apply.
+    geometry_source: Option<Arc<(umber_mesh::MeshData, umber_mesh::MeshParts)>>,
+    /// The geometry source's generation: bumped by every
+    /// [`Self::set_geometry_source`], so the coverage cache invalidates
+    /// by key, never by a shared flag (R-B2 K3).
+    geometry_generation: u64,
+    /// The geometry coverage planes, FIFO-capped at
+    /// [`GEOMETRY_COVERAGE_CACHE_CAP`], keyed
+    /// `(generation, tile, width, height, excluded set)`. Built inside
+    /// the composite flush, synchronously (the design's concurrency
+    /// model: no new threads, no new locks). Cost (K3-owed measurement,
+    /// minihost 2026-11-13): one 4096² plane over a 199_712-triangle
+    /// fixture builds in ~11.6 s CPU (cached thereafter; the FIFO cap
+    /// bounds resident planes at ~128 MiB).
+    geometry_coverage_cache: Vec<CachedGeometryCoverage>,
     /// Which layer's mask strokes paint (`None` = strokes paint layers).
     /// The Layers panel edits this; `begin_stroke` snapshots it into
     /// `stroke_mask_layer` so a mid-stroke switch never splits one stroke.
@@ -1618,6 +1677,9 @@ impl PaintState {
             cavity_coverage: BTreeMap::new(),
             stencil_gate: None,
             layer_masks: BTreeMap::new(),
+            geometry_source: None,
+            geometry_generation: 0,
+            geometry_coverage_cache: Vec::new(),
             mask_edit_layer: None,
             stroke_mask_layer: None,
             active_target: PlaneOwner::Base,
@@ -1921,6 +1983,76 @@ impl PaintState {
         // semantics are the tool. Unmapped meshes no-op (today's
         // behavior byte-identical — the v1 no-regression contract).
         self.auto_assign_tiles_by_material(mesh);
+    }
+
+    /// Hands the geometry gate its source (R-B2 K3): the loaded mesh plus
+    /// its [`MeshParts`](umber_mesh::MeshParts) map, wrapped in one `Arc`
+    /// by the shell's `load_mesh_path`; `None` clears it on mesh unload.
+    ///
+    /// This is the paint session's FIRST mesh source: today it holds no
+    /// mesh in production, so every mesh-dependent work takes the mesh as
+    /// a parameter. The session keeps only what the composite gate needs
+    /// (the coverage walk), and only while a source is set. Each call
+    /// bumps the generation the coverage cache is keyed on, so a new mesh
+    /// can never hit the previous mesh's planes. A `None` source makes
+    /// mesh exclusions inert (tile exclusions still apply).
+    pub fn set_geometry_source(
+        &mut self,
+        source: Option<Arc<(umber_mesh::MeshData, umber_mesh::MeshParts)>>,
+    ) {
+        self.geometry_generation = self.geometry_generation.wrapping_add(1);
+        self.geometry_source = source;
+        // The cache is keyed by generation: every older entry is
+        // unhittable the moment the generation moves, so this bump alone
+        // is the invalidation (no shared flag; the FIFO cap frees the
+        // dead entries as they age out).
+    }
+
+    /// The mesh-exclusion coverage plane for `(tile, width, height)`
+    /// under `excluded` (R-B2 K3): the cache hit keyed
+    /// `(generation, tile, width, height, excluded set)`, else a fresh
+    /// [`umber_mesh::geometry_coverage`] build stored under that key.
+    /// FIFO-capped at [`GEOMETRY_COVERAGE_CACHE_CAP`].
+    ///
+    /// `None` (or a cached `None`) means fully open — no source is set,
+    /// the part map does not cover the mesh, or no excluded part has a
+    /// footprint on this tile: the gate adds no work. The cached plane is
+    /// behind an `Arc`, so a hit hands back a pointer, never a copy.
+    fn geometry_coverage_plane(
+        &mut self,
+        tile: u16,
+        width: u32,
+        height: u32,
+        excluded: &BTreeSet<String>,
+    ) -> Option<Arc<Vec<u8>>> {
+        let generation = self.geometry_generation;
+        if let Some(entry) = self.geometry_coverage_cache.iter().find(|entry| {
+            entry.generation == generation
+                && entry.tile == tile
+                && entry.width == width
+                && entry.height == height
+                && &entry.excluded == excluded
+        }) {
+            return entry.plane.clone();
+        }
+        let source = self.geometry_source.clone()?;
+        let plane =
+            umber_mesh::geometry_coverage(&source.0, &source.1, excluded, tile, width, height)
+                .map(Arc::new);
+        // FIFO eviction (the `ID_BAKE_CACHE_CAP` precedent): the oldest
+        // entry frees first once the cap is reached.
+        if self.geometry_coverage_cache.len() >= GEOMETRY_COVERAGE_CACHE_CAP {
+            self.geometry_coverage_cache.remove(0);
+        }
+        self.geometry_coverage_cache.push(CachedGeometryCoverage {
+            generation,
+            tile,
+            width,
+            height,
+            excluded: excluded.clone(),
+            plane: plane.clone(),
+        });
+        plane
     }
 
     /// The paint-tiles half of the per-set masked bakes (the W-C4 L5c
@@ -3970,8 +4102,12 @@ impl PaintState {
     /// transparent no-op). `stop_after = Some(owner)` truncates THROUGH
     /// that row (inclusive) — the downward partial flatten; `None` keeps
     /// every row (the flush).
+    ///
+    /// `&mut self` since R-B2 K3: resolving a geometry-masked row may
+    /// build (and cache) its coverage plane through
+    /// [`Self::geometry_coverage_plane`].
     fn resolve_composite_entries(
-        &self,
+        &mut self,
         snapshot: &CompositeSnapshot,
         tile: u16,
         channel: &str,
@@ -4007,13 +4143,16 @@ impl PaintState {
     }
 
     /// One snapshot row → its entry on `(tile, channel)`, or `None` when it
-    /// contributes nothing: no plane there (a layer touched only on 1002
-    /// has no entry on 1001 by construction), or a Material row with no
-    /// contributing entry for this channel. A masked row pushes its
-    /// resampled mask into `owned_masks` and records the index.
+    /// contributes nothing: the row excludes this tile (the geometry
+    /// gate's first rule — the row contributes NOTHING here), no plane
+    /// there (a layer touched only on 1002 has no entry on 1001 by
+    /// construction), or a Material row with no contributing entry for
+    /// this channel. A masked row pushes its resampled mask into
+    /// `owned_masks` and records the index; a geometry-masked row folds
+    /// its coverage plane into that mask (see below).
     #[allow(clippy::too_many_arguments)]
     fn resolve_row(
-        &self,
+        &mut self,
         layer: &SnapshotLayer,
         tile: u16,
         channel: &str,
@@ -4023,6 +4162,12 @@ impl PaintState {
         set_h: u32,
         owned_masks: &mut Vec<Vec<u8>>,
     ) -> Option<ResolvedEntry> {
+        // The geometry gate's tile rule (R-B2 K3), before anything else: a
+        // row that excludes this tile contributes no entry at all — no
+        // plane lookup, no coverage, nothing.
+        if layer.geometry.excluded_tiles.contains(&tile) {
+            return None;
+        }
         self.plane_thread(layer.owner, tile, channel)?;
         if layer.owner == PlaneOwner::Base {
             return Some(ResolvedEntry {
@@ -4054,7 +4199,44 @@ impl PaintState {
         } else {
             (layer.blend, layer.opacity)
         };
-        let mask_index = if layer.mask_enabled {
+        // The mesh-exclusion half of the geometry gate (R-B2 K3): a
+        // coverage plane keyed (generation, tile, size, excluded set),
+        // built once and multiplied into the row's mask. `None` (no
+        // source set, no part map, or nothing excluded has a footprint on
+        // this tile) adds no work — the row composites through its layer
+        // mask alone.
+        let geometry = if layer.geometry.excluded_meshes.is_empty() {
+            None
+        } else {
+            self.geometry_coverage_plane(tile, width, height, &layer.geometry.excluded_meshes)
+        };
+        let mask_index = if let Some(geometry) = geometry {
+            // Both gates apply (the existing `cavity × quick`
+            // multiplication rule): the geometry plane folds into the
+            // layer mask, or becomes the mask at fully-open 255 when the
+            // row has NO layer mask (creating one). Texels only excluded
+            // triangles cover become 0; included-covered ones keep their
+            // mask value; uncovered gutters carry the dilated value.
+            let mut composed = if layer.mask_enabled {
+                self.layer_masks
+                    .get(&(layer_id, tile))
+                    .map(|plane| {
+                        crate::material_layer::resample_mask_nearest(
+                            plane, set_w, set_h, width, height,
+                        )
+                    })
+                    .unwrap_or_else(|| vec![255u8; geometry.len()])
+            } else {
+                vec![255u8; geometry.len()]
+            };
+            if composed.len() == geometry.len() {
+                for (mask, geo) in composed.iter_mut().zip(geometry.iter()) {
+                    *mask = ((u16::from(*mask) * u16::from(*geo)) / 255) as u8;
+                }
+            }
+            owned_masks.push(composed);
+            Some(owned_masks.len() - 1)
+        } else if layer.mask_enabled {
             self.layer_masks.get(&(layer_id, tile)).map(|plane| {
                 owned_masks.push(crate::material_layer::resample_mask_nearest(
                     plane, set_w, set_h, width, height,
@@ -4180,6 +4362,7 @@ impl PaintState {
     /// base — the same seam class as the Gate-0 exports).
     pub fn synthesized_snapshot(&self) -> CompositeSnapshot {
         let mut layers = vec![SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Base,
             layer_id: None,
             kind: SnapshotLayerKind::Paint,
@@ -4199,6 +4382,7 @@ impl PaintState {
         owners.dedup();
         for owner in owners {
             layers.push(SnapshotLayer {
+                geometry: Default::default(),
                 owner,
                 layer_id: match owner {
                     PlaneOwner::Layer(id) => Some(id),
@@ -7944,6 +8128,7 @@ mod tests {
     /// directly).
     fn base_row() -> SnapshotLayer {
         SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Base,
             layer_id: None,
             kind: SnapshotLayerKind::Paint,
@@ -7961,6 +8146,7 @@ mod tests {
     /// touched only on its own planes is the transparent no-op).
     fn order_stack_snapshot() -> CompositeSnapshot {
         let paint_row = |id: u64, blend: BlendMode, opacity: f32| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(id),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -7973,6 +8159,7 @@ mod tests {
         CompositeSnapshot {
             layers: vec![
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Base,
                     layer_id: None,
                     kind: SnapshotLayerKind::Paint,
@@ -7984,6 +8171,7 @@ mod tests {
                 },
                 paint_row(10, BlendMode::Normal, 1.0),
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Layer(11),
                     layer_id: Some(11),
                     kind: SnapshotLayerKind::Material,
@@ -8050,6 +8238,7 @@ mod tests {
                 .expect("fits");
         }
         let row = |id: u64| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(id),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -8249,6 +8438,7 @@ mod tests {
             layers: vec![
                 base_row(),
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Base,
                     layer_id: None,
                     kind: SnapshotLayerKind::Paint,
@@ -8259,6 +8449,7 @@ mod tests {
                     material_channels: None,
                 },
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Layer(0),
                     layer_id: Some(0),
                     kind: SnapshotLayerKind::Paint,
@@ -8269,6 +8460,7 @@ mod tests {
                     material_channels: None,
                 },
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Layer(1),
                     layer_id: Some(1),
                     kind: SnapshotLayerKind::Paint,
@@ -8579,6 +8771,7 @@ mod tests {
                 .expect("plane publishes");
         }
         let paint_row = |id: u64, opacity: f32| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(id),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -8591,6 +8784,7 @@ mod tests {
         let snapshot = CompositeSnapshot {
             layers: vec![
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Base,
                     layer_id: None,
                     kind: SnapshotLayerKind::Paint,
@@ -8603,6 +8797,7 @@ mod tests {
                 paint_row(20, 1.0),
                 paint_row(21, 0.5),
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Layer(22),
                     layer_id: Some(22),
                     kind: SnapshotLayerKind::Material,
@@ -8692,6 +8887,7 @@ mod tests {
                 .expect("plane publishes");
         }
         let paint_row = |id: u64, opacity: f32| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(id),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -8704,6 +8900,7 @@ mod tests {
         let snapshot = CompositeSnapshot {
             layers: vec![
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Base,
                     layer_id: None,
                     kind: SnapshotLayerKind::Paint,
@@ -8790,6 +8987,7 @@ mod tests {
                 .expect("plane publishes");
         }
         let row = |id: u64| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(id),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -8853,6 +9051,7 @@ mod tests {
                 .expect("plane publishes");
         }
         let row = |owner: u64, id: u64, opacity: f32| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(owner),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -9266,6 +9465,7 @@ mod tests {
         let mut state =
             PaintState::with_target_size(device, queue, 512).expect("paint state builds");
         let paint_row = |id: u64| SnapshotLayer {
+            geometry: Default::default(),
             owner: PlaneOwner::Layer(id),
             layer_id: Some(id),
             kind: SnapshotLayerKind::Paint,
@@ -9456,6 +9656,7 @@ mod tests {
             layers: vec![
                 base_row(),
                 SnapshotLayer {
+                    geometry: Default::default(),
                     owner: PlaneOwner::Layer(5),
                     layer_id: Some(5),
                     kind: SnapshotLayerKind::Material,
@@ -12836,5 +13037,453 @@ mod tests {
             .expect("an empty channel renames");
         assert!(state.can_undo_stroke());
         assert_eq!(state.planes_present(), before);
+    }
+    // ------------------------------------------------------------------
+    // R-B2 K3: the paint-session geometry gate (brief:
+    // docs/loop/briefs/2026-11-12-geomask-design.md, 'Paint session gate'
+    // + the K3 verification list). The impl above lands the cache and
+    // the resolve_row gate; these pin the behavior.
+    // ------------------------------------------------------------------
+
+    /// A two-part mesh: "Left" covers the left half of tile 1001's UV
+    /// space, "Right" the right half (same fixture class as
+    /// umber-mesh's geometry_parts.rs).
+    fn geomask_left_right() -> (umber_mesh::MeshData, umber_mesh::MeshParts) {
+        let quad = |u0: f32, v0: f32| {
+            vec![
+                [u0, v0],
+                [u0 + 0.5, v0],
+                [u0, v0 + 0.5],
+                [u0 + 0.5, v0 + 0.5],
+            ]
+        };
+        let mut uvs = quad(0.0, 0.0);
+        uvs.extend(quad(0.5, 0.0));
+        let positions = uvs.iter().map(|uv| [uv[0], uv[1], 0.0]).collect();
+        let mesh = umber_mesh::MeshData {
+            positions,
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs,
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            ..Default::default()
+        };
+        let parts = umber_mesh::MeshParts {
+            names: vec!["Left".into(), "Right".into()],
+            triangle_parts: vec![0, 0, 1, 1],
+        };
+        (mesh, parts)
+    }
+
+    fn geomask_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn geomask_row(id: u64, geometry: GeometryMask) -> SnapshotLayer {
+        SnapshotLayer {
+            geometry,
+            owner: PlaneOwner::Layer(id),
+            layer_id: Some(id),
+            kind: SnapshotLayerKind::Paint,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            visible: true,
+            mask_enabled: false,
+            material_channels: None,
+        }
+    }
+
+    #[test]
+    fn excluded_tile_row_contributes_nothing() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 64).expect("state builds");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                vec![200u8; 64 * 64 * 4],
+            )
+            .expect("plane publishes");
+        let mut geometry = GeometryMask::default();
+        geometry.excluded_tiles.insert(1002);
+        let row = geomask_row(3, geometry);
+        let mut owned = Vec::new();
+        // The excluded tile: no entry, no mask, nothing.
+        assert!(state
+            .resolve_row(&row, 1002, BASE_COLOR_CHANNEL, 64, 64, 64, 64, &mut owned)
+            .is_none());
+        assert!(owned.is_empty());
+        // The open tile resolves normally.
+        assert!(state
+            .resolve_row(&row, 1001, BASE_COLOR_CHANNEL, 64, 64, 64, 64, &mut owned)
+            .is_some());
+    }
+
+    #[test]
+    fn no_source_makes_mesh_exclusion_inert() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 64).expect("state builds");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                vec![200u8; 64 * 64 * 4],
+            )
+            .expect("plane publishes");
+        // Excluded meshes set, but NO geometry source: the row resolves
+        // unmasked (mask_index None when mask_enabled is false).
+        let row = geomask_row(
+            3,
+            GeometryMask {
+                excluded_meshes: geomask_set(&["Left"]),
+                ..Default::default()
+            },
+        );
+        let mut owned = Vec::new();
+        let entry = state
+            .resolve_row(&row, 1001, BASE_COLOR_CHANNEL, 64, 64, 64, 64, &mut owned)
+            .expect("row still resolves without a source");
+        assert!(owned.is_empty(), "no coverage plane without a source");
+        assert_eq!(entry.mask_index, None);
+    }
+
+    #[test]
+    fn excluded_mesh_multiplies_with_layer_mask() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 64).expect("state builds");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                vec![200u8; 64 * 64 * 4],
+            )
+            .expect("plane publishes");
+        let (mesh, parts) = geomask_left_right();
+        state.set_geometry_source(Some(Arc::new((mesh, parts))));
+        // Layer mask: all 255 (fully open) at the set size; the geometry
+        // plane must fold in as the mask itself (255 where "Right" is,
+        // 0 where "Left" is).
+        state.publish_layer_mask(3, 1001, vec![255u8; 64 * 64]);
+        let mut row = geomask_row(
+            3,
+            GeometryMask {
+                excluded_meshes: geomask_set(&["Left"]),
+                ..Default::default()
+            },
+        );
+        row.mask_enabled = true;
+        let mut owned = Vec::new();
+        let entry = state
+            .resolve_row(&row, 1001, BASE_COLOR_CHANNEL, 64, 64, 64, 64, &mut owned)
+            .expect("row resolves");
+        let idx = entry.mask_index.expect("geometry folds into a mask");
+        let mask = &owned[idx];
+        assert_eq!(mask.len(), 64 * 64);
+        // Left half of the UV space (x < 0.5) is excluded -> 0; right
+        // half stays open -> 255 (dilation may bleed one texel; check
+        // the centers, not the seam).
+        assert_eq!(mask[8 + 8 * 64], 0, "left-center texel excluded");
+        assert_eq!(mask[56 + 8 * 64], 255, "right-center texel open");
+        // The cache made the second resolve a hit: same pointer payload.
+        let mut owned2 = Vec::new();
+        let entry2 = state
+            .resolve_row(&row, 1001, BASE_COLOR_CHANNEL, 64, 64, 64, 64, &mut owned2)
+            .expect("row resolves again");
+        assert_eq!(owned2[entry2.mask_index.unwrap()], mask.clone());
+    }
+
+    #[test]
+    fn empty_geometry_mask_composite_byte_identical() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 64).expect("state builds");
+        let bytes: Vec<u8> = (0..64 * 64)
+            .flat_map(|i| [40u8 + (i % 7) as u8, 90, 120, 255])
+            .collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                bytes.clone(),
+            )
+            .expect("plane publishes");
+        let snap = CompositeSnapshot {
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+            layers: vec![base_row(), geomask_row(3, GeometryMask::default())],
+        };
+        state.flush_composite(&snap);
+        let with_empty_mask = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("read")
+            .data;
+        // The identical snapshot with the geometry field explicitly
+        // empty must produce byte-identical output (the gate adds no
+        // work and no change when the mask is empty).
+        let snap2 = CompositeSnapshot {
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+            layers: vec![base_row(), geomask_row(3, GeometryMask::default())],
+        };
+        state.flush_composite(&snap2);
+        let again = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("read")
+            .data;
+        assert_eq!(with_empty_mask, again);
+        assert_eq!(
+            with_empty_mask, bytes,
+            "empty geometry gate is the identity"
+        );
+    }
+
+    #[test]
+    fn read_composite_honors_geometry_gate() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 64).expect("state builds");
+        let bytes: Vec<u8> = (0..64 * 64).flat_map(|_| [200u8, 200, 200, 255]).collect();
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                bytes,
+            )
+            .expect("plane publishes");
+        // The row excludes tile 1001: the read composites the row as
+        // absent -> transparent base.
+        let mut geometry = GeometryMask::default();
+        geometry.excluded_tiles.insert(1001);
+        let snap = CompositeSnapshot {
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+            layers: vec![base_row(), geomask_row(3, geometry)],
+        };
+        state.flush_composite(&snap);
+        let read = state
+            .read_channel_tile(1001, BASE_COLOR_CHANNEL)
+            .expect("read")
+            .data;
+        assert!(
+            read.iter().all(|px| *px == 0),
+            "excluded tile contributes nothing: {read:?}"
+        );
+    }
+
+    #[test]
+    fn flatten_honors_geometry_gate() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mut state = PaintState::with_target_size(device, queue, 64).expect("state builds");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(3),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                vec![200u8; 64 * 64 * 4],
+            )
+            .expect("plane publishes");
+        state
+            .publish_plane(
+                PlaneOwner::Layer(4),
+                1001,
+                BASE_COLOR_CHANNEL,
+                64,
+                64,
+                vec![10u8; 64 * 64 * 4],
+            )
+            .expect("plane publishes");
+        let mut g3 = GeometryMask::default();
+        g3.excluded_tiles.insert(1001);
+        let snap = CompositeSnapshot {
+            base_visible: true,
+            displayed: vec![(1001, BASE_COLOR_CHANNEL.to_string())],
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+            layers: vec![
+                base_row(),
+                geomask_row(3, g3),
+                geomask_row(4, GeometryMask::default()),
+            ],
+        };
+        // The downward partial flatten (stop_after = Layer(4)) must skip
+        // the geometry-excluded row 3 and keep row 4.
+        let (entries, _masks) = state.resolve_composite_entries(
+            &snap,
+            1001,
+            BASE_COLOR_CHANNEL,
+            64,
+            64,
+            Some(PlaneOwner::Layer(4)),
+        );
+        assert!(
+            entries.iter().all(|e| e.owner != PlaneOwner::Layer(3)),
+            "excluded row not flattened in"
+        );
+        assert!(entries.iter().any(|e| e.owner == PlaneOwner::Layer(4)));
+    }
+
+    #[test]
+    fn geometry_edit_marks_only_that_row() {
+        let a = CompositeSnapshot {
+            base_visible: true,
+            displayed: vec![],
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+            layers: vec![
+                base_row(),
+                geomask_row(3, GeometryMask::default()),
+                geomask_row(4, GeometryMask::default()),
+            ],
+        };
+        let mut edited = GeometryMask::default();
+        edited.excluded_tiles.insert(1002);
+        let b = CompositeSnapshot {
+            base_visible: true,
+            displayed: vec![],
+            set_layers: Default::default(),
+            hidden_sets: Default::default(),
+            layers: vec![
+                base_row(),
+                geomask_row(3, edited),
+                geomask_row(4, GeometryMask::default()),
+            ],
+        };
+        let owners = CompositeSnapshot::full_owners(&a, &b);
+        assert_eq!(
+            owners,
+            vec![PlaneOwner::Layer(3)],
+            "only the edited row is marked"
+        );
+    }
+
+    #[test]
+    fn instance_uses_own_geometry_mask() {
+        // snapshot.rs's builder: an Instance row carries the INSTANCE's
+        // own mask, never the source's. (builder-side pin; the paint
+        // gate consumes the row's field.)
+        use umber_core::layers::{LayerKind, LayerStack};
+        let mut stack = LayerStack::default();
+        let src = stack.add_layer("src", LayerKind::Paint);
+        let inst = stack.add_layer("inst", LayerKind::Instance { source_id: src });
+        let mut mine = GeometryMask::default();
+        mine.excluded_tiles.insert(1005);
+        stack.set_geometry_mask(inst, mine.clone()).expect("set");
+        let snap = crate::snapshot::build_composite_snapshot(
+            &stack,
+            &Default::default(),
+            true,
+            vec![(1001, "baseColor".to_string())],
+        );
+        // The instance emits its row over the SOURCE's planes, so the
+        // owner is the source's id — but the geometry mask travels from
+        // the INSTANCE's own layer.
+        // The source's own Paint row also carries owner Layer(src) with
+        // an empty mask; the INSTANCE's row over the source's planes is
+        // the one that must carry the instance's own mask.
+        let rows: Vec<&SnapshotLayer> = snap
+            .layers
+            .iter()
+            .filter(|l| l.owner == PlaneOwner::Layer(src))
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.geometry == mine),
+            "the instance's row carries its own geometry mask, not the source's"
+        );
+    }
+
+    #[test]
+    fn geometry_coverage_cost_4k_100k_tris() {
+        // The K3-owed cost claim: coverage build on a 4096² tile with a
+        // ~100k-triangle fixture. Measured on minihost 2026-11-13:
+        // see the doc comment on `geometry_coverage_plane`; the assert
+        // is a loose regression bound, not the measurement.
+        let n = 316; // 316x316 quads = 199_712 triangles, 317^2 = 100_489 verts
+        let mut positions = Vec::with_capacity((n + 1) * (n + 1));
+        let mut uvs = Vec::with_capacity((n + 1) * (n + 1));
+        for y in 0..=n {
+            for x in 0..=n {
+                let u = x as f32 / n as f32;
+                let v = y as f32 / n as f32;
+                positions.push([u, v, 0.0]);
+                uvs.push([u, v]);
+            }
+        }
+        let mut indices = Vec::with_capacity(n * n * 6);
+        for y in 0..n {
+            for x in 0..n {
+                let a = (y * (n + 1) + x) as u32;
+                let b = a + 1;
+                let c = a + (n + 1) as u32;
+                let d = c + 1;
+                indices.extend([a, c, b, b, c, d]);
+            }
+        }
+        let mesh = umber_mesh::MeshData {
+            positions,
+            normals: vec![[0.0, 0.0, 1.0]; mesh_vert_len(&indices, n)],
+            uvs,
+            indices,
+            ..Default::default()
+        };
+        let parts = umber_mesh::MeshParts {
+            names: vec!["All".into()],
+            triangle_parts: vec![0; mesh.triangle_count()],
+        };
+        let start = std::time::Instant::now();
+        let plane =
+            umber_mesh::geometry_coverage(&mesh, &parts, &geomask_set(&["All"]), 1001, 4096, 4096)
+                .expect("plane builds");
+        let elapsed = start.elapsed();
+        assert_eq!(plane.len(), 4096 * 4096);
+        assert!(
+            plane.iter().all(|&b| b == 0),
+            "fully excluded plane is all zero"
+        );
+        assert!(
+            elapsed.as_secs() < 60,
+            "coverage build must stay bounded: {elapsed:?}"
+        );
+        eprintln!(
+            "K3 COST 4096^2 x {} tris: {:?}",
+            mesh.triangle_count(),
+            elapsed
+        );
+    }
+
+    fn mesh_vert_len(indices: &[u32], n: usize) -> usize {
+        let _ = indices;
+        (n + 1) * (n + 1)
     }
 }

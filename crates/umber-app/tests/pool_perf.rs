@@ -87,6 +87,7 @@ fn harness_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnaps
     CompositeSnapshot {
         layers: vec![
             SnapshotLayer {
+                geometry: Default::default(),
                 owner: PlaneOwner::Base,
                 layer_id: None,
                 kind: SnapshotLayerKind::Paint,
@@ -97,6 +98,7 @@ fn harness_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnaps
                 material_channels: None,
             },
             SnapshotLayer {
+                geometry: Default::default(),
                 owner: PlaneOwner::Layer(1),
                 layer_id: Some(1),
                 kind: SnapshotLayerKind::Paint,
@@ -141,6 +143,7 @@ fn drag_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnapshot
     CompositeSnapshot {
         layers: vec![
             SnapshotLayer {
+                geometry: Default::default(),
                 owner: PlaneOwner::Base,
                 layer_id: None,
                 kind: SnapshotLayerKind::Paint,
@@ -151,6 +154,7 @@ fn drag_snapshot(opacity: f32, displayed: &[(u16, String)]) -> CompositeSnapshot
                 material_channels: None,
             },
             SnapshotLayer {
+                geometry: Default::default(),
                 owner: PlaneOwner::Layer(1),
                 layer_id: Some(1),
                 kind: SnapshotLayerKind::Material,

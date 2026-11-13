@@ -40,6 +40,7 @@ pub fn build_composite_snapshot(
         visible: base_visible,
         mask_enabled: false,
         material_channels: None,
+        geometry: Default::default(),
     }];
     for layer in &stack.layers {
         let owner = PlaneOwner::Layer(layer.id);
@@ -69,6 +70,7 @@ pub fn build_composite_snapshot(
                     visible: layer.visible,
                     mask_enabled,
                     material_channels: Some(channels),
+                    geometry: layer.geometry_mask.clone(),
                 });
             }
             umber_core::LayerKind::Fill => {
@@ -81,6 +83,7 @@ pub fn build_composite_snapshot(
                     visible: layer.visible,
                     mask_enabled,
                     material_channels: None,
+                    geometry: layer.geometry_mask.clone(),
                 });
             }
             umber_core::LayerKind::Paint => {
@@ -93,6 +96,7 @@ pub fn build_composite_snapshot(
                     visible: layer.visible,
                     mask_enabled,
                     material_channels: None,
+                    geometry: layer.geometry_mask.clone(),
                 });
             }
             umber_core::LayerKind::Instance { .. } => {
@@ -132,6 +136,7 @@ pub fn build_composite_snapshot(
                             visible: layer.visible,
                             mask_enabled,
                             material_channels: Some(channels),
+                            geometry: layer.geometry_mask.clone(),
                         });
                     }
                     umber_core::LayerKind::Paint | umber_core::LayerKind::Fill => {
@@ -149,6 +154,7 @@ pub fn build_composite_snapshot(
                             visible: layer.visible,
                             mask_enabled,
                             material_channels: None,
+                            geometry: layer.geometry_mask.clone(),
                         });
                     }
                     umber_core::LayerKind::Folder { .. }
