@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 
 use fluent::FluentValue;
 use umber_core::journal::{Journal, JournalOp};
-use umber_core::layers::{InstanceError, Layer, LayerCommand, LayerKind, LayerStack};
+use umber_core::layers::{
+    InstanceError, Layer, LayerCommand, LayerKind, LayerStack, MaterialParamOverride,
+    MaterialParamValue, MaterialParams,
+};
+use umber_core::smart::{SmartMaterial, SmartParam, SmartParamKind, SmartParamValue};
 use umber_core::undo::UndoStack;
 
 use crate::history_panel::{HistoryKind, SessionHistory};
@@ -1050,6 +1054,9 @@ pub fn layers_ui(
             // blend mode and the name, each an undoable command.
             if active == PlaneOwner::Layer(layer.id) {
                 layer_properties_row(ui, doc, layer.id);
+                // 4.1b: the applied smart material's parameter controls,
+                // when the selected layer was instantiated by a `.umbersmart`.
+                smart_params_section(ui, doc, layer.id);
             }
             // Dynamic-material expandable rows (Kill B): under their own row,
             // never replacing it — the badge line above stays visible while
@@ -1497,7 +1504,152 @@ pub fn apply_smart_material(
         }
         ids.push(id);
     }
+    stamp_smart_instance(doc, material, &ids);
     ids
+}
+
+/// The `material_id` prefix marking a layer as instantiated by a
+/// `.umbersmart` apply (4.1b). The full id is
+/// `umbersmart:<preset name>#<root layer id>`: every layer the apply
+/// created carries it (so the inspector recognizes any of them), and the
+/// ROOT layer's `material.params` holds the current parameter values
+/// (the other members carry an empty param list). The write rides the
+/// ordinary undoable, journaled, persisted `SetMaterial` command — no
+/// new wire shape, project version stays 1.
+pub const SMART_MATERIAL_ID_PREFIX: &str = "umbersmart:";
+
+/// The `material_id` of the instance of preset `preset` rooted at `root`.
+fn smart_material_id(preset: &str, root: u64) -> String {
+    format!("{SMART_MATERIAL_ID_PREFIX}{preset}#{root}")
+}
+
+/// If `layer` was instantiated by a `.umbersmart` apply, its
+/// `(preset name, root layer id)` — parsed from the `umbersmart:` marker
+/// in its `material.material_id`. `None` for every ordinary layer.
+pub fn smart_instance_of(layer: &Layer) -> Option<(String, u64)> {
+    let id = layer
+        .material
+        .as_ref()?
+        .material_id
+        .strip_prefix(SMART_MATERIAL_ID_PREFIX)?;
+    let (name, root) = id.rsplit_once('#')?;
+    if name.is_empty() {
+        return None;
+    }
+    let root: u64 = root.parse().ok()?;
+    Some((name.to_string(), root))
+}
+
+/// The declared value of `param` encoded as the `MaterialParamValue` the
+/// instance root stores: a float stays a float, a choice is its option
+/// index (`Int` — `MaterialParamValue` has no string variant).
+fn default_material_value(param: &SmartParam) -> MaterialParamValue {
+    match param.value() {
+        SmartParamValue::Float(f) => MaterialParamValue::Float(f),
+        SmartParamValue::Choice(option) => {
+            let index = match &param.kind {
+                SmartParamKind::Choice { options, .. } => {
+                    options.iter().position(|o| o == option).unwrap_or(0) as i32
+                }
+                SmartParamKind::Float { .. } => 0,
+            };
+            MaterialParamValue::Int(index)
+        }
+    }
+}
+
+/// Stamps the just-applied smart material (4.1b): one undoable
+/// `SetMaterial` per created layer, all carrying the `umbersmart:` marker;
+/// the root (the first created id) additionally holds every declared
+/// parameter's default value. Presets without a `parameters` block are
+/// left untouched. Each command journals as an ordinary `SetMaterial` op,
+/// so undoing the apply removes the stamps with the layers' other edits.
+fn stamp_smart_instance(doc: &mut Document, material: &SmartMaterial, ids: &[u64]) {
+    if ids.is_empty() || material.parameters.is_empty() {
+        return;
+    }
+    let root = ids[0];
+    let material_id = smart_material_id(&material.name, root);
+    for (i, &id) in ids.iter().enumerate() {
+        let params = if i == 0 {
+            material
+                .parameters
+                .iter()
+                .map(|param| MaterialParamOverride {
+                    node_id: 0,
+                    param: param.id.clone(),
+                    value: default_material_value(param),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        doc.run(LayerCommand::set_material(
+            id,
+            MaterialParams {
+                material_id: material_id.clone(),
+                channels: Vec::new(),
+                params,
+            },
+        ));
+    }
+}
+
+/// The current stored value of `param` on the instance rooted at `root`
+/// (the declared default when the root carries no entry yet — e.g. a
+/// project saved before 4.1b, which loads with defaults).
+pub fn smart_param_value(doc: &Document, root: u64, param: &SmartParam) -> MaterialParamValue {
+    doc.stack
+        .layer(root)
+        .and_then(|layer| layer.material.as_ref())
+        .and_then(|mat| {
+            mat.params
+                .iter()
+                .find(|o| o.param == param.id)
+                .map(|o| o.value.clone())
+        })
+        .unwrap_or_else(|| default_material_value(param))
+}
+
+/// Writes one parameter edit as exactly ONE undoable, journaled
+/// `SetMaterial` on the instance's root layer: `params` upserts the
+/// (param id → value) entry and the command replays/reverts like every
+/// material write. The generator input reads this value back through
+/// [`smart_param_value`] (the fill itself is a baked snapshot in this
+/// build — the graph-side consumption is the named follow-up).
+fn write_smart_param(doc: &mut Document, root: u64, param: &SmartParam, value: MaterialParamValue) {
+    let Some(mut mat) = doc
+        .stack
+        .layer(root)
+        .and_then(|layer| layer.material.clone())
+    else {
+        return;
+    };
+    match mat.params.iter_mut().find(|o| o.param == param.id) {
+        Some(entry) => entry.value = value,
+        None => mat.params.push(MaterialParamOverride {
+            node_id: 0,
+            param: param.id.clone(),
+            value,
+        }),
+    }
+    doc.run(LayerCommand::set_material(root, mat));
+}
+
+/// The smart-library preset named `name`, cached per egui context for the
+/// frame group (the smart shelf's own cache pattern — disk scan once).
+fn smart_material_by_name(ctx: &egui::Context, name: &str) -> Option<SmartMaterial> {
+    let cache_id = egui::Id::new("smart-params-materials");
+    let list: Option<Vec<(String, SmartMaterial)>> = ctx.data(|d| d.get_temp(cache_id));
+    let list = match list {
+        Some(list) => list,
+        None => {
+            let list = list_smart_materials(&smart_dirs());
+            ctx.data_mut(|d| d.insert_temp(cache_id, list.clone()));
+            list
+        }
+    };
+    list.into_iter().find(|(n, _)| n == name).map(|(_, m)| m)
 }
 
 /// The `noise_perlin` smart generator's pattern frequency (fill-UV units):
@@ -1662,6 +1814,113 @@ pub fn duplicate_layer(doc: &mut Document, id: u64) -> Option<u64> {
         doc.run(LayerCommand::set_blend_mode(new_id, source.blend_mode));
     }
     Some(new_id)
+}
+
+/// The applied smart material's declared parameters as editable controls
+/// (4.1b), drawn under the selected layer's properties row when that layer
+/// was instantiated by a `.umbersmart` apply. One control per declared
+/// [`SmartParam`]: a slider for a float (bounded by the declared
+/// `min..=max`, stepped by `step`), a combo for a choice. Each edit is
+/// exactly ONE undoable, journaled `SetMaterial` on the instance's root
+/// layer ([`write_smart_param`]); the values persist with the layer
+/// through project save/load (the `material` field's existing serde
+/// path — no project version bump), and old projects load with the
+/// declared defaults ([`smart_param_value`]). Theme-aware colors only:
+/// plain labels/combos/sliders, muted via `ui.weak` for the missing-
+/// preset note.
+pub(crate) fn smart_params_section(ui: &mut egui::Ui, doc: &mut Document, id: u64) {
+    let Some(layer) = doc.stack.layer(id).cloned() else {
+        return;
+    };
+    let Some((preset_name, root)) = smart_instance_of(&layer) else {
+        return;
+    };
+    let Some(material) = smart_material_by_name(ui.ctx(), &preset_name) else {
+        let args = [("name", FluentValue::from(preset_name.as_str()))];
+        ui.weak(tr_args("layers.smart-params-missing", args));
+        return;
+    };
+    if material.parameters.is_empty() {
+        return;
+    }
+    let header = format!("{} ▸ {}", tr("layers.smart-params-header"), material.name);
+    egui::CollapsingHeader::new(header)
+        .id_salt(("smart-params", id))
+        .default_open(true)
+        .show(ui, |ui| {
+            for param in &material.parameters {
+                let current = smart_param_value(doc, root, param);
+                match &param.kind {
+                    SmartParamKind::Float { min, max, step, .. } => {
+                        let fallback = match param.value() {
+                            SmartParamValue::Float(f) => f,
+                            SmartParamValue::Choice(_) => *min,
+                        };
+                        let mut value = match current {
+                            MaterialParamValue::Float(f) if f.is_finite() => f.clamp(*min, *max),
+                            _ => fallback,
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(&param.label);
+                            let response = ui.add(
+                                egui::Slider::new(&mut value, *min..=*max).step_by(*step as f64),
+                            );
+                            if response.changed() && Some(value) != float_of(&current) {
+                                write_smart_param(
+                                    doc,
+                                    root,
+                                    param,
+                                    MaterialParamValue::Float(value),
+                                );
+                            }
+                        });
+                    }
+                    SmartParamKind::Choice { options, .. } => {
+                        let fallback_index = match param.value() {
+                            SmartParamValue::Choice(option) => {
+                                options.iter().position(|o| o == option).unwrap_or(0)
+                            }
+                            SmartParamValue::Float(_) => 0,
+                        };
+                        let current_index = match &current {
+                            MaterialParamValue::Int(i) if (0..options.len() as i32).contains(i) => {
+                                *i as usize
+                            }
+                            _ => fallback_index,
+                        };
+                        let mut picked = current_index;
+                        let combo_id = egui::Id::new(("smart-param", id, param.id.as_str()));
+                        ui.horizontal(|ui| {
+                            ui.label(&param.label);
+                            egui::ComboBox::from_id_salt(combo_id)
+                                .selected_text(options.get(picked).cloned().unwrap_or_default())
+                                .show_ui(ui, |ui| {
+                                    for (index, option) in options.iter().enumerate() {
+                                        ui.selectable_value(&mut picked, index, option);
+                                    }
+                                });
+                        });
+                        if picked != current_index {
+                            write_smart_param(
+                                doc,
+                                root,
+                                param,
+                                MaterialParamValue::Int(picked as i32),
+                            );
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// The float the `current` value holds, or `None` when it is not a float
+/// (a malformed/legacy entry re-renders at the fallback).
+fn float_of(current: &MaterialParamValue) -> Option<f32> {
+    match current {
+        MaterialParamValue::Float(f) => Some(*f),
+        _ => None,
+    }
 }
 
 /// The selected layer's properties rows: opacity, blend mode, visibility.
