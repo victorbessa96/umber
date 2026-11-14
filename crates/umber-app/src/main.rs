@@ -532,6 +532,12 @@ struct PanelViewer<'a> {
     /// The Layers panel's gesture state (g2-layer-gestures): selection,
     /// mask solo, the pending ✕ confirm.
     layer_gestures: &'a mut layers_panel::gestures::GestureState,
+    /// The loaded mesh's part map (R-B2 K4): the Layers panel's geometry
+    /// section lists it, the viewport's hide-excluded seam consumes it.
+    mesh_parts: Option<&'a umber_mesh::MeshParts>,
+    /// The geometry-mask session clipboard (R-B2 K4), edited by the
+    /// Layers panel's Copy/Paste.
+    geometry_clipboard: &'a mut Option<umber_core::layers::GeometryMask>,
     /// A texture-set resize waiting for its confirm.
     pending_resize: &'a mut Option<PendingResize>,
     /// Fill layers blocked by the plane budget: layer id → badge line.
@@ -686,6 +692,41 @@ impl TabViewer for PanelViewer<'_> {
                 // viewer chain (the same DisplaySettings the Display panel
                 // edits) rides along every frame, identity by default.
                 self.viewport.set_display_settings(self.display);
+                // R-B2 K4: feed the hide-excluded seam (K5's
+                // `set_triangle_visibility`) the ACTIVE layer's mask
+                // predicates through `viewport::triangle_visibility`. Cheap
+                // every frame: an unchanged input re-derives nothing; with
+                // the toggle off or an empty mask the input is `None` and
+                // the full mesh draws (byte-identical to pre-feature).
+                {
+                    let active_layer =
+                        self.layer_gestures.selection.primary().or_else(|| {
+                            match self.paint.as_ref().map(|p| p.active_target()) {
+                                Some(paint_state::PlaneOwner::Layer(id)) => Some(id),
+                                _ => None,
+                            }
+                        });
+                    let mask = active_layer
+                        .and_then(|id| self.doc.stack.layer(id))
+                        .map(|l| l.geometry_mask.clone());
+                    let vis = match (self.mesh, mask) {
+                        (Some(mesh), Some(m)) if self.viewport.hide_excluded() && !m.is_empty() => {
+                            let (tp, pn): (&[u16], &[String]) = match self.mesh_parts {
+                                Some(p) if p.is_complete_for(mesh) => (&p.triangle_parts, &p.names),
+                                _ => (&[], &[]),
+                            };
+                            Some(viewport::triangle_visibility(
+                                mesh,
+                                tp,
+                                pn,
+                                &m.excluded_meshes,
+                                &m.excluded_tiles,
+                            ))
+                        }
+                        _ => None,
+                    };
+                    self.viewport.set_triangle_visibility(vis.as_deref());
+                }
                 // The ID-mask arm (C1 worklist #11): same strip-only shape.
                 // A click bakes the mesh's region IDs at the paint target's
                 // size and selects the clicked region through the paint
@@ -1159,6 +1200,22 @@ impl TabViewer for PanelViewer<'_> {
                 // metadata rows have nothing to route strokes to.
                 if let Some(paint) = self.paint.as_deref_mut() {
                     document::layer_mask_ui(ui, self.doc, paint);
+                }
+                // The geometry-mask section (R-B2 K4): per-layer excluded
+                // mesh names + UV tiles, bulk actions, copy/paste over the
+                // session clipboard. Drawn under the rows, same arm.
+                {
+                    let geo_layer = self.layer_gestures.selection.primary();
+                    let tiles: Vec<u16> =
+                        self.mesh.map(umber_mesh::present_tiles).unwrap_or_default();
+                    let mut ctx = layers_panel::GeometrySectionCtx {
+                        parts: self.mesh_parts,
+                        tiles: &tiles,
+                        selection: &self.layer_gestures.selection,
+                        clipboard: self.geometry_clipboard,
+                        notices: &mut self.pick_notices,
+                    };
+                    layers_panel::geometry_section(ui, self.doc, geo_layer, &mut ctx);
                 }
             }
             Panel::Properties => {
@@ -1763,6 +1820,11 @@ type MaterialSizesSnapshot = ((u32, u32), Vec<(String, (u32, u32))>);
 #[derive(Default)]
 pub struct AppState {
     pub mesh: Option<umber_mesh::MeshData>,
+    /// The loaded mesh's part map (R-B2 K4): the side table
+    /// `umber_mesh::load_with_parts` returns beside the mesh; feeds the
+    /// Layers panel's geometry section and the viewport's hide-excluded
+    /// seam. `None` until a mesh loads.
+    pub mesh_parts: Option<umber_mesh::MeshParts>,
     pub mesh_path: Option<PathBuf>,
     pub viewport: Viewport,
     pub uv_view: UvView,
@@ -1814,6 +1876,9 @@ pub struct AppState {
     /// multi-selection, the mask solo and the pending ✕ confirm. Session
     /// state keyed by layer id, so it dies with its document.
     pub layer_gestures: layers_panel::gestures::GestureState,
+    /// The geometry-mask session clipboard (R-B2 K4): the Layers panel's
+    /// Copy/Paste; never persisted (the `BakeSync` clipboard precedent).
+    pub geometry_clipboard: Option<umber_core::layers::GeometryMask>,
     /// A texture-set resize armed by the size combo (confirm first).
     pub pending_resize: Option<PendingResize>,
     /// Dormant fill/material layers (§6.3 [B2, M11]): their pre-v2 result
@@ -3066,8 +3131,8 @@ impl UmberApp {
     /// Loads `path` as the session mesh (the picker and a mesh drop on
     /// the window both land here). Failures log; the current mesh stays.
     fn load_mesh_path(&mut self, path: PathBuf) {
-        match umber_mesh::load(&path) {
-            Ok(mesh) => {
+        match umber_mesh::load_with_parts(&path) {
+            Ok((mesh, parts)) => {
                 let n = mesh.vertex_count();
                 match self.state.viewport.load_mesh(&self.gpu, &mesh) {
                     Ok(()) => {
@@ -3083,7 +3148,18 @@ impl UmberApp {
                             // set: the first real set adopts it, or fills
                             // on this mesh stage onto no tile.
                             paint.adopt_placeholder_tiles(&set_name);
+                            // R-B2 K4: the paint session's first mesh
+                            // source — the composite geometry gate reads
+                            // the coverage planes off this (K3's
+                            // `set_geometry_source`); each load bumps the
+                            // generation, so a new mesh can never hit the
+                            // previous mesh's cached planes.
+                            paint.set_geometry_source(Some(std::sync::Arc::new((
+                                mesh.clone(),
+                                parts.clone(),
+                            ))));
                         }
+                        self.state.mesh_parts = Some(parts);
                         self.state.mesh = Some(mesh);
                         self.state.mesh_path = Some(path);
                         log::info!("loaded mesh: {n} vertices");
@@ -5304,6 +5380,17 @@ impl eframe::App for UmberApp {
                 ui.checkbox(&mut self.view.wireframe, tr("menu.wireframe"));
                 ui.checkbox(&mut self.view.grid, tr("menu.grid"));
                 ui.checkbox(&mut self.show_gizmo, tr("menu.gizmo"));
+                // R-B2 K4: the hide-excluded toggle (K5's session-only
+                // viewport seam; never persisted, never read by export or
+                // bake). The per-triangle input rides the Viewport tab's
+                // per-frame `set_triangle_visibility` call.
+                let mut hide_excluded = self.state.viewport.hide_excluded();
+                if ui
+                    .checkbox(&mut hide_excluded, tr("menu.hide-excluded"))
+                    .changed()
+                {
+                    self.state.viewport.set_hide_excluded(hide_excluded);
+                }
                 if ui.button(tr("menu.frame-mesh")).clicked() {
                     self.state.viewport.frame_mesh();
                     ui.close();
@@ -5704,6 +5791,8 @@ impl eframe::App for UmberApp {
                         base_visible: &mut self.state.base_visible,
                         thumbnails: &mut self.state.thumbnails,
                         layer_gestures: &mut self.state.layer_gestures,
+                        mesh_parts: self.state.mesh_parts.as_ref(),
+                        geometry_clipboard: &mut self.state.geometry_clipboard,
                         pending_resize: &mut self.state.pending_resize,
                         fill_badges: &self.state.fill_badges,
                         import_badges: &self.state.import_badges,

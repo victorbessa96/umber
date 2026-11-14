@@ -181,3 +181,59 @@ fn rich_tooltip_snapshot() {
     support::settle(&mut harness);
     support::snapshot(&mut harness, "rich_tooltip");
 }
+
+// R-B2 K4: the Layers panel's geometry-mask section — two parts (one
+// excluded), two tiles (one excluded), the bulk-action and copy/paste
+// buttons. The PNG baseline is tests/snapshots/layers_panel_geometry_section.png.
+#[test]
+fn layers_panel_geometry_section_snapshot() {
+    use umber_app::document::Document;
+    use umber_app::layers_panel::gestures::LayerSelection;
+    use umber_core::layers::{GeometryMask, LayerCommand, LayerKind};
+    struct Geo {
+        doc: Document,
+        parts: Option<umber_mesh::MeshParts>,
+        tiles: Vec<u16>,
+        selection: LayerSelection,
+        clipboard: Option<GeometryMask>,
+        notices: Vec<String>,
+    }
+    let mut doc = Document::default();
+    doc.run(LayerCommand::add("body paint", LayerKind::Paint));
+    let id = doc.layers()[0].id;
+    doc.run(LayerCommand::set_geometry_mask(
+        id,
+        GeometryMask {
+            excluded_meshes: ["gun".to_string()].into_iter().collect(),
+            excluded_tiles: [1002u16].into_iter().collect(),
+        },
+    ));
+    let mut selection = LayerSelection::default();
+    selection.set_single(id);
+    let mut harness = support::harness_state(
+        |ui, s: &mut Geo| {
+            let layer = s.selection.primary();
+            let mut ctx = umber_app::layers_panel::GeometrySectionCtx {
+                parts: s.parts.as_ref(),
+                tiles: &s.tiles,
+                selection: &s.selection,
+                clipboard: &mut s.clipboard,
+                notices: &mut s.notices,
+            };
+            umber_app::layers_panel::geometry_section(ui, &mut s.doc, layer, &mut ctx);
+        },
+        Geo {
+            doc,
+            parts: Some(umber_mesh::MeshParts {
+                names: vec!["body".into(), "gun".into()],
+                triangle_parts: vec![0, 1, 0],
+            }),
+            tiles: vec![1001, 1002],
+            selection,
+            clipboard: Some(GeometryMask::default()),
+            notices: Vec::new(),
+        },
+    );
+    support::settle(&mut harness);
+    support::snapshot(&mut harness, "layers_panel_geometry_section");
+}

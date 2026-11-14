@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use fluent::FluentValue;
 use umber_core::layers::{
-    BlendMode, Layer, LayerCommand, LayerStack, MaterialChannel, MaterialParams,
+    BlendMode, GeometryMask, Layer, LayerCommand, LayerStack, MaterialChannel, MaterialParams,
 };
 
 use crate::document::Document;
@@ -433,6 +433,247 @@ fn channel_rows(
         let args = [("channels", FluentValue::from(list.as_str()))];
         ui.weak(tr_args("layers.material-ignored", args));
     }
+}
+
+// --- Geometry mask section (R-B2 K4) -------------------------------------
+//
+// Per-layer excluded mesh names x UV-tile sets, the panel half of the
+// geometry-mask feature (brief `docs/loop/briefs/2026-11-12-geomask-design.md`).
+// The UI shows INCLUDE checkboxes; unchecking writes an exclusion through
+// one undoable `LayerCommand::SetGeometryMask` per edit. Bulk actions
+// (include all / exclude all / invert) act over the VISIBLE checklist and
+// are one command on the active layer each. Copy/paste rides a session
+// clipboard (never persisted, the `BakeSync` precedent): paste replaces the
+// mask on every SELECTED layer, one command per layer.
+
+/// Display-escapes an untrusted part name (brief, Security model): control
+/// characters and bidi overrides render as their `\u{...}` escape — the
+/// name is shown, never interpreted.
+pub fn escape_part_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_control()
+            || matches!(
+                c,
+                '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )
+        {
+            out.push_str(&format!("\\u{{{:04X}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The mask with `name`'s mesh exclusion flipped (pure; the UI's one command
+/// per checkbox click is `LayerCommand::set_geometry_mask` with the result).
+pub fn toggle_mesh_exclusion(mask: &GeometryMask, name: &str) -> GeometryMask {
+    let mut next = mask.clone();
+    if !next.excluded_meshes.remove(name) {
+        next.excluded_meshes.insert(name.to_string());
+    }
+    next
+}
+
+/// The mask with `tile`'s tile exclusion flipped (pure).
+pub fn toggle_tile_exclusion(mask: &GeometryMask, tile: u16) -> GeometryMask {
+    let mut next = mask.clone();
+    if !next.excluded_tiles.remove(&tile) {
+        next.excluded_tiles.insert(tile);
+    }
+    next
+}
+
+/// The mask with every VISIBLE checklist entry flipped (invert): names not in
+/// `mesh_names` / tiles not in `tiles` keep their exclusion state — the bulk
+/// action only touches what the panel draws.
+pub fn invert_visible_entries(
+    mask: &GeometryMask,
+    mesh_names: &[&str],
+    tiles: &[u16],
+) -> GeometryMask {
+    let mut next = mask.clone();
+    for name in mesh_names {
+        if !next.excluded_meshes.remove(*name) {
+            next.excluded_meshes.insert((*name).to_string());
+        }
+    }
+    for tile in tiles {
+        if !next.excluded_tiles.remove(tile) {
+            next.excluded_tiles.insert(*tile);
+        }
+    }
+    next
+}
+
+/// The mask with every visible checklist entry set to excluded (`true`) or
+/// included (`false`); entries outside the visible list are untouched.
+pub fn set_visible_entries(
+    mask: &GeometryMask,
+    mesh_names: &[&str],
+    tiles: &[u16],
+    excluded: bool,
+) -> GeometryMask {
+    let mut next = mask.clone();
+    for name in mesh_names {
+        if excluded {
+            next.excluded_meshes.insert((*name).to_string());
+        } else {
+            next.excluded_meshes.remove(*name);
+        }
+    }
+    for tile in tiles {
+        if excluded {
+            next.excluded_tiles.insert(*tile);
+        } else {
+            next.excluded_tiles.remove(tile);
+        }
+    }
+    next
+}
+
+/// What [`geometry_section`] reads beyond the document: the loaded mesh's
+/// part map and present tiles, the panel selection, the session clipboard,
+/// and the toast rail for the empty-paste notice. Built per frame by the
+/// shell in `main.rs`.
+pub struct GeometrySectionCtx<'a> {
+    /// The loaded mesh's part map; `None` (no mesh) hides the mesh checklist.
+    pub parts: Option<&'a umber_mesh::MeshParts>,
+    /// The loaded mesh's present tiles (sorted, deduped by the caller).
+    pub tiles: &'a [u16],
+    /// The panel selection: paste targets `selection.ids()`.
+    pub selection: &'a gestures::LayerSelection,
+    /// The session geometry-mask clipboard (never persisted).
+    pub clipboard: &'a mut Option<GeometryMask>,
+    /// Toast rail for the empty-paste notice.
+    pub notices: &'a mut Vec<String>,
+}
+
+/// The geometry-mask section of the Layers panel, drawn under the rows (the
+/// `layer_mask_ui` call-site pattern in `main.rs`). One undoable
+/// `SetGeometryMask` per widget change; no-op edits run nothing (the
+/// `reset_channels` no-spam precedent).
+pub fn geometry_section(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    layer_id: Option<u64>,
+    ctx: &mut GeometrySectionCtx<'_>,
+) {
+    ui.separator();
+    ui.label(tr("layers.geometry-section"));
+    let Some(id) = layer_id else {
+        ui.weak(tr("layers.geometry-empty"));
+        return;
+    };
+    let Some(layer) = doc.stack.layer(id).cloned() else {
+        return;
+    };
+    let mask = layer.geometry_mask.clone();
+
+    // The visible checklist: parts with at least one triangle on the mesh's
+    // present tiles (a part with zero triangles is not listed), and the
+    // present tiles themselves.
+    let counts = ctx.parts.map(|p| p.triangle_counts()).unwrap_or_default();
+    let names: Vec<&str> = match ctx.parts {
+        Some(parts) => parts
+            .names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| counts.get(*i).is_some_and(|&c| c > 0))
+            .map(|(_, n)| n.as_str())
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut tiles: Vec<u16> = ctx.tiles.to_vec();
+    tiles.sort_unstable();
+    tiles.dedup();
+
+    if names.is_empty() && tiles.is_empty() {
+        ui.weak(tr("layers.geometry-no-mesh"));
+    }
+
+    if !names.is_empty() {
+        ui.label(
+            egui::RichText::new(tr("layers.geometry-meshes"))
+                .small()
+                .color(umber_gui::theme::muted()),
+        );
+        for name in &names {
+            let mut checked = !mask.excluded_meshes.contains(*name);
+            if ui.checkbox(&mut checked, escape_part_name(name)).changed() {
+                let next = toggle_mesh_exclusion(&mask, name);
+                if next != mask {
+                    doc.run(LayerCommand::set_geometry_mask(id, next));
+                }
+            }
+        }
+    }
+    if !tiles.is_empty() {
+        ui.label(
+            egui::RichText::new(tr("layers.geometry-tiles"))
+                .small()
+                .color(umber_gui::theme::muted()),
+        );
+        for tile in &tiles {
+            let mut checked = !mask.excluded_tiles.contains(tile);
+            let label = tr_args(
+                "layers.geometry-tile",
+                [("tile", FluentValue::from(i64::from(*tile)))],
+            );
+            if ui.checkbox(&mut checked, label).changed() {
+                let next = toggle_tile_exclusion(&mask, *tile);
+                if next != mask {
+                    doc.run(LayerCommand::set_geometry_mask(id, next));
+                }
+            }
+        }
+    }
+
+    // Bulk actions over the visible checklist: one command on the active
+    // layer each.
+    ui.horizontal(|ui| {
+        if ui.small_button(tr("layers.geometry-include-all")).clicked() {
+            let next = set_visible_entries(&mask, &names, &tiles, false);
+            if next != mask {
+                doc.run(LayerCommand::set_geometry_mask(id, next));
+            }
+        }
+        if ui.small_button(tr("layers.geometry-exclude-all")).clicked() {
+            let next = set_visible_entries(&mask, &names, &tiles, true);
+            if next != mask {
+                doc.run(LayerCommand::set_geometry_mask(id, next));
+            }
+        }
+        if ui.small_button(tr("layers.geometry-invert")).clicked() {
+            let next = invert_visible_entries(&mask, &names, &tiles);
+            if next != mask {
+                doc.run(LayerCommand::set_geometry_mask(id, next));
+            }
+        }
+    });
+
+    // Copy / paste: the clipboard is session-only; paste replaces the mask on
+    // every selected layer, one command per layer (the multi-selection
+    // precedent). Empty clipboard is a no-op with a notice.
+    ui.horizontal(|ui| {
+        if ui.small_button(tr("layers.geometry-copy")).clicked() {
+            *ctx.clipboard = Some(mask.clone());
+        }
+        if ui.small_button(tr("layers.geometry-paste")).clicked() {
+            match ctx.clipboard.clone() {
+                Some(copied) => {
+                    for sel_id in ctx.selection.ids() {
+                        let current = doc.stack.layer(sel_id).map(|l| l.geometry_mask.clone());
+                        if current.as_ref() != Some(&copied) {
+                            doc.run(LayerCommand::set_geometry_mask(sel_id, copied.clone()));
+                        }
+                    }
+                }
+                None => ctx.notices.push(tr("layers.geometry-paste-empty")),
+            }
+        }
+    });
 }
 
 pub use gestures::{
@@ -1981,6 +2222,75 @@ mod tests {
         assert!(
             !paint_gate_allows(&stack, 999),
             "unknown ids cannot be painted"
+        );
+    }
+
+    // --- geometry mask section (R-B2 K4) pure helpers ----------------------
+
+    fn mask_with(meshes: &[&str], tiles: &[u16]) -> GeometryMask {
+        GeometryMask {
+            excluded_meshes: meshes.iter().map(|m| (*m).to_string()).collect(),
+            excluded_tiles: tiles.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn escape_part_name_escapes_control_and_bidi_only() {
+        assert_eq!(escape_part_name("body"), "body");
+        assert_eq!(escape_part_name("a\u{0007}b"), "a\\u{0007}b");
+        assert_eq!(escape_part_name("x\u{202E}y"), "x\\u{202E}y");
+        assert_eq!(escape_part_name("\u{2067}"), "\\u{2067}");
+        // Ordinary unicode (accents, CJK) passes through untouched.
+        assert_eq!(escape_part_name("café 魚"), "café 魚");
+    }
+
+    #[test]
+    fn toggle_helpers_flip_one_entry() {
+        let mask = mask_with(&["body"], &[1001]);
+        let next = toggle_mesh_exclusion(&mask, "gun");
+        assert_eq!(next.excluded_meshes.len(), 2);
+        assert!(next.excluded_meshes.contains("gun"));
+        let back = toggle_mesh_exclusion(&next, "gun");
+        assert_eq!(back, mask, "toggling twice restores the mask");
+        let tile = toggle_tile_exclusion(&mask, 1002);
+        assert!(tile.excluded_tiles.contains(&1002));
+        assert!(toggle_tile_exclusion(&tile, 1002) == mask);
+    }
+
+    #[test]
+    fn invert_flips_only_the_visible_checklist() {
+        // "hidden_part" is excluded but NOT in the visible list: invert must
+        // leave it excluded.
+        let mask = mask_with(&["body", "hidden_part"], &[1001]);
+        let names = ["body", "gun"];
+        let tiles = [1001u16, 1002];
+        let next = invert_visible_entries(&mask, &names, &tiles);
+        assert!(next.excluded_meshes.contains("gun"));
+        assert!(!next.excluded_meshes.contains("body"));
+        assert!(
+            next.excluded_meshes.contains("hidden_part"),
+            "non-visible exclusions survive invert"
+        );
+        assert!(next.excluded_tiles.contains(&1002));
+        assert!(!next.excluded_tiles.contains(&1001));
+        assert_eq!(invert_visible_entries(&next, &names, &tiles), mask);
+    }
+
+    #[test]
+    fn set_visible_entries_sets_only_the_visible_checklist() {
+        let mask = mask_with(&["hidden_part"], &[]);
+        let names = ["body"];
+        let tiles = [1001u16];
+        let all_excluded = set_visible_entries(&mask, &names, &tiles, true);
+        assert!(all_excluded.excluded_meshes.contains("body"));
+        assert!(all_excluded.excluded_meshes.contains("hidden_part"));
+        assert!(all_excluded.excluded_tiles.contains(&1001));
+        let all_included = set_visible_entries(&all_excluded, &names, &tiles, false);
+        assert!(!all_included.excluded_meshes.contains("body"));
+        assert!(!all_included.excluded_tiles.contains(&1001));
+        assert!(
+            all_included.excluded_meshes.contains("hidden_part"),
+            "include-all does not touch entries outside the visible list"
         );
     }
 }

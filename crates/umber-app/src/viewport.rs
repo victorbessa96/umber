@@ -564,7 +564,8 @@ pub struct Viewport {
 /// [`triangle_visibility`] is the adapter from mask predicates.
 #[derive(Default)]
 struct HideExcluded {
-    /// The toggle (View menu wiring rides the panel kill).
+    /// The toggle (wired to the View menu's "Hide excluded geometry" by
+    /// the K4 panel kill).
     on: bool,
     /// The shell's per-triangle input; `None` = nothing to hide. Entries
     /// past the slice's end read as visible (a short, stale input never
@@ -614,9 +615,9 @@ impl HideExcluded {
 /// empty; any length mismatch makes mesh exclusions inert (the parts
 /// table's all-or-nothing rule), as does an out-of-range part index for
 /// that triangle. Tile exclusions always apply.
-// `dead_code`: the shell wires the active layer's mask in the panel kill
-// (K4); this kill ships the seam.
-#[allow(dead_code)]
+// Wired by the K4 panel kill: `main.rs` calls this every frame with the
+// active layer's mask predicates (see the Viewport tab's
+// `set_triangle_visibility` call site).
 pub fn triangle_visibility(
     mesh: &umber_mesh::MeshData,
     triangle_parts: &[u16],
@@ -749,10 +750,9 @@ impl Viewport {
         Ok(())
     }
 
-    /// Turns hide-excluded on or off (geometry masks K5): session-only,
-    /// off by default, never persisted. See [`HideExcluded`].
-    // `dead_code`: the shell's View-menu wiring rides the panel kill (K4).
-    #[allow(dead_code)]
+    /// Turns hide-excluded on or off (geometry masks K5/K4): session-only,
+    /// off by default, never persisted. The View menu's checkbox calls
+    /// this; see [`HideExcluded`].
     pub fn set_hide_excluded(&mut self, on: bool) {
         if self.hide.on != on {
             self.hide.on = on;
@@ -762,7 +762,6 @@ impl Viewport {
     }
 
     /// Whether hide-excluded is on.
-    #[allow(dead_code)]
     pub fn hide_excluded(&self) -> bool {
         self.hide.on
     }
@@ -771,7 +770,7 @@ impl Viewport {
     /// by triangle of the loaded mesh; see [`triangle_visibility`]), or
     /// clears it with `None`. Cheap to call every frame: an unchanged
     /// input re-derives nothing. Applies only while hide-excluded is on.
-    #[allow(dead_code)]
+    /// The shell calls this every frame in the Viewport tab (K4).
     pub fn set_triangle_visibility(&mut self, visible: Option<&[bool]>) {
         if self.hide.visible.as_deref() == visible {
             return;

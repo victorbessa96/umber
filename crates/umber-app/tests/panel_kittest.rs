@@ -467,3 +467,164 @@ fn the_blend_combo_sets_the_selected_layers_mode_and_undo_restores() {
         "one undo restores the mode (one command per change)"
     );
 }
+
+// --- geometry mask section (R-B2 K4, brief 2026-11-12-geomask-design.md) --
+
+/// The geometry section's harness state: a document, the mesh part map,
+/// present tiles, the panel selection, the session clipboard, toasts.
+struct GeoState {
+    doc: umber_app::document::Document,
+    parts: Option<umber_mesh::MeshParts>,
+    tiles: Vec<u16>,
+    selection: umber_app::layers_panel::gestures::LayerSelection,
+    clipboard: Option<umber_core::layers::GeometryMask>,
+    notices: Vec<String>,
+}
+
+fn geo_harness(state: GeoState) -> egui_kittest::Harness<'static, GeoState> {
+    support::harness_state(
+        |ui, s: &mut GeoState| {
+            let layer = s.selection.primary();
+            let mut ctx = umber_app::layers_panel::GeometrySectionCtx {
+                parts: s.parts.as_ref(),
+                tiles: &s.tiles,
+                selection: &s.selection,
+                clipboard: &mut s.clipboard,
+                notices: &mut s.notices,
+            };
+            umber_app::layers_panel::geometry_section(ui, &mut s.doc, layer, &mut ctx);
+        },
+        state,
+    )
+}
+
+fn geo_fixture() -> GeoState {
+    use umber_core::layers::{LayerCommand, LayerKind};
+    let mut doc = umber_app::document::Document::default();
+    doc.run(LayerCommand::add("one", LayerKind::Paint));
+    let id = doc.layers()[0].id;
+    let mut selection = umber_app::layers_panel::gestures::LayerSelection::default();
+    selection.set_single(id);
+    GeoState {
+        doc,
+        parts: Some(umber_mesh::MeshParts {
+            names: vec!["body".into(), "gun".into()],
+            triangle_parts: vec![0, 1, 0],
+        }),
+        tiles: vec![1002, 1001], // unsorted on purpose: the section sorts
+        selection,
+        clipboard: None,
+        notices: Vec::new(),
+    }
+}
+
+#[test]
+fn geometry_uncheck_writes_one_command() {
+    let mut harness = geo_harness(geo_fixture());
+    support::settle(&mut harness);
+    let before = harness.state().doc.history.len();
+    support::click_label(&mut harness, "body");
+    let st = harness.state();
+    assert_eq!(
+        st.doc.history.len(),
+        before + 1,
+        "unchecking one mesh writes exactly one SetGeometryMask command"
+    );
+    let id = st.selection.primary().expect("a selected layer");
+    let mask = &st.doc.stack.layer(id).expect("the layer").geometry_mask;
+    assert!(
+        mask.excluded_meshes.contains("body") && !mask.excluded_meshes.contains("gun"),
+        "the mask now excludes exactly the unchecked part: {mask:?}"
+    );
+}
+
+#[test]
+fn paste_geometry_mask_one_command_per_selected() {
+    use umber_core::layers::{GeometryMask, LayerCommand, LayerKind};
+    let mut st = geo_fixture();
+    st.doc.run(LayerCommand::add("two", LayerKind::Paint));
+    let ids: Vec<u64> = st.doc.layers().iter().map(|l| l.id).collect();
+    st.selection.set_many(&ids, Some(ids[0]));
+    st.clipboard = Some(GeometryMask {
+        excluded_meshes: Default::default(),
+        excluded_tiles: [1001u16].into_iter().collect(),
+    });
+    let mut harness = geo_harness(st);
+    support::settle(&mut harness);
+    let before = harness.state().doc.history.len();
+    support::click_label(&mut harness, &umber_app::i18n::tr("layers.geometry-paste"));
+    let st = harness.state();
+    assert_eq!(
+        st.doc.history.len(),
+        before + 2,
+        "paste writes one SetGeometryMask per selected layer"
+    );
+    for layer in st.doc.layers() {
+        assert!(
+            layer.geometry_mask.excluded_tiles.contains(&1001),
+            "layer {} carries the pasted mask",
+            layer.id
+        );
+    }
+}
+
+#[test]
+fn paste_empty_clipboard_is_noop() {
+    let mut harness = geo_harness(geo_fixture());
+    support::settle(&mut harness);
+    let before = harness.state().doc.history.len();
+    support::click_label(&mut harness, &umber_app::i18n::tr("layers.geometry-paste"));
+    let st = harness.state();
+    assert_eq!(
+        st.doc.history.len(),
+        before,
+        "an empty clipboard runs no command"
+    );
+    assert!(
+        st.notices
+            .iter()
+            .any(|n| n == &umber_app::i18n::tr("layers.geometry-paste-empty")),
+        "the empty paste posts its notice"
+    );
+}
+
+#[test]
+fn invert_flips_visible_checklist_only() {
+    use umber_core::layers::{GeometryMask, LayerCommand};
+    let mut st = geo_fixture();
+    let id = st.selection.primary().expect("a selected layer");
+    // "hidden_part" is excluded but NOT in the visible checklist (the parts
+    // map lists body/gun): invert must leave it excluded.
+    st.doc.run(LayerCommand::set_geometry_mask(
+        id,
+        GeometryMask {
+            excluded_meshes: ["body".to_string(), "hidden_part".to_string()]
+                .into_iter()
+                .collect(),
+            excluded_tiles: [1001u16].into_iter().collect(),
+        },
+    ));
+    let mut harness = geo_harness(st);
+    support::settle(&mut harness);
+    let before = harness.state().doc.history.len();
+    support::click_label(&mut harness, &umber_app::i18n::tr("layers.geometry-invert"));
+    let st = harness.state();
+    assert_eq!(
+        st.doc.history.len(),
+        before + 1,
+        "invert is one command on the active layer"
+    );
+    let mask = &st.doc.stack.layer(id).expect("the layer").geometry_mask;
+    assert!(
+        !mask.excluded_meshes.contains("body") && mask.excluded_meshes.contains("gun"),
+        "visible mesh rows flipped: {mask:?}"
+    );
+    assert!(
+        mask.excluded_meshes.contains("hidden_part"),
+        "the non-visible exclusion survives invert: {mask:?}"
+    );
+    assert!(
+        !mask.excluded_tiles.contains(&1001) && mask.excluded_tiles.contains(&1002),
+        "visible tile rows flipped: {mask:?}"
+    );
+}
