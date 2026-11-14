@@ -35,7 +35,8 @@
 //! and saves stamp the live high-water mark.
 //!
 //! Edit steps (queue row 14's follow-up): `layer_add`, `layer_remove`,
-//! `layer_set_opacity`, `layer_reorder` and `layer_set_material` drive the
+//! `layer_set_opacity`, `layer_reorder`, `layer_set_material` and
+//! `layer_set_geometry_mask` (wave-5 R-B2 K6, additive — no protocol bump) drive the
 //! active set's stack through the same per-set `histories` + attached
 //! autosave journal the undo/redo arms use (one `Document::run` chokepoint
 //! each — see `Session::apply_edit`), so every edit is undoable and every
@@ -116,8 +117,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use umber_core::{
-    BlendMode, ChannelKind, Journal, JournalOp, Layer, LayerCommand, LayerKind, LayerStack,
-    MaterialChannel, MaterialParams, ProjectModel, TextureSet, TileSet, UndoStack,
+    BlendMode, ChannelKind, GeometryMask, Journal, JournalOp, Layer, LayerCommand, LayerKind,
+    LayerStack, MaterialChannel, MaterialParams, ProjectModel, TextureSet, TileSet, UndoStack,
 };
 
 use umber_paint::paint_state::{CompositeSnapshot, PaintState, PlaneOwner};
@@ -162,6 +163,7 @@ enum AgentStep {
     LayerReorder(LayerReorderStep),
     LayerRename(LayerRenameStep),
     LayerSetMaterial(LayerSetMaterialStep),
+    LayerSetGeometryMask(LayerSetGeometryMaskStep),
     Undo(NoFields),
     Redo(NoFields),
     PaintStroke(PaintStrokeStep),
@@ -496,6 +498,23 @@ struct LayerSetMaterialStep {
     channels: Option<Vec<MaterialChannelStep>>,
 }
 
+/// `layer_set_geometry_mask` — replace one layer's geometry mask
+/// (wave-5 R-B2 K6, additive step, no protocol bump): one undoable
+/// [`LayerCommand::SetGeometryMask`] through the same edit chokepoint as
+/// every `layer_*` step. Exclusions, not inclusions: `excluded_meshes`
+/// names mesh parts (empty = all included), `excluded_tiles` UDIM tile
+/// ids. Mesh exclusions composite only while a mesh is loaded (the paint
+/// half's geometry source); tile exclusions apply regardless.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerSetGeometryMaskStep {
+    id: u64,
+    #[serde(default)]
+    excluded_meshes: Vec<String>,
+    #[serde(default)]
+    excluded_tiles: Vec<u16>,
+}
+
 /// The [`MaterialChannel::named`] opacity default for a wire channel entry
 /// that omits it.
 fn default_material_channel_opacity() -> f32 {
@@ -744,6 +763,10 @@ struct ProjectSession {
     /// or at `project_open` when the project has a `paint/` sidecar. A
     /// session that never paints requests no GPU device.
     paint: Option<PaintState>,
+    /// The held mesh as the paint half's geometry source (R-B2 K6): set
+    /// from `Session::mesh_source` at `project_open` and whenever the
+    /// mesh (re)loads, so mesh exclusions composite through the gate.
+    mesh_source: Option<Arc<(umber_mesh::MeshData, umber_mesh::MeshParts)>>,
     /// The last snapshot the paint half flushed against: the shell's
     /// `prev_snapshot`. The flush does NOT diff snapshots itself — the
     /// caller marks changed owners `Full` (`CompositeSnapshot::full_owners`)
@@ -809,6 +832,11 @@ fn no_control_endpoint() -> anyhow::Error {
 /// A session's state between steps.
 pub(crate) struct Session {
     loaded: Option<Loaded>,
+    /// The held mesh handed to the paint half as its geometry source
+    /// (`PaintState::set_geometry_source`), set by `load` and re-armed
+    /// whenever the paint session is (re)created. `None` until a mesh
+    /// loads — with no source, mesh exclusions stay inert (K3's rule).
+    mesh_source: Option<Arc<(umber_mesh::MeshData, umber_mesh::MeshParts)>>,
     bake: Option<BakeJob>,
     project: Option<ProjectSession>,
     /// The live app's `--control` channel, when the env names one (see
@@ -827,6 +855,7 @@ impl Default for Session {
     fn default() -> Self {
         Session {
             loaded: None,
+            mesh_source: None,
             bake: None,
             project: None,
             control: ControlEndpoint::from_env(),
@@ -1076,6 +1105,7 @@ impl ProjectSession {
             let mut paint = PaintState::with_target_size(device, queue, size)
                 .map_err(|e| anyhow::anyhow!("paint session: {e}"))?;
             paint.set_active_set(&self.active);
+            paint.set_geometry_source(self.mesh_source.clone());
             self.paint = Some(paint);
         }
         self.paint
@@ -1107,8 +1137,9 @@ impl ProjectSession {
     /// whose row changed since the last flush `Full` and retires removed
     /// layers (the app's diff — `full_owners` / `removed`), then flushes.
     /// No-op when the session never painted (nothing to composite).
-    fn flush_paint(&mut self) -> Result<()> {
-        let snapshot = self.snapshot()?;
+    fn flush_paint(&mut self, displayed: Vec<(u16, String)>) -> Result<()> {
+        let mut snapshot = self.snapshot()?;
+        snapshot.displayed = displayed;
         let Some(paint) = self.paint.as_mut() else {
             return Ok(());
         };
@@ -1230,14 +1261,23 @@ impl Session {
     fn run(&mut self, step: AgentStep) -> Result<Fields> {
         match step {
             AgentStep::Load(s) => {
-                let mesh = umber_mesh::load(&s.mesh)?;
+                let (mesh, parts) = umber_mesh::load_with_parts(&s.mesh)?;
                 let summary = mesh_summary(&s.mesh, &mesh);
                 let reply = summary_fields(&summary)?;
+                self.mesh_source = Some(Arc::new((mesh.clone(), parts.clone())));
                 self.loaded = Some(Loaded {
                     path: s.mesh,
                     mesh: Arc::new(mesh),
                     summary,
                 });
+                // A live paint session re-arms its geometry source (the
+                // K3 generation bump invalidates the coverage cache).
+                if let Some(p) = self.project.as_mut() {
+                    p.mesh_source = self.mesh_source.clone();
+                    if let Some(paint) = p.paint.as_mut() {
+                        paint.set_geometry_source(self.mesh_source.clone());
+                    }
+                }
                 Ok(reply)
             }
             AgentStep::State(NoFields {}) => summary_fields(&self.loaded()?.summary),
@@ -1312,6 +1352,7 @@ impl Session {
             AgentStep::LayerReorder(s) => self.layer_reorder(s),
             AgentStep::LayerRename(s) => self.layer_rename(s),
             AgentStep::LayerSetMaterial(s) => self.layer_set_material(s),
+            AgentStep::LayerSetGeometryMask(s) => self.layer_set_geometry_mask(s),
             AgentStep::Undo(NoFields {}) => self.project_undo(),
             AgentStep::Redo(NoFields {}) => self.project_redo(),
             AgentStep::PaintStroke(s) => self.paint_stroke(s),
@@ -1353,6 +1394,7 @@ impl Session {
             histories: BTreeMap::new(),
             journal,
             paint: None,
+            mesh_source: self.mesh_source.clone(),
             prev_snapshot: None,
         };
         // A project with a `paint/` sidecar restores its pixels now (the
@@ -1375,7 +1417,7 @@ impl Session {
             painted = report.restored;
             // Seed the diff baseline with the opened stack (the app's
             // first frame after open).
-            session.flush_paint()?;
+            session.flush_paint(Vec::new())?;
         }
         let census = session.census();
         self.project = Some(session);
@@ -1660,6 +1702,34 @@ impl Session {
     /// `layer_set_material`: re-points one layer (one undoable
     /// `SetMaterial` op). An absent list stores the sparse form; a present
     /// one replaces the whole list (see the module docs).
+    /// `layer_set_geometry_mask`: the geometry-mask edit path. The reply
+    /// censuses the row plus the mask actually stored (exclusions).
+    fn layer_set_geometry_mask(&mut self, s: LayerSetGeometryMaskStep) -> Result<Fields> {
+        let id = s.id;
+        if active_stack(self.project()?)?.layer(id).is_none() {
+            return Err(anyhow::anyhow!("unknown layer {id}"));
+        }
+        let mask = GeometryMask {
+            excluded_meshes: s.excluded_meshes.into_iter().collect(),
+            excluded_tiles: s.excluded_tiles.into_iter().collect(),
+        };
+        let report = self.apply_edit(LayerCommand::set_geometry_mask(id, mask.clone()))?;
+        let stack = active_stack(self.project()?)?;
+        let row = stack
+            .layer(id)
+            .map(layer_census_row)
+            .ok_or_else(|| anyhow::anyhow!("internal: layer {id} missing after edit"))?;
+        fields(serde_json::json!({
+            "id": id,
+            "layer": row,
+            "excluded_meshes": mask.excluded_meshes,
+            "excluded_tiles": mask.excluded_tiles,
+            "journal_seq": report.journal_seq,
+            "can_undo": report.can_undo,
+            "can_redo": report.can_redo,
+        }))
+    }
+
     fn layer_set_material(&mut self, s: LayerSetMaterialStep) -> Result<Fields> {
         let id = s.id;
         if active_stack(self.project()?)?.layer(id).is_none() {
@@ -1820,7 +1890,7 @@ impl Session {
         // composites on a fresh session).
         if held.paint.is_none() {
             held.paint_mut()?;
-            held.flush_paint()?;
+            held.flush_paint(Vec::new())?;
         }
         let paint = held.paint_mut()?;
         paint.sync_active_target(target, verdict, index);
@@ -1866,7 +1936,7 @@ impl Session {
             .process_pending()
             .map_err(|e| anyhow::anyhow!("paint drain failed: {e:#}"))?;
         let (can_undo, can_redo) = (paint.can_undo_stroke(), paint.can_redo_stroke());
-        held.flush_paint()?;
+        held.flush_paint(Vec::new())?;
         let tiles: std::collections::BTreeSet<u16> = s
             .points
             .iter()
@@ -1911,8 +1981,12 @@ impl Session {
         if composite {
             // The read composites the stack as it stands NOW: a wire
             // layer edit since the last step (opacity, order, removal)
-            // diffs into `Full` dirt here, never a stale cache.
-            held.flush_paint()?;
+            // diffs into `Full` dirt here, never a stale cache. The
+            // requested (tile, channel) rides as `displayed` so the flush
+            // composites it against the REAL snapshot — the coalesced
+            // non-displayed path synthesizes an all-visible stack that
+            // carries no geometry masks (R-B2 K6).
+            held.flush_paint(vec![(tile, channel.to_string())])?;
         }
         let paint = held.paint_mut()?;
         let image = if composite {
@@ -2054,7 +2128,7 @@ impl Session {
             .process_pending()
             .map_err(|e| anyhow::anyhow!("paint drain failed: {e:#}"))?;
         let (can_undo, can_redo) = (paint.can_undo_stroke(), paint.can_redo_stroke());
-        held.flush_paint()?;
+        held.flush_paint(Vec::new())?;
         fields(serde_json::json!({
             (key): moved,
             "can_undo_stroke": can_undo,
@@ -2983,6 +3057,168 @@ mod tests {
     // The field assignment builds test state incrementally (the
     // session starts default, the project lands mid-test); the
     // struct-literal form would need the full Session surface.
+    /// R-B2 K6's verification test: the CLI export path (the composite
+    /// `paint_read`) honors a layer's geometry mask. The mesh is built in
+    /// memory (two quads: `Body` over the LEFT half of the UV space,
+    /// `Hilt` over the right, same tile 1001 — a multi-object OBJ fixture
+    /// would trip the importer's per-model index quirk) and armed as the
+    /// session's geometry source exactly the way `load` arms it. A stroke
+    /// across the middle lands on both halves of the layer plane (planes
+    /// are never masked); the composite read shows both painted, and once
+    /// `Hilt` is excluded through the wire step, the right half gates to 0.
+    #[test]
+    fn agent_export_honors_mesh_exclusion() {
+        // The composite path needs the paint device; without a
+        // paint-capable adapter the test skips (the umber-paint pattern).
+        if paint_context().is_err() {
+            eprintln!("skipping: no paint-capable adapter");
+            return;
+        }
+        // Two quads, one per part, tile 1001: Body u in [0, 0.5], Hilt
+        // u in [0.5, 1] (v full range).
+        let quad = |u0: f32| vec![[u0, 0.0], [u0 + 0.5, 0.0], [u0, 1.0], [u0 + 0.5, 1.0]];
+        let mut uvs = quad(0.0);
+        uvs.extend(quad(0.5));
+        let mesh = umber_mesh::MeshData {
+            positions: uvs.iter().map(|uv| [uv[0], uv[1], 0.0]).collect(),
+            normals: vec![[0.0, 0.0, 1.0]; 8],
+            uvs: uvs.clone(),
+            indices: vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7],
+            ..Default::default()
+        };
+        let parts = umber_mesh::MeshParts {
+            names: vec!["Body".to_string(), "Hilt".to_string()],
+            triangle_parts: vec![0, 0, 1, 1],
+        };
+        let mut session = Session::default();
+        session.loaded = Some(Loaded {
+            path: PathBuf::from("/in-memory.obj"),
+            mesh: Arc::new(mesh.clone()),
+            summary: mesh_summary(Path::new("/in-memory.obj"), &mesh),
+        });
+        session.mesh_source = Some(Arc::new((mesh, parts)));
+        session.project = Some(ProjectSession {
+            model: fixture_project(),
+            dir: PathBuf::from("/none"),
+            active: "Body".to_string(),
+            histories: BTreeMap::new(),
+            journal: None,
+            paint: None,
+            mesh_source: session.mesh_source.clone(),
+            prev_snapshot: None,
+        });
+        // layer_add -> id 2 (fixture stack: Base=0, Top=1).
+        let add = session
+            .run(AgentStep::LayerAdd(LayerAddStep {
+                name: "Stroke".to_string(),
+                kind: LayerAddKind::Paint,
+                opacity: None,
+            }))
+            .expect("layer_add");
+        let id = add["id"].as_u64().expect("layer id");
+        assert_eq!(id, 2, "fixture stack: Base=0, Top=1, added=2");
+        // One stroke across the middle of tile 1001, layer id 2.
+        session
+            .run(AgentStep::PaintStroke(PaintStrokeStep {
+                layer: Some(id),
+                points: vec![[0.25, 0.5], [0.75, 0.5]],
+                color: [1.0, 0.0, 0.0, 1.0],
+                radius_scale: 1.0,
+                radius: Some(96.0),
+                radius_texels: None,
+            }))
+            .expect("paint_stroke");
+        let read = |session: &mut Session| -> Fields {
+            session
+                .run(AgentStep::PaintRead(PaintReadStep {
+                    layer: None,
+                    composite: Some(true),
+                    tile: 1001,
+                    channel: "baseColor".to_string(),
+                    texels: vec![[512, 1024], [1536, 1024]],
+                }))
+                .expect("paint_read")
+        };
+        // Before the mask: both halves painted red (brush falloff, so
+        // assert a strong red, not exactly 255).
+        let painted = |t: &Value| {
+            let px = t.as_array().expect("texel array");
+            px[0].as_u64().unwrap() > 200
+                && px[3].as_u64().unwrap() > 200
+                && px[1] == 0
+                && px[2] == 0
+        };
+        let before = read(&mut session);
+        assert!(
+            painted(&before["texels"][0]),
+            "left half painted: {before:?}"
+        );
+        assert!(
+            painted(&before["texels"][1]),
+            "right half painted: {before:?}"
+        );
+        // Exclude Hilt through the wire step.
+        let set = session
+            .run(AgentStep::LayerSetGeometryMask(LayerSetGeometryMaskStep {
+                id,
+                excluded_meshes: vec!["Hilt".to_string()],
+                excluded_tiles: vec![],
+            }))
+            .expect("layer_set_geometry_mask");
+        assert_eq!(
+            set["excluded_meshes"],
+            serde_json::json!(["Hilt"]),
+            "{set:?}"
+        );
+        // After: left stays painted, right is gated to 0.
+        let after = read(&mut session);
+        assert!(
+            painted(&after["texels"][0]),
+            "left still painted: {after:?}"
+        );
+        assert_eq!(
+            after["texels"][1],
+            serde_json::json!([0, 0, 0, 0]),
+            "right gated by the mesh exclusion: {after:?}"
+        );
+    }
+
+    /// The same composite read with an excluded TILE needs no mesh at
+    /// all: the row contributes nothing for that tile (K3's tile rule
+    /// through the CLI wire).
+    #[test]
+    fn agent_export_honors_tile_exclusion_without_a_mesh() {
+        if paint_context().is_err() {
+            eprintln!("skipping: no paint-capable adapter");
+            return;
+        }
+        let project = write_fixture_project("k6-tile");
+        let open = step_line(&serde_json::json!({ "project_open": { "dir": project } }));
+        let add =
+            step_line(&serde_json::json!({ "layer_add": { "name": "Stroke", "kind": "paint" } }));
+        let stroke = step_line(&serde_json::json!({
+            "paint_stroke": { "layer": 2, "points": [[0.5, 0.5]], "color": [0.0, 1.0, 0.0, 1.0], "radius": 64.0 }
+        }));
+        let set_mask = step_line(&serde_json::json!({
+            "layer_set_geometry_mask": { "id": 2, "excluded_tiles": [1001] }
+        }));
+        let read = step_line(&serde_json::json!({
+            "paint_read": { "composite": true, "tile": 1001, "channel": "baseColor", "texels": [[512, 512]] }
+        }));
+        let replies = session(&format!("{open}{add}{stroke}{set_mask}{read}"));
+        assert_eq!(replies.len(), 5, "{replies:?}");
+        for (i, r) in replies.iter().enumerate() {
+            assert_eq!(r["ok"], true, "step {i}: {r}");
+        }
+        assert_eq!(replies[3]["excluded_tiles"], serde_json::json!([1001]));
+        assert_eq!(
+            replies[4]["texels"][0],
+            serde_json::json!([0, 0, 0, 0]),
+            "{}",
+            replies[4]
+        );
+    }
+
     #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn undo_and_redo_drive_the_held_model() {
@@ -2994,6 +3230,7 @@ mod tests {
             histories: BTreeMap::new(),
             journal: None,
             paint: None,
+            mesh_source: None,
             prev_snapshot: None,
         });
         // A journaled edit, the way a future edit step records one:
