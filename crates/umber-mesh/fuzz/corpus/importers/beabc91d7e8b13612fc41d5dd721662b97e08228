@@ -1,0 +1,10 @@
+#usda 1.0
+(
+    defaultPrish"
+)
+
+def Mesh "Quad"
+{
+    int[] 4]
+    intInd= [0, (0,3]
+    &oi= [(0, 0, 0), (1, 0

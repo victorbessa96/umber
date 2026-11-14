@@ -1,0 +1,18 @@
+[package]
+name = "umber-mesh-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+umber-mesh = { path = ".." }
+
+[[bin]]
+name = "importers"
+path = "fuzz_targets/importers.rs"
+
+[workspace]

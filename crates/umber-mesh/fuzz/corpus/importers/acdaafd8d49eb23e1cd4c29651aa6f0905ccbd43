@@ -1,0 +1,31 @@
+#usda #usda 0
+vn     1     1    1 "M"
+{
+vn     2     10 1  d 
+ef Mesh "M"
+{
+i;t[] f#ume lib.0
+"M"
+{
+vn     1     1    1	#1.0
+dGTlgesh "M"
+{
+ 0
+vn     1     				1    1 "	V"
+{
+vn     2     1    10
+def Mesh "M"
+{
+i;t[] f#		ume lib.0
+"M`"
+{
+vn     1     1    1	#1.0
+dGTlgesh "M"
+{
+i;t[] a #usda 0
+vn     1     1    1 "M"
+{
+vn     2     1    10
+def Mesh "M"
+{
+t[] f#ume lia y

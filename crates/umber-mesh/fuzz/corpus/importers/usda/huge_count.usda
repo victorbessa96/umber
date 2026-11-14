@@ -1,0 +1,7 @@
+#usda 1.0
+def Mesh "M"
+{
+int[] faceVertexCounts = [9000000000000000000, 9000000000000000000, 9000000000000000000]
+int[] faceVertexIndices = [0, 1, 2]
+point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)]
+}
