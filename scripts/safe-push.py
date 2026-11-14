@@ -76,7 +76,11 @@ ENV["PATH"] = ENV.get("PATH", "") + os.pathsep + os.path.expanduser("~/.cargo/bi
 
 
 def sh(root, *cmd, check=False):
-    r = subprocess.run(cmd, cwd=root, capture_output=True, text=True, env=ENV)
+    # text=True with errors='replace': repo content has non-UTF8 bytes
+    # (0xfc seen 2026-11-14 in git log output) and a strict decode crashes
+    # the gate mid-push-check with UnicodeDecodeError.
+    r = subprocess.run(cmd, cwd=root, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=ENV)
     if check and r.returncode != 0:
         print(f"safe-push: `{' '.join(cmd)}` failed:\n{r.stdout}{r.stderr}", file=sys.stderr)
         sys.exit(3)
@@ -123,7 +127,7 @@ def patch_id(root, commit):
     if diff.returncode != 0 or not diff.stdout.strip():
         return None
     r = subprocess.run(
-        ["git", "patch-id", "--stable"], cwd=root, input=diff.stdout, capture_output=True, text=True
+        ["git", "patch-id", "--stable"], cwd=root, input=diff.stdout, capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
     return r.stdout.split()[0] if r.returncode == 0 and r.stdout.strip() else None
 
