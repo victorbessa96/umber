@@ -628,3 +628,166 @@ fn invert_flips_visible_checklist_only() {
         "visible tile rows flipped: {mask:?}"
     );
 }
+
+// --- smart-material parameter controls (wave 4.1b) ---------------------------
+
+/// 4.1b: an applied smart material's declared parameters render as editable
+/// controls under the selected layer; editing one writes exactly ONE
+/// undoable command (one undo restores the old value), and the value
+/// round-trips through a project save/load.
+#[test]
+fn smart_material_params_render_edit_undo_and_roundtrip() {
+    use umber_app::document::{
+        apply_smart_material, list_smart_materials, smart_dirs, smart_instance_of,
+        smart_param_value,
+    };
+    use umber_core::layers::MaterialParamValue;
+    use umber_core::smart::SmartParamKind;
+
+    // A bundled preset with a declared parameter block (float + choice).
+    let material = list_smart_materials(&smart_dirs())
+        .into_iter()
+        .find(|(_, m)| {
+            m.parameters
+                .iter()
+                .any(|p| matches!(p.kind, SmartParamKind::Choice { .. }))
+        })
+        .map(|(_, m)| m)
+        .expect("a bundled .umbersmart declares a choice parameter");
+    let choice = material
+        .parameters
+        .iter()
+        .find(|p| matches!(p.kind, SmartParamKind::Choice { .. }))
+        .unwrap();
+    let options = match &choice.kind {
+        SmartParamKind::Choice { options, .. } => options.clone(),
+        SmartParamKind::Float { .. } => unreachable!(),
+    };
+    assert!(options.len() >= 2, "the choice has a second option to pick");
+    let float = material
+        .parameters
+        .iter()
+        .find(|p| matches!(p.kind, SmartParamKind::Float { .. }))
+        .expect("the preset also declares a float parameter");
+
+    let mut doc = umber_app::document::Document::default();
+    let ids = apply_smart_material(&mut doc, &material);
+    assert!(ids.len() >= 2, "the preset instantiated layers");
+    let root = ids[0];
+    let (stamped_name, stamped_root) =
+        smart_instance_of(&doc.layers()[0]).expect("the apply stamped the instance marker");
+    assert_eq!(stamped_name, material.name);
+    assert_eq!(stamped_root, root, "the root layer carries the values");
+    assert_eq!(
+        smart_param_value(&doc, root, choice),
+        MaterialParamValue::Int(0),
+        "the choice starts at its declared default"
+    );
+
+    // Layers + History over one document, the instance root selected (the
+    // blend-combo test's shape: the undo must reach the same document the
+    // controls edit).
+    let mut harness = support::harness_state(
+        move |ui, s: &mut umber_app::document::Document| {
+            use umber_app::layers_panel::gestures::GestureState;
+            let defs = std::collections::BTreeMap::<String, String>::new();
+            let badges = std::collections::HashMap::<u64, String>::new();
+            let mut states = umber_app::material_layer::MaterialLayerStates::default();
+            let thumbs = umber_app::document::LayerThumbs::default();
+            let gestures = GestureState::default();
+            let mats = umber_app::layers_panel::MaterialPanelContext {
+                defs: &defs,
+                badges: &badges,
+                status: None,
+                states: &mut states,
+            };
+            let _ = umber_app::document::layers_ui(
+                ui,
+                s,
+                mats,
+                umber_app::paint_state::PlaneOwner::Layer(root),
+                true,
+                &umber_app::document::LayerRowBadges::default(),
+                &thumbs,
+                &gestures,
+            );
+            umber_app::history_panel::history_ui(ui, s, None);
+        },
+        doc,
+    );
+    support::settle(&mut harness);
+    // Both declared controls render under the selected layer's row.
+    for label in [&float.label, &choice.label] {
+        assert!(
+            support::has_label(&harness, label),
+            "the {label} control renders"
+        );
+    }
+
+    // Edit the choice: open its combo (the one showing the current option,
+    // not the blend combo), pick the second option.
+    let before = harness.state().history.len();
+    let current_option = options[0].clone();
+    harness.get_by_value(&current_option).click();
+    support::settle(&mut harness);
+    let second_option = options[1].clone();
+    harness.get_by_label(&second_option).click();
+    support::settle(&mut harness);
+    let st = harness.state();
+    assert_eq!(
+        smart_param_value(st, root, choice),
+        MaterialParamValue::Int(1),
+        "the pick landed on the instance root"
+    );
+    assert_eq!(
+        st.history.len(),
+        before + 1,
+        "the edit wrote exactly one undoable command"
+    );
+
+    // The value round-trips through the project format (save/load).
+    let dir = std::env::temp_dir().join(format!("umber-smartparams-kit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = umber_core::project::ProjectModel::new(
+        vec![umber_core::TextureSet::new_default("Set")],
+        vec![umber_core::project::TextureSetLayers {
+            texture_set: "Set".into(),
+            stack: st.stack.clone(),
+        }],
+        umber_core::project::ProjectSettings {
+            active_texture_set: Some("Set".into()),
+            ..Default::default()
+        },
+    );
+    umber_core::project::save_to_dir(&model, &dir).expect("project saves");
+    let loaded = umber_core::project::load_from_dir(&dir).expect("project loads");
+    let _ = std::fs::remove_dir_all(&dir);
+    let loaded_root = loaded.layers[0]
+        .stack
+        .layer(root)
+        .expect("the root layer survives the round-trip");
+    let (loaded_name, loaded_root_id) =
+        smart_instance_of(loaded_root).expect("the marker survives the round-trip");
+    assert_eq!(loaded_name, material.name);
+    assert_eq!(loaded_root_id, root);
+    let loaded_value = loaded_root
+        .material
+        .as_ref()
+        .and_then(|m| m.params.iter().find(|o| o.param == choice.id))
+        .map(|o| o.value.clone());
+    assert_eq!(
+        loaded_value,
+        Some(MaterialParamValue::Int(1)),
+        "the edited value round-trips through save/load"
+    );
+
+    // One undo restores the old value (the edit was exactly one command).
+    support::click_label(&mut harness, &umber_app::i18n::tr("history.undo"));
+    support::settle(&mut harness);
+    assert_eq!(
+        smart_param_value(harness.state(), root, choice),
+        MaterialParamValue::Int(0),
+        "one undo restores the declared default"
+    );
+}
