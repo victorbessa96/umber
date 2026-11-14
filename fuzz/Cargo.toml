@@ -1,0 +1,37 @@
+[package]
+name = "umber-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# This directory lives under the repo's hidden `.worktrees/` checkout in
+# subagent runs, which cargo's workspace walk-up skips, so root the crate
+# here explicitly. On master the root `exclude = ["examples", "fuzz"]`
+# covers the same thing.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+umber-mesh = { path = "../crates/umber-mesh" }
+umber-spp = { path = "../crates/spp" }
+
+# cargo-fuzz targets. The root workspace excludes this directory (root
+# Cargo.toml `exclude = ["examples", "fuzz"]`), so this crate is its own
+# workspace and never builds under the root `cargo test --workspace`.
+
+[[bin]]
+name = "mesh_load"
+path = "fuzz_targets/mesh_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spp_open"
+path = "fuzz_targets/spp_open.rs"
+test = false
+doc = false
+bench = false

@@ -21,7 +21,7 @@ members = [
 # The example plugins are wasm32 cdylibs with their own workspace
 # (examples/Cargo.toml): a no_std panic-handler crate cannot build for
 # the host under `cargo test --workspace`.
-exclude = ["examples"]
+exclude = ["examples", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
