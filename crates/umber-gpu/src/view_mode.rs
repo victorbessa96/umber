@@ -173,7 +173,7 @@ impl ViewMode {
     /// Every previewable bake kind, in preview-id order (matches
     /// [`preview_id`](Self::preview_id) and the `VIEW_MODE_PREVIEW_*`
     /// WGSL constants).
-    pub const ALL_PREVIEW_KINDS: [MeshMapKind; 9] = [
+    pub const ALL_PREVIEW_KINDS: [MeshMapKind; 10] = [
         MeshMapKind::AmbientOcclusion,
         MeshMapKind::Curvature,
         MeshMapKind::NormalBase,
@@ -183,6 +183,7 @@ impl ViewMode {
         MeshMapKind::Height,
         MeshMapKind::BentNormal,
         MeshMapKind::WorldSpaceNormal,
+        MeshMapKind::Opacity,
     ];
 
     /// The `V` shortcut: cycles lit ↔ unlit. From Solo or
@@ -249,6 +250,7 @@ impl ViewMode {
             MeshMapKind::Height => 6,
             MeshMapKind::BentNormal => 7,
             MeshMapKind::WorldSpaceNormal => 8,
+            MeshMapKind::Opacity => 9,
         }
     }
 
@@ -430,7 +432,7 @@ mod tests {
     /// Unlit, and every solo stay on the composite.
     #[test]
     fn mesh_map_preview_routes_the_bake_output() {
-        assert_eq!(ViewMode::ALL_PREVIEW_KINDS.len(), 9);
+        assert_eq!(ViewMode::ALL_PREVIEW_KINDS.len(), 10);
         for kind in ViewMode::ALL_PREVIEW_KINDS {
             assert_eq!(
                 ViewMode::MeshMapPreview(kind).pixel_source(),
@@ -469,7 +471,7 @@ mod tests {
             .iter()
             .map(|k| ViewMode::preview_id(*k))
             .collect();
-        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     /// The shader-side contract: `MESH_SHADER` embeds the snippet

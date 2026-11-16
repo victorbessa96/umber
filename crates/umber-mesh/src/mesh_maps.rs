@@ -38,6 +38,8 @@ pub enum MeshMapKind {
     BentNormal,
     /// `<set>_world_space_normal`
     WorldSpaceNormal,
+    /// `<set>_opacity` (D3 opacity baker)
+    Opacity,
 }
 
 impl MeshMapKind {
@@ -53,6 +55,7 @@ impl MeshMapKind {
             Self::Height => "height",
             Self::BentNormal => "bent_normal",
             Self::WorldSpaceNormal => "world_space_normal",
+            Self::Opacity => "opacity",
         }
     }
 }
@@ -90,6 +93,7 @@ pub fn parse_mesh_map_stem(stem: &str) -> Option<MeshMapName> {
         MeshMapKind::Height,
         MeshMapKind::BentNormal,
         MeshMapKind::WorldSpaceNormal,
+        MeshMapKind::Opacity,
     ];
     // Sort by suffix length descending once (const array, could be
     // pre-sorted; done at runtime for clarity).

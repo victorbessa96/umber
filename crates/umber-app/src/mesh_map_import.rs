@@ -90,6 +90,7 @@ pub fn channel_for_kind(kind: MeshMapKind) -> &'static str {
         MeshMapKind::Height => "height",
         MeshMapKind::BentNormal => "bentNormal",
         MeshMapKind::WorldSpaceNormal => "worldSpaceNormal",
+        MeshMapKind::Opacity => "opacity",
     }
 }
 
