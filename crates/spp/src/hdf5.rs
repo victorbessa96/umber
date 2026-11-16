@@ -1953,12 +1953,15 @@ fn parse_link(ctx: Ctx<'_>, payload: &[u8]) -> Result<Link, SppError> {
     }
     let name_len = uint_le(payload, cursor, width)? as usize;
     cursor += width;
-    if payload.len() < cursor + name_len {
+    let name_end = cursor
+        .checked_add(name_len)
+        .ok_or_else(|| SppError::Corrupt("link name length overflows usize".into()))?;
+    if payload.len() < name_end {
         return Err(SppError::Corrupt("link name overruns the message".into()));
     }
-    let name = String::from_utf8(payload[cursor..cursor + name_len].to_vec())
+    let name = String::from_utf8(payload[cursor..name_end].to_vec())
         .map_err(|_| SppError::Corrupt("link name is not UTF-8".into()))?;
-    cursor += name_len;
+    cursor = name_end;
     match link_type {
         0 => {
             if payload.len() < cursor + ctx.off_size {

@@ -60,6 +60,7 @@ mod hdf5;
 mod model;
 pub mod texture_cache;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 /// Open an `.spp` file and import its raster channels.
@@ -67,6 +68,11 @@ use std::path::Path;
 /// Returns the version stamp, the texture sets (heuristic H2), the
 /// per-channel images (heuristic H1), and the full import report. HBO
 /// datasets are classified detection-only and reported, never parsed.
+///
+/// The HDF5 parse runs inside [`catch_unwind`]: a panic in the reader
+/// (logic bug or dependency) becomes [`SppError::Panicked`] instead of
+/// taking the app down on File → Open. It catches unwinding panics only:
+/// a stack overflow or an allocation-failure abort still kills the process.
 pub fn open(path: &Path) -> Result<SppProject, SppError> {
     // Size from metadata before reading: the reader holds the whole file,
     // so a hostile multi-GB path must be refused before `fs::read`.
@@ -84,13 +90,28 @@ pub fn open(path: &Path) -> Result<SppProject, SppError> {
         .and_then(|s| s.to_str())
         .unwrap_or("project")
         .to_string();
-    let tree = hdf5::parse(&bytes)?;
-    // The datasets are copies; the file buffer is dead from here on.
-    // Dropped before `build` decodes the channels, so peak memory is the
-    // datasets plus the channels, not the file on top (741 MiB less on
-    // the largest corpus file).
-    drop(bytes);
-    Ok(model::build(tree, &stem))
+
+    // The HDF5 parse and model build run inside catch_unwind.
+    // AssertUnwindSafe: the closure borrows only `bytes` and `stem`
+    // (read-only), and a caught panic returns an error — no partially
+    // built state escapes.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let tree = hdf5::parse(&bytes)?;
+        drop(bytes);
+        Ok(model::build(tree, &stem))
+    }));
+
+    match result {
+        Ok(inner) => inner,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_string());
+            Err(SppError::Panicked(format!("hdf5 reader: {detail}")))
+        }
+    }
 }
 
 /// Largest `.spp` opened: 4 GiB. The corpus's largest is 742 MiB, and
@@ -113,6 +134,10 @@ pub enum SppError {
     /// File I/O failure, as a string so no `std` type crosses the seam.
     #[error("io: {0}")]
     Io(String),
+    /// A panic in the HDF5 reader (dependency or logic) caught by the
+    /// `catch_unwind` boundary in `open` and converted to a typed error.
+    #[error("panicked: {0}")]
+    Panicked(String),
 }
 
 /// An imported `.spp` project: version stamp, texture sets, import report.
