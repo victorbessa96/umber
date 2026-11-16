@@ -12,6 +12,7 @@ pub mod gbuffer;
 pub mod id;
 pub mod margin;
 pub mod normal_map;
+pub mod opacity;
 pub mod position;
 pub mod skew;
 pub mod thickness;
@@ -27,6 +28,9 @@ pub use dilation::{DilateError, DilateParams};
 pub use gbuffer::{bake_uv_gbuffer, UvGBufferError, UvGBufferGpu};
 pub use id::{IdBakeError, IdBakeParams, IdFlavor};
 pub use normal_map::{TangentNormalBakeError, TangentNormalParams};
+pub use opacity::{
+    bake_opacity_mesh, bake_opacity_tile, OpacityBakeError, OpacityParams, OpacitySource,
+};
 pub use skew::{
     affected_maps_for_param, apply_edge_protection, combine_skew_with_paint, skew_byte,
     skew_deg_from_byte, skew_deviation_deg, skew_map_from_deviations, skew_threshold_byte,
@@ -111,6 +115,8 @@ pub enum BakeMap {
     /// deviation, paintable, consumed by the edge-protection guard
     /// (see [`skew`]).
     Skew,
+    /// Per-texel opacity mask from cavity (AO), ID map, or uniform value (D3).
+    Opacity,
 }
 
 impl BakeMap {
@@ -128,6 +134,7 @@ impl BakeMap {
             BakeMap::BentNormal => "bent_normal",
             BakeMap::WorldSpaceNormal => "world_space_normal",
             BakeMap::Skew => "skew",
+            BakeMap::Opacity => "opacity",
         }
     }
 }
@@ -147,6 +154,7 @@ mod tests {
             "world_space_normal"
         );
         assert_eq!(BakeMap::Skew.file_stem_suffix(), "skew");
+        assert_eq!(BakeMap::Opacity.file_stem_suffix(), "opacity");
     }
 
     #[test]

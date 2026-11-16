@@ -249,6 +249,7 @@ bakes =
     .map-id = ID
     .map-bent-normal = Normal dobrada
     .map-height-transfer = Altura (transferência da malha alta)
+    .map-opacity = Opacidade
     .no-mesh = Nenhuma malha carregada — abra uma malha para fazer bake.
     .no-gpu = Sem dispositivo de GPU — o bake precisa do dispositivo wgpu.
     .resolution = Resolução
@@ -310,6 +311,12 @@ bakes =
     .unlinked = { $set } desvinculado: mantém sua própria cópia das configurações.
     .not-linked = { $set } não está em um grupo vinculado.
     .bake-group = Assar grupo
+    .opacity-source = Fonte de opacidade
+    .opacity-source-cavity = Cavidade (AO)
+    .opacity-source-id = Mapa de ID
+    .opacity-source-manual = Manual
+    .opacity-strength = Força
+    .opacity-invert = Inverter
 
 ## Painel de exportação
 

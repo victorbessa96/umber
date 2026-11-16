@@ -151,6 +151,33 @@ use umber_mesh::FIRST_TILE;
 use crate::i18n::{tr, tr_args};
 use crate::tile_selection::{MeshTilesCache, TileSelection};
 
+/// Opacity source for the opacity baker (D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpacitySource {
+    /// Bake AO on the fly and use 1.0 - AO (occlusion) as opacity.
+    Cavity,
+    /// Sample an existing ID map's coverage.
+    IdMap,
+    /// Uniform value.
+    Manual,
+}
+
+impl Default for OpacitySource {
+    fn default() -> Self {
+        Self::Cavity
+    }
+}
+
+impl OpacitySource {
+    pub fn label(self) -> String {
+        match self {
+            Self::Cavity => tr("bakes.opacity-source-cavity"),
+            Self::IdMap => tr("bakes.opacity-source-id"),
+            Self::Manual => tr("bakes.opacity-source-manual"),
+        }
+    }
+}
+
 /// Bake resolutions offered by the panel (square targets): the shared
 /// 512..8K presets ([`crate::size_presets::SIZE_PRESETS`]). The pre-8K list
 /// was 128..2048; the sub-512 preview sizes left with the switch to the
@@ -213,11 +240,14 @@ pub enum BakeSelection {
     /// C2-29). Only the High-poly group bakes it, so it is NOT in
     /// [`Self::ALL`] (a low-only mesh has no height to bake).
     Height,
+    /// Per-texel opacity mask from cavity (AO), ID map, or uniform value (D3).
+    /// Low-mesh self-bake, single-tile only in v1 (like curvature/position).
+    Opacity,
 }
 
 impl BakeSelection {
     /// Every selectable map, in bake order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Ao,
         Self::Curvature,
         Self::Thickness,
@@ -226,11 +256,12 @@ impl BakeSelection {
         Self::WorldNormal,
         Self::Id,
         Self::BentNormal,
+        Self::Opacity,
     ];
 
     /// What a fresh panel checks: the four original maps plus the normal
-    /// (an export's normal slot needs it). World normal, ID and bent
-    /// normal are opt-in: niche, and bent normal is a second AO bake.
+    /// (an export's normal slot needs it). World normal, ID, bent normal,
+    /// and opacity are opt-in: niche, and bent normal is a second AO bake.
     pub const DEFAULT_ON: [Self; 5] = [
         Self::Ao,
         Self::Curvature,
@@ -262,6 +293,7 @@ impl BakeSelection {
             // The High-poly group's height is the TRANSFER output, so it
             // names the transfer, not the paintable height channel.
             Self::Height => tr("bakes.map-height-transfer"),
+            Self::Opacity => tr("bakes.map-opacity"),
         }
     }
 
@@ -277,6 +309,7 @@ impl BakeSelection {
             Self::Id => umber_mesh::MeshMapKind::Id,
             Self::BentNormal => umber_mesh::MeshMapKind::BentNormal,
             Self::Height => umber_mesh::MeshMapKind::Height,
+            Self::Opacity => umber_mesh::MeshMapKind::Opacity,
         }
     }
 }
@@ -344,7 +377,8 @@ pub struct BakePlan {
 ///   (`tiles` is necessarily `[1001]` or empty there and is ignored).
 /// - Otherwise, per selected tile: AO bakes over the tile's window; the
 ///   other maps bake whole-mesh for tile 1001 (their `[0, 1]` raster IS
-///   tile 1001) and are skipped for any other tile.
+///   tile 1001) and are skipped for any other tile. Opacity (like
+///   curvature/position) is single-tile only in v1.
 pub fn plan_bake(maps: &[BakeSelection], present: &[u16], tiles: &[u16]) -> BakePlan {
     let single = present.is_empty() || present == [FIRST_TILE];
     if single {
@@ -417,6 +451,8 @@ pub enum BakeSettingId {
     OccluderScope,
     /// Cage visualization toggle.
     Cage,
+    /// Opacity source combo (Cavity / ID map / Manual).
+    OpacitySource,
 }
 
 /// One bake-log entry (§6:59): timestamp, map, set, duration, warnings
@@ -479,7 +515,7 @@ impl BakeLogEntry {
     /// threshold; AO/thickness (the raycast bakers) at the ray count;
     /// position (whose only panel lever is the target size) at resolution;
     /// curvature (whose strength is not a panel param) at dilation, the
-    /// post-pass every map shares.
+    /// post-pass every map shares; opacity at the source combo.
     pub fn setting_hint(&self) -> BakeSettingId {
         if self.skew_clamped > 0 || self.selection.is_none() {
             BakeSettingId::SkewThreshold
@@ -492,6 +528,8 @@ impl BakeLogEntry {
             BakeSettingId::Rays
         } else if matches!(self.selection, Some(BakeSelection::Position)) {
             BakeSettingId::Resolution
+        } else if matches!(self.selection, Some(BakeSelection::Opacity)) {
+            BakeSettingId::OpacitySource
         } else {
             BakeSettingId::Dilation
         }
@@ -597,6 +635,7 @@ pub fn bake_map_of(selection: BakeSelection) -> umber_bake::BakeMap {
         BakeSelection::Id => umber_bake::BakeMap::Id,
         BakeSelection::BentNormal => umber_bake::BakeMap::BentNormal,
         BakeSelection::Height => umber_bake::BakeMap::Height,
+        BakeSelection::Opacity => umber_bake::BakeMap::Opacity,
     }
 }
 
@@ -626,6 +665,12 @@ pub mod bake_param {
     pub const OCCLUDER_OWN_SET: &str = "occluder_own_set";
     /// Skew edge-protection threshold in degrees (`Float`; the AO guard).
     pub const SKEW_THRESHOLD: &str = "skew_threshold";
+    /// Opacity source (`Int`: 0 = Cavity, 1 = ID Map, 2 = Manual).
+    pub const OPACITY_SOURCE: &str = "opacity_source";
+    /// Opacity strength multiplier (`Float`; 0.0..=1.0).
+    pub const OPACITY_STRENGTH: &str = "opacity_strength";
+    /// Opacity invert (`Bool`).
+    pub const OPACITY_INVERT: &str = "opacity_invert";
 }
 
 impl BakeSelection {
@@ -641,6 +686,7 @@ impl BakeSelection {
             Self::Id => "id",
             Self::BentNormal => "bent_normal",
             Self::Height => "height",
+            Self::Opacity => "opacity",
         }
     }
 
@@ -1183,6 +1229,12 @@ pub struct BakesPanel {
     /// triangles only (Marmoset's Ignore Groups). Applies to AO,
     /// thickness and bent normals.
     occluder_own_set: bool,
+    /// Opacity source (Cavity / ID Map / Manual).
+    opacity_source: OpacitySource,
+    /// Opacity strength multiplier (0.0..=1.0).
+    opacity_strength: f32,
+    /// Opacity invert flag.
+    opacity_invert: bool,
     /// Auto-rebake on parameter change (§6:58; default off — background
     /// bakes are opt-in).
     auto_rebake: bool,
@@ -1199,6 +1251,9 @@ pub struct BakesPanel {
     applied_margin: MarginType,
     applied_skew_threshold_deg: f32,
     applied_occluder_own_set: bool,
+    applied_opacity_source: OpacitySource,
+    applied_opacity_strength: f32,
+    applied_opacity_invert: bool,
     /// The per-set checklist (§6:59), synced from the mesh each frame.
     sets: Vec<SetCheck>,
     /// Whether the cage wireframe overlay shows (synced to the viewport
@@ -1333,6 +1388,9 @@ impl BakesPanel {
             // The occluder scope row (L5b): `false` = the whole mesh
             // occludes — today's behavior, byte for byte.
             occluder_own_set: false,
+            opacity_source: OpacitySource::default(),
+            opacity_strength: 1.0,
+            opacity_invert: false,
             auto_rebake: false,
             auto_state: umber_bake::skew::AutoRebake::new(),
             affected_tiles: umber_core::AffectedRegion::new(),
@@ -1342,6 +1400,9 @@ impl BakesPanel {
             applied_margin: MarginType::Extend,
             applied_skew_threshold_deg: DEFAULT_SKEW_THRESHOLD_DEG,
             applied_occluder_own_set: false,
+            applied_opacity_source: OpacitySource::default(),
+            applied_opacity_strength: 1.0,
+            applied_opacity_invert: false,
             sets: Vec::new(),
             show_cage: false,
             highlighted_setting: None,
@@ -1395,6 +1456,20 @@ impl BakesPanel {
                     ParamValue::Float(self.skew_threshold_deg),
                 );
             }
+            if kind == BakeSelection::Opacity {
+                params.insert(
+                    bake_param::OPACITY_SOURCE.to_owned(),
+                    ParamValue::Int(self.opacity_source as i32),
+                );
+                params.insert(
+                    bake_param::OPACITY_STRENGTH.to_owned(),
+                    ParamValue::Float(self.opacity_strength),
+                );
+                params.insert(
+                    bake_param::OPACITY_INVERT.to_owned(),
+                    ParamValue::Bool(self.opacity_invert),
+                );
+            }
             bakers.insert(kind, params);
         }
         BakeSettingsBlock {
@@ -1438,6 +1513,19 @@ impl BakesPanel {
         }
         if let Some(ParamValue::Float(v)) = find(bake_param::SKEW_THRESHOLD) {
             self.set_skew_threshold_deg(v);
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::OPACITY_SOURCE) {
+            self.opacity_source = match v {
+                1 => OpacitySource::IdMap,
+                2 => OpacitySource::Manual,
+                _ => OpacitySource::Cavity,
+            };
+        }
+        if let Some(ParamValue::Float(v)) = find(bake_param::OPACITY_STRENGTH) {
+            self.opacity_strength = v.clamp(0.0, 1.0);
+        }
+        if let Some(ParamValue::Bool(v)) = find(bake_param::OPACITY_INVERT) {
+            self.opacity_invert = v;
         }
         self.output_dir = block.out_dir.clone();
     }
@@ -1950,6 +2038,18 @@ impl BakesPanel {
             changed.push(umber_bake::skew::BakeParam::SkewThreshold);
             self.applied_skew_threshold_deg = self.skew_threshold_deg;
         }
+        if self.opacity_source != self.applied_opacity_source {
+            changed.push(umber_bake::skew::BakeParam::RayLength); // Opacity (cavity) uses AO-style raycast
+            self.applied_opacity_source = self.opacity_source;
+        }
+        if (self.opacity_strength - self.applied_opacity_strength).abs() > f32::EPSILON {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_opacity_strength = self.opacity_strength;
+        }
+        if self.opacity_invert != self.applied_opacity_invert {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_opacity_invert = self.opacity_invert;
+        }
         for param in changed {
             self.auto_state.mark_param_change(param, now);
             self.affected_tiles.mark_tiles(selected_tiles);
@@ -2241,6 +2341,56 @@ impl BakesPanel {
                         ui.selectable_value(&mut self.occluder_own_set, true, own);
                     });
             });
+
+            // Opacity settings (D3): shown when Opacity map is checked.
+            if self.is_map_enabled(BakeSelection::Opacity) {
+                let source_label =
+                    self.row_label(BakeSettingId::OpacitySource, tr("bakes.opacity-source"));
+                group.row(source_label.as_str(), |ui| {
+                    let cavity = tr("bakes.opacity-source-cavity");
+                    let id_map = tr("bakes.opacity-source-id");
+                    let manual = tr("bakes.opacity-source-manual");
+                    let selected = match self.opacity_source {
+                        OpacitySource::Cavity => &cavity,
+                        OpacitySource::IdMap => &id_map,
+                        OpacitySource::Manual => &manual,
+                    };
+                    egui::ComboBox::from_id_salt("bakes-opacity-source")
+                        .selected_text(selected.as_str())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.opacity_source,
+                                OpacitySource::Cavity,
+                                cavity,
+                            );
+                            ui.selectable_value(
+                                &mut self.opacity_source,
+                                OpacitySource::IdMap,
+                                id_map,
+                            );
+                            ui.selectable_value(
+                                &mut self.opacity_source,
+                                OpacitySource::Manual,
+                                manual,
+                            );
+                        });
+                });
+
+                let strength_label = tr("bakes.opacity-strength");
+                group.row(strength_label.as_str(), |ui| {
+                    ui.add(
+                        ValueField::new(&mut self.opacity_strength)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .default_value(1.0)
+                            .range(0.0..=1.0)
+                            .step(0.01)
+                            .decimals(2),
+                    );
+                });
+
+                let invert_label = tr("bakes.opacity-invert");
+                group.ui.checkbox(&mut self.opacity_invert, invert_label);
+            }
 
             group
                 .ui

@@ -245,6 +245,7 @@ bakes =
     .map-id = ID
     .map-bent-normal = Bent normal
     .map-height-transfer = Height (high-poly transfer)
+    .map-opacity = Opacity
     .no-mesh = No mesh loaded — open a mesh to enable baking.
     .no-gpu = No GPU device — baking needs the wgpu device.
     .resolution = Resolution
@@ -306,6 +307,12 @@ bakes =
     .unlinked = Unlinked { $set }: it keeps its own copy of the settings.
     .not-linked = { $set } is not in a linked group.
     .bake-group = Bake group
+    .opacity-source = Opacity source
+    .opacity-source-cavity = Cavity (AO)
+    .opacity-source-id = ID map
+    .opacity-source-manual = Manual
+    .opacity-strength = Strength
+    .opacity-invert = Invert
 
 ## Export panel
 

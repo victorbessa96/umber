@@ -1979,6 +1979,271 @@ fn cs_main(
 }
 "#;
 
+/// Opacity bake shader (D3 opacity baker): two entry points matching AO/thickness.
+///
+/// # Plane entry (`cs_main`)
+/// Identical dispatch to AO plane path; reads `params.source` (u32 enum),
+/// `strength`, `invert`, `max_distance`, `bias`, `rays`. For `Cavity` (source=0):
+/// replicates AO's hemisphere loop but writes `opacity = (1.0 - ao) * strength`
+/// (inverted AO), then `invert` flips it. For `IdMap`/`Manual`: not supported
+/// in plane path (mesh-fed only).
+///
+/// # Mesh-fed entry (`cs_main_from_position`)
+/// Reads `position_tex`/`normal_tex` + optional `id_tex` (binding 6,
+/// `texture_2d<f32>`). For `Cavity` (source=0): same as AO but outputs opacity.
+/// For `IdMap` (source=1): samples `id_tex` at texel; coverage
+/// (`id_tex.a > 0.5`) → `opacity = strength`, else `0.0`. For `Manual` (source=2):
+/// `opacity = strength`. `invert` flips. Output `vec4(opacity, opacity, opacity, coverage)`.
+///
+/// # Uniform struct
+/// `OpacityParams { source: u32, strength: f32, invert: u32, max_distance: f32,
+/// bias: f32, rays: u32, tri_count: u32, _pad: u32 }` (32 bytes, 16-byte aligned).
+///
+/// # Dispatch + workgroup shape
+/// One workgroup (`@workgroup_size(1)`) per texel, dispatched as
+/// `dispatch_workgroups(width, height, 1)` — the same shape as
+/// `AO_BAKE_SHADER`/`THICKNESS_BAKE_SHADER` mesh-fed paths.
+pub const OPACITY_BAKE_SHADER: &str = r#"
+struct Tri {
+    v0: vec4<f32>,
+    v1: vec4<f32>,
+    v2: vec4<f32>,
+    normal: vec4<f32>,
+};
+
+struct OpacityParams {
+    source: u32,
+    strength: f32,
+    invert: u32,
+    max_distance: f32,
+    bias: f32,
+    rays: u32,
+    tri_count: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read> triangles: array<Tri>;
+@group(0) @binding(1) var out_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var<uniform> params: OpacityParams;
+@group(0) @binding(3) var position_tex: texture_2d<f32>;
+@group(0) @binding(4) var normal_tex: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> cage_offsets: array<vec4<f32>>;
+@group(0) @binding(6) var id_tex: texture_2d<f32>;
+
+const MT_PARALLEL_EPS: f32 = 1e-8;
+const MT_T_EPS: f32 = 1e-5;
+const GOLDEN_CONJ: f32 = 0.618034;
+const EPS: f32 = 1e-6;
+
+fn ray_hit_distance(
+    orig: vec3<f32>,
+    dir: vec3<f32>,
+    v0: vec3<f32>,
+    v1: vec3<f32>,
+    v2: vec3<f32>,
+    max_t: f32,
+) -> f32 {
+    let e1 = v1 - v0;
+    let e2 = v2 - v0;
+    let h = cross(dir, e2);
+    let a = dot(e1, h);
+    if (abs(a) < MT_PARALLEL_EPS) {
+        return -1.0;
+    }
+    let f = 1.0 / a;
+    let s = orig - v0;
+    let u = f * dot(s, h);
+    if (u < 0.0 || u > 1.0) {
+        return -1.0;
+    }
+    let q = cross(s, e1);
+    let v = f * dot(dir, q);
+    if (v < 0.0 || u + v > 1.0) {
+        return -1.0;
+    }
+    let t = f * dot(e2, q);
+    if (t > MT_T_EPS && t < max_t) {
+        return t;
+    }
+    return -1.0;
+}
+
+fn uv_point_in_tri(uv: vec2<f32>, uv0: vec2<f32>, uv1: vec2<f32>, uv2: vec2<f32>, bary: ptr<function, vec3<f32>>) -> bool {
+    let e0 = uv1 - uv0;
+    let e1 = uv2 - uv0;
+    let v = uv - uv0;
+
+    let d00 = dot(e0, e0);
+    let d01 = dot(e0, e1);
+    let d11 = dot(e1, e1);
+    let d20 = dot(v, e0);
+    let d21 = dot(v, e1);
+
+    let denom = d00 * d11 - d01 * d01;
+    if (abs(denom) < 1e-10) {
+        return false;
+    }
+
+    let inv_denom = 1.0 / denom;
+    let u = (d11 * d20 - d01 * d21) * inv_denom;
+    let v_bary = (d00 * d21 - d01 * d20) * inv_denom;
+    let w = 1.0 - u - v_bary;
+
+    let eps = 1e-6;
+    if (u >= -eps && v_bary >= -eps && w >= -eps) {
+        *bary = vec3<f32>(w, u, v_bary);
+        return true;
+    }
+    return false;
+}
+
+fn orthonormal_basis(n: vec3<f32>) -> Basis {
+    let sign_z = select(-1.0, 1.0, n.z >= 0.0);
+    let a = -1.0 / (sign_z + n.z);
+    let b = n.x * n.y * a;
+    return Basis(
+        vec3<f32>(1.0 + sign_z * n.x * n.x * a, sign_z * b, -sign_z * n.x),
+        vec3<f32>(b, sign_z + n.y * n.y * a, -n.y),
+    );
+}
+
+struct Basis {
+    b1: vec3<f32>,
+    b2: vec3<f32>,
+}
+
+fn hemisphere_sample(i: u32, n: u32) -> vec3<f32> {
+    let nf = f32(max(n, 1u));
+    let cos_theta = 1.0 - (f32(i) + 0.5) / nf;
+    let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+    let scaled = f32(i) * GOLDEN_CONJ;
+    let phi = 2.0 * 3.141592653589793 * (scaled - floor(scaled));
+    return vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+}
+
+/// Plane entry point: bakes opacity from a parameter plane (Cavity source only).
+/// One workgroup per texel, matching AO/thickness plane paths.
+@compute @workgroup_size(1)
+fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
+    let coord = vec2<i32>(workgroup_id.xy);
+    
+    // For plane path, we don't have position/normal textures.
+    // Only Cavity source is supported in plane path.
+    if (params.source != 0u) {
+        // IdMap and Manual not supported in plane path
+        return;
+    }
+
+    // Build a simple plane at origin with +Z normal for the cavity bake
+    // This mirrors AO's plane path
+    let plane_origin = vec3<f32>(0.0, 0.0, 0.0);
+    let plane_u = vec3<f32>(1.0, 0.0, 0.0);
+    let plane_v = vec3<f32>(0.0, 1.0, 0.0);
+    let plane_normal = vec3<f32>(0.0, 0.0, 1.0);
+    
+    // Cavity = 1.0 - AO (occlusion). We replicate AO's hemisphere loop.
+    let ray_origin = plane_origin + params.bias * plane_normal;
+    let basis = orthonormal_basis(plane_normal);
+    
+    var ao = 0.0;
+    let n = params.rays;
+    for (var i: u32 = 0u; i < n; i = i + 1u) {
+        let local_dir = hemisphere_sample(i, n);
+        let dir = normalize(
+            local_dir.x * basis.b1 + local_dir.y * basis.b2 + local_dir.z * plane_normal
+        );
+        var hit = false;
+        for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+            let tri = triangles[t];
+            if (ray_hit_distance(ray_origin, dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance) > 0.0) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) {
+            ao = ao + 1.0;
+        }
+    }
+    ao = ao / f32(n);
+    
+    // Opacity = (1.0 - AO) * strength, then invert if needed
+    var opacity = (1.0 - ao) * params.strength;
+    if (params.invert == 1u) {
+        opacity = 1.0 - opacity;
+    }
+    opacity = clamp(opacity, 0.0, 1.0);
+    
+    // Plane path: full coverage (alpha = 255)
+    textureStore(out_tex, coord, vec4<f32>(opacity, opacity, opacity, 1.0));
+}
+
+/// Mesh-fed entry point: reads position/normal from position pass, optional ID map.
+/// One workgroup per texel.
+@compute @workgroup_size(1)
+fn cs_main_from_position(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
+    let coord = vec2<i32>(workgroup_id.xy);
+    
+    let pos_sample = textureLoad(position_tex, coord, 0);
+    if (pos_sample.w <= 0.5) {
+        // Uncovered texel
+        textureStore(out_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    
+    let surface_pos = pos_sample.xyz;
+    let normal = normalize(textureLoad(normal_tex, coord, 0).xyz);
+    let basis = orthonormal_basis(normal);
+    let ray_origin = surface_pos + params.bias * normal;
+    
+    var opacity: f32 = 0.0;
+    
+    if (params.source == 0u) {
+        // Cavity: replicate AO hemisphere loop, output opacity = (1 - AO) * strength
+        var ao = 0.0;
+        let n = params.rays;
+        for (var i: u32 = 0u; i < n; i = i + 1u) {
+            let local_dir = hemisphere_sample(i, n);
+            let dir = normalize(
+                local_dir.x * basis.b1 + local_dir.y * basis.b2 + local_dir.z * normal
+            );
+            var hit = false;
+            for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+                let tri = triangles[t];
+                if (ray_hit_distance(ray_origin, dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance) > 0.0) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) {
+                ao = ao + 1.0;
+            }
+        }
+        ao = ao / f32(n);
+        opacity = (1.0 - ao) * params.strength;
+    } else if (params.source == 1u) {
+        // IdMap: sample ID texture at this texel
+        let id_sample = textureLoad(id_tex, coord, 0);
+        if (id_sample.w > 0.5) {
+            opacity = params.strength;
+        } else {
+            opacity = 0.0;
+        }
+    } else {
+        // Manual: uniform strength
+        opacity = params.strength;
+    }
+    
+    if (params.invert == 1u) {
+        opacity = 1.0 - opacity;
+    }
+    opacity = clamp(opacity, 0.0, 1.0);
+    
+    // Coverage = position pass coverage
+    let coverage = pos_sample.w;
+    textureStore(out_tex, coord, vec4<f32>(opacity, opacity, opacity, coverage));
+}
+"#;
+
 #[cfg(test)]
 mod uv_eps_parity {
     //! Row 156-B: the WGSL UV solves must quote the same epsilon pair as
