@@ -29,11 +29,15 @@
 //! still flip every glyph vertically, so the loader carries its own
 //! 8-bit-RGBA-only decoder ([`decode_atlas_png`]) on the `png` micro-crate.
 //!
-//! # Deferred (v1 boundary)
+//! # Runtime DPI re-raster (LANDED 2026-11-16)
 //!
-//! Runtime re-raster on DPI change is NOT done: the 2x bake covers HiDPI,
-//! and callers pick the scale once via `hidpi`. Regenerating the atlas
-//! mid-session on `pixels_per_point` movement is a follow-up.
+//! The 2x bake covers HiDPI at startup; mid-session `pixels_per_point`
+//! movement is handled by the watcher in `umber-app`'s `fn ui`: when the
+//! hidpi class (`preferences::hidpi_class`, the same >= 1.75 threshold)
+//! flips, the atlas reloads via [`load_baked_atlas_merged`] at the new
+//! density and the frame requests a repaint so the viewport re-rasterizes.
+//! A reload failure keeps the previous atlas — a missing atlas is never
+//! a frame error.
 //!
 //! An unknown name, or an atlas whose texture is not built yet, draws a
 //! faint placeholder box. It never panics, so a missing glyph cannot take

@@ -481,6 +481,28 @@ pub fn style_delta(
     }
 }
 
+/// The hidpi class for a `pixels_per_point` value: egui's convention is
+/// native scale ≥ 1.75 (the same threshold the startup atlas pick at
+/// `main.rs` uses). The runtime watcher in `fn ui` compares this per frame
+/// so a window dragged between monitors reloads the 1x/2x icon atlas when
+/// the class flips (ROADMAP "DPI runtime re-raster", landed 2026-11-16).
+pub fn hidpi_class(pixels_per_point: f32) -> bool {
+    pixels_per_point >= 1.75
+}
+
+#[cfg(test)]
+mod hidpi_tests {
+    use super::hidpi_class;
+
+    #[test]
+    fn hidpi_class_boundary_is_1_75() {
+        assert!(!hidpi_class(1.0));
+        assert!(!hidpi_class(1.74));
+        assert!(hidpi_class(1.75));
+        assert!(hidpi_class(2.0));
+    }
+}
+
 /// The theme to paint with: the preference, or (Follow OS) the OS
 /// appearance mapped to Dark / Light.
 pub fn resolve_theme(pref: Option<umber_gui::Theme>, os_dark: bool) -> umber_gui::Theme {

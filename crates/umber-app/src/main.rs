@@ -2436,6 +2436,10 @@ pub struct UmberApp {
     /// the lucide raster step lands (see `toolbar`'s module docs), so the
     /// strip shows placeholder glyphs.
     icons: umber_gui::IconAtlas,
+    /// The hidpi class `icons` was baked for; the runtime watcher in
+    /// `fn ui` reloads the atlas when `pixels_per_point` crosses 1.75
+    /// mid-session (ROADMAP "DPI runtime re-raster", landed 2026-11-16).
+    last_hidpi: bool,
     /// The requested HDR surface mode (§5 P1 row 85). Persisted as a
     /// user preference (`display_panel::hdr_pref_path`), not a project
     /// field — see `umber_gpu::hdr`'s module boundary note. The EFFECTIVE
@@ -2528,7 +2532,7 @@ impl UmberApp {
         // load failure keeps the empty atlas: every lookup misses cleanly
         // and callers keep their text placeholders (icons.rs' contract) —
         // a missing atlas is never a startup error.
-        let hidpi = cc.egui_ctx.input(|input| input.pixels_per_point) >= 1.75;
+        let hidpi = preferences::hidpi_class(cc.egui_ctx.input(|input| input.pixels_per_point));
         // BOTH families in one atlas (UI/UX pass U1-3): the toolbar paints
         // Panel ids (file / undo / view glyphs) beside the Tool row, and
         // the Properties rail its own Panel ids, all through this atlas.
@@ -2602,6 +2606,10 @@ impl UmberApp {
             last_dabs_composited: 0,
             view: toolbar::ViewToggles::default(),
             icons,
+            // The hidpi class the icon atlas was baked for (see the
+            // runtime watcher in `fn ui`); initialized from the same
+            // input read as the atlas.
+            last_hidpi: hidpi,
             hdr_mode,
             pending_new: None,
             pending_quit: false,
@@ -4871,6 +4879,24 @@ impl eframe::App for UmberApp {
         // poll's pattern. Inspect reads app state; screenshot sends
         // ViewportCommand::Screenshot and stashes the reply sender.
         self.drain_control(ui.ctx());
+        // DPI runtime watcher (ROADMAP "DPI runtime re-raster", landed
+        // 2026-11-16): when `pixels_per_point` crosses the 1.75 hidpi
+        // boundary mid-session (window dragged to another monitor), reload
+        // the icon atlas at the new density and force a repaint so the
+        // viewport re-rasterizes at the new scale. Under `ui_scale_auto`
+        // egui's zoom already follows `pixels_per_point`; under a manual
+        // `ui_scale` the zoom stays pinned by `style_delta` below.
+        let ppp = ui.ctx().input(|i| i.pixels_per_point);
+        let hidpi = preferences::hidpi_class(ppp);
+        if hidpi != self.last_hidpi {
+            self.last_hidpi = hidpi;
+            self.icons =
+                umber_gui::icons::load_baked_atlas_merged(ui.ctx(), hidpi).unwrap_or_else(|err| {
+                    log::warn!("icon atlas reload unavailable ({err}); keeping the previous atlas");
+                    std::mem::replace(&mut self.icons, umber_gui::IconAtlas::empty())
+                });
+            ui.ctx().request_repaint();
+        }
         // The `viewport.screenshot` reply arrives as an input event on a
         // later frame; complete the stashed reply here (still the UI thread).
         let shot = ui.ctx().input(|i| {

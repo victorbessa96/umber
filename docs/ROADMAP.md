@@ -298,8 +298,13 @@ pass; the .ftl lock lift — **CLOSED 2026-11-16 truthing: the lock was LIFTED p
 - The winink live-HWND question — OPEN: the decode IS in the tree
   (`crates/stylus/src/winink.rs`, passive decode); the WndProc hook +
   HWND hand-off is the gate.
-- DPI runtime re-raster — OPEN (the manual ui_scale exists;
-  the runtime-change re-raster does not).
+- DPI runtime re-raster — **LANDED 2026-11-16** (kill dpi-runtime-reraster):
+  `preferences::hidpi_class(ppp)` (>= 1.75, egui's convention, now also the
+  startup pick) plus a per-frame watcher in `fn ui` that reloads the 1x/2x
+  icon atlas when the hidpi class flips mid-session and requests a repaint
+  so the viewport re-rasterizes; under manual `ui_scale` the zoom stays
+  pinned by `style_delta`. Battery: clippy -D warnings clean, 1335 passed
+  / 0 failed (incl. `hidpi_class_boundary_is_1_75`).
 - ~~The AssetStore GC's shell caller~~ **LANDED `1f0e438` (row 238)** —
   `umber gc <project> [--delete] [--min-age-secs N]` headless lane in
   main.rs over `asset_gc::run_cli`; live-verified 2026-11-07: dry-run on a
