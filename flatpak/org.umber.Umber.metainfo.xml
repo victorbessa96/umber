@@ -45,6 +45,10 @@
   </content_rating>
   <releases>
     <release version="0.1.0-alpha.1" type="development" date="2026-11-16">
+      <description>
+        <p>0.1.0 dry-run alpha tag (C2-25): unsigned, SHA-256 checksums; first release.yml run.</p>
+      </description>
+    </release>
     <release version="0.1.0" type="development" date="2026-10-12">
       <description>
         <p>Pre-release packaging track: Flatpak and AppImage manifests land; no release tag cut yet.</p>
