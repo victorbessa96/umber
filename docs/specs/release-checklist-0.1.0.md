@@ -129,6 +129,12 @@ queue row C2-13..19, closed 2026-10-15.]
 - The dist workflow (release.yml) builds on the tag push: the two
   targets, shell + PowerShell installers, checksums — measured at
   11 MB against the 150 MB budget.
+  - **Alpha tag FIRED 2026-11-16** (`v0.1.0-alpha.1` @ `bc4d642f`,
+    pre-release published 17:34Z, release.yml SUCCESS): umber-app
+    linux tar.xz 14.0 MB, windows zip 18.6 MB (sha256 verified locally:
+    `sha256sum -c` OK), umber-cli linux 5.5 MB / windows 8.4 MB,
+    source.tar.gz 9.2 MB, installers + sha256.sum + dist-manifest.json.
+    All well under the 150 MB budget. Unsigned per C2-22 decision.
 - SPEC ratification + a dogfood cohort are gates 7-8 above (the
   review's IMPROVEMENTS §4.4).
 
