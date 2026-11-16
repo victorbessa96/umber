@@ -4756,7 +4756,7 @@ dependencies = [
 
 [[package]]
 name = "stylus"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "log",
  "thiserror 2.0.21",
@@ -5162,7 +5162,7 @@ dependencies = [
 
 [[package]]
 name = "umber-app"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "ag-psd",
  "anyhow",
@@ -5201,7 +5201,7 @@ dependencies = [
 
 [[package]]
 name = "umber-bake"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -5215,7 +5215,7 @@ dependencies = [
 
 [[package]]
 name = "umber-brush"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "glam",
  "serde",
@@ -5226,7 +5226,7 @@ dependencies = [
 
 [[package]]
 name = "umber-cli"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5256,7 +5256,7 @@ dependencies = [
 
 [[package]]
 name = "umber-color"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "ocio-rs",
  "serde",
@@ -5266,7 +5266,7 @@ dependencies = [
 
 [[package]]
 name = "umber-core"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "glam",
@@ -5280,7 +5280,7 @@ dependencies = [
 
 [[package]]
 name = "umber-export"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "ag-psd",
  "bytemuck",
@@ -5296,7 +5296,7 @@ dependencies = [
 
 [[package]]
 name = "umber-gpu"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "egui-wgpu",
@@ -5315,14 +5315,14 @@ dependencies = [
 
 [[package]]
 name = "umber-graph"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "umber-gui"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "egui",
  "egui_kittest",
@@ -5336,7 +5336,7 @@ dependencies = [
 
 [[package]]
 name = "umber-mesh"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -5351,7 +5351,7 @@ dependencies = [
 
 [[package]]
 name = "umber-paint"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "emath",
@@ -5373,11 +5373,11 @@ dependencies = [
 
 [[package]]
 name = "umber-plugin-sdk"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 
 [[package]]
 name = "umber-spp"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "lz4_flex",
@@ -5388,7 +5388,7 @@ dependencies = [
 
 [[package]]
 name = "umber-wasm"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
  "umber-graph",

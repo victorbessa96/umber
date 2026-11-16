@@ -63,9 +63,9 @@ see below), not by this kill (no cargo / no downloads in the claw).
   accesskit); `--filesystem=xdg-documents` + `--filesystem=xdg-pictures`
   (project/mesh homes; one-off picks go through portals). No
   `--filesystem=host`, no PulseAudio (the app produces no audio).
-- **Git source tracks `master`.** No release tag exists yet (releases are
-  Bessa's call per the installers design doc); at ship time this pins to
-  the release tag. The CI job builds the working tree as-is.
+- **Git source pinned to `v0.1.0-alpha.1`** (template, 2026-11-16, ship-time
+  pin per the installers design doc; commit bc4d642f). The CI job builds
+  the working tree as-is; future releases re-pin the template.
 - **Metainfo has no `<screenshot>`.** Screenshots must be hosted URLs;
   inventing one would fail `appstreamcli validate` and lie to users.
   Adding the screenshot URL is queued behind the first public release.

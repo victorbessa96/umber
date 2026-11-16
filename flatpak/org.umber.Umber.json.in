@@ -36,7 +36,8 @@
                 {
                     "type": "git",
                     "url": "https://github.com/victorbessa96/umber",
-                    "branch": "master"
+                    "tag": "v0.1.0-alpha.1",
+                        "commit": "bc4d642f0696233ac5293683c88b2e860e52b3b2"
                 },
                 {
                     "type": "file",

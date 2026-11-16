@@ -1030,3 +1030,5 @@ extend CRATES when those kills pin + announce.
 - 491- 2026-11-16 12:5x FIX (dragon, lock umber-alpha-bump2): packaging.yml drift gate caught stale flatpak manifest after the Cargo.lock regen — regenerated flatpak/org.umber.Umber.json via gen-cargo-sources.py (654 registry crates), --check now clean. Amending into the alpha bump push.
 
 - 492- 2026-11-16 13:0x FIX (dragon, lock umber-alpha-xml): AppStream validation failed on my metainfo insert (unclosed release element) — both metainfo files fixed with a proper <description> + </release>; xml.dom parse OK both.
+
+- 493- 2026-11-16 13:1x REVERT+PIN (dragon, lock umber-alpha-revert): post-tag commit — workspace version back to 0.1.0 (Cargo.lock regen, 20 lines), metainfo keeps the alpha release line as history, flatpak template pinned to tag v0.1.0-alpha.1 @ bc4d642f (gen-cargo-sources --check green), README ship-time note updated. Tag v0.1.0-alpha.1 pushed at 12:5x; release.yml running on the tag.
