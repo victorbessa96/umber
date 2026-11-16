@@ -44,6 +44,7 @@
     <content_attribute id="money-gambling">none</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.1.0-alpha.1" type="development" date="2026-11-16">
     <release version="0.1.0" type="development" date="2026-10-12">
       <description>
         <p>Pre-release packaging track: Flatpak and AppImage manifests land; no release tag cut yet.</p>

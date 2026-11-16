@@ -24,7 +24,7 @@ members = [
 exclude = ["examples"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/victorbessa96/umber"

@@ -996,3 +996,33 @@ extend CRATES when those kills pin + announce.
 - 488- 2026-11-16 12:0x BRIEF LANDED (dragon; lock umber-d2-brief): D2 auto-cage design brief landed at docs/loop/briefs/2026-11-16-d2-auto-cage.md (claw deleg_ff712f2b, docs-only, cross-reviewed: anchors verified vs tree — Cage bake_support.rs:46, HighPoly bakes_panel.rs:1247, GPU gap bake_shaders.rs:1292, transfer.rs:28). Next: code dispatch under lock razul-d2-auto-cage.
 
 - 489- 2026-11-16 12:2x ALIGNMENT ANSWERS LANDED (dragon; lock umber-align-2026-11-16): Bessa's form answers — C2-25 alpha tag: he fires v0.1.0-alpha.1 now; C2-22: alpha unsigned+checksums, signing route after; SPEC v1.1: ratified now (checklist gate 7 MET); replay-exact: default-off (toggle kill to section B); C2-24/C2-30: he schedules dogfood+walkthrough. Checklist gates 7/9 + next-steps list truthed.
+
+- 490- 2026-11-16 12:4x VERSION BUMP (dragon, lock umber-alpha-bump; Bessa authorized "proceed with the tag and release autonomously"): workspace version 0.1.0-alpha.1 + <release> entry in BOTH metainfo files (2026-11-16, old 0.1.0 line kept as history) + Cargo.lock regen (16 workspace lines; examples workspace stays 0.1.0). announcing v0.1.0-alpha.1
+  umber-app 0.1.0-alpha.1
+    source.tar.gz
+      [checksum] source.tar.gz.sha256
+    umber-app-installer.sh
+    umber-app-installer.ps1
+    sha256.sum
+    umber-app-x86_64-pc-windows-msvc.zip
+      [bin] umber.exe
+      [misc] CHANGELOG.md, LICENSE, README.md, THIRD_PARTY.md, THIRD_PARTY_FONTS.txt, assets, examples
+      [checksum] umber-app-x86_64-pc-windows-msvc.zip.sha256
+    umber-app-x86_64-unknown-linux-gnu.tar.xz
+      [bin] umber
+      [misc] CHANGELOG.md, LICENSE, README.md, THIRD_PARTY.md, THIRD_PARTY_FONTS.txt, assets, examples
+      [checksum] umber-app-x86_64-unknown-linux-gnu.tar.xz.sha256
+  umber-cli 0.1.0-alpha.1
+    source.tar.gz
+      [checksum] source.tar.gz.sha256
+    umber-cli-installer.sh
+    umber-cli-installer.ps1
+    sha256.sum
+    umber-cli-x86_64-pc-windows-msvc.zip
+      [bin] umber-cli.exe
+      [misc] CHANGELOG.md, LICENSE, README.md, THIRD_PARTY.md, THIRD_PARTY_FONTS.txt, assets, examples
+      [checksum] umber-cli-x86_64-pc-windows-msvc.zip.sha256
+    umber-cli-x86_64-unknown-linux-gnu.tar.xz
+      [bin] umber-cli
+      [misc] CHANGELOG.md, LICENSE, README.md, THIRD_PARTY.md, THIRD_PARTY_FONTS.txt, assets, examples
+      [checksum] umber-cli-x86_64-unknown-linux-gnu.tar.xz.sha256 announces BOTH packages (app+cli), linux tar.xz + windows zip + installers + sha256, [misc] carries THIRD_PARTY_FONTS.txt + THIRD_PARTY.md. win-version-resource already in build.rs. Next: push, CI green, tag v0.1.0-alpha.1 + push tag, watch release.yml/packaging.yml, then revert-to-0.1.0 commit + flatpak tag pin.
