@@ -1026,3 +1026,5 @@ extend CRATES when those kills pin + announce.
       [bin] umber-cli
       [misc] CHANGELOG.md, LICENSE, README.md, THIRD_PARTY.md, THIRD_PARTY_FONTS.txt, assets, examples
       [checksum] umber-cli-x86_64-unknown-linux-gnu.tar.xz.sha256 announces BOTH packages (app+cli), linux tar.xz + windows zip + installers + sha256, [misc] carries THIRD_PARTY_FONTS.txt + THIRD_PARTY.md. win-version-resource already in build.rs. Next: push, CI green, tag v0.1.0-alpha.1 + push tag, watch release.yml/packaging.yml, then revert-to-0.1.0 commit + flatpak tag pin.
+
+- 491- 2026-11-16 12:5x FIX (dragon, lock umber-alpha-bump2): packaging.yml drift gate caught stale flatpak manifest after the Cargo.lock regen — regenerated flatpak/org.umber.Umber.json via gen-cargo-sources.py (654 registry crates), --check now clean. Amending into the alpha bump push.
