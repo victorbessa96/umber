@@ -5168,6 +5168,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "blake3",
+ "bytemuck",
  "eframe",
  "egui",
  "egui_dock",

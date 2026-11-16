@@ -279,7 +279,7 @@ impl ViewMode {
 /// two u32s + padding to the 16-byte uniform multiple. Zeroable so
 /// fresh buffers start as Lit (mode 0, channel 0).
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Default)]
 pub struct ViewModeParams {
     /// [`ViewMode::mode_id`].
     pub mode: u32,
