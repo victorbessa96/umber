@@ -276,18 +276,20 @@
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 // The lib owns the projection module (row 278); main.rs re-exports it
 // (row 281), so the path names the lib directly — the same types either way.
+use bytemuck;
 use umber_app::projection::{
     overlay_quad, rasterize_projection, rasterize_projection_live, ProjectionState,
 };
 use umber_color::{apply_display_chain, DisplaySettings};
 use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
-use umber_gpu::postfx::PostChain;
-use umber_gpu::renderer::PaintParams;
 use umber_gpu::{
+    postfx::PostChain,
+    renderer::{PaintParams, WireColor},
     DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, PostFxViewport, SoloChannel,
     ViewMode, ViewportRoute,
 };
 use umber_mesh::tile_of_uv;
+use wgpu::util::DeviceExt;
 
 use crate::i18n::tr;
 use crate::paint_state::PaintState;
@@ -447,6 +449,16 @@ pub struct Viewport {
     /// toggle, ordering (after the mesh, with the wireframe), and overlay
     /// plumbing are the shipped surface.
     show_cage: bool,
+    /// Pre-built cage wireframe vertex buffer (displaced positions:
+    /// `low_pos + cage_offset` per vertex, duplicated per triangle).
+    /// Built when a cage is generated via auto-cage; `None` if no cage
+    /// has been generated yet.
+    cage_wire_buffer: Option<wgpu::Buffer>,
+    /// Number of vertices in the cage wire buffer.
+    cage_wire_count: u32,
+    /// The cage offsets used to build the cage wire buffer (for rebuild
+    /// if the mesh changes). Stored as `Vec<[f32; 3]>` per vertex.
+    cage_offsets: Option<Vec<[f32; 3]>>,
     /// The shading mode (View menu; V cycles lit ↔ unlit). Defaults
     /// to Lit — today's render, byte-identical with the mode uniform
     /// at (0, 0).
@@ -741,6 +753,7 @@ impl Viewport {
         self.mesh_data = Some(mesh.clone());
         self.mesh = Some(buffers);
         self.seam_cache = None;
+        self.clear_cage_wire();
         // A new mesh invalidates the per-triangle input (its indices name
         // the old mesh's triangles); the shell re-sends it. The fresh
         // buffers draw the full mesh, so nothing is left to re-bind.
@@ -870,6 +883,48 @@ impl Viewport {
     /// Whether the cage overlay shows.
     pub fn show_cage(&self) -> bool {
         self.show_cage
+    }
+
+    /// Sets the cage wireframe buffer from the generated cage offsets.
+    /// Builds a displaced-positions wire buffer using `cage_wire_vertices_from_indices`.
+    /// Call this when a new cage is generated (e.g., after auto-cage bake).
+    pub fn set_cage_wire(
+        &mut self,
+        gpu: &GpuContext,
+        mesh: &umber_mesh::MeshData,
+        cage_offsets: &[[f32; 3]],
+    ) {
+        if cage_offsets.is_empty() || cage_offsets.len() != mesh.positions.len() {
+            self.cage_wire_buffer = None;
+            self.cage_wire_count = 0;
+            self.cage_offsets = None;
+            return;
+        }
+        let wire_vertices = umber_mesh::cage_wire_vertices_from_indices(mesh, cage_offsets);
+        if wire_vertices.is_empty() {
+            self.cage_wire_buffer = None;
+            self.cage_wire_count = 0;
+            self.cage_offsets = None;
+            return;
+        }
+        let cage_wire_count = u32::try_from(wire_vertices.len()).unwrap_or(0);
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_cage_wire_vertex_buffer"),
+                contents: bytemuck::cast_slice(&wire_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.cage_wire_buffer = Some(buffer);
+        self.cage_wire_count = cage_wire_count;
+        self.cage_offsets = Some(cage_offsets.to_vec());
+    }
+
+    /// Clears the cage wire buffer (e.g., when mesh is unloaded).
+    pub fn clear_cage_wire(&mut self) {
+        self.cage_wire_buffer = None;
+        self.cage_wire_count = 0;
+        self.cage_offsets = None;
     }
 
     /// Sets the shading mode (View menu rows / V shortcut; synced from
@@ -1460,9 +1515,28 @@ impl Viewport {
             }
             // Cage overlay (§6:59): after the wireframe so its edges win,
             // skipped entirely when off (byte-identical to cage-off).
+            // Uses pre-built cage wire buffer with displaced positions.
             if self.show_cage {
-                let cage = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::cage());
-                ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
+                if let (Some(cage_buffer), Some(mesh_data)) =
+                    (&self.cage_wire_buffer, &self.mesh_data)
+                {
+                    if self.cage_wire_count > 0 {
+                        let cage = gpu.cage_wire_callback(
+                            uniform,
+                            cage_buffer.clone(),
+                            self.cage_wire_count,
+                            mesh.uniform_buffer().clone(),
+                            umber_gpu::WireColor::cage(),
+                        );
+                        if let Some(cage) = cage {
+                            ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
+                        }
+                    }
+                } else {
+                    // Fallback: draw regular wireframe in cage color if no cage buffer yet.
+                    let cage = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::cage());
+                    ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
+                }
             }
         }
         // The stencil overlay (g6-stencil-overlay): the overlays family's

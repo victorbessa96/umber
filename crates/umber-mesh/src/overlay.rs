@@ -61,6 +61,49 @@ pub fn wire_vertices_from_indices(mesh: &MeshData) -> Vec<WireVertex> {
     out
 }
 
+/// Builds the cage wireframe vertex buffer: like `wire_vertices_from_indices`
+/// but with positions displaced by `cage_offsets` (one per vertex).
+/// `cage_offsets.len()` must equal `mesh.positions.len()`.
+/// Returns an empty vec if offsets are empty or don't match.
+pub fn cage_wire_vertices_from_indices(
+    mesh: &MeshData,
+    cage_offsets: &[[f32; 3]],
+) -> Vec<WireVertex> {
+    if cage_offsets.is_empty() || cage_offsets.len() != mesh.positions.len() {
+        return Vec::new();
+    }
+    const BARY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let mut out = Vec::with_capacity(mesh.indices.len());
+    for tri in mesh.indices.chunks_exact(3) {
+        let mut positions = [[0.0f32; 3]; 3];
+        let mut valid = true;
+        for (slot, &index) in tri.iter().enumerate() {
+            let idx = index as usize;
+            match mesh.positions.get(idx) {
+                Some(&position) => {
+                    let offset = cage_offsets[idx];
+                    positions[slot] = [
+                        position[0] + offset[0],
+                        position[1] + offset[1],
+                        position[2] + offset[2],
+                    ];
+                }
+                None => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if !valid {
+            continue;
+        }
+        for (position, bary) in positions.into_iter().zip(BARY) {
+            out.push(WireVertex { position, bary });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

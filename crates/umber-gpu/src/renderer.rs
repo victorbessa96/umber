@@ -403,6 +403,14 @@ pub struct GpuContext {
     /// (`HdrMode::effective`) without this crate needing an i18n-facing
     /// getter.
     pub hdr_probe: crate::hdr::HdrProbe,
+    /// Dummy vertex buffer (one vertex) for fallback bind groups.
+    dummy_vertex_buffer: wgpu::Buffer,
+    /// Dummy spec buffer (one SpecParams) for fallback bind groups.
+    dummy_spec_buffer: wgpu::Buffer,
+    /// Dummy view mode buffer (one ViewModeParams) for fallback bind groups.
+    dummy_view_mode_buffer: wgpu::Buffer,
+    /// Dummy paint params buffer (one PaintParams) for fallback bind groups.
+    dummy_paint_params_buffer: wgpu::Buffer,
 }
 
 /// Depth format used by the viewport mesh pipeline when depth is enabled.
@@ -583,6 +591,113 @@ impl GpuContext {
             uniform_buffer: buffers.uniform_buffer.clone(),
             uniform,
         }
+    }
+
+    /// Builds a cage wireframe callback: like `wire_callback` but with
+    /// a pre-built cage wire buffer (displaced positions: `low_pos +
+    /// cage_offset` per vertex, duplicated per triangle for wireframe).
+    /// The wire buffer should contain 3 vertices per triangle with
+    /// barycentric corners (same format as `MeshBuffers::wire_buffer`).
+    pub fn cage_wire_callback(
+        &self,
+        uniform: CameraUniform,
+        cage_wire_buffer: wgpu::Buffer,
+        cage_wire_count: u32,
+        uniform_buffer: wgpu::Buffer,
+        color: WireColor,
+    ) -> Option<WireframePaintCallback> {
+        if cage_wire_count == 0 {
+            return None;
+        }
+
+        let color_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_cage_wire_color_buffer"),
+                contents: bytemuck::bytes_of(&color),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let color_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("umber_cage_wire_color_bind_group"),
+            layout: &self.wire_color_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &color_buffer,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
+        Some(WireframePaintCallback {
+            pipeline: self.wire_pipeline.clone(),
+            bind_group: self.fallback_wire_bind_group(),
+            color_bind_group,
+            vertex_buffer: cage_wire_buffer,
+            vertex_count: cage_wire_count,
+            uniform_buffer,
+            uniform,
+        })
+    }
+
+    /// Returns a minimal bind group for the cage wire callback (uses the
+    /// mesh bind group layout but with dummy textures/samplers since the
+    /// wireframe shader only uses the vertex position).
+    fn fallback_wire_bind_group(&self) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("umber_fallback_wire_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.dummy_vertex_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.fallback_env_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.env_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.fallback_paint_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.paint_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.dummy_spec_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.dummy_view_mode_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.dummy_paint_params_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        })
     }
 
     /// Builds the ground-grid callback (Wave-4 item 7): a fullscreen
@@ -1112,6 +1227,33 @@ impl GpuContext {
             cache: None,
         });
 
+        let dummy_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_dummy_vertex_buffer"),
+            contents: bytemuck::bytes_of(&[crate::Vertex {
+                position: [0.0; 3],
+                normal: [0.0; 3],
+                uv: [0.0; 2],
+                tangent: [0.0; 4],
+            }]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let dummy_spec_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_dummy_spec_buffer"),
+            contents: bytemuck::bytes_of(&[SpecParams::default()]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let dummy_view_mode_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("umber_dummy_view_mode_buffer"),
+            contents: bytemuck::bytes_of(&[ViewModeParams::default()]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let dummy_paint_params_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_dummy_paint_params_buffer"),
+                contents: bytemuck::bytes_of(&[PaintParams::disabled()]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
         Self {
             device,
             queue,
@@ -1134,6 +1276,10 @@ impl GpuContext {
             display_lut_layout,
             identity_lut,
             hdr_probe,
+            dummy_vertex_buffer,
+            dummy_spec_buffer,
+            dummy_view_mode_buffer,
+            dummy_paint_params_buffer,
         }
     }
 
@@ -1695,6 +1841,11 @@ impl MeshBuffers {
         self.subset
             .as_ref()
             .map_or(&self.wire_buffer, |s| &s.wire_buffer)
+    }
+
+    /// The uniform buffer for the mesh draw (camera + IBL + spec + view mode).
+    pub fn uniform_buffer(&self) -> &wgpu::Buffer {
+        &self.uniform_buffer
     }
 
     /// Rebuilds the group-0 bind group from the current flags + bound

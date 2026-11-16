@@ -1909,6 +1909,8 @@ pub struct AppState {
     pub temp_tools: toolbar::TempTools,
     /// The bakes panel: mesh-map bake settings + last-bake status.
     pub bakes: BakesPanel,
+    /// Whether a bake was in flight last frame (to detect completion).
+    pub prev_baking: bool,
     /// The export dialog: preset choice, output dir + last-export status.
     pub export: ExportDialog,
     /// The node-graph panel: procedural graph + cached eval (wave-5).
@@ -5114,8 +5116,20 @@ impl eframe::App for UmberApp {
             self.about_open = open && !close;
         }
         if self.state.bakes.poll_job() {
+            self.state.prev_baking = true;
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self.state.prev_baking {
+            // A bake just completed. Check if it was a high-poly bake with auto-cage.
+            if let Some(cage) = self.state.bakes.last_cage() {
+                if let Some(mesh) = self.state.mesh.as_ref() {
+                    self.state
+                        .viewport
+                        .set_cage_wire(&self.gpu, mesh, &cage.offsets);
+                }
+            }
+            self.state.prev_baking = false;
         }
         // The cavity mask's input (brush-wiring cavity half): each landed
         // Curvature bake loads into the paint session for its tile, once

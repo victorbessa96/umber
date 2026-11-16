@@ -1289,12 +1289,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// A validated hit outside `map_mode ∈ {0, 1, 2}` cannot occur (the Rust side
 /// only ever writes `0`/`1`/`2`); misses write background `(0, 0, 0, 0)`.
 ///
-/// # The cage does NOT enter v1's GPU path
+/// # Cage support (D2 auto-cage)
 ///
-/// `Cage::lerp_at` needs per-vertex offsets interpolated mid-shader, which
-/// needs a cage buffer this binding set does not carry. Cage support lands
-/// when the app-wiring slice adds that buffer; the FRONT/BACK clamps DO
-/// enter v1 (see above).
+/// Per-vertex cage offsets are uploaded as a storage buffer (binding 5) and
+/// lerped per texel using the same barycentric weights as `Cage::lerp_at`.
+/// The ray origin becomes `low_pos + normal * front_offset + cage_off`.
+/// When no cage is provided (or offsets are empty), a dummy zero buffer is
+/// bound so the shader reads zeros — preserving v1's implicit cage behavior.
 ///
 /// # Layout contracts
 ///
@@ -1341,6 +1342,7 @@ struct TransferParams {
     back_distance: f32,
     front_offset: f32,
     high_tri_count: u32,
+    low_tri_count: u32,
     map_mode: u32,
     width: u32,
     height: u32,
@@ -1352,6 +1354,9 @@ struct TransferParams {
 @group(0) @binding(2) var<uniform> params: TransferParams;
 @group(0) @binding(3) var low_pos_tex: texture_2d<f32>;
 @group(0) @binding(4) var low_normal_tex: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> cage_offsets: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> low_uvs: array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read> low_tri_verts: array<vec3<u32>>;
 
 // Möller–Trumbore constants mirroring `umber_mesh::raycast::ray_intersect`
 // (see also `umber_mesh::bvh::tri_hit`): 1e-8 parallel epsilon, 1e-5
@@ -1398,6 +1403,44 @@ fn ray_hit_distance(
         return t;
     }
     return -1.0;
+}
+
+/// UV point-in-triangle test with barycentric output.
+/// Returns true if hit, false otherwise. The barycentric coordinates are
+/// returned via the `bary` output parameter (w, u, v for vertices 0, 1, 2).
+fn uv_point_in_tri(uv: vec2<f32>, uv0: vec2<f32>, uv1: vec2<f32>, uv2: vec2<f32>, bary: ptr<function, vec3<f32>>) -> bool {
+    let e0 = uv1 - uv0;
+    let e1 = uv2 - uv0;
+    let v = uv - uv0;
+
+    let d00 = dot(e0, e0);
+    let d01 = dot(e0, e1);
+    let d11 = dot(e1, e1);
+    let d20 = dot(v, e0);
+    let d21 = dot(v, e1);
+
+    let denom = d00 * d11 - d01 * d01;
+    if (abs(denom) < 1e-10) {
+        return false;
+    }
+
+    let inv_denom = 1.0 / denom;
+    let u = (d11 * d20 - d01 * d21) * inv_denom;
+    let v_bary = (d00 * d21 - d01 * d20) * inv_denom;
+    let w = 1.0 - u - v_bary;
+
+    // Edge-inclusive test with epsilon
+    let eps = 1e-6;
+    if (u >= -eps && v_bary >= -eps && w >= -eps) {
+        *bary = vec3<f32>(w, u, v_bary); // w weights vertex 0, u weights vertex 1, v weights vertex 2
+        return true;
+    }
+    return false;
+}
+
+/// Barycentric lerp of three vec3 values (matches Cage::lerp_at order: w, u, v)
+fn lerp3_cage(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, bary: vec3<f32>) -> vec3<f32> {
+    return a * bary.x + b * bary.y + c * bary.z;
 }
 
 /// Mikktspace-style per-texel UV-derivative frame; green = +Y up (OpenGL/Mikktspace).
@@ -1480,7 +1523,7 @@ fn transfer_tbn(coord: vec2<i32>, p0: vec3<f32>, N: vec3<f32>) -> TbnFrame {
 /// `cs_main`, baked from the LOW mesh). `low_pos_tex`'s alpha is the position
 /// pass's coverage flag: `<= 0.5` means no LOW UV triangle covered this texel,
 /// so there is no surface to cast from — the texel writes `(0, 0, 0, 0)`.
-/// Otherwise one ray (`origin = low_pos + n * front_offset` along `-n`) is
+/// Otherwise one ray (`origin = low_pos + n * front_offset + cage_off` along `-n`) is
 /// brute-forced against the HIGH triangle list, gated by the front/back
 /// clamps, and the uniform-selected map is written (see this constant's doc
 /// comment for the ray math, the gate, and both encodings).
@@ -1495,7 +1538,37 @@ fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 
     let low_pos = sample.xyz;
     let n = normalize(textureLoad(low_normal_tex, coord, 0).xyz);
-    let origin = low_pos + n * params.front_offset;
+
+    // Compute UV from texel coordinate (same as position bake)
+    let dims = vec2<f32>(f32(params.width), f32(params.height));
+    let uv = vec2<f32>(
+        (f32(coord.x) + 0.5) / dims.x,
+        1.0 - (f32(coord.y) + 0.5) / dims.y,
+    );
+
+    // Find the low mesh triangle and barycentric coordinates for this UV
+    var cage_off = vec3<f32>(0.0);
+    var bary = vec3<f32>(0.0);
+    for (var t: u32 = 0u; t < params.low_tri_count; t = t + 1u) {
+        let tri_verts = low_tri_verts[t];
+        let uv0 = low_uvs[tri_verts.x];
+        let uv1 = low_uvs[tri_verts.y];
+        let uv2 = low_uvs[tri_verts.z];
+        let hit = uv_point_in_tri(uv, uv0, uv1, uv2, &bary);
+        if (hit) {
+            // Lerp cage offsets using the triangle's vertex indices
+            let i0 = tri_verts.x;
+            let i1 = tri_verts.y;
+            let i2 = tri_verts.z;
+            let o0 = cage_offsets[i0].xyz;
+            let o1 = cage_offsets[i1].xyz;
+            let o2 = cage_offsets[i2].xyz;
+            cage_off = lerp3_cage(o0, o1, o2, bary);
+            break;
+        }
+    }
+
+    let origin = low_pos + n * params.front_offset + cage_off;
     let dir = -n;
     // The LOW surface sits `front_offset` behind the origin along the unit
     // ray (origin = surface + n * front_offset, dir = -n), so the surface

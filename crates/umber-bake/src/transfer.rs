@@ -52,7 +52,7 @@ use glam::Vec3;
 use wgpu::util::DeviceExt as _;
 
 use umber_gpu::bake_shaders::TRANSFER_BAKE_SHADER;
-use umber_mesh::MeshData;
+use umber_mesh::{bake_support::Cage, MeshData};
 
 use crate::ao::{AoBakeError, BakeTarget};
 use crate::position::{bake_position_and_normal, PositionMapError, MAX_TRIS_PER_BAKE};
@@ -226,6 +226,7 @@ struct TransferUniform {
     back_distance: f32,
     front_offset: f32,
     high_tri_count: u32,
+    low_tri_count: u32,
     map_mode: u32,
     width: u32,
     height: u32,
@@ -233,7 +234,7 @@ struct TransferUniform {
 }
 
 const _: () = assert!(
-    size_of::<TransferUniform>() == 32,
+    size_of::<TransferUniform>() == 36,
     "TransferUniform must match TRANSFER_BAKE_SHADER's WGSL TransferParams layout"
 );
 
@@ -241,12 +242,17 @@ const _: () = assert!(
 /// `0`/`1` via [`TransferMap::as_u32`] — factored out so the enum-to-word
 /// mapping is unit-testable without a device, matching
 /// `ao::uniform_for`'s convention).
-fn uniform_for(params: &TransferParams, high_tri_count: u32) -> TransferUniform {
+fn uniform_for(
+    params: &TransferParams,
+    high_tri_count: u32,
+    low_tri_count: u32,
+) -> TransferUniform {
     TransferUniform {
         front_distance: params.front_distance,
         back_distance: params.back_distance,
         front_offset: params.front_offset,
         high_tri_count,
+        low_tri_count,
         map_mode: params.map.as_u32(),
         width: params.width,
         height: params.height,
@@ -383,6 +389,7 @@ pub fn bake_transfer_mesh(
     low: &MeshData,
     high: &MeshData,
     params: &TransferParams,
+    cage: Option<&Cage>,
 ) -> Result<Vec<u8>, TransferError> {
     profiling::scope!("bake_pass");
     validate(low, high, params)?;
@@ -403,11 +410,63 @@ pub fn bake_transfer_mesh(
         usage: wgpu::BufferUsages::STORAGE,
     });
 
-    let uniform = uniform_for(params, triangles.len() as u32);
+    let low_tri_count = low.triangle_count() as u32;
+
+    let uniform = uniform_for(params, triangles.len() as u32, low_tri_count);
     let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("umber_bake_transfer_params"),
         contents: bytemuck::cast_slice(&[uniform]),
         usage: wgpu::BufferUsages::UNIFORM,
+    });
+
+    // Cage buffer: upload if cage is provided and non-empty (offsets.len() == low.vertex_count()).
+    // When absent or empty, we still bind a dummy buffer (zeros) so the shader always has binding 5.
+    let cage_buffer = if let Some(cage) = cage {
+        if !cage.offsets.is_empty() && cage.offsets.len() == low.vertex_count() {
+            // Convert Vec<[f32; 3]> to Vec<[f32; 4]> for 16-byte alignment (vec4 in WGSL)
+            let cage_vec4: Vec<[f32; 4]> = cage
+                .offsets
+                .iter()
+                .map(|o| [o[0], o[1], o[2], 0.0])
+                .collect();
+            Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("umber_bake_transfer_cage_offsets"),
+                    contents: bytemuck::cast_slice(&cage_vec4),
+                    usage: wgpu::BufferUsages::STORAGE,
+                }),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Dummy cage buffer (zeros) for when no cage is provided or cage is empty
+    let dummy_cage_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("umber_bake_transfer_cage_dummy"),
+        contents: &[0u8; 16], // one vec4 of zeros
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    // Low mesh UVs buffer (vec2<f32> per vertex)
+    let low_uvs_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("umber_bake_transfer_low_uvs"),
+        contents: bytemuck::cast_slice(&low.uvs),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    // Low mesh triangle vertex indices buffer (vec3<u32> per triangle)
+    let low_tri_verts: Vec<[u32; 3]> = low
+        .indices
+        .chunks_exact(3)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect();
+    let low_tri_verts_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("umber_bake_transfer_low_tri_verts"),
+        contents: bytemuck::cast_slice(&low_tri_verts),
+        usage: wgpu::BufferUsages::STORAGE,
     });
 
     // Reuses `ao::BakeTarget`'s `Rgba8Unorm` texture/view/readback
@@ -480,6 +539,39 @@ pub fn bake_transfer_mesh(
                 },
                 count: None,
             },
+            // Binding 5: cage offsets storage buffer (read-only)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(16), // at least one vec4
+                },
+                count: None,
+            },
+            // Binding 6: low mesh UVs (vec2<f32> per vertex)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(8), // vec2<f32>
+                },
+                count: None,
+            },
+            // Binding 7: low mesh triangle vertex indices (vec3<u32> per triangle)
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(16), // vec3<u32> (16-byte aligned)
+                },
+                count: None,
+            },
         ],
     });
 
@@ -529,6 +621,33 @@ pub fn bake_transfer_mesh(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::TextureView(&position_map.normal_view),
+            },
+            // Binding 5: cage offsets (real or dummy)
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: cage_buffer.as_ref().unwrap_or(&dummy_cage_buffer),
+                    offset: 0,
+                    size: None,
+                }),
+            },
+            // Binding 6: low mesh UVs
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &low_uvs_buffer,
+                    offset: 0,
+                    size: None,
+                }),
+            },
+            // Binding 7: low mesh triangle vertex indices
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &low_tri_verts_buffer,
+                    offset: 0,
+                    size: None,
+                }),
             },
         ],
     });
@@ -601,7 +720,7 @@ mod tests {
 
     #[test]
     fn transfer_uniform_layout_matches_wgsl_struct_size() {
-        assert_eq!(size_of::<TransferUniform>(), 32);
+        assert_eq!(size_of::<TransferUniform>(), 36);
     }
 
     #[test]
@@ -638,20 +757,21 @@ mod tests {
     #[test]
     fn uniform_for_maps_fields_word_for_word() {
         let params = transfer_params(TransferMap::WorldNormal);
-        let uniform = uniform_for(&params, 7);
+        let uniform = uniform_for(&params, 7, 2);
         assert_eq!(
             (
                 uniform.front_distance,
                 uniform.back_distance,
                 uniform.front_offset,
                 uniform.high_tri_count,
+                uniform.low_tri_count,
                 uniform.map_mode,
                 uniform.width,
                 uniform.height
             ),
-            (1.0, 2.0, 0.5, 7, 1, 32, 32)
+            (1.0, 2.0, 0.5, 7, 2, 1, 32, 32)
         );
-        let height = uniform_for(&transfer_params(TransferMap::Height), 3);
+        let height = uniform_for(&transfer_params(TransferMap::Height), 3, 2);
         assert_eq!((height.map_mode, height.high_tri_count), (0, 3));
     }
 
