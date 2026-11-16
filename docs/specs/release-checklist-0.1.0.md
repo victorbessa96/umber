@@ -5,9 +5,13 @@ commit). This is the readiness state, so the word is the only
 remaining input.
 
 Re-verified 2026-10-19 against the live queue rows + kill reports (the
-stale-claim sweep, kill `release-checklist-truth`): gate 6 is MET
-PENDING the first drift-hardened nightly green on a pushed tip; gates
-7-9 are NOT MET (Bessa's). Earlier, 2026-10-12, per the strategy review: every
+stale-claim sweep, kill `release-checklist-truth`); truth-refreshed
+2026-11-16 (docs-only, no code): gate 6 is now MET — the drift-hardened
+perf-nightly has run green on pushed master tips repeatedly since
+(latest four schedule runs all `success` at f587a55a+), and the
+DPI runtime re-raster landed `0c15c8ec`. Gates 7-9 remain NOT MET
+(Bessa's): SPEC v1.1 ratification, the dogfood pass (C2-24), the
+pre-release dry-run tag (C2-25, approved 2026-10-15, awaiting his tag). Earlier, 2026-10-12, per the strategy review: every
 gate below checked process; none checked FUNCTION. Gate 0 (the
 journey test) is now the first gate — the process gates follow it.
 The 2026-10-15 C2-audit update's claims that landed since are
@@ -163,7 +167,10 @@ blend set LANDED `d861482` (all 32 variants in `layers.rs`'s
 in `display_panel.rs`); the path tools LANDED (`path_tool.rs` + the
 parity row's smudge/clone/symmetry/path/polygon ✓); the post-effects
 stack LANDED (requirements row 84: built `86e77ff`+`a523647`+`112b378`,
-persisted `f35cf48`). The 2026-10-24 pass, M1 pass 4, removed the
+persisted `f35cf48`). The 2026-11-16 docs-only truth refresh (no findings
+removed; the known-deferred stays Windows signing alone; gate 6 moved
+to MET on the hardened nightly's repeated green schedule runs). The
+2026-10-24 pass, M1 pass 4, removed the
 last: .usdz read beyond the first layer LANDED `d36cfb1` — load_usdz
 walks the sublayer stack (root precedence, authored order,
 depth-first, resolved inside the package; cycle-guarded + depth-bounded;
