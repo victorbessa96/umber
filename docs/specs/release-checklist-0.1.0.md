@@ -6,7 +6,9 @@ remaining input.
 
 Re-verified 2026-10-19 against the live queue rows + kill reports (the
 stale-claim sweep, kill `release-checklist-truth`); truth-refreshed
-2026-11-16 (docs-only, no code): gate 6 is now MET — the drift-hardened
+2026-11-16 (docs-only, no code, alignment-form answers): gate 7 MET
+(SPEC v1.1 ratified by Bessa), gate 9 in flight (alpha tag = Bessa's
+hands, unsigned per C2-22), gate 6 MET — the drift-hardened
 perf-nightly has run green on pushed master tips repeatedly since
 (latest four schedule runs all `success` at f587a55a+), and the
 DPI runtime re-raster landed `0c15c8ec`. Gates 7-9 remain NOT MET
@@ -61,15 +63,18 @@ queue row C2-13..19, closed 2026-10-15.]
    (`dc4b355`). The gate reads MET when the first hardened nightly
    runs green on a pushed tip (the pending W-C3a wave push carries
    it).
-7. **SPEC ratified** (Bessa) — NOT MET: SPEC.md v1.0 is DRAFT, and the
-   v1.1 amendment draft waits.
+7. **SPEC ratified** (Bessa) — MET 2026-11-16: Bessa answered the
+   alignment form "ratify v1.1 now" (draft `spec-v1.1-amendment-draft.md`
+   + `spec-ratification-brief.md` were ready).
 8. **One dogfood asset painted end to end** (Bessa first) — NOT MET: the
    dogfood pass has not happened. The 10-15 blocker is GONE — painting
    reaches every channel and export writes every painted channel
    (C2-5 + C2-6, queue rows closed 2026-10-15); what remains is the
    pass itself (Bessa's two-material prop, C2-24).
-9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — NOT MET: no tag has
-   ever run `release.yml` (C2-25).
+9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — IN FLIGHT
+   2026-11-16: Bessa answered "I'll make the version-bump commit and push
+   `v0.1.0-alpha.1` now"; per his C2-22 answer the alpha ships UNSIGNED
+   with SHA-256 checksums (signing decided after the alpha exists).
    - The local half ran 2026-10-15. `dist plan` (cargo-dist 0.32.0) shows
      that a `v0.1.0-alpha.1` tag on today's tree releases NOTHING ("doesn't
      have anything for dist to Release"): dist matches the tag against the
@@ -149,14 +154,12 @@ protocol had no number to freeze). After 0.1.0, any step change bumps it.
 
 ## The known-deferred (honest, in the tag's companion notes not the message)
 
-- **Windows code signing (C2-22, decided 2026-10-15 by Bessa):** the alpha
-  ships unsigned with the SHA-256 checksums and the SmartScreen
-  "More info → Run anyway" note (`docs/CODE_SIGNING.md`). Apply to
-  SignPath Foundation's free OSS signing now; it requires the code signing
-  policy page (written) and an already-released artifact, which is what the
-  alpha provides. Azure Artifact Signing is out (individuals: US/Canada
-  only). An OV certificate ($150–300/yr) is the fallback; EV no longer
-  bypasses SmartScreen since 2024.
+- **Windows code signing (C2-22, DECIDED 2026-11-16 by Bessa):** the
+  alpha ships unsigned with the SHA-256 checksums and the SmartScreen
+  "More info → Run anyway" note (`docs/CODE_SIGNING.md`); the signing
+  route (SignPath Foundation free OSS vs OV cert $150–300/yr) is decided
+  AFTER the alpha artifact exists. Azure Artifact Signing is out
+  (individuals: US/Canada only). EV no longer bypasses SmartScreen since 2024.
 
 (Sweep history, preserved as the list shrinks — the known-deferred is
 down to Windows signing alone. The 2026-10-19 pass, kill

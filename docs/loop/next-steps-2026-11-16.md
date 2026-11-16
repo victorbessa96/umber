@@ -67,11 +67,18 @@ the commit.
     2026-10-15, awaiting his tag push).
 19. Upstream bug drafts (`docs/upstream/`) — PR gate applies.
 20. i18n native-speaker pass (pt-BR).
-21. wave-replay-exact default decision — prep brief ready
-    (`docs/loop/briefs/2026-11-14-replay-exact-decision-prep.md`).
+21. wave-replay-exact — **DECIDED 2026-11-16 (alignment form): default-off
+    stands**; the remaining work is the opt-in toggle kill, moved to
+    section B (after D5/displacement). Prep brief:
+    `docs/loop/briefs/2026-11-14-replay-exact-decision-prep.md`.
 
 ## Execution record
 
+- 2026-11-16 ~12:2x: alignment-form answers landed (docs-only): C2-25
+  alpha tag = Bessa firing now; C2-22 = alpha unsigned, signing after;
+  SPEC v1.1 ratified now (gate 7 MET); replay-exact default-off (item
+  21 decided, toggle kill moves to B); C2-24/C2-30 dogfood+walkthrough =
+  Bessa scheduling. Checklist gates 7/9 truthing committed with this.
 - 2026-11-16 ~06:0x: items 1-3 landed (ROADMAP row 234 + scoreboard
   truthing) in the same commit as this list; pushed via dcommit +
   safe-push.
