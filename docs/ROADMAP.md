@@ -262,7 +262,7 @@ freeze-recovery close scripts; the loop restart machinery
 The release decisions (C2-16, 22, 23-25, 30); the SPEC v1.1
 ratification packet; the release checklist walkthrough; the
 upstream bug drafts (docs/upstream/); the i18n native-speaker
-pass; the .ftl lock lift (if it stands).
+pass; the .ftl lock lift — **CLOSED 2026-11-16 truthing: the lock was LIFTED per the 2026-10-24 audit** (both the UI lens `audit-2026-10-24-lens-uiux.md` and the platform lens `audit-2026-10-24-lens-platform.md` record "the .ftl lock LIFTED"); only the native-speaker pass itself remains partner-gated.
 
 ## Standing debts (refreshed 2026-10-24, live-verified)
 
