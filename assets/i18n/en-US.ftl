@@ -1149,7 +1149,7 @@ overlays =
     .projection-occlusion-hint = Texels behind a nearer surface do not take the decal. Uncheck to let every covered texel write.
     .displacement = Displacement preview
     .displacement-strength = Strength
-    .displacement-hint = Displace mesh vertices along normals by the baked height map. Requires a height texture.
+    .displacement-hint = Displace vertices along normals by baked height. Needs height texture.
 
 ## Shared colour-picker row labels (picker-app-sites; channel letters are
 ## the international convention — a locale may localize them)

@@ -161,6 +161,19 @@ const PAINT_HAS_HEIGHT_TEXTURE: u32 = 2u;
 @group(0) @binding(12) var height_tex: texture_2d<f32>;
 // ---- end paint tile ----
 
+// Displacement preview (kill razul-displacement-preview): vertex
+// displacement along normal from the baked height map. Binding 13 is
+// additive after the height texture at binding 12 — the same
+// layout-sync-safe pattern as every earlier block in this group.
+// When enabled == 0, vs_main is byte-identical to the current version
+// (the branch is uniform control flow; the off path does no arithmetic).
+struct DisplacementParams {
+    enabled: u32,      // 0 = off (byte-identical to current vs_main), 1 = on
+    strength: f32,     // world units of displacement per unit height (scales height_strength)
+    _pad: vec2<u32>,   // 16-byte alignment
+}
+@group(0) @binding(13) var<uniform> displacement_params: DisplacementParams;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -191,9 +204,21 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    var pos = in.position;
+    // Displacement: sample height map at vertex UV, displace along normal
+    if (displacement_params.enabled != 0u) {
+        let tile_uv = paint_tile_uv(in.uv);
+        let dims = textureDimensions(height_tex);
+        let dims_f = vec2<f32>(dims);
+        let max_texel = vec2<i32>(dims) - vec2<i32>(1, 1);
+        let texel = clamp(vec2<i32>(floor(tile_uv * dims_f)), vec2<i32>(0, 0), max_texel);
+        let h = textureLoad(height_tex, texel, 0).r; // height in [0, 1]
+        let disp = (h - 0.5) * 2.0 * displacement_params.strength * paint_params.height_strength;
+        pos = pos + in.normal * disp;
+    }
+    out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
     out.world_normal = in.normal;
-    out.world_pos = in.position;
+    out.world_pos = pos; // displaced world position for fragment
     out.uv = in.uv;
     out.tangent = in.tangent;
     return out;

@@ -122,6 +122,23 @@ const _: () = assert!(
     "PaintParams must match the WGSL PaintParams layout"
 );
 
+/// Displacement preview uniform (shaders::MESH_SHADER binding 13).
+/// 16 bytes, 16-byte aligned. Mirrors the WGSL `DisplacementParams` struct.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DisplacementParams {
+    /// 0 = off (byte-identical to current vs_main), 1 = on.
+    pub enabled: u32,
+    /// World units of displacement per unit height (scales height_strength).
+    pub strength: f32,
+    /// Padding to 16-byte alignment.
+    pub _pad: [u32; 2],
+}
+const _: () = assert!(
+    size_of::<DisplacementParams>() == 16,
+    "DisplacementParams must be 16 bytes (16-byte aligned)"
+);
+
 impl PaintParams {
     /// Flag bit: a paint texture is bound (the shader samples it).
     pub const HAS_TEXTURE: u32 = 1;
@@ -419,6 +436,8 @@ pub struct GpuContext {
     dummy_view_mode_buffer: wgpu::Buffer,
     /// Dummy paint params buffer (one PaintParams) for fallback bind groups.
     dummy_paint_params_buffer: wgpu::Buffer,
+    /// Displacement params uniform buffer (binding 13).
+    displacement_params_buffer: wgpu::Buffer,
 }
 
 /// Depth format used by the viewport mesh pipeline when depth is enabled.
@@ -601,6 +620,22 @@ impl GpuContext {
         }
     }
 
+    /// Updates the displacement params uniform (binding 13) for the
+    /// vertex displacement preview. Called each frame when the toggle
+    /// or strength changes.
+    pub fn update_displacement_params(&self, enabled: bool, strength: f32) {
+        let params = DisplacementParams {
+            enabled: if enabled { 1 } else { 0 },
+            strength,
+            _pad: [0; 2],
+        };
+        self.queue.write_buffer(
+            &self.displacement_params_buffer,
+            0,
+            bytemuck::bytes_of(&params),
+        );
+    }
+
     /// Builds a cage wireframe callback: like `wire_callback` but with
     /// a pre-built cage wire buffer (displaced positions: `low_pos +
     /// cage_offset` per vertex, duplicated per triangle for wireframe).
@@ -744,6 +779,15 @@ impl GpuContext {
                     binding: 7,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.dummy_paint_params_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                // Binding 13: displacement params (dummy reads as enabled=0).
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.displacement_params_buffer,
                         offset: 0,
                         size: None,
                     }),
@@ -941,7 +985,7 @@ impl GpuContext {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -956,11 +1000,27 @@ impl GpuContext {
                 // this group.
                 wgpu::BindGroupLayoutEntry {
                     binding: 12,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
+                    },
+                    count: None,
+                },
+                // Displacement preview (kill razul-displacement-preview):
+                // vertex displacement uniform at binding 13. Appended
+                // after the height texture — same additive pattern.
+                // Used in vertex shader (vs_main) and fragment (world_pos
+                // passes displaced position). The fallback buffer reads as
+                // enabled=0 → byte-identical to displacement-off.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(size_of::<DisplacementParams>() as u64),
                     },
                     count: None,
                 },
@@ -1305,6 +1365,16 @@ impl GpuContext {
                 contents: bytemuck::bytes_of(&[PaintParams::disabled()]),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
+        let displacement_params_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_displacement_params_buffer"),
+                contents: bytemuck::bytes_of(&[DisplacementParams {
+                    enabled: 0,
+                    strength: 0.0,
+                    _pad: [0; 2],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
 
         Self {
             device,
@@ -1332,6 +1402,7 @@ impl GpuContext {
             dummy_spec_buffer,
             dummy_view_mode_buffer,
             dummy_paint_params_buffer,
+            displacement_params_buffer,
         }
     }
 
@@ -1493,6 +1564,15 @@ impl GpuContext {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: wgpu::BindingResource::TextureView(paint.height_view),
+                },
+                // Binding 13: displacement params (vertex displacement preview).
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.displacement_params_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
                 },
             ],
         })

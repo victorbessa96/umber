@@ -239,6 +239,12 @@ pub struct OverlaySettings {
     pub face_orientation: bool,
     /// The soloed channel / mesh map's name, drawn in the viewport.
     pub channel_readout: bool,
+    /// Displacement preview overlay (kill razul-displacement-preview):
+    /// vertex displacement along normals from the baked height map.
+    pub displacement: bool,
+    /// Displacement strength multiplier (world units per unit height).
+    /// Clamped to 0.0..=10.0; default 1.0 (unscaled).
+    pub displacement_strength: f32,
 }
 
 impl OverlaySettings {
@@ -263,6 +269,8 @@ impl Default for OverlaySettings {
             uv_seams: false,
             face_orientation: false,
             channel_readout: true,
+            displacement: false,
+            displacement_strength: 1.0,
         }
     }
 }
@@ -319,6 +327,27 @@ pub fn overlay_rows(ui: &mut Ui, s: &mut OverlaySettings) -> bool {
     changed |= ui
         .checkbox(&mut s.channel_readout, i18n::tr("overlays.channel-readout"))
         .changed();
+    // Displacement preview (kill razul-displacement-preview):
+    // toggle + strength slider (shown when enabled).
+    changed |= ui
+        .checkbox(&mut s.displacement, i18n::tr("overlays.displacement"))
+        .changed();
+    ui.add_enabled_ui(s.displacement, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(i18n::tr("overlays.displacement-strength"));
+            changed |= ui
+                .add(
+                    ValueField::new(&mut s.displacement_strength)
+                        .range(0.0..=10.0)
+                        .step(0.01)
+                        .decimals(2)
+                        .default_value(1.0)
+                        .context_menu(crate::i18n::prop_menu_labels()),
+                )
+                .on_hover_text(i18n::tr("overlays.displacement-hint"))
+                .changed();
+        });
+    });
     changed
 }
 

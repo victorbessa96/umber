@@ -460,6 +460,13 @@ pub struct Viewport {
     /// ground plane toggle by the app shell). Off by default with the
     /// same byte-identical-off contract.
     show_ground_plane: bool,
+    /// Displacement preview overlay (kill razul-displacement-preview):
+    /// vertex displacement along normals from the baked height map.
+    /// Off by default (byte-identical-off contract).
+    show_displacement: bool,
+    /// Displacement strength multiplier (world units per unit height).
+    /// Clamped to 0.0..=10.0; default 1.0 (unscaled).
+    displacement_strength: f32,
     /// Pre-built ground plane wireframe vertex buffer (plane edges at
     /// the configured height offset). Built when ground plane params
     /// change; `None` if not generated yet.
@@ -853,6 +860,8 @@ impl Viewport {
         self.overlays.wireframe_opacity = overlays.wireframe_opacity.clamp(0.0, 1.0);
         self.show_wireframe = overlays.wireframe;
         self.show_grid = overlays.grid;
+        self.show_displacement = overlays.displacement;
+        self.displacement_strength = overlays.displacement_strength.clamp(0.0, 10.0);
     }
 
     /// The popover's edit since the last take, for the shell to store
@@ -947,6 +956,33 @@ impl Viewport {
     /// Whether the ground plane overlay shows.
     pub fn show_ground_plane(&self) -> bool {
         self.show_ground_plane
+    }
+
+    /// Shows or hides the displacement preview overlay (kill
+    /// razul-displacement-preview). Synced from the Overlays popover.
+    pub fn set_show_displacement(&mut self, on: bool) {
+        self.show_displacement = on;
+    }
+
+    /// Whether the displacement preview overlay shows.
+    pub fn show_displacement(&self) -> bool {
+        self.show_displacement
+    }
+
+    /// Sets the displacement strength multiplier (world units per unit
+    /// height). Clamped to 0.0..=10.0.
+    pub fn set_displacement_strength(&mut self, strength: f32) {
+        self.displacement_strength = strength.clamp(0.0, 10.0);
+    }
+
+    /// Returns the displacement strength multiplier. Defaults to 1.0
+    /// (unscaled) when the field is zero (fresh default).
+    pub fn displacement_strength(&self) -> f32 {
+        if self.displacement_strength == 0.0 {
+            1.0
+        } else {
+            self.displacement_strength
+        }
     }
 
     /// Sets the ground plane wireframe buffer from the generated ground plane mesh.
@@ -1491,6 +1527,18 @@ impl Viewport {
             if let Some(post) = &self.postfx {
                 post.release();
             }
+        }
+
+        // Displacement preview (kill razul-displacement-preview):
+        // update the uniform each frame from the viewport state.
+        // Do this before the mutable mesh borrow below.
+        let show_disp = self.show_displacement;
+        let disp_strength = self.displacement_strength();
+        let has_mesh = self.mesh.is_some();
+        if show_disp && has_mesh {
+            gpu.update_displacement_params(true, disp_strength);
+        } else {
+            gpu.update_displacement_params(false, 0.0);
         }
 
         if let Some(mesh) = self.mesh.as_mut() {

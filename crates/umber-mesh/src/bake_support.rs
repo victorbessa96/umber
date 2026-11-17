@@ -529,6 +529,57 @@ pub fn find_high_for_low(
     None
 }
 
+/// CPU mirror of the vertex shader displacement arithmetic (kill
+/// razul-displacement-preview). Returns displaced position =
+/// `pos + normal * disp` where `disp = (h - 0.5) * 2.0 * strength *
+/// height_strength`. `h` is the height map value at `uv` (point-sample
+/// at texel center, matching the vertex shader's `textureLoad`). Returns
+/// `None` if `uv` out of bounds or `height_map` empty.
+#[allow(clippy::too_many_arguments)]
+pub fn displace_vertex_cpu(
+    pos: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+    height_map: &[u8], // RGBA8, row-major, width*height*4
+    width: u32,
+    height: u32,
+    uv_offset: [f32; 2],
+    uv_scale: [f32; 2],
+    strength: f32,
+    height_strength: f32,
+) -> Option<[f32; 3]> {
+    if height_map.is_empty() || width == 0 || height == 0 {
+        return None;
+    }
+    // Tile UV (mirrors paint_tile_uv in shaders.rs)
+    let tile_uv = [
+        (uv[0] - uv_offset[0]) * uv_scale[0],
+        (uv[1] - uv_offset[1]) * uv_scale[1],
+    ];
+    // Point sample at texel center (matches vertex shader textureLoad)
+    let dims_f = [width as f32, height as f32];
+    let texel = [
+        (tile_uv[0] * dims_f[0]).floor() as i32,
+        (tile_uv[1] * dims_f[1]).floor() as i32,
+    ];
+    let max_texel = [width as i32 - 1, height as i32 - 1];
+    let texel = [
+        texel[0].clamp(0, max_texel[0]) as usize,
+        texel[1].clamp(0, max_texel[1]) as usize,
+    ];
+    let idx = (texel[1] * width as usize + texel[0]) * 4;
+    if idx + 3 >= height_map.len() {
+        return None;
+    }
+    let h = height_map[idx] as f32 / 255.0; // R channel
+    let disp = (h - 0.5) * 2.0 * strength * height_strength;
+    Some([
+        pos[0] + normal[0] * disp,
+        pos[1] + normal[1] * disp,
+        pos[2] + normal[2] * disp,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
