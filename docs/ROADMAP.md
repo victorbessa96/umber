@@ -206,8 +206,8 @@ bin→lib with zero path churn (the W-C4 L1).
 gltf/fbx/obj attach); §3 raster half (the per-set submesh bakes,
 bakes_panel.rs:638/1781); §3 ray half — the with_occluder split +
 `OccluderScope` (0955ac8); §4 the per-set fan-out; §5 the
-auto-mapping (0ec64bd). Remaining: only the OccluderScope PANEL
-row + i18n keys (see the open waves).
+auto-mapping (0ec64bd). Remaining: none; the OccluderScope panel row
+landed 2026-10-24 (see the landed rows below).
 
 ### The tooling + machinery (the loop's own hardening)
 
@@ -218,9 +218,9 @@ locks + the main-tree pattern; the brief-template; the
 freeze-recovery close scripts; the loop restart machinery
 (2026-10-24 04:05).
 
-## Open waves + recent landings (dependency-ordered; each row names its gate and its status)
+## Landed waves + gates (dependency-ordered; each row names its gate and its status)
 
-### Ungated — the runway continues (the next kills)
+### Ungated engineering — truth refreshed 2026-11-17: every row below is LANDED; no ungated engineering runway remains
 
 | Kill | Closes | Notes |
 |---|---|---|
@@ -241,7 +241,7 @@ freeze-recovery close scripts; the loop restart machinery
 | wave-fuzz-corpus (b) | coverage-guided fuzzing | **LANDED 2026-11-14 `fc8b9ce8`**: cargo-fuzz `importers` target, first 900 s run clean (2.54M execs, 0 panics) |
 | wave-abr | .abr brush preset import — **FULL WAVE CLOSED 2026-11-10 (rows 268/271 + 282-285 + wave 3)**: the clean-room v6/v7/v9/v10 reader is complete end-to-end: `samp` reader (`ca70ea80`, oracle-exact vs real files row 271), the `desc` descriptor parser (`a68f97f4`, `abr_desc.rs` + `read_abr`/`AbrBrush`/`match_sample`, pinned against UNTRIMMED upstream files `577bc07c`), the `.abr` → `.umberbrush` + `.stamp.png` mapping (`c9ee71e5`, `abr_import.rs`), and the CLI fan-out `umber-cli import-asset --kind brush <file.abr>` (`4cc2bdfe`). The wave-3 tail landed too: `patt` pattern reader (`72b409cc`) + `PatternTexture` preset block / CLI sidecar (`14d9dbf1`), per-brush skip-and-count (wave 3.2, row 338), dynamics→engine wiring (wave 3.3, `3079e4cb`), cross-library stamp dedup (`0bcc1687`, wave 3.4) — wave 3 CLOSED (row 340). v8/11 stay refused as **unattested** (row 333: no public sample exists; "descriptor-only" is a content class, not a header number). Live-verified on real Photoshop files: "Soft Round" (computed) and "Bobbys Brush 743" (sampled, 112x105 stamp). | the one legal Adobe format |
 | wave-svg-import | SVG vector assets — **the IMPORT wave LANDED 2026-11-07 (rows 266 + 269)**: the clean-room `umber_core::svg` parser + 4x4-supersampled scanline rasterizer (`5d4fcccc`, cross-reviewed with hostile-input budgets in `107f90d1`), the app stencil loader accepting `.svg` next to `.png` (`399dce90`) with the 16 MiB input budget (`57f88d6f`), and the headless `umber-cli stencil` converter (`06d29936`). An `.svg` rasterizes AT IMPORT into the stencil coverage plane — no vector state persists. What is still open: the PATH-TOOL wave (live, editable vector paths on the canvas — the row 265 design calls that the path-tool wave's problem, not the stencil's) | the one legal vector format artists hand over |
-| wave-replay-exact | path replays paint exactly | a UX call (default-off until decided) — **decision prep brief written 2026-11-14** (`docs/loop/briefs/2026-11-14-replay-exact-decision-prep.md`) |
+| wave-replay-exact | path replays paint exactly | **DECIDED 2026-11-16: default-off stands; the opt-in toggle LANDED `aa1f5903` (report `bf9f5f25`)** — no open work remains |
 | Split-redo (engine landed 850b839; RedoPending lift landed 1347e13; **History-panel wiring LANDED 2026-11-07 `22e0efb`, row 262**: `edit.split_redo` command + the panel's "Split redo" button, outcome notices, both i18n catalogs, snapshots regenerated**) + merge-below-top (**WIRED 2026-11-07 `bbdc08b`, row 257**) | the undo journal's two named follow-ups — both closed | retouch.rs's debts |
 | wave-procedural-history | graph topology edits as undoable commands | **LANDED `2a84fb89`** |
 | wave-smart-material-params | exposed parameter UI | **LANDED 4.1a `7a9745c4` + 4.1b `db08895a` 2026-11-14** |
@@ -261,7 +261,7 @@ freeze-recovery close scripts; the loop restart machinery
 
 The published alpha and SPEC v1.1 ratification are complete (`v0.1.0-alpha.1` at `bc4d642f`, 2026-11-16). Remaining human release work is the dogfood walkthrough (C2-24), final signing decision (C2-22), release-checklist walkthrough, upstream bug drafts (docs/upstream/), and the i18n native-speaker pass. The .ftl lock is **CLOSED 2026-11-16**: it was lifted per the 2026-10-24 audit; only the native-speaker pass remains a human-quality gate.
 
-## Standing debts (refreshed 2026-10-24, live-verified)
+## Standing debts (refreshed 2026-11-17; rows below are closed landed items unless explicitly named OPEN)
 
 - **Added 2026-11-06 (charter-v2 T1-T3, `5af3c84`):** the Export panel
   button path lacks `flush_for_export` (export.run has it); `job.status`
