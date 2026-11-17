@@ -150,7 +150,9 @@ pub fn validate_ground_plane(
     Ok(())
 }
 
-/// GPU-side params uniform for the ground plane shader (32 bytes, 16-byte aligned).
+/// GPU-side params uniform for the ground plane shader (48 bytes, 16-byte aligned).
+/// Matches WGSL `GroundPlaneParams { maps_bitmask: u32, rays: u32, max_distance: f32,
+/// bias: f32, tri_count: u32, _pad: vec3<u32> }` where `vec3<u32>` has 16-byte alignment.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpUniform {
@@ -159,12 +161,14 @@ struct GpUniform {
     max_distance: f32,
     bias: f32,
     tri_count: u32,
-    _pad: [u32; 3],
+    _align_pad: [u32; 3], // pads to offset 32 for 16-byte aligned _pad
+    _pad: [u32; 3],       // matches WGSL vec3<u32> at offset 32
+    _struct_pad: u32,     // rounds struct to 48 bytes (no padding)
 }
 
 const _: () = assert!(
-    size_of::<GpUniform>() == 32,
-    "GpUniform must be 32 bytes for WGSL alignment"
+    size_of::<GpUniform>() == 48,
+    "GpUniform must be 48 bytes to match WGSL GroundPlaneParams layout"
 );
 
 fn uniform_for(params: &GroundPlaneParams, tri_count: u32) -> GpUniform {
@@ -174,7 +178,9 @@ fn uniform_for(params: &GroundPlaneParams, tri_count: u32) -> GpUniform {
         max_distance: params.max_distance,
         bias: params.bias,
         tri_count,
+        _align_pad: [0; 3],
         _pad: [0; 3],
+        _struct_pad: 0,
     }
 }
 
@@ -630,6 +636,23 @@ fn try_bake_2d_fallback(
         .as_ref()
         .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
 
+    // Create dummy texture views for unused output bindings (layout requires all 7)
+    let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("umber_bake_ground_plane_dummy"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING,
+        view_formats: &[],
+    });
+    let dummy_view = dummy_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("umber_bake_ground_plane_pipeline_layout_2d"),
         bind_group_layouts: &[Some(&bind_group_layout)],
@@ -645,8 +668,8 @@ fn try_bake_2d_fallback(
         cache: None,
     });
 
-    // Build bind group entries (only include bound textures)
-    let mut entries = vec![
+    // Build bind group entries (always include all 7 bindings per layout)
+    let entries = vec![
         wgpu::BindGroupEntry {
             binding: 0,
             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -654,6 +677,20 @@ fn try_bake_2d_fallback(
                 offset: 0,
                 size: None,
             }),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(ao_view.as_ref().unwrap_or(&dummy_view)),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::TextureView(
+                height_view.as_ref().unwrap_or(&dummy_view),
+            ),
+        },
+        wgpu::BindGroupEntry {
+            binding: 3,
+            resource: wgpu::BindingResource::TextureView(id_view.as_ref().unwrap_or(&dummy_view)),
         },
         wgpu::BindGroupEntry {
             binding: 4,
@@ -672,25 +709,6 @@ fn try_bake_2d_fallback(
             resource: wgpu::BindingResource::TextureView(&position_map.normal_view),
         },
     ];
-
-    if let Some(view) = &ao_view {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 1,
-            resource: wgpu::BindingResource::TextureView(view),
-        });
-    }
-    if let Some(view) = &height_view {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 2,
-            resource: wgpu::BindingResource::TextureView(view),
-        });
-    }
-    if let Some(view) = &id_view {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 3,
-            resource: wgpu::BindingResource::TextureView(view),
-        });
-    }
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("umber_bake_ground_plane_bind_group_2d"),

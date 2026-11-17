@@ -2423,8 +2423,9 @@ fn cs_main_from_position(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= dims.x || gid.y >= dims.y) {
     return;
   }
-  textureStore(out_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0))
-  }
+  let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+  textureStore(out_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+}
   "#
 }
 
