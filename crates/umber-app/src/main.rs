@@ -4312,6 +4312,12 @@ impl UmberApp {
                 display: self.state.display.clone(),
                 postfx: postfx_panel::carry_from_chain(&self.state.postfx),
                 symmetry: symmetry_carry_from(&self.brush_panel.symmetry),
+                replay_exact: self
+                    .state
+                    .paint
+                    .as_ref()
+                    .map(|p| p.replay_exact())
+                    .unwrap_or(false),
             },
         )
         .with_graphs_mtlx(graphs_mtlx)
@@ -4590,6 +4596,12 @@ impl UmberApp {
                 // adopt into the brush panel; the paint session syncs
                 // on the next stroke through its own adoption path).
                 self.brush_panel.symmetry = symmetry_from_carry(&model.settings.symmetry);
+                // The replay-exact flag: adopt into the paint session so
+                // stroke replay (path tool, undo/redo, journal recovery)
+                // uses deterministic RNG and iteration order when enabled.
+                if let Some(paint) = self.state.paint.as_mut() {
+                    paint.set_replay_exact(model.settings.replay_exact);
+                }
                 // The painted pixels (or a clear to transparent when the
                 // project predates the sidecar — never the previous
                 // document's paint). The session lifecycle (§6.3 [M10])

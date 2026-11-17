@@ -104,6 +104,8 @@ status =
 
 settings =
     .language = Language
+    .replay-exact = Replay exact
+    .replay-exact-hint = Undo/redo and crash recovery replay pixel-identically when on. Default off.
 
 ## Shared fragments (several panels)
 

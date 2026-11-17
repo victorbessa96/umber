@@ -108,6 +108,8 @@ status =
 
 settings =
     .language = Idioma
+    .replay-exact = Replay exato
+    .replay-exact-hint = Desfazer/refazer e recuperação repetem pixel a pixel quando ligado. Desligado por padrão.
 
 ## Fragmentos compartilhados
 

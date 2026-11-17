@@ -1541,6 +1541,12 @@ pub struct PaintState {
     /// What layer-mask strokes paint (white opens, black closes — the
     /// quick mask's [`MaskPaint`] semantics on a `u8` plane).
     layer_mask_paint: MaskPaint,
+    /// Replay-exact mode: when enabled, stroke replay (undo/redo, journal
+    /// recovery) uses seeded RNG, fixed iteration order, and stable
+    /// float-op order so the replay paints pixel-identically to the
+    /// original stroke. Default OFF (status quo). Set from the project's
+    /// `settings.replay_exact` on project open.
+    replay_exact: bool,
     /// Queued `WriteMask` commands since construction (test
     /// observability for the mask-stroke and zero-cost contracts).
     #[cfg(test)]
@@ -1698,6 +1704,7 @@ impl PaintState {
             over_budget: false,
             tombstone_notice: None,
             layer_mask_paint: MaskPaint::default(),
+            replay_exact: false,
             #[cfg(test)]
             mask_uploads: 0,
             #[cfg(test)]
@@ -1741,6 +1748,20 @@ impl PaintState {
     /// The active texture set's name.
     pub fn active_set(&self) -> &str {
         &self.active_set
+    }
+
+    /// Replay-exact mode: when enabled, stroke replay (undo/redo, journal
+    /// recovery) uses seeded RNG, fixed iteration order, and stable
+    /// float-op order so the replay paints pixel-identically to the
+    /// original stroke. Default OFF (status quo).
+    pub fn replay_exact(&self) -> bool {
+        self.replay_exact
+    }
+
+    /// Sets replay-exact mode. Called on project open from the loaded
+    /// `ProjectSettings::replay_exact`.
+    pub fn set_replay_exact(&mut self, enabled: bool) {
+        self.replay_exact = enabled;
     }
 
     /// The channel new strokes paint (see the `active_channel` field
@@ -4785,7 +4806,11 @@ impl PaintState {
         // them back).
         if let Some(stroke) = self.retouch.take() {
             let cursor = self.retouch_history.len();
-            if stroke.record(&mut self.retouch_history, &mut self.retouch_writes) {
+            if stroke.record(
+                &mut self.retouch_history,
+                &mut self.retouch_writes,
+                self.replay_exact,
+            ) {
                 self.pending_commits.push(StrokeCommit {
                     cursor,
                     depth: self.retouch_history.len(),
@@ -4858,7 +4883,12 @@ impl PaintState {
                 end,
             })
             .collect();
-        record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles)
+        record_stroke(
+            &mut self.retouch_history,
+            &mut self.retouch_writes,
+            &tiles,
+            self.replay_exact,
+        )
     }
 
     /// Blends a rasterized decal (`rgba`, `w`x`h`, straight alpha) onto the
@@ -4991,7 +5021,12 @@ impl PaintState {
             start: &before,
             end: &after,
         }];
-        if record_stroke(&mut self.retouch_history, &mut self.retouch_writes, &tiles) {
+        if record_stroke(
+            &mut self.retouch_history,
+            &mut self.retouch_writes,
+            &tiles,
+            self.replay_exact,
+        ) {
             self.pending_commits.push(StrokeCommit {
                 cursor,
                 depth: self.retouch_history.len(),
@@ -5007,6 +5042,10 @@ impl PaintState {
     /// then the splat for paint or the CPU mirror for erase/smudge (the
     /// consumer `op` already selects). A closed path appends its sealing
     /// segment, like `umber_brush::path`'s headless replay.
+    ///
+    /// When `self.replay_exact()` is true, the replay uses seeded RNG,
+    /// fixed iteration order, and stable float-op order so the replay
+    /// paints pixel-identically to the original stroke.
     ///
     /// `false` (nothing staged) with fewer than 2 points or while a live
     /// stroke runs — a replay never splits a stroke. The session tool is
@@ -5048,6 +5087,10 @@ impl PaintState {
     /// ([`rasterize_polygon_mask`], reused — no duplicated parity math),
     /// and each covered row run replays as one stroke at the path's mean
     /// style through the same pipeline as [`Self::replay_path`].
+    ///
+    /// When `self.replay_exact()` is true, the replay uses seeded RNG,
+    /// fixed iteration order, and stable float-op order so the replay
+    /// paints pixel-identically to the original stroke.
     ///
     /// `false` (nothing staged) unless the path can fill, while a live
     /// stroke runs, or when the loop covers no texel of the active tile.

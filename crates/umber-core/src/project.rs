@@ -287,6 +287,13 @@ pub struct ProjectSettings {
     /// live in umber-app).
     #[serde(default)]
     pub symmetry: ProjectSymmetry,
+    /// Replay-exact mode: when enabled, stroke replay (undo/redo, journal recovery)
+    /// uses seeded RNG, fixed iteration order, and stable float-op order so the
+    /// replay paints pixel-identically to the original stroke. Default OFF (status
+    /// quo). Additive carry: absent in file = false, so pre-toggle projects load
+    /// unchanged and re-save byte-identically when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_exact: bool,
 }
 
 /// The core-owned serde mirror of the brush's symmetry settings
@@ -533,6 +540,10 @@ struct ProjectFile {
     /// save so those files re-save byte-identically.
     #[serde(default, skip_serializing_if = "BakeSyncCarry::is_empty")]
     bake_sync: BakeSyncCarry,
+    /// See `ProjectSettings::replay_exact`. Additive: `default` loads pre-toggle
+    /// files as `false`. Omitted when false to keep files byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replay_exact: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -802,6 +813,7 @@ pub fn save_to_dir(model: &ProjectModel, dir: &Path) -> Result<(), ProjectError>
         material_defs_mtlx: material_defs_mtlx.clone(),
         journal_seq: *journal_seq,
         bake_sync: bake_sync.clone(),
+        replay_exact: settings.replay_exact,
     };
     write_atomic(&dir.join("project.json"), &to_pretty_json_bytes(&file)?)?;
     if layers_root.exists() {
@@ -836,6 +848,7 @@ pub fn load_from_dir(dir: &Path) -> Result<ProjectModel, ProjectError> {
         material_defs_mtlx: file_material_defs_mtlx,
         journal_seq: file_journal_seq,
         bake_sync: file_bake_sync,
+        replay_exact: _file_replay_exact,
     } = file;
 
     let texture_set_names: Vec<String> =
@@ -1025,6 +1038,7 @@ mod tests {
             material_defs_mtlx: model.material_defs_mtlx.clone(),
             journal_seq: model.journal_seq,
             bake_sync: model.bake_sync.clone(),
+            replay_exact: model.settings.replay_exact,
         };
 
         let bytes_1 = to_pretty_json_bytes(&file).unwrap();

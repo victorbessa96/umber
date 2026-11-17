@@ -399,7 +399,7 @@ impl RetouchStroke {
     /// [`Self::record`].
     #[cfg(test)]
     pub(crate) fn finish(self) -> Option<PaintStrokeCommand> {
-        stroke_command(&self.stroke_tiles())
+        stroke_command(&self.stroke_tiles(), false)
     }
 
     /// Ends the stroke onto `history` through [`record_stroke`] (merged
@@ -409,8 +409,9 @@ impl RetouchStroke {
         self,
         history: &mut UndoStack<PaintStrokeCommand>,
         writes: &mut PaintWrites,
+        replay_exact: bool,
     ) -> bool {
-        record_stroke(history, writes, &self.stroke_tiles())
+        record_stroke(history, writes, &self.stroke_tiles(), replay_exact)
     }
 }
 
@@ -441,7 +442,10 @@ fn fits(rect: DirtyRect, image: &RgbaBuffer) -> bool {
 
 /// The unmerged record of a stroke: one region per tile, its rect's
 /// start + end bytes. `None` when no tile was written.
-pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeCommand> {
+pub(crate) fn stroke_command(
+    tiles: &[StrokeTile<'_>],
+    replay_exact: bool,
+) -> Option<PaintStrokeCommand> {
     let regions: Vec<TileRegion> = tiles
         .iter()
         .map(|t| TileRegion {
@@ -456,6 +460,7 @@ pub(crate) fn stroke_command(tiles: &[StrokeTile<'_>]) -> Option<PaintStrokeComm
     (!regions.is_empty()).then_some(PaintStrokeCommand {
         regions,
         parts: Vec::new(),
+        replay_exact,
     })
 }
 
@@ -532,6 +537,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
     let PaintStrokeCommand {
         regions: top_regions,
         parts: top_parts,
+        replay_exact: top_replay_exact,
     } = top;
     // The split-redo journal: an unmerged top becomes part 1; a merged
     // top's newest part gets its afters filled from the entry's after
@@ -608,6 +614,7 @@ fn merge_stroke(top: PaintStrokeCommand, tiles: &[StrokeTile<'_>]) -> PaintStrok
     PaintStrokeCommand {
         regions: regions.into_values().collect(),
         parts,
+        replay_exact: top_replay_exact,
     }
 }
 
@@ -622,6 +629,7 @@ pub(crate) fn record_stroke(
     history: &mut UndoStack<PaintStrokeCommand>,
     writes: &mut PaintWrites,
     tiles: &[StrokeTile<'_>],
+    replay_exact: bool,
 ) -> bool {
     // Top fast path: coalesce into the top entry (unchanged).
     if history.peek_undo().is_some_and(|top| can_merge(top, tiles)) {
@@ -671,7 +679,7 @@ pub(crate) fn record_stroke(
             }
         }
     }
-    let Some(command) = stroke_command(tiles) else {
+    let Some(command) = stroke_command(tiles, replay_exact) else {
         return false;
     };
     history.push(command, writes);
@@ -776,6 +784,7 @@ pub(crate) fn split_parts(merged: &PaintStrokeCommand) -> Option<Vec<PaintStroke
         out.push(PaintStrokeCommand {
             regions,
             parts: Vec::new(),
+            replay_exact: merged.replay_exact,
         });
     }
     Some(out)
@@ -880,6 +889,12 @@ pub(crate) struct PaintStrokeCommand {
     /// ([`split_top`], [`split_redo`]) rebuilds per-stroke entries from
     /// `regions`' before plus these afters.
     pub parts: Vec<StrokePart>,
+    /// Replay-exact mode: when enabled, stroke replay uses seeded RNG,
+    /// fixed iteration order, and stable float-op order. Captured at
+    /// push time from the document's settings so a stroke recorded with
+    /// `replay_exact=true` replays exactly even if the setting is later
+    /// toggled.
+    pub replay_exact: bool,
 }
 
 /// The pending region writes undo/redo produce: the [`Command::Doc`] of
@@ -1605,7 +1620,7 @@ mod tests {
             start: &start,
             end: &end,
         }];
-        assert!(record_stroke(history, writes, &tiles));
+        assert!(record_stroke(history, writes, &tiles, false));
         assert!(writes.writes.is_empty(), "the push's re-apply is dropped");
     }
 
@@ -1747,15 +1762,18 @@ mod tests {
         for k in 0..N {
             let r = rect(8 + 4 * k, 8, 24 + 4 * k, 24);
             let (start, end) = fill_stroke(&mut scratch, r, 10 * (k as u8 + 1));
-            let cmd = stroke_command(&[StrokeTile {
-                owner: PlaneOwner::Base,
-                tile: TILE,
-                channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
-                rect: r,
-                start: &start,
-                end: &end,
-            }])
-            .expect("the fill writes");
+            let cmd = stroke_command(
+                        &[StrokeTile {
+                            owner: PlaneOwner::Base,
+                            tile: TILE,
+                            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+                            rect: r,
+                            start: &start,
+                            end: &end,
+                        }],
+                        false,
+                    )
+                    .expect("the fill writes");
             baseline.push(cmd, &mut writes);
         }
         writes.writes.clear();
@@ -1867,7 +1885,7 @@ mod tests {
             start: &s1,
             end: &e1,
         }];
-        assert!(record_stroke(&mut history, &mut writes, &tiles));
+        assert!(record_stroke(&mut history, &mut writes, &tiles, false));
 
         // Stroke 2: overlaps on TILE ([16,32)×[8,24) → union [8,32)×[8,24),
         // 24·16·4·2 = 3072) and writes OTHER fresh (16·16·4·2 = 2048).
@@ -1893,7 +1911,7 @@ mod tests {
                 end: &e2o,
             },
         ];
-        assert!(record_stroke(&mut history, &mut writes, &tiles));
+        assert!(record_stroke(&mut history, &mut writes, &tiles, false));
         assert_eq!(history.len(), 1);
         assert_eq!(history.peek_undo().unwrap().regions.len(), 2);
         // + 1024: stroke 1's journal after (split redo).
@@ -1911,7 +1929,7 @@ mod tests {
             start: &s3,
             end: &e3,
         }];
-        assert!(record_stroke(&mut history, &mut writes, &tiles));
+        assert!(record_stroke(&mut history, &mut writes, &tiles, false));
         assert_eq!(history.len(), 2);
         assert_eq!(history.bytes_held(), 3072 + 2048 + 1024 + 512);
 
@@ -1952,11 +1970,11 @@ mod tests {
         let up: Vec<[f32; 2]> = (0..6).map(|i| [33.0, 36.0 - 4.0 * i as f32]).collect();
 
         let stroke = drive_stroke(&mut image, smudge(), &down, &none, None);
-        assert!(stroke.record(&mut history, &mut writes));
+        assert!(stroke.record(&mut history, &mut writes, false));
         let after_first = image.clone();
         assert_ne!(after_first, original);
         let stroke = drive_stroke(&mut image, smudge(), &up, &none, None);
-        assert!(stroke.record(&mut history, &mut writes));
+        assert!(stroke.record(&mut history, &mut writes, false));
         assert_ne!(image, after_first, "the second smudge moves texels too");
         assert_eq!(history.len(), 1, "the overlapping smudge coalesced");
 
@@ -1976,14 +1994,17 @@ mod tests {
     /// The plain (unmerged) record of a fill, for byte comparison.
     fn plain_fill(image: &mut RgbaBuffer, r: DirtyRect, value: u8) -> PaintStrokeCommand {
         let (start, end) = fill_stroke(image, r, value);
-        stroke_command(&[StrokeTile {
-            owner: PlaneOwner::Base,
-            tile: TILE,
-            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
-            rect: r,
-            start: &start,
-            end: &end,
-        }])
+        stroke_command(
+            &[StrokeTile {
+                owner: PlaneOwner::Base,
+                tile: TILE,
+                channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+                rect: r,
+                start: &start,
+                end: &end,
+            }],
+            false,
+        )
         .expect("the fill writes")
     }
 

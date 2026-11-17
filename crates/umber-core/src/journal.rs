@@ -363,7 +363,11 @@ impl JournalOp {
     ///
     /// Ids of `u64::MAX` are skipped: both re-insert paths compute `id + 1`
     /// for the stack's id counter, and `project` rejects that id anyway.
-    pub fn apply_to(&self, stack: &mut LayerStack) {
+    ///
+    /// The `replay_exact` flag is threaded through for future
+    /// determinism enforcement (stroke replay paths); current journal ops
+    /// are layer-metadata only and do not use it.
+    pub fn apply_to(&self, stack: &mut LayerStack, _replay_exact: bool) {
         match self {
             JournalOp::Add { id, name, kind } => {
                 if *id != u64::MAX && stack.layer(*id).is_none() {
@@ -536,6 +540,7 @@ fn set_len_synced(path: &Path, len: u64) -> io::Result<()> {
 /// lacks is consumed without effect (best-effort recovery). Returns how
 /// many entries were past the high-water mark.
 pub fn replay(model: &mut ProjectModel, entries: &[JournalEntry]) -> usize {
+    let replay_exact = model.settings.replay_exact;
     let mut replayed = 0;
     for entry in entries {
         if entry.seq <= model.journal_seq {
@@ -546,7 +551,7 @@ pub fn replay(model: &mut ProjectModel, entries: &[JournalEntry]) -> usize {
             .iter_mut()
             .find(|set| set.texture_set == entry.texture_set)
         {
-            entry.op.apply_to(&mut set.stack);
+            entry.op.apply_to(&mut set.stack, replay_exact);
         }
         model.journal_seq = entry.seq;
         replayed += 1;
@@ -920,7 +925,7 @@ mod tests {
             excluded_tiles: (0..=crate::layers::MAX_GEOMETRY_MASK_TILES as u16).collect(),
             ..GeometryMask::default()
         };
-        JournalOp::SetGeometryMask { id: 0, mask: over }.apply_to(&mut stack);
+        JournalOp::SetGeometryMask { id: 0, mask: over }.apply_to(&mut stack, false);
         assert_eq!(stack.layer(0).unwrap().geometry_mask, mask);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1008,8 +1013,8 @@ mod tests {
         // ...and each op is idempotent on its own, high-water aside.
         let mut stack = model.layers[0].stack.clone();
         for entry in &entries {
-            entry.op.apply_to(&mut stack);
-            entry.op.apply_to(&mut stack);
+            entry.op.apply_to(&mut stack, false);
+            entry.op.apply_to(&mut stack, false);
         }
         assert_eq!(stack, once.layers[0].stack);
         let _ = fs::remove_dir_all(&dir);
