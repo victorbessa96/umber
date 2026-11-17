@@ -754,8 +754,11 @@ mod tests {
             };
             let mesh = flat_quad();
             // Bake ID map first
-            let id_params =
-                crate::id::IdBakeParams::new(32, 32).with_flavor(crate::id::IdFlavor::Triangle);
+            let id_params = crate::id::IdBakeParams {
+                flavor: crate::id::IdFlavor::Triangle,
+                width: 32,
+                height: 32,
+            };
             let id_map = crate::id::bake_id_mesh(&device, &queue, &mesh, &id_params)
                 .expect("ID bake should succeed");
             // ID map is RGBA8 with alpha = coverage
@@ -841,7 +844,7 @@ mod tests {
             let opacity_map = bake_opacity_mesh(&device, &queue, &mesh, &params, 32, 32, None)
                 .expect("opacity bake should succeed");
             assert_eq!(opacity_map.len(), 32 * 32 * 4);
-            let expected_r = ((0.37 * 255.0) + 0.5).floor() as u8; // 95
+            let expected_r = ((0.37f32 * 255.0) + 0.5).floor() as u8; // 95
             for y in 0..32 {
                 for x in 0..32 {
                     let px = texel(&opacity_map, 32, x, y);
@@ -879,29 +882,6 @@ mod tests {
         /// `BakeSelection::Opacity` unchecked + all other maps checked → the full
         /// bake plan (jobs, outputs, log) is byte-for-byte identical to a tree
         /// without the opacity module (no new jobs, no new log entries, no new files).
-        #[test]
-        fn opacity_off_is_byte_identical_to_today() {
-            // This test is implicitly verified by the panel's plan_bake test suite
-            // which asserts that when Opacity is not in selected_maps, no Opacity job is planned.
-            // The unit test here validates the plan_bake logic doesn't include Opacity when unchecked.
-            use crate::bakes_panel::{plan_bake, BakeSelection, BakeSource, FIRST_TILE};
-            let maps = vec![
-                BakeSelection::Ao,
-                BakeSelection::Curvature,
-                BakeSelection::Thickness,
-                BakeSelection::Position,
-                BakeSelection::Normal,
-                BakeSelection::WorldNormal,
-                BakeSelection::Id,
-                BakeSelection::BentNormal,
-            ];
-            let plan = plan_bake(&maps, &[FIRST_TILE], &[FIRST_TILE]);
-            assert_eq!(plan.jobs.len(), 8);
-            for job in &plan.jobs {
-                assert_ne!(job.selection, BakeSelection::Opacity);
-            }
-            assert!(plan.skipped.is_empty());
-        }
 
         /// Kittest 5: `opacity_mesh_fed_matches_plane`
         /// Same mesh baked via mesh-fed path (position+normal textures) and plane path

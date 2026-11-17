@@ -1166,9 +1166,15 @@ mod tests {
                 return;
             };
             let params = TransferParams::new(1.0, 2.0, 0.5, 32, 32);
-            let map =
-                bake_transfer_mesh(&device, &queue, &low_quad(), &high_coplanar_ramp(), &params)
-                    .expect("bake should succeed");
+            let map = bake_transfer_mesh(
+                &device,
+                &queue,
+                &low_quad(),
+                &high_coplanar_ramp(),
+                &params,
+                None,
+            )
+            .expect("bake should succeed");
             assert_eq!(map.len(), 32 * 32 * 4);
 
             // Coplanar half (columns 0..16, x < 0): h == 1/3 -> 85, alpha 255.
@@ -1226,6 +1232,7 @@ mod tests {
                 &low_quad(),
                 &high_at_minus_two_point_five(),
                 &TransferParams::new(3.0, 3.0, 0.5, 32, 32),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(hit.len(), 32 * 32 * 4);
@@ -1245,6 +1252,7 @@ mod tests {
                 &low_quad(),
                 &high_at_minus_two_point_five(),
                 &TransferParams::new(3.0, 2.0, 0.5, 32, 32),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(miss.len(), 32 * 32 * 4);
@@ -1270,6 +1278,7 @@ mod tests {
                     &half_uv_low(),
                     &high_coplanar_ramp(),
                     &TransferParams::new(1.0, 2.0, 0.5, 32, 32).with_map(map),
+                    None,
                 )
                 .expect("bake should succeed");
                 assert_eq!(
@@ -1307,6 +1316,7 @@ mod tests {
                 &low_quad(),
                 &high_coplanar_ramp(),
                 &TransferParams::new(1.0, 2.0, 0.5, 32, 32).with_map(TransferMap::WorldNormal),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(map.len(), 32 * 32 * 4);
@@ -1369,6 +1379,7 @@ mod tests {
                 &low_quad(),
                 &high_steep_x_ramp(),
                 &TransferParams::new(1.0, 25.0, 0.5, 32, 32).with_map(TransferMap::TangentNormal),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(steep.len(), 32 * 32 * 4);
@@ -1398,6 +1409,7 @@ mod tests {
                 &low_quad(),
                 &high_flat_at_minus_half(),
                 &TransferParams::new(1.0, 2.0, 0.5, 32, 32).with_map(TransferMap::TangentNormal),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(flat.len(), 32 * 32 * 4);
@@ -1438,6 +1450,7 @@ mod tests {
                 &low_rotated_uv(),
                 &high_steep_y_ramp(),
                 &TransferParams::new(1.0, 25.0, 0.5, 32, 32).with_map(TransferMap::TangentNormal),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(map.len(), 32 * 32 * 4);
@@ -1486,6 +1499,7 @@ mod tests {
                 &two_island_low(),
                 &high_wide_flat(),
                 &TransferParams::new(1.0, 2.0, 0.5, 32, 32).with_map(TransferMap::TangentNormal),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(map.len(), 32 * 32 * 4);
@@ -1533,6 +1547,7 @@ mod tests {
                     &low_quad(),
                     &high_coplanar_ramp(),
                     &params,
+                    None,
                 )
                 .expect("bake should succeed");
                 let second = bake_transfer_mesh(
@@ -1541,6 +1556,7 @@ mod tests {
                     &low_quad(),
                     &high_coplanar_ramp(),
                     &params,
+                    None,
                 )
                 .expect("bake should succeed");
                 assert_eq!(
@@ -1563,6 +1579,7 @@ mod tests {
                 &low_quad(),
                 &MeshData::default(),
                 &TransferParams::new(1.0, 2.0, 0.5, 8, 8),
+                None,
             )
             .expect("bake should succeed");
             assert_eq!(map.len(), 8 * 8 * 4);
