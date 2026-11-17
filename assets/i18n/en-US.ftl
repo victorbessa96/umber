@@ -327,6 +327,7 @@ bakes =
     .id-blend-mode-additive = Additive
     .id-blend-mode-max = Max
     .id-blend-mode-replace = Replace
+    .id-max-sources = Max 8 sources
     .ground-plane = Ground plane
     .ground-plane-size = Size
     .ground-plane-height = Height offset

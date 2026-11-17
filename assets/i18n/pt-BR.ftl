@@ -331,6 +331,7 @@ bakes =
     .id-blend-mode-additive = Aditivo
     .id-blend-mode-max = Máximo
     .id-blend-mode-replace = Substituir
+    .id-max-sources = Máx. 8 fontes
     .ground-plane = Plano de chão
     .ground-plane-size = Tamanho
     .ground-plane-height = Deslocamento de altura

@@ -2261,6 +2261,8 @@ fn cs_main_from_position(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 /// - Reuses `fnv1a_step` / `hash_triangle` from `ID_BAKE_SHADER` logic.
 pub fn id_multi_bake_shader() -> &'static str {
     r#"
+enable wgpu_binding_array;
+
 struct IdSourceUniform {
   source: u32,      // IdSource enum discriminant
   weight: f32,

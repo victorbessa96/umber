@@ -2641,6 +2641,153 @@ impl BakesPanel {
                 group.ui.checkbox(&mut self.opacity_invert, invert_label);
             }
 
+            // IdMulti settings (D4): shown when IdMulti map is checked.
+            if self.is_map_enabled(BakeSelection::IdMulti) {
+                let sources_label =
+                    self.row_label(BakeSettingId::IdSources, tr("bakes.id-sources"));
+                group.row(sources_label.as_str(), |ui| {
+                    ui.label(tr("bakes.id-sources"));
+                    // Source list editor: add/remove/reorder sources (max 8).
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            let mut remove_idx = None;
+                            for (idx, src) in self.id_multi_sources.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    // Source type combo
+                                    let source_label = match src.source {
+                                        IdSource::Triangle => tr("bakes.id-source-triangle"),
+                                        IdSource::Material => tr("bakes.id-source-material"),
+                                        IdSource::IdMap => tr("bakes.id-source-id-map"),
+                                        IdSource::Manual => tr("bakes.id-source-manual"),
+                                    };
+                                    egui::ComboBox::from_id_salt(("id-source-type", idx))
+                                        .selected_text(source_label)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut src.source,
+                                                IdSource::Triangle,
+                                                tr("bakes.id-source-triangle"),
+                                            );
+                                            ui.selectable_value(
+                                                &mut src.source,
+                                                IdSource::Material,
+                                                tr("bakes.id-source-material"),
+                                            );
+                                            ui.selectable_value(
+                                                &mut src.source,
+                                                IdSource::IdMap,
+                                                tr("bakes.id-source-id-map"),
+                                            );
+                                            ui.selectable_value(
+                                                &mut src.source,
+                                                IdSource::Manual,
+                                                tr("bakes.id-source-manual"),
+                                            );
+                                        });
+                                    // Weight slider
+                                    let weight_label = tr("bakes.id-source-weight");
+                                    ui.add(
+                                        ValueField::new(&mut src.weight)
+                                            .context_menu(crate::i18n::prop_menu_labels())
+                                            .default_value(1.0)
+                                            .range(0.0..=1.0)
+                                            .step(0.01)
+                                            .decimals(2)
+                                            .unit(weight_label.as_str()),
+                                    );
+                                    // Mask texture picker (optional)
+                                    let mask_label = tr("bakes.id-source-mask");
+                                    if ui
+                                        .button(mask_label)
+                                        .on_hover_text("Pick mask texture")
+                                        .clicked()
+                                    {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter(
+                                                "Image files",
+                                                &["png", "jpg", "jpeg", "exr", "tga"],
+                                            )
+                                            .pick_file()
+                                        {
+                                            src.mask_path =
+                                                Some(path.to_string_lossy().into_owned());
+                                        }
+                                    }
+                                    if let Some(mask_path) = &src.mask_path {
+                                        ui.label(mask_path);
+                                    }
+                                    // Color picker for Manual source
+                                    if src.source == IdSource::Manual {
+                                        let mut color = [
+                                            src.color[0] as f32 / 255.0,
+                                            src.color[1] as f32 / 255.0,
+                                            src.color[2] as f32 / 255.0,
+                                        ];
+                                        if ui.color_edit_button_rgb(&mut color).changed() {
+                                            src.color = [
+                                                (color[0] * 255.0).round() as u8,
+                                                (color[1] * 255.0).round() as u8,
+                                                (color[2] * 255.0).round() as u8,
+                                            ];
+                                        }
+                                    }
+                                    // Remove button
+                                    if ui.button("✕").clicked() {
+                                        remove_idx = Some(idx);
+                                    }
+                                });
+                            }
+                            if let Some(idx) = remove_idx {
+                                self.id_multi_sources.remove(idx);
+                            }
+                            // Add source button (max 8)
+                            if self.id_multi_sources.len() < 8 {
+                                if ui.button(tr("button.add")).clicked() {
+                                    self.id_multi_sources.push(IdSourceParams::default());
+                                }
+                            } else {
+                                ui.label(tr("bakes.id-max-sources"));
+                            }
+                        });
+                });
+
+                // Blend mode combo
+                let blend_label = self.row_label(
+                    BakeSettingId::IdSourceWeights, // reusing for blend mode row
+                    tr("bakes.id-blend-mode"),
+                );
+                group.row(blend_label.as_str(), |ui| {
+                    let additive = tr("bakes.id-blend-mode-additive");
+                    let max = tr("bakes.id-blend-mode-max");
+                    let replace = tr("bakes.id-blend-mode-replace");
+                    let selected = match self.id_multi_blend_mode {
+                        IdBlendMode::Additive => &additive,
+                        IdBlendMode::Max => &max,
+                        IdBlendMode::Replace => &replace,
+                    };
+                    egui::ComboBox::from_id_salt("id-multi-blend-mode")
+                        .selected_text(selected.as_str())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.id_multi_blend_mode,
+                                IdBlendMode::Additive,
+                                additive,
+                            );
+                            ui.selectable_value(
+                                &mut self.id_multi_blend_mode,
+                                IdBlendMode::Max,
+                                max,
+                            );
+                            ui.selectable_value(
+                                &mut self.id_multi_blend_mode,
+                                IdBlendMode::Replace,
+                                replace,
+                            );
+                        });
+                });
+            }
+
             // Ground plane settings (D5): shown when GroundPlane map is checked.
             if self.is_map_enabled(BakeSelection::GroundPlane) {
                 let size_label = self.row_label(
