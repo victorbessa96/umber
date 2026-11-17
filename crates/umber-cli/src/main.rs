@@ -731,7 +731,8 @@ fn run_bake_transfer(
             settings.size,
         )
         .with_map(map.map());
-        let data = umber_bake::bake_transfer_mesh(&ctx.device, &ctx.queue, &low, &high, &params)?;
+        let data =
+            umber_bake::bake_transfer_mesh(&ctx.device, &ctx.queue, &low, &high, &params, None)?;
         let path = umber_mesh::format_mesh_map(out_dir, &set, map.kind(), "png");
         umber_export::png::write_png(
             &path,
