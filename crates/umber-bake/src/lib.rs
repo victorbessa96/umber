@@ -9,6 +9,7 @@ pub mod ao;
 pub mod curvature;
 pub mod dilation;
 pub mod gbuffer;
+pub mod ground_plane;
 pub mod id;
 pub mod margin;
 pub mod normal_map;
@@ -26,6 +27,10 @@ pub use ao::{
 pub use curvature::{CurvatureBakeError, CurvatureParams};
 pub use dilation::{DilateError, DilateParams};
 pub use gbuffer::{bake_uv_gbuffer, UvGBufferError, UvGBufferGpu};
+pub use ground_plane::{
+    bake_ground_plane_mesh, validate_ground_plane, BakeOutputs, GroundPlaneBakeError,
+    GroundPlaneMap, GroundPlaneParams,
+};
 pub use id::{
     bake_id_multi_mesh, validate_multi, IdBakeError, IdBakeParams, IdBlendMode, IdFlavor,
     IdMultiParams, IdSource, IdSourceParams,
@@ -122,6 +127,9 @@ pub enum BakeMap {
     Skew,
     /// Per-texel opacity mask from cavity (AO), ID map, or uniform value (D3).
     Opacity,
+    /// Ground plane bake (D5): AO, height, and ID baked onto a generated
+    /// ground plane mesh beneath the scene.
+    GroundPlane,
 }
 
 impl BakeMap {
@@ -141,6 +149,7 @@ impl BakeMap {
             BakeMap::WorldSpaceNormal => "world_space_normal",
             BakeMap::Skew => "skew",
             BakeMap::Opacity => "opacity",
+            BakeMap::GroundPlane => "ground_plane",
         }
     }
 }
@@ -162,6 +171,7 @@ mod tests {
         assert_eq!(BakeMap::Skew.file_stem_suffix(), "skew");
         assert_eq!(BakeMap::Opacity.file_stem_suffix(), "opacity");
         assert_eq!(BakeMap::IdMulti.file_stem_suffix(), "id_multi");
+        assert_eq!(BakeMap::GroundPlane.file_stem_suffix(), "ground_plane");
     }
 
     #[test]

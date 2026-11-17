@@ -25,7 +25,10 @@ pub mod usd;
 pub mod usdc;
 pub mod uv_gbuffer;
 
-pub use bake_support::{find_high_for_low, match_by_name, Cage, CageMethod, TransferClamps};
+pub use bake_support::{
+    find_high_for_low, generate_ground_plane, match_by_name, Cage, CageMethod, GroundPlaneDesc,
+    GroundPlaneError, TransferClamps,
+};
 pub use depth::{rasterize_depth, NEAR_EPS, SCREEN_COND_EPS};
 pub use fbx::load_fbx;
 pub use fill::{
@@ -312,7 +315,7 @@ pub fn load_with_parts(path: &std::path::Path) -> Result<(MeshData, MeshParts), 
     };
     // AssertUnwindSafe: the closure borrows only `path` and `format`
     // (read-only), and a caught panic returns an error — no partially
-    /// built state escapes.
+    // built state escapes.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(dispatch)).unwrap_or_else(|payload| {
         let detail = payload
             .downcast_ref::<&str>()
@@ -360,9 +363,9 @@ pub fn load_obj_with_parts(path: &std::path::Path) -> Result<(MeshData, MeshPart
         ..Default::default()
     };
     // Per-set masked bakes §1: each OBJ model carries tobj's
-    /// `material_id` — one material per model's triangles. All-or-nothing
-    /// at file scope: any model without a material keeps the whole-mesh
-    /// fallback for the whole file.
+    // `material_id` — one material per model's triangles. All-or-nothing
+    // at file scope: any model without a material keeps the whole-mesh
+    // fallback for the whole file.
     let mut pending_triangle_materials: Vec<u16> = Vec::new();
     let mut complete = true;
     let mut parts = MeshPartsBuilder::new();
@@ -373,7 +376,7 @@ pub fn load_obj_with_parts(path: &std::path::Path) -> Result<(MeshData, MeshPart
             .and_then(|id| u16::try_from(id).ok())
             .filter(|&id| usize::from(id) < data.material_names.len());
         // Validate attribute lengths before chunking: tobj does not guarantee
-        /// exact multiples for malformed files (review #1 — silent-drop risk).
+        // exact multiples for malformed files (review #1 — silent-drop risk).
         if mesh.positions.len() % 3 != 0
             || mesh.normals.len() % 3 != 0
             || mesh.texcoords.len() % 2 != 0
@@ -407,9 +410,9 @@ pub fn load_obj_with_parts(path: &std::path::Path) -> Result<(MeshData, MeshPart
         data.triangle_materials = pending_triangle_materials;
     }
     // tobj silently ignores lines it does not recognize, so a non-OBJ
-    /// text file "loads" as zero models. Refuse it like the other
-    /// importers do (row 156-A: hostile input is a typed Err, never a
-    /// silent empty Ok).
+    // text file "loads" as zero models. Refuse it like the other
+    // importers do (row 156-A: hostile input is a typed Err, never a
+    // silent empty Ok).
     if data.positions.is_empty() {
         return Err(ImportError::Obj("no mesh geometry found".into()));
     }
@@ -424,9 +427,9 @@ mod tests {
     #[test]
     fn triangle_materials_empty_means_whole_mesh() {
         // §1's contract: a mesh without the map (every pre-field mesh)
-        /// has no triangles_of_material — the caller's whole-mesh
-        /// fallback — and an out-of-range material on a MAPPED mesh
-        /// yields an empty submesh, never a silent whole-mesh bake.
+        // has no triangles_of_material — the caller's whole-mesh
+        // fallback — and an out-of-range material on a MAPPED mesh
+        // yields an empty submesh, never a silent whole-mesh bake.
         let mesh = MeshData {
             positions: vec![[0.0; 3], [1.0; 3], [0.0; 3], [1.0; 3]],
             normals: vec![[0.0; 3]; 4],
@@ -445,8 +448,8 @@ mod tests {
     fn submesh_for_material_keeps_the_sets_triangles() {
         // Two materials, two triangles: material 1 owns triangle 1.
         // The submesh keeps the FULL vertex arrays (the bake cores
-        /// resolve through `indices` — the subset-mesh kill's contract)
-        /// and only the kept triangle's original ids.
+        // resolve through `indices` — the subset-mesh kill's contract)
+        // and only the kept triangle's original ids.
         let mesh = MeshData {
             positions: vec![
                 [0.0, 0.0, 0.0],
@@ -532,8 +535,8 @@ mod tests {
     #[test]
     fn read_capped_refuses_over_cap_without_reading_whole_file() {
         // Hostile-input preflight pin (2026-11-02 sweep): a file over the
-        /// cap is refused via the metadata check; a file that grows past
-        /// the cap between check and read is refused by the take(cap+1).
+        // cap is refused via the metadata check; a file that grows past
+        // the cap between check and read is refused by the take(cap+1).
         let dir = std::env::temp_dir().join(format!("umber-mesh-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -403,16 +403,14 @@ fn fnv1a_triangle_cpu(tri: u32) -> [u8; 3] {
     ]
 }
 
-/// CPU reference: computes composite color for one texel given winning triangle
-/// + barycentrics. Mirrors shader logic exactly (same FNV-1a, same blend math,
-/// same IEEE operation order).
-///
-/// - `mesh`: the mesh being baked (for triangle count, material indices)
-/// - `params`: multi-source configuration
-/// - `tri`: winning triangle index (u32::MAX = uncovered)
-/// - `bary`: barycentric coordinates (unused for ID sources, kept for parity)
-/// - `id_map_tex`: optional ID map texture bytes (RGBA8, row-major)
-/// - `id_map_dims`: dimensions of `id_map_tex` if present
+/// CPU reference: computes composite color for one texel given a winning
+/// triangle and barycentrics. Mirrors shader logic exactly (same FNV-1a, same
+/// blend math, same IEEE operation order). Args: `mesh` (mesh being baked, for
+/// triangle count and material indices), `params` (multi-source configuration),
+/// `tri` (winning triangle index, u32::MAX = uncovered), `bary` (barycentric
+/// coordinates, unused for ID sources, kept for parity), `id_map_tex` (optional
+/// ID map texture bytes, RGBA8 row-major), `id_map_dims` (dimensions of
+/// `id_map_tex` if present).
 pub fn hash_source_cpu(
     mesh: &MeshData,
     params: &IdMultiParams,
@@ -448,7 +446,7 @@ pub fn hash_source_cpu(
             }
             IdSource::IdMap => {
                 if let Some(tex) = id_map_tex {
-                    let (w, h) = id_map_dims;
+                    let (w, _h) = id_map_dims;
                     let x = ((tri as f32 / mesh.triangle_count() as f32) * w as f32) as u32; // approximation; shader uses actual texel coords
                     let y = 0; // shader computes from gid
                                // Note: CPU reference can't know exact texel coord from triangle index alone.
@@ -950,9 +948,9 @@ mod tests {
         let expected_g = (tri0_hash[1] as f32 * 0.5).round() as u8;
         let expected_b = (tri0_hash[2] as f32 * 0.5).round() as u8;
         let result = hash_source_cpu(&mesh, &params, 0, (0.0, 0.0), None, (32, 32));
-        assert_eq!(result[0], expected_r.min(255));
-        assert_eq!(result[1], expected_g.min(255));
-        assert_eq!(result[2], expected_b.min(255));
+        assert_eq!(result[0], expected_r);
+        assert_eq!(result[1], expected_g);
+        assert_eq!(result[2], expected_b);
         assert_eq!(result[3], 255);
     }
 

@@ -325,6 +325,16 @@ bakes =
     .id-blend-mode-additive = Additive
     .id-blend-mode-max = Max
     .id-blend-mode-replace = Replace
+    .ground-plane = Ground plane
+    .ground-plane-size = Size
+    .ground-plane-height = Height offset
+    .ground-plane-subdivs = Subdivisions
+    .ground-plane-maps = Maps
+    .ground-plane-map-ao = AO
+    .ground-plane-map-height = Height
+    .ground-plane-map-id = ID
+    .show-ground-plane = Show ground plane
+    .ground-plane-hint = Generated plane beneath the scene for AO, height, and ID bakes.
 
 ## Export panel
 

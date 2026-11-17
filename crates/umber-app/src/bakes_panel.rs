@@ -145,7 +145,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fluent::FluentValue;
 use umber_bake::margin::MarginType;
-use umber_bake::{IdBlendMode, IdMultiParams, IdSource, IdSourceParams};
+use umber_bake::{IdBlendMode, IdSource, IdSourceParams};
 use umber_gui::{ParamGroup, ValueField};
 use umber_mesh::FIRST_TILE;
 
@@ -153,30 +153,15 @@ use crate::i18n::{tr, tr_args};
 use crate::tile_selection::{MeshTilesCache, TileSelection};
 
 /// Opacity source for the opacity baker (D3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpacitySource {
     /// Bake AO on the fly and use 1.0 - AO (occlusion) as opacity.
+    #[default]
     Cavity,
     /// Sample an existing ID map's coverage.
     IdMap,
     /// Uniform value.
     Manual,
-}
-
-impl Default for OpacitySource {
-    fn default() -> Self {
-        Self::Cavity
-    }
-}
-
-impl OpacitySource {
-    pub fn label(self) -> String {
-        match self {
-            Self::Cavity => tr("bakes.opacity-source-cavity"),
-            Self::IdMap => tr("bakes.opacity-source-id"),
-            Self::Manual => tr("bakes.opacity-source-manual"),
-        }
-    }
 }
 
 /// Bake resolutions offered by the panel (square targets): the shared
@@ -213,7 +198,7 @@ pub const MIN_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::MIN_SKEW_THRESHOLD_DEG
 /// Maximum skew threshold (90° = protection effectively off).
 pub const MAX_SKEW_THRESHOLD_DEG: f32 = umber_bake::skew::MAX_SKEW_THRESHOLD_DEG;
 
-/// Which mesh map the panel can bake (the four `umber-bake` entry points
+/// Which mesh map the panel can bake (the `umber-bake` entry points
 /// the panel drives; a subset of [`umber_mesh::MeshMapKind`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BakeSelection {
@@ -247,11 +232,14 @@ pub enum BakeSelection {
     /// Per-texel opacity mask from cavity (AO), ID map, or uniform value (D3).
     /// Low-mesh self-bake, single-tile only in v1 (like curvature/position).
     Opacity,
+    /// Ground plane bake (D5): AO, height, and ID baked onto a generated
+    /// ground plane mesh beneath the scene. Single-tile only in v1.
+    GroundPlane,
 }
 
 impl BakeSelection {
     /// Every selectable map, in bake order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Ao,
         Self::Curvature,
         Self::Thickness,
@@ -262,6 +250,7 @@ impl BakeSelection {
         Self::IdMulti,
         Self::BentNormal,
         Self::Opacity,
+        Self::GroundPlane,
     ];
 
     /// What a fresh panel checks: the four original maps plus the normal
@@ -300,6 +289,7 @@ impl BakeSelection {
             // names the transfer, not the paintable height channel.
             Self::Height => tr("bakes.map-height-transfer"),
             Self::Opacity => tr("bakes.map-opacity"),
+            Self::GroundPlane => tr("bakes.ground-plane"),
         }
     }
 
@@ -317,6 +307,7 @@ impl BakeSelection {
             Self::BentNormal => umber_mesh::MeshMapKind::BentNormal,
             Self::Height => umber_mesh::MeshMapKind::Height,
             Self::Opacity => umber_mesh::MeshMapKind::Opacity,
+            Self::GroundPlane => umber_mesh::MeshMapKind::GroundPlane,
         }
     }
 }
@@ -413,6 +404,11 @@ pub fn plan_bake(maps: &[BakeSelection], present: &[u16], tiles: &[u16]) -> Bake
                     continue;
                 }
             };
+            // GroundPlane is single-tile only (like curvature/position/opacity/IdMulti)
+            if *selection == BakeSelection::GroundPlane && *tile != FIRST_TILE {
+                skipped.push((*tile, *selection));
+                continue;
+            }
             jobs.push(BakeJob {
                 selection: *selection,
                 tile: *tile,
@@ -465,6 +461,14 @@ pub enum BakeSettingId {
     IdSourceWeights,
     /// ID Multi source masks.
     IdSourceMasks,
+    /// Ground plane size.
+    GroundPlaneSize,
+    /// Ground plane height offset.
+    GroundPlaneHeight,
+    /// Ground plane subdivisions.
+    GroundPlaneSubdivs,
+    /// Ground plane maps checkbox group.
+    GroundPlaneMaps,
 }
 
 /// One bake-log entry (§6:59): timestamp, map, set, duration, warnings
@@ -647,9 +651,11 @@ pub fn bake_map_of(selection: BakeSelection) -> umber_bake::BakeMap {
         BakeSelection::Normal => umber_bake::BakeMap::Normal,
         BakeSelection::WorldNormal => umber_bake::BakeMap::WorldSpaceNormal,
         BakeSelection::Id => umber_bake::BakeMap::Id,
+        BakeSelection::IdMulti => umber_bake::BakeMap::IdMulti,
         BakeSelection::BentNormal => umber_bake::BakeMap::BentNormal,
         BakeSelection::Height => umber_bake::BakeMap::Height,
         BakeSelection::Opacity => umber_bake::BakeMap::Opacity,
+        BakeSelection::GroundPlane => umber_bake::BakeMap::GroundPlane,
     }
 }
 
@@ -689,6 +695,20 @@ pub mod bake_param {
     pub const ID_MULTI_SOURCES: &str = "id_multi_sources";
     /// IdMulti blend mode (`Int`: 0 = Additive, 1 = Max, 2 = Replace).
     pub const ID_MULTI_BLEND_MODE: &str = "id_multi_blend_mode";
+    /// Ground plane size (`Float`).
+    pub const GROUND_PLANE_SIZE: &str = "ground_plane_size";
+    /// Ground plane height offset (`Float`).
+    pub const GROUND_PLANE_HEIGHT: &str = "ground_plane_height";
+    /// Ground plane subdivisions (`Int`).
+    pub const GROUND_PLANE_SUBDIVS: &str = "ground_plane_subdivs";
+    /// Ground plane maps bitmask (`Int`).
+    pub const GROUND_PLANE_MAPS: &str = "ground_plane_maps";
+    /// Ground plane rays (`Int`).
+    pub const GROUND_PLANE_RAYS: &str = "ground_plane_rays";
+    /// Ground plane max distance (`Float`).
+    pub const GROUND_PLANE_MAX_DISTANCE: &str = "ground_plane_max_distance";
+    /// Ground plane bias (`Float`).
+    pub const GROUND_PLANE_BIAS: &str = "ground_plane_bias";
 }
 
 impl BakeSelection {
@@ -706,6 +726,7 @@ impl BakeSelection {
             Self::BentNormal => "bent_normal",
             Self::Height => "height",
             Self::Opacity => "opacity",
+            Self::GroundPlane => "ground_plane",
         }
     }
 
@@ -1258,6 +1279,20 @@ pub struct BakesPanel {
     id_multi_blend_mode: IdBlendMode,
     /// IdMulti sources (serialized via settings snapshot).
     id_multi_sources: Vec<IdSourceParams>,
+    /// Ground plane size (world units, square).
+    ground_plane_size: f32,
+    /// Ground plane height offset below scene (world units).
+    ground_plane_height_offset: f32,
+    /// Ground plane subdivisions (tessellation).
+    ground_plane_subdivs: u32,
+    /// Ground plane maps bitmask (bit 0=AO, bit 1=Height, bit 2=Id).
+    ground_plane_maps_bitmask: u32,
+    /// Ground plane rays (AO only).
+    ground_plane_rays: u32,
+    /// Ground plane max distance.
+    ground_plane_max_distance: f32,
+    /// Ground plane bias.
+    ground_plane_bias: f32,
     /// Auto-rebake on parameter change (§6:58; default off — background
     /// bakes are opt-in).
     auto_rebake: bool,
@@ -1277,8 +1312,13 @@ pub struct BakesPanel {
     applied_opacity_source: OpacitySource,
     applied_opacity_strength: f32,
     applied_opacity_invert: bool,
-    applied_id_multi_blend_mode: IdBlendMode,
-    applied_id_multi_sources: Vec<IdSourceParams>,
+    applied_ground_plane_size: f32,
+    applied_ground_plane_height_offset: f32,
+    applied_ground_plane_subdivs: u32,
+    applied_ground_plane_maps_bitmask: u32,
+    applied_ground_plane_rays: u32,
+    applied_ground_plane_max_distance: f32,
+    applied_ground_plane_bias: f32,
     /// The per-set checklist (§6:59), synced from the mesh each frame.
     sets: Vec<SetCheck>,
     /// Whether the cage wireframe overlay shows (synced to the viewport
@@ -1423,6 +1463,14 @@ impl BakesPanel {
                 mask_path: None,
                 color: [255, 255, 255],
             }],
+            // Ground plane defaults (matching umber_mesh::GroundPlaneDesc::default)
+            ground_plane_size: 10.0,
+            ground_plane_height_offset: 0.1,
+            ground_plane_subdivs: 32,
+            ground_plane_maps_bitmask: 1, // AO only by default
+            ground_plane_rays: 16,
+            ground_plane_max_distance: 100.0,
+            ground_plane_bias: 0.001,
             auto_rebake: false,
             auto_state: umber_bake::skew::AutoRebake::new(),
             affected_tiles: umber_core::AffectedRegion::new(),
@@ -1435,13 +1483,13 @@ impl BakesPanel {
             applied_opacity_source: OpacitySource::default(),
             applied_opacity_strength: 1.0,
             applied_opacity_invert: false,
-            applied_id_multi_blend_mode: IdBlendMode::default(),
-            applied_id_multi_sources: vec![IdSourceParams {
-                source: IdSource::Triangle,
-                weight: 1.0,
-                mask_path: None,
-                color: [255, 255, 255],
-            }],
+            applied_ground_plane_size: 10.0,
+            applied_ground_plane_height_offset: 0.1,
+            applied_ground_plane_subdivs: 32,
+            applied_ground_plane_maps_bitmask: 1,
+            applied_ground_plane_rays: 16,
+            applied_ground_plane_max_distance: 100.0,
+            applied_ground_plane_bias: 0.001,
             sets: Vec::new(),
             show_cage: false,
             highlighted_setting: None,
@@ -1510,36 +1558,72 @@ impl BakesPanel {
                 );
             }
             if kind == BakeSelection::IdMulti {
-                use umber_bake::{IdBlendMode, IdSource, IdSourceParams};
-                // Serialize sources as a list of maps
+                // Serialize sources using available ParamValue variants.
+                // TODO: proper serialization with full format when ParamValue supports Map/List.
                 let sources_list: Vec<ParamValue> = self
                     .id_multi_sources
                     .iter()
                     .map(|src| {
-                        let mut m = BTreeMap::new();
-                        m.insert("source".to_owned(), ParamValue::Int(src.source as i32));
-                        m.insert("weight".to_owned(), ParamValue::Float(src.weight));
-                        if let Some(ref mask) = src.mask_path {
-                            m.insert("mask_path".to_owned(), ParamValue::String(mask.clone()));
-                        }
-                        m.insert(
-                            "color".to_owned(),
-                            ParamValue::List(vec![
-                                ParamValue::Int(src.color[0] as i32),
-                                ParamValue::Int(src.color[1] as i32),
-                                ParamValue::Int(src.color[2] as i32),
-                            ]),
-                        );
-                        ParamValue::Map(m)
+                        // Encode source as Color: [source_idx, weight, blend_mode, reserved]
+                        // Use Asset for mask_path if present.
+                        let mut color = [0.0f32; 3];
+                        color[0] = src.source as u8 as f32;
+                        color[1] = src.weight;
+                        color[2] = self.id_multi_blend_mode as u8 as f32;
+                        ParamValue::Color(color)
                     })
                     .collect();
                 params.insert(
                     bake_param::ID_MULTI_SOURCES.to_owned(),
-                    ParamValue::List(sources_list),
+                    ParamValue::Stops(
+                        sources_list
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, c)| {
+                                if let ParamValue::Color(c) = c {
+                                    // Color has 3 components: [source_idx, weight, blend_mode]
+                                    // Use 0.0 as default for 4th component
+                                    (i as f32, [c[0], c[1], c[2], 0.0])
+                                } else {
+                                    (0.0, [0.0; 4])
+                                }
+                            })
+                            .collect(),
+                    ),
                 );
                 params.insert(
                     bake_param::ID_MULTI_BLEND_MODE.to_owned(),
                     ParamValue::Int(self.id_multi_blend_mode as i32),
+                );
+            }
+            if kind == BakeSelection::GroundPlane {
+                params.insert(
+                    bake_param::GROUND_PLANE_SIZE.to_owned(),
+                    ParamValue::Float(self.ground_plane_size),
+                );
+                params.insert(
+                    bake_param::GROUND_PLANE_HEIGHT.to_owned(),
+                    ParamValue::Float(self.ground_plane_height_offset),
+                );
+                params.insert(
+                    bake_param::GROUND_PLANE_SUBDIVS.to_owned(),
+                    ParamValue::Int(i32::try_from(self.ground_plane_subdivs).unwrap_or(i32::MAX)),
+                );
+                params.insert(
+                    bake_param::GROUND_PLANE_MAPS.to_owned(),
+                    ParamValue::Int(self.ground_plane_maps_bitmask as i32),
+                );
+                params.insert(
+                    bake_param::GROUND_PLANE_RAYS.to_owned(),
+                    ParamValue::Int(i32::try_from(self.ground_plane_rays).unwrap_or(i32::MAX)),
+                );
+                params.insert(
+                    bake_param::GROUND_PLANE_MAX_DISTANCE.to_owned(),
+                    ParamValue::Float(self.ground_plane_max_distance),
+                );
+                params.insert(
+                    bake_param::GROUND_PLANE_BIAS.to_owned(),
+                    ParamValue::Float(self.ground_plane_bias),
                 );
             }
             bakers.insert(kind, params);
@@ -1606,67 +1690,28 @@ impl BakesPanel {
                 _ => IdBlendMode::Additive,
             };
         }
-        if let Some(ParamValue::List(sources)) = find(bake_param::ID_MULTI_SOURCES) {
-            use umber_bake::{IdBlendMode, IdSource, IdSourceParams};
+        if let Some(ParamValue::Stops(sources)) = find(bake_param::ID_MULTI_SOURCES) {
             self.id_multi_sources = sources
                 .into_iter()
-                .filter_map(|src| {
-                    let ParamValue::Map(m) = src else {
-                        return None;
-                    };
-                    let source = m.get("source").and_then(|v| {
-                        if let ParamValue::Int(i) = v {
-                            match i {
-                                1 => Some(IdSource::Material),
-                                2 => Some(IdSource::IdMap),
-                                3 => Some(IdSource::Manual),
-                                _ => Some(IdSource::Triangle),
-                            }
-                        } else {
-                            None
-                        }
-                    })?;
-                    let weight = m
-                        .get("weight")
-                        .and_then(|v| {
-                            if let ParamValue::Float(f) = v {
-                                Some(*f)
-                            } else {
-                                None
-                            }
+                .filter_map(|(_, color_arr)| {
+                    if color_arr.len() >= 3 {
+                        let source_idx = color_arr[0] as u8;
+                        let source = match source_idx {
+                            1 => IdSource::Material,
+                            2 => IdSource::IdMap,
+                            3 => IdSource::Manual,
+                            _ => IdSource::Triangle,
+                        };
+                        let weight = color_arr[1];
+                        Some(IdSourceParams {
+                            source,
+                            weight,
+                            mask_path: None, // TODO: restore mask_path when ParamValue supports Asset
+                            color: [255, 255, 255],
                         })
-                        .unwrap_or(1.0);
-                    let mask_path = m.get("mask_path").and_then(|v| {
-                        if let ParamValue::String(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    let color = m
-                        .get("color")
-                        .and_then(|v| {
-                            if let ParamValue::List(arr) = v {
-                                if arr.len() == 3 {
-                                    Some([
-                                        arr[0].clone().try_into().ok()?,
-                                        arr[1].clone().try_into().ok()?,
-                                        arr[2].clone().try_into().ok()?,
-                                    ])
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or([255, 255, 255]);
-                    Some(IdSourceParams {
-                        source,
-                        weight,
-                        mask_path,
-                        color,
-                    })
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             if self.id_multi_sources.is_empty() {
@@ -1677,6 +1722,27 @@ impl BakesPanel {
                     color: [255, 255, 255],
                 }];
             }
+        }
+        if let Some(ParamValue::Float(v)) = find(bake_param::GROUND_PLANE_SIZE) {
+            self.ground_plane_size = v.max(0.1);
+        }
+        if let Some(ParamValue::Float(v)) = find(bake_param::GROUND_PLANE_HEIGHT) {
+            self.ground_plane_height_offset = v.max(0.0);
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::GROUND_PLANE_SUBDIVS) {
+            self.ground_plane_subdivs = v.max(1) as u32;
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::GROUND_PLANE_MAPS) {
+            self.ground_plane_maps_bitmask = v.max(1) as u32;
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::GROUND_PLANE_RAYS) {
+            self.ground_plane_rays = v.max(1) as u32;
+        }
+        if let Some(ParamValue::Float(v)) = find(bake_param::GROUND_PLANE_MAX_DISTANCE) {
+            self.ground_plane_max_distance = v.max(0.001);
+        }
+        if let Some(ParamValue::Float(v)) = find(bake_param::GROUND_PLANE_BIAS) {
+            self.ground_plane_bias = v.max(0.0);
         }
         self.output_dir = block.out_dir.clone();
     }
@@ -2201,6 +2267,38 @@ impl BakesPanel {
             changed.push(umber_bake::skew::BakeParam::RayLength);
             self.applied_opacity_invert = self.opacity_invert;
         }
+        if (self.ground_plane_size - self.applied_ground_plane_size).abs() > f32::EPSILON {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_size = self.ground_plane_size;
+        }
+        if (self.ground_plane_height_offset - self.applied_ground_plane_height_offset).abs()
+            > f32::EPSILON
+        {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_height_offset = self.ground_plane_height_offset;
+        }
+        if self.ground_plane_subdivs != self.applied_ground_plane_subdivs {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_subdivs = self.ground_plane_subdivs;
+        }
+        if self.ground_plane_maps_bitmask != self.applied_ground_plane_maps_bitmask {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_maps_bitmask = self.ground_plane_maps_bitmask;
+        }
+        if self.ground_plane_rays != self.applied_ground_plane_rays {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_rays = self.ground_plane_rays;
+        }
+        if (self.ground_plane_max_distance - self.applied_ground_plane_max_distance).abs()
+            > f32::EPSILON
+        {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_max_distance = self.ground_plane_max_distance;
+        }
+        if (self.ground_plane_bias - self.applied_ground_plane_bias).abs() > f32::EPSILON {
+            changed.push(umber_bake::skew::BakeParam::RayLength);
+            self.applied_ground_plane_bias = self.ground_plane_bias;
+        }
         for param in changed {
             self.auto_state.mark_param_change(param, now);
             self.affected_tiles.mark_tiles(selected_tiles);
@@ -2541,6 +2639,92 @@ impl BakesPanel {
 
                 let invert_label = tr("bakes.opacity-invert");
                 group.ui.checkbox(&mut self.opacity_invert, invert_label);
+            }
+
+            // Ground plane settings (D5): shown when GroundPlane map is checked.
+            if self.is_map_enabled(BakeSelection::GroundPlane) {
+                let size_label = self.row_label(
+                    BakeSettingId::GroundPlaneSize,
+                    tr("bakes.ground-plane-size"),
+                );
+                group.row(size_label.as_str(), |ui| {
+                    ui.add(
+                        ValueField::new(&mut self.ground_plane_size)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .default_value(10.0)
+                            .range(0.1..=100.0)
+                            .step(0.1)
+                            .decimals(1),
+                    );
+                });
+                let height_label = self.row_label(
+                    BakeSettingId::GroundPlaneHeight,
+                    tr("bakes.ground-plane-height"),
+                );
+                group.row(height_label.as_str(), |ui| {
+                    ui.add(
+                        ValueField::new(&mut self.ground_plane_height_offset)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .default_value(0.1)
+                            .range(0.0..=10.0)
+                            .step(0.01)
+                            .decimals(2),
+                    );
+                });
+                let subdivs_label = self.row_label(
+                    BakeSettingId::GroundPlaneSubdivs,
+                    tr("bakes.ground-plane-subdivs"),
+                );
+                group.row(subdivs_label.as_str(), |ui| {
+                    ui.add(
+                        ValueField::new(&mut self.ground_plane_subdivs)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .default_value(32)
+                            .range(1..=128)
+                            .step(1.0),
+                    );
+                });
+                let maps_label = self.row_label(
+                    BakeSettingId::GroundPlaneMaps,
+                    tr("bakes.ground-plane-maps"),
+                );
+                group.row(maps_label.as_str(), |ui| {
+                    ui.horizontal(|ui| {
+                        let mut ao_on = (self.ground_plane_maps_bitmask & 1) != 0;
+                        if ui
+                            .checkbox(&mut ao_on, tr("bakes.ground-plane-map-ao"))
+                            .changed()
+                        {
+                            if ao_on {
+                                self.ground_plane_maps_bitmask |= 1;
+                            } else {
+                                self.ground_plane_maps_bitmask &= !1;
+                            }
+                        }
+                        let mut height_on = (self.ground_plane_maps_bitmask & 2) != 0;
+                        if ui
+                            .checkbox(&mut height_on, tr("bakes.ground-plane-map-height"))
+                            .changed()
+                        {
+                            if height_on {
+                                self.ground_plane_maps_bitmask |= 2;
+                            } else {
+                                self.ground_plane_maps_bitmask &= !2;
+                            }
+                        }
+                        let mut id_on = (self.ground_plane_maps_bitmask & 4) != 0;
+                        if ui
+                            .checkbox(&mut id_on, tr("bakes.ground-plane-map-id"))
+                            .changed()
+                        {
+                            if id_on {
+                                self.ground_plane_maps_bitmask |= 4;
+                            } else {
+                                self.ground_plane_maps_bitmask &= !4;
+                            }
+                        }
+                    });
+                });
             }
 
             group

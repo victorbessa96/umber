@@ -276,17 +276,14 @@
 use egui::{Color32, PointerButton, Response, Sense, Ui};
 // The lib owns the projection module (row 278); main.rs re-exports it
 // (row 281), so the path names the lib directly — the same types either way.
-use bytemuck;
 use umber_app::projection::{
     overlay_quad, rasterize_projection, rasterize_projection_live, ProjectionState,
 };
 use umber_color::{apply_display_chain, DisplaySettings};
 use umber_core::stencil::{forward_map, StencilImage, StencilTransform};
 use umber_gpu::{
-    postfx::PostChain,
-    renderer::{PaintParams, WireColor},
-    DisplayLut, EnvIrradiance, GpuContext, MeshBuffers, OrbitCamera, PostFxViewport, SoloChannel,
-    ViewMode, ViewportRoute,
+    postfx::PostChain, renderer::PaintParams, DisplayLut, EnvIrradiance, GpuContext, MeshBuffers,
+    OrbitCamera, PostFxViewport, SoloChannel, ViewMode, ViewportRoute,
 };
 use umber_mesh::tile_of_uv;
 use wgpu::util::DeviceExt;
@@ -459,6 +456,19 @@ pub struct Viewport {
     /// The cage offsets used to build the cage wire buffer (for rebuild
     /// if the mesh changes). Stored as `Vec<[f32; 3]>` per vertex.
     cage_offsets: Option<Vec<[f32; 3]>>,
+    /// Ground plane wireframe overlay (D5, synced from the Bakes panel's
+    /// ground plane toggle by the app shell). Off by default with the
+    /// same byte-identical-off contract.
+    show_ground_plane: bool,
+    /// Pre-built ground plane wireframe vertex buffer (plane edges at
+    /// the configured height offset). Built when ground plane params
+    /// change; `None` if not generated yet.
+    ground_plane_wire_buffer: Option<wgpu::Buffer>,
+    /// Number of vertices in the ground plane wire buffer.
+    ground_plane_wire_count: u32,
+    /// The ground plane desc used to build the wire buffer (for rebuild
+    /// if the mesh changes). Stored as `GroundPlaneDesc`.
+    ground_plane_desc: Option<umber_mesh::GroundPlaneDesc>,
     /// The shading mode (View menu; V cycles lit ↔ unlit). Defaults
     /// to Lit — today's render, byte-identical with the mode uniform
     /// at (0, 0).
@@ -925,6 +935,58 @@ impl Viewport {
         self.cage_wire_buffer = None;
         self.cage_wire_count = 0;
         self.cage_offsets = None;
+    }
+
+    /// Shows or hides the ground plane wireframe overlay (Bakes panel `Show
+    /// ground plane`). Synced from the app shell each frame before `ui`, like the
+    /// wireframe/grid toggles.
+    pub fn set_show_ground_plane(&mut self, on: bool) {
+        self.show_ground_plane = on;
+    }
+
+    /// Whether the ground plane overlay shows.
+    pub fn show_ground_plane(&self) -> bool {
+        self.show_ground_plane
+    }
+
+    /// Sets the ground plane wireframe buffer from the generated ground plane mesh.
+    /// Builds a wire buffer using the plane's edge vertices at the configured height.
+    /// Call this when ground plane params change (e.g., from the Bakes panel).
+    pub fn set_ground_plane_wire(&mut self, gpu: &GpuContext, desc: &umber_mesh::GroundPlaneDesc) {
+        let mesh = match umber_mesh::generate_ground_plane(desc) {
+            Ok(m) => m,
+            Err(_) => {
+                self.ground_plane_wire_buffer = None;
+                self.ground_plane_wire_count = 0;
+                self.ground_plane_desc = None;
+                return;
+            }
+        };
+        let wire_vertices = umber_mesh::wire_vertices_from_indices(&mesh);
+        if wire_vertices.is_empty() {
+            self.ground_plane_wire_buffer = None;
+            self.ground_plane_wire_count = 0;
+            self.ground_plane_desc = None;
+            return;
+        }
+        let wire_count = u32::try_from(wire_vertices.len()).unwrap_or(0);
+        let buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_ground_plane_wire_vertex_buffer"),
+                contents: bytemuck::cast_slice(&wire_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.ground_plane_wire_buffer = Some(buffer);
+        self.ground_plane_wire_count = wire_count;
+        self.ground_plane_desc = Some(*desc);
+    }
+
+    /// Clears the ground plane wire buffer (e.g., when mesh is unloaded).
+    pub fn clear_ground_plane_wire(&mut self) {
+        self.ground_plane_wire_buffer = None;
+        self.ground_plane_wire_count = 0;
+        self.ground_plane_desc = None;
     }
 
     /// Sets the shading mode (View menu rows / V shortcut; synced from
@@ -1517,9 +1579,7 @@ impl Viewport {
             // skipped entirely when off (byte-identical to cage-off).
             // Uses pre-built cage wire buffer with displaced positions.
             if self.show_cage {
-                if let (Some(cage_buffer), Some(mesh_data)) =
-                    (&self.cage_wire_buffer, &self.mesh_data)
-                {
+                if let (Some(cage_buffer), Some(_)) = (&self.cage_wire_buffer, &self.mesh_data) {
                     if self.cage_wire_count > 0 {
                         let cage = gpu.cage_wire_callback(
                             uniform,
@@ -1536,6 +1596,26 @@ impl Viewport {
                     // Fallback: draw regular wireframe in cage color if no cage buffer yet.
                     let cage = gpu.wire_callback(&*mesh, uniform, umber_gpu::WireColor::cage());
                     ui.painter().add(umber_gpu::wire_paint_shape(rect, cage));
+                }
+            }
+            // Ground plane overlay (D5): after the cage so its edges are on top,
+            // skipped entirely when off (byte-identical to ground-plane-off).
+            // Uses pre-built ground plane wire buffer with plane edges at the
+            // configured height offset.
+            if self.show_ground_plane {
+                if let Some(ground_plane_buffer) = &self.ground_plane_wire_buffer {
+                    if self.ground_plane_wire_count > 0 {
+                        let gp = gpu.ground_plane_wire_callback(
+                            uniform,
+                            ground_plane_buffer.clone(),
+                            self.ground_plane_wire_count,
+                            mesh.uniform_buffer().clone(),
+                            umber_gpu::WireColor::ground_plane(),
+                        );
+                        if let Some(gp) = gp {
+                            ui.painter().add(umber_gpu::wire_paint_shape(rect, gp));
+                        }
+                    }
                 }
             }
         }

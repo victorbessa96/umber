@@ -329,6 +329,16 @@ bakes =
     .id-blend-mode-additive = Aditivo
     .id-blend-mode-max = Máximo
     .id-blend-mode-replace = Substituir
+    .ground-plane = Plano de chão
+    .ground-plane-size = Tamanho
+    .ground-plane-height = Deslocamento de altura
+    .ground-plane-subdivs = Subdivisões
+    .ground-plane-maps = Mapas
+    .ground-plane-map-ao = AO
+    .ground-plane-map-height = Altura
+    .ground-plane-map-id = ID
+    .show-ground-plane = Mostrar plano de chão
+    .ground-plane-hint = Plano gerado abaixo da cena para bakes de AO, altura e ID.
 
 ## Painel de exportação
 

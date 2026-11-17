@@ -212,7 +212,7 @@ impl BakeTarget {
 /// extra padding fields are needed to line the two layouts up.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuTriangle {
+pub struct GpuTriangle {
     v0: [f32; 4],
     v1: [f32; 4],
     v2: [f32; 4],
@@ -230,7 +230,7 @@ const _: () = assert!(
 /// imported without vertex normals; it is carried in the buffer for the
 /// next slice's use (e.g. backface culling) — this slice's shader does
 /// not yet consume it.
-fn build_triangles(mesh: &MeshData) -> Vec<GpuTriangle> {
+pub fn build_triangles(mesh: &MeshData) -> Vec<GpuTriangle> {
     mesh.indices
         .chunks_exact(3)
         .map(|idx| {

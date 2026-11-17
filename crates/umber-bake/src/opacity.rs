@@ -31,7 +31,7 @@ use umber_gpu::bake_shaders::OPACITY_BAKE_SHADER;
 use umber_mesh::MeshData;
 
 use crate::ao::{AoBakeError, BakeTarget};
-use crate::position::{bake_position_and_normal, PositionMapError, MAX_TRIS_PER_BAKE};
+use crate::position::{bake_position_and_normal, PositionMapError};
 
 /// Which source drives the opacity bake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -508,6 +508,7 @@ pub fn bake_opacity_mesh(
 /// Bakes opacity for a single tile (like curvature/position: single-tile only in v1).
 /// Filters `mesh` to the tile's triangles and rebases their UVs, then reuses
 /// the existing [`bake_opacity_mesh`] core.
+#[allow(clippy::too_many_arguments)] // wgpu dispatch fns take the full pipeline state
 pub fn bake_opacity_tile(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

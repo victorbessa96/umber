@@ -89,6 +89,103 @@ impl Cage {
     }
 }
 
+/// Parameters for generating a ground plane mesh.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GroundPlaneDesc {
+    /// Full width/depth of the plane in world units (square).
+    pub size: f32,
+    /// Height offset below the scene's minimum Y (world units). Positive = below scene.
+    pub height_offset: f32,
+    /// Subdivisions per axis (tessellation). `subdivs = 1` → 2 triangles (1 quad).
+    /// Each subdivision doubles the triangle count per axis.
+    pub subdivisions: u32,
+}
+
+impl Default for GroundPlaneDesc {
+    fn default() -> Self {
+        Self {
+            size: 10.0,
+            height_offset: 0.1,
+            subdivisions: 32,
+        }
+    }
+}
+
+/// Error type for ground plane generation.
+#[derive(Debug, thiserror::Error)]
+pub enum GroundPlaneError {
+    /// `desc.subdivisions` was zero.
+    #[error("subdivisions must be at least 1")]
+    InvalidSubdivisions,
+    /// `desc.size` was zero or negative.
+    #[error("size must be positive (got {size})")]
+    InvalidSize { size: f32 },
+}
+
+/// Generates a ground plane `MeshData` centered at (0, -height_offset, 0) with
+/// planar UVs covering [0, 1] × [0, 1] across the plane extents.
+/// Returns `Err` if `subdivisions == 0` or `size <= 0.0`.
+pub fn generate_ground_plane(desc: &GroundPlaneDesc) -> Result<MeshData, GroundPlaneError> {
+    if desc.subdivisions == 0 {
+        return Err(GroundPlaneError::InvalidSubdivisions);
+    }
+    if desc.size <= 0.0 {
+        return Err(GroundPlaneError::InvalidSize { size: desc.size });
+    }
+
+    let half = desc.size * 0.5;
+    let step = desc.size / desc.subdivisions as f32;
+    let y = -desc.height_offset;
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+
+    // Generate vertices in a grid (subdivisions+1 points per axis)
+    for vz in 0..=desc.subdivisions {
+        for vx in 0..=desc.subdivisions {
+            let x = -half + vx as f32 * step;
+            let z = -half + vz as f32 * step;
+            positions.push([x, y, z]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([
+                vx as f32 / desc.subdivisions as f32,
+                vz as f32 / desc.subdivisions as f32,
+            ]);
+        }
+    }
+
+    let stride = desc.subdivisions + 1;
+
+    // Generate triangles (two per quad)
+    for gz in 0..desc.subdivisions {
+        for gx in 0..desc.subdivisions {
+            let i0 = gz * stride + gx;
+            let i1 = gz * stride + gx + 1;
+            let i2 = (gz + 1) * stride + gx;
+            let i3 = (gz + 1) * stride + gx + 1;
+            // Two triangles per quad (CCW winding)
+            indices.push(i0);
+            indices.push(i1);
+            indices.push(i2);
+            indices.push(i1);
+            indices.push(i3);
+            indices.push(i2);
+        }
+    }
+
+    Ok(MeshData {
+        positions,
+        normals,
+        uvs,
+        indices,
+        material_names: Vec::new(),
+        triangle_materials: Vec::new(),
+    })
+}
+
 /// Computes the closest point on a triangle to a given point.
 /// Returns the closest point on the triangle (including interior and edges).
 fn closest_point_on_triangle(
@@ -765,5 +862,90 @@ mod tests {
         assert_eq!(cage.offsets[0], [0.0, 0.0, front]);
         assert_eq!(cage.offsets[1], [0.0, front, 0.0]);
         assert_eq!(cage.offsets[2], [front, 0.0, 0.0]);
+    }
+
+    // --- Ground plane generator tests (kittest-first DoD) ---
+
+    /// `subdivisions=2` produces 9 vertices, 8 triangles; UVs at corners are
+    /// exactly `(0,0)`, `(1,0)`, `(0,1)`, `(1,1)`; interior vertices bilinear.
+    #[test]
+    fn ground_plane_uvs_cover_unit_square() {
+        let desc = GroundPlaneDesc {
+            size: 4.0,
+            height_offset: 0.5,
+            subdivisions: 2,
+        };
+        let mesh = generate_ground_plane(&desc).expect("ground plane generation");
+
+        // (subdivs+1)^2 vertices = 9
+        assert_eq!(mesh.positions.len(), 9);
+        // 2 * subdivs^2 triangles = 8
+        assert_eq!(mesh.triangle_count(), 8);
+
+        // Corner UVs
+        // Vertex order: z=0 (vz=0): x=0,1,2 (vx=0,1,2), then z=1, then z=2
+        // vx=0,vz=0 -> idx 0 -> UV (0,0)
+        assert_eq!(mesh.uvs[0], [0.0, 0.0]);
+        // vx=2,vz=0 -> idx 2 -> UV (1,0)
+        assert_eq!(mesh.uvs[2], [1.0, 0.0]);
+        // vx=0,vz=2 -> idx 6 -> UV (0,1)
+        assert_eq!(mesh.uvs[6], [0.0, 1.0]);
+        // vx=2,vz=2 -> idx 8 -> UV (1,1)
+        assert_eq!(mesh.uvs[8], [1.0, 1.0]);
+
+        // Interior vertex (vx=1,vz=1) -> idx 4 -> UV (0.5, 0.5)
+        assert_eq!(mesh.uvs[4], [0.5, 0.5]);
+    }
+
+    /// `height_offset=0.5` → all vertex Y == `-0.5`; `size=4.0` → X/Z span `[-2, 2]`.
+    #[test]
+    fn ground_plane_height_offset_is_below_scene() {
+        let desc = GroundPlaneDesc {
+            size: 4.0,
+            height_offset: 0.5,
+            subdivisions: 2,
+        };
+        let mesh = generate_ground_plane(&desc).expect("ground plane generation");
+
+        // All vertices at Y = -0.5
+        for pos in &mesh.positions {
+            assert!(
+                (pos[1] + 0.5).abs() < 1e-6,
+                "Y should be -0.5, got {}",
+                pos[1]
+            );
+        }
+
+        // X/Z span [-2, 2] (half of size)
+        let xs: Vec<f32> = mesh.positions.iter().map(|p| p[0]).collect();
+        let zs: Vec<f32> = mesh.positions.iter().map(|p| p[2]).collect();
+        assert!((xs.iter().copied().fold(f32::INFINITY, f32::min) + 2.0).abs() < 1e-6);
+        assert!((xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 2.0).abs() < 1e-6);
+        assert!((zs.iter().copied().fold(f32::INFINITY, f32::min) + 2.0).abs() < 1e-6);
+        assert!((zs.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 2.0).abs() < 1e-6);
+    }
+
+    /// `subdivisions=0` returns `Err`.
+    #[test]
+    fn ground_plane_subdiv_zero_errors() {
+        let desc = GroundPlaneDesc {
+            size: 10.0,
+            height_offset: 0.1,
+            subdivisions: 0,
+        };
+        let err = generate_ground_plane(&desc).unwrap_err();
+        assert!(matches!(err, GroundPlaneError::InvalidSubdivisions));
+    }
+
+    /// `size=0.0` returns `Err`.
+    #[test]
+    fn ground_plane_size_zero_errors() {
+        let desc = GroundPlaneDesc {
+            size: 0.0,
+            height_offset: 0.1,
+            subdivisions: 32,
+        };
+        let err = generate_ground_plane(&desc).unwrap_err();
+        assert!(matches!(err, GroundPlaneError::InvalidSize { size: 0.0 }));
     }
 }

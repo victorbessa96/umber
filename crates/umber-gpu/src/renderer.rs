@@ -308,6 +308,14 @@ impl WireColor {
             color: [0.9, 0.6, 0.1, 0.6],
         }
     }
+
+    /// The ground plane overlay color (D5): cyan at 60% so ground plane
+    /// edges read distinctly over the wireframe and cage.
+    pub fn ground_plane() -> Self {
+        Self {
+            color: [0.1, 0.8, 0.9, 0.6],
+        }
+    }
 }
 
 /// Ground-grid uniforms (group 0 binding 0 of `shaders::GRID_SHADER`):
@@ -635,6 +643,50 @@ impl GpuContext {
             color_bind_group,
             vertex_buffer: cage_wire_buffer,
             vertex_count: cage_wire_count,
+            uniform_buffer,
+            uniform,
+        })
+    }
+
+    /// Builds a ground plane wireframe callback: like `cage_wire_callback`
+    /// but for the ground plane mesh (plane edges at the configured height).
+    pub fn ground_plane_wire_callback(
+        &self,
+        uniform: CameraUniform,
+        ground_plane_wire_buffer: wgpu::Buffer,
+        ground_plane_wire_count: u32,
+        uniform_buffer: wgpu::Buffer,
+        color: WireColor,
+    ) -> Option<WireframePaintCallback> {
+        if ground_plane_wire_count == 0 {
+            return None;
+        }
+
+        let color_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("umber_ground_plane_wire_color_buffer"),
+                contents: bytemuck::bytes_of(&color),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let color_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("umber_ground_plane_wire_color_bind_group"),
+            layout: &self.wire_color_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &color_buffer,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
+        Some(WireframePaintCallback {
+            pipeline: self.wire_pipeline.clone(),
+            bind_group: self.fallback_wire_bind_group(),
+            color_bind_group,
+            vertex_buffer: ground_plane_wire_buffer,
+            vertex_count: ground_plane_wire_count,
             uniform_buffer,
             uniform,
         })

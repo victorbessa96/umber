@@ -40,6 +40,8 @@ pub enum MeshMapKind {
     WorldSpaceNormal,
     /// `<set>_opacity` (D3 opacity baker)
     Opacity,
+    /// `<set>_ground_plane` (D5 ground plane bake)
+    GroundPlane,
 }
 
 impl MeshMapKind {
@@ -56,6 +58,7 @@ impl MeshMapKind {
             Self::BentNormal => "bent_normal",
             Self::WorldSpaceNormal => "world_space_normal",
             Self::Opacity => "opacity",
+            Self::GroundPlane => "ground_plane",
         }
     }
 }
@@ -94,6 +97,7 @@ pub fn parse_mesh_map_stem(stem: &str) -> Option<MeshMapName> {
         MeshMapKind::BentNormal,
         MeshMapKind::WorldSpaceNormal,
         MeshMapKind::Opacity,
+        MeshMapKind::GroundPlane,
     ];
     // Sort by suffix length descending once (const array, could be
     // pre-sorted; done at runtime for clarity).
@@ -205,6 +209,7 @@ mod tests {
             ("terr_height", MeshMapKind::Height),
             ("bot_bent_normal", MeshMapKind::BentNormal),
             ("ship_world_space_normal", MeshMapKind::WorldSpaceNormal),
+            ("ground_ground_plane", MeshMapKind::GroundPlane),
         ] {
             let parsed = parse_mesh_map_stem(stem).expect("parses");
             assert_eq!(parsed.kind, kind, "{stem}");
