@@ -1147,6 +1147,9 @@ overlays =
     .projection-cull-backfaces-hint = Surfaces facing away from the camera do not take the decal. Uncheck to paint both sides.
     .projection-occlusion = Occlusion
     .projection-occlusion-hint = Texels behind a nearer surface do not take the decal. Uncheck to let every covered texel write.
+    .displacement = Displacement preview
+    .displacement-strength = Strength
+    .displacement-hint = Displace mesh vertices along normals by the baked height map. Requires a height texture.
 
 ## Shared colour-picker row labels (picker-app-sites; channel letters are
 ## the international convention — a locale may localize them)
