@@ -32,6 +32,7 @@ DOCS_ROOT_FILES = {
     "CODE_OF_CONDUCT.md",
     "STATE.md",
     "DECISIONS.md",
+    "SPEC.md",
     "CLAUDE.md",
     "AGENTS.md",
     "LICENSE",
