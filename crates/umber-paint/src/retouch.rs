@@ -1763,17 +1763,17 @@ mod tests {
             let r = rect(8 + 4 * k, 8, 24 + 4 * k, 24);
             let (start, end) = fill_stroke(&mut scratch, r, 10 * (k as u8 + 1));
             let cmd = stroke_command(
-                        &[StrokeTile {
-                            owner: PlaneOwner::Base,
-                            tile: TILE,
-                            channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
-                            rect: r,
-                            start: &start,
-                            end: &end,
-                        }],
-                        false,
-                    )
-                    .expect("the fill writes");
+                &[StrokeTile {
+                    owner: PlaneOwner::Base,
+                    tile: TILE,
+                    channel: crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+                    rect: r,
+                    start: &start,
+                    end: &end,
+                }],
+                false,
+            )
+            .expect("the fill writes");
             baseline.push(cmd, &mut writes);
         }
         writes.writes.clear();
