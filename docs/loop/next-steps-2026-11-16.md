@@ -1,85 +1,73 @@
-# Umber next-steps — the complete to-do list, 2026-11-16 (~06:00)
+# Umber next steps — reconciled 2026-11-17
 
-Authored at Bessa's ask ("make a complete and detailed to-do list of all
-the next and remaining steps and follow it to completion according to
-your suggestions"). Sources of truth read live before writing:
-`docs/ROADMAP.md`, `docs/loop/waves/2026-11-09-wave-plan.md`,
-`docs/loop/queue.md` (rows through 486), `docs/specs/release-checklist-0.1.0.md`,
-the 2026-10-24 audit lenses, and live CI (`gh run list`).
+This is the current, executable list after the alpha release and the post-alpha
+baker-power wave. It replaces the original 2026-11-16 ordering, whose D2–D5
+and displacement items are now landed. Git history, the published release,
+and committed kill reports outrank this summary.
 
-## A. Docs truthing — executable now, docs-only (this session)
+## Completed since the original list
 
-1. ROADMAP row 234 (`wave-a11y-first-pass`) still reads open; it LANDED
-   2026-11-12 (queue row 378, lock `razul-a11y-first-pass`, brief
-   `docs/loop/briefs/2026-11-11-a11y-first-pass.md`). Mark LANDED.
-2. ROADMAP parity scoreboard is stale: "channel add/remove/rename open"
-   landed (rows 370 + 374); "four post nodes open" landed (rows 375/376);
-   the "ribbon GAP" is a declared NON-GOAL
-   (`docs/specs/gui-audit-and-roadmap.md:265`: "The ribbon? No. Never.")
-   — mark it decided, not open. Keep open: displacement preview, D2-D5.
-3. Wave-plan status header: confirm it reflects rows 444+ (W4 closed,
-   W5 closed except replay-exact).
+- Docs truthing A.1–A.3 landed in `7031b5d7`.
+- D2 auto-cage (`533560e8`), D3 opacity (`c499255f`), D4 multi-source ID
+  (`35097df5`), D5 ground plane (`752bc991`), and displacement preview
+  (`9e0517bf`) landed. D5's cross-review HIGH findings were closed in
+  `3b72c98f` and `baec964b`.
+- The replay-exact default-off decision is implemented as an opt-in toggle
+  (`aa1f5903`).
+- Bessa ratified SPEC v1.1 and published unsigned pre-release
+  `v0.1.0-alpha.1` from `bc4d642f`; the workspace then returned to `0.1.0`
+  and Flatpak was pinned to that tag (`d49d0acc`).
 
-## B. Ungated engineering kills — the real remaining runway (in order)
+## A. Release hardening and human gates
 
-4. **D2 auto-cage** (baker power row; SPP lens `audit-2026-10-24-lens-spp.md:37`).
-   Brief first, then claw dispatch, then dragon battery.
-5. **D3 opacity baker.** Same loop.
-6. **D4 ID sources** (multi-source ID bake). Same loop.
-7. **D5 ground plane.** Same loop.
-8. **Displacement preview** in the viewport (scoreboard Viewport row).
-   Same loop.
+1. **Dogfood C2-24.** Run the prepared first-run walkthrough against the
+   published alpha with a two-material prop. Capture every failure, visual
+   artifact, output filename, and export round-trip result in the session log.
+   This is the immediate release-quality gate.
+2. **Resolve dogfood findings.** Every reproduced failure gets a brief, lock,
+   fix, regression test where automatable, and a kill report. No beta or stable
+   tag before this closes.
+3. **pt-BR native-speaker pass.** Review user-visible Portuguese rather than
+   merely checking key parity. Keep source and translation edits paired.
+4. **Windows signing decision, C2-22.** Alpha is intentionally unsigned with
+   checksums. Select and document a signing route before the first signed
+   release; do not retroactively claim the alpha was signed.
+5. **Release verification.** Before a beta or stable version bump, run
+   `scripts/release-ci.sh` on the exact tip, verify the resulting GitHub
+   release object and artifacts by read-back, and record size/checksum results.
 
-Each follows the standing order of operations (wave plan §"standing
-order"): scout → brief lands first in `docs/loop/briefs/` → kill-lock →
-claw writes code → dragon battery (rustfmt, check-layers, scorecard,
-clippy `-D warnings`, crate tests, all under `flock
-/tmp/umber-cargo.lock` + `UMBER_ASSETS_DIR`) → kill report + queue row →
-`dcommit.py --path-limited` → `safe-push.py` bare → release lock with
-the commit.
+## B. Post-alpha engineering hardening
 
-## C. Deferred by decision, not by neglect (post-0.1.0 / v3)
+1. **D2 auto-cage contract alignment.** The cross-review found the flat-plane
+   Inflate test and brief disagree about ray origin/offset semantics. Resolve
+   the contract deliberately, then align implementation, test, and docs. Do
+   not silently weaken the test.
+2. **D3 opacity parity.** The plane shader path uses a fixed origin plane while
+   the intended AO-style `PlaneDesc` path is broader. Either implement the
+   full plane contract and direct mesh-vs-plane parity test or narrow the
+   public contract to the supported mesh-fed route with a documented reason.
+3. **D4 persistence completeness.** Preserve every user-authored ID Multi
+   source field, including mask paths and manual colours, rather than keeping
+   lossy TODO-based serialization. Add a save/reopen regression test.
+4. **GPU-environment portability.** The binding-array feature failure on
+   lavapipe is an environment capability boundary. Add explicit capability
+   detection or a portable fallback before treating D4's GPU path as universal.
 
-9. R-A2 v3 depth/occlusion culling — projection fill is "CLOSED to v3"
-   (ROADMAP row 238); design briefs exist
-   (`2026-11-09-projection-occlusion-{design,kill-brief}.md`).
-10. R-A2 §2.2 product questions (seam/symmetry expansion of projections,
-    a decal channel, the bake family) — queued as product calls.
+## C. Explicitly deferred or externally gated
 
-## D. Gated — no derivation until the gate opens
-
-11. L4 winink live hook / wave-stylus-win32 — needs a real Windows
-    session (partner-gated; decode already in tree).
-12. L7 color_button delegate conversion — G1-gated.
-13. wave-wasm-shaders / tessellation / hdr / ray-query — eframe/wgpu
-    upgrade postures.
-14. .spp staged import R1-R4 — fidelity report's staged lanes.
-15. **Never (hard walls):** .spp WRITING; .sbsar execution; fake
-    interchange (declared custom nodedefs).
-
-## E. Partner-gated — Bessa's calls, queued and named
-
-16. Release decisions C2-16, 22, 23-25, 30.
-17. SPEC v1.1 ratification packet (`docs/specs/spec-v1.1-amendment-draft.md`
-    + `spec-ratification-brief.md` ready).
-18. Release checklist walkthrough (gates 7-9: SPEC ratification,
-    dogfood pass C2-24, `v0.1.0-alpha.1` dry-run tag C2-25 — approved
-    2026-10-15, awaiting his tag push).
-19. Upstream bug drafts (`docs/upstream/`) — PR gate applies.
-20. i18n native-speaker pass (pt-BR).
-21. wave-replay-exact — **DECIDED 2026-11-16 (alignment form): default-off
-    stands**; the remaining work is the opt-in toggle kill, moved to
-    section B (after D5/displacement). Prep brief:
-    `docs/loop/briefs/2026-11-14-replay-exact-decision-prep.md`.
+- **Live Windows Ink and real-pen validation:** passive decode exists, but the
+  WndProc/HWND integration and a real Windows pen session are still required.
+- **Rendering upgrade postures:** WASM shaders, hardware tessellation, HDR
+  surface output, and ray query wait on their eframe/wgpu upgrade path.
+- **`.spp` staged fidelity lanes:** import-only remains in scope; writing is
+  permanently forbidden. `.sbsar` execution is permanently forbidden.
+- **Projection product calls:** seam/symmetry expansion, a decal channel, and
+  the bake family need an artist-facing product decision before derivation.
+- **Upstream bugs:** prepare locally, but the public-PR gate applies before
+  any upstream submission.
 
 ## Execution record
 
-- 2026-11-16 ~12:2x: alignment-form answers landed (docs-only): C2-25
-  alpha tag = Bessa firing now; C2-22 = alpha unsigned, signing after;
-  SPEC v1.1 ratified now (gate 7 MET); replay-exact default-off (item
-  21 decided, toggle kill moves to B); C2-24/C2-30 dogfood+walkthrough =
-  Bessa scheduling. Checklist gates 7/9 truthing committed with this.
-- 2026-11-16 ~06:0x: items 1-3 landed (ROADMAP row 234 + scoreboard
-  truthing) in the same commit as this list; pushed via dcommit +
-  safe-push.
-- Next: item 4 (D2 auto-cage) brief dispatched.
+- 2026-11-17: this reconciliation replaced completed D2–D5/displacement work
+  with the actual release and hardening queue. It makes no claim that dogfood,
+  native-speaker review, signing, beta, or stable release have occurred.

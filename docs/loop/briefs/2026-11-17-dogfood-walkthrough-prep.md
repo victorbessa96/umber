@@ -34,10 +34,10 @@
 | Feature | Status | Key UI / Controls | Kill Report / Brief |
 |---------|--------|-------------------|---------------------|
 | **D2 Auto-cage** | ✅ Landed | Bakes panel → High-poly group → "Auto cage" checkbox + "Cage method" combo (Inflate / Shrinkwrap / Manual). Viewport cage wire overlay toggled via panel state. | `docs/loop/kill-reports/2026-11-16-d2-auto-cage.md` |
-| **D3 Opacity baker** | 📋 Design only (not yet landed) | Bakes panel → new "Opacity" map in checklist. Source selector (cavity / AO / ID map). Output: single-channel R or RGBA with alpha. | `docs/loop/briefs/2026-11-16-d3-opacity-baker.md` |
+| **D3 Opacity baker** | ✅ Landed | Bakes panel → opt-in "Opacity" map. Source selector (Cavity / ID map / Manual), strength, and invert; RGBA output with opacity in R and coverage in A. | `docs/loop/kill-reports/2026-11-16-d3-opacity-baker.md` |
 | **D4 ID sources (multi-source ID)** | ✅ Landed | Bakes panel → "ID Multi" map. Source list: Triangle / Material (gated) / IdMap / Manual. Per-source weight, optional mask path, color. Blend mode: Additive / Max / Replace. | `docs/loop/kill-reports/2026-11-16-d4-id-sources.md` |
 | **D5 Ground plane** | ✅ Landed | Bakes panel → "Ground Plane" map. Settings: size, height offset, subdivisions, maps (AO/Height/ID). Viewport wire preview toggle. | `docs/loop/kill-reports/2026-11-16-d5-ground-plane.md` |
-| **Displacement preview** | 📋 Design only | Viewport overlay toggle + strength slider (OverlaySettings). Vertex displacement in `MESH_SHADER` `vs_main` sampling `height_tex`. CPU reference in `bake_support`. | `docs/loop/briefs/2026-11-16-displacement-preview.md` |
+| **Displacement preview** | ✅ Landed | Overlays popover → displacement toggle + strength slider. Mesh vertices displace along normals from the baked height texture; default off and CPU reference parity pinned. | `docs/loop/kill-reports/2026-11-17-displacement-preview.md` |
 
 **Already-present bakes panel features** (baseline for dogfood):
 - Async bake (non-blocking, one job at a time)
@@ -84,7 +84,7 @@
 | **18. UDIM (if multi-tile mesh)** | Load multi-tile FBX → tile selector shows 1001, 1002… → select 1001+1002 → Bake AO | Per-tile AO written: `<set>_ambient_occlusion_1001.png`, `_1002.png`. Curvature/Position skip non-1001 tiles (reported skipped). | Verify tile naming; skipped maps logged correctly. |
 | **19. Export (ORM/glTF)** | File → Export → glTF preset → select all painted channels + baked maps → Export | Exported `.gltf` + textures; ORM packing correct (Occlusion=R, Roughness=G, Metalness=B). Baked maps included per preset. | List exported files + sizes; open in glTF viewer (e.g., glTF Viewer) to verify. |
 | **20. Save / reopen project** | Save `.umber` → quit → relaunch → open project | All layers, bake settings, linked groups, sync carry restored. Viewport state (cage/ground plane toggles) restored. | Verify persistence; note any lost state. |
-| **21. Displacement preview (design-only check)** | If displacement preview landed: enable height map bake → enable displacement preview toggle → adjust strength slider | Vertex displacement visible in viewport; strength scales displacement. CPU reference in `bake_support` matches. | **If not landed**: note as "design only — not testable". |
+| **21. Displacement preview** | Enable a height-map bake → enable the displacement-preview overlay → adjust the strength slider | Vertex displacement is visible; strength scales it linearly; disabled or missing-height cases are no-ops. | Screenshot at two strengths; note any shader artifact. |
 
 ### 3.2 Recording Template (per session)
 

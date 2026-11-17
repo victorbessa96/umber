@@ -1,6 +1,6 @@
-# Umber — Spec v1.0 (DRAFT — awaiting Bessa's ratification)
+# Umber — Spec v1.1 (RATIFIED 2026-11-16)
 
-> The project contract. v0.1 draft written at project start; this v1.0 draft folds in the Wave-0 research corpus (docs/research/01–05) and the adversarial-review fixes (docs/research/06). **Ratified only when Bessa approves.** Until then, no implementation work beyond what this spec names as Wave-0.
+> The project contract. The original v1.0 draft folds in the Wave-0 research corpus (docs/research/01–05) and the adversarial-review fixes (docs/research/06). Bessa ratified the v1.1 contract on 2026-11-16; the amendment is preserved in `docs/specs/spec-v1.1-amendment-draft.md`. The dated draft material remains historical evidence, not a live implementation gate.
 >
 > AMENDMENT NOTE (2026-10-12, A2 of the core-loop queue): the strategy review
 > (docs/specs/2026-10-12-strategy-review.md) re-cut the roadmap around the six
@@ -70,7 +70,7 @@ Ordered scope milestones. Waves carry no calendar commitment — velocity is unk
 
 | Wave | Goal | Exit criteria (all [CI] items run in CI) |
 |---|---|---|
-| 0 | Research + spec ratification | 5 research reports landed ✓; consolidation docs ✓; adversarial review + fixes ✓; **Bessa ratifies SPEC v1.0** (pending) |
+| 0 | Research + spec ratification | 5 research reports landed ✓; consolidation docs ✓; adversarial review + fixes ✓; **Bessa ratified SPEC v1.1 on 2026-11-16** |
 | 1 | Workspace skeleton + mesh import + PBR viewport | Workspace builds on Windows+Linux CI; app boots (wgpu+egui+winit), loads glTF/OBJ/FBX, IBL-lit viewport using bundled env maps (HDR file import lands W2), camera controls, dockable UI shell; **stylus risk callout: first backend of the owned `stylus` crate = raw Windows Ink WM_POINTER path** (winit 0.30 has no pen events — we bypass it; winit 0.31 pen events adopted when stable); **dependency license audit gate: THIRD_PARTY.md manifest before first merge** |
 | 2 | Painting core | Brush engine (libmypaint-documented-semantics dynamics, one-euro + lazy mouse); seam-aware UV-rasterization stamping + golden-image harness; 3D-space stroke evaluation (tile-count-independent — works single-tile); layer stack + masks + per-channel blending (core 12 blend modes); undo journal; OCIO viewport; OpenPBR über-shader + conformance suite; bundled brush presets; **tile-pool memory architecture foundation**; .umber project format with CPU-path deterministic round-trip; HDR image import (env maps + bitmaps); history window; Windows dual stylus path (Ink + Wintab); 2D UV view; wireframe/grid overlays |
 | 3 | Export + bake + fill layer | Template/preset export (4 engine presets, packing, naming tokens, PNG/EXR); bake engine (AO/normal/curvature/position/ID) with golden-image CI + cage controls + mesh-map import by naming convention; **fill layers with fill projections (UV/tri-planar/planar/spherical/cylindrical)**; smudge + clone; straight-line/angle snap; **tile-pool bake-target integration** |
@@ -111,7 +111,7 @@ Prior OSS texture tools died of: full-DCC scope + single maintainer + no funding
 
 If docs/code conflict with this spec during execution, this list is what wins.
 
-1. This SPEC.md (contract) — changes only by explicit Bessa decision, recorded in DECISIONS.md
+1. This SPEC.md (v1.1 contract) — changes only by explicit Bessa decision, recorded in DECISIONS.md
 2. docs/specs/requirements.md + tech-stack.md + architecture.md (Wave-0 consolidation, research-derived)
 3. Adobe Substance 3D Painter official docs + release notes (feature-reference bar — docs/research/01)
 4. OpenPBR 1.1 spec (ASWF) + MaterialX spec (material model + graph interchange)
@@ -120,11 +120,7 @@ If docs/code conflict with this spec during execution, this list is what wins.
 
 ---
 
-*Ratification block (Bessa — morning):*
+## Ratification record
 
-- [ ] One-sentence goal — approved / edits:
-- [ ] Non-goals — approved / edits:
-- [ ] Deliverables + acceptance criteria (with oracles) — approved / edits:
-- [ ] Wave plan (master scope mapping) — approved / edits:
-- [ ] Constraints + Risks + Sustainability — approved / edits:
-- [ ] **SPEC v1.0 RATIFIED** (all five above)
+- **2026-11-16:** Bessa ratified SPEC v1.1 through the release-alignment form.
+- The original v1.0 checklist and the v1.1 amendment draft remain preserved as the review record. Capability evidence belongs in `docs/specs/requirements.md`; release evidence belongs in `docs/specs/release-checklist-0.1.0.md`.

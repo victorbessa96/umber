@@ -1,23 +1,15 @@
 # The 0.1.0 Release Checklist
 
-The tag fires on Bessa's word (the standing rule from the packaging
-commit). This is the readiness state, so the word is the only
-remaining input.
+The final `v0.1.0` tag fires on Bessa's release decision. The alpha tag already
+fired and is evidence for packaging, not a substitute for the remaining human
+and release-quality gates.
 
-Re-verified 2026-10-19 against the live queue rows + kill reports (the
-stale-claim sweep, kill `release-checklist-truth`); truth-refreshed
-2026-11-16 (docs-only, no code, alignment-form answers): gate 7 MET
-(SPEC v1.1 ratified by Bessa), gate 9 in flight (alpha tag = Bessa's
-hands, unsigned per C2-22), gate 6 MET — the drift-hardened
-perf-nightly has run green on pushed master tips repeatedly since
-(latest four schedule runs all `success` at f587a55a+), and the
-DPI runtime re-raster landed `0c15c8ec`. Gates 7-9 remain NOT MET
-(Bessa's): SPEC v1.1 ratification, the dogfood pass (C2-24), the
-pre-release dry-run tag (C2-25, approved 2026-10-15, awaiting his tag). Earlier, 2026-10-12, per the strategy review: every
-gate below checked process; none checked FUNCTION. Gate 0 (the
-journey test) is now the first gate — the process gates follow it.
-The 2026-10-15 C2-audit update's claims that landed since are
-corrected in place below.
+Re-verified against live Git and the GitHub release on 2026-11-17: Gate 6 is
+MET; Gate 7 is MET (SPEC v1.1 ratified by Bessa on 2026-11-16); Gate 9 is MET
+(`v0.1.0-alpha.1` published as an unsigned pre-release at `bc4d642f`, with
+checksums and distribution artifacts). Gate 8, the real dogfood pass, remains
+NOT MET. Earlier, the strategy review found that process gates alone were not
+enough; Gate 0 remains the first function gate.
 
 ## Gate 0 — the journey test (the FUNCTION gate, added by the review)
 
@@ -50,8 +42,7 @@ queue row C2-13..19, closed 2026-10-15.]
 5. **The requirements marked** — ✓ the census current through the
    core-loop phase: all six criticals' rows marked ✓ code with the
    code-vs-reachable split (the last marks: `472b774`).
-6. **The perf baselines** — MET PENDING the first drift-hardened nightly
-   green on a pushed tip. Every sub-item the 10-15 audit named is
+6. **The perf baselines** — MET. Every sub-item the 10-15 audit named is
    closed (queue row C2-13..19, ALL SEVEN CLOSED): the nightly runs
    (C2-14), the gate is leak-proof (C2-15), and the 60 fps / 1M-tri /
    4K budget is measured on real hardware (C2-16 — the RTX 3070
@@ -60,9 +51,7 @@ queue row C2-13..19, closed 2026-10-15.]
    authentic runs after the runner-fleet drift conviction
    (`c53a08d`/`b1d3660`, triage in `docs/perf/protocol.md`) and the
    nightly is drift-hardened — median-of-3 plus a same-tip canary leg
-   (`dc4b355`). The gate reads MET when the first hardened nightly
-   runs green on a pushed tip (the pending W-C3a wave push carries
-   it).
+   (`dc4b355`). Hardened schedule runs subsequently passed on pushed tips.
 7. **SPEC ratified** (Bessa) — MET 2026-11-16: Bessa answered the
    alignment form "ratify v1.1 now" (draft `spec-v1.1-amendment-draft.md`
    + `spec-ratification-brief.md` were ready).
@@ -71,70 +60,26 @@ queue row C2-13..19, closed 2026-10-15.]
    reaches every channel and export writes every painted channel
    (C2-5 + C2-6, queue rows closed 2026-10-15); what remains is the
    pass itself (Bessa's two-material prop, C2-24).
-9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — IN FLIGHT
-   2026-11-16: Bessa answered "I'll make the version-bump commit and push
-   `v0.1.0-alpha.1` now"; per his C2-22 answer the alpha ships UNSIGNED
-   with SHA-256 checksums (signing decided after the alpha exists).
-   - The local half ran 2026-10-15. `dist plan` (cargo-dist 0.32.0) shows
-     that a `v0.1.0-alpha.1` tag on today's tree releases NOTHING ("doesn't
-     have anything for dist to Release"): dist matches the tag against the
-     workspace `version = "0.1.0"`.
-   - The dry run needs a version-bump commit first:
-     `version = "0.1.0-alpha.1"` in `[workspace.package]`, then the tag.
-     With the bump, `dist plan` announces both packages (`umber-app`,
-     `umber-cli`), each with the Linux `.tar.xz`, the Windows `.zip`, the
-     shell + PowerShell installers and the sha256 sums.
-   - Afterwards, set the version back to `0.1.0` for the real tag.
-   - Pushing either tag is Bessa's call. It publishes a GitHub pre-release.
-   - **APPROVED by Bessa 2026-10-15.** The W-C2g CI-green precondition
-     is long met (runs 38872572891 / 38885801883, both platforms);
-     what remains is the version-bump commit and the tag push, which
-     is Bessa's call (above).
-     The exact steps:
-     0. Land kill `win-version-resource` first (Windows ProductName/Version
-        metadata, which SignPath requires; `2026-10-15-c2-22-signing.md`).
-     1. One commit: `version = "0.1.0-alpha.1"` in the root
-        `[workspace.package]` (all 17 crates inherit it), plus a
-        `<release version="0.1.0-alpha.1" type="development"
-        date="<day>">` entry in BOTH metainfo files
-        (`flatpak/` and `appimage/`: `packaging.yml` diffs them, so they
-        must stay identical). Regenerate `Cargo.lock` on the build host
-        (17 `version = ` lines change). The `examples/` workspace is
-        separate and unpublished, so it stays 0.1.0.
-     2. The wave gate on a clean clone, then push. CI green.
-     3. `dist plan --tag v0.1.0-alpha.1` on the host must announce both
-        packages, as in the dry run, each archive's `[misc]` now listing
-        `THIRD_PARTY_FONTS.txt` + `THIRD_PARTY.md` (the embedded fonts'
-        licences require it: `2026-10-15-release-font-notices.md`).
-     4. `git tag v0.1.0-alpha.1 && git push origin v0.1.0-alpha.1`, then
-        watch `release.yml` + `packaging.yml` (the tag triggers both).
-     5. Record the artifact sizes in the §12 table (installer budget
-        < 150 MB) and download the Windows zip to check its `.sha256`.
-     6. A follow-up commit returns the version to `0.1.0`, whose metainfo
-        entry keeps the alpha's release line as history. The same commit
-        pins the Flatpak manifest's git source to the tag: replace
-        `"branch": "master"` with `"tag": "v0.1.0-alpha.1"` +
-        `"commit": "<the tagged sha>"` (flatpak/README.md: "at ship time
-        this pins to the release tag"). The sha only exists after step 4.
+9. **A pre-release dry-run tag** (`v0.1.0-alpha.1`) — **MET 2026-11-16.**
+   The version-bump and packaging commits produced the tag at `bc4d642f` and
+   a GitHub pre-release at 17:34Z. Its Linux/Windows app and CLI archives,
+   shell/PowerShell installers, source archive, `sha256.sum`, and
+   `dist-manifest.json` were published; the largest archive was 18.6 MB,
+   below the 150 MB budget. The post-tag commit `d49d0acc` restored the
+   development workspace version to `0.1.0` and pinned Flatpak to the tag.
+   The alpha is intentionally unsigned under C2-22; checksums were verified.
 
-## The tag shape (drafted, not fired)
+## Alpha tag shape (published)
 
-- `v0.1.0` on master, the annotated tag.
-- The message: the one-paragraph 0.1.0 definition — "the professional
-  floor: the brush engine (seam-aware, presets, symmetry, smudge/
-  clone, the quick mask), six bakers, the export pipeline (glTF/
-  Unreal/Unity/Blender presets + PSD/EXR/MTLX), UDIM, the node graph,
-  WASM plugins, headless CLI + the JSONL agent surface, i18n (en/pt-BR),
-  installers for Linux + Windows."
-- The dist workflow (release.yml) builds on the tag push: the two
-  targets, shell + PowerShell installers, checksums — measured at
-  11 MB against the 150 MB budget.
-  - **Alpha tag FIRED 2026-11-16** (`v0.1.0-alpha.1` @ `bc4d642f`,
-    pre-release published 17:34Z, release.yml SUCCESS): umber-app
-    linux tar.xz 14.0 MB, windows zip 18.6 MB (sha256 verified locally:
-    `sha256sum -c` OK), umber-cli linux 5.5 MB / windows 8.4 MB,
-    source.tar.gz 9.2 MB, installers + sha256.sum + dist-manifest.json.
-    All well under the 150 MB budget. Unsigned per C2-22 decision.
+- **Tag:** `v0.1.0-alpha.1` at `bc4d642f0696233ac5293683c88b2e860e52b3b2`.
+- **Release object:** GitHub pre-release, published 2026-11-16 17:34Z, not a
+  draft and not the final `v0.1.0` release.
+- **Artifacts:** umber-app Linux `.tar.xz` 14.0 MB; umber-app Windows `.zip`
+  18.6 MB; umber-cli Linux `.tar.xz` 5.5 MB; umber-cli Windows `.zip` 8.4 MB;
+  source archive 9.2 MB; shell/PowerShell installers; checksums; distribution
+  manifest. Every archive is under the 150 MB budget.
+- **Integrity and signing:** SHA-256 verification passed; signing is
+  deliberately deferred under C2-22.
 - SPEC ratification + a dogfood cohort are gates 7-8 above (the
   review's IMPROVEMENTS §4.4).
 

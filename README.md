@@ -17,7 +17,7 @@
 > [!IMPORTANT]
 > **Status: pre-release, core loop complete.** The whole path works end to end and is tested on Linux and Windows CI: import a mesh → paint at 4K with real pen pressure → see it lit in the 3D viewport → undo/redo byte-exact → save and reopen with nothing lost → export engine-ready textures (decode-verified). Every layer owns its own pixels, materials and fills are live, and a headless JSONL agent protocol drives the same paint engine the app uses. <!-- scorecard:crates -->16<!-- /scorecard --> crates, <!-- scorecard:tests -->3,000+<!-- /scorecard --> tests.
 >
-> **Not yet:** no release tag (SPEC ratification and the first drift-hardened nightly green lead the 0.1.0 checklist, `docs/specs/release-checklist-0.1.0.md`); the open feature waves — the Win32 tablet path, the a11y pass, the power-user tail and the 0.1.0 release gates — are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) and the current wave plan [`docs/loop/waves/2026-11-09-wave-plan.md`](docs/loop/waves/2026-11-09-wave-plan.md) (the decal projector lane closed 2026-11-09; brush angle/jitter and bitmap stamps landed C2-11, 2026-10-19).
+> **Alpha available:** [`v0.1.0-alpha.1`](https://github.com/victorbessa96/umber/releases/tag/v0.1.0-alpha.1) was published as an unsigned GitHub pre-release on 2026-11-16 with SHA-256 checksums. It is not the final 0.1.0 release. The remaining release gates are a real dogfood walkthrough, native-speaker review, the Windows-signing decision, and final release CI; tracked state lives in [`docs/specs/release-checklist-0.1.0.md`](docs/specs/release-checklist-0.1.0.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 <p align="center">
   <a href="#why">Why</a> ·
@@ -59,14 +59,14 @@ Substance Painter is the industry standard for game/film texturing — and it is
 | **Painting** | MyPaint-style dynamics + stabilizer, 9 falloff curves, smudge / clone / erase, mirror + radial symmetry, path and polygon tools, quick mask, seam-aware strokes, front-face falloff for 3D strokes, UDIM |
 | **Layers** | per-layer pixel planes, paint / fill / material / folder / instance layers, masks, anchors, 32 blend modes, click-to-time-travel history |
 | **Materials** | an original node-graph engine (generators, filters, smart materials); MaterialX export + import |
-| **Baking** | AO, normal (mesh + high→low with cage), curvature, position, world-space normal, thickness, ID, bent normals; dilation and an Adjacent Faces seam margin |
-| **Viewport** | OpenPBR shading, IBL, view modes, post-effects, orthographic camera, OCIO / ACES color management |
+| **Baking** | AO, normal (mesh + high→low with manual/inflate/shrinkwrap cage), curvature, position, world-space normal, thickness, ID and multi-source ID, bent normals, opacity, ground-plane maps; dilation and an Adjacent Faces seam margin |
+| **Viewport** | OpenPBR shading, IBL, view modes, post-effects, orthographic camera, height-map displacement preview, OCIO / ACES color management |
 | **Export** | engine presets (Unreal, Unity, glTF, Blender) with DX/GL normal conventions, EXR / PNG / TIFF / PSD / USD / MaterialX, up to 8K |
 | **Automation** | headless CLI (bake, export, batch recipes) and a versioned JSONL agent protocol: projects, layers, undo, paint strokes, plane snapshots |
 | **Extensibility** | sandboxed WASM plugins (wasmtime, fuel-metered, memory-capped) |
 | **Platform** | Linux + Windows; crash-safe GPU startup with backend fallback; i18n (en-US, pt-BR) |
 
-Still open is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md) — the Win32 tablet path, the a11y pass, channel manage, the four post nodes, and the 0.1.0 release gates among them.
+The remaining work is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md): live Windows Ink / real-pen validation, upgrade-gated rendering lanes, staged `.spp` fidelity work, human review gates, and the final-release checklist.
 
 ## Quick start
 

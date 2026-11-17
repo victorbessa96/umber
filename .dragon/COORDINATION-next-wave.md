@@ -1,6 +1,20 @@
-# Next-wave coordination (post-stencil-wave, 2026-10-19)
+# Next-wave coordination
 
-## STATE (auto-maintained — rewrite this block on every claim/land; the body below stays append-only)
+## CURRENT STATE (rewrite this block on every claim or landing)
+
+**Updated 2026-11-17:** `master` is at `0654ba48`. `v0.1.0-alpha.1` is a
+published unsigned GitHub pre-release at `bc4d642f`, not the final release.
+The post-alpha D2 auto-cage, D3 opacity, D4 multi-source ID, D5 ground-plane,
+replay-exact toggle, and displacement-preview kills are committed. The active
+release-quality gate is the real dogfood walkthrough; Windows signing,
+native-speaker review, live Windows Ink verification, and beta/stable release
+remain named human or platform gates. The documentation truthing lock owns the
+current handoff files. Consult `STATE.md` and `docs/loop/next-steps-2026-11-16.md`
+before claiming new work; use an exact-file kill lock before edits.
+
+## Historical coordination snapshots (append-only; not current status)
+
+### Snapshot current as of 2026-11-06
 Updated: 2026-11-06 ~17:2x -03 (Razul, local-1625-rz6f2a): row 247 LANDED+PUSHED `ec45651` — `--version`/`-V` on both binaries via one predicate `umber_core::control::is_version_arg` (pin `version_flag_predicate`); live-verified on dev bins; battery 19 suites 0-failed (core 185 incl. pin, app lib 253 / bin 753); fmt + clippy -D warnings clean. Next free row: 248. Remaining installers gaps (row 240): #2 exe-relative runtime assets, #4 cli bench 49k-tri cap, #5 no-display GPU-fallback poisoning; #3 v0.1.0 tag stays partner-gated.
 Updated: 2026-11-06 ~17:0x -03 (Razul, local-1625-rz6f2a, lock razul-version-flag): CLAIMED installers gap #1 (row 240) — `umber --version` / `umber-cli --version`/`-V` via one predicate `umber_core::control::is_version_arg`; battery proc_20b04dc78e62 running (core+cli+app, flock, nice 19). Queue row 247 in flight; next free row: 248.
 Updated: 2026-11-06 ~16:4x -03 (Razul, local-1625-rz6f2a, lock razul-job-timeout): export-longer-than-30s ui_timeout debt CLOSED — `command.run` of `bake.run`/`export.run` waits `JOB_REPLY_TIMEOUT` (30 min) in control.rs; battery green (fmt, clippy -D warnings 0, app lib 253 / bin 753 / integ 0-failed). M1 sweep: hunt b09ae253 completed as stale (landed 0981d2f + 6ef5b3d). Release CI 42276402204 on da3ed59 GREEN. kill-locks ENOSPC refusal confirmed landed (87d0285). Queue row 246 written; next free row: 247. Census at claim: tip da3ed59 == origin, locks empty, no cargo/sibling, /tmp 14%.

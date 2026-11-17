@@ -259,10 +259,7 @@ freeze-recovery close scripts; the loop restart machinery
 
 ### Partner-gated — his calls, queued and named
 
-The release decisions (C2-16, 22, 23-25, 30); the SPEC v1.1
-ratification packet; the release checklist walkthrough; the
-upstream bug drafts (docs/upstream/); the i18n native-speaker
-pass; the .ftl lock lift — **CLOSED 2026-11-16 truthing: the lock was LIFTED per the 2026-10-24 audit** (both the UI lens `audit-2026-10-24-lens-uiux.md` and the platform lens `audit-2026-10-24-lens-platform.md` record "the .ftl lock LIFTED"); only the native-speaker pass itself remains partner-gated.
+The published alpha and SPEC v1.1 ratification are complete (`v0.1.0-alpha.1` at `bc4d642f`, 2026-11-16). Remaining human release work is the dogfood walkthrough (C2-24), final signing decision (C2-22), release-checklist walkthrough, upstream bug drafts (docs/upstream/), and the i18n native-speaker pass. The .ftl lock is **CLOSED 2026-11-16**: it was lifted per the 2026-10-24 audit; only the native-speaker pass remains a human-quality gate.
 
 ## Standing debts (refreshed 2026-10-24, live-verified)
 
@@ -277,12 +274,7 @@ pass; the .ftl lock lift — **CLOSED 2026-11-16 truthing: the lock was LIFTED p
 
 - ~~The cached ID-mask bake~~ **LANDED SILENTLY** — the P1 tile
   cache + the L3 pre-warm; this row was stale for a week.
-- ~~Split-redo under merged undo entries~~ **ENGINE LANDED 2026-11-06**
-  (`850b839`, split_redo/split_parts in retouch.rs + `PaintState::
-  split_redo_stroke`, byte-exact pins; rows 167/242): undoing a merged
-  entry then redoing replays its constituent strokes one at a time.
-  REMAINING: the History-panel "split" affordance wiring — blocked on
-  document.rs/main.rs (sibling lock `razul-bundled-assets`).
+- ~~Split-redo under merged undo entries~~ **CLOSED 2026-11-07**: the engine (`850b839`) and the History-panel `edit.split_redo` command + button (`22e0efbf`) are landed with byte-exact replay pins.
 - Merge below the top undo entry — **WIRED 2026-11-07** (`bbdc08b`, row
   257): the splice primitive landed `592df58` (row 256) —
   `UndoStack::merge_below_top(k, doc, build)` + `push_unapplied` rewrite
@@ -292,9 +284,8 @@ pass; the .ftl lock lift — **CLOSED 2026-11-16 truthing: the lock was LIFTED p
   bounded window (8) below the top through the new `peek_undo_at`, but
   only when the redo stack is empty and the stroke intersects NO entry
   above the target (redoing those would clobber the merged after over the
-  overlap); both directions pinned byte-exact. What remains: the
-  History-panel "split" affordance wiring — blocked on
-  document.rs/main.rs (sibling lock).
+  overlap); both directions pinned byte-exact. The companion History-panel
+  split-redo affordance landed in `22e0efbf`.
 - The winink live-HWND question — OPEN: the decode IS in the tree
   (`crates/stylus/src/winink.rs`, passive decode); the WndProc hook +
   HWND hand-off is the gate.
@@ -336,8 +327,8 @@ pass; the .ftl lock lift — **CLOSED 2026-11-16 truthing: the lock was LIFTED p
 | Path tools | PARITY (paint-along + filled + polygon + straight-line); ribbon = decided NON-GOAL (`gui-audit-and-roadmap.md:265`: "The ribbon? No. Never.") |
 | Fill/material layers + anchors + instances | PARITY (materials composite-only by design) |
 | Texture sets / channels / UDIM | PARITY (auto-assign landed; channel add/remove/rename LANDED 2026-11-11, rows 370/374) |
-|| Baking | PARITY (per-set masked bakes closed; D1 baker sync LANDED 2026-11-11 row 377; D2-D5 power rows landed-pending-push (533560e8/c499255f/35097df5/752bc991)) |
-| Viewport | PARITY (four post nodes LANDED 2026-11-11 rows 375/376; displacement preview open — next-steps list item B) |
+|| Baking | PARITY (per-set masked bakes closed; D1 baker sync landed 2026-11-11; D2 auto-cage `533560e8`, D3 opacity `c499255f`, D4 multi-source ID `35097df5`, and D5 ground plane `752bc991`, subsequently hardened) |
+| Viewport | PARITY (four post nodes landed 2026-11-11; height-map displacement preview landed `9e0517bf`) |
 | Color management | PARITY |
 | Export/Import | PARITY (the .spp v2 staged lanes; text unsupported) |
 | History/undo | PARITY (the unified timeline LANDED — L6, `75c9594`, 2026-10-27) |
