@@ -878,11 +878,9 @@ mod tests {
             }
         }
 
-        /// Kittest 4: `opacity_off_is_byte_identical_to_today`
-        /// `BakeSelection::Opacity` unchecked + all other maps checked → the full
-        /// bake plan (jobs, outputs, log) is byte-for-byte identical to a tree
-        /// without the opacity module (no new jobs, no new log entries, no new files).
-
+        /// Kittest 4 (`opacity_off_is_byte_identical_to_today`) lives in umber-app's
+        /// bakes_panel plan_bake tests; umber-bake cannot import umber-app (cycle).
+        ///
         /// Kittest 5: `opacity_mesh_fed_matches_plane`
         /// Same mesh baked via mesh-fed path (position+normal textures) and plane path
         /// (PlaneDesc covering the mesh bounds) with `OpacitySource::Cavity` →

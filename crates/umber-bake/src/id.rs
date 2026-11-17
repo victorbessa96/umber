@@ -1206,9 +1206,9 @@ mod tests {
             let expected_b = (tri0_hash[2] as f32 * 0.5) as u8;
             for y in [8, 16, 24] {
                 let px = texel(&bytes, SIZE, 3, y);
-                assert_eq!(px[0], expected_r.min(255), "x=3,y={y} R");
-                assert_eq!(px[1], expected_g.min(255), "x=3,y={y} G");
-                assert_eq!(px[2], expected_b.min(255), "x=3,y={y} B");
+                assert_eq!(px[0], expected_r, "x=3,y={y} R");
+                assert_eq!(px[1], expected_g, "x=3,y={y} G");
+                assert_eq!(px[2], expected_b, "x=3,y={y} B");
                 assert_eq!(px[3], 255, "x=3,y={y} A");
             }
         }
