@@ -2,9 +2,11 @@
 
 ## Supported versions
 
-Umber is pre-release: no tagged release exists yet, so no version
-receives security fixes on a branch of its own — fixes land on `master`.
-The first supported tag will be `v0.1.0`.
+Umber has a pre-release tag, `v0.1.0-alpha.1` (2026-11-16, published as an
+unsigned GitHub pre-release with SHA-256 checksums). No stable tagged
+release exists yet, so no version receives security fixes on a branch of
+its own — fixes land on `master`. The first supported stable tag will be
+`v0.1.0`.
 
 ## Reporting a vulnerability
 

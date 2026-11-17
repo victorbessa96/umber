@@ -1,6 +1,8 @@
 # Umber Long-Horizon Roadmap — the Substance-Parity March and Beyond
 
-Version: 2026-10-24 (the consolidation era), delta through 2026-11-09.
+Version: 2026-10-24 (the consolidation era), delta through 2026-11-09;
+landed-wave and gate rows refreshed through 2026-11-17 (`v0.1.0-alpha.1`
+published as a pre-release 2026-11-16; SPEC v1.1 ratified 2026-11-16).
 Supersedes the 2026-10-14 edition. requirements.md stays the CONTRACT of record
 (each kill's Doc-delta updates its rows); this roadmap ORDERS the
 work. The 2026-10-24 full-project audit
