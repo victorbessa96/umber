@@ -145,6 +145,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fluent::FluentValue;
 use umber_bake::margin::MarginType;
+use umber_bake::{IdBlendMode, IdMultiParams, IdSource, IdSourceParams};
 use umber_gui::{ParamGroup, ValueField};
 use umber_mesh::FIRST_TILE;
 
@@ -233,6 +234,9 @@ pub enum BakeSelection {
     /// Per-triangle ID (`umber_bake::id`, the FNV-hashed triangle flavor):
     /// a colour per mesh region for masking.
     Id,
+    /// Multi-source ID bake (D4): composite ID from Triangle, Material,
+    /// ID map, and Manual sources with weights, masks, and blend modes.
+    IdMulti,
     /// Bent normal (`umber_bake::ao::bake_ao_and_bent_mesh`): the average
     /// unoccluded direction, at the panel's ray count. Written LINEAR.
     BentNormal,
@@ -247,7 +251,7 @@ pub enum BakeSelection {
 
 impl BakeSelection {
     /// Every selectable map, in bake order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Ao,
         Self::Curvature,
         Self::Thickness,
@@ -255,12 +259,13 @@ impl BakeSelection {
         Self::Normal,
         Self::WorldNormal,
         Self::Id,
+        Self::IdMulti,
         Self::BentNormal,
         Self::Opacity,
     ];
 
     /// What a fresh panel checks: the four original maps plus the normal
-    /// (an export's normal slot needs it). World normal, ID, bent normal,
+    /// (an export's normal slot needs it). World normal, ID, IdMulti, bent normal,
     /// and opacity are opt-in: niche, and bent normal is a second AO bake.
     pub const DEFAULT_ON: [Self; 5] = [
         Self::Ao,
@@ -289,6 +294,7 @@ impl BakeSelection {
             Self::Normal => tr("viewmode.normal"),
             Self::WorldNormal => tr("bakes.map-world-normal"),
             Self::Id => tr("bakes.map-id"),
+            Self::IdMulti => tr("bakes.map-id-multi"),
             Self::BentNormal => tr("bakes.map-bent-normal"),
             // The High-poly group's height is the TRANSFER output, so it
             // names the transfer, not the paintable height channel.
@@ -307,6 +313,7 @@ impl BakeSelection {
             Self::Normal => umber_mesh::MeshMapKind::NormalBase,
             Self::WorldNormal => umber_mesh::MeshMapKind::WorldSpaceNormal,
             Self::Id => umber_mesh::MeshMapKind::Id,
+            Self::IdMulti => umber_mesh::MeshMapKind::Id,
             Self::BentNormal => umber_mesh::MeshMapKind::BentNormal,
             Self::Height => umber_mesh::MeshMapKind::Height,
             Self::Opacity => umber_mesh::MeshMapKind::Opacity,
@@ -371,14 +378,13 @@ pub struct BakePlan {
 /// Plans a Bake over the checked `maps` (pure logic). `present` is the
 /// mesh's present tiles; `tiles` the selected list
 /// ([`TileSelection::resolve`]).
-///
 /// - Single-tile mesh (`present` is `[1001]`, or empty): every map bakes
 ///   whole-mesh, untiled names — the pre-UDIM behavior exactly
 ///   (`tiles` is necessarily `[1001]` or empty there and is ignored).
 /// - Otherwise, per selected tile: AO bakes over the tile's window; the
 ///   other maps bake whole-mesh for tile 1001 (their `[0, 1]` raster IS
-///   tile 1001) and are skipped for any other tile. Opacity (like
-///   curvature/position) is single-tile only in v1.
+///   tile 1001) and are skipped for any other tile. Opacity and IdMulti (like
+///   curvature/position) are single-tile only in v1.
 pub fn plan_bake(maps: &[BakeSelection], present: &[u16], tiles: &[u16]) -> BakePlan {
     let single = present.is_empty() || present == [FIRST_TILE];
     if single {
@@ -453,6 +459,12 @@ pub enum BakeSettingId {
     Cage,
     /// Opacity source combo (Cavity / ID map / Manual).
     OpacitySource,
+    /// ID Multi sources list.
+    IdSources,
+    /// ID Multi source weights.
+    IdSourceWeights,
+    /// ID Multi source masks.
+    IdSourceMasks,
 }
 
 /// One bake-log entry (§6:59): timestamp, map, set, duration, warnings
@@ -515,7 +527,7 @@ impl BakeLogEntry {
     /// threshold; AO/thickness (the raycast bakers) at the ray count;
     /// position (whose only panel lever is the target size) at resolution;
     /// curvature (whose strength is not a panel param) at dilation, the
-    /// post-pass every map shares; opacity at the source combo.
+    /// post-pass every map shares; opacity at the source combo; IdMulti at sources.
     pub fn setting_hint(&self) -> BakeSettingId {
         if self.skew_clamped > 0 || self.selection.is_none() {
             BakeSettingId::SkewThreshold
@@ -530,6 +542,8 @@ impl BakeLogEntry {
             BakeSettingId::Resolution
         } else if matches!(self.selection, Some(BakeSelection::Opacity)) {
             BakeSettingId::OpacitySource
+        } else if matches!(self.selection, Some(BakeSelection::IdMulti)) {
+            BakeSettingId::IdSources
         } else {
             BakeSettingId::Dilation
         }
@@ -671,6 +685,10 @@ pub mod bake_param {
     pub const OPACITY_STRENGTH: &str = "opacity_strength";
     /// Opacity invert (`Bool`).
     pub const OPACITY_INVERT: &str = "opacity_invert";
+    /// IdMulti sources (serialized as List of Maps).
+    pub const ID_MULTI_SOURCES: &str = "id_multi_sources";
+    /// IdMulti blend mode (`Int`: 0 = Additive, 1 = Max, 2 = Replace).
+    pub const ID_MULTI_BLEND_MODE: &str = "id_multi_blend_mode";
 }
 
 impl BakeSelection {
@@ -684,6 +702,7 @@ impl BakeSelection {
             Self::Normal => "normal",
             Self::WorldNormal => "world_normal",
             Self::Id => "id",
+            Self::IdMulti => "id_multi",
             Self::BentNormal => "bent_normal",
             Self::Height => "height",
             Self::Opacity => "opacity",
@@ -1235,6 +1254,10 @@ pub struct BakesPanel {
     opacity_strength: f32,
     /// Opacity invert flag.
     opacity_invert: bool,
+    /// IdMulti blend mode.
+    id_multi_blend_mode: IdBlendMode,
+    /// IdMulti sources (serialized via settings snapshot).
+    id_multi_sources: Vec<IdSourceParams>,
     /// Auto-rebake on parameter change (§6:58; default off — background
     /// bakes are opt-in).
     auto_rebake: bool,
@@ -1254,6 +1277,8 @@ pub struct BakesPanel {
     applied_opacity_source: OpacitySource,
     applied_opacity_strength: f32,
     applied_opacity_invert: bool,
+    applied_id_multi_blend_mode: IdBlendMode,
+    applied_id_multi_sources: Vec<IdSourceParams>,
     /// The per-set checklist (§6:59), synced from the mesh each frame.
     sets: Vec<SetCheck>,
     /// Whether the cage wireframe overlay shows (synced to the viewport
@@ -1391,6 +1416,13 @@ impl BakesPanel {
             opacity_source: OpacitySource::default(),
             opacity_strength: 1.0,
             opacity_invert: false,
+            id_multi_blend_mode: IdBlendMode::default(),
+            id_multi_sources: vec![IdSourceParams {
+                source: IdSource::Triangle,
+                weight: 1.0,
+                mask_path: None,
+                color: [255, 255, 255],
+            }],
             auto_rebake: false,
             auto_state: umber_bake::skew::AutoRebake::new(),
             affected_tiles: umber_core::AffectedRegion::new(),
@@ -1403,6 +1435,13 @@ impl BakesPanel {
             applied_opacity_source: OpacitySource::default(),
             applied_opacity_strength: 1.0,
             applied_opacity_invert: false,
+            applied_id_multi_blend_mode: IdBlendMode::default(),
+            applied_id_multi_sources: vec![IdSourceParams {
+                source: IdSource::Triangle,
+                weight: 1.0,
+                mask_path: None,
+                color: [255, 255, 255],
+            }],
             sets: Vec::new(),
             show_cage: false,
             highlighted_setting: None,
@@ -1470,6 +1509,39 @@ impl BakesPanel {
                     ParamValue::Bool(self.opacity_invert),
                 );
             }
+            if kind == BakeSelection::IdMulti {
+                use umber_bake::{IdBlendMode, IdSource, IdSourceParams};
+                // Serialize sources as a list of maps
+                let sources_list: Vec<ParamValue> = self
+                    .id_multi_sources
+                    .iter()
+                    .map(|src| {
+                        let mut m = BTreeMap::new();
+                        m.insert("source".to_owned(), ParamValue::Int(src.source as i32));
+                        m.insert("weight".to_owned(), ParamValue::Float(src.weight));
+                        if let Some(ref mask) = src.mask_path {
+                            m.insert("mask_path".to_owned(), ParamValue::String(mask.clone()));
+                        }
+                        m.insert(
+                            "color".to_owned(),
+                            ParamValue::List(vec![
+                                ParamValue::Int(src.color[0] as i32),
+                                ParamValue::Int(src.color[1] as i32),
+                                ParamValue::Int(src.color[2] as i32),
+                            ]),
+                        );
+                        ParamValue::Map(m)
+                    })
+                    .collect();
+                params.insert(
+                    bake_param::ID_MULTI_SOURCES.to_owned(),
+                    ParamValue::List(sources_list),
+                );
+                params.insert(
+                    bake_param::ID_MULTI_BLEND_MODE.to_owned(),
+                    ParamValue::Int(self.id_multi_blend_mode as i32),
+                );
+            }
             bakers.insert(kind, params);
         }
         BakeSettingsBlock {
@@ -1526,6 +1598,85 @@ impl BakesPanel {
         }
         if let Some(ParamValue::Bool(v)) = find(bake_param::OPACITY_INVERT) {
             self.opacity_invert = v;
+        }
+        if let Some(ParamValue::Int(v)) = find(bake_param::ID_MULTI_BLEND_MODE) {
+            self.id_multi_blend_mode = match v {
+                1 => IdBlendMode::Max,
+                2 => IdBlendMode::Replace,
+                _ => IdBlendMode::Additive,
+            };
+        }
+        if let Some(ParamValue::List(sources)) = find(bake_param::ID_MULTI_SOURCES) {
+            use umber_bake::{IdBlendMode, IdSource, IdSourceParams};
+            self.id_multi_sources = sources
+                .into_iter()
+                .filter_map(|src| {
+                    let ParamValue::Map(m) = src else {
+                        return None;
+                    };
+                    let source = m.get("source").and_then(|v| {
+                        if let ParamValue::Int(i) = v {
+                            match i {
+                                1 => Some(IdSource::Material),
+                                2 => Some(IdSource::IdMap),
+                                3 => Some(IdSource::Manual),
+                                _ => Some(IdSource::Triangle),
+                            }
+                        } else {
+                            None
+                        }
+                    })?;
+                    let weight = m
+                        .get("weight")
+                        .and_then(|v| {
+                            if let ParamValue::Float(f) = v {
+                                Some(*f)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(1.0);
+                    let mask_path = m.get("mask_path").and_then(|v| {
+                        if let ParamValue::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    let color = m
+                        .get("color")
+                        .and_then(|v| {
+                            if let ParamValue::List(arr) = v {
+                                if arr.len() == 3 {
+                                    Some([
+                                        arr[0].clone().try_into().ok()?,
+                                        arr[1].clone().try_into().ok()?,
+                                        arr[2].clone().try_into().ok()?,
+                                    ])
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or([255, 255, 255]);
+                    Some(IdSourceParams {
+                        source,
+                        weight,
+                        mask_path,
+                        color,
+                    })
+                })
+                .collect();
+            if self.id_multi_sources.is_empty() {
+                self.id_multi_sources = vec![IdSourceParams {
+                    source: IdSource::Triangle,
+                    weight: 1.0,
+                    mask_path: None,
+                    color: [255, 255, 255],
+                }];
+            }
         }
         self.output_dir = block.out_dir.clone();
     }

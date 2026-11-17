@@ -247,6 +247,7 @@ bakes =
     .map-position = Posição
     .map-world-normal = Normal em espaço de mundo
     .map-id = ID
+    .map-id-multi = ID Multi
     .map-bent-normal = Normal dobrada
     .map-height-transfer = Altura (transferência da malha alta)
     .map-opacity = Opacidade
@@ -317,6 +318,17 @@ bakes =
     .opacity-source-manual = Manual
     .opacity-strength = Força
     .opacity-invert = Inverter
+    .id-sources = Fontes de ID
+    .id-source-triangle = Triângulo
+    .id-source-material = Material
+    .id-source-id-map = Mapa de ID
+    .id-source-manual = Manual
+    .id-source-weight = Peso
+    .id-source-mask = Máscara
+    .id-blend-mode = Modo de mesclagem
+    .id-blend-mode-additive = Aditivo
+    .id-blend-mode-max = Máximo
+    .id-blend-mode-replace = Substituir
 
 ## Painel de exportação
 

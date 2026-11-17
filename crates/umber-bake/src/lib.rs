@@ -26,7 +26,10 @@ pub use ao::{
 pub use curvature::{CurvatureBakeError, CurvatureParams};
 pub use dilation::{DilateError, DilateParams};
 pub use gbuffer::{bake_uv_gbuffer, UvGBufferError, UvGBufferGpu};
-pub use id::{IdBakeError, IdBakeParams, IdFlavor};
+pub use id::{
+    bake_id_multi_mesh, validate_multi, IdBakeError, IdBakeParams, IdBlendMode, IdFlavor,
+    IdMultiParams, IdSource, IdSourceParams,
+};
 pub use normal_map::{TangentNormalBakeError, TangentNormalParams};
 pub use opacity::{
     bake_opacity_mesh, bake_opacity_tile, OpacityBakeError, OpacityParams, OpacitySource,
@@ -108,6 +111,8 @@ pub enum BakeMap {
     Position,
     Thickness,
     Id,
+    /// Multi-source ID bake (D4): composite ID from Triangle, Material, ID map, Manual sources.
+    IdMulti,
     Height,
     BentNormal,
     WorldSpaceNormal,
@@ -130,6 +135,7 @@ impl BakeMap {
             BakeMap::Position => "position",
             BakeMap::Thickness => "thickness",
             BakeMap::Id => "id",
+            BakeMap::IdMulti => "id_multi",
             BakeMap::Height => "height",
             BakeMap::BentNormal => "bent_normal",
             BakeMap::WorldSpaceNormal => "world_space_normal",
@@ -155,6 +161,7 @@ mod tests {
         );
         assert_eq!(BakeMap::Skew.file_stem_suffix(), "skew");
         assert_eq!(BakeMap::Opacity.file_stem_suffix(), "opacity");
+        assert_eq!(BakeMap::IdMulti.file_stem_suffix(), "id_multi");
     }
 
     #[test]

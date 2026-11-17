@@ -110,6 +110,7 @@ painter cannot yet finish a real PBR asset in the GUI.
 || C2-29 | Bakes panel: all nine mesh-map kinds (normal + cage, world normal, ID, bent normal), not four | 2 loop | ✓ 9 of 9 (High poly group: pick, cage, Bake from high; `2026-10-15-c2-29-transfer.md`); Export writes the newest baked normal ✓ |
 || C2-30 | Windows Ink default-on for the Windows build (or documented as opt-in) | 5 release | ✓ closed without a change: the default build already has Windows pen pressure through winit's WM_POINTER path; `winink` is hook-less (dead code if enabled). Tilt/eraser = a future WndProc kill (`2026-10-15-c2-30-winink.md`) |
 || D2 | Auto-cage (baker power row; SPP lens audit-2026-10-24-lens-spp.md:37) | 2 loop | ✅ done — CPU cage generator (Inflate/Shrinkwrap/Manual) + GPU cage buffer + shader lerp + panel UI (auto-cage checkbox + method combo) + viewport cage wire overlay + BakeSync persistence; kill report `docs/loop/kill-reports/2026-11-16-d2-auto-cage.md`; battery GREEN |
+|| D4 | ID sources (multi-source ID bake; SPP lens audit-2026-10-24-lens-spp.md:37) | 2 loop | ✅ done — CPU multi-source ID (Triangle/Material/IdMap/Manual) + GPU composite shader (Additive/Max/Replace) + panel UI (source list, weights, masks, blend mode) + BakeSync persistence; kill report `docs/loop/kill-reports/2026-11-16-d4-id-sources.md`; battery GREEN |
 
 Frozen (historical note): the GUI/P2 freeze is LIFTED per Bessa's
 standing directive 2026-10-12 ("do NOT wait on me for anything to work

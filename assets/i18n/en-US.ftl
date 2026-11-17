@@ -243,6 +243,7 @@ bakes =
     .map-position = Position
     .map-world-normal = World-space normal
     .map-id = ID
+    .map-id-multi = ID Multi
     .map-bent-normal = Bent normal
     .map-height-transfer = Height (high-poly transfer)
     .map-opacity = Opacity
@@ -313,6 +314,17 @@ bakes =
     .opacity-source-manual = Manual
     .opacity-strength = Strength
     .opacity-invert = Invert
+    .id-sources = ID sources
+    .id-source-triangle = Triangle
+    .id-source-material = Material
+    .id-source-id-map = ID map
+    .id-source-manual = Manual
+    .id-source-weight = Weight
+    .id-source-mask = Mask
+    .id-blend-mode = Blend mode
+    .id-blend-mode-additive = Additive
+    .id-blend-mode-max = Max
+    .id-blend-mode-replace = Replace
 
 ## Export panel
 
