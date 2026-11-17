@@ -2690,6 +2690,260 @@ pub const GROUND_PLANE_BAKE_SHADER: &str = r#"
   }
   "#;
 
+/// Fallback ground plane bake shader using three separate 2D storage textures
+/// for targets that don't support 3D storage textures (texture_storage_3d).
+/// Bindings:
+/// - Binding 0: scene triangles (storage buffer, read-only)
+/// - Binding 1: AO output texture (texture_storage_2d<rgba8unorm, write>)
+/// - Binding 2: Height output texture (texture_storage_2d<rgba8unorm, write>)
+/// - Binding 3: ID output texture (texture_storage_2d<rgba8unorm, write>)
+/// - Binding 4: params uniform
+/// - Binding 5: position texture (texture_2d<f32>)
+/// - Binding 6: normal texture (texture_2d<f32>)
+pub const GROUND_PLANE_BAKE_SHADER_2D_FALLBACK: &str = r#"
+  struct Tri {
+      v0: vec4<f32>,
+      v1: vec4<f32>,
+      v2: vec4<f32>,
+      normal: vec4<f32>,
+  };
+
+  struct GroundPlaneParams {
+      maps_bitmask: u32,
+      rays: u32,
+      max_distance: f32,
+      bias: f32,
+      tri_count: u32,
+      _pad: vec3<u32>,
+  };
+
+  @group(0) @binding(0) var<storage, read> triangles: array<Tri>;
+  @group(0) @binding(1) var out_ao: texture_storage_2d<rgba8unorm, write>;
+  @group(0) @binding(2) var out_height: texture_storage_2d<rgba8unorm, write>;
+  @group(0) @binding(3) var out_id: texture_storage_2d<rgba8unorm, write>;
+  @group(0) @binding(4) var<uniform> params: GroundPlaneParams;
+  @group(0) @binding(5) var position_tex: texture_2d<f32>;
+  @group(0) @binding(6) var normal_tex: texture_2d<f32>;
+
+  const PI: f32 = 3.14159265358979;
+  const GOLDEN_CONJ: f32 = 0.6180339887498949;
+  const EPS: f32 = 1e-6;
+  const FNV_OFFSET_BASIS: u32 = 2166136261u;
+  const FNV_PRIME: u32 = 16777619u;
+
+  fn fnv1a_step(h: u32, b: u32) -> u32 {
+      return (h ^ b) * FNV_PRIME;
+  }
+
+  fn hash_triangle(tri: u32) -> u32 {
+      var h = FNV_OFFSET_BASIS;
+      h = fnv1a_step(h, tri & 0xFFu);
+      h = fnv1a_step(h, (tri >> 8u) & 0xFFu);
+      h = fnv1a_step(h, (tri >> 16u) & 0xFFu);
+      h = fnv1a_step(h, (tri >> 24u) & 0xFFu);
+      return h;
+  }
+
+  fn hemisphere_sample(i: u32, n: u32) -> vec3<f32> {
+      let nf = max(f32(n), 1.0);
+      let cos_theta = 1.0 - (f32(i) + 0.5) / nf;
+      let sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+      let phi = 2.0 * PI * fract(f32(i) * GOLDEN_CONJ);
+      return vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+  }
+
+  fn hits_triangle(
+      orig: vec3<f32>,
+      dir: vec3<f32>,
+      v0: vec3<f32>,
+      v1: vec3<f32>,
+      v2: vec3<f32>,
+      max_t: f32,
+  ) -> bool {
+      let e1 = v1 - v0;
+      let e2 = v2 - v0;
+      let h = cross(dir, e2);
+      let a = dot(e1, h);
+      if (abs(a) < EPS) {
+          return false;
+      }
+      let f = 1.0 / a;
+      let s = orig - v0;
+      let u = f * dot(s, h);
+      if (u < 0.0 || u > 1.0) {
+          return false;
+      }
+      let q = cross(s, e1);
+      let v = f * dot(dir, q);
+      if (v < 0.0 || u + v > 1.0) {
+          return false;
+      }
+      let t = f * dot(e2, q);
+      return t > EPS && t < max_t;
+  }
+
+  fn ray_hit_distance(
+      orig: vec3<f32>,
+      dir: vec3<f32>,
+      v0: vec3<f32>,
+      v1: vec3<f32>,
+      v2: vec3<f32>,
+      max_t: f32,
+  ) -> f32 {
+      let e1 = v1 - v0;
+      let e2 = v2 - v0;
+      let h = cross(dir, e2);
+      let a = dot(e1, h);
+      if (abs(a) < EPS) {
+          return -1.0;
+      }
+      let f = 1.0 / a;
+      let s = orig - v0;
+      let u = f * dot(s, h);
+      if (u < 0.0 || u > 1.0) {
+          return -1.0;
+      }
+      let q = cross(s, e1);
+      let v = f * dot(dir, q);
+      if (v < 0.0 || u + v > 1.0) {
+          return -1.0;
+      }
+      let t = f * dot(e2, q);
+      if (t > EPS && t < max_t) {
+          return t;
+      }
+      return -1.0;
+  }
+
+  struct Basis {
+      b1: vec3<f32>,
+      b2: vec3<f32>,
+  }
+
+  fn orthonormal_basis(n: vec3<f32>) -> Basis {
+      let sign_z = select(-1.0, 1.0, n.z >= 0.0);
+      let a = -1.0 / (sign_z + n.z);
+      let b = n.x * n.y * a;
+      return Basis(
+          vec3<f32>(1.0 + sign_z * n.x * n.x * a, sign_z * b, -sign_z * n.x),
+          vec3<f32>(b, sign_z + n.y * n.y * a, -n.y),
+      );
+  }
+
+  @compute @workgroup_size(8, 8)
+  fn cs_main(
+      @builtin(global_invocation_id) gid: vec3<u32>,
+  ) {
+      let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+      let dims = textureDimensions(position_tex);
+      if (coord.x >= i32(dims.x) || coord.y >= i32(dims.y)) {
+          return;
+      }
+
+      let sample = textureLoad(position_tex, coord, 0);
+      let covered = sample.w > 0.5;
+
+      if (!covered) {
+          if (params.maps_bitmask & 1u) != 0u {
+              textureStore(out_ao, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+          }
+          if (params.maps_bitmask & 2u) != 0u {
+              textureStore(out_height, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+          }
+          if (params.maps_bitmask & 4u) != 0u {
+              textureStore(out_id, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+          }
+          return;
+      }
+
+      let surface_pos = sample.xyz;
+      let normal = normalize(textureLoad(normal_tex, coord, 0).xyz);
+      let basis = orthonormal_basis(normal);
+      let ray_origin = surface_pos + params.bias * normal;
+
+      // AO (bit 0)
+      if ((params.maps_bitmask & 1u) != 0u) {
+          var hit_count: u32 = 0u;
+          let n = params.rays;
+          for (var i: u32 = 0u; i < n; i = i + 1u) {
+              let local_dir = hemisphere_sample(i, n);
+              let dir = normalize(
+                  local_dir.x * basis.b1 + local_dir.y * basis.b2 + local_dir.z * normal
+              );
+              var hit = false;
+              for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+                  let tri = triangles[t];
+                  if (hits_triangle(ray_origin, dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance)) {
+                      hit = true;
+                      break;
+                  }
+              }
+              if (hit) {
+                  hit_count = hit_count + 1u;
+              }
+          }
+          let blocked = f32(hit_count) / f32(max(params.rays, 1u));
+          let ao = clamp(1.0 - blocked, 0.0, 1.0);
+          textureStore(out_ao, coord, vec4<f32>(ao, ao, ao, 1.0));
+      } else {
+          textureStore(out_ao, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+      }
+
+      // Height (bit 1) - ray along -Y (world down)
+      if ((params.maps_bitmask & 2u) != 0u) {
+          var best_t = params.max_distance;
+          var hit_found = false;
+          let height_dir = -vec3<f32>(0.0, 1.0, 0.0);
+          for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+              let tri = triangles[t];
+              let hit = ray_hit_distance(ray_origin, height_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance);
+              if (hit > 0.0 && (!hit_found || hit < best_t)) {
+                  best_t = hit;
+                  hit_found = true;
+              }
+          }
+          if (hit_found) {
+              let h = clamp(best_t / max(params.max_distance, EPS), 0.0, 1.0);
+              textureStore(out_height, coord, vec4<f32>(h, h, h, 1.0));
+          } else {
+              textureStore(out_height, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+          }
+      } else {
+          textureStore(out_height, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+      }
+
+      // ID (bit 2) - same ray as Height
+      if ((params.maps_bitmask & 4u) != 0u) {
+          var best_t = params.max_distance;
+          var best_tri: u32 = 0xFFFFFFFFu;
+          var hit_found = false;
+          let id_dir = -vec3<f32>(0.0, 1.0, 0.0);
+          for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
+              let tri = triangles[t];
+              let hit = ray_hit_distance(ray_origin, id_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance);
+              if (hit > 0.0 && (!hit_found || hit < best_t)) {
+                  best_t = hit;
+                  best_tri = t;
+                  hit_found = true;
+              }
+          }
+          if (hit_found) {
+              let h = hash_triangle(best_tri);
+              let rgb = vec3<f32>(
+                  f32(h & 0xFFu),
+                  f32((h >> 8u) & 0xFFu),
+                  f32((h >> 16u) & 0xFFu),
+              ) / 255.0;
+              textureStore(out_id, coord, vec4<f32>(rgb, 1.0));
+          } else {
+              textureStore(out_id, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+          }
+      } else {
+          textureStore(out_id, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+      }
+  }
+  "#;
+
 #[cfg(test)]
 mod uv_eps_parity {
     //! Row 156-B: the WGSL UV solves must quote the same epsilon pair as
