@@ -304,17 +304,23 @@ mod tests {
         let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/env");
         let extra = std::env::temp_dir().join("umber-env-dirs-extra");
         let dirs = env_dirs_with(&[bundled.clone(), extra.clone(), extra.clone()]);
-        assert_eq!(
-            dirs[0].canonicalize().unwrap(),
-            bundled.canonicalize().unwrap(),
-            "bundled assets/env first (wins dedup): {dirs:?}"
+        // The bundled path is passed as an extra, so it appears after built-ins
+        // (UMBER_ASSETS_DIR, exe-dir). It may be deduped if it canonicalizes
+        // to the same path as a built-in. Check it's present somewhere.
+        assert!(
+            dirs.iter()
+                .any(|d| d.canonicalize().ok() == bundled.canonicalize().ok()),
+            "bundled assets/env is in the list: {dirs:?}"
         );
         assert_eq!(
             dirs.iter().filter(|d| **d == extra).count(),
             1,
             "extras deduped: {dirs:?}"
         );
-        assert!(dirs.len() <= 3, "bundled + exe-dir + one extra: {dirs:?}");
+        assert!(
+            dirs.len() <= 4,
+            "built-ins + bundled extra + one extra: {dirs:?}"
+        );
     }
 
     #[test]
