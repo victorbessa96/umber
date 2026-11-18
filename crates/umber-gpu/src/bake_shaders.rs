@@ -2259,6 +2259,9 @@ fn cs_main_from_position(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
 ///
 /// - `@workgroup_size(8, 8)`, dispatched `ceil(w/8) x ceil(h/8)`.
 /// - Reuses `fnv1a_step` / `hash_triangle` from `ID_BAKE_SHADER` logic.
+/// - Single entry point `cs_main`: the mesh-fed `cs_main_from_position`
+///   variant was removed 2026-11-18 (D4 persistence kill) — it was never
+///   dispatched and wrote zeros if called; the UV G-buffer is the only route.
 pub fn id_multi_bake_shader() -> &'static str {
     r#"
 enable wgpu_binding_array;
@@ -2408,25 +2411,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   } else {
     textureStore(out_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
   }
-}
-
-/// Mesh-fed entry point (stub for v1 — delegates to plane logic).
-/// The ID multi bake uses the UV G-buffer for triangle index, so the
-/// mesh-fed path (which would reconstruct from position/normal) is not
-/// needed. Kept for API parity with AO/thickness/opacity pattern.
-@compute @workgroup_size(8, 8, 1)
-fn cs_main_from_position(@builtin(global_invocation_id) gid: vec3<u32>) {
-  // For v1, ID multi uses the plane entry point (UV G-buffer).
-  // This entry point exists for API completeness but is not dispatched.
-  // If called, it falls back to the same logic as cs_main by reading
-  // the G-buffer via the same bindings (which won't be bound in this
-  // pipeline variant). The plane path is the primary one for ID bakes.
-  let dims = textureDimensions(out_tex);
-  if (gid.x >= dims.x || gid.y >= dims.y) {
-    return;
-  }
-  let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-  textureStore(out_tex, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
 }
   "#
 }

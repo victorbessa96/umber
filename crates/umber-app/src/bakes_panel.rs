@@ -691,7 +691,11 @@ pub mod bake_param {
     pub const OPACITY_STRENGTH: &str = "opacity_strength";
     /// Opacity invert (`Bool`).
     pub const OPACITY_INVERT: &str = "opacity_invert";
-    /// IdMulti sources (serialized as List of Maps).
+    /// IdMulti source count (`Int`, 0..=8): the flat-key encoding written
+    /// since 2026-11-18 (D4 persistence kill).
+    pub const ID_MULTI_COUNT: &str = "id_multi_count";
+    /// Legacy IdMulti sources key (`Stops` packing [source, weight, blend]).
+    /// Written before 2026-11-18, read-only fallback now.
     pub const ID_MULTI_SOURCES: &str = "id_multi_sources";
     /// IdMulti blend mode (`Int`: 0 = Additive, 1 = Max, 2 = Replace).
     pub const ID_MULTI_BLEND_MODE: &str = "id_multi_blend_mode";
@@ -709,6 +713,12 @@ pub mod bake_param {
     pub const GROUND_PLANE_MAX_DISTANCE: &str = "ground_plane_max_distance";
     /// Ground plane bias (`Float`).
     pub const GROUND_PLANE_BIAS: &str = "ground_plane_bias";
+
+    /// Flat per-source key of the 2026-11-18 IdMulti encoding, e.g.
+    /// `id_multi_src_2_mask` for source index 2's mask path.
+    pub fn id_multi_src_key(i: usize, field: &str) -> String {
+        format!("id_multi_src_{i}_{field}")
+    }
 }
 
 impl BakeSelection {
@@ -1055,7 +1065,8 @@ fn param_to_carry(value: &umber_graph::ParamValue) -> Option<umber_core::project
         umber_graph::ParamValue::Float(v) => Some(BakeParamCarry::Float(*v)),
         umber_graph::ParamValue::Int(v) => Some(BakeParamCarry::Int(*v)),
         umber_graph::ParamValue::Bool(v) => Some(BakeParamCarry::Bool(*v)),
-        // Bake settings are scalar; nothing else is ever stored.
+        umber_graph::ParamValue::Asset(s) => Some(BakeParamCarry::Text(s.clone())),
+        // Bake settings are scalars or asset paths; nothing else is stored.
         _ => None,
     }
 }
@@ -1066,6 +1077,7 @@ fn param_from_carry(value: umber_core::project::BakeParamCarry) -> umber_graph::
         BakeParamCarry::Float(v) => umber_graph::ParamValue::Float(v),
         BakeParamCarry::Int(v) => umber_graph::ParamValue::Int(v),
         BakeParamCarry::Bool(v) => umber_graph::ParamValue::Bool(v),
+        BakeParamCarry::Text(s) => umber_graph::ParamValue::Asset(s),
     }
 }
 
@@ -1100,7 +1112,7 @@ fn block_from_carry(
                 let kind = BakeSelection::from_kind_key(key)?;
                 let params = params
                     .iter()
-                    .map(|(k, v)| (k.clone(), param_from_carry(*v)))
+                    .map(|(k, v)| (k.clone(), param_from_carry(v.clone())))
                     .collect();
                 Some((kind, params))
             })
@@ -1558,39 +1570,35 @@ impl BakesPanel {
                 );
             }
             if kind == BakeSelection::IdMulti {
-                // Serialize sources using available ParamValue variants.
-                // TODO: proper serialization with full format when ParamValue supports Map/List.
-                let sources_list: Vec<ParamValue> = self
-                    .id_multi_sources
-                    .iter()
-                    .map(|src| {
-                        // Encode source as Color: [source_idx, weight, blend_mode, reserved]
-                        // Use Asset for mask_path if present.
-                        let mut color = [0.0f32; 3];
-                        color[0] = src.source as u8 as f32;
-                        color[1] = src.weight;
-                        color[2] = self.id_multi_blend_mode as u8 as f32;
-                        ParamValue::Color(color)
-                    })
-                    .collect();
+                // Flat scalar keys (2026-11-18 D4 persistence): every value is
+                // an Int/Float/Asset, so all of them survive the BakeParamCarry
+                // mirror into project.json (mask_path included).
                 params.insert(
-                    bake_param::ID_MULTI_SOURCES.to_owned(),
-                    ParamValue::Stops(
-                        sources_list
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, c)| {
-                                if let ParamValue::Color(c) = c {
-                                    // Color has 3 components: [source_idx, weight, blend_mode]
-                                    // Use 0.0 as default for 4th component
-                                    (i as f32, [c[0], c[1], c[2], 0.0])
-                                } else {
-                                    (0.0, [0.0; 4])
-                                }
-                            })
-                            .collect(),
-                    ),
+                    bake_param::ID_MULTI_COUNT.to_owned(),
+                    ParamValue::Int(self.id_multi_sources.len() as i32),
                 );
+                for (i, src) in self.id_multi_sources.iter().enumerate() {
+                    params.insert(
+                        bake_param::id_multi_src_key(i, "source"),
+                        ParamValue::Int(src.source as i32),
+                    );
+                    params.insert(
+                        bake_param::id_multi_src_key(i, "weight"),
+                        ParamValue::Float(src.weight),
+                    );
+                    if let Some(mask) = &src.mask_path {
+                        params.insert(
+                            bake_param::id_multi_src_key(i, "mask"),
+                            ParamValue::Asset(mask.clone()),
+                        );
+                    }
+                    for (ch, v) in ["r", "g", "b"].into_iter().zip(src.color.iter()) {
+                        params.insert(
+                            bake_param::id_multi_src_key(i, &format!("color_{ch}")),
+                            ParamValue::Int(i32::from(*v)),
+                        );
+                    }
+                }
                 params.insert(
                     bake_param::ID_MULTI_BLEND_MODE.to_owned(),
                     ParamValue::Int(self.id_multi_blend_mode as i32),
@@ -1690,7 +1698,53 @@ impl BakesPanel {
                 _ => IdBlendMode::Additive,
             };
         }
-        if let Some(ParamValue::Stops(sources)) = find(bake_param::ID_MULTI_SOURCES) {
+        let flat_count = match find(bake_param::ID_MULTI_COUNT) {
+            Some(ParamValue::Int(n)) => Some(n),
+            _ => None,
+        };
+        if let Some(count) = flat_count {
+            // 2026-11-18 flat encoding: the full source config (kind, weight,
+            // mask path, manual color) survives the project-file carry.
+            let n = usize::try_from(count.clamp(0, 8)).unwrap_or(0);
+            let mut sources = Vec::with_capacity(n);
+            for i in 0..n {
+                let src_i = |field: &str| find(&bake_param::id_multi_src_key(i, field));
+                let source = match src_i("source") {
+                    Some(ParamValue::Int(v)) => match v {
+                        1 => IdSource::Material,
+                        2 => IdSource::IdMap,
+                        3 => IdSource::Manual,
+                        _ => IdSource::Triangle,
+                    },
+                    _ => IdSource::Triangle,
+                };
+                let weight = match src_i("weight") {
+                    Some(ParamValue::Float(w)) => w.clamp(0.0, 1.0),
+                    _ => 1.0,
+                };
+                let mask_path = match src_i("mask") {
+                    Some(ParamValue::Asset(p)) => Some(p),
+                    _ => None,
+                };
+                let chan = |c: &str| match src_i(&format!("color_{c}")) {
+                    Some(ParamValue::Int(v)) => u8::try_from(v.clamp(0, 255)).unwrap_or(255),
+                    _ => 255,
+                };
+                sources.push(IdSourceParams {
+                    source,
+                    weight,
+                    mask_path,
+                    color: [chan("r"), chan("g"), chan("b")],
+                });
+            }
+            self.id_multi_sources = if sources.is_empty() {
+                vec![IdSourceParams::default()]
+            } else {
+                sources
+            };
+        } else if let Some(ParamValue::Stops(sources)) = find(bake_param::ID_MULTI_SOURCES) {
+            // Legacy pre-2026-11-18 encoding: source kind + weight only, no
+            // mask path or manual color survived it.
             self.id_multi_sources = sources
                 .into_iter()
                 .filter_map(|(_, color_arr)| {
@@ -1706,7 +1760,7 @@ impl BakesPanel {
                         Some(IdSourceParams {
                             source,
                             weight,
-                            mask_path: None, // TODO: restore mask_path when ParamValue supports Asset
+                            mask_path: None,
                             color: [255, 255, 255],
                         })
                     } else {
@@ -5656,6 +5710,138 @@ mod tests {
         assert_eq!(q.resolution(), 1024);
         assert!(q.is_map_enabled(BakeSelection::Id));
         assert_eq!(q.output_dir(), Path::new("/tmp/out-a"));
+    }
+
+    #[test]
+    fn id_multi_sources_round_trip_through_snapshot_and_apply() {
+        let mut p = panel();
+        p.set_map_enabled(BakeSelection::IdMulti, true);
+        p.id_multi_sources = vec![
+            IdSourceParams {
+                source: IdSource::Manual,
+                weight: 0.4,
+                mask_path: Some("/tmp/masks/rust.png".to_owned()),
+                color: [255, 0, 0],
+            },
+            IdSourceParams {
+                source: IdSource::IdMap,
+                weight: 1.0,
+                mask_path: None,
+                color: [10, 20, 30],
+            },
+        ];
+        p.id_multi_blend_mode = IdBlendMode::Max;
+        let block = p.settings_snapshot();
+        // Flat scalar keys only: every value survives the BakeParamCarry mirror.
+        let idm = &block.bakers[&BakeSelection::IdMulti];
+        assert_eq!(
+            idm.get(bake_param::ID_MULTI_COUNT),
+            Some(&umber_graph::ParamValue::Int(2))
+        );
+        assert_eq!(
+            idm.get(&bake_param::id_multi_src_key(0, "mask")),
+            Some(&umber_graph::ParamValue::Asset(
+                "/tmp/masks/rust.png".to_owned()
+            ))
+        );
+        assert_eq!(
+            idm.get(&bake_param::id_multi_src_key(0, "color_r")),
+            Some(&umber_graph::ParamValue::Int(255))
+        );
+        assert!(!idm.contains_key(&bake_param::id_multi_src_key(1, "mask")));
+        assert!(!idm.contains_key(bake_param::ID_MULTI_SOURCES));
+
+        let mut q = panel();
+        q.apply_settings(&block);
+        assert_eq!(q.id_multi_sources, p.id_multi_sources);
+        assert_eq!(q.id_multi_blend_mode, IdBlendMode::Max);
+        assert_eq!(q.settings_snapshot(), block);
+    }
+
+    #[test]
+    fn id_multi_sources_round_trip_through_the_project_file() {
+        let mut p = panel();
+        let names = three_sets(&mut p);
+        p.set_settings_focus(Some("A".into()));
+        p.set_map_enabled(BakeSelection::IdMulti, true);
+        p.id_multi_sources = vec![
+            IdSourceParams {
+                source: IdSource::Manual,
+                weight: 0.25,
+                mask_path: Some("/tmp/masks/cav.png".to_owned()),
+                color: [1, 2, 3],
+            },
+            IdSourceParams {
+                source: IdSource::Triangle,
+                weight: 0.9,
+                mask_path: None,
+                color: [200, 100, 50],
+            },
+        ];
+        p.id_multi_blend_mode = IdBlendMode::Replace;
+        p.commit_focus_settings();
+        let carry = p.sync_carry();
+        // The mask path must reach the carry as Text (survives serde).
+        let idm = &carry.sets[&names[0]].bakers["id_multi"];
+        assert!(matches!(
+            idm.get(&bake_param::id_multi_src_key(0, "mask")),
+            Some(umber_core::project::BakeParamCarry::Text(_))
+        ));
+
+        let dir = std::env::temp_dir().join(format!(
+            "umber-idmulti-{}-{}",
+            std::process::id(),
+            BakesPanel::now_unix_secs()
+        ));
+        let model = umber_core::project::ProjectModel::new(
+            vec![umber_core::TextureSet::new_default("A")],
+            Vec::new(),
+            umber_core::project::ProjectSettings::default(),
+        )
+        .with_bake_sync(carry.clone());
+        umber_core::project::save_to_dir(&model, &dir).unwrap();
+        let loaded = umber_core::project::load_from_dir(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded.bake_sync, carry);
+
+        let mut q = panel();
+        q.sync_sets(&names);
+        q.load_sync_carry(&loaded.bake_sync);
+        let block = q.sync().settings_for(&names[0]).unwrap().clone();
+        let mut r = panel();
+        r.apply_settings(&block);
+        assert_eq!(r.id_multi_sources, p.id_multi_sources);
+        assert_eq!(r.id_multi_blend_mode, IdBlendMode::Replace);
+        assert_eq!(r.settings_snapshot(), p.settings_snapshot());
+    }
+
+    #[test]
+    fn id_multi_legacy_stops_encoding_still_loads() {
+        let mut params = BTreeMap::new();
+        params.insert(
+            bake_param::ID_MULTI_SOURCES.to_owned(),
+            umber_graph::ParamValue::Stops(vec![
+                (0.0, [0.0, 0.5, 0.0, 0.0]), // Triangle, weight 0.5
+                (1.0, [3.0, 1.0, 0.0, 0.0]), // Manual, weight 1.0
+            ]),
+        );
+        params.insert(
+            bake_param::ID_MULTI_BLEND_MODE.to_owned(),
+            umber_graph::ParamValue::Int(1),
+        );
+        let block = BakeSettingsBlock {
+            bakers: [(BakeSelection::IdMulti, params)].into_iter().collect(),
+            out_dir: PathBuf::from("/tmp/umber-bakes-test"),
+        };
+        let mut q = panel();
+        q.apply_settings(&block);
+        assert_eq!(q.id_multi_sources.len(), 2);
+        assert_eq!(q.id_multi_sources[0].source, IdSource::Triangle);
+        assert!((q.id_multi_sources[0].weight - 0.5).abs() < 1e-6);
+        assert_eq!(q.id_multi_sources[0].mask_path, None);
+        assert_eq!(q.id_multi_sources[0].color, [255, 255, 255]);
+        assert_eq!(q.id_multi_sources[1].source, IdSource::Manual);
+        assert_eq!(q.id_multi_blend_mode, IdBlendMode::Max);
     }
 
     #[test]

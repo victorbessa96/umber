@@ -350,10 +350,10 @@ impl Default for ProjectSymmetry {
 }
 
 /// One persisted bake parameter value (R-D1): a plain-data mirror of the
-/// scalar `umber_graph::ParamValue` arms the Bakes panel's settings use.
-/// `umber-core` takes no graph dep for this carry (the
-/// [`PostFxEffect`] mirror rule); the app converts at the boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// scalar `umber_graph::ParamValue` arms the Bakes panel's settings use
+/// (`Asset` mirrors as `Text`). `umber-core` takes no graph dep for this
+/// carry (the [`PostFxEffect`] mirror rule); the app converts at the boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BakeParamCarry {
     /// A float parameter (e.g. the skew threshold, degrees).
     Float(f32),
@@ -361,6 +361,9 @@ pub enum BakeParamCarry {
     Int(i32),
     /// A flag (e.g. the occluder scope).
     Bool(bool),
+    /// A text parameter (an IdMulti source's mask path). Additive since
+    /// 2026-11-18 (D4 persistence kill): pre-kill files never carry it.
+    Text(String),
 }
 
 /// One bake settings block (R-D1): baker kind (the app's stable baker key,
@@ -1696,7 +1699,7 @@ mod tests {
             .into_iter()
             .collect();
             for (k, v) in extra {
-                params.insert((*k).to_string(), *v);
+                params.insert((*k).to_string(), v.clone());
             }
             params
         };
@@ -1747,7 +1750,7 @@ mod tests {
         assert_eq!(loaded, model);
         let ao = &loaded.bake_sync.groups[0].settings.bakers["ao"];
         assert_eq!(ao["skew_threshold"], BakeParamCarry::Float(0.3));
-        match ao["skew_threshold"] {
+        match &ao["skew_threshold"] {
             BakeParamCarry::Float(v) => assert_eq!(v.to_bits(), 0.3f32.to_bits()),
             other => panic!("expected a float, got {other:?}"),
         }
