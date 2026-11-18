@@ -236,6 +236,7 @@ bakes =
     .cage-method-inflate = Inflate (raycast along normals)
     .cage-method-shrinkwrap = Shrinkwrap (closest point)
     .cage-method-manual = Manual (implicit cage only)
+    .cage-method-hint = Inflate raycasts normals, Shrinkwrap closest point, Manual implicit cage.
     .bake-from-high = Bake from high
     .transfer-normal = Transfer normal
     .transfer-height = Transfer height

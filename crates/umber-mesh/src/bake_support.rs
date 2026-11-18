@@ -702,7 +702,12 @@ mod tests {
         assert_eq!(manual.offsets.len(), 4);
         // On a flat surface where high == low, Inflate hits at the surface (offset=0),
         // while Manual uses the implicit cage (front * normal).
-        for (inf, man) in inflate.offsets.iter().zip(manual.offsets.iter()) {
+        for (idx, (inf, man)) in inflate
+            .offsets
+            .iter()
+            .zip(manual.offsets.iter())
+            .enumerate()
+        {
             // Inflate: ray hits at surface → offset = 0
             assert!(
                 inf[0].abs() < 1e-6 && inf[1].abs() < 1e-6 && inf[2].abs() < 1e-6,
@@ -715,7 +720,57 @@ mod tests {
                 man[0].abs() < 1e-6 && man[1].abs() < 1e-6,
                 "Manual offset.xy = 0"
             );
+            // Resolved contract (2026-11-18 cross-review D2 MED): cage offset is
+            // hit − low_pos and the shader ray origin is
+            // low_pos + n*front_offset + cage_off. On flat geometry Inflate's
+            // offset is 0, so its ray origin coincides with the no-cage v1
+            // origin (low_pos + n*front) → byte-equal transfer output to
+            // auto-cage-off. Manual returns front*normal by design.
+            let p = glam::Vec3::from_array(low.positions[idx]);
+            let n = glam::Vec3::from_array(low.normals[idx]);
+            let origin_inflate = p + n * front + glam::Vec3::from_array(*inf);
+            let v1_origin = p + n * front;
+            assert!(
+                (origin_inflate - v1_origin).length() < 1e-6,
+                "Inflate on flat must reproduce the v1 (no-cage) ray origin: {:?} vs {:?}",
+                origin_inflate,
+                v1_origin
+            );
         }
+    }
+
+    /// Mirrors WGSL `lerp3_cage` (`bake_shaders.rs`: `a*bary.x + b*bary.y +
+    /// c*bary.z` with bary = (w, u, v)). CPU `Cage::lerp_at` uses the same op
+    /// order via `uv_gbuffer::lerp3`, so the result must be bit-identical per
+    /// component (cross-review D2 MED: named test, not indirect coverage).
+    #[test]
+    fn transfer_shader_cage_lerp_matches_cpu() {
+        let cage = Cage {
+            offsets: vec![
+                [1.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [0.0, 0.0, 3.0],
+                [9.0, 9.0, 9.0],
+            ],
+        };
+        let tri = [0u32, 1, 2];
+        for &(u, v) in &[(0.0f32, 0.0f32), (0.25, 0.5), (1.0, 0.0), (0.3, 0.7)] {
+            let w = 1.0 - u - v;
+            let got = cage.lerp_at(&tri, (u, v)).expect("valid tri");
+            let (o0, o1, o2) = (cage.offsets[0], cage.offsets[1], cage.offsets[2]);
+            let expect = [
+                o0[0] * w + o1[0] * u + o2[0] * v,
+                o0[1] * w + o1[1] * u + o2[1] * v,
+                o0[2] * w + o1[2] * u + o2[2] * v,
+            ];
+            assert_eq!(
+                got, expect,
+                "lerp_at must be bit-identical to the shader expansion at bary ({u}, {v})"
+            );
+        }
+        // Degenerate / out-of-bounds triangles never panic.
+        assert!(cage.lerp_at(&[0, 1], (0.5, 0.5)).is_none());
+        assert!(cage.lerp_at(&[0, 1, 99], (0.5, 0.5)).is_none());
     }
 
     /// Low vertex inside high cavity → Shrinkwrap offset magnitude < Inflate

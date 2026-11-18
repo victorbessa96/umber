@@ -3048,7 +3048,7 @@ impl BakesPanel {
                 .checkbox(&mut self.high.auto_cage, tr("bakes.auto-cage"))
                 .on_hover_text(tr("bakes.auto-cage-hint"));
             group.row(tr("bakes.cage-method").as_str(), |ui| {
-                egui::ComboBox::from_id_salt("bakes-cage-method")
+                let combo = egui::ComboBox::from_id_salt("bakes-cage-method")
                     .selected_text(match self.high.cage_method {
                         umber_mesh::CageMethod::Inflate => tr("bakes.cage-method-inflate"),
                         umber_mesh::CageMethod::Shrinkwrap => tr("bakes.cage-method-shrinkwrap"),
@@ -3071,6 +3071,7 @@ impl BakesPanel {
                             tr("bakes.cage-method-manual"),
                         );
                     });
+                combo.response.on_hover_text(tr("bakes.cage-method-hint"));
             });
             group
                 .ui

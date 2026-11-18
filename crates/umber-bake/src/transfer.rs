@@ -348,6 +348,14 @@ fn build_high_triangles(high: &MeshData) -> Result<Vec<GpuTriangle>, TransferErr
         .collect()
 }
 
+/// Packs cage offsets into vec4 for the WGSL storage buffer (16-byte aligned,
+/// `GpuTriangle` precedent); the w lane is padding and always 0.
+/// Extracted 2026-11-18 (D2 cross-review MED) so the alignment contract is
+/// unit-testable without a device.
+fn pack_cage_vec4(offsets: &[[f32; 3]]) -> Vec<[f32; 4]> {
+    offsets.iter().map(|o| [o[0], o[1], o[2], 0.0]).collect()
+}
+
 /// Bakes HIGH-mesh surface data into LOW-mesh UV space: first rasterizes
 /// `low`'s own UV layout into a world-position + face-normal map (see
 /// [`crate::position::bake_position_and_normal`]), then casts one `-normal`
@@ -424,11 +432,7 @@ pub fn bake_transfer_mesh(
     let cage_buffer = if let Some(cage) = cage {
         if !cage.offsets.is_empty() && cage.offsets.len() == low.vertex_count() {
             // Convert Vec<[f32; 3]> to Vec<[f32; 4]> for 16-byte alignment (vec4 in WGSL)
-            let cage_vec4: Vec<[f32; 4]> = cage
-                .offsets
-                .iter()
-                .map(|o| [o[0], o[1], o[2], 0.0])
-                .collect();
+            let cage_vec4 = pack_cage_vec4(&cage.offsets);
             Some(
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("umber_bake_transfer_cage_offsets"),
@@ -682,6 +686,27 @@ mod tests {
 
     fn transfer_params(map: TransferMap) -> TransferParams {
         TransferParams::new(1.0, 2.0, 0.5, 32, 32).with_map(map)
+    }
+
+    /// D2 cross-review MED: the cage buffer upload must stay 16-byte aligned
+    /// (vec4 in WGSL, `GpuTriangle` precedent) with a zero padding lane.
+    #[test]
+    fn pack_cage_vec4_is_16_byte_aligned_with_zero_padding() {
+        let offsets = vec![[1.0f32, 2.0, 3.0], [-0.5, 0.25, 7.0]];
+        let packed = pack_cage_vec4(&offsets);
+        assert_eq!(packed.len(), offsets.len());
+        for (src, dst) in offsets.iter().zip(packed.iter()) {
+            assert_eq!(&dst[..3], src, "xyz must be preserved");
+            assert_eq!(dst[3], 0.0, "w lane is padding");
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(&packed);
+        assert_eq!(bytes.len(), offsets.len() * 16);
+        assert_eq!(
+            bytes.len() % 16,
+            0,
+            "storage buffer must stay 16-byte aligned"
+        );
+        assert!(pack_cage_vec4(&[]).is_empty());
     }
 
     fn low_quad() -> MeshData {

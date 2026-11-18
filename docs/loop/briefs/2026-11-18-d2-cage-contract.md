@@ -17,14 +17,16 @@ surface at `t = front`, i.e. hit point = `low_pos`, so offset = 0. The
 implementation (`Cage::from_high_low`, bake_support.rs) follows the recipe, and the
 test asserts offset = 0 for Inflate vs `front*n` for Manual.
 
-**Resolved contract**: the cage offset is defined relative to `low_pos`, and the
-effective transfer ray origin is `low_pos + normal*front + offset` (brief line 58,
-shader `cs_main`). On flat geometry Inflate (offset 0) and Manual (offset
-`front*n`) therefore produce the *same effective ray origin* — which is what
-"byte-equal to Manual" must mean, since that is what the transfer output depends
-on. The DoD line is corrected to say exactly this; the implementation is unchanged.
+**Resolved contract**: the cage offset is defined as `hit − low_pos` (miss →
+`front * normal`), and the shader ray origin is `low_pos + n*front_offset + cage_off`
+(`TRANSFER_BAKE_SHADER` line 1571; the app passes `front_offset = front` whether or not
+a cage is bound). On flat geometry (high == low) Inflate's ray from `low_pos + front*n`
+along `-n` hits at `t = front`, i.e. hit = `low_pos`, so offset = 0 — its ray origin
+coincides with the no-cage v1 origin and the transfer output is byte-equal to
+auto-cage-off. Manual returns `front * normal` by design (the shipped D2 behavior).
+The DoD line is corrected to say exactly this; the implementation is unchanged.
 The test is strengthened, not weakened: it keeps the per-method offset assertions
-and adds the effective-ray-origin equality assertion across methods.
+and adds the Inflate-on-flat == v1-origin equality assertion.
 
 ## Scope
 
