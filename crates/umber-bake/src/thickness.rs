@@ -533,7 +533,24 @@ mod tests {
                 eprintln!("skipping: no wgpu adapter available");
                 return None;
             };
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+            if std::env::var_os("UMBER_RUN_GPU_TESTS").is_none() {
+                eprintln!("skipping: UMBER_RUN_GPU_TESTS not set (2026-11-18 capability gate)");
+                return None;
+            }
+            if !adapter
+                .features()
+                .contains(wgpu::Features::TEXTURE_BINDING_ARRAY)
+            {
+                eprintln!(
+                    "skipping: adapter lacks TEXTURE_BINDING_ARRAY (2026-11-18 capability gate)"
+                );
+                return None;
+            }
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::TEXTURE_BINDING_ARRAY,
+                ..Default::default()
+            }))
+            .ok()
         }
 
         /// Two-triangle quad spanning world `[-1, 1]` with full-`[0, 1]`

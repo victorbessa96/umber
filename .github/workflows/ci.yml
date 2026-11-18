@@ -142,6 +142,11 @@ jobs:
         # silently skipped. Lavapipe satisfies the adapter.
       - name: GPU feature tests (Linux lavapipe)
         if: runner.os == 'Linux'
+        env:
+          # 2026-11-18 capability gate: GPU parity tests are opt-in via
+          # UMBER_RUN_GPU_TESTS so feature-unified local runs on adapters
+          # that cannot run the shaders (SKL/GL fallback) skip cleanly.
+          UMBER_RUN_GPU_TESTS: "1"
         run: cargo test -p umber-gpu --features gpu
 
         # The workspace clippy step compiles umber-gpu and umber-bake
@@ -157,6 +162,9 @@ jobs:
         # the multi-device-on-lavapipe rule.
       - name: umber-bake GPU feature tests (Linux lavapipe)
         if: runner.os == 'Linux'
+        env:
+          # See the GPU feature tests step above (2026-11-18 capability gate).
+          UMBER_RUN_GPU_TESTS: "1"
         run: cargo test -p umber-bake --features gpu -- --test-threads=1
 
       # Windows Ink backend: feature-gated behind `winink` (target-gated dep —
