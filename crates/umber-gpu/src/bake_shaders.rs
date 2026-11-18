@@ -1979,14 +1979,11 @@ fn cs_main(
 }
 "#;
 
-/// Opacity bake shader (D3 opacity baker): two entry points matching AO/thickness.
-///
-/// # Plane entry (`cs_main`)
-/// Identical dispatch to AO plane path; reads `params.source` (u32 enum),
-/// `strength`, `invert`, `max_distance`, `bias`, `rays`. For `Cavity` (source=0):
-/// replicates AO's hemisphere loop but writes `opacity = (1.0 - ao) * strength`
-/// (inverted AO), then `invert` flips it. For `IdMap`/`Manual`: not supported
-/// in plane path (mesh-fed only).
+/// Opacity bake shader (D3 opacity baker): single mesh-fed entry point, matching the
+/// AO/thickness mesh-fed shape. (2026-11-18: the old plane entry `cs_main` with a
+/// hardcoded origin plane was removed — it was dispatched instead of the mesh-fed
+/// entry by mistake and could never serve arbitrary PlaneDesc; opacity is mesh-fed
+/// only. See docs/loop/briefs/2026-11-18-d3-opacity-plane-dispatch.md.)
 ///
 /// # Mesh-fed entry (`cs_main_from_position`)
 /// Reads `position_tex`/`normal_tex` + optional `id_tex` (binding 6,
@@ -2119,62 +2116,6 @@ fn hemisphere_sample(i: u32, n: u32) -> vec3<f32> {
     let scaled = f32(i) * GOLDEN_CONJ;
     let phi = 2.0 * 3.141592653589793 * (scaled - floor(scaled));
     return vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
-}
-
-/// Plane entry point: bakes opacity from a parameter plane (Cavity source only).
-/// One workgroup per texel, matching AO/thickness plane paths.
-@compute @workgroup_size(1)
-fn cs_main(@builtin(workgroup_id) workgroup_id: vec3<u32>) {
-    let coord = vec2<i32>(workgroup_id.xy);
-    
-    // For plane path, we don't have position/normal textures.
-    // Only Cavity source is supported in plane path.
-    if (params.source != 0u) {
-        // IdMap and Manual not supported in plane path
-        return;
-    }
-
-    // Build a simple plane at origin with +Z normal for the cavity bake
-    // This mirrors AO's plane path
-    let plane_origin = vec3<f32>(0.0, 0.0, 0.0);
-    let plane_u = vec3<f32>(1.0, 0.0, 0.0);
-    let plane_v = vec3<f32>(0.0, 1.0, 0.0);
-    let plane_normal = vec3<f32>(0.0, 0.0, 1.0);
-    
-    // Cavity = 1.0 - AO (occlusion). We replicate AO's hemisphere loop.
-    let ray_origin = plane_origin + params.bias * plane_normal;
-    let basis = orthonormal_basis(plane_normal);
-    
-    var ao = 0.0;
-    let n = params.rays;
-    for (var i: u32 = 0u; i < n; i = i + 1u) {
-        let local_dir = hemisphere_sample(i, n);
-        let dir = normalize(
-            local_dir.x * basis.b1 + local_dir.y * basis.b2 + local_dir.z * plane_normal
-        );
-        var hit = false;
-        for (var t: u32 = 0u; t < params.tri_count; t = t + 1u) {
-            let tri = triangles[t];
-            if (ray_hit_distance(ray_origin, dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz, params.max_distance) > 0.0) {
-                hit = true;
-                break;
-            }
-        }
-        if (!hit) {
-            ao = ao + 1.0;
-        }
-    }
-    ao = ao / f32(n);
-    
-    // Opacity = (1.0 - AO) * strength, then invert if needed
-    var opacity = (1.0 - ao) * params.strength;
-    if (params.invert == 1u) {
-        opacity = 1.0 - opacity;
-    }
-    opacity = clamp(opacity, 0.0, 1.0);
-    
-    // Plane path: full coverage (alpha = 255)
-    textureStore(out_tex, coord, vec4<f32>(opacity, opacity, opacity, 1.0));
 }
 
 /// Mesh-fed entry point: reads position/normal from position pass, optional ID map.

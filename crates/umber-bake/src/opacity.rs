@@ -11,9 +11,11 @@
 //! [`crate::position::bake_position_and_normal`]), then bind both textures
 //! read-only into the second pass — the mesh-fed entry point reads
 //! `position_tex`/`normal_tex` from the position pass and optionally an
-//! `id_tex` (binding 6) for the `IdMap` source. The plane entry point
-//! (`cs_main`) runs without those textures (same as AO/thickness plane
-//! paths) and only supports `OpacitySource::Cavity`.
+//! `id_tex` (binding 6) for the `IdMap` source. The only entry point is the
+//! mesh-fed `cs_main_from_position`, which reads `position_tex`/`normal_tex`
+//! from the position pass; the old hardcoded-plane entry was removed
+//! 2026-11-18 (contract narrowed to mesh-fed, see
+//! docs/loop/briefs/2026-11-18-d3-opacity-plane-dispatch.md).
 //!
 //! Output encoding: full `width * height * 4` RGBA8 bytes in row-major order.
 //! R = opacity (0 = transparent, 255 = opaque), A = coverage (0 = position
@@ -424,7 +426,7 @@ pub fn bake_opacity_mesh(
         label: Some("umber_bake_opacity_pipeline"),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: Some("cs_main"),
+        entry_point: Some("cs_main_from_position"),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
     });
@@ -553,6 +555,23 @@ mod tests {
     #[test]
     fn opacity_uniform_layout_matches_wgsl_struct_size() {
         assert_eq!(size_of::<OpacityUniform>(), 32);
+    }
+
+    /// Source-level regression guard (2026-11-18, cross-review D3 MED): the
+    /// pipeline must dispatch the mesh-fed entry, and the shader must no longer
+    /// carry the hardcoded-plane entry.
+    #[test]
+    fn opacity_pipeline_dispatches_mesh_fed_entry() {
+        const SRC: &str = include_str!("opacity.rs");
+        assert!(
+            SRC.contains("entry_point: Some(\"cs_main_from_position\")"),
+            "bake_opacity_mesh must dispatch the mesh-fed entry"
+        );
+        assert!(
+            !umber_gpu::bake_shaders::OPACITY_BAKE_SHADER.contains("plane_origin"),
+            "the hardcoded-plane entry must stay removed"
+        );
+        assert!(umber_gpu::bake_shaders::OPACITY_BAKE_SHADER.contains("fn cs_main_from_position"));
     }
 
     #[test]
@@ -898,12 +917,11 @@ mod tests {
         /// Kittest 4 (`opacity_off_is_byte_identical_to_today`) lives in umber-app's
         /// bakes_panel plan_bake tests; umber-bake cannot import umber-app (cycle).
         ///
-        /// Kittest 5: `opacity_mesh_fed_matches_plane`
-        /// Same mesh baked via mesh-fed path (position+normal textures) and plane path
-        /// (PlaneDesc covering the mesh bounds) with `OpacitySource::Cavity` →
-        /// outputs byte-identical (same ray count, same seed order, same IEEE arithmetic).
+        /// Kittest 5 (renamed 2026-11-18: the plane path was removed — contract
+        /// narrowed to mesh-fed, cross-review D3 MED): mesh-fed double-bake must
+        /// be byte-identical (same ray count, same seed order, same IEEE arithmetic).
         #[test]
-        fn opacity_mesh_fed_matches_plane() {
+        fn opacity_mesh_fed_double_bake_is_byte_identical() {
             let Some((device, queue)) = try_request_device() else {
                 return;
             };
@@ -916,11 +934,8 @@ mod tests {
                 bias: 0.01,
                 rays: 16,
             };
-            // Mesh-fed path (the main entry point)
             let mesh_fed = bake_opacity_mesh(&device, &queue, &mesh, &params, 32, 32, None)
                 .expect("mesh-fed opacity bake should succeed");
-            // Plane path would need a separate entry point; for now this test
-            // validates the mesh-fed path is deterministic (double-bake).
             let mesh_fed_2 = bake_opacity_mesh(&device, &queue, &mesh, &params, 32, 32, None)
                 .expect("second mesh-fed opacity bake should succeed");
             assert_eq!(

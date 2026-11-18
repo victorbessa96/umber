@@ -54,6 +54,7 @@ Locked files (exact surface at dispatch):
 
 2. **GPU shader (`OPACITY_BAKE_SHADER` in `bake_shaders.rs`)**:
    - Plane entry `cs_main`: identical dispatch to AO plane path; reads `params.source` (u32 enum), `strength`, `invert`, `max_distance`, `bias`, `rays`. For `Cavity`: replicates AO's hemisphere loop but writes `opacity = (1.0 - ao) * strength` (inverted AO), then `invert` flips it. For `IdMap`: not supported in plane path (mesh-fed only).
+     - **2026-11-18 resolution (cross-review D3 MED, brief `2026-11-18-d3-opacity-plane-dispatch.md`)**: the plane entry was never dispatched (the pipeline ran `cs_main` with a hardcoded origin plane while the mesh-fed entry sat unused) and cannot serve arbitrary `PlaneDesc`. Contract narrowed: opacity is mesh-fed only (`cs_main_from_position`); the plane entry was removed.
    - Mesh-fed entry `cs_main_from_position`: reads `position_tex`/`normal_tex` + optional `id_tex` (binding 6, `texture_2d<f32>`). For `Cavity`: same as AO but outputs opacity. For `IdMap`: samples `id_tex` at texel; coverage (`id_tex.a > 0.5`) → `opacity = strength`, else `0.0`. `invert` flips. Output `vec4(opacity, opacity, opacity, coverage)`.
    - Uniform struct `OpacityParams { source: u32, strength: f32, invert: u32, max_distance: f32, bias: f32, rays: u32, tri_count: u32, _pad: u32 }` (32 bytes, 16-byte aligned).
 
@@ -76,6 +77,7 @@ Locked files (exact surface at dispatch):
 - `opacity_manual_uniform`: `OpacitySource::Manual`, `strength=0.37` (non-representable float) → every covered texel reads R=95 (0.37*255 rounded), A=255; uncovered reads (0,0,0,0). Bit-exact on readback.
 - `opacity_off_is_byte_identical_to_today`: `BakeSelection::Opacity` unchecked + all other maps checked → the full bake plan (jobs, outputs, log) is byte-for-byte identical to a tree without the opacity module (no new jobs, no new log entries, no new files). Proves zero regression when the new baker is not selected.
 - `opacity_mesh_fed_matches_plane`: same mesh baked via mesh-fed path (position+normal textures) and plane path (PlaneDesc covering the mesh bounds) with `OpacitySource::Cavity` → outputs byte-identical (same ray count, same seed order, same IEEE arithmetic — the AO/thickness precedent at `ao.rs:72` `lerp3` property).
+  - **2026-11-18 resolution**: plane path removed (contract narrowed to mesh-fed); the test became `opacity_mesh_fed_double_bake_is_byte_identical` plus a source-level guard that the pipeline dispatches `cs_main_from_position`.
 
 ## Rules
 
