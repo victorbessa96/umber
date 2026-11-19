@@ -10,8 +10,7 @@ and `.dragon/COORDINATION-next-wave.md`.
 Implements `docs/loop/briefs/2026-11-19-umber-vector-svg-export.md`: Target and
 decisions 1–4, tests, and exact lock surface. K1 is `46d4bff5`, K2 `0b5cb72d`,
 K3 `98fdbb80`, K4 `a4373c51`, and the K5a brief is `18858292`. The K5a code
-landing is recorded in the follow-up hash-truthing commit. K5b import remains
-separate.
+landing is `09d01fbd`. K5b import remains separate.
 
 ## Built
 

@@ -2,10 +2,10 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** K4 `a4373c51` is pushed on top of K3 `98fdbb80`,
-K2 `0b5cb72d`, and K1 `46d4bff5`. K5a deterministic SVG export is implemented
-under `razul-vector-svg-export` with its landing SHA pending; the brief is
-`18858292`. New `umber_core::vector_svg` serializes exact UV M/L/C/Z geometry,
+**Updated 2026-11-19:** K5a `09d01fbd` is pushed on top of K4 `a4373c51`,
+K3 `98fdbb80`, K2 `0b5cb72d`, and K1 `46d4bff5`; the K5a brief is `18858292`.
+The `razul-vector-svg-export` lock is released after safe-push.
+New `umber_core::vector_svg` serializes exact UV M/L/C/Z geometry,
 nonzero fill and round-stroke attributes with typed refusals. Each Vector
 section exports through rfd to a user-selected path with safe filenames and
 localized Saved/Failed notices. Focused serializer/panel/i18n suites are green.
