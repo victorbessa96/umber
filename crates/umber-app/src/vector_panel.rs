@@ -10,6 +10,12 @@ use crate::i18n::tr;
 
 const DEFAULT_STROKE_WIDTH: f32 = 0.01;
 
+/// One user-selected SVG export result, handed to the shell's notice rail.
+pub enum VectorExportOutcome {
+    Saved(std::path::PathBuf),
+    Failed(String),
+}
+
 /// Search labels in draw order. Stroke-only rows stay listed while hidden,
 /// matching the Fill section's static-vocabulary convention.
 const ROW_LABEL_KEYS: &[&str] = &[
@@ -19,6 +25,7 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "vector.stroke",
     "vector.stroke-width",
     "vector.stroke-color",
+    "vector.export-svg",
 ];
 
 pub fn row_labels() -> Vec<String> {
@@ -28,7 +35,8 @@ pub fn row_labels() -> Vec<String> {
 /// One collapsible property section per vector layer. A fresh `None` layer
 /// edits the same visible default as the canvas; the first real change creates
 /// its params through one undoable command.
-pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) {
+pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<VectorExportOutcome> {
+    let mut outcome = None;
     ui.add_space(8.0);
     ui.separator();
     ui.strong(tr("vector.section"));
@@ -40,10 +48,10 @@ pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) {
         .collect();
     if vectors.is_empty() {
         ui.label(tr("vector.none"));
-        return;
+        return None;
     }
     for (id, name, params) in vectors {
-        egui::CollapsingHeader::new(name)
+        egui::CollapsingHeader::new(&name)
             .default_open(true)
             .show(ui, |ui| {
                 let mut edited = params.unwrap_or_default();
@@ -94,11 +102,55 @@ pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) {
                         }
                     });
                 }
+                let export_clicked = ui.button(tr("vector.export-svg")).clicked();
                 if changed {
-                    doc.run(LayerCommand::set_vector(id, edited));
+                    doc.run(LayerCommand::set_vector(id, edited.clone()));
+                }
+                if export_clicked {
+                    outcome = export_one(&name, &edited);
                 }
             });
     }
+    outcome
+}
+
+/// Opens the native save dialog and writes only the user-selected path.
+/// Cancel returns `None`; serialization and filesystem failures stay visible.
+fn export_one(name: &str, params: &VectorParams) -> Option<VectorExportOutcome> {
+    let svg = match umber_core::vector_svg::export_svg(&params.shape) {
+        Ok(svg) => svg,
+        Err(error) => return Some(VectorExportOutcome::Failed(error.to_string())),
+    };
+    let path = rfd::FileDialog::new()
+        .add_filter("SVG", &["svg"])
+        .set_file_name(suggested_svg_name(name))
+        .save_file()?;
+    match std::fs::write(&path, svg) {
+        Ok(()) => Some(VectorExportOutcome::Saved(path)),
+        Err(error) => Some(VectorExportOutcome::Failed(error.to_string())),
+    }
+}
+
+/// Stable, filesystem-safe layer-name suggestion (ASCII, bounded, nonempty).
+fn suggested_svg_name(name: &str) -> String {
+    let candidate: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let candidate = candidate.trim_matches('_');
+    let stem = if candidate.is_empty() {
+        "vector"
+    } else {
+        candidate
+    };
+    format!("{stem}.svg")
 }
 
 /// Enables a stroke with useful defaults, or removes it. Re-enabling an
@@ -148,6 +200,7 @@ mod row_label_tests {
                 "Stroke",
                 "Stroke width",
                 "Stroke color",
+                "Export SVG",
             ]
         );
     }
@@ -176,6 +229,17 @@ mod tests {
         assert_eq!(shape.stroke, None);
         assert_eq!(shape.fill, [255, 255, 255, 255]);
         assert_eq!(shape.anchors.len(), 1);
+    }
+
+    #[test]
+    fn svg_filename_suggestions_are_safe_bounded_and_nonempty() {
+        assert_eq!(suggested_svg_name("Body / Arms"), "Body___Arms.svg");
+        assert_eq!(suggested_svg_name("..."), "vector.svg");
+        assert_eq!(suggested_svg_name(""), "vector.svg");
+        assert_eq!(
+            suggested_svg_name(&"x".repeat(100)),
+            format!("{}.svg", "x".repeat(64))
+        );
     }
 
     #[test]

@@ -953,6 +953,9 @@ vector =
     .stroke = Contorno
     .stroke-width = Largura do contorno
     .stroke-color = Cor do contorno
+    .export-svg = Exportar SVG
+    .export-saved = Exportado { $path }
+    .export-failed = Falha ao exportar SVG: { $error }
 
 ## Saída de superfície HDR (§5, linha P1 85)
 

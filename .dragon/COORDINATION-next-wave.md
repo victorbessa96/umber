@@ -3,18 +3,19 @@
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
 **Updated 2026-11-19:** K4 `a4373c51` is pushed on top of K3 `98fdbb80`,
-K2 `0b5cb72d`, and K1 `46d4bff5`; the K4 brief is `7f1c6cc3`. The
-`razul-vector-widgets` lock is released after safe-push. The final tree has a dedicated Vector Properties rail with the
-existing spline glyph, native sRGBA fill/stroke controls, bounded stroke width,
-and one SetVector per egui change. New-path defaults are visible opaque white
-fill and no stroke; `VectorShape::empty()` stays transparent and undo-to-None
-is preserved. Focused core/gui/panel/editor/rail/i18n suites are green. Final
-r1 battery is GREEN: clippy 0 errors, 22 suites, 2,133 passed / 0 failed
-(`vector-widgets-final-battery-r1.log`). Bounded Kimi review returned SHIP.
-K5 SVG io is NEXT; Fill cache-lifecycle parity is the named follow-up.
-Human/platform gates are unchanged: dogfood, native-speaker review, Windows
-signing, live Windows Ink verification, and beta/stable release. Consult
-`STATE.md` and the live lock registry before claiming new work.
+K2 `0b5cb72d`, and K1 `46d4bff5`. K5a deterministic SVG export is implemented
+under `razul-vector-svg-export` with its landing SHA pending; the brief is
+`18858292`. New `umber_core::vector_svg` serializes exact UV M/L/C/Z geometry,
+nonzero fill and round-stroke attributes with typed refusals. Each Vector
+section exports through rfd to a user-selected path with safe filenames and
+localized Saved/Failed notices. Focused serializer/panel/i18n suites are green.
+Final r1 battery is GREEN: clippy 0 errors, 22 suites, 2,139 passed / 0 failed
+(`vector-svg-export-final-battery-r1.log`). Bounded Kimi review returned SHIP.
+K5b SVG-to-vector import is NEXT through geometry-sink reuse; Fill
+cache-lifecycle parity is the named follow-up. Human/platform gates are
+unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink
+verification, and beta/stable release. Consult `STATE.md` and the live lock
+registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 

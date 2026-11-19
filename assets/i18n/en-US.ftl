@@ -934,6 +934,9 @@ vector =
     .stroke = Stroke
     .stroke-width = Stroke width
     .stroke-color = Stroke color
+    .export-svg = Export SVG
+    .export-saved = Exported { $path }
+    .export-failed = SVG export failed: { $error }
 
 ## HDR surface output (§5 P1 row 85)
 

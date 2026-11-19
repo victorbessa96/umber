@@ -1408,7 +1408,28 @@ impl TabViewer for PanelViewer<'_> {
                         umber_gui::ContextKind::Vector => {
                             // K4: fill/stroke/closure edits ride K3's SetVector
                             // command, journal, adoption, and raster refresh.
-                            vector_panel::vector_section_ui(ui, self.doc);
+                            if let Some(outcome) = vector_panel::vector_section_ui(ui, self.doc) {
+                                let notice = match outcome {
+                                    vector_panel::VectorExportOutcome::Saved(path) => {
+                                        crate::i18n::tr_args(
+                                            "vector.export-saved",
+                                            [(
+                                                "path",
+                                                fluent::FluentValue::from(
+                                                    path.display().to_string(),
+                                                ),
+                                            )],
+                                        )
+                                    }
+                                    vector_panel::VectorExportOutcome::Failed(error) => {
+                                        crate::i18n::tr_args(
+                                            "vector.export-failed",
+                                            [("error", fluent::FluentValue::from(error))],
+                                        )
+                                    }
+                                };
+                                self.pick_notices.push(notice);
+                            }
                         }
                         umber_gui::ContextKind::Mask => {
                             if let Some(paint) = self.paint.as_deref_mut() {
