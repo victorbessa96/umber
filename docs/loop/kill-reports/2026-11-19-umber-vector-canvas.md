@@ -9,9 +9,9 @@ catalogs, `README.md`, `docs/ROADMAP.md`, the K3 brief, this report,
 
 Implements `docs/loop/briefs/2026-11-19-umber-vector-canvas.md`: Target and
 decisions 1–6, tests, and exact lock surface. K1 is `46d4bff5`; K2 is
-`0b5cb72d`; the K3 design brief is `8520c09b`; the K3 code landing is recorded
-in the follow-up hash-truthing commit. K4 property widgets and K5 SVG
-conversion/export remain separate kills.
+`0b5cb72d`; the K3 design brief is `8520c09b`; the K3 code landing is
+`98fdbb80`. K4 property widgets and K5 SVG conversion/export remain separate
+kills.
 
 ## Built
 

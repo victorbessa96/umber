@@ -3,8 +3,9 @@
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
 **Updated 2026-11-19:** K2 `0b5cb72d` is pushed on top of K1 `46d4bff5`;
-the K2 design brief is `60322097`. K3 canvas editing is implemented under
-`razul-vector-canvas` with its landing SHA pending; the K3 brief is `8520c09b`.
+the K2 design brief is `60322097`. K3 canvas editing landed as `98fdbb80`;
+the K3 brief is `8520c09b`. The `razul-vector-canvas` lock is released after
+safe-push.
 The final tree has reversible SetVector journal/history support, fresh-layer
 `None` adoption, one command per completed edit, external-edit protection,
 K2-exact centerline guides, exact-handle deletion, explicit collapsed-handle
