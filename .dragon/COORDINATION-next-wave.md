@@ -9,8 +9,9 @@ tests green, including complete-plane restores, refresh-wide refusal
 aggregation, NaN cache identity, and non-finite control-point handling. Final
 r9 battery is GREEN: clippy 0 errors, 20 suites, 1,964 passed / 0 failed
 (`vector-raster-final-battery-r9.log`). Final two-point review verdict: SHIP.
-K3 canvas editing is unclaimed and next.
-K3 canvas editing, K4 panel widgets, and K5 SVG io remain separate. Fill
+K3 canvas editing is CLAIMED under `razul-vector-canvas`: design brief first,
+then SetVector journal support and UV anchor/handle gestures. K4 panel widgets
+and K5 SVG io remain separate. Fill
 cache-lifecycle parity is the named follow-up. Human/platform gates are
 unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink
 verification, and beta/stable release. Consult `STATE.md` and the live lock
