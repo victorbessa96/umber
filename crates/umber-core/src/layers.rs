@@ -64,6 +64,13 @@ pub enum LayerKind {
     /// at another definition is an ordinary [`LayerCommand::SetMaterial`]),
     /// and the by-value `match layer.kind` sites never bind a `String`.
     Material,
+    /// A live editable vector path (K1 of the path-tool vector wave,
+    /// `razul-vector-model`, 2026-11-18). Plain tag like [`LayerKind::Fill`]:
+    /// the payload lives on [`Layer::vector`] (`Some` exactly for vector
+    /// layers), so matches over `LayerKind` never churn when the vector
+    /// model grows. Composites as fully transparent until K2's
+    /// rasterizer lands.
+    Vector,
 }
 
 /// Everything that can go wrong with layer instancing (§3:41).
@@ -112,6 +119,14 @@ pub enum InstanceError {
         /// The material layer a paint was attempted on.
         layer: u64,
     },
+    /// The layer is a vector path (K1 of the vector wave: brush strokes
+    /// cannot paint it — the canvas editor owns it, K3).
+    #[error("layer {layer} is a vector layer: paths are edited, not painted")]
+    PaintOnVector {
+        /// The vector layer a paint was attempted on.
+        layer: u64,
+    },
+
     /// A fill's pixels are its evaluation: the next refresh overwrites the
     /// plane whole, so a stroke there would be silently destroyed (paint the
     /// mask instead). The field is `layer`, never `source` (the
@@ -1028,6 +1043,12 @@ pub struct Layer {
     /// it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialParams>,
+    /// The vector shape, `Some` exactly for [`LayerKind::Vector`] layers.
+    /// Additive like `material`: files without the key load with `None`,
+    /// and re-saved non-vector layer JSON stays free of a `"vector": null`
+    /// key (R-D1 pattern, no format version bump).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector: Option<crate::vector::VectorParams>,
     /// The mesh/tile exclusions (see [`GeometryMask`]). Additive like
     /// `material`: files without the key load with the empty mask, and an
     /// empty mask writes no key, so pre-feature layers re-save
@@ -1165,6 +1186,7 @@ impl LayerStack {
             mask: None,
             fill: None,
             material: None,
+            vector: None,
             geometry_mask: GeometryMask::default(),
         });
         id
@@ -1188,6 +1210,7 @@ impl LayerStack {
             mask: None,
             fill: None,
             material: None,
+            vector: None,
             geometry_mask: GeometryMask::default(),
         });
         self.next_id = self.next_id.max(id + 1);
@@ -1357,6 +1380,7 @@ impl LayerStack {
             mask: None,
             fill: None,
             material: None,
+            vector: None,
             geometry_mask: GeometryMask::default(),
         });
         Ok(id)
@@ -1608,6 +1632,7 @@ impl LayerStack {
                 source_id: *source_id,
             }),
             LayerKind::Material => Err(InstanceError::PaintOnMaterial { layer: id }),
+            LayerKind::Vector => Err(InstanceError::PaintOnVector { layer: id }),
         }
     }
 

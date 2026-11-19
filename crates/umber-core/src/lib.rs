@@ -36,6 +36,7 @@ pub mod svg;
 pub mod tiles;
 pub mod undo;
 pub mod uv_dilation;
+pub mod vector;
 
 pub use assets::{AssetError, AssetRef, AssetStore};
 pub use journal::{Journal, JournalEntry, JournalOp};

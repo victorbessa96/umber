@@ -899,6 +899,7 @@ pub fn layers_ui(
                     LayerKind::Fill => (tr("layers.kind-fill"), None),
                     LayerKind::Folder { .. } => (tr("layers.kind-folder"), None),
                     LayerKind::Material => (tr("layers.kind-material"), None),
+                    LayerKind::Vector => (tr("layers.kind-vector"), None),
                     LayerKind::Instance { source_id } => {
                         let source_name = match doc.stack.check_paintable(layer.id) {
                             Err(InstanceError::PaintOnInstance { source_id, .. }) => doc

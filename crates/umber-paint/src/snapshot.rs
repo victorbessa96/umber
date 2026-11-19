@@ -86,6 +86,19 @@ pub fn build_composite_snapshot(
                     geometry: layer.geometry_mask.clone(),
                 });
             }
+            umber_core::LayerKind::Vector => {
+                layers.push(SnapshotLayer {
+                    owner,
+                    layer_id: Some(layer.id),
+                    kind: SnapshotLayerKind::Vector,
+                    blend: layer.blend_mode,
+                    opacity: layer.opacity,
+                    visible: layer.visible,
+                    mask_enabled,
+                    material_channels: None,
+                    geometry: layer.geometry_mask.clone(),
+                });
+            }
             umber_core::LayerKind::Paint => {
                 layers.push(SnapshotLayer {
                     owner,
@@ -139,11 +152,13 @@ pub fn build_composite_snapshot(
                             geometry: layer.geometry_mask.clone(),
                         });
                     }
-                    umber_core::LayerKind::Paint | umber_core::LayerKind::Fill => {
-                        let kind = if source.kind == umber_core::LayerKind::Fill {
-                            SnapshotLayerKind::Fill
-                        } else {
-                            SnapshotLayerKind::Paint
+                    umber_core::LayerKind::Paint
+                    | umber_core::LayerKind::Fill
+                    | umber_core::LayerKind::Vector => {
+                        let kind = match source.kind {
+                            umber_core::LayerKind::Fill => SnapshotLayerKind::Fill,
+                            umber_core::LayerKind::Vector => SnapshotLayerKind::Vector,
+                            _ => SnapshotLayerKind::Paint,
                         };
                         layers.push(SnapshotLayer {
                             owner: source_owner,

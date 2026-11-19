@@ -148,6 +148,8 @@ pub enum HistoryKind {
     AddMaterial,
     /// [`LayerCommand::Add`] of an instance layer (§3:41).
     AddInstance,
+    /// [`LayerCommand::Add`] of a vector layer (razul-vector-model K1).
+    AddVector,
     /// [`LayerCommand::Remove`].
     Remove,
     /// [`LayerCommand::Reorder`].
@@ -234,6 +236,7 @@ impl HistoryKind {
                 LayerKind::Folder { .. } => Self::AddFolder,
                 LayerKind::Material => Self::AddMaterial,
                 LayerKind::Instance { .. } => Self::AddInstance,
+                LayerKind::Vector => Self::AddVector,
             },
             LayerCommand::Remove { .. } => Self::Remove,
             LayerCommand::Reorder { .. } => Self::Reorder,
@@ -260,6 +263,7 @@ impl HistoryKind {
             Self::AddFolder => tr("history.op-add-folder"),
             Self::AddMaterial => tr("history.op-add-material"),
             Self::AddInstance => tr("history.op-add-instance"),
+            Self::AddVector => tr("history.op-add-vector"),
             Self::Remove => tr("history.op-remove"),
             Self::Reorder => tr("history.op-reorder"),
             Self::SetOpacity => tr("history.op-set-opacity"),
@@ -300,6 +304,7 @@ impl HistoryKind {
             Self::AddFolder => "add folder",
             Self::AddMaterial => "add material layer",
             Self::AddInstance => "add instance layer",
+            Self::AddVector => "add vector layer",
             Self::Remove => "remove layer",
             Self::Reorder => "reorder layer",
             Self::SetOpacity => "set opacity",
@@ -1720,6 +1725,7 @@ mod tests {
             AddFolder,
             AddMaterial,
             AddInstance,
+            AddVector,
             Remove,
             Reorder,
             SetOpacity,

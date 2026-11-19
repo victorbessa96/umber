@@ -2125,4 +2125,60 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn vector_layer_round_trips_through_project_exactly() {
+        // razul-vector-model K1: a vector layer's shape survives
+        // save -> load exactly, and save -> load -> save is byte-identical.
+        use crate::layers::LayerKind;
+        use crate::vector::{Anchor, Stroke, VectorParams, VectorShape};
+        let mut model = fixture_model();
+        let shape = VectorShape {
+            closed: true,
+            fill: [200, 30, 40, 255],
+            stroke: Some(Stroke {
+                width: 0.01,
+                color: [10, 10, 10, 255],
+            }),
+            anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
+        };
+        let id = model.layers[0].stack.add_layer("Path", LayerKind::Vector);
+        model.layers[0].stack.layer_mut(id).unwrap().vector = Some(VectorParams {
+            shape: shape.clone(),
+        });
+
+        let dir_a = unique_temp_dir("vector-a");
+        let dir_b = unique_temp_dir("vector-b");
+        save_to_dir(&model, &dir_a).expect("save vector project");
+        let loaded = load_from_dir(&dir_a).expect("load vector project");
+        assert_eq!(
+            loaded.layers[0].stack.layer(id).unwrap().vector,
+            Some(VectorParams { shape }),
+            "the vector shape must survive the round trip"
+        );
+        save_to_dir(&loaded, &dir_b).expect("resave");
+        assert_dirs_byte_identical(&dir_a, &dir_b);
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn project_without_vector_key_loads_with_none() {
+        // R-D1 additive rule: a pre-vector project file (no "vector" key)
+        // loads with vector == None and re-saves WITHOUT the key.
+        use crate::layers::LayerKind;
+        let mut model = fixture_model();
+        let id = model.layers[0].stack.add_layer("Tint", LayerKind::Fill);
+        let dir_a = unique_temp_dir("novec-a");
+        save_to_dir(&model, &dir_a).expect("save");
+        // strip any vector key defensively (fill layers never write one)
+        let proj = dir_a.join("project.json");
+        let text = fs::read_to_string(&proj).expect("read project.json");
+        assert!(
+            !text.contains("\"vector\""),
+            "non-vector layers write no vector key (skip_serializing_if)"
+        );
+        let loaded = load_from_dir(&dir_a).expect("load");
+        assert_eq!(loaded.layers[0].stack.layer(id).unwrap().vector, None);
+        let _ = fs::remove_dir_all(&dir_a);
+    }
 }

@@ -973,6 +973,10 @@ pub enum SnapshotLayerKind {
     /// Eval-owned per-channel planes; the blend/opacity ride
     /// [`SnapshotLayer::material_channels`], never the layer's own.
     Material,
+    /// Vector layer (K1, razul-vector-model 2026-11-18): composites as
+    /// fully transparent until K2's rasterizer lands, so it rides the
+    /// snapshot like Fill but with its own kind tag.
+    Vector,
 }
 
 /// One material channel's composite entry (§5.2): only DECLARED + enabled
