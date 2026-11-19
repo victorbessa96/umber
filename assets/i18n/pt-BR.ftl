@@ -861,6 +861,7 @@ history =
     .op-bake = Bake
     .op-export = Exportação
     .op-filter-apply = Aplicar filtro
+    .op-quick-mask = Máscara rápida
     .strokes = Traços de borrar / clonar / borracha
     .undo-stroke = ↺ Desfazer traço
     .redo-stroke = ↻ Refazer traço

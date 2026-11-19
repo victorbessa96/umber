@@ -806,6 +806,7 @@ history =
     .op-bake = Bake
     .op-export = Export
     .op-filter-apply = Apply filter
+    .op-quick-mask = Quick mask
     .strokes = Smudge / clone / eraser strokes
     .undo-stroke = ↺ Undo stroke
     .redo-stroke = ↻ Redo stroke

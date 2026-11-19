@@ -1234,6 +1234,23 @@ pub struct StrokeCommit {
     pub layer: Option<u64>,
 }
 
+/// One quick-mask edit (a mask-mode stroke, or an ID-mask click) queued for
+/// the shell to turn into one history row + one undo step on the shell's
+/// mask-op stack (the `razul-quickmask-undo` kill, 2026-11-18 — the filter-op
+/// precedent, `filter_apply.rs`). `before`/`after` are whole-mask snapshots
+/// of the active set, so undo restores exact plane bytes.
+#[derive(Debug)]
+pub struct MaskUndoEvent {
+    /// The mask set the edit touched (the active set at edit time).
+    pub set: String,
+    /// Whole-mask snapshot before the edit.
+    pub before: QuickMask,
+    /// Whole-mask snapshot after the edit.
+    pub after: QuickMask,
+    /// True for an ID-mask click selection, false for a mask-mode stroke.
+    pub id_select: bool,
+}
+
 /// The paint session: one GPU target per UDIM tile plus the live stroke
 /// conditioner.
 pub struct PaintState {
@@ -1384,6 +1401,14 @@ pub struct PaintState {
     /// or one — the app drains every frame). Queued in [`Self::end_stroke`],
     /// cleared beside the journal in [`Self::resize_set`].
     pending_commits: Vec<StrokeCommit>,
+    /// Quick-mask edits recorded since the last History-window drain (the
+    /// [`MaskUndoEvent`] twin of `pending_commits`). Queued in
+    /// [`Self::end_stroke`] (mask-mode strokes) and [`Self::select_id_mask`],
+    /// cleared beside the journal in [`Self::resize_set`].
+    pending_mask_events: Vec<MaskUndoEvent>,
+    /// Whole-mask snapshot taken at `begin_stroke` when the stroke is a
+    /// mask-mode stroke; compared against the live mask at `end_stroke`.
+    mask_stroke_before: Option<(String, QuickMask)>,
     /// The stroke-history generation: bumped every time the journal is
     /// cleared wholesale ([`Self::resize_set`]), so the History window can
     /// drop rows that describe evicted commands. Starts at 0, matching a
@@ -1666,6 +1691,8 @@ impl PaintState {
                 .with_memory_budget(RETOUCH_HISTORY_MAX_BYTES),
             retouch_writes: PaintWrites::default(),
             pending_commits: Vec::new(),
+            pending_mask_events: Vec::new(),
+            mask_stroke_before: None,
             stroke_epoch: 0,
             owner_revision: BTreeMap::new(),
             symmetry: SymmetrySettings::default(),
@@ -2181,6 +2208,13 @@ impl PaintState {
         // Snapshot the quick-mask modes too: X / I mid-stroke never split
         // one stroke between the mask and the layer.
         self.stroke_mask_edit = self.quick_mask().is_editing();
+        // Snapshot the whole active mask for a mask-mode stroke, so
+        // `end_stroke` can queue one undo step when the stroke changed it
+        // (the razul-quickmask-undo kill; generation is bumped by every
+        // mask mutation, so equality on it means "unchanged").
+        self.mask_stroke_before = self
+            .stroke_mask_edit
+            .then(|| (self.active_set().to_string(), self.quick_mask().clone()));
         self.stroke_mask_gate =
             self.quick_mask().gates() || self.cavity_gates() || self.stencil_gates();
         // Snapshot the layer-mask target too: a mid-stroke panel switch
@@ -2872,8 +2906,20 @@ impl PaintState {
         if self.stroking {
             return Err(IdSelectError::StrokeInFlight);
         }
+        let before = (self.active_set().to_string(), self.quick_mask().clone());
         let id = select_id(self.mask_of_tile_mut(tile), tile, bake, width, height, uv)?;
         self.mask_synced.retain(|(_, t, _)| *t != tile);
+        // One undo step for the click when it changed the mask
+        // (razul-quickmask-undo): the whole-mask before/after pair.
+        let after = self.quick_mask().clone();
+        if after.generation() != before.1.generation() {
+            self.pending_mask_events.push(MaskUndoEvent {
+                set: before.0,
+                before: before.1,
+                after,
+                id_select: true,
+            });
+        }
         Ok(id)
     }
 
@@ -3157,6 +3203,13 @@ impl PaintState {
     /// zero or one — the app drains every frame).
     pub fn take_stroke_commits(&mut self) -> Vec<StrokeCommit> {
         std::mem::take(&mut self.pending_commits)
+    }
+
+    /// Takes the [`MaskUndoEvent`]s queued since the last drain (usually
+    /// zero or one — the app drains every frame), for the shell to record
+    /// as history rows and push onto its mask-op undo stack.
+    pub fn take_mask_events(&mut self) -> Vec<MaskUndoEvent> {
+        std::mem::take(&mut self.pending_mask_events)
     }
 
     /// Queues the retouch history's pending region writes on their planes
@@ -4828,6 +4881,21 @@ impl PaintState {
                 });
             }
         }
+        // Mask-mode stroke: one undo step when the active mask changed
+        // (generation bump). The before snapshot rides from `begin_stroke`.
+        if let Some((set, before)) = self.mask_stroke_before.take() {
+            if self.stroke_mask_edit {
+                let after = self.quick_mask().clone();
+                if after.generation() != before.generation() {
+                    self.pending_mask_events.push(MaskUndoEvent {
+                        set,
+                        before,
+                        after,
+                        id_select: false,
+                    });
+                }
+            }
+        }
     }
 
     /// Ends a paint stroke's undo capture: drains each touched tile, reads
@@ -5366,6 +5434,7 @@ impl PaintState {
         // drops when it sees the bumped epoch below), nor the queued
         // commits describing them.
         self.pending_commits.clear();
+        self.pending_mask_events.clear();
         self.stroke_epoch += 1;
         // Nor does the set's mask: it resets with the targets' contents
         // (the `Resize` command drops each target's GPU mask too). Other
@@ -5491,6 +5560,7 @@ impl PaintState {
         // Snapshots recorded at the old size no longer fit the targets.
         self.retouch_history.clear();
         self.pending_commits.clear();
+        self.pending_mask_events.clear();
         self.stroke_epoch += 1;
         // ONLY this channel's materialized planes on this set's tiles:
         // a never-materialized channel costs nothing (its size is
@@ -5551,6 +5621,7 @@ impl PaintState {
         }
         self.retouch_history.clear();
         self.pending_commits.clear();
+        self.pending_mask_events.clear();
         self.stroke_epoch += 1;
         let (width, height) = self.size_of_set(set);
         let tiles = self.tiles_of_set(set);
@@ -5773,6 +5844,7 @@ impl PaintState {
         // Undo snapshots name the old plane.
         self.retouch_history.clear();
         self.pending_commits.clear();
+        self.pending_mask_events.clear();
         self.stroke_epoch += 1;
         Ok(())
     }
@@ -11392,6 +11464,48 @@ mod tests {
             .expect("click-time bake");
         assert_eq!(baked, id_a);
         assert!(fresh.quick_mask().gates());
+    }
+
+    /// razul-quickmask-undo: an ID-mask click queues exactly one
+    /// [`MaskUndoEvent`] (id_select), and restoring its `before` snapshot
+    /// through [`PaintState::restore_quick_mask`] brings the mask back to
+    /// the pre-click state (same generation).
+    #[test]
+    fn id_mask_click_queues_one_undo_event_and_restores() {
+        let Some((device, queue)) = try_request_device() else {
+            return;
+        };
+        let mesh = split_halves_mesh();
+        let bytes = bake_id_mesh(
+            &device,
+            &queue,
+            &mesh,
+            &IdBakeParams {
+                flavor: IdFlavor::Triangle,
+                width: ID_SIZE,
+                height: ID_SIZE,
+            },
+        )
+        .expect("the two-region bake succeeds");
+        let mut state =
+            PaintState::with_target_size(device, queue, ID_SIZE).expect("paint state builds");
+        let gen_before = state.quick_mask().generation();
+        state
+            .select_id_mask(FIRST_TILE, &bytes, ID_SIZE, ID_SIZE, [3.5 / 32.0, 0.5])
+            .expect("a covered click selects");
+        let events = state.take_mask_events();
+        assert_eq!(events.len(), 1, "one click = one undo step");
+        let ev = &events[0];
+        assert!(ev.id_select);
+        assert_eq!(ev.before.generation(), gen_before);
+        assert!(ev.after.generation() > ev.before.generation());
+        // Undo semantics: restoring `before` returns to the pre-click mask.
+        state.restore_quick_mask(&ev.set, ev.before.clone());
+        assert_eq!(state.quick_mask().generation(), gen_before);
+        assert!(
+            state.take_mask_events().is_empty(),
+            "restore queues nothing"
+        );
     }
 
     /// The audit gate, routing half: after an ID selection the live stroke

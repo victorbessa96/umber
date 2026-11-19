@@ -48,6 +48,13 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
                     app.state.filter_undos.undo(paint);
                 }
                 app.state.doc.session_history.pop_last();
+            } else if app.state.mask_undos.newest_is_ours(newest.as_ref()) {
+                // A quick-mask edit (mask-mode stroke or ID-mask click) is
+                // one undo step on the shell's mask-op stack.
+                if let Some(paint) = app.state.paint.as_mut() {
+                    app.state.mask_undos.undo(paint);
+                }
+                app.state.doc.session_history.pop_last();
             } else {
                 let _ = history_panel::unified_undo(
                     &mut app.state.doc,
@@ -76,6 +83,23 @@ pub fn run_command(app: &mut UmberApp, action: toolbar::ShellAction) {
                     .map_or(next, |e| e.op_id);
                 if let Some(paint) = app.state.paint.as_mut() {
                     app.state.filter_undos.redo(paint, id);
+                }
+            } else if app.state.mask_undos.redo_is_next(next) {
+                // The mask stack's redo twin: re-record a QuickMask row and
+                // re-file the op under the fresh id.
+                app.state
+                    .doc
+                    .session_history
+                    .record_context(history_panel::HistoryKind::QuickMask);
+                let id = app
+                    .state
+                    .doc
+                    .session_history
+                    .entries()
+                    .last()
+                    .map_or(next, |e| e.op_id);
+                if let Some(paint) = app.state.paint.as_mut() {
+                    app.state.mask_undos.redo(paint, id);
                 }
             } else {
                 let _ = history_panel::unified_redo(

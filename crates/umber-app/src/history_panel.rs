@@ -214,6 +214,11 @@ pub enum HistoryKind {
     /// plane-op stack (`filter_apply::FilterUndoStack`), which the
     /// Undo/Redo arms step when this row is the newest.
     FilterApply,
+    /// A quick-mask edit (a mask-mode stroke, or an ID-mask click). Context
+    /// row: the mask revert lives on the shell's own mask-op stack
+    /// (`quick_mask_undo::QuickMaskUndoStack`), which the Undo/Redo arms
+    /// step when this row is the newest.
+    QuickMask,
 }
 
 impl HistoryKind {
@@ -280,6 +285,7 @@ impl HistoryKind {
             Self::Export => tr("history.op-export"),
             Self::Flatten => tr("history.op-flatten"),
             Self::FilterApply => tr("history.op-filter-apply"),
+            Self::QuickMask => tr("history.op-quick-mask"),
         }
     }
 
@@ -319,6 +325,7 @@ impl HistoryKind {
             Self::Export => "export",
             Self::Flatten => "flatten layers",
             Self::FilterApply => "filter apply",
+            Self::QuickMask => "quick mask",
         }
     }
 }
@@ -1738,6 +1745,7 @@ mod tests {
             Export,
             Flatten,
             FilterApply,
+            QuickMask,
         ];
         let labels: Vec<&str> = all.iter().map(|k| k.crash_label()).collect();
         let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();

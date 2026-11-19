@@ -149,6 +149,7 @@ mod logfile;
 mod navigation;
 mod palette;
 mod preferences;
+mod quick_mask_undo;
 mod recent;
 mod recovery;
 mod rich_tooltip;
@@ -1838,6 +1839,10 @@ pub struct AppState {
     /// plane publish, so the shell keeps its own plane-op stack here and
     /// the Undo/Redo arms interleave it via the history row's op id.
     pub filter_undos: filter_apply::FilterUndoStack,
+    /// The quick-mask undo stack (razul-quickmask-undo, 2026-11-18): one
+    /// step per mask-mode stroke and per ID-mask click, interleaved with the
+    /// journals by op id like `filter_undos`.
+    pub mask_undos: quick_mask_undo::QuickMaskUndoStack,
     /// The polygon-fill lasso tool: the armed click-path capture feeding
     /// pixel masks into fill layers (session state, never serialized).
     pub polygon_fill: fill_layer::PolygonFillTool,
@@ -5606,6 +5611,28 @@ impl eframe::App for UmberApp {
         // hidden still get rows.
         if let Some(paint) = self.state.paint.as_mut() {
             history_panel::drain_stroke_commits(&mut self.state.doc, paint);
+            // Mask-edit drain (razul-quickmask-undo): each queued
+            // MaskUndoEvent becomes one QuickMask history row + one undo
+            // step on the shell's mask-op stack.
+            let events = paint.take_mask_events();
+            for ev in events {
+                self.state
+                    .doc
+                    .session_history
+                    .record_context(history_panel::HistoryKind::QuickMask);
+                let op_id = self
+                    .state
+                    .doc
+                    .session_history
+                    .entries()
+                    .last()
+                    .map_or(0, |e| e.op_id);
+                // The mask is already mutated on the paint side; the op only
+                // restores bytes on undo/redo, so no publish here.
+                self.state
+                    .mask_undos
+                    .push(op_id, quick_mask_undo::QuickMaskOp::from_event(ev));
+            }
             // g2-history-panel entry thumbs: capture each new row's snapshot
             // in its record frame (entry thumbs freeze on capture, so a later
             // undo/paint must not rewrite a row's past), and drop snapshots

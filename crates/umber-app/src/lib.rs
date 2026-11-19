@@ -64,6 +64,7 @@ pub mod filter_apply;
 pub mod history_panel;
 /// The i18n catalog (the snapshot tests init it before rendering).
 pub mod i18n;
+pub mod quick_mask_undo;
 // `document` names `layers_panel`; `toolbar` names `rich_tooltip`: the
 // lib target needs the whole `crate::` closure of the kittest modules.
 /// AssetStore garbage collection (requirements row 121): manifest-
