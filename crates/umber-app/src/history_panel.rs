@@ -164,6 +164,8 @@ pub enum HistoryKind {
     Rename,
     /// [`LayerCommand::SetFill`].
     SetFill,
+    /// [`LayerCommand::SetVector`] (one completed vector edit gesture).
+    SetVector,
     /// [`LayerCommand::SetMaterial`] (a material layer's definition,
     /// channel controls or param overrides changed).
     SetMaterial,
@@ -245,6 +247,7 @@ impl HistoryKind {
             LayerCommand::SetBlendMode { .. } => Self::SetBlendMode,
             LayerCommand::Rename { .. } => Self::Rename,
             LayerCommand::SetFill { .. } => Self::SetFill,
+            LayerCommand::SetVector { .. } => Self::SetVector,
             LayerCommand::SetMaterial { .. } => Self::SetMaterial,
             LayerCommand::SetInstanceSource { .. } => Self::SetInstanceSource,
             LayerCommand::AttachMask { .. } => Self::AttachMask,
@@ -271,6 +274,7 @@ impl HistoryKind {
             Self::SetBlendMode => tr("history.op-set-blend"),
             Self::Rename => tr("history.op-rename"),
             Self::SetFill => tr("history.op-set-fill"),
+            Self::SetVector => tr("history.op-set-vector"),
             Self::SetMaterial => tr("history.op-set-material"),
             Self::SetInstanceSource => tr("history.op-set-instance-source"),
             Self::AttachMask => tr("history.op-attach-mask"),
@@ -312,6 +316,7 @@ impl HistoryKind {
             Self::SetBlendMode => "set blend mode",
             Self::Rename => "rename layer",
             Self::SetFill => "edit fill",
+            Self::SetVector => "edit vector path",
             Self::SetMaterial => "edit material",
             Self::SetInstanceSource => "retarget instance",
             Self::AttachMask => "attach mask",
@@ -1733,6 +1738,7 @@ mod tests {
             SetBlendMode,
             Rename,
             SetFill,
+            SetVector,
             SetMaterial,
             SetInstanceSource,
             AttachMask,

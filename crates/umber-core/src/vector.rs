@@ -207,9 +207,15 @@ fn device_point(p: [f32; 2], width: u32, height: u32) -> [f64; 2] {
 }
 
 /// The path's flattened centerline in device px, shared by fill and stroke.
-/// Any non-finite control coordinate invalidates this shape's geometry: it
-/// contributes no coverage instead of becoming a straight segment by accident.
-fn centerline(shape: &VectorShape, width: u32, height: u32) -> Result<Vec<[f64; 2]>, VectorError> {
+/// K3's UV overlay reads this exact geometry for its drag preview; it does not
+/// allocate a second flattener. Any non-finite control coordinate invalidates
+/// this shape's geometry: it contributes no coverage instead of becoming a
+/// straight segment by accident.
+pub fn centerline(
+    shape: &VectorShape,
+    width: u32,
+    height: u32,
+) -> Result<Vec<[f64; 2]>, VectorError> {
     let Some(first) = shape.anchors.first() else {
         return Ok(Vec::new());
     };

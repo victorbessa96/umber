@@ -12,6 +12,7 @@ use umber_mesh::MeshData;
 use crate::fill_layer::{PolygonFillMode, PolygonFillTool};
 use crate::i18n::tr;
 use crate::path_tool::PaintPathTool;
+use crate::vector_edit::{VectorEditTool, VectorHandle};
 
 /// Wireframe color for UV island edges.
 const UV_EDGE_COLOR: Color32 = Color32::from_rgb(140, 190, 255);
@@ -20,6 +21,8 @@ const UV_EDGE_COLOR: Color32 = Color32::from_rgb(140, 190, 255);
 const PATH_COLOR: Color32 = Color32::from_rgb(110, 220, 130);
 /// The path's closing edge (dimmer: it previews, not yet committed).
 const PATH_COLOR_DIM: Color32 = Color32::from_rgb(70, 140, 85);
+/// The document-backed vector path (cyan: distinct from the replay green).
+const VECTOR_COLOR: Color32 = Color32::from_rgb(100, 210, 255);
 /// Half-size (logical pixels) of a path point's drag/select rect.
 const PATH_POINT_GRAB_PX: f32 = 7.0;
 /// Segment-click and right-click-delete tolerance, in logical pixels
@@ -113,6 +116,8 @@ impl UvView {
         display_lut: Option<&umber_gpu::DisplayLut>,
         mut tool: Option<&mut PolygonFillTool>,
         mut path_tool: Option<&mut PaintPathTool>,
+        mut vector_edit: Option<&mut VectorEditTool>,
+        doc: &mut crate::document::Document,
     ) {
         let rect = ui.available_rect_before_wrap();
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -321,8 +326,77 @@ impl UvView {
                     }
                 }
             }
+            let vector_armed = vector_edit
+                .as_ref()
+                .is_some_and(|tool| tool.target().is_some());
+            let mut vector_handle_active = false;
+            if vector_armed {
+                if let Some(vtool) = vector_edit.as_deref_mut() {
+                    let anchors = vtool.shape().anchors.clone();
+                    for (i, anchor) in anchors.iter().enumerate() {
+                        // Anchor registers last so it wins coincident plain
+                        // drags. Shift/Alt route collapsed in/out handles
+                        // explicitly instead of depending on widget order.
+                        for (kind, uv) in [
+                            (VectorHandle::In, anchor.in_handle),
+                            (VectorHandle::Out, anchor.out_handle),
+                            (VectorHandle::Anchor, anchor.pos),
+                        ] {
+                            let center = to_screen(uv);
+                            let grab = egui::Rect::from_center_size(
+                                center,
+                                egui::vec2(PATH_POINT_GRAB_PX * 2.0, PATH_POINT_GRAB_PX * 2.0),
+                            );
+                            let handle = ui.interact(
+                                grab,
+                                ui.id().with(("uv-vector-handle", i, kind as u8)),
+                                Sense::click_and_drag(),
+                            );
+                            let routed = route_vector_handle(
+                                anchor,
+                                kind,
+                                ui.input(|input| input.modifiers),
+                            );
+                            if handle.secondary_clicked() {
+                                vtool.delete_anchor(doc, i);
+                                vector_handle_active = true;
+                                continue;
+                            }
+                            if handle.clicked() {
+                                vtool.select(i, routed);
+                                vector_handle_active = true;
+                            }
+                            if handle.dragged() {
+                                if !vtool.has_gesture() {
+                                    vtool.begin_drag(i, routed);
+                                }
+                                if let Some(pos) = handle.interact_pointer_pos() {
+                                    if let Some(uv) = uv_from_pointer(square, pos) {
+                                        vtool.drag_to([uv.x, uv.y]);
+                                        vector_handle_active = true;
+                                    }
+                                }
+                            }
+                            if handle.drag_stopped() && vtool.has_gesture() {
+                                vtool.finish_drag(doc);
+                                vector_handle_active = true;
+                            }
+                        }
+                    }
+                    if interact.hovered()
+                        && !ui.ctx().egui_wants_keyboard_input()
+                        && ui.input(|input| input.key_pressed(egui::Key::C))
+                    {
+                        let closed = !vtool.shape().closed;
+                        if vtool.set_closed(doc, closed) {
+                            vector_handle_active = true;
+                        }
+                    }
+                }
+            }
             let pointer_down = !handle_active
                 && !path_point_active
+                && !vector_handle_active
                 && (interact.dragged_by(egui::PointerButton::Primary) || interact.clicked());
             // The material pick (R-A10 v1, Ctrl+Alt+click): a bare click
             // with both modifiers records the pick for the shell (which
@@ -351,7 +425,28 @@ impl UvView {
             // right-clicks delete — and never start a stroke. It wins over
             // the lasso capture below when both are armed (the explicit
             // edit mode).
-            if path_armed {
+            if vector_armed {
+                if paint.is_stroking() {
+                    paint.end_stroke();
+                }
+                if !handle_active && !path_point_active && !vector_handle_active {
+                    if let Some(pos) = interact.interact_pointer_pos() {
+                        if let Some(uv) = uv_from_pointer(square, pos) {
+                            if let Some(vtool) = vector_edit.as_deref_mut() {
+                                let clicked = [uv.x, uv.y];
+                                let tol = PATH_CLICK_TOL_PX / side;
+                                if interact.secondary_clicked() {
+                                    vtool.delete_near(doc, clicked, tol);
+                                } else if interact.clicked()
+                                    && !vtool.insert_near_segment(doc, clicked, tol)
+                                {
+                                    vtool.append(doc, clicked);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if path_armed {
                 if paint.is_stroking() {
                     paint.end_stroke();
                 }
@@ -442,6 +537,13 @@ impl UvView {
                 if let Some(read) = self.inspect_readout.clone() {
                     f.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
                         r.monospace(read);
+                    });
+                } else if vector_edit
+                    .as_ref()
+                    .is_some_and(|tool| tool.target().is_some())
+                {
+                    f.with_layout(egui::Layout::right_to_left(egui::Align::Center), |r| {
+                        r.label(tr("uv.vector-edit-hint"));
                     });
                 }
             });
@@ -678,6 +780,50 @@ impl UvView {
                             egui::StrokeKind::Middle,
                         );
                     }
+                }
+            }
+        }
+        // The document-backed vector overlay (K3): K2's exact centerline plus
+        // anchor and in/out handle guides. A drag previews the working shape;
+        // the raster plane republishes only when its one journal op lands.
+        if let Some(vtool) = vector_edit.as_ref().filter(|tool| tool.target().is_some()) {
+            const GUIDE: f32 = 256.0;
+            if let Ok(points) = umber_core::vector::centerline(vtool.shape(), 256, 256) {
+                let pts: Vec<egui::Pos2> = points
+                    .iter()
+                    .map(|point| to_screen([(point[0] as f32) / GUIDE, (point[1] as f32) / GUIDE]))
+                    .collect();
+                for pair in pts.windows(2) {
+                    painter.line_segment([pair[0], pair[1]], Stroke::new(2.0, VECTOR_COLOR));
+                }
+            }
+            for (i, anchor) in vtool.shape().anchors.iter().enumerate() {
+                let center = to_screen(anchor.pos);
+                painter.circle_filled(center, 4.0, VECTOR_COLOR);
+                if vtool.selected().is_some_and(|(selected, _)| selected == i) {
+                    painter.circle_stroke(center, 7.0, Stroke::new(1.5, Color32::WHITE));
+                    for handle in [anchor.in_handle, anchor.out_handle] {
+                        painter.line_segment(
+                            [center, to_screen(handle)],
+                            Stroke::new(1.0, Color32::WHITE),
+                        );
+                        painter.circle_stroke(
+                            to_screen(handle),
+                            3.0,
+                            Stroke::new(1.0, Color32::WHITE),
+                        );
+                    }
+                } else {
+                    painter.circle_stroke(
+                        to_screen(anchor.in_handle),
+                        2.5,
+                        Stroke::new(1.0, VECTOR_COLOR),
+                    );
+                    painter.circle_stroke(
+                        to_screen(anchor.out_handle),
+                        2.5,
+                        Stroke::new(1.0, VECTOR_COLOR),
+                    );
                 }
             }
         }
@@ -950,6 +1096,29 @@ fn inspector_line(x: u32, y: u32, texel: [u8; 4]) -> String {
     )
 }
 
+/// Routes a hit on a vector handle when several handles share one position.
+/// Plain drags favor the anchor; Shift pulls a collapsed in-handle and Alt a
+/// collapsed out-handle. Once a drag starts, `VectorEditTool::Gesture` retains
+/// this choice even if the dragged handle separates from the others.
+fn route_vector_handle(
+    anchor: &umber_core::vector::Anchor,
+    hit: VectorHandle,
+    modifiers: egui::Modifiers,
+) -> VectorHandle {
+    match hit {
+        VectorHandle::Anchor if modifiers.shift && anchor.in_handle == anchor.pos => {
+            VectorHandle::In
+        }
+        VectorHandle::Anchor if modifiers.alt && anchor.out_handle == anchor.pos => {
+            VectorHandle::Out
+        }
+        VectorHandle::Out if modifiers.shift && anchor.in_handle == anchor.out_handle => {
+            VectorHandle::In
+        }
+        _ => hit,
+    }
+}
+
 /// Extracts a UV-space position from a pointer interaction on a UV-square
 /// `rect` (the UV view's square layout), or `None` outside. Lives
 /// here, not in the headless paint engine: it is screen geometry.
@@ -966,6 +1135,51 @@ pub fn uv_from_pointer(rect: egui::Rect, pos: egui::Pos2) -> Option<egui::Pos2> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapsed_vector_handles_have_explicit_anchor_in_and_out_routes() {
+        let corner = umber_core::vector::Anchor::corner([0.5, 0.5]);
+        assert_eq!(
+            route_vector_handle(&corner, VectorHandle::Anchor, egui::Modifiers::NONE),
+            VectorHandle::Anchor
+        );
+        assert_eq!(
+            route_vector_handle(&corner, VectorHandle::Anchor, egui::Modifiers::SHIFT),
+            VectorHandle::In
+        );
+        assert_eq!(
+            route_vector_handle(&corner, VectorHandle::Anchor, egui::Modifiers::ALT),
+            VectorHandle::Out
+        );
+
+        let smooth = umber_core::vector::Anchor {
+            pos: [0.5, 0.5],
+            in_handle: [0.4, 0.4],
+            out_handle: [0.6, 0.6],
+        };
+        assert_eq!(
+            route_vector_handle(&smooth, VectorHandle::Anchor, egui::Modifiers::SHIFT),
+            VectorHandle::Anchor
+        );
+        assert_eq!(
+            route_vector_handle(&smooth, VectorHandle::In, egui::Modifiers::NONE),
+            VectorHandle::In
+        );
+        assert_eq!(
+            route_vector_handle(&smooth, VectorHandle::Out, egui::Modifiers::NONE),
+            VectorHandle::Out
+        );
+
+        let shared_handles = umber_core::vector::Anchor {
+            pos: [0.5, 0.5],
+            in_handle: [0.4, 0.4],
+            out_handle: [0.4, 0.4],
+        };
+        assert_eq!(
+            route_vector_handle(&shared_handles, VectorHandle::Out, egui::Modifiers::SHIFT),
+            VectorHandle::In
+        );
+    }
 
     #[test]
     fn uv_mapping_round_trips_and_rejects_outside() {

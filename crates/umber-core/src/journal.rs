@@ -33,6 +33,7 @@ use crate::layers::{
 };
 use crate::project::ProjectModel;
 use crate::undo::Command;
+use crate::vector::VectorParams;
 use umber_mesh::FillParams;
 
 /// The journal's file name inside a `.umber` project directory.
@@ -110,6 +111,14 @@ pub enum JournalOp {
         id: u64,
         /// The fill parameters after the apply.
         fill: Option<FillParams>,
+    },
+    /// A layer's vector parameters ([`LayerCommand::SetVector`]): `None` when
+    /// the layer holds no vector params after the apply.
+    SetVector {
+        /// The layer's id.
+        id: u64,
+        /// The vector parameters after the apply.
+        vector: Option<VectorParams>,
     },
     /// A layer's material parameters ([`LayerCommand::SetMaterial`]):
     /// `None` when the layer holds no material params after the apply (a
@@ -218,6 +227,13 @@ impl JournalOp {
                     fill: layer.fill.clone(),
                 })
             }
+            LayerCommand::SetVector { id, old, .. } => {
+                old.as_ref()?;
+                stack.layer(*id).map(|layer| JournalOp::SetVector {
+                    id: *id,
+                    vector: layer.vector.clone(),
+                })
+            }
             LayerCommand::SetMaterial { id, old, .. } => {
                 old.as_ref()?;
                 stack.layer(*id).map(|layer| JournalOp::SetMaterial {
@@ -306,6 +322,9 @@ impl JournalOp {
             LayerCommand::SetFill { id, old, .. } => {
                 old.clone().map(|fill| JournalOp::SetFill { id: *id, fill })
             }
+            LayerCommand::SetVector { id, old, .. } => old
+                .clone()
+                .map(|vector| JournalOp::SetVector { id: *id, vector }),
             LayerCommand::SetMaterial { id, old, .. } => old
                 .clone()
                 .map(|material| JournalOp::SetMaterial { id: *id, material }),
@@ -413,6 +432,16 @@ impl JournalOp {
                 None => {
                     if let Some(layer) = stack.layer_mut(*id) {
                         layer.fill = None;
+                    }
+                }
+            },
+            JournalOp::SetVector { id, vector } => match vector.clone() {
+                Some(params) => {
+                    stack.set_vector(*id, params);
+                }
+                None => {
+                    if let Some(layer) = stack.layer_mut(*id) {
+                        layer.vector = None;
                     }
                 }
             },
@@ -677,6 +706,44 @@ mod tests {
         );
         save_to_dir(&model, dir).expect("base save");
         model
+    }
+
+    #[test]
+    fn set_vector_journals_forward_revert_and_replay() {
+        let id = 7;
+        let params = crate::vector::VectorParams {
+            shape: crate::vector::VectorShape {
+                closed: true,
+                fill: [20, 40, 60, 255],
+                stroke: None,
+                anchors: vec![
+                    crate::vector::Anchor::corner([0.25, 0.5]),
+                    crate::vector::Anchor::corner([0.75, 0.5]),
+                ],
+            },
+        };
+        let mut stack = LayerStack::new();
+        LayerCommand::Add {
+            name: "Path".into(),
+            kind: LayerKind::Vector,
+            id: Some(id),
+        }
+        .apply(&mut stack);
+        let mut command = LayerCommand::set_vector(id, params.clone());
+        command.apply(&mut stack);
+        let forward = JournalOp::applied(&command, &stack).expect("forward vector op");
+        let json = serde_json::to_string(&forward).expect("journal op serializes");
+        let back: JournalOp = serde_json::from_str(&json).expect("journal op parses");
+        back.apply_to(&mut stack, false);
+        assert_eq!(stack.layer(id).unwrap().vector, Some(params.clone()));
+
+        let reverting = JournalOp::reverting(&command, &stack).expect("revert vector op");
+        command.revert(&mut stack);
+        assert_eq!(stack.layer(id).unwrap().vector, None);
+        let json = serde_json::to_string(&reverting).expect("revert op serializes");
+        let back: JournalOp = serde_json::from_str(&json).expect("revert op parses");
+        back.apply_to(&mut stack, false);
+        assert_eq!(stack.layer(id).unwrap().vector, None);
     }
 
     /// A live session mirroring the app's `Document` chokepoints: apply

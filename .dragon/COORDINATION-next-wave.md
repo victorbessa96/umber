@@ -3,19 +3,19 @@
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
 **Updated 2026-11-19:** K2 `0b5cb72d` is pushed on top of K1 `46d4bff5`;
-the K2 design brief is `60322097`. The `razul-vector-raster` lock is released.
-The final tree has 18 core vector, 24 app fill-layer, and 15 brush symmetry
-tests green, including complete-plane restores, refresh-wide refusal
-aggregation, NaN cache identity, and non-finite control-point handling. Final
-r9 battery is GREEN: clippy 0 errors, 20 suites, 1,964 passed / 0 failed
-(`vector-raster-final-battery-r9.log`). Final two-point review verdict: SHIP.
-K3 canvas editing is CLAIMED under `razul-vector-canvas`: design brief first,
-then SetVector journal support and UV anchor/handle gestures. K4 panel widgets
-and K5 SVG io remain separate. Fill
-cache-lifecycle parity is the named follow-up. Human/platform gates are
-unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink
-verification, and beta/stable release. Consult `STATE.md` and the live lock
-registry before claiming new work.
+the K2 design brief is `60322097`. K3 canvas editing is implemented under
+`razul-vector-canvas` with its landing SHA pending; the K3 brief is `8520c09b`.
+The final tree has reversible SetVector journal/history support, fresh-layer
+`None` adoption, one command per completed edit, external-edit protection,
+K2-exact centerline guides, exact-handle deletion, explicit collapsed-handle
+routing, and shell-level hidden-tab release. Kimi's first review found four
+issues; all were fixed and pinned, and its bounded re-review returned SHIP.
+Final r1 battery is GREEN: clippy 0 errors, 20 suites, 1,978 passed / 0 failed
+(`vector-canvas-final-battery-r1.log`). K4 panel widgets are NEXT; K5 SVG io
+remains separate. Fill cache-lifecycle parity is the named follow-up.
+Human/platform gates are unchanged: dogfood, native-speaker review, Windows
+signing, live Windows Ink verification, and beta/stable release. Consult
+`STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 

@@ -846,6 +846,7 @@ history =
     .op-set-blend = Definir modo de mesclagem
     .op-rename = Renomear camada
     .op-set-fill = Camada de preenchimento
+    .op-set-vector = Editar caminho vetorial
     .op-set-material = Definir material
     .op-set-instance-source = Definir origem da instância
     .op-attach-mask = Anexar máscara
@@ -918,6 +919,7 @@ uv =
     .mask-mode = MODO MÁSCARA (X para sair)
     .isolate = Canal
     .pick-applied = Amostrada { $color } para a camada de preenchimento
+    .vector-edit-hint = Vetor: clique adiciona · direito apaga · C fecha · Shift/Alt alças recolhidas
 
 ## Ferramentas de caminho de pintura (§2 P1)
 

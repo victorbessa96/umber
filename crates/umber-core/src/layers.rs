@@ -14,6 +14,7 @@ use std::mem::size_of;
 use umber_mesh::FillParams;
 
 use crate::undo::Command;
+use crate::vector::VectorParams;
 
 /// What a layer contains and how its children (if any) relate to the stack.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1281,6 +1282,15 @@ impl LayerStack {
         Some(layer.fill.replace(params))
     }
 
+    /// Sets a layer's vector parameters, returning the previous value (`None`
+    /// when the layer had none — including non-vector layers, which accept the
+    /// write but stay non-vector: the evaluator only runs `vector` on
+    /// [`LayerKind::Vector`] layers, so a stray write is inert data).
+    pub fn set_vector(&mut self, id: u64, params: VectorParams) -> Option<Option<VectorParams>> {
+        let layer = self.layer_mut(id)?;
+        Some(layer.vector.replace(params))
+    }
+
     /// Sets a layer's material parameters, returning the previous value
     /// (`None` when the layer had none — including non-material layers,
     /// which accept the write but stay non-material: the evaluator only
@@ -1730,6 +1740,17 @@ pub enum LayerCommand {
         /// captured by `apply` for `revert`.
         old: Option<Option<FillParams>>,
     },
+    /// Sets a vector layer's path parameters. K3 canvas editing uses one
+    /// command per completed gesture, never one per pointer frame.
+    SetVector {
+        /// Id of the layer to update.
+        id: u64,
+        /// New vector parameters.
+        new: VectorParams,
+        /// Previous vector parameters (`None` when the layer had none),
+        /// captured by `apply` for `revert`.
+        old: Option<Option<VectorParams>>,
+    },
     /// Sets a layer's material parameters (definition id + per-channel
     /// controls + graph-param overrides). Re-pointing a layer at another
     /// definition is an ordinary `SetMaterial` (the kind tag never carries
@@ -1842,6 +1863,7 @@ impl LayerCommand {
             | Self::SetBlendMode { id, .. }
             | Self::Rename { id, .. }
             | Self::SetFill { id, .. }
+            | Self::SetVector { id, .. }
             | Self::SetMaterial { id, .. }
             | Self::SetInstanceSource { id, .. }
             | Self::AttachMask { id, .. }
@@ -1881,6 +1903,15 @@ impl LayerCommand {
     /// Builds a [`SetFill`](LayerCommand::SetFill) command.
     pub fn set_fill(id: u64, params: FillParams) -> Self {
         LayerCommand::SetFill {
+            id,
+            new: params,
+            old: None,
+        }
+    }
+
+    /// Builds a [`SetVector`](LayerCommand::SetVector) command.
+    pub fn set_vector(id: u64, params: VectorParams) -> Self {
+        LayerCommand::SetVector {
             id,
             new: params,
             old: None,
@@ -1983,6 +2014,9 @@ impl Command for LayerCommand {
             LayerCommand::SetBlendMode { id, new, old } => *old = doc.set_blend_mode(*id, *new),
             LayerCommand::Rename { id, new, old } => *old = doc.rename_layer(*id, new.clone()),
             LayerCommand::SetFill { id, new, old } => *old = doc.set_fill(*id, new.clone()),
+            LayerCommand::SetVector { id, new, old } => {
+                *old = doc.set_vector(*id, new.clone());
+            }
             LayerCommand::SetMaterial { id, new, old } => {
                 *old = doc.set_material(*id, new.clone());
             }
@@ -2058,6 +2092,20 @@ impl Command for LayerCommand {
                         None => {
                             if let Some(layer) = doc.layer_mut(*id) {
                                 layer.fill = None;
+                            }
+                        }
+                    }
+                }
+            }
+            LayerCommand::SetVector { id, old, .. } => {
+                if let Some(previous) = old.take() {
+                    match previous {
+                        Some(params) => {
+                            doc.set_vector(*id, params);
+                        }
+                        None => {
+                            if let Some(layer) = doc.layer_mut(*id) {
+                                layer.vector = None;
                             }
                         }
                     }
@@ -2355,6 +2403,62 @@ mod tests {
         let back: FillParams = serde_json::from_value(unmasked).unwrap();
         assert_eq!(back.mask, None);
         assert_eq!(back, red);
+    }
+
+    #[test]
+    fn set_vector_round_trips_through_undo_and_json() {
+        use crate::vector::{Anchor, Stroke, VectorShape};
+        let mut stack = LayerStack::new();
+        let id = stack.add_layer("Path", LayerKind::Vector);
+        assert_eq!(stack.layer(id).unwrap().vector, None);
+        let red = crate::vector::VectorParams {
+            shape: VectorShape {
+                closed: false,
+                fill: [255, 0, 0, 255],
+                stroke: Some(Stroke {
+                    width: 0.125,
+                    color: [10, 20, 30, 255],
+                }),
+                anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+            },
+        };
+        let blue = crate::vector::VectorParams {
+            shape: VectorShape {
+                closed: true,
+                ..red.shape.clone()
+            },
+        };
+        let mut undo: UndoStack<LayerCommand> = UndoStack::new(100);
+        undo.push(LayerCommand::set_vector(id, red.clone()), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().vector, Some(red.clone()));
+        undo.push(LayerCommand::set_vector(id, blue.clone()), &mut stack);
+        assert_eq!(stack.layer(id).unwrap().vector, Some(blue.clone()));
+        assert_eq!(
+            LayerCommand::set_vector(id, red.clone()).target_layer(&stack),
+            Some(id)
+        );
+
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().vector, Some(red.clone()));
+        assert!(undo.undo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().vector, None);
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().vector, Some(red.clone()));
+        assert!(undo.redo(&mut stack));
+        assert_eq!(stack.layer(id).unwrap().vector, Some(blue.clone()));
+
+        let json = serde_json::to_string(stack.layer(id).unwrap()).unwrap();
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.vector, Some(blue));
+        let mut legacy = serde_json::from_str::<serde_json::Value>(&json)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        legacy.remove("vector");
+        let back: Layer = serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(back.vector, None);
+        assert_eq!(back.name, "Path");
     }
 
     /// A material layer's params: the plain-tag convention (`kind` carries

@@ -791,6 +791,7 @@ history =
     .op-set-blend = Set blend mode
     .op-rename = Rename layer
     .op-set-fill = Fill layer
+    .op-set-vector = Edit vector path
     .op-set-material = Set material
     .op-set-instance-source = Set instance source
     .op-attach-mask = Attach mask
@@ -899,6 +900,7 @@ uv =
     .mask-mode = MASK MODE (X to exit)
     .isolate = Channel
     .pick-applied = Picked { $color } into the fill layer
+    .vector-edit-hint = Vector: click add · right-click delete · C close · Shift/Alt collapsed handles
 
 ## Paint path tools (§2 P1 row)
 

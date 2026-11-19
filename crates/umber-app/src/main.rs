@@ -164,6 +164,7 @@ mod perf_soak;
 mod plugins;
 mod postfx_panel;
 mod psd_import;
+mod vector_edit;
 use umber_paint::persistence::{
     dormancy_for, load_paint_tiles_reported, load_quick_masks, paint_manifest_path,
     paint_save_version, parse_manifest_header, save_paint_tiles, save_quick_masks, LayerDormancy,
@@ -490,6 +491,7 @@ struct PanelViewer<'a> {
     store: Option<&'a umber_core::AssetStore>,
     polygon_fill: &'a mut fill_layer::PolygonFillTool,
     path_tool: &'a mut path_tool::PaintPathTool,
+    vector_edit: &'a mut vector_edit::VectorEditTool,
     /// Embedded material definitions (the session copy of
     /// `ProjectModel::material_defs_mtlx` — the frame refresh reads them,
     /// the Layers panel lists them, the Graph panel extends them).
@@ -821,6 +823,21 @@ impl TabViewer for PanelViewer<'_> {
                 }
             }
             Panel::UvView => {
+                let vector_active = if self.path_tool.is_armed() || self.polygon_fill.is_armed() {
+                    None
+                } else {
+                    match self.paint.as_deref().map(|paint| paint.active_target()) {
+                        Some(paint_state::PlaneOwner::Layer(id)) => self
+                            .doc
+                            .layers()
+                            .iter()
+                            .find(|layer| layer.id == id)
+                            .filter(|layer| matches!(layer.kind, umber_core::LayerKind::Vector))
+                            .map(|layer| (id, layer.vector.as_ref())),
+                        _ => None,
+                    }
+                };
+                self.vector_edit.adopt(vector_active);
                 self.uv_view.ui(
                     ui,
                     self.mesh,
@@ -829,6 +846,8 @@ impl TabViewer for PanelViewer<'_> {
                     self.display_lut,
                     Some(&mut *self.polygon_fill),
                     Some(&mut *self.path_tool),
+                    Some(&mut *self.vector_edit),
+                    &mut *self.doc,
                 );
                 // The material pick (R-A10 v1): Ctrl+Alt+click handed the
                 // shell (tile, UV) — read the ACTIVE channel's composite at
@@ -1910,6 +1929,8 @@ pub struct AppState {
     /// The paint-path tool: the editable polyline replayed as
     /// paint/erase/smudge strokes (session state, never serialized).
     pub path_tool: path_tool::PaintPathTool,
+    /// The active vector layer's document-backed edit session (K3).
+    pub vector_edit: vector_edit::VectorEditTool,
     /// g7-polish-batch: the held-key temp-tool state (hold E = erase
     /// while held, restore on release; Space = pan hold the viewport
     /// will read). Fed by [`toolbar::poll_temp_keys`] every frame.
@@ -2033,6 +2054,7 @@ impl AppState {
         // Fill 3 state (§8 T30).
         self.fill_states = fill_layer::FillLayerStates::default();
         self.vector_states = fill_layer::VectorLayerStates::default();
+        self.vector_edit.clear();
         // Stage-4 session pixel state: Base shows again, dormancy and
         // badges die with their document, and the snapshot baseline
         // restarts (the next frame diffs against nothing).
@@ -4655,6 +4677,7 @@ impl UmberApp {
                 // baseline all reset.
                 self.state.mesh_import.to_publish.clear();
                 self.state.vector_states = fill_layer::VectorLayerStates::default();
+                self.state.vector_edit.clear();
                 self.state.base_visible = true;
                 self.state.dormant.clear();
                 self.state.prev_snapshot = None;
@@ -4922,6 +4945,13 @@ impl eframe::App for UmberApp {
         // poll's pattern. Inspect reads app state; screenshot sends
         // ViewportCommand::Screenshot and stashes the reply sender.
         self.drain_control(ui.ctx());
+        // A vector drag must finish on primary release even if the UV tab was
+        // hidden before its handle could emit `drag_stopped` (K3). The editor's
+        // document-baseline check still wins if another command edited the path.
+        let primary_released = ui.ctx().input(|input| input.pointer.primary_released());
+        self.state
+            .vector_edit
+            .finish_on_primary_release(&mut self.state.doc, primary_released);
         // DPI runtime watcher (ROADMAP "DPI runtime re-raster", landed
         // 2026-11-16): when `pixels_per_point` crosses the 1.75 hidpi
         // boundary mid-session (window dragged to another monitor), reload
@@ -5876,6 +5906,7 @@ impl eframe::App for UmberApp {
                         icons: &self.icons,
                         polygon_fill: &mut self.state.polygon_fill,
                         path_tool: &mut self.state.path_tool,
+                        vector_edit: &mut self.state.vector_edit,
                         material_defs: &mut self.state.material_defs,
                         material_badges: &self.state.material_badges,
                         material_status: self.state.material_status.as_deref(),
