@@ -2,16 +2,14 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** origin/master is `46d4bff5` (K1 vector model).
-The K2 design brief is local `60322097`, with a docs-only project-watch commit
-beside it. The active kill lock `razul-vector-raster` owns the K2 raster core,
-Fill-pipeline integration, rect symmetry, i18n, ROADMAP/STATE/queue handoffs,
-and this file. The final tree has 18 core vector, 24 app fill-layer, and 15
-brush symmetry tests green, including complete-plane restores, refresh-wide
-refusal aggregation, NaN cache identity, and non-finite control-point handling.
-Final r9 battery is GREEN: clippy 0 errors, 20 suites, 1,964 passed / 0 failed
+**Updated 2026-11-19:** K2 `0b5cb72d` is pushed on top of K1 `46d4bff5`;
+the K2 design brief is `60322097`. The `razul-vector-raster` lock is released.
+The final tree has 18 core vector, 24 app fill-layer, and 15 brush symmetry
+tests green, including complete-plane restores, refresh-wide refusal
+aggregation, NaN cache identity, and non-finite control-point handling. Final
+r9 battery is GREEN: clippy 0 errors, 20 suites, 1,964 passed / 0 failed
 (`vector-raster-final-battery-r9.log`). Final two-point review verdict: SHIP.
-The local landing commit and push are pending.
+K3 canvas editing is unclaimed and next.
 K3 canvas editing, K4 panel widgets, and K5 SVG io remain separate. Fill
 cache-lifecycle parity is the named follow-up. Human/platform gates are
 unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink

@@ -10,8 +10,9 @@ The lock held `crates/umber-core/src/{vector,svg,layers}.rs`,
 
 Implements `docs/loop/briefs/2026-11-19-umber-vector-raster.md`: Target and
 decisions 1–7, API and budgets, concurrency, robustness, and verification.
-K1 is `46d4bff5`; the K2 brief is `60322097`. K3 canvas editing, K4 panel
-widgets, and K5 SVG conversion/export remain separate kills.
+K1 is `46d4bff5`; the K2 brief is `60322097`; the K2 code landing is
+`0b5cb72d`. K3 canvas editing, K4 panel widgets, and K5 SVG conversion/export
+remain separate kills.
 
 ## Built
 
