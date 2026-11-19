@@ -106,6 +106,11 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     Ok(out)
 }
 
+/// Imports the bounded K5b single-path SVG subset into one vector layer.
+pub fn import_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, crate::svg::SvgError> {
+    crate::svg::import_vector_svg(bytes)
+}
+
 fn hex(color: [u8; 4]) -> String {
     format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2])
 }
@@ -250,5 +255,107 @@ mod tests {
                 limit: MAX_VECTOR_ANCHORS,
             })
         );
+    }
+
+    #[test]
+    fn canonical_export_import_export_is_byte_identical() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 0, 128, 128],
+            stroke: Some(Stroke {
+                width: 0.01,
+                color: [0, 0, 0, 255],
+            }),
+            anchors: vec![
+                Anchor::corner([0.0, -0.0]),
+                Anchor {
+                    pos: [0.5, 0.5],
+                    in_handle: [0.25, 0.5],
+                    out_handle: [0.75, 0.5],
+                },
+                Anchor::corner([1.0, 0.0]),
+            ],
+        };
+        let first = export_svg(&shape).expect("export");
+        let imported = import_svg(first.as_bytes()).expect("import");
+        assert_eq!(imported.shape, shape);
+        let second = export_svg(&imported.shape).expect("re-export");
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn quadratic_and_smooth_quadratic_elevate_to_exact_cubics() {
+        let svg =
+            br#"<svg width="1" height="1"><path d="m 0.1 0.1 q 0.2 0.3 0.4 0.1 t 0.4 0"/></svg>"#;
+        let params = import_svg(svg).expect("import");
+        assert_eq!(params.shape.anchors.len(), 3);
+        let anchors = &params.shape.anchors;
+        let near = |actual: f32, expected: f32| (actual - expected).abs() < 0.00001;
+        assert!(near(anchors[0].out_handle[0], 0.23333333));
+        assert!(near(anchors[0].out_handle[1], 0.3));
+        assert!(near(anchors[1].pos[0], 0.5));
+        assert!(near(anchors[1].pos[1], 0.2));
+        assert!(near(anchors[1].in_handle[0], 0.36666667));
+        assert!(near(anchors[1].in_handle[1], 0.33333333));
+        assert!(near(anchors[1].out_handle[0], 0.633_333_3));
+        assert!(near(anchors[1].out_handle[1], 0.06666667));
+        assert!(near(anchors[2].in_handle[0], 0.76666667));
+        assert!(near(anchors[2].in_handle[1], 0.06666667));
+        assert!(near(anchors[2].pos[0], 0.9));
+        assert!(near(anchors[2].pos[1], 0.2));
+    }
+
+    #[test]
+    fn viewbox_short_hex_and_opacity_map_to_uv() {
+        let svg = br##"<svg width="100" height="200" viewBox="0 0 10 20"><path d="M1 2 L3 4 Z" fill="#abc" fill-opacity="0.5"/></svg>"##;
+        let params = import_svg(svg).expect("import");
+        assert_eq!(params.shape.anchors[0].pos, [0.1, 0.1]);
+        assert_eq!(params.shape.anchors[1].pos, [0.3, 0.2]);
+        assert_eq!(params.shape.fill, [170, 187, 204, 128]);
+        assert!(params.shape.closed);
+        assert_eq!(params.shape.stroke, None);
+    }
+
+    #[test]
+    fn root_transform_is_applied_once_and_path_transform_is_refused() {
+        let svg =
+            br#"<svg width="2" height="2" transform="translate(1 0)"><path d="M0 0 L1 1"/></svg>"#;
+        let params = import_svg(svg).expect("one root transform");
+        assert_eq!(params.shape.anchors[0].pos, [0.5, 0.0]);
+        assert_eq!(params.shape.anchors[1].pos, [1.0, 0.5]);
+
+        let svg = br#"<svg width="2" height="2" transform="translate(1 0)"><path transform="translate(1 0)" d="M0 0 L1 1"/></svg>"#;
+        assert!(matches!(
+            import_svg(svg),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn unsupported_documents_and_anchor_floods_are_typed_refusals() {
+        let cases: &[&[u8]] = &[
+            br#"<svg width="1" height="1"><path d="M0 0"/><path d="M1 1"/></svg>"#,
+            br#"<svg width="1" height="1"><path d="M0 0 M1 1"/></svg>"#,
+            br#"<svg width="1" height="1"><g><path d="M0 0"/></g></svg>"#,
+            br#"<svg width="1" height="1"><path d="M0 0 A1 1 0 0 0 1 1"/></svg>"#,
+            br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z" fill-rule="evenodd"/></svg>"#,
+            "<svg width=\"1\" height=\"1\"><path d=\"M0 0\" fill=\"#øøø\"/></svg>".as_bytes(),
+        ];
+        for svg in cases {
+            assert!(import_svg(svg).is_err(), "accepted unsupported {svg:?}");
+        }
+
+        let mut d = String::from("M0 0");
+        for index in 1..=crate::vector::MAX_VECTOR_ANCHORS {
+            d.push_str(&format!(" L{index} 1"));
+        }
+        let svg = format!("<svg width=\"1\" height=\"1\"><path d=\"{d}\"/></svg>");
+        assert!(matches!(
+            import_svg(svg.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "anchors",
+                limit: crate::vector::MAX_VECTOR_ANCHORS,
+            })
+        ));
     }
 }

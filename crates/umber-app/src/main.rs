@@ -1409,8 +1409,8 @@ impl TabViewer for PanelViewer<'_> {
                             // K4: fill/stroke/closure edits ride K3's SetVector
                             // command, journal, adoption, and raster refresh.
                             if let Some(outcome) = vector_panel::vector_section_ui(ui, self.doc) {
-                                let notice = match outcome {
-                                    vector_panel::VectorExportOutcome::Saved(path) => {
+                                let notice = match &outcome {
+                                    vector_panel::VectorPanelOutcome::ExportSaved(path) => {
                                         crate::i18n::tr_args(
                                             "vector.export-saved",
                                             [(
@@ -1421,13 +1421,31 @@ impl TabViewer for PanelViewer<'_> {
                                             )],
                                         )
                                     }
-                                    vector_panel::VectorExportOutcome::Failed(error) => {
+                                    vector_panel::VectorPanelOutcome::ExportFailed(error) => {
                                         crate::i18n::tr_args(
                                             "vector.export-failed",
                                             [("error", fluent::FluentValue::from(error))],
                                         )
                                     }
+                                    vector_panel::VectorPanelOutcome::Imported(id) => {
+                                        crate::i18n::tr_args(
+                                            "vector.imported",
+                                            [("id", fluent::FluentValue::from(*id))],
+                                        )
+                                    }
+                                    vector_panel::VectorPanelOutcome::ImportFailed(error) => {
+                                        crate::i18n::tr_args(
+                                            "vector.import-failed",
+                                            [("error", fluent::FluentValue::from(error))],
+                                        )
+                                    }
                                 };
+                                if let vector_panel::VectorPanelOutcome::Imported(id) = outcome {
+                                    self.layer_gestures.selection.set_single(id);
+                                    if let Some(paint) = self.paint.as_deref_mut() {
+                                        paint.set_active_target(paint_state::PlaneOwner::Layer(id));
+                                    }
+                                }
                                 self.pick_notices.push(notice);
                             }
                         }

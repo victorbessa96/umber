@@ -937,6 +937,10 @@ vector =
     .export-svg = Export SVG
     .export-saved = Exported { $path }
     .export-failed = SVG export failed: { $error }
+    .import-svg = Import SVG
+    .imported = Imported as vector layer { $id }
+    .import-failed = SVG import failed: { $error }
+    .imported-default = Imported path
 
 ## HDR surface output (§5 P1 row 85)
 

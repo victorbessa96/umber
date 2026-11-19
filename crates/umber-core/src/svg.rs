@@ -1155,8 +1155,81 @@ fn reflect(ctrl: [f64; 2], about: [f64; 2]) -> [f64; 2] {
     [2.0 * about[0] - ctrl[0], 2.0 * about[1] - ctrl[1]]
 }
 
-/// Parses path data `d` into the builder.
-fn build_path(d: &Attr, b: &mut PolyBuilder) -> Result<(), SvgError> {
+/// Crate-private geometry destination for the path-data walker. The raster
+/// builder keeps its established flattening behavior; K5b's import sink keeps
+/// cubic anchors instead. Every command can refuse so unsupported geometry and
+/// anchor budgets fail before a partial layer is produced.
+trait PathSink {
+    fn sink_move_to(&mut self, point: [f64; 2]) -> Result<(), SvgError>;
+    fn sink_line_to(&mut self, from: [f64; 2], to: [f64; 2]) -> Result<(), SvgError>;
+    fn sink_cubic_to(
+        &mut self,
+        from: [f64; 2],
+        c1: [f64; 2],
+        c2: [f64; 2],
+        to: [f64; 2],
+    ) -> Result<(), SvgError>;
+    fn sink_quad_to(
+        &mut self,
+        from: [f64; 2],
+        ctrl: [f64; 2],
+        to: [f64; 2],
+    ) -> Result<(), SvgError>;
+    fn sink_arc_to(&mut self, from: [f64; 2], arc: &ArcSeg) -> Result<(), SvgError>;
+    fn sink_close_path(&mut self) -> Result<(), SvgError>;
+}
+
+impl PathSink for PolyBuilder {
+    fn sink_move_to(&mut self, point: [f64; 2]) -> Result<(), SvgError> {
+        self.move_to(point);
+        Ok(())
+    }
+
+    fn sink_line_to(&mut self, from: [f64; 2], to: [f64; 2]) -> Result<(), SvgError> {
+        self.line_to(from, to);
+        Ok(())
+    }
+
+    fn sink_cubic_to(
+        &mut self,
+        from: [f64; 2],
+        c1: [f64; 2],
+        c2: [f64; 2],
+        to: [f64; 2],
+    ) -> Result<(), SvgError> {
+        self.cubic_to(from, c1, c2, to);
+        Ok(())
+    }
+
+    fn sink_quad_to(
+        &mut self,
+        from: [f64; 2],
+        ctrl: [f64; 2],
+        to: [f64; 2],
+    ) -> Result<(), SvgError> {
+        self.quad_to(from, ctrl, to);
+        Ok(())
+    }
+
+    fn sink_arc_to(&mut self, from: [f64; 2], arc: &ArcSeg) -> Result<(), SvgError> {
+        self.arc_to(from, arc);
+        Ok(())
+    }
+
+    fn sink_close_path(&mut self) -> Result<(), SvgError> {
+        self.flush();
+        Ok(())
+    }
+}
+
+/// Parses path data `d` into the selected geometry sink.
+///
+/// This walker deliberately sees only path commands, never presentation
+/// attributes. Element/root transforms are composed by the caller: the raster
+/// `PolyBuilder` owns its CTM, and K5b's `VectorImportBuilder` owns the single
+/// root CTM-to-UV map. Path `transform`/`style` attrs are refused by import
+/// before this walker is called, so no transform is applied twice.
+fn build_path<S: PathSink>(d: &Attr, b: &mut S) -> Result<(), SvgError> {
     let mut cur = Cursor::new(d);
     let mut command: Option<u8> = None;
     let mut pos = [0.0, 0.0];
@@ -1191,7 +1264,7 @@ fn build_path(d: &Attr, b: &mut PolyBuilder) -> Result<(), SvgError> {
         match cmd.to_ascii_uppercase() {
             b'M' => {
                 let p = add(origin, cur.pair()?);
-                b.move_to(p);
+                b.sink_move_to(p)?;
                 pos = p;
                 start = p;
                 // A repeated moveto pair is an implicit lineto.
@@ -1199,24 +1272,24 @@ fn build_path(d: &Attr, b: &mut PolyBuilder) -> Result<(), SvgError> {
             }
             b'L' => {
                 let p = add(origin, cur.pair()?);
-                b.line_to(pos, p);
+                b.sink_line_to(pos, p)?;
                 pos = p;
             }
             b'H' => {
                 let p = [cur.number()? + origin[0], pos[1]];
-                b.line_to(pos, p);
+                b.sink_line_to(pos, p)?;
                 pos = p;
             }
             b'V' => {
                 let p = [pos[0], cur.number()? + origin[1]];
-                b.line_to(pos, p);
+                b.sink_line_to(pos, p)?;
                 pos = p;
             }
             b'C' => {
                 let c1 = add(origin, cur.pair()?);
                 let c2 = add(origin, cur.pair()?);
                 let p = add(origin, cur.pair()?);
-                b.cubic_to(pos, c1, c2, p);
+                b.sink_cubic_to(pos, c1, c2, p)?;
                 next_cubic = Some(c2);
                 pos = p;
             }
@@ -1224,21 +1297,21 @@ fn build_path(d: &Attr, b: &mut PolyBuilder) -> Result<(), SvgError> {
                 let c1 = last_cubic.map_or(pos, |c| reflect(c, pos));
                 let c2 = add(origin, cur.pair()?);
                 let p = add(origin, cur.pair()?);
-                b.cubic_to(pos, c1, c2, p);
+                b.sink_cubic_to(pos, c1, c2, p)?;
                 next_cubic = Some(c2);
                 pos = p;
             }
             b'Q' => {
                 let c = add(origin, cur.pair()?);
                 let p = add(origin, cur.pair()?);
-                b.quad_to(pos, c, p);
+                b.sink_quad_to(pos, c, p)?;
                 next_quad = Some(c);
                 pos = p;
             }
             b'T' => {
                 let c = last_quad.map_or(pos, |q| reflect(q, pos));
                 let p = add(origin, cur.pair()?);
-                b.quad_to(pos, c, p);
+                b.sink_quad_to(pos, c, p)?;
                 next_quad = Some(c);
                 pos = p;
             }
@@ -1257,11 +1330,11 @@ fn build_path(d: &Attr, b: &mut PolyBuilder) -> Result<(), SvgError> {
                     sweep,
                     to: p,
                 };
-                b.arc_to(pos, &arc);
+                b.sink_arc_to(pos, &arc)?;
                 pos = p;
             }
             b'Z' => {
-                b.flush();
+                b.sink_close_path()?;
                 pos = start;
             }
             _ => {
@@ -1276,6 +1349,419 @@ fn build_path(d: &Attr, b: &mut PolyBuilder) -> Result<(), SvgError> {
         last_quad = next_quad;
     }
     Ok(())
+}
+
+/// K5b's anchor-preserving path sink. Coordinates are mapped through the root
+/// CTM and normalized to UV; no flattening occurs.
+struct VectorImportBuilder {
+    shape: crate::vector::VectorShape,
+    ctm: Affine,
+    width: u32,
+    height: u32,
+}
+
+impl VectorImportBuilder {
+    fn new(ctm: Affine, width: u32, height: u32) -> Self {
+        Self {
+            shape: crate::vector::VectorShape::empty(),
+            ctm,
+            width,
+            height,
+        }
+    }
+
+    fn map(&self, point: [f64; 2]) -> Result<[f32; 2], SvgError> {
+        let device = self.ctm.apply(point);
+        let uv = [
+            (device[0] / f64::from(self.width)) as f32,
+            (device[1] / f64::from(self.height)) as f32,
+        ];
+        if uv.iter().all(|value| value.is_finite()) {
+            Ok(uv)
+        } else {
+            Err(SvgError::Unsupported {
+                what: "non-finite UV geometry".to_owned(),
+            })
+        }
+    }
+
+    fn push_anchor(&mut self, point: [f64; 2]) -> Result<(), SvgError> {
+        if self.shape.anchors.len() >= crate::vector::MAX_VECTOR_ANCHORS {
+            return Err(SvgError::TooComplex {
+                what: "anchors",
+                limit: crate::vector::MAX_VECTOR_ANCHORS,
+            });
+        }
+        let pos = self.map(point)?;
+        self.shape.anchors.push(crate::vector::Anchor::corner(pos));
+        Ok(())
+    }
+
+    fn ensure_open(&mut self, from: [f64; 2]) -> Result<(), SvgError> {
+        if self.shape.closed {
+            return Err(SvgError::Unsupported {
+                what: "multiple subpaths in one vector layer".to_owned(),
+            });
+        }
+        if self.shape.anchors.is_empty() {
+            return self.push_anchor(from);
+        }
+        let expected = self.map(from)?;
+        if self
+            .shape
+            .anchors
+            .last()
+            .is_some_and(|anchor| anchor.pos != expected)
+        {
+            return Err(SvgError::Unsupported {
+                what: "multiple subpaths in one vector layer".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl PathSink for VectorImportBuilder {
+    fn sink_move_to(&mut self, point: [f64; 2]) -> Result<(), SvgError> {
+        if !self.shape.anchors.is_empty() {
+            return Err(SvgError::Unsupported {
+                what: "multiple subpaths in one vector layer".to_owned(),
+            });
+        }
+        self.push_anchor(point)
+    }
+
+    fn sink_line_to(&mut self, from: [f64; 2], to: [f64; 2]) -> Result<(), SvgError> {
+        self.ensure_open(from)?;
+        self.push_anchor(to)
+    }
+
+    fn sink_cubic_to(
+        &mut self,
+        from: [f64; 2],
+        c1: [f64; 2],
+        c2: [f64; 2],
+        to: [f64; 2],
+    ) -> Result<(), SvgError> {
+        self.ensure_open(from)?;
+        let out_handle = self.map(c1)?;
+        let in_handle = self.map(c2)?;
+        let pos = self.map(to)?;
+        if let Some(anchor) = self.shape.anchors.last_mut() {
+            anchor.out_handle = out_handle;
+        }
+        if self.shape.anchors.len() >= crate::vector::MAX_VECTOR_ANCHORS {
+            return Err(SvgError::TooComplex {
+                what: "anchors",
+                limit: crate::vector::MAX_VECTOR_ANCHORS,
+            });
+        }
+        self.shape.anchors.push(crate::vector::Anchor {
+            pos,
+            in_handle,
+            out_handle: pos,
+        });
+        Ok(())
+    }
+
+    fn sink_quad_to(
+        &mut self,
+        from: [f64; 2],
+        ctrl: [f64; 2],
+        to: [f64; 2],
+    ) -> Result<(), SvgError> {
+        // Exact quadratic → cubic elevation; the affine UV map commutes with it.
+        let c1 = [
+            from[0] + (2.0 / 3.0) * (ctrl[0] - from[0]),
+            from[1] + (2.0 / 3.0) * (ctrl[1] - from[1]),
+        ];
+        let c2 = [
+            to[0] + (2.0 / 3.0) * (ctrl[0] - to[0]),
+            to[1] + (2.0 / 3.0) * (ctrl[1] - to[1]),
+        ];
+        self.sink_cubic_to(from, c1, c2, to)
+    }
+
+    fn sink_arc_to(&mut self, _from: [f64; 2], _arc: &ArcSeg) -> Result<(), SvgError> {
+        Err(SvgError::Unsupported {
+            what: "arc-to-cubic conversion".to_owned(),
+        })
+    }
+
+    fn sink_close_path(&mut self) -> Result<(), SvgError> {
+        self.shape.closed = true;
+        // SVG records the closing segment explicitly. Umber's model stores it
+        // implicitly between last and first, so an explicit return to the first
+        // point must not become a duplicate anchor. Its incoming control is the
+        // first anchor's incoming control for that closing cubic.
+        let should_fold = self.shape.anchors.len() >= 2
+            && self.shape.anchors.first().map(|first| first.pos)
+                == self.shape.anchors.last().map(|last| last.pos);
+        if should_fold {
+            if let Some(last) = self.shape.anchors.pop() {
+                if let Some(first) = self.shape.anchors.first_mut() {
+                    first.in_handle = last.in_handle;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parses the bounded K5b document subset into one vector layer. The old
+/// raster path never calls this function; both share the strict XML tokenizer,
+/// root geometry, and path-command walker.
+pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, SvgError> {
+    if bytes.len() > MAX_SVG_INPUT_BYTES {
+        return Err(SvgError::InputTooLarge {
+            bytes: bytes.len(),
+            max_bytes: MAX_SVG_INPUT_BYTES,
+        });
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| parse_err(error.valid_up_to(), "the input is not valid UTF-8"))?;
+    let (base, text) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => ('\u{feff}'.len_utf8(), rest),
+        None => (0, text),
+    };
+    let mut tok = Tokenizer::new(text, base);
+    let (root_attrs, _root_self_closing) = match tok.next_event()? {
+        Event::Start {
+            name,
+            attrs,
+            self_closing,
+            offset,
+        } => {
+            if name != "svg" {
+                return Err(parse_err(
+                    offset,
+                    format!("root element is <{name}>, expected <svg>"),
+                ));
+            }
+            (attrs, self_closing)
+        }
+        Event::End | Event::Eof => return Err(parse_err(base, "no <svg> root element")),
+    };
+    let (width, height, root_ctm) = root_geometry(&root_attrs)?;
+    if width == 0 || height == 0 {
+        return Err(SvgError::ZeroSize { width, height });
+    }
+    if u64::from(width) * u64::from(height) > crate::vector::MAX_VECTOR_RASTER_PIXELS as u64 {
+        return Err(SvgError::TooLarge {
+            width,
+            height,
+            max_pixels: crate::vector::MAX_VECTOR_RASTER_PIXELS,
+        });
+    }
+    // Match the raster walker's root composition exactly: viewBox sizing from
+    // root_geometry first, then the root transform/presentation attrs once.
+    // build_path itself never sees presentation attrs, so this cannot double.
+    let root_style = apply_presentation(
+        Style {
+            painted: true,
+            rule: FillRule::NonZero,
+            ctm: root_ctm,
+        },
+        &root_attrs,
+    )?;
+    let root_ctm = root_style.ctm;
+
+    let mut stack = vec![true];
+    let mut found = None;
+    loop {
+        match tok.next_event()? {
+            Event::Eof => break,
+            Event::End => {
+                stack.pop();
+            }
+            Event::Start {
+                name,
+                attrs,
+                self_closing,
+                ..
+            } => {
+                let known_parent = stack.last().copied().unwrap_or(false);
+                let descend = false;
+                if known_parent {
+                    if name == "path" {
+                        if found.is_some() {
+                            return Err(SvgError::Unsupported {
+                                what: "multiple paths in one vector layer".to_owned(),
+                            });
+                        }
+                        let d = find_attr(&attrs, "d").ok_or_else(|| SvgError::Unsupported {
+                            what: "path without d".to_owned(),
+                        })?;
+                        if find_attr(&attrs, "transform").is_some()
+                            || find_attr(&attrs, "style").is_some()
+                        {
+                            return Err(SvgError::Unsupported {
+                                what: "path transform/style in vector import".to_owned(),
+                            });
+                        }
+                        let mut builder = VectorImportBuilder::new(root_ctm, width, height);
+                        build_path(d, &mut builder)?;
+                        let mut shape = builder.shape;
+                        let (fill, stroke) = parse_vector_paint(&attrs, root_ctm, width, height)?;
+                        shape.fill = fill;
+                        shape.stroke = stroke;
+                        found = Some(shape);
+                    } else if name == "g" {
+                        return Err(SvgError::Unsupported {
+                            what: "groups in vector import".to_owned(),
+                        });
+                    } else if is_shape(&name) {
+                        return Err(SvgError::Unsupported {
+                            what: format!("multiple shapes in one vector layer: <{name}>"),
+                        });
+                    }
+                }
+                if !self_closing {
+                    stack.push(descend);
+                }
+            }
+        }
+    }
+    let shape = found.ok_or_else(|| SvgError::Unsupported {
+        what: "no path in vector import".to_owned(),
+    })?;
+    Ok(crate::vector::VectorParams { shape })
+}
+
+fn parse_vector_paint(
+    attrs: &[Attr],
+    ctm: Affine,
+    width: u32,
+    height: u32,
+) -> Result<([u8; 4], Option<crate::vector::Stroke>), SvgError> {
+    if let Some(rule) = find_attr(attrs, "fill-rule") {
+        if rule.value.trim() != "nonzero" {
+            return Err(SvgError::Unsupported {
+                what: format!("fill-rule {}", rule.value.trim()),
+            });
+        }
+    }
+    let fill = match find_attr(attrs, "fill") {
+        None => [0, 0, 0, 255],
+        Some(attr) => match parse_svg_color(&attr.value, "fill")? {
+            Some(rgb) => with_alpha(rgb, opacity_attr(attrs, "fill-opacity")?),
+            None => [0, 0, 0, 0],
+        },
+    };
+    let stroke_rgb = match find_attr(attrs, "stroke") {
+        None => None,
+        Some(attr) => parse_svg_color(&attr.value, "stroke")?,
+    };
+    let Some(rgb) = stroke_rgb else {
+        return Ok((fill, None));
+    };
+    for (key, expected) in [("stroke-linecap", "round"), ("stroke-linejoin", "round")] {
+        if find_attr(attrs, key).is_none_or(|attr| attr.value.trim() != expected) {
+            return Err(SvgError::Unsupported {
+                what: format!("{key} must be {expected} for vector import"),
+            });
+        }
+    }
+    let raw_width = match find_attr(attrs, "stroke-width") {
+        Some(attr) => parse_length(attr, "path")?,
+        None => 1.0,
+    };
+    if !raw_width.is_finite() || raw_width < 0.0 {
+        return Err(SvgError::Unsupported {
+            what: "negative or non-finite stroke width".to_owned(),
+        });
+    }
+    let scale = ctm.max_scale() / f64::from(width.min(height));
+    let stroke_width = (raw_width * scale) as f32;
+    if !stroke_width.is_finite() {
+        return Err(SvgError::Unsupported {
+            what: "non-finite transformed stroke width".to_owned(),
+        });
+    }
+    let color = with_alpha(rgb, opacity_attr(attrs, "stroke-opacity")?);
+    if stroke_width == 0.0 || color[3] == 0 {
+        return Ok((fill, None));
+    }
+    Ok((
+        fill,
+        Some(crate::vector::Stroke {
+            width: stroke_width,
+            color,
+        }),
+    ))
+}
+
+fn parse_svg_color(raw: &str, key: &str) -> Result<Option<[u8; 3]>, SvgError> {
+    let raw = raw.trim();
+    if raw == "none" {
+        return Ok(None);
+    }
+    let hex = raw.strip_prefix('#').ok_or_else(|| SvgError::Unsupported {
+        what: format!("{key} paint {raw}"),
+    })?;
+    if !hex.is_ascii() {
+        return Err(SvgError::Unsupported {
+            what: format!("{key} paint {raw}"),
+        });
+    }
+    let component = |text: &str| u8::from_str_radix(text, 16).ok();
+    let rgb = match hex.len() {
+        3 => {
+            let bytes = hex.as_bytes();
+            let mut out = [0u8; 3];
+            for (index, slot) in out.iter_mut().enumerate() {
+                let digit =
+                    char::from(bytes[index])
+                        .to_digit(16)
+                        .ok_or_else(|| SvgError::Unsupported {
+                            what: format!("{key} paint {raw}"),
+                        })? as u8;
+                *slot = digit * 17;
+            }
+            out
+        }
+        6 => {
+            let mut out = [0u8; 3];
+            for (index, slot) in out.iter_mut().enumerate() {
+                *slot = component(&hex[index * 2..index * 2 + 2]).ok_or_else(|| {
+                    SvgError::Unsupported {
+                        what: format!("{key} paint {raw}"),
+                    }
+                })?;
+            }
+            out
+        }
+        _ => {
+            return Err(SvgError::Unsupported {
+                what: format!("{key} paint {raw}"),
+            });
+        }
+    };
+    Ok(Some(rgb))
+}
+
+fn opacity_attr(attrs: &[Attr], key: &str) -> Result<f32, SvgError> {
+    let Some(attr) = find_attr(attrs, key) else {
+        return Ok(1.0);
+    };
+    let value = attr
+        .value
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value));
+    value.ok_or_else(|| SvgError::Unsupported {
+        what: format!("{key} value {}", attr.value.trim()),
+    })
+}
+
+fn with_alpha(rgb: [u8; 3], opacity: f32) -> [u8; 4] {
+    [
+        rgb[0],
+        rgb[1],
+        rgb[2],
+        (opacity * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
 }
 
 /// `points` of a polygon/polyline: coordinate pairs; an odd count is a

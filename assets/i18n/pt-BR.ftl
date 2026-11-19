@@ -956,6 +956,10 @@ vector =
     .export-svg = Exportar SVG
     .export-saved = Exportado { $path }
     .export-failed = Falha ao exportar SVG: { $error }
+    .import-svg = Importar SVG
+    .imported = Importado como camada vetorial { $id }
+    .import-failed = Falha ao importar SVG: { $error }
+    .imported-default = Caminho importado
 
 ## Saída de superfície HDR (§5, linha P1 85)
 

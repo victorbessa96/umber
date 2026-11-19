@@ -10,10 +10,12 @@ use crate::i18n::tr;
 
 const DEFAULT_STROKE_WIDTH: f32 = 0.01;
 
-/// One user-selected SVG export result, handed to the shell's notice rail.
-pub enum VectorExportOutcome {
-    Saved(std::path::PathBuf),
-    Failed(String),
+/// One user-selected panel action result, handed to the shell's notice rail.
+pub enum VectorPanelOutcome {
+    ExportSaved(std::path::PathBuf),
+    Imported(u64),
+    ExportFailed(String),
+    ImportFailed(String),
 }
 
 /// Search labels in draw order. Stroke-only rows stay listed while hidden,
@@ -35,11 +37,16 @@ pub fn row_labels() -> Vec<String> {
 /// One collapsible property section per vector layer. A fresh `None` layer
 /// edits the same visible default as the canvas; the first real change creates
 /// its params through one undoable command.
-pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<VectorExportOutcome> {
+pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<VectorPanelOutcome> {
     let mut outcome = None;
     ui.add_space(8.0);
     ui.separator();
     ui.strong(tr("vector.section"));
+    ui.add_space(4.0);
+    if ui.button(tr("vector.import-svg")).clicked() {
+        outcome = import_one(doc);
+    }
+    ui.add_space(4.0);
     let vectors: Vec<(u64, String, Option<VectorParams>)> = doc
         .layers()
         .iter()
@@ -116,22 +123,77 @@ pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<Vector
 
 /// Opens the native save dialog and writes only the user-selected path.
 /// Cancel returns `None`; serialization and filesystem failures stay visible.
-fn export_one(name: &str, params: &VectorParams) -> Option<VectorExportOutcome> {
+fn export_one(name: &str, params: &VectorParams) -> Option<VectorPanelOutcome> {
     let svg = match umber_core::vector_svg::export_svg(&params.shape) {
         Ok(svg) => svg,
-        Err(error) => return Some(VectorExportOutcome::Failed(error.to_string())),
+        Err(error) => return Some(VectorPanelOutcome::ExportFailed(error.to_string())),
     };
     let path = rfd::FileDialog::new()
         .add_filter("SVG", &["svg"])
         .set_file_name(suggested_svg_name(name))
         .save_file()?;
     match std::fs::write(&path, svg) {
-        Ok(()) => Some(VectorExportOutcome::Saved(path)),
-        Err(error) => Some(VectorExportOutcome::Failed(error.to_string())),
+        Ok(()) => Some(VectorPanelOutcome::ExportSaved(path)),
+        Err(error) => Some(VectorPanelOutcome::ExportFailed(error.to_string())),
     }
 }
 
-/// Stable, filesystem-safe layer-name suggestion (ASCII, bounded, nonempty).
+/// Opens the native open dialog, refuses oversized files before reading them,
+/// parses only after the whole read is in memory, and installs the result as
+/// one undoable add + set. Cancel and every failure leave the document intact.
+fn import_one(doc: &mut Document) -> Option<VectorPanelOutcome> {
+    let path = rfd::FileDialog::new()
+        .add_filter("SVG", &["svg"])
+        .pick_file()?;
+    let bytes = match read_svg_capped(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => return Some(VectorPanelOutcome::ImportFailed(error)),
+    };
+    let params = match umber_core::vector_svg::import_svg(&bytes) {
+        Ok(params) => params,
+        Err(error) => return Some(VectorPanelOutcome::ImportFailed(error.to_string())),
+    };
+    let id = install_imported_params(doc, params);
+    Some(VectorPanelOutcome::Imported(id))
+}
+
+fn validate_svg_len(bytes: usize) -> Result<(), String> {
+    if bytes > umber_core::svg::MAX_SVG_INPUT_BYTES {
+        return Err(format!(
+            "SVG exceeds the {}-byte import budget",
+            umber_core::svg::MAX_SVG_INPUT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn read_svg_capped(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    validate_svg_len(metadata.len() as usize)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    validate_svg_len(bytes.len()).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(bytes)
+}
+
+/// Adds one vector layer and installs its parsed params in a single history
+/// group, so undo removes the imported layer instead of leaving an empty one.
+fn install_imported_params(doc: &mut Document, params: VectorParams) -> u64 {
+    let mut id = None;
+    doc.run_grouped(crate::history_panel::HistoryKind::AddVector, |doc| {
+        doc.run(LayerCommand::add(
+            tr("vector.imported-default"),
+            LayerKind::Vector,
+        ));
+        id = doc.layers().last().map(|layer| layer.id);
+        if let Some(id) = id {
+            doc.run(LayerCommand::set_vector(id, params));
+        }
+    });
+    id.expect("add always appends one layer")
+}
+
 fn suggested_svg_name(name: &str) -> String {
     let candidate: String = name
         .chars()
@@ -266,5 +328,37 @@ mod tests {
         );
         assert!(doc.undo());
         assert!(doc.layers()[0].vector.is_none());
+    }
+
+    #[test]
+    fn import_budget_refuses_before_any_file_read() {
+        assert!(validate_svg_len(umber_core::svg::MAX_SVG_INPUT_BYTES).is_ok());
+        assert!(validate_svg_len(umber_core::svg::MAX_SVG_INPUT_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn installed_import_is_one_history_group_and_undo_removes_the_layer() {
+        let mut doc = Document::default();
+        let params = VectorParams {
+            shape: umber_core::vector::VectorShape {
+                closed: true,
+                fill: [1, 2, 3, 255],
+                stroke: None,
+                anchors: vec![
+                    umber_core::vector::Anchor::corner([0.0, 0.0]),
+                    umber_core::vector::Anchor::corner([1.0, 1.0]),
+                ],
+            },
+        };
+        let id = install_imported_params(&mut doc, params.clone());
+        assert_eq!(doc.layers().len(), 1);
+        assert_eq!(doc.layers()[0].id, id);
+        assert_eq!(doc.layers()[0].vector, Some(params));
+        // Two raw commands, but `run_grouped` records one undoable history row
+        // and one undo crosses both.
+        assert_eq!(doc.history.len(), 2);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
     }
 }
