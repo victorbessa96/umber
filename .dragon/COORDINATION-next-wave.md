@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** K5b code `0d1b6ad7` is committed on top of K5a
+**Updated 2026-11-19:** K5b code `0d1b6ad7` is pushed on top of K5a
 `09d01fbd`, K4 `a4373c51`, K3 `98fdbb80`, K2 `0b5cb72d`, and K1 `46d4bff5`.
 `umber_core::vector_svg::import_svg` uses the shared path walker with an
 anchor-preserving sink: one root/one path, M/L/H/V/C/S/Q/T/Z and relative
