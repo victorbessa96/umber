@@ -2,10 +2,9 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** K3 `98fdbb80` is pushed on top of K2 `0b5cb72d` and
-K1 `46d4bff5`. K4 vector property widgets are implemented under
-`razul-vector-widgets` with their landing SHA pending; the K4 brief is
-`7f1c6cc3`. The final tree has a dedicated Vector Properties rail with the
+**Updated 2026-11-19:** K4 `a4373c51` is pushed on top of K3 `98fdbb80`,
+K2 `0b5cb72d`, and K1 `46d4bff5`; the K4 brief is `7f1c6cc3`. The
+`razul-vector-widgets` lock is released after safe-push. The final tree has a dedicated Vector Properties rail with the
 existing spline glyph, native sRGBA fill/stroke controls, bounded stroke width,
 and one SetVector per egui change. New-path defaults are visible opaque white
 fill and no stroke; `VectorShape::empty()` stays transparent and undo-to-None

@@ -11,8 +11,7 @@ held `crates/umber-gui/src/widgets/context_rail.rs`,
 Implements `docs/loop/briefs/2026-11-19-umber-vector-widgets.md`: Target and
 decisions 1–5, tests, and exact lock surface. K1 is `46d4bff5`, K2 is
 `0b5cb72d`, K3 is `98fdbb80`, and the K4 brief is `7f1c6cc3`. The K4 code
-landing is recorded in the follow-up hash-truthing commit. K5 SVG
-conversion/export remains separate.
+landing is `a4373c51`. K5 SVG conversion/export remains separate.
 
 ## Built
 
