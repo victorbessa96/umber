@@ -1234,7 +1234,11 @@ mod tests {
         // At plane center, the 10x10 quad at distance 0.1 covers ~99% of upper hemisphere
         // With 16 rays, nearly all hit → AO ≈ 0
         let center_ao = ground_plane_ao_cpu(&plane, &scene, &desc, &params, (16, 16));
-        // Physics gives AO ≈ 0 (not 0.5 as originally assumed in brief)
+        // Solid-angle argument (cross-review D5 MED, resolved 2026-11-18): a quad
+        // spanning [-5,5]² at distance 0.1 subtends ~99% of the upper hemisphere,
+        // so occlusion ≈ 1 and AO ≈ 0. The brief's original R=128 (0.5) expectation
+        // was wrong physics, not a relaxed assertion — the brief's DoD line is
+        // corrected in docs/loop/briefs/2026-11-16-d5-ground-plane.md.
         assert!(
             (0.0..=0.1).contains(&center_ao),
             "AO at center should be near 0 (fully occluded), got: {}",

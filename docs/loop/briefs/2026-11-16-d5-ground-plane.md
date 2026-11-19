@@ -173,7 +173,7 @@ Viewport sync (in `BakesPanel::show` or app shell):
 
 ## Kittest-first definition of done
 
-- `ground_plane_ao_cpu_matches_ao_bake_on_flat_scene`: plane at Y=-0.1, scene = single quad at Y=0 spanning [-5,5]×[-5,5] → AO at plane center (texel 256,256 at 512²) reads R=128 (0.5 occlusion) ±1, A=255; exact value asserted against CPU reference `ground_plane_ao_cpu`.
+- `ground_plane_ao_cpu_matches_ao_bake_on_flat_scene`: plane at Y=-0.1, scene = single quad at Y=0 spanning [-5,5]×[-5,5] → AO at plane center (texel 256,256 at 512²) reads R≈0 (fully occluded), A=255; exact value asserted against CPU reference `ground_plane_ao_cpu`. (Corrected 2026-11-18, cross-review D5 MED: the original "R=128 (0.5 occlusion)" was wrong physics — a 10×10 quad at distance 0.1 subtends ~99% of the upper hemisphere, so occlusion ≈ 1 and AO ≈ 0. The implementation was right; the brief's expectation was not.)
 - `ground_plane_height_cpu_returns_normalized_distance`: plane at Y=-0.5, scene quad at Y=0, `max_distance=10.0` → height R = 0.05 * 255 = 13 (rounded), A=255; uncovered texels (outside scene bounds) read (0,0,0,0).
 - `ground_plane_id_cpu_hashes_hit_triangle`: scene with triangle index 42 covering plane center → ID map at center reads RGB = FNV-1a(42) as 24-bit color, A=255.
 - `ground_plane_gpu_ao_matches_cpu_texel_for_texel`: same flat scene, 256², AO only, 16 rays → GPU output layer 0 byte-identical to `ground_plane_ao_cpu` over all texels (extends `ao.rs` CPU-GPU parity precedent).
