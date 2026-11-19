@@ -237,3 +237,48 @@ fn layers_panel_geometry_section_snapshot() {
     support::settle(&mut harness);
     support::snapshot(&mut harness, "layers_panel_geometry_section");
 }
+
+// snapshot-breadth-2 (2026-11-18): the command-palette overlay, the last
+// lib-pub renderable surface that is headless-constructible. Two PNGs from
+// one surface: open with an empty query (the full recents list), and open
+// with a query typed (filtered hits). Baselines host-generated with
+// UPDATE_SNAPSHOTS=1 before the battery, per the A2 precedent.
+
+#[test]
+fn palette_overlay_snapshot() {
+    let mut palette = umber_app::palette::Palette::default();
+    palette.open();
+    let mut harness = support::builder::<()>()
+        .with_size(egui::vec2(360.0, 260.0))
+        .build_ui(|ui| {
+            palette.show(
+                ui.ctx(),
+                |k| k.to_string(),
+                |k| k.to_string(),
+                |_| None,
+                "Search commands",
+            );
+        });
+    support::settle(&mut harness);
+    support::snapshot(&mut harness, "palette_overlay");
+}
+
+#[test]
+fn palette_query_filtered_snapshot() {
+    let mut palette = umber_app::palette::Palette::default();
+    palette.open();
+    palette.set_query("save");
+    let mut harness = support::builder::<()>()
+        .with_size(egui::vec2(360.0, 260.0))
+        .build_ui(|ui| {
+            palette.show(
+                ui.ctx(),
+                |k| k.to_string(),
+                |k| k.to_string(),
+                |_| None,
+                "Search commands",
+            );
+        });
+    support::settle(&mut harness);
+    support::snapshot(&mut harness, "palette_query_filtered");
+}
