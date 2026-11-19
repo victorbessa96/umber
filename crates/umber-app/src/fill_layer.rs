@@ -39,8 +39,10 @@
 
 use std::collections::HashMap;
 
-use umber_brush::symmetry::{symmetrize_coverage, texel_transforms};
-use umber_brush::{QuickMask, SymTransform, SymmetrySettings};
+use umber_brush::symmetry::{
+    symmetrize_coverage, texel_transforms_rect, SymTransform, SymmetrySettings,
+};
+use umber_brush::QuickMask;
 use umber_core::{Layer, LayerCommand, LayerKind};
 use umber_mesh::{
     evaluate_fill_tile, uv_triangle_at, FillMask, FillParams, FillProjection, FillSource, FillTile,
@@ -297,12 +299,18 @@ pub fn apply_quick_mask(tile: FillTile, mask: &QuickMask, tile_id: u16) -> FillT
 /// sampling rule as `symmetrize_coverage`, so color and coverage agree on
 /// every texel: coverage 1.0 always has a copied color behind it).
 /// Symmetry off returns the tile untouched (zero-cost, byte-identical).
+/// Empty or size-mismatched grids also return untouched: there is no complete
+/// texel grid to mirror, and indexing one would panic the UI thread.
 pub fn apply_symmetry(tile: FillTile, symmetry: &SymmetrySettings) -> FillTile {
     if !symmetry.is_active() {
         return tile;
     }
     let (width, height) = (tile.width, tile.height);
-    let transforms = texel_transforms(symmetry, width as f32);
+    let texels = (width as usize).saturating_mul(height as usize);
+    if texels == 0 || tile.coverage.len() != texels || tile.rgba.len() != texels * 4 {
+        return tile;
+    }
+    let transforms = texel_transforms_rect(symmetry, width as f32, height as f32);
     let coverage = symmetrize_coverage(&tile.coverage, width, height, &transforms)
         .unwrap_or(tile.coverage.clone());
     let inverses: Vec<SymTransform> = transforms.iter().map(SymTransform::inverse).collect();
@@ -351,6 +359,50 @@ pub fn fold_coverage_to_premultiplied(rgba: &[u8], coverage: &[f32]) -> Vec<u8> 
     for i in 0..n {
         let cov = if coverage[i].is_finite() {
             coverage[i].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let alpha = f32::from(rgba[i * 4 + 3]) / 255.0 * cov;
+        out.push(f32_to_u8(f32::from(rgba[i * 4]) / 255.0 * alpha));
+        out.push(f32_to_u8(f32::from(rgba[i * 4 + 1]) / 255.0 * alpha));
+        out.push(f32_to_u8(f32::from(rgba[i * 4 + 2]) / 255.0 * alpha));
+        out.push(f32_to_u8(alpha));
+    }
+    out
+}
+
+/// Single-pass quick-mask + premultiply used by vector refresh. Byte-identical
+/// to `apply_quick_mask` followed by `fold_coverage_to_premultiplied`, but
+/// borrows the cached tile and allocates only the final plane.
+fn gate_and_fold(
+    rgba: &[u8],
+    coverage: &[f32],
+    width: u32,
+    height: u32,
+    mask: &QuickMask,
+    tile_id: u16,
+) -> Vec<u8> {
+    use umber_gpu::f32_to_u8;
+    let n = (rgba.len() / 4).min(coverage.len());
+    let gated = mask.gates() && mask.dimensions() == (width, height);
+    let mut out = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let mut cov = if coverage[i].is_finite() && coverage[i] > 0.0 {
+            coverage[i]
+        } else {
+            0.0
+        };
+        if gated && cov > 0.0 {
+            cov *= mask
+                .sample(
+                    tile_id,
+                    (i % width as usize) as u32,
+                    (i / width as usize) as u32,
+                )
+                .clamp(0.0, 1.0);
+        }
+        let cov = if cov.is_finite() {
+            cov.clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -431,6 +483,481 @@ pub fn refresh_fill_layer(
         }
     }
     staged
+}
+
+/// CPU cache ceiling per vector layer. The just-used tile is retained even
+/// when it alone exceeds the cap; every older tile is evicted first.
+const MAX_VECTOR_CACHE_BYTES_PER_LAYER: usize = 512 * 1024 * 1024;
+/// Document-wide CPU cache ceiling. The active layer is the final eviction
+/// candidate, so one just-used tile may exceed the global cap.
+const MAX_VECTOR_CACHE_BYTES_TOTAL: usize = 1024 * 1024 * 1024;
+
+/// One vector tile's cache entry. Unlike Fill's square-only cache this
+/// records both dimensions because project-loaded channels may be non-square.
+struct VectorCachedTile {
+    generation: u64,
+    symmetry: SymmetrySettings,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    coverage: Vec<f32>,
+}
+
+/// A live vector layer's eval cache (K2): `Layer.vector` is authoritative;
+/// this state mirrors it and recomputes only when shape, size, or symmetry
+/// changes. Raster errors degrade to transparent with a loud log, never a
+/// panic in the UI thread.
+pub struct VectorLayerState {
+    layer_id: u64,
+    params: umber_core::vector::VectorParams,
+    generation: u64,
+    dirty: bool,
+    cache: HashMap<u16, VectorCachedTile>,
+    cache_cap_bytes: usize,
+    last_used: u64,
+    evaluation_count: u64,
+    refusal: Option<umber_core::vector::VectorError>,
+    budget_blocked: Option<u64>,
+    budget_retry_watermark: Option<u64>,
+}
+
+impl VectorLayerState {
+    pub fn new(layer_id: u64, params: umber_core::vector::VectorParams) -> Self {
+        Self {
+            layer_id,
+            params,
+            generation: 0,
+            dirty: true,
+            cache: HashMap::new(),
+            cache_cap_bytes: MAX_VECTOR_CACHE_BYTES_PER_LAYER,
+            last_used: 0,
+            evaluation_count: 0,
+            refusal: None,
+            budget_blocked: None,
+            budget_retry_watermark: None,
+        }
+    }
+
+    pub fn layer_id(&self) -> u64 {
+        self.layer_id
+    }
+
+    pub fn params(&self) -> &umber_core::vector::VectorParams {
+        &self.params
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn evaluation_count(&self) -> u64 {
+        self.evaluation_count
+    }
+
+    pub fn refusal(&self) -> Option<&umber_core::vector::VectorError> {
+        self.refusal.as_ref()
+    }
+
+    /// Straight RGBA + f32 coverage bytes retained by this layer.
+    pub fn cache_bytes(&self) -> usize {
+        self.cache
+            .values()
+            .map(|tile| tile.rgba.len() + tile.coverage.len() * std::mem::size_of::<f32>())
+            .sum()
+    }
+
+    fn enforce_cache_budget(&mut self, keep: u16) {
+        let mut candidates: Vec<u16> = self
+            .cache
+            .keys()
+            .copied()
+            .filter(|tile| *tile != keep)
+            .collect();
+        candidates.sort_unstable();
+        for tile in candidates {
+            if self.cache_bytes() <= self.cache_cap_bytes || self.cache.len() <= 1 {
+                break;
+            }
+            self.cache.remove(&tile);
+        }
+    }
+
+    pub fn budget_blocked(&self) -> Option<u64> {
+        self.budget_blocked
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.dirty = true;
+        self.refusal = None;
+        self.cache.clear();
+    }
+
+    pub fn set_params(&mut self, params: umber_core::vector::VectorParams) {
+        if !self.params.same_cache_key(&params) {
+            self.params = params;
+            self.mark_dirty();
+        }
+    }
+
+    /// Evaluates one tile, reusing the cached post-symmetry bytes when the
+    /// complete cache key is unchanged.
+    pub fn evaluate(
+        &mut self,
+        tile: u16,
+        width: u32,
+        height: u32,
+        symmetry: &SymmetrySettings,
+    ) -> &[u8] {
+        let stale = self.cache.get(&tile).is_none_or(|c| {
+            c.generation != self.generation
+                || !c.symmetry.same_cache_key(symmetry)
+                || c.width != width
+                || c.height != height
+        });
+        if stale {
+            let (rgba, coverage) =
+                match umber_core::vector::rasterize(&self.params.shape, width, height) {
+                    Ok(raster) => {
+                        self.refusal = None;
+                        raster.into_rgba_coverage()
+                    }
+                    Err(err) => {
+                        let layer = self.layer_id;
+                        log::warn!("vector layer {layer}: raster refused: {err}");
+                        self.refusal = Some(err);
+                        (Vec::new(), Vec::new())
+                    }
+                };
+            let done = apply_symmetry(
+                FillTile {
+                    width,
+                    height,
+                    rgba,
+                    coverage,
+                },
+                symmetry,
+            );
+            self.cache.insert(
+                tile,
+                VectorCachedTile {
+                    generation: self.generation,
+                    symmetry: *symmetry,
+                    width,
+                    height,
+                    rgba: done.rgba,
+                    coverage: done.coverage,
+                },
+            );
+            self.enforce_cache_budget(tile);
+            self.evaluation_count += 1;
+        }
+        self.dirty = false;
+        self.cache
+            .get(&tile)
+            .map(|c| c.rgba.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn coverage_of(&self, tile: u16, width: u32, height: u32) -> Option<&[f32]> {
+        self.cache
+            .get(&tile)
+            .filter(|c| c.width == width && c.height == height)
+            .map(|c| c.coverage.as_slice())
+    }
+}
+
+/// Evaluates and publishes every requested tile of a vector layer. No mesh
+/// is read: the shape is already in tile-local UV. The publish path is the
+/// Fill pipeline verbatim, including quick-mask and premultiplication. Empty
+/// and refused rasters erase already-owned planes without allocating new ones.
+pub fn refresh_vector_layer(
+    state: &mut VectorLayerState,
+    paint: &mut PaintState,
+    tiles: &[u16],
+    symmetry: &SymmetrySettings,
+) -> Vec<u16> {
+    let layer_id = state.layer_id();
+    let mut staged = Vec::new();
+    let mut needs_retry = false;
+    let mut refresh_refusal = None;
+    for &tile in tiles {
+        let (width, height) = paint.tile_channel_size(tile, crate::paint_state::BASE_COLOR_CHANNEL);
+        if width == 0 || height == 0 {
+            needs_retry = true;
+            continue;
+        }
+        state.evaluate(tile, width, height, symmetry);
+        if let Some(error) = state.refusal.clone() {
+            refresh_refusal = Some(error);
+        }
+        // A refused raster has an empty cached grid. Keep flowing through the
+        // common empty-grid path so a valid-to-invalid edit erases any plane
+        // this layer already owns instead of leaving stale art on screen.
+        let Some(cached) = state.cache.get(&tile) else {
+            needs_retry = true;
+            continue;
+        };
+        let (rgba, coverage) = (cached.rgba.as_slice(), cached.coverage.as_slice());
+        let expected_len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        let mut plane = gate_and_fold(rgba, coverage, width, height, paint.quick_mask(), tile);
+        if plane.len() != expected_len {
+            if rgba.is_empty() && coverage.is_empty() {
+                let owned = paint.planes_present().iter().any(|(owner, t, channel)| {
+                    *owner == crate::paint_state::PlaneOwner::Layer(layer_id)
+                        && *t == tile
+                        && channel == crate::paint_state::BASE_COLOR_CHANNEL
+                });
+                if owned {
+                    plane = vec![0; expected_len];
+                } else {
+                    state.budget_blocked = None;
+                    state.budget_retry_watermark = None;
+                    continue;
+                }
+            } else {
+                needs_retry = true;
+                log::warn!("vector layer {layer_id}: incomplete raster grid, retrying");
+                continue;
+            }
+        }
+        match paint.publish_plane(
+            crate::paint_state::PlaneOwner::Layer(layer_id),
+            tile,
+            crate::paint_state::BASE_COLOR_CHANNEL,
+            width,
+            height,
+            plane,
+        ) {
+            Ok(()) => {
+                state.budget_blocked = None;
+                state.budget_retry_watermark = None;
+                staged.push(tile);
+            }
+            Err(crate::paint_state::PaintRefusal::PlaneBudget { bytes }) => {
+                state.budget_blocked = Some(bytes);
+                state.budget_retry_watermark = Some(paint.plane_bytes());
+                needs_retry = true;
+                log::warn!("vector layer {layer_id}: plane budget refused ({bytes} bytes)");
+                break;
+            }
+            Err(refusal) => {
+                needs_retry = true;
+                log::warn!("vector layer {layer_id}: publish refused ({refusal:?})");
+            }
+        }
+    }
+    // A later valid tile must not hide an earlier tile's refusal. The next
+    // complete pass starts a fresh aggregate, so a genuine recovery clears it.
+    state.refusal = refresh_refusal;
+    state.dirty = needs_retry;
+    staged
+}
+
+/// Whether every active BaseColor tile has this layer's restored plane.
+/// A partial restore is planeless for refresh purposes: seeding the whole
+/// layer clean would suppress every missing tile until an unrelated edit.
+pub fn vector_planes_complete(
+    present: &[(crate::paint_state::PlaneOwner, u16, String)],
+    layer: u64,
+    tiles: &[u16],
+) -> bool {
+    tiles.iter().all(|tile| {
+        present.iter().any(|(owner, present_tile, channel)| {
+            *owner == crate::paint_state::PlaneOwner::Layer(layer)
+                && *present_tile == *tile
+                && channel == crate::paint_state::BASE_COLOR_CHANNEL
+        })
+    })
+}
+
+/// The session's vector-layer caches and dirty queue (K2), kept beside
+/// Fill's because both share the same document and publish lifecycle.
+#[derive(Default)]
+pub struct VectorLayerStates {
+    pub map: HashMap<u64, VectorLayerState>,
+    pub dirty: Vec<u64>,
+    clock: u64,
+    last_symmetry: Option<SymmetrySettings>,
+    last_size: Option<(u32, u32)>,
+}
+
+impl VectorLayerStates {
+    /// Adopts the document's current vector parameters. First sight or a
+    /// shape change queues exactly one refresh; an unchanged ensure is inert.
+    pub fn ensure(&mut self, layer: u64, params: &umber_core::vector::VectorParams) {
+        let fresh = !self.map.contains_key(&layer);
+        let state = self
+            .map
+            .entry(layer)
+            .or_insert_with(|| VectorLayerState::new(layer, params.clone()));
+        if fresh || !state.params().same_cache_key(params) {
+            state.set_params(params.clone());
+            state.budget_blocked = None;
+            state.budget_retry_watermark = None;
+            if !self.dirty.contains(&layer) {
+                self.dirty.push(layer);
+            }
+        }
+    }
+
+    /// First sight uses a restored plane as authoritative; later sightings use
+    /// normal document adoption so an edit is never suppressed by that plane.
+    pub fn ensure_seeded(
+        &mut self,
+        layer: u64,
+        params: &umber_core::vector::VectorParams,
+        planed: bool,
+    ) {
+        if self.map.contains_key(&layer) {
+            self.ensure(layer, params);
+            return;
+        }
+        let mut state = VectorLayerState::new(layer, params.clone());
+        if planed {
+            state.dirty = false;
+            state.budget_blocked = None;
+            state.budget_retry_watermark = None;
+        } else if !self.dirty.contains(&layer) {
+            self.dirty.push(layer);
+        }
+        self.map.insert(layer, state);
+    }
+
+    /// Seeds a reopened saved plane CLEAN. The sidecar is authoritative;
+    /// re-evaluating it would spend work and could alter the reopened image.
+    pub fn ensure_open(&mut self, layer: u64, params: &umber_core::vector::VectorParams) {
+        let state = self
+            .map
+            .entry(layer)
+            .or_insert_with(|| VectorLayerState::new(layer, params.clone()));
+        if !state.params().same_cache_key(params) {
+            state.params = params.clone();
+            state.mark_dirty();
+        }
+        state.refusal = None;
+        state.budget_blocked = None;
+        state.budget_retry_watermark = None;
+        state.dirty = false;
+    }
+
+    /// Marks a planeless or explicitly refreshed vector dirty and queues it.
+    pub fn mark_dirty(&mut self, layer: u64) {
+        if let Some(state) = self.map.get_mut(&layer) {
+            state.mark_dirty();
+            state.budget_blocked = None;
+            state.budget_retry_watermark = None;
+            if !self.dirty.contains(&layer) {
+                self.dirty.push(layer);
+            }
+        }
+    }
+
+    /// Drops deleted layers and their queued work. Returns sorted removed ids
+    /// so the caller can clear their HUD badges deterministically.
+    pub fn retain_live(&mut self, live: &std::collections::HashSet<u64>) -> Vec<u64> {
+        let mut removed: Vec<u64> = self
+            .map
+            .keys()
+            .copied()
+            .filter(|id| !live.contains(id))
+            .collect();
+        removed.sort_unstable();
+        for id in &removed {
+            self.map.remove(id);
+        }
+        self.dirty.retain(|id| live.contains(id));
+        removed
+    }
+
+    /// Total retained vector cache bytes in the document.
+    pub fn cache_bytes(&self) -> usize {
+        self.map.values().map(VectorLayerState::cache_bytes).sum()
+    }
+
+    /// Marks a layer most-recently-used for global cache eviction.
+    pub fn touch(&mut self, layer: u64) {
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(state) = self.map.get_mut(&layer) {
+            state.last_used = self.clock;
+        }
+    }
+
+    /// Applies the production document-wide cache ceiling.
+    pub fn enforce_global_budget_default(&mut self, keep_layer: Option<u64>) {
+        self.enforce_global_budget(MAX_VECTOR_CACHE_BYTES_TOTAL, keep_layer);
+    }
+
+    /// Evicts whole least-recently-used layer caches until the document cap is
+    /// met. `keep_layer` is the active refresh and is never selected.
+    pub fn enforce_global_budget(&mut self, cap: usize, keep_layer: Option<u64>) {
+        let mut candidates: Vec<(u64, u64)> = self
+            .map
+            .iter()
+            .filter(|(id, state)| {
+                Some(**id) != keep_layer && !state.cache.is_empty() && state.last_used > 0
+            })
+            .map(|(id, state)| (state.last_used, *id))
+            .collect();
+        candidates.sort_unstable();
+        for (_, id) in candidates {
+            if self.cache_bytes() <= cap {
+                break;
+            }
+            if let Some(state) = self.map.get_mut(&id) {
+                state.cache.clear();
+            }
+        }
+    }
+
+    /// Observes frame-wide raster inputs. A symmetry or tile-size transition
+    /// queues every live vector; cache entries remain valid by their own keys.
+    pub fn observe_frame(&mut self, symmetry: &SymmetrySettings, size: Option<(u32, u32)>) {
+        let changed = self
+            .last_symmetry
+            .is_some_and(|previous| !previous.same_cache_key(symmetry))
+            || self
+                .last_size
+                .is_some_and(|previous| Some(previous) != size);
+        self.last_symmetry = Some(*symmetry);
+        self.last_size = size;
+        if !changed {
+            return;
+        }
+        for (id, state) in &mut self.map {
+            state.dirty = true;
+            if !self.dirty.contains(id) {
+                self.dirty.push(*id);
+            }
+        }
+    }
+
+    /// Retries budget-blocked vectors only after plane bytes fall below the
+    /// watermark captured at refusal. Cached tiles are reused for republish.
+    pub fn retry_budget_freed(&mut self, plane_bytes: u64) {
+        let retry: Vec<u64> = self
+            .map
+            .iter()
+            .filter(|(_, state)| {
+                state
+                    .budget_retry_watermark
+                    .is_some_and(|watermark| plane_bytes < watermark)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in retry {
+            if let Some(state) = self.map.get_mut(&id) {
+                state.budget_blocked = None;
+                state.budget_retry_watermark = None;
+                state.dirty = true;
+            }
+            if !self.dirty.contains(&id) {
+                self.dirty.push(id);
+            }
+        }
+    }
 }
 
 /// The polygon-fill tool's pick mode (§2 line 24's P1 row): which of the
@@ -1333,6 +1860,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gate_and_fold_matches_mask_then_fold_exactly() {
+        let tile = FillTile {
+            width: 16,
+            height: 16,
+            rgba: vec![
+                255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 255, 255, 255, 0,
+            ]
+            .repeat(64),
+            coverage: [1.0, 0.5, 0.0, f32::NAN].repeat(64),
+        };
+        let mask = left_half_mask();
+        let gated = apply_quick_mask(
+            FillTile {
+                width: 16,
+                height: 16,
+                rgba: tile.rgba.clone(),
+                coverage: tile.coverage.clone(),
+            },
+            &mask,
+            1001,
+        );
+        let expected = fold_coverage_to_premultiplied(&gated.rgba, &gated.coverage);
+        let actual = gate_and_fold(&tile.rgba, &tile.coverage, 16, 16, &mask, 1001);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn empty_tile_symmetry_is_an_untouched_passthrough() {
+        let tile = FillTile {
+            width: 16,
+            height: 16,
+            rgba: Vec::new(),
+            coverage: Vec::new(),
+        };
+        let done = apply_symmetry(tile, &mirror_x_half());
+        assert_eq!((done.width, done.height), (16, 16));
+        assert!(done.rgba.is_empty());
+        assert!(done.coverage.is_empty());
+    }
+
+    #[test]
+    fn non_square_mirror_y_maps_rows_exactly() {
+        let (width, height) = (32u32, 16u32);
+        let mut coverage = vec![0.0f32; (width * height) as usize];
+        coverage[..(width * 4) as usize].fill(1.0);
+        let tile = FillTile {
+            width,
+            height,
+            rgba: [255, 0, 0, 255].repeat((width * height) as usize),
+            coverage,
+        };
+        let settings = SymmetrySettings {
+            mirror: MirrorSettings {
+                enabled: true,
+                axis: MirrorAxis::Y,
+                offset: 0.5,
+            },
+            ..SymmetrySettings::default()
+        };
+        let done = apply_symmetry(tile, &settings);
+        for y in 0..height as usize {
+            let want = if !(4..12).contains(&y) { 1.0 } else { 0.0 };
+            for x in 0..width as usize {
+                assert_eq!(
+                    done.coverage[y * width as usize + x],
+                    want,
+                    "texel ({x},{y})"
+                );
+            }
+        }
+    }
+
     /// Test (f): the coverage symmetry — a left-half fill mirrored at
     /// U = 0.5 covers the right half too, and the mirror halves match
     /// texel-for-texel.
@@ -1901,5 +2501,534 @@ mod tests {
         states.mark_dirty(7);
         assert!(states.dirty.contains(&7));
         assert!(states.map.get(&7).unwrap().is_dirty());
+    }
+
+    fn test_vector_params(color: [u8; 4]) -> umber_core::vector::VectorParams {
+        use umber_core::vector::{Anchor, VectorShape};
+        umber_core::vector::VectorParams {
+            shape: VectorShape {
+                closed: true,
+                fill: color,
+                stroke: None,
+                anchors: vec![
+                    Anchor::corner([0.25, 0.25]),
+                    Anchor::corner([0.75, 0.25]),
+                    Anchor::corner([0.75, 0.75]),
+                    Anchor::corner([0.25, 0.75]),
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn vector_state_evaluates_caches_and_invalidates() {
+        let off = SymmetrySettings::default();
+        let mut state = VectorLayerState::new(7, test_vector_params([255, 0, 0, 255]));
+        assert!(state.is_dirty());
+        let first = state.evaluate(1001, 16, 16, &off).to_vec();
+        assert_eq!(state.evaluation_count(), 1);
+        assert!(!state.is_dirty());
+        fn at(buf: &[u8], x: usize, y: usize) -> &[u8] {
+            &buf[(y * 16 + x) * 4..][..4]
+        }
+        assert_eq!(at(&first, 7, 7), &[255, 0, 0, 255]);
+        assert_eq!(at(&first, 0, 0), &[0, 0, 0, 0]);
+        let second = state.evaluate(1001, 16, 16, &off);
+        assert_eq!(second, first);
+        assert_eq!(
+            state.evaluation_count(),
+            1,
+            "unchanged input reuses the cache"
+        );
+
+        state.set_params(test_vector_params([0, 255, 0, 255]));
+        assert!(state.is_dirty());
+        let green = state.evaluate(1001, 16, 16, &off).to_vec();
+        assert_eq!(at(&green, 7, 7), &[0, 255, 0, 255]);
+        assert_eq!(state.evaluation_count(), 2);
+
+        let mirrored = state.evaluate(1001, 16, 16, &mirror_x_half()).to_vec();
+        assert_eq!(state.evaluation_count(), 3, "symmetry is cache identity");
+        assert_eq!(mirrored.len(), first.len());
+        let resized = state.evaluate(1001, 32, 32, &off);
+        assert_eq!(resized.len(), 32 * 32 * 4);
+        assert_eq!(state.evaluation_count(), 4, "tile size is cache identity");
+    }
+
+    #[test]
+    fn vector_state_refreshes_every_tile_and_symmetry() {
+        let off = SymmetrySettings::default();
+        let mut state = VectorLayerState::new(7, test_vector_params([255, 0, 0, 255]));
+        state.evaluate(1001, 16, 16, &off);
+        state.evaluate(1002, 16, 16, &off);
+        state.set_params(test_vector_params([0, 255, 0, 255]));
+
+        let first = state.evaluate(1001, 16, 16, &off).to_vec();
+        let second = state.evaluate(1002, 16, 16, &off).to_vec();
+        assert_eq!(first, second);
+        assert_eq!(&first[(7 * 16 + 7) * 4..][..4], &[0, 255, 0, 255]);
+        assert_eq!(
+            state.evaluation_count(),
+            4,
+            "both tiles recompute after the edit"
+        );
+
+        let mirrored_first = state.evaluate(1001, 16, 16, &mirror_x_half()).to_vec();
+        let mirrored_second = state.evaluate(1002, 16, 16, &mirror_x_half()).to_vec();
+        assert_eq!(mirrored_first, mirrored_second);
+        assert_eq!(
+            state.evaluation_count(),
+            6,
+            "both tiles adopt the new symmetry"
+        );
+    }
+
+    #[test]
+    fn budget_retry_waits_for_bytes_to_fall_and_reuses_cache() {
+        let off = SymmetrySettings::default();
+        let mut states = VectorLayerStates::default();
+        states.ensure(3, &test_vector_params([0, 255, 0, 255]));
+        states.dirty.clear();
+        let state = states.map.get_mut(&3).expect("vector state exists");
+        state.evaluate(1001, 16, 16, &off);
+        state.budget_retry_watermark = Some(100);
+
+        states.retry_budget_freed(100);
+        assert!(states.dirty.is_empty(), "no memory was freed, so no retry");
+        states.retry_budget_freed(101);
+        assert!(states.dirty.is_empty(), "growth is not a retry signal");
+
+        states.retry_budget_freed(99);
+        assert_eq!(states.dirty, vec![3]);
+        let state = states.map.get_mut(&3).expect("vector state exists");
+        assert_eq!(
+            state.cache.len(),
+            1,
+            "the cached tile survives for republish"
+        );
+        state.evaluate(1001, 16, 16, &off);
+        assert_eq!(
+            state.evaluation_count(),
+            1,
+            "budget retry does not rasterize again"
+        );
+    }
+
+    #[test]
+    fn frame_observation_requeues_on_symmetry_and_size_changes() {
+        let off = SymmetrySettings::default();
+        let mut states = VectorLayerStates::default();
+        states.ensure(3, &test_vector_params([0, 255, 0, 255]));
+        states.dirty.clear();
+
+        states.observe_frame(&off, Some((16, 16)));
+        states.observe_frame(&off, Some((16, 16)));
+        assert!(states.dirty.is_empty());
+
+        states.observe_frame(&mirror_x_half(), Some((16, 16)));
+        assert_eq!(states.dirty, vec![3]);
+        states.dirty.clear();
+        states.observe_frame(&mirror_x_half(), Some((32, 32)));
+        assert_eq!(states.dirty, vec![3]);
+    }
+
+    #[test]
+    fn vector_cache_is_bounded_and_pruned_with_live_layers() {
+        let off = SymmetrySettings::default();
+        let mut state = VectorLayerState::new(3, test_vector_params([0, 255, 0, 255]));
+        state.cache_cap_bytes = 1024;
+        state.evaluate(1001, 16, 16, &off);
+        state.evaluate(1002, 16, 16, &off);
+        assert_eq!(state.cache.len(), 1, "the over-cap older tile is evicted");
+        assert!(
+            state.cache.contains_key(&1002),
+            "the just-used tile survives"
+        );
+        assert_eq!(
+            state.cache_bytes(),
+            state.cache[&1002].rgba.len() + state.cache[&1002].coverage.len() * 4
+        );
+
+        let mut states = VectorLayerStates::default();
+        states.map.insert(3, state);
+        states.map.insert(
+            9,
+            VectorLayerState::new(9, test_vector_params([255, 0, 0, 255])),
+        );
+        states.touch(3);
+        states.touch(9);
+        states.map.get_mut(&9).unwrap().evaluate(1001, 16, 16, &off);
+        states.enforce_global_budget(1024, Some(9));
+        assert!(
+            states.map[&3].cache.is_empty(),
+            "the older layer yields first"
+        );
+        assert!(
+            !states.map[&9].cache.is_empty(),
+            "the active layer keeps its tile"
+        );
+
+        states.dirty = vec![3, 9];
+        let live = std::collections::HashSet::from([3]);
+        assert_eq!(states.retain_live(&live), vec![9]);
+        assert!(!states.map.contains_key(&9));
+        assert_eq!(states.dirty, vec![3]);
+    }
+
+    #[test]
+    fn vector_refusal_is_recorded_without_fallback_allocation_and_cleared() {
+        let off = SymmetrySettings::default();
+        let mut state = VectorLayerState::new(3, test_vector_params([0, 255, 0, 255]));
+        state.evaluate(1001, 8193, 8193, &off);
+        assert_eq!(
+            state.refusal,
+            Some(umber_core::vector::VectorError::TooLarge {
+                width: 8193,
+                height: 8193,
+                max_pixels: umber_core::vector::MAX_VECTOR_RASTER_PIXELS,
+            })
+        );
+        assert!(state.cache[&1001].rgba.is_empty());
+        assert!(state.cache[&1001].coverage.is_empty());
+
+        state.evaluate(1001, 16, 16, &off);
+        assert_eq!(state.refusal, None);
+        assert_eq!(state.cache[&1001].rgba.len(), 16 * 16 * 4);
+    }
+
+    #[test]
+    fn identical_nan_geometry_and_symmetry_do_not_invalidate() {
+        let mut params = test_vector_params([0, 255, 0, 255]);
+        params.shape.anchors[0].pos[0] = f32::NAN;
+        let mut symmetry = mirror_x_half();
+        symmetry.mirror.offset = f32::NAN;
+        let mut states = VectorLayerStates::default();
+        states.ensure(3, &params);
+        states.dirty.clear();
+        states
+            .map
+            .get_mut(&3)
+            .unwrap()
+            .evaluate(1001, 16, 16, &symmetry);
+        assert_eq!(states.map[&3].evaluation_count(), 1);
+
+        states.ensure(3, &params);
+        assert!(
+            states.dirty.is_empty(),
+            "identical NaN geometry must not look edited"
+        );
+        states
+            .map
+            .get_mut(&3)
+            .unwrap()
+            .evaluate(1001, 16, 16, &symmetry);
+        assert_eq!(
+            states.map[&3].evaluation_count(),
+            1,
+            "identical NaN symmetry must reuse the cache"
+        );
+
+        states.observe_frame(&symmetry, Some((16, 16)));
+        states.observe_frame(&symmetry, Some((16, 16)));
+        assert!(!states.map[&3].is_dirty());
+        assert!(states.dirty.is_empty());
+    }
+
+    #[test]
+    fn open_seed_recomputes_every_planeless_tile() {
+        let off = SymmetrySettings::default();
+        let mut states = VectorLayerStates::default();
+        let mut previous = VectorLayerState::new(3, test_vector_params([255, 0, 0, 255]));
+        previous.evaluate(1001, 16, 16, &off);
+        previous.evaluate(1002, 16, 16, &off);
+        states.map.insert(3, previous);
+        let next = test_vector_params([0, 255, 0, 255]);
+        states.ensure_open(3, &next);
+        states.mark_dirty(3);
+
+        let state = states.map.get_mut(&3).expect("open state exists");
+        let first = state.evaluate(1001, 16, 16, &off).to_vec();
+        let second = state.evaluate(1002, 16, 16, &off).to_vec();
+        assert_eq!(first, second);
+        assert_eq!(&first[(7 * 16 + 7) * 4..][..4], &[0, 255, 0, 255]);
+        assert_eq!(
+            state.evaluation_count(),
+            4,
+            "open-seed recomputes every tile"
+        );
+    }
+
+    #[test]
+    fn partial_restore_is_not_clean() {
+        let params = test_vector_params([255, 0, 0, 255]);
+        let mut present = vec![(
+            crate::paint_state::PlaneOwner::Layer(7),
+            1001,
+            crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+        )];
+        assert!(!vector_planes_complete(&present, 7, &[1001, 1002]));
+        let mut states = VectorLayerStates::default();
+        states.ensure_seeded(
+            7,
+            &params,
+            vector_planes_complete(&present, 7, &[1001, 1002]),
+        );
+        assert!(states.map[&7].is_dirty());
+        assert_eq!(states.dirty, vec![7]);
+
+        present.push((
+            crate::paint_state::PlaneOwner::Layer(7),
+            1002,
+            crate::paint_state::BASE_COLOR_CHANNEL.to_string(),
+        ));
+        assert!(vector_planes_complete(&present, 7, &[1001, 1002]));
+        let mut complete = VectorLayerStates::default();
+        complete.ensure_seeded(
+            7,
+            &params,
+            vector_planes_complete(&present, 7, &[1001, 1002]),
+        );
+        assert!(!complete.map[&7].is_dirty());
+        assert!(complete.dirty.is_empty());
+    }
+
+    #[test]
+    fn ensure_seeded_honors_saved_planes_only_on_first_sight() {
+        let params = test_vector_params([255, 0, 0, 255]);
+        let mut states = VectorLayerStates::default();
+        states.ensure_seeded(7, &params, true);
+        assert!(!states.map[&7].is_dirty());
+        assert!(states.dirty.is_empty());
+
+        let changed = test_vector_params([0, 255, 0, 255]);
+        states.ensure_seeded(7, &changed, true);
+        assert!(states.map[&7].is_dirty());
+        assert_eq!(
+            states.dirty,
+            vec![7],
+            "an existing state's edit is never suppressed"
+        );
+
+        states.ensure_seeded(9, &params, false);
+        assert!(states.map[&9].is_dirty());
+        assert!(states.dirty.contains(&9));
+    }
+
+    #[test]
+    fn vector_states_open_clean_or_planeless_dirty() {
+        let params = test_vector_params([255, 0, 0, 255]);
+        let mut opened = VectorLayerStates::default();
+        opened.ensure_open(7, &params);
+        assert!(!opened.map.get(&7).unwrap().is_dirty());
+        assert!(opened.dirty.is_empty());
+        opened.ensure_open(7, &params);
+        assert!(
+            opened.dirty.is_empty(),
+            "re-seeding a saved plane never queues"
+        );
+        opened.mark_dirty(7);
+        assert_eq!(opened.dirty, vec![7]);
+
+        let mut runtime = VectorLayerStates::default();
+        runtime.ensure(9, &params);
+        assert!(runtime.dirty.contains(&9));
+        assert!(runtime.map.get(&9).unwrap().is_dirty());
+        runtime.ensure(9, &params);
+        assert_eq!(
+            runtime.dirty,
+            vec![9],
+            "an unchanged ensure does not double-queue"
+        );
+    }
+
+    fn try_vector_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return None;
+        };
+        if !adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        {
+            return None;
+        }
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            ..Default::default()
+        }))
+        .ok()
+    }
+
+    #[test]
+    fn mixed_size_refusal_is_aggregated_in_both_orders() {
+        let Some((device, queue)) = try_vector_device() else {
+            assert!(
+                std::env::var_os("UMBER_REQUIRE_GPU").is_none(),
+                "UMBER_REQUIRE_GPU=1 but no suitable wgpu adapter is available"
+            );
+            eprintln!(
+                "SKIP mixed_size_refusal_is_aggregated_in_both_orders: no suitable wgpu adapter"
+            );
+            return;
+        };
+        let mut paint =
+            PaintState::with_target_size(device, queue, 16).expect("paint state builds");
+        paint.resize_set("huge", 8193, 8193);
+        paint.assign_tile_to_set(1002, "huge");
+
+        for tiles in [[1002, 1001], [1001, 1002]] {
+            let mut state = VectorLayerState::new(7, test_vector_params([255, 0, 0, 255]));
+            let staged =
+                refresh_vector_layer(&mut state, &mut paint, &tiles, &SymmetrySettings::default());
+            assert_eq!(staged, vec![1001], "only the in-cap tile publishes");
+            assert!(matches!(
+                state.refusal(),
+                Some(umber_core::vector::VectorError::TooLarge {
+                    width: 8193,
+                    height: 8193,
+                    ..
+                })
+            ));
+            assert!(!state.is_dirty(), "a completed refresh does not churn");
+        }
+    }
+
+    #[test]
+    fn vector_refresh_publishes_plane_without_mesh() {
+        let Some((device, queue)) = try_vector_device() else {
+            assert!(
+                std::env::var_os("UMBER_REQUIRE_GPU").is_none(),
+                "UMBER_REQUIRE_GPU=1 but no suitable wgpu adapter is available"
+            );
+            eprintln!("SKIP vector_refresh_publishes_plane_without_mesh: no suitable wgpu adapter");
+            return;
+        };
+        let mut paint =
+            PaintState::with_target_size(device, queue, 16).expect("paint state builds");
+        paint.restore_quick_mask(crate::paint_state::DEFAULT_TEXTURE_SET, left_half_mask());
+        let mut state = VectorLayerState::new(7, test_vector_params([255, 0, 0, 255]));
+        let staged = refresh_vector_layer(
+            &mut state,
+            &mut paint,
+            &[1001],
+            &SymmetrySettings::default(),
+        );
+        assert_eq!(staged, vec![1001]);
+        let plane = paint
+            .read_plane(
+                crate::paint_state::PlaneOwner::Layer(7),
+                1001,
+                crate::paint_state::BASE_COLOR_CHANNEL,
+            )
+            .expect("the vector plane materialized");
+        assert_eq!((plane.width, plane.height), (16, 16));
+        let at = |x: u32, y: u32| {
+            let i = ((y * 16 + x) * 4) as usize;
+            &plane.data[i..i + 4]
+        };
+        assert_eq!(at(7, 7), &[255, 0, 0, 255], "inside shape and mask");
+        assert_eq!(at(11, 7), &[0, 0, 0, 0], "inside shape but quick-masked");
+        assert_eq!(at(0, 0), &[0, 0, 0, 0], "outside the shape");
+
+        state.dirty = true; // budget-recovery republish must reuse the cache.
+        let republished = refresh_vector_layer(
+            &mut state,
+            &mut paint,
+            &[1001],
+            &SymmetrySettings::default(),
+        );
+        assert_eq!(republished, vec![1001]);
+        assert_eq!(state.evaluation_count(), 1, "the cached tile is reused");
+        assert!(
+            !state.is_dirty(),
+            "a successful cache-hit refresh drains dirty"
+        );
+
+        state.set_params(umber_core::vector::VectorParams {
+            shape: umber_core::vector::VectorShape {
+                anchors: vec![
+                    umber_core::vector::Anchor::corner([0.25, 0.5]);
+                    umber_core::vector::MAX_VECTOR_ANCHORS + 1
+                ],
+                ..umber_core::vector::VectorShape::empty()
+            },
+        });
+        let refused = refresh_vector_layer(
+            &mut state,
+            &mut paint,
+            &[1001],
+            &SymmetrySettings::default(),
+        );
+        assert_eq!(
+            refused,
+            vec![1001],
+            "a valid-to-invalid edit erases the stale owned plane"
+        );
+        assert!(matches!(
+            state.refusal(),
+            Some(umber_core::vector::VectorError::TooComplex {
+                what: "anchors",
+                ..
+            })
+        ));
+        assert!(!state.is_dirty(), "a refused raster does not churn");
+        let plane = paint
+            .read_plane(
+                crate::paint_state::PlaneOwner::Layer(7),
+                1001,
+                crate::paint_state::BASE_COLOR_CHANNEL,
+            )
+            .expect("the refused plane was explicitly erased");
+        assert!(plane.data.iter().all(|byte| *byte == 0));
+
+        state.set_params(test_vector_params([255, 0, 0, 255]));
+        assert_eq!(
+            refresh_vector_layer(
+                &mut state,
+                &mut paint,
+                &[1001],
+                &SymmetrySettings::default(),
+            ),
+            vec![1001],
+            "a valid edit recovers after refusal"
+        );
+        assert!(state.refusal().is_none());
+
+        state.set_params(umber_core::vector::VectorParams {
+            shape: umber_core::vector::VectorShape::empty(),
+        });
+        let erased = refresh_vector_layer(&mut state, &mut paint, &[1001], &mirror_x_half());
+        assert_eq!(erased, vec![1001], "an existing plane is explicitly erased");
+        assert!(!state.is_dirty());
+        let plane = paint
+            .read_plane(
+                crate::paint_state::PlaneOwner::Layer(7),
+                1001,
+                crate::paint_state::BASE_COLOR_CHANNEL,
+            )
+            .expect("the erased plane remains present");
+        assert!(plane.data.iter().all(|byte| *byte == 0));
+
+        let mut empty = VectorLayerState::new(
+            99,
+            umber_core::vector::VectorParams {
+                shape: umber_core::vector::VectorShape::empty(),
+            },
+        );
+        let staged = refresh_vector_layer(&mut empty, &mut paint, &[1001], &mirror_x_half());
+        assert!(
+            staged.is_empty(),
+            "a planeless empty layer allocates nothing"
+        );
+        assert!(!empty.is_dirty());
+        assert!(
+            !paint.planes_present().iter().any(|(owner, tile, channel)| {
+                *owner == crate::paint_state::PlaneOwner::Layer(99)
+                    && *tile == 1001
+                    && channel == crate::paint_state::BASE_COLOR_CHANNEL
+            })
+        );
     }
 }

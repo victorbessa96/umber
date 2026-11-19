@@ -731,6 +731,7 @@ layers =
     .base-paint = Pintura base
     .base-paint-hint = Pintura que não pertence a nenhuma camada: projetos v1 e traços feitos sem camada selecionada.
     .budget-blocked = Orçamento de planos estourado ({ $bytes } bytes)
+    .vector-refused = Rasterização vetorial recusada: { $error }
     .budget-line = Memória de planos { $used } / { $cap } bytes
     .stroke-refused = Traço recusado
     .tombstone-lost = Camada { $layer } recriada vazia ao desfazer (pixels aposentados liberados)

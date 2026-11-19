@@ -119,7 +119,8 @@ pub fn build_composite_snapshot(
                 // the instance's own blend; a Material source keeps its
                 // per-channel blends with the instance's opacity folded in
                 // (the material row's `layer.opacity × entry.opacity`
-                // shape). A dangling or Folder source contributes nothing.
+                // shape). Vector rows resolve to their eval-owned baseColor
+                // planes (K2); a dangling or Folder source contributes nothing.
                 let Some(source) = resolve_instance_source(stack, layer.id) else {
                     continue;
                 };

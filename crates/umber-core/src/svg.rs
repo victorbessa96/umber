@@ -912,6 +912,67 @@ fn second_difference(p0: [f64; 2], p1: [f64; 2], p2: [f64; 2]) -> f64 {
     (p0[0] - 2.0 * p1[0] + p2[0]).hypot(p0[1] - 2.0 * p1[1] + p2[1])
 }
 
+/// Points an axis-aligned device-space ellipse contributes. Used by K2 to
+/// charge the stroke budget before emitting the polygon, not after.
+pub(crate) fn ellipse_point_count(rx: f64, ry: f64) -> usize {
+    arc_segment_count(rx.max(ry), TAU).max(3)
+}
+
+/// Test reference: flatten one device-space cubic into a fresh `Vec`.
+/// Production uses [`cubic_device_points_into`] so no per-cubic temporary
+/// allocation is needed.
+#[cfg(test)]
+pub(crate) fn cubic_device_points(
+    p0: [f64; 2],
+    p1: [f64; 2],
+    p2: [f64; 2],
+    p3: [f64; 2],
+) -> Vec<[f64; 2]> {
+    let mut points = Vec::with_capacity(cubic_device_point_count(p0, p1, p2, p3));
+    cubic_device_points_into(p0, p1, p2, p3, &mut points);
+    points
+}
+
+/// Number of points [`cubic_device_points_into`] appends, including both ends.
+/// Used to charge a caller's point budget before emitting geometry.
+pub(crate) fn cubic_device_point_count(
+    p0: [f64; 2],
+    p1: [f64; 2],
+    p2: [f64; 2],
+    p3: [f64; 2],
+) -> usize {
+    let dd = second_difference(p0, p1, p2).max(second_difference(p1, p2, p3));
+    segment_count((0.75 * dd / FLATNESS_TOLERANCE_PX).sqrt()) + 1
+}
+
+/// Flattens one device-space cubic, including both endpoints, directly into
+/// the caller's buffer. Shared by SVG's builder and the live-vector centerline
+/// so their geometry cannot drift apart (K2). An exact duplicate `p0` is not
+/// appended.
+pub(crate) fn cubic_device_points_into(
+    p0: [f64; 2],
+    p1: [f64; 2],
+    p2: [f64; 2],
+    p3: [f64; 2],
+    out: &mut Vec<[f64; 2]>,
+) {
+    let dd = second_difference(p0, p1, p2).max(second_difference(p1, p2, p3));
+    let n = segment_count((0.75 * dd / FLATNESS_TOLERANCE_PX).sqrt());
+    if out.last() != Some(&p0) {
+        out.push(p0);
+    }
+    for i in 1..n {
+        let t = i as f64 / n as f64;
+        let mt = 1.0 - t;
+        let (w0, w1, w2, w3) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
+        out.push([
+            w0 * p0[0] + w1 * p1[0] + w2 * p2[0] + w3 * p3[0],
+            w0 * p0[1] + w1 * p1[1] + w2 * p2[1] + w3 * p3[1],
+        ]);
+    }
+    out.push(p3);
+}
+
 /// One elliptical-arc segment in endpoint parameterization (user space).
 #[derive(Debug, Clone, Copy)]
 struct ArcSeg {
@@ -924,7 +985,11 @@ struct ArcSeg {
 }
 
 /// Accumulates one shape's subpaths as device-space polygons.
-struct PolyBuilder {
+///
+/// K2's live-vector raster shares this builder so SVG imports and
+/// [`crate::vector`] flatten identical cubics identically. It stays
+/// crate-private: the public SVG API remains bytes-in/coverage-out.
+pub(crate) struct PolyBuilder {
     ctm: Affine,
     /// `ctm.max_scale()`, cached for the arc segment counts.
     scale: f64,
@@ -940,6 +1005,12 @@ impl PolyBuilder {
             polys: Vec::new(),
             current: Vec::new(),
         }
+    }
+
+    /// A builder for geometry already expressed in device px. Live-vector
+    /// UV coordinates are mapped by the caller before any curve is flattened.
+    pub(crate) fn new_device() -> Self {
+        Self::new(Affine::IDENTITY)
     }
 
     /// Ends the current subpath (fill closes it implicitly); fewer than
@@ -960,12 +1031,12 @@ impl PolyBuilder {
         }
     }
 
-    fn move_to(&mut self, p: [f64; 2]) {
+    pub(crate) fn move_to(&mut self, p: [f64; 2]) {
         self.flush();
         self.current.push(self.ctm.apply(p));
     }
 
-    fn line_to(&mut self, from: [f64; 2], to: [f64; 2]) {
+    pub(crate) fn line_to(&mut self, from: [f64; 2], to: [f64; 2]) {
         self.begin(from);
         self.current.push(self.ctm.apply(to));
     }
@@ -988,22 +1059,11 @@ impl PolyBuilder {
         self.current.push(p2);
     }
 
-    fn cubic_to(&mut self, from: [f64; 2], c1: [f64; 2], c2: [f64; 2], to: [f64; 2]) {
+    pub(crate) fn cubic_to(&mut self, from: [f64; 2], c1: [f64; 2], c2: [f64; 2], to: [f64; 2]) {
         self.begin(from);
         let ctm = self.ctm;
         let [p0, p1, p2, p3] = [from, c1, c2, to].map(|p| ctm.apply(p));
-        let dd = second_difference(p0, p1, p2).max(second_difference(p1, p2, p3));
-        let n = segment_count((0.75 * dd / FLATNESS_TOLERANCE_PX).sqrt());
-        for i in 1..n {
-            let t = i as f64 / n as f64;
-            let mt = 1.0 - t;
-            let (w0, w1, w2, w3) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
-            self.current.push([
-                w0 * p0[0] + w1 * p1[0] + w2 * p2[0] + w3 * p3[0],
-                w0 * p0[1] + w1 * p1[1] + w2 * p2[1] + w3 * p3[1],
-            ]);
-        }
-        self.current.push(p3);
+        cubic_device_points_into(p0, p1, p2, p3, &mut self.current);
     }
 
     /// The SVG implementation-notes endpoint → center conversion, then a
@@ -1069,7 +1129,7 @@ impl PolyBuilder {
     }
 
     /// A full axis-aligned ellipse as its own closed subpath.
-    fn ellipse(&mut self, [cx, cy]: [f64; 2], rx: f64, ry: f64) {
+    pub(crate) fn ellipse(&mut self, [cx, cy]: [f64; 2], rx: f64, ry: f64) {
         self.flush();
         let n = arc_segment_count(rx.max(ry) * self.scale, TAU).max(3);
         for i in 0..n {
@@ -1080,7 +1140,7 @@ impl PolyBuilder {
         self.flush();
     }
 
-    fn finish(mut self) -> Vec<Vec<[f64; 2]>> {
+    pub(crate) fn finish(mut self) -> Vec<Vec<[f64; 2]>> {
         self.flush();
         self.polys
     }
@@ -1658,6 +1718,18 @@ fn fill_span(mask: &mut [bool], x0: f64, x1: f64) -> bool {
         }
         _ => false,
     }
+}
+
+/// Rasterizes device-space polygons under the nonzero fill rule. This is
+/// the live-vector K2 bridge into the exact SVG scanline implementation;
+/// crate-private so it cannot become a second public SVG geometry API.
+pub(crate) fn rasterize_polys(width: u32, height: u32, polys: &[Vec<[f64; 2]>]) -> Vec<u8> {
+    if polys.is_empty() {
+        return Vec::new();
+    }
+    shape_from_polys(polys, FillRule::NonZero)
+        .map(|shape| rasterize(width, height, &[shape]))
+        .unwrap_or_else(|| vec![0u8; (width as usize).saturating_mul(height as usize)])
 }
 
 /// Rasterizes `shapes` (device space) into a `width * height` coverage

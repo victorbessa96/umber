@@ -29,30 +29,42 @@ SVG io remain separate kills.
    before flattening, exactly like an SVG viewBox stretched over the same raster.
    Existing SVG output stays byte-identical.
 2. **Closed paths fill under the nonzero rule.** An open path contributes no
-   fill. Fill needs at least three anchors and nonzero enclosed area. Transparent
-   fill contributes nothing.
+   fill. Fill needs at least two anchors and nonzero enclosed area (two cubic
+   segments can close a loop). Transparent fill contributes nothing.
 3. **Stroke works on open and closed paths.** Every cubic segment shares the
    same flattened centerline as the fill. K2's documented v1 stroke joins and
    caps are ROUND. Width uses the shorter raster edge: `stroke.width *
    min(width,height)` device px; non-finite or non-positive width contributes
    nothing. Segment quads plus round join/cap polygons are unioned through the
    same scanline core.
-4. **Stroke composites source-over fill per texel.** Color alpha multiplies the
-   4x4 geometric coverage before source-over. `VectorRaster.rgba` carries the
-   resulting straight RGB with alpha 255 wherever coverage is nonzero;
-   `VectorRaster.coverage` carries total source-over alpha. This is deliberate:
-   the existing `fold_coverage_to_premultiplied` then performs the final color
-   and alpha quantization exactly once, after symmetry and quick-mask gating.
-5. **Vectors are eval-owned baseColor planes.** A small `VectorLayerState`
-   beside the fill state in `fill_layer.rs` caches per `(tile, size, symmetry)`.
-   Shape edits, undo/redo/journal replay, tile-size changes, and symmetry changes
-   invalidate it. Refresh reuses the fill helpers verbatim: `apply_symmetry` →
-   `apply_quick_mask` → `fold_coverage_to_premultiplied` → `publish_plane`.
-   No mesh is required.
+4. **Stroke composites source-over fill per texel in sRGB-encoded space.** Color
+   alpha multiplies the 4x4 geometric coverage before source-over.
+   `VectorRaster.rgba` carries the resulting straight RGB with alpha 255 wherever
+   coverage is nonzero; `VectorRaster.coverage` carries total source-over alpha.
+   This is deliberate: the existing `fold_coverage_to_premultiplied` then performs
+   the final color and alpha quantization exactly once, after symmetry and
+   quick-mask gating. Linear-light blending is a separate wave.
+5. **Vectors are eval-owned baseColor planes.** `VectorLayerState` caches each
+   tile by `(generation, size, symmetry)`. Shape edits, undo/redo/journal replay,
+   and explicit open invalidation bump the generation; frame observation queues
+   every vector on tile-size or symmetry changes. Refresh reuses the fill helpers
+   verbatim: `apply_symmetry` → `apply_quick_mask` →
+   `gate_and_fold` → `publish_plane`. No mesh is required. `gate_and_fold` is
+   byte-identical to `apply_quick_mask` → `fold_coverage_to_premultiplied` and
+   borrows the cached tile, eliminating two full-tile clones. Deleted layers are
+   pruned; CPU cache is capped per layer and document-wide with LRU eviction.
 6. **Open/new behavior follows Fill.** `AppState.vector_states` resets with the
-   document. On project open, saved planes seed CLEAN; a planeless vector seeds
-   DIRTY and evaluates without waiting for a mesh. Vectors have no legacy
-   pre-v2/Base dormancy case. `Passthrough` composites as `Normal`, matching Fill.
+   document and is explicitly cleared on project open. Complete saved-plane sets
+   seed CLEAN on first sight, including parked sets; a partial restore queues the
+   missing work. Later edits always use normal dirty
+   adoption. A planeless vector seeds DIRTY and evaluates without a mesh. Empty
+   vectors erase an already-owned plane but never materialize a zero plane.
+   Vectors have no legacy pre-v2/Base dormancy case. `Passthrough` composites as
+   `Normal`, matching Fill. Budget refusal records a retry watermark and
+   republishes cached tiles only after plane bytes fall; raster refusal stores a
+   typed error, shows `layers.vector-refused`, and erases any stale plane the
+   layer already owns without allocating a planeless fallback. Refusal reporting
+   aggregates across the refresh, never letting a later valid tile hide an error.
 7. **No schema or migration change.** K1's additive `Layer.vector` remains the
    only document metadata. K2 changes no project version and adds no vector-
    specific sidecar. Existing plane save/load and clean-skip logic is the
@@ -70,8 +82,24 @@ Result<VectorRaster, VectorError>`.
   app's 8K ceiling.
 - `MAX_VECTOR_ANCHORS = 65_536` and `MAX_VECTOR_POINTS = 262_144` bound work
   before raster allocation. Exceeding either returns `VectorError::TooComplex`.
+  Centerline and stroke points are charged BEFORE each cubic, quad, or ellipse
+  is emitted, so the cap is also the construction-time memory bound. Cubics
+  append into the shared centerline without a per-segment temporary `Vec`.
+- `MAX_VECTOR_EDGE_ROW_VISITS = 100_000_000` bounds the conservative
+  `edges × height × 4` scanline cost and returns `VectorError::TooExpensive`
+  before either coverage plane is allocated. Empty and zero-sized requests
+  short-circuit before flattening; refused rasters allocate no fallback plane.
+- The CPU cache ceiling is 512 MiB per layer plus the just-used tile and 1 GiB
+  document-wide plus the active layer; older entries/layers are evicted by
+  deterministic LRU rules and deleted layers are pruned. At the 8K raster cap
+  the core's successful-raster peak is bounded at 640 MiB (two u8 coverage
+  planes plus straight RGBA and f32 coverage). Single-pass `gate_and_fold`
+  removes the app-side RGBA+coverage clones, leaving one output plane.
 - Non-finite/degenerate geometry contributes no coverage and never panics.
-  Determinism is required at identical inputs, including non-square rasters.
+  Cache-key comparison treats identical NaN bits as stable (ordinary float
+  semantics otherwise), so invalid inputs cannot re-edit or re-rasterize every
+  frame. Determinism is required at identical inputs, including non-square
+  rasters.
 
 ## Concurrency model
 
@@ -92,18 +120,31 @@ external content, and no change to `.spp`/`.sbsar` walls.
 
 Core unit tests in `vector.rs`:
 
-- `closed_shape_matches_svg_coverage_exactly`: an opaque closed cubic shape's
-  coverage equals the equivalent SVG raster byte-for-byte.
-- `open_shape_stroke_has_round_caps_and_no_fill`: exact center/exterior/cap
-  coverage pins and zero fill without a stroke.
+- `centerline_matches_individually_flattened_cubics` and
+  `cubic_into_appends_without_duplicate_start`: the append-only shared
+  flattener preserves every point and its pre-emission count exactly.
+- `closed_shape_matches_svg_coverage_exactly` and
+  `closed_shape_with_curved_closure_matches_svg`: opaque closed cubic coverage
+  equals the equivalent SVG byte-for-byte, including a genuine curved closure.
+- `open_shape_stroke_has_round_caps`: exact center/exterior/cap coverage,
+  including cap/quad overlap; `zero_alpha_stroke_is_identical_to_no_stroke`
+  pins transparent stroke behavior.
 - `stroke_composites_source_over_fill`: exact RGBA/coverage values for an
-  alpha-red fill under an alpha-blue stroke, including zero-alpha behavior.
-- `invalid_and_empty_geometry_is_transparent`: empty, one-anchor, NaN,
-  zero-size, and degenerate inputs never panic and produce transparent output.
+  alpha-red fill under an alpha-blue stroke.
+- `invalid_and_empty_geometry_is_transparent` and
+  `empty_inputs_short_circuit_before_geometry`: empty, one-anchor, NaN control
+  points, zero-size, and degenerate inputs never panic, paint accidental lines,
+  or allocate needlessly.
+- `cache_identity_is_stable_for_nan_and_signed_zero`,
+  `cache_identity_is_stable_for_nan_offsets_and_signed_zero`, and
+  `identical_nan_geometry_and_symmetry_do_not_invalidate`: malformed inputs
+  cannot cause perpetual adoption, cache misses, or frame-wide requeues.
 - `raster_is_deterministic_and_non_square`: repeated inputs are byte-identical;
   non-square UV mapping and shorter-edge stroke width are pinned.
-- `dimension_and_structure_budgets_are_typed_errors`: 8K-inclusive cap,
-  over-cap dimensions, and over-limit anchors return their exact variants.
+- `dimension_budget_is_a_typed_error`, `structure_budgets_are_typed_errors`,
+  `stroke_geometry_budget_is_typed_error`, and
+  `edge_row_budget_is_a_typed_error`: exact typed dimension, point, stroke
+  construction, and scanline-cost refusal.
 
 App tests in `fill_layer.rs`:
 
@@ -114,10 +155,33 @@ App tests in `fill_layer.rs`:
   no mesh; quick-mask gating is pinned on the same plane.
 - `vector_states_open_clean_or_planeless_dirty`: open seeding does not re-run
   saved planes, while planeless vectors queue exactly once.
+- `vector_state_refreshes_every_tile_and_symmetry` and
+  `open_seed_recomputes_every_planeless_tile`: multi-tile refreshes cannot serve
+  stale bytes after an edit, symmetry change, or document open.
+- `frame_observation_requeues_on_symmetry_and_size_changes`,
+  `budget_retry_waits_for_bytes_to_fall_and_reuses_cache`,
+  `vector_cache_is_bounded_and_pruned_with_live_layers`, and
+  `vector_refusal_is_recorded_without_fallback_allocation_and_cleared`: frame
+  invalidation, retry, memory, and refusal contracts.
+- `non_square_mirror_y_maps_rows_exactly`,
+  `empty_tile_symmetry_is_an_untouched_passthrough`, and
+  `texel_rect_conjugation_commutes_with_the_uv_map`: rect symmetry uses
+  independent X/Y scales and empty grids never panic.
+- `gate_and_fold_matches_mask_then_fold_exactly`: the borrowed single-pass
+  optimization is byte-identical to the original mask→fold pipeline.
+- `ensure_seeded_honors_saved_planes_only_on_first_sight`: parked-set and open
+  planes stay authoritative on first sight without suppressing later edits.
+- The extended `vector_refresh_publishes_plane_without_mesh` also pins cache-hit
+  dirty draining, valid→invalid refusal erasure and recovery, owned-plane
+  erasure on empty vectors, and no allocation for planeless empty layers.
+- `partial_restore_is_not_clean`: one restored tile cannot suppress a missing
+  tile; clean first sight requires every active BaseColor plane.
+- `mixed_size_refusal_is_aggregated_in_both_orders`: fail-then-succeed and
+  succeed-then-fail both keep the refusal visible without dirty churn.
 
 Battery: rustfmt on touched `.rs`; `check-layers.py`; `scorecard.py --check`;
-clippy `-p umber-core -p umber-paint -p umber-app --all-targets -- -D warnings`;
-tests for those three crates under `flock /tmp/umber-cargo.lock`,
+clippy `-p umber-core -p umber-brush -p umber-paint -p umber-app --all-targets -- -D warnings`;
+tests for those four crates under `flock /tmp/umber-cargo.lock`,
 `CARGO_BUILD_JOBS=3`, `CARGO_PROFILE_TEST_DEBUG=0`, `nice -n 19`, and
 `UMBER_ASSETS_DIR=/mnt/hdd/data/Projects/umber`. A pre-existing failure must be
 reproduced at clean HEAD before it can be named environmental. The known
@@ -129,10 +193,13 @@ failure is outside this kill's touched crates.
 - `crates/umber-core/src/vector.rs`
 - `crates/umber-core/src/svg.rs`
 - `crates/umber-core/src/layers.rs` (K1 comment sync only)
+- `crates/umber-brush/src/symmetry.rs` (rect-tile conjugation)
 - `crates/umber-app/src/fill_layer.rs`
 - `crates/umber-app/src/main.rs`
 - `crates/umber-paint/src/paint_state.rs`
 - `crates/umber-paint/src/snapshot.rs` (K1 comment sync only)
+- `assets/i18n/en-US.ftl`
+- `assets/i18n/pt-BR.ftl`
 - `docs/ROADMAP.md`
 - `docs/loop/briefs/2026-11-19-umber-vector-raster.md`
 - `docs/loop/kill-reports/2026-11-19-umber-vector-raster.md`

@@ -1848,6 +1848,8 @@ pub struct AppState {
     pub polygon_fill: fill_layer::PolygonFillTool,
     /// The fill layers' evaluation caches + the panel's dirty queue.
     pub fill_states: fill_layer::FillLayerStates,
+    /// Live vector layers' raster caches and dirty queue (K2).
+    pub vector_states: fill_layer::VectorLayerStates,
     /// The dynamic-material live eval states beside the document (the
     /// `fill_states` precedent): one state per live material layer plus the
     /// dirty queue the frame's refresh drain consumes (Kill B).
@@ -2030,6 +2032,7 @@ impl AppState {
         // without this reset document B's Fill 3 inherits document A's
         // Fill 3 state (§8 T30).
         self.fill_states = fill_layer::FillLayerStates::default();
+        self.vector_states = fill_layer::VectorLayerStates::default();
         // Stage-4 session pixel state: Base shows again, dormancy and
         // badges die with their document, and the snapshot baseline
         // restarts (the next frame diffs against nothing).
@@ -4651,6 +4654,7 @@ impl UmberApp {
                 // ids), Base visibility, dormancy, badges and the snapshot
                 // baseline all reset.
                 self.state.mesh_import.to_publish.clear();
+                self.state.vector_states = fill_layer::VectorLayerStates::default();
                 self.state.base_visible = true;
                 self.state.dormant.clear();
                 self.state.prev_snapshot = None;
@@ -4691,6 +4695,11 @@ impl UmberApp {
                             paint_state::PlaneOwner::Base => None,
                         })
                         .collect();
+                    let vector_tiles = paint.tiles_of_set(&name);
+                    let vector_planes = paint.planes_present();
+                    let vector_complete = |layer_id| {
+                        fill_layer::vector_planes_complete(&vector_planes, layer_id, &vector_tiles)
+                    };
                     // Borrow-split: the layer rows clone out first (the
                     // seeding mutates sibling state below).
                     let rows: Vec<OpenSeedRow> = self
@@ -4755,6 +4764,21 @@ impl UmberApp {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                    // Vectors have no legacy pre-v2/Base dormancy case:
+                    // restored planes seed clean; planeless vectors evaluate
+                    // without waiting for a mesh (K2).
+                    for layer in &self.state.doc.stack.layers {
+                        if !matches!(layer.kind, umber_core::LayerKind::Vector) {
+                            continue;
+                        }
+                        let Some(params) = layer.vector.clone() else {
+                            continue;
+                        };
+                        self.state.vector_states.ensure_open(layer.id, &params);
+                        if !vector_complete(layer.id) {
+                            self.state.vector_states.mark_dirty(layer.id);
                         }
                     }
                     // The size-census baseline: set now, so the first frame's
@@ -6302,6 +6326,92 @@ impl eframe::App for UmberApp {
             }
         }
 
+        // Vector-layer refresh (K2): adopt every doc-side shape, then
+        // rasterize and publish dirty layers. Unlike Fill this needs no mesh;
+        // the vector's tile-local UV is already the complete raster input.
+        if let Some(paint) = self.state.paint.as_mut() {
+            let layers: Vec<(u64, &umber_core::vector::VectorParams)> = self
+                .state
+                .doc
+                .layers()
+                .iter()
+                .filter(|layer| matches!(layer.kind, umber_core::LayerKind::Vector))
+                .filter_map(|layer| layer.vector.as_ref().map(|params| (layer.id, params)))
+                .collect();
+            let plane_rows = paint.planes_present();
+            let active_set = paint.active_set().to_string();
+            let active_tiles = paint.tiles_of_set(&active_set);
+            for (id, params) in &layers {
+                let complete = fill_layer::vector_planes_complete(&plane_rows, *id, &active_tiles);
+                self.state
+                    .vector_states
+                    .ensure_seeded(*id, params, complete);
+            }
+            let live: std::collections::HashSet<u64> = layers.iter().map(|(id, _)| *id).collect();
+            for id in self.state.vector_states.retain_live(&live) {
+                self.state.fill_badges.remove(&id);
+            }
+            let symmetry = *paint.symmetry();
+            let size = Some(paint.size_of_set(&active_set));
+            self.state.vector_states.observe_frame(&symmetry, size);
+            self.state
+                .vector_states
+                .retry_budget_freed(paint.plane_bytes());
+            if !self.state.vector_states.dirty.is_empty() {
+                let tiles = active_tiles;
+                let dirty: Vec<u64> = self.state.vector_states.dirty.drain(..).collect();
+                for layer in dirty {
+                    if !self.state.doc.layers().iter().any(|candidate| {
+                        candidate.id == layer
+                            && matches!(candidate.kind, umber_core::LayerKind::Vector)
+                    }) {
+                        continue;
+                    }
+                    self.state.vector_states.touch(layer);
+                    let Some(state) = self.state.vector_states.map.get_mut(&layer) else {
+                        continue;
+                    };
+                    fill_layer::refresh_vector_layer(state, paint, &tiles, &symmetry);
+                    self.state.dormant.remove(&layer);
+                    if state.is_dirty()
+                        && state.budget_blocked().is_none()
+                        && state.refusal().is_none()
+                    {
+                        log::warn!("vector refresh for layer {layer} staged no tiles");
+                    }
+                    if let Some(error) = state.refusal().map(ToString::to_string) {
+                        self.state.fill_badges.insert(
+                            layer,
+                            crate::i18n::tr_args(
+                                "layers.vector-refused",
+                                [("error", fluent::FluentValue::from(error))],
+                            ),
+                        );
+                    } else if let Some(bytes) = state.budget_blocked() {
+                        self.state.fill_badges.insert(
+                            layer,
+                            crate::i18n::tr_args(
+                                "layers.budget-blocked",
+                                [("bytes", fluent::FluentValue::from(bytes as i64))],
+                            ),
+                        );
+                    } else {
+                        self.state.fill_badges.remove(&layer);
+                    }
+                    if state.is_dirty()
+                        && state.budget_blocked().is_none()
+                        && state.refusal().is_none()
+                        && !self.state.vector_states.dirty.contains(&layer)
+                    {
+                        self.state.vector_states.dirty.push(layer);
+                    }
+                    self.state
+                        .vector_states
+                        .enforce_global_budget_default(Some(layer));
+                }
+            }
+        }
+
         // Dynamic-material refresh (Kill B, `docs/specs/dynamic-materials-
         // design.md` §2, stage-4 planes): adopt every doc-side material
         // change, then drain the dirty queue bottom-to-top through the
@@ -7803,6 +7913,25 @@ mod new_project_tests {
             state.fill_states.dirty.is_empty(),
             "no fill dirty queued survives a new document"
         );
+    }
+
+    #[test]
+    fn reset_for_new_clears_vector_states() {
+        let mut state = AppState::default();
+        let params = umber_core::vector::VectorParams {
+            shape: umber_core::vector::VectorShape::empty(),
+        };
+        state
+            .vector_states
+            .map
+            .insert(3, fill_layer::VectorLayerState::new(3, params));
+        state.vector_states.dirty.push(3);
+        assert!(!state.vector_states.map.is_empty());
+
+        state.reset_for_new();
+
+        assert!(state.vector_states.map.is_empty());
+        assert!(state.vector_states.dirty.is_empty());
     }
 }
 

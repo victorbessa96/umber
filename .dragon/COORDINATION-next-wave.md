@@ -2,15 +2,21 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-17:** `master` is at `0654ba48`. `v0.1.0-alpha.1` is a
-published unsigned GitHub pre-release at `bc4d642f`, not the final release.
-The post-alpha D2 auto-cage, D3 opacity, D4 multi-source ID, D5 ground-plane,
-replay-exact toggle, and displacement-preview kills are committed. The active
-release-quality gate is the real dogfood walkthrough; Windows signing,
-native-speaker review, live Windows Ink verification, and beta/stable release
-remain named human or platform gates. The documentation truthing lock owns the
-current handoff files. Consult `STATE.md` and `docs/loop/next-steps-2026-11-16.md`
-before claiming new work; use an exact-file kill lock before edits.
+**Updated 2026-11-19:** origin/master is `46d4bff5` (K1 vector model).
+The K2 design brief is local `60322097`, with a docs-only project-watch commit
+beside it. The active kill lock `razul-vector-raster` owns the K2 raster core,
+Fill-pipeline integration, rect symmetry, i18n, ROADMAP/STATE/queue handoffs,
+and this file. The final tree has 18 core vector, 24 app fill-layer, and 15
+brush symmetry tests green, including complete-plane restores, refresh-wide
+refusal aggregation, NaN cache identity, and non-finite control-point handling.
+Final r9 battery is GREEN: clippy 0 errors, 20 suites, 1,964 passed / 0 failed
+(`vector-raster-final-battery-r9.log`). Final two-point review verdict: SHIP.
+The local landing commit and push are pending.
+K3 canvas editing, K4 panel widgets, and K5 SVG io remain separate. Fill
+cache-lifecycle parity is the named follow-up. Human/platform gates are
+unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink
+verification, and beta/stable release. Consult `STATE.md` and the live lock
+registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 

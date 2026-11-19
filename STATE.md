@@ -4,14 +4,16 @@
 > `CHANGELOG.md`, `DECISIONS.md`, `docs/loop/queue.md`, and dated kill reports.
 > Do not use old queue or coordination entries as live status.
 
-## Status — 2026-11-17
+## Status — 2026-11-19
 
-Umber is in its **published-alpha hardening phase**.
+Umber is in its **published-alpha hardening phase**, with the path-tool vector
+wave moving through ungated engineering in parallel with the human release gates.
 
 - **Published artifact:** [`v0.1.0-alpha.1`](https://github.com/victorbessa96/umber/releases/tag/v0.1.0-alpha.1) is a GitHub pre-release, published 2026-11-16 17:34Z from `bc4d642f`. It is deliberately unsigned, carries SHA-256 checksums, and is **not** the final `v0.1.0` release.
-- **Workspace state:** the post-tag tree restored its development version to `0.1.0` and pinned Flatpak's source to the alpha tag in `d49d0acc`. Current tip is `0654ba48` at this handoff.
+- **Workspace state:** origin/master is `46d4bff5` (K1 additive vector model). The local K2 design brief is `60322097`; the active lock is `razul-vector-raster`. The final r9 battery is green: clippy 0 errors, 20 suites, 1,964 passed / 0 failed. Focused suites are 18 core vector, 24 app fill-layer, and 15 brush symmetry. Final two-point review verdict: SHIP. K2's local landing commit and push are pending.
 - **Specification:** Bessa ratified SPEC v1.1 on 2026-11-16. `SPEC.md` is the ratified contract; the v1.1 amendment records the changes from the original v1.0 draft.
-- **Recent product work:** D2 auto-cage (`533560e8`), D3 opacity (`c499255f`), D4 multi-source ID (`35097df5`), D5 ground-plane baking (`752bc991`, hardened by `3b72c98f`/`baec964b`), the replay-exact opt-in toggle (`aa1f5903`), and viewport displacement preview (`9e0517bf`) have landed after the alpha tag. Their reports and review receipts are under `docs/loop/kill-reports/` and `docs/loop/reviews/`.
+- **Recent product work:** quick-mask undo (`c5909efe`), snapshot-breadth-2 (`e9d0926f`), and vector model K1 (`46d4bff5`) are the latest landed kills. Earlier post-alpha D2–D5, replay-exact, and displacement-preview work is recorded in `docs/loop/queue.md` and dated kill reports.
+- **Active engineering:** K2 adds nonzero fills, round-cap/join strokes, source-over alpha, typed resource budgets, and cached eval-owned baseColor planes. Independent review drove construction-time work caps, per-tile generation/symmetry, open-reset, rect symmetry, retry-watermark, frame-observation, cache-pruning, and typed-refusal hardening. K3 canvas editing, K4 panel widgets, and K5 SVG conversion/export remain separate kills; Fill cache-lifecycle parity is the named follow-up.
 - **Quality boundary:** the alpha proves release packaging produced downloadable app and CLI archives, installers, source, checksums, and a distribution manifest. It does not replace the final-release gates.
 
 ## Remaining release and product gates

@@ -712,6 +712,7 @@ layers =
     .base-paint = Base paint
     .base-paint-hint = Paint that belongs to no layer: v1 projects, and strokes made with no layer selected.
     .budget-blocked = Plane budget blocked ({ $bytes } bytes)
+    .vector-refused = Vector raster refused: { $error }
     .budget-line = Plane memory { $used } / { $cap } bytes
     .stroke-refused = Stroke refused
     .tombstone-lost = Layer { $layer } revives empty on undo (its tombstone was freed)

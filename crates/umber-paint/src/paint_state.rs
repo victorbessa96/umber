@@ -973,9 +973,8 @@ pub enum SnapshotLayerKind {
     /// Eval-owned per-channel planes; the blend/opacity ride
     /// [`SnapshotLayer::material_channels`], never the layer's own.
     Material,
-    /// Vector layer (K1, razul-vector-model 2026-11-18): composites as
-    /// fully transparent until K2's rasterizer lands, so it rides the
-    /// snapshot like Fill but with its own kind tag.
+    /// Vector layer (K1 model + K2 raster): its eval-owned baseColor plane
+    /// rides the snapshot like Fill, with `Passthrough` normalized to `Normal`.
     Vector,
 }
 
@@ -4269,10 +4268,13 @@ impl PaintState {
                 .find(|c| c.channel == channel)?;
             (entry.blend, entry.opacity)
         } else if layer.blend == BlendMode::Passthrough
-            && matches!(layer.kind, SnapshotLayerKind::Fill)
+            && matches!(
+                layer.kind,
+                SnapshotLayerKind::Fill | SnapshotLayerKind::Vector
+            )
         {
-            // A fill carrying `Passthrough` composites as `Normal`
-            // (structural for folders, not a pixel op — §5.1).
+            // Fill and vector rows carrying `Passthrough` composite as
+            // `Normal` (structural for folders, not a pixel op — §5.1).
             (BlendMode::Normal, layer.opacity)
         } else {
             (layer.blend, layer.opacity)

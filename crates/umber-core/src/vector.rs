@@ -4,9 +4,9 @@
 //!
 //! A vector layer (`LayerKind::Vector`) carries ONE [`VectorShape`] in
 //! `Layer::vector`: bezier anchors with in/out handles in UV space, a fill
-//! color, and an optional stroke. K1 is model-only: the shape composites
-//! as fully transparent until K2's rasterizer lands, and there is no SVG
-//! write side anywhere (K5 owns io).
+//! color, and an optional stroke. K1 landed the model; K2's [`rasterize`]
+//! fills closed paths and strokes open or closed paths into eval-owned
+//! baseColor planes through the app's Fill pipeline. K5 owns SVG io.
 //!
 //! Serialization is additive (`#[serde(default)]` on the `Layer` field),
 //! so projects saved before this row load with `vector == None`.
@@ -78,6 +78,316 @@ pub struct VectorParams {
     pub shape: VectorShape,
 }
 
+fn f32_cache_eq(a: f32, b: f32) -> bool {
+    a == b || (a.is_nan() && b.is_nan() && a.to_bits() == b.to_bits())
+}
+
+fn point_cache_eq(a: [f32; 2], b: [f32; 2]) -> bool {
+    f32_cache_eq(a[0], b[0]) && f32_cache_eq(a[1], b[1])
+}
+
+fn anchor_cache_eq(a: &Anchor, b: &Anchor) -> bool {
+    point_cache_eq(a.pos, b.pos)
+        && point_cache_eq(a.in_handle, b.in_handle)
+        && point_cache_eq(a.out_handle, b.out_handle)
+}
+
+fn stroke_cache_eq(a: Option<Stroke>, b: Option<Stroke>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => f32_cache_eq(a.width, b.width) && a.color == b.color,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl VectorShape {
+    /// Equality for evaluation-cache identity. Unlike derived `PartialEq`,
+    /// identical NaN bits compare equal so an invalid project cannot look
+    /// edited on every frame; ordinary float semantics (including ±0) stay.
+    pub fn same_cache_key(&self, other: &Self) -> bool {
+        self.closed == other.closed
+            && self.fill == other.fill
+            && stroke_cache_eq(self.stroke, other.stroke)
+            && self.anchors.len() == other.anchors.len()
+            && self
+                .anchors
+                .iter()
+                .zip(&other.anchors)
+                .all(|(a, b)| anchor_cache_eq(a, b))
+    }
+}
+
+impl VectorParams {
+    /// Cache-key equality for the complete live-vector parameter set.
+    pub fn same_cache_key(&self, other: &Self) -> bool {
+        self.shape.same_cache_key(&other.shape)
+    }
+}
+
+/// The live-vector raster ceiling: the app's 8K maximum, inclusive.
+pub const MAX_VECTOR_RASTER_PIXELS: usize = 8192 * 8192;
+/// The most anchors one live shape may carry.
+pub const MAX_VECTOR_ANCHORS: usize = 65_536;
+/// The most flattened centerline points one live shape may carry.
+pub const MAX_VECTOR_POINTS: usize = 262_144;
+/// Worst-case edge visits across all four subsamples of every output row.
+pub const MAX_VECTOR_EDGE_ROW_VISITS: u64 = 100_000_000;
+
+/// Errors a live-vector raster can report before allocation or flattening.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VectorError {
+    /// The requested raster exceeds [`MAX_VECTOR_RASTER_PIXELS`].
+    #[error("vector raster {width}x{height} exceeds the {max_pixels}-pixel cap")]
+    TooLarge {
+        width: u32,
+        height: u32,
+        max_pixels: usize,
+    },
+    /// A structural budget refused the shape before rasterization.
+    #[error("vector shape is too complex: more than {limit} {what}")]
+    TooComplex { what: &'static str, limit: usize },
+    /// The scanline's conservative edge × row × subsample cost is too high.
+    #[error("vector raster needs {edges} edges across {rows} subsampled rows (limit {limit})")]
+    TooExpensive { edges: usize, rows: u64, limit: u64 },
+}
+
+/// A rasterized live vector: straight RGB with alpha 255 wherever the
+/// coverage is nonzero, and total source-over alpha per texel. The alpha
+/// lives in `coverage` so the app's existing quick-mask and premultiply
+/// pipeline performs the final quantization exactly once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorRaster {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    coverage: Vec<f32>,
+}
+
+impl VectorRaster {
+    fn empty(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            rgba: Vec::new(),
+            coverage: Vec::new(),
+        }
+    }
+
+    /// Raster width in texels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Raster height in texels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Total source-over alpha, row-major, `0.0..=1.0` per texel.
+    pub fn coverage(&self) -> &[f32] {
+        &self.coverage
+    }
+
+    /// Straight RGB with alpha 255 wherever `coverage` is nonzero.
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+
+    /// Consumes the raster into the fill pipeline's straight-RGB + coverage pair.
+    pub fn into_rgba_coverage(self) -> (Vec<u8>, Vec<f32>) {
+        (self.rgba, self.coverage)
+    }
+}
+
+fn device_point(p: [f32; 2], width: u32, height: u32) -> [f64; 2] {
+    [
+        f64::from(p[0]) * f64::from(width),
+        f64::from(p[1]) * f64::from(height),
+    ]
+}
+
+/// The path's flattened centerline in device px, shared by fill and stroke.
+/// Any non-finite control coordinate invalidates this shape's geometry: it
+/// contributes no coverage instead of becoming a straight segment by accident.
+fn centerline(shape: &VectorShape, width: u32, height: u32) -> Result<Vec<[f64; 2]>, VectorError> {
+    let Some(first) = shape.anchors.first() else {
+        return Ok(Vec::new());
+    };
+    if shape.anchors.iter().any(|anchor| {
+        anchor
+            .pos
+            .iter()
+            .chain(anchor.in_handle.iter())
+            .chain(anchor.out_handle.iter())
+            .any(|value| !value.is_finite())
+    }) {
+        return Ok(Vec::new());
+    }
+    let mut points = vec![device_point(first.pos, width, height)];
+    let segments = if shape.closed {
+        shape.anchors.len()
+    } else {
+        shape.anchors.len().saturating_sub(1)
+    };
+    for i in 0..segments {
+        let a = &shape.anchors[i];
+        let b = &shape.anchors[(i + 1) % shape.anchors.len()];
+        let (p0, p1, p2, p3) = (
+            device_point(a.pos, width, height),
+            device_point(a.out_handle, width, height),
+            device_point(b.in_handle, width, height),
+            device_point(b.pos, width, height),
+        );
+        let added = crate::svg::cubic_device_point_count(p0, p1, p2, p3).saturating_sub(1);
+        let next_len = points.len().saturating_add(added);
+        if next_len > MAX_VECTOR_POINTS {
+            return Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            });
+        }
+        crate::svg::cubic_device_points_into(p0, p1, p2, p3, &mut points);
+    }
+    Ok(points)
+}
+
+fn stroke_polys(
+    shape: &VectorShape,
+    centerline: &[[f64; 2]],
+    width: u32,
+    height: u32,
+) -> Result<Vec<Vec<[f64; 2]>>, VectorError> {
+    let Some(stroke) = shape.stroke.filter(|s| {
+        s.color[3] > 0 && s.width.is_finite() && s.width > 0.0 && shape.anchors.len() >= 2
+    }) else {
+        return Ok(Vec::new());
+    };
+    let radius = f64::from(stroke.width) * f64::from(width.min(height)) * 0.5;
+    let ellipse_cost = crate::svg::ellipse_point_count(radius, radius);
+    let mut builder = crate::svg::PolyBuilder::new_device();
+    let mut points = 0usize;
+    for pair in centerline.windows(2) {
+        if points.saturating_add(4) > MAX_VECTOR_POINTS {
+            return Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            });
+        }
+        let [a, b] = [pair[0], pair[1]];
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let length = dx.hypot(dy);
+        if !length.is_finite() || length <= 0.0 {
+            continue;
+        }
+        let (nx, ny) = (-dy / length * radius, dx / length * radius);
+        let quad = [
+            [a[0] + nx, a[1] + ny],
+            [b[0] + nx, b[1] + ny],
+            [b[0] - nx, b[1] - ny],
+            [a[0] - nx, a[1] - ny],
+        ];
+        builder.move_to(quad[0]);
+        for i in 1..quad.len() {
+            builder.line_to(quad[i - 1], quad[i]);
+        }
+        points += 4;
+    }
+    for &point in centerline {
+        if points.saturating_add(ellipse_cost) > MAX_VECTOR_POINTS {
+            return Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            });
+        }
+        builder.ellipse(point, radius, radius);
+        points += ellipse_cost;
+    }
+    Ok(builder.finish())
+}
+
+/// Rasterizes a live vector shape at the target tile size. Closed paths
+/// fill under the nonzero rule; open paths contribute only their stroke.
+/// Strokes composite source-over fill per texel in sRGB-encoded space,
+/// matching the app's byte-space premultiply boundary; linear-light blending
+/// is a separate wave.
+pub fn rasterize(
+    shape: &VectorShape,
+    width: u32,
+    height: u32,
+) -> Result<VectorRaster, VectorError> {
+    if u64::from(width) * u64::from(height) > MAX_VECTOR_RASTER_PIXELS as u64 {
+        return Err(VectorError::TooLarge {
+            width,
+            height,
+            max_pixels: MAX_VECTOR_RASTER_PIXELS,
+        });
+    }
+    if shape.anchors.len() > MAX_VECTOR_ANCHORS {
+        return Err(VectorError::TooComplex {
+            what: "anchors",
+            limit: MAX_VECTOR_ANCHORS,
+        });
+    }
+    let fills = shape.closed && shape.fill[3] > 0;
+    let strokes = shape.stroke.is_some_and(|s| {
+        s.color[3] > 0 && s.width.is_finite() && s.width > 0.0 && shape.anchors.len() >= 2
+    });
+    if width == 0 || height == 0 || shape.anchors.len() < 2 || (!fills && !strokes) {
+        return Ok(VectorRaster::empty(width, height));
+    }
+    let centerline = centerline(shape, width, height)?;
+    let fill_polys = if shape.closed && shape.fill[3] > 0 && centerline.len() >= 2 {
+        vec![centerline.clone()]
+    } else {
+        Vec::new()
+    };
+    let stroke_geometry = stroke_polys(shape, &centerline, width, height)?;
+    let edges: usize = fill_polys
+        .iter()
+        .chain(&stroke_geometry)
+        .map(Vec::len)
+        .sum();
+    let rows = u64::from(height) * 4;
+    if (edges as u64).saturating_mul(rows) > MAX_VECTOR_EDGE_ROW_VISITS {
+        return Err(VectorError::TooExpensive {
+            edges,
+            rows,
+            limit: MAX_VECTOR_EDGE_ROW_VISITS,
+        });
+    }
+    let fill = crate::svg::rasterize_polys(width, height, &fill_polys);
+    let stroke = crate::svg::rasterize_polys(width, height, &stroke_geometry);
+    let pixels = (width as usize).saturating_mul(height as usize);
+    let mut rgba = vec![0u8; pixels.saturating_mul(4)];
+    let mut coverage = vec![0.0f32; pixels];
+    for i in 0..pixels {
+        let stroke_color = shape.stroke.map(|v| v.color).unwrap_or([0; 4]);
+        let fill_alpha = f32::from(fill.get(i).copied().unwrap_or(0)) / 255.0
+            * (f32::from(shape.fill[3]) / 255.0);
+        let stroke_alpha = f32::from(stroke.get(i).copied().unwrap_or(0)) / 255.0
+            * (f32::from(stroke_color[3]) / 255.0);
+        let alpha = stroke_alpha + fill_alpha * (1.0 - stroke_alpha);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let fill_weight = fill_alpha * (1.0 - stroke_alpha);
+        for channel in 0..3 {
+            let value = (f32::from(stroke_color[channel]) * stroke_alpha
+                + f32::from(shape.fill[channel]) * fill_weight)
+                / alpha;
+            rgba[i * 4 + channel] = (value.clamp(0.0, 255.0) + 0.5).floor() as u8;
+        }
+        rgba[i * 4 + 3] = 255;
+        coverage[i] = alpha;
+    }
+    Ok(VectorRaster {
+        width,
+        height,
+        rgba,
+        coverage,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +418,40 @@ mod tests {
     }
 
     #[test]
+    fn cache_identity_is_stable_for_nan_and_signed_zero() {
+        let shape = VectorShape {
+            closed: false,
+            fill: [255, 0, 0, 255],
+            stroke: Some(Stroke {
+                width: f32::NAN,
+                color: [0, 0, 255, 255],
+            }),
+            anchors: vec![
+                Anchor {
+                    pos: [f32::NAN, -0.0],
+                    in_handle: [f32::INFINITY, 0.25],
+                    out_handle: [0.5, f32::NAN],
+                },
+                Anchor::corner([0.75, 0.5]),
+            ],
+        };
+        assert!(shape.same_cache_key(&shape.clone()));
+        let params = VectorParams {
+            shape: shape.clone(),
+        };
+        assert!(params.same_cache_key(&params.clone()));
+        let mut signed_zero = shape.clone();
+        signed_zero.anchors[0].pos[1] = 0.0;
+        assert!(shape.same_cache_key(&signed_zero));
+        let mut changed = shape.clone();
+        changed.anchors[0].pos[0] = 0.0;
+        assert!(!shape.same_cache_key(&changed));
+        let mut changed_nan = shape.clone();
+        changed_nan.stroke.as_mut().unwrap().width = f32::from_bits(f32::NAN.to_bits() ^ 1);
+        assert!(!shape.same_cache_key(&changed_nan));
+    }
+
+    #[test]
     fn empty_shape_reports_empty() {
         assert!(VectorShape::empty().is_empty());
         let one = VectorShape {
@@ -115,5 +459,433 @@ mod tests {
             ..VectorShape::empty()
         };
         assert!(one.is_empty(), "one anchor cannot cover anything");
+    }
+
+    #[test]
+    fn cubic_into_appends_without_duplicate_start() {
+        let (p0, p1, p2, p3) = ([0.0, 0.0], [1.0, 2.0], [3.0, 2.0], [4.0, 0.0]);
+        let expected = crate::svg::cubic_device_points(p0, p1, p2, p3);
+        let mut actual = vec![p0];
+        crate::svg::cubic_device_points_into(p0, p1, p2, p3, &mut actual);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            crate::svg::cubic_device_point_count(p0, p1, p2, p3),
+            expected.len()
+        );
+    }
+
+    #[test]
+    fn centerline_matches_individually_flattened_cubics() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            stroke: None,
+            anchors: vec![
+                Anchor {
+                    pos: [0.1, 0.2],
+                    in_handle: [0.0, 0.1],
+                    out_handle: [0.3, 0.0],
+                },
+                Anchor {
+                    pos: [0.8, 0.3],
+                    in_handle: [0.6, 0.0],
+                    out_handle: [1.0, 0.6],
+                },
+                Anchor {
+                    pos: [0.4, 0.9],
+                    in_handle: [0.8, 0.8],
+                    out_handle: [0.2, 1.0],
+                },
+            ],
+        };
+        let mut expected = vec![device_point(shape.anchors[0].pos, 64, 32)];
+        for i in 0..shape.anchors.len() {
+            let a = &shape.anchors[i];
+            let b = &shape.anchors[(i + 1) % shape.anchors.len()];
+            expected.extend(
+                crate::svg::cubic_device_points(
+                    device_point(a.pos, 64, 32),
+                    device_point(a.out_handle, 64, 32),
+                    device_point(b.in_handle, 64, 32),
+                    device_point(b.pos, 64, 32),
+                )
+                .into_iter()
+                .skip(1),
+            );
+        }
+        assert_eq!(centerline(&shape, 64, 32).unwrap(), expected);
+    }
+
+    #[test]
+    fn closed_shape_matches_svg_coverage_exactly() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [200, 30, 40, 255],
+            stroke: None,
+            anchors: vec![
+                Anchor {
+                    pos: [2.0 / 32.0, 20.0 / 32.0],
+                    in_handle: [2.0 / 32.0, 20.0 / 32.0],
+                    out_handle: [2.0 / 32.0, 12.0 / 32.0],
+                },
+                Anchor {
+                    pos: [14.0 / 32.0, 20.0 / 32.0],
+                    in_handle: [14.0 / 32.0, 12.0 / 32.0],
+                    out_handle: [14.0 / 32.0, 20.0 / 32.0],
+                },
+            ],
+        };
+        let actual = rasterize(&shape, 32, 32).expect("closed cubic rasterizes");
+        let actual_coverage: Vec<u8> = actual
+            .coverage()
+            .iter()
+            .map(|v| (v * 255.0 + 0.5).floor() as u8)
+            .collect();
+        let expected = crate::svg::rasterize_svg_default(
+            br#"<svg width="32" height="32"><path d="M 2 20 C 2 12, 14 12, 14 20 Z"/></svg>"#,
+        )
+        .expect("reference SVG rasterizes");
+        assert_eq!(actual_coverage, expected.coverage());
+    }
+
+    #[test]
+    fn closed_shape_with_curved_closure_matches_svg() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [40, 180, 220, 255],
+            stroke: None,
+            anchors: vec![
+                Anchor {
+                    pos: [0.2, 0.2],
+                    in_handle: [0.1, 0.1],
+                    out_handle: [0.4, 0.1],
+                },
+                Anchor {
+                    pos: [0.8, 0.2],
+                    in_handle: [0.6, 0.1],
+                    out_handle: [0.9, 0.4],
+                },
+                Anchor {
+                    pos: [0.5, 0.8],
+                    in_handle: [0.9, 0.6],
+                    out_handle: [0.1, 0.6],
+                },
+            ],
+        };
+        let actual = rasterize(&shape, 64, 64).expect("vector raster");
+        let svg = crate::svg::rasterize_svg_default(
+            br#"<svg width="64" height="64"><path d="M 12.8 12.8 C 25.6 6.4 38.4 6.4 51.2 12.8 C 57.6 25.6 57.6 38.4 32 51.2 C 6.4 38.4 6.4 6.4 12.8 12.8 Z"/></svg>"#,
+        )
+        .expect("SVG raster");
+        let actual_coverage: Vec<u8> = actual
+            .coverage()
+            .iter()
+            .map(|alpha| (alpha * 255.0 + 0.5).floor() as u8)
+            .collect();
+        assert_eq!(actual_coverage, svg.coverage());
+    }
+
+    #[test]
+    fn open_shape_stroke_has_round_caps() {
+        let shape = VectorShape {
+            closed: false,
+            fill: [200, 30, 40, 255],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+            }),
+            anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+        };
+        let actual = rasterize(&shape, 16, 16).expect("open stroke rasterizes");
+        let at = |x: u32, y: u32| {
+            let i = (y * 16 + x) as usize;
+            (actual.coverage()[i], &actual.rgba()[i * 4..i * 4 + 4])
+        };
+        assert_eq!(at(7, 7), (1.0, &[10, 20, 30, 255][..]));
+        assert_eq!(
+            at(5, 7),
+            (1.0, &[10, 20, 30, 255][..]),
+            "the left cap and its quad overlap without cancelling"
+        );
+        assert_eq!(
+            at(10, 7),
+            (1.0, &[10, 20, 30, 255][..]),
+            "the right cap and its quad overlap without cancelling"
+        );
+        assert_eq!(
+            at(3, 7),
+            (1.0, &[10, 20, 30, 255][..]),
+            "round cap reaches one pixel left of the endpoint"
+        );
+        assert_eq!(
+            at(1, 7).0,
+            0.0,
+            "the cap stays circular instead of becoming a square"
+        );
+        assert_eq!(at(7, 1).0, 0.0, "outside the stroke stays transparent");
+        assert_eq!(at(0, 0).0, 0.0);
+    }
+
+    #[test]
+    fn stroke_composites_source_over_fill() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 0, 0, 128],
+            stroke: Some(Stroke {
+                width: 0.5,
+                color: [0, 0, 255, 128],
+            }),
+            anchors: vec![
+                Anchor::corner([0.0, 0.0]),
+                Anchor::corner([1.0, 0.0]),
+                Anchor::corner([1.0, 1.0]),
+                Anchor::corner([0.0, 1.0]),
+            ],
+        };
+        let actual = rasterize(&shape, 16, 16).expect("alpha shape rasterizes");
+        let at = |x: u32, y: u32| {
+            let i = (y * 16 + x) as usize;
+            (actual.coverage()[i], &actual.rgba()[i * 4..i * 4 + 4])
+        };
+        let (stroke_alpha, stroke_rgb) = at(7, 0);
+        assert!((stroke_alpha - 48_896.0 / 65_025.0).abs() < 1e-6);
+        assert_eq!(stroke_rgb, &[85, 0, 170, 255]);
+        let (fill_alpha, fill_rgb) = at(7, 7);
+        assert!((fill_alpha - 128.0 / 255.0).abs() < 1e-6);
+        assert_eq!(fill_rgb, &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn zero_alpha_stroke_is_identical_to_no_stroke() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 0, 0, 128],
+            stroke: Some(Stroke {
+                width: 0.5,
+                color: [0, 0, 255, 0],
+            }),
+            anchors: vec![
+                Anchor::corner([0.25, 0.25]),
+                Anchor::corner([0.75, 0.25]),
+                Anchor::corner([0.75, 0.75]),
+                Anchor::corner([0.25, 0.75]),
+            ],
+        };
+        let invisible = rasterize(&shape, 16, 16).expect("zero-alpha stroke");
+        let absent = rasterize(
+            &VectorShape {
+                stroke: None,
+                ..shape
+            },
+            16,
+            16,
+        )
+        .expect("no stroke");
+        assert_eq!(invisible, absent);
+    }
+
+    #[test]
+    fn dimension_budget_is_a_typed_error() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            stroke: None,
+            anchors: vec![
+                Anchor::corner([0.0, 0.0]),
+                Anchor::corner([1.0, 0.0]),
+                Anchor::corner([1.0, 1.0]),
+                Anchor::corner([0.0, 1.0]),
+            ],
+        };
+        assert!(rasterize(&shape, 8192, 1).is_ok(), "8K is inclusive");
+        assert_eq!(
+            rasterize(&shape, 8193, 8193),
+            Err(VectorError::TooLarge {
+                width: 8193,
+                height: 8193,
+                max_pixels: MAX_VECTOR_RASTER_PIXELS,
+            })
+        );
+    }
+
+    #[test]
+    fn structure_budgets_are_typed_errors() {
+        let base = VectorShape {
+            closed: false,
+            fill: [0, 0, 0, 0],
+            stroke: None,
+            anchors: Vec::new(),
+        };
+        let too_many = VectorShape {
+            anchors: vec![Anchor::corner([0.5, 0.5]); MAX_VECTOR_ANCHORS + 1],
+            ..base.clone()
+        };
+        assert_eq!(
+            rasterize(&too_many, 16, 16),
+            Err(VectorError::TooComplex {
+                what: "anchors",
+                limit: MAX_VECTOR_ANCHORS,
+            })
+        );
+        let curved = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            stroke: None,
+            anchors: (0..300)
+                .map(|_| Anchor {
+                    pos: [0.5, 0.5],
+                    in_handle: [-1.0e6, -1.0e6],
+                    out_handle: [1.0e6, 1.0e6],
+                })
+                .collect(),
+        };
+        assert_eq!(
+            rasterize(&curved, 8192, 8192),
+            Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_and_empty_geometry_is_transparent() {
+        let cases = [
+            VectorShape::empty(),
+            VectorShape {
+                closed: false,
+                fill: [255, 0, 0, 255],
+                stroke: Some(Stroke {
+                    width: 0.25,
+                    color: [0, 0, 255, 255],
+                }),
+                anchors: vec![Anchor::corner([0.5, 0.5])],
+            },
+            VectorShape {
+                closed: false,
+                fill: [255, 0, 0, 255],
+                stroke: None,
+                anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+            },
+            VectorShape {
+                closed: true,
+                fill: [255, 0, 0, 255],
+                stroke: Some(Stroke {
+                    width: 0.25,
+                    color: [0, 0, 255, 255],
+                }),
+                anchors: vec![
+                    Anchor::corner([f32::NAN, 0.5]),
+                    Anchor::corner([f32::NAN, f32::NAN]),
+                ],
+            },
+            VectorShape {
+                closed: false,
+                fill: [255, 0, 0, 255],
+                stroke: Some(Stroke {
+                    width: 0.25,
+                    color: [0, 0, 255, 255],
+                }),
+                anchors: vec![
+                    Anchor {
+                        pos: [0.25, 0.5],
+                        in_handle: [0.25, 0.5],
+                        out_handle: [f32::NAN, 0.5],
+                    },
+                    Anchor::corner([0.75, 0.5]),
+                ],
+            },
+        ];
+        for shape in &cases {
+            let actual = rasterize(shape, 16, 16).expect("degenerate input is not an error");
+            assert!(actual.coverage().iter().all(|v| *v == 0.0));
+            assert!(actual.rgba().iter().all(|v| *v == 0));
+        }
+        let empty = rasterize(&cases[1], 0, 16).expect("zero-sized output is empty");
+        assert!(empty.coverage().is_empty());
+        assert!(empty.rgba().is_empty());
+    }
+
+    #[test]
+    fn raster_is_deterministic_and_non_square() {
+        let shape = VectorShape {
+            closed: false,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+            }),
+            anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+        };
+        let first = rasterize(&shape, 32, 16).expect("non-square stroke rasterizes");
+        let second = rasterize(&shape, 32, 16).expect("repeat rasterization");
+        assert_eq!(first, second);
+        let at = |x: u32, y: u32| first.coverage()[(y * 32 + x) as usize];
+        assert_eq!(at(15, 7), 1.0);
+        assert_eq!(at(7, 7), 1.0, "the shorter edge sets the same 2px radius");
+        assert_eq!(at(5, 7), 0.0);
+        assert_eq!(at(15, 1), 0.0);
+    }
+
+    #[test]
+    fn empty_inputs_short_circuit_before_geometry() {
+        let shape = VectorShape {
+            closed: false,
+            fill: [255, 0, 0, 255],
+            stroke: None,
+            anchors: (0..300)
+                .map(|_| Anchor {
+                    pos: [0.5, 0.5],
+                    in_handle: [-1.0e6, -1.0e6],
+                    out_handle: [1.0e6, 1.0e6],
+                })
+                .collect(),
+        };
+        let empty = rasterize(&shape, 4096, 4096).expect("no painted primitive is empty");
+        assert!(empty.coverage().is_empty());
+        assert!(empty.rgba().is_empty());
+        let zero = rasterize(&shape, 0, 4096).expect("zero width is empty");
+        assert!(zero.coverage().is_empty());
+        assert!(zero.rgba().is_empty());
+        assert_eq!((zero.width(), zero.height()), (0, 4096));
+    }
+
+    #[test]
+    fn edge_row_budget_is_a_typed_error() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            stroke: None,
+            anchors: (0..1_000)
+                .map(|i| Anchor::corner([0.25 + 0.5 * (i % 2) as f32, 0.5]))
+                .collect(),
+        };
+        let result = rasterize(&shape, 8192, 8192);
+        let Err(VectorError::TooExpensive { edges, rows, limit }) = result else {
+            panic!("edge-row budget must refuse this shape: {result:?}");
+        };
+        assert_eq!(rows, 8192 * 4);
+        assert_eq!(limit, MAX_VECTOR_EDGE_ROW_VISITS);
+        assert!((edges as u64) * rows > limit);
+    }
+
+    #[test]
+    fn stroke_geometry_budget_is_typed_error() {
+        let shape = VectorShape {
+            closed: false,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 1.0e6,
+                color: [255, 255, 255, 255],
+            }),
+            anchors: vec![Anchor::corner([0.5, 0.5]); 300],
+        };
+        assert_eq!(
+            rasterize(&shape, 16, 16),
+            Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            })
+        );
     }
 }

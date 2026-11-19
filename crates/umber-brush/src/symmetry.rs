@@ -118,6 +118,20 @@ impl SymmetrySettings {
     pub fn is_active(&self) -> bool {
         self.mirror.enabled || self.radial.enabled
     }
+
+    /// Equality for evaluation-cache identity. Identical NaN offset bits
+    /// compare equal so a malformed project cannot invalidate every frame;
+    /// ordinary float semantics (including ±0) are preserved.
+    pub fn same_cache_key(&self, other: &Self) -> bool {
+        let offset_eq = self.mirror.offset == other.mirror.offset
+            || (self.mirror.offset.is_nan()
+                && other.mirror.offset.is_nan()
+                && self.mirror.offset.to_bits() == other.mirror.offset.to_bits());
+        self.radial == other.radial
+            && self.mirror.enabled == other.mirror.enabled
+            && self.mirror.axis == other.mirror.axis
+            && offset_eq
+    }
 }
 
 /// An affine map `p ↦ m · p + t` (row-major `m`).
@@ -194,11 +208,20 @@ impl SymTransform {
     /// flip negates its off-diagonal terms.
     #[must_use]
     pub fn to_texel_space(&self, texels_per_uv: f32) -> Self {
-        let s = texels_per_uv;
-        let to_uv = |p: [f32; 2]| [p[0] / s, 1.0 - p[1] / s];
-        let to_texel = |uv: [f32; 2]| [uv[0] * s, (1.0 - uv[1]) * s];
+        self.to_texel_space_xy(texels_per_uv, texels_per_uv)
+    }
+
+    /// The rect-tile form of [`Self::to_texel_space`]: independent X/Y
+    /// scales for non-square rasters. Square inputs delegate here unchanged.
+    #[must_use]
+    pub fn to_texel_space_xy(&self, texels_per_u: f32, texels_per_v: f32) -> Self {
+        let to_uv = |p: [f32; 2]| [p[0] / texels_per_u, 1.0 - p[1] / texels_per_v];
+        let to_texel = |uv: [f32; 2]| [uv[0] * texels_per_u, (1.0 - uv[1]) * texels_per_v];
         Self {
-            m: [[self.m[0][0], -self.m[0][1]], [-self.m[1][0], self.m[1][1]]],
+            m: [
+                [self.m[0][0], -(texels_per_u / texels_per_v) * self.m[0][1]],
+                [-(texels_per_v / texels_per_u) * self.m[1][0], self.m[1][1]],
+            ],
             t: to_texel(self.apply(to_uv([0.0, 0.0]))),
         }
     }
@@ -310,9 +333,18 @@ pub fn sibling_positions<'a>(
 /// The settings' transforms in tile-local texel space (see
 /// [`SymTransform::to_texel_space`]), identity first.
 pub fn texel_transforms(settings: &SymmetrySettings, texels_per_uv: f32) -> Vec<SymTransform> {
+    texel_transforms_rect(settings, texels_per_uv, texels_per_uv)
+}
+
+/// The settings' transforms in a non-square tile's texel space, identity first.
+pub fn texel_transforms_rect(
+    settings: &SymmetrySettings,
+    texels_per_u: f32,
+    texels_per_v: f32,
+) -> Vec<SymTransform> {
     symmetric_transforms(settings)
         .iter()
-        .map(|t| t.to_texel_space(texels_per_uv))
+        .map(|t| t.to_texel_space_xy(texels_per_u, texels_per_v))
         .collect()
 }
 
@@ -527,6 +559,17 @@ mod tests {
     }
 
     #[test]
+    fn cache_identity_is_stable_for_nan_offsets_and_signed_zero() {
+        let nan = mirror(MirrorAxis::X, f32::NAN);
+        assert!(nan.same_cache_key(&nan));
+        let mut different_nan = nan;
+        different_nan.mirror.offset = f32::from_bits(f32::NAN.to_bits() ^ 1);
+        assert!(!nan.same_cache_key(&different_nan));
+        assert!(mirror(MirrorAxis::X, 0.0).same_cache_key(&mirror(MirrorAxis::X, -0.0)));
+        assert!(!nan.same_cache_key(&mirror(MirrorAxis::X, 0.5)));
+    }
+
+    #[test]
     fn texel_conjugation_commutes_with_the_uv_map() {
         let s = 512.0;
         let f = |uv: [f32; 2]| [uv[0] * s, (1.0 - uv[1]) * s];
@@ -552,6 +595,26 @@ mod tests {
         // The V-mirror at 0.25 reflects about y = (1 - 0.25) * s, not 0.25 * s.
         let ty = texel_transforms(&mirror(MirrorAxis::Y, 0.25), s)[1];
         assert_eq!(ty.apply([10.0, 0.75 * s]), [10.0, 0.75 * s]);
+    }
+
+    #[test]
+    fn texel_rect_conjugation_commutes_with_the_uv_map() {
+        let (sx, sy) = (32.0, 16.0);
+        let f = |uv: [f32; 2]| [uv[0] * sx, (1.0 - uv[1]) * sy];
+        for settings in [mirror(MirrorAxis::Y, 0.25), radial(4, true, true)] {
+            for t in symmetric_transforms(&settings) {
+                let tt = t.to_texel_space_xy(sx, sy);
+                for uv in [[0.5, 0.1], [0.13, 0.77], [0.9, 0.42]] {
+                    let actual = tt.apply(f(uv));
+                    let expected = f(t.apply(uv));
+                    assert!(
+                        (actual[0] - expected[0]).abs() < 1e-2
+                            && (actual[1] - expected[1]).abs() < 1e-2,
+                        "actual={actual:?} expected={expected:?} settings={settings:?} t={t:?} uv={uv:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
