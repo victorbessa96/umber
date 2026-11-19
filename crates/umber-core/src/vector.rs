@@ -78,6 +78,20 @@ pub struct VectorParams {
     pub shape: VectorShape,
 }
 
+impl Default for VectorParams {
+    /// Defaults for a new editable path (K4): visible opaque white fill, no
+    /// stroke, no anchors. `VectorShape::empty()` deliberately stays transparent
+    /// for geometry/raster short-circuits; this default is for editor adoption.
+    fn default() -> Self {
+        Self {
+            shape: VectorShape {
+                fill: [255, 255, 255, 255],
+                ..VectorShape::empty()
+            },
+        }
+    }
+}
+
 fn f32_cache_eq(a: f32, b: f32) -> bool {
     a == b || (a.is_nan() && b.is_nan() && a.to_bits() == b.to_bits())
 }
@@ -455,6 +469,17 @@ mod tests {
         let mut changed_nan = shape.clone();
         changed_nan.stroke.as_mut().unwrap().width = f32::from_bits(f32::NAN.to_bits() ^ 1);
         assert!(!shape.same_cache_key(&changed_nan));
+    }
+
+    #[test]
+    fn new_path_default_is_visible_but_geometry_empty() {
+        let params = VectorParams::default();
+        assert!(params.shape.is_empty());
+        assert!(!params.shape.closed);
+        assert_eq!(params.shape.fill, [255, 255, 255, 255]);
+        assert_eq!(params.shape.stroke, None);
+        assert!(params.shape.anchors.is_empty());
+        assert_eq!(VectorShape::empty().fill, [0, 0, 0, 0]);
     }
 
     #[test]

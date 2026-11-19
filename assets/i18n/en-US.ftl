@@ -66,6 +66,7 @@ ctx-rail =
     .brush = Brush
     .layer = Layer
     .fill = Fill
+    .vector = Vector
     .mask = Mask
     .texture-set = Texture Set
     .search-hint = Search properties…
@@ -922,6 +923,17 @@ path =
     .clear = Clear path
     .no-paint = No paint session — replay needs the GPU target.
     .need-points = Add at least two points to replay.
+
+## Vector layer properties (K4)
+
+vector =
+    .section = Vector
+    .none = No vector layers.
+    .closed = Closed path
+    .fill = Fill
+    .stroke = Stroke
+    .stroke-width = Stroke width
+    .stroke-color = Stroke color
 
 ## HDR surface output (§5 P1 row 85)
 

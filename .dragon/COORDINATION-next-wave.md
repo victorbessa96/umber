@@ -2,18 +2,17 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** K2 `0b5cb72d` is pushed on top of K1 `46d4bff5`;
-the K2 design brief is `60322097`. K3 canvas editing landed as `98fdbb80`;
-the K3 brief is `8520c09b`. The `razul-vector-canvas` lock is released after
-safe-push.
-The final tree has reversible SetVector journal/history support, fresh-layer
-`None` adoption, one command per completed edit, external-edit protection,
-K2-exact centerline guides, exact-handle deletion, explicit collapsed-handle
-routing, and shell-level hidden-tab release. Kimi's first review found four
-issues; all were fixed and pinned, and its bounded re-review returned SHIP.
-Final r1 battery is GREEN: clippy 0 errors, 20 suites, 1,978 passed / 0 failed
-(`vector-canvas-final-battery-r1.log`). K4 panel widgets are NEXT; K5 SVG io
-remains separate. Fill cache-lifecycle parity is the named follow-up.
+**Updated 2026-11-19:** K3 `98fdbb80` is pushed on top of K2 `0b5cb72d` and
+K1 `46d4bff5`. K4 vector property widgets are implemented under
+`razul-vector-widgets` with their landing SHA pending; the K4 brief is
+`7f1c6cc3`. The final tree has a dedicated Vector Properties rail with the
+existing spline glyph, native sRGBA fill/stroke controls, bounded stroke width,
+and one SetVector per egui change. New-path defaults are visible opaque white
+fill and no stroke; `VectorShape::empty()` stays transparent and undo-to-None
+is preserved. Focused core/gui/panel/editor/rail/i18n suites are green. Final
+r1 battery is GREEN: clippy 0 errors, 22 suites, 2,133 passed / 0 failed
+(`vector-widgets-final-battery-r1.log`). Bounded Kimi review returned SHIP.
+K5 SVG io is NEXT; Fill cache-lifecycle parity is the named follow-up.
 Human/platform gates are unchanged: dogfood, native-speaker review, Windows
 signing, live Windows Ink verification, and beta/stable release. Consult
 `STATE.md` and the live lock registry before claiming new work.

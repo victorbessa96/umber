@@ -165,6 +165,7 @@ mod plugins;
 mod postfx_panel;
 mod psd_import;
 mod vector_edit;
+mod vector_panel;
 use umber_paint::persistence::{
     dormancy_for, load_paint_tiles_reported, load_quick_masks, paint_manifest_path,
     paint_save_version, parse_manifest_header, save_paint_tiles, save_quick_masks, LayerDormancy,
@@ -1334,6 +1335,7 @@ impl TabViewer for PanelViewer<'_> {
                     tr("ctx-rail.brush"),
                     tr("ctx-rail.layer"),
                     tr("ctx-rail.fill"),
+                    tr("ctx-rail.vector"),
                     tr("ctx-rail.mask"),
                     tr("ctx-rail.texture-set"),
                 ];
@@ -1346,6 +1348,7 @@ impl TabViewer for PanelViewer<'_> {
                         &tips_raw[2],
                         &tips_raw[3],
                         &tips_raw[4],
+                        &tips_raw[5],
                     ],
                     breadcrumb: &crumb,
                     search_hint: &hint,
@@ -1401,6 +1404,11 @@ impl TabViewer for PanelViewer<'_> {
                                 self.paint.as_deref_mut(),
                                 &mut *self.path_tool,
                             );
+                        }
+                        umber_gui::ContextKind::Vector => {
+                            // K4: fill/stroke/closure edits ride K3's SetVector
+                            // command, journal, adoption, and raster refresh.
+                            vector_panel::vector_section_ui(ui, self.doc);
                         }
                         umber_gui::ContextKind::Mask => {
                             if let Some(paint) = self.paint.as_deref_mut() {
@@ -3563,6 +3571,9 @@ fn properties_kinds(
     if target == Some(umber_core::LayerKind::Fill) {
         kinds.push(ContextKind::Fill);
     }
+    if target == Some(umber_core::LayerKind::Vector) {
+        kinds.push(ContextKind::Vector);
+    }
     if has_mask || mask_focus {
         kinds.push(ContextKind::Mask);
     }
@@ -3587,6 +3598,7 @@ fn properties_row_labels(kind: umber_gui::ContextKind) -> Vec<String> {
             labels.extend(path_tool::row_labels());
             labels
         }
+        ContextKind::Vector => vector_panel::row_labels(),
         ContextKind::Mask => document::layer_mask_row_labels(),
         ContextKind::TextureSet => texture_sets_row_labels(),
     }
@@ -7331,6 +7343,23 @@ mod properties_rail_tests {
         assert!(focus.contains(&ContextKind::Mask), "a mask edit shows Mask");
     }
 
+    #[test]
+    fn a_vector_target_puts_vector_not_fill_on_the_rail() {
+        let vector = properties_kinds(Some(umber_core::LayerKind::Vector), false, false);
+        assert_eq!(
+            vector,
+            vec![
+                ContextKind::Brush,
+                ContextKind::Layer,
+                ContextKind::Vector,
+                ContextKind::TextureSet,
+            ]
+        );
+        assert!(!vector.contains(&ContextKind::Fill));
+        let paint = properties_kinds(Some(umber_core::LayerKind::Paint), false, false);
+        assert!(!paint.contains(&ContextKind::Vector));
+    }
+
     /// The plan row's kittest pin, drawn headless: a fill target's rail
     /// actually SHOWS the fill tab, a paint target's does not. The
     /// queries are what a screen reader sees (the tooltip label rides
@@ -7349,7 +7378,7 @@ mod properties_rail_tests {
             let _ = rail.set_applicable(kinds);
             let atlas = umber_gui::IconAtlas::empty();
             const TIPS: [&str; ContextKind::COUNT] =
-                ["Brush", "Layer", "Fill", "Mask", "Texture set"];
+                ["Brush", "Layer", "Fill", "Vector", "Mask", "Texture set"];
             let crumb = vec!["Set".to_owned(), "Sword".to_owned()];
             let ctx = umber_gui::ContextRailCtx {
                 atlas: &atlas,

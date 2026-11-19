@@ -88,7 +88,7 @@ impl VectorEditTool {
             self.adopted = params.cloned();
             self.working = params
                 .map(|params| params.shape.clone())
-                .unwrap_or_else(VectorShape::empty);
+                .unwrap_or_else(|| VectorParams::default().shape);
             self.selected = self
                 .selected
                 .filter(|(index, _)| *index < self.working.anchors.len());
@@ -586,6 +586,7 @@ mod tests {
         let mut tool = VectorEditTool::default();
         tool.adopt(Some((0, None)));
         assert!(tool.is_editing());
+        assert_eq!(tool.shape().fill, [255, 255, 255, 255]);
         let base = doc.history.len();
         assert!(tool.append(&mut doc, [0.5, 0.5]));
         assert_eq!(doc.history.len(), base + 1);

@@ -67,6 +67,7 @@ ctx-rail =
     .brush = Pincel
     .layer = Camada
     .fill = Preenchimento
+    .vector = Vetor
     .mask = Máscara
     .texture-set = Conjunto de texturas
     .search-hint = Pesquisar propriedades…
@@ -941,6 +942,17 @@ path =
     .clear = Limpar caminho
     .no-paint = Sem sessão de pintura — repetir precisa do alvo da GPU.
     .need-points = Adicione ao menos dois pontos para repetir.
+
+## Propriedades da camada vetorial (K4)
+
+vector =
+    .section = Vetor
+    .none = Nenhuma camada vetorial.
+    .closed = Caminho fechado
+    .fill = Preenchimento
+    .stroke = Contorno
+    .stroke-width = Largura do contorno
+    .stroke-color = Cor do contorno
 
 ## Saída de superfície HDR (§5, linha P1 85)
 

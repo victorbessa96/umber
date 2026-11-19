@@ -49,6 +49,8 @@ pub enum ContextKind {
     Layer,
     /// The selected fill layer's fill.
     Fill,
+    /// The selected vector layer's path properties.
+    Vector,
     /// The selected layer's mask.
     Mask,
     /// The active texture set.
@@ -57,10 +59,11 @@ pub enum ContextKind {
 
 impl ContextKind {
     /// Every kind, in rail order.
-    pub const ALL: [ContextKind; 5] = [
+    pub const ALL: [ContextKind; 6] = [
         ContextKind::Brush,
         ContextKind::Layer,
         ContextKind::Fill,
+        ContextKind::Vector,
         ContextKind::Mask,
         ContextKind::TextureSet,
     ];
@@ -74,8 +77,9 @@ impl ContextKind {
             ContextKind::Brush => 0,
             ContextKind::Layer => 1,
             ContextKind::Fill => 2,
-            ContextKind::Mask => 3,
-            ContextKind::TextureSet => 4,
+            ContextKind::Vector => 3,
+            ContextKind::Mask => 4,
+            ContextKind::TextureSet => 5,
         }
     }
 
@@ -88,6 +92,7 @@ impl ContextKind {
             ContextKind::Brush => "paintbrush",
             ContextKind::Layer => "layers",
             ContextKind::Fill => "paint-bucket",
+            ContextKind::Vector => "spline",
             ContextKind::Mask => "square-dashed",
             ContextKind::TextureSet => "layout-grid",
         }
@@ -681,7 +686,8 @@ mod tests {
 
     // ---- headless frames ---------------------------------------------
 
-    const TIPS: [&str; ContextKind::COUNT] = ["Brush", "Layer", "Fill", "Mask", "Texture set"];
+    const TIPS: [&str; ContextKind::COUNT] =
+        ["Brush", "Layer", "Fill", "Vector", "Mask", "Texture set"];
 
     fn key(key: Key, modifiers: Modifiers) -> Event {
         Event::Key {
