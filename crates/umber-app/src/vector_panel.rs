@@ -31,6 +31,8 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "vector.stroke-color",
     "vector.stroke-cap",
     "vector.stroke-join",
+    "vector.stroke-dash",
+    "vector.stroke-dash-offset",
     "vector.export-svg",
 ];
 
@@ -224,6 +226,49 @@ where
                             changed = true;
                         }
                     });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(tr("vector.stroke-dash")).color(umber_gui::muted()),
+                        );
+                        let text_id = egui::Id::new(("vector-dash-pattern", id));
+                        let current = format_dash_pattern(&stroke.dash);
+                        let mut text = ui.memory_mut(|memory| {
+                            memory
+                                .data
+                                .get_temp::<String>(text_id)
+                                .unwrap_or_else(|| current.clone())
+                        });
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut text)
+                                .desired_width(140.0)
+                                .hint_text("solid"),
+                        );
+                        if response.changed() {
+                            ui.memory_mut(|memory| memory.data.insert_temp(text_id, text.clone()));
+                            if let Ok(dash) = parse_dash_pattern(&text, stroke.dash.offset) {
+                                if dash != stroke.dash {
+                                    stroke.dash = dash;
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if !response.has_focus() {
+                            ui.memory_mut(|memory| {
+                                memory
+                                    .data
+                                    .insert_temp(text_id, format_dash_pattern(&stroke.dash))
+                            });
+                        }
+                    });
+                    if field_row(
+                        ui,
+                        &tr("vector.stroke-dash-offset"),
+                        umber_gui::ValueField::new(&mut stroke.dash.offset)
+                            .context_menu(crate::i18n::prop_menu_labels())
+                            .range(-16.0..=16.0),
+                    ) {
+                        changed = true;
+                    }
                 }
                 let export_clicked = ui.button(tr("vector.export-svg")).clicked();
                 if changed {
@@ -386,12 +431,41 @@ fn set_stroke_enabled(shape: &mut VectorShape, enabled: bool) {
                 cap: umber_core::vector::StrokeCap::Round,
 
                 join: umber_core::vector::StrokeJoin::Round,
+                dash: umber_core::vector::StrokeDash::solid(),
                 color: [0, 0, 0, 255],
             });
         }
         (false, _) => shape.stroke = None,
         (true, Some(_)) => {}
     }
+}
+
+fn parse_dash_pattern(
+    text: &str,
+    offset: f32,
+) -> Result<umber_core::vector::StrokeDash, umber_core::vector::VectorError> {
+    let text = text.trim();
+    if text.is_empty() || text == "solid" {
+        return Ok(umber_core::vector::StrokeDash::solid());
+    }
+    let lengths = text
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .parse::<f32>()
+                .map_err(|_| umber_core::vector::VectorError::InvalidDash)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    umber_core::vector::StrokeDash::from_lengths(&lengths, offset)
+}
+
+fn format_dash_pattern(dash: &umber_core::vector::StrokeDash) -> String {
+    dash.lengths()
+        .iter()
+        .map(|length| length.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn field_row<N: egui::emath::Numeric>(
@@ -437,6 +511,8 @@ mod row_label_tests {
                 "Stroke color",
                 "Stroke cap",
                 "Stroke join",
+                "Dash pattern",
+                "Dash offset",
                 "Export SVG",
             ]
         );
@@ -483,6 +559,20 @@ mod tests {
     }
 
     #[test]
+    fn dash_editor_parses_patterns_and_preserves_offset() {
+        let dash = parse_dash_pattern("0.25, 0.125", 0.0625).expect("valid dash");
+        assert_eq!(dash.lengths(), &[0.25, 0.125]);
+        assert_eq!(dash.offset, 0.0625);
+        assert_eq!(format_dash_pattern(&dash), "0.25,0.125");
+        assert!(parse_dash_pattern("", 0.0)
+            .expect("empty is solid")
+            .is_solid());
+        assert!(parse_dash_pattern("solid", 0.0).expect("solid").is_solid());
+        assert!(parse_dash_pattern("0 0", 0.0).is_err());
+        assert!(parse_dash_pattern("not-a-number", 0.0).is_err());
+    }
+
+    #[test]
     fn svg_filename_suggestions_are_safe_bounded_and_nonempty() {
         assert_eq!(suggested_svg_name("Body / Arms"), "Body___Arms.svg");
         assert_eq!(suggested_svg_name("..."), "vector.svg");
@@ -515,6 +605,7 @@ mod tests {
                 cap: umber_core::vector::StrokeCap::Round,
 
                 join: umber_core::vector::StrokeJoin::Round,
+                dash: umber_core::vector::StrokeDash::solid(),
                 color: [0, 0, 0, 255],
             })
         );

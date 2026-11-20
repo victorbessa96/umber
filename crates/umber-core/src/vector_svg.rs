@@ -15,6 +15,8 @@ pub enum VectorSvgError {
     TooComplex { what: &'static str, limit: usize },
     #[error("vector anchor {anchor} contains non-finite geometry")]
     NonFinite { anchor: usize },
+    #[error("invalid stroke dash pattern")]
+    InvalidDash,
 }
 
 /// Serializes one vector shape as a deterministic SVG 1.1 document. Open
@@ -94,6 +96,10 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
         drawable && stroke.color[3] > 0 && stroke.width.is_finite() && stroke.width > 0.0
     });
     if let Some(stroke) = painted_stroke {
+        stroke
+            .dash
+            .validate()
+            .map_err(|_| VectorSvgError::InvalidDash)?;
         out.push_str(" stroke=\"");
         out.push_str(&hex(stroke.color));
         out.push('"');
@@ -117,6 +123,21 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
             crate::vector::StrokeJoin::Bevel => "bevel",
         });
         out.push('"');
+        if !stroke.dash.is_solid() {
+            out.push_str(" stroke-dasharray=\"");
+            for (index, length) in stroke.dash.lengths().iter().enumerate() {
+                if index > 0 {
+                    out.push(' ');
+                }
+                out.push_str(&number(*length));
+            }
+            out.push('"');
+            if stroke.dash.offset != 0.0 {
+                out.push_str(" stroke-dashoffset=\"");
+                out.push_str(&number(stroke.dash.offset));
+                out.push('"');
+            }
+        }
     } else {
         out.push_str(" stroke=\"none\"");
     }
@@ -171,6 +192,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [0, 0, 0, 255],
             }),
             anchors: vec![
@@ -219,6 +241,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.5, 0.5])],
@@ -236,6 +259,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [255, 255, 255, 255],
             },
             Stroke {
@@ -243,6 +267,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [255, 255, 255, 255],
             },
             Stroke {
@@ -250,6 +275,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [255, 255, 255, 0],
             },
         ] {
@@ -324,6 +350,7 @@ mod tests {
                     cap: crate::vector::StrokeCap::Round,
 
                     join: crate::vector::StrokeJoin::Round,
+                    dash: crate::vector::StrokeDash::solid(),
                     color: [1, 2, 3, alpha],
                 }),
                 anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -353,6 +380,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [0, 0, 0, 255],
             }),
             anchors: vec![
@@ -374,6 +402,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.1, 0.2]), Anchor::corner([0.8, 0.9])],
@@ -402,6 +431,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [10, 20, 30, 128],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -443,6 +473,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: crate::vector::StrokeDash::solid(),
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -566,6 +597,7 @@ mod tests {
                     color: [10, 20, 30, 255],
                     cap,
                     join: crate::vector::StrokeJoin::Round,
+                    dash: crate::vector::StrokeDash::solid(),
                 }),
                 anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
             };
@@ -598,6 +630,7 @@ mod tests {
                     color: [10, 20, 30, 255],
                     cap: crate::vector::StrokeCap::Butt,
                     join,
+                    dash: crate::vector::StrokeDash::solid(),
                 }),
                 anchors: vec![Anchor::corner([0.25, 0.75]), Anchor::corner([0.50, 0.25])],
             };
@@ -612,6 +645,64 @@ mod tests {
             import_svg(invalid),
             Err(crate::svg::SvgError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn dash_patterns_export_import_and_reject_invalid_values() {
+        let dash =
+            crate::vector::StrokeDash::from_lengths(&[0.25, 0.125], 0.0625).expect("valid dash");
+        let shape = VectorShape {
+            closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+                cap: crate::vector::StrokeCap::Butt,
+                join: crate::vector::StrokeJoin::Bevel,
+                dash,
+            }),
+            anchors: vec![Anchor::corner([0.25, 0.75]), Anchor::corner([0.50, 0.25])],
+        };
+        let first = export_svg(&shape).expect("dash export");
+        assert!(first.contains("stroke-dasharray=\"0.25 0.125\""));
+        assert!(first.contains("stroke-dashoffset=\"0.0625\""));
+        let imported = import_svg(first.as_bytes()).expect("dash import");
+        assert_eq!(imported.shape.stroke.expect("stroke").dash, dash);
+        assert_eq!(export_svg(&imported.shape).expect("re-export"), first);
+
+        let odd = crate::vector::StrokeDash::from_lengths(&[0.25], -0.125).expect("odd dash");
+        let mut odd_shape = shape.clone();
+        odd_shape.stroke.as_mut().unwrap().dash = odd;
+        let odd_svg = export_svg(&odd_shape).expect("odd export");
+        let odd_import = import_svg(odd_svg.as_bytes()).expect("odd import");
+        assert_eq!(odd_import.shape.stroke.expect("odd stroke").dash, odd);
+        assert_eq!(
+            export_svg(&odd_import.shape).expect("odd re-export"),
+            odd_svg
+        );
+
+        for invalid in [
+            "stroke-dasharray=\"0 0\"",
+            "stroke-dasharray=\"-1 2\"",
+            "stroke-dasharray=\"1 2 3 4 5 6 7 8 9\"",
+        ] {
+            let svg = format!(
+                "<svg width=\"1\" height=\"1\"><path stroke=\"#000\" {invalid} d=\"M0 0 L1 1\"/></svg>"
+            );
+            assert!(matches!(
+                import_svg(svg.as_bytes()),
+                Err(crate::svg::SvgError::Unsupported { .. })
+            ));
+        }
+        let solid = br##"<svg width="1" height="1"><path stroke="#000" stroke-dasharray="none" d="M0 0 L1 1"/></svg>"##;
+        assert!(import_svg(solid)
+            .expect("none dash")
+            .shape
+            .stroke
+            .expect("stroke")
+            .dash
+            .is_solid());
     }
 
     #[test]
@@ -660,10 +751,6 @@ mod tests {
             (
                 br#"<svg width="1" height="1"><path style="fill:none" d="M0 0"/></svg>"#,
                 "path transform/style",
-            ),
-            (
-                br#"<svg width="1" height="1"><path stroke-dasharray="1 2" d="M0 0"/></svg>"#,
-                "path stroke-dasharray",
             ),
             (
                 br#"<svg width="1" height="1"><path clip-path="url(#c)" d="M0 0"/></svg>"#,
@@ -716,10 +803,6 @@ mod tests {
             (
                 br#"<svg width="1" height="1" vector-effect="non-scaling-stroke"><path d="M0 0"/></svg>"#,
                 "root vector-effect",
-            ),
-            (
-                br#"<svg width="1" height="1"><path stroke-dashoffset="1" d="M0 0"/></svg>"#,
-                "path stroke-dashoffset",
             ),
             (
                 br#"<svg width="1" height="1" paint-order="stroke"><path d="M0 0"/></svg>"#,

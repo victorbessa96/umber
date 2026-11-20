@@ -1692,8 +1692,6 @@ fn refuse_path_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
         "opacity",
         "display",
         "visibility",
-        "stroke-dasharray",
-        "stroke-dashoffset",
         "clip-path",
         "mask",
         "filter",
@@ -1781,6 +1779,32 @@ fn parse_vector_paint(
         });
     }
     let scale = ctm.max_scale() / f64::from(width.min(height));
+    let dash = match find_attr(attrs, "stroke-dasharray") {
+        None => crate::vector::StrokeDash::solid(),
+        Some(attr) if attr.value.trim() == "none" => crate::vector::StrokeDash::solid(),
+        Some(attr) => {
+            let mut lengths = Vec::new();
+            for token in attr
+                .value
+                .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+                .filter(|token| !token.is_empty())
+            {
+                let token_attr = Attr {
+                    name: "stroke-dasharray".to_owned(),
+                    value: token.to_owned(),
+                    value_offset: attr.value_offset,
+                };
+                let value = parse_length(&token_attr, "path")?;
+                lengths.push((value * scale) as f32);
+            }
+            let offset = length_attr(attrs, "stroke-dashoffset", "path")?.unwrap_or(0.0);
+            crate::vector::StrokeDash::from_lengths(&lengths, (offset * scale) as f32).map_err(
+                |_| SvgError::Unsupported {
+                    what: "invalid stroke dash pattern".to_owned(),
+                },
+            )?
+        }
+    };
     let stroke_width = (raw_width * scale) as f32;
     if !stroke_width.is_finite() {
         return Err(SvgError::Unsupported {
@@ -1798,6 +1822,7 @@ fn parse_vector_paint(
             color,
             cap,
             join,
+            dash,
         }),
         fill_rule,
     ))

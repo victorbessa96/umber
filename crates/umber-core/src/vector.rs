@@ -58,6 +58,71 @@ pub enum StrokeJoin {
     Bevel,
 }
 
+/// Maximum number of entries in a dash pattern. Fixed capacity keeps
+/// `Stroke` copyable and bounded in serialized projects.
+pub const MAX_DASH_LENGTHS: usize = 8;
+
+/// A bounded SVG-style dash pattern in UV units. `len == 0` means solid.
+/// Odd-length patterns are repeated by the rasterizer to preserve on/off
+/// alternation, matching SVG.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct StrokeDash {
+    #[serde(default)]
+    pub lengths: [f32; MAX_DASH_LENGTHS],
+    #[serde(default)]
+    pub len: u8,
+    #[serde(default)]
+    pub offset: f32,
+}
+
+impl StrokeDash {
+    pub fn solid() -> Self {
+        Self::default()
+    }
+
+    pub fn is_solid(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn lengths(&self) -> &[f32] {
+        &self.lengths[..usize::from(self.len).min(MAX_DASH_LENGTHS)]
+    }
+
+    pub fn from_lengths(lengths: &[f32], offset: f32) -> Result<Self, VectorError> {
+        if lengths.is_empty() {
+            return Ok(Self::solid());
+        }
+        if lengths.len() > MAX_DASH_LENGTHS
+            || lengths.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || lengths.iter().all(|v| *v == 0.0)
+            || !offset.is_finite()
+        {
+            return Err(VectorError::InvalidDash);
+        }
+        let mut dash = Self {
+            len: lengths.len() as u8,
+            offset,
+            ..Self::default()
+        };
+        dash.lengths[..lengths.len()].copy_from_slice(lengths);
+        Ok(dash)
+    }
+
+    pub fn validate(&self) -> Result<(), VectorError> {
+        if self.is_solid() {
+            return Ok(());
+        }
+        if usize::from(self.len) > MAX_DASH_LENGTHS
+            || self.lengths().iter().any(|v| !v.is_finite() || *v < 0.0)
+            || self.lengths().iter().all(|v| *v == 0.0)
+            || !self.offset.is_finite()
+        {
+            return Err(VectorError::InvalidDash);
+        }
+        Ok(())
+    }
+}
+
 /// An optional stroke around the shape's outline.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
@@ -71,6 +136,9 @@ pub struct Stroke {
     /// Join style at direction changes. Additive: old projects default to Round.
     #[serde(default)]
     pub join: StrokeJoin,
+    /// Dash pattern. Additive: old projects default to solid.
+    #[serde(default)]
+    pub dash: StrokeDash,
 }
 
 /// The shape a vector layer holds. `anchors` in path order; `closed`
@@ -147,6 +215,7 @@ fn stroke_cache_eq(a: Option<Stroke>, b: Option<Stroke>) -> bool {
                 && a.color == b.color
                 && a.cap == b.cap
                 && a.join == b.join
+                && dash_cache_eq(a.dash, b.dash)
         }
         (None, None) => true,
         _ => false,
@@ -200,6 +269,9 @@ pub enum VectorError {
     /// A structural budget refused the shape before rasterization.
     #[error("vector shape is too complex: more than {limit} {what}")]
     TooComplex { what: &'static str, limit: usize },
+    /// A dash pattern is non-finite, negative, all-zero, or too long.
+    #[error("invalid stroke dash pattern")]
+    InvalidDash,
     /// The scanline's conservative edge × row × subsample cost is too high.
     #[error("vector raster needs {edges} edges across {rows} subsampled rows (limit {limit})")]
     TooExpensive { edges: usize, rows: u64, limit: u64 },
@@ -322,6 +394,9 @@ fn stroke_polys(
     }) else {
         return Ok(Vec::new());
     };
+    if !stroke.dash.is_solid() {
+        return dashed_stroke_polys(shape, centerline, width, height, stroke);
+    }
     let radius = f64::from(stroke.width) * f64::from(width.min(height)) * 0.5;
     let ellipse_cost = crate::svg::ellipse_point_count(radius, radius);
     let mut builder = crate::svg::PolyBuilder::new_device();
@@ -450,6 +525,280 @@ fn stroke_polys(
         }
     }
     Ok(builder.finish())
+}
+
+#[derive(Debug, Clone)]
+struct DashPattern {
+    entries: Vec<(f64, bool)>,
+    period: f64,
+    offset: f64,
+}
+
+impl DashPattern {
+    fn new(dash: StrokeDash, scale: f64) -> Result<Self, VectorError> {
+        dash.validate()?;
+        let lengths = dash.lengths();
+        let repeats = if lengths.len() % 2 == 1 { 2 } else { 1 };
+        let mut entries = Vec::with_capacity(lengths.len() * repeats);
+        let mut period = 0.0;
+        for index in 0..lengths.len() * repeats {
+            let length = f64::from(lengths[index % lengths.len()]) * scale;
+            if length > 0.0 {
+                entries.push((length, index % 2 == 0));
+                period += length;
+            }
+        }
+        if entries.is_empty() || !period.is_finite() || period <= 0.0 {
+            return Err(VectorError::InvalidDash);
+        }
+        Ok(Self {
+            entries,
+            period,
+            offset: f64::from(dash.offset) * scale,
+        })
+    }
+
+    /// Returns whether `distance` is on a dash and the next pattern boundary.
+    fn state(&self, distance: f64) -> (bool, f64) {
+        let mut position = (distance + self.offset).rem_euclid(self.period);
+        for (length, on) in &self.entries {
+            if position < *length {
+                return (*on, distance + (*length - position));
+            }
+            position -= *length;
+        }
+        // Floating-point roundoff can only reach this fallback at a period
+        // boundary. Refuse to invent coverage there and advance one period.
+        (false, distance + self.period)
+    }
+
+    fn intervals(&self, start: f64, end: f64) -> Result<Vec<(f64, f64)>, VectorError> {
+        let mut intervals: Vec<(f64, f64)> = Vec::new();
+        let mut cursor = start;
+        let mut steps = 0usize;
+        while cursor < end {
+            steps += 1;
+            if steps > MAX_VECTOR_POINTS {
+                return Err(VectorError::TooComplex {
+                    what: "dash steps",
+                    limit: MAX_VECTOR_POINTS,
+                });
+            }
+            let (on, next) = self.state(cursor);
+            let stop = next.min(end);
+            if !stop.is_finite() || stop <= cursor {
+                break;
+            }
+            if on {
+                let local_start = cursor - start;
+                let local_end = stop - start;
+                if let Some(last) = intervals.last_mut() {
+                    if (last.1 - local_start).abs() <= 1e-12 {
+                        // A zero off-length is not a dash break. Merge the
+                        // adjacent active intervals so no false cap appears.
+                        last.1 = local_end;
+                        cursor = stop;
+                        continue;
+                    }
+                }
+                if intervals.len() >= MAX_VECTOR_POINTS / 4 {
+                    return Err(VectorError::TooComplex {
+                        what: "dash segments",
+                        limit: MAX_VECTOR_POINTS / 4,
+                    });
+                }
+                intervals.push((local_start, local_end));
+            }
+            cursor = stop;
+        }
+        Ok(intervals)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DashPart {
+    start: f64,
+    end: f64,
+    a: [f64; 2],
+    b: [f64; 2],
+    direction: [f64; 2],
+}
+
+fn push_stroke_polygon(
+    builder: &mut crate::svg::PolyBuilder,
+    points: &mut usize,
+    polygon: &[[f64; 2]],
+) -> Result<(), VectorError> {
+    if polygon.is_empty() {
+        return Ok(());
+    }
+    if points.saturating_add(polygon.len()) > MAX_VECTOR_POINTS {
+        return Err(VectorError::TooComplex {
+            what: "path points",
+            limit: MAX_VECTOR_POINTS,
+        });
+    }
+    builder.move_to(polygon[0]);
+    for index in 1..polygon.len() {
+        builder.line_to(polygon[index - 1], polygon[index]);
+    }
+    *points += polygon.len();
+    Ok(())
+}
+
+fn push_stroke_ellipse(
+    builder: &mut crate::svg::PolyBuilder,
+    points: &mut usize,
+    center: [f64; 2],
+    radius: f64,
+) -> Result<(), VectorError> {
+    let count = crate::svg::ellipse_point_count(radius, radius);
+    if points.saturating_add(count) > MAX_VECTOR_POINTS {
+        return Err(VectorError::TooComplex {
+            what: "path points",
+            limit: MAX_VECTOR_POINTS,
+        });
+    }
+    builder.ellipse(center, radius, radius);
+    *points += count;
+    Ok(())
+}
+
+/// Rasterizes a dashed stroke as bounded active intervals along the exact
+/// flattened centerline. Each interval gets caps at actual dash breaks;
+/// continuous turns get the selected join. Solid strokes keep the K6c path.
+fn dashed_stroke_polys(
+    shape: &VectorShape,
+    centerline: &[[f64; 2]],
+    width: u32,
+    height: u32,
+    stroke: Stroke,
+) -> Result<Vec<Vec<[f64; 2]>>, VectorError> {
+    let scale = f64::from(width.min(height));
+    let pattern = DashPattern::new(stroke.dash, scale)?;
+    let radius = f64::from(stroke.width) * scale * 0.5;
+    let mut segments: Vec<Vec<DashPart>> = Vec::with_capacity(centerline.len().saturating_sub(1));
+    let mut cumulative = Vec::with_capacity(centerline.len());
+    cumulative.push(0.0);
+    for pair in centerline.windows(2) {
+        let [a, b] = [pair[0], pair[1]];
+        let delta = [b[0] - a[0], b[1] - a[1]];
+        let length = delta[0].hypot(delta[1]);
+        let start = *cumulative.last().unwrap_or(&0.0);
+        if !length.is_finite() || length <= 0.0 {
+            segments.push(Vec::new());
+            cumulative.push(start);
+            continue;
+        }
+        let direction = [delta[0] / length, delta[1] / length];
+        let mut parts = Vec::new();
+        for (local_start, local_end) in pattern.intervals(start, start + length)? {
+            let at = |distance: f64| {
+                let t = distance / length;
+                [a[0] + delta[0] * t, a[1] + delta[1] * t]
+            };
+            parts.push(DashPart {
+                start: start + local_start,
+                end: start + local_end,
+                a: at(local_start),
+                b: at(local_end),
+                direction,
+            });
+        }
+        segments.push(parts);
+        cumulative.push(start + length);
+    }
+
+    let total = *cumulative.last().unwrap_or(&0.0);
+    let continuous = |vertex: usize| {
+        let count = segments.len();
+        if count == 0 {
+            return false;
+        }
+        let vertex = if shape.closed && vertex == count {
+            0
+        } else {
+            vertex
+        };
+        if !shape.closed && (vertex == 0 || vertex >= count) {
+            return false;
+        }
+        let previous = if vertex == 0 { count - 1 } else { vertex - 1 };
+        let next = if vertex == count { 0 } else { vertex };
+        let Some(previous) = segments[previous].last() else {
+            return false;
+        };
+        let Some(next) = segments[next].first() else {
+            return false;
+        };
+        if shape.closed && vertex == 0 {
+            (previous.end - total).abs() <= 1e-9 && next.start.abs() <= 1e-9
+        } else {
+            let boundary = cumulative[vertex];
+            (previous.end - boundary).abs() <= 1e-9 && (next.start - boundary).abs() <= 1e-9
+        }
+    };
+
+    let mut builder = crate::svg::PolyBuilder::new_device();
+    let mut points = 0usize;
+    for (index, parts) in segments.iter().enumerate() {
+        let segment_start = cumulative[index];
+        let segment_end = cumulative[index + 1];
+        for part in parts {
+            let start_continuous = (part.start - segment_start).abs() <= 1e-9 && continuous(index);
+            let end_continuous = (part.end - segment_end).abs() <= 1e-9 && continuous(index + 1);
+            let mut a = part.a;
+            let mut b = part.b;
+            if stroke.cap == StrokeCap::Square {
+                if !start_continuous {
+                    a[0] -= part.direction[0] * radius;
+                    a[1] -= part.direction[1] * radius;
+                }
+                if !end_continuous {
+                    b[0] += part.direction[0] * radius;
+                    b[1] += part.direction[1] * radius;
+                }
+            }
+            let normal = [-part.direction[1] * radius, part.direction[0] * radius];
+            let quad = [
+                [a[0] + normal[0], a[1] + normal[1]],
+                [b[0] + normal[0], b[1] + normal[1]],
+                [b[0] - normal[0], b[1] - normal[1]],
+                [a[0] - normal[0], a[1] - normal[1]],
+            ];
+            push_stroke_polygon(&mut builder, &mut points, &quad)?;
+            if stroke.cap == StrokeCap::Round {
+                if !start_continuous {
+                    push_stroke_ellipse(&mut builder, &mut points, part.a, radius)?;
+                }
+                if !end_continuous {
+                    push_stroke_ellipse(&mut builder, &mut points, part.b, radius)?;
+                }
+            }
+        }
+    }
+
+    for (index, &point) in centerline.iter().enumerate() {
+        if !continuous(index) || !join_at(centerline, index, shape.closed) {
+            continue;
+        }
+        if stroke.join == StrokeJoin::Round {
+            push_stroke_ellipse(&mut builder, &mut points, point, radius)?;
+        } else {
+            let polygon = join_polygon(centerline, index, radius, stroke.join, shape.closed)?;
+            push_stroke_polygon(&mut builder, &mut points, &polygon)?;
+        }
+    }
+    Ok(builder.finish())
+}
+
+fn dash_cache_eq(a: StrokeDash, b: StrokeDash) -> bool {
+    a.len == b.len
+        && f32_cache_eq(a.offset, b.offset)
+        && a.lengths
+            .iter()
+            .zip(b.lengths.iter())
+            .all(|(x, y)| f32_cache_eq(*x, *y))
 }
 
 /// One join polygon at `index`. Bevel uses a flat outer triangle; Miter
@@ -662,6 +1011,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [10, 10, 10, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -684,6 +1034,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [0, 0, 255, 255],
             }),
             anchors: vec![
@@ -870,6 +1221,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
@@ -915,6 +1267,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [0, 0, 255, 128],
             }),
             anchors: vec![
@@ -948,6 +1301,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [0, 0, 255, 0],
             }),
             anchors: vec![
@@ -1050,6 +1404,7 @@ mod tests {
                     cap: crate::vector::StrokeCap::Round,
 
                     join: crate::vector::StrokeJoin::Round,
+                    dash: StrokeDash::solid(),
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![Anchor::corner([0.5, 0.5])],
@@ -1070,6 +1425,7 @@ mod tests {
                     cap: crate::vector::StrokeCap::Round,
 
                     join: crate::vector::StrokeJoin::Round,
+                    dash: StrokeDash::solid(),
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![
@@ -1086,6 +1442,7 @@ mod tests {
                     cap: crate::vector::StrokeCap::Round,
 
                     join: crate::vector::StrokeJoin::Round,
+                    dash: StrokeDash::solid(),
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![
@@ -1119,6 +1476,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
@@ -1274,6 +1632,7 @@ mod tests {
                 color: [10, 20, 30, 255],
                 cap,
                 join: StrokeJoin::Round,
+                dash: StrokeDash::solid(),
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
         };
@@ -1306,6 +1665,7 @@ mod tests {
                     cap: StrokeCap::Round,
 
                     join: crate::vector::StrokeJoin::Round,
+                    dash: StrokeDash::solid(),
                     ..closed.stroke.expect("closed stroke")
                 }),
                 ..closed.clone()
@@ -1320,6 +1680,7 @@ mod tests {
                     cap: StrokeCap::Butt,
 
                     join: crate::vector::StrokeJoin::Round,
+                    dash: StrokeDash::solid(),
                     ..closed.stroke.expect("closed stroke")
                 }),
                 ..closed
@@ -1368,6 +1729,7 @@ mod tests {
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Butt,
                 join,
+                dash: StrokeDash::solid(),
             }),
             anchors: vec![
                 Anchor::corner([0.25, 0.75]),
@@ -1458,6 +1820,195 @@ mod tests {
     }
 
     #[test]
+    fn dash_pattern_alternates_offsets_and_repeats_odd_patterns() {
+        let dash = StrokeDash::from_lengths(&[0.25, 0.125], 0.0).expect("valid dash");
+        let pattern = DashPattern::new(dash, 1.0).expect("pattern");
+        let intervals = pattern.intervals(0.0, 1.0).expect("intervals");
+        assert_eq!(intervals, vec![(0.0, 0.25), (0.375, 0.625), (0.75, 1.0)]);
+
+        let offset = StrokeDash::from_lengths(&[0.25, 0.125], 0.125).expect("offset dash");
+        let pattern = DashPattern::new(offset, 1.0).expect("offset pattern");
+        let intervals = pattern.intervals(0.0, 0.75).expect("offset intervals");
+        assert_eq!(intervals, vec![(0.0, 0.125), (0.25, 0.5), (0.625, 0.75)]);
+
+        let odd = StrokeDash::from_lengths(&[0.25], 0.0).expect("odd dash");
+        let pattern = DashPattern::new(odd, 1.0).expect("odd pattern");
+        assert_eq!(
+            pattern.intervals(0.0, 1.0).expect("odd intervals"),
+            vec![(0.0, 0.25), (0.5, 0.75)]
+        );
+        let zero_off =
+            StrokeDash::from_lengths(&[0.25, 0.0, 0.25, 0.25], 0.0).expect("zero off length");
+        let pattern = DashPattern::new(zero_off, 1.0).expect("zero-off pattern");
+        assert_eq!(
+            pattern.intervals(0.0, 1.0).expect("zero-off intervals"),
+            vec![(0.0, 0.5), (0.75, 1.0)],
+            "a zero off-length merges contiguous dashes instead of adding caps"
+        );
+        let zero_on =
+            StrokeDash::from_lengths(&[0.0, 0.25, 0.25, 0.25], 0.0).expect("zero on length");
+        let pattern = DashPattern::new(zero_on, 1.0).expect("zero-on pattern");
+        assert_eq!(
+            pattern.intervals(0.0, 1.0).expect("zero-on intervals"),
+            vec![(0.25, 0.5)]
+        );
+        assert!(StrokeDash::from_lengths(&[0.0, 0.0], 0.0).is_err());
+        assert!(StrokeDash::from_lengths(&[-0.1, 0.2], 0.0).is_err());
+        assert!(StrokeDash::from_lengths(&[0.1; 9], 0.0).is_err());
+    }
+
+    #[test]
+    fn dashed_strokes_emit_caps_joins_and_scaled_intervals() {
+        let shape = |cap, join, dash| VectorShape {
+            closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+                cap,
+                join,
+                dash,
+            }),
+            anchors: vec![Anchor::corner([0.0, 0.5]), Anchor::corner([1.0, 0.5])],
+        };
+        let dash = StrokeDash::from_lengths(&[0.25, 0.25], 0.0).expect("dash");
+        let butt = stroke_polys(
+            &shape(StrokeCap::Butt, StrokeJoin::Round, dash),
+            &centerline(&shape(StrokeCap::Butt, StrokeJoin::Round, dash), 16, 16).unwrap(),
+            16,
+            16,
+        )
+        .expect("butt dashes");
+        assert!(butt.iter().all(|polygon| polygon.len() == 4));
+        let runs = butt.windows(2).fold(1usize, |runs, pair| {
+            let right = pair[0]
+                .iter()
+                .map(|p| p[0])
+                .fold(f64::NEG_INFINITY, f64::max);
+            let left = pair[1].iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+            runs + usize::from(left > right + 1e-6)
+        });
+        assert_eq!(runs, 2, "16px line, 4px on / 4px off");
+
+        let round = stroke_polys(
+            &shape(StrokeCap::Round, StrokeJoin::Round, dash),
+            &centerline(&shape(StrokeCap::Round, StrokeJoin::Round, dash), 16, 16).unwrap(),
+            16,
+            16,
+        )
+        .expect("round dash caps");
+        assert_eq!(round.len(), butt.len() + 4, "four round dash caps added");
+
+        let square = stroke_polys(
+            &shape(StrokeCap::Square, StrokeJoin::Round, dash),
+            &centerline(&shape(StrokeCap::Square, StrokeJoin::Round, dash), 16, 16).unwrap(),
+            16,
+            16,
+        )
+        .expect("square dash caps");
+        assert_eq!(square.len(), butt.len());
+        let min_x = square[0].iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+        let max_x = square
+            .last()
+            .expect("second dash run")
+            .iter()
+            .map(|p| p[0])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((min_x + 2.0).abs() < 1e-6 && (max_x - 14.0).abs() < 1e-6);
+
+        let zero_off =
+            StrokeDash::from_lengths(&[0.25, 0.0, 0.25, 0.25], 0.0).expect("zero off length");
+        let zero_butt = stroke_polys(
+            &shape(StrokeCap::Butt, StrokeJoin::Round, zero_off),
+            &centerline(&shape(StrokeCap::Butt, StrokeJoin::Round, zero_off), 16, 16).unwrap(),
+            16,
+            16,
+        )
+        .expect("zero-gap butt dashes");
+        let zero_round = stroke_polys(
+            &shape(StrokeCap::Round, StrokeJoin::Round, zero_off),
+            &centerline(
+                &shape(StrokeCap::Round, StrokeJoin::Round, zero_off),
+                16,
+                16,
+            )
+            .unwrap(),
+            16,
+            16,
+        )
+        .expect("zero-gap round caps");
+        assert_eq!(
+            zero_round.len(),
+            zero_butt.len() + 4,
+            "two merged dash runs get four caps, not a false cap at the zero gap"
+        );
+
+        let turn_shape = |dash| VectorShape {
+            anchors: vec![
+                Anchor::corner([0.25, 0.75]),
+                Anchor::corner([0.50, 0.75]),
+                Anchor::corner([0.50, 0.25]),
+            ],
+            ..shape(StrokeCap::Butt, StrokeJoin::Bevel, dash)
+        };
+        let continuous = StrokeDash::from_lengths(&[2.0, 1.0], 0.0).expect("continuous dash");
+        let joined = stroke_polys(
+            &turn_shape(continuous),
+            &centerline(&turn_shape(continuous), 16, 16).unwrap(),
+            16,
+            16,
+        )
+        .expect("continuous join");
+        assert!(joined.iter().any(|polygon| polygon.len() == 3));
+        let gap = StrokeDash::from_lengths(&[0.25, 0.5], 0.0).expect("gap dash");
+        let broken = stroke_polys(
+            &turn_shape(gap),
+            &centerline(&turn_shape(gap), 16, 16).unwrap(),
+            16,
+            16,
+        )
+        .expect("gap at join");
+        assert!(!broken.iter().any(|polygon| polygon.len() == 3));
+    }
+
+    #[test]
+    fn dash_json_cache_and_invalid_values_are_safe() {
+        let dash = StrokeDash::from_lengths(&[0.25, 0.125], 0.0625).expect("dash");
+        let shape = VectorShape {
+            closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+                cap: StrokeCap::Round,
+                join: StrokeJoin::Round,
+                dash,
+            }),
+            anchors: vec![Anchor::corner([0.0, 0.5]), Anchor::corner([1.0, 0.5])],
+        };
+        let json = serde_json::to_string(&shape).expect("serialize dash");
+        let back: VectorShape = serde_json::from_str(&json).expect("deserialize dash");
+        assert_eq!(back.stroke.expect("stroke").dash, dash);
+        let old: VectorShape = serde_json::from_str(
+            r#"{"closed":false,"fill":[0,0,0,0],"stroke":{"width":0.25,"color":[10,20,30,255]},"anchors":[]}"#,
+        )
+        .expect("pre-dash project loads");
+        assert!(old.stroke.expect("old stroke").dash.is_solid());
+        let mut changed = shape.clone();
+        changed.stroke.as_mut().unwrap().dash.offset = 0.125;
+        assert!(!shape.same_cache_key(&changed));
+        let mut invalid = shape;
+        invalid.stroke.as_mut().unwrap().dash.len = 9;
+        let line = centerline(&invalid, 16, 16).expect("centerline");
+        assert_eq!(
+            stroke_polys(&invalid, &line, 16, 16),
+            Err(VectorError::InvalidDash)
+        );
+    }
+
+    #[test]
     fn stroke_geometry_budget_is_typed_error() {
         let shape = VectorShape {
             closed: false,
@@ -1468,6 +2019,7 @@ mod tests {
                 cap: crate::vector::StrokeCap::Round,
 
                 join: crate::vector::StrokeJoin::Round,
+                dash: StrokeDash::solid(),
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.5, 0.5]); 300],
