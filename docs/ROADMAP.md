@@ -22,10 +22,11 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K6c stroke join options are landed at `68cbf388`, on K6b stroke cap options
-`1839de83` and K6a even-odd fill `7372aa53`. Round, Miter, and Bevel joins
-have closure-safe geometry and SVG roundtrip. Next: dashed strokes or
-multi-shape input; release work remains gated.
+K6d dash patterns are landed at `58f9e160`, on K6c stroke joins `68cbf388`,
+K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`. Bounded dash
+patterns have UV-scaled segmentation, cap/join behavior, closure continuity,
+and SVG roundtrip. Next: multi-shape input or further vector hardening;
+release work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 
