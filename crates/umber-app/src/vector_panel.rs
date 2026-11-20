@@ -667,6 +667,13 @@ mod tests {
         let parse_failure = import_with_io(&mut doc, || Ok(3), || Ok(b"not svg".to_vec()));
         assert!(parse_failure.is_err());
         assert_eq!(doc_snapshot(&doc), before);
+
+        let grouped = br#"<svg width="1" height="1"><g opacity="0.5"><path d="M0 0"/></g></svg>"#;
+        let declared = grouped.len() as u64;
+        let group_failure =
+            import_with_io(&mut doc, move || Ok(declared), move || Ok(grouped.to_vec()));
+        assert!(group_failure.is_err());
+        assert_eq!(doc_snapshot(&doc), before);
     }
 
     #[test]
@@ -724,6 +731,23 @@ mod tests {
         assert_eq!(doc.session_history.len(), 1);
         assert!(doc.undo());
         assert!(doc.layers().is_empty());
+    }
+
+    #[test]
+    fn grouped_svg_import_adds_layers_in_one_undo_group() {
+        let mut doc = Document::default();
+        let svg = br##"<svg width="1" height="1" fill="#123456"><g><path d="M0 0 L1 0 L1 1 Z"/><g fill="none" stroke="#000"><path d="M0 1 L1 0"/></g></g></svg>"##;
+        let declared = svg.len() as u64;
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("grouped import succeeds");
+        assert_eq!(doc.layers().len(), 2);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(doc.history.len(), 4);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        assert_eq!(doc.layers().len(), 2);
     }
 
     #[test]

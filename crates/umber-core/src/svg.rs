@@ -1570,8 +1570,8 @@ pub(crate) fn import_vector_svg_many(
             max_pixels: crate::vector::MAX_VECTOR_RASTER_PIXELS,
         });
     }
-    // Root transform is supported; root paint/style/visibility inheritance is
-    // outside K5b's subset and must be refused rather than silently discarded.
+    // Root transform and inheritable paint are supported; root CSS, group
+    // opacity, visibility, and effects must be refused rather than discarded.
     refuse_root_import_presentation(&root_attrs)?;
     // Match the raster walker's root composition exactly: viewBox sizing from
     // root_geometry first, then the root transform/presentation attrs once.
@@ -1586,13 +1586,13 @@ pub(crate) fn import_vector_svg_many(
     )?;
     let root_ctm = root_style.ctm;
 
-    // A self-closing root has no parent frame for later path events. The
-    // tokenizer already rejects trailing content; this also keeps the import
-    // document invariant explicit if that policy ever changes.
+    // Each open group owns an effective inherited presentation frame. `None`
+    // skips an unknown/path subtree just like the raster document walker.
+    let root_frame = inherited_vector_paint(&[], &root_attrs);
     let mut stack = if root_self_closing {
         Vec::new()
     } else {
-        vec![true]
+        vec![Some(root_frame)]
     };
     let mut shapes = Vec::new();
     let mut total_anchors = 0usize;
@@ -1608,9 +1608,9 @@ pub(crate) fn import_vector_svg_many(
                 self_closing,
                 ..
             } => {
-                let known_parent = stack.last().copied().unwrap_or(false);
-                let descend = false;
-                if known_parent {
+                let parent = stack.last().and_then(|frame| frame.as_ref()).cloned();
+                let mut frame = None;
+                if let Some(parent) = parent {
                     if name == "path" {
                         if shapes.len() >= crate::vector::MAX_VECTOR_SHAPES {
                             return Err(SvgError::TooComplex {
@@ -1642,8 +1642,14 @@ pub(crate) fn import_vector_svg_many(
                                 limit: crate::vector::MAX_VECTOR_SHAPES,
                             });
                         }
-                        let (fill, stroke, fill_rule) =
-                            parse_vector_paint(&attrs, root_ctm, width, height, root_style.rule)?;
+                        let effective_attrs = inherited_vector_paint(&parent, &attrs);
+                        let (fill, stroke, fill_rule) = parse_vector_paint(
+                            &effective_attrs,
+                            root_ctm,
+                            width,
+                            height,
+                            root_style.rule,
+                        )?;
                         if subpaths.len() > 1 && fill[3] > 0 {
                             return Err(SvgError::Unsupported {
                                 what: "filled compound subpaths require one compound layer"
@@ -1664,9 +1670,8 @@ pub(crate) fn import_vector_svg_many(
                             shapes.push(crate::vector::VectorParams { shape });
                         }
                     } else if name == "g" {
-                        return Err(SvgError::Unsupported {
-                            what: "groups in vector import".to_owned(),
-                        });
+                        refuse_group_import_effects(&attrs)?;
+                        frame = Some(inherited_vector_paint(&parent, &attrs));
                     } else if is_shape(&name) {
                         return Err(SvgError::Unsupported {
                             what: format!("multiple shapes in one vector layer: <{name}>"),
@@ -1674,7 +1679,7 @@ pub(crate) fn import_vector_svg_many(
                     }
                 }
                 if !self_closing {
-                    stack.push(descend);
+                    stack.push(frame);
                 }
             }
         }
@@ -1700,19 +1705,9 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
 }
 
 fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
-    // Only transform and an explicit nonzero/even-odd rule are meaningful to
-    // the import subset. Everything else here would be dropped instead of
-    // inherited.
+    // Transform and inheritable paint are meaningful to the import subset.
+    // Group opacity/effects/CSS would be dropped instead of inherited.
     for key in [
-        "fill",
-        "stroke",
-        "fill-opacity",
-        "stroke-opacity",
-        "stroke-width",
-        "stroke-linecap",
-        "stroke-linejoin",
-        "stroke-dasharray",
-        "stroke-dashoffset",
         "clip-path",
         "mask",
         "filter",
@@ -1733,13 +1728,89 @@ fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
         }
     }
     if let Some(rule) = find_attr(attrs, "fill-rule") {
-        if !matches!(rule.value.trim(), "nonzero" | "evenodd") {
+        if !matches!(rule.value.trim(), "" | "inherit" | "nonzero" | "evenodd") {
             return Err(SvgError::Unsupported {
                 what: format!("root fill-rule {}", rule.value.trim()),
             });
         }
     }
-    Ok(())
+    refuse_nondefault_miterlimit(attrs, "root")
+}
+
+fn refuse_group_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
+    for key in [
+        "transform",
+        "style",
+        "opacity",
+        "display",
+        "visibility",
+        "clip-path",
+        "mask",
+        "filter",
+        "marker-start",
+        "marker-mid",
+        "marker-end",
+        "vector-effect",
+        "paint-order",
+    ] {
+        if find_attr(attrs, key).is_some() {
+            return Err(SvgError::Unsupported {
+                what: format!("group {key} in vector import"),
+            });
+        }
+    }
+    refuse_nondefault_miterlimit(attrs, "group")
+}
+
+fn refuse_nondefault_miterlimit(attrs: &[Attr], element: &str) -> Result<(), SvgError> {
+    let Some(attr) = find_attr(attrs, "stroke-miterlimit") else {
+        return Ok(());
+    };
+    let raw = attr.value.trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("inherit")
+        || raw.parse::<f32>().is_ok_and(|value| value == 4.0)
+    {
+        Ok(())
+    } else {
+        Err(SvgError::Unsupported {
+            what: format!("{element} stroke-miterlimit {raw} in vector import"),
+        })
+    }
+}
+
+const VECTOR_INHERITED_PAINT_ATTRS: [&str; 10] = [
+    "fill",
+    "fill-opacity",
+    "fill-rule",
+    "stroke",
+    "stroke-opacity",
+    "stroke-width",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+];
+
+/// Composes inherited SVG presentation attributes. Unsupported color schemes
+/// and effects are refused by the leaf paint/effect parsers.
+fn inherited_vector_paint(parent: &[Attr], attrs: &[Attr]) -> Vec<Attr> {
+    let mut effective = parent.to_vec();
+    for key in VECTOR_INHERITED_PAINT_ATTRS {
+        let Some(attr) = find_attr(attrs, key) else {
+            continue;
+        };
+        let value = attr.value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("inherit") {
+            continue;
+        }
+        if let Some(existing) = effective.iter_mut().find(|existing| existing.name == key) {
+            *existing = attr.clone();
+        } else {
+            effective.push(attr.clone());
+        }
+    }
+    effective
 }
 
 fn refuse_path_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
@@ -1762,7 +1833,7 @@ fn refuse_path_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
             });
         }
     }
-    Ok(())
+    refuse_nondefault_miterlimit(attrs, "path")
 }
 
 fn parse_vector_paint(

@@ -780,11 +780,11 @@ mod tests {
 
     #[test]
     fn multi_path_import_has_shape_and_total_anchor_budgets() {
-        let mut accepted_paths = String::from("<svg width=\"1\" height=\"1\">");
+        let mut accepted_paths = String::from("<svg width=\"1\" height=\"1\"><g>");
         for _ in 0..crate::vector::MAX_VECTOR_SHAPES {
             accepted_paths.push_str("<path d=\"M0 0 L1 1\"/>");
         }
-        accepted_paths.push_str("</svg>");
+        accepted_paths.push_str("</g></svg>");
         assert_eq!(
             import_svg_many(accepted_paths.as_bytes())
                 .expect("exact path cap is accepted")
@@ -792,11 +792,11 @@ mod tests {
             crate::vector::MAX_VECTOR_SHAPES
         );
 
-        let mut paths = String::from("<svg width=\"1\" height=\"1\">");
+        let mut paths = String::from("<svg width=\"1\" height=\"1\"><g>");
         for _ in 0..=crate::vector::MAX_VECTOR_SHAPES {
             paths.push_str("<path d=\"M0 0 L1 1\"/>");
         }
-        paths.push_str("</svg>");
+        paths.push_str("</g></svg>");
         assert!(matches!(
             import_svg_many(paths.as_bytes()),
             Err(crate::svg::SvgError::TooComplex {
@@ -844,12 +844,60 @@ mod tests {
     }
 
     #[test]
-    fn root_and_path_presentation_effects_are_typed_refusals() {
+    fn root_and_nested_groups_inherit_override_and_isolate_paint() {
+        let svg = br##"<svg width="1" height="1" fill="#112233" fill-opacity="0.5" fill-rule="evenodd" stroke="#445566" stroke-opacity="0.25" stroke-width="2" stroke-linecap="butt" stroke-linejoin="miter" stroke-dasharray="2 3" stroke-dashoffset="1"><g stroke="#AABBCC" stroke-linecap="square"><g fill="none" fill-rule="nonzero"><path d="M0 0 L1 1"/></g></g><g><path d="M0 1 L1 0"/></g></svg>"##;
+        let shapes = import_svg_many(svg).expect("group paint inheritance");
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(shapes[0].shape.fill, [0, 0, 0, 0]);
+        assert_eq!(shapes[0].shape.fill_rule, crate::svg::FillRule::NonZero);
+        let first = shapes[0].shape.stroke.as_ref().expect("first stroke");
+        assert_eq!(first.color, [170, 187, 204, 64]);
+        assert_eq!(first.width, 2.0);
+        assert_eq!(first.cap, crate::vector::StrokeCap::Square);
+        assert_eq!(first.join, crate::vector::StrokeJoin::Miter);
+        assert_eq!(
+            first.dash,
+            crate::vector::StrokeDash::from_lengths(&[2.0, 3.0], 1.0).expect("dash")
+        );
+
+        assert_eq!(shapes[1].shape.fill, [17, 34, 51, 128]);
+        assert_eq!(shapes[1].shape.fill_rule, crate::svg::FillRule::EvenOdd);
+        let second = shapes[1].shape.stroke.as_ref().expect("second stroke");
+        assert_eq!(second.color, [68, 85, 102, 64]);
+        assert_eq!(second.cap, crate::vector::StrokeCap::Butt);
+        assert_eq!(second.dash, first.dash);
+    }
+
+    #[test]
+    fn group_inherit_and_empty_values_preserve_parent_properties() {
+        let svg = br##"<svg width="1" height="1" fill="#010203" fill-opacity="0.5"><g fill="inherit" fill-opacity="inherit"><path fill="" d="M0 0 L1 1 Z"/></g><g fill="#A0B0C0"><path fill="inherit" d="M0 1 L1 0 Z"/></g></svg>"##;
+        let shapes = import_svg_many(svg).expect("explicit inheritance");
+        assert_eq!(shapes[0].shape.fill, [1, 2, 3, 128]);
+        assert_eq!(shapes[1].shape.fill, [160, 176, 192, 128]);
+
+        let skipped = br##"<svg width="1" height="1"><defs><g fill="#FFFFFF"><path d="M0 0 L1 1"/></g></defs><g><path d="M0 0 L1 1"/></g></svg>"##;
+        assert_eq!(
+            import_svg_many(skipped)
+                .expect("unknown subtree is skipped")
+                .len(),
+            1
+        );
+        let one =
+            br##"<svg width="1" height="1"><g fill="#010203"><path d="M0 0 L1 1 Z"/></g></svg>"##;
+        assert_eq!(
+            import_svg(one)
+                .expect("single grouped path compatibility")
+                .shape
+                .fill,
+            [1, 2, 3, 255]
+        );
+        let default_miter = br##"<svg width="1" height="1" stroke-miterlimit="4"><g stroke-miterlimit="inherit"><path stroke-miterlimit="4.0" d="M0 0 L1 1"/></g></svg>"##;
+        assert!(import_svg(default_miter).is_ok());
+    }
+
+    #[test]
+    fn root_group_and_path_presentation_effects_are_typed_refusals() {
         let cases: &[(&[u8], &str)] = &[
-            (
-                br##"<svg width="1" height="1" fill="#fff"><path d="M0 0"/></svg>"##,
-                "root fill",
-            ),
             (
                 br#"<svg width="1" height="1" style="fill:none"><path d="M0 0"/></svg>"#,
                 "root style",
@@ -867,12 +915,36 @@ mod tests {
                 "root visibility",
             ),
             (
-                br##"<svg width="1" height="1" stroke="#fff"><path d="M0 0"/></svg>"##,
-                "root stroke",
+                br#"<svg width="1" height="1"><g transform="translate(1 0)"><path d="M0 0"/></g></svg>"#,
+                "group transform",
             ),
             (
-                br#"<svg width="1" height="1" stroke-width="2"><path d="M0 0"/></svg>"#,
-                "root stroke-width",
+                br#"<svg width="1" height="1"><g style="fill:none"><path d="M0 0"/></g></svg>"#,
+                "group style",
+            ),
+            (
+                br#"<svg width="1" height="1"><g opacity="0.5"><path d="M0 0"/></g></svg>"#,
+                "group opacity",
+            ),
+            (
+                br#"<svg width="1" height="1"><g display="none"><path d="M0 0"/></g></svg>"#,
+                "group display",
+            ),
+            (
+                br#"<svg width="1" height="1"><g visibility="hidden"><path d="M0 0"/></g></svg>"#,
+                "group visibility",
+            ),
+            (
+                br#"<svg width="1" height="1"><g clip-path="url(#c)"><path d="M0 0"/></g></svg>"#,
+                "group clip-path",
+            ),
+            (
+                br#"<svg width="1" height="1"><g stroke-miterlimit="2"><path d="M0 0"/></g></svg>"#,
+                "group stroke-miterlimit",
+            ),
+            (
+                br#"<svg width="1" height="1" stroke-miterlimit="2"><path d="M0 0"/></svg>"#,
+                "root stroke-miterlimit",
             ),
             (
                 br#"<svg width="1" height="1"><path opacity="0.5" d="M0 0"/></svg>"#,
@@ -911,18 +983,6 @@ mod tests {
                 "path vector-effect",
             ),
             (
-                br#"<svg width="1" height="1" fill-opacity="0.5"><path d="M0 0"/></svg>"#,
-                "root fill-opacity",
-            ),
-            (
-                br#"<svg width="1" height="1" stroke-linecap="butt"><path d="M0 0"/></svg>"#,
-                "root stroke-linecap",
-            ),
-            (
-                br#"<svg width="1" height="1" stroke-linejoin="miter"><path d="M0 0"/></svg>"#,
-                "root stroke-linejoin",
-            ),
-            (
                 br#"<svg width="1" height="1" clip-path="url(#c)"><path d="M0 0"/></svg>"#,
                 "root clip-path",
             ),
@@ -949,6 +1009,10 @@ mod tests {
             (
                 br#"<svg width="1" height="1"><path paint-order="stroke" d="M0 0"/></svg>"#,
                 "path paint-order",
+            ),
+            (
+                br#"<svg width="1" height="1"><path stroke-miterlimit="2" d="M0 0"/></svg>"#,
+                "path stroke-miterlimit",
             ),
         ];
         for (svg, needle) in cases {
@@ -987,7 +1051,6 @@ mod tests {
         let cases: &[&[u8]] = &[
             br#"<svg width="1" height="1"><path d="M0 0"/><path d="M1 1"/></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 M1 1"/></svg>"#,
-            br#"<svg width="1" height="1"><g><path d="M0 0"/></g></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 A1 1 0 0 0 1 1"/></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z" fill-rule="winding"/></svg>"#,
             "<svg width=\"1\" height=\"1\"><path d=\"M0 0\" fill=\"#øøø\"/></svg>".as_bytes(),
