@@ -2,8 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K7a multi-path SVG import `29a02f9a` is pushed on top of K6d `58f9e160`; the K7a brief is `925c525b`.
-`import_svg_many` returns one shape per top-level path in order with independent paint, cap, join, and dash state; the existing single-path API stays strict. Imports cap at 256 paths and 65,536 total anchors with exact acceptance and typed over-limit refusals. The panel creates one vector layer per path in one undo group, redo restores all, the shell selects the last id, and en/pt singular/plural notices are wired. Groups, non-path shapes, path transforms/style, unsupported effects, and multi-subpath `d` remain refused. Final battery is GREEN: clippy 0 errors, 21 suites, 2,188 passed / 0 failed (`vector-multipath-final-battery.log`). Bounded review returned SHIP. Multi-subpath splitting and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
+**Updated 2026-11-20:** K7b stroke-only subpath import `3d087302` is pushed on top of K7a `29a02f9a`; the K7b brief is `e76cd23e`.
+`VectorImportBuilder` collects moveto-delimited subpaths in order, including segments after closepath. `import_svg_many` splits stroke-only compound paths into one shape per subpath with shared stroke/cap/join/dash state and transparent fill. Filled compound subpaths remain typed refusals to preserve nonzero/evenodd hole semantics. The 256-shape and 65,536-anchor budgets include subpaths; strict single-shape `import_svg` remains. Panel creates every split layer in one undo group. Final battery is GREEN: clippy 0 errors, 21 suites, 2,190 passed / 0 failed (`vector-subpaths-final-battery.log`). Bounded review returned SHIP; direct `Z` + segment coverage passed. Compound fill modeling and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 

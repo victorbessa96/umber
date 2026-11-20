@@ -22,11 +22,12 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K7a multi-path SVG import is landed at `29a02f9a`, on K6d dash patterns
-`58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`, and K6a
-even-odd fill `7372aa53`. Up to 256 paths and 65,536 total anchors import as
-one vector layer per path in one undo group. Next: multi-subpath splitting or
-further vector hardening; release work remains gated.
+K7b stroke-only subpath import is landed at `3d087302`, on K7a multi-path
+import `29a02f9a`, K6d dash patterns `58f9e160`, K6c stroke joins `68cbf388`,
+K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`. Stroke-only
+subpaths split in order with closepath handling; filled compound subpaths stay
+refused to preserve fill-rule holes. Next: compound fill modeling or further
+vector hardening; release work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 
