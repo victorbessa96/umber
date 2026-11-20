@@ -736,6 +736,49 @@ mod tests {
     }
 
     #[test]
+    fn stroke_only_subpaths_split_and_filled_compounds_are_refused() {
+        let svg = br##"<svg width="1" height="1"><path fill="none" stroke="#000000" d="M0 0 L1 0 M0 1 L1 1"/></svg>"##;
+        let shapes = import_svg_many(svg).expect("stroke subpaths split");
+        assert_eq!(shapes.len(), 2);
+        assert!(shapes.iter().all(|params| params.shape.fill[3] == 0));
+        assert!(shapes.iter().all(|params| params.shape.stroke.is_some()));
+        assert_eq!(shapes[0].shape.anchors[0].pos, [0.0, 0.0]);
+        assert_eq!(shapes[1].shape.anchors[0].pos, [0.0, 1.0]);
+        assert!(matches!(
+            import_svg(svg),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+
+        let after_close = br##"<svg width="1" height="1"><path fill="none" stroke="#000000" d="M0 0 L1 0 Z L1 1"/></svg>"##;
+        let split = import_svg_many(after_close).expect("segment after closepath splits");
+        assert_eq!(split.len(), 2);
+        assert!(split[0].shape.closed);
+        assert!(!split[1].shape.closed);
+        assert_eq!(split[1].shape.anchors[0].pos, [0.0, 0.0]);
+
+        let filled = br##"<svg width="1" height="1"><path fill="#FFFFFF" d="M0 0 L1 0 L1 1 Z M0 0 L1 1 L0 1 Z"/></svg>"##;
+        assert!(matches!(
+            import_svg_many(filled),
+            Err(crate::svg::SvgError::Unsupported { what }) if what.contains("filled compound")
+        ));
+
+        let mut d = String::new();
+        for index in 0..=crate::vector::MAX_VECTOR_SHAPES {
+            d.push_str(&format!("M{index} 0 L{index} 1 "));
+        }
+        let flood = format!(
+            "<svg width=\"1\" height=\"1\"><path fill=\"none\" stroke=\"#000\" d=\"{d}\"/></svg>"
+        );
+        assert!(matches!(
+            import_svg_many(flood.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "vector paths",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn multi_path_import_has_shape_and_total_anchor_budgets() {
         let mut accepted_paths = String::from("<svg width=\"1\" height=\"1\">");
         for _ in 0..crate::vector::MAX_VECTOR_SHAPES {

@@ -1356,6 +1356,7 @@ fn build_path<S: PathSink>(d: &Attr, b: &mut S) -> Result<(), SvgError> {
 /// CTM and normalized to UV; no flattening occurs.
 struct VectorImportBuilder {
     shape: crate::vector::VectorShape,
+    subpaths: Vec<crate::vector::VectorShape>,
     ctm: Affine,
     width: u32,
     height: u32,
@@ -1365,6 +1366,7 @@ impl VectorImportBuilder {
     fn new(ctm: Affine, width: u32, height: u32) -> Self {
         Self {
             shape: crate::vector::VectorShape::empty(),
+            subpaths: Vec::new(),
             ctm,
             width,
             height,
@@ -1398,11 +1400,27 @@ impl VectorImportBuilder {
         Ok(())
     }
 
+    fn start_subpath(&mut self) {
+        if !self.shape.anchors.is_empty() {
+            self.subpaths.push(std::mem::replace(
+                &mut self.shape,
+                crate::vector::VectorShape::empty(),
+            ));
+        } else {
+            self.shape = crate::vector::VectorShape::empty();
+        }
+    }
+
+    fn finish(mut self) -> Vec<crate::vector::VectorShape> {
+        if !self.shape.anchors.is_empty() {
+            self.subpaths.push(self.shape);
+        }
+        self.subpaths
+    }
+
     fn ensure_open(&mut self, from: [f64; 2]) -> Result<(), SvgError> {
         if self.shape.closed {
-            return Err(SvgError::Unsupported {
-                what: "multiple subpaths in one vector layer".to_owned(),
-            });
+            self.start_subpath();
         }
         if self.shape.anchors.is_empty() {
             return self.push_anchor(from);
@@ -1424,11 +1442,7 @@ impl VectorImportBuilder {
 
 impl PathSink for VectorImportBuilder {
     fn sink_move_to(&mut self, point: [f64; 2]) -> Result<(), SvgError> {
-        if !self.shape.anchors.is_empty() {
-            return Err(SvgError::Unsupported {
-                what: "multiple subpaths in one vector layer".to_owned(),
-            });
-        }
+        self.start_subpath();
         self.push_anchor(point)
     }
 
@@ -1619,20 +1633,36 @@ pub(crate) fn import_vector_svg_many(
                         refuse_path_import_effects(&attrs)?;
                         let mut builder = VectorImportBuilder::new(root_ctm, width, height);
                         build_path(d, &mut builder)?;
-                        let mut shape = builder.shape;
-                        let (fill, stroke, fill_rule) =
-                            parse_vector_paint(&attrs, root_ctm, width, height, root_style.rule)?;
-                        shape.fill = fill;
-                        shape.stroke = stroke;
-                        shape.fill_rule = fill_rule;
-                        total_anchors = total_anchors.saturating_add(shape.anchors.len());
-                        if total_anchors > crate::vector::MAX_VECTOR_ANCHORS {
+                        let subpaths = builder.finish();
+                        if shapes.len().saturating_add(subpaths.len())
+                            > crate::vector::MAX_VECTOR_SHAPES
+                        {
                             return Err(SvgError::TooComplex {
-                                what: "vector anchors across paths",
-                                limit: crate::vector::MAX_VECTOR_ANCHORS,
+                                what: "vector paths",
+                                limit: crate::vector::MAX_VECTOR_SHAPES,
                             });
                         }
-                        shapes.push(crate::vector::VectorParams { shape });
+                        let (fill, stroke, fill_rule) =
+                            parse_vector_paint(&attrs, root_ctm, width, height, root_style.rule)?;
+                        if subpaths.len() > 1 && fill[3] > 0 {
+                            return Err(SvgError::Unsupported {
+                                what: "filled compound subpaths require one compound layer"
+                                    .to_owned(),
+                            });
+                        }
+                        for mut shape in subpaths {
+                            shape.fill = fill;
+                            shape.stroke = stroke;
+                            shape.fill_rule = fill_rule;
+                            total_anchors = total_anchors.saturating_add(shape.anchors.len());
+                            if total_anchors > crate::vector::MAX_VECTOR_ANCHORS {
+                                return Err(SvgError::TooComplex {
+                                    what: "vector anchors across paths",
+                                    limit: crate::vector::MAX_VECTOR_ANCHORS,
+                                });
+                            }
+                            shapes.push(crate::vector::VectorParams { shape });
+                        }
                     } else if name == "g" {
                         return Err(SvgError::Unsupported {
                             what: "groups in vector import".to_owned(),
