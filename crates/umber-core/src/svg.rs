@@ -1758,11 +1758,19 @@ fn parse_vector_paint(
             }
         },
     };
-    if find_attr(attrs, "stroke-linejoin").is_none_or(|attr| attr.value.trim() != "round") {
-        return Err(SvgError::Unsupported {
-            what: "stroke-linejoin must be round for vector import".to_owned(),
-        });
-    }
+    let join = match find_attr(attrs, "stroke-linejoin") {
+        None => crate::vector::StrokeJoin::Round,
+        Some(attr) => match attr.value.trim() {
+            "miter" => crate::vector::StrokeJoin::Miter,
+            "round" => crate::vector::StrokeJoin::Round,
+            "bevel" => crate::vector::StrokeJoin::Bevel,
+            other => {
+                return Err(SvgError::Unsupported {
+                    what: format!("stroke-linejoin {other}"),
+                });
+            }
+        },
+    };
     let raw_width = match find_attr(attrs, "stroke-width") {
         Some(attr) => parse_length(attr, "path")?,
         None => 1.0,
@@ -1789,6 +1797,7 @@ fn parse_vector_paint(
             width: stroke_width,
             color,
             cap,
+            join,
         }),
         fill_rule,
     ))

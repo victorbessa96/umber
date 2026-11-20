@@ -46,6 +46,18 @@ pub enum StrokeCap {
     Square,
 }
 
+/// Join style at a real direction change. `Round` preserves the K2 raster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StrokeJoin {
+    /// Extend the outer edges to their intersection, bounded by 4× radius.
+    Miter,
+    /// A semicircular join centered on the turn.
+    #[default]
+    Round,
+    /// A flat bevel between the two outer edges.
+    Bevel,
+}
+
 /// An optional stroke around the shape's outline.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
@@ -56,6 +68,9 @@ pub struct Stroke {
     /// Endpoint style. Additive: old projects default to Round.
     #[serde(default)]
     pub cap: StrokeCap,
+    /// Join style at direction changes. Additive: old projects default to Round.
+    #[serde(default)]
+    pub join: StrokeJoin,
 }
 
 /// The shape a vector layer holds. `anchors` in path order; `closed`
@@ -128,7 +143,10 @@ fn anchor_cache_eq(a: &Anchor, b: &Anchor) -> bool {
 fn stroke_cache_eq(a: Option<Stroke>, b: Option<Stroke>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => {
-            f32_cache_eq(a.width, b.width) && a.color == b.color && a.cap == b.cap
+            f32_cache_eq(a.width, b.width)
+                && a.color == b.color
+                && a.cap == b.cap
+                && a.join == b.join
         }
         (None, None) => true,
         _ => false,
@@ -341,9 +359,20 @@ fn stroke_polys(
     } else {
         shape.stroke.map(|s| s.cap).unwrap_or_default()
     };
+    let join = shape.stroke.map(|s| s.join).unwrap_or_default();
     for (index, &point) in centerline.iter().enumerate() {
-        let join = join_at(centerline, index);
-        if cap == StrokeCap::Round || join {
+        let turn = join_at(centerline, index, shape.closed);
+        let endpoint = if shape.closed {
+            false
+        } else {
+            index == 0 || index + 1 == centerline.len()
+        };
+        let ellipse = match (cap, join) {
+            (_, StrokeJoin::Round) => cap == StrokeCap::Round || turn,
+            (StrokeCap::Round, _) => endpoint && !turn,
+            _ => false,
+        };
+        if ellipse {
             if points.saturating_add(ellipse_cost) > MAX_VECTOR_POINTS {
                 return Err(VectorError::TooComplex {
                     what: "path points",
@@ -352,6 +381,22 @@ fn stroke_polys(
             }
             builder.ellipse(point, radius, radius);
             points += ellipse_cost;
+        } else if turn && join != StrokeJoin::Round {
+            let polygon = join_polygon(centerline, index, radius, join, shape.closed)?;
+            if polygon.is_empty() {
+                continue;
+            }
+            if points.saturating_add(polygon.len()) > MAX_VECTOR_POINTS {
+                return Err(VectorError::TooComplex {
+                    what: "path points",
+                    limit: MAX_VECTOR_POINTS,
+                });
+            }
+            builder.move_to(polygon[0]);
+            for i in 1..polygon.len() {
+                builder.line_to(polygon[i - 1], polygon[i]);
+            }
+            points += polygon.len();
         }
     }
     if cap == StrokeCap::Square && !shape.closed && centerline.len() >= 2 {
@@ -407,14 +452,97 @@ fn stroke_polys(
     Ok(builder.finish())
 }
 
+/// One join polygon at `index`. Bevel uses a flat outer triangle; Miter
+/// extends the outer edges to their intersection, falling back to bevel
+/// beyond a 4×radius miter limit. Closed paths use the last real segment
+/// as the previous segment for index 0, so the closure join is retained.
+fn join_polygon(
+    centerline: &[[f64; 2]],
+    index: usize,
+    radius: f64,
+    join: StrokeJoin,
+    closed: bool,
+) -> Result<Vec<[f64; 2]>, VectorError> {
+    if centerline.len() < 2 || index + 1 >= centerline.len() {
+        return Ok(Vec::new());
+    }
+    let a = if index == 0 {
+        if !closed {
+            return Ok(Vec::new());
+        }
+        centerline[centerline.len() - 2]
+    } else {
+        centerline[index - 1]
+    };
+    let b = centerline[index];
+    let c = centerline[index + 1];
+    let prev = [b[0] - a[0], b[1] - a[1]];
+    let next = [c[0] - b[0], c[1] - b[1]];
+    let prev_len = prev[0].hypot(prev[1]);
+    let next_len = next[0].hypot(next[1]);
+    if prev_len <= 0.0 || next_len <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let prev_normal = [-prev[1] / prev_len, prev[0] / prev_len];
+    let next_normal = [-next[1] / next_len, next[0] / next_len];
+    let cross = prev[0] * next[1] - prev[1] * next[0];
+    let outer_sign = if cross > 0.0 { -1.0 } else { 1.0 };
+    let prev_outer = [
+        b[0] + outer_sign * prev_normal[0] * radius,
+        b[1] + outer_sign * prev_normal[1] * radius,
+    ];
+    let next_outer = [
+        b[0] + outer_sign * next_normal[0] * radius,
+        b[1] + outer_sign * next_normal[1] * radius,
+    ];
+    if join == StrokeJoin::Miter {
+        let prev_start = [
+            a[0] + outer_sign * prev_normal[0] * radius,
+            a[1] + outer_sign * prev_normal[1] * radius,
+        ];
+        let next_end = [
+            c[0] + outer_sign * next_normal[0] * radius,
+            c[1] + outer_sign * next_normal[1] * radius,
+        ];
+        if let Some(miter) = line_intersection(prev_start, prev_outer, next_outer, next_end) {
+            let distance = (miter[0] - b[0]).hypot(miter[1] - b[1]);
+            if distance.is_finite() && distance <= 4.0 * radius {
+                return Ok(vec![prev_outer, miter, next_outer, b]);
+            }
+        }
+    }
+    Ok(vec![prev_outer, next_outer, b])
+}
+
+/// Intersects two finite line segments' supporting lines. `None` for
+/// parallel or non-finite intersections.
+fn line_intersection(a0: [f64; 2], a1: [f64; 2], b0: [f64; 2], b1: [f64; 2]) -> Option<[f64; 2]> {
+    let a = [a1[0] - a0[0], a1[1] - a0[1]];
+    let b = [b1[0] - b0[0], b1[1] - b0[1]];
+    let denominator = a[0] * b[1] - a[1] * b[0];
+    if denominator.abs() <= 1e-12 {
+        return None;
+    }
+    let t = ((b0[0] - a0[0]) * b[1] - (b0[1] - a0[1]) * b[0]) / denominator;
+    let point = [a0[0] + t * a[0], a0[1] + t * a[1]];
+    point.iter().all(|v| v.is_finite()).then_some(point)
+}
+
 /// Whether `index` is a genuine join rather than a collinear flattening
 /// point. Non-round caps still get round joins at real turns, but never
 /// get accidental caps from a collinear point near an endpoint.
-fn join_at(centerline: &[[f64; 2]], index: usize) -> bool {
-    if index == 0 || index + 1 >= centerline.len() {
+fn join_at(centerline: &[[f64; 2]], index: usize, closed: bool) -> bool {
+    if index + 1 >= centerline.len() {
         return false;
     }
-    let a = centerline[index - 1];
+    let a = if index == 0 {
+        if !closed || centerline.len() < 2 {
+            return false;
+        }
+        centerline[centerline.len() - 2]
+    } else {
+        centerline[index - 1]
+    };
     let b = centerline[index];
     let c = centerline[index + 1];
     let prev = [b[0] - a[0], b[1] - a[1]];
@@ -532,6 +660,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [10, 10, 10, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -552,6 +682,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: f32::NAN,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [0, 0, 255, 255],
             }),
             anchors: vec![
@@ -736,6 +868,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.25,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
@@ -779,6 +913,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.5,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [0, 0, 255, 128],
             }),
             anchors: vec![
@@ -810,6 +946,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.5,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [0, 0, 255, 0],
             }),
             anchors: vec![
@@ -910,6 +1048,8 @@ mod tests {
                 stroke: Some(Stroke {
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
+
+                    join: crate::vector::StrokeJoin::Round,
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![Anchor::corner([0.5, 0.5])],
@@ -928,6 +1068,8 @@ mod tests {
                 stroke: Some(Stroke {
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
+
+                    join: crate::vector::StrokeJoin::Round,
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![
@@ -942,6 +1084,8 @@ mod tests {
                 stroke: Some(Stroke {
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
+
+                    join: crate::vector::StrokeJoin::Round,
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![
@@ -973,6 +1117,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.25,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
@@ -1127,6 +1273,7 @@ mod tests {
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap,
+                join: StrokeJoin::Round,
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
         };
@@ -1157,6 +1304,8 @@ mod tests {
             &VectorShape {
                 stroke: Some(Stroke {
                     cap: StrokeCap::Round,
+
+                    join: crate::vector::StrokeJoin::Round,
                     ..closed.stroke.expect("closed stroke")
                 }),
                 ..closed.clone()
@@ -1169,6 +1318,8 @@ mod tests {
             &VectorShape {
                 stroke: Some(Stroke {
                     cap: StrokeCap::Butt,
+
+                    join: crate::vector::StrokeJoin::Round,
                     ..closed.stroke.expect("closed stroke")
                 }),
                 ..closed
@@ -1207,6 +1358,103 @@ mod tests {
     }
 
     #[test]
+    fn bevel_and_miter_joins_emit_the_expected_geometry() {
+        let shape = |join| VectorShape {
+            closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+                cap: StrokeCap::Butt,
+                join,
+            }),
+            anchors: vec![
+                Anchor::corner([0.25, 0.75]),
+                Anchor::corner([0.50, 0.75]),
+                Anchor::corner([0.50, 0.25]),
+            ],
+        };
+        let centerline = |join| centerline(&shape(join), 16, 16).expect("centerline");
+        let bevel = stroke_polys(
+            &shape(StrokeJoin::Bevel),
+            &centerline(StrokeJoin::Bevel),
+            16,
+            16,
+        )
+        .expect("bevel join");
+        assert!(bevel.iter().any(|polygon| polygon.len() == 3));
+        let line = centerline(StrokeJoin::Bevel);
+        let join_index = (0..line.len())
+            .find(|&index| join_at(&line, index, false))
+            .expect("an actual turn exists");
+        let actual = join_polygon(&line, join_index, 2.0, StrokeJoin::Bevel, false)
+            .expect("bevel polygon");
+        let expected = [[8.0, 14.0], [10.0, 12.0], [8.0, 12.0]];
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual[0] - expected[0]).abs() < 1e-6);
+            assert!((actual[1] - expected[1]).abs() < 1e-6);
+        }
+        let miter = stroke_polys(
+            &shape(StrokeJoin::Miter),
+            &centerline(StrokeJoin::Miter),
+            16,
+            16,
+        )
+        .expect("miter join");
+        assert!(miter.iter().any(|polygon| polygon.len() == 4));
+        let actual = join_polygon(&line, join_index, 2.0, StrokeJoin::Miter, false)
+            .expect("miter polygon");
+        let expected = [[8.0, 14.0], [10.0, 14.0], [10.0, 12.0], [8.0, 12.0]];
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual[0] - expected[0]).abs() < 1e-6);
+            assert!((actual[1] - expected[1]).abs() < 1e-6);
+        }
+
+        let closed = VectorShape {
+            closed: true,
+            anchors: vec![
+                Anchor::corner([0.0, 0.0]),
+                Anchor::corner([1.0, 0.0]),
+                Anchor::corner([1.0, 1.0]),
+                Anchor::corner([0.0, 1.0]),
+            ],
+            ..shape(StrokeJoin::Bevel)
+        };
+        let closed_line = super::centerline(&closed, 16, 16).expect("closed centerline");
+        let closed_geometry = stroke_polys(&closed, &closed_line, 16, 16).expect("closed join");
+        assert_eq!(
+            join_polygon(&closed_line, 0, 2.0, StrokeJoin::Bevel, true)
+                .expect("closure join polygon"),
+            vec![[-2.0, 0.0], [0.0, -2.0], [0.0, 0.0]],
+            "the closure join is a real join, not an endpoint cap"
+        );
+        assert!(closed_geometry.iter().any(|polygon| {
+            polygon.len() == 3
+                && polygon.iter().zip([[-2.0, 0.0], [0.0, -2.0], [0.0, 0.0]]).all(|(a, e)| {
+                    (a[0] - e[0]).abs() < 1e-6 && (a[1] - e[1]).abs() < 1e-6
+                })
+        }));
+        let ellipse_points = crate::svg::ellipse_point_count(2.0, 2.0);
+        assert!(
+            !closed_geometry.iter().any(|polygon| polygon.len() == ellipse_points),
+            "closed Miter/Bevel joins must not emit a round endpoint cap"
+        );
+
+        let json = serde_json::to_string(&shape(StrokeJoin::Miter)).expect("serialize join");
+        let back: VectorShape = serde_json::from_str(&json).expect("deserialize join");
+        assert_eq!(back.stroke.expect("join survives").join, StrokeJoin::Miter);
+        let old: VectorShape = serde_json::from_str(
+            r#"{"closed":false,"fill":[0,0,0,0],"stroke":{"width":0.25,"color":[10,20,30,255]},"anchors":[]}"#,
+        )
+        .expect("pre-join project loads");
+        assert_eq!(old.stroke.expect("old stroke").join, StrokeJoin::Round);
+        let mut changed = shape(StrokeJoin::Miter);
+        changed.stroke.as_mut().unwrap().join = StrokeJoin::Bevel;
+        assert!(!shape(StrokeJoin::Miter).same_cache_key(&changed));
+    }
+
+    #[test]
     fn stroke_geometry_budget_is_typed_error() {
         let shape = VectorShape {
             closed: false,
@@ -1215,6 +1463,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 1.0e6,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.5, 0.5]); 300],

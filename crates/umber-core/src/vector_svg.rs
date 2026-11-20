@@ -110,7 +110,13 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
             crate::vector::StrokeCap::Round => "round",
             crate::vector::StrokeCap::Square => "square",
         });
-        out.push_str("\" stroke-linejoin=\"round\"");
+        out.push_str("\" stroke-linejoin=\"");
+        out.push_str(match stroke.join {
+            crate::vector::StrokeJoin::Miter => "miter",
+            crate::vector::StrokeJoin::Round => "round",
+            crate::vector::StrokeJoin::Bevel => "bevel",
+        });
+        out.push('"');
     } else {
         out.push_str(" stroke=\"none\"");
     }
@@ -163,6 +169,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [0, 0, 0, 255],
             }),
             anchors: vec![
@@ -209,6 +217,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.5, 0.5])],
@@ -224,16 +234,22 @@ mod tests {
             Stroke {
                 width: 0.0,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [255, 255, 255, 255],
             },
             Stroke {
                 width: f32::NAN,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [255, 255, 255, 255],
             },
             Stroke {
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [255, 255, 255, 0],
             },
         ] {
@@ -306,6 +322,8 @@ mod tests {
                 stroke: Some(Stroke {
                     width: 0.1,
                     cap: crate::vector::StrokeCap::Round,
+
+                    join: crate::vector::StrokeJoin::Round,
                     color: [1, 2, 3, alpha],
                 }),
                 anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -333,6 +351,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [0, 0, 0, 255],
             }),
             anchors: vec![
@@ -352,6 +372,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.02,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.1, 0.2]), Anchor::corner([0.8, 0.9])],
@@ -378,6 +400,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.125,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [10, 20, 30, 128],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -417,6 +441,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -539,6 +565,7 @@ mod tests {
                     width: 0.25,
                     color: [10, 20, 30, 255],
                     cap,
+                    join: crate::vector::StrokeJoin::Round,
                 }),
                 anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
             };
@@ -549,6 +576,38 @@ mod tests {
             assert_eq!(export_svg(&imported.shape).expect("re-export"), first);
         }
         let invalid = br##"<svg width="1" height="1"><path stroke="#000" stroke-linecap="pointed" d="M0 0"/></svg>"##;
+        assert!(matches!(
+            import_svg(invalid),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn stroke_joins_export_and_import_as_the_same_join() {
+        for (join, text) in [
+            (crate::vector::StrokeJoin::Miter, "miter"),
+            (crate::vector::StrokeJoin::Round, "round"),
+            (crate::vector::StrokeJoin::Bevel, "bevel"),
+        ] {
+            let shape = VectorShape {
+                closed: false,
+                fill_rule: crate::svg::FillRule::NonZero,
+                fill: [0, 0, 0, 0],
+                stroke: Some(Stroke {
+                    width: 0.25,
+                    color: [10, 20, 30, 255],
+                    cap: crate::vector::StrokeCap::Butt,
+                    join,
+                }),
+                anchors: vec![Anchor::corner([0.25, 0.75]), Anchor::corner([0.50, 0.25])],
+            };
+            let first = export_svg(&shape).expect("join export");
+            assert!(first.contains(&format!("stroke-linejoin=\"{text}\"")));
+            let imported = import_svg(first.as_bytes()).expect("join import");
+            assert_eq!(imported.shape.stroke.expect("imported stroke").join, join);
+            assert_eq!(export_svg(&imported.shape).expect("re-export"), first);
+        }
+        let invalid = br##"<svg width="1" height="1"><path stroke="#000" stroke-linejoin="pointed" d="M0 0"/></svg>"##;
         assert!(matches!(
             import_svg(invalid),
             Err(crate::svg::SvgError::Unsupported { .. })

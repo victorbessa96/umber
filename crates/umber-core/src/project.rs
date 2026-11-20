@@ -2139,6 +2139,8 @@ mod tests {
             stroke: Some(Stroke {
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
+
+                join: crate::vector::StrokeJoin::Round,
                 color: [10, 10, 10, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],

@@ -30,6 +30,7 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "vector.stroke-width",
     "vector.stroke-color",
     "vector.stroke-cap",
+    "vector.stroke-join",
     "vector.export-svg",
 ];
 
@@ -181,6 +182,45 @@ where
                             });
                         if cap != stroke.cap {
                             stroke.cap = cap;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(tr("vector.stroke-join")).color(umber_gui::muted()),
+                        );
+                        let mut join = stroke.join;
+                        egui::ComboBox::from_id_salt(format!("vector-stroke-join-{id}"))
+                            .selected_text(match join {
+                                umber_core::vector::StrokeJoin::Miter => {
+                                    tr("vector.stroke-join-miter")
+                                }
+                                umber_core::vector::StrokeJoin::Round => {
+                                    tr("vector.stroke-join-round")
+                                }
+                                umber_core::vector::StrokeJoin::Bevel => {
+                                    tr("vector.stroke-join-bevel")
+                                }
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut join,
+                                    umber_core::vector::StrokeJoin::Miter,
+                                    tr("vector.stroke-join-miter"),
+                                );
+                                ui.selectable_value(
+                                    &mut join,
+                                    umber_core::vector::StrokeJoin::Round,
+                                    tr("vector.stroke-join-round"),
+                                );
+                                ui.selectable_value(
+                                    &mut join,
+                                    umber_core::vector::StrokeJoin::Bevel,
+                                    tr("vector.stroke-join-bevel"),
+                                );
+                            });
+                        if join != stroke.join {
+                            stroke.join = join;
                             changed = true;
                         }
                     });
@@ -344,6 +384,8 @@ fn set_stroke_enabled(shape: &mut VectorShape, enabled: bool) {
             shape.stroke = Some(Stroke {
                 width: DEFAULT_STROKE_WIDTH,
                 cap: umber_core::vector::StrokeCap::Round,
+
+                join: umber_core::vector::StrokeJoin::Round,
                 color: [0, 0, 0, 255],
             });
         }
@@ -394,6 +436,7 @@ mod row_label_tests {
                 "Stroke width",
                 "Stroke color",
                 "Stroke cap",
+                "Stroke join",
                 "Export SVG",
             ]
         );
@@ -470,6 +513,8 @@ mod tests {
             Some(Stroke {
                 width: DEFAULT_STROKE_WIDTH,
                 cap: umber_core::vector::StrokeCap::Round,
+
+                join: umber_core::vector::StrokeJoin::Round,
                 color: [0, 0, 0, 255],
             })
         );
