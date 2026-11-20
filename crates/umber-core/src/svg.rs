@@ -99,7 +99,8 @@
 //! - Arcs: endpoint parameterization → center parameterization (the SVG
 //!   implementation-notes conversion, radii scaled up when too small),
 //!   then a segment fan. Zero radius → a straight line; identical
-//!   endpoints → omitted.
+//!   endpoints → omitted. Editable vector import shares this conversion and
+//!   stores derivative-derived cubics split at 90°, never flattened polylines.
 //! - Each shape's fill closes every subpath implicitly and fills under
 //!   its own fill rule; shapes union into the plane (a subsample is
 //!   covered if ANY painted shape covers it).
@@ -116,7 +117,7 @@
 //!   references before the error (then they are relative to the raw
 //!   value start plus the decoded position — approximate).
 
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_2, TAU};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -985,6 +986,171 @@ struct ArcSeg {
     to: [f64; 2],
 }
 
+/// Center parameterization shared by raster flattening and editable cubics.
+#[derive(Debug, Clone, Copy)]
+struct CenterArc {
+    center: [f64; 2],
+    rx: f64,
+    ry: f64,
+    sin_phi: f64,
+    cos_phi: f64,
+    start_angle: f64,
+    delta_angle: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EndpointArc {
+    Omit,
+    Line,
+    Center(CenterArc),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArcCubic {
+    c1: [f64; 2],
+    c2: [f64; 2],
+    to: [f64; 2],
+}
+
+/// SVG 1.1 implementation-notes endpoint → center conversion. Invalid arithmetic
+/// is distinguished from SVG's two deliberate no-curve cases so vector import
+/// can refuse it while the raster builder retains its non-finite skip behavior.
+fn endpoint_arc(from: [f64; 2], arc: &ArcSeg) -> Option<EndpointArc> {
+    let [x1, y1] = from;
+    let [x2, y2] = arc.to;
+    if x1 == x2 && y1 == y2 {
+        return Some(EndpointArc::Omit);
+    }
+    let mut rx = arc.rx.abs();
+    let mut ry = arc.ry.abs();
+    if rx == 0.0 || ry == 0.0 {
+        return Some(EndpointArc::Line);
+    }
+    let (sin_phi, cos_phi) = arc.x_axis_rotation_deg.to_radians().sin_cos();
+    let dx2 = (x1 - x2) / 2.0;
+    let dy2 = (y1 - y2) / 2.0;
+    let x1p = cos_phi * dx2 + sin_phi * dy2;
+    let y1p = -sin_phi * dx2 + cos_phi * dy2;
+    let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+    if lambda > 1.0 {
+        let grow = lambda.sqrt();
+        rx *= grow;
+        ry *= grow;
+    }
+    let (rx2, ry2) = (rx * rx, ry * ry);
+    let num = rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p;
+    let den = rx2 * y1p * y1p + ry2 * x1p * x1p;
+    let mut coef = if den > 0.0 {
+        (num / den).max(0.0).sqrt()
+    } else {
+        0.0
+    };
+    if arc.large_arc == arc.sweep {
+        coef = -coef;
+    }
+    let cxp = coef * rx * y1p / ry;
+    let cyp = -coef * ry * x1p / rx;
+    let center = [
+        cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0,
+        sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0,
+    ];
+    let start_angle = ((y1p - cyp) / ry).atan2((x1p - cxp) / rx);
+    let end_angle = ((-y1p - cyp) / ry).atan2((-x1p - cxp) / rx);
+    let mut delta_angle = end_angle - start_angle;
+    if arc.sweep && delta_angle < 0.0 {
+        delta_angle += TAU;
+    } else if !arc.sweep && delta_angle > 0.0 {
+        delta_angle -= TAU;
+    }
+    let center_arc = CenterArc {
+        center,
+        rx,
+        ry,
+        sin_phi,
+        cos_phi,
+        start_angle,
+        delta_angle,
+    };
+    [
+        center[0],
+        center[1],
+        rx,
+        ry,
+        sin_phi,
+        cos_phi,
+        start_angle,
+        delta_angle,
+    ]
+    .into_iter()
+    .all(|value| value.is_finite())
+    .then_some(EndpointArc::Center(center_arc))
+}
+
+impl CenterArc {
+    fn point(self, angle: f64) -> [f64; 2] {
+        let (sin, cos) = angle.sin_cos();
+        [
+            self.center[0] + self.rx * self.cos_phi * cos - self.ry * self.sin_phi * sin,
+            self.center[1] + self.rx * self.sin_phi * cos + self.ry * self.cos_phi * sin,
+        ]
+    }
+
+    fn derivative(self, angle: f64) -> [f64; 2] {
+        let (sin, cos) = angle.sin_cos();
+        [
+            -self.rx * self.cos_phi * sin - self.ry * self.sin_phi * cos,
+            -self.rx * self.sin_phi * sin + self.ry * self.cos_phi * cos,
+        ]
+    }
+
+    /// Derivative-derived cubics, split at 90° so the usual elliptical-arc
+    /// approximation stays bounded. The final endpoint is the SVG endpoint
+    /// exactly; intermediate joins share their evaluated point.
+    fn cubics(self, from: [f64; 2], to: [f64; 2]) -> Result<Vec<ArcCubic>, SvgError> {
+        let quarter_turns = self.delta_angle.abs() / FRAC_PI_2;
+        // atan2 and sweep normalization can put an exact quarter turn one ULP
+        // above π/2. Do not turn that roundoff into a different editable model;
+        // the tolerance scales with the ratio and stays far below any real arc.
+        let rounded = quarter_turns - 4.0 * f64::EPSILON * quarter_turns.max(1.0);
+        let count = rounded.ceil().max(1.0) as usize;
+        if count > 4 {
+            return Err(non_finite_arc_geometry());
+        }
+        let mut cubics = Vec::with_capacity(count);
+        let mut start = from;
+        for index in 0..count {
+            let angle0 = self.start_angle + self.delta_angle * index as f64 / count as f64;
+            let angle1 = self.start_angle + self.delta_angle * (index + 1) as f64 / count as f64;
+            let end = if index + 1 == count {
+                to
+            } else {
+                self.point(angle1)
+            };
+            let alpha = (4.0 / 3.0) * ((angle1 - angle0) / 4.0).tan();
+            let d0 = self.derivative(angle0);
+            let d1 = self.derivative(angle1);
+            let c1 = [start[0] + alpha * d0[0], start[1] + alpha * d0[1]];
+            let c2 = [end[0] - alpha * d1[0], end[1] - alpha * d1[1]];
+            if [start, c1, c2, end]
+                .into_iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+            {
+                return Err(non_finite_arc_geometry());
+            }
+            cubics.push(ArcCubic { c1, c2, to: end });
+            start = end;
+        }
+        Ok(cubics)
+    }
+}
+
+fn non_finite_arc_geometry() -> SvgError {
+    SvgError::Unsupported {
+        what: "non-finite arc geometry".to_owned(),
+    }
+}
+
 /// Accumulates one shape's subpaths as device-space polygons.
 ///
 /// K2's live-vector raster shares this builder so SVG imports and
@@ -1067,64 +1233,23 @@ impl PolyBuilder {
         cubic_device_points_into(p0, p1, p2, p3, &mut self.current);
     }
 
-    /// The SVG implementation-notes endpoint → center conversion, then a
-    /// segment fan (points computed in user space, then mapped).
+    /// The shared endpoint → center conversion, then a segment fan (points
+    /// computed in user space, then mapped). Invalid non-finite arithmetic keeps
+    /// the rasterizer's established no-contribution behavior.
     fn arc_to(&mut self, from: [f64; 2], arc: &ArcSeg) {
-        let [x1, y1] = from;
-        let [x2, y2] = arc.to;
-        if x1 == x2 && y1 == y2 {
-            return;
-        }
-        let mut rx = arc.rx.abs();
-        let mut ry = arc.ry.abs();
-        if rx == 0.0 || ry == 0.0 {
-            self.line_to(from, arc.to);
-            return;
-        }
-        let (sin_phi, cos_phi) = arc.x_axis_rotation_deg.to_radians().sin_cos();
-        let dx2 = (x1 - x2) / 2.0;
-        let dy2 = (y1 - y2) / 2.0;
-        let x1p = cos_phi * dx2 + sin_phi * dy2;
-        let y1p = -sin_phi * dx2 + cos_phi * dy2;
-        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
-        if lambda > 1.0 {
-            let grow = lambda.sqrt();
-            rx *= grow;
-            ry *= grow;
-        }
-        let (rx2, ry2) = (rx * rx, ry * ry);
-        let num = rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p;
-        let den = rx2 * y1p * y1p + ry2 * x1p * x1p;
-        let mut coef = if den > 0.0 {
-            (num / den).max(0.0).sqrt()
-        } else {
-            0.0
+        let center = match endpoint_arc(from, arc) {
+            Some(EndpointArc::Omit) | None => return,
+            Some(EndpointArc::Line) => {
+                self.line_to(from, arc.to);
+                return;
+            }
+            Some(EndpointArc::Center(center)) => center,
         };
-        if arc.large_arc == arc.sweep {
-            coef = -coef;
-        }
-        let cxp = coef * rx * y1p / ry;
-        let cyp = -coef * ry * x1p / rx;
-        let cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0;
-        let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0;
-        let theta1 = ((y1p - cyp) / ry).atan2((x1p - cxp) / rx);
-        let theta2 = ((-y1p - cyp) / ry).atan2((-x1p - cxp) / rx);
-        let mut dtheta = theta2 - theta1;
-        if arc.sweep && dtheta < 0.0 {
-            dtheta += TAU;
-        } else if !arc.sweep && dtheta > 0.0 {
-            dtheta -= TAU;
-        }
-        let n = arc_segment_count(rx.max(ry) * self.scale, dtheta);
+        let n = arc_segment_count(center.rx.max(center.ry) * self.scale, center.delta_angle);
         self.begin(from);
         for i in 1..n {
-            let theta = theta1 + dtheta * (i as f64 / n as f64);
-            let (sin, cos) = theta.sin_cos();
-            let p = [
-                cx + rx * cos_phi * cos - ry * sin_phi * sin,
-                cy + rx * sin_phi * cos + ry * cos_phi * sin,
-            ];
-            self.current.push(self.ctm.apply(p));
+            let theta = center.start_angle + center.delta_angle * (i as f64 / n as f64);
+            self.current.push(self.ctm.apply(center.point(theta)));
         }
         self.current.push(self.ctm.apply(arc.to));
     }
@@ -1497,10 +1622,36 @@ impl PathSink for VectorImportBuilder {
         self.sink_cubic_to(from, c1, c2, to)
     }
 
-    fn sink_arc_to(&mut self, _from: [f64; 2], _arc: &ArcSeg) -> Result<(), SvgError> {
-        Err(SvgError::Unsupported {
-            what: "arc-to-cubic conversion".to_owned(),
-        })
+    fn sink_arc_to(&mut self, from: [f64; 2], arc: &ArcSeg) -> Result<(), SvgError> {
+        let center = match endpoint_arc(from, arc) {
+            None => return Err(non_finite_arc_geometry()),
+            Some(EndpointArc::Omit) => return Ok(()),
+            Some(EndpointArc::Line) => return self.sink_line_to(from, arc.to),
+            Some(EndpointArc::Center(center)) => center,
+        };
+        let cubics = center.cubics(from, arc.to)?;
+        // Charge the whole generated arc before mutating either a handle or an
+        // anchor list. `ensure_open` starts a fresh shape after closepath.
+        let current = if self.shape.closed {
+            0
+        } else {
+            self.shape.anchors.len()
+        };
+        let start = usize::from(current == 0);
+        if current.saturating_add(start).saturating_add(cubics.len())
+            > crate::vector::MAX_VECTOR_ANCHORS
+        {
+            return Err(SvgError::TooComplex {
+                what: "anchors",
+                limit: crate::vector::MAX_VECTOR_ANCHORS,
+            });
+        }
+        let mut segment_from = from;
+        for cubic in cubics {
+            self.sink_cubic_to(segment_from, cubic.c1, cubic.c2, cubic.to)?;
+            segment_from = cubic.to;
+        }
+        Ok(())
     }
 
     fn sink_close_path(&mut self) -> Result<(), SvgError> {
@@ -1523,8 +1674,8 @@ impl PathSink for VectorImportBuilder {
     }
 }
 
-/// Builds exact straight-line shape geometry through the same anchor sink as
-/// path data. Curved forms stay refused until arc-to-cubic conversion exists.
+/// Builds basic-shape geometry through the same anchor sink as path data.
+/// Curves remain editable cubics; no flattened points enter vector state.
 fn build_vector_geometry(
     name: &str,
     attrs: &[Attr],
@@ -1552,16 +1703,48 @@ fn build_vector_geometry(
                 (Some(radius), None) | (None, Some(radius)) => (radius, radius),
                 (None, None) => (0.0, 0.0),
             };
+            let (rx, ry) = (rx.min(w / 2.0), ry.min(h / 2.0));
             if rx > 0.0 && ry > 0.0 {
-                return Err(SvgError::Unsupported {
-                    what: "rounded rect in vector import (arc-to-cubic conversion)".to_owned(),
-                });
+                let ring = [
+                    [x + rx, y],
+                    [x + w - rx, y],
+                    [x + w, y + ry],
+                    [x + w, y + h - ry],
+                    [x + w - rx, y + h],
+                    [x + rx, y + h],
+                    [x, y + h - ry],
+                    [x, y + ry],
+                ];
+                let mut from = ring[0];
+                b.sink_move_to(from)?;
+                for (index, &to) in ring.iter().cycle().skip(1).take(ring.len()).enumerate() {
+                    if index % 2 == 0 {
+                        if from != to {
+                            b.sink_line_to(from, to)?;
+                        }
+                    } else {
+                        b.sink_arc_to(
+                            from,
+                            &ArcSeg {
+                                rx,
+                                ry,
+                                x_axis_rotation_deg: 0.0,
+                                large_arc: false,
+                                sweep: true,
+                                to,
+                            },
+                        )?;
+                    }
+                    from = to;
+                }
+                b.sink_close_path()
+            } else {
+                b.sink_move_to([x, y])?;
+                b.sink_line_to([x, y], [x + w, y])?;
+                b.sink_line_to([x + w, y], [x + w, y + h])?;
+                b.sink_line_to([x + w, y + h], [x, y + h])?;
+                b.sink_close_path()
             }
-            b.sink_move_to([x, y])?;
-            b.sink_line_to([x, y], [x + w, y])?;
-            b.sink_line_to([x + w, y], [x + w, y + h])?;
-            b.sink_line_to([x + w, y + h], [x, y + h])?;
-            b.sink_close_path()
         }
         "polygon" | "polyline" => {
             if let Some(points) = find_attr(attrs, "points") {
@@ -1588,9 +1771,40 @@ fn build_vector_geometry(
             b.sink_move_to([x1, y1])?;
             b.sink_line_to([x1, y1], [x2, y2])
         }
-        "circle" | "ellipse" => Err(SvgError::Unsupported {
-            what: format!("{name} in vector import (arc-to-cubic conversion)"),
-        }),
+        "circle" | "ellipse" => {
+            let cx = length_attr(attrs, "cx", name)?.unwrap_or(0.0);
+            let cy = length_attr(attrs, "cy", name)?.unwrap_or(0.0);
+            let (rx, ry) = if name == "circle" {
+                let radius = length_attr(attrs, "r", name)?.unwrap_or(0.0);
+                (radius, radius)
+            } else {
+                (
+                    length_attr(attrs, "rx", name)?.unwrap_or(0.0),
+                    length_attr(attrs, "ry", name)?.unwrap_or(0.0),
+                )
+            };
+            if rx <= 0.0 || ry <= 0.0 {
+                return Ok(());
+            }
+            let start = [cx + rx, cy];
+            let mut from = start;
+            b.sink_move_to(from)?;
+            for to in [[cx, cy + ry], [cx - rx, cy], [cx, cy - ry], start] {
+                b.sink_arc_to(
+                    from,
+                    &ArcSeg {
+                        rx,
+                        ry,
+                        x_axis_rotation_deg: 0.0,
+                        large_arc: false,
+                        sweep: true,
+                        to,
+                    },
+                )?;
+                from = to;
+            }
+            b.sink_close_path()
+        }
         _ => Err(SvgError::Unsupported {
             what: format!("element {name} in vector import"),
         }),

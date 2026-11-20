@@ -190,6 +190,28 @@ mod tests {
     use super::*;
     use crate::vector::{Anchor, Stroke};
 
+    /// Independent 90° circular-arc derivative coefficient, not a production
+    /// constant: `4/3 * tan((π/2) / 4)`.
+    fn quarter_cubic_k() -> f64 {
+        (4.0 / 3.0) * (std::f64::consts::PI / 8.0).tan()
+    }
+
+    fn positions(shape: &VectorShape) -> Vec<[f32; 2]> {
+        shape.anchors.iter().map(|anchor| anchor.pos).collect()
+    }
+
+    fn assert_point_near(actual: [f32; 2], expected: [f32; 2]) {
+        // sin/cos at quarter turns leaves a few f32 ULPs around mathematically
+        // zero coordinates; all non-zero geometry is still pinned exactly enough
+        // to catch center, flag, radius, and derivative regressions.
+        for axis in 0..2 {
+            assert!(
+                (actual[axis] - expected[axis]).abs() <= 2.0e-6,
+                "axis {axis}: actual {actual:?}, expected {expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn closed_shape_matches_the_exact_deterministic_golden() {
         let shape = VectorShape {
@@ -781,17 +803,332 @@ mod tests {
             br#"<svg width="1" height="1"><rect width="1" height="1" rx="1" ry="0"/></svg>"#;
         assert!(import_svg(square).is_ok());
 
-        for unsupported in [
-            r#"<svg width="1" height="1"><rect width="1" height="1" rx="0.5"/></svg>"#,
-            r#"<svg width="1" height="1"><circle r="1"/></svg>"#,
-            r#"<svg width="1" height="1"><ellipse rx="1" ry="1"/></svg>"#,
-            r#"<svg width="1" height="1"><line x1="1mm"/></svg>"#,
+        let unsupported = r#"<svg width="1" height="1"><line x1="1mm"/></svg>"#;
+        assert!(matches!(
+            import_svg(unsupported.as_bytes()),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn absolute_relative_and_negative_radius_arcs_share_exact_quarter_cubics() {
+        let absolute =
+            import_svg(br#"<svg width="2" height="2"><path d="M1 0 A1 1 0 0 1 0 1"/></svg>"#)
+                .expect("absolute arc")
+                .shape;
+        let relative =
+            import_svg(br#"<svg width="2" height="2"><path d="M1 0 a1 1 0 0 1 -1 1"/></svg>"#)
+                .expect("relative arc")
+                .shape;
+        let negative =
+            import_svg(br#"<svg width="2" height="2"><path d="M1 0 A-1 -1 0 0 1 0 1"/></svg>"#)
+                .expect("negative radii use absolute values")
+                .shape;
+        let k = quarter_cubic_k();
+        assert_eq!(positions(&absolute), vec![[0.5, 0.0], [0.0, 0.5]]);
+        assert_eq!(absolute.anchors[0].out_handle, [0.5, (k / 2.0) as f32]);
+        assert_eq!(absolute.anchors[1].in_handle, [(k / 2.0) as f32, 0.5]);
+        assert_eq!(relative.anchors, absolute.anchors);
+        assert_eq!(negative.anchors, absolute.anchors);
+        assert!(!absolute.closed);
+    }
+
+    #[test]
+    fn arc_large_arc_and_sweep_flags_select_the_derived_center_and_direction() {
+        let k = quarter_cubic_k();
+        for (large, sweep, expected_anchors, expected_out) in [
+            (0, 0, 2, [(1.0 - k) as f32, 0.0]),
+            (0, 1, 2, [1.0, k as f32]),
+            (1, 0, 4, [1.0, (-k) as f32]),
+            (1, 1, 4, [(1.0 + k) as f32, 0.0]),
         ] {
-            assert!(matches!(
-                import_svg(unsupported.as_bytes()),
-                Err(crate::svg::SvgError::Unsupported { .. })
-            ));
+            let svg = format!(
+                "<svg width=\"1\" height=\"1\"><path d=\"M1 0 A1 1 0 {large} {sweep} 0 1\"/></svg>"
+            );
+            let shape = import_svg(svg.as_bytes()).expect("flagged arc").shape;
+            assert_eq!(shape.anchors.len(), expected_anchors, "{large}{sweep}");
+            assert_point_near(shape.anchors[0].out_handle, expected_out);
+            assert_eq!(
+                shape.anchors.last().map(|anchor| anchor.pos),
+                Some([0.0, 1.0])
+            );
+            if large == 1 && sweep == 0 {
+                // Center (0,0), angles 0 → -π/2 → -π → exact SVG end (0,1).
+                let angle = -std::f64::consts::FRAC_PI_2;
+                assert_eq!(
+                    shape.anchors[1].pos,
+                    [angle.cos() as f32, angle.sin() as f32]
+                );
+            }
+            if large == 1 && sweep == 1 {
+                // Center (1,1), angles -π/2 → 0 → π/2 → exact SVG end (0,1).
+                assert_eq!(shape.anchors[1].pos, [2.0, 1.0]);
+                assert_eq!(shape.anchors[2].pos, [1.0, 2.0]);
+            }
         }
+    }
+
+    #[test]
+    fn arc_rotation_and_radius_correction_match_independent_center_geometry() {
+        let rotated =
+            import_svg(br#"<svg width="1" height="1"><path d="M1 0 A2 1 90 0 1 0 2"/></svg>"#)
+                .expect("rotated ellipse quarter")
+                .shape;
+        let k = quarter_cubic_k();
+        // With φ=90°, this is center (0,0), θ=-π/2 → 0: start derivative
+        // (0,2), end derivative (-1,0), independently fixing both handles.
+        assert_eq!(rotated.anchors.len(), 2, "{:?}", rotated.anchors);
+        assert_point_near(rotated.anchors[0].out_handle, [1.0, (2.0 * k) as f32]);
+        assert_point_near(rotated.anchors[1].in_handle, [k as f32, 2.0]);
+
+        let corrected =
+            import_svg(br#"<svg width="1" height="1"><path d="M2 0 A1 1 0 0 1 0 2"/></svg>"#)
+                .expect("radii grow uniformly")
+                .shape;
+        // λ=2, hence rx=ry=√2 and the center is (1,1). The two cubics meet
+        // at θ=π/4, independently derived rather than sampled from production.
+        let radius = 2.0f64.sqrt();
+        let angle = std::f64::consts::FRAC_PI_4;
+        assert_eq!(corrected.anchors.len(), 3);
+        assert_eq!(
+            corrected.anchors[1].pos,
+            [
+                (1.0 + radius * angle.cos()) as f32,
+                (1.0 + radius * angle.sin()) as f32,
+            ]
+        );
+        assert_eq!(positions(&corrected).last(), Some(&[0.0, 2.0]));
+    }
+
+    #[test]
+    fn arc_degenerate_and_non_finite_cases_follow_svg_or_fail_typed() {
+        let line =
+            import_svg(br#"<svg width="1" height="1"><path d="M0 0 A0 1 0 0 1 1 0"/></svg>"#)
+                .expect("zero radius is a line")
+                .shape;
+        assert_eq!(positions(&line), vec![[0.0, 0.0], [1.0, 0.0]]);
+        assert!(line
+            .anchors
+            .iter()
+            .all(|anchor| anchor.in_handle == anchor.pos && anchor.out_handle == anchor.pos));
+
+        let omitted =
+            import_svg(br#"<svg width="1" height="1"><path d="M0 0 A1 1 0 0 1 0 0"/></svg>"#)
+                .expect("identical endpoints omit the arc")
+                .shape;
+        assert_eq!(omitted.anchors.len(), 1);
+
+        let overflow =
+            br#"<svg width="1" height="1"><path d="M0 0 A1e308 1e308 0 0 1 1 1"/></svg>"#;
+        assert!(matches!(
+            import_svg(overflow),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+        let bad_flag = br#"<svg width="1" height="1"><path d="M0 0 A1 1 0 2 1 1 1"/></svg>"#;
+        assert!(matches!(
+            import_svg(bad_flag),
+            Err(crate::svg::SvgError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn rounded_rect_imports_exact_lines_cubic_corners_and_closure() {
+        let shape =
+            import_svg(br#"<svg width="8" height="8"><rect width="4" height="4" rx="1"/></svg>"#)
+                .expect("rounded rect")
+                .shape;
+        let k = quarter_cubic_k() / 8.0;
+        assert!(shape.closed);
+        assert_eq!(
+            positions(&shape),
+            vec![
+                [0.125, 0.0],
+                [0.375, 0.0],
+                [0.5, 0.125],
+                [0.5, 0.375],
+                [0.375, 0.5],
+                [0.125, 0.5],
+                [0.0, 0.375],
+                [0.0, 0.125],
+            ]
+        );
+        assert_eq!(shape.anchors[0].out_handle, shape.anchors[0].pos);
+        assert_point_near(shape.anchors[1].out_handle, [0.375 + k as f32, 0.0]);
+        assert_point_near(shape.anchors[2].in_handle, [0.5, 0.125 - k as f32]);
+        assert_point_near(shape.anchors[0].in_handle, [0.125 - k as f32, 0.0]);
+        assert_point_near(shape.anchors[7].out_handle, [0.0, 0.125 - k as f32]);
+    }
+
+    #[test]
+    fn rounded_rect_radius_rules_clamp_inherit_and_preserve_square_behavior() {
+        let clamped = import_svg(
+            br#"<svg width="1" height="1"><rect width="4" height="4" rx="99" ry="99"/></svg>"#,
+        )
+        .expect("clamped full-round rect")
+        .shape;
+        let circle =
+            import_svg(br#"<svg width="1" height="1"><circle cx="2" cy="2" r="2"/></svg>"#)
+                .expect("equivalent circle")
+                .shape;
+        assert!(clamped.closed);
+        // Circle starts at its rightmost point; the rect starts at the top.
+        // Rotating the closed anchor ring compares identical cubics in order.
+        let mut circle_from_top = circle.anchors[3..].to_vec();
+        circle_from_top.extend_from_slice(&circle.anchors[..3]);
+        assert_eq!(clamped.anchors, circle_from_top);
+        assert_eq!(
+            clamped.anchors.len(),
+            4,
+            "zero-length edges emit no anchors"
+        );
+
+        for square in [
+            r#"<svg width="1" height="1"><rect width="4" height="4" rx="99" ry="0"/></svg>"#,
+            r#"<svg width="1" height="1"><rect width="4" height="4" rx="-1"/></svg>"#,
+        ] {
+            let shape = import_svg(square.as_bytes()).expect("square rect").shape;
+            assert_eq!(shape.anchors.len(), 4);
+            assert!(shape
+                .anchors
+                .iter()
+                .all(|anchor| anchor.in_handle == anchor.pos && anchor.out_handle == anchor.pos));
+        }
+        let negative_auto = import_svg(
+            br#"<svg width="1" height="1"><rect width="4" height="4" rx="-1" ry="1"/></svg>"#,
+        )
+        .expect("negative rx is auto and ry supplies both")
+        .shape;
+        assert_eq!(negative_auto.anchors.len(), 8);
+    }
+
+    #[test]
+    fn circles_ellipses_close_exactly_and_zero_geometry_emits_no_layer() {
+        let k = quarter_cubic_k();
+        let circle = import_svg(br#"<svg width="1" height="1"><circle r="1"/></svg>"#)
+            .expect("circle")
+            .shape;
+        assert!(circle.closed);
+        assert_eq!(
+            positions(&circle),
+            vec![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]
+        );
+        assert_eq!(circle.anchors[0].out_handle, [1.0, k as f32]);
+        assert_eq!(circle.anchors[0].in_handle, [1.0, (-k) as f32]);
+
+        let ellipse = import_svg(br#"<svg width="1" height="1"><ellipse rx="2" ry="1"/></svg>"#)
+            .expect("ellipse")
+            .shape;
+        assert!(ellipse.closed);
+        assert_eq!(
+            positions(&ellipse),
+            vec![[2.0, 0.0], [0.0, 1.0], [-2.0, 0.0], [0.0, -1.0]]
+        );
+        assert_eq!(ellipse.anchors[0].out_handle, [2.0, k as f32]);
+        assert_eq!(ellipse.anchors[1].in_handle, [(2.0 * k) as f32, 1.0]);
+
+        let mixed = import_svg_many(
+            br#"<svg width="1" height="1"><circle r="0"/><circle r="-1"/><ellipse rx="0" ry="1"/><ellipse rx="1" ry="-1"/><line x2="1"/></svg>"#,
+        )
+        .expect("empty curved geometry is skipped");
+        assert_eq!(mixed.len(), 1);
+        assert!(!mixed[0].shape.closed);
+    }
+
+    #[test]
+    fn curved_shapes_use_effective_ctm_scoped_paint_and_cubic_roundtrip() {
+        let transformed = import_svg(
+            br##"<svg width="8" height="8" fill="#123456"><g transform="translate(1 0) scale(2 1)" stroke="#ABCDEF"><ellipse cx="1" cy="1" rx="1" ry="0.5"/></g></svg>"##,
+        )
+        .expect("transformed ellipse")
+        .shape;
+        assert_eq!(
+            positions(&transformed),
+            vec![
+                [0.625, 0.125],
+                [0.375, 0.1875],
+                [0.125, 0.125],
+                [0.375, 0.0625],
+            ]
+        );
+        assert_eq!(transformed.fill, [18, 52, 86, 255]);
+        let stroke = transformed.stroke.expect("inherited stroke");
+        assert_eq!(stroke.color, [171, 205, 239, 255]);
+        assert_eq!(stroke.width, 0.25);
+
+        for svg in [
+            r#"<svg width="1" height="1"><circle r="1"/></svg>"#,
+            r#"<svg width="1" height="1"><rect width="4" height="4" rx="1"/></svg>"#,
+            r#"<svg width="1" height="1"><path d="M1 0 A1 1 0 1 1 0 1"/></svg>"#,
+        ] {
+            let imported = import_svg(svg.as_bytes()).expect("initial curved import");
+            let exported = export_svg(&imported.shape).expect("cubic export");
+            assert!(exported.contains(" C "));
+            assert!(!exported.contains(" A "));
+            let reimported = import_svg(exported.as_bytes()).expect("cubic reimport");
+            assert_eq!(
+                export_svg(&reimported.shape).expect("second export"),
+                exported
+            );
+        }
+    }
+
+    #[test]
+    fn generated_arc_anchors_charge_the_exact_per_shape_budget() {
+        let mut d = String::from("M0 0");
+        for _ in 0..MAX_VECTOR_ANCHORS - 2 {
+            d.push_str(" L0 0");
+        }
+        let exact = format!("<svg width=\"1\" height=\"1\"><path d=\"{d} A1 1 0 0 1 0 1\"/></svg>");
+        assert_eq!(
+            import_svg(exact.as_bytes())
+                .expect("arc's final generated anchor reaches the cap exactly")
+                .shape
+                .anchors
+                .len(),
+            MAX_VECTOR_ANCHORS
+        );
+
+        let over = format!(
+            "<svg width=\"1\" height=\"1\"><path d=\"{d} A1 1 0 0 1 0 1 A1 1 0 0 1 1 1\"/></svg>"
+        );
+        assert!(matches!(
+            import_svg(over.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "anchors",
+                limit: MAX_VECTOR_ANCHORS,
+            })
+        ));
+    }
+
+    #[test]
+    fn curved_shapes_charge_the_existing_shape_and_total_anchor_budgets() {
+        let mut exact = String::from("<svg width=\"1\" height=\"1\">");
+        for _ in 0..crate::vector::MAX_VECTOR_SHAPES {
+            exact.push_str("<circle r=\"1\"/>");
+        }
+        exact.push_str("</svg>");
+        let shapes = import_svg_many(exact.as_bytes()).expect("exact curved shape cap");
+        assert_eq!(shapes.len(), crate::vector::MAX_VECTOR_SHAPES);
+        assert_eq!(
+            shapes
+                .iter()
+                .map(|params| params.shape.anchors.len())
+                .sum::<usize>(),
+            4 * crate::vector::MAX_VECTOR_SHAPES
+        );
+
+        let mut over = String::from("<svg width=\"1\" height=\"1\">");
+        for _ in 0..=crate::vector::MAX_VECTOR_SHAPES {
+            over.push_str("<ellipse rx=\"1\" ry=\"1\"/>");
+        }
+        over.push_str("</svg>");
+        assert!(matches!(
+            import_svg_many(over.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "vector paths",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1106,7 +1443,6 @@ mod tests {
         let cases: &[&[u8]] = &[
             br#"<svg width="1" height="1"><path d="M0 0"/><path d="M1 1"/></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 M1 1"/></svg>"#,
-            br#"<svg width="1" height="1"><path d="M0 0 A1 1 0 0 0 1 1"/></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z" fill-rule="winding"/></svg>"#,
             "<svg width=\"1\" height=\"1\"><path d=\"M0 0\" fill=\"#øøø\"/></svg>".as_bytes(),
         ];

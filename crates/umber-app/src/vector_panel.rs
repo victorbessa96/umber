@@ -685,6 +685,13 @@ mod tests {
         );
         assert!(transform_failure.is_err());
         assert_eq!(doc_snapshot(&doc), before);
+
+        let curved = br#"<svg width="1" height="1"><circle r="1"/><path d="M0 0 A1e308 1e308 0 0 1 1 1"/></svg>"#;
+        let declared = curved.len() as u64;
+        let curved_failure =
+            import_with_io(&mut doc, move || Ok(declared), move || Ok(curved.to_vec()));
+        assert!(curved_failure.is_err());
+        assert_eq!(doc_snapshot(&doc), before);
     }
 
     #[test]
@@ -793,6 +800,37 @@ mod tests {
         assert!(doc.layers().is_empty());
         assert!(doc.redo());
         assert_eq!(doc.layers().len(), 4);
+    }
+
+    #[test]
+    fn arcs_and_curved_basic_shapes_share_one_grouped_undo_and_redo() {
+        let mut doc = Document::default();
+        let svg = br#"<svg width="4" height="4"><path d="M1 0 A1 1 0 1 1 0 1"/><rect width="3" height="2" rx="0.5"/><circle cx="1" cy="1" r="1"/><ellipse cx="2" cy="1" rx="1" ry="0.5"/></svg>"#;
+        let declared = svg.len() as u64;
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("curved import succeeds");
+        assert_eq!(doc.layers().len(), 4);
+        assert_eq!(ids.len(), 4);
+        assert_eq!(doc.history.len(), 8);
+        assert_eq!(doc.session_history.len(), 1);
+        let expected = doc
+            .layers()
+            .iter()
+            .map(|layer| layer.vector.clone().expect("installed vector"))
+            .collect::<Vec<_>>();
+        assert!(expected[0].shape.anchors[0].out_handle != expected[0].shape.anchors[0].pos);
+        assert!(expected[1..].iter().all(|params| params.shape.closed));
+
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        let restored = doc
+            .layers()
+            .iter()
+            .map(|layer| layer.vector.clone().expect("restored vector"))
+            .collect::<Vec<_>>();
+        assert_eq!(restored, expected);
+        assert_eq!(doc.session_history.len(), 1);
     }
 
     #[test]
