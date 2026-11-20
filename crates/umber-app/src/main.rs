@@ -4725,8 +4725,11 @@ impl UmberApp {
                 // Session pixel state keyed by layer id dies with the
                 // document: queued import publishes (another document's
                 // ids), Base visibility, dormancy, badges and the snapshot
-                // baseline all reset.
+                // baseline all reset. Fill and vector evaluation caches
+                // reset too, so document B cannot inherit document A's
+                // dirty queue or tile bytes.
                 self.state.mesh_import.to_publish.clear();
+                self.state.fill_states = fill_layer::FillLayerStates::default();
                 self.state.vector_states = fill_layer::VectorLayerStates::default();
                 self.state.vector_edit.clear();
                 self.state.base_visible = true;
@@ -4799,11 +4802,16 @@ impl UmberApp {
                         match kind {
                             umber_core::LayerKind::Fill => {
                                 if let Some(params) = fill {
+                                    let complete = fill_layer::fill_planes_complete(
+                                        &vector_planes,
+                                        *id,
+                                        &params.channel,
+                                        &vector_tiles,
+                                    );
                                     self.state
                                         .fill_states
-                                        .ensure_open(*id, params, *blend, *opacity);
-                                    match dormancy_for(has_planes, header_v2, listed, base_nonempty)
-                                    {
+                                        .ensure_seeded(*id, params, *blend, *opacity, complete);
+                                    match dormancy_for(complete, header_v2, listed, base_nonempty) {
                                         LayerDormancy::Dormant => {
                                             self.state.dormant.insert(*id);
                                         }
@@ -6352,19 +6360,36 @@ impl eframe::App for UmberApp {
             for (id, params, blend, opacity) in &layers {
                 self.state.fill_states.ensure(*id, params, *blend, *opacity);
             }
-            // Budget-blocked fills retry when bytes fell (a plane freed);
-            // param edits requeue through `ensure` above.
+            let live: std::collections::HashSet<u64> =
+                layers.iter().map(|(id, _, _, _)| *id).collect();
+            for id in self.state.fill_states.retain_live(&live) {
+                self.state.fill_badges.remove(&id);
+                self.state.dormant.remove(&id);
+            }
+            let active_set = paint.active_set().to_string();
+            let active_tiles = paint.tiles_of_set(&active_set);
+            let symmetry = *paint.symmetry();
+            let size = Some(paint.size_of_set(&active_set));
+            let dormant = self.state.dormant.clone();
+            self.state.fill_states.observe_frame(
+                &symmetry,
+                size,
+                paint.channel_sizes(),
+                &active_tiles,
+                &dormant,
+            );
+            // Budget-blocked fills retry when bytes fell (a plane freed) or
+            // the hard cap rose; param edits requeue through `ensure` above.
             self.state
                 .fill_states
-                .retry_budget_freed(paint.plane_bytes());
+                .retry_budget_freed(paint.plane_bytes(), paint.plane_hard_cap_bytes());
             if !self.state.fill_states.dirty.is_empty() {
                 if let Some(mesh) = self.state.mesh.clone() {
                     let dirty: Vec<u64> = self.state.fill_states.dirty.drain(..).collect();
                     // The ACTIVE set's tiles only (C2-9): the doc's live
                     // stack is that set's, and another set's tiles never
                     // composite these fills (the material drain's rule).
-                    let active_set = paint.active_set().to_string();
-                    let (tiles, symmetry) = (paint.tiles_of_set(&active_set), *paint.symmetry());
+                    let tiles = active_tiles;
                     for layer in dirty {
                         // A layer deleted between queueing and the mesh's
                         // arrival must not ghost-publish.

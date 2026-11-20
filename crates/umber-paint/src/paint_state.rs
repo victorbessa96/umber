@@ -3897,6 +3897,12 @@ impl PaintState {
         self.plane_hard_cap_bytes = bytes;
     }
 
+    /// The enforced plane budget in bytes. Refresh paths capture this at
+    /// refusal so a later cap increase also requeues a blocked fill.
+    pub fn plane_hard_cap_bytes(&self) -> u64 {
+        self.plane_hard_cap_bytes
+    }
+
     /// `owner`'s content revision: changes whenever any of its planes was
     /// written. Equal revisions mean equal pixels, so a thumbnail cache can
     /// skip the readback. `0` = never written this session.
