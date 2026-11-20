@@ -3,7 +3,7 @@
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
 **Updated 2026-11-19:** K5b code `0d1b6ad7` plus full review hardening
-`6ffec3bc` is committed on top of K5a `09d01fbd`, K4 `a4373c51`, K3 `98fdbb80`,
+`6ffec3bc` is pushed on top of K5a `09d01fbd`, K4 `a4373c51`, K3 `98fdbb80`,
 K2 `0b5cb72d`, and K1 `46d4bff5`; the hardening brief is `d6e2ba35`.
 The hardening closes the late full review: typed root/path presentation-effect
 refusals before geometry parsing, shortest-f32 formatting, four-case exact
