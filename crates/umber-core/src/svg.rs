@@ -1523,8 +1523,82 @@ impl PathSink for VectorImportBuilder {
     }
 }
 
-/// Parses the bounded document subset into one vector shape per path or
-/// stroke-only subpath, with scoped inherited paint and affine transforms.
+/// Builds exact straight-line shape geometry through the same anchor sink as
+/// path data. Curved forms stay refused until arc-to-cubic conversion exists.
+fn build_vector_geometry(
+    name: &str,
+    attrs: &[Attr],
+    b: &mut VectorImportBuilder,
+) -> Result<(), SvgError> {
+    match name {
+        "path" => {
+            let d = find_attr(attrs, "d").ok_or_else(|| SvgError::Unsupported {
+                what: "path without d".to_owned(),
+            })?;
+            build_path(d, b)
+        }
+        "rect" => {
+            let x = length_attr(attrs, "x", name)?.unwrap_or(0.0);
+            let y = length_attr(attrs, "y", name)?.unwrap_or(0.0);
+            let w = length_attr(attrs, "width", name)?.unwrap_or(0.0);
+            let h = length_attr(attrs, "height", name)?.unwrap_or(0.0);
+            if w <= 0.0 || h <= 0.0 {
+                return Ok(());
+            }
+            let rx = length_attr(attrs, "rx", name)?.filter(|radius| *radius >= 0.0);
+            let ry = length_attr(attrs, "ry", name)?.filter(|radius| *radius >= 0.0);
+            let (rx, ry) = match (rx, ry) {
+                (Some(rx), Some(ry)) => (rx, ry),
+                (Some(radius), None) | (None, Some(radius)) => (radius, radius),
+                (None, None) => (0.0, 0.0),
+            };
+            if rx > 0.0 && ry > 0.0 {
+                return Err(SvgError::Unsupported {
+                    what: "rounded rect in vector import (arc-to-cubic conversion)".to_owned(),
+                });
+            }
+            b.sink_move_to([x, y])?;
+            b.sink_line_to([x, y], [x + w, y])?;
+            b.sink_line_to([x + w, y], [x + w, y + h])?;
+            b.sink_line_to([x + w, y + h], [x, y + h])?;
+            b.sink_close_path()
+        }
+        "polygon" | "polyline" => {
+            if let Some(points) = find_attr(attrs, "points") {
+                let points = parse_points(points)?;
+                if let Some((&first, rest)) = points.split_first() {
+                    b.sink_move_to(first)?;
+                    let mut from = first;
+                    for &to in rest {
+                        b.sink_line_to(from, to)?;
+                        from = to;
+                    }
+                    if name == "polygon" {
+                        b.sink_close_path()?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        "line" => {
+            let x1 = length_attr(attrs, "x1", name)?.unwrap_or(0.0);
+            let y1 = length_attr(attrs, "y1", name)?.unwrap_or(0.0);
+            let x2 = length_attr(attrs, "x2", name)?.unwrap_or(0.0);
+            let y2 = length_attr(attrs, "y2", name)?.unwrap_or(0.0);
+            b.sink_move_to([x1, y1])?;
+            b.sink_line_to([x1, y1], [x2, y2])
+        }
+        "circle" | "ellipse" => Err(SvgError::Unsupported {
+            what: format!("{name} in vector import (arc-to-cubic conversion)"),
+        }),
+        _ => Err(SvgError::Unsupported {
+            what: format!("element {name} in vector import"),
+        }),
+    }
+}
+
+/// Parses the bounded document subset into one vector shape per supported
+/// shape or stroke-only subpath, with scoped inherited paint and transforms.
 /// The old raster path never calls this function; both share the strict XML
 /// tokenizer, root geometry, transform parser, and path-command walker.
 pub(crate) fn import_vector_svg_many(
@@ -1612,30 +1686,27 @@ pub(crate) fn import_vector_svg_many(
                 let parent = stack.last().and_then(|frame| frame.as_ref()).cloned();
                 let mut frame = None;
                 if let Some((parent_attrs, parent_ctm)) = parent {
-                    if name == "path" {
+                    if is_shape(&name) {
                         if shapes.len() >= crate::vector::MAX_VECTOR_SHAPES {
                             return Err(SvgError::TooComplex {
                                 what: "vector paths",
                                 limit: crate::vector::MAX_VECTOR_SHAPES,
                             });
                         }
-                        let d = find_attr(&attrs, "d").ok_or_else(|| SvgError::Unsupported {
-                            what: "path without d".to_owned(),
-                        })?;
                         if find_attr(&attrs, "style").is_some() {
                             return Err(SvgError::Unsupported {
-                                what: "path style in vector import".to_owned(),
+                                what: format!("{name} style in vector import"),
                             });
                         }
                         // Refuse unsupported effects before spending geometry
                         // work, and report them ahead of malformed path data.
-                        refuse_path_import_effects(&attrs)?;
+                        refuse_shape_import_effects(&attrs, &name)?;
                         let ctm = match find_attr(&attrs, "transform") {
                             Some(transform) => parent_ctm.compose(parse_transform(transform)?),
                             None => parent_ctm,
                         };
                         let mut builder = VectorImportBuilder::new(ctm, width, height);
-                        build_path(d, &mut builder)?;
+                        build_vector_geometry(&name, &attrs, &mut builder)?;
                         let subpaths = builder.finish();
                         if shapes.len().saturating_add(subpaths.len())
                             > crate::vector::MAX_VECTOR_SHAPES
@@ -1679,10 +1750,6 @@ pub(crate) fn import_vector_svg_many(
                             None => parent_ctm,
                         };
                         frame = Some((inherited_vector_paint(&parent_attrs, &attrs), ctm));
-                    } else if is_shape(&name) {
-                        return Err(SvgError::Unsupported {
-                            what: format!("multiple shapes in one vector layer: <{name}>"),
-                        });
                     }
                 }
                 if !self_closing {
@@ -1693,19 +1760,19 @@ pub(crate) fn import_vector_svg_many(
     }
     if shapes.is_empty() {
         return Err(SvgError::Unsupported {
-            what: "no path in vector import".to_owned(),
+            what: "no supported vector geometry in vector import".to_owned(),
         });
     }
     Ok(shapes)
 }
 
-/// Backward-compatible single-path import used by the K5b API. New UI code
+/// Backward-compatible single-shape import used by the K5b API. New UI code
 /// uses `import_vector_svg_many` and creates one layer per returned shape.
 pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, SvgError> {
     let mut shapes = import_vector_svg_many(bytes)?;
     if shapes.len() != 1 {
         return Err(SvgError::Unsupported {
-            what: format!("expected exactly one path, found {}", shapes.len()),
+            what: format!("expected exactly one vector shape, found {}", shapes.len()),
         });
     }
     Ok(shapes.remove(0))
@@ -1819,7 +1886,7 @@ fn inherited_vector_paint(parent: &[Attr], attrs: &[Attr]) -> Vec<Attr> {
     effective
 }
 
-fn refuse_path_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
+fn refuse_shape_import_effects(attrs: &[Attr], element: &str) -> Result<(), SvgError> {
     for key in [
         "opacity",
         "display",
@@ -1835,11 +1902,11 @@ fn refuse_path_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
     ] {
         if find_attr(attrs, key).is_some() {
             return Err(SvgError::Unsupported {
-                what: format!("path {key} in vector import"),
+                what: format!("{element} {key} in vector import"),
             });
         }
     }
-    refuse_nondefault_miterlimit(attrs, "path")
+    refuse_nondefault_miterlimit(attrs, element)
 }
 
 fn parse_vector_paint(

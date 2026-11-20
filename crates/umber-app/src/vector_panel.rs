@@ -779,6 +779,23 @@ mod tests {
     }
 
     #[test]
+    fn basic_shapes_import_adds_layers_in_one_undo_group() {
+        let mut doc = Document::default();
+        let svg = br##"<svg width="8" height="8"><rect width="2" height="2"/><polygon points="0 0 2 0 1 2"/><polyline points="0,0 1,0 1,1" fill="none" stroke="#000"/><line x2="1" y2="1" stroke="#000"/></svg>"##;
+        let declared = svg.len() as u64;
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("basic-shape import succeeds");
+        assert_eq!(doc.layers().len(), 4);
+        assert_eq!(ids.len(), 4);
+        assert_eq!(doc.history.len(), 8);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        assert_eq!(doc.layers().len(), 4);
+    }
+
+    #[test]
     fn empty_panel_preserves_import_failure_outcome() {
         use egui_kittest::kittest::Queryable;
         use std::cell::RefCell;

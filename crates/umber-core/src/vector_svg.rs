@@ -145,16 +145,16 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     Ok(out)
 }
 
-/// Imports the bounded SVG subset into one vector shape per path or
-/// stroke-only subpath, with scoped group paint and affine transforms.
+/// Imports the bounded SVG subset into one vector shape per supported shape
+/// or stroke-only subpath, with scoped group paint and affine transforms.
 pub fn import_svg_many(
     bytes: &[u8],
 ) -> Result<Vec<crate::vector::VectorParams>, crate::svg::SvgError> {
     crate::svg::import_vector_svg_many(bytes)
 }
 
-/// Imports the bounded K5b single-path SVG subset into one vector layer.
-/// Multi-path documents remain available through [`import_svg_many`].
+/// Imports the bounded SVG subset when it contains exactly one vector shape.
+/// Multi-shape documents remain available through [`import_svg_many`].
 pub fn import_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, crate::svg::SvgError> {
     crate::svg::import_vector_svg(bytes)
 }
@@ -750,6 +750,51 @@ mod tests {
     }
 
     #[test]
+    fn basic_shapes_import_exact_geometry_and_closure() {
+        let svg = br##"<svg width="8" height="8"><g transform="translate(1 0)" stroke="#000000"><rect x="1" y="2" width="3" height="4" rx="-1"/><polyline points="0,0 1,0 1,1" fill="none"/><polygon points="0 0 2 0 1 2"/><line x1="0" y1="7" x2="1" y2="7"/></g><rect width="0" height="1"/><polyline/></svg>"##;
+        let shapes = import_svg_many(svg).expect("basic shapes");
+        assert_eq!(shapes.len(), 4);
+        let rect = &shapes[0].shape;
+        assert!(rect.closed);
+        assert_eq!(
+            rect.anchors
+                .iter()
+                .map(|anchor| anchor.pos)
+                .collect::<Vec<_>>(),
+            vec![[0.25, 0.25], [0.625, 0.25], [0.625, 0.75], [0.25, 0.75]]
+        );
+        assert!(!shapes[1].shape.closed);
+        assert_eq!(shapes[1].shape.anchors.len(), 3);
+        assert_eq!(shapes[1].shape.fill, [0, 0, 0, 0]);
+        assert!(shapes[2].shape.closed);
+        assert_eq!(shapes[2].shape.anchors.len(), 3);
+        assert!(!shapes[3].shape.closed);
+        assert_eq!(shapes[3].shape.anchors[0].pos, [0.125, 0.875]);
+        assert_eq!(shapes[3].shape.anchors[1].pos, [0.25, 0.875]);
+        assert!(shapes[3].shape.stroke.is_some());
+
+        let one = br#"<svg width="1" height="1"><rect width="1" height="1"/></svg>"#;
+        let rect = import_svg(one).expect("single rect compatibility").shape;
+        assert!(rect.closed);
+        assert_eq!(rect.anchors.len(), 4);
+        let square =
+            br#"<svg width="1" height="1"><rect width="1" height="1" rx="1" ry="0"/></svg>"#;
+        assert!(import_svg(square).is_ok());
+
+        for unsupported in [
+            r#"<svg width="1" height="1"><rect width="1" height="1" rx="0.5"/></svg>"#,
+            r#"<svg width="1" height="1"><circle r="1"/></svg>"#,
+            r#"<svg width="1" height="1"><ellipse rx="1" ry="1"/></svg>"#,
+            r#"<svg width="1" height="1"><line x1="1mm"/></svg>"#,
+        ] {
+            assert!(matches!(
+                import_svg(unsupported.as_bytes()),
+                Err(crate::svg::SvgError::Unsupported { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn stroke_only_subpaths_split_and_filled_compounds_are_refused() {
         let svg = br##"<svg width="1" height="1"><path fill="none" stroke="#000000" d="M0 0 L1 0 M0 1 L1 1"/></svg>"##;
         let shapes = import_svg_many(svg).expect("stroke subpaths split");
@@ -808,7 +853,7 @@ mod tests {
 
         let mut paths = String::from("<svg width=\"1\" height=\"1\"><g>");
         for _ in 0..=crate::vector::MAX_VECTOR_SHAPES {
-            paths.push_str("<path d=\"M0 0 L1 1\"/>");
+            paths.push_str("<rect width=\"1\" height=\"1\"/>");
         }
         paths.push_str("</g></svg>");
         assert!(matches!(
