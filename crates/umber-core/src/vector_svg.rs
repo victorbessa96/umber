@@ -19,7 +19,7 @@ pub enum VectorSvgError {
 
 /// Serializes one vector shape as a deterministic SVG 1.1 document. Open
 /// paths never fill; closed paths use the shape's nonzero or even-odd fill
-/// rule. Painted strokes always carry K2's round cap and join.
+/// rule. Painted strokes carry the configured cap and K2's round join.
 pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     if shape.anchors.len() > MAX_VECTOR_ANCHORS {
         return Err(VectorSvgError::TooComplex {
@@ -104,7 +104,13 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
         }
         out.push_str(" stroke-width=\"");
         out.push_str(&number(stroke.width));
-        out.push_str("\" stroke-linecap=\"round\" stroke-linejoin=\"round\"");
+        out.push_str("\" stroke-linecap=\"");
+        out.push_str(match stroke.cap {
+            crate::vector::StrokeCap::Butt => "butt",
+            crate::vector::StrokeCap::Round => "round",
+            crate::vector::StrokeCap::Square => "square",
+        });
+        out.push_str("\" stroke-linejoin=\"round\"");
     } else {
         out.push_str(" stroke=\"none\"");
     }
@@ -156,6 +162,7 @@ mod tests {
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
                 width: 0.01,
+                cap: crate::vector::StrokeCap::Round,
                 color: [0, 0, 0, 255],
             }),
             anchors: vec![
@@ -201,6 +208,7 @@ mod tests {
             fill: [255, 255, 255, 255],
             stroke: Some(Stroke {
                 width: 0.1,
+                cap: crate::vector::StrokeCap::Round,
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.5, 0.5])],
@@ -215,14 +223,17 @@ mod tests {
         for stroke in [
             Stroke {
                 width: 0.0,
+                cap: crate::vector::StrokeCap::Round,
                 color: [255, 255, 255, 255],
             },
             Stroke {
                 width: f32::NAN,
+                cap: crate::vector::StrokeCap::Round,
                 color: [255, 255, 255, 255],
             },
             Stroke {
                 width: 0.1,
+                cap: crate::vector::StrokeCap::Round,
                 color: [255, 255, 255, 0],
             },
         ] {
@@ -294,6 +305,7 @@ mod tests {
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
                     width: 0.1,
+                    cap: crate::vector::StrokeCap::Round,
                     color: [1, 2, 3, alpha],
                 }),
                 anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -320,6 +332,7 @@ mod tests {
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
                 width: 0.01,
+                cap: crate::vector::StrokeCap::Round,
                 color: [0, 0, 0, 255],
             }),
             anchors: vec![
@@ -338,6 +351,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 width: 0.02,
+                cap: crate::vector::StrokeCap::Round,
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.1, 0.2]), Anchor::corner([0.8, 0.9])],
@@ -363,6 +377,7 @@ mod tests {
             fill: [1, 2, 3, 255],
             stroke: Some(Stroke {
                 width: 0.125,
+                cap: crate::vector::StrokeCap::Round,
                 color: [10, 20, 30, 128],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -401,6 +416,7 @@ mod tests {
             fill: [1, 2, 3, 0],
             stroke: Some(Stroke {
                 width: 0.1,
+                cap: crate::vector::StrokeCap::Round,
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -502,6 +518,37 @@ mod tests {
             crate::svg::FillRule::EvenOdd
         );
         let invalid = br#"<svg width="1" height="1" fill-rule="winding"><path d="M0 0"/></svg>"#;
+        assert!(matches!(
+            import_svg(invalid),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn stroke_caps_export_and_import_as_the_same_cap() {
+        for (cap, text) in [
+            (crate::vector::StrokeCap::Butt, "butt"),
+            (crate::vector::StrokeCap::Round, "round"),
+            (crate::vector::StrokeCap::Square, "square"),
+        ] {
+            let shape = VectorShape {
+                closed: false,
+                fill_rule: crate::svg::FillRule::NonZero,
+                fill: [0, 0, 0, 0],
+                stroke: Some(Stroke {
+                    width: 0.25,
+                    color: [10, 20, 30, 255],
+                    cap,
+                }),
+                anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+            };
+            let first = export_svg(&shape).expect("cap export");
+            assert!(first.contains(&format!("stroke-linecap=\"{text}\"")));
+            let imported = import_svg(first.as_bytes()).expect("cap import");
+            assert_eq!(imported.shape.stroke.expect("imported stroke").cap, cap);
+            assert_eq!(export_svg(&imported.shape).expect("re-export"), first);
+        }
+        let invalid = br##"<svg width="1" height="1"><path stroke="#000" stroke-linecap="pointed" d="M0 0"/></svg>"##;
         assert!(matches!(
             import_svg(invalid),
             Err(crate::svg::SvgError::Unsupported { .. })

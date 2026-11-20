@@ -1745,12 +1745,23 @@ fn parse_vector_paint(
     let Some(rgb) = stroke_rgb else {
         return Ok((fill, None, fill_rule));
     };
-    for (key, expected) in [("stroke-linecap", "round"), ("stroke-linejoin", "round")] {
-        if find_attr(attrs, key).is_none_or(|attr| attr.value.trim() != expected) {
-            return Err(SvgError::Unsupported {
-                what: format!("{key} must be {expected} for vector import"),
-            });
-        }
+    let cap = match find_attr(attrs, "stroke-linecap") {
+        None => crate::vector::StrokeCap::Round,
+        Some(attr) => match attr.value.trim() {
+            "butt" => crate::vector::StrokeCap::Butt,
+            "round" => crate::vector::StrokeCap::Round,
+            "square" => crate::vector::StrokeCap::Square,
+            other => {
+                return Err(SvgError::Unsupported {
+                    what: format!("stroke-linecap {other}"),
+                });
+            }
+        },
+    };
+    if find_attr(attrs, "stroke-linejoin").is_none_or(|attr| attr.value.trim() != "round") {
+        return Err(SvgError::Unsupported {
+            what: "stroke-linejoin must be round for vector import".to_owned(),
+        });
     }
     let raw_width = match find_attr(attrs, "stroke-width") {
         Some(attr) => parse_length(attr, "path")?,
@@ -1777,6 +1788,7 @@ fn parse_vector_paint(
         Some(crate::vector::Stroke {
             width: stroke_width,
             color,
+            cap,
         }),
         fill_rule,
     ))

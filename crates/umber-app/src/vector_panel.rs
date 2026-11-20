@@ -29,6 +29,7 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "vector.stroke",
     "vector.stroke-width",
     "vector.stroke-color",
+    "vector.stroke-cap",
     "vector.export-svg",
 ];
 
@@ -143,6 +144,43 @@ where
                             .color_edit_button_srgba_unmultiplied(&mut stroke.color)
                             .changed()
                         {
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(tr("vector.stroke-cap")).color(umber_gui::muted()),
+                        );
+                        let mut cap = stroke.cap;
+                        egui::ComboBox::from_id_salt(format!("vector-stroke-cap-{id}"))
+                            .selected_text(match cap {
+                                umber_core::vector::StrokeCap::Butt => tr("vector.stroke-cap-butt"),
+                                umber_core::vector::StrokeCap::Round => {
+                                    tr("vector.stroke-cap-round")
+                                }
+                                umber_core::vector::StrokeCap::Square => {
+                                    tr("vector.stroke-cap-square")
+                                }
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut cap,
+                                    umber_core::vector::StrokeCap::Butt,
+                                    tr("vector.stroke-cap-butt"),
+                                );
+                                ui.selectable_value(
+                                    &mut cap,
+                                    umber_core::vector::StrokeCap::Round,
+                                    tr("vector.stroke-cap-round"),
+                                );
+                                ui.selectable_value(
+                                    &mut cap,
+                                    umber_core::vector::StrokeCap::Square,
+                                    tr("vector.stroke-cap-square"),
+                                );
+                            });
+                        if cap != stroke.cap {
+                            stroke.cap = cap;
                             changed = true;
                         }
                     });
@@ -305,6 +343,7 @@ fn set_stroke_enabled(shape: &mut VectorShape, enabled: bool) {
         (true, None) => {
             shape.stroke = Some(Stroke {
                 width: DEFAULT_STROKE_WIDTH,
+                cap: umber_core::vector::StrokeCap::Round,
                 color: [0, 0, 0, 255],
             });
         }
@@ -354,6 +393,7 @@ mod row_label_tests {
                 "Stroke",
                 "Stroke width",
                 "Stroke color",
+                "Stroke cap",
                 "Export SVG",
             ]
         );
@@ -429,6 +469,7 @@ mod tests {
                 .stroke,
             Some(Stroke {
                 width: DEFAULT_STROKE_WIDTH,
+                cap: umber_core::vector::StrokeCap::Round,
                 color: [0, 0, 0, 255],
             })
         );

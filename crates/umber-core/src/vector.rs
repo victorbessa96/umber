@@ -34,6 +34,18 @@ impl Anchor {
     }
 }
 
+/// Stroke endpoint style. `Round` preserves the K2 raster exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StrokeCap {
+    /// No cap beyond the endpoint.
+    Butt,
+    /// A semicircular cap centered on the endpoint.
+    #[default]
+    Round,
+    /// A square cap extended by the stroke radius.
+    Square,
+}
+
 /// An optional stroke around the shape's outline.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
@@ -41,6 +53,9 @@ pub struct Stroke {
     pub width: f32,
     /// sRGBA color.
     pub color: [u8; 4],
+    /// Endpoint style. Additive: old projects default to Round.
+    #[serde(default)]
+    pub cap: StrokeCap,
 }
 
 /// The shape a vector layer holds. `anchors` in path order; `closed`
@@ -112,7 +127,9 @@ fn anchor_cache_eq(a: &Anchor, b: &Anchor) -> bool {
 
 fn stroke_cache_eq(a: Option<Stroke>, b: Option<Stroke>) -> bool {
     match (a, b) {
-        (Some(a), Some(b)) => f32_cache_eq(a.width, b.width) && a.color == b.color,
+        (Some(a), Some(b)) => {
+            f32_cache_eq(a.width, b.width) && a.color == b.color && a.cap == b.cap
+        }
         (None, None) => true,
         _ => false,
     }
@@ -317,17 +334,98 @@ fn stroke_polys(
         }
         points += 4;
     }
-    for &point in centerline {
-        if points.saturating_add(ellipse_cost) > MAX_VECTOR_POINTS {
-            return Err(VectorError::TooComplex {
-                what: "path points",
-                limit: MAX_VECTOR_POINTS,
-            });
+    // Cap style affects open endpoints only. A closed path has no endpoints,
+    // so every cap keeps Round's join behavior, including the closure corner.
+    let cap = if shape.closed {
+        StrokeCap::Round
+    } else {
+        shape.stroke.map(|s| s.cap).unwrap_or_default()
+    };
+    for (index, &point) in centerline.iter().enumerate() {
+        let join = join_at(centerline, index);
+        if cap == StrokeCap::Round || join {
+            if points.saturating_add(ellipse_cost) > MAX_VECTOR_POINTS {
+                return Err(VectorError::TooComplex {
+                    what: "path points",
+                    limit: MAX_VECTOR_POINTS,
+                });
+            }
+            builder.ellipse(point, radius, radius);
+            points += ellipse_cost;
         }
-        builder.ellipse(point, radius, radius);
-        points += ellipse_cost;
+    }
+    if cap == StrokeCap::Square && !shape.closed && centerline.len() >= 2 {
+        let last = centerline.len() - 1;
+        for (point, direction) in [
+            (
+                centerline[0],
+                [
+                    centerline[0][0] - centerline[1][0],
+                    centerline[0][1] - centerline[1][1],
+                ],
+            ),
+            (
+                centerline[last],
+                [
+                    centerline[last][0] - centerline[last - 1][0],
+                    centerline[last][1] - centerline[last - 1][1],
+                ],
+            ),
+        ] {
+            let length = direction[0].hypot(direction[1]);
+            if length <= 0.0 || !length.is_finite() {
+                continue;
+            }
+            let direction = [direction[0] / length, direction[1] / length];
+            let normal = [-direction[1] * radius, direction[0] * radius];
+            let extension = [direction[0] * radius, direction[1] * radius];
+            let quad = [
+                [point[0] + normal[0], point[1] + normal[1]],
+                [
+                    point[0] + extension[0] + normal[0],
+                    point[1] + extension[1] + normal[1],
+                ],
+                [
+                    point[0] + extension[0] - normal[0],
+                    point[1] + extension[1] - normal[1],
+                ],
+                [point[0] - normal[0], point[1] - normal[1]],
+            ];
+            if points.saturating_add(4) > MAX_VECTOR_POINTS {
+                return Err(VectorError::TooComplex {
+                    what: "path points",
+                    limit: MAX_VECTOR_POINTS,
+                });
+            }
+            builder.move_to(quad[0]);
+            for i in 1..quad.len() {
+                builder.line_to(quad[i - 1], quad[i]);
+            }
+            points += 4;
+        }
     }
     Ok(builder.finish())
+}
+
+/// Whether `index` is a genuine join rather than a collinear flattening
+/// point. Non-round caps still get round joins at real turns, but never
+/// get accidental caps from a collinear point near an endpoint.
+fn join_at(centerline: &[[f64; 2]], index: usize) -> bool {
+    if index == 0 || index + 1 >= centerline.len() {
+        return false;
+    }
+    let a = centerline[index - 1];
+    let b = centerline[index];
+    let c = centerline[index + 1];
+    let prev = [b[0] - a[0], b[1] - a[1]];
+    let next = [c[0] - b[0], c[1] - b[1]];
+    let prev_len = prev[0].hypot(prev[1]);
+    let next_len = next[0].hypot(next[1]);
+    if prev_len <= 0.0 || next_len <= 0.0 {
+        return false;
+    }
+    let cross = prev[0] * next[1] - prev[1] * next[0];
+    cross.abs() > 1e-12 || prev[0] * next[0] + prev[1] * next[1] < 0.0
 }
 
 /// Rasterizes a live vector shape at the target tile size. Closed paths
@@ -433,6 +531,7 @@ mod tests {
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 width: 0.01,
+                cap: crate::vector::StrokeCap::Round,
                 color: [10, 10, 10, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -452,6 +551,7 @@ mod tests {
             fill: [255, 0, 0, 255],
             stroke: Some(Stroke {
                 width: f32::NAN,
+                cap: crate::vector::StrokeCap::Round,
                 color: [0, 0, 255, 255],
             }),
             anchors: vec![
@@ -635,6 +735,7 @@ mod tests {
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 width: 0.25,
+                cap: crate::vector::StrokeCap::Round,
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
@@ -677,6 +778,7 @@ mod tests {
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
                 width: 0.5,
+                cap: crate::vector::StrokeCap::Round,
                 color: [0, 0, 255, 128],
             }),
             anchors: vec![
@@ -707,6 +809,7 @@ mod tests {
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
                 width: 0.5,
+                cap: crate::vector::StrokeCap::Round,
                 color: [0, 0, 255, 0],
             }),
             anchors: vec![
@@ -806,6 +909,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.25,
+                    cap: crate::vector::StrokeCap::Round,
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![Anchor::corner([0.5, 0.5])],
@@ -823,6 +927,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.25,
+                    cap: crate::vector::StrokeCap::Round,
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![
@@ -836,6 +941,7 @@ mod tests {
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.25,
+                    cap: crate::vector::StrokeCap::Round,
                     color: [0, 0, 255, 255],
                 }),
                 anchors: vec![
@@ -866,6 +972,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 width: 0.25,
+                cap: crate::vector::StrokeCap::Round,
                 color: [10, 20, 30, 255],
             }),
             anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
@@ -1011,6 +1118,95 @@ mod tests {
     }
 
     #[test]
+    fn butt_and_square_caps_follow_the_endpoints() {
+        let shape = |cap| VectorShape {
+            closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+                cap,
+            }),
+            anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+        };
+        let at = |raster: &VectorRaster, x: u32, y: u32| raster.coverage()[(y * 16 + x) as usize];
+        let butt = rasterize(&shape(StrokeCap::Butt), 16, 16).expect("butt cap");
+        assert_eq!(at(&butt, 3, 7), 0.0, "butt stops before the endpoint");
+        assert_eq!(at(&butt, 5, 7), 1.0);
+        assert_eq!(at(&butt, 10, 7), 1.0);
+        assert_eq!(at(&butt, 13, 7), 0.0, "butt stops after the last endpoint");
+
+        let square = rasterize(&shape(StrokeCap::Square), 16, 16).expect("square cap");
+        assert_eq!(at(&square, 2, 7), 1.0, "square extends by the radius");
+        assert_eq!(at(&square, 1, 7), 0.0, "square still stops at its cap edge");
+        assert_eq!(at(&square, 13, 7), 1.0, "the last square cap extends too");
+        assert_eq!(at(&square, 14, 7), 0.0);
+
+        let closed = VectorShape {
+            closed: true,
+            anchors: vec![
+                Anchor::corner([0.0, 0.0]),
+                Anchor::corner([1.0, 0.0]),
+                Anchor::corner([1.0, 1.0]),
+                Anchor::corner([0.0, 1.0]),
+            ],
+            ..shape(StrokeCap::Butt)
+        };
+        let round = rasterize(
+            &VectorShape {
+                stroke: Some(Stroke {
+                    cap: StrokeCap::Round,
+                    ..closed.stroke.expect("closed stroke")
+                }),
+                ..closed.clone()
+            },
+            16,
+            16,
+        )
+        .expect("closed round");
+        let butt = rasterize(
+            &VectorShape {
+                stroke: Some(Stroke {
+                    cap: StrokeCap::Butt,
+                    ..closed.stroke.expect("closed stroke")
+                }),
+                ..closed
+            },
+            16,
+            16,
+        )
+        .expect("closed butt");
+        assert_eq!(round, butt, "closed paths have no endpoints to cap");
+
+        for (x, y) in [(0, 0), (0, 15), (15, 0), (15, 15)] {
+            let index = (y * 16 + x) as usize;
+            assert_eq!(
+                round.coverage()[index],
+                1.0,
+                "Round keeps the closure join at ({x},{y})"
+            );
+            assert_eq!(
+                butt.coverage()[index],
+                1.0,
+                "cap choice must not remove the closure join at ({x},{y})"
+            );
+        }
+
+        let json = serde_json::to_string(&shape(StrokeCap::Square)).expect("serialize cap");
+        let back: VectorShape = serde_json::from_str(&json).expect("deserialize cap");
+        assert_eq!(back.stroke.expect("cap survives").cap, StrokeCap::Square);
+        let old: VectorShape = serde_json::from_str(
+            r#"{"closed":false,"fill":[0,0,0,0],"stroke":{"width":0.25,"color":[10,20,30,255]},"anchors":[{"pos":[0.25,0.5],"in_handle":[0.25,0.5],"out_handle":[0.25,0.5]},{"pos":[0.75,0.5],"in_handle":[0.75,0.5],"out_handle":[0.75,0.5]}]}"#,
+        )
+        .expect("pre-cap project loads");
+        assert_eq!(old.stroke.expect("old stroke").cap, StrokeCap::Round);
+        let mut changed = shape(StrokeCap::Square);
+        changed.stroke.as_mut().unwrap().cap = StrokeCap::Butt;
+        assert!(!shape(StrokeCap::Square).same_cache_key(&changed));
+    }
+
+    #[test]
     fn stroke_geometry_budget_is_typed_error() {
         let shape = VectorShape {
             closed: false,
@@ -1018,6 +1214,7 @@ mod tests {
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 width: 1.0e6,
+                cap: crate::vector::StrokeCap::Round,
                 color: [255, 255, 255, 255],
             }),
             anchors: vec![Anchor::corner([0.5, 0.5]); 300],

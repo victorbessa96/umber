@@ -2138,6 +2138,7 @@ mod tests {
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 width: 0.01,
+                cap: crate::vector::StrokeCap::Round,
                 color: [10, 10, 10, 255],
             }),
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
