@@ -2,8 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K6a even-odd vector fill `7372aa53` is pushed on top of Fill cache-lifecycle `8747c681`; the K6a brief is `894a8e14`.
-`VectorShape` now carries additive `fill_rule` with NonZero default, so old projects load unchanged and cache identity includes the rule. `rasterize_polys_rule` uses the shared scanline for even-odd while the old nonzero wrapper remains unchanged. Vector Properties has a Nonzero / Even-odd combo through one undoable SetVector edit and both i18n catalogs. SVG export/import roundtrips both rules, with root-rule inheritance and invalid values refused. The star test compares full coverage arrays against the SVG oracle. Final battery is GREEN: clippy 0 errors, 21 suites, 2,176 passed / 0 failed (`vector-fill-rule-final-battery-r2.log`). `opencode/beam-free` final review returned SHIP; its test-honesty note was closed with the full-oracle difference proof. Cap/join selectors remain K6b; dashes, multi-shape, and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
+**Updated 2026-11-20:** K6b stroke cap options `1839de83` is committed on top of K6a `7372aa53`; the K6b brief is `fc022678`.
+`Stroke` now carries additive `cap` with Round default and cache identity. Butt and Square caps work at open endpoints; `join_at` limits non-round-cap ellipses to actual turns, and closed paths force Round join behavior including the closure corner. Vector Properties has a cap combo through one undoable SetVector edit and both i18n catalogs. SVG export/import roundtrips all three caps. Final battery is GREEN: clippy 0 errors, 21 suites, 2,178 passed / 0 failed (`vector-stroke-cap-final-battery-r3.log`). Round 1 review FIX-FIRST for closure variance was fixed and re-reviewed SHIP; the closure test also asserts corner coverage directly. Join selectors remain K6c; dashes, multi-shape, and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 
