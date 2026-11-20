@@ -2,8 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K7b stroke-only subpath import `3d087302` is pushed on top of K7a `29a02f9a`; the K7b brief is `e76cd23e`.
-`VectorImportBuilder` collects moveto-delimited subpaths in order, including segments after closepath. `import_svg_many` splits stroke-only compound paths into one shape per subpath with shared stroke/cap/join/dash state and transparent fill. Filled compound subpaths remain typed refusals to preserve nonzero/evenodd hole semantics. The 256-shape and 65,536-anchor budgets include subpaths; strict single-shape `import_svg` remains. Panel creates every split layer in one undo group. Final battery is GREEN: clippy 0 errors, 21 suites, 2,190 passed / 0 failed (`vector-subpaths-final-battery.log`). Bounded review returned SHIP; direct `Z` + segment coverage passed. Compound fill modeling and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
+**Updated 2026-11-20:** K7c root/group paint inheritance `f04ed236` is pushed on top of K7b `3d087302`; the K7c brief is `793fed3d`.
+Scoped root and nested-group frames inherit fill, fill-opacity/rule, stroke paint/opacity/width, cap, join, and dash properties. Child overrides, empty/inherit preservation, and sibling isolation are pinned. Paths reuse existing paint parsing, geometry, subpath behavior, grouped budgets, strict single-shape compatibility, and one-history-group panel undo/redo. Unknown subtrees skip; group transforms, CSS style, opacity, visibility, and effects remain typed refusals. Non-default stroke-miterlimit is refused at root/group/path; explicit default 4 and inherit are accepted. Final battery is GREEN: clippy 0 errors, 21 suites, 2,193 passed / 0 failed (`vector-groups-final-battery-r1.log`). Bounded review returned SHIP. Compound fill modeling and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 
