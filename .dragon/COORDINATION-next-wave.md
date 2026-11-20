@@ -2,7 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K6b stroke cap options `1839de83` is committed on top of K6a `7372aa53`; the K6b brief is `fc022678`.
+**Updated 2026-11-20:** K6b stroke cap options `1839de83` is pushed on top of K6a `7372aa53`; the K6b brief is `fc022678`.
 `Stroke` now carries additive `cap` with Round default and cache identity. Butt and Square caps work at open endpoints; `join_at` limits non-round-cap ellipses to actual turns, and closed paths force Round join behavior including the closure corner. Vector Properties has a cap combo through one undoable SetVector edit and both i18n catalogs. SVG export/import roundtrips all three caps. Final battery is GREEN: clippy 0 errors, 21 suites, 2,178 passed / 0 failed (`vector-stroke-cap-final-battery-r3.log`). Round 1 review FIX-FIRST for closure variance was fixed and re-reviewed SHIP; the closure test also asserts corner coverage directly. Join selectors remain K6c; dashes, multi-shape, and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
