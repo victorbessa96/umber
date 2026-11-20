@@ -145,7 +145,8 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     Ok(out)
 }
 
-/// Imports the bounded SVG subset into one vector shape per top-level path.
+/// Imports the bounded SVG subset into one vector shape per path or
+/// stroke-only subpath, with scoped group paint and affine transforms.
 pub fn import_svg_many(
     bytes: &[u8],
 ) -> Result<Vec<crate::vector::VectorParams>, crate::svg::SvgError> {
@@ -538,18 +539,31 @@ mod tests {
     }
 
     #[test]
-    fn root_transform_is_applied_once_and_path_transform_is_refused() {
+    fn root_group_and_path_transforms_compose_once_and_scale_strokes() {
         let svg =
             br#"<svg width="2" height="2" transform="translate(1 0)"><path d="M0 0 L1 1"/></svg>"#;
         let params = import_svg(svg).expect("one root transform");
         assert_eq!(params.shape.anchors[0].pos, [0.5, 0.0]);
         assert_eq!(params.shape.anchors[1].pos, [1.0, 0.5]);
 
-        let svg = br#"<svg width="2" height="2" transform="translate(1 0)"><path transform="translate(1 0)" d="M0 0 L1 1"/></svg>"#;
-        assert!(matches!(
-            import_svg(svg),
-            Err(crate::svg::SvgError::Unsupported { .. })
-        ));
+        let nested = br##"<svg width="4" height="4"><g transform="translate(1 0)"><g transform="scale(2)"><path transform="translate(0.5 0.5)" fill="none" stroke="#000000" stroke-width="0.5" stroke-dasharray="1 2" stroke-dashoffset="0.5" d="M0 0 L1 0"/></g></g><path d="M0 0 L1 0"/></svg>"##;
+        let shapes = import_svg_many(nested).expect("nested transforms");
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(shapes[0].shape.anchors[0].pos, [0.5, 0.25]);
+        assert_eq!(shapes[0].shape.anchors[1].pos, [1.0, 0.25]);
+        let stroke = shapes[0].shape.stroke.as_ref().expect("scaled stroke");
+        assert_eq!(stroke.width, 0.25);
+        assert_eq!(stroke.dash.lengths(), &[0.5, 1.0]);
+        assert_eq!(stroke.dash.offset, 0.25);
+        assert_eq!(shapes[1].shape.anchors[0].pos, [0.0, 0.0]);
+        assert_eq!(shapes[1].shape.anchors[1].pos, [0.25, 0.0]);
+
+        for invalid in [
+            r#"<svg width="1" height="1"><g transform="bogus(1)"><path d="M0 0"/></g></svg>"#,
+            r#"<svg width="1" height="1"><path transform="scale(1 2 3)" d="M0 0"/></svg>"#,
+        ] {
+            assert!(import_svg(invalid.as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -915,10 +929,6 @@ mod tests {
                 "root visibility",
             ),
             (
-                br#"<svg width="1" height="1"><g transform="translate(1 0)"><path d="M0 0"/></g></svg>"#,
-                "group transform",
-            ),
-            (
                 br#"<svg width="1" height="1"><g style="fill:none"><path d="M0 0"/></g></svg>"#,
                 "group style",
             ),
@@ -960,7 +970,7 @@ mod tests {
             ),
             (
                 br#"<svg width="1" height="1"><path style="fill:none" d="M0 0"/></svg>"#,
-                "path transform/style",
+                "path style",
             ),
             (
                 br#"<svg width="1" height="1"><path clip-path="url(#c)" d="M0 0"/></svg>"#,

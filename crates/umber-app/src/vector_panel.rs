@@ -674,6 +674,17 @@ mod tests {
             import_with_io(&mut doc, move || Ok(declared), move || Ok(grouped.to_vec()));
         assert!(group_failure.is_err());
         assert_eq!(doc_snapshot(&doc), before);
+
+        let transformed =
+            br#"<svg width="1" height="1"><g transform="bogus(1)"><path d="M0 0"/></g></svg>"#;
+        let declared = transformed.len() as u64;
+        let transform_failure = import_with_io(
+            &mut doc,
+            move || Ok(declared),
+            move || Ok(transformed.to_vec()),
+        );
+        assert!(transform_failure.is_err());
+        assert_eq!(doc_snapshot(&doc), before);
     }
 
     #[test]
@@ -740,6 +751,23 @@ mod tests {
         let declared = svg.len() as u64;
         let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
             .expect("grouped import succeeds");
+        assert_eq!(doc.layers().len(), 2);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(doc.history.len(), 4);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        assert_eq!(doc.layers().len(), 2);
+    }
+
+    #[test]
+    fn transformed_group_import_adds_layers_in_one_undo_group() {
+        let mut doc = Document::default();
+        let svg = br##"<svg width="4" height="4"><g transform="translate(1 0)"><path fill="#123456" d="M0 0 L1 0 L1 1 Z"/><path transform="scale(2)" fill="none" stroke="#000" d="M0 1 L1 0"/></g></svg>"##;
+        let declared = svg.len() as u64;
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("transformed import succeeds");
         assert_eq!(doc.layers().len(), 2);
         assert_eq!(ids.len(), 2);
         assert_eq!(doc.history.len(), 4);

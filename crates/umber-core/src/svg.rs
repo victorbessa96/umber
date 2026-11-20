@@ -1227,9 +1227,9 @@ impl PathSink for PolyBuilder {
 ///
 /// This walker deliberately sees only path commands, never presentation
 /// attributes. Element/root transforms are composed by the caller: the raster
-/// `PolyBuilder` owns its CTM, and K5b's `VectorImportBuilder` owns the single
-/// root CTM-to-UV map. Path `transform`/`style` attrs are refused by import
-/// before this walker is called, so no transform is applied twice.
+/// `PolyBuilder` owns its CTM, and vector import owns the effective root,
+/// group, and path CTM-to-UV map. CSS `style` remains refused; transforms are
+/// composed by the caller before this walker is called.
 fn build_path<S: PathSink>(d: &Attr, b: &mut S) -> Result<(), SvgError> {
     let mut cur = Cursor::new(d);
     let mut command: Option<u8> = None;
@@ -1523,9 +1523,10 @@ impl PathSink for VectorImportBuilder {
     }
 }
 
-/// Parses the bounded document subset into one vector shape per top-level
-/// path. The old raster path never calls this function; both share the strict
-/// XML tokenizer, root geometry, and path-command walker.
+/// Parses the bounded document subset into one vector shape per path or
+/// stroke-only subpath, with scoped inherited paint and affine transforms.
+/// The old raster path never calls this function; both share the strict XML
+/// tokenizer, root geometry, transform parser, and path-command walker.
 pub(crate) fn import_vector_svg_many(
     bytes: &[u8],
 ) -> Result<Vec<crate::vector::VectorParams>, SvgError> {
@@ -1586,9 +1587,9 @@ pub(crate) fn import_vector_svg_many(
     )?;
     let root_ctm = root_style.ctm;
 
-    // Each open group owns an effective inherited presentation frame. `None`
+    // Each open group owns inherited paint plus its effective CTM. `None`
     // skips an unknown/path subtree just like the raster document walker.
-    let root_frame = inherited_vector_paint(&[], &root_attrs);
+    let root_frame = (inherited_vector_paint(&[], &root_attrs), root_ctm);
     let mut stack = if root_self_closing {
         Vec::new()
     } else {
@@ -1610,7 +1611,7 @@ pub(crate) fn import_vector_svg_many(
             } => {
                 let parent = stack.last().and_then(|frame| frame.as_ref()).cloned();
                 let mut frame = None;
-                if let Some(parent) = parent {
+                if let Some((parent_attrs, parent_ctm)) = parent {
                     if name == "path" {
                         if shapes.len() >= crate::vector::MAX_VECTOR_SHAPES {
                             return Err(SvgError::TooComplex {
@@ -1621,17 +1622,19 @@ pub(crate) fn import_vector_svg_many(
                         let d = find_attr(&attrs, "d").ok_or_else(|| SvgError::Unsupported {
                             what: "path without d".to_owned(),
                         })?;
-                        if find_attr(&attrs, "transform").is_some()
-                            || find_attr(&attrs, "style").is_some()
-                        {
+                        if find_attr(&attrs, "style").is_some() {
                             return Err(SvgError::Unsupported {
-                                what: "path transform/style in vector import".to_owned(),
+                                what: "path style in vector import".to_owned(),
                             });
                         }
                         // Refuse unsupported effects before spending geometry
                         // work, and report them ahead of malformed path data.
                         refuse_path_import_effects(&attrs)?;
-                        let mut builder = VectorImportBuilder::new(root_ctm, width, height);
+                        let ctm = match find_attr(&attrs, "transform") {
+                            Some(transform) => parent_ctm.compose(parse_transform(transform)?),
+                            None => parent_ctm,
+                        };
+                        let mut builder = VectorImportBuilder::new(ctm, width, height);
                         build_path(d, &mut builder)?;
                         let subpaths = builder.finish();
                         if shapes.len().saturating_add(subpaths.len())
@@ -1642,10 +1645,10 @@ pub(crate) fn import_vector_svg_many(
                                 limit: crate::vector::MAX_VECTOR_SHAPES,
                             });
                         }
-                        let effective_attrs = inherited_vector_paint(&parent, &attrs);
+                        let effective_attrs = inherited_vector_paint(&parent_attrs, &attrs);
                         let (fill, stroke, fill_rule) = parse_vector_paint(
                             &effective_attrs,
-                            root_ctm,
+                            ctm,
                             width,
                             height,
                             root_style.rule,
@@ -1671,7 +1674,11 @@ pub(crate) fn import_vector_svg_many(
                         }
                     } else if name == "g" {
                         refuse_group_import_effects(&attrs)?;
-                        frame = Some(inherited_vector_paint(&parent, &attrs));
+                        let ctm = match find_attr(&attrs, "transform") {
+                            Some(transform) => parent_ctm.compose(parse_transform(transform)?),
+                            None => parent_ctm,
+                        };
+                        frame = Some((inherited_vector_paint(&parent_attrs, &attrs), ctm));
                     } else if is_shape(&name) {
                         return Err(SvgError::Unsupported {
                             what: format!("multiple shapes in one vector layer: <{name}>"),
@@ -1739,7 +1746,6 @@ fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
 
 fn refuse_group_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
     for key in [
-        "transform",
         "style",
         "opacity",
         "display",
