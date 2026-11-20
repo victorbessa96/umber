@@ -1388,8 +1388,8 @@ mod tests {
         let join_index = (0..line.len())
             .find(|&index| join_at(&line, index, false))
             .expect("an actual turn exists");
-        let actual = join_polygon(&line, join_index, 2.0, StrokeJoin::Bevel, false)
-            .expect("bevel polygon");
+        let actual =
+            join_polygon(&line, join_index, 2.0, StrokeJoin::Bevel, false).expect("bevel polygon");
         let expected = [[8.0, 14.0], [10.0, 12.0], [8.0, 12.0]];
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert!((actual[0] - expected[0]).abs() < 1e-6);
@@ -1403,8 +1403,8 @@ mod tests {
         )
         .expect("miter join");
         assert!(miter.iter().any(|polygon| polygon.len() == 4));
-        let actual = join_polygon(&line, join_index, 2.0, StrokeJoin::Miter, false)
-            .expect("miter polygon");
+        let actual =
+            join_polygon(&line, join_index, 2.0, StrokeJoin::Miter, false).expect("miter polygon");
         let expected = [[8.0, 14.0], [10.0, 14.0], [10.0, 12.0], [8.0, 12.0]];
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert!((actual[0] - expected[0]).abs() < 1e-6);
@@ -1431,13 +1431,16 @@ mod tests {
         );
         assert!(closed_geometry.iter().any(|polygon| {
             polygon.len() == 3
-                && polygon.iter().zip([[-2.0, 0.0], [0.0, -2.0], [0.0, 0.0]]).all(|(a, e)| {
-                    (a[0] - e[0]).abs() < 1e-6 && (a[1] - e[1]).abs() < 1e-6
-                })
+                && polygon
+                    .iter()
+                    .zip([[-2.0, 0.0], [0.0, -2.0], [0.0, 0.0]])
+                    .all(|(a, e)| (a[0] - e[0]).abs() < 1e-6 && (a[1] - e[1]).abs() < 1e-6)
         }));
         let ellipse_points = crate::svg::ellipse_point_count(2.0, 2.0);
         assert!(
-            !closed_geometry.iter().any(|polygon| polygon.len() == ellipse_points),
+            !closed_geometry
+                .iter()
+                .any(|polygon| polygon.len() == ellipse_points),
             "closed Miter/Bevel joins must not emit a round endpoint cap"
         );
 
