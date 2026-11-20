@@ -2,24 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** K5b code `0d1b6ad7` plus full review hardening
-`6ffec3bc` is pushed on top of K5a `09d01fbd`, K4 `a4373c51`, K3 `98fdbb80`,
-K2 `0b5cb72d`, and K1 `46d4bff5`; the hardening brief is `d6e2ba35`.
-The hardening closes the late full review: typed root/path presentation-effect
-refusals before geometry parsing, shortest-f32 formatting, four-case exact
-roundtrip plus every fill/stroke alpha byte, exact Q/T assertions, injected
-metadata/read ordering with document-failure atomicity, capped streaming file
-reads, path-prefixed errors, empty-panel ImportFailed preservation, searchable
-Import SVG, production-only label-order checks, and self-closing-root handling.
-Final r3 battery is GREEN: clippy 0 errors, 19 suites, 1,953 passed / 0 failed
-(`vector-svg-import-hardening-final-battery-r3.log`). Kimi stalled twice with
-empty logs; bounded DeepSeek final review returned SHIP with no HIGH/MEDIUM
-defects. The alleged SessionHistory truncate bug was rejected with source
-evidence: it takes undo depth, not a vector index. Fill cache-lifecycle parity
-is the named follow-up; richer SVG stays out of scope. Human/platform gates are
-unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink
-verification, and beta/stable release. Consult `STATE.md` and the live lock
-registry before claiming new work.
+**Updated 2026-11-20:** Fill cache-lifecycle parity `8747c681` is committed on top of K5b import `0d1b6ad7` and full review hardening `6ffec3bc`; the lifecycle brief is `35aae84b`.
+Fill now records width and height in every cache entry, re-evaluates on params, symmetry, tile, or dimension changes, and publishes through the single-pass quick-mask/premultiply path. Open/New clear Fill state; complete restored planes seed clean while partial or planeless fills seed dirty. `retain_live` prunes deleted layers; `observe_frame` covers symmetry, set size, channel-size overrides, and sorted tile membership while skipping dormant ids. Budget refusal records byte and hard-cap watermarks; retry triggers when bytes fall or the cap rises and only republishes cached grids. `plane_hard_cap_bytes()` exposes the cap getter. Final battery is GREEN: clippy 0 errors, 21 suites, 2,174 passed / 0 failed (`fill-cache-lifecycle-final-battery-r3.log`). DeepSeek rounds 1-2 findings were fixed; `opencode/beam-free` final review returned SHIP. Richer SVG remains out of scope. Human/platform gates are unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink verification, and beta/stable release. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 
