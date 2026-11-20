@@ -22,13 +22,14 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K7c root/group paint inheritance is landed at `f04ed236`, on K7b subpath
-import `3d087302`, K7a multi-path import `29a02f9a`, K6d dash patterns
-`58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`, and K6a
-even-odd fill `7372aa53`. Scoped root and nested-group frames inherit paint,
-cap, join, and dash properties without leaking across siblings; non-default
-miter limits and unsupported effects stay refused. Next: further safe SVG
-hardening or compound fill modeling; release work remains gated.
+K7d group/path affine transforms are landed at `65957542`, on K7c group
+paint inheritance `f04ed236`, K7b subpath import `3d087302`, K7a multi-path
+import `29a02f9a`, K6d dash patterns `58f9e160`, K6c stroke joins `68cbf388`,
+K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`. Scoped frames
+compose nested group and leaf-path transforms with exact geometry and
+stroke/dash scaling while preserving sibling isolation and typed refusals.
+Next: further safe SVG hardening or compound fill modeling; release work
+remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 

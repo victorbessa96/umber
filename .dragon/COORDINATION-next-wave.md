@@ -2,8 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K7c root/group paint inheritance `f04ed236` is pushed on top of K7b `3d087302`; the K7c brief is `793fed3d`.
-Scoped root and nested-group frames inherit fill, fill-opacity/rule, stroke paint/opacity/width, cap, join, and dash properties. Child overrides, empty/inherit preservation, and sibling isolation are pinned. Paths reuse existing paint parsing, geometry, subpath behavior, grouped budgets, strict single-shape compatibility, and one-history-group panel undo/redo. Unknown subtrees skip; group transforms, CSS style, opacity, visibility, and effects remain typed refusals. Non-default stroke-miterlimit is refused at root/group/path; explicit default 4 and inherit are accepted. Final battery is GREEN: clippy 0 errors, 21 suites, 2,193 passed / 0 failed (`vector-groups-final-battery-r1.log`). Bounded review returned SHIP. Compound fill modeling and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
+**Updated 2026-11-20:** K7d group/path affine transforms `65957542` are pushed on top of K7c `f04ed236`; the K7d brief is `13772368`.
+Scoped frames carry inherited paint plus effective CTM. Nested group and leaf-path transforms compose parent ∘ local in order, root applies once, and siblings stay isolated. Anchors/handles, stroke width, dash lengths, and dash offset use the effective CTM and established max-scale conversion. Existing inheritance, subpath behavior, grouped budgets, strict single-shape API, and one-history-group panel undo/redo remain. CSS style, opacity, visibility, effects, filled compounds, and non-default miter limits stay typed refusals. Final battery is GREEN: clippy 0 errors, 21 suites, 2,194 passed / 0 failed (`vector-transforms-final-battery-r1.log`). Bounded review returned SHIP. Compound fill modeling and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 
