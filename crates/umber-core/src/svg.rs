@@ -1525,7 +1525,7 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
         None => (0, text),
     };
     let mut tok = Tokenizer::new(text, base);
-    let (root_attrs, _root_self_closing) = match tok.next_event()? {
+    let (root_attrs, root_self_closing) = match tok.next_event()? {
         Event::Start {
             name,
             attrs,
@@ -1553,6 +1553,9 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
             max_pixels: crate::vector::MAX_VECTOR_RASTER_PIXELS,
         });
     }
+    // Root transform is supported; root paint/style/visibility inheritance is
+    // outside K5b's subset and must be refused rather than silently discarded.
+    refuse_root_import_presentation(&root_attrs)?;
     // Match the raster walker's root composition exactly: viewBox sizing from
     // root_geometry first, then the root transform/presentation attrs once.
     // build_path itself never sees presentation attrs, so this cannot double.
@@ -1566,7 +1569,14 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
     )?;
     let root_ctm = root_style.ctm;
 
-    let mut stack = vec![true];
+    // A self-closing root has no parent frame for later path events. The
+    // tokenizer already rejects trailing content; this also keeps the import
+    // document invariant explicit if that policy ever changes.
+    let mut stack = if root_self_closing {
+        Vec::new()
+    } else {
+        vec![true]
+    };
     let mut found = None;
     loop {
         match tok.next_event()? {
@@ -1599,6 +1609,9 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
                                 what: "path transform/style in vector import".to_owned(),
                             });
                         }
+                        // Refuse unsupported effects before spending geometry
+                        // work, and report them ahead of malformed path data.
+                        refuse_path_import_effects(&attrs)?;
                         let mut builder = VectorImportBuilder::new(root_ctm, width, height);
                         build_path(d, &mut builder)?;
                         let mut shape = builder.shape;
@@ -1626,6 +1639,73 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
         what: "no path in vector import".to_owned(),
     })?;
     Ok(crate::vector::VectorParams { shape })
+}
+
+fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
+    // Only transform and an explicit nonzero rule are meaningful to the import
+    // subset. Everything else here would be dropped instead of inherited.
+    for key in [
+        "fill",
+        "stroke",
+        "fill-opacity",
+        "stroke-opacity",
+        "stroke-width",
+        "stroke-linecap",
+        "stroke-linejoin",
+        "stroke-dasharray",
+        "stroke-dashoffset",
+        "clip-path",
+        "mask",
+        "filter",
+        "marker-start",
+        "marker-mid",
+        "marker-end",
+        "vector-effect",
+        "paint-order",
+        "opacity",
+        "style",
+        "display",
+        "visibility",
+    ] {
+        if find_attr(attrs, key).is_some() {
+            return Err(SvgError::Unsupported {
+                what: format!("root {key} in vector import"),
+            });
+        }
+    }
+    if let Some(rule) = find_attr(attrs, "fill-rule") {
+        if rule.value.trim() != "nonzero" {
+            return Err(SvgError::Unsupported {
+                what: format!("root fill-rule {}", rule.value.trim()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn refuse_path_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
+    for key in [
+        "opacity",
+        "display",
+        "visibility",
+        "stroke-dasharray",
+        "stroke-dashoffset",
+        "clip-path",
+        "mask",
+        "filter",
+        "marker-start",
+        "marker-mid",
+        "marker-end",
+        "vector-effect",
+        "paint-order",
+    ] {
+        if find_attr(attrs, key).is_some() {
+            return Err(SvgError::Unsupported {
+                what: format!("path {key} in vector import"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_vector_paint(

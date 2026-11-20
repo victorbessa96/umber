@@ -1,8 +1,9 @@
-//! Deterministic SVG export for one live vector layer (K5a).
+//! Deterministic SVG export (K5a) and bounded SVG-to-vector import (K5b).
 //!
-//! The document uses a 1×1 UV viewBox, the same direct x/y coordinate mapping
-//! as K2's `device_point`. K5b import is deliberately separate; this module
-//! only serializes the model and never reads or writes files.
+//! Export uses a 1×1 UV viewBox, the same direct x/y coordinate mapping as
+//! K2's `device_point`. K5b parsing delegates to `umber_core::svg`'s strict
+//! tokenizer, root geometry, and path walker. Neither direction reads or
+//! writes files itself; native file selection lives in the app panel.
 
 use thiserror::Error;
 
@@ -125,18 +126,11 @@ fn point(out: &mut String, value: [f32; 2]) {
     out.push_str(&number(value[1]));
 }
 
-/// Nine fractional digits are enough to round-trip an f32 while keeping the
-/// export stable. Trimming zeros and canonicalizing -0 keeps goldens readable.
+/// Rust's shortest f32 Display round-trips every finite value, including tiny
+/// UV coordinates and stroke widths that fixed decimal places would lose.
+/// Canonicalizing -0 keeps the document stable across equivalent shapes.
 fn number(value: f32) -> String {
-    let mut text = format!("{value:.9}");
-    if text.contains('.') {
-        while text.ends_with('0') {
-            text.pop();
-        }
-        if text.ends_with('.') {
-            text.pop();
-        }
-    }
+    let text = value.to_string();
     if text == "-0" {
         "0".to_owned()
     } else {
@@ -172,7 +166,7 @@ mod tests {
         let expected = concat!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\" viewBox=\"0 0 1 1\">\n",
             "<path d=\"M 0 0 C 0 0 0.25 0.5 0.5 0.5 C 0.75 0.5 1 0 1 0 L 0 0 Z\" ",
-            "fill-rule=\"nonzero\" fill=\"#FF0080\" fill-opacity=\"0.501960814\" ",
+            "fill-rule=\"nonzero\" fill=\"#FF0080\" fill-opacity=\"0.5019608\" ",
             "stroke=\"#000000\" stroke-width=\"0.01\" stroke-linecap=\"round\" ",
             "stroke-linejoin=\"round\"/>\n</svg>\n"
         );
@@ -258,8 +252,60 @@ mod tests {
     }
 
     #[test]
+    fn number_format_roundtrips_small_f32_values() {
+        for value in [
+            f32::from_bits(0x3c08_9c92),
+            0.0001,
+            0.0000001,
+            -f32::from_bits(0x3c08_9c92),
+            f32::from(128u8) / 255.0,
+        ] {
+            let text = number(value);
+            let parsed: f32 = text.parse().expect("formatted number parses");
+            assert_eq!(parsed.to_bits(), value.to_bits(), "{value} -> {text}");
+        }
+        assert_eq!(number(-0.0), "0");
+    }
+
+    #[test]
+    fn every_alpha_byte_roundtrips_through_svg_opacity() {
+        for alpha in 0..=255u8 {
+            let shape = VectorShape {
+                closed: true,
+                fill: [1, 2, 3, alpha],
+                stroke: None,
+                anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
+            };
+            let svg = export_svg(&shape).expect("export");
+            let imported = import_svg(svg.as_bytes()).expect("import");
+            assert_eq!(imported.shape.fill[3], alpha, "fill alpha {alpha}");
+
+            let shape = VectorShape {
+                closed: true,
+                fill: [0, 0, 0, 0],
+                stroke: Some(Stroke {
+                    width: 0.1,
+                    color: [1, 2, 3, alpha],
+                }),
+                anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
+            };
+            let svg = export_svg(&shape).expect("stroke export");
+            let imported = import_svg(svg.as_bytes()).expect("stroke import");
+            if alpha == 0 {
+                assert_eq!(imported.shape.stroke, None);
+            } else {
+                assert_eq!(
+                    imported.shape.stroke.expect("painted stroke").color[3],
+                    alpha,
+                    "stroke alpha {alpha}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn canonical_export_import_export_is_byte_identical() {
-        let shape = VectorShape {
+        let closed_mixed = VectorShape {
             closed: true,
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
@@ -276,11 +322,81 @@ mod tests {
                 Anchor::corner([1.0, 0.0]),
             ],
         };
-        let first = export_svg(&shape).expect("export");
-        let imported = import_svg(first.as_bytes()).expect("import");
-        assert_eq!(imported.shape, shape);
-        let second = export_svg(&imported.shape).expect("re-export");
-        assert_eq!(second, first);
+        let open_line = VectorShape {
+            closed: false,
+            fill: [0, 0, 0, 0],
+            stroke: Some(Stroke {
+                width: 0.02,
+                color: [10, 20, 30, 255],
+            }),
+            anchors: vec![Anchor::corner([0.1, 0.2]), Anchor::corner([0.8, 0.9])],
+        };
+        let open_cubic = VectorShape {
+            closed: false,
+            fill: [0, 0, 0, 0],
+            stroke: None,
+            anchors: vec![
+                Anchor::corner([0.0, 0.0]),
+                Anchor {
+                    pos: [0.5, 0.5],
+                    in_handle: [0.25, 0.5],
+                    out_handle: [0.75, 0.5],
+                },
+                Anchor::corner([1.0, 0.0]),
+            ],
+        };
+        let stroke_alpha = VectorShape {
+            closed: true,
+            fill: [1, 2, 3, 255],
+            stroke: Some(Stroke {
+                width: 0.125,
+                color: [10, 20, 30, 128],
+            }),
+            anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
+        };
+        for (name, shape) in [
+            ("closed mixed", closed_mixed),
+            ("open line", open_line),
+            ("open cubic", open_cubic),
+            ("stroke alpha", stroke_alpha),
+        ] {
+            let first = export_svg(&shape).expect("export");
+            let imported = import_svg(first.as_bytes()).expect("import");
+            assert_eq!(imported.shape, shape, "{name}");
+            let second = export_svg(&imported.shape).expect("re-export");
+            assert_eq!(second, first, "{name}");
+        }
+    }
+
+    #[test]
+    fn unpainted_fill_normalization_is_pinned() {
+        let open_painted = VectorShape {
+            closed: false,
+            fill: [255, 0, 0, 255],
+            stroke: None,
+            anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
+        };
+        let first = export_svg(&open_painted).expect("open export");
+        let imported = import_svg(first.as_bytes()).expect("open import");
+        assert_eq!(imported.shape.fill, [0, 0, 0, 0]);
+        assert_eq!(export_svg(&imported.shape).expect("open re-export"), first);
+
+        let closed_stroke_only = VectorShape {
+            closed: true,
+            fill: [1, 2, 3, 0],
+            stroke: Some(Stroke {
+                width: 0.1,
+                color: [255, 255, 255, 255],
+            }),
+            anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
+        };
+        let first = export_svg(&closed_stroke_only).expect("closed export");
+        let imported = import_svg(first.as_bytes()).expect("closed import");
+        assert_eq!(imported.shape.fill, [0, 0, 0, 0]);
+        assert_eq!(
+            export_svg(&imported.shape).expect("closed re-export"),
+            first
+        );
     }
 
     #[test]
@@ -290,19 +406,28 @@ mod tests {
         let params = import_svg(svg).expect("import");
         assert_eq!(params.shape.anchors.len(), 3);
         let anchors = &params.shape.anchors;
-        let near = |actual: f32, expected: f32| (actual - expected).abs() < 0.00001;
-        assert!(near(anchors[0].out_handle[0], 0.23333333));
-        assert!(near(anchors[0].out_handle[1], 0.3));
-        assert!(near(anchors[1].pos[0], 0.5));
-        assert!(near(anchors[1].pos[1], 0.2));
-        assert!(near(anchors[1].in_handle[0], 0.36666667));
-        assert!(near(anchors[1].in_handle[1], 0.33333333));
-        assert!(near(anchors[1].out_handle[0], 0.633_333_3));
-        assert!(near(anchors[1].out_handle[1], 0.06666667));
-        assert!(near(anchors[2].in_handle[0], 0.76666667));
-        assert!(near(anchors[2].in_handle[1], 0.06666667));
-        assert!(near(anchors[2].pos[0], 0.9));
-        assert!(near(anchors[2].pos[1], 0.2));
+        let uv = |point: [f64; 2]| [point[0] as f32, point[1] as f32];
+        let elevate = |from: [f64; 2], ctrl: [f64; 2], to: [f64; 2]| {
+            (
+                [
+                    from[0] + (2.0 / 3.0) * (ctrl[0] - from[0]),
+                    from[1] + (2.0 / 3.0) * (ctrl[1] - from[1]),
+                ],
+                [
+                    to[0] + (2.0 / 3.0) * (ctrl[0] - to[0]),
+                    to[1] + (2.0 / 3.0) * (ctrl[1] - to[1]),
+                ],
+            )
+        };
+        let (c1, c2) = elevate([0.1, 0.1], [0.3, 0.4], [0.5, 0.2]);
+        assert_eq!(anchors[0].out_handle, uv(c1));
+        assert_eq!(anchors[1].pos, uv([0.5, 0.2]));
+        assert_eq!(anchors[1].in_handle, uv(c2));
+        let reflected = [2.0 * 0.5 - 0.3, 2.0 * 0.2 - 0.4];
+        let (c1, c2) = elevate([0.5, 0.2], reflected, [0.9, 0.2]);
+        assert_eq!(anchors[1].out_handle, uv(c1));
+        assert_eq!(anchors[2].in_handle, uv(c2));
+        assert_eq!(anchors[2].pos, uv([0.9, 0.2]));
     }
 
     #[test]
@@ -332,6 +457,157 @@ mod tests {
     }
 
     #[test]
+    fn root_and_path_presentation_effects_are_typed_refusals() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                br#"<svg width="1" height="1" fill-rule="evenodd"><path d="M0 0"/></svg>"#,
+                "root fill-rule",
+            ),
+            (
+                br##"<svg width="1" height="1" fill="#fff"><path d="M0 0"/></svg>"##,
+                "root fill",
+            ),
+            (
+                br#"<svg width="1" height="1" style="fill:none"><path d="M0 0"/></svg>"#,
+                "root style",
+            ),
+            (
+                br#"<svg width="1" height="1" opacity="0.5"><path d="M0 0"/></svg>"#,
+                "root opacity",
+            ),
+            (
+                br#"<svg width="1" height="1" display="none"><path d="M0 0"/></svg>"#,
+                "root display",
+            ),
+            (
+                br#"<svg width="1" height="1" visibility="hidden"><path d="M0 0"/></svg>"#,
+                "root visibility",
+            ),
+            (
+                br##"<svg width="1" height="1" stroke="#fff"><path d="M0 0"/></svg>"##,
+                "root stroke",
+            ),
+            (
+                br#"<svg width="1" height="1" stroke-width="2"><path d="M0 0"/></svg>"#,
+                "root stroke-width",
+            ),
+            (
+                br#"<svg width="1" height="1"><path opacity="0.5" d="M0 0"/></svg>"#,
+                "path opacity",
+            ),
+            (
+                br#"<svg width="1" height="1"><path display="none" d="M0 0"/></svg>"#,
+                "path display",
+            ),
+            (
+                br#"<svg width="1" height="1"><path visibility="hidden" d="M0 0"/></svg>"#,
+                "path visibility",
+            ),
+            (
+                br#"<svg width="1" height="1"><path style="fill:none" d="M0 0"/></svg>"#,
+                "path transform/style",
+            ),
+            (
+                br#"<svg width="1" height="1"><path stroke-dasharray="1 2" d="M0 0"/></svg>"#,
+                "path stroke-dasharray",
+            ),
+            (
+                br#"<svg width="1" height="1"><path clip-path="url(#c)" d="M0 0"/></svg>"#,
+                "path clip-path",
+            ),
+            (
+                br#"<svg width="1" height="1"><path mask="url(#m)" d="M0 0"/></svg>"#,
+                "path mask",
+            ),
+            (
+                br#"<svg width="1" height="1"><path filter="url(#f)" d="M0 0"/></svg>"#,
+                "path filter",
+            ),
+            (
+                br#"<svg width="1" height="1"><path marker-end="url(#a)" d="M0 0"/></svg>"#,
+                "path marker-end",
+            ),
+            (
+                br#"<svg width="1" height="1"><path vector-effect="non-scaling-stroke" d="M0 0"/></svg>"#,
+                "path vector-effect",
+            ),
+            (
+                br#"<svg width="1" height="1" fill-opacity="0.5"><path d="M0 0"/></svg>"#,
+                "root fill-opacity",
+            ),
+            (
+                br#"<svg width="1" height="1" stroke-linecap="butt"><path d="M0 0"/></svg>"#,
+                "root stroke-linecap",
+            ),
+            (
+                br#"<svg width="1" height="1" stroke-linejoin="miter"><path d="M0 0"/></svg>"#,
+                "root stroke-linejoin",
+            ),
+            (
+                br#"<svg width="1" height="1" clip-path="url(#c)"><path d="M0 0"/></svg>"#,
+                "root clip-path",
+            ),
+            (
+                br#"<svg width="1" height="1" mask="url(#m)"><path d="M0 0"/></svg>"#,
+                "root mask",
+            ),
+            (
+                br#"<svg width="1" height="1" filter="url(#f)"><path d="M0 0"/></svg>"#,
+                "root filter",
+            ),
+            (
+                br#"<svg width="1" height="1" marker-end="url(#a)"><path d="M0 0"/></svg>"#,
+                "root marker-end",
+            ),
+            (
+                br#"<svg width="1" height="1" vector-effect="non-scaling-stroke"><path d="M0 0"/></svg>"#,
+                "root vector-effect",
+            ),
+            (
+                br#"<svg width="1" height="1"><path stroke-dashoffset="1" d="M0 0"/></svg>"#,
+                "path stroke-dashoffset",
+            ),
+            (
+                br#"<svg width="1" height="1" paint-order="stroke"><path d="M0 0"/></svg>"#,
+                "root paint-order",
+            ),
+            (
+                br#"<svg width="1" height="1"><path paint-order="stroke" d="M0 0"/></svg>"#,
+                "path paint-order",
+            ),
+        ];
+        for (svg, needle) in cases {
+            match import_svg(svg) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains(needle), "{what} lacks {needle}")
+                }
+                _ => panic!("accepted or mistyped refusal for {needle}"),
+            }
+        }
+        // An explicit nonzero root rule is the implemented default, not an
+        // unsupported semantic change.
+        let svg = br#"<svg width="1" height="1" fill-rule="nonzero"><path d="M0 0 L1 1 Z"/></svg>"#;
+        assert!(import_svg(svg).is_ok());
+    }
+
+    #[test]
+    fn path_effects_are_refused_before_path_data_is_parsed() {
+        let svg = br#"<svg width="1" height="1"><path display="none" d="not a path"/></svg>"#;
+        match import_svg(svg) {
+            Err(crate::svg::SvgError::Unsupported { what }) => {
+                assert!(what.contains("path display"), "{what}")
+            }
+            _ => panic!("geometry parse ran before the effect refusal"),
+        }
+    }
+
+    #[test]
+    fn self_closing_root_is_refused_without_path_content() {
+        assert!(import_svg(br#"<svg width="1" height="1"/>"#).is_err());
+        assert!(import_svg(br#"<svg width="1" height="1"/><path d="M0 0"/>"#).is_err());
+    }
+
+    #[test]
     fn unsupported_documents_and_anchor_floods_are_typed_refusals() {
         let cases: &[&[u8]] = &[
             br#"<svg width="1" height="1"><path d="M0 0"/><path d="M1 1"/></svg>"#,
@@ -342,7 +618,13 @@ mod tests {
             "<svg width=\"1\" height=\"1\"><path d=\"M0 0\" fill=\"#øøø\"/></svg>".as_bytes(),
         ];
         for svg in cases {
-            assert!(import_svg(svg).is_err(), "accepted unsupported {svg:?}");
+            assert!(
+                matches!(
+                    import_svg(svg),
+                    Err(crate::svg::SvgError::Unsupported { .. })
+                ),
+                "accepted or mistyped unsupported {svg:?}"
+            );
         }
 
         let mut d = String::from("M0 0");

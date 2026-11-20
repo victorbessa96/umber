@@ -22,6 +22,7 @@ pub enum VectorPanelOutcome {
 /// matching the Fill section's static-vocabulary convention.
 const ROW_LABEL_KEYS: &[&str] = &[
     "vector.section",
+    "vector.import-svg",
     "vector.closed",
     "vector.fill",
     "vector.stroke",
@@ -38,13 +39,24 @@ pub fn row_labels() -> Vec<String> {
 /// edits the same visible default as the canvas; the first real change creates
 /// its params through one undoable command.
 pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<VectorPanelOutcome> {
+    vector_section_ui_with_import(ui, doc, import_one)
+}
+
+fn vector_section_ui_with_import<F>(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    import: F,
+) -> Option<VectorPanelOutcome>
+where
+    F: FnOnce(&mut Document) -> Option<VectorPanelOutcome>,
+{
     let mut outcome = None;
     ui.add_space(8.0);
     ui.separator();
     ui.strong(tr("vector.section"));
     ui.add_space(4.0);
     if ui.button(tr("vector.import-svg")).clicked() {
-        outcome = import_one(doc);
+        outcome = import(doc);
     }
     ui.add_space(4.0);
     let vectors: Vec<(u64, String, Option<VectorParams>)> = doc
@@ -55,7 +67,7 @@ pub fn vector_section_ui(ui: &mut egui::Ui, doc: &mut Document) -> Option<Vector
         .collect();
     if vectors.is_empty() {
         ui.label(tr("vector.none"));
-        return None;
+        return outcome;
     }
     for (id, name, params) in vectors {
         egui::CollapsingHeader::new(&name)
@@ -145,16 +157,56 @@ fn import_one(doc: &mut Document) -> Option<VectorPanelOutcome> {
     let path = rfd::FileDialog::new()
         .add_filter("SVG", &["svg"])
         .pick_file()?;
-    let bytes = match read_svg_capped(&path) {
-        Ok(bytes) => bytes,
-        Err(error) => return Some(VectorPanelOutcome::ImportFailed(error)),
-    };
-    let params = match umber_core::vector_svg::import_svg(&bytes) {
-        Ok(params) => params,
-        Err(error) => return Some(VectorPanelOutcome::ImportFailed(error.to_string())),
-    };
-    let id = install_imported_params(doc, params);
-    Some(VectorPanelOutcome::Imported(id))
+    let result = import_with_io(
+        doc,
+        || {
+            std::fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .map_err(|error| error.to_string())
+        },
+        || read_file_capped(&path).map_err(|error| error.to_string()),
+    )
+    .map_err(|error| import_error(&path, error));
+    match result {
+        Ok(id) => Some(VectorPanelOutcome::Imported(id)),
+        Err(error) => Some(VectorPanelOutcome::ImportFailed(error)),
+    }
+}
+
+/// Reads at most one byte past the import budget, even for FIFOs or files whose
+/// metadata reports zero. The caller validates the resulting length.
+fn read_capped<R: std::io::Read>(reader: R) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    reader
+        .take((umber_core::svg::MAX_SVG_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_file_capped(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    read_capped(std::fs::File::open(path)?)
+}
+
+fn import_error(path: &std::path::Path, error: String) -> String {
+    format!("{}: {error}", path.display())
+}
+
+/// Testable import seam: metadata is always evaluated before the read closure,
+/// and parsing always completes before the document is touched.
+fn import_with_io<M, R>(doc: &mut Document, metadata: M, read: R) -> Result<u64, String>
+where
+    M: FnOnce() -> Result<u64, String>,
+    R: FnOnce() -> Result<Vec<u8>, String>,
+{
+    let bytes = read_svg_capped_with(metadata, read)?;
+    import_bytes(doc, &bytes)
+}
+
+fn import_bytes(doc: &mut Document, bytes: &[u8]) -> Result<u64, String> {
+    let params = umber_core::vector_svg::import_svg(bytes).map_err(|error| error.to_string())?;
+    Ok(install_imported_params(doc, params))
 }
 
 fn validate_svg_len(bytes: usize) -> Result<(), String> {
@@ -167,13 +219,18 @@ fn validate_svg_len(bytes: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn read_svg_capped(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let metadata =
-        std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    validate_svg_len(metadata.len() as usize)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    validate_svg_len(bytes.len()).map_err(|error| format!("{}: {error}", path.display()))?;
+fn read_svg_capped_with<M, R>(metadata: M, read: R) -> Result<Vec<u8>, String>
+where
+    M: FnOnce() -> Result<u64, String>,
+    R: FnOnce() -> Result<Vec<u8>, String>,
+{
+    let declared = metadata()?;
+    let declared =
+        usize::try_from(declared).map_err(|_| "SVG size does not fit this platform".to_owned())?;
+    validate_svg_len(declared)?;
+    let bytes = read()?;
+    // A file can grow between metadata and read. Check the actual bytes too.
+    validate_svg_len(bytes.len())?;
     Ok(bytes)
 }
 
@@ -253,10 +310,18 @@ mod row_label_tests {
         let drawn = drawn_source(src, "ROW_LABEL_KEYS").expect("list");
         let labels = row_labels();
         assert_row_label_keys(ROW_LABEL_KEYS, &labels, &drawn);
+        let production = drawn.split("#[cfg(test)]").next().unwrap_or(&drawn);
+        let section_at = production.find("\"vector.section\"").expect("section draw");
+        let import_at = production
+            .find("\"vector.import-svg\"")
+            .expect("import draw");
+        let closed_at = production.find("\"vector.closed\"").expect("closed draw");
+        assert!(section_at < import_at && import_at < closed_at);
         assert_eq!(
             labels,
             [
                 "Vector",
+                "Import SVG",
                 "Closed path",
                 "Fill",
                 "Stroke",
@@ -271,6 +336,20 @@ mod row_label_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type DocSnapshot = (Vec<(u64, String, Option<VectorParams>)>, bool, usize, usize);
+
+    fn doc_snapshot(doc: &Document) -> DocSnapshot {
+        (
+            doc.layers()
+                .iter()
+                .map(|layer| (layer.id, layer.name.clone(), layer.vector.clone()))
+                .collect(),
+            doc.dirty,
+            doc.history.len(),
+            doc.session_history.len(),
+        )
+    }
 
     #[test]
     fn stroke_toggle_installs_defaults_and_preserves_other_geometry() {
@@ -331,9 +410,100 @@ mod tests {
     }
 
     #[test]
-    fn import_budget_refuses_before_any_file_read() {
+    fn over_cap_metadata_refuses_before_the_read_closure() {
+        use std::cell::Cell;
+
+        let read_called = Cell::new(false);
+        let result = read_svg_capped_with(
+            || Ok((umber_core::svg::MAX_SVG_INPUT_BYTES + 1) as u64),
+            || {
+                read_called.set(true);
+                Ok(Vec::new())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!read_called.get(), "read ran after over-cap metadata");
         assert!(validate_svg_len(umber_core::svg::MAX_SVG_INPUT_BYTES).is_ok());
-        assert!(validate_svg_len(umber_core::svg::MAX_SVG_INPUT_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn capped_stream_read_stops_one_byte_past_the_budget() {
+        use std::io::Read;
+
+        let bytes =
+            read_capped(std::io::repeat(0).take((umber_core::svg::MAX_SVG_INPUT_BYTES + 2) as u64))
+                .expect("capped read");
+        assert_eq!(bytes.len(), umber_core::svg::MAX_SVG_INPUT_BYTES + 1);
+        assert!(validate_svg_len(bytes.len()).is_err());
+
+        let error = import_error(
+            std::path::Path::new("picked.svg"),
+            "SVG exceeds the budget".to_owned(),
+        );
+        assert_eq!(error, "picked.svg: SVG exceeds the budget");
+        assert_eq!(error.matches("picked.svg").count(), 1);
+    }
+
+    #[test]
+    fn read_and_parse_failures_leave_the_document_unchanged() {
+        let mut doc = Document::default();
+        doc.run(LayerCommand::add("Existing", LayerKind::Vector));
+        let before = doc_snapshot(&doc);
+
+        let read_failure = import_with_io(&mut doc, || Ok(3), || Err("read failed".to_owned()));
+        assert!(read_failure.is_err());
+        assert_eq!(doc_snapshot(&doc), before);
+
+        let parse_failure = import_with_io(&mut doc, || Ok(3), || Ok(b"not svg".to_vec()));
+        assert!(parse_failure.is_err());
+        assert_eq!(doc_snapshot(&doc), before);
+    }
+
+    #[test]
+    fn import_with_io_success_adds_one_grouped_layer() {
+        let mut doc = Document::default();
+        let svg = br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z"/></svg>"#;
+        let declared = svg.len() as u64;
+        let id = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("import succeeds");
+        assert_eq!(doc.layers().len(), 1);
+        assert_eq!(doc.layers()[0].id, id);
+        assert_eq!(doc.history.len(), 2);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.dirty);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+    }
+
+    #[test]
+    fn empty_panel_preserves_import_failure_outcome() {
+        use egui_kittest::kittest::Queryable;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        crate::i18n::install(crate::i18n::I18n::builtin());
+        let doc = Rc::new(RefCell::new(Document::default()));
+        let outcomes = Rc::new(RefCell::new(Vec::new()));
+        let doc_ui = doc.clone();
+        let outcomes_ui = outcomes.clone();
+        let mut harness = egui_kittest::Harness::new_ui(move |ui| {
+            if let Some(outcome) =
+                vector_section_ui_with_import(ui, &mut doc_ui.borrow_mut(), |_doc| {
+                    Some(VectorPanelOutcome::ImportFailed("boom".to_owned()))
+                })
+            {
+                outcomes_ui.borrow_mut().push(outcome);
+            }
+        });
+        harness.run();
+        harness.get_by_label("Import SVG").click();
+        harness.run();
+        assert!(outcomes
+            .borrow()
+            .iter()
+            .any(|outcome| matches!(outcome, VectorPanelOutcome::ImportFailed(_))));
+        assert!(doc.borrow().layers().is_empty());
+        assert!(!doc.borrow().dirty);
     }
 
     #[test]
