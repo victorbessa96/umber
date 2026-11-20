@@ -2,22 +2,21 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-19:** K5b code `0d1b6ad7` is pushed on top of K5a
-`09d01fbd`, K4 `a4373c51`, K3 `98fdbb80`, K2 `0b5cb72d`, and K1 `46d4bff5`.
-`umber_core::vector_svg::import_svg` uses the shared path walker with an
-anchor-preserving sink: one root/one path, M/L/H/V/C/S/Q/T/Z and relative
-forms, exact quadratic elevation, nonzero fill, #RGB/#RRGGBB/none + opacity,
-round-stroke mapping, and typed refusals for multiple paths/subpaths, groups,
-shapes, arcs, evenodd, path transform/style, unsupported paint, non-finite UV,
-and caps. Root transform composes exactly once like the raster walker; the
-closing point folds without duplicating the first anchor; K5a roundtrip is
-byte-identical. Vector Properties Import SVG checks the metadata cap before
-reading, parses before mutation, grouped Add+SetVector is one undo step, and
-the shell selects the new layer/paint target with localized en/pt notices.
-Final r2 battery is GREEN: clippy 0 errors, 19 suites, 1,943 passed / 0 failed
-(`vector-svg-import-final-battery-r2.log`). Kimi r1's transform finding was
-fixed and its delta re-review returned SHIP. Fill cache-lifecycle parity is
-the named follow-up; richer SVG stays out of scope. Human/platform gates are
+**Updated 2026-11-19:** K5b code `0d1b6ad7` plus full review hardening
+`6ffec3bc` is committed on top of K5a `09d01fbd`, K4 `a4373c51`, K3 `98fdbb80`,
+K2 `0b5cb72d`, and K1 `46d4bff5`; the hardening brief is `d6e2ba35`.
+The hardening closes the late full review: typed root/path presentation-effect
+refusals before geometry parsing, shortest-f32 formatting, four-case exact
+roundtrip plus every fill/stroke alpha byte, exact Q/T assertions, injected
+metadata/read ordering with document-failure atomicity, capped streaming file
+reads, path-prefixed errors, empty-panel ImportFailed preservation, searchable
+Import SVG, production-only label-order checks, and self-closing-root handling.
+Final r3 battery is GREEN: clippy 0 errors, 19 suites, 1,953 passed / 0 failed
+(`vector-svg-import-hardening-final-battery-r3.log`). Kimi stalled twice with
+empty logs; bounded DeepSeek final review returned SHIP with no HIGH/MEDIUM
+defects. The alleged SessionHistory truncate bug was rejected with source
+evidence: it takes undo depth, not a vector index. Fill cache-lifecycle parity
+is the named follow-up; richer SVG stays out of scope. Human/platform gates are
 unchanged: dogfood, native-speaker review, Windows signing, live Windows Ink
 verification, and beta/stable release. Consult `STATE.md` and the live lock
 registry before claiming new work.
