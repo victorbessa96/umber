@@ -249,7 +249,9 @@ impl VectorParams {
 
 /// The live-vector raster ceiling: the app's 8K maximum, inclusive.
 pub const MAX_VECTOR_RASTER_PIXELS: usize = 8192 * 8192;
-/// The most anchors one live shape may carry.
+/// The most shapes one multi-path SVG import may produce.
+pub const MAX_VECTOR_SHAPES: usize = 256;
+/// The most anchors one live shape, or one multi-path import in total, may carry.
 pub const MAX_VECTOR_ANCHORS: usize = 65_536;
 /// The most flattened centerline points one live shape may carry.
 pub const MAX_VECTOR_POINTS: usize = 262_144;

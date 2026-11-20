@@ -1427,11 +1427,18 @@ impl TabViewer for PanelViewer<'_> {
                                             [("error", fluent::FluentValue::from(error))],
                                         )
                                     }
-                                    vector_panel::VectorPanelOutcome::Imported(id) => {
-                                        crate::i18n::tr_args(
-                                            "vector.imported",
-                                            [("id", fluent::FluentValue::from(*id))],
-                                        )
+                                    vector_panel::VectorPanelOutcome::Imported(ids) => {
+                                        if ids.len() == 1 {
+                                            crate::i18n::tr_args(
+                                                "vector.imported",
+                                                [("id", fluent::FluentValue::from(ids[0]))],
+                                            )
+                                        } else {
+                                            crate::i18n::tr_args(
+                                                "vector.imported-many",
+                                                [("count", fluent::FluentValue::from(ids.len()))],
+                                            )
+                                        }
                                     }
                                     vector_panel::VectorPanelOutcome::ImportFailed(error) => {
                                         crate::i18n::tr_args(
@@ -1440,10 +1447,14 @@ impl TabViewer for PanelViewer<'_> {
                                         )
                                     }
                                 };
-                                if let vector_panel::VectorPanelOutcome::Imported(id) = outcome {
-                                    self.layer_gestures.selection.set_single(id);
-                                    if let Some(paint) = self.paint.as_deref_mut() {
-                                        paint.set_active_target(paint_state::PlaneOwner::Layer(id));
+                                if let vector_panel::VectorPanelOutcome::Imported(ids) = outcome {
+                                    if let Some(id) = ids.last().copied() {
+                                        self.layer_gestures.selection.set_single(id);
+                                        if let Some(paint) = self.paint.as_deref_mut() {
+                                            paint.set_active_target(
+                                                paint_state::PlaneOwner::Layer(id),
+                                            );
+                                        }
                                     }
                                 }
                                 self.pick_notices.push(notice);

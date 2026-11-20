@@ -13,7 +13,7 @@ const DEFAULT_STROKE_WIDTH: f32 = 0.01;
 /// One user-selected panel action result, handed to the shell's notice rail.
 pub enum VectorPanelOutcome {
     ExportSaved(std::path::PathBuf),
-    Imported(u64),
+    Imported(Vec<u64>),
     ExportFailed(String),
     ImportFailed(String),
 }
@@ -317,7 +317,7 @@ fn import_one(doc: &mut Document) -> Option<VectorPanelOutcome> {
     )
     .map_err(|error| import_error(&path, error));
     match result {
-        Ok(id) => Some(VectorPanelOutcome::Imported(id)),
+        Ok(ids) => Some(VectorPanelOutcome::Imported(ids)),
         Err(error) => Some(VectorPanelOutcome::ImportFailed(error)),
     }
 }
@@ -344,7 +344,7 @@ fn import_error(path: &std::path::Path, error: String) -> String {
 
 /// Testable import seam: metadata is always evaluated before the read closure,
 /// and parsing always completes before the document is touched.
-fn import_with_io<M, R>(doc: &mut Document, metadata: M, read: R) -> Result<u64, String>
+fn import_with_io<M, R>(doc: &mut Document, metadata: M, read: R) -> Result<Vec<u64>, String>
 where
     M: FnOnce() -> Result<u64, String>,
     R: FnOnce() -> Result<Vec<u8>, String>,
@@ -353,8 +353,9 @@ where
     import_bytes(doc, &bytes)
 }
 
-fn import_bytes(doc: &mut Document, bytes: &[u8]) -> Result<u64, String> {
-    let params = umber_core::vector_svg::import_svg(bytes).map_err(|error| error.to_string())?;
+fn import_bytes(doc: &mut Document, bytes: &[u8]) -> Result<Vec<u64>, String> {
+    let params =
+        umber_core::vector_svg::import_svg_many(bytes).map_err(|error| error.to_string())?;
     Ok(install_imported_params(doc, params))
 }
 
@@ -383,21 +384,26 @@ where
     Ok(bytes)
 }
 
-/// Adds one vector layer and installs its parsed params in a single history
-/// group, so undo removes the imported layer instead of leaving an empty one.
-fn install_imported_params(doc: &mut Document, params: VectorParams) -> u64 {
-    let mut id = None;
+/// Adds one vector layer per parsed path in a single history group, so undo
+/// removes the whole import instead of leaving empty layers behind.
+fn install_imported_params(doc: &mut Document, params: Vec<VectorParams>) -> Vec<u64> {
+    let mut ids = Vec::with_capacity(params.len());
     doc.run_grouped(crate::history_panel::HistoryKind::AddVector, |doc| {
-        doc.run(LayerCommand::add(
-            tr("vector.imported-default"),
-            LayerKind::Vector,
-        ));
-        id = doc.layers().last().map(|layer| layer.id);
-        if let Some(id) = id {
+        for params in params {
+            doc.run(LayerCommand::add(
+                tr("vector.imported-default"),
+                LayerKind::Vector,
+            ));
+            let id = doc
+                .layers()
+                .last()
+                .map(|layer| layer.id)
+                .expect("add appends");
             doc.run(LayerCommand::set_vector(id, params));
+            ids.push(id);
         }
     });
-    id.expect("add always appends one layer")
+    ids
 }
 
 fn suggested_svg_name(name: &str) -> String {
@@ -668,15 +674,41 @@ mod tests {
         let mut doc = Document::default();
         let svg = br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z"/></svg>"#;
         let declared = svg.len() as u64;
-        let id = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
             .expect("import succeeds");
         assert_eq!(doc.layers().len(), 1);
-        assert_eq!(doc.layers()[0].id, id);
+        assert_eq!(ids, vec![doc.layers()[0].id]);
         assert_eq!(doc.history.len(), 2);
         assert_eq!(doc.session_history.len(), 1);
         assert!(doc.dirty);
         assert!(doc.undo());
         assert!(doc.layers().is_empty());
+    }
+
+    #[test]
+    fn multi_path_import_adds_all_layers_in_one_undo_group() {
+        let mut doc = Document::default();
+        let svg =
+            br#"<svg width="1" height="1"><path d="M0 0 L1 0 L1 1 Z"/><path d="M0 0 L1 1"/></svg>"#;
+        let declared = svg.len() as u64;
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("multi-path import succeeds");
+        assert_eq!(doc.layers().len(), 2);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            ids,
+            doc.layers()
+                .iter()
+                .map(|layer| layer.id)
+                .collect::<Vec<_>>()
+        );
+        assert!(doc.layers().iter().all(|layer| layer.vector.is_some()));
+        assert_eq!(doc.history.len(), 4);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        assert_eq!(doc.layers().len(), 2);
     }
 
     #[test]
@@ -725,9 +757,9 @@ mod tests {
                 ],
             },
         };
-        let id = install_imported_params(&mut doc, params.clone());
+        let ids = install_imported_params(&mut doc, vec![params.clone()]);
         assert_eq!(doc.layers().len(), 1);
-        assert_eq!(doc.layers()[0].id, id);
+        assert_eq!(ids, vec![doc.layers()[0].id]);
         assert_eq!(doc.layers()[0].vector, Some(params));
         // Two raw commands, but `run_grouped` records one undoable history row
         // and one undo crosses both.

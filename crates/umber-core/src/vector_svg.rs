@@ -145,7 +145,15 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     Ok(out)
 }
 
+/// Imports the bounded SVG subset into one vector shape per top-level path.
+pub fn import_svg_many(
+    bytes: &[u8],
+) -> Result<Vec<crate::vector::VectorParams>, crate::svg::SvgError> {
+    crate::svg::import_vector_svg_many(bytes)
+}
+
 /// Imports the bounded K5b single-path SVG subset into one vector layer.
+/// Multi-path documents remain available through [`import_svg_many`].
 pub fn import_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, crate::svg::SvgError> {
     crate::svg::import_vector_svg(bytes)
 }
@@ -703,6 +711,93 @@ mod tests {
             .expect("stroke")
             .dash
             .is_solid());
+    }
+
+    #[test]
+    fn multi_path_import_preserves_order_paint_and_single_path_compatibility() {
+        let svg = br##"<svg width="1" height="1"><path fill="#FF0000" d="M0 0 L1 0 L1 1 Z"/><path fill="#00FF00" stroke="#000000" stroke-dasharray="0.25 0.25" d="M0 0 L1 1"/></svg>"##;
+        let shapes = import_svg_many(svg).expect("two paths import");
+        assert_eq!(shapes.len(), 2);
+        assert_eq!(shapes[0].shape.fill, [255, 0, 0, 255]);
+        assert_eq!(shapes[1].shape.fill, [0, 255, 0, 255]);
+        assert_eq!(
+            shapes[1]
+                .shape
+                .stroke
+                .expect("second path stroke")
+                .dash
+                .lengths(),
+            &[0.25, 0.25]
+        );
+        assert!(matches!(
+            import_svg(svg),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn multi_path_import_has_shape_and_total_anchor_budgets() {
+        let mut accepted_paths = String::from("<svg width=\"1\" height=\"1\">");
+        for _ in 0..crate::vector::MAX_VECTOR_SHAPES {
+            accepted_paths.push_str("<path d=\"M0 0 L1 1\"/>");
+        }
+        accepted_paths.push_str("</svg>");
+        assert_eq!(
+            import_svg_many(accepted_paths.as_bytes())
+                .expect("exact path cap is accepted")
+                .len(),
+            crate::vector::MAX_VECTOR_SHAPES
+        );
+
+        let mut paths = String::from("<svg width=\"1\" height=\"1\">");
+        for _ in 0..=crate::vector::MAX_VECTOR_SHAPES {
+            paths.push_str("<path d=\"M0 0 L1 1\"/>");
+        }
+        paths.push_str("</svg>");
+        assert!(matches!(
+            import_svg_many(paths.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "vector paths",
+                ..
+            })
+        ));
+
+        let mut exact_anchors = String::from("<svg width=\"1\" height=\"1\">");
+        for path in 0..218 {
+            exact_anchors.push_str("<path d=\"M0 0");
+            for point in 1..300 {
+                exact_anchors.push_str(&format!(" L{} {}", point, path));
+            }
+            exact_anchors.push_str("\"/>");
+        }
+        exact_anchors.push_str("<path d=\"M0 0");
+        for point in 1..136 {
+            exact_anchors.push_str(&format!(" L{} 218", point));
+        }
+        exact_anchors.push_str("\"/></svg>");
+        assert_eq!(
+            import_svg_many(exact_anchors.as_bytes())
+                .expect("exact total anchor cap is accepted")
+                .len(),
+            219
+        );
+
+        let mut anchors = String::from("<svg width=\"1\" height=\"1\">");
+        for path in 0..220 {
+            anchors.push_str("<path d=\"M0 0");
+            for point in 1..300 {
+                anchors.push_str(&format!(" L{} {}", point, path));
+            }
+            anchors.push_str("\"/>");
+        }
+        anchors.push_str("</svg>");
+        assert!(matches!(
+            import_svg_many(anchors.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "vector anchors across paths",
+                ..
+            })
+        ));
     }
 
     #[test]

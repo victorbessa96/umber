@@ -952,6 +952,7 @@ vector =
     .export-failed = SVG export failed: { $error }
     .import-svg = Import SVG
     .imported = Imported as vector layer { $id }
+    .imported-many = Imported { $count } vector layers
     .import-failed = SVG import failed: { $error }
     .imported-default = Imported path
 

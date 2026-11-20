@@ -971,6 +971,7 @@ vector =
     .export-failed = Falha ao exportar SVG: { $error }
     .import-svg = Importar SVG
     .imported = Importado como camada vetorial { $id }
+    .imported-many = { $count } camadas vetoriais importadas
     .import-failed = Falha ao importar SVG: { $error }
     .imported-default = Caminho importado
 

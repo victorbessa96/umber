@@ -1509,10 +1509,12 @@ impl PathSink for VectorImportBuilder {
     }
 }
 
-/// Parses the bounded K5b document subset into one vector layer. The old
-/// raster path never calls this function; both share the strict XML tokenizer,
-/// root geometry, and path-command walker.
-pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, SvgError> {
+/// Parses the bounded document subset into one vector shape per top-level
+/// path. The old raster path never calls this function; both share the strict
+/// XML tokenizer, root geometry, and path-command walker.
+pub(crate) fn import_vector_svg_many(
+    bytes: &[u8],
+) -> Result<Vec<crate::vector::VectorParams>, SvgError> {
     if bytes.len() > MAX_SVG_INPUT_BYTES {
         return Err(SvgError::InputTooLarge {
             bytes: bytes.len(),
@@ -1578,7 +1580,8 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
     } else {
         vec![true]
     };
-    let mut found = None;
+    let mut shapes = Vec::new();
+    let mut total_anchors = 0usize;
     loop {
         match tok.next_event()? {
             Event::Eof => break,
@@ -1595,9 +1598,10 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
                 let descend = false;
                 if known_parent {
                     if name == "path" {
-                        if found.is_some() {
-                            return Err(SvgError::Unsupported {
-                                what: "multiple paths in one vector layer".to_owned(),
+                        if shapes.len() >= crate::vector::MAX_VECTOR_SHAPES {
+                            return Err(SvgError::TooComplex {
+                                what: "vector paths",
+                                limit: crate::vector::MAX_VECTOR_SHAPES,
                             });
                         }
                         let d = find_attr(&attrs, "d").ok_or_else(|| SvgError::Unsupported {
@@ -1621,7 +1625,14 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
                         shape.fill = fill;
                         shape.stroke = stroke;
                         shape.fill_rule = fill_rule;
-                        found = Some(shape);
+                        total_anchors = total_anchors.saturating_add(shape.anchors.len());
+                        if total_anchors > crate::vector::MAX_VECTOR_ANCHORS {
+                            return Err(SvgError::TooComplex {
+                                what: "vector anchors across paths",
+                                limit: crate::vector::MAX_VECTOR_ANCHORS,
+                            });
+                        }
+                        shapes.push(crate::vector::VectorParams { shape });
                     } else if name == "g" {
                         return Err(SvgError::Unsupported {
                             what: "groups in vector import".to_owned(),
@@ -1638,10 +1649,24 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
             }
         }
     }
-    let shape = found.ok_or_else(|| SvgError::Unsupported {
-        what: "no path in vector import".to_owned(),
-    })?;
-    Ok(crate::vector::VectorParams { shape })
+    if shapes.is_empty() {
+        return Err(SvgError::Unsupported {
+            what: "no path in vector import".to_owned(),
+        });
+    }
+    Ok(shapes)
+}
+
+/// Backward-compatible single-path import used by the K5b API. New UI code
+/// uses `import_vector_svg_many` and creates one layer per returned shape.
+pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorParams, SvgError> {
+    let mut shapes = import_vector_svg_many(bytes)?;
+    if shapes.len() != 1 {
+        return Err(SvgError::Unsupported {
+            what: format!("expected exactly one path, found {}", shapes.len()),
+        });
+    }
+    Ok(shapes.remove(0))
 }
 
 fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
