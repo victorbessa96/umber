@@ -22,11 +22,11 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K6d dash patterns are landed at `58f9e160`, on K6c stroke joins `68cbf388`,
-K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`. Bounded dash
-patterns have UV-scaled segmentation, cap/join behavior, closure continuity,
-and SVG roundtrip. Next: multi-shape input or further vector hardening;
-release work remains gated.
+K7a multi-path SVG import is landed at `29a02f9a`, on K6d dash patterns
+`58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`, and K6a
+even-odd fill `7372aa53`. Up to 256 paths and 65,536 total anchors import as
+one vector layer per path in one undo group. Next: multi-subpath splitting or
+further vector hardening; release work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 

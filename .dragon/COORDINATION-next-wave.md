@@ -2,8 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K6d dash patterns `58f9e160` is pushed on top of K6c `68cbf388`; the K6d brief is `7da1997f`.
-`Stroke` now carries additive bounded `dash` with solid default and full cache identity. Up to 8 UV lengths plus offset support SVG odd-pattern alternation, deterministic UV-scaled segmentation, cap-at-break behavior, continuous-turn joins, and closure continuity. Zero off-lengths merge active intervals so they cannot create false caps. Vector Properties has a persistent dash editor and offset field with en/pt labels. SVG export/import roundtrips dasharray/dashoffset and rejects invalid or over-cap patterns. Final battery is GREEN: clippy 0 errors, 21 suites, 2,185 passed / 0 failed (`vector-dash-final-battery.log`). Both bounded reviews returned SHIP. Multi-shape input and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
+**Updated 2026-11-20:** K7a multi-path SVG import `29a02f9a` is pushed on top of K6d `58f9e160`; the K7a brief is `925c525b`.
+`import_svg_many` returns one shape per top-level path in order with independent paint, cap, join, and dash state; the existing single-path API stays strict. Imports cap at 256 paths and 65,536 total anchors with exact acceptance and typed over-limit refusals. The panel creates one vector layer per path in one undo group, redo restores all, the shell selects the last id, and en/pt singular/plural notices are wired. Groups, non-path shapes, path transforms/style, unsupported effects, and multi-subpath `d` remain refused. Final battery is GREEN: clippy 0 errors, 21 suites, 2,188 passed / 0 failed (`vector-multipath-final-battery.log`). Bounded review returned SHIP. Multi-subpath splitting and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 
