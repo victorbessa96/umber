@@ -22,14 +22,14 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K7d group/path affine transforms are landed at `65957542`, on K7c group
-paint inheritance `f04ed236`, K7b subpath import `3d087302`, K7a multi-path
-import `29a02f9a`, K6d dash patterns `58f9e160`, K6c stroke joins `68cbf388`,
-K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`. Scoped frames
-compose nested group and leaf-path transforms with exact geometry and
-stroke/dash scaling while preserving sibling isolation and typed refusals.
-Next: further safe SVG hardening or compound fill modeling; release work
-remains gated.
+K7e straight-line basic-shape import is landed at `64dad2b1`, on K7d
+transforms `65957542`, K7c group paint inheritance `f04ed236`, K7b subpath
+import `3d087302`, K7a multi-path import `29a02f9a`, K6d dash patterns
+`58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`, and K6a
+even-odd fill `7372aa53`. Rect, polygon, polyline, and line now import as exact
+editable geometry; rounded and curved forms stay refused pending arc
+conversion. Next: arc-to-cubic conversion and curved basic shapes; release
+work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 

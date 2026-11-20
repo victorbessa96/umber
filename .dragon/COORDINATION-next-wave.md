@@ -2,8 +2,8 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-20:** K7d group/path affine transforms `65957542` are pushed on top of K7c `f04ed236`; the K7d brief is `13772368`.
-Scoped frames carry inherited paint plus effective CTM. Nested group and leaf-path transforms compose parent ∘ local in order, root applies once, and siblings stay isolated. Anchors/handles, stroke width, dash lengths, and dash offset use the effective CTM and established max-scale conversion. Existing inheritance, subpath behavior, grouped budgets, strict single-shape API, and one-history-group panel undo/redo remain. CSS style, opacity, visibility, effects, filled compounds, and non-default miter limits stay typed refusals. Final battery is GREEN: clippy 0 errors, 21 suites, 2,194 passed / 0 failed (`vector-transforms-final-battery-r1.log`). Bounded review returned SHIP. Compound fill modeling and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
+**Updated 2026-11-20:** K7e straight-line basic-shape import `64dad2b1` is pushed on top of K7d `65957542`; the K7e brief is `8c448f8d`.
+Shared leaf dispatch imports exact rect/polygon/polyline/line anchors through the existing sink; rect/polygon close, polyline/line stay open, zero rect geometry emits no layer, and negative/zero radii follow square behavior. Rounded rects/circle/ellipse stay typed refusals pending arc conversion. All shapes reuse scoped paint, effective CTM, order, budgets, strict one-shape API, and grouped panel undo/redo. Final battery is GREEN: clippy 0 errors, 21 suites, 2,196 passed / 0 failed (`vector-basic-shapes-final-battery-r1.log`). Bounded review returned SHIP; fresh ad-hoc geometry/budget/undo probe passed 8/8. Arc conversion and release gates remain out of scope. Consult `STATE.md` and the live lock registry before claiming new work.
 
 ## Historical coordination snapshots (append-only; not current status)
 
