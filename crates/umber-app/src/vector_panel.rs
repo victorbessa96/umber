@@ -24,6 +24,7 @@ const ROW_LABEL_KEYS: &[&str] = &[
     "vector.section",
     "vector.import-svg",
     "vector.closed",
+    "vector.fill-rule",
     "vector.fill",
     "vector.stroke",
     "vector.stroke-width",
@@ -81,6 +82,31 @@ where
                 {
                     changed = true;
                 }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tr("vector.fill-rule")).color(umber_gui::muted()));
+                    let mut rule = edited.shape.fill_rule;
+                    egui::ComboBox::from_id_salt(format!("vector-fill-rule-{id}"))
+                        .selected_text(match rule {
+                            umber_core::svg::FillRule::NonZero => tr("vector.fill-rule-nonzero"),
+                            umber_core::svg::FillRule::EvenOdd => tr("vector.fill-rule-evenodd"),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut rule,
+                                umber_core::svg::FillRule::NonZero,
+                                tr("vector.fill-rule-nonzero"),
+                            );
+                            ui.selectable_value(
+                                &mut rule,
+                                umber_core::svg::FillRule::EvenOdd,
+                                tr("vector.fill-rule-evenodd"),
+                            );
+                        });
+                    if rule != edited.shape.fill_rule {
+                        edited.shape.fill_rule = rule;
+                        changed = true;
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tr("vector.fill")).color(umber_gui::muted()));
                     if ui
@@ -323,6 +349,7 @@ mod row_label_tests {
                 "Vector",
                 "Import SVG",
                 "Closed path",
+                "Fill rule",
                 "Fill",
                 "Stroke",
                 "Stroke width",
@@ -512,6 +539,7 @@ mod tests {
         let params = VectorParams {
             shape: umber_core::vector::VectorShape {
                 closed: true,
+                fill_rule: umber_core::svg::FillRule::NonZero,
                 fill: [1, 2, 3, 255],
                 stroke: None,
                 anchors: vec![

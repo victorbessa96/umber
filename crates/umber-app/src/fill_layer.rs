@@ -3008,6 +3008,7 @@ mod tests {
         umber_core::vector::VectorParams {
             shape: VectorShape {
                 closed: true,
+                fill_rule: umber_core::svg::FillRule::NonZero,
                 fill: color,
                 stroke: None,
                 anchors: vec![

@@ -18,8 +18,8 @@ pub enum VectorSvgError {
 }
 
 /// Serializes one vector shape as a deterministic SVG 1.1 document. Open
-/// paths never fill; closed paths use nonzero fill. Painted strokes always
-/// carry K2's round cap and join.
+/// paths never fill; closed paths use the shape's nonzero or even-odd fill
+/// rule. Painted strokes always carry K2's round cap and join.
 pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     if shape.anchors.len() > MAX_VECTOR_ANCHORS {
         return Err(VectorSvgError::TooComplex {
@@ -69,7 +69,12 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
             out.push_str(" Z");
         }
     }
-    out.push_str("\" fill-rule=\"nonzero\"");
+    out.push_str("\" fill-rule=\"");
+    out.push_str(match shape.fill_rule {
+        crate::svg::FillRule::NonZero => "nonzero",
+        crate::svg::FillRule::EvenOdd => "evenodd",
+    });
+    out.push('"');
 
     let drawable = shape.anchors.len() >= 2;
     if drawable && shape.closed && shape.fill[3] > 0 {
@@ -147,6 +152,7 @@ mod tests {
     fn closed_shape_matches_the_exact_deterministic_golden() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
                 width: 0.01,
@@ -191,6 +197,7 @@ mod tests {
     fn fewer_than_two_anchors_export_no_paint() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
             stroke: Some(Stroke {
                 width: 0.1,
@@ -272,6 +279,7 @@ mod tests {
         for alpha in 0..=255u8 {
             let shape = VectorShape {
                 closed: true,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [1, 2, 3, alpha],
                 stroke: None,
                 anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -282,6 +290,7 @@ mod tests {
 
             let shape = VectorShape {
                 closed: true,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
                     width: 0.1,
@@ -307,6 +316,7 @@ mod tests {
     fn canonical_export_import_export_is_byte_identical() {
         let closed_mixed = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
                 width: 0.01,
@@ -324,6 +334,7 @@ mod tests {
         };
         let open_line = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 width: 0.02,
@@ -333,6 +344,7 @@ mod tests {
         };
         let open_cubic = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: None,
             anchors: vec![
@@ -347,6 +359,7 @@ mod tests {
         };
         let stroke_alpha = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [1, 2, 3, 255],
             stroke: Some(Stroke {
                 width: 0.125,
@@ -372,6 +385,7 @@ mod tests {
     fn unpainted_fill_normalization_is_pinned() {
         let open_painted = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
             stroke: None,
             anchors: vec![Anchor::corner([0.0, 0.0]), Anchor::corner([1.0, 1.0])],
@@ -383,6 +397,7 @@ mod tests {
 
         let closed_stroke_only = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [1, 2, 3, 0],
             stroke: Some(Stroke {
                 width: 0.1,
@@ -457,12 +472,45 @@ mod tests {
     }
 
     #[test]
+    fn evenodd_exports_and_imports_as_the_same_rule() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 0, 0, 255],
+            fill_rule: crate::svg::FillRule::EvenOdd,
+            stroke: None,
+            anchors: vec![
+                Anchor::corner([0.50, 0.05]),
+                Anchor::corner([0.79, 0.95]),
+                Anchor::corner([0.02, 0.39]),
+                Anchor::corner([0.98, 0.39]),
+                Anchor::corner([0.21, 0.95]),
+            ],
+        };
+        let first = export_svg(&shape).expect("evenodd export");
+        assert!(first.contains("fill-rule=\"evenodd\""));
+        let imported = import_svg(first.as_bytes()).expect("evenodd import");
+        assert_eq!(imported.shape.fill_rule, crate::svg::FillRule::EvenOdd);
+        assert_eq!(export_svg(&imported.shape).expect("re-export"), first);
+
+        let root =
+            br#"<svg width="1" height="1" fill-rule="evenodd"><path d="M0 0 L1 1 Z"/></svg>"#;
+        assert_eq!(
+            import_svg(root)
+                .expect("root evenodd import")
+                .shape
+                .fill_rule,
+            crate::svg::FillRule::EvenOdd
+        );
+        let invalid = br#"<svg width="1" height="1" fill-rule="winding"><path d="M0 0"/></svg>"#;
+        assert!(matches!(
+            import_svg(invalid),
+            Err(crate::svg::SvgError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
     fn root_and_path_presentation_effects_are_typed_refusals() {
         let cases: &[(&[u8], &str)] = &[
-            (
-                br#"<svg width="1" height="1" fill-rule="evenodd"><path d="M0 0"/></svg>"#,
-                "root fill-rule",
-            ),
             (
                 br##"<svg width="1" height="1" fill="#fff"><path d="M0 0"/></svg>"##,
                 "root fill",
@@ -614,7 +662,7 @@ mod tests {
             br#"<svg width="1" height="1"><path d="M0 0 M1 1"/></svg>"#,
             br#"<svg width="1" height="1"><g><path d="M0 0"/></g></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 A1 1 0 0 0 1 1"/></svg>"#,
-            br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z" fill-rule="evenodd"/></svg>"#,
+            br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z" fill-rule="winding"/></svg>"#,
             "<svg width=\"1\" height=\"1\"><path d=\"M0 0\" fill=\"#øøø\"/></svg>".as_bytes(),
         ];
         for svg in cases {

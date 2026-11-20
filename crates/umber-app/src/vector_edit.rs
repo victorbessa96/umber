@@ -340,6 +340,7 @@ mod tests {
         VectorParams {
             shape: VectorShape {
                 closed,
+                fill_rule: umber_core::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: None,
                 anchors: vec![

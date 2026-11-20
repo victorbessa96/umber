@@ -714,6 +714,7 @@ mod tests {
         let params = crate::vector::VectorParams {
             shape: crate::vector::VectorShape {
                 closed: true,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [20, 40, 60, 255],
                 stroke: None,
                 anchors: vec![

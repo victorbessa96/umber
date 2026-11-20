@@ -118,6 +118,7 @@
 
 use std::f64::consts::TAU;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The default raster cap for [`rasterize_svg_default`]: 2048² px. The
@@ -1615,9 +1616,11 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
                         let mut builder = VectorImportBuilder::new(root_ctm, width, height);
                         build_path(d, &mut builder)?;
                         let mut shape = builder.shape;
-                        let (fill, stroke) = parse_vector_paint(&attrs, root_ctm, width, height)?;
+                        let (fill, stroke, fill_rule) =
+                            parse_vector_paint(&attrs, root_ctm, width, height, root_style.rule)?;
                         shape.fill = fill;
                         shape.stroke = stroke;
+                        shape.fill_rule = fill_rule;
                         found = Some(shape);
                     } else if name == "g" {
                         return Err(SvgError::Unsupported {
@@ -1642,8 +1645,9 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
 }
 
 fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
-    // Only transform and an explicit nonzero rule are meaningful to the import
-    // subset. Everything else here would be dropped instead of inherited.
+    // Only transform and an explicit nonzero/even-odd rule are meaningful to
+    // the import subset. Everything else here would be dropped instead of
+    // inherited.
     for key in [
         "fill",
         "stroke",
@@ -1674,7 +1678,7 @@ fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
         }
     }
     if let Some(rule) = find_attr(attrs, "fill-rule") {
-        if rule.value.trim() != "nonzero" {
+        if !matches!(rule.value.trim(), "nonzero" | "evenodd") {
             return Err(SvgError::Unsupported {
                 what: format!("root fill-rule {}", rule.value.trim()),
             });
@@ -1713,14 +1717,20 @@ fn parse_vector_paint(
     ctm: Affine,
     width: u32,
     height: u32,
-) -> Result<([u8; 4], Option<crate::vector::Stroke>), SvgError> {
-    if let Some(rule) = find_attr(attrs, "fill-rule") {
-        if rule.value.trim() != "nonzero" {
-            return Err(SvgError::Unsupported {
-                what: format!("fill-rule {}", rule.value.trim()),
-            });
-        }
-    }
+    inherited_rule: FillRule,
+) -> Result<([u8; 4], Option<crate::vector::Stroke>, FillRule), SvgError> {
+    let fill_rule = match find_attr(attrs, "fill-rule") {
+        None => inherited_rule,
+        Some(rule) => match rule.value.trim() {
+            "nonzero" => FillRule::NonZero,
+            "evenodd" => FillRule::EvenOdd,
+            other => {
+                return Err(SvgError::Unsupported {
+                    what: format!("fill-rule {other}"),
+                });
+            }
+        },
+    };
     let fill = match find_attr(attrs, "fill") {
         None => [0, 0, 0, 255],
         Some(attr) => match parse_svg_color(&attr.value, "fill")? {
@@ -1733,7 +1743,7 @@ fn parse_vector_paint(
         Some(attr) => parse_svg_color(&attr.value, "stroke")?,
     };
     let Some(rgb) = stroke_rgb else {
-        return Ok((fill, None));
+        return Ok((fill, None, fill_rule));
     };
     for (key, expected) in [("stroke-linecap", "round"), ("stroke-linejoin", "round")] {
         if find_attr(attrs, key).is_none_or(|attr| attr.value.trim() != expected) {
@@ -1760,7 +1770,7 @@ fn parse_vector_paint(
     }
     let color = with_alpha(rgb, opacity_attr(attrs, "stroke-opacity")?);
     if stroke_width == 0.0 || color[3] == 0 {
-        return Ok((fill, None));
+        return Ok((fill, None, fill_rule));
     }
     Ok((
         fill,
@@ -1768,6 +1778,7 @@ fn parse_vector_paint(
             width: stroke_width,
             color,
         }),
+        fill_rule,
     ))
 }
 
@@ -1863,8 +1874,9 @@ fn parse_points(attr: &Attr) -> Result<Vec<[f64; 2]>, SvgError> {
 // Document walk
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FillRule {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FillRule {
+    #[default]
     NonZero,
     EvenOdd,
 }
@@ -2290,10 +2302,22 @@ fn fill_span(mask: &mut [bool], x0: f64, x1: f64) -> bool {
 /// the live-vector K2 bridge into the exact SVG scanline implementation;
 /// crate-private so it cannot become a second public SVG geometry API.
 pub(crate) fn rasterize_polys(width: u32, height: u32, polys: &[Vec<[f64; 2]>]) -> Vec<u8> {
+    rasterize_polys_rule(width, height, polys, FillRule::NonZero)
+}
+
+/// Rasterizes device-space polygons under `rule`. This is the live-vector
+/// K6a bridge into the same scanline implementation; the existing nonzero
+/// wrapper above preserves the K2 API and every old caller's behavior.
+pub(crate) fn rasterize_polys_rule(
+    width: u32,
+    height: u32,
+    polys: &[Vec<[f64; 2]>],
+    rule: FillRule,
+) -> Vec<u8> {
     if polys.is_empty() {
         return Vec::new();
     }
-    shape_from_polys(polys, FillRule::NonZero)
+    shape_from_polys(polys, rule)
         .map(|shape| rasterize(width, height, &[shape]))
         .unwrap_or_else(|| vec![0u8; (width as usize).saturating_mul(height as usize)])
 }

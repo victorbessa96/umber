@@ -50,6 +50,9 @@ pub struct VectorShape {
     pub closed: bool,
     /// Fill color, sRGBA.
     pub fill: [u8; 4],
+    /// Fill rule for closed paths. Additive: old projects default to nonzero.
+    #[serde(default)]
+    pub fill_rule: crate::svg::FillRule,
     pub stroke: Option<Stroke>,
     pub anchors: Vec<Anchor>,
 }
@@ -60,6 +63,7 @@ impl VectorShape {
         Self {
             closed: false,
             fill: [0, 0, 0, 0],
+            fill_rule: crate::svg::FillRule::NonZero,
             stroke: None,
             anchors: Vec::new(),
         }
@@ -121,6 +125,7 @@ impl VectorShape {
     pub fn same_cache_key(&self, other: &Self) -> bool {
         self.closed == other.closed
             && self.fill == other.fill
+            && self.fill_rule == other.fill_rule
             && stroke_cache_eq(self.stroke, other.stroke)
             && self.anchors.len() == other.anchors.len()
             && self
@@ -326,7 +331,8 @@ fn stroke_polys(
 }
 
 /// Rasterizes a live vector shape at the target tile size. Closed paths
-/// fill under the nonzero rule; open paths contribute only their stroke.
+/// fill under the shape's nonzero or even-odd rule; open paths contribute
+/// only their stroke.
 /// Strokes composite source-over fill per texel in sRGB-encoded space,
 /// matching the app's byte-space premultiply boundary; linear-light blending
 /// is a separate wave.
@@ -375,7 +381,7 @@ pub fn rasterize(
             limit: MAX_VECTOR_EDGE_ROW_VISITS,
         });
     }
-    let fill = crate::svg::rasterize_polys(width, height, &fill_polys);
+    let fill = crate::svg::rasterize_polys_rule(width, height, &fill_polys, shape.fill_rule);
     let stroke = crate::svg::rasterize_polys(width, height, &stroke_geometry);
     let pixels = (width as usize).saturating_mul(height as usize);
     let mut rgba = vec![0u8; pixels.saturating_mul(4)];
@@ -423,6 +429,7 @@ mod tests {
     fn shape_round_trips_through_json_deterministically() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 width: 0.01,
@@ -441,6 +448,7 @@ mod tests {
     fn cache_identity_is_stable_for_nan_and_signed_zero() {
         let shape = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
             stroke: Some(Stroke {
                 width: f32::NAN,
@@ -509,6 +517,7 @@ mod tests {
     fn centerline_matches_individually_flattened_cubics() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
             stroke: None,
             anchors: vec![
@@ -551,6 +560,7 @@ mod tests {
     fn closed_shape_matches_svg_coverage_exactly() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: None,
             anchors: vec![
@@ -583,6 +593,7 @@ mod tests {
     fn closed_shape_with_curved_closure_matches_svg() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [40, 180, 220, 255],
             stroke: None,
             anchors: vec![
@@ -620,6 +631,7 @@ mod tests {
     fn open_shape_stroke_has_round_caps() {
         let shape = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 width: 0.25,
@@ -661,6 +673,7 @@ mod tests {
     fn stroke_composites_source_over_fill() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
                 width: 0.5,
@@ -690,6 +703,7 @@ mod tests {
     fn zero_alpha_stroke_is_identical_to_no_stroke() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
                 width: 0.5,
@@ -719,6 +733,7 @@ mod tests {
     fn dimension_budget_is_a_typed_error() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
             stroke: None,
             anchors: vec![
@@ -743,6 +758,7 @@ mod tests {
     fn structure_budgets_are_typed_errors() {
         let base = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: None,
             anchors: Vec::new(),
@@ -760,6 +776,7 @@ mod tests {
         );
         let curved = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
             stroke: None,
             anchors: (0..300)
@@ -785,6 +802,7 @@ mod tests {
             VectorShape::empty(),
             VectorShape {
                 closed: false,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.25,
@@ -794,12 +812,14 @@ mod tests {
             },
             VectorShape {
                 closed: false,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: None,
                 anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
             },
             VectorShape {
                 closed: true,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.25,
@@ -812,6 +832,7 @@ mod tests {
             },
             VectorShape {
                 closed: false,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.25,
@@ -841,6 +862,7 @@ mod tests {
     fn raster_is_deterministic_and_non_square() {
         let shape = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 width: 0.25,
@@ -862,6 +884,7 @@ mod tests {
     fn empty_inputs_short_circuit_before_geometry() {
         let shape = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
             stroke: None,
             anchors: (0..300)
@@ -885,6 +908,7 @@ mod tests {
     fn edge_row_budget_is_a_typed_error() {
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
             stroke: None,
             anchors: (0..1_000)
@@ -901,9 +925,96 @@ mod tests {
     }
 
     #[test]
+    fn evenodd_star_changes_only_the_inner_pentagon() {
+        let star = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            fill_rule: crate::svg::FillRule::EvenOdd,
+            stroke: None,
+            anchors: vec![
+                Anchor::corner([0.50, 0.05]),
+                Anchor::corner([0.79, 0.95]),
+                Anchor::corner([0.02, 0.39]),
+                Anchor::corner([0.98, 0.39]),
+                Anchor::corner([0.21, 0.95]),
+            ],
+        };
+        let evenodd = rasterize(&star, 100, 100).expect("evenodd star");
+        let nonzero = rasterize(
+            &VectorShape {
+                fill_rule: crate::svg::FillRule::NonZero,
+                ..star.clone()
+            },
+            100,
+            100,
+        )
+        .expect("nonzero star");
+        let at = |raster: &VectorRaster, x: u32, y: u32| raster.coverage()[(y * 100 + x) as usize];
+        assert_eq!(
+            at(&evenodd, 50, 50),
+            0.0,
+            "inner pentagon is outside evenodd"
+        );
+        assert_eq!(
+            at(&nonzero, 50, 50),
+            1.0,
+            "inner pentagon is inside nonzero"
+        );
+        assert_eq!(at(&evenodd, 50, 10), 1.0, "star tip is inside both");
+        assert_eq!(at(&nonzero, 50, 10), 1.0);
+
+        let svg_evenodd = crate::svg::rasterize_svg_default(
+            br#"<svg width="100" height="100"><path fill-rule="evenodd" d="M 50 5 L 79 95 L 2 39 L 98 39 L 21 95 Z"/></svg>"#,
+        )
+        .expect("SVG evenodd oracle");
+        let svg_nonzero = crate::svg::rasterize_svg_default(
+            br#"<svg width="100" height="100"><path fill-rule="nonzero" d="M 50 5 L 79 95 L 2 39 L 98 39 L 21 95 Z"/></svg>"#,
+        )
+        .expect("SVG nonzero oracle");
+        let evenodd_bytes: Vec<u8> = evenodd
+            .coverage()
+            .iter()
+            .map(|value| (value * 255.0 + 0.5).floor() as u8)
+            .collect();
+        let nonzero_bytes: Vec<u8> = nonzero
+            .coverage()
+            .iter()
+            .map(|value| (value * 255.0 + 0.5).floor() as u8)
+            .collect();
+        assert_eq!(evenodd_bytes, svg_evenodd.coverage());
+        assert_eq!(nonzero_bytes, svg_nonzero.coverage());
+        let different: Vec<usize> = (0..100 * 100)
+            .filter(|&index| evenodd_bytes[index] != nonzero_bytes[index])
+            .collect();
+        assert!(!different.is_empty());
+        for index in different {
+            assert!(
+                evenodd_bytes[index] < nonzero_bytes[index],
+                "evenodd must not add coverage outside the inner pentagon"
+            );
+        }
+
+        let json = serde_json::to_string(&star).expect("serialize evenodd");
+        let back: VectorShape = serde_json::from_str(&json).expect("deserialize evenodd");
+        assert_eq!(back.fill_rule, crate::svg::FillRule::EvenOdd);
+        let old: VectorShape = serde_json::from_str(
+            r#"{"closed":true,"fill":[255,255,255,255],"stroke":null,"anchors":[]}"#,
+        )
+        .expect("pre-fill-rule project loads");
+        assert_eq!(old.fill_rule, crate::svg::FillRule::NonZero);
+        let mut changed = star.clone();
+        changed.fill_rule = crate::svg::FillRule::NonZero;
+        assert!(
+            !star.same_cache_key(&changed),
+            "fill rule is cache identity"
+        );
+    }
+
+    #[test]
     fn stroke_geometry_budget_is_typed_error() {
         let shape = VectorShape {
             closed: false,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
                 width: 1.0e6,

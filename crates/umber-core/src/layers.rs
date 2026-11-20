@@ -2414,6 +2414,7 @@ mod tests {
         let red = crate::vector::VectorParams {
             shape: VectorShape {
                 closed: false,
+                fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
                     width: 0.125,
@@ -2425,6 +2426,7 @@ mod tests {
         let blue = crate::vector::VectorParams {
             shape: VectorShape {
                 closed: true,
+                fill_rule: crate::svg::FillRule::NonZero,
                 ..red.shape.clone()
             },
         };

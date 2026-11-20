@@ -2134,6 +2134,7 @@ mod tests {
         let mut model = fixture_model();
         let shape = VectorShape {
             closed: true,
+            fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
                 width: 0.01,
