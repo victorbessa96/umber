@@ -22,14 +22,16 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K7e straight-line basic-shape import is landed at `64dad2b1`, on K7d
-transforms `65957542`, K7c group paint inheritance `f04ed236`, K7b subpath
-import `3d087302`, K7a multi-path import `29a02f9a`, K6d dash patterns
-`58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`, and K6a
-even-odd fill `7372aa53`. Rect, polygon, polyline, and line now import as exact
-editable geometry; rounded and curved forms stay refused pending arc
-conversion. Next: arc-to-cubic conversion and curved basic shapes; release
-work remains gated.
+K7f arc-to-cubic conversion and curved basic-shape import is landed at
+`2555d2d8`, on K7e straight-line shapes `64dad2b1`, K7d transforms `65957542`,
+K7c group paint inheritance `f04ed236`, K7b subpath import `3d087302`, K7a
+multi-path import `29a02f9a`, K6d dash patterns `58f9e160`, K6c stroke joins
+`68cbf388`, K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`.
+Absolute/relative SVG arcs now become editable cubics through shared
+endpoint-to-center conversion; rounded rects, circles, and ellipses reuse the
+same sink with correct flags, rotation, radius correction, closure, transforms,
+paint, budgets, and grouped undo. Next: compound-fill modeling or further
+scoped SVG hardening; release work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 
