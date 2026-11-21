@@ -50,9 +50,10 @@
 //! gradients/patterns (as elements; a `fill="url(…)"` reference counts as
 //! painted, above), strokes (coverage is fill only; a `line` therefore never
 //! covers anything, though its coordinates are still validated), `opacity` /
-//! `fill-opacity`, `display`/`visibility`, nested `svg`, `a`, `switch`.
-//! The editable vector importer additionally interprets `display` and
-//! `visibility` per SVG 1.1 §11.5; that does not change raster behavior.
+//! `fill-opacity`, nested `svg`, `a`, `switch`.
+//! Both raster and editable vector import interpret `display` and `visibility`
+//! per SVG 1.1 §11.5; display prunes direct rendering and visibility inherits
+//! with child-visible override. Unsupported effects still fail closed.
 //!
 //! **Unknown-element policy: skip the subtree.** Any element outside the
 //! list above (`metadata`, `title`, `defs`, `style`, `text`, editor
@@ -1935,6 +1936,8 @@ pub(crate) fn import_vector_svg_many(
             painted: true,
             rule: FillRule::NonZero,
             ctm: root_ctm,
+            display: true,
+            visible: true,
         },
         &root_attrs,
     )?;
@@ -2452,6 +2455,8 @@ struct Style {
     painted: bool,
     rule: FillRule,
     ctm: Affine,
+    display: bool,
+    visible: bool,
 }
 
 /// One polygon edge with `y0 < y1`; `dir` is the original winding
@@ -2546,6 +2551,20 @@ fn apply_presentation(parent: Style, attrs: &[Attr]) -> Result<Style, SvgError> 
     if let Some(transform) = find_attr(attrs, "transform") {
         style.ctm = style.ctm.compose(parse_transform(transform)?);
     }
+    Ok(style)
+}
+
+/// Raster presentation adds effective display pruning and inherited visibility
+/// after the shared fill/rule/transform validation. Editable import keeps its
+/// own VectorImportFrame path; this wrapper is only for the stencil walker.
+fn apply_raster_presentation(
+    parent: Style,
+    attrs: &[Attr],
+    element: &str,
+) -> Result<Style, SvgError> {
+    let mut style = apply_presentation(parent, attrs)?;
+    style.display = parent.display && vector_display_renders(attrs);
+    style.visible = vector_visibility_renders(attrs, parent.visible, element)?;
     Ok(style)
 }
 
@@ -2772,13 +2791,16 @@ fn parse_document(text: &str, base: usize, max_pixels: usize) -> Result<Document
             max_pixels,
         });
     }
-    let root_style = apply_presentation(
+    let root_style = apply_raster_presentation(
         Style {
             painted: true,
             rule: FillRule::NonZero,
             ctm: root_ctm,
+            display: true,
+            visible: true,
         },
         &root_attrs,
+        "root",
     )?;
     // One frame per open element: `Some` = a container whose children
     // render under that style, `None` = a skipped subtree.
@@ -2802,10 +2824,12 @@ fn parse_document(text: &str, base: usize, max_pixels: usize) -> Result<Document
                 let parent = stack.last().copied().flatten();
                 let frame = match parent {
                     None => None,
-                    Some(parent) if name == "g" => Some(apply_presentation(parent, &attrs)?),
+                    Some(parent) if name == "g" => {
+                        Some(apply_raster_presentation(parent, &attrs, "group")?)
+                    }
                     Some(parent) if is_shape(&name) => {
-                        let style = apply_presentation(parent, &attrs)?;
-                        if style.painted {
+                        let style = apply_raster_presentation(parent, &attrs, &name)?;
+                        if style.display && style.visible && style.painted {
                             shapes.extend(build_shape(&name, &attrs, style)?);
                             // The document-level shape budget (see
                             // [`MAX_SHAPES`]): checked as the document is
@@ -3177,6 +3201,67 @@ mod tests {
         assert_eq!(stencil.coverage()[3 * 32 + 12], 255);
         assert_eq!(stencil.coverage()[10 * 32 + 13], 0);
         assert_eq!(stencil.coverage()[12 * 32 + 13], 255);
+    }
+
+    #[test]
+    fn display_and_visibility_filter_raster_coverage() {
+        let r = raster(
+            r#"<svg width="8" height="8" display="block"><rect x="0" y="0" width="1" height="1"/><rect display="none" x="1" y="0" width="1" height="1"/><g display="none"><rect x="2" y="0" width="1" height="1"/><g display="inline"><rect x="3" y="0" width="1" height="1"/></g></g><g visibility="hidden"><rect x="4" y="0" width="1" height="1"/><rect visibility="visible" x="5" y="0" width="1" height="1"/><g visibility="collapse"><rect visibility="inherit" x="6" y="0" width="1" height="1"/></g></g><g visibility="visible" display="block"><rect visibility="" x="7" y="0" width="1" height="1"/></g><rect visibility="hidden" x="0" y="1" width="1" height="1"/><rect display="inherit" x="1" y="1" width="1" height="1"/></svg>"#,
+        );
+        let mut expected = [0u8; 64];
+        for (x, y) in [(0, 0), (5, 0), (7, 0), (1, 1)] {
+            expected[y * 8 + x] = 255;
+        }
+        assert_eq!(r.coverage(), &expected[..]);
+
+        let overridden = raster(
+            r#"<svg width="2" height="1" visibility="hidden"><rect visibility="visible" width="1" height="1"/></svg>"#,
+        );
+        assert_eq!(overridden.coverage(), &[255, 0]);
+        let pruned = raster(
+            r#"<svg width="2" height="1" display="none"><g display="inline"><rect visibility="visible" width="1" height="1"/></g></svg>"#,
+        );
+        assert_eq!(pruned.coverage(), &[0, 0]);
+    }
+
+    #[test]
+    fn all_hidden_raster_is_blank_and_invalid_values_are_typed() {
+        for source in [
+            r#"<svg width="2" height="1" visibility="hidden"><rect width="1" height="1"/></svg>"#,
+            r#"<svg width="2" height="1"><g visibility="collapse"><rect width="1" height="1"/></g></svg>"#,
+            r#"<svg width="2" height="1"><rect display="none" width="1" height="1"/></svg>"#,
+        ] {
+            let r = rasterize_svg_default(source.as_bytes()).expect("blank hidden raster");
+            assert_eq!(r.coverage(), &[0, 0]);
+        }
+        let invalid = r#"<svg width="1" height="1"><path visibility="bogus" d="M0 0"/></svg>"#;
+        match rasterize_svg_default(invalid.as_bytes()) {
+            Err(SvgError::Unsupported { what }) => {
+                assert!(what.contains("path visibility"), "{what}")
+            }
+            other => panic!("invalid visibility was not refused: {other:?}"),
+        }
+        for source in [
+            r#"<svg width="1" height="1"><path display="none" transform="bogus" d="M0 0 L1 1"/></svg>"#,
+            r#"<svg width="1" height="1"><g display="none" transform="bogus"><path d="M0 0 L1 1"/></g></svg>"#,
+        ] {
+            assert!(matches!(
+                rasterize_svg_default(source.as_bytes()),
+                Err(SvgError::Parse { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn hidden_raster_shapes_do_not_consume_shape_budget() {
+        let mut source = String::from("<svg width=\"1\" height=\"1\">");
+        for _ in 0..MAX_SHAPES {
+            source.push_str("<rect display=\"none\" width=\"1\" height=\"1\"/>");
+        }
+        source.push_str("<rect width=\"1\" height=\"1\"/></svg>");
+        let r = rasterize_svg_default(source.as_bytes())
+            .expect("hidden shapes do not consume MAX_SHAPES");
+        assert_eq!(r.coverage(), &[255]);
     }
 
     // 7a. Malformed XML → Parse with the offset.
