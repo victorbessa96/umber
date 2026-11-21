@@ -23,13 +23,23 @@ pub enum VectorSvgError {
 /// paths never fill; closed paths use the shape's nonzero or even-odd fill
 /// rule. Painted strokes carry the configured cap and K2's round join.
 pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
-    if shape.anchors.len() > MAX_VECTOR_ANCHORS {
+    if shape.total_anchors() > MAX_VECTOR_ANCHORS {
         return Err(VectorSvgError::TooComplex {
             what: "anchors",
             limit: MAX_VECTOR_ANCHORS,
         });
     }
-    for (index, anchor) in shape.anchors.iter().enumerate() {
+    for (index, anchor) in shape
+        .anchors
+        .iter()
+        .chain(
+            shape
+                .subpaths
+                .iter()
+                .flat_map(|subpath| subpath.anchors.iter()),
+        )
+        .enumerate()
+    {
         if anchor
             .pos
             .iter()
@@ -44,32 +54,14 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     let mut out = String::from(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\" viewBox=\"0 0 1 1\">\n<path d=\"",
     );
-    if let Some(first) = shape.anchors.first() {
-        out.push_str("M ");
-        point(&mut out, first.pos);
-        let segments = if shape.closed {
-            shape.anchors.len()
-        } else {
-            shape.anchors.len().saturating_sub(1)
-        };
-        for index in 0..segments {
-            let a = &shape.anchors[index];
-            let b = &shape.anchors[(index + 1) % shape.anchors.len()];
-            if a.out_handle == a.pos && b.in_handle == b.pos {
-                out.push_str(" L ");
-                point(&mut out, b.pos);
-            } else {
-                out.push_str(" C ");
-                point(&mut out, a.out_handle);
-                out.push(' ');
-                point(&mut out, b.in_handle);
-                out.push(' ');
-                point(&mut out, b.pos);
-            }
+    write_contour(&mut out, &shape.anchors, shape.closed);
+    let mut has_contour = !shape.anchors.is_empty();
+    for subpath in shape.subpaths.iter() {
+        if has_contour && !subpath.anchors.is_empty() {
+            out.push(' ');
         }
-        if shape.closed {
-            out.push_str(" Z");
-        }
+        write_contour(&mut out, &subpath.anchors, subpath.closed);
+        has_contour |= !subpath.anchors.is_empty();
     }
     out.push_str("\" fill-rule=\"");
     out.push_str(match shape.fill_rule {
@@ -78,8 +70,13 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     });
     out.push('"');
 
-    let drawable = shape.anchors.len() >= 2;
-    if drawable && shape.closed && shape.fill[3] > 0 {
+    let drawable = !shape.is_empty();
+    let has_closed_contour = (shape.closed && shape.anchors.len() >= 2)
+        || shape
+            .subpaths
+            .iter()
+            .any(|subpath| subpath.closed && subpath.anchors.len() >= 2);
+    if has_closed_contour && shape.fill[3] > 0 {
         out.push_str(" fill=\"");
         out.push_str(&hex(shape.fill));
         out.push('"');
@@ -145,8 +142,39 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
     Ok(out)
 }
 
-/// Imports the bounded SVG subset into one vector shape per supported shape
-/// or stroke-only subpath, with scoped group paint and affine transforms.
+fn write_contour(out: &mut String, anchors: &[crate::vector::Anchor], closed: bool) {
+    let Some(first) = anchors.first() else {
+        return;
+    };
+    out.push_str("M ");
+    point(out, first.pos);
+    let segments = if closed {
+        anchors.len()
+    } else {
+        anchors.len().saturating_sub(1)
+    };
+    for index in 0..segments {
+        let a = &anchors[index];
+        let b = &anchors[(index + 1) % anchors.len()];
+        if a.out_handle == a.pos && b.in_handle == b.pos {
+            out.push_str(" L ");
+            point(out, b.pos);
+        } else {
+            out.push_str(" C ");
+            point(out, a.out_handle);
+            out.push(' ');
+            point(out, b.in_handle);
+            out.push(' ');
+            point(out, b.pos);
+        }
+    }
+    if closed {
+        out.push_str(" Z");
+    }
+}
+
+/// Imports the bounded SVG subset into one compound vector shape per supported
+/// path or basic-shape element, with scoped group paint and affine transforms.
 pub fn import_svg_many(
     bytes: &[u8],
 ) -> Result<Vec<crate::vector::VectorParams>, crate::svg::SvgError> {
@@ -215,6 +243,7 @@ mod tests {
     #[test]
     fn closed_shape_matches_the_exact_deterministic_golden() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 128, 128],
@@ -264,6 +293,7 @@ mod tests {
     #[test]
     fn fewer_than_two_anchors_export_no_paint() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
@@ -362,6 +392,7 @@ mod tests {
     fn every_alpha_byte_roundtrips_through_svg_opacity() {
         for alpha in 0..=255u8 {
             let shape = VectorShape {
+                subpaths: Vec::new().into(),
                 closed: true,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [1, 2, 3, alpha],
@@ -373,6 +404,7 @@ mod tests {
             assert_eq!(imported.shape.fill[3], alpha, "fill alpha {alpha}");
 
             let shape = VectorShape {
+                subpaths: Vec::new().into(),
                 closed: true,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
@@ -403,6 +435,7 @@ mod tests {
     #[test]
     fn canonical_export_import_export_is_byte_identical() {
         let closed_mixed = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 128, 128],
@@ -425,6 +458,7 @@ mod tests {
             ],
         };
         let open_line = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -439,6 +473,7 @@ mod tests {
             anchors: vec![Anchor::corner([0.1, 0.2]), Anchor::corner([0.8, 0.9])],
         };
         let open_cubic = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -454,6 +489,7 @@ mod tests {
             ],
         };
         let stroke_alpha = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [1, 2, 3, 255],
@@ -484,6 +520,7 @@ mod tests {
     #[test]
     fn unpainted_fill_normalization_is_pinned() {
         let open_painted = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
@@ -496,6 +533,7 @@ mod tests {
         assert_eq!(export_svg(&imported.shape).expect("open re-export"), first);
 
         let closed_stroke_only = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [1, 2, 3, 0],
@@ -591,6 +629,7 @@ mod tests {
     #[test]
     fn evenodd_exports_and_imports_as_the_same_rule() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill: [255, 0, 0, 255],
             fill_rule: crate::svg::FillRule::EvenOdd,
@@ -633,6 +672,7 @@ mod tests {
             (crate::vector::StrokeCap::Square, "square"),
         ] {
             let shape = VectorShape {
+                subpaths: Vec::new().into(),
                 closed: false,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
@@ -666,6 +706,7 @@ mod tests {
             (crate::vector::StrokeJoin::Bevel, "bevel"),
         ] {
             let shape = VectorShape {
+                subpaths: Vec::new().into(),
                 closed: false,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
@@ -696,6 +737,7 @@ mod tests {
         let dash =
             crate::vector::StrokeDash::from_lengths(&[0.25, 0.125], 0.0625).expect("valid dash");
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -1132,31 +1174,31 @@ mod tests {
     }
 
     #[test]
-    fn stroke_only_subpaths_split_and_filled_compounds_are_refused() {
+    fn subpaths_combine_into_one_compound_shape() {
         let svg = br##"<svg width="1" height="1"><path fill="none" stroke="#000000" d="M0 0 L1 0 M0 1 L1 1"/></svg>"##;
-        let shapes = import_svg_many(svg).expect("stroke subpaths split");
-        assert_eq!(shapes.len(), 2);
-        assert!(shapes.iter().all(|params| params.shape.fill[3] == 0));
-        assert!(shapes.iter().all(|params| params.shape.stroke.is_some()));
+        let shapes = import_svg_many(svg).expect("stroke subpaths combine");
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].shape.fill[3], 0);
+        assert!(shapes[0].shape.stroke.is_some());
         assert_eq!(shapes[0].shape.anchors[0].pos, [0.0, 0.0]);
-        assert_eq!(shapes[1].shape.anchors[0].pos, [0.0, 1.0]);
-        assert!(matches!(
-            import_svg(svg),
-            Err(crate::svg::SvgError::Unsupported { .. })
-        ));
+        assert_eq!(shapes[0].shape.subpaths.len(), 1);
+        assert_eq!(shapes[0].shape.subpaths[0].anchors[0].pos, [0.0, 1.0]);
+        assert!(
+            import_svg(svg).is_ok(),
+            "one compound path stays strict-compatible"
+        );
 
         let after_close = br##"<svg width="1" height="1"><path fill="none" stroke="#000000" d="M0 0 L1 0 Z L1 1"/></svg>"##;
-        let split = import_svg_many(after_close).expect("segment after closepath splits");
-        assert_eq!(split.len(), 2);
-        assert!(split[0].shape.closed);
-        assert!(!split[1].shape.closed);
-        assert_eq!(split[1].shape.anchors[0].pos, [0.0, 0.0]);
+        let compound = import_svg(after_close).expect("segment after closepath becomes secondary");
+        assert!(compound.shape.closed);
+        assert_eq!(compound.shape.subpaths.len(), 1);
+        assert!(!compound.shape.subpaths[0].closed);
+        assert_eq!(compound.shape.subpaths[0].anchors[0].pos, [0.0, 0.0]);
 
         let filled = br##"<svg width="1" height="1"><path fill="#FFFFFF" d="M0 0 L1 0 L1 1 Z M0 0 L1 1 L0 1 Z"/></svg>"##;
-        assert!(matches!(
-            import_svg_many(filled),
-            Err(crate::svg::SvgError::Unsupported { what }) if what.contains("filled compound")
-        ));
+        let compound = import_svg(filled).expect("filled compound imports");
+        assert_eq!(compound.shape.subpaths.len(), 1);
+        assert!(compound.shape.subpaths[0].closed);
 
         let mut d = String::new();
         for index in 0..=crate::vector::MAX_VECTOR_SHAPES {
@@ -1168,7 +1210,7 @@ mod tests {
         assert!(matches!(
             import_svg_many(flood.as_bytes()),
             Err(crate::svg::SvgError::TooComplex {
-                what: "vector paths",
+                what: "vector contours across paths",
                 ..
             })
         ));
@@ -1442,7 +1484,6 @@ mod tests {
     fn unsupported_documents_and_anchor_floods_are_typed_refusals() {
         let cases: &[&[u8]] = &[
             br#"<svg width="1" height="1"><path d="M0 0"/><path d="M1 1"/></svg>"#,
-            br#"<svg width="1" height="1"><path d="M0 0 M1 1"/></svg>"#,
             br#"<svg width="1" height="1"><path d="M0 0 L1 1 Z" fill-rule="winding"/></svg>"#,
             "<svg width=\"1\" height=\"1\"><path d=\"M0 0\" fill=\"#øøø\"/></svg>".as_bytes(),
         ];
@@ -1466,6 +1507,121 @@ mod tests {
             Err(crate::svg::SvgError::TooComplex {
                 what: "anchors",
                 limit: crate::vector::MAX_VECTOR_ANCHORS,
+            })
+        ));
+    }
+
+    #[test]
+    fn compound_export_emits_one_path_with_every_contour() {
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            anchors: vec![
+                Anchor::corner([0.0, 0.0]),
+                Anchor::corner([0.0, 1.0]),
+                Anchor::corner([1.0, 1.0]),
+                Anchor::corner([1.0, 0.0]),
+            ],
+            subpaths: vec![crate::vector::VectorSubpath {
+                closed: true,
+                anchors: vec![
+                    Anchor::corner([0.25, 0.25]),
+                    Anchor::corner([0.75, 0.25]),
+                    Anchor::corner([0.75, 0.75]),
+                    Anchor::corner([0.25, 0.75]),
+                ],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        let svg = export_svg(&shape).expect("compound export");
+        assert_eq!(
+            svg,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\" viewBox=\"0 0 1 1\">\n<path d=\"M 0 0 L 0 1 L 1 1 L 1 0 L 0 0 Z M 0.25 0.25 L 0.75 0.25 L 0.75 0.75 L 0.25 0.75 L 0.25 0.25 Z\" fill-rule=\"nonzero\" fill=\"#FFFFFF\" stroke=\"none\"/>\n</svg>\n"
+        );
+    }
+
+    #[test]
+    fn compound_import_combines_contours_and_roundtrips_bytes() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\" viewBox=\"0 0 1 1\">\n<path d=\"M 0 0 L 0 1 L 1 1 L 1 0 L 0 0 Z M 0.25 0.25 L 0.75 0.25 L 0.75 0.75 L 0.25 0.75 L 0.25 0.25 Z\" fill-rule=\"nonzero\" fill=\"#FFFFFF\" stroke=\"none\"/>\n</svg>\n";
+        let params = import_svg(svg.as_bytes()).expect("compound import");
+        assert_eq!(params.shape.anchors.len(), 4);
+        assert!(params.shape.closed);
+        assert_eq!(params.shape.subpaths.len(), 1);
+        assert_eq!(params.shape.subpaths[0].anchors.len(), 4);
+        assert!(params.shape.subpaths[0].closed);
+        assert_eq!(export_svg(&params.shape).expect("compound re-export"), svg);
+    }
+
+    #[test]
+    fn compound_primary_empty_export_paints_secondary_geometry() {
+        let shape = VectorShape {
+            fill: [255, 255, 255, 255],
+            subpaths: vec![crate::vector::VectorSubpath {
+                closed: true,
+                anchors: vec![
+                    Anchor::corner([0.25, 0.25]),
+                    Anchor::corner([0.75, 0.25]),
+                    Anchor::corner([0.75, 0.75]),
+                ],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        let svg = export_svg(&shape).expect("secondary-only export");
+        assert!(svg.contains("<path d=\"M 0.25 0.25"), "{svg}");
+        assert!(svg.contains("fill=\"#FFFFFF\""), "{svg}");
+        assert!(!svg.contains("fill=\"none\""), "{svg}");
+    }
+
+    #[test]
+    fn compound_export_validates_every_contour() {
+        let shape = VectorShape {
+            subpaths: vec![crate::vector::VectorSubpath {
+                closed: false,
+                anchors: vec![Anchor::corner([f32::NAN, 0.5])],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        assert_eq!(
+            export_svg(&shape),
+            Err(VectorSvgError::NonFinite { anchor: 0 })
+        );
+        let too_many = VectorShape {
+            anchors: vec![Anchor::corner([0.5, 0.5]); MAX_VECTOR_ANCHORS],
+            subpaths: vec![crate::vector::VectorSubpath {
+                closed: false,
+                anchors: vec![Anchor::corner([0.25, 0.25])],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        assert_eq!(
+            export_svg(&too_many),
+            Err(VectorSvgError::TooComplex {
+                what: "anchors",
+                limit: MAX_VECTOR_ANCHORS,
+            })
+        );
+    }
+
+    #[test]
+    fn compound_builder_charges_aggregate_anchors() {
+        let mut d = String::from("M0 0");
+        for index in 1..40_000 {
+            d.push_str(&format!(" L{index} 0"));
+        }
+        d.push_str(" M0 1");
+        for index in 1..40_000 {
+            d.push_str(&format!(" L{index} 1"));
+        }
+        let svg = format!("<svg width=\"1\" height=\"1\"><path d=\"{d}\"/></svg>");
+        assert!(matches!(
+            import_svg_many(svg.as_bytes()),
+            Err(crate::svg::SvgError::TooComplex {
+                what: "anchors",
+                limit: MAX_VECTOR_ANCHORS,
             })
         ));
     }

@@ -2413,6 +2413,7 @@ mod tests {
         assert_eq!(stack.layer(id).unwrap().vector, None);
         let red = crate::vector::VectorParams {
             shape: VectorShape {
+                subpaths: Vec::new().into(),
                 closed: false,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],

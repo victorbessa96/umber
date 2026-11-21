@@ -1513,8 +1513,16 @@ impl VectorImportBuilder {
         }
     }
 
+    fn total_anchors(&self) -> usize {
+        self.subpaths
+            .iter()
+            .fold(self.shape.anchors.len(), |total, contour| {
+                total.saturating_add(contour.anchors.len())
+            })
+    }
+
     fn push_anchor(&mut self, point: [f64; 2]) -> Result<(), SvgError> {
-        if self.shape.anchors.len() >= crate::vector::MAX_VECTOR_ANCHORS {
+        if self.total_anchors() >= crate::vector::MAX_VECTOR_ANCHORS {
             return Err(SvgError::TooComplex {
                 what: "anchors",
                 limit: crate::vector::MAX_VECTOR_ANCHORS,
@@ -1536,11 +1544,24 @@ impl VectorImportBuilder {
         }
     }
 
-    fn finish(mut self) -> Vec<crate::vector::VectorShape> {
+    fn finish(mut self) -> Option<crate::vector::VectorShape> {
         if !self.shape.anchors.is_empty() {
             self.subpaths.push(self.shape);
         }
-        self.subpaths
+        let mut contours = self.subpaths;
+        if contours.is_empty() {
+            return None;
+        }
+        let mut primary = contours.remove(0);
+        primary.subpaths = contours
+            .into_iter()
+            .map(|contour| crate::vector::VectorSubpath {
+                closed: contour.closed,
+                anchors: contour.anchors,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Some(primary)
     }
 
     fn ensure_open(&mut self, from: [f64; 2]) -> Result<(), SvgError> {
@@ -1587,14 +1608,14 @@ impl PathSink for VectorImportBuilder {
         let out_handle = self.map(c1)?;
         let in_handle = self.map(c2)?;
         let pos = self.map(to)?;
-        if let Some(anchor) = self.shape.anchors.last_mut() {
-            anchor.out_handle = out_handle;
-        }
-        if self.shape.anchors.len() >= crate::vector::MAX_VECTOR_ANCHORS {
+        if self.total_anchors() >= crate::vector::MAX_VECTOR_ANCHORS {
             return Err(SvgError::TooComplex {
                 what: "anchors",
                 limit: crate::vector::MAX_VECTOR_ANCHORS,
             });
+        }
+        if let Some(anchor) = self.shape.anchors.last_mut() {
+            anchor.out_handle = out_handle;
         }
         self.shape.anchors.push(crate::vector::Anchor {
             pos,
@@ -1638,7 +1659,10 @@ impl PathSink for VectorImportBuilder {
             self.shape.anchors.len()
         };
         let start = usize::from(current == 0);
-        if current.saturating_add(start).saturating_add(cubics.len())
+        if self
+            .total_anchors()
+            .saturating_add(start)
+            .saturating_add(cubics.len())
             > crate::vector::MAX_VECTOR_ANCHORS
         {
             return Err(SvgError::TooComplex {
@@ -1885,6 +1909,7 @@ pub(crate) fn import_vector_svg_many(
     };
     let mut shapes = Vec::new();
     let mut total_anchors = 0usize;
+    let mut total_contours = 0usize;
     loop {
         match tok.next_event()? {
             Event::Eof => break,
@@ -1921,34 +1946,33 @@ pub(crate) fn import_vector_svg_many(
                         };
                         let mut builder = VectorImportBuilder::new(ctm, width, height);
                         build_vector_geometry(&name, &attrs, &mut builder)?;
-                        let subpaths = builder.finish();
-                        if shapes.len().saturating_add(subpaths.len())
-                            > crate::vector::MAX_VECTOR_SHAPES
-                        {
-                            return Err(SvgError::TooComplex {
-                                what: "vector paths",
-                                limit: crate::vector::MAX_VECTOR_SHAPES,
-                            });
-                        }
-                        let effective_attrs = inherited_vector_paint(&parent_attrs, &attrs);
-                        let (fill, stroke, fill_rule) = parse_vector_paint(
-                            &effective_attrs,
-                            ctm,
-                            width,
-                            height,
-                            root_style.rule,
-                        )?;
-                        if subpaths.len() > 1 && fill[3] > 0 {
-                            return Err(SvgError::Unsupported {
-                                what: "filled compound subpaths require one compound layer"
-                                    .to_owned(),
-                            });
-                        }
-                        for mut shape in subpaths {
+                        if let Some(mut shape) = builder.finish() {
+                            let contour_count = shape.subpaths.len().saturating_add(1);
+                            total_contours = total_contours.saturating_add(contour_count);
+                            if total_contours > crate::vector::MAX_VECTOR_SHAPES {
+                                return Err(SvgError::TooComplex {
+                                    what: "vector contours across paths",
+                                    limit: crate::vector::MAX_VECTOR_SHAPES,
+                                });
+                            }
+                            let effective_attrs = inherited_vector_paint(&parent_attrs, &attrs);
+                            let (fill, stroke, fill_rule) = parse_vector_paint(
+                                &effective_attrs,
+                                ctm,
+                                width,
+                                height,
+                                root_style.rule,
+                            )?;
                             shape.fill = fill;
                             shape.stroke = stroke;
                             shape.fill_rule = fill_rule;
-                            total_anchors = total_anchors.saturating_add(shape.anchors.len());
+                            let shape_anchors = shape
+                                .subpaths
+                                .iter()
+                                .fold(shape.anchors.len(), |total, subpath| {
+                                    total.saturating_add(subpath.anchors.len())
+                                });
+                            total_anchors = total_anchors.saturating_add(shape_anchors);
                             if total_anchors > crate::vector::MAX_VECTOR_ANCHORS {
                                 return Err(SvgError::TooComplex {
                                     what: "vector anchors across paths",

@@ -737,18 +737,40 @@ mod tests {
     }
 
     #[test]
-    fn stroke_only_subpaths_become_layers_in_one_undo_group() {
+    fn compound_subpaths_become_one_layer_in_one_undo_group() {
         let mut doc = Document::default();
         let svg = br##"<svg width="1" height="1"><path fill="none" stroke="#000" d="M0 0 L1 0 M0 1 L1 1"/></svg>"##;
         let declared = svg.len() as u64;
         let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
-            .expect("subpath import succeeds");
-        assert_eq!(doc.layers().len(), 2);
-        assert_eq!(ids.len(), 2);
-        assert_eq!(doc.history.len(), 4);
+            .expect("compound import succeeds");
+        assert_eq!(doc.layers().len(), 1);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            doc.layers()[0]
+                .vector
+                .as_ref()
+                .unwrap()
+                .shape
+                .subpaths
+                .len(),
+            1
+        );
+        assert_eq!(doc.history.len(), 2);
         assert_eq!(doc.session_history.len(), 1);
         assert!(doc.undo());
         assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        assert_eq!(doc.layers().len(), 1);
+        assert_eq!(
+            doc.layers()[0]
+                .vector
+                .as_ref()
+                .unwrap()
+                .shape
+                .subpaths
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -869,6 +891,7 @@ mod tests {
         let mut doc = Document::default();
         let params = VectorParams {
             shape: umber_core::vector::VectorShape {
+                subpaths: Vec::new().into(),
                 closed: true,
                 fill_rule: umber_core::svg::FillRule::NonZero,
                 fill: [1, 2, 3, 255],

@@ -3007,6 +3007,7 @@ mod tests {
         use umber_core::vector::{Anchor, VectorShape};
         umber_core::vector::VectorParams {
             shape: VectorShape {
+                subpaths: Vec::new().into(),
                 closed: true,
                 fill_rule: umber_core::svg::FillRule::NonZero,
                 fill: color,
@@ -3054,6 +3055,32 @@ mod tests {
         let resized = state.evaluate(1001, 32, 32, &off);
         assert_eq!(resized.len(), 32 * 32 * 4);
         assert_eq!(state.evaluation_count(), 4, "tile size is cache identity");
+    }
+
+    #[test]
+    fn vector_secondary_edit_invalidates_cached_planes() {
+        let off = SymmetrySettings::default();
+        let mut params = test_vector_params([255, 0, 0, 255]);
+        params
+            .shape
+            .subpaths
+            .push(umber_core::vector::VectorSubpath {
+                closed: true,
+                anchors: vec![
+                    umber_core::vector::Anchor::corner([0.0, 0.0]),
+                    umber_core::vector::Anchor::corner([0.125, 0.0]),
+                    umber_core::vector::Anchor::corner([0.125, 0.125]),
+                ],
+            });
+        let mut state = VectorLayerState::new(7, params.clone());
+        let first = state.evaluate(1001, 16, 16, &off).to_vec();
+        assert_eq!(state.evaluation_count(), 1);
+        params.shape.subpaths[0].anchors[0].pos = [0.875, 0.875];
+        state.set_params(params);
+        assert!(state.is_dirty());
+        let second = state.evaluate(1001, 16, 16, &off).to_vec();
+        assert_eq!(state.evaluation_count(), 2);
+        assert_ne!(first, second);
     }
 
     #[test]

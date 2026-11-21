@@ -713,6 +713,15 @@ mod tests {
         let id = 7;
         let params = crate::vector::VectorParams {
             shape: crate::vector::VectorShape {
+                subpaths: vec![crate::vector::VectorSubpath {
+                    closed: true,
+                    anchors: vec![
+                        crate::vector::Anchor::corner([0.25, 0.25]),
+                        crate::vector::Anchor::corner([0.75, 0.25]),
+                        crate::vector::Anchor::corner([0.75, 0.75]),
+                    ],
+                }]
+                .into(),
                 closed: true,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [20, 40, 60, 255],

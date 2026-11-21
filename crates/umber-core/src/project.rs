@@ -2133,6 +2133,7 @@ mod tests {
         use crate::vector::{Anchor, Stroke, VectorParams, VectorShape};
         let mut model = fixture_model();
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],

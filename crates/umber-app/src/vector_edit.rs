@@ -107,7 +107,7 @@ impl VectorEditTool {
         if self.target.is_none() || self.gesture.is_some() || !finite_uv(uv) {
             return false;
         }
-        if self.working.anchors.len() >= MAX_VECTOR_ANCHORS {
+        if self.working.total_anchors() >= MAX_VECTOR_ANCHORS {
             return false;
         }
         let before = self.params();
@@ -120,7 +120,7 @@ impl VectorEditTool {
         if self.target.is_none()
             || self.gesture.is_some()
             || self.working.anchors.len() < 2
-            || self.working.anchors.len() >= MAX_VECTOR_ANCHORS
+            || self.working.total_anchors() >= MAX_VECTOR_ANCHORS
             || !finite_uv(uv)
             || !tol.is_finite()
             || tol < 0.0
@@ -339,6 +339,7 @@ mod tests {
     fn params(closed: bool) -> VectorParams {
         VectorParams {
             shape: VectorShape {
+                subpaths: Vec::new().into(),
                 closed,
                 fill_rule: umber_core::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
@@ -507,6 +508,23 @@ mod tests {
     }
 
     #[test]
+    fn compound_primary_edit_charges_aggregate_anchor_cap() {
+        let (mut doc, _) = doc_with_shape(false);
+        let mut compound = params(false).shape;
+        compound.anchors = vec![Anchor::corner([0.5, 0.5]); MAX_VECTOR_ANCHORS - 1];
+        compound.subpaths.push(umber_core::vector::VectorSubpath {
+            closed: false,
+            anchors: vec![Anchor::corner([0.25, 0.25])],
+        });
+        doc.run(LayerCommand::set_vector(
+            0,
+            VectorParams { shape: compound },
+        ));
+        let mut tool = tool_for(&doc);
+        assert!(!tool.append(&mut doc, [0.5, 0.5]));
+    }
+
+    #[test]
     fn document_undo_redo_adopts_when_not_dragging() {
         let (mut doc, original) = doc_with_shape(false);
         let mut tool = tool_for(&doc);
@@ -518,6 +536,39 @@ mod tests {
         assert!(doc.undo());
         tool.adopt(Some((0, doc.layers()[0].vector.as_ref())));
         assert_eq!(tool.shape(), &original.shape);
+    }
+
+    #[test]
+    fn primary_edits_preserve_compound_secondaries() {
+        let (mut doc, mut compound) = doc_with_shape(false);
+        compound
+            .shape
+            .subpaths
+            .push(umber_core::vector::VectorSubpath {
+                closed: true,
+                anchors: vec![
+                    Anchor::corner([0.25, 0.25]),
+                    Anchor::corner([0.75, 0.25]),
+                    Anchor::corner([0.75, 0.75]),
+                ],
+            });
+        doc.run(LayerCommand::set_vector(0, compound.clone()));
+        let mut tool = tool_for(&doc);
+        assert!(tool.append(&mut doc, [0.5, 0.75]));
+        assert_eq!(
+            doc.layers()[0].vector.as_ref().unwrap().shape.subpaths,
+            compound.shape.subpaths
+        );
+        assert!(tool.set_closed(&mut doc, true));
+        assert_eq!(
+            doc.layers()[0].vector.as_ref().unwrap().shape.subpaths,
+            compound.shape.subpaths
+        );
+        assert!(doc.undo());
+        assert_eq!(
+            doc.layers()[0].vector.as_ref().unwrap().shape.subpaths,
+            compound.shape.subpaths
+        );
     }
 
     #[test]

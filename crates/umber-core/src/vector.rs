@@ -141,6 +141,14 @@ pub struct Stroke {
     pub dash: StrokeDash,
 }
 
+/// A secondary contour in a compound vector shape. It shares the primary
+/// contour's fill, fill rule, and stroke, but keeps its own closure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorSubpath {
+    pub closed: bool,
+    pub anchors: Vec<Anchor>,
+}
+
 /// The shape a vector layer holds. `anchors` in path order; `closed`
 /// joins the last anchor back to the first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +161,10 @@ pub struct VectorShape {
     pub fill_rule: crate::svg::FillRule,
     pub stroke: Option<Stroke>,
     pub anchors: Vec<Anchor>,
+    /// Additional contours sharing this shape's paint. Additive and omitted
+    /// when empty so pre-compound JSON remains byte-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subpaths: Box<Vec<VectorSubpath>>,
 }
 
 impl VectorShape {
@@ -164,12 +176,26 @@ impl VectorShape {
             fill_rule: crate::svg::FillRule::NonZero,
             stroke: None,
             anchors: Vec::new(),
+            subpaths: Vec::new().into(),
         }
+    }
+
+    /// Total anchors across primary and secondary contours.
+    pub fn total_anchors(&self) -> usize {
+        self.subpaths
+            .iter()
+            .fold(self.anchors.len(), |total, subpath| {
+                total.saturating_add(subpath.anchors.len())
+            })
     }
 
     /// Whether the shape can cover any texel (K2's rasterizer gate).
     pub fn is_empty(&self) -> bool {
         self.anchors.len() < 2
+            && self
+                .subpaths
+                .iter()
+                .all(|subpath| subpath.anchors.len() < 2)
     }
 }
 
@@ -237,6 +263,19 @@ impl VectorShape {
                 .iter()
                 .zip(&other.anchors)
                 .all(|(a, b)| anchor_cache_eq(a, b))
+            && self.subpaths.len() == other.subpaths.len()
+            && self
+                .subpaths
+                .iter()
+                .zip(other.subpaths.iter())
+                .all(|(a, b)| {
+                    a.closed == b.closed
+                        && a.anchors.len() == b.anchors.len()
+                        && a.anchors
+                            .iter()
+                            .zip(&b.anchors)
+                            .all(|(a, b)| anchor_cache_eq(a, b))
+                })
     }
 }
 
@@ -344,6 +383,15 @@ pub fn centerline(
     width: u32,
     height: u32,
 ) -> Result<Vec<[f64; 2]>, VectorError> {
+    centerline_with_budget(shape, width, height, &mut 0)
+}
+
+fn centerline_with_budget(
+    shape: &VectorShape,
+    width: u32,
+    height: u32,
+    used: &mut usize,
+) -> Result<Vec<[f64; 2]>, VectorError> {
     let Some(first) = shape.anchors.first() else {
         return Ok(Vec::new());
     };
@@ -358,6 +406,13 @@ pub fn centerline(
         return Ok(Vec::new());
     }
     let mut points = vec![device_point(first.pos, width, height)];
+    let mut total = used.saturating_add(1);
+    if total > MAX_VECTOR_POINTS {
+        return Err(VectorError::TooComplex {
+            what: "path points",
+            limit: MAX_VECTOR_POINTS,
+        });
+    }
     let segments = if shape.closed {
         shape.anchors.len()
     } else {
@@ -373,8 +428,8 @@ pub fn centerline(
             device_point(b.pos, width, height),
         );
         let added = crate::svg::cubic_device_point_count(p0, p1, p2, p3).saturating_sub(1);
-        let next_len = points.len().saturating_add(added);
-        if next_len > MAX_VECTOR_POINTS {
+        total = total.saturating_add(added);
+        if total > MAX_VECTOR_POINTS {
             return Err(VectorError::TooComplex {
                 what: "path points",
                 limit: MAX_VECTOR_POINTS,
@@ -382,14 +437,26 @@ pub fn centerline(
         }
         crate::svg::cubic_device_points_into(p0, p1, p2, p3, &mut points);
     }
+    *used = total;
     Ok(points)
 }
 
+#[cfg(test)]
 fn stroke_polys(
     shape: &VectorShape,
     centerline: &[[f64; 2]],
     width: u32,
     height: u32,
+) -> Result<Vec<Vec<[f64; 2]>>, VectorError> {
+    stroke_polys_with_budget(shape, centerline, width, height, &mut 0)
+}
+
+fn stroke_polys_with_budget(
+    shape: &VectorShape,
+    centerline: &[[f64; 2]],
+    width: u32,
+    height: u32,
+    used: &mut usize,
 ) -> Result<Vec<Vec<[f64; 2]>>, VectorError> {
     let Some(stroke) = shape.stroke.filter(|s| {
         s.color[3] > 0 && s.width.is_finite() && s.width > 0.0 && shape.anchors.len() >= 2
@@ -397,12 +464,12 @@ fn stroke_polys(
         return Ok(Vec::new());
     };
     if !stroke.dash.is_solid() {
-        return dashed_stroke_polys(shape, centerline, width, height, stroke);
+        return dashed_stroke_polys(shape, centerline, width, height, stroke, used);
     }
     let radius = f64::from(stroke.width) * f64::from(width.min(height)) * 0.5;
     let ellipse_cost = crate::svg::ellipse_point_count(radius, radius);
     let mut builder = crate::svg::PolyBuilder::new_device();
-    let mut points = 0usize;
+    let mut points = *used;
     for pair in centerline.windows(2) {
         if points.saturating_add(4) > MAX_VECTOR_POINTS {
             return Err(VectorError::TooComplex {
@@ -526,6 +593,7 @@ fn stroke_polys(
             points += 4;
         }
     }
+    *used = points;
     Ok(builder.finish())
 }
 
@@ -675,6 +743,7 @@ fn dashed_stroke_polys(
     width: u32,
     height: u32,
     stroke: Stroke,
+    used: &mut usize,
 ) -> Result<Vec<Vec<[f64; 2]>>, VectorError> {
     let scale = f64::from(width.min(height));
     let pattern = DashPattern::new(stroke.dash, scale)?;
@@ -742,7 +811,7 @@ fn dashed_stroke_polys(
     };
 
     let mut builder = crate::svg::PolyBuilder::new_device();
-    let mut points = 0usize;
+    let mut points = *used;
     for (index, parts) in segments.iter().enumerate() {
         let segment_start = cumulative[index];
         let segment_end = cumulative[index + 1];
@@ -791,6 +860,7 @@ fn dashed_stroke_polys(
             push_stroke_polygon(&mut builder, &mut points, &polygon)?;
         }
     }
+    *used = points;
     Ok(builder.finish())
 }
 
@@ -925,26 +995,64 @@ pub fn rasterize(
             max_pixels: MAX_VECTOR_RASTER_PIXELS,
         });
     }
-    if shape.anchors.len() > MAX_VECTOR_ANCHORS {
+    if shape.subpaths.len().saturating_add(1) > MAX_VECTOR_SHAPES {
+        return Err(VectorError::TooComplex {
+            what: "contours",
+            limit: MAX_VECTOR_SHAPES,
+        });
+    }
+    if shape.total_anchors() > MAX_VECTOR_ANCHORS {
         return Err(VectorError::TooComplex {
             what: "anchors",
             limit: MAX_VECTOR_ANCHORS,
         });
     }
-    let fills = shape.closed && shape.fill[3] > 0;
+    let has_drawable_contour = shape.anchors.len() >= 2
+        || shape
+            .subpaths
+            .iter()
+            .any(|subpath| subpath.anchors.len() >= 2);
+    let fills = shape.fill[3] > 0
+        && ((shape.closed && shape.anchors.len() >= 2)
+            || shape
+                .subpaths
+                .iter()
+                .any(|subpath| subpath.closed && subpath.anchors.len() >= 2));
     let strokes = shape.stroke.is_some_and(|s| {
-        s.color[3] > 0 && s.width.is_finite() && s.width > 0.0 && shape.anchors.len() >= 2
+        s.color[3] > 0 && s.width.is_finite() && s.width > 0.0 && has_drawable_contour
     });
-    if width == 0 || height == 0 || shape.anchors.len() < 2 || (!fills && !strokes) {
+    if width == 0 || height == 0 || !has_drawable_contour || (!fills && !strokes) {
         return Ok(VectorRaster::empty(width, height));
     }
-    let centerline = centerline(shape, width, height)?;
-    let fill_polys = if shape.closed && shape.fill[3] > 0 && centerline.len() >= 2 {
-        vec![centerline.clone()]
+    let mut centerline_points = 0usize;
+    let primary_line = centerline_with_budget(shape, width, height, &mut centerline_points)?;
+    let mut fill_polys = if shape.closed && shape.fill[3] > 0 && primary_line.len() >= 2 {
+        vec![primary_line.clone()]
     } else {
         Vec::new()
     };
-    let stroke_geometry = stroke_polys(shape, &centerline, width, height)?;
+    let mut stroke_points = 0usize;
+    let mut stroke_geometry =
+        stroke_polys_with_budget(shape, &primary_line, width, height, &mut stroke_points)?;
+    for subpath in shape.subpaths.iter() {
+        let contour = VectorShape {
+            closed: subpath.closed,
+            anchors: subpath.anchors.clone(),
+            stroke: shape.stroke,
+            ..VectorShape::empty()
+        };
+        let points = centerline_with_budget(&contour, width, height, &mut centerline_points)?;
+        if subpath.closed && shape.fill[3] > 0 && points.len() >= 2 {
+            fill_polys.push(points.clone());
+        }
+        stroke_geometry.extend(stroke_polys_with_budget(
+            &contour,
+            &points,
+            width,
+            height,
+            &mut stroke_points,
+        )?);
+    }
     let edges: usize = fill_polys
         .iter()
         .chain(&stroke_geometry)
@@ -1005,6 +1113,7 @@ mod tests {
     #[test]
     fn shape_round_trips_through_json_deterministically() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
@@ -1023,11 +1132,33 @@ mod tests {
         assert_eq!(shape, back);
         let s2 = serde_json::to_string(&shape).expect("serialize again");
         assert_eq!(s, s2, "serialization is deterministic");
+        assert!(!s.contains("subpaths"), "empty compound state is omitted");
+        let legacy: VectorShape = serde_json::from_str(&s).expect("legacy JSON");
+        assert!(legacy.subpaths.is_empty());
+
+        let compound = VectorShape {
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                anchors: vec![Anchor::corner([0.25, 0.25]), Anchor::corner([0.75, 0.75])],
+            }]
+            .into(),
+            ..shape
+        };
+        let json = serde_json::to_string(&compound).expect("compound JSON");
+        assert!(json.contains("subpaths"));
+        let restored: VectorShape = serde_json::from_str(&json).expect("compound restore");
+        assert_eq!(restored, compound);
+        assert_eq!(
+            serde_json::to_string(&restored).expect("compound re-save"),
+            json,
+            "compound serialization is deterministic"
+        );
     }
 
     #[test]
     fn cache_identity_is_stable_for_nan_and_signed_zero() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
@@ -1101,6 +1232,7 @@ mod tests {
     #[test]
     fn centerline_matches_individually_flattened_cubics() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
@@ -1144,6 +1276,7 @@ mod tests {
     #[test]
     fn closed_shape_matches_svg_coverage_exactly() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
@@ -1177,6 +1310,7 @@ mod tests {
     #[test]
     fn closed_shape_with_curved_closure_matches_svg() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [40, 180, 220, 255],
@@ -1215,6 +1349,7 @@ mod tests {
     #[test]
     fn open_shape_stroke_has_round_caps() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
@@ -1261,6 +1396,7 @@ mod tests {
     #[test]
     fn stroke_composites_source_over_fill() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 128],
@@ -1295,6 +1431,7 @@ mod tests {
     #[test]
     fn zero_alpha_stroke_is_identical_to_no_stroke() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 128],
@@ -1329,6 +1466,7 @@ mod tests {
     #[test]
     fn dimension_budget_is_a_typed_error() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
@@ -1354,6 +1492,7 @@ mod tests {
     #[test]
     fn structure_budgets_are_typed_errors() {
         let base = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -1372,6 +1511,7 @@ mod tests {
             })
         );
         let curved = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
@@ -1398,6 +1538,7 @@ mod tests {
         let cases = [
             VectorShape::empty(),
             VectorShape {
+                subpaths: Vec::new().into(),
                 closed: false,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
@@ -1412,6 +1553,7 @@ mod tests {
                 anchors: vec![Anchor::corner([0.5, 0.5])],
             },
             VectorShape {
+                subpaths: Vec::new().into(),
                 closed: false,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
@@ -1419,6 +1561,7 @@ mod tests {
                 anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
             },
             VectorShape {
+                subpaths: Vec::new().into(),
                 closed: true,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
@@ -1436,6 +1579,7 @@ mod tests {
                 ],
             },
             VectorShape {
+                subpaths: Vec::new().into(),
                 closed: false,
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
@@ -1470,6 +1614,7 @@ mod tests {
     #[test]
     fn raster_is_deterministic_and_non_square() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -1496,6 +1641,7 @@ mod tests {
     #[test]
     fn empty_inputs_short_circuit_before_geometry() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
@@ -1520,6 +1666,7 @@ mod tests {
     #[test]
     fn edge_row_budget_is_a_typed_error() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
@@ -1540,6 +1687,7 @@ mod tests {
     #[test]
     fn evenodd_star_changes_only_the_inner_pentagon() {
         let star = VectorShape {
+            subpaths: Vec::new().into(),
             closed: true,
             fill: [255, 255, 255, 255],
             fill_rule: crate::svg::FillRule::EvenOdd,
@@ -1626,6 +1774,7 @@ mod tests {
     #[test]
     fn butt_and_square_caps_follow_the_endpoints() {
         let shape = |cap| VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -1723,6 +1872,7 @@ mod tests {
     #[test]
     fn bevel_and_miter_joins_emit_the_expected_geometry() {
         let shape = |join| VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -1862,6 +2012,7 @@ mod tests {
     #[test]
     fn dashed_strokes_emit_caps_joins_and_scaled_intervals() {
         let shape = |cap, join, dash| VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -1978,6 +2129,7 @@ mod tests {
     fn dash_json_cache_and_invalid_values_are_safe() {
         let dash = StrokeDash::from_lengths(&[0.25, 0.125], 0.0625).expect("dash");
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -2013,6 +2165,7 @@ mod tests {
     #[test]
     fn stroke_geometry_budget_is_typed_error() {
         let shape = VectorShape {
+            subpaths: Vec::new().into(),
             closed: false,
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
@@ -2031,6 +2184,307 @@ mod tests {
             Err(VectorError::TooComplex {
                 what: "path points",
                 limit: MAX_VECTOR_POINTS,
+            })
+        );
+    }
+
+    #[test]
+    fn compound_nonzero_reversed_inner_contour_cuts_a_donut_hole() {
+        let contour = |points: &[[f32; 2]]| {
+            points
+                .iter()
+                .map(|point| Anchor::corner([point[0] / 8.0, point[1] / 8.0]))
+                .collect::<Vec<_>>()
+        };
+        let shape = VectorShape {
+            closed: true,
+            fill: [255, 255, 255, 255],
+            fill_rule: crate::svg::FillRule::NonZero,
+            stroke: None,
+            anchors: contour(&[[1.0, 1.0], [1.0, 7.0], [7.0, 7.0], [7.0, 1.0]]),
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                anchors: contour(&[[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]]),
+            }]
+            .into(),
+        };
+        let raster = rasterize(&shape, 8, 8).expect("compound donut");
+        let at = |x: u32, y: u32| raster.coverage()[(y * 8 + x) as usize];
+        assert_eq!(at(2, 2), 0.0, "reversed inner winding cuts a hole");
+        assert_eq!(at(1, 1), 255.0 / 255.0, "outer ring stays filled");
+        assert_eq!(at(0, 0), 0.0, "outside stays transparent");
+    }
+
+    #[test]
+    fn compound_primary_empty_secondary_still_renders() {
+        let shape = VectorShape {
+            fill: [255, 255, 255, 255],
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                anchors: vec![
+                    Anchor::corner([0.25, 0.25]),
+                    Anchor::corner([0.75, 0.25]),
+                    Anchor::corner([0.75, 0.75]),
+                    Anchor::corner([0.25, 0.75]),
+                ],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        let raster = rasterize(&shape, 8, 8).expect("secondary-only compound");
+        assert_eq!(raster.coverage().get(4 * 8 + 4), Some(&1.0));
+    }
+
+    #[test]
+    fn compound_open_secondary_contributes_its_stroke() {
+        let shape = VectorShape {
+            stroke: Some(Stroke {
+                width: 0.25,
+                color: [10, 20, 30, 255],
+                cap: StrokeCap::Round,
+                join: StrokeJoin::Round,
+                dash: StrokeDash::solid(),
+            }),
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        let raster = rasterize(&shape, 16, 16).expect("open secondary stroke");
+        let index = 7 * 16 + 7;
+        assert_eq!(raster.coverage()[index], 1.0);
+        assert_eq!(&raster.rgba()[index * 4..index * 4 + 4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn compound_emptiness_and_cache_identity_include_secondaries() {
+        let shape = VectorShape {
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                anchors: vec![
+                    Anchor {
+                        pos: [f32::NAN, 0.25],
+                        in_handle: [0.25, 0.25],
+                        out_handle: [0.25, 0.25],
+                    },
+                    Anchor::corner([0.75, 0.75]),
+                ],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        assert!(!shape.is_empty());
+        assert!(shape.same_cache_key(&shape.clone()));
+        let mut changed = shape.clone();
+        changed.subpaths[0].anchors[1].pos[0] = 0.5;
+        assert!(!shape.same_cache_key(&changed));
+        let mut changed_closure = shape.clone();
+        changed_closure.subpaths[0].closed = false;
+        assert!(!shape.same_cache_key(&changed_closure));
+    }
+
+    #[test]
+    fn compound_anchor_budget_is_aggregate() {
+        let shape = VectorShape {
+            anchors: vec![Anchor::corner([0.5, 0.5]); MAX_VECTOR_ANCHORS],
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                anchors: vec![Anchor::corner([0.25, 0.25])],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        assert_eq!(
+            rasterize(&shape, 16, 16),
+            Err(VectorError::TooComplex {
+                what: "anchors",
+                limit: MAX_VECTOR_ANCHORS,
+            })
+        );
+    }
+
+    #[test]
+    fn compound_centerline_budget_is_aggregate() {
+        let anchors: Vec<_> = (0..160)
+            .map(|_| Anchor {
+                pos: [0.5, 0.5],
+                in_handle: [-1.0e6, -1.0e6],
+                out_handle: [1.0e6, 1.0e6],
+            })
+            .collect();
+        let primary = VectorShape {
+            closed: true,
+            anchors: anchors.clone(),
+            ..VectorShape::empty()
+        };
+        let primary_points = centerline(&primary, 8192, 8192).expect("primary centerline");
+        assert!(primary_points.len() <= MAX_VECTOR_POINTS);
+        assert!(primary_points.len().saturating_mul(2) > MAX_VECTOR_POINTS);
+        let compound = VectorShape {
+            fill: [255, 255, 255, 255],
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                anchors,
+            }]
+            .into(),
+            ..primary
+        };
+        assert_eq!(
+            rasterize(&compound, 8192, 8192),
+            Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            })
+        );
+    }
+
+    #[test]
+    fn compound_stroke_point_budget_is_aggregate() {
+        let anchors: Vec<_> = (0..20)
+            .map(|index| Anchor::corner([0.25 + 0.5 * (index % 2) as f32, 0.5]))
+            .collect();
+        let contour = VectorShape {
+            closed: true,
+            stroke: Some(Stroke {
+                width: 1.0e6,
+                color: [255, 255, 255, 255],
+                cap: StrokeCap::Round,
+                join: StrokeJoin::Round,
+                dash: StrokeDash::solid(),
+            }),
+            anchors: anchors.clone(),
+            ..VectorShape::empty()
+        };
+        let line = centerline(&contour, 16, 16).expect("straight centerline");
+        let geometry = stroke_polys(&contour, &line, 16, 16).expect("individual stroke");
+        let points = geometry.iter().map(Vec::len).sum::<usize>();
+        assert!(points <= MAX_VECTOR_POINTS, "individual points={points}");
+        assert!(
+            points.saturating_mul(2) > MAX_VECTOR_POINTS,
+            "two contours must exceed the cap; points={points}"
+        );
+        let compound = VectorShape {
+            subpaths: vec![VectorSubpath {
+                closed: true,
+                anchors,
+            }]
+            .into(),
+            ..contour
+        };
+        assert_eq!(
+            rasterize(&compound, 16, 16),
+            Err(VectorError::TooComplex {
+                what: "path points",
+                limit: MAX_VECTOR_POINTS,
+            })
+        );
+    }
+
+    #[test]
+    fn compound_fill_rules_windings_and_open_contours_match_exact_grids() {
+        let contour = |points: &[[f32; 2]]| {
+            points
+                .iter()
+                .map(|point| Anchor::corner([point[0] / 8.0, point[1] / 8.0]))
+                .collect::<Vec<_>>()
+        };
+        let outer = contour(&[[1.0, 1.0], [1.0, 7.0], [7.0, 7.0], [7.0, 1.0]]);
+        let reversed = contour(&[[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]]);
+        let same = contour(&[[2.0, 4.0], [4.0, 4.0], [4.0, 2.0], [2.0, 2.0]]);
+        for (rule, inner, closed, hole) in [
+            (crate::svg::FillRule::NonZero, reversed.clone(), true, true),
+            (crate::svg::FillRule::NonZero, same.clone(), true, false),
+            (crate::svg::FillRule::EvenOdd, reversed.clone(), true, true),
+            (crate::svg::FillRule::EvenOdd, same.clone(), true, true),
+            (
+                crate::svg::FillRule::NonZero,
+                reversed.clone(),
+                false,
+                false,
+            ),
+            (crate::svg::FillRule::EvenOdd, same, false, false),
+        ] {
+            let shape = VectorShape {
+                closed: true,
+                fill: [255, 255, 255, 255],
+                fill_rule: rule,
+                anchors: outer.clone(),
+                subpaths: vec![VectorSubpath {
+                    closed,
+                    anchors: inner,
+                }]
+                .into(),
+                ..VectorShape::empty()
+            };
+            let raster = rasterize(&shape, 8, 8).expect("compound grid");
+            for y in 0..8u32 {
+                for x in 0..8u32 {
+                    let in_outer = (1..7).contains(&x) && (1..7).contains(&y);
+                    let in_hole = hole && (2..4).contains(&x) && (2..4).contains(&y);
+                    let expected = if in_outer && !in_hole { 1.0 } else { 0.0 };
+                    assert_eq!(
+                        raster.coverage()[(y * 8 + x) as usize],
+                        expected,
+                        "rule={rule:?} closed={closed} at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_dash_phase_restarts_for_each_contour() {
+        let dash = StrokeDash::from_lengths(&[0.25, 0.25], 0.0).expect("dash");
+        let shape = VectorShape {
+            closed: false,
+            stroke: Some(Stroke {
+                width: 0.125,
+                color: [255, 255, 255, 255],
+                cap: StrokeCap::Butt,
+                join: StrokeJoin::Bevel,
+                dash,
+            }),
+            anchors: vec![Anchor::corner([0.0, 0.25]), Anchor::corner([0.375, 0.25])],
+            subpaths: vec![VectorSubpath {
+                closed: false,
+                anchors: vec![Anchor::corner([0.0, 0.75]), Anchor::corner([1.0, 0.75])],
+            }]
+            .into(),
+            ..VectorShape::empty()
+        };
+        let raster = rasterize(&shape, 16, 16).expect("two dashed contours");
+        let at = |x: u32, y: u32| raster.coverage()[(y * 16 + x) as usize];
+        assert_eq!(at(1, 3), 1.0, "primary starts on");
+        assert_eq!(at(5, 3), 0.0, "primary ends in its first gap");
+        for (x, expected) in [(1, 1.0), (5, 0.0), (9, 1.0), (13, 0.0)] {
+            assert_eq!(
+                at(x, 11),
+                expected,
+                "secondary restarts its dash phase at x={x}; a continued primary phase would differ"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_contour_count_is_bounded() {
+        let shape = VectorShape {
+            subpaths: vec![
+                VectorSubpath {
+                    closed: false,
+                    anchors: Vec::new(),
+                };
+                crate::vector::MAX_VECTOR_SHAPES
+            ]
+            .into(),
+            ..VectorShape::empty()
+        };
+        assert_eq!(
+            rasterize(&shape, 16, 16),
+            Err(VectorError::TooComplex {
+                what: "contours",
+                limit: crate::vector::MAX_VECTOR_SHAPES,
             })
         );
     }
