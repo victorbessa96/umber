@@ -2,9 +2,7 @@
 
 ## CURRENT STATE (rewrite this block on every claim or landing)
 
-**Updated 2026-11-21 11:0x:** K8b SVG stroke miter limits `22bdd3e4` is landed on K8a `6f35557f`; the K8b brief is `069fbdb5`. K8c is now CLAIMED by session `20261120_095914_7937a6` under kill lock `razul-vector-panel-miter-limit`: expose the stored `miter_limit` as a Miter-only numeric row in the Vector Properties rail, both i18n catalogs, one undoable `SetVector`, no core/schema/export change. K8c brief committed as `81088f54`; implementation and battery pending. Queue row 566 is K8b's landed record; row 567 is the live K8c claim. Consult `STATE.md` and the live lock registry before claiming new work.
-
-**Claim 2026-11-21 (session `20261120_095914_7937a6`):** K8c brief `81088f54` landed docs-only before code; lock `razul-vector-panel-miter-limit` covers vector_panel.rs, both .ftl catalogs, the brief/report, queue.md, coordination, STATE.md, and ROADMAP.md. Safe-push from MAIN and `git ls-remote` remain the origin gate. No L-AI/cb4b2026 work, centralhost contact, release action, public PR, schema/version change, new dependency, or foreign dirty file enters the kill.
+**Updated 2026-11-21 13:4x:** K8c Vector Properties miter-limit row implementation is `803d6a35a8c1987896cf4d006649377e7290c2e7`, on K8b `22bdd3e4`; brief `81088f54`, report `docs/loop/kill-reports/2026-11-21-umber-vector-panel-miter-limit.md`, queue row 568. The row is Miter-only, uses a no-op-aware production mediator, preserves Round/Bevel stored values, and changes no core/schema/export behavior. Full app battery and strict clippy are green; R1 findings were fixed and R2 `deleg_d39ed2ad` returned APPROVED with zero findings. This status-doc commit releases `razul-vector-panel-miter-limit`; safe-push from MAIN and `git ls-remote` remain the origin gate. NEXT: scout and brief the next disjoint vector/SVG hardening kill. No L-AI/cb4b2026 work, centralhost contact, release action, public PR, schema/version change, new dependency, or foreign dirty file enters the lane.
 
 ## Historical coordination snapshots (append-only; not current status)
 

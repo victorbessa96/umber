@@ -22,6 +22,15 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8c Vector Properties miter-limit row is landed at `803d6a35`, with brief
+`81088f54`. The panel now exposes a localized Miter-only ValueField after the
+join combo. Its production mediator changes only the stored limit, reports
+no-ops, and rides one undoable `SetVector`; Round/Bevel hide the row without
+losing the value. The 1..=1000 range is a deliberate UI cap inside core's finite
+>=1 domain. Full app battery and strict clippy are green; R2 `deleg_d39ed2ad`
+returned APPROVED after the R1 test-binding and brief-wording fixes. Report:
+`docs/loop/kill-reports/2026-11-21-umber-vector-panel-miter-limit.md`.
+
 K8b SVG stroke miter limits is landed at `22bdd3e4`, with brief `069fbdb5`.
 `Stroke.miter_limit` defaults to 4, participates in cache identity, omits the
 default from JSON, and validates finite values >=1 at the shared builder. Miter
