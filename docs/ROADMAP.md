@@ -22,6 +22,17 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8d editable vector-import display/visibility semantics are landed at
+`4f1858aa`, with brief `eb9dff7c`. Scoped frames now carry effective display
+and inherited visibility alongside paint and CTM. Pruned ancestors still
+validate descendants without building geometry or charging budgets; hidden
+leaves validate transforms and paint without parsing path data. Child-visible
+override, all-hidden typed refusal, document order, visible zero-geometry
+behavior, and grouped panel undo/redo are pinned. Core is 343/343 and the full
+app battery is green (321 lib + 892 bin + every integration/doc suite). R1's
+two blockers were reproduced RED and fixed; R2 `deleg_263daeff` returned
+APPROVED. Report: `docs/loop/kill-reports/2026-11-21-umber-vector-visibility.md`.
+
 K8c Vector Properties miter-limit row is landed at `803d6a35`, with brief
 `81088f54`. The panel now exposes a localized Miter-only ValueField after the
 join combo. Its production mediator changes only the stored limit, reports
