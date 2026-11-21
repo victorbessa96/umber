@@ -49,7 +49,7 @@ pub enum StrokeCap {
 /// Join style at a real direction change. `Round` preserves the K2 raster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StrokeJoin {
-    /// Extend the outer edges to their intersection, bounded by 4× radius.
+    /// Extend the outer edges to their intersection, bounded by `miter_limit`.
     Miter,
     /// A semicircular join centered on the turn.
     #[default]
@@ -123,6 +123,16 @@ impl StrokeDash {
     }
 }
 
+pub const DEFAULT_MITER_LIMIT: f32 = 4.0;
+
+fn default_miter_limit() -> f32 {
+    DEFAULT_MITER_LIMIT
+}
+
+fn is_default_miter_limit(value: &f32) -> bool {
+    *value == DEFAULT_MITER_LIMIT
+}
+
 /// An optional stroke around the shape's outline.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Stroke {
@@ -139,6 +149,12 @@ pub struct Stroke {
     /// Dash pattern. Additive: old projects default to solid.
     #[serde(default)]
     pub dash: StrokeDash,
+    /// SVG miter-length/stroke-width ratio. Additive: old projects default to 4.
+    #[serde(
+        default = "default_miter_limit",
+        skip_serializing_if = "is_default_miter_limit"
+    )]
+    pub miter_limit: f32,
 }
 
 /// A secondary contour in a compound vector shape. It shares the primary
@@ -242,6 +258,7 @@ fn stroke_cache_eq(a: Option<Stroke>, b: Option<Stroke>) -> bool {
                 && a.cap == b.cap
                 && a.join == b.join
                 && dash_cache_eq(a.dash, b.dash)
+                && f32_cache_eq(a.miter_limit, b.miter_limit)
         }
         (None, None) => true,
         _ => false,
@@ -313,6 +330,9 @@ pub enum VectorError {
     /// A dash pattern is non-finite, negative, all-zero, or too long.
     #[error("invalid stroke dash pattern")]
     InvalidDash,
+    /// SVG requires a finite miter limit of at least 1.
+    #[error("invalid stroke miter limit")]
+    InvalidMiterLimit,
     /// The scanline's conservative edge × row × subsample cost is too high.
     #[error("vector raster needs {edges} edges across {rows} subsampled rows (limit {limit})")]
     TooExpensive { edges: usize, rows: u64, limit: u64 },
@@ -463,6 +483,9 @@ fn stroke_polys_with_budget(
     }) else {
         return Ok(Vec::new());
     };
+    if !stroke.miter_limit.is_finite() || stroke.miter_limit < 1.0 {
+        return Err(VectorError::InvalidMiterLimit);
+    }
     if !stroke.dash.is_solid() {
         return dashed_stroke_polys(shape, centerline, width, height, stroke, used);
     }
@@ -526,7 +549,14 @@ fn stroke_polys_with_budget(
             builder.ellipse(point, radius, radius);
             points += ellipse_cost;
         } else if turn && join != StrokeJoin::Round {
-            let polygon = join_polygon(centerline, index, radius, join, shape.closed)?;
+            let polygon = join_polygon_with_limit(
+                centerline,
+                index,
+                radius,
+                join,
+                shape.closed,
+                f64::from(stroke.miter_limit),
+            )?;
             if polygon.is_empty() {
                 continue;
             }
@@ -856,7 +886,14 @@ fn dashed_stroke_polys(
         if stroke.join == StrokeJoin::Round {
             push_stroke_ellipse(&mut builder, &mut points, point, radius)?;
         } else {
-            let polygon = join_polygon(centerline, index, radius, stroke.join, shape.closed)?;
+            let polygon = join_polygon_with_limit(
+                centerline,
+                index,
+                radius,
+                stroke.join,
+                shape.closed,
+                f64::from(stroke.miter_limit),
+            )?;
             push_stroke_polygon(&mut builder, &mut points, &polygon)?;
         }
     }
@@ -873,16 +910,28 @@ fn dash_cache_eq(a: StrokeDash, b: StrokeDash) -> bool {
             .all(|(x, y)| f32_cache_eq(*x, *y))
 }
 
-/// One join polygon at `index`. Bevel uses a flat outer triangle; Miter
-/// extends the outer edges to their intersection, falling back to bevel
-/// beyond a 4×radius miter limit. Closed paths use the last real segment
-/// as the previous segment for index 0, so the closure join is retained.
+/// One join polygon at `index`, using SVG's default miter limit of 4.
+#[cfg(test)]
 fn join_polygon(
     centerline: &[[f64; 2]],
     index: usize,
     radius: f64,
     join: StrokeJoin,
     closed: bool,
+) -> Result<Vec<[f64; 2]>, VectorError> {
+    join_polygon_with_limit(centerline, index, radius, join, closed, 4.0)
+}
+
+/// Bevel uses a flat outer triangle. Miter extends the outer edges to their
+/// intersection, falling back to bevel when SVG's normative interior-angle
+/// `1 / sin(theta/2)` miter-length/stroke-width ratio exceeds `miter_limit`.
+fn join_polygon_with_limit(
+    centerline: &[[f64; 2]],
+    index: usize,
+    radius: f64,
+    join: StrokeJoin,
+    closed: bool,
+    miter_limit: f64,
 ) -> Result<Vec<[f64; 2]>, VectorError> {
     if centerline.len() < 2 || index + 1 >= centerline.len() {
         return Ok(Vec::new());
@@ -917,6 +966,19 @@ fn join_polygon(
         b[1] + outer_sign * next_normal[1] * radius,
     ];
     if join == StrokeJoin::Miter {
+        let prev_direction = [prev[0] / prev_len, prev[1] / prev_len];
+        let next_direction = [next[0] / next_len, next[1] / next_len];
+        let bisector = [
+            prev_direction[0] + next_direction[0],
+            prev_direction[1] + next_direction[1],
+        ];
+        // If delta is the direction change, SVG's interior angle is pi-delta.
+        // |u+v| = 2*cos(delta/2) = 2*sin(SVG_angle/2).
+        let ratio = 2.0 / bisector[0].hypot(bisector[1]);
+        // Two normalizations, the bisector sum, hypot, and division accumulate
+        // a small relative error. 32 eps is a conservative operation bound;
+        // it is not tuned to one ratio, and is far below one f32 ULP here.
+        let tolerance = 32.0 * f64::EPSILON * ratio.abs().max(miter_limit.abs()).max(1.0);
         let prev_start = [
             a[0] + outer_sign * prev_normal[0] * radius,
             a[1] + outer_sign * prev_normal[1] * radius,
@@ -925,23 +987,34 @@ fn join_polygon(
             c[0] + outer_sign * next_normal[0] * radius,
             c[1] + outer_sign * next_normal[1] * radius,
         ];
-        if let Some(miter) = line_intersection(prev_start, prev_outer, next_outer, next_end) {
-            let distance = (miter[0] - b[0]).hypot(miter[1] - b[1]);
-            if distance.is_finite() && distance <= 4.0 * radius {
-                return Ok(vec![prev_outer, miter, next_outer, b]);
+        if ratio <= miter_limit + tolerance {
+            if let Some(miter) = line_intersection(prev_start, prev_outer, next_outer, next_end) {
+                if miter.iter().all(|value| value.is_finite()) {
+                    return Ok(vec![prev_outer, miter, next_outer, b]);
+                }
             }
         }
     }
     Ok(vec![prev_outer, next_outer, b])
 }
 
-/// Intersects two finite line segments' supporting lines. `None` for
-/// parallel or non-finite intersections.
+/// Intersects two finite line segments' supporting lines. Directions are
+/// normalized so the parallel test is independent of segment scale.
 fn line_intersection(a0: [f64; 2], a1: [f64; 2], b0: [f64; 2], b1: [f64; 2]) -> Option<[f64; 2]> {
-    let a = [a1[0] - a0[0], a1[1] - a0[1]];
-    let b = [b1[0] - b0[0], b1[1] - b0[1]];
+    let mut a = [a1[0] - a0[0], a1[1] - a0[1]];
+    let mut b = [b1[0] - b0[0], b1[1] - b0[1]];
+    let a_len = a[0].hypot(a[1]);
+    let b_len = b[0].hypot(b[1]);
+    if !a_len.is_finite() || !b_len.is_finite() || a_len == 0.0 || b_len == 0.0 {
+        return None;
+    }
+    a = [a[0] / a_len, a[1] / a_len];
+    b = [b[0] / b_len, b[1] / b_len];
     let denominator = a[0] * b[1] - a[1] * b[0];
-    if denominator.abs() <= 1e-12 {
+    // Any nonzero angle is legal when the configured finite miter limit
+    // permits it. Only truly parallel lines have no unique intersection;
+    // non-finite arithmetic is still rejected by the result guard below.
+    if denominator == 0.0 {
         return None;
     }
     let t = ((b0[0] - a0[0]) * b[1] - (b0[1] - a0[1]) * b[0]) / denominator;
@@ -1118,6 +1191,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1163,6 +1237,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 255],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: f32::NAN,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1354,6 +1429,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1401,6 +1477,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.5,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1436,6 +1513,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 0, 128],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.5,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1543,6 +1621,7 @@ mod tests {
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
+                    miter_limit: 4.0,
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -1566,6 +1645,7 @@ mod tests {
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
+                    miter_limit: 4.0,
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -1584,6 +1664,7 @@ mod tests {
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [255, 0, 0, 255],
                 stroke: Some(Stroke {
+                    miter_limit: 4.0,
                     width: 0.25,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -1619,6 +1700,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -1779,6 +1861,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap,
@@ -1877,6 +1960,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Butt,
@@ -1972,6 +2056,383 @@ mod tests {
     }
 
     #[test]
+    fn miter_limit_uses_the_svg_interior_angle_for_both_windings() {
+        for winding in [-1.0, 1.0] {
+            for (degrees, default_len, below, above) in
+                [(20.0f64, 4, 1.0, 2.0), (160.0, 3, 5.0, 6.0)]
+            {
+                let delta = degrees.to_radians();
+                let line = vec![
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0 + 10.0 * delta.cos(), winding * 10.0 * delta.sin()],
+                ];
+                let svg_angle = std::f64::consts::PI - delta;
+                let ratio = 1.0 / (svg_angle / 2.0).sin();
+                let polygon = |limit| {
+                    join_polygon_with_limit(&line, 1, 2.0, StrokeJoin::Miter, false, limit)
+                        .expect("join")
+                };
+                assert_eq!(
+                    polygon(4.0).len(),
+                    default_len,
+                    "direction change {degrees}, winding {winding}, ratio {ratio}"
+                );
+                assert_eq!(polygon(below).len(), 3, "below ratio {ratio}");
+                assert_eq!(polygon(above).len(), 4, "above ratio {ratio}");
+                assert_eq!(polygon(ratio).len(), 4, "exact ratio {ratio}");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_five_limit_is_inclusive_under_rotation_and_next_down_rejects() {
+        let svg_angle = 2.0 * 0.2f64.asin();
+        let delta = std::f64::consts::PI - svg_angle;
+        let next_down = f64::from(f32::from_bits(5.0f32.to_bits() - 1));
+        for rotation in [0.0f64, 0.3, 1.2] {
+            for winding in [-1.0, 1.0] {
+                let raw = [
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0 + 10.0 * delta.cos(), winding * 10.0 * delta.sin()],
+                ];
+                let rotate = |point: [f64; 2]| {
+                    [
+                        point[0] * rotation.cos() - point[1] * rotation.sin(),
+                        point[0] * rotation.sin() + point[1] * rotation.cos(),
+                    ]
+                };
+                let line = raw.map(rotate);
+                let polygon = |limit| {
+                    join_polygon_with_limit(&line, 1, 2.0, StrokeJoin::Miter, false, limit)
+                        .expect("join")
+                };
+                assert_eq!(polygon(5.0).len(), 4, "exact five must accept");
+                assert_eq!(polygon(next_down).len(), 3, "next-down five must bevel");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_fifty_limit_has_bounded_roundoff_and_next_down_rejects() {
+        let svg_angle = 2.0 * 0.02f64.asin();
+        let delta = std::f64::consts::PI - svg_angle;
+        let next_down = f64::from(f32::from_bits(50.0f32.to_bits() - 1));
+        for rotation in [0.0f64, 0.3, 1.2] {
+            for winding in [-1.0, 1.0] {
+                let raw = [
+                    [0.0, 0.0],
+                    [10.0, 0.0],
+                    [10.0 + 10.0 * delta.cos(), winding * 10.0 * delta.sin()],
+                ];
+                let rotate = |point: [f64; 2]| {
+                    [
+                        point[0] * rotation.cos() - point[1] * rotation.sin(),
+                        point[0] * rotation.sin() + point[1] * rotation.cos(),
+                    ]
+                };
+                let line = raw.map(rotate);
+                let polygon = |limit| {
+                    join_polygon_with_limit(&line, 1, 2.0, StrokeJoin::Miter, false, limit)
+                        .expect("join")
+                };
+                assert_eq!(polygon(50.0).len(), 4, "exact fifty must accept");
+                assert_eq!(polygon(next_down).len(), 3, "next-down fifty must bevel");
+            }
+        }
+    }
+
+    #[test]
+    fn exact_five_uses_real_stroke_storage_and_public_solid_and_dashed_rasters() {
+        let shape = |cos, sin, miter_limit| VectorShape {
+            closed: false,
+            stroke: Some(Stroke {
+                width: 0.125,
+                color: [255, 255, 255, 255],
+                cap: StrokeCap::Butt,
+                join: StrokeJoin::Miter,
+                dash: StrokeDash::solid(),
+                miter_limit,
+            }),
+            anchors: vec![
+                Anchor::corner([0.0, 0.5]),
+                Anchor::corner([0.5, 0.5]),
+                Anchor::corner([0.5 + 0.5 * cos, 0.5 + 0.5 * sin]),
+            ],
+            ..VectorShape::empty()
+        };
+        let next_down = f32::from_bits(5.0f32.to_bits() - 1);
+        let candidates = [
+            (3_211_494_695, 1_053_337_997),
+            (3_211_494_582, 1_053_337_902),
+            (3_211_494_859, 1_053_338_138),
+            (3_211_494_832, 1_053_338_115),
+            (3_211_494_609, 1_053_337_925),
+            (3_211_494_555, 1_053_337_879),
+            (3_211_494_886, 1_053_338_161),
+            (3_211_494_805, 1_053_338_092),
+            (3_211_494_636, 1_053_337_948),
+            (3_211_494_528, 1_053_337_856),
+            (3_211_494_913, 1_053_338_184),
+            (3_211_494_778, 1_053_338_069),
+        ];
+        let mut selected = None;
+        for (cos_bits, sin_bits) in candidates {
+            let cos = f32::from_bits(cos_bits);
+            let sin = f32::from_bits(sin_bits);
+            let probe = shape(cos, sin, 5.0);
+            let line = centerline(&probe, 64, 64).expect("centerline");
+            let join = (0..line.len())
+                .find(|&index| join_at(&line, index, false))
+                .expect("turn");
+            let previous = line[join - 1];
+            let current = line[join];
+            let next = line[join + 1];
+            let before = [current[0] - previous[0], current[1] - previous[1]];
+            let after = [next[0] - current[0], next[1] - current[1]];
+            let before_len = before[0].hypot(before[1]);
+            let after_len = after[0].hypot(after[1]);
+            let bisector = [
+                before[0] / before_len + after[0] / after_len,
+                before[1] / before_len + after[1] / after_len,
+            ];
+            let ratio = 2.0 / bisector[0].hypot(bisector[1]);
+            if f64::from(next_down) < ratio && ratio <= 5.0 {
+                selected = Some((cos, sin, probe, line, join, ratio));
+                break;
+            }
+        }
+        let (cos, sin, exact, line, join, actual_ratio) =
+            selected.expect("an f32 fixture straddles exact five");
+        let below = shape(cos, sin, next_down);
+        let miter = join_polygon_with_limit(&line, join, 4.0, StrokeJoin::Miter, false, 5.0)
+            .expect("miter");
+        assert_eq!(miter.len(), 4, "actual ratio {actual_ratio}");
+        let below_miter = join_polygon_with_limit(
+            &line,
+            join,
+            4.0,
+            StrokeJoin::Miter,
+            false,
+            f64::from(next_down),
+        )
+        .expect("below miter");
+        assert_eq!(below_miter.len(), 3, "actual ratio {actual_ratio}");
+        assert!(stroke_polys(&exact, &line, 64, 64)
+            .expect("exact stroke")
+            .contains(&miter));
+        assert!(!stroke_polys(&below, &line, 64, 64)
+            .expect("below stroke")
+            .contains(&miter));
+        let exact_raster = rasterize(&exact, 64, 64).expect("exact raster");
+        let below_raster = rasterize(&below, 64, 64).expect("below raster");
+        assert_ne!(exact_raster.coverage(), below_raster.coverage());
+
+        let dashed = |shape: VectorShape| VectorShape {
+            stroke: Some(Stroke {
+                dash: StrokeDash::from_lengths(&[1.0, 0.25], 0.0).expect("dash"),
+                ..shape.stroke.expect("stroke")
+            }),
+            ..shape
+        };
+        let exact_dashed = rasterize(&dashed(exact), 64, 64).expect("exact dashed raster");
+        let below_dashed = rasterize(&dashed(below), 64, 64).expect("below dashed raster");
+        assert_ne!(exact_dashed.coverage(), below_dashed.coverage());
+    }
+
+    #[test]
+    fn miter_intersection_is_scale_relative_and_exact_limit_inclusive() {
+        let delta = 120.0f64.to_radians();
+        for scale in [1e-6f64, 1e6] {
+            let line = vec![
+                [0.0, 0.0],
+                [scale, 0.0],
+                [scale + scale * delta.cos(), scale * delta.sin()],
+            ];
+            for limit in [2.0, 4.0] {
+                let polygon =
+                    join_polygon_with_limit(&line, 1, 2.0, StrokeJoin::Miter, false, limit)
+                        .expect("scaled join");
+                assert_eq!(polygon.len(), 4, "scale {scale}, limit {limit}");
+            }
+        }
+    }
+
+    #[test]
+    fn near_reversal_allows_a_high_finite_miter_limit() {
+        let delta = std::f64::consts::PI - 8.0 * f64::EPSILON;
+        let line = vec![
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0 + 10.0 * delta.cos(), 10.0 * delta.sin()],
+        ];
+        let polygon = join_polygon_with_limit(&line, 1, 2.0, StrokeJoin::Miter, false, 2.0e15)
+            .expect("near-reversal join");
+        assert_eq!(polygon.len(), 4, "finite permitted miter must not bevel");
+        assert!(polygon.iter().flatten().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn closed_miter_limit_preserves_closure_joins_for_both_windings() {
+        let height = 3.0f64.sqrt() / 2.0;
+        for winding in [-1.0, 1.0] {
+            let line = vec![[0.0, 0.0], [1.0, 0.0], [0.5, winding * height], [0.0, 0.0]];
+            for index in 0..3 {
+                assert_eq!(
+                    join_polygon_with_limit(&line, index, 0.25, StrokeJoin::Miter, true, 2.0)
+                        .expect("exact closure miter")
+                        .len(),
+                    4,
+                    "closed vertex {index}, winding {winding}"
+                );
+                assert_eq!(
+                    join_polygon_with_limit(&line, index, 0.25, StrokeJoin::Miter, true, 1.5)
+                        .expect("below closure miter")
+                        .len(),
+                    3
+                );
+            }
+            let shape = |miter_limit| VectorShape {
+                closed: true,
+                stroke: Some(Stroke {
+                    width: 0.0625,
+                    color: [255, 255, 255, 255],
+                    cap: StrokeCap::Butt,
+                    join: StrokeJoin::Miter,
+                    dash: StrokeDash::solid(),
+                    miter_limit,
+                }),
+                anchors: vec![
+                    Anchor::corner([0.1, 0.1]),
+                    Anchor::corner([0.9, 0.1]),
+                    Anchor::corner([0.5, 0.1 + 0.8 * height as f32 * winding as f32]),
+                ],
+                ..VectorShape::empty()
+            };
+            let miter = rasterize(&shape(2.1), 64, 64).expect("closed miter raster");
+            let bevel = rasterize(&shape(1.5), 64, 64).expect("closed bevel raster");
+            assert_ne!(miter.coverage(), bevel.coverage());
+        }
+    }
+
+    #[test]
+    fn stroke_miter_limit_drives_raster_geometry_and_cache_identity() {
+        // A 160-degree direction change is a 20-degree SVG interior angle.
+        let theta = 160.0f32.to_radians();
+        let shape = |miter_limit| VectorShape {
+            closed: false,
+            stroke: Some(Stroke {
+                width: 0.125,
+                color: [255, 255, 255, 255],
+                cap: StrokeCap::Butt,
+                join: StrokeJoin::Miter,
+                dash: StrokeDash::solid(),
+                miter_limit,
+            }),
+            anchors: vec![
+                Anchor::corner([0.0, 0.5]),
+                Anchor::corner([0.5, 0.5]),
+                Anchor::corner([0.5 + 0.5 * theta.cos(), 0.5 + 0.5 * theta.sin()]),
+            ],
+            ..VectorShape::empty()
+        };
+        let line = centerline(&shape(4.0), 16, 16).expect("centerline");
+        let join_index = (0..line.len())
+            .find(|&index| join_at(&line, index, false))
+            .expect("actual turn");
+        let miter = join_polygon_with_limit(&line, join_index, 1.0, StrokeJoin::Miter, false, 6.0)
+            .expect("miter polygon");
+        let default_geometry = stroke_polys(&shape(4.0), &line, 16, 16).expect("default");
+        assert!(!default_geometry.contains(&miter));
+        let custom_geometry = stroke_polys(&shape(6.0), &line, 16, 16).expect("custom");
+        assert!(
+            custom_geometry.contains(&miter),
+            "miter={miter:?} actual={custom_geometry:?}"
+        );
+        assert!(!shape(4.0).same_cache_key(&shape(6.0)));
+        let mut dashed = shape(6.0);
+        dashed.stroke.as_mut().expect("stroke").dash =
+            StrokeDash::from_lengths(&[1.0, 0.25], 0.0).expect("dash");
+        let dashed_line = centerline(&dashed, 16, 16).expect("dashed centerline");
+        let dashed_join = (0..dashed_line.len())
+            .find(|&index| join_at(&dashed_line, index, false))
+            .expect("dashed turn");
+        let dashed_miter = join_polygon_with_limit(
+            &dashed_line,
+            dashed_join,
+            1.0,
+            StrokeJoin::Miter,
+            false,
+            6.0,
+        )
+        .expect("dashed miter");
+        assert!(dashed_stroke_polys(
+            &dashed,
+            &dashed_line,
+            16,
+            16,
+            dashed.stroke.expect("stroke"),
+            &mut 0,
+        )
+        .expect("dashed geometry")
+        .contains(&dashed_miter));
+        assert!(shape(f32::NAN).same_cache_key(&shape(f32::NAN)));
+        assert!(!shape(f32::NAN).same_cache_key(&shape(4.0)));
+    }
+
+    #[test]
+    fn invalid_miter_limit_is_a_typed_raster_error() {
+        let shape = |miter_limit| VectorShape {
+            closed: false,
+            stroke: Some(Stroke {
+                width: 0.125,
+                color: [255, 255, 255, 255],
+                cap: StrokeCap::Butt,
+                join: StrokeJoin::Miter,
+                dash: StrokeDash::solid(),
+                miter_limit,
+            }),
+            anchors: vec![Anchor::corner([0.25, 0.5]), Anchor::corner([0.75, 0.5])],
+            ..VectorShape::empty()
+        };
+        for invalid in [f32::NAN, 0.5, f32::INFINITY] {
+            let shape = shape(invalid);
+            let line = centerline(&shape, 16, 16).expect("centerline");
+            assert_eq!(
+                stroke_polys(&shape, &line, 16, 16),
+                Err(VectorError::InvalidMiterLimit)
+            );
+        }
+    }
+
+    #[test]
+    fn stroke_miter_limit_json_is_additive_and_default_omitted() {
+        let stroke = Stroke {
+            width: 0.125,
+            color: [255, 255, 255, 255],
+            cap: StrokeCap::Butt,
+            join: StrokeJoin::Miter,
+            dash: StrokeDash::solid(),
+            miter_limit: 4.0,
+        };
+        let old_json = serde_json::to_string(&stroke).expect("default JSON");
+        assert!(!old_json.contains("miter_limit"), "{old_json}");
+        let old: Stroke = serde_json::from_str(&old_json).expect("default decode");
+        assert_eq!(old.miter_limit, 4.0);
+        let custom = Stroke {
+            miter_limit: 6.0,
+            ..stroke
+        };
+        let json = serde_json::to_string(&custom).expect("custom JSON");
+        assert!(json.contains("\"miter_limit\":6.0"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<Stroke>(&json).expect("custom decode"),
+            custom
+        );
+    }
+
+    #[test]
     fn dash_pattern_alternates_offsets_and_repeats_odd_patterns() {
         let dash = StrokeDash::from_lengths(&[0.25, 0.125], 0.0).expect("valid dash");
         let pattern = DashPattern::new(dash, 1.0).expect("pattern");
@@ -2017,6 +2478,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap,
@@ -2134,6 +2596,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Round,
@@ -2170,6 +2633,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 1.0e6,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -2239,6 +2703,7 @@ mod tests {
     fn compound_open_secondary_contributes_its_stroke() {
         let shape = VectorShape {
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: StrokeCap::Round,
@@ -2348,6 +2813,7 @@ mod tests {
         let contour = VectorShape {
             closed: true,
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 1.0e6,
                 color: [255, 255, 255, 255],
                 cap: StrokeCap::Round,
@@ -2440,6 +2906,7 @@ mod tests {
         let shape = VectorShape {
             closed: false,
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.125,
                 color: [255, 255, 255, 255],
                 cap: StrokeCap::Butt,

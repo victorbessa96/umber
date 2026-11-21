@@ -14,9 +14,13 @@ Normative source: W3C SVG 1.1 (Second Edition), Painting §11.4,
 https://www.w3.org/TR/SVG11/painting.html#StrokeMiterlimitProperty .
 The limit is the ratio `miterLength / stroke-width = 1 / sin(theta/2)`,
 must be >= 1, and defaults to 4. Miter length is outer tip to inner corner.
-In this symmetric construction that distance is twice the centerline-to-tip
-distance, so the existing `4 * radius` threshold is equivalent and must not be
-"corrected" into a default-geometry regression.
+The first threshold fixture confused direction change with SVG's interior
+angle. Independent review corrected the model: for direction change `delta`,
+SVG's angle is `pi - delta`; a 20-degree direction change has ratio about
+1.015, not 5.759. The old heuristic agrees with the default outcome in both
+review probes, so no default-geometry defect is claimed. K8b computes the
+normative ratio directly as `2 / |u + v|`, adds scaled inclusive-boundary
+tolerance, and normalizes intersection directions for scale independence.
 
 ## Target
 
@@ -45,11 +49,15 @@ dependency, UI redesign, release action, public PR, or work outside the kill.
 
 ## Verification
 
-Tests cover direct miter-vs-bevel thresholds, default preservation, exact
-boundary acceptance, invalid and NaN limits, cache identity, deterministic
-old/new JSON, root/group/path inheritance, export/import/export byte stability,
-strict single-shape behavior, compound contours, full core/app battery, and a
-bounded independent review.
+Tests cover direct miter-vs-bevel thresholds, default preservation, exact-5
+and exact-50 boundary acceptance and next-down rejection, near-reversal finite
+limits, rotations, both windings, closed joins, small/large-scale intersections,
+public solid/dashed rasters, invalid
+and NaN limits, masked-invalid ancestors, cache identity, deterministic
+old/new JSON, root/group/path inheritance including empty/inherit preservation,
+Round/Bevel/Miter export/import/export byte stability, strict single-shape
+behavior, compound contours, full core/app battery, and bounded independent
+review.
 
 ## Non-goals
 

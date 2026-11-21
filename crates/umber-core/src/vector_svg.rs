@@ -17,6 +17,8 @@ pub enum VectorSvgError {
     NonFinite { anchor: usize },
     #[error("invalid stroke dash pattern")]
     InvalidDash,
+    #[error("invalid stroke miter limit")]
+    InvalidMiterLimit,
 }
 
 /// Serializes one vector shape as a deterministic SVG 1.1 document. Open
@@ -97,6 +99,9 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
             .dash
             .validate()
             .map_err(|_| VectorSvgError::InvalidDash)?;
+        if !stroke.miter_limit.is_finite() || stroke.miter_limit < 1.0 {
+            return Err(VectorSvgError::InvalidMiterLimit);
+        }
         out.push_str(" stroke=\"");
         out.push_str(&hex(stroke.color));
         out.push('"');
@@ -120,6 +125,11 @@ pub fn export_svg(shape: &VectorShape) -> Result<String, VectorSvgError> {
             crate::vector::StrokeJoin::Bevel => "bevel",
         });
         out.push('"');
+        if stroke.miter_limit != crate::vector::DEFAULT_MITER_LIMIT {
+            out.push_str(" stroke-miterlimit=\"");
+            out.push_str(&number(stroke.miter_limit));
+            out.push('"');
+        }
         if !stroke.dash.is_solid() {
             out.push_str(" stroke-dasharray=\"");
             for (index, length) in stroke.dash.lengths().iter().enumerate() {
@@ -248,6 +258,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -298,6 +309,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 255, 255, 255],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -316,6 +328,7 @@ mod tests {
     fn invisible_or_invalid_strokes_are_stroke_none() {
         for stroke in [
             Stroke {
+                miter_limit: 4.0,
                 width: 0.0,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -324,6 +337,7 @@ mod tests {
                 color: [255, 255, 255, 255],
             },
             Stroke {
+                miter_limit: 4.0,
                 width: f32::NAN,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -332,6 +346,7 @@ mod tests {
                 color: [255, 255, 255, 255],
             },
             Stroke {
+                miter_limit: 4.0,
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -409,6 +424,7 @@ mod tests {
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
+                    miter_limit: 4.0,
                     width: 0.1,
                     cap: crate::vector::StrokeCap::Round,
 
@@ -440,6 +456,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [255, 0, 128, 128],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -463,6 +480,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.02,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -494,6 +512,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [1, 2, 3, 255],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.125,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -538,6 +557,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [1, 2, 3, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.1,
                 cap: crate::vector::StrokeCap::Round,
 
@@ -677,6 +697,7 @@ mod tests {
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
+                    miter_limit: 4.0,
                     width: 0.25,
                     color: [10, 20, 30, 255],
                     cap,
@@ -711,6 +732,7 @@ mod tests {
                 fill_rule: crate::svg::FillRule::NonZero,
                 fill: [0, 0, 0, 0],
                 stroke: Some(Stroke {
+                    miter_limit: 4.0,
                     width: 0.25,
                     color: [10, 20, 30, 255],
                     cap: crate::vector::StrokeCap::Butt,
@@ -742,6 +764,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [0, 0, 0, 0],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.25,
                 color: [10, 20, 30, 255],
                 cap: crate::vector::StrokeCap::Butt,
@@ -1373,14 +1396,6 @@ mod tests {
                 "group clip-path",
             ),
             (
-                br#"<svg width="1" height="1"><g stroke-miterlimit="2"><path d="M0 0"/></g></svg>"#,
-                "group stroke-miterlimit",
-            ),
-            (
-                br#"<svg width="1" height="1" stroke-miterlimit="2"><path d="M0 0"/></svg>"#,
-                "root stroke-miterlimit",
-            ),
-            (
                 br#"<svg width="1" height="1"><path opacity="0.5" d="M0 0"/></svg>"#,
                 "path opacity",
             ),
@@ -1443,10 +1458,6 @@ mod tests {
             (
                 br#"<svg width="1" height="1"><path paint-order="stroke" d="M0 0"/></svg>"#,
                 "path paint-order",
-            ),
-            (
-                br#"<svg width="1" height="1"><path stroke-miterlimit="2" d="M0 0"/></svg>"#,
-                "path stroke-miterlimit",
             ),
         ];
         for (svg, needle) in cases {
@@ -1604,6 +1615,121 @@ mod tests {
                 limit: MAX_VECTOR_ANCHORS,
             })
         );
+    }
+
+    #[test]
+    fn miter_limit_export_roundtrips_and_omits_default() {
+        let shape = |miter_limit| VectorShape {
+            closed: false,
+            stroke: Some(crate::vector::Stroke {
+                width: 0.125,
+                color: [0, 0, 0, 255],
+                cap: crate::vector::StrokeCap::Butt,
+                join: crate::vector::StrokeJoin::Miter,
+                dash: crate::vector::StrokeDash::solid(),
+                miter_limit,
+            }),
+            anchors: vec![
+                crate::vector::Anchor::corner([0.25, 0.5]),
+                crate::vector::Anchor::corner([0.75, 0.5]),
+            ],
+            ..VectorShape::empty()
+        };
+        let custom = export_svg(&shape(6.0)).expect("custom export");
+        assert!(custom.contains("stroke-miterlimit=\"6\""), "{custom}");
+        let imported = import_svg(custom.as_bytes()).expect("custom import");
+        assert_eq!(imported.shape.stroke.expect("stroke").miter_limit, 6.0);
+        assert_eq!(export_svg(&imported.shape).expect("re-export"), custom);
+        let default = export_svg(&shape(4.0)).expect("default export");
+        assert!(!default.contains("stroke-miterlimit"), "{default}");
+        for join in [
+            crate::vector::StrokeJoin::Round,
+            crate::vector::StrokeJoin::Bevel,
+        ] {
+            let mut custom_shape = shape(6.0);
+            custom_shape.stroke.as_mut().expect("stroke").join = join;
+            let custom = export_svg(&custom_shape).expect("non-Miter export");
+            assert!(custom.contains("stroke-miterlimit=\"6\""), "{custom}");
+            let imported = import_svg(custom.as_bytes()).expect("non-Miter import");
+            let stroke = imported.shape.stroke.expect("stroke");
+            assert_eq!(stroke.join, join);
+            assert_eq!(stroke.miter_limit, 6.0);
+            assert_eq!(
+                export_svg(&imported.shape).expect("non-Miter re-export"),
+                custom
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_miter_limit_is_typed_in_import_and_export() {
+        for raw in ["0", "0.5", "-1", "NaN", "inf", "junk"] {
+            let svg = format!(
+                r##"<svg width="1" height="1"><path stroke="#000000" stroke-miterlimit="{raw}" d="M0 0 L1 0 L1 1"/></svg>"##
+            );
+            let error = import_svg(svg.as_bytes()).expect_err("invalid import must refuse");
+            assert!(
+                matches!(error, crate::svg::SvgError::Unsupported { ref what } if what.contains("stroke-miterlimit")),
+                "{raw}: {error:?}"
+            );
+        }
+        for invalid in [f32::NAN, 0.5, f32::INFINITY] {
+            let shape = VectorShape {
+                closed: false,
+                stroke: Some(crate::vector::Stroke {
+                    width: 0.125,
+                    color: [0, 0, 0, 255],
+                    cap: crate::vector::StrokeCap::Butt,
+                    join: crate::vector::StrokeJoin::Miter,
+                    dash: crate::vector::StrokeDash::solid(),
+                    miter_limit: invalid,
+                }),
+                anchors: vec![
+                    crate::vector::Anchor::corner([0.25, 0.5]),
+                    crate::vector::Anchor::corner([0.75, 0.5]),
+                ],
+                ..VectorShape::empty()
+            };
+            assert_eq!(export_svg(&shape), Err(VectorSvgError::InvalidMiterLimit));
+        }
+    }
+
+    #[test]
+    fn invalid_ancestor_miter_limit_cannot_be_masked_by_a_path_override() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                br##"<svg width="1" height="1" stroke="#000000" stroke-miterlimit="0"><path stroke-miterlimit="6" d="M0 0 L1 0 L1 1"/></svg>"##,
+                "root stroke-miterlimit",
+            ),
+            (
+                br##"<svg width="1" height="1" stroke="#000000"><g stroke-miterlimit="0.5"><path stroke-miterlimit="6" d="M0 0 L1 0 L1 1"/></g></svg>"##,
+                "group stroke-miterlimit",
+            ),
+            (
+                br##"<svg width="1" height="1" stroke="#000000"><g stroke-miterlimit="NaN"><path stroke-miterlimit="6" d="M0 0 L1 0 L1 1"/></g></svg>"##,
+                "group stroke-miterlimit",
+            ),
+        ];
+        for (svg, needle) in cases {
+            match import_svg(svg) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains(needle), "{what} lacks {needle}")
+                }
+                result => panic!("masked invalid ancestor was accepted for {needle}: {result:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn miter_limit_inherits_overrides_and_isolates_siblings() {
+        let svg = br##"<svg width="1" height="1" stroke="#000000" stroke-linejoin="miter" stroke-miterlimit="6"><g stroke-miterlimit="5"><path d="M0 0 L1 0 L1 1"/><path stroke-miterlimit="6" d="M0 1 L1 1 L1 0"/></g><g stroke-miterlimit=""><path stroke-miterlimit="inherit" d="M0 0 L0 1 L1 1"/></g><path d="M0 0 L1 1 L1 0"/></svg>"##;
+        let shapes = import_svg_many(svg).expect("miter-limit inheritance");
+        assert_eq!(shapes.len(), 4);
+        let limits: Vec<f32> = shapes
+            .iter()
+            .map(|params| params.shape.stroke.expect("stroke").miter_limit)
+            .collect();
+        assert_eq!(limits, [5.0, 6.0, 6.0, 6.0]);
     }
 
     #[test]

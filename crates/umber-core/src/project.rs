@@ -2138,6 +2138,7 @@ mod tests {
             fill_rule: crate::svg::FillRule::NonZero,
             fill: [200, 30, 40, 255],
             stroke: Some(Stroke {
+                miter_limit: 4.0,
                 width: 0.01,
                 cap: crate::vector::StrokeCap::Round,
 

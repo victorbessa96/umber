@@ -2016,6 +2016,26 @@ pub(crate) fn import_vector_svg(bytes: &[u8]) -> Result<crate::vector::VectorPar
     Ok(shapes.remove(0))
 }
 
+fn validate_miter_limit_attr(attrs: &[Attr], element: &str) -> Result<(), SvgError> {
+    let Some(attr) = find_attr(attrs, "stroke-miterlimit") else {
+        return Ok(());
+    };
+    let raw = attr.value.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("inherit") {
+        return Ok(());
+    }
+    if raw
+        .parse::<f32>()
+        .is_ok_and(|value| value.is_finite() && value >= 1.0)
+    {
+        Ok(())
+    } else {
+        Err(SvgError::Unsupported {
+            what: format!("{element} stroke-miterlimit {raw}"),
+        })
+    }
+}
+
 fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
     // Transform and inheritable paint are meaningful to the import subset.
     // Group opacity/effects/CSS would be dropped instead of inherited.
@@ -2046,7 +2066,7 @@ fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
             });
         }
     }
-    refuse_nondefault_miterlimit(attrs, "root")
+    validate_miter_limit_attr(attrs, "root")
 }
 
 fn refuse_group_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
@@ -2070,27 +2090,10 @@ fn refuse_group_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
             });
         }
     }
-    refuse_nondefault_miterlimit(attrs, "group")
+    validate_miter_limit_attr(attrs, "group")
 }
 
-fn refuse_nondefault_miterlimit(attrs: &[Attr], element: &str) -> Result<(), SvgError> {
-    let Some(attr) = find_attr(attrs, "stroke-miterlimit") else {
-        return Ok(());
-    };
-    let raw = attr.value.trim();
-    if raw.is_empty()
-        || raw.eq_ignore_ascii_case("inherit")
-        || raw.parse::<f32>().is_ok_and(|value| value == 4.0)
-    {
-        Ok(())
-    } else {
-        Err(SvgError::Unsupported {
-            what: format!("{element} stroke-miterlimit {raw} in vector import"),
-        })
-    }
-}
-
-const VECTOR_INHERITED_PAINT_ATTRS: [&str; 10] = [
+const VECTOR_INHERITED_PAINT_ATTRS: [&str; 11] = [
     "fill",
     "fill-opacity",
     "fill-rule",
@@ -2101,6 +2104,7 @@ const VECTOR_INHERITED_PAINT_ATTRS: [&str; 10] = [
     "stroke-linejoin",
     "stroke-dasharray",
     "stroke-dashoffset",
+    "stroke-miterlimit",
 ];
 
 /// Composes inherited SVG presentation attributes. Unsupported color schemes
@@ -2144,7 +2148,7 @@ fn refuse_shape_import_effects(attrs: &[Attr], element: &str) -> Result<(), SvgE
             });
         }
     }
-    refuse_nondefault_miterlimit(attrs, element)
+    validate_miter_limit_attr(attrs, element)
 }
 
 fn parse_vector_paint(
@@ -2172,6 +2176,18 @@ fn parse_vector_paint(
             Some(rgb) => with_alpha(rgb, opacity_attr(attrs, "fill-opacity")?),
             None => [0, 0, 0, 0],
         },
+    };
+    let miter_limit = match find_attr(attrs, "stroke-miterlimit") {
+        None => crate::vector::DEFAULT_MITER_LIMIT,
+        Some(attr) => {
+            let raw = attr.value.trim();
+            raw.parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite() && *value >= 1.0)
+                .ok_or_else(|| SvgError::Unsupported {
+                    what: format!("stroke-miterlimit {raw}"),
+                })?
+        }
     };
     let stroke_rgb = match find_attr(attrs, "stroke") {
         None => None,
@@ -2260,6 +2276,7 @@ fn parse_vector_paint(
             cap,
             join,
             dash,
+            miter_limit,
         }),
         fill_rule,
     ))
