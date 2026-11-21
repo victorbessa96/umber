@@ -881,6 +881,31 @@ mod tests {
     }
 
     #[test]
+    fn visibility_filtered_import_adds_only_visible_layers_in_one_undo_group() {
+        let mut doc = Document::default();
+        let svg = br##"<svg width="1" height="1"><path fill="#010203" d="M0 0 L1 0 L1 1 Z"/><path display="none" d="not a path"/><g visibility="hidden"><path d="not a path"/><path visibility="visible" fill="#040506" d="M0 1 L1 0"/></g></svg>"##;
+        let declared = svg.len() as u64;
+        let ids = import_with_io(&mut doc, move || Ok(declared), move || Ok(svg.to_vec()))
+            .expect("visibility-filtered import succeeds");
+        assert_eq!(doc.layers().len(), 2);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            doc.layers()[0].vector.as_ref().unwrap().shape.fill,
+            [1, 2, 3, 255]
+        );
+        assert_eq!(
+            doc.layers()[1].vector.as_ref().unwrap().shape.fill,
+            [4, 5, 6, 255]
+        );
+        assert_eq!(doc.history.len(), 4);
+        assert_eq!(doc.session_history.len(), 1);
+        assert!(doc.undo());
+        assert!(doc.layers().is_empty());
+        assert!(doc.redo());
+        assert_eq!(doc.layers().len(), 2);
+    }
+
+    #[test]
     fn transformed_group_import_adds_layers_in_one_undo_group() {
         let mut doc = Document::default();
         let svg = br##"<svg width="4" height="4"><g transform="translate(1 0)"><path fill="#123456" d="M0 0 L1 0 L1 1 Z"/><path transform="scale(2)" fill="none" stroke="#000" d="M0 1 L1 0"/></g></svg>"##;

@@ -184,7 +184,8 @@ fn write_contour(out: &mut String, anchors: &[crate::vector::Anchor], closed: bo
 }
 
 /// Imports the bounded SVG subset into one compound vector shape per supported
-/// path or basic-shape element, with scoped group paint and affine transforms.
+/// visible path or basic-shape element, with scoped group paint, affine
+/// transforms, display pruning, and inherited visibility.
 pub fn import_svg_many(
     bytes: &[u8],
 ) -> Result<Vec<crate::vector::VectorParams>, crate::svg::SvgError> {
@@ -1368,14 +1369,6 @@ mod tests {
                 "root opacity",
             ),
             (
-                br#"<svg width="1" height="1" display="none"><path d="M0 0"/></svg>"#,
-                "root display",
-            ),
-            (
-                br#"<svg width="1" height="1" visibility="hidden"><path d="M0 0"/></svg>"#,
-                "root visibility",
-            ),
-            (
                 br#"<svg width="1" height="1"><g style="fill:none"><path d="M0 0"/></g></svg>"#,
                 "group style",
             ),
@@ -1384,28 +1377,12 @@ mod tests {
                 "group opacity",
             ),
             (
-                br#"<svg width="1" height="1"><g display="none"><path d="M0 0"/></g></svg>"#,
-                "group display",
-            ),
-            (
-                br#"<svg width="1" height="1"><g visibility="hidden"><path d="M0 0"/></g></svg>"#,
-                "group visibility",
-            ),
-            (
                 br#"<svg width="1" height="1"><g clip-path="url(#c)"><path d="M0 0"/></g></svg>"#,
                 "group clip-path",
             ),
             (
                 br#"<svg width="1" height="1"><path opacity="0.5" d="M0 0"/></svg>"#,
                 "path opacity",
-            ),
-            (
-                br#"<svg width="1" height="1"><path display="none" d="M0 0"/></svg>"#,
-                "path display",
-            ),
-            (
-                br#"<svg width="1" height="1"><path visibility="hidden" d="M0 0"/></svg>"#,
-                "path visibility",
             ),
             (
                 br#"<svg width="1" height="1"><path style="fill:none" d="M0 0"/></svg>"#,
@@ -1475,11 +1452,188 @@ mod tests {
     }
 
     #[test]
+    fn display_none_prunes_shapes_and_groups_before_geometry() {
+        let svg = br##"<svg width="1" height="1" display="block"><path display="inherit" fill="#010203" d="M0 0 L1 0 L1 1 Z"/><path display="none" d="not a path"/><rect display="none" width="1" height="1"/><circle visibility="hidden" r="1"/><g display="none"><path d="not a path"/></g><g display="block"><path display="inline" fill="#040506" d="M0 1 L1 0"/><rect display="inline" fill="#070809" width="1" height="1"/></g></svg>"##;
+        let shapes = import_svg_many(svg).expect("display filtering");
+        assert_eq!(shapes.len(), 3);
+        assert_eq!(shapes[0].shape.fill, [1, 2, 3, 255]);
+        assert_eq!(shapes[1].shape.fill, [4, 5, 6, 255]);
+        assert_eq!(shapes[2].shape.fill, [7, 8, 9, 255]);
+
+        let all_hidden =
+            br#"<svg width="1" height="1" display="none"><path d="not a path"/></svg>"#;
+        match import_svg_many(all_hidden) {
+            Err(crate::svg::SvgError::Unsupported { what }) => {
+                assert!(what.contains("no supported vector geometry"), "{what}")
+            }
+            other => panic!("all-hidden document was not refused: {other:?}"),
+        }
+
+        let hidden_effect = br#"<svg width="1" height="1"><path display="none" opacity="0.5" d="not a path"/></svg>"#;
+        match import_svg_many(hidden_effect) {
+            Err(crate::svg::SvgError::Unsupported { what }) => {
+                assert!(what.contains("path opacity"), "{what}")
+            }
+            other => panic!("hidden element bypassed effect validation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn visibility_is_inherited_and_children_can_override() {
+        let svg = br##"<svg width="1" height="1" visibility="hidden"><path visibility="visible" fill="#010203" d="M0 0 L1 0"/><g visibility="hidden"><path fill="#020304" d="M0 0 L1 0"/><path visibility="visible" fill="#030405" d="M0 1 L1 0"/><g visibility="collapse"><path visibility="inherit" d="not a path"/></g></g><path visibility="inherit" d="not a path"/><g visibility="visible"><path visibility="inherit" fill="#050607" d="M0 0 L1 1"/><path visibility="" fill="#060708" d="M0 1 L1 1"/></g></svg>"##;
+        let shapes = import_svg_many(svg).expect("visibility filtering");
+        assert_eq!(shapes.len(), 4);
+        assert_eq!(shapes[0].shape.fill, [1, 2, 3, 255]);
+        assert_eq!(shapes[1].shape.fill, [3, 4, 5, 255]);
+        assert_eq!(shapes[2].shape.fill, [5, 6, 7, 255]);
+        assert_eq!(shapes[3].shape.fill, [6, 7, 8, 255]);
+
+        for svg in [
+            br#"<svg width="1" height="1" visibility="hidden"><path d="M0 0"/></svg>"#.as_slice(),
+            br#"<svg width="1" height="1"><g visibility="collapse"><path d="M0 0"/></g></svg>"#
+                .as_slice(),
+            br#"<svg width="1" height="1"><path visibility="hidden" d="M0 0"/></svg>"#.as_slice(),
+        ] {
+            match import_svg_many(svg) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains("no supported vector geometry"), "{what}")
+                }
+                other => panic!("all-hidden document was not refused: {other:?}"),
+            }
+        }
+
+        let invalid = br#"<svg width="1" height="1"><path visibility="bogus" d="M0 0"/></svg>"#;
+        match import_svg_many(invalid) {
+            Err(crate::svg::SvgError::Unsupported { what }) => {
+                assert!(what.contains("path visibility"), "{what}")
+            }
+            other => panic!("invalid visibility was not refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_pruning_still_validates_descendants() {
+        let visible = r##"<path fill="#010203" d="M0 0 L1 1"/>"##;
+        for (document, needle) in [
+            (
+                format!(
+                    r#"<svg width="1" height="1"><g display="none"><path opacity="0.5" d="not a path"/></g>{visible}</svg>"#
+                ),
+                "path opacity",
+            ),
+            (
+                format!(
+                    r#"<svg width="1" height="1" display="none"><path clip-path="url(#c)" d="not a path"/>{visible}</svg>"#
+                ),
+                "path clip-path",
+            ),
+            (
+                format!(
+                    r#"<svg width="1" height="1"><g display="none"><g opacity="0.5"><path d="not a path"/></g></g>{visible}</svg>"#
+                ),
+                "group opacity",
+            ),
+            (
+                format!(
+                    r#"<svg width="1" height="1"><g display="none"><path visibility="bogus" d="not a path"/></g>{visible}</svg>"#
+                ),
+                "path visibility",
+            ),
+        ] {
+            match import_svg_many(document.as_bytes()) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains(needle), "{what} lacks {needle}")
+                }
+                other => panic!("pruned descendant bypassed {needle}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn hidden_leaves_validate_transform_and_paint_without_changing_zero_geometry() {
+        let visible = r##"<path fill="#010203" d="M0 0 L1 1"/>"##;
+        for document in [
+            format!(
+                r#"<svg width="1" height="1"><path display="none" transform="bogus" d="not a path"/>{visible}</svg>"#
+            ),
+            format!(
+                r#"<svg width="1" height="1"><path visibility="hidden" transform="bogus" d="not a path"/>{visible}</svg>"#
+            ),
+            format!(
+                r#"<svg width="1" height="1"><rect display="none" transform="bogus" width="1" height="1"/>{visible}</svg>"#
+            ),
+            format!(
+                r#"<svg width="1" height="1"><g display="none" transform="bogus"><path d="not a path"/></g>{visible}</svg>"#
+            ),
+        ] {
+            assert!(
+                matches!(
+                    import_svg_many(document.as_bytes()),
+                    Err(crate::svg::SvgError::Parse { .. })
+                ),
+                "hidden transform was not validated: {document}"
+            );
+        }
+        for document in [
+            format!(
+                r##"<svg width="1" height="1"><path display="none" fill="#GG0000" d="not a path"/>{visible}</svg>"##
+            ),
+            format!(
+                r##"<svg width="1" height="1"><rect visibility="hidden" fill="#GG0000" width="1" height="1"/>{visible}</svg>"##
+            ),
+        ] {
+            match import_svg_many(document.as_bytes()) {
+                Err(crate::svg::SvgError::Unsupported { what }) => {
+                    assert!(what.contains("fill"), "{what}")
+                }
+                other => panic!("hidden paint was not validated: {other:?}"),
+            }
+        }
+
+        let zero_geometry = br##"<svg width="1" height="1"><rect width="0" height="1" fill="#GG0000"/><path fill="#010203" d="M0 0 L1 1"/></svg>"##;
+        assert_eq!(
+            import_svg_many(zero_geometry)
+                .expect("visible zero-geometry paint stays unparsed")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hidden_geometry_does_not_consume_shape_or_anchor_budgets() {
+        let mut svg = String::from("<svg width=\"1\" height=\"1\">");
+        for _ in 0..crate::vector::MAX_VECTOR_SHAPES {
+            svg.push_str("<path display=\"none\" d=\"M0 0\"/>");
+        }
+        svg.push_str("<path d=\"M0 0 L1 1\"/></svg>");
+        assert_eq!(
+            import_svg_many(svg.as_bytes())
+                .expect("hidden paths do not consume the shape budget")
+                .len(),
+            1
+        );
+
+        let mut flood = String::from("M0 0");
+        for _ in 0..=crate::vector::MAX_VECTOR_ANCHORS {
+            flood.push_str(" L0 0");
+        }
+        let svg = format!(
+            "<svg width=\"1\" height=\"1\"><path visibility=\"hidden\" d=\"{flood}\"/><path d=\"M0 0 L1 1\"/></svg>"
+        );
+        assert_eq!(
+            import_svg_many(svg.as_bytes())
+                .expect("hidden path data is neither parsed nor charged")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn path_effects_are_refused_before_path_data_is_parsed() {
-        let svg = br#"<svg width="1" height="1"><path display="none" d="not a path"/></svg>"#;
+        let svg = br#"<svg width="1" height="1"><path opacity="0.5" d="not a path"/></svg>"#;
         match import_svg(svg) {
             Err(crate::svg::SvgError::Unsupported { what }) => {
-                assert!(what.contains("path display"), "{what}")
+                assert!(what.contains("path opacity"), "{what}")
             }
             _ => panic!("geometry parse ran before the effect refusal"),
         }

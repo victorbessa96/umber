@@ -44,13 +44,15 @@
 //!   B first, then A) and inherited through `g`. A root `svg` transform is
 //!   honored like a `g` transform, inside the viewBox mapping.
 //!
-//! What is NOT parsed: CSS in any form (`<style>` elements AND the `style`
-//! attribute — a `style="fill:none"` is ignored, so such a shape renders
-//! painted), `use`/`defs`/`symbol`, `text`, `image`, gradients/patterns
-//! (as elements; a `fill="url(…)"` reference counts as painted, above),
-//! strokes (coverage is fill only; a `line` therefore never covers
-//! anything, though its coordinates are still validated), `opacity` /
+//! What the RASTER path does NOT parse: CSS in any form (`<style>` elements
+//! AND the `style` attribute — a `style="fill:none"` is ignored, so such a
+//! shape renders painted), `use`/`defs`/`symbol`, `text`, `image`,
+//! gradients/patterns (as elements; a `fill="url(…)"` reference counts as
+//! painted, above), strokes (coverage is fill only; a `line` therefore never
+//! covers anything, though its coordinates are still validated), `opacity` /
 //! `fill-opacity`, `display`/`visibility`, nested `svg`, `a`, `switch`.
+//! The editable vector importer additionally interprets `display` and
+//! `visibility` per SVG 1.1 §11.5; that does not change raster behavior.
 //!
 //! **Unknown-element policy: skip the subtree.** Any element outside the
 //! list above (`metadata`, `title`, `defs`, `style`, `text`, editor
@@ -1835,10 +1837,47 @@ fn build_vector_geometry(
     }
 }
 
+#[derive(Clone)]
+struct VectorImportFrame {
+    paint: Vec<Attr>,
+    ctm: Affine,
+    display: bool,
+    visible: bool,
+}
+
+/// SVG 1.1 §11.5: display is not inherited. Every value other than none or
+/// inherit renders; a none group prunes the whole direct-rendering subtree.
+fn vector_display_renders(attrs: &[Attr]) -> bool {
+    !find_attr(attrs, "display").is_some_and(|attr| attr.value.trim().eq_ignore_ascii_case("none"))
+}
+
+/// Visibility is inherited, and a visible child can override a hidden group.
+fn vector_visibility_renders(
+    attrs: &[Attr],
+    inherited: bool,
+    element: &str,
+) -> Result<bool, SvgError> {
+    let Some(attr) = find_attr(attrs, "visibility") else {
+        return Ok(inherited);
+    };
+    let raw = attr.value.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("inherit") {
+        Ok(inherited)
+    } else if raw.eq_ignore_ascii_case("visible") {
+        Ok(true)
+    } else if raw.eq_ignore_ascii_case("hidden") || raw.eq_ignore_ascii_case("collapse") {
+        Ok(false)
+    } else {
+        Err(SvgError::Unsupported {
+            what: format!("{element} visibility {raw} in vector import"),
+        })
+    }
+}
+
 /// Parses the bounded document subset into one vector shape per supported
-/// shape or stroke-only subpath, with scoped inherited paint and transforms.
-/// The old raster path never calls this function; both share the strict XML
-/// tokenizer, root geometry, transform parser, and path-command walker.
+/// shape or stroke-only subpath, with scoped inherited paint, visibility, and
+/// transforms. The old raster path never calls this function; both share the
+/// strict XML tokenizer, root geometry, transform parser, and path walker.
 pub(crate) fn import_vector_svg_many(
     bytes: &[u8],
 ) -> Result<Vec<crate::vector::VectorParams>, SvgError> {
@@ -1883,9 +1922,11 @@ pub(crate) fn import_vector_svg_many(
             max_pixels: crate::vector::MAX_VECTOR_RASTER_PIXELS,
         });
     }
-    // Root transform and inheritable paint are supported; root CSS, group
-    // opacity, visibility, and effects must be refused rather than discarded.
+    // Root transform and inheritable paint are supported; root CSS, opacity,
+    // and effects must be refused rather than discarded.
     refuse_root_import_presentation(&root_attrs)?;
+    let root_display = vector_display_renders(&root_attrs);
+    let root_visibility = vector_visibility_renders(&root_attrs, true, "root")?;
     // Match the raster walker's root composition exactly: viewBox sizing from
     // root_geometry first, then the root transform/presentation attrs once.
     // build_path itself never sees presentation attrs, so this cannot double.
@@ -1899,9 +1940,15 @@ pub(crate) fn import_vector_svg_many(
     )?;
     let root_ctm = root_style.ctm;
 
-    // Each open group owns inherited paint plus its effective CTM. `None`
-    // skips an unknown/path subtree just like the raster document walker.
-    let root_frame = (inherited_vector_paint(&[], &root_attrs), root_ctm);
+    // Each open group owns inherited paint, effective CTM, display pruning,
+    // and visibility. None is reserved for unknown/path subtree skipping;
+    // display:none frames still validate descendants without rendering them.
+    let root_frame = VectorImportFrame {
+        paint: inherited_vector_paint(&[], &root_attrs),
+        ctm: root_ctm,
+        display: root_display,
+        visible: root_visibility,
+    };
     let mut stack = if root_self_closing {
         Vec::new()
     } else {
@@ -1924,9 +1971,12 @@ pub(crate) fn import_vector_svg_many(
             } => {
                 let parent = stack.last().and_then(|frame| frame.as_ref()).cloned();
                 let mut frame = None;
-                if let Some((parent_attrs, parent_ctm)) = parent {
+                if let Some(parent) = parent {
                     if is_shape(&name) {
-                        if shapes.len() >= crate::vector::MAX_VECTOR_SHAPES {
+                        let display = vector_display_renders(&attrs);
+                        let visible = vector_visibility_renders(&attrs, parent.visible, &name)?;
+                        let render = parent.display && display && visible;
+                        if render && shapes.len() >= crate::vector::MAX_VECTOR_SHAPES {
                             return Err(SvgError::TooComplex {
                                 what: "vector paths",
                                 limit: crate::vector::MAX_VECTOR_SHAPES,
@@ -1941,53 +1991,74 @@ pub(crate) fn import_vector_svg_many(
                         // work, and report them ahead of malformed path data.
                         refuse_shape_import_effects(&attrs, &name)?;
                         let ctm = match find_attr(&attrs, "transform") {
-                            Some(transform) => parent_ctm.compose(parse_transform(transform)?),
-                            None => parent_ctm,
+                            Some(transform) => parent.ctm.compose(parse_transform(transform)?),
+                            None => parent.ctm,
                         };
-                        let mut builder = VectorImportBuilder::new(ctm, width, height);
-                        build_vector_geometry(&name, &attrs, &mut builder)?;
-                        if let Some(mut shape) = builder.finish() {
-                            let contour_count = shape.subpaths.len().saturating_add(1);
-                            total_contours = total_contours.saturating_add(contour_count);
-                            if total_contours > crate::vector::MAX_VECTOR_SHAPES {
-                                return Err(SvgError::TooComplex {
-                                    what: "vector contours across paths",
-                                    limit: crate::vector::MAX_VECTOR_SHAPES,
-                                });
-                            }
-                            let effective_attrs = inherited_vector_paint(&parent_attrs, &attrs);
-                            let (fill, stroke, fill_rule) = parse_vector_paint(
+                        if !render {
+                            // Hidden leaves still validate inherited paint and
+                            // transforms. Visible zero-geometry shapes retain
+                            // the old behavior of skipping paint parsing.
+                            let effective_attrs = inherited_vector_paint(&parent.paint, &attrs);
+                            parse_vector_paint(
                                 &effective_attrs,
                                 ctm,
                                 width,
                                 height,
                                 root_style.rule,
                             )?;
-                            shape.fill = fill;
-                            shape.stroke = stroke;
-                            shape.fill_rule = fill_rule;
-                            let shape_anchors = shape
-                                .subpaths
-                                .iter()
-                                .fold(shape.anchors.len(), |total, subpath| {
-                                    total.saturating_add(subpath.anchors.len())
-                                });
-                            total_anchors = total_anchors.saturating_add(shape_anchors);
-                            if total_anchors > crate::vector::MAX_VECTOR_ANCHORS {
-                                return Err(SvgError::TooComplex {
-                                    what: "vector anchors across paths",
-                                    limit: crate::vector::MAX_VECTOR_ANCHORS,
-                                });
+                        } else {
+                            let mut builder = VectorImportBuilder::new(ctm, width, height);
+                            build_vector_geometry(&name, &attrs, &mut builder)?;
+                            if let Some(mut shape) = builder.finish() {
+                                let contour_count = shape.subpaths.len().saturating_add(1);
+                                total_contours = total_contours.saturating_add(contour_count);
+                                if total_contours > crate::vector::MAX_VECTOR_SHAPES {
+                                    return Err(SvgError::TooComplex {
+                                        what: "vector contours across paths",
+                                        limit: crate::vector::MAX_VECTOR_SHAPES,
+                                    });
+                                }
+                                let effective_attrs = inherited_vector_paint(&parent.paint, &attrs);
+                                let (fill, stroke, fill_rule) = parse_vector_paint(
+                                    &effective_attrs,
+                                    ctm,
+                                    width,
+                                    height,
+                                    root_style.rule,
+                                )?;
+                                shape.fill = fill;
+                                shape.stroke = stroke;
+                                shape.fill_rule = fill_rule;
+                                let shape_anchors = shape
+                                    .subpaths
+                                    .iter()
+                                    .fold(shape.anchors.len(), |total, subpath| {
+                                        total.saturating_add(subpath.anchors.len())
+                                    });
+                                total_anchors = total_anchors.saturating_add(shape_anchors);
+                                if total_anchors > crate::vector::MAX_VECTOR_ANCHORS {
+                                    return Err(SvgError::TooComplex {
+                                        what: "vector anchors across paths",
+                                        limit: crate::vector::MAX_VECTOR_ANCHORS,
+                                    });
+                                }
+                                shapes.push(crate::vector::VectorParams { shape });
                             }
-                            shapes.push(crate::vector::VectorParams { shape });
                         }
                     } else if name == "g" {
                         refuse_group_import_effects(&attrs)?;
+                        let display = vector_display_renders(&attrs);
+                        let visible = vector_visibility_renders(&attrs, parent.visible, "group")?;
                         let ctm = match find_attr(&attrs, "transform") {
-                            Some(transform) => parent_ctm.compose(parse_transform(transform)?),
-                            None => parent_ctm,
+                            Some(transform) => parent.ctm.compose(parse_transform(transform)?),
+                            None => parent.ctm,
                         };
-                        frame = Some((inherited_vector_paint(&parent_attrs, &attrs), ctm));
+                        frame = Some(VectorImportFrame {
+                            paint: inherited_vector_paint(&parent.paint, &attrs),
+                            ctm,
+                            display: parent.display && display,
+                            visible,
+                        });
                     }
                 }
                 if !self_closing {
@@ -2050,8 +2121,6 @@ fn refuse_root_import_presentation(attrs: &[Attr]) -> Result<(), SvgError> {
         "paint-order",
         "opacity",
         "style",
-        "display",
-        "visibility",
     ] {
         if find_attr(attrs, key).is_some() {
             return Err(SvgError::Unsupported {
@@ -2073,8 +2142,6 @@ fn refuse_group_import_effects(attrs: &[Attr]) -> Result<(), SvgError> {
     for key in [
         "style",
         "opacity",
-        "display",
-        "visibility",
         "clip-path",
         "mask",
         "filter",
@@ -2131,8 +2198,6 @@ fn inherited_vector_paint(parent: &[Attr], attrs: &[Attr]) -> Vec<Attr> {
 fn refuse_shape_import_effects(attrs: &[Attr], element: &str) -> Result<(), SvgError> {
     for key in [
         "opacity",
-        "display",
-        "visibility",
         "clip-path",
         "mask",
         "filter",
