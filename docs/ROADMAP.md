@@ -22,6 +22,15 @@ partner."
 
 ## Current vector wave (2026-11-21)
 
+K8e raster display/visibility semantics are landed at `c2831099`, with brief
+`661f6f14`. Raster Style now carries effective display and visibility; hidden
+shapes bypass geometry and MAX_SHAPES while transforms still validate. Display
+cannot be re-enabled below a pruned ancestor, child-visible override works, and
+all-hidden input yields zero-filled coverage. Editable import, app, model, and
+export are unchanged. Core is 346/346 and the full app battery is green (321
+lib + 892 bin + every integration/doc suite). Independent `deleg_c0a26c8a`
+returned APPROVED. Report: `docs/loop/kill-reports/2026-11-21-umber-raster-visibility.md`.
+
 K8d editable vector-import display/visibility semantics are landed at
 `4f1858aa`, with brief `eb9dff7c`. Scoped frames now carry effective display
 and inherited visibility alongside paint and CTM. Pruned ancestors still
