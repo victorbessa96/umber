@@ -22,16 +22,18 @@ partner."
 
 ## Current vector wave (2026-11-20)
 
-K7f arc-to-cubic conversion and curved basic-shape import is landed at
-`2555d2d8`, on K7e straight-line shapes `64dad2b1`, K7d transforms `65957542`,
-K7c group paint inheritance `f04ed236`, K7b subpath import `3d087302`, K7a
-multi-path import `29a02f9a`, K6d dash patterns `58f9e160`, K6c stroke joins
-`68cbf388`, K6b stroke caps `1839de83`, and K6a even-odd fill `7372aa53`.
-Absolute/relative SVG arcs now become editable cubics through shared
-endpoint-to-center conversion; rounded rects, circles, and ellipses reuse the
-same sink with correct flags, rotation, radius correction, closure, transforms,
-paint, budgets, and grouped undo. Next: compound-fill modeling or further
-scoped SVG hardening; release work remains gated.
+K8a compound fill and one-layer-per-path subpath import is landed at
+`6f35557f`, on K7f arcs/curved shapes `2555d2d8`, K7e straight-line shapes
+`64dad2b1`, K7d transforms `65957542`, K7c group paint inheritance `f04ed236`,
+K7b subpath import `3d087302`, K7a multi-path import `29a02f9a`, K6d dash
+patterns `58f9e160`, K6c stroke joins `68cbf388`, K6b stroke caps `1839de83`,
+and K6a even-odd fill `7372aa53`.
+Primary and secondary contours now share one deterministic fill rule, paint,
+stroke, cache key, and grouped undo history. Nonzero/evenodd holes, primary-empty
+rendering, per-contour closure/dash state, aggregate geometry budgets, compound
+SVG byte stability, and secondary-safe cache invalidation are pinned. Next:
+further scoped SVG hardening or a separately designed secondary-contour editing
+wave; release work remains gated.
 
 ## Delta since 2026-10-24 (as of 2026-11-09)
 
